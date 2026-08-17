@@ -52,6 +52,12 @@ export interface PolicyValues {
   worktreeReapGraceMs: number;
   pollIntervalMs: number;
   fixStrikeCap: number;
+  /** W1-T943: the WORKER-STALL detector's quiet threshold — how long a LIVE in-flight run's
+   *  newest `worker.state` row (W1-T942) may age before that run is judged stalled and
+   *  escalated once through §4 (src/run-task.ts's `runWorkerStallDetectorRung`). NET-NEW: no
+   *  prior source literal ever measured this. See plan/policy.yaml's own row for why the
+   *  default sits comfortably above the ~16-minute `--ci-parity` suite (W1-T463/W1-T465). */
+  workerStall: number;
   sweep: {
     staleDays: number;
     strikeCap: number;
@@ -185,6 +191,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   worktreeReapGraceMs: "net-new",
   pollIntervalMs: "lifted",
   fixStrikeCap: "lifted",
+  workerStall: "net-new",
   "sweep.staleDays": "lifted",
   "sweep.strikeCap": "lifted",
   "sweep.wipLimit": "lifted",
@@ -371,6 +378,7 @@ export function validatePolicy(raw: unknown): Policy {
   const worktreeReapGraceMs = numberField("worktreeReapGraceMs", raw.worktreeReapGraceMs, origin);
   const pollIntervalMs = numberField("pollIntervalMs", raw.pollIntervalMs, origin);
   const fixStrikeCap = numberField("fixStrikeCap", raw.fixStrikeCap, origin);
+  const workerStall = numberField("workerStall", raw.workerStall, origin);
 
   const sweepRaw = raw.sweep;
   if (!isPlainObject(sweepRaw)) throw new PolicyError("policy.yaml: 'sweep' must be a mapping.");
@@ -434,6 +442,7 @@ export function validatePolicy(raw: unknown): Policy {
       worktreeReapGraceMs,
       pollIntervalMs,
       fixStrikeCap,
+      workerStall,
       sweep: {
         staleDays,
         strikeCap: sweepStrikeCap,
