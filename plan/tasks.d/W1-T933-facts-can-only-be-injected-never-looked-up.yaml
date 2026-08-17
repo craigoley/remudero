@@ -1,0 +1,138 @@
+- id: W1-T933
+  title: "a measured fact can only be injected, never looked up, so the knowledge corpus is capped at 61046 bytes with 81 left and the only way to add one is to delete another"
+  repo: remudero
+  type: implement
+  verify: auto
+  risk: medium
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "**THE CORPUS HAS ONE READER AND IT IS THE PROMPT.** `src/lib/knowledge-dedup.ts` says it
+    in its own words: 'the corpus's only reader is the injection engine, so a duplicate learning costs
+    double context-tax against the knowledge budget'. Everything the fleet knows must therefore fit in
+    the prompt, because delivery-by-injection is the only delivery there is.
+
+    (1) **THE CEILING IS LIVE AND ESSENTIALLY FULL.** `scripts/claude-md-budget-baseline.json` sets
+    `capBytes: 61046` and states it carries **ZERO HEADROOM** by charter: 'every addition must be paid
+    for by a fold'. Measured at 2ff63cb: `CLAUDE.md` is **60965 bytes — 81 bytes of headroom, 99.87% of
+    cap**. The sibling `scripts/learnings-budget-baseline.json` caps a second corpus at 20000 chars.
+    A rule cannot be added today without deleting one.
+
+    (2) **NO RETRIEVAL LAYER EXISTS OVER THE PROSE, MEASURED WITH WORKING CONTROLS.** Sweeping src/ and
+    scripts/ for `pgvector`, `sqlite-vec`, `faiss`, `bm25`, `tantivy`, `minisearch`, `cosine`, `tf-idf`
+    and `semantic search` returns **0 files each**; the two hits for `embedding`/`vector` are a comment
+    REJECTING embeddings and the phrases 'attack vector'/'argument vector'. Positive controls on the
+    same corpus and tool: `loadPlan` 20 files, `appendLedger` 20, `DISPOSITION_RULES` 6. And no CLI verb
+    searches knowledge: across 116 verb mentions in `docs/cli-reference.md` none is a search/find/query/
+    lookup/recall verb (control: `rmd ledger-grep` reads 3 — it retrieves LEDGER ROWS, not prose).
+
+    (3) **BUT THE HONEST NUANCE, WHICH NARROWS THE TASK: A WORKER IS NOT BLIND.** Every worker tool set
+    already carries `Grep` and `Glob` (5 tool lists contain `Grep`). A worker CAN scan the markdown
+    today. What is missing is not capability but STRUCTURE AND A CALLABLE SEAM — nothing declares what
+    the searchable corpus is at decision time, so scanning is ad-hoc, unbounded and unprompted.
+    **THIS SHARD MUST NOT BE WRITTEN AS 'WORKERS CANNOT SEARCH'. THEY CAN.**
+
+    (4) **AND THE SEAM ALREADY EXISTS IN EMBRYO, WHICH IS WHY THIS IS SMALL.** `.remudero/skills/`
+    carries 7 registry entries, each declaring `grounding_sources` (`MASTER-PLAN.md`, `plan/tasks.yaml`,
+    `LEARNINGS.md`, `DECISIONS.md`, `plan/feedback`). `groundClarifyRequest` (`src/lib/panel-skill-run.ts`)
+    already 'searches every file it declares under `grounding_sources` for the target task'. That is a
+    scoped, declarative lookup — and it is TRAPPED in the console panel path, reachable only through a
+    surface bound to `127.0.0.1:4317` with no published port.
+
+    (5) **CONSOLIDATION IS ABSENT, AND THE RESERVOIR IS THE PROOF.** Eight scheduled workflows exist
+    (`clock-sweep`, `codeql`, `fleet-heartbeat-watch`, `mutation-nightly`, `osv-scanner`,
+    `recovery-drill`, `scorecard`, `semgrep`) and NONE consolidates knowledge. Measured at 2ff63cb:
+    `plan/feedback/` holds **150 entries — 73 `status: new`, 41 rejected, 25 accepted, 10 proposed** —
+    with nothing ageing them out. **THIS SHARD DOES NOT FEED THAT RESERVOIR AND MUST NOT.**"
+  design: |
+    (i) SCOPE: lift the existing declared-source lookup out of the console panel path into a reusable
+    registry primitive, so a caller can ask 'what does the declared corpus already say about X' without
+    going through a surface that has no published port. NOT an index. NOT embeddings. NOT Postgres.
+    (ii) NAME THE CONSUMER IN THE SAME CHANGE. `groundClarifyRequest` (`src/lib/panel-skill-run.ts`) is
+    the FIRST caller and already implements this search inline — it is refactored onto the primitive
+    rather than left duplicating it, so the primitive ships with a real consumer on day one and cannot
+    become the tenth built-and-unread mechanism. The measured eight are `hasPushedRunBranch`,
+    `armedButStalled`, `dispatch.stood_down`, `CiFailure.outsidePrRange`, `dh-rate-limit`,
+    `rareOverlapWarnings`, `rmd coverage-improve` and `supersessionVerdict` — the last with no producer
+    at all, only a completeness gate tracking its absence.
+    (iii) DETERMINISTIC, OFFLINE, NO MODEL CALL. `src/lib/knowledge-dedup.ts` already made this exact
+    trade for intake and documented its miss: 'an embedding check is a model call inside a lint path —
+    nondeterministic, priced, and unfalsifiable at review', and 'PARAPHRASE EVADES IT'. The same
+    tradeoff and the same documented miss apply here and must be stated, not discovered.
+    (iv) WHAT THIS COSTS IN BYTES, STATED BECAUSE THE CEILING IS AT 99.87%: the primitive adds NOTHING
+    to `CLAUDE.md` or to the learnings corpus. Its value is the opposite direction — a fact that can be
+    LOOKED UP is a fact that need not be CARRIED, which is the only mechanism by which the injected
+    corpus can shrink without losing the knowledge. Any follow-on that moves a rule out of `CLAUDE.md`
+    must show the lookup path that replaces it in the same change.
+    (v) NOT IN SCOPE, DELIBERATELY: an index or embedding store (see (vi)); a nightly consolidation
+    pass; adding `Skill` to any worker tool set; and anything that writes to `plan/feedback/`.
+    (vi) WHY NOT ADOPT THE OBVIOUS PRIOR ART. `garrytan/gbrain` (re-derived from its own README and
+    docs at HEAD 9c2c911) does solve this, with PGLite/Postgres, HNSW over pgvector, BM25, reciprocal-
+    rank fusion and graph traversal, and publishes a real retrieval lift (49.1 P@5 / 97.9 R@5 against
+    ~18 / ~80 for vector-only RAG on its corpus). **IT IS STILL THE WRONG TRADE HERE, ON ITS OWN
+    EVIDENCE.** Its most-documented operational burden is keeping the derived index in sync with the
+    markdown — the whole point of `docs/guides/live-sync.md`, whose stated failure mode is 'you correct
+    a hallucination in a brain page, but the vector DB keeps serving the old text because nobody ran
+    `gbrain sync`'. It also ships an in-tree postmortem, `docs/incidents/2026-05-20-lsd-cost-explosion.md`,
+    recording a 53x overrun ($50.71 against $0.96 estimated, 7.3M tokens) whose outcome was 'Zero ideas
+    surfaced to the user — complete failure'. A fleet whose console has no published port should not
+    take on a derived store it must keep synchronised. **WHAT TRANSFERS IS THE IDEA — declare the
+    corpus, look it up before answering — NOT THE SOFTWARE.**
+    (vii) CORRECTIONS TO THE SECONDARY READING, RECORDED SO THEY ARE NOT RE-CITED: gbrain's README at
+    HEAD reads 155,795 pages / 24,589 people / 5,340 companies / 66 cron jobs, not ~146,000 (that figure
+    was replaced on 2026-08-11 by commit d35c9c9e); it says '50+ curated skills' with 69 tracked, never
+    '40+'; '20-66 cron jobs' conflates one operator's 66 with a docs recommendation of '20+'; and
+    'single-operator by design' is contradicted by a 562-line company-brain tutorial for 10-50 people —
+    what is single-user by design is the PGLITE ENGINE, whose single-process lock already breaks one
+    user running two clients.
+  acceptance:
+    - claim: "a caller can search a skill's declared grounding sources without the console path"
+      proof: "unit test: W1-T933: declared grounding sources are searchable off the panel path"
+    - claim: "the existing clarify grounding path uses the primitive rather than its own copy"
+      proof: "unit test: W1-T933: the clarify path calls the shared lookup"
+    - claim: "a source a skill does not declare is never searched"
+      proof: "unit test: W1-T933: an undeclared source is never searched"
+    - claim: "the lookup makes no model call and reads only declared paths"
+      proof: "unit test: W1-T933: the lookup stays deterministic and offline"
+  origin: recon#injected-not-retrievable-2026-08-16
+  plan_refs: ["W1-T420", "W1-T503", "W1-T38"]
+  files: [src/lib/skill.ts, test/skill.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: medium` IS SET UP FRONT. This adds a read-only primitive and refactors one existing
+    caller onto it; it changes no gate, no disposition and no policy. The declared span is one module
+    and its own suite, so Rule 19 sizing holds at this band. It is not `low` because
+    `src/lib/skill.ts` is the registry contract every skill entry is read through.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT (`git grep -cw`) AT 2ff63cb. `grounding_sources`
+    scores `src/lib/panel-skill-run.ts` 12, `test/panel-skill-run.test.ts` 7, `test/skill.test.ts` 5;
+    `loadSkill` scores `test/skill.test.ts` 6, `src/lib/panel-skill-run.ts` 5, `src/lib/skill.ts` 2.
+    The primitive belongs in `src/lib/skill.ts` because that is where the registry entry is loaded and
+    where `grounding_sources` becomes a contract rather than a caller's private read.
+    **`src/lib/panel-skill-run.ts` IS DELIBERATELY NOT DECLARED** even though it scores highest: this
+    task's change there is the one-line substitution of the shared primitive for its inline copy, and
+    declaring it would widen the span to two modules at a band Rule 19 sizes tightly. If the refactor
+    turns out to need real edits there, that is a second shard, not a widened `files:`.
+    **`src/run-task.ts` IS NOT DECLARED** — 103 of 277 shards declare it and it serialises every task
+    naming it (W1-T471), and nothing about this primitive lives there.
+
+    **ID PROVENANCE, AND THE RESERVATION DID NOT TAKE.** Four surfaces swept at 2ff63cb: `refs/rmd-id/*`
+    max 929 over 40 refs; shard FILENAMES on origin/main max 932 over 313 files (control: W1-T932
+    appears exactly once); every OPEN PR's TITLE (1 open PR, #2011, no id in its title); and every OPEN
+    PR's FILE LIST (6 files, no shard paths; extractor control returns 932 on a synthetic shard path).
+    Tree max across `plan/tasks.yaml` and every shard is 932, so 933. The `refs/rmd-id/W1-T933` push was
+    attempted with a unique orphan commit over the EMPTY TREE carrying nonce
+    `vm-12002-1786928418644223329`, the refspec variable braced, and the exit status captured into a
+    variable rather than read through a pipe: it FAILED with exit 1, and the readback confirms the ref
+    is ABSENT on origin while the positive control `refs/rmd-id/W1-T929` reads 1 line. This host cannot
+    write non-branch refs. **SO THIS ID RESTS ON THE FOUR-SURFACE SWEEP ALONE AND COULD STILL COLLIDE
+    WITH A CONCURRENT MINT.**
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, never pure paths. Each is under 100
+    characters with no comma, so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail it,
+    and each matches ZERO files today against a control matching exactly one.
+
+    **WHAT THIS SHARD DOES NOT CLAIM.** It does not claim workers cannot search — they hold `Grep` and
+    `Glob` in every lane and can scan the tree today. It does not claim the byte ceiling is wrong; the
+    ceiling is a reasonable response to injection-only delivery, and the honest reading is that it is a
+    SYMPTOM of that constraint rather than a virtue in itself. And it does not claim a retrieval layer
+    would let the cap rise — a lookup makes carrying OPTIONAL, which is a different and smaller claim."
