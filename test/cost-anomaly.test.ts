@@ -441,6 +441,62 @@ test("parseCostAnomalyPolicy: a non-finite bound is refused — a .nan bound wou
   }
 });
 
+test("runSweep contains a cost-anomaly detector throw rather than failing the reconciliation pass it shares a ledger read with", async () => {
+  const path = ledgerTmpPath();
+  const ndjson = [
+    runLines({ runId: "W1-A1", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T00:00:00.000Z" }),
+    runLines({ runId: "W1-A2", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T01:00:00.000Z" }),
+    runLines({ runId: "W1-A3", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T02:00:00.000Z" }),
+    runLines({ runId: "W1-A4", taskId: "W1-A", taskClass: "src", costUsd: 1, ts: "2026-08-01T03:00:00.000Z" }),
+    runLines({ runId: "W1-T7", taskId: "W1-T7", taskClass: "src", costUsd: 9.32, ts: "2026-08-01T04:00:00.000Z" }),
+  ].join("\n");
+  writeFileSync(path, `${ndjson}\n`);
+
+  // The SAME ledger and PR the disposition test above uses, so the only difference between the two
+  // is that the detector throws here — a real throw out of `recordCostAnomalies`, taken through the
+  // injected-policy seam `runSweep` already exposes rather than by stubbing the module. Every field
+  // explodes because `detectCostAnomalies` reads `minSamples` per class and `multiplier` per run:
+  // which one it happens to touch first is an implementation detail this test must not encode.
+  const exploding: CostAnomalyPolicy = {
+    get multiplier(): number {
+      throw new Error("cost-anomaly policy read exploded");
+    },
+    get minSamples(): number {
+      throw new Error("cost-anomaly policy read exploded");
+    },
+  };
+
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const deps = fakeSweepDeps(path, {
+    costAnomalyPolicy: exploding,
+    log: (step, extra) => {
+      logged.push({ step, extra });
+    },
+  });
+
+  // Containment means the pass RETURNS, so awaiting it is itself the first assertion.
+  const summary = await runSweep([mergeableTestPr()], deps);
+
+  // The throw was caught and named, ONCE, carrying the original message rather than a generic one.
+  const errors = logged.filter((l) => l.step === "sweep.cost_anomaly.error");
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0]?.extra?.error), /cost-anomaly policy read exploded/);
+
+  // A detector that threw wrote nothing — no half-finding, no partial row.
+  const lines = parseLedger(readFileSync(path, "utf8"));
+  assert.equal(lines.filter((r) => r.step === COST_ANOMALY_STEP).length, 0);
+
+  // And the reconciliation the detector shares this pass with is byte-identical to the healthy
+  // case: the PR still arms exactly once and nothing is recorded as a failed action.
+  assert.equal(deps.armed.length, 1);
+  assert.equal(deps.closed.length, 0);
+  assert.equal(deps.fixed.length, 0);
+  assert.equal(deps.escalated.length, 0);
+  assert.equal(summary.actionsTaken, 1);
+  assert.equal(summary.actionsFailed, 0);
+  assert.equal(summary.byDisposition.mergeable, 1);
+});
+
 test("loadCostAnomalyPolicy: a file that is not valid YAML is refused, naming the path", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-cost-anomaly-badyaml-"));
   const bad = join(dir, "policy.yaml");
