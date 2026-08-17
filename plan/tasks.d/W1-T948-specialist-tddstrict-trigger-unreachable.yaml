@@ -1,0 +1,132 @@
+- id: W1-T948
+  title: "the testing-specialist trigger branches on a field nothing in src/ ever assigns, and its own router has no production caller either — so `principles: {tdd: strict}` can never route a task to the testing specialist, and the suite passes regardless because it hand-builds the input"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    FILED FROM RECON at origin/main c96fb6d, extended while reading source at b736b41. Every
+    figure below was re-derived on this branch; the ones that came from the brief are marked.
+
+    (1) THE BRANCH EXISTS AND NOTHING CAN REACH IT. `testingTrigger` (src/lib/specialist-panel.ts)
+    opens with `if (task.tddStrict) return { specialist: "testing", reason: "task declares
+    `principles: {tdd: strict}`" }`. The field is declared optional on `SpecialistTaskMetadata` in
+    the same module. `git grep -n "tddStrict:" -- src/` returns ONLY the two parameter
+    declarations in src/lib/review.ts — nothing in src/ ever assigns it. POSITIVE CONTROL on the
+    same invocation: `git grep -c "coverageDelta" -- src/` returns src/lib/specialist-panel.ts:3,
+    a sibling field that is equally declaration-only, so the query works and the zero is real.
+
+    (2) AND THE ROUTER ITSELF HAS NO PRODUCTION CALLER, WHICH IS THE LARGER FACT AND WAS NOT IN
+    THE BRIEF. `routeSpecialists` is the only consumer of `SpecialistTaskMetadata`.
+    `git grep -n "routeSpecialists|SpecialistPanelInput|SpecialistTaskMetadata" -- src/` with its
+    own module excluded returns EMPTY (exit 1). Its only call sites are in
+    test/specialist-panel.test.ts. TWO POSITIVE CONTROLS: `git grep -c "SPECIALIST_TOOLS" -- src/`
+    returns three files including src/lib/onboard/recon.ts and src/run-task.ts — so symbols from
+    this module ARE imported elsewhere and the query is not blind; and `git grep -c "judgeReview"
+    -- src/ test/` reads across many files, confirming the invocation shape finds real consumers.
+    src/lib/onboard/recon.ts imports `isReadOnlyToolset`, `SPECIALIST_TOOLS` and `SpecialistName`
+    from this module and NOT the router.
+
+    (3) SO POPULATING THE FIELD ALONE WOULD CHANGE NOTHING OBSERVABLE. A builder who reads only
+    the brief would assign `tddStrict` at some metadata construction site, watch a new test pass,
+    and ship a path that still no production code path reaches. THAT IS THE TRAP THIS RECORD
+    EXISTS TO PREVENT, and it is why criterion 1 below is a determination rather than an edit.
+
+    (4) THE SUITE CANNOT SEE ANY OF THIS. test/specialist-panel.test.ts constructs its metadata
+    objects by hand — `testingTrigger({ tddStrict: true })` and a `routeSpecialists` input
+    literal — so the tests pass whether or not anything in production ever builds such an object.
+    A dead path with green tests is invisible to CI by construction.
+
+    (5) NOT THIS RECORD'S CONCERN, STATED SO IT IS NOT RE-FILED. `decideAutoMergeArm`'s unused
+    `tddStrict` parameter is DELIBERATE and documented in src/lib/review.ts's own comment block
+    above the function: W1-T229 removed it from the gate so a CAPPED verdict refuses to arm
+    UNCONDITIONALLY, and the parameter survives purely for override-provenance bookkeeping in
+    `resolveAutoMergeArm`. That is a strengthening, not a defect, and this task must not touch it.
+  design: |
+    THE SHAPE: decide whether the trigger should live or die, record the determination, then make
+    the outcome reachable and prove it discriminates. One module and its suite. No new surface.
+
+    (i) THE DETERMINATION COMES FIRST AND IT IS THE FIRST DELIVERABLE. Two outcomes are
+    admissible and the builder must establish which, in writing, before editing anything:
+      (a) POPULATE — the testing specialist is wanted, so `SpecialistTaskMetadata.tddStrict` is
+          assigned from the task record wherever the metadata is constructed. This is only
+          coherent if a construction site is CREATED or identified, because rationale (2)
+          establishes there is none today.
+      (b) REMOVE — the trigger is obsolete, so the branch and the field go, and the tests that
+          hand-build them go with them.
+    A determination that names neither, or that picks (a) without naming the caller that would
+    build the metadata, is not a determination and must not proceed to an edit.
+
+    (ii) OUTCOME (a) IS NOT COMPLETE AT THE ASSIGNMENT. Rationale (2) is the binding constraint:
+    `routeSpecialists` has no production caller, so assigning the field leaves the trigger exactly
+    as unreachable as it is today, with a green test to disguise it. Choosing (a) therefore means
+    wiring the router to a real call path as part of the same change, or the task is not done.
+
+    (iii) A POSITIVE TEST ALONE PROVES NOTHING HERE. An implementation that fires the trigger
+    unconditionally satisfies "the trigger fires from production-constructed metadata". The
+    negative control must run in the SAME suite invocation against a task WITHOUT the property
+    and observe no testing trigger, so one run carries both directions.
+
+    (iv) AND THE MUTATION CHECK MUST BE FILE-SHA BRACKETED. A no-op mutation is indistinguishable
+    from a surviving mutant from the result alone — a session measured 5 pass / 0 fail this
+    weekend from a regex that never applied. So the check is: read the sha256 of the edited file,
+    remove the assignment, read the sha256 again and require it to DIFFER, run the suite and
+    require the positive test to FAIL, restore, and require the sha to return to the original.
+
+    (v) OUT OF SCOPE, ENUMERATED. Any change to `decideAutoMergeArm` or its signature; any change
+    to the `isTddStrict` doc comment in src/lib/review.ts; any change to the contents of any
+    plan/tasks.d/ shard; any change to what `principles: {tdd: strict}` means at review time; and
+    any widening of the specialist panel beyond the testing trigger.
+  acceptance:
+    - claim: "the builder records which of populate-or-remove is correct, and why, before editing"
+      proof: "unit test: W1-T948: the determination between populating and removing is recorded"
+    - claim: "the testing trigger fires from a metadata object production actually builds"
+      proof: "unit test: W1-T948: the testing trigger fires from production-constructed metadata"
+    - claim: "a task without the property does not fire the trigger, in the same run"
+      proof: "unit test: W1-T948: a task without the declaration does not fire the testing trigger"
+    - claim: "removing the assignment fails the positive test, with the file sha read either side"
+      proof: "unit test: W1-T948: removing the assignment fails the positive test"
+    - claim: "the router reaches the trigger from a real call path rather than from a test literal"
+      proof: "unit test: W1-T948: the specialist router is reached from a production call path"
+  risk: medium
+  origin: "recon#specialist-tddstrict-unreachable-2026-08-17"
+  plan_refs: ["W1-T229"]
+  files: [src/lib/specialist-panel.ts, test/specialist-panel.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS SET DELIBERATELY AND UP FRONT. This is arm-adjacent review machinery and
+    design item (i) requires a JUDGEMENT — populate or remove — before any edit. A judgement is
+    exactly the shape `isDispatchEligible` must not auto-dispatch at, and the same predicate
+    W1-T923 records: one remedy form is automatable, a choice is not. risk:medium is Rule 19's
+    span (one source module plus its suite), not blast radius; blast radius is bounded because the
+    path is unreachable today, so nothing observable can regress from touching it.
+
+    files: DERIVED BY READING THE SOURCE, NOT GUESSED, at b736b41. `testingTrigger`,
+    `SpecialistTaskMetadata`, `routeSpecialists` and the field declaration are ALL in
+    src/lib/specialist-panel.ts — one module. Its only exercising suite is
+    test/specialist-panel.test.ts, which is where the hand-built literals live. No third path is
+    declared because rationale (2) establishes there is no construction site to name yet;
+    identifying or creating one is design item (i)'s job, and a builder choosing outcome (a) will
+    need to widen this list at that point. src/lib/review.ts is DELIBERATELY NOT DECLARED — the
+    `tddStrict` hits there are the W1-T229 parameter, which rationale (5) puts out of scope.
+    src/run-task.ts is not declared either: it imports SPECIALIST_TOOLS from this module but never
+    the router, and W1-T471 records that declaring the monolith serialises every task naming it.
+
+    THE ID RESTS ON THE SWEEP ALONE, AND ONE SURFACE IS PROVABLY INCOMPLETE. The gated push to
+    refs/rmd-id/W1-T948 was attempted with a unique orphan payload over the empty tree
+    (4b825dc6) carrying a host-pid-nanosecond nonce, the refspec braced, and the exit code
+    captured in a variable rather than read through a pipe. It returned HTTP 403 — the same
+    credential limit W1-T518 files — so the readback found no ref and the reservation does not
+    exist. The four-surface sweep is therefore the whole basis: W1-T948 read 0 against the plan
+    tree (both id lines and shard filenames), 0 against refs/rmd-id/*, 0 across every open PR's
+    file list, and 0 across every open PR's title. Highest id claimed on ANY surface was 947, from
+    an open PR's file list.
+
+    AND CONTROL A FAILED, WHICH IS ITSELF A FINDING. `refs/rmd-id/W1-T945` reads 0 while W1-T945
+    is unambiguously taken — its shard file exists (control B read 1). So refs/rmd-id/* does NOT
+    hold a reservation for every taken id, and a sweep that trusted it alone would mint a
+    collision. That is why all four surfaces were swept and why the tree, not the ref namespace,
+    is the authority here.
