@@ -1,18 +1,43 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { parse as parseYaml } from "yaml";
-import {
+
+// `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
+// `import … from "../scripts/check-dependency-licences.mjs"` is a TS7016 — the same reason
+// test/clock-sweep.test.ts reaches its script through a runtime import rather than a typed one.
+// A dynamic specifier is not statically resolved, so this loads the REAL module with no shadow
+// copy to drift from it.
+const SCRIPT_URL = pathToFileURL(
+  join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "check-dependency-licences.mjs"),
+).href;
+const {
   DEFAULT_ALLOW_LICENSES,
   classifyLicense,
   collectLockPackages,
   diffAdded,
   evaluate,
-} from "../scripts/check-dependency-licences.mjs";
+} = (await import(SCRIPT_URL)) as {
+  DEFAULT_ALLOW_LICENSES: readonly string[];
+  classifyLicense: (license: string | null | undefined, allowList: string[]) => string;
+  collectLockPackages: (lock: unknown) => Map<string, string | null>;
+  diffAdded: (
+    baseMap: Map<string, string | null>,
+    headMap: Map<string, string | null>,
+  ) => Array<{ name: string; version: string; license: string | null }>;
+  evaluate: (
+    added: Array<{ name: string; version: string; license: string | null }>,
+    opts: { allowList: string[]; exemptions?: Array<{ name: string; reason: string }> },
+  ) => {
+    offenders: Array<{ name: string; version: string; license: string | null; verdict: string }>;
+    undetermined: Array<{ name: string; version: string; license: string | null; verdict: string }>;
+    allowed: Array<{ name: string; version: string; license: string | null }>;
+  };
+};
 
 // ── W1-T934: "no dependency-licence policy exists" — a copyleft dep must not merge green ────
 //
