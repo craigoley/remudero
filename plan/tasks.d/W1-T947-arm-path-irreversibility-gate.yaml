@@ -1,0 +1,111 @@
+- id: W1-T947
+  title: "THE AUTO-MERGE ARM PATH CONSULTS NO IRREVERSIBILITY SIGNAL — operator ruling W1-T919 says the fleet gates on irreversibility rather than outwardness, and nothing on the arm path enforces it, so a change classified irreversible arms itself exactly like an ordinary one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: |
+    MEASURED AT bda7487 BY THE RECON THAT PRODUCED THIS FILING; the findings below are that
+    recon's, restated rather than re-derived.
+    ARMING AT PR OPEN IS UNCONDITIONAL. `armAutoMergeAtOpen` (src/run-task.ts) is a bare
+    `return attemptArm(prUrl, deps)` — it takes a PR url and its deps and consults no verdict,
+    no risk band and no path classification. Its call site in the implement lane arms as soon
+    as the PR exists, and `attemptArm` is the shared completion both it and the gated path use.
+    THE ARM DECISION THAT DOES EXIST TAKES NO SUCH INPUT EITHER. `decideAutoMergeArm`
+    (src/lib/review.ts) is called with `(verdict, tddStrict, override)` and branches only on
+    `state`, `capped` and `planOnly`. There is no parameter through which an irreversibility
+    classification could reach it today.
+    ONLY FOUR CONDITIONS FORCE A HUMAN, AND NONE IS PATH- OR IRREVERSIBILITY-BASED:
+    `verify: human` blocking dispatch (src/lib/drain.ts), a non-success review verdict and a
+    CAPPED verdict without a ledgered override (both src/lib/review.ts), and risk-judge
+    escalation (src/lib/risk-judge.ts).
+    THE STATIC `risk:` FIELD IS DELIBERATELY NEVER CONSULTED — src/lib/risk-judge.ts and
+    src/run-task.ts each document that in place. This task must not quietly reverse that
+    ruling by routing `risk:` into the gate; the signal it needs is a property of the DIFF.
+    THE MECHANISM PARTLY EXISTS AND IS SIMPLY UNROUTED. A `RiskBand` type including
+    `"critical"` lives in src/lib/risk-score.ts and its only consumers are the specialist panel
+    (src/lib/specialist-panel.ts). Nothing connects it to the arm path.
+    AND NO PATH GATE COVERS `src/`. `INSTRUMENT_SURFACE` (src/lib/review.ts) holds six
+    patterns and none of them matches `src/`, so Rule 25's surface check cannot stand in for
+    this.
+    THE RULING IS RECORDED AND UNENFORCED. W1-T919's operator ruling is in DECISIONS.md and
+    has no enforcement point on the arm path. That gap is the whole of this task.
+  design: |
+    (i) ROUTE AN IRREVERSIBILITY SIGNAL INTO THE ARM DECISION. A change classified
+    IRREVERSIBLE must refuse to auto-arm and must fall to operator review; an ordinary change
+    must arm exactly as it does today. The signal is a property of the DIFF, never the static
+    `risk:` field, whose non-consultation is a standing ruling this task preserves rather than
+    reverses.
+    (ii) BOTH ARM SITES MUST HONOUR IT, and this is why the task is larger than it first
+    looks. `decideAutoMergeArm` can grow an input, but `armAutoMergeAtOpen` currently makes NO
+    decision at all — it arms before any verdict exists. A gate added only to the decision
+    function would leave the at-open path arming an irreversible change seconds after the PR
+    opens, which is the exact hole this task exists to close.
+    (iii) THE REFUSAL MUST BE LEGIBLE, NOT SILENT. A refusal to arm reads identically to
+    "nobody got round to arming it" unless it says so; the decision must carry a reason a
+    human reads on the PR, in the same shape the existing refusal reasons take.
+    (iv) FALSIFIER, BOTH DIRECTIONS, AND THE SECOND ONE IS THE POINT. A diff classified
+    irreversible does NOT arm (a gate that never fires fails this), AND an ordinary diff STILL
+    ARMS (a gate that refused everything would pass the first and fail this). The second is the
+    positive control: without it, disabling auto-merge entirely would satisfy the first.
+    (v) NOT IN SCOPE, each for a stated reason. `src/lib/daemon.ts` and the daemon boot-path
+    ORDERING are claimed by W1-T936 and must not be touched here. The ORDERING of the risk
+    judge relative to review posting is a SEPARATE DEFECT and is to be filed separately — it is
+    named here only so an implementer does not silently absorb it. `INSTRUMENT_SURFACE` and
+    Rule 25 are a different question (instrument entanglement, not irreversibility). And the
+    static `risk:` field stays unconsulted, per (i).
+  acceptance:
+    - claim: "a diff classified irreversible does not arm, and the refusal names irreversibility as the reason"
+      proof: "unit test: an irreversible diff refuses to arm and names irreversibility as the reason"
+    - claim: "an ordinary diff still arms, so the gate has not simply disabled auto-merge"
+      proof: "unit test: an ordinary diff still arms so the gate is not a blanket refusal"
+    - claim: "the at-open arm honours the gate rather than arming before any decision is reached"
+      proof: "unit test: the at open arm refuses an irreversible diff before any verdict exists"
+  risk: high
+  origin: oper#arm-path-irreversibility-2026-08-17
+  plan_refs: ["W1-T919", "W1-T936"]
+  files: [src/lib/review.ts, src/run-task.ts, test/arm-at-open.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS DELIBERATE AND IS NOT NEGOTIABLE FOR THIS SHARD. This task modifies the
+    gate that governs its own merge: a worker that built it could arm and merge its own change
+    to the arming rule. `isDispatchEligible` (src/lib/drain.ts) returns false at
+    `t.verify !== "auto"` BEFORE the linter is consulted, so this shard can never be picked up
+    by the drain, which is the intended effect.
+    risk: high IS SET UP FRONT and is Rule 19's SPAN: the files span three subsystems (review,
+    run-task, arm-at-open). The blast radius is genuinely high as well — this changes when the
+    fleet merges without a human, which is the single most consequential behaviour it has.
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT, not guessed:
+    `decideAutoMergeArm` reads review.ts=17, run-task.ts=10, test=47; `armAutoMergeAtOpen`
+    reads run-task.ts=9, test=15; `attemptArm` reads run-task.ts=5, test=3. The two arm sites
+    therefore live in exactly those two source files, and test/arm-at-open.test.ts is the one
+    suite that already exercises BOTH `decideAutoMergeArm` and `armAutoMergeAtOpen`.
+    `src/run-task.ts` IS DECLARED AND THE COST IS ACCEPTED IN WRITING. 103 of 277 shards
+    already declare it and W1-T471 serialises every task naming it, so this shard will wait
+    behind them. It is declared anyway because `armAutoMergeAtOpen` — the unconditional arm
+    that is half the defect — is defined there and nowhere else; a filing that omitted it would
+    describe a fix that cannot be built.
+    `src/lib/risk-score.ts` is NOT declared: `RiskBand` may or may not turn out to be the right
+    carrier, and clause (i) fixes only that the signal is diff-derived. An implementer who
+    concludes the classifier belongs there MUST AMEND THIS SHARD TO DECLARE IT FIRST rather
+    than overrunning.
+    PROOF NOTES: all three proofs are the NAME-FILTERED `unit test:` form, never a whole-file
+    path, so each names the behaviour it proves rather than a file that would pass on any test
+    in it. Each title was verified to match ZERO files today via `grep -rlF` over test/,
+    against a control matching one. Each is plain prose under 100 characters with no comma and
+    no regex metacharacter, so `looksLikeScenarioNarrative` does not fire.
+    HOW A REVIEWER CONFIRMS BOTH DIRECTIONS: run the two suites named above and read the pair
+    together — the refusal test alone is satisfiable by disabling auto-merge outright, so it
+    proves nothing without the ordinary-diff control passing in the same run. A reviewer should
+    also require a mutation that FAILS the refusal test, checked by file sha before and after,
+    because a no-op mutation is indistinguishable from a surviving mutant from the result alone.
+    ID PROVENANCE: refs/rmd-id/W1-T947 COULD NOT BE MINTED — the gated push returned HTTP 403
+    (the session-credential limit W1-T518 files). The gate refused rather than leaving a corrupt
+    ref, and the ABSENCE was confirmed by re-reading the ref and matching a host-pid-nanosecond
+    nonce. THIS ID THEREFORE RESTS ON THE FOUR-SURFACE SWEEP ALONE: refs/rmd-id/* (max 946),
+    shard filenames on origin/main (max 945), every open PR's file list (#2039 W1-T936, #2037
+    none) and every open PR's title (W1-T936, W1-T942) — all read 0 for W1-T947, against
+    positive controls of refs/rmd-id/W1-T946 reading 1 and W1-T945's shard reading 1.
