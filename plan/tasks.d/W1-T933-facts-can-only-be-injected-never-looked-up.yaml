@@ -67,8 +67,17 @@
     pass; adding `Skill` to any worker tool set; and anything that writes to `plan/feedback/`.
     (vi) WHY NOT ADOPT THE OBVIOUS PRIOR ART. `garrytan/gbrain` (re-derived from its own README and
     docs at HEAD 9c2c911) does solve this, with PGLite/Postgres, HNSW over pgvector, BM25, reciprocal-
-    rank fusion and graph traversal, and publishes a real retrieval lift (49.1 P@5 / 97.9 R@5 against
-    ~18 / ~80 for vector-only RAG on its corpus). **IT IS STILL THE WRONG TRADE HERE, ON ITS OWN
+        rank fusion and graph traversal. **ITS PUBLISHED RETRIEVAL FIGURES ARE REAL BUT MUST NOT BE
+    QUOTED AS CURRENT**: the headline benchmark (49.1 P@5 / 97.9 R@5 against ~18 / ~80 for vector-only
+    RAG) was measured on the then-default ZeroEntropy stack, which `docs/tutorials/company-brain.md`
+    states directly above the numbers is now DEPRECATED with its hosted API ending 2026-09-04; the
+    current default is Voyage `voyage-4` + `rerank-2.5`, and NO PUBLISHED FIGURE IN THAT REPO MEASURES
+    THE CURRENT DEFAULT STACK. The project also states its own lift three inconsistent ways across
+    three primary documents — `+31.4` P@5 in README.md, `+31` in `docs/architecture/RETRIEVAL.md`, and
+    'beats commodity vector retrieval by 38 percentage points' in the company-brain tutorial — and its
+    own RETRIEVAL.md credits the lift to 'the graph + extract quality work' JOINTLY rather than to the
+    graph alone, with hybrid-without-graph scoring the SAME P@5 as plain vector-only.
+    **IT IS STILL THE WRONG TRADE HERE, ON ITS OWN
     EVIDENCE.** Its most-documented operational burden is keeping the derived index in sync with the
     markdown — the whole point of `docs/guides/live-sync.md`, whose stated failure mode is 'you correct
     a hallucination in a brain page, but the vector DB keeps serving the old text because nobody ran
@@ -135,4 +144,14 @@
     `Glob` in every lane and can scan the tree today. It does not claim the byte ceiling is wrong; the
     ceiling is a reasonable response to injection-only delivery, and the honest reading is that it is a
     SYMPTOM of that constraint rather than a virtue in itself. And it does not claim a retrieval layer
-    would let the cap rise — a lookup makes carrying OPTIONAL, which is a different and smaller claim."
+    would let the cap rise — a lookup makes carrying OPTIONAL, which is a different and smaller claim.
+
+    **AND ONE ADJACENT QUESTION IS RECORDED AS UNDETERMINED RATHER THAN ANSWERED.** Whether a spawned
+    worker can invoke a SKILL is NOT settled by the tool arrays. `Skill` appears in none of them
+    (positive control: the literal Read entry appears in 3 files), but the Agent SDK doc for its own
+    `skills` option says that is the single place to turn skills on and that adding Skill to
+    `allowedTools` is unnecessary — and that OMITTING the option means CLI defaults still apply and
+    is explicitly NOT skills-off. Remudero never passes that option, while it does pass explicit
+    tool arrays at spawn sites in `escalate.ts`, `feedback.ts`, `flight-judge.ts` and `isolation.ts`.
+    So per-lane skill availability is UNRESOLVED FROM SOURCE and needs a spawn-time probe rather than
+    another reading of the arrays. Anyone building on this must not inherit the stronger claim."
