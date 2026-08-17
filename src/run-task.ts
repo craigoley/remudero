@@ -853,6 +853,175 @@ export function sweepStaleWorkerTails(root: string, opts: { maxAgeMs?: number; n
   return { removed };
 }
 
+// ── W1-T945: `rmd peek <runId>` — READ-ONLY reader over W1-T942's tail (design note i: the
+// verb and its console-route twin below open the tail file for READING and expose no parameter
+// that can reach the worker — no stdin, no message injection, no signal, no kill, no resume). ──
+
+/**
+ * The run-id SHAPE `readWorkerTail`/the `GET /v1/peek` route (serve.ts) both validate BEFORE any
+ * path is built (design note vi) — letters, digits, `-`, `_` only, matching every id this
+ * codebase actually mints (`${taskId}-${Date.now()}`, `RETRO-<ms>`, `review-PR<n>-<ms>`,
+ * `SERVE-<ms>`, …). No `/`, no `.`, so no id can escape `state/runs/` or reach `..`. Duplicated
+ * (not imported) in serve.ts — see that file's own copy for why: serve.ts is a lib module and
+ * this file is the CLI entrypoint that imports FROM lib/*, never the reverse, so the one
+ * property this task's design needs on BOTH sides of that boundary is declared once per side
+ * rather than smuggling a lib->entrypoint cycle into a security-relevant check.
+ */
+export const RUN_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
+
+export function isValidRunId(id: string): boolean {
+  return RUN_ID_SHAPE.test(id);
+}
+
+/** `rmd peek`'s default `--lines` — generous enough for a glance, far below the 500-line ring
+ *  ceiling {@link WORKER_TAIL_MAX_LINES} the tail file itself can never exceed. */
+export const PEEK_DEFAULT_LINES = 50;
+
+/** What one `readWorkerTail` read reports — HONEST EMPTINESS (design note iv): `found: false`
+ *  always carries a NAMED `reason`, never a silent empty `lines`. `live` is independent of
+ *  `found`/`lines` — a run can be LIVE with no tail yet (sensor not wired for this spawn path,
+ *  MASTER-PLAN's own documented one-of-six-call-sites coverage limit) or FINISHED with a full
+ *  retained one. */
+export interface PeekTailResult {
+  runId: string;
+  live: boolean;
+  found: boolean;
+  lines: string[];
+  reason?: string;
+}
+
+/**
+ * READ-ONLY tail read for ONE run — the shared primitive `peekCommand` below and the console's
+ * `GET /v1/peek` route (serve.ts, via an injected `isLive`) both exist to expose. Liveness reuses
+ * the EXISTING `liveInflightRuns` pid-checked read of `state/inflight/*.lock` (design note ii) —
+ * never a second definition of "in flight". An invalid run-id shape or a missing/unreadable tail
+ * file both resolve to `found: false` with a NAMED reason (design note iv) rather than throwing
+ * or returning silent empty output; the shape check runs BEFORE any path is built (design note
+ * vi), so an id that fails it never reaches a `readFile` call at all.
+ */
+export function readWorkerTail(
+  root: string,
+  runId: string,
+  opts: {
+    maxLines?: number;
+    inflightDir?: string;
+    isPidAlive?: (pid: number) => boolean;
+    readFile?: (path: string) => string;
+  } = {},
+): PeekTailResult {
+  const inflightDir = opts.inflightDir ?? join(root, "state", "inflight");
+  const live = liveInflightRuns(inflightDir, opts.isPidAlive).some((r) => r.runId === runId);
+  if (!isValidRunId(runId)) {
+    return {
+      runId,
+      live,
+      found: false,
+      lines: [],
+      reason: `invalid run id '${runId}' — expected letters, digits, '-', '_' only`,
+    };
+  }
+  const tailPath = join(root, "state", "runs", `${runId}.tail`);
+  const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
+  let raw: string;
+  try {
+    raw = readFile(tailPath);
+  } catch {
+    return { runId, live, found: false, lines: [], reason: `no tail recorded for ${runId}` };
+  }
+  const split = raw.split("\n");
+  if (split.length > 0 && split[split.length - 1] === "") split.pop();
+  const maxLines = Math.min(opts.maxLines ?? PEEK_DEFAULT_LINES, WORKER_TAIL_MAX_LINES);
+  const lines = capWorkerTailLines(split, maxLines, WORKER_TAIL_MAX_BYTES);
+  return { runId, live, found: true, lines };
+}
+
+/**
+ * `rmd peek <runId> [--lines <n>] [--follow]` (W1-T945, design note ii): prints the last
+ * `--lines` (default {@link PEEK_DEFAULT_LINES}) lines of `state/runs/<runId>.tail` and exits 0,
+ * stating plainly whether the run is LIVE or FINISHED. Works identically on a FINISHED run's
+ * RETAINED tail (design note iii) — the surviving half of fb-1784821673624-321a4b, whose
+ * final-message half already shipped as `report_excerpt` (#1584; not re-implemented here). An
+ * unknown run id or an absent tail prints a NAMED reason and still exits 0 (design note iv) —
+ * never silent empty output. `--follow` re-reads on a poll and reprints only when the content
+ * changes, stopping on its own the moment the run is no longer live — it never hangs on an
+ * already-finished run (design note ii's own termination requirement), reusing the SAME
+ * `readWorkerTail`/`liveInflightRuns` read every tick, never a second liveness definition.
+ * READ-ONLY BY CONSTRUCTION: `--lines`/`--follow` only change how much of the SAME read-only
+ * file is printed and how often — neither this command nor any flag on it writes to, signals,
+ * resumes or kills the run (design note i; there is no steering surface in v1).
+ */
+export async function peekCommand(
+  rest: string[],
+  deps: {
+    root?: string;
+    inflightDir?: string;
+    isPidAlive?: (pid: number) => boolean;
+    readFile?: (path: string) => string;
+    sleep?: (ms: number) => Promise<void>;
+    pollMs?: number;
+    maxFollowIterations?: number;
+  } = {},
+): Promise<number> {
+  const runId = rest[0];
+  const badArg = unknownArgError("peek", rest.slice(1), ["--lines"], ["--follow"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!runId) {
+    console.error(`rmd peek: <runId> is required — usage: ${commandSyntax("peek")}\n` + USAGE);
+    return 2;
+  }
+  const linesRaw = flagValue(rest, "--lines");
+  const maxLines = linesRaw === undefined ? PEEK_DEFAULT_LINES : Number(linesRaw);
+  if (!Number.isInteger(maxLines) || maxLines <= 0) {
+    console.error(`rmd peek: --lines must be a positive integer, got ${JSON.stringify(linesRaw)}\n` + USAGE);
+    return 2;
+  }
+  const follow = rest.includes("--follow");
+  const root = deps.root ?? loadConfig().root;
+  const readOpts = { maxLines, inflightDir: deps.inflightDir, isPidAlive: deps.isPidAlive, readFile: deps.readFile };
+
+  const render = (r: PeekTailResult): void => {
+    if (!r.found) {
+      console.log(`rmd peek ${r.runId} — ${r.live ? "LIVE" : "FINISHED"} — ${r.reason}`);
+      return;
+    }
+    console.log(`rmd peek ${r.runId} — ${r.live ? "LIVE" : "FINISHED"} — last ${r.lines.length} line(s)`);
+    if (r.lines.length === 0) {
+      console.log("  (tail is empty — no output recorded yet)");
+    } else {
+      for (const line of r.lines) console.log(line);
+    }
+  };
+
+  let result = readWorkerTail(root, runId, readOpts);
+  render(result);
+  if (!follow || !result.live) return 0;
+
+  // --follow: poll until the run stops being live, then stop on its own — see this function's
+  // own doc for why that is the whole termination contract design note ii asks for.
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const pollMs = deps.pollMs ?? 2000;
+  const maxIterations = deps.maxFollowIterations ?? Infinity;
+  let lastRendered = result.found ? result.lines.join("\n") : "";
+  let iterations = 0;
+  while (result.live && iterations < maxIterations) {
+    await sleep(pollMs);
+    iterations++;
+    result = readWorkerTail(root, runId, readOpts);
+    const rendered = result.found ? result.lines.join("\n") : "";
+    if (rendered !== lastRendered || !result.found) {
+      render(result);
+      lastRendered = rendered;
+    }
+  }
+  if (!result.live) {
+    console.log(`rmd peek ${runId} — run finished, stopping --follow`);
+  }
+  return 0;
+}
+
 /**
  * Resolve the repo root a `rmd` invocation GATES, in priority order — replacing the
  * old INSTALL-PATH derivation (`dirname(dirname(fileURLToPath(import.meta.url)))`,
@@ -14548,6 +14717,12 @@ export async function serveCommand(
     // an unconfigured install, identity is never consulted, exactly as before.
     identity,
     log,
+    // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
+    // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
+    // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact
+    // same read `inflightHolder` above already wires, never a second definition of "in flight"
+    // (design note ii).
+    peek: { root: config.root, isLive: (runId) => liveInflightRuns(join(config.root, "state", "inflight")).some((r) => r.runId === runId) },
   });
 
   // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
@@ -20700,6 +20875,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd trace <id>   # render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha; <id> resolves as a task id first (reverse: task back to its origin:), else as a plan/feedback/<id> id (forward: feedback out to every task it produced)",
   },
   {
+    name: "peek",
+    usage:
+      "rmd peek <runId> [--lines <n>] [--follow]   # W1-T945: READ-ONLY tail of one run's output — the last <n> lines (default 50, never more than the 500-line ring ceiling) of its retained state/runs/<runId>.tail (W1-T942), printed with a LIVE/FINISHED verdict from the SAME liveInflightRuns pid-checked read every other liveness decision in this fleet uses — never a second definition of 'in flight'. Works identically on a FINISHED run's retained tail, the surviving half of fb-1784821673624-321a4b (its final-message half already shipped as report_excerpt, #1584). An unknown run id or an absent tail prints a NAMED reason and still exits 0 — never silent empty output. --follow re-polls and reprints on change, stopping on its own the moment the run is no longer live — it never hangs on an already-finished run. READ-ONLY BY CONSTRUCTION: no flag here writes to, signals, resumes or kills the run — there is no steering surface in v1.",
+  },
+  {
     name: "plan",
     usage:
       "rmd plan --mode=create|clarify|expand [<brief>...]   # the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review",
@@ -21272,6 +21452,9 @@ export async function main(
   }
   if (cmd === "trace") {
     process.exit(await traceCommand(rest));
+  }
+  if (cmd === "peek") {
+    process.exit(await peekCommand(rest));
   }
   if (cmd === "plan") {
     process.exit(await planCommand(rest));
