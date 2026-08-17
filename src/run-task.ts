@@ -6385,9 +6385,7 @@ async function runTask(
     // time (own-repo PRs #251/#245/#240/#249; #274 NEVER reached the old
     // post-review arm call because its fix-rung loop was still running). Safe
     // because GitHub's required-status contract (ci-gate + remudero-review) is
-    // what actually gates the merge — `ci` and `coverage-ratchet` gate
-    // transitively, aggregated by ci-gate's own REQUIRED list, never as
-    // required contexts themselves — see armAutoMergeAtOpen's doc. The one gap
+    // what actually gates the merge — see armAutoMergeAtOpen's doc. The one gap
     // this leaves (a CAPPED verdict that still posts remudero-review=success)
     // is closed below by disarmAutoMerge, right where the capped-refusal
     // decision is made.
