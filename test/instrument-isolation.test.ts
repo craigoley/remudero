@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   applyVerdictStability,
+  detectInstrumentEntanglement,
+  ENTANGLEMENT_EXEMPT_INSTRUMENTS,
   failSummary,
   INSTRUMENT_SURFACE,
   judgeReview,
@@ -193,6 +195,70 @@ test("W1-T297 criterion 3: a docs-only PR PASSES", () => {
   const v = judgeReview(SIMPLE_CRITERIA, { diff: DOCS_ONLY_DIFF, report: SIMPLE_REPORT });
   assert.equal(v.instrumentEntangled, false);
   assert.equal(v.state, "success", v.summary);
+});
+
+// ── W1-T941 prerequisite: ENTANGLEMENT_EXEMPT_INSTRUMENTS narrows, never widens ─────────────
+//
+// scripts/knowledge-budget-baseline.json matches INSTRUMENT_SURFACE by filename alone, but no
+// .github/workflows/ job ratchets against it — its only reader is a pinned product constant
+// (src/lib/learnings.ts) and its own test/ falsifier, both of which MUST land beside it for the
+// pin to mean anything. Unlike every other *-baseline.json, that product-constant line can never
+// be isolated into its own instrument-only PR, so it earns a narrow, named exemption.
+
+test("detectInstrumentEntanglement: an EXEMPT baseline changed alongside a src/ path does NOT entangle", () => {
+  const r = detectInstrumentEntanglement(["scripts/knowledge-budget-baseline.json", "src/lib/learnings.ts"]);
+  assert.equal(r.entangled, false);
+  assert.deepEqual(r.instrumentPaths, []);
+  assert.deepEqual(r.srcPaths, ["src/lib/learnings.ts"]);
+});
+
+test("detectInstrumentEntanglement: the exemption is NARROW — a DIFFERENT baseline (not exempt) still entangles alongside a src/ path", () => {
+  const r = detectInstrumentEntanglement(["scripts/coverage-baseline.json", "src/lib/widget.ts"]);
+  assert.equal(r.entangled, true, "coverage-baseline.json is a REAL CI ratchet — nothing exempts it");
+  assert.deepEqual(r.instrumentPaths, ["scripts/coverage-baseline.json"]);
+});
+
+test("detectInstrumentEntanglement: an exempt path changed ALONE (no src/ path) still reports zero instrument paths, not a stray survivor", () => {
+  const r = detectInstrumentEntanglement(["scripts/knowledge-budget-baseline.json"]);
+  assert.equal(r.entangled, false);
+  assert.deepEqual(r.instrumentPaths, []);
+});
+
+test("detectInstrumentEntanglement: a diff mixing an exempt AND a non-exempt instrument path alongside src/ still entangles on the non-exempt one", () => {
+  const r = detectInstrumentEntanglement([
+    "scripts/knowledge-budget-baseline.json",
+    "scripts/coverage-baseline.json",
+    "src/lib/widget.ts",
+  ]);
+  assert.equal(r.entangled, true);
+  assert.deepEqual(r.instrumentPaths, ["scripts/coverage-baseline.json"], "the exempt path never re-enters the evidence");
+});
+
+test("judgeReview: a PR pinning DEFAULT_KNOWLEDGE_BUDGET_CHARS beside its baseline PASSES the entanglement floor", () => {
+  const diff = `
+diff --git a/scripts/knowledge-budget-baseline.json b/scripts/knowledge-budget-baseline.json
++++ b/scripts/knowledge-budget-baseline.json
+@@
++{ "capChars": 8148 }
+diff --git a/src/lib/learnings.ts b/src/lib/learnings.ts
++++ b/src/lib/learnings.ts
+@@
+-export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800;
++export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 8148;
+diff --git a/test/knowledge-budget-derivation.test.ts b/test/knowledge-budget-derivation.test.ts
++++ b/test/knowledge-budget-derivation.test.ts
+@@
++test("drift pin", () => {
++  assert.equal(DEFAULT_KNOWLEDGE_BUDGET_CHARS, 8148);
++});
+`.trim();
+  const v = judgeReview(SIMPLE_CRITERIA, { diff, report: SIMPLE_REPORT });
+  assert.equal(v.instrumentEntangled, false, v.summary);
+  assert.equal(v.state, "success", v.summary);
+});
+
+test("ENTANGLEMENT_EXEMPT_INSTRUMENTS: exactly the one named, reviewed W1-T941 path — no blanket widening", () => {
+  assert.deepEqual([...ENTANGLEMENT_EXEMPT_INSTRUMENTS], ["scripts/knowledge-budget-baseline.json"]);
 });
 
 // ── Criterion 5: THE MESSAGE MUST TEACH THE ESCAPE ──────────────────────────

@@ -241,6 +241,16 @@ export interface LearningEntry {
    */
   operatorImpact?: boolean;
   /**
+   * (W1-T939) Marks a `failures`-subsystem incident whose GUARD carried the fleet through it and
+   * can be injected into a `scripts/recovery-drill.mjs` fixture (`RECOVERY_PATHS`, W1-T366/
+   * W1-T938) — sibling obligation to {@link operatorImpact}, one level narrower: "this incident's
+   * guard belongs in the drill library." Optional; defaults to `false` — most failures entries are
+   * dev-time postmortems about a rule, a lint or a stale criterion, with no guard to inject. `true`
+   * obligates a matching drill-table touch in the same diff; `checkDrillCoverage`
+   * (src/lib/review.ts) enforces that at review time from the diff alone.
+   */
+  drillObligating?: boolean;
+  /**
    * (P32/W1-T145) Which knowledge layer this entry lives at. Optional;
    * DEFAULTS TO `"project"` when omitted — every pre-existing shard entry
    * (written before this field existed) is a project entry with no edit
@@ -394,6 +404,10 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       throw new LearningsError(`learnings '${id}': 'operator_impact' must be a boolean (${sourceLabel}).`);
     }
     const operatorImpact = e.operator_impact === true;
+    if (e.drill_obligating !== undefined && typeof e.drill_obligating !== "boolean") {
+      throw new LearningsError(`learnings '${id}': 'drill_obligating' must be a boolean (${sourceLabel}).`);
+    }
+    const drillObligating = e.drill_obligating === true;
     let layer: Layer | undefined;
     if (e.layer !== undefined) {
       if (e.layer !== "project" && e.layer !== "user-overall" && e.layer !== "global") {
@@ -428,6 +442,7 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       assertion,
       quarantinedReason,
       operatorImpact,
+      drillObligating,
       layer,
       share,
       files: e.files as string[],

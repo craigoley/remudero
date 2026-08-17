@@ -4638,6 +4638,7 @@ export type RubricKey =
   | "refactor-honesty"
   | "docs-awareness"
   | "troubleshooting-coverage"
+  | "drill-coverage"
   | "satisfied-by-guard";
 
 /** One rubric item's verdict over a (diff, report). */
@@ -5197,6 +5198,34 @@ function isProductPath(path: string): boolean {
 }
 
 /**
+ * ENTANGLEMENT-EXEMPT INSTRUMENTS (prerequisite for W1-T941, Standing rule 25's own deferred
+ * decision): {@link INSTRUMENT_SURFACE}'s doc names what the isolation rule protects — "the
+ * code's own falsifiers were graded by the very version of the instrument that shipped beside
+ * them", i.e. a GATE that decides OTHER PRs' pass/fail. A `scripts/*-baseline.json` matches the
+ * surface by filename alone, with no regard for whether anything in `.github/workflows/` actually
+ * READS it as a ratchet. A baseline nothing in CI reads has no grading power over anything — it is
+ * a recorded derivation an unrelated PINNED CONSTANT cites, falsified by its OWN test/ fixture in
+ * the SAME diff (exactly {@link detectInstrumentEntanglement}'s own "instrument + its own test/
+ * falsifier" sanctioned shape), except that pin is one product-code line, not a whole file, so it
+ * cannot be isolated into an instrument-only PR the way a full ratchet script/workflow pair can.
+ *
+ * EXACT PATHS, HAND-ENUMERATED, NEVER A PATTERN — the opposite failure mode from
+ * {@link INSTRUMENT_SURFACE} (W1-T402: a hand enumeration went stale by DROPPING coverage). This
+ * list can only ever NARROW what {@link INSTRUMENT_SURFACE} already claims for a named, reviewed
+ * path; a new baseline this list has never heard of gets the safe default — full entanglement
+ * blocking — never a silent gap on the other side. Adding an entry is a deliberate, reviewed
+ * decision, like every other line on the instrument surface; the day a `.github/workflows/` job
+ * starts reading a listed path as a pass/fail ratchet, remove it — the entanglement risk the rule
+ * exists to catch would then genuinely apply.
+ */
+export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
+  // W1-T941: the knowledge-budget cap's derivation record. No workflow job ratchets against it;
+  // its only reader is the pinned DEFAULT_KNOWLEDGE_BUDGET_CHARS constant (src/lib/learnings.ts)
+  // and test/knowledge-budget-derivation.test.ts's own falsifier, both landing beside it.
+  "scripts/knowledge-budget-baseline.json",
+]);
+
+/**
  * INSTRUMENT ISOLATION (W1-T297, Standing rule 25): true when `diffFiles`
  * contains at least one {@link INSTRUMENT_SURFACE} path AND at least one
  * {@link isProductPath} src/ path — the ENTANGLEMENT predicate, not mere
@@ -5205,11 +5234,18 @@ function isProductPath(path: string): boolean {
  * returns `entangled: false`; so does a src-only, plan-only, or docs-only
  * diff. `instrumentPaths`/`srcPaths` are the OBSERVED EVIDENCE named in the
  * failure text and the fix rung's escalation (W1-T186 emitter discipline).
+ *
+ * {@link ENTANGLEMENT_EXEMPT_INSTRUMENTS} is subtracted FIRST, before either array is built — a
+ * path on that list never counts as `instrumentPaths` evidence, exactly as if it were never on
+ * {@link INSTRUMENT_SURFACE} at all (it stays on that surface for every OTHER purpose: docs
+ * awareness, the completeness alarm, `USER_VISIBLE_SURFACE_RE`).
  */
 export function detectInstrumentEntanglement(
   diffFiles: string[],
 ): { entangled: boolean; instrumentPaths: string[]; srcPaths: string[] } {
-  const instrumentPaths = diffFiles.filter((f) => INSTRUMENT_SURFACE_RE.test(f));
+  const instrumentPaths = diffFiles.filter(
+    (f) => INSTRUMENT_SURFACE_RE.test(f) && !ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(f),
+  );
   // A PATH ON THE INSTRUMENT SURFACE IS NOT PRODUCT CODE, EVEN WHEN IT LIVES UNDER `src/`.
   //
   // WHY THIS SUBTRACTION EXISTS. `isProductPath` is unconditionally `src/` and not `test/`, so
@@ -5368,6 +5404,93 @@ export function checkTroubleshootingCoverage(diff: string, report?: string): Rub
   };
 }
 
+// ── Item 7: DRILL COVERAGE (§5D, W1-T939) ───────────────────────────────────
+
+const RECOVERY_DRILL_PATH = "scripts/recovery-drill.mjs";
+
+/**
+ * The ids of entries NEWLY ADDED (not merely edited) to `learnings/failures.yaml`
+ * that carry `drill_obligating: true`. Same diff-scoped "newly added" rule as
+ * {@link newOperatorImpactfulFailureIds}: a `- id: <id>` line present only on an
+ * ADD line (never as context, never on a DEL line) starts a brand-new entry; a
+ * field added to an EXISTING entry leaves the `- id:` line itself on a context
+ * line, so it is a modification, not a new entry. Each new entry's span runs
+ * from its `- id:` add-line to the next `- id:` add-line (or end of file).
+ */
+function newDrillObligatingFailureIds(lines: DiffLine[]): string[] {
+  const failureLines = lines.filter((l) => l.file === FAILURES_LEARNINGS_PATH);
+  const ids: string[] = [];
+  let current: { id: string; drillObligating: boolean } | null = null;
+  const flush = () => {
+    if (current?.drillObligating) ids.push(current.id);
+    current = null;
+  };
+  for (const l of failureLines) {
+    if (l.kind !== "add") continue;
+    const idMatch = l.text.match(LEARNING_ID_LINE_RE);
+    if (idMatch) {
+      flush();
+      current = { id: idMatch[1], drillObligating: false };
+      continue;
+    }
+    if (current && /^\s*drill_obligating:\s*true\s*$/.test(l.text)) {
+      current.drillObligating = true;
+    }
+  }
+  flush();
+  return ids;
+}
+
+/**
+ * A reason the report STATES for why a new drill-obligating failure has no
+ * drill-table touch — same shape as {@link TROUBLESHOOTING_STATED_REASON_RE},
+ * scoped to this item's own excuse phrase so the two items' excuses can't be
+ * confused for each other.
+ */
+const DRILL_STATED_REASON_RE = /\bno\s+drill\s+(?:table\s+)?entry\b[^.\n]{0,6}(?:because|:|-|—)\s*\S/i;
+
+/**
+ * DRILL COVERAGE: a diff that adds a new `drill_obligating: true` entry to
+ * `learnings/failures.yaml` must also touch `scripts/recovery-drill.mjs` (the
+ * `RECOVERY_PATHS` table W1-T366/W1-T938 built), or the report must state why
+ * not. Mirrors TROUBLESHOOTING COVERAGE (Item 6) exactly, one field over: the
+ * postmortem's last step becomes "add it to the drill" instead of "write up
+ * the symptom" — same diff-only derivation, same stated-reason escape hatch,
+ * same "flag or say why not" polarity.
+ */
+export function checkDrillCoverage(diff: string, report?: string): RubricItemResult {
+  const lines = walkDiff(diff);
+  const newIds = newDrillObligatingFailureIds(lines);
+  if (newIds.length === 0) {
+    return {
+      key: "drill-coverage",
+      pass: true,
+      reason: "no new drill_obligating:true entry added to learnings/failures.yaml",
+    };
+  }
+  const drillLines = lines.filter((l) => l.file === RECOVERY_DRILL_PATH && l.kind === "add");
+  const missing = newIds.filter((id) => !drillLines.some((l) => l.text.includes(id)));
+  if (missing.length === 0) {
+    return {
+      key: "drill-coverage",
+      pass: true,
+      reason: `scripts/recovery-drill.mjs updated for ${newIds.join(", ")}`,
+    };
+  }
+  if (DRILL_STATED_REASON_RE.test(report ?? "")) {
+    return {
+      key: "drill-coverage",
+      pass: true,
+      reason: "report states why no drill entry was needed",
+    };
+  }
+  return {
+    key: "drill-coverage",
+    pass: false,
+    reason: `new drill-obligating failure(s) with no scripts/recovery-drill.mjs entry and no stated reason: ${missing.join(", ")}`,
+  };
+}
+
 // ── The GUARD: no worker-authored criteria edit (rule 15) ──────────────────
 
 /**
@@ -5472,9 +5595,9 @@ export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): Ru
 
 /**
  * Run the full rubric — the four §5 layer-2 judgment items plus DOCS AWARENESS,
- * TROUBLESHOOTING COVERAGE, and the satisfied_by guard — over a (diff, report)
- * and PR-level facts. ADVISORY: `pass` rolls up all items, but the binding gate
- * is layer 1. `failures` names exactly which items tripped.
+ * TROUBLESHOOTING COVERAGE, DRILL COVERAGE, and the satisfied_by guard — over a
+ * (diff, report) and PR-level facts. ADVISORY: `pass` rolls up all items, but
+ * the binding gate is layer 1. `failures` names exactly which items tripped.
  */
 export function judgeRubric(input: RubricInput): RubricResult {
   const items: RubricItemResult[] = [
@@ -5484,6 +5607,7 @@ export function judgeRubric(input: RubricInput): RubricResult {
     checkRefactorHonesty(input.diff, input.report),
     checkDocsAwareness(input.diff, input.report),
     checkTroubleshootingCoverage(input.diff, input.report),
+    checkDrillCoverage(input.diff, input.report),
     checkSatisfiedByGuard(input.diff, { planOnly: input.planOnly, humanAuthored: input.humanAuthored }),
   ];
   const failures = items.filter((i) => !i.pass);
@@ -5508,7 +5632,7 @@ export function rubricAdvisorySection(rubric: RubricResult): string | undefined 
     `**Rubric (advisory — does not affect remudero-review's verdict)**\n\n` +
     `Layer-2 judgment items MASTER-PLAN §5 asks that no acceptance criterion can: ` +
     `one concern per PR, callers audited, test theater, refactor-phase honesty, docs/` +
-    `troubleshooting awareness, and the satisfied_by guard. These are observations for the ` +
+    `troubleshooting/drill awareness, and the satisfied_by guard. These are observations for the ` +
     `operator and the fix rung — never a blocking condition.\n\n${lines.join("\n")}`
   );
 }
