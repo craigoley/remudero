@@ -724,12 +724,11 @@ function awaitProcessGroupGoneSync(pid, timeoutMs = 5000) {
  * is not this entry's fault surface, real termination is. HEALTHY: the real `killProcessGroup`
  * sends a real `SIGKILL`; the report names the pid killed AND the process group is independently
  * re-polled empty via a real `ps` scan — never merely trusted from the report's own `killed`
- * list. SABOTAGED:
- * `kill` swapped for a no-op — the sweep's attribution logic still runs and still LEDGERS
- * `worker_orphan_killed` as if termination happened, but the real process survives: a false
- * clean, exactly the shape this entry exists to catch (a sweep that reports success without
- * actually ending the stray). The real child is unconditionally reaped in a `finally`, regardless
- * of mode, so a sabotaged run never leaks a live process past this drill.
+ * list. SABOTAGED: `kill` swapped for a no-op — the sweep's attribution logic still runs and
+ * still LEDGERS `worker_orphan_killed` as if termination happened, but the real process
+ * survives: a false clean, exactly the shape this entry exists to catch (a sweep that reports
+ * success without actually ending the stray). The real child is unconditionally reaped in a
+ * `finally`, regardless of mode, so a sabotaged run never leaks a live process past this drill.
  */
 export function exerciseOrphanSweepSigkill(mode) {
   return withFixtureDir("recovery-drill-orphan-", (dir) => {
