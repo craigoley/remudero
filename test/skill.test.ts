@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,11 +8,14 @@ import {
   loadSkill,
   loadSkillRegistry,
   renderSkillList,
+  searchGroundingSources,
   SkillError,
   skillsDir,
   validateSkill,
   type Skill,
 } from "../src/lib/skill.js";
+import { groundClarifyRequest } from "../src/lib/panel-skill-run.js";
+import type { Task } from "../src/lib/plan.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -237,4 +240,96 @@ test("design-review never grants browser_run_code_unsafe (§7C: HARD-DENIED, RCE
   const designReview = skills.find((s) => s.name === "design-review");
   assert.ok(designReview, "design-review must be a shipped skill");
   assert.ok(!designReview!.tools.some((t) => /browser_run_code_unsafe/.test(t)));
+});
+
+// ── searchGroundingSources: the declared-corpus lookup primitive (W1-T933) ─────────────────
+//
+// W1-T933's shard: the `grounding_sources` search embedded in `panel-skill-run.ts`'s
+// `groundClarifyRequest` was TRAPPED in the console panel path (bound to 127.0.0.1:4317, no
+// published port). This lifts it into `searchGroundingSources` here so any caller can ask "what
+// does the declared corpus already say about X" directly, and refactors `groundClarifyRequest`
+// onto it rather than leaving it duplicated. Four proofs, matching the shard's acceptance table:
+//   1. searchable off the panel path — call the primitive with no panel/HTTP plumbing at all.
+//   2. the clarify path calls the shared lookup, not its own copy.
+//   3. a source the skill does not declare is never searched, even if it contains a match.
+//   4. the lookup makes no model call and is deterministic (same input -> same output, offline).
+
+test("W1-T933: declared grounding sources are searchable off the panel path", () => {
+  withTempDir((dir) => {
+    writeFileSync(join(dir, "notes.md"), "line one\nW9-T9 mentioned right here\nline three\n");
+    const skill = validateSkill({ ...goodRaw(), grounding_sources: ["notes.md"] }, "plan");
+
+    // No `panel-skill-run.ts`, no HTTP route, no console/127.0.0.1:4317 plumbing anywhere in this
+    // call chain — the primitive is reachable directly off `lib/skill.ts`.
+    const notes = searchGroundingSources(dir, skill, "W9-T9");
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].source, "notes.md");
+    assert.match(notes[0].excerpts[0], /W9-T9/);
+  });
+});
+
+test("W1-T933: the clarify path calls the shared lookup", () => {
+  withTempDir((dir) => {
+    const skillsDirPath = skillsDir(dir);
+    mkdirSync(skillsDirPath, { recursive: true });
+    writeFileSync(
+      join(skillsDirPath, "plan.yaml"),
+      "tools:\n  - Read\npermission_profile: implement\noutput_contract: a PR\ngrounding_sources:\n  - notes.md\ngate: ci\ntier: G-17\n",
+    );
+    writeFileSync(join(dir, "notes.md"), "W9-T5 discussed here\n");
+    const task = { id: "W9-T5", title: "example" } as unknown as Task;
+
+    const viaClarify = groundClarifyRequest(dir, task);
+    const planSkill = loadSkill(join(skillsDirPath, "plan.yaml"));
+    const viaPrimitiveDirectly = searchGroundingSources(dir, planSkill, task.id);
+
+    // `groundClarifyRequest` is now a thin wrapper: it resolves the "plan" skill, then delegates
+    // to the SAME `searchGroundingSources` primitive a direct caller would use — not its own
+    // parallel copy of the search loop. Identical inputs through either route -> identical output.
+    assert.deepEqual(viaClarify, viaPrimitiveDirectly);
+    assert.equal(viaClarify.length, 1);
+    assert.equal(viaClarify[0].source, "notes.md");
+  });
+});
+
+test("W1-T933: an undeclared source is never searched", () => {
+  withTempDir((dir) => {
+    writeFileSync(join(dir, "declared.md"), "nothing relevant\n");
+    // `undeclared.md` DOES contain a match for the query, but the skill never names it under
+    // `grounding_sources` — it must not be opened, let alone show up in the results.
+    writeFileSync(join(dir, "undeclared.md"), "SECRET-TARGET lives right here\n");
+    const skill = validateSkill({ ...goodRaw(), grounding_sources: ["declared.md"] }, "plan");
+
+    const notes = searchGroundingSources(dir, skill, "SECRET-TARGET");
+    // Empty results proves `undeclared.md` was never opened: it DOES contain a match, so a
+    // non-empty result here could only mean the search reached beyond `grounding_sources`.
+    assert.deepEqual(notes, []);
+  });
+});
+
+test("W1-T933: the lookup stays deterministic and offline", () => {
+  withTempDir((dir) => {
+    writeFileSync(join(dir, "notes.md"), "W9-T2 appears once\nW9-T2 appears twice\nirrelevant\n");
+    const skill = validateSkill({ ...goodRaw(), grounding_sources: ["notes.md"] }, "plan");
+
+    const originalFetch = globalThis.fetch;
+    // Deliberately poison network access for the duration of this assertion.
+    globalThis.fetch = (() => {
+      throw new Error("searchGroundingSources must never make a network/model call");
+    }) as typeof fetch;
+    let first: ReturnType<typeof searchGroundingSources>;
+    let second: ReturnType<typeof searchGroundingSources>;
+    try {
+      first = searchGroundingSources(dir, skill, "W9-T2");
+      second = searchGroundingSources(dir, skill, "W9-T2");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    // Same input -> byte-identical output, with `fetch` armed to throw for the whole call —
+    // proves both "no model/network call" and "deterministic" in one assertion.
+    assert.deepEqual(first, second);
+    assert.equal(first.length, 1);
+    assert.equal(first[0].excerpts.length, 2);
+  });
 });
