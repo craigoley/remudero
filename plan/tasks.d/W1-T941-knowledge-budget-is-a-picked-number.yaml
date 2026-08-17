@@ -1,0 +1,96 @@
+# W1-T941 — DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800 carries no derivation anywhere in the tree.
+# House precedent for constants: plan/policy.yaml's deploy ceiling ("1800000 (30 min) is MEASURED,
+# not picked") and scripts/learnings-budget-baseline.json (a cap that moves only via a visible
+# baseline diff). This task applies that discipline to the INJECTION cap.
+
+- id: W1-T941
+  title: "the knowledge budget is a picked number — 1800 chars drops 13 of 16 matched learnings per spawn with no recorded derivation: measure the drop pressure and the cache cost of the Tier-1 block, and pin the cap to a baseline that carries its own arithmetic"
+  repo: remudero
+  depends_on: ["W1-T940"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FILED FROM feedback fb-1785237596465-45d06d (cli, 2026-07-28), evidence re-derived
+    in-tree. THE CONSTANT HAS NO PROVENANCE: `DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800`
+    (src/lib/learnings.ts) is documented for what it CAPS and nowhere for WHY 1800 — no
+    measurement, no baseline, no plan line pins the figure (MASTER-PLAN §8A names the knowledge
+    budget as a concept only). Meanwhile the observed effect is large: an operator-reported W1-T84
+    spawn matched 16 entries and injected 3.
+    WHY THIS IS NOT A GUESS DRESSED AS A FIX: the feedback's own instruction is 'measure, don't
+    assume', and both halves of the measurement already exist as machinery. COST SIDE: the result
+    envelope carries `cache_read_input_tokens`/`cache_creation_input_tokens`, W1-T929 landed
+    `cacheHitRatio` + `aggregateCacheHitTotals` (src/lib/digest.ts) over it, and §8A's ordering
+    rule already places the volatile Tier-1 learnings block LAST precisely so its growth cannot
+    bust the stable prefix — so the marginal cost of a bigger block is BOUNDED and computable, not
+    speculative. PRESSURE SIDE: `selectLearnings` already returns the `dropped` set, entry weight
+    is already a shared derivation (the per-layer ratchet's char accounting), and W1-T940's
+    aggregate makes the dropped-per-spawn history readable from the ledger.
+    WHY A BASELINE ARTIFACT RATHER THAN AN EDITED LITERAL: this repo already refuses bare
+    constants twice over — plan/policy.yaml records the deploy ceiling as MEASURED with the
+    derivation inline, and scripts/learnings-budget-baseline.json makes the corpus cap movable only
+    via a visible, reviewed diff. A cap that carries its arithmetic can be re-argued by the next
+    reader; a literal cannot, which is exactly how 1800 survived unexamined this long."
+  design: |
+    A DERIVED CAP, NOT A BIGGER GUESS.
+    (i) MEASURE THE PRESSURE: a pure derivation over `learnings.injected` ledger rows (consuming
+    W1-T940's aggregate, not a second traversal) plus the corpus's own entry weights — how many
+    chars of matched-but-dropped fact the budget refused per spawn, at p50 and p90. Dropped WEIGHT
+    is the figure that matters; a dropped count alone cannot size a char cap.
+    (ii) MEASURE THE COST: express the marginal cap increase in tokens on the four-chars-per-token
+    heuristic already used in this plan, and price it with the SAME cache arithmetic digest.ts
+    exports — §8A's stable-first/volatile-last ordering means the Tier-1 block's own bytes are the
+    only ones re-charged, so cost is `delta chars` priced at the measured cache mix, not a
+    whole-prompt re-render. The derivation function returns the number AND the inputs that produced
+    it, so the recommendation is auditable.
+    (iii) RECORD IT: scripts/knowledge-budget-baseline.json carries capturedAt, the measured
+    dropped-weight percentiles, the cache mix used, the priced delta, and `capChars` — the cap the
+    arithmetic supports. `DEFAULT_KNOWLEDGE_BUDGET_CHARS` reads/pins to that recorded figure and its
+    doc comment cites the baseline file by name, so the literal can never drift from the derivation
+    behind it.
+    (iv) "NO CHANGE" IS A LEGAL RESULT AND MUST BE RECORDABLE. If the measured dropped weight is
+    trivial or the priced delta is not worth it, the baseline records 1800 WITH the evidence — the
+    task's deliverable is a DERIVATION, not a raise. A design that can only ever increase the cap
+    would be assuming exactly what the feedback said not to assume.
+    (v) FALSIFIER, BOTH DIRECTIONS: a fixture history with heavy, sustained dropped weight derives
+    a cap above the current figure; a fixture with negligible dropped weight derives the current
+    figure unchanged; and a drift test fails if the exported constant and the baseline's `capChars`
+    ever disagree (delete the pin and it goes red).
+    NOT IN SCOPE: per-task or per-layer dynamic budgets (one global cap stays the shape); changing
+    `selectLearnings`' RANKING (W1-T419 owns evidence-ranked selection, and a cap change must not
+    smuggle in a ranking change); the corpus-weight ceiling in scripts/learnings-budget-ratchet.mjs
+    (a different budget, untouched); CLAUDE.md's cap (W1-T503); the two always-injected doctrine
+    lines, which are excluded from this cap by construction and stay so.
+  acceptance:
+    - claim: "the injection cap is pinned to the recorded baseline figure, so the number can only move together with the derivation that justifies it"
+      proof: "unit test: test/knowledge-budget-derivation.test.ts"
+    - claim: "the cap is derived from measured dropped weight and the priced cache delta, and a fixture with negligible dropped weight derives the current figure unchanged rather than a raise"
+      proof: "unit test: test/knowledge-budget-derivation.test.ts"
+    - claim: "the constant's own documentation names the baseline artifact, so the next reader finds the arithmetic instead of a literal"
+      proof: "grep: knowledge-budget-baseline in src/lib/learnings.ts"
+  risk: high
+  origin: feedback#fb-1785237596465-45d06d
+  plan_refs: ["§8A", "W1-T940", "W1-T929", "W1-T419", "W1-T38"]
+  files: [src/lib/learnings.ts, src/lib/digest.ts, scripts/knowledge-budget-baseline.json, test/knowledge-budget-derivation.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the derivation is a pure function over fixture ledger rows and fixture
+    entry weights; both falsifier directions and the drift pin are offline-decidable.
+    risk:high — Rule 19's SPAN (two lib modules plus a scripts baseline plus its test) AND real
+    blast radius: this constant is read on EVERY spawn, so a wrong cap changes every prompt. The
+    containment is that the value moves only via a reviewed baseline diff, and that 'unchanged' is
+    an explicitly supported outcome.
+    budget_usd 60 — a measurement pass, a baseline artifact, a pin, and two-direction fixtures;
+    higher than its sibling because the deliverable is an argued NUMBER, not a rendered block.
+    PROOF NOTES: the unit proof is the forward PATH form against a declared file (test/knowledge-
+    budget-derivation.test.ts does not exist today — verified). `knowledge-budget-baseline` has
+    ZERO occurrences repo-wide today (verified), and the grep is path-scoped to src/lib/learnings.ts
+    so it misses the merge-base and proves the constant's own doc, not the artifact's mere
+    existence.
+    depends_on W1-T940 IS REAL ORDERING, NOT DECORATION: the dropped-per-spawn aggregate this
+    derivation consumes is that task's deliverable, and duplicating the traversal here would give
+    `rmd status` and the cap two different opinions of the same rows.
+    ITEM (1) OF THE FEEDBACK IS NOT FILED: the `global artifact not found` refusal is designed
+    behaviour — the receiving layer is on main, the SENDING transport is W1-T425 (queued) and the
+    path is derived by construction via `globalArtifactPath` (src/lib/config.ts), made explicitly
+    shareable by W1-T432 (queued). Nothing to build or repoint here."

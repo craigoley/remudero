@@ -15,5 +15,23 @@ raw: "GLOBAL LEARNINGS ARTIFACT MISSING — every worker spawn logs
   measure, don't assume)."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2029
+summary:
+  headline: Global learnings artifact missing—81% of knowledge dropped
+  what_happened: Workers cannot load the global learnings artifact at the expected
+    path, so 13 of 16 matched learnings are dropped due to an 1800-character
+    budget. This reduces institutional knowledge available to workers.
+  decision: Rebuild the global artifact; add drop-count visibility to rmd status;
+    measure whether expanding the learnings budget and caching larger blocks
+    reduces downstream bugs.
+  options:
+    - label: Rebuild artifact, keep 1800-char budget
+      consequence: Restores baseline delivery; 81% drop rate persists unless later
+        budget expansion is justified.
+    - label: Rebuild artifact, expand budget, cache larger blocks
+      consequence: Preserves more institutional knowledge; measure cache cost-benefit
+        against bugs prevented post-deployment.
+    - label: Add drop-count visibility only, defer rebuild
+      consequence: Exposes problem; workers still operate with reduced knowledge until
+        rebuild is prioritized.

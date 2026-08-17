@@ -1,0 +1,88 @@
+# W1-T940 — the knowledge budget's DROP LIST is written to the ledger and read by nobody.
+# Sibling precedent (same surface, same seam): W1-T929's cache-hit block, filed from
+# feedback fb-1785237559155-feef92, aggregates ledger rows in digest.ts and renders one
+# block in status-board.ts. This is that pattern applied to `learnings.injected`.
+
+- id: W1-T940
+  title: "the injection drop list is ledger-only — 13 of 16 matched learnings are dropped per spawn and no operator surface says so: `rmd status` gains a learnings-injection block naming matched, dropped, the budget, and any global-artifact refusal by reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "FILED FROM feedback fb-1785237596465-45d06d (cli, 2026-07-28), evidence re-derived
+    in-tree. THE SIGNAL EXISTS AND IS ORPHANED: `runTask` logs `learnings.injected` with
+    `matched`, `matched_ids`, `dropped` (ids), `budget_chars` and `global_refused_reason`
+    (src/run-task.ts, the promptsmith block) — every fact the feedback asks for is ALREADY
+    written on every spawn. THE READER IS MISSING: `src/lib/status-board.ts` contains ZERO
+    occurrences of `learnings` (measured), so the only way to see that a spawn flew with 3 of 16
+    facts is to grep the NDJSON by hand. That is the naked-ledger shape this repo has ruled
+    against repeatedly — a measurement nobody reads is not an instrument.
+    WHY STATUS AND NOT A NEW SURFACE: the board already carries a section built from exactly this
+    kind of aggregate — W1-T929's CACHE HIT block, filed from the sibling feedback
+    fb-1785237559155-feef92, aggregates over the SAME already-open ledger window in digest.ts
+    (`aggregateCacheHitTotals`) and renders one block in status-board.ts. Adding a second block on
+    that established seam costs one traversal that is already happening and no new surface area.
+    WHAT THE FEEDBACK'S ITEM (1) DOES NOT NEED: the `global artifact not found` reason is CORRECT
+    behaviour, not a bug — the receiving layer is built and the SENDING side is W1-T425's deferred
+    transport, and the path itself is derived by construction (`globalArtifactPath`, src/lib/config.ts,
+    made explicitly shareable by W1-T432). This task therefore does not build or repoint the
+    artifact; it makes the refusal VISIBLE so the operator stops rediscovering it from a console
+    feed."
+  design: |
+    ONE AGGREGATE, ONE BLOCK — the cache-hit shape, applied to `learnings.injected`.
+    (i) `aggregateLearningsInjection(lines)` in src/lib/digest.ts, beside `aggregateCacheHitTotals`
+    and with the same soft-compose discard: it walks the SAME ledger lines the board already read
+    and returns rows/matched/dropped totals, the distinct `budget_chars` values seen, and the
+    distinct `global_refused_reason` strings with their counts. `undefined` when the window carries
+    no `learnings.injected` rows at all — never a fabricated zero.
+    (ii) status-board.ts gains a `LearningsInjectionSection` on `StatusBoardModel` and a
+    `renderLearningsInjectionBlock` in `renderStatusBoardText`, so `rmd status` TEXT and `--json`
+    project the same derivation twice (that module's stated invariant) — the JSON consumer gets the
+    counts without scraping the text.
+    (iii) THE REFUSAL IS NAMED, NEVER FOLDED INTO THE DROP COUNT. A `global_refused_reason` is a
+    layer contributing ZERO entries; a budget drop is a ranked entry losing a tie. Rendering them
+    as one number would make a missing artifact look like ordinary budget pressure — the two lines
+    stay distinct and the reason string is printed verbatim (deduped, with a count), because the
+    reason is the diagnosis.
+    (iv) EMPTY WINDOW READS AS EMPTY: no rows ⇒ `found: false` ⇒ "no injection rows in this
+    window", the same explicit-absence wording the cache-hit block uses for missing token data —
+    a naked `dropped: 0` must never be printable from a window that saw no spawns.
+    (v) FALSIFIER, BOTH DIRECTIONS: a fixture ledger of injection rows (one carrying 3 matched /
+    13 dropped and a `global artifact not found` reason) renders the dropped count, the budget in
+    force, and the refusal reason by name; a fixture window with no injection rows renders the
+    explicit absence line and never a zero.
+    NOT IN SCOPE: changing WHAT is injected or how it is ranked (W1-T419 owns evidence-ranked
+    selection); the budget's VALUE (W1-T941, this filing's sibling); building or repointing the
+    global artifact (W1-T425's transport); the HTML console panels (`rmd serve`) — this task is the
+    `rmd status` text + `--json` surface, matching W1-T931's scoping of the same board.
+  acceptance:
+    - claim: "the status surface reports matched, dropped and the budget in force from injection ledger rows, so drop pressure is visible without grepping NDJSON"
+      proof: "unit test: test/learnings-injection-status.test.ts"
+    - claim: "a global-artifact refusal is surfaced verbatim as its own line rather than folded into the drop count, and a window with no injection rows renders explicit absence instead of a zero"
+      proof: "unit test: test/learnings-injection-status.test.ts"
+    - claim: "the block rides the aggregate the board's existing ledger traversal already opened, so status gains no second scan and cannot disagree with the digest"
+      proof: "grep: aggregateLearningsInjection( in src/lib/status-board.ts"
+  risk: high
+  origin: feedback#fb-1785237596465-45d06d
+  plan_refs: ["§8A", "W1-T929", "W1-T419", "W1-T425"]
+  files: [src/lib/digest.ts, src/lib/status-board.ts, test/learnings-injection-status.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — an aggregate over fixture ledger lines and a rendered block are entirely
+    fixture-decidable offline; no live daemon, no network.
+    risk:high — Rule 19's SPAN (two lib modules plus its test), not blast radius: both additions
+    are READ-ONLY reporting on rows that are already written, and the board's own header states it
+    renders, never senses, never acts.
+    budget_usd 45 — one aggregate function mirrored from a sibling, one model field, one render
+    block, two-direction fixtures.
+    PROOF NOTES: the unit proof is the forward PATH form against a declared file (test/learnings-
+    injection-status.test.ts does not exist today — verified). The grep pattern
+    `aggregateLearningsInjection` has ZERO occurrences repo-wide today (verified), so it cannot
+    pass off the merge-base and discriminates the implement diff; it is path-scoped to
+    src/lib/status-board.ts, which pins the CALL SITE rather than a definition that could ship
+    inert (the #781 lesson).
+    NO depends_on: `learnings.injected` already carries `dropped`, `budget_chars` and
+    `global_refused_reason` on main; W1-T419 adds `matched_ids` to the same row and composes
+    without being needed here."
