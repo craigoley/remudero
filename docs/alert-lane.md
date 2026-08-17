@@ -94,7 +94,9 @@ fresh `alert-fix-<origin>-<epochMs>` branch off `origin/main` — a minimal
 analog of the sweep fix-rung's worktree/settings-file mechanics, scoped down
 because this is a **brand-new** run, never a fix on an existing task's
 branch. The worker fixes the one named alert and opens its own PR (through
-the full `[ci, remudero-review]` gate) carrying `origin: alert#<id>`
+the full `[ci-gate, remudero-review]` required gate — `ci` and
+`coverage-ratchet` are not contexts of their own, they ride inside `ci-gate`'s
+aggregation) carrying `origin: alert#<id>`
 provenance and the standard `Remudero-Task:`/`Acceptance:` trailer
 discipline every other worker-opened PR in this repo carries; this command
 only spawns it and tears the worktree down after. `--dry-run` previews every
