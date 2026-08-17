@@ -1,0 +1,145 @@
+- id: W1-T938
+  title: "the scheduled drill exercises four RECOVERY paths and zero of the GUARDS that actually carried this fleet through its incidents — the husk preflight, the torn-tail indeterminate, the gh-outage degrade and the dirty-tree proceed have never been exercised on any cadence, only in the incidents that discovered them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "FILED FROM fb-1785237583569-3304ae (2026-07-28, origin cli). THE FEEDBACK ASKED FOR AN
+    INSTRUMENT THAT HAS SINCE BEEN BUILT, AND FOR A POPULATION THAT HAS NOT. Read the ask against the
+    tree as it stands and it splits cleanly in two, which is why this shard files only the second half.
+    ALREADY BUILT, AND DELIBERATELY NOT RE-OPENED HERE. W1-T366 (oper#ruling-production-path-proofs-
+    2026-08-05) shipped `scripts/recovery-drill.mjs` + `.github/workflows/recovery-drill.yml`: a weekly
+    cron drill that runs every entry of a DATA TABLE (`RECOVERY_PATHS`, recovery-drill.mjs:383) through
+    `runDrill`, twice per entry — once against a HEALTHY fixture and once against a SABOTAGED one — and
+    passes an entry only when it reports healthy for the first and unhealthy for the second
+    (recovery-drill.mjs:413-429). It renders UNREACHABLE distinctly from FAIL (`renderReport`, :437-443),
+    and a red drill opens a needs-human issue (`scripts/needs-human-issue.mjs --source recovery-drill`,
+    recovery-drill.yml:83). So `periodic`, `injects a fault`, `discriminates`, `loud when it cannot run`
+    and `a failure escalates as its own incident` are all SETTLED and RUNNING. The feedback's own
+    sequencing premise is also stale: it said the drill 'waits on W1-T201', and DECISIONS.md 2026-07-31
+    records W1-T201's retro cadence trigger as already-satisfied (shipped as W1-T160/#853, fired
+    unattended twice in production). Nothing here waits on anything.
+    NOT BUILT: THE POPULATION THE FEEDBACK NAMED. The four drilled entries are the deploy rollback, the
+    dispatch-breaker reset, the stale-lock reclaim and the keychain re-provision. Every guard the week of
+    incidents actually leaned on is absent — the spawn preflight that names an unlaunchable claude binary
+    (W1-T901, `src/lib/worker.ts:459`, whose own falsifier writes a real non-executable husk), the
+    W1-T119 `indeterminate` projection that must refuse to act on a torn ledger tail rather than report a
+    false `clear` (`src/lib/status.ts:317-332`, :1449-1457), the GitHub-gateway degrade path that must
+    say 'the read could not decide' instead of 'no PR' (`src/lib/status-board.ts:1024-1034`, :1146), and
+    the `daemon.tree_dirty` PROCEED (`src/run-task.ts:20729`, `src/lib/self-sync.ts:411`) whose opposite —
+    a refusal expressed as a nonzero exit under `KeepAlive` — is the crash-loop shape the detector exists
+    to catch. Each of those is unit-tested. NONE of them is EXERCISED ON A CADENCE, and W1-T366's whole
+    rationale is that those are different claims: 'this branch has never executed in anger' is a runtime
+    fact about production that no static instrument reaches.
+    THE ASK IS ALSO UNFILED BY THE PLAN'S OWN ADMISSION. `plan/tasks.d/W1-T926-operator-dirt-drill.yaml`
+    design (v) names 'the periodic fault-injection DRILL LIBRARY proposed in fb-1785237583569-3304ae' as
+    explicitly NOT IN SCOPE. It is acknowledged and unowned, which is exactly the described-but-unfiled
+    class the recon rung calls its most valuable finding."
+  design: |
+    ADD ENTRIES TO THE EXISTING TABLE. DO NOT BUILD A SECOND DRILL, A SECOND WORKFLOW OR A SECOND
+    SCHEDULER. `RECOVERY_PATHS` is already the growth mechanism the feedback asked for: `runDrill(paths)`
+    is pure and total over whatever table it is handed, so a new fault costs one entry plus one
+    exerciser. W1-T366's design (i) says in terms 'do not invent a second scheduling idiom', and the
+    weekly workflow already executes the whole table — which is also why the feedback's 'ONE fault per
+    cycle from a ROTATING library' is DECLINED AS SPECIFIED: rotation would drill each fault a quarter as
+    often and add cross-run state to a stateless instrument. If total runtime ever forces rotation, that
+    is a measured argument to make in the PR body with numbers, not a starting assumption.
+    THE QUALIFICATION CRITERION IS W1-T366'S, UNCHANGED, AND EACH CANDIDATE MUST BE CONFIRMED AGAINST IT
+    FROM SOURCE: a path qualifies when it (a) exists to survive a failure, (b) is not exercised by the
+    ordinary success path, and (c) has an observable outcome that can be asserted. A candidate that fails
+    (c) is a FINDING TO REPORT, not an entry to fake. The table's labels and the script header's
+    population note must be widened honestly if guards join it — the instrument stops being 'recovery
+    paths' and becomes 'the paths that carry a failure', and a header that still says otherwise is a lie
+    the next reader inherits.
+    WHAT 'HEALTHY' AND 'SABOTAGED' MEAN FOR A GUARD, stated once because it is the whole design. HEALTHY
+    = the fault is injected into the fixture and the guard fires with its NAMED reason and its BOUNDED
+    recovery (refuse-with-a-reason, or proceed-and-ledger — whichever the shipped guard actually does;
+    read it, do not assume). SABOTAGED = the fault is injected AND the seam the guard depends on is made
+    to misjudge (the probe answers wrong, the read silently drops the torn line, the gateway failure
+    arrives as an empty-but-successful result), so the guard goes quiet or reports a false clean. An
+    entry PASSES only on healthy→healthy and sabotaged→unhealthy, per the orchestrator that already
+    exists. The sabotage lives in the FIXTURE, never in a source edit.
+    THE CANDIDATE LIST, FROM THE FEEDBACK, EACH TO BE RE-DERIVED FROM SOURCE BEFORE IT IS BUILT:
+      1. BINARY HUSK. A real 500-byte non-executable `claude` written into a temp dir (the shape
+         test/toolchain-refusal-errno.test.ts already builds), asserting the preflight refuses with the
+         reason class that distinguishes an EACCES husk from a binary that runs and crashes. Sabotage:
+         the executability probe made to swallow its errno — the `catch { return false }` shape W1-T901
+         was filed to end — so both faults render as one indistinguishable string.
+      2. TORN LEDGER TAIL. A real fixture ledger whose last line is truncated mid-JSON, asserting the
+         projection reports `indeterminate` (DO NOT ACT) rather than a false `clear`. CHECK FIRST FOR
+         DUPLICATION: `exerciseCircuitBreakerReset` already sabotages with a torn read. If the shipped
+         entry already covers this fault at this layer, say so in the report and drop the entry rather
+         than shipping a second copy — a drill with two entries for one fault overstates its own
+         coverage.
+      3. GH 500s / EMPTY VIA THE INJECTABLE GATEWAY. A gateway stub returning 500s, then an empty body,
+         asserting the degrade-don't-die path names the read as undecided (the `unavailableReason` /
+         `githubUnobservableSince` family) and never renders 'no PR' as fact. Sabotage: the failure
+         surfaced as a successful empty read.
+      4. DIRTY DAEMON TREE. A throwaway git checkout dirtied in one shape, asserting the freshness
+         predicate LEDGERS `daemon.tree_dirty` AND PROCEEDS. Sabotage: the predicate made to refuse, which
+         must be caught — a refusal here is the nonzero exit that `KeepAlive{SuccessfulExit:false}` turns
+         into the crash loop. SCOPE FENCE: W1-T924/W1-T925/W1-T926 own the operator-dirt TOPOLOGY and its
+         five dirt shapes; this entry owns ONE shape exercised ON A CADENCE, and must not rebuild their
+         table or edit `scripts/operator-dirt-drill.mjs`.
+      5. SIGKILL MID-RUN. A real throwaway child process, started against a fixture state dir, killed
+         with SIGKILL, asserting the invariant that carries the fleet past it (the crash-loop detector
+         over `daemon.boot` timestamps, and/or the liveness/orphan classification of the killed run —
+         establish which from source). A real child is consistent with the drill's existing posture: git
+         and the filesystem are real there, only host-touching commands are faked. IF A FIXTURE CANNOT
+         FAITHFULLY REPRODUCE THIS ON A CI RUNNER, SAY SO IN THE REPORT AND DROP IT — W1-T366's design
+         (iii) demands exactly that, and the unattended live version is already filed as W1-T147.
+    NEVER TOUCHES A LIVE FLEET, and this is the reason the feedback's `drill.executed` ledger line is NOT
+    built here. The drill runs in CI against throwaway fixtures with `contents: read`; there is no live
+    ledger to append to and injecting these faults into the running daemon would trade one outage class
+    for another (W1-T366 design (iii)). The drill's per-cycle record is its report artifact plus the
+    needs-human issue on failure — the delivery path that already exists. A ledgered `drill.executed` on
+    the real fleet is a DIFFERENT instrument and belongs to W1-T147's operator-run drill, not here.
+    OUT OF SCOPE, EXPLICITLY: changing any guard's behaviour (an entry that finds a guard broken is a
+    finding, and its fix is its own task), the cadence/cron/workflow polarity, rotation state, W1-T147's
+    unattended live drill, and the incident→drill growth rung (filed as its own shard).
+  acceptance:
+    - claim: "the drill table carries the guard faults as data entries — a husk binary, a torn ledger tail, a gh 500/empty gateway, a dirty daemon tree and a SIGKILLed run — and each asserts the shipped guard's NAMED reason and bounded recovery, not merely that something threw"
+      proof: "unit test: test/recovery-drill.test.ts"
+    - claim: "each new entry discriminates: with the fault injected the guard fires and the entry reports healthy, and with the guard's own seam sabotaged it reports unhealthy — a guard that went quiet is caught"
+      proof: "unit test: test/recovery-drill.test.ts"
+    - claim: "an entry whose fixture cannot faithfully reproduce its fault reports UNREACHABLE distinctly from a fault the drill ran and caught, so a dropped entry can never read as a pass"
+      proof: "unit test: test/recovery-drill.test.ts"
+    - claim: "the whole table still runs every cycle on the existing weekly workflow — no rotation state, no second scheduler, no second drill script, and no live-fleet write"
+      proof: "unit test: test/recovery-drill.test.ts"
+    - claim: "a new fault costs one table entry plus one exerciser, with the orchestrator unchanged and pure over the table it is handed"
+      proof: "grep: runDrill(paths in scripts/recovery-drill.mjs"
+  risk: high
+  origin: feedback#fb-1785237583569-3304ae
+  plan_refs: ["§5D", "§10", "W1-T366", "W1-T901", "W1-T119", "W1-T147", "W1-T926"]
+  files: [scripts/recovery-drill.mjs, test/recovery-drill.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE WORKFLOW IS DELIBERATELY NOT DECLARED. `.github/workflows/recovery-drill.yml` already runs
+    `scripts/recovery-drill.mjs` whole, so new table entries need no workflow edit — and leaving it
+    untouched keeps this diff off `checkDocsAwareness`'s `.github/workflows/` surface. If the widened
+    scope makes the workflow's needs-human TITLE inaccurate enough to matter, that rename is a follow-up
+    with its docs touch, not a smuggled edit to an undeclared file.
+    verify:auto — every claim is an assertion over the drill's own output against fixtures it creates and
+    tears down, with no operator present. Contrast W1-T147 (unattended live drill) and W1-T926 (live
+    launchd restart), both verify:human because a real host is in the loop; nothing here leaves tmpdir.
+    risk:high — the entries reach into the spawn preflight, the ledger projection, the GitHub gateway and
+    a real killed child process. Rule 19 counts that span, and a drill that can cause the outage it
+    exists to prevent is the specific hazard; the fixture-only fence and the no-source-sabotage rule are
+    where that risk is managed.
+    budget_usd 90 — five exercisers, each needing its fault fixture AND its sabotage variant, plus the
+    honest header/label widening. Higher than W1-T366's 80 because the population is given here but the
+    fault fixtures are harder than the four recovery ones.
+    PROOFS NAME AN EXISTING FILE ON PURPOSE: test/recovery-drill.test.ts exists today (it gates the
+    workflow at recovery-drill.yml:62), so all four whole-file proofs execute at filing time rather than
+    being forward references.
+    THE FIFTH PROOF is a grep for a call SHAPE that must survive: `runDrill(paths` is the orchestrator
+    staying pure over an injected table, which is what makes 'one entry per fault' true. It matches
+    today, so a merge-base comparison will read it as pre-existing — that is intended: it is a
+    DON'T-BREAK-THIS proof, and the four behavioural claims above are what this task adds.
+    WHAT THIS SHARD DOES NOT RE-OPEN, so a future reader does not relitigate it: the cadence idiom
+    (W1-T366, GitHub Actions weekly cron following clock-sweep), the never-touch-a-live-fleet posture,
+    the needs-human delivery, and the retro-trigger sequencing the feedback assumed (DECISIONS.md
+    2026-07-31 — W1-T201 already satisfied by W1-T160/#853).

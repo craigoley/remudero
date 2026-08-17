@@ -1,0 +1,94 @@
+- id: W1-T939
+  title: "nothing obligates a postmortem to leave a drill entry behind — `operator_impact: true` already forces a troubleshooting entry from the diff alone, and the identical rung for 'add it to the drill' does not exist, so the drill library only ever grows when somebody remembers"
+  repo: remudero
+  depends_on: [W1-T938]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "FILED FROM fb-1785237583569-3304ae (2026-07-28, origin cli), whose last sentence is the
+    half W1-T938 does not carry: 'the drill library grows one entry per real incident — the postmortem's
+    last step becomes add it to the drill.' That is a PROCESS INVARIANT, and this repo already knows how
+    to enforce exactly this shape from a diff.
+    THE PATTERN EXISTS AND IS LOAD-BEARING. `learnings/failures.yaml` is the incident/postmortem shard;
+    its header (lines 10-14) records that `operator_impact: true` OBLIGATES a matching
+    `docs/troubleshooting.md` entry, and `checkTroubleshootingCoverage` (`src/lib/review.ts`, W1-T50)
+    flags a new `operator_impact: true` entry added with no matching troubleshooting touch in the same
+    diff. `src/lib/learnings.ts:225-232` carries the field and says so in its own doc comment. That rung
+    is the working proof that 'an incident must leave a durable artifact behind' is enforceable at review
+    time with no scheduler, no state and no human memory.
+    WHAT IS MISSING IS THE SECOND OBLIGATION. An incident that a guard survived leaves a
+    `failures.yaml` fact and, if operator-visible, a troubleshooting entry — and nothing at all in the
+    drill table. So the library that W1-T366 built to grow (`RECOVERY_PATHS` is plain data,
+    `scripts/recovery-drill.mjs:383`) grows only when an author happens to think of it. The measured
+    evidence that this does not happen on its own is the feedback itself: four incidents in one week
+    (binary husk, daemon crash-loop, rotation storm, torn-review stalls), every guard exercised
+    involuntarily, and zero of them in the drill table months later — W1-T938 exists precisely because
+    nobody was obligated.
+    WHY A RUNG AND NOT A CHECKLIST. A checklist that lives in a doc is advice; W1-T50's rung is the same
+    obligation expressed where it cannot be forgotten. This repo has already ruled on that distinction
+    once and the ruling is worth reusing rather than re-arguing."
+  design: |
+    MIRROR `checkTroubleshootingCoverage` EXACTLY, AND READ IT FIRST. Do not invent a second idiom for an
+    obligation the reviewer already knows how to express: same diff-only derivation, same
+    flag-with-a-reason-you-can-answer-in-the-report escape hatch, same 'add the entry or say why it does
+    not need one' polarity. If this rung's needs genuinely differ from W1-T50's, say where and why in the
+    PR body.
+    THE MARKER IS A NEW SHARD-LOCAL FIELD ON `failures.yaml` ENTRIES, sibling to `operator_impact` and
+    documented in the same header block: a boolean (default false) meaning 'a guard carried this incident
+    and that guard's firing can be injected into a fixture'. Name it for what it obligates, keep the YAML
+    snake_case / TS camelCase convention `learnings.ts` already uses, and give it a doc comment that says
+    what `true` costs — the same way `operatorImpact`'s does.
+    THE OBLIGATION IS A DRILL-TABLE TOUCH IN THE SAME DIFF. A new entry marked true with no touch to the
+    drill table (`scripts/recovery-drill.mjs`) in the same diff is FLAGGED. VERIFY FROM SOURCE how
+    `checkTroubleshootingCoverage` decides 'new entry' from a diff (it is a diff-shape judgement, not a
+    corpus read) and follow it rather than parsing the YAML corpus off disk — a rung that needs the
+    working tree is a rung that behaves differently in CI.
+    DEFAULT FALSE IS THE WHOLE SAFETY ARGUMENT. Most `failures.yaml` entries are dev-time postmortems
+    about a rule, a lint or a stale criterion — nothing to inject. An obligation that fired on every
+    entry would be noise, and a noisy rung gets muted, which is worse than none (clock-sweep's own
+    argument, and W1-T215's false-positive falsifier). THE FALSIFIER FOR THIS TASK IS THEREFORE THE
+    FALSE-POSITIVE ONE: an ordinary unmarked entry, and an entry marked true whose diff DOES touch the
+    drill table, both clear the rung silently.
+    SEED THE FIELD FROM THE RECORD, NOT FROM IMAGINATION. Mark the already-recorded incidents whose guard
+    is (or becomes) a drill entry under W1-T938, so the field's meaning is legible from real examples
+    rather than from its doc comment alone. Marking an existing entry true does not retroactively flag
+    anything — the rung reads new entries in a diff.
+    NOT IN SCOPE: building any drill exerciser (W1-T938), changing `checkTroubleshootingCoverage`'s own
+    behaviour, making either rung a hard merge block if it is not one today, and any ledger-side or
+    scheduler-side change.
+  acceptance:
+    - claim: "a new failures.yaml entry marked as drill-obligating, added in a diff that does not touch the drill table, is flagged by the reviewer rubric with a message naming the drill table"
+      proof: "unit test: test/drill-coverage-rubric.test.ts"
+    - claim: "THE FALSE-POSITIVE FALSIFIER — an ordinary unmarked incident entry, and a marked entry whose diff DOES touch the drill table, both clear the rung with no flag"
+      proof: "unit test: test/drill-coverage-rubric.test.ts"
+    - claim: "the rung derives its verdict from the diff alone, exactly as checkTroubleshootingCoverage does, and never from reading the corpus off the working tree"
+      proof: "unit test: test/drill-coverage-rubric.test.ts"
+    - claim: "the new field is documented where an author will meet it — the failures.yaml header block beside operator_impact, and the learnings type's own doc comment — stating what true obligates"
+      proof: "unit test: test/drill-coverage-rubric.test.ts"
+  risk: high
+  origin: feedback#fb-1785237583569-3304ae
+  plan_refs: ["§5D", "W1-T50", "W1-T366", "W1-T938", "W1-T418"]
+  files: [src/lib/review.ts, src/lib/learnings.ts, learnings/failures.yaml, test/drill-coverage-rubric.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — every claim is an assertion over the rubric's verdict against synthetic diffs. No
+    operator, no live fleet, no drill run.
+    risk:high is Rule 19's SPAN plus the blast radius: `files:` crosses the reviewer rubric, the learnings
+    schema and the corpus, and a rung on the review floor that misfires blocks unrelated PRs. The
+    false-positive criterion is the load-bearing one for exactly that reason.
+    budget_usd 55 — one rung mirroring an existing one, one optional schema field, and a seeding pass.
+    Below W1-T938 because the pattern is given rather than designed.
+    depends_on W1-T938 — the obligation is 'add it to the drill', so the drill must first host the class
+    of entry an incident would add; wiring the rung first would obligate authors to touch a table that
+    does not yet accept guard faults. The two share no declared file, so this serialises on the DAG only.
+    THE PROOF PATH IS A FORWARD REFERENCE TO A FILE, never to a symbol: test/drill-coverage-rubric.test.ts
+    does not exist yet and is declared in `files:` so the worker creates it. A dedicated file rather than
+    test/review.test.ts keeps this off the largest shared suite and out of any co-dispatched task's path
+    set.
+    ON THE SECOND HALF OF THE FEEDBACK'S SENTENCE — 'one entry per REAL incident' is deliberately read as
+    'per incident a guard carried and a fixture can reproduce', not 'per incident'. The drill's own
+    qualification criterion (W1-T366 design (ii): exists to survive a failure, not exercised by the
+    success path, has an assertable outcome) already decides which incidents qualify, and this rung must
+    defer to it rather than invent a second answer.
