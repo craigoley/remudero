@@ -1,0 +1,184 @@
+- id: W1-T963
+  title: "THREE TRIAGE PRs MERGED WITH AN EMPTY DIFF AND ALL THREE PASSED REVIEW — the generated triage proof greps the feedback entry's POST-FIX state, so it is satisfied identically whether this PR made the change or a sibling already did, and nothing downstream refuses a diff that is empty against its own declared scope"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 85.00
+  rationale: |
+    FILED FROM direct diff inspection of the #2075/#2077/#2078/#2082 sequence. Branch cut at
+    5c3d15a; every file:line and every invocation count below was re-read on that tree.
+
+    (1) WHAT HAPPENED, AS DIFFS. Four triage PRs were opened for ONE feedback entry,
+    `plan/feedback/fb-alert-craigoley-remudero-code-scanning-82.yaml`. All four merged. Exactly
+    ONE changed anything: d46d0a0 (#2082) carries `-status: new` / `+status: rejected` plus
+    `+summary: null`, numstat 2 added 1 removed. The other three — b460421 (#2075), 612f05c
+    (#2077), cc98ad7 (#2078) — each produce NO OUTPUT from `git show <sha> -- plan/feedback/`.
+    Empty against that path. Confirmed a second way rather than inferred from the empty diff:
+    `git show b460421:plan/feedback/fb-alert-craigoley-remudero-code-scanning-82.yaml` reads
+    `9:status: rejected`, so the file ALREADY said rejected when that commit was made. Squash
+    merges rewrite committer dates, so `git log` order does not establish which ran first; the
+    file contents do.
+
+    (2) THE PROOF CANNOT DISCRIMINATE, AND ITS OWN DOC ASSERTS THAT IT CAN. `triageAcceptanceProof`
+    (src/lib/triage.ts:495) returns `grep: status: ${status} in ${feedbackEntryRepoPath(feedbackId)}`,
+    reached from `triageCommitMessage` at :548, :567 and :585, which `run-task.ts:18282` calls. The
+    comment directly above it (src/lib/triage.ts:492-494) says: *"IT DISCRIMINATES. The entry reads
+    `status: new` on the merge base and the flipped value on the head, so the grep MISSES the base."*
+    That holds ONLY when this PR is the one that flips the entry. When a sibling already flipped it,
+    the base and the head both read `rejected`, the grep matches both, and the criterion is satisfied
+    by a state the PR did not produce. The machinery to catch exactly this already exists and did not
+    fire: `executed_stale` (src/lib/review.ts:2150, W1-T273, extended to `unit test:` by W1-T362)
+    downgrades a proof matching head AND base. Determining why it did not fire here is design item
+    (i) and is NOT assumed by this shard.
+
+    (3) THE SECOND GAP IS INDEPENDENT, AND EITHER ALONE WOULD HAVE STOPPED ALL THREE MERGES.
+    Nothing refuses an empty diff at merge. `bodyContradictsDiff` (src/lib/review.ts:2696, called
+    from src/run-task.ts:1984) is TRIVIALLY SATISFIED when there is no diff to contradict — it
+    tests claims AGAINST `diffFiles`, so an empty `diffFiles` contradicts nothing. This is not a
+    defect in that function; it is a hole nothing else covers. The two gaps are filed as ONE
+    concern because closing either one alone closes the observed hole, so a fix that addresses
+    only one and declares the defect closed is untestable against the incident that produced it.
+
+    (4) THE COST IS HISTORY, NOT MINUTES. An empty merge credits work twice: the trailer and the
+    head-branch credit path both attribute the entry to a PR that changed nothing, and any later
+    reconstruction of "who did this" reads four PRs where one acted. It also pollutes `main` with
+    commits whose acceptance evidence is real, executed, green, and about someone else's change.
+
+    (5) THIS CLASS IS ALREADY BEING CLOSED BY HAND, WHICH IS THE COST THIS TASK REMOVES. d63d835,
+    *"docs: close W1-T413 re-dispatch as already-satisfied (no-op)"*, is a human doing this
+    adjudication manually. The `chore(feedback): land pending filings` commits ef0d949, 14d2fe3
+    and 1c44f93 are the same manual counterpart on the feedback side.
+  design: |
+    THE SHAPE: make the generated proof discriminate, AND refuse an empty diff, AND close rather
+    than merge a triage PR whose work is already done. Two determinations first, both from source.
+
+    (i) DETERMINE FROM SOURCE WHERE THE TRIAGE PROOF IS EMITTED AND WHY `executed_stale` DID NOT
+    FIRE, BEFORE CHOOSING AN APPROACH. The emitter is named in rationale (2) and is not in doubt;
+    what IS in doubt is the evaluation path. `executed_stale` exists precisely to catch a proof
+    matching head and base, and it did not catch these three. Read the proof-execution path in
+    src/lib/review.ts and establish whether the base comparison was skipped (no `baseCwd` — see
+    the note at :2295-2299, which records that `judgeCriterion` is structurally never stale when
+    `baseCwd` is absent), disabled for this lane, or evaluated and passed. The answer decides
+    whether the fix belongs in the emitter, the executor, or the lane that wires them. A builder
+    who patches the emitter without settling this may leave the executor blind to every other
+    generated proof.
+
+    (ii) DETERMINE WHERE THE MERGE GATE EVALUATES A DIFF. `bodyContradictsDiff` receives
+    `diffFiles` at src/run-task.ts:1984 and `judgeReview` receives `evidence.diff`
+    (src/lib/review.ts:3093). Establish which of these — or which caller above them — is the
+    point where "this PR's diff is empty against its declared scope" can be decided, and state
+    why the others are wrong. `nonPlanFilesInDiff` (src/lib/triage.ts:423) and `diffCitesFeedback`
+    (:433) already inspect a triage diff and are the closest existing precedent.
+
+    (iii) DELIVERABLE A — THE GENERATED PROOF MUST DISCRIMINATE. A triage proof must FAIL at the
+    merge base and PASS at the head. A proof satisfied by the post-fix state alone is the defect,
+    so asserting the flip rather than the destination state is the shape to beat; any alternative
+    must be justified against that bar.
+
+    (iv) DELIVERABLE B — REFUSE AN EMPTY DIFF. A PR whose diff is empty against its declared scope
+    must not merge. Scope here means the paths the PR claims to touch, not the whole tree: a PR
+    that changes only its own body is empty for this purpose.
+
+    (v) DELIVERABLE C — CLOSE, DO NOT MERGE. When a triage PR's work is found already done, the
+    lane must CLOSE it rather than merge it. Merging an empty PR is not a harmless no-op; per
+    rationale (4) it credits the work twice and pollutes history. A refusal that leaves the PR
+    open forever is not the outcome either — the disposition must be terminal.
+
+    (vi) A REFUSAL TEST ALONE PROVES NOTHING, AND THIS IS THE TRAP THIS SHARD IS ABOUT. An
+    implementation that refuses EVERY PR satisfies "an empty-diff PR is refused" perfectly, and a
+    proof-checker that fails every proof satisfies "the proof fails at base" perfectly. Both
+    positive controls must run in the SAME suite invocation as their refusals, so one run carries
+    both directions and neither can pass vacuously. This shard is about a non-discriminating
+    proof; its own acceptance must not repeat the defect.
+
+    (vii) AND THE MUTATION CHECK MUST BE FILE-SHA BRACKETED. A no-op mutation is indistinguishable
+    from a surviving mutant from the result alone. Read the sha256 of the edited file, remove the
+    discrimination, read it again and require it to DIFFER, run the suite and require the base-side
+    test to FAIL, restore, and require the sha to return to the original.
+
+    (viii) OUT OF SCOPE, TO BE FILED SEPARATELY. The re-dispatch and supersession behaviour that
+    opened FOUR PRs for one feedback entry. That governs HOW MANY are opened; this task governs
+    whether an empty one may merge. They are genuinely independent — fixing dispatch would have
+    reduced the count without making any of the three refusable, and fixing this makes the extra
+    PRs harmless without reducing their number. Not to be absorbed here, and not a reason to
+    widen this task.
+  acceptance:
+    - claim: "the triage proof fails at the merge base and passes at the head, proven in one run"
+      proof: "unit test: W1-T963: the triage proof fails at base and passes at head"
+    - claim: "removing the discrimination fails the base-side test, with the file sha read either side"
+      proof: "unit test: W1-T963: removing the discrimination fails the base-side test"
+    - claim: "a PR whose diff is empty against its declared scope is refused"
+      proof: "unit test: W1-T963: an empty-diff PR is refused"
+    - claim: "a PR with a real diff still passes, in the same run as the refusal above"
+      proof: "unit test: W1-T963: a non-empty diff still passes in the same run"
+    - claim: "a triage PR whose work is already done is closed rather than merged"
+      proof: "unit test: W1-T963: an already-done triage PR is closed not merged"
+  risk: high
+  origin: "oper#empty-triage-merge-2026-08-17"
+  plan_refs: ["#2075", "#2077", "#2078", "#2082"]
+  files: [src/lib/triage.ts, src/lib/review.ts, src/run-task.ts, test/triage-proof-dialect.test.ts, test/empty-diff-merge-gate.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS SET UP FRONT. Design items (i) and (ii) require determinations from source
+    that decide WHERE the fix belongs, and item (v) requires a disposition ruling — close versus
+    merge versus leave open — that no test can make. `isDispatchEligible` (src/lib/drain.ts)
+    returns false at `t.verify !== "auto"` before the linter is consulted, so this shard can never
+    be picked up by the drain. That is the intended effect, not a side effect.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (src/lib/task-linter.ts:193-204) exempts ONLY `task.risk === "high"` at :194 and returns clean
+    only at `subsystems.size < 2` — so TWO concerns is the threshold, not many. This shard's
+    `files:` names triage, review and run-task at minimum, which is already three, so no list
+    satisfying its own scope could pass at risk:medium. An operator wanting risk:medium recorded
+    must decompose it into one task per concern, which contradicts rationale (3): either gap alone
+    closes the observed hole, so decomposing them produces two tasks each of which can be declared
+    done while the incident remains reproducible.
+
+    FILES DERIVED BY INVOCATION COUNT AT 5c3d15a, NOT GUESSED. `triageAcceptanceProof`:
+    src/lib/triage.ts=4 (definition at :495 plus call sites :548/:567/:585), src/lib/review.ts=0,
+    src/run-task.ts=0 — it reaches run-task only through `triageCommitMessage`, which reads 1 at
+    src/run-task.ts:18282. `bodyContradictsDiff`: src/lib/review.ts=11, src/run-task.ts=9,
+    src/lib/triage.ts=0. `judgeReview`: src/lib/review.ts=22, src/run-task.ts=10.
+    `nonPlanFilesInDiff`: src/lib/triage.ts=1, src/run-task.ts=3. Control: `routeSpecialists`
+    reads 0 in all three modules, so the counts discriminate rather than matching everything.
+    test/triage-proof-dialect.test.ts is the ONLY test file referencing `triageAcceptanceProof`
+    (`grep -rln` over test/ returns exactly it). test/empty-diff-merge-gate.test.ts does not exist
+    yet and is declared as a NEW file: forward-referencing a PATH is safe, and CLAUDE.md requires
+    coverage-load-bearing tests to sit in their own file rather than being appended to a shared
+    one. src/run-task.ts IS DECLARED AND THE COST IS ACCEPTED IN WRITING — it holds both the
+    triage commit-message call site and the `bodyContradictsDiff` call site, so neither deliverable
+    can be wired without it; W1-T471 records that declaring the monolith serialises every task
+    naming it, and this shard will wait behind those.
+
+    THE ID RESTS ON A FIVE-SURFACE SWEEP WITH COVERAGE ASSERTED SEPARATELY FROM READABILITY, AND
+    REFS TREATED AS BLOCKING RATHER THAN AUTHORITATIVE. W1-T963 read 0 on all five: refs/rmd-id
+    (positive control refs/rmd-id/W1-T953 = 1, negative W1-T99999 = 0), shard filenames on main
+    (control W1-T952 = 1; 331 files enumerated against 331 expected), the whole main tree as a
+    filed id (control W1-T952 = 1 file, negative W1-T99999 = 0 files), open-PR file lists, and
+    plan/tasks.yaml (control W1-T280 = 1). 963 IS NOT 953: refs/rmd-id already reserves
+    953-962 and 1000-1003, so the lowest free id above the highest filed shard (952) is 963, not
+    the next integer. COVERAGE WAS ASSERTED, NOT ASSUMED: surface 4 enumerated 0 open PRs and
+    captured 0 file lists with 0 failures, and that zero was controlled — the SAME endpoint with
+    `state=closed` returned 10 and `state=all` returned 10 of which 0 open, so the empty set is
+    real rather than a failed query. IDS ABOVE 952 IN THE TREE WERE INVESTIGATED, NOT TRUSTED:
+    977, 998, 999, 1054, 1200, 1780, 1781, 1790, 5001, 9513, 90497 and 1786799102812 all appear
+    only as synthetic runIds and fixtures inside test files and shard prose — none is a filed id,
+    and none is 963.
+
+    THE RESERVATION WAS REFUSED. The gated push to refs/rmd-id/W1-T963 used an orphan commit over
+    the empty tree (4b825dc6) carrying a host-pid-nanosecond nonce, a braced refspec, and the exit
+    code captured in a variable rather than read through a pipe. PUSH_EXIT_CODE=1, verbatim:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+    The readback returned 0 lines while a control readback of refs/rmd-id/W1-T953 returned its
+    sha, so the ref genuinely does not exist and the query that checked was working. The
+    reservation does not exist and the five-surface sweep is the whole basis. This is the same
+    credential limit W1-T518 files and is recorded rather than treated as blocking. Refs are
+    CORROBORATING ONLY IN THE ABSENT DIRECTION: the namespace holds 61 refs against 331 filed
+    shards, and W1-T952 is filed with NO ref at all, so a ref reading absent proves nothing —
+    but a ref reading PRESENT does block, which is why 953-962 were skipped.
