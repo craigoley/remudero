@@ -91,23 +91,30 @@ export interface PanelSkillRunDeps {
 export type { GroundingNote };
 
 /**
- * GROUND step: read the "plan" skill's registry entry and search every file it declares under
- * `grounding_sources` for mentions of `task.id` — the SAME corpus `.remudero/skills/plan.yaml`
- * names, resolved via `lib/skill.ts`'s `loadSkill` (the identical primitive `rmd skill list`
- * uses), never a hand-picked substitute. A missing registry entry degrades to "found nothing"
- * rather than throwing — Refine must still be able to grill even against a half-populated repo.
- * The actual search is `lib/skill.ts`'s `searchGroundingSources` (W1-T933) — lifted out of this
- * function so the SAME declared-corpus lookup is reachable without the console panel path this
- * function is bound to; this is now a thin wrapper naming which skill and which query.
+ * GROUND step: read a skill's registry entry (`skillName`, defaulting to "plan") and search every
+ * file it declares under `grounding_sources` for mentions of `query` (defaulting to `task.id`) —
+ * the SAME corpus `.remudero/skills/<skillName>.yaml` names, resolved via `lib/skill.ts`'s
+ * `loadSkill` (the identical primitive `rmd skill list` uses), never a hand-picked substitute. A
+ * missing registry entry degrades to "found nothing" rather than throwing — Refine must still be
+ * able to grill even against a half-populated repo. The actual search is `lib/skill.ts`'s
+ * `searchGroundingSources` (W1-T933) — lifted out of this function so the SAME declared-corpus
+ * lookup is reachable without the console panel path this function is bound to.
+ *
+ * W1-T935: `query`/`skillName` are new — before this, the only key a caller could ask about was
+ * `task.id` against the hardcoded "plan" skill, so "ask the grounding lookup a question" had
+ * nowhere to put the question. Both default to the prior behavior so every existing 2-arg caller
+ * (this module's own Refine handler, below, now refactored onto the wider signature explicitly;
+ * every 2-arg test) is unchanged. `searchGroundingSources` itself already took a `query` (W1-T933,
+ * merged as #2019) — this is what widens the one thing that still didn't: the wrapper around it.
  */
-export function groundClarifyRequest(root: string, task: Task): GroundingNote[] {
-  let planSkill: Skill;
+export function groundClarifyRequest(root: string, task: Task, query: string = task.id, skillName: string = "plan"): GroundingNote[] {
+  let skill: Skill;
   try {
-    planSkill = loadSkill(join(skillsDir(root), "plan.yaml"));
+    skill = loadSkill(join(skillsDir(root), `${skillName}.yaml`));
   } catch {
     return [];
   }
-  return searchGroundingSources(root, planSkill, task.id);
+  return searchGroundingSources(root, skill, query);
 }
 
 // ── GRILL: the plan skill's own grounding PLUS the §5C deterministic linter ─────────────────
@@ -233,7 +240,12 @@ export function buildRunSkillRoute(deps: PanelSkillRunDeps): Route {
         return;
       }
 
-      const grounding = groundClarifyRequest(deps.root, task);
+      // W1-T935: refactored onto the wider (root, task, query, skillName) signature explicitly —
+      // Refine still asks the same question (task.id, against "plan") it always did; the point is
+      // that the call site now NAMES the query/skill instead of a 2-arg call that could only ever
+      // mean one thing, so a future caller has a signature to widen further rather than a second,
+      // narrower duplicate to reconcile with this one.
+      const grounding = groundClarifyRequest(deps.root, task, task.id, "plan");
       const lint = lintTask(task);
       const grillText = buildClarifyGrill(task, lint, grounding);
       const captured = captureFeedback(deps.root, { raw: grillText, origin: "ui" });
