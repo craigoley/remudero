@@ -1,0 +1,75 @@
+- id: W1-T944
+  title: "THE NOW CARD SHOWS ELAPSED AND SPEND AND CANNOT SAY WHETHER THE WORKER IS ALIVE — a 16-minute test suite and a worker that has emitted nothing for 16 minutes render identically, so the per-run worker state must ride the same read model onto the NOW row next to spend, with quiet rendered as a duration"
+  repo: remudero
+  depends_on: ["W1-T942"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    FILED FROM fb-1785237627858-ffafd9 (2026-07-28, origin cli) — the render half of item (1).
+    "'quiet 11m' is the signal the operator currently cannot get" is the feedback's own sentence, and
+    it is precise. Verified at filing by reading the source: the NOW row is the W1-T183 density line
+    `id · status · phase · elapsed · spend · PR/issue link` (src/lib/serve.ts), fed by GET /v1/status
+    from board.ts's BoardRow, whose in-flight fields come from `deriveRunState` (src/lib/status.ts) —
+    a ledger scan keyed on run/task id that already yields `phase`, `startedAt`/`elapsedMs` and the
+    live spend, and `isRunningRow` (board.ts) which defines "running" as `phase != null`.
+    THE EXISTING ANOMALY FLAG IS THE WRONG INSTRUMENT, NOT A SUBSTITUTE. W1-T183's
+    DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS raises "⚠ long-running" off the HARNESS PHASE's elapsed clock.
+    That clock runs at the same rate for a worker executing the ~16-minute `--ci-parity` suite
+    (W1-T463's measurement) and for a worker that stopped emitting entirely — so the flag fires on
+    both or neither, and the operator learns nothing from it about liveness.
+    THE INPUT IS A LEDGER ROW, WHICH IS WHY THIS IS A ROW AND NOT A CODE BRANCH. W1-T942 appends
+    `worker.state` transitions keyed by the SAME run_id/task_id `deriveRunState` already scans on, so
+    this task adds one field to an existing scan and one span to an existing line.
+  design: |
+    (i) ONE DERIVATION, ONE MODEL, TWO WORDS OF UI. `deriveRunState` (status.ts) gains the newest
+    `worker.state` for the run and, when that state is `quiet`, the transition timestamp it started
+    at; board.ts carries it as ONE field (`workerState`) on the row beside the spend fields; serve.ts
+    renders it in the NOW row next to spend. No second scan, no client-side re-derivation — the
+    console must never be able to disagree with the model it was served (the W1-T262 discipline).
+    (ii) QUIET IS RENDERED AS A DURATION, COMPUTED CLIENT-SIDE OFF THE SAME TICK THAT ALREADY AGES
+    `elapsedMs`. "quiet 11m" must keep counting between polls exactly as elapsed does, or the operator
+    reads a frozen number and mistrusts the whole card.
+    (iii) UNKNOWN IS A RENDERED WORD, NOT A BLANK AND NEVER A GREEN DEFAULT. A run with no
+    `worker.state` row — every run that started before W1-T942 shipped, and any run whose observer
+    never fired — renders "state unknown". The repo has now paid repeatedly for an unknown that LOOKS
+    healthy (the ~17h invisible DEPLOY_FAILED latch behind W1-T279; board.ts's own `liveSpendPending`
+    carve-out against a defined `liveSpendUsd: 0`).
+    (iv) NEVER COLOUR ALONE. The state rides as TEXT, exactly as W1-T183's anomaly marker pairs its
+    colour with a "⚠ long-running" text+glyph; a state legible only to a sighted operator on a good
+    monitor is not legible.
+    (v) A ROW THAT IS NOT RUNNING CARRIES NO STATE. `isRunningRow`'s existing definition governs —
+    this task introduces no second notion of "live", and a finished task's last known state must not
+    linger on the card as if it were current.
+    (vi) EXPLICITLY OUT OF SCOPE: `rmd status`'s terminal board (W1-T279/W1-T280 render whatever rows
+    exist and this one becomes a row for them, not a branch), the peek affordance and its route
+    (W1-T945), thresholds/escalation (W1-T943), and any write or steering control on the NOW card —
+    the fb-…9daa9b UP NEXT write-actions stay exactly as they are.
+  acceptance:
+    - claim: "the NOW row renders the run's worker state beside spend, and a quiet run renders as a DURATION that keeps ageing between polls on the same tick elapsedMs uses"
+      proof: "unit test: test/now-card-worker-state.test.ts"
+    - claim: "a run with no worker.state row renders 'state unknown' — never blank, never a healthy-looking default, and never colour alone"
+      proof: "unit test: test/now-card-worker-state.test.ts"
+    - claim: "a row that is not running (isRunningRow false) carries no worker state at all, so a finished task's last state cannot linger as if current"
+      proof: "unit test: test/now-card-worker-state.test.ts"
+    - claim: "the state reaches the client through the SAME served read model as phase/elapsed/spend, with no second ledger scan and no client-side re-derivation"
+      proof: "grep: workerState in src/lib/board.ts"
+  risk: high
+  origin: feedback#fb-1785237627858-ffafd9
+  plan_refs: ["§7"]
+  files: [src/lib/status.ts, src/lib/board.ts, src/lib/serve.ts, test/now-card-worker-state.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high is Rule 19's SPAN (three src/lib modules plus test/), the W1-T310 grade. Blast radius
+    argues DOWN: one optional field and one text span; the worst failure is a wrong word on a card.
+    budget_usd 60 — close to W1-T929's 55 for the same shape (one derivation, one render site) plus
+    the client-side ageing tick.
+    depends_on W1-T942 because there is nothing to render until worker.state rows exist; shipping the
+    render first would put a permanent "state unknown" on every row, which is W1-T323's ships-unwired
+    shape wearing an honest label.
+    SERIALISATION, STATED RATHER THAN DISCOVERED: W1-T945 also declares src/lib/serve.ts, so these two
+    cannot batch. That is the partitioner working correctly on a real shared file, not a filing
+    defect. Neither declares src/lib/worker.ts, so both stay clear of W1-T942's own lane.
+    THE TEST PATH IS DECLARED IN files: (W1-T310) — every proof names a declared path.

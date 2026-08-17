@@ -1,0 +1,90 @@
+- id: W1-T945
+  title: "THERE IS NO WAY TO READ A LIVE WORKER'S OUTPUT — the operator waits for the verdict or digs the daemon log afterwards, so `rmd peek <runId>` and a NOW-card affordance must tail the run's recent output READ-ONLY, with no steering surface of any kind in v1"
+  repo: remudero
+  depends_on: ["W1-T942"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: |
+    FILED FROM fb-1785237627858-ffafd9 (2026-07-28, origin cli), item (3).
+    A STATE BADGE ANSWERS "IS IT MOVING", NOT "IS IT DOING THE RIGHT THING". W1-T944 puts
+    `quiet 11m` on the card; the operator's very next question — what is it actually saying? — has no
+    answer short of waiting for the verdict. Verified at filing: `rmd --help`'s verb list carries no
+    read-only inspection verb (docs/operator-guide.md's command table), and W1-T279's rationale
+    already established that every existing verb ACTS or serves a surface.
+    THE AFTER-THE-FACT SUBSTITUTES ARE DOCUMENTED FAILURES. fb-1784821673624-321a4b observed run
+    W1-T163-1784820207394's reasoning as UNRECOVERABLE because `daemon.out.log` had already ended;
+    W1-T238's rationale records a cause that "lived only in memory and died with each of the four
+    failing spawns". Log archaeology is what the fleet has, and it is a documented dead end.
+    THE ARTIFACT THIS VERB NEEDS IS W1-T942's OUTPUT, NOT A NEW CAPTURE. W1-T942 writes a bounded,
+    capped, 0600 ring at `<root>/state/runs/<runId>.tail` and RETAINS it past exit for every verdict.
+    This task adds readers, and only readers.
+  design: |
+    (i) READ-ONLY BY CONSTRUCTION, NOT BY POLICY. The verb and the route open the tail file for
+    READING and expose no parameter that can reach the worker — no stdin, no message injection, no
+    signal, no kill, no resume. The feedback says "no steering surface in v1" and the reason is that a
+    steering channel into a running worker is a whole security and containment decision (§5B/§8) that
+    this filing has not made and must not smuggle in. A future paramedic verb is a separate,
+    evidenced decision.
+    (ii) `rmd peek <runId>` PRINTS THE LAST N LINES AND EXITS 0. N is a flag with a bounded default;
+    a `--follow` mode may append new lines as they land, and it must terminate cleanly when the run
+    ends rather than hanging forever on a finished run. Liveness resolution reuses the EXISTING
+    `liveInflightRuns` read of `state/inflight/*.lock` with its pid check (src/run-task.ts) — never a
+    second definition of "in flight" — and the verb states plainly whether the run it just printed is
+    LIVE or FINISHED.
+    (iii) IT WORKS ON A FINISHED RUN TOO, and that is the point of W1-T942's retention: the same verb
+    is how a non-PR verdict's last transcript lines are read back, which is the surviving half of
+    fb-1784821673624-321a4b (its final-message half already shipped as `report_excerpt`, #1584 —
+    do not re-implement that).
+    (iv) HONEST EMPTINESS. An unknown run id, a reaped tail, or a run that predates the sensor prints
+    a NAMED reason ("no tail recorded for <runId>") and exits 0 — never silent empty output, which
+    reads identically to a worker producing nothing and would recreate the ambiguity this whole
+    filing exists to remove.
+    (v) THE CONSOLE AFFORDANCE IS A READ-ONLY PANEL ON THE NOW ROW, served by ONE new GET route
+    `/v1/peek` that inherits serve.ts's EXISTING auth/nonce and localhost binding — no new auth path,
+    no new listener, no write verb. The response is capped in bytes and lines per request, and the
+    panel is opt-in per row (a NOW card that streams every live worker by default is a cost and a
+    noise problem, not a feature).
+    (vi) SECRET DISCIPLINE IS LOAD-BEARING HERE, because this is the first surface that puts raw
+    worker output on an HTTP route: the same 0600 and no-token rules W1-T238 established apply, and
+    the route must not become a way to read anything other than a tail file (path traversal on a
+    run-id parameter is the obvious hazard — the id is validated against the known run-id shape, never
+    concatenated into a path unchecked).
+    (vii) EXPLICITLY OUT OF SCOPE: producing the tail (W1-T942), the state badge (W1-T944),
+    thresholds and escalation (W1-T943), any steering/kill/resume affordance, and any change to
+    ledger retention policy beyond reading what W1-T942 retains.
+  acceptance:
+    - claim: "`rmd peek <runId>` prints the last N lines of that run's tail and exits 0, and states whether the run is LIVE or FINISHED using the existing in-flight lock + pid liveness test rather than a second definition"
+      proof: "unit test: test/worker-peek.test.ts"
+    - claim: "peek works on a FINISHED run's retained tail, so the last transcript lines of a non-PR verdict are readable after the fact"
+      proof: "unit test: test/worker-peek.test.ts"
+    - claim: "an unknown run id or an absent tail prints a NAMED reason and exits 0 — never silent empty output"
+      proof: "unit test: test/worker-peek.test.ts"
+    - claim: "the surface is read-only by construction: neither the verb nor the route exposes any parameter that writes to, signals, resumes or kills the run"
+      proof: "unit test: test/worker-peek.test.ts"
+    - claim: "the run id is validated against the known run-id shape before any path is built, so no id can read a file outside the tail directory, and the response is byte- and line-capped"
+      proof: "unit test: test/worker-peek.test.ts"
+    - claim: "the console reads the tail through ONE new read-only route inheriting serve's existing auth and binding"
+      proof: "grep: /v1/peek in src/lib/serve.ts"
+    - claim: "the verb is listed in the operator guide's command table, where every other operator verb is documented"
+      proof: "grep: rmd peek in docs/operator-guide.md"
+  risk: high
+  origin: feedback#fb-1785237627858-ffafd9
+  plan_refs: ["§7", "§5D"]
+  files: [src/run-task.ts, src/lib/serve.ts, docs/operator-guide.md, test/worker-peek.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high is Rule 19's SPAN, and here blast radius argues UP rather than down for ONE reason: this
+    is the first route that serves raw worker output over HTTP. Criteria 4, 5 and 6 exist to keep that
+    honest (read-only, id-validated, capped, no new auth path). The verb itself is a file tail.
+    budget_usd 80 — the tail read is trivial; the cost is the route, the follow-mode termination
+    fixture and the traversal/cap falsifiers.
+    depends_on W1-T942: with no `<root>/state/runs/<runId>.tail` there is nothing to read, and a peek
+    verb that always prints "no tail recorded" is a shipped-unwired surface (W1-T322/W1-T323).
+    SERIALISATION, STATED: src/lib/serve.ts is shared with W1-T944 and src/run-task.ts with W1-T942,
+    so this task batches with neither. Both are real shared files, not a filing defect — and both are
+    ordered before it by depends_on anyway.
+    THE TEST PATH AND BOTH GREP PATHS ARE DECLARED IN files: (W1-T310), so the scope guard cannot
+    refuse this run after the work is done.

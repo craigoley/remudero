@@ -1,0 +1,102 @@
+- id: W1-T942
+  title: "A WORKER IS OPAQUE BETWEEN SPAWN AND VERDICT — the SDK stream is already consumed message by message and every message is discarded except its text, so nothing anywhere knows whether a live run is working, mid-tool-call, or has said nothing for eleven minutes: derive a per-run worker state off that same stream, ledger the TRANSITIONS as worker.state, and keep a bounded live tail of the worker's recent output on disk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 110.00
+  rationale: |
+    FILED FROM fb-1785237627858-ffafd9 (2026-07-28, origin cli), item (1) plus the artifact item (3)
+    needs. This is the PRODUCE half; nothing here renders anything.
+    THE STREAM IS ALREADY IN HAND AND ALREADY THROWN AWAY — verified by reading the source at filing,
+    not inferred from the plan. `collectWorkerResult` (src/lib/worker.ts) reduces the SDK message
+    stream in one `for await (const raw of messages)` loop (~:1128) with exactly three branches:
+    `system` (fed to detectCompactionEvents), `assistant` (only `type === "text"` content blocks are
+    pushed onto `blocks`), and `result` (the terminal envelope). TOOL-USE BLOCKS ARE DROPPED
+    ENTIRELY and NO MESSAGE IS EVER TIMESTAMPED — the only clock in the function is `startedAtMs`
+    (~:1110), used solely to stamp `worker_duration_ms` on the terminal result. So the fleet already
+    holds, message by message, exactly the evidence needed to say "this worker last spoke 11 minutes
+    ago" and reduces it to a single number at the end of the run.
+    WHAT THE OPERATOR CAN SEE TODAY IS NOT THIS. The console NOW card renders `id · status · phase ·
+    elapsed · spend · PR/issue link` (src/lib/serve.ts, the W1-T183 density line) with a per-PHASE
+    elapsed anomaly flag (DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS). `phase` is the HARNESS's own stage
+    (recon/implement/fix-rung/…) and its elapsed clock runs identically for a worker executing a
+    16-minute test suite and for one that has emitted nothing at all since it started. The two are
+    indistinguishable on every surface the fleet has, which is the entire complaint.
+    THE PERSISTENCE HALF IS PARTLY SHIPPED AND MUST NOT BE RE-FILED. `report_excerpt` (#1584) already
+    lands the worker's closing report on `no_pr` verdict rows (`classifyNoPrShape`, src/run-task.ts),
+    and W1-T238 (queued) persists a capped stderr excerpt on FAILED spawns. That is why
+    fb-1784821673624-321a4b is `status: rejected`. WHAT REMAINS of it is the LAST N TRANSCRIPT LINES,
+    and this task yields them for free: the live tail written for the sensor is simply NOT DELETED on
+    exit, for every verdict. No new verdict field, no second excerpt, no change to `no_pr` semantics.
+  design: |
+    (i) ONE OBSERVER SEAM, INJECTED — worker.ts STILL CANNOT REACH THE LEDGER. The module says so in
+    its own comment ("worker.ts cannot reach the ledger: `ledgerPathFor` lives in run-task.ts"), and
+    that boundary is not relaxed here. `collectWorkerResult` gains ONE optional injected observer
+    callback invoked per message with the message kind and the injected clock's timestamp; absent the
+    callback the loop behaves byte-identically to today. THE WIRING IS A DELIVERABLE, NOT A FOLLOW-UP
+    (Standing rule 14): run-task.ts wires the real observer at the spawn call sites so the states are
+    produced by live runs, never only by a test.
+    (ii) THE STATE VOCABULARY IS THREE VALUES AND NO MORE: `working` (assistant text arriving),
+    `tool-executing` (a tool_use block seen with no result yet), `quiet` (no message of any kind for
+    longer than the quiet floor). A fourth state invented here would have to be re-rendered by two
+    consumers and re-judged by W1-T943; keep it at three.
+    (iii) LEDGER TRANSITIONS, NEVER MESSAGES. The ledger step is exactly `worker.state`, carrying
+    `run_id` + `task_id` (the keys every other run-scoped row already uses, and the keys
+    `deriveRunState`/board.ts scan on) and the new state. A row is appended ONLY when the state
+    CHANGES — a per-message row would multiply ledger volume by the turn count and slow every reader
+    in the repo, and `quiet` is a duration, not an event, so its transition row is what carries the
+    "since" timestamp a reader subtracts from now.
+    (iv) THE LIVE TAIL IS A BOUNDED RING, WRITTEN AT `<root>/state/runs/<runId>.tail`. Capped in BOTH
+    bytes and lines so a runaway transcript can neither bloat the disk nor stall the run; the write is
+    best-effort and a write failure NEVER fails the run (an observability organ that can kill a worker
+    is worse than the blindness it cures). 0600 and the same no-token discipline the persisted-stderr
+    work established (W1-T238) — worker output can carry credential text, and this file is about to be
+    readable from a console route (W1-T945).
+    (v) RETAINED ON EXIT FOR EVERY VERDICT — merged, no_pr, blocked, pr_attribution_failed, failed.
+    The reaper/sweep path that reclaims run scratch must be extended to age these out on a stated
+    retention, not to delete them at run end; "the tail exists only while the run lives" would rebuild
+    exactly the hole fb-1784821673624-321a4b reported.
+    (vi) CANNOT-OBSERVE IS ITS OWN ANSWER (W1-T130 polarity). A run with no `worker.state` row yet, or
+    whose observer never fired, is UNKNOWN — never defaulted to `working`. A green-looking default is
+    the failure this sensor exists to end.
+    (vii) EXPLICITLY OUT OF SCOPE: any threshold, escalation or NEEDS-ME surface (W1-T943), any
+    console/CLI rendering (W1-T944, W1-T945), any change to `no_pr`/`report_excerpt` semantics, and
+    any steering or kill affordance whatsoever.
+  acceptance:
+    - claim: "the state is derived from the SAME SDK message stream collectWorkerResult already consumes — assistant text yields working, a tool_use block yields tool-executing, and a gap with no message of any kind yields quiet — with no second stream and no extra SDK call"
+      proof: "unit test: test/worker-state-sensor.test.ts"
+    - claim: "worker.state rows are appended on TRANSITIONS only, keyed by run_id and task_id, so a long run does not append one row per message"
+      proof: "unit test: test/worker-state-sensor.test.ts"
+    - claim: "a run with no worker.state row, or an observer that never fired, reads UNKNOWN — never working (the W1-T130 cannot-observe polarity)"
+      proof: "unit test: test/worker-state-sensor.test.ts"
+    - claim: "the live tail is byte- and line-capped, written 0600, survives run exit for a NON-PR verdict as well as a merged one, and a tail write failure never fails the run"
+      proof: "unit test: test/worker-state-sensor.test.ts"
+    - claim: "the observer is WIRED at the real spawn path, not merely available — a live run emits worker.state (Standing rule 14)"
+      proof: "grep: worker.state in src/run-task.ts"
+  risk: high
+  origin: feedback#fb-1785237627858-ffafd9
+  plan_refs: ["§5D", "§7"]
+  files: [src/lib/worker.ts, src/run-task.ts, test/worker-state-sensor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high is Rule 19's SPAN (src/lib + src/ + test/, the W1-T310 grade), and here the blast radius
+    argues UP too: `collectWorkerResult` is the reduce loop EVERY worker and brain-plane call passes
+    through, so a throw introduced in that loop takes the whole fleet down. Hence the design's
+    best-effort, never-fatal contract for both the observer and the tail write.
+    budget_usd 110 — the derivation is small; the cost is the fixture stream matrix (text / tool_use /
+    silence / synthetic result-only), the exit-retention path, and re-deriving the spawn call sites
+    from source rather than assuming one.
+    THE TEST PATH IS DECLARED IN files: (W1-T310) — every proof above names a declared path, so the
+    scope guard cannot refuse this run after the work is done. If the exit-retention edit turns out to
+    need the reaper module, DECLARE IT and drop any declared path left untouched
+    (inverseScopeUntouchedFiles fails a declared-but-untouched path exactly as scopeViolationFiles
+    fails an undeclared one).
+    SIBLINGS FROM THIS FILING, all origin fb-1785237627858-ffafd9 and all depending on this one:
+    W1-T943 (stall detector), W1-T944 (NOW-card state), W1-T945 (rmd peek). This task is the only one
+    that touches src/lib/worker.ts, deliberately, so the three consumers never serialise on it.
+    NOT A RE-DECISION of rmd status (W1-T279/W1-T280): those RENDER and explicitly sense nothing —
+    their own notes name "the live-worker states of fb-1785237627858-ffafd9" as the separate filing
+    that produces inputs they pick up as rows. This is that filing.
