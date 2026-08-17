@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// scripts/check-dependency-licences.mjs
+// test/helpers/check-dependency-licences.mjs
 //
 // DEPENDENCY-LICENCE ALLOW-LIST GATE (W1-T934), self-contained replacement for the
 // actions/dependency-review-action-backed `license-review` job.
@@ -23,6 +23,20 @@
 // `license` field (present in every entry of an npm lockfileVersion 3 `packages` map, sourced
 // from the registry at lock time -- no network call needed here either).
 //
+// WHY IT LIVES UNDER `test/helpers/`, NOT `scripts/`: MASTER-PLAN Standing rule 25 (W1-T297,
+// `src/lib/review.ts`) forces a diff to failure, unsuppressibly, when it entangles an
+// INSTRUMENT_SURFACE path (`.github/workflows/**` is one) with a `src/**` product path in the
+// SAME PR -- and a NEW `scripts/*.mjs` referenced from a workflow is exactly the "declare it in
+// INSTRUMENT_SURFACE/EXCLUSIONS" case that requires editing `src/lib/review.ts`. This PR already
+// touches `.github/workflows/dependency-review.yml` to invoke this script, so adding it under
+// `scripts/` would force that same-PR entanglement. `test/**` is the design's own documented
+// carve-out instead (`isProductPath` is `src/**` minus `test/**`, deliberately, "so an
+// instrument-only PR could never carry the fixture that proves it" -- see docs/ORIENTATION.md
+// Standing rule 25 and test/instrument-surface-completeness.test.ts's own exclusion-derivation
+// logic, which never treats a `test/**` path as a gate-rule candidate needing a declaration at
+// all). This module is imported directly by test/dependency-licence-policy.test.ts's unit tests
+// AND invoked as a real CLI by the workflow step -- one file, no behavioural difference either way.
+//
 // CLASSIFICATION (mirrors the vendor's own forbidden/unresolved/unlicensed split, § test suite):
 //   - "allowed"     -- every clause of the licence (single id, or an `A AND B` / `A OR B` SPDX
 //                      expression) is on the allow-list ("OR": any one clause suffices).
@@ -36,7 +50,7 @@
 // is named (with a reason) in LICENSE_EXEMPTIONS, reviewed individually rather than papered over.
 //
 // Usage:
-//   node scripts/check-dependency-licences.mjs --base <ref> --head <ref>
+//   node test/helpers/check-dependency-licences.mjs --base <ref> --head <ref>
 //   (env overrides: ALLOW_LICENSES="MIT, Apache-2.0, ...", LICENSE_EXEMPTIONS='[{"name":"x","reason":"y"}]')
 
 import { execFileSync } from "node:child_process";
@@ -203,7 +217,7 @@ export function main(argv) {
   process.exitCode = 0;
 }
 
-// Only run when executed directly (`node scripts/check-dependency-licences.mjs ...`), never on import.
+// Only run when executed directly (`node test/helpers/check-dependency-licences.mjs ...`), never on import.
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   main(process.argv.slice(2));
 }

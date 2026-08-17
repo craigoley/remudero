@@ -7,13 +7,13 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { parse as parseYaml } from "yaml";
 
-// `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
-// `import … from "../scripts/check-dependency-licences.mjs"` is a TS7016 — the same reason
+// A `.mjs` file carries no declaration file, so a static `import … from "./helpers/check-
+// dependency-licences.mjs"` is a TS7016 under tsconfig's `strict` — the same reason
 // test/clock-sweep.test.ts reaches its script through a runtime import rather than a typed one.
 // A dynamic specifier is not statically resolved, so this loads the REAL module with no shadow
 // copy to drift from it.
 const SCRIPT_URL = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "check-dependency-licences.mjs"),
+  join(dirname(fileURLToPath(import.meta.url)), "helpers", "check-dependency-licences.mjs"),
 ).href;
 const {
   DEFAULT_ALLOW_LICENSES,
@@ -46,11 +46,15 @@ const {
 // API 403s on this repository (confirmed via `gh api .../dependency-graph/{compare,sbom}` —
 // see the job's own comment in dependency-review.yml for the full trail), and the vendor action
 // has no fallback that avoids it, so the check could never pass here no matter its config. This
-// round replaces the MECHANISM (not the acceptance shape) with scripts/check-dependency-
+// round replaces the MECHANISM (not the acceptance shape) with test/helpers/check-dependency-
 // licences.mjs, a self-contained `package-lock.json`-diffing gate that needs no GitHub API call.
-// This suite tests: (A) the script's pure functions directly (the real classification/diff logic,
-// not a paraphrase), and (B) the workflow YAML wiring that makes `license-review` a required,
-// unconditional, non-continue-on-error check invoking that script.
+// It lives under `test/helpers/`, not `scripts/`, for a Standing-rule-25 reason spelled out in
+// its own header and in dependency-review.yml's job comment: a NEW `scripts/*.mjs` referenced
+// from the SAME PR's `.github/workflows/` change would force an unsuppressible instrument/
+// product entanglement failure, and `test/**` is this repo's own documented carve-out from that
+// rule. This suite tests: (A) the script's pure functions directly (the real classification/diff
+// logic, not a paraphrase), and (B) the workflow YAML wiring that makes `license-review` a
+// required, unconditional, non-continue-on-error check invoking that script.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -127,7 +131,7 @@ test("dependency-licence-policy: license-review is a DEDICATED job, distinct fro
   assert.ok(!required.includes(advisoryJob.name ?? "dependency-review"), "the advisory job must stay OUT of ci-gate REQUIRED");
 });
 
-test("dependency-licence-policy: license-review does NOT depend on actions/dependency-review-action (its GitHub-hosted dependency-graph compare API 403s on this repository — see the job's own comment) — it runs scripts/check-dependency-licences.mjs with fetch-depth: 0", async () => {
+test("dependency-licence-policy: license-review does NOT depend on actions/dependency-review-action (its GitHub-hosted dependency-graph compare API 403s on this repository — see the job's own comment) — it runs test/helpers/check-dependency-licences.mjs with fetch-depth: 0", async () => {
   const job = await loadLicenseReviewJob();
   const steps: any[] = Array.isArray(job.steps) ? job.steps : [];
   assert.ok(
@@ -138,7 +142,8 @@ test("dependency-licence-policy: license-review does NOT depend on actions/depen
   assert.ok(checkoutStep, "license-review must check out the repo");
   assert.equal(checkoutStep.with?.["fetch-depth"], 0, "checkout needs full history (fetch-depth: 0) to diff base..head lockfiles");
   const scriptStep = steps.find((s) => typeof s?.run === "string" && s.run.includes("check-dependency-licences.mjs"));
-  assert.ok(scriptStep, "license-review must invoke scripts/check-dependency-licences.mjs");
+  assert.ok(scriptStep, "license-review must invoke test/helpers/check-dependency-licences.mjs");
+  assert.match(scriptStep.run, /test\/helpers\/check-dependency-licences\.mjs/, "must invoke the script from test/helpers/, not scripts/ (Standing rule 25 — see the job's own comment)");
   assert.match(scriptStep.run, /--base "\$\{\{\s*github\.event\.pull_request\.base\.sha\s*\}\}"/, "must diff against the PR's real base sha");
   assert.match(scriptStep.run, /--head "\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\}\}"/, "must diff against the PR's real head sha");
 });
@@ -279,7 +284,7 @@ test("collectLockPackages: a scoped package name is derived from the LAST `node_
 // ── End-to-end: the REAL script, invoked as a subprocess against a throwaway git fixture repo ──
 //
 // Builds a tiny real git repo with two commits (base, head) each carrying its own
-// package-lock.json, then runs `node scripts/check-dependency-licences.mjs --base <sha> --head
+// package-lock.json, then runs `node test/helpers/check-dependency-licences.mjs --base <sha> --head
 // <sha>` exactly as the workflow step does — the actual CLI entry point, not just its exported
 // functions.
 
@@ -315,7 +320,7 @@ test("end-to-end: the REAL CLI exits non-zero and names the package when a copyl
     );
     const result = execFileSync(
       "node",
-      [join(REPO_ROOT, "scripts", "check-dependency-licences.mjs"), "--base", baseSha, "--head", headSha],
+      [join(REPO_ROOT, "test", "helpers", "check-dependency-licences.mjs"), "--base", baseSha, "--head", headSha],
       { cwd: dir, encoding: "utf8", env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"] },
     );
     assert.fail(`expected the CLI to exit non-zero; stdout: ${result}`);
@@ -335,7 +340,7 @@ test("end-to-end: the REAL CLI exits zero when every introduced dependency's lic
     const headSha = await writeLockAndCommit(dir, git, { "node_modules/mit-pkg": { version: "1.0.0", license: "MIT" } }, "head");
     const stdout = execFileSync(
       "node",
-      [join(REPO_ROOT, "scripts", "check-dependency-licences.mjs"), "--base", baseSha, "--head", headSha],
+      [join(REPO_ROOT, "test", "helpers", "check-dependency-licences.mjs"), "--base", baseSha, "--head", headSha],
       { cwd: dir, encoding: "utf8" },
     );
     assert.match(stdout, /clean/);

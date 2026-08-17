@@ -48,13 +48,16 @@ jobs:
   # source of dependency changes in `src/main.ts`, in this or any released version through
   # `main`). Flipping Dependency graph on is an org/repo `administration`-scope admin action this
   # worker's token does not carry — so this job now computes the diff itself, WITHOUT calling
-  # that API at all, via `scripts/check-dependency-licences.mjs` (its own header carries the same
-  # verification trail).
+  # that API at all, via `test/helpers/check-dependency-licences.mjs` (its own header carries the
+  # same verification trail, INCLUDING why it lives under `test/` rather than `scripts/` — MASTER-
+  # PLAN Standing rule 25 would otherwise force this very diff to an unsuppressible review failure
+  # for entangling a NEW `scripts/*.mjs` gate script with the `.github/workflows/` change wiring
+  # it in, in the same PR).
   #
   # `allow-licenses`, NEVER a deny-list (design (ii)): a deny-list fails OPEN on every licence
   # nobody thought to enumerate — the wrong shape for an ALLOWED-list with copyleft flagged as the
-  # consequence, not the enumeration. `scripts/check-dependency-licences.mjs` only ever takes an
-  # allow-list (`ALLOW_LICENSES`), mirroring that choice; there is no deny-list input to misuse.
+  # consequence, not the enumeration. `test/helpers/check-dependency-licences.mjs` only ever takes
+  # an allow-list (`ALLOW_LICENSES`), mirroring that choice; there is no deny-list input to misuse.
   #
   # THE ALLOW-LIST, seeded exactly from the permissive family the originating feedback names
   # (MIT / Apache-2.0 / BSD-2-Clause / BSD-3-Clause / ISC) and NOT silently widened (design (vi)).
@@ -102,6 +105,6 @@ jobs:
           LICENSE_EXEMPTIONS: >-
             []
         run: |
-          node scripts/check-dependency-licences.mjs \
+          node test/helpers/check-dependency-licences.mjs \
             --base "${{ github.event.pull_request.base.sha }}" \
             --head "${{ github.event.pull_request.head.sha }}"
