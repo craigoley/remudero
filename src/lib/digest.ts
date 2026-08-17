@@ -181,6 +181,74 @@ export function renderCacheHitLine(label: string, grains: Record<string, CacheHi
   return `${label}: ${parts.join(", ")}`;
 }
 
+// ── W1-T940: LEARNINGS INJECTION DROP PRESSURE ──────────────────────────────────────────────
+//
+// run-task.ts's promptsmith block already logs a `learnings.injected` row on every spawn —
+// `matched`, `matched_ids`, `dropped` (ids), `budget_chars`, and `global_refused_reason` — but
+// nothing read it (measured: zero occurrences of "learnings" in status-board.ts before this
+// task). This is the ONE aggregation (mirrors `aggregateCacheHitTotals` above, W1-T929's same
+// seam): it walks the SAME ledger lines the board already read and totals `matched`/`dropped`
+// across the window, the DISTINCT `budget_chars` values seen (a mid-window constant change stays
+// visible rather than getting averaged away), and the DISTINCT `global_refused_reason` strings
+// with their counts — a refusal is a diagnosis, never folded into the drop count (design note
+// (iii): a `global_refused_reason` is a layer contributing ZERO entries; a budget drop is a
+// ranked entry losing a tie).
+
+/**
+ * One window's totals over every `learnings.injected` ledger row (W1-T940). `budgetChars` is
+ * every DISTINCT `budget_chars` value seen (sorted ascending), not one summary number, so a
+ * mid-window constant change is visible instead of averaged away. `globalRefusedReasons` keys
+ * the verbatim reason string to how many rows carried it — deduped, and deliberately kept off
+ * `dropped` (design note (iii)).
+ */
+export interface LearningsInjectionTotals {
+  /** Count of `learnings.injected` ledger rows in the window. */
+  rows: number;
+  /** Sum of each row's `matched` count. */
+  matched: number;
+  /** Sum of each row's `dropped` array length. */
+  dropped: number;
+  /** Every distinct `budget_chars` value seen, ascending. */
+  budgetChars: number[];
+  /** Verbatim `global_refused_reason` string → how many rows carried it. */
+  globalRefusedReasons: Record<string, number>;
+}
+
+/**
+ * Group `lines` (any ledger window) into {@link LearningsInjectionTotals} — the ONE traversal
+ * status-board.ts's `buildStatusBoard` walks too (grep-provable: `aggregateLearningsInjection(`
+ * in src/lib/status-board.ts), so the two surfaces can never disagree on which rows count.
+ *
+ * `undefined` when `lines` carries NO `learnings.injected` rows at all (design note (iv), the
+ * same soft-compose discipline {@link aggregateCacheHitTotals} keeps above) — the caller then
+ * renders explicit absence rather than a fabricated `dropped: 0` for a window that saw no spawns.
+ */
+export function aggregateLearningsInjection(lines: LedgerLine[]): LearningsInjectionTotals | undefined {
+  let rows = 0;
+  let matched = 0;
+  let dropped = 0;
+  const budgetCharsSeen = new Set<number>();
+  const reasonCounts = new Map<string, number>();
+  for (const l of lines) {
+    if (l.step !== "learnings.injected") continue;
+    rows++;
+    if (typeof l.matched === "number") matched += l.matched;
+    if (Array.isArray(l.dropped)) dropped += l.dropped.length;
+    if (typeof l.budget_chars === "number") budgetCharsSeen.add(l.budget_chars);
+    if (typeof l.global_refused_reason === "string" && l.global_refused_reason.length > 0) {
+      reasonCounts.set(l.global_refused_reason, (reasonCounts.get(l.global_refused_reason) ?? 0) + 1);
+    }
+  }
+  if (rows === 0) return undefined;
+  return {
+    rows,
+    matched,
+    dropped,
+    budgetChars: [...budgetCharsSeen].sort((a, b) => a - b),
+    globalRefusedReasons: Object.fromEntries(reasonCounts),
+  };
+}
+
 export interface DigestSummary {
   sinceIso: string;
   merged: string[];
