@@ -103,6 +103,20 @@ export interface RunSummary {
    *  three-state epistemology (proven-holding | proven-broken | UNPROVEN)
    *  verbatim — never collapsed to a boolean. */
   observed?: string;
+  /**
+   * W1-T930: summed `TokenUsage.output` (src/lib/worker.ts) off every DONE_STEPS
+   * line, mirroring `numTurns` above exactly (same steps, same reduce shape).
+   * `workerLedgerFields` already writes `tokens: {input, output, cacheRead,
+   * cacheCreation}` on every `recon.done`/`implement.done`/`implement.resumed`
+   * line — the dominant spend term (output runs ~5x input price) was captured
+   * on every worker call and never once read back by a calibration aggregate
+   * until this field. Optional (unlike `numTurns`) ONLY so a hand-built
+   * `RunSummary` fixture predating this task keeps compiling unchanged;
+   * {@link gatherRuns} itself always sets it (0, never omitted, same
+   * "present but honestly zero" discipline `numTurns` keeps) — every reader
+   * treats a genuinely absent value as 0 too (never as "unknown").
+   */
+  outputTokens?: number;
 }
 
 const DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
@@ -119,6 +133,19 @@ function correctionFor(lines: LedgerRecord[]): string | undefined {
     if (l.step === "correction.provenance" && typeof l.actual_pr_url === "string") url = l.actual_pr_url;
   }
   return url;
+}
+
+/** W1-T930: `l.tokens.output` off one ledger line, tolerating every shape a
+ *  hand-built test fixture or a pre-token-ledgering line might carry (missing
+ *  `tokens`, a non-object `tokens`, a non-numeric `output`) — `0`, never a
+ *  thrown TypeError, on anything that isn't the real `TokenUsage` shape. */
+function outputTokensOf(l: LedgerRecord): number {
+  const t = l.tokens;
+  if (t && typeof t === "object" && "output" in t) {
+    const v = (t as { output?: unknown }).output;
+    if (typeof v === "number") return v;
+  }
+  return 0;
 }
 
 /** Reduce ledger lines into per-run summaries, keyed by run_id (deterministic). */
@@ -138,6 +165,13 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
     const numTurns = lines
       .filter((l) => l.step && DONE_STEPS.has(l.step))
       .reduce((s, l) => s + (typeof l.num_turns === "number" ? l.num_turns : 0), 0);
+    // W1-T930: same DONE_STEPS scope as numTurns above — recon + implement
+    // (+ its resume) are the worker calls that actually spend output tokens
+    // toward this run's own work; a reviewer/dep-review call ledgers its own
+    // separate run_id and is out of scope here, exactly as it already is for turns.
+    const outputTokens = lines
+      .filter((l) => l.step && DONE_STEPS.has(l.step))
+      .reduce((s, l) => s + outputTokensOf(l), 0);
     const costLine = verdictLine ?? lines.find((l) => typeof l.cost_usd === "number");
     const prLine =
       lines.find((l) => l.step === "pr.opened") ?? verdictLine ?? lines.find((l) => l.pr_url);
@@ -151,6 +185,7 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       verdict: String(verdictLine?.verdict ?? "incomplete"),
       costUsd: typeof costLine?.cost_usd === "number" ? costLine.cost_usd : 0,
       numTurns,
+      outputTokens,
       prUrl: correctedUrl ?? claimedPrUrl,
       ...(correctedUrl !== undefined ? { correctedFromPrUrl: claimedPrUrl } : {}),
       ...(typeof start.risk === "string" ? { risk: start.risk } : {}),
@@ -205,6 +240,16 @@ export function aggregateByType(runs: RunSummary[]): TypeCalibration[] {
 }
 
 /**
+ * W1-T930: below this fraction of a class's runs reporting a nonzero
+ * `numTurns`, the numerator `turnsPerMerge`/`outputTokensPerMerge` divide by
+ * is too thin to trust — MASTER-PLAN's own worked example (4 of 14 credited
+ * runs, 29%) sits well under this bar and is the exact case the design's
+ * "reuse the discipline verbatim" clause names. Exported so a test can pin
+ * the boundary rather than re-deriving it from a magic number.
+ */
+export const MIN_TURN_COVERAGE_FOR_PER_MERGE = 0.5;
+
+/**
  * Calibration aggregate for one task CLASS (W1-T167 — docs / plan-lint / src) —
  * the same shape as {@link TypeCalibration}, grouped on the routing table's
  * THIRD axis instead of the first, plus `mergeRate` (merged/runs) since a
@@ -212,6 +257,19 @@ export function aggregateByType(runs: RunSummary[]): TypeCalibration[] {
  * mount still merging" — the retro needs the rate, not just the raw count, to
  * evaluate the routing hypothesis (design note: "routing is a hypothesis to
  * be measured, not asserted").
+ *
+ * W1-T930 adds the PER-MERGE half beside the per-run figures above (never
+ * replacing them — `avgTurns`/`merged`/`mergeRate` are untouched): turns and
+ * output tokens are gameable when divided by RUN count (a refused run is
+ * short, so more refusals lower the average) but not when divided by MERGE
+ * count, which only rises when a class needs more work to land the same
+ * result. `merged`/`mergeRate` above stay ledger-verdict-only (unchanged,
+ * matching every existing caller); the new fields divide by whichever merge
+ * source `aggregateByClass`'s caller could actually reach (`mergeSource`
+ * names it, `mergedForDenominator` is the count actually used) — CLAUDE.md's
+ * standing rule is that merge state comes from the `Remudero-Task:` trailer,
+ * never a ledger verdict line, and the ledger-verdict `merged` count is the
+ * one MASTER-PLAN documents as UNDERCOUNTING real ships by more than half.
  */
 export interface ClassCalibration {
   taskClass: string;
@@ -221,6 +279,35 @@ export interface ClassCalibration {
   avgTurns: number;
   merged: number;
   mergeRate: number;
+  /** W1-T930: total `TokenUsage.output` summed across every run in this
+   *  class — the per-run companion to `totalCostUsd`, the dominant spend
+   *  term that had no calibration column at all before this task. */
+  totalOutputTokens: number;
+  /** W1-T930: fraction of this class's runs with a nonzero logged
+   *  `numTurns` — travels beside `turnsPerMerge`/`outputTokensPerMerge` so a
+   *  thin numerator is never read as a solid one (MASTER-PLAN's "29%
+   *  coverage" signal, generalized). Below {@link MIN_TURN_COVERAGE_FOR_PER_MERGE}
+   *  the per-merge cells below carry a coverage caveat rather than a bare number. */
+  turnCoverage: number;
+  /** W1-T930: which merge-crediting mechanism `mergedForDenominator` (and
+   *  therefore the per-merge fields) actually divides by — `"shipped"` when
+   *  the caller passed the W1-T51 SHIPPED union (trailer-matched, closes the
+   *  known ledger-verdict undercount), `"ledger"` when it did not and this
+   *  fell back to the same ledger-verdict `merged` count above. Always set —
+   *  a row with no nameable merge source is never emitted. */
+  mergeSource: "ledger" | "shipped";
+  /** W1-T930: the merge count the per-merge fields below actually divide
+   *  by — NOT always equal to `merged` above (see `mergeSource`). */
+  mergedForDenominator: number;
+  /** W1-T930: turns spent per MERGED PR in this class — numerator is
+   *  `avgTurns`'s own total (ALL turns spent, including refused runs, so
+   *  a class cannot lower this by refusing more), denominator is
+   *  `mergedForDenominator`. `null` only when `mergedForDenominator` is 0
+   *  (division by zero is never computed and never silently reads as 0). */
+  turnsPerMerge: number | null;
+  /** W1-T930: output tokens spent per MERGED PR — same numerator/denominator
+   *  discipline as `turnsPerMerge`. `null` only when `mergedForDenominator` is 0. */
+  outputTokensPerMerge: number | null;
 }
 
 /**
@@ -229,8 +316,19 @@ export interface ClassCalibration {
  * `type`. A run with no `taskClass` (a ledger line predating W1-T167, or any
  * step that never logged it) is grouped under `"unknown"` rather than dropped
  * — an omitted class is itself a fact the retro should see, not silently lose.
+ *
+ * W1-T930: `shipped` is the ALREADY-COMPUTED `RetroGather.shipped` union
+ * (ledger ∪ GitHub-trailer-matched, {@link shippedSince}/{@link
+ * ledgerOnlyShipped}) — optional so every existing caller (and this file's
+ * own tests) keeps compiling unchanged, but `buildGather` below always
+ * passes it, because that union is the accurate merge count and the
+ * ledger-verdict `merged` count alone is the one MASTER-PLAN names as
+ * undercounting real ships by more than half. `ShippedRecord` carries no
+ * `taskClass` of its own (it is a merge-union record, not a routing
+ * record), so each one is attributed back to its OWN run's class via a
+ * `runId` join against `runs` — never a second, independently-scoped read.
  */
-export function aggregateByClass(runs: RunSummary[]): ClassCalibration[] {
+export function aggregateByClass(runs: RunSummary[], shipped?: ShippedRecord[]): ClassCalibration[] {
   const byClass = new Map<string, RunSummary[]>();
   for (const r of runs) {
     const key = r.taskClass ?? "unknown";
@@ -238,11 +336,30 @@ export function aggregateByClass(runs: RunSummary[]): ClassCalibration[] {
     arr.push(r);
     byClass.set(key, arr);
   }
+  // W1-T930: runId -> class, the join `shipped` (which carries no taskClass)
+  // needs to be attributed back to the class its own run was routed under.
+  const classOfRun = new Map<string, string>();
+  for (const r of runs) classOfRun.set(r.runId, r.taskClass ?? "unknown");
+  const shippedByClass = new Map<string, number>();
+  if (shipped) {
+    for (const s of shipped) {
+      const key = classOfRun.get(s.runId) ?? "unknown";
+      shippedByClass.set(key, (shippedByClass.get(key) ?? 0) + 1);
+    }
+  }
   const out: ClassCalibration[] = [];
   for (const [taskClass, rs] of byClass) {
     const totalCost = rs.reduce((s, r) => s + r.costUsd, 0);
     const totalTurns = rs.reduce((s, r) => s + r.numTurns, 0);
+    const totalOutputTokens = rs.reduce((s, r) => s + (r.outputTokens ?? 0), 0);
     const merged = rs.filter((r) => r.verdict === "merged").length;
+    // W1-T930: nonzero-numTurns coverage over this class's own runs — the
+    // numerator-trust signal, independent of which merge count is the
+    // denominator (that is `mergeSource`/`mergedForDenominator` below).
+    const runsWithTurns = rs.filter((r) => r.numTurns > 0).length;
+    const turnCoverage = round(runsWithTurns / rs.length);
+    const mergeSource: "ledger" | "shipped" = shipped ? "shipped" : "ledger";
+    const mergedForDenominator = shipped ? (shippedByClass.get(taskClass) ?? 0) : merged;
     out.push({
       taskClass,
       runs: rs.length,
@@ -251,6 +368,12 @@ export function aggregateByClass(runs: RunSummary[]): ClassCalibration[] {
       avgTurns: round(totalTurns / rs.length),
       merged,
       mergeRate: round(merged / rs.length),
+      totalOutputTokens,
+      turnCoverage,
+      mergeSource,
+      mergedForDenominator,
+      turnsPerMerge: mergedForDenominator === 0 ? null : round(totalTurns / mergedForDenominator),
+      outputTokensPerMerge: mergedForDenominator === 0 ? null : round(totalOutputTokens / mergedForDenominator),
     });
   }
   out.sort((a, b) => (a.taskClass < b.taskClass ? -1 : a.taskClass > b.taskClass ? 1 : 0));
@@ -1227,7 +1350,12 @@ export function buildGather(opts: {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
     byType: aggregateByType(scoped),
-    byClass: aggregateByClass(scoped),
+    // W1-T930: `shipped` (the ledger∪GitHub-trailer union computed above,
+    // degrading gracefully to ledger-only when no `github` gateway is wired)
+    // is ALWAYS passed — it is the more-accurate-or-equal merge count, so
+    // the per-class per-merge figures never divide by the ledger-verdict
+    // count MASTER-PLAN documents as undercounting real ships by more than half.
+    byClass: aggregateByClass(scoped, shipped),
     // P34 clause (d), W1-T250: computed over the FULL `runs` (never `scoped`) —
     // "this week" is an absolute calendar window, not marker-relative, so a
     // fresh `sinceTs` must not truncate it out from under a week already in
@@ -1282,16 +1410,38 @@ export function calibrationTable(byType: TypeCalibration[]): string {
   ].join("\n");
 }
 
+/**
+ * W1-T930: render one per-merge cell — `turnsPerMerge`/`outputTokensPerMerge`
+ * — with the coverage discipline the design mandates ("reuse verbatim" the
+ * MASTER-PLAN `37 ⚠ 29% coverage — DO NOT USE` cell): a thin-coverage figure
+ * is STILL PRINTED, flagged, never laundered or blanked; only the genuine
+ * zero-merge divide-by-zero case (`value === null`) renders as an explicit
+ * non-numeric marker — never a bare `0`, never `NaN`.
+ */
+function perMergeCell(value: number | null, turnCoverage: number): string {
+  if (value === null) return `n/a (0 merges)`;
+  if (turnCoverage < MIN_TURN_COVERAGE_FOR_PER_MERGE) {
+    return `${value} ⚠ ${(turnCoverage * 100).toFixed(0)}% coverage — DO NOT USE`;
+  }
+  return `${value}`;
+}
+
 /** Render the per-class calibration table (markdown, W1-T167) — the routing
- *  table's effectiveness, measured. */
+ *  table's effectiveness, measured. W1-T930 appends the per-merge half
+ *  (output tokens, turns/merge, output tokens/merge, and the named merge
+ *  source/denominator they divide by) AFTER the existing per-run columns —
+ *  every column already here is unchanged, in the same order, same format. */
 export function classCalibrationTable(byClass: ClassCalibration[]): string {
   const rows = byClass.map(
     (c) =>
-      `| ${c.taskClass} | ${c.runs} | ${c.merged} | ${(c.mergeRate * 100).toFixed(0)}% | $${c.avgCostUsd.toFixed(3)} | ${c.avgTurns} | $${c.totalCostUsd.toFixed(3)} |`,
+      `| ${c.taskClass} | ${c.runs} | ${c.merged} | ${(c.mergeRate * 100).toFixed(0)}% | $${c.avgCostUsd.toFixed(3)} | ${c.avgTurns} | $${c.totalCostUsd.toFixed(3)} | ` +
+      `${c.totalOutputTokens} | ${c.mergeSource} (n=${c.mergedForDenominator}) | ` +
+      `${perMergeCell(c.turnsPerMerge, c.turnCoverage)} | ` +
+      `${perMergeCell(c.outputTokensPerMerge, c.turnCoverage)} |`,
   );
   return [
-    "| task_class | runs | merged | merge rate | avg $ | avg turns | total $ |",
-    "|---|---|---|---|---|---|---|",
+    "| task_class | runs | merged | merge rate | avg $ | avg turns | total $ | output tokens | merge source | turns/merge | output tokens/merge |",
+    "|---|---|---|---|---|---|---|---|---|---|---|",
     ...rows,
   ].join("\n");
 }
