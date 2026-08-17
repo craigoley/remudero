@@ -59,6 +59,7 @@ import {
   type CrashLoopVerdict,
   type CrashLoopWindow,
 } from "./daemon.js";
+import { COST_ANOMALY_STEP } from "./cost-anomaly.js";
 import { aggregateCacheHitTotals, cacheHitRatio, formatCacheHitFigure, type CacheHitGrain, type CacheHitTotals } from "./digest.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -460,6 +461,38 @@ export interface CacheHitSection {
   totals?: CacheHitTotals;
 }
 
+/**
+ * W1-T931 COST-ANOMALY SENTINEL (fb-1785237559155-feef92, item 4) — one un-dismissed
+ * `cost.anomaly` ledger row (`src/lib/cost-anomaly.ts`'s `recordCostAnomalies`, hung off
+ * `src/lib/sweep.ts`'s `runSweep`): a run that cost more than `multiplier` times its own task
+ * CLASS's median, over a class with at least the policy's minimum sample count. Names every fact
+ * the task's own acceptance criterion asks for — the run, its class, its cost, and the median it
+ * exceeded — and NOTHING more: this row REPORTS ONLY (design note v), the same "renders, never
+ * senses, never acts" discipline this module's own header states for every other section.
+ */
+export interface CostAnomalyRow {
+  runId: string;
+  taskId: string;
+  taskClass: string;
+  costUsd: number;
+  medianCostUsd: number;
+  multiplier: number;
+  sampleSize: number;
+  /** The `cost.anomaly` ledger line's own `ts`, when present. */
+  ts?: string;
+}
+
+/**
+ * NEEDS ME — the board's own escalation surface (distinct from `rmd serve`'s HTML "Needs me"
+ * panel, which is task-escalation-driven; design note (viii) scopes this task to EXACTLY the
+ * console surfaces `rmd status` text and `--json` project, "the whole surface here"). Today
+ * carries only the cost-anomaly rows this task ships; a future sentinel is a new field here, not
+ * a new section.
+ */
+export interface NeedsMeSection {
+  costAnomaly: CostAnomalyRow[];
+}
+
 export interface StatusBoardModel {
   generatedAt: string;
   liveness: LivenessSection;
@@ -470,6 +503,7 @@ export interface StatusBoardModel {
   inbox: InboxSection;
   headroom: HeadroomSection;
   cacheHit: CacheHitSection;
+  needsMe: NeedsMeSection;
 }
 
 // ── Deps ─────────────────────────────────────────────────────────────────────────────────────
@@ -1460,6 +1494,45 @@ function deriveHeadroom(lines: Array<Record<string, unknown>>, nowMs: number, en
 }
 
 /**
+ * W1-T931: this board's own read of `cost.anomaly` ledger rows — never a re-derivation of the
+ * detector's own math (that lives entirely in `src/lib/cost-anomaly.ts`; this module only
+ * RENDERS the vocabulary `sweep.ts` already ledgered, per this file's own header doctrine).
+ *
+ * DEDUPED BY `run_id`, LAST ONE WINS. `recordCostAnomalies`'s own idempotency (one row per run
+ * id, proven at the unit level) assumes a single, sequential reader of a single ledger snapshot;
+ * `runSweepLightPass` fans `runSweep` out across every open PR CONCURRENTLY (W1-T463), each with
+ * its OWN ledger read, so two overlapping calls in the same tick can each observe the ledger
+ * before the other's write lands and both append a `cost.anomaly` row for the same run. That is
+ * a cosmetic duplicate-WRITE risk this board does not attempt to close (no new cross-call lock —
+ * out of this task's scope), but a duplicate-READ risk this render trivially can: collapsing to
+ * one row per run id here means an operator never sees the SAME run named twice in NEEDS ME
+ * regardless of how many `cost.anomaly` lines it actually accumulated.
+ */
+function deriveNeedsMe(lines: ReadonlyArray<Record<string, unknown>>): NeedsMeSection {
+  const byRunId = new Map<string, CostAnomalyRow>();
+  for (const l of lines) {
+    if (l.step !== COST_ANOMALY_STEP) continue;
+    const runId = typeof l.run_id === "string" ? l.run_id : undefined;
+    if (!runId) continue;
+    const ts = typeof l.ts === "string" ? l.ts : undefined;
+    const existing = byRunId.get(runId);
+    if (existing && !isNewer(ts, existing.ts)) continue;
+    byRunId.set(runId, {
+      runId,
+      taskId: typeof l.task_id === "string" ? l.task_id : "?",
+      taskClass: typeof l.task_class === "string" ? l.task_class : "unknown",
+      costUsd: typeof l.cost_usd === "number" ? l.cost_usd : 0,
+      medianCostUsd: typeof l.median_cost_usd === "number" ? l.median_cost_usd : 0,
+      multiplier: typeof l.multiplier === "number" ? l.multiplier : 0,
+      sampleSize: typeof l.sample_size === "number" ? l.sample_size : 0,
+      ts,
+    });
+  }
+  const costAnomaly = [...byRunId.values()].sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  return { costAnomaly };
+}
+
+/**
  * Is `a` strictly newer than `b`, by PARSED timestamp? An absent or unparseable `b` (no successful
  * read has EVER been recorded) makes `a` newer — that is the parked-since-boot case, the whole
  * point. An absent or unparseable `a` is never newer: an undatable blindness report cannot
@@ -1626,6 +1699,10 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const cacheHitTotals = aggregateCacheHitTotals(lines);
   const cacheHit: CacheHitSection = { found: cacheHitTotals !== undefined, totals: cacheHitTotals };
 
+  // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
+  // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
+  const needsMe = deriveNeedsMe(lines);
+
   return {
     generatedAt: new Date(nowMs).toISOString(),
     liveness,
@@ -1636,6 +1713,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     inbox,
     headroom,
     cacheHit,
+    needsMe,
   };
 }
 
@@ -1851,6 +1929,24 @@ function renderCacheHitBlock(c: CacheHitSection): string[] {
   return out;
 }
 
+/** W1-T931 — one line per un-dismissed `cost.anomaly` row, naming the run, its class, its cost,
+ *  and the median it exceeded (this task's own acceptance criterion, verbatim). `nothing needs
+ *  you` on an empty set, matching this module's "no rule matches, no line" doctrine elsewhere. */
+function renderNeedsMeBlock(n: NeedsMeSection): string[] {
+  const out = ["── NEEDS ME ─────────────────────────────────────────────"];
+  if (n.costAnomaly.length === 0) {
+    out.push("nothing needs you");
+    return out;
+  }
+  for (const r of n.costAnomaly) {
+    out.push(
+      `cost.anomaly : ${r.taskId} (${r.runId}) [${r.taskClass}] $${r.costUsd.toFixed(2)} vs class median ` +
+        `$${r.medianCostUsd.toFixed(2)} (>${r.multiplier}x, n=${r.sampleSize})`,
+    );
+  }
+  return out;
+}
+
 /** The text projection of {@link StatusBoardModel} — every field it prints comes off the model
  *  passed in, never a fresh read, so `--json` and the default text output can never disagree
  *  (they are the SAME derivation, rendered twice). */
@@ -1863,6 +1959,7 @@ export function renderStatusBoardText(model: StatusBoardModel): string {
   lines.push(...renderQueueHeadBlock(model.queueHead), "");
   lines.push(...renderInboxBlock(model.inbox), "");
   lines.push(...renderHeadroomBlock(model.headroom), "");
-  lines.push(...renderCacheHitBlock(model.cacheHit));
+  lines.push(...renderCacheHitBlock(model.cacheHit), "");
+  lines.push(...renderNeedsMeBlock(model.needsMe));
   return lines.join("\n");
 }
