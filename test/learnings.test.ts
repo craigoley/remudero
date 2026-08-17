@@ -336,6 +336,29 @@ test("loadLearnings rejects a non-boolean operator_impact", () => {
   assert.throws(() => loadLearnings(path), /'operator_impact' must be a boolean/);
 });
 
+// ── drill_obligating (W1-T939): a failures entry obligating a drill-table entry ──
+
+test("a bare entry (no drill_obligating:) defaults to false", () => {
+  const path = writeCorpus("- id: bare\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n");
+  const [entry] = loadLearnings(path);
+  assert.equal(entry.drillObligating, false);
+});
+
+test("loadLearnings accepts drill_obligating: true", () => {
+  const path = writeCorpus(
+    "- id: x\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  drill_obligating: true\n",
+  );
+  const [entry] = loadLearnings(path);
+  assert.equal(entry.drillObligating, true);
+});
+
+test("loadLearnings rejects a non-boolean drill_obligating", () => {
+  const path = writeCorpus(
+    "- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  drill_obligating: yes-please\n",
+  );
+  assert.throws(() => loadLearnings(path), /'drill_obligating' must be a boolean/);
+});
+
 test("loadLearnings rejects superseded_by set without lifecycle: superseded", () => {
   const path = writeCorpus(
     "- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  superseded_by: other\n",

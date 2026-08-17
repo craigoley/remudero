@@ -95,6 +95,9 @@ function goodRaw(): Record<string, unknown> {
     worktreeReapGraceMs: { value: 1_800_000, origin: "net-new", min: 120_000, max: 7_200_000 },
     pollIntervalMs: { value: 60_000, origin: "lifted:src/lib/daemon.ts:87 (DEFAULT_POLL_INTERVAL_MS)", min: 5_000, max: 600_000 },
     fixStrikeCap: { value: 2, origin: "lifted:src/lib/config.ts:218 (fixStrikeCap default)", min: 1, max: 10 },
+    // W1-T943: the worker-stall detector's quiet threshold — net-new, no prior source literal.
+    // See plan/policy.yaml's own row for the ~16-minute `--ci-parity` headroom rationale.
+    workerStall: { value: 3_600_000, origin: "net-new", min: 1_200_000, max: 7_200_000 },
     sweep: {
       staleDays: { value: 14, origin: "lifted:src/lib/sweep.ts:254 (DEFAULT_SWEEP_POLICY.staleDays)", min: 1, max: 90 },
       strikeCap: { value: 2, origin: "lifted:src/lib/sweep.ts:255 (DEFAULT_SWEEP_POLICY.strikeCap)", min: 1, max: 10 },
@@ -218,7 +221,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
   // would already have thrown inside loadPolicy, so this asserts the positive fact directly
   // rather than only trusting the absence of a throw.
   const expectedTopLevelKeys = [
-    "proofTimeoutMs", "pruneGraceMs", "worktreeReapGraceMs", "pollIntervalMs", "fixStrikeCap",
+    "proofTimeoutMs", "pruneGraceMs", "worktreeReapGraceMs", "pollIntervalMs", "fixStrikeCap", "workerStall",
     "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
@@ -501,6 +504,9 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // closing a PR off a supersession verdict; the disposition and the verdict shape are
     // both net-new.
     "sweep.supersessionDisposal",
+    // W1-T943: `workerStall` joins them too — no prior literal ever measured a worker-quiet
+    // threshold before this task's own filing verified plan/policy.yaml carried zero rows for it.
+    "workerStall",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

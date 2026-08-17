@@ -853,6 +853,175 @@ export function sweepStaleWorkerTails(root: string, opts: { maxAgeMs?: number; n
   return { removed };
 }
 
+// ── W1-T945: `rmd peek <runId>` — READ-ONLY reader over W1-T942's tail (design note i: the
+// verb and its console-route twin below open the tail file for READING and expose no parameter
+// that can reach the worker — no stdin, no message injection, no signal, no kill, no resume). ──
+
+/**
+ * The run-id SHAPE `readWorkerTail`/the `GET /v1/peek` route (serve.ts) both validate BEFORE any
+ * path is built (design note vi) — letters, digits, `-`, `_` only, matching every id this
+ * codebase actually mints (`${taskId}-${Date.now()}`, `RETRO-<ms>`, `review-PR<n>-<ms>`,
+ * `SERVE-<ms>`, …). No `/`, no `.`, so no id can escape `state/runs/` or reach `..`. Duplicated
+ * (not imported) in serve.ts — see that file's own copy for why: serve.ts is a lib module and
+ * this file is the CLI entrypoint that imports FROM lib/*, never the reverse, so the one
+ * property this task's design needs on BOTH sides of that boundary is declared once per side
+ * rather than smuggling a lib->entrypoint cycle into a security-relevant check.
+ */
+export const RUN_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
+
+export function isValidRunId(id: string): boolean {
+  return RUN_ID_SHAPE.test(id);
+}
+
+/** `rmd peek`'s default `--lines` — generous enough for a glance, far below the 500-line ring
+ *  ceiling {@link WORKER_TAIL_MAX_LINES} the tail file itself can never exceed. */
+export const PEEK_DEFAULT_LINES = 50;
+
+/** What one `readWorkerTail` read reports — HONEST EMPTINESS (design note iv): `found: false`
+ *  always carries a NAMED `reason`, never a silent empty `lines`. `live` is independent of
+ *  `found`/`lines` — a run can be LIVE with no tail yet (sensor not wired for this spawn path,
+ *  MASTER-PLAN's own documented one-of-six-call-sites coverage limit) or FINISHED with a full
+ *  retained one. */
+export interface PeekTailResult {
+  runId: string;
+  live: boolean;
+  found: boolean;
+  lines: string[];
+  reason?: string;
+}
+
+/**
+ * READ-ONLY tail read for ONE run — the shared primitive `peekCommand` below and the console's
+ * `GET /v1/peek` route (serve.ts, via an injected `isLive`) both exist to expose. Liveness reuses
+ * the EXISTING `liveInflightRuns` pid-checked read of `state/inflight/*.lock` (design note ii) —
+ * never a second definition of "in flight". An invalid run-id shape or a missing/unreadable tail
+ * file both resolve to `found: false` with a NAMED reason (design note iv) rather than throwing
+ * or returning silent empty output; the shape check runs BEFORE any path is built (design note
+ * vi), so an id that fails it never reaches a `readFile` call at all.
+ */
+export function readWorkerTail(
+  root: string,
+  runId: string,
+  opts: {
+    maxLines?: number;
+    inflightDir?: string;
+    isPidAlive?: (pid: number) => boolean;
+    readFile?: (path: string) => string;
+  } = {},
+): PeekTailResult {
+  const inflightDir = opts.inflightDir ?? join(root, "state", "inflight");
+  const live = liveInflightRuns(inflightDir, opts.isPidAlive).some((r) => r.runId === runId);
+  if (!isValidRunId(runId)) {
+    return {
+      runId,
+      live,
+      found: false,
+      lines: [],
+      reason: `invalid run id '${runId}' — expected letters, digits, '-', '_' only`,
+    };
+  }
+  const tailPath = join(root, "state", "runs", `${runId}.tail`);
+  const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
+  let raw: string;
+  try {
+    raw = readFile(tailPath);
+  } catch {
+    return { runId, live, found: false, lines: [], reason: `no tail recorded for ${runId}` };
+  }
+  const split = raw.split("\n");
+  if (split.length > 0 && split[split.length - 1] === "") split.pop();
+  const maxLines = Math.min(opts.maxLines ?? PEEK_DEFAULT_LINES, WORKER_TAIL_MAX_LINES);
+  const lines = capWorkerTailLines(split, maxLines, WORKER_TAIL_MAX_BYTES);
+  return { runId, live, found: true, lines };
+}
+
+/**
+ * `rmd peek <runId> [--lines <n>] [--follow]` (W1-T945, design note ii): prints the last
+ * `--lines` (default {@link PEEK_DEFAULT_LINES}) lines of `state/runs/<runId>.tail` and exits 0,
+ * stating plainly whether the run is LIVE or FINISHED. Works identically on a FINISHED run's
+ * RETAINED tail (design note iii) — the surviving half of fb-1784821673624-321a4b, whose
+ * final-message half already shipped as `report_excerpt` (#1584; not re-implemented here). An
+ * unknown run id or an absent tail prints a NAMED reason and still exits 0 (design note iv) —
+ * never silent empty output. `--follow` re-reads on a poll and reprints only when the content
+ * changes, stopping on its own the moment the run is no longer live — it never hangs on an
+ * already-finished run (design note ii's own termination requirement), reusing the SAME
+ * `readWorkerTail`/`liveInflightRuns` read every tick, never a second liveness definition.
+ * READ-ONLY BY CONSTRUCTION: `--lines`/`--follow` only change how much of the SAME read-only
+ * file is printed and how often — neither this command nor any flag on it writes to, signals,
+ * resumes or kills the run (design note i; there is no steering surface in v1).
+ */
+export async function peekCommand(
+  rest: string[],
+  deps: {
+    root?: string;
+    inflightDir?: string;
+    isPidAlive?: (pid: number) => boolean;
+    readFile?: (path: string) => string;
+    sleep?: (ms: number) => Promise<void>;
+    pollMs?: number;
+    maxFollowIterations?: number;
+  } = {},
+): Promise<number> {
+  const runId = rest[0];
+  const badArg = unknownArgError("peek", rest.slice(1), ["--lines"], ["--follow"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!runId) {
+    console.error(`rmd peek: <runId> is required — usage: ${commandSyntax("peek")}\n` + USAGE);
+    return 2;
+  }
+  const linesRaw = flagValue(rest, "--lines");
+  const maxLines = linesRaw === undefined ? PEEK_DEFAULT_LINES : Number(linesRaw);
+  if (!Number.isInteger(maxLines) || maxLines <= 0) {
+    console.error(`rmd peek: --lines must be a positive integer, got ${JSON.stringify(linesRaw)}\n` + USAGE);
+    return 2;
+  }
+  const follow = rest.includes("--follow");
+  const root = deps.root ?? loadConfig().root;
+  const readOpts = { maxLines, inflightDir: deps.inflightDir, isPidAlive: deps.isPidAlive, readFile: deps.readFile };
+
+  const render = (r: PeekTailResult): void => {
+    if (!r.found) {
+      console.log(`rmd peek ${r.runId} — ${r.live ? "LIVE" : "FINISHED"} — ${r.reason}`);
+      return;
+    }
+    console.log(`rmd peek ${r.runId} — ${r.live ? "LIVE" : "FINISHED"} — last ${r.lines.length} line(s)`);
+    if (r.lines.length === 0) {
+      console.log("  (tail is empty — no output recorded yet)");
+    } else {
+      for (const line of r.lines) console.log(line);
+    }
+  };
+
+  let result = readWorkerTail(root, runId, readOpts);
+  render(result);
+  if (!follow || !result.live) return 0;
+
+  // --follow: poll until the run stops being live, then stop on its own — see this function's
+  // own doc for why that is the whole termination contract design note ii asks for.
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const pollMs = deps.pollMs ?? 2000;
+  const maxIterations = deps.maxFollowIterations ?? Infinity;
+  let lastRendered = result.found ? result.lines.join("\n") : "";
+  let iterations = 0;
+  while (result.live && iterations < maxIterations) {
+    await sleep(pollMs);
+    iterations++;
+    result = readWorkerTail(root, runId, readOpts);
+    const rendered = result.found ? result.lines.join("\n") : "";
+    if (rendered !== lastRendered || !result.found) {
+      render(result);
+      lastRendered = rendered;
+    }
+  }
+  if (!result.live) {
+    console.log(`rmd peek ${runId} — run finished, stopping --follow`);
+  }
+  return 0;
+}
+
 /**
  * Resolve the repo root a `rmd` invocation GATES, in priority order — replacing the
  * old INSTALL-PATH derivation (`dirname(dirname(fileURLToPath(import.meta.url)))`,
@@ -13373,6 +13542,10 @@ export async function daemonCommand(
           policy.values.sweep.tmpMaxAgeMs,
           undefined,
           createGhCallPacer(),
+          // W1-T943: the policy-data quiet threshold — see runWorkerStallDetectorRung's own doc
+          // and plan/policy.yaml's `workerStall` row for the ~16-minute `--ci-parity` default's
+          // headroom rationale.
+          policy.values.workerStall,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -14550,6 +14723,12 @@ export async function serveCommand(
     // an unconfigured install, identity is never consulted, exactly as before.
     identity,
     log,
+    // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
+    // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
+    // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact
+    // same read `inflightHolder` above already wires, never a second definition of "in flight"
+    // (design note ii).
+    peek: { root: config.root, isLive: (runId) => liveInflightRuns(join(config.root, "state", "inflight")).some((r) => r.runId === runId) },
   });
 
   // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
@@ -16658,6 +16837,206 @@ export function runTmpSweepRung(
   }
 }
 
+// ── WORKER STALL DETECTOR (W1-T943) ─────────────────────────────────────────────────────────
+//
+// W1-T942 produces `worker.state`; nothing judged it until now — the exact shape W1-T316/
+// W1-T317/W1-T916 already paid for (a signal with no reader). LEVEL-TRIGGERED (design note i):
+// reads the AGE of the newest `worker.state` row for each LIVE in-flight run (`liveInflightRuns`'s
+// own pid-checked lock read — never a second, looser "in flight"), never an event the run itself
+// must emit — a wedged, swapped, or dead-socket worker may never emit anything again, so a
+// detector waiting for it to announce its own stall cannot fire in exactly the case it exists for.
+
+/** Ledger step a worker-stall verdict rides — appended ONCE per quiet episode (design ii), never
+ *  once per tick. */
+export const WORKER_STALLED_LEDGER_STEP = "worker.stalled";
+
+/** DEFAULT quiet threshold, mirrored from `plan/policy.yaml`'s `workerStall` row for a caller
+ *  with no policy in hand (test fixtures, primarily) — production always threads the real
+ *  `policy.values.workerStall` through {@link buildSweepHook} instead of relying on this. See
+ *  that row's own comment for why 60 minutes is the default (design note v: comfortably above
+ *  the ~16-minute `--ci-parity` suite W1-T463/W1-T465 measured). */
+export const DEFAULT_WORKER_STALL_MS = 3_600_000;
+
+/** One live in-flight run whose newest `worker.state` row has aged past the policy `workerStall`
+ *  threshold, per {@link findStalledWorkers}. */
+export interface WorkerStallCandidate {
+  runId: string;
+  taskId: string;
+  /** ms of quiet since this run's newest `worker.state` transition. */
+  quietMs: number;
+  /** the run's newest recorded `worker.state` value, when one exists. */
+  lastState: string | undefined;
+}
+
+/**
+ * Pure judgement (design i/ii): which of `liveRuns` have gone quiet past `thresholdMs`, derived
+ * from the AGE of each run's own newest `worker.state` ledger row — never a second, event-driven
+ * definition of "stalled". A live run with NO `worker.state` row at all is skipped outright:
+ * there is nothing whose age this can measure yet (the W1-T942 dependency's own shape — shipping
+ * this detector before it would be a guard with no input, W1-T916's class of defect).
+ *
+ * DEDUP, ONE ROW PER QUIET EPISODE (design ii): a run is excluded when it already carries a
+ * `worker.stalled` row NEWER than its own newest `worker.state` row — that quiet episode was
+ * already reported and nothing has changed since. The moment the run speaks again (a fresh
+ * `worker.state` transition postdating the last `worker.stalled` row), the comparison flips and
+ * a LATER quiet stretch re-arms this check — never a per-tick re-fire, and never permanently
+ * silenced either.
+ *
+ * Pure — no fs, no clock read of its own (`nowMs` is a parameter) — so the whole dedup/re-arm
+ * shape is unit-testable against synthetic ledger lines with no file on disk at all
+ * (test/worker-stall-detector.test.ts).
+ */
+export function findStalledWorkers(
+  liveRuns: readonly Pick<LiveInflightRun, "runId" | "taskId">[],
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  thresholdMs: number,
+  nowMs: number,
+): WorkerStallCandidate[] {
+  const out: WorkerStallCandidate[] = [];
+  for (const run of liveRuns) {
+    let lastStateTs: number | undefined;
+    let lastState: string | undefined;
+    let lastStalledTs: number | undefined;
+    for (const line of ledgerLines) {
+      if (line.run_id !== run.runId) continue;
+      const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+      if (!Number.isFinite(ts)) continue;
+      if (line.step === WORKER_STATE_LEDGER_STEP && (lastStateTs === undefined || ts > lastStateTs)) {
+        lastStateTs = ts;
+        lastState = typeof line.state === "string" ? line.state : undefined;
+      }
+      if (line.step === WORKER_STALLED_LEDGER_STEP && (lastStalledTs === undefined || ts > lastStalledTs)) {
+        lastStalledTs = ts;
+      }
+    }
+    if (lastStateTs === undefined) continue; // nothing to measure yet (W1-T942 dependency)
+    if (lastStalledTs !== undefined && lastStalledTs > lastStateTs) continue; // mid-episode — already reported
+    const quietMs = nowMs - lastStateTs;
+    if (quietMs < thresholdMs) continue;
+    out.push({ runId: run.runId, taskId: run.taskId, quietMs, lastState });
+  }
+  return out;
+}
+
+/** Bound the worker-stall escalation's tail excerpt is capped to AT THE ATTACH SITE (design
+ *  note iii: "a 2 MB issue body is its own outage") — deliberately TIGHTER than the tail FILE's
+ *  own {@link WORKER_TAIL_MAX_LINES}/{@link WORKER_TAIL_MAX_BYTES} ceiling: an issue body is read
+ *  by a human deciding "wedged or just busy", not grepped, and a shorter excerpt is already
+ *  enough evidence for that judgment. */
+export const WORKER_STALL_TAIL_ATTACH_MAX_LINES = 100;
+export const WORKER_STALL_TAIL_ATTACH_MAX_BYTES = 8 * 1024;
+
+/** Best-effort, never-throwing read of a run's live tail for the stall escalation's evidence
+ *  attachment — the read-side mirror of {@link writeWorkerTailBestEffort}. An absent/unreadable
+ *  tail degrades to an empty array: the escalation still fires — W1-T942's own tail write is
+ *  best-effort too, and a missing tail must never block the ONLY thing this detector is allowed
+ *  to do (tell someone, design note iv). */
+function readWorkerTailBestEffort(tailPath: string): string[] {
+  try {
+    if (!existsSync(tailPath)) return [];
+    return readFileSync(tailPath, "utf8")
+      .split("\n")
+      .filter((l) => l.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The daemon's per-poll WORKER-STALL rung (W1-T943) — appends `worker.stalled` ONCE per quiet
+ * episode ({@link findStalledWorkers}) and escalates through the EXISTING §4 machinery
+ * ({@link tryEscalate}), never a second one. NEVER acts on the run itself (design iv): no kill,
+ * no signal, no dispatch deferral, no strike, no budget change — appending a ledger row and
+ * filing/deduping an issue are the only two things this function does, full stop. Rides the SAME
+ * per-poll cadence `runWorktreeReapRung`/`runInflightLockSweepRung`/`runWorkerTailSweepRung`
+ * already occupy (see `buildSweepHook`'s call site) — own try/catch so a hiccup here never masks,
+ * or is masked by, the rungs around it.
+ */
+export function runWorkerStallDetectorRung(
+  owner: string,
+  repo: string,
+  config: Config,
+  ledgerPath: string,
+  runId: string,
+  thresholdMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  issues?: IssueGateway,
+  // Injectable clock (tests) — same discipline as sweepStaleWorkerTails'/DaemonDeps' own `now`,
+  // so the age comparison + the episode-boundary re-arm are provable without a real wall-clock
+  // wait (Rule 18). Omitted ⇒ the real wall clock, unchanged production behavior.
+  now: () => number = Date.now,
+): void {
+  try {
+    const inflightDir = join(config.root, "state", "inflight");
+    const liveRuns = liveInflightRuns(inflightDir);
+    if (liveRuns.length === 0) return;
+    const ledgerLines = readLedgerLines(ledgerPath);
+    const stalled = findStalledWorkers(liveRuns, ledgerLines, thresholdMs, now());
+    for (const candidate of stalled) {
+      const quietMinutes = Math.round(candidate.quietMs / 60_000);
+      // Ledgered BEFORE the escalation call, mirroring escalateCircuitBreak/
+      // escalateLifetimeCapExceeded's "the dedup marker is written whether or not delivery
+      // succeeds" discipline — the row IS the dedup key `findStalledWorkers` reads back next
+      // tick, so a `gh` failure below must never leave this episode un-marked and re-firing on
+      // the very next poll.
+      appendLedger(ledgerPath, {
+        run_id: candidate.runId,
+        task_id: candidate.taskId,
+        step: WORKER_STALLED_LEDGER_STEP,
+        quiet_ms: candidate.quietMs,
+        last_state: candidate.lastState ?? null,
+      });
+      const tailPath = join(config.root, "state", "runs", `${candidate.runId}.tail`);
+      const tail = capWorkerTailLines(
+        readWorkerTailBestEffort(tailPath),
+        WORKER_STALL_TAIL_ATTACH_MAX_LINES,
+        WORKER_STALL_TAIL_ATTACH_MAX_BYTES,
+      ).join("\n");
+      const issueUrl = tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: candidate.taskId,
+          // The STALLED run's own id — the evidence an operator needs to act on "stop this run"
+          // — never the daemon's own coordinating run id (see EscalateDeps.runId below for that).
+          runId: candidate.runId,
+          summary: `${candidate.taskId}: worker run ${candidate.runId} has said nothing for ${quietMinutes} min`,
+          detail:
+            `W1-T943: run ${candidate.runId} (task ${candidate.taskId}) has produced no \`worker.state\` ` +
+            `transition for ${quietMinutes} minute(s) — past the policy \`workerStall\` threshold. This can be ` +
+            `a genuinely wedged worker OR a long healthy step the fixed threshold misjudged: never auto-killed ` +
+            `either way (design note iv) — the operator, or a future paramedic verb, decides. Last recorded ` +
+            `state: ${candidate.lastState ?? "unknown"}.\n\n` +
+            `Last tail lines from this run:\n\`\`\`\n${tail || "(no tail captured)"}\n\`\`\``,
+          options: [
+            {
+              label: "leave it running",
+              detail:
+                "Take no action. A long but legitimate step (a full local suite, a slow spawn) can look " +
+                "identical to a wedge from the outside — silence alone is not proof.",
+            },
+            {
+              label: "stop this run",
+              detail: `Interrupt run ${candidate.runId} yourself and let the fleet redispatch ${candidate.taskId} fresh — this detector never does so itself.`,
+            },
+          ],
+          recommendation: "leave it running",
+        },
+        // `runId` HERE is the escalating daemon's OWN run — the escalation-machinery dedup/
+        // failure-ledger actor, distinct from `e.runId` (the stalled run) immediately above.
+        { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId },
+      );
+      log("daemon.worker_stall", {
+        run_id: candidate.runId,
+        task_id: candidate.taskId,
+        quiet_ms: candidate.quietMs,
+        issue_url: issueUrl,
+      });
+    }
+  } catch (e) {
+    log("daemon.worker_stall", { error: String((e as Error)?.message ?? e) });
+  }
+}
+
 /**
  * The daemon's per-iteration sweep hook (acceptance 4: the SAME runSweep the CLI
  * uses). Best-effort by the DaemonDeps.sweep contract — swallows its own errors so
@@ -16687,6 +17066,10 @@ export function buildSweepHook(
   // test included) is unaffected; omitted ⇒ no pacing, exactly the pre-W1-T468 behavior. The
   // daemon's real (non-test) wiring is the only caller that constructs and passes one.
   pacer?: GhCallPacer,
+  // W1-T943: the resolved `policy.values.workerStall` the real daemon command threads through to
+  // {@link runWorkerStallDetectorRung} below — optional and trailing so every existing caller
+  // (tests included) that predates W1-T943 is unaffected; omitted ⇒ {@link DEFAULT_WORKER_STALL_MS}.
+  workerStallMs?: number,
 ): () => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -16772,6 +17155,11 @@ export function buildSweepHook(
       // above (boot-only never re-fires on a healthy long-lived daemon), and now load-bearing
       // for `deriveStatus`'s lock-based liveness disjunct. Own try/catch inside the rung.
       runInflightLockSweepRung(config, log);
+      // W1-T943 — the worker-stall detector's PER-POLL rung: judges every LIVE in-flight run's
+      // newest `worker.state` row against the policy `workerStall` threshold and escalates a
+      // quiet one through §4 (never kills/signals it — see runWorkerStallDetectorRung's own
+      // doc). Own try/catch inside the rung.
+      runWorkerStallDetectorRung(owner, repo, config, ledgerPath, runId, workerStallMs ?? DEFAULT_WORKER_STALL_MS, log);
       // W1-T436 — the weekly feedback docket rung: gathers the five human-feedback capture
       // surfaces and files at most one inbox proposal per rolling 7-day window. Own
       // try/catch inside the rung; a `state/last-feedback-docket.json` marker keeps this a
@@ -20702,6 +21090,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd trace <id>   # render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha; <id> resolves as a task id first (reverse: task back to its origin:), else as a plan/feedback/<id> id (forward: feedback out to every task it produced)",
   },
   {
+    name: "peek",
+    usage:
+      "rmd peek <runId> [--lines <n>] [--follow]   # W1-T945: READ-ONLY tail of one run's output — the last <n> lines (default 50, never more than the 500-line ring ceiling) of its retained state/runs/<runId>.tail (W1-T942), printed with a LIVE/FINISHED verdict from the SAME liveInflightRuns pid-checked read every other liveness decision in this fleet uses — never a second definition of 'in flight'. Works identically on a FINISHED run's retained tail, the surviving half of fb-1784821673624-321a4b (its final-message half already shipped as report_excerpt, #1584). An unknown run id or an absent tail prints a NAMED reason and still exits 0 — never silent empty output. --follow re-polls and reprints on change, stopping on its own the moment the run is no longer live — it never hangs on an already-finished run. READ-ONLY BY CONSTRUCTION: no flag here writes to, signals, resumes or kills the run — there is no steering surface in v1.",
+  },
+  {
     name: "plan",
     usage:
       "rmd plan --mode=create|clarify|expand [<brief>...]   # the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review",
@@ -21274,6 +21667,9 @@ export async function main(
   }
   if (cmd === "trace") {
     process.exit(await traceCommand(rest));
+  }
+  if (cmd === "peek") {
+    process.exit(await peekCommand(rest));
   }
   if (cmd === "plan") {
     process.exit(await planCommand(rest));

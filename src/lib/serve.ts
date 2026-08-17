@@ -33,7 +33,7 @@
  * everywhere else in this codebase).
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -65,6 +65,7 @@ import {
   buildQuietHoursRoute,
   buildResumeRoute,
   buildStopRoute,
+  sendJson,
   type ControlStatusDeps,
   type IssueCloser,
   type PanelActionDeps,
@@ -197,6 +198,17 @@ export interface ServeDeps {
    * assert on a known nonce; `rmd serve`'s own CLI wiring never has to construct one itself.
    */
   confirmNonces?: ConfirmNonceStore;
+  /**
+   * W1-T945: `GET /v1/peek`'s read root + liveness predicate. `root` defaults to
+   * `fleetControlRoot` (config.root) — the SAME root W1-T942's tail writer resolves
+   * `state/runs/<runId>.tail` against (`buildWorkerStateSensor`, run-task.ts), never a second
+   * root. `isLive` defaults to a predicate that never claims LIVE, so a caller that omits it (a
+   * bare test) gets an honest FINISHED rather than a fabricated liveness signal. Real wiring
+   * (`serveCommand`, run-task.ts) always supplies `isLive` as a closure over the REAL
+   * `liveInflightRuns` — the SAME pid-checked read every other liveness decision in this
+   * codebase uses (design note ii), never a second definition of "in flight" declared here.
+   */
+  peek?: { root?: string; isLive?: (runId: string) => boolean };
 }
 
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
@@ -4498,6 +4510,84 @@ function buildAuthScopeRoute(): Route {
   };
 }
 
+/**
+ * W1-T945: the run-id SHAPE `readWorkerTail` (run-task.ts) validates BEFORE building a path —
+ * duplicated here rather than imported, because serve.ts is a lib module and run-task.ts is the
+ * CLI entrypoint that imports FROM lib/*, never the reverse (this file's own module header); the
+ * one property design note (vi) needs on BOTH sides of that boundary is declared once per side
+ * rather than smuggling a lib->entrypoint cycle into a security-relevant check. Accepts exactly
+ * the id shapes run-task.ts actually mints (`${taskId}-${Date.now()}`, `RETRO-<ms>`,
+ * `review-PR<n>-<ms>`, `SERVE-<ms>`, …) — letters, digits, `-`, `_` only, so no id can contain a
+ * `/` or a `.` and therefore cannot escape `state/runs/`.
+ */
+const PEEK_RUN_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
+
+function isValidPeekRunId(id: string): boolean {
+  return PEEK_RUN_ID_SHAPE.test(id);
+}
+
+/** Mirrors run-task.ts's `WORKER_TAIL_MAX_LINES`/`WORKER_TAIL_MAX_BYTES` (duplicated for the
+ *  same lib/entrypoint-direction reason as {@link PEEK_RUN_ID_SHAPE}, above) — the response is
+ *  capped in BOTH dimensions regardless of what `?lines=` asks for (design note v). */
+const PEEK_MAX_LINES = 500;
+const PEEK_MAX_BYTES = 64 * 1024;
+const PEEK_DEFAULT_LINES = 50;
+
+/**
+ * `GET /v1/peek?runId=<id>[&lines=<n>]` — read-scoped, W1-T945: the console's read-only tail
+ * reader, the FIRST HTTP route in this codebase to serve raw worker output (design note vi).
+ * Inherits this surface's EXISTING auth/nonce/localhost-binding wholesale — mounted in
+ * {@link buildServeRoutes} exactly like every other route, no new listener, no new auth path
+ * (design note v). The run id is validated against {@link isValidPeekRunId} BEFORE any path is
+ * built — an invalid shape 400s and never reaches a `readFileSync` call at all. A validly-shaped
+ * but unknown/absent tail 200s with a NAMED `reason` (design note iv) — never a silent empty
+ * body, matching `readWorkerTail`'s own honest-emptiness contract (run-task.ts). `deps.isLive` is
+ * INJECTED, never a second liveness definition here: the real wiring (`serveCommand`) passes a
+ * closure over the SAME `liveInflightRuns` read every other liveness decision in this codebase
+ * uses (design note ii). No parameter this handler reads writes to, signals, resumes or kills
+ * anything (design note i) — `lines` only bounds how much of the read-only file comes back, and
+ * both `runId`/`lines` are the ONLY two query params this handler ever consults.
+ */
+export function buildPeekRoute(deps: { root: string; isLive: (runId: string) => boolean }): Route {
+  return {
+    method: "GET",
+    path: "/v1/peek",
+    scope: "read",
+    handler: (req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const runId = url.searchParams.get("runId");
+      if (!runId || !runId.trim()) {
+        sendJson(res, 400, { error: "invalid_request", detail: "?runId=<run-id> is required" });
+        return;
+      }
+      if (!isValidPeekRunId(runId)) {
+        sendJson(res, 400, { error: "invalid_request", detail: `'${runId}' is not a valid run id` });
+        return;
+      }
+      const live = deps.isLive(runId);
+      const linesRaw = url.searchParams.get("lines");
+      const requested = linesRaw === null ? PEEK_DEFAULT_LINES : Number(linesRaw);
+      const maxLines = Number.isInteger(requested) && requested > 0 ? Math.min(requested, PEEK_MAX_LINES) : PEEK_DEFAULT_LINES;
+
+      const tailPath = join(deps.root, "state", "runs", `${runId}.tail`);
+      let raw: string;
+      try {
+        raw = readFileSync(tailPath, "utf8");
+      } catch {
+        sendJson(res, 200, { runId, live, found: false, lines: [], reason: `no tail recorded for ${runId}` });
+        return;
+      }
+      const split = raw.split("\n");
+      if (split.length > 0 && split[split.length - 1] === "") split.pop();
+      let lines = split.length > maxLines ? split.slice(split.length - maxLines) : split;
+      while (lines.length > 0 && Buffer.byteLength(lines.join("\n"), "utf8") > PEEK_MAX_BYTES) {
+        lines = lines.slice(1);
+      }
+      sendJson(res, 200, { runId, live, found: true, lines });
+    },
+  };
+}
+
 /** Every REST route `rmd serve` registers — board, panel actions (two-root split, see module header), panel graph, and the shell. Reused verbatim from each module's own exported builder. */
 export function buildServeRoutes(deps: ServeDeps): Route[] {
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
@@ -4614,6 +4704,10 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
       ledgerPath: deps.ledgerPath,
     }),
     buildVersionRoute(consoleSha),
+    // W1-T945: read-only run-tail reader — root defaults to fleetControlRoot (= config.root, the
+    // same root the tail writer resolves state/runs/<runId>.tail against); isLive defaults to
+    // "never live" so a caller that omits it (a bare test) never fabricates liveness.
+    buildPeekRoute({ root: deps.peek?.root ?? deps.fleetControlRoot, isLive: deps.peek?.isLive ?? (() => false) }),
     // W1-T500: the nonce-issuance route design (iv)'s second factor needs to exist AT ALL -- built
     // (service.ts, W1-T404) and exported, but mounted nowhere until now, which is why every
     // HIGH-tier write was one flag flip away from a `confirm_nonce_required` with no way to

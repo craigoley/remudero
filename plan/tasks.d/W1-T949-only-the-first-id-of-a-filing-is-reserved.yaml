@@ -1,0 +1,206 @@
+- id: W1-T949
+  title: "ONLY THE FIRST ID OF A FILING IS RESERVED WHERE ANOTHER WRITER CAN SEE IT — `reserveTaskIdRemote` has ONE call site and reserves ONE ref while triage's own prompt tells the worker to number upward for extra tasks, and the plan and approve lanes reserve a block that exists only inside a sandbox, so every id after the first is minted against a substrate nobody shares"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: |
+    MEASURED ON THIS BRANCH AT origin/main 1c99344 BY READING THE SOURCE, not inferred from the
+    plan. Every count below was re-derived here and every one carries the invocation that produced
+    it; where a count is a ZERO it carries a positive control on the same invocation.
+
+    (1) THE REMOTE RESERVER RESERVES EXACTLY ONE ID, AND IT IS CALLED ONCE.
+    `reserveTaskIdRemote` (src/lib/task-id-reservation.ts:448) takes a single `startId` and returns
+    a single `RemoteReservationHandle`; its loop `for (let n = startId; n < startId + maxScan; n++)`
+    RETURNS on the first `created`. Its only call site in src/ is src/run-task.ts:17751, inside
+    `triageCommand`'s mint. POSITIVE CONTROL on the same sweep: `reserveTaskIdBlock` reads TWO call
+    sites in the same file (src/run-task.ts:18096 and :18811), so the query is not blind to call
+    sites in that module and the ONE is real.
+
+    (2) AND THE LANE THAT CALLS IT TELLS ITS WORKER TO INVENT THE REST. src/lib/triage.ts:217 hands
+    the worker, verbatim: "If the feedback needs MORE than one new task, number them upward from
+    ${mintedId} (${mintedId}, then the next integers)." The harness reserved `mintedId` locally
+    (src/run-task.ts:17740) and remotely (:17751) and passes `filedIds: [reservedTaskId]` — a
+    ONE-ELEMENT array — to the relint loop at :17796. So a triage run that files two tasks pushes
+    ONE ref and ships a SECOND id that no writer anywhere can see is taken. The block reserver's own
+    doc already names this exact case (src/lib/task-id-reservation.ts:269-272: "triage reserves ONE
+    id and then tells its worker 'if you need more, number them upward' … so a triage run filing two
+    tasks has its SECOND id unreserved"); what it fixed was the LOCAL half.
+
+    (3) THE TWO LANES THAT DO RESERVE A BLOCK RESERVE IT SOMEWHERE NOBODY ELSE CAN READ. The plan
+    lane reserves `PLAN_MAX_NEW_TASKS` = 5 ids (src/run-task.ts:18027, :18096) and the approve lane
+    reserves the drafted fragment's ids (:18811) — both through `reserveTaskIdBlock(…,
+    taskIdReservationsDir(config.root), …)`, which is the LOCAL O_EXCL directory. Neither lane calls
+    `reserveTaskIdRemote` at all, so a plan run filing five tasks pushes ZERO refs. The remote
+    module's own header states why that is not a reservation anyone else observes: "for a worker
+    that is a path inside a bwrap sandbox discarded when the worker exits — not merely local,
+    EPHEMERAL BY CONSTRUCTION" (src/lib/task-id-reservation.ts, the W1-T509 section header).
+
+    (4) THE COVERAGE THIS PRODUCES, MEASURED AGAINST THE REAL REMOTE. `git ls-remote origin
+    'refs/rmd-id/*'` returns 46 refs, lowest W1-T515 and highest W1-T946. The plan tree at this sha
+    declares 581 distinct ids, 54 of them at or above W1-T515 — i.e. inside the window the namespace
+    has existed for. Of those 54, exactly 34 have a ref and 20 do NOT. A further 12 refs name an id
+    the plan does not carry (abandoned or in-flight filings — a hole is not a defect, per the
+    module's own doc). CONTROL: the 34-way intersection is non-empty and contains W1-T515/W1-T516/
+    W1-T520, so `comm` is aligned and the 20 is a real difference rather than a sort artifact.
+    THE 20 IS CORROBORATION, NOT PROOF, AND THE ALTERNATIVES ARE NAMED: those ids could equally have
+    come from hand-filed session shards (this very filing is one — see the note), from the plan and
+    approve lanes that never reserve remotely at all, or from triage's second-and-subsequent ids.
+    The code reading in (1)-(3) is the evidence; the 20 only shows the gap is not hypothetical.
+
+    (5) FOUR EXISTING SHARDS RECORD THE SINGLE CALL SITE AS AN OBSERVATION AND NONE CLAIMS THE FIX.
+    W1-T516, W1-T519, W1-T521 and W1-T518 each state that `reserveTaskIdRemote` has a single call
+    site; W1-T518's design clause (v) puts that call site OUT of scope in writing, on the ground
+    that it was blocked on a credential rather than on code. So this is not a duplicate filing —
+    it is the task those four deferred, stated as a claim for the first time.
+
+    (6) AND A FAILURE TO RESERVE LEAVES NOTHING A LATER READER CAN ADJUDICATE. `reserveTaskIdRemote`
+    throws `TaskIdReservationError` on an unreachable remote (src/lib/task-id-reservation.ts:462);
+    NOTHING in src/ catches it — the only hits for that symbol outside its own module are two doc
+    comments (src/run-task.ts:17738, src/lib/inbox.ts:1538). It lands in each lane's generic catch,
+    which logs `triage.error` (src/run-task.ts:17973) or `plan.error` (:18306) with the message
+    stringified into a free-text `error` field: no id, no ref, no outcome discriminator, and nothing
+    that separates "could not reach origin" from any other lane failure. It is not durable either —
+    `DECISION_RELEVANT_LEDGER_STEPS` (src/lib/ledger.ts:377) contains ZERO `*.error` steps against a
+    positive control of `run.start` reading 1 in the same range, so `rotateLedger` archives these
+    rows on the ordinary schedule and the evidence that a reservation was refused is gone.
+  design: |
+    THE SHAPE: make the number of refs pushed equal the number of ids a filing creates, in every
+    lane that mints, and make a refusal to reserve legible after the fact. No new namespace, no new
+    substrate, no change to the locking argument — `reserveTaskIdRemote`'s orphan-payload CAS is
+    correct and stays exactly as it is.
+
+    (i) EVERY ID A FILING CREATES GETS A REF, NOT JUST THE FIRST. The remote side needs the same
+    block shape the local side already has: reserve N up front, before the paid worker spawns, on
+    the one store every writer shares. `reserveTaskIdBlock` (src/lib/task-id-reservation.ts:281) is
+    the model — including its partial-acquire rule, which matters more remotely than locally: a
+    block that acquired three refs and failed on the fourth must not leave a caller believing it
+    holds four.
+
+    (ii) THE WORKER MUST BE TOLD THE IDS, NOT TOLD TO INVENT THEM. As long as src/lib/triage.ts:217
+    says "number them upward", a reserved block and a filed set can diverge by construction, and no
+    amount of reserving fixes it. The plan lane already shows the shape that works —
+    `planArchitectPrompt(mode, brief, runId, reservedIds)` states the reserved ids — so this is a
+    change of kind, not of mechanism.
+
+    (iii) A HOLE IS STILL NOT A DEFECT. The module's standing ruling — "NOTHING RELEASES A
+    RESERVATION, AND THAT IS DELIBERATE … A HOLE IS NOT A DEFECT; A COLLISION IS" — is preserved.
+    Reserving five and filing two must leave three refs standing, exactly as the local block leaves
+    three ids released-but-skipped. An implementation that deletes unused refs to keep the sequence
+    tidy has reintroduced a distributed-state problem the module already refused, and fails (iii).
+
+    (iv) A REFUSAL TO RESERVE MUST BE READABLE A WEEK LATER. The failure path writes its own ledger
+    event carrying the id it could not reserve, the ref, and the classified outcome — never a
+    stringified message inside a lane's generic `*.error`. Rationale (6) is the whole argument for
+    this half: a free-text field cannot be queried and a rotated row cannot be read at all. If the
+    event is to survive rotation it must be retained; MEASURED at this sha, the derived-from-
+    consumers test asserts only the MISSING direction (test/ledger-rotation.test.ts:93-98 filters
+    `expectedDecisionRelevant` for steps absent from the set), so adding a step no automated
+    consumer reads does not fail it — but an implementer must re-run that test rather than trusting
+    this sentence.
+
+    (v) THE FALSIFIER IS A PAIR AND THE SECOND HALF IS THE POINT. "A filing that creates N ids
+    reserves N refs" is satisfied by a change that always pushes a fixed block regardless of N, so
+    the paired control — a filing that creates ONE id reserves EXACTLY ONE ref, asserted in the SAME
+    suite invocation — is what makes the first mean anything. Both directions in one run, or
+    neither is evidence.
+
+    (vi) AND THE MUTATION CHECK MUST BE FILE-SHA BRACKETED. A no-op mutation is indistinguishable
+    from a surviving mutant from the result alone. Read the sha256 of the edited file, remove the
+    per-id reservation, read the sha256 again and require it to DIFFER, run the suite and require
+    the N-ref test to FAIL, restore, and require the sha to return to the original.
+
+    (vii) OUT OF SCOPE, ENUMERATED, EACH WITH ITS REASON.
+      - THE FOUR-SURFACE SWEEP OMITTING plan/tasks.yaml. The sweep briefs prescribe refs, shard
+        filenames, open-PR file lists and open-PR titles; the monolith is a fifth surface that owns
+        ids the shards do not. That is a defect in the SWEEP PROCEDURE, which is prose in briefs
+        rather than code in this repo, and fixing prose is not this task.
+      - `classifyPushFailure` TREATING HTTP 403 AS "unreachable"
+        (src/lib/task-id-reservation.ts:377). A credential that cannot push is not a network
+        failure, and folding the two loses the distinction — but the fail-closed direction is
+        already correct (it refuses to mint), the module's doc argues that choice explicitly, and
+        changing the classifier changes when the fleet refuses rather than how many refs it pushes.
+        Separate concern, separate evidence, separate filing.
+      - ANY CHANGE TO SWEEP ATOMICITY. Whether the sweep that reads these surfaces is atomic
+        against a concurrent mint is a different question from whether the mint reserves what it
+        creates. Nothing here may widen into it.
+      - The namespace itself, which W1-T509 established and this task reuses unchanged; the
+        advisory read, which is W1-T518's; and `unreservedFiledIds` (src/lib/plan-architect.ts:396),
+        whose report-only posture at src/run-task.ts:18179 is DELIBERATE and stays report-only.
+  acceptance:
+    - claim: "a filing that creates N ids reserves N refs on the shared substrate rather than one"
+      proof: "unit test: W1-T949: a filing that creates N ids reserves N refs"
+    - claim: "a filing that creates one id still reserves exactly one, so the fix is not a fixed block"
+      proof: "unit test: W1-T949: a filing that creates one id reserves exactly one ref"
+    - claim: "removing the per-id reservation fails the N-ref test with the file sha read either side"
+      proof: "unit test: W1-T949: removing the per id reservation fails the N ref test"
+    - claim: "a reservation that cannot be obtained leaves a durable ledger event naming the id and outcome"
+      proof: "unit test: W1-T949: a failed reservation leaves a durable ledger event"
+  risk: high
+  origin: oper#multi-id-mint-gap-2026-08-17
+  plan_refs: ["W1-T509", "W1-T518", "W1-T311"]
+  files: [src/lib/task-id-reservation.ts, src/run-task.ts, src/lib/triage.ts, src/lib/ledger.ts, test/task-id-reservation.test.ts, test/plan-lane-mint.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS SET UP FRONT AND IS THE POINT OF THE SHARD, NOT A HEDGE. This task changes the
+    allocator that hands out the ids every future filing uses, and a worker building it would be
+    minting its own id through the very path it is editing. `isDispatchEligible` (src/lib/drain.ts)
+    returns false at `t.verify !== "auto"` BEFORE the linter is consulted, so this shard can never
+    be picked up by the drain — which is the intended effect.
+
+    risk: high IS Rule 19's SPAN AND THE BLAST RADIUS AGREES. The span is four source modules and
+    two suites. The blast radius is genuinely high independently: a reserver that refuses too
+    eagerly stops every lane from filing anything, and one that reserves too little reintroduces the
+    collision class that refused `loadPlan` on origin/main twice (W1-T509's rationale (1)).
+
+    FILES DERIVED BY READING THE SOURCE AT 1c99344, NOT GUESSED — what was read, and what each
+    declaration buys:
+      - src/lib/task-id-reservation.ts — `reserveTaskIdRemote` (:448), `reserveTaskIdBlock` (:281),
+        `gitRemoteRefReserver` (:396), `taskIdReservationRef` (:355) and `classifyPushFailure`
+        (:377) are all here. The block-shaped remote reserve has nowhere else to live.
+      - src/run-task.ts — ALL THREE mint call sites are in this one file: triage at :17740/:17751,
+        plan at :18096, approve at :18811. THE COST IS ACCEPTED IN WRITING: W1-T471 serialises every
+        task declaring the monolith, so this shard will wait behind them. It is declared anyway
+        because a filing that omitted it would describe a fix that cannot be built.
+      - src/lib/triage.ts — design clause (ii). :217 is the "number them upward" instruction; a
+        block reservation that left it standing would still ship unreserved ids.
+      - src/lib/ledger.ts — design clause (iv). `DECISION_RELEVANT_LEDGER_STEPS` (:377) is where a
+        step earns retention, and a failure event that rotates away is not durable.
+      - test/task-id-reservation.test.ts — the reserver's own suite; its remote half already holds
+        the fixtures (the injected `run`, the anchor override) the N-ref pair needs.
+      - test/plan-lane-mint.test.ts — the lane-level reservation suite (:198-:379), which already
+        drives a fake reserver through the plan lane and is where the paired 1-id control belongs.
+    DELIBERATELY NOT DECLARED, each with its reason: src/lib/inbox.ts, because
+    `materializeDraftTaskIds` takes `reserveBlock` as an INJECTED callback and the closure that
+    supplies it is built in src/run-task.ts:18811 — the remote half threads through the callback
+    without touching that module; src/lib/plan-architect.ts, because `unreservedFiledIds` stays
+    report-only per clause (vii); and test/ledger-rotation.test.ts, because its derived-from-
+    consumers assertion checks only the MISSING direction (:93-98), so an added step needs no edit
+    there. An implementer who concludes otherwise MUST AMEND THIS SHARD TO DECLARE THE FILE FIRST
+    rather than overrunning.
+
+    PROOF NOTES: all four proofs are the NAME-FILTERED `unit test:` form, never the whole-file path
+    form, so each names the behaviour it proves rather than a file that would pass on any test in
+    it. Each title is plain prose, under 100 characters, with no comma and no regex metacharacter,
+    so `looksLikeScenarioNarrative` does not fire and `parseTestTarget`'s escaped-literal match has
+    nothing to mis-handle. Each was verified to match ZERO files today via `grep -rlF` over test/
+    against a control matching one — they are FORWARD references to titles this task will create.
+
+    THE ID RESTS ON THE FOUR-SURFACE SWEEP, BECAUSE THE RESERVATION COULD NOT BE OBTAINED. The
+    gated push to refs/rmd-id/W1-T949 was attempted FIRST, with a unique orphan payload over the
+    empty tree (4b825dc6), a host-pid-nanosecond nonce in the message, the refspec braced, and the
+    exit code captured into a variable rather than read through a pipe. It exited 1 with
+    `send-pack: unexpected disconnect while reading sideband packet` / `fatal: the remote end hung
+    up unexpectedly`, and the readback (`git ls-remote origin refs/rmd-id/W1-T949`) came back EMPTY
+    — so the ref is ABSENT and the mint did not take. SO THE SWEEP IS THE WHOLE BASIS, and it was
+    run over FIVE surfaces rather than four, because the monolith owns ids the shards do not
+    (clause (vii) names that omission as a defect in the procedure): W1-T949 read 0 against
+    refs/rmd-id/* (46 refs, max W1-T946), 0 against shard filenames on origin/main (max W1-T947), 0
+    against plan/tasks.yaml (max W1-T280), 0 across every open PR's file list (#2042, #2043), and 0
+    across every open PR's title. Highest id claimed on ANY surface was W1-T948, from open PR
+    #2042's file list. TWO POSITIVE CONTROLS ON THE SAME INVOCATIONS: W1-T947's shard filename reads
+    1 on the filename surface, and refs/rmd-id/W1-T946 reads 1 on the ref surface — so both
+    zero-returning queries were demonstrably able to see their corpus.
