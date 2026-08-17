@@ -10,7 +10,7 @@
  * is a pure function of its arguments, provable with plain string assertions
  * in a unit test — no real launchd involved.
  *
- * Two things this unit gets right on purpose:
+ * Three things this unit gets right on purpose:
  *
  *  1. ABSOLUTE PATHS EVERYWHERE. launchd execs `ProgramArguments[0]` directly
  *     (no shell, no PATH search) and starts the child in `/` unless
@@ -35,10 +35,29 @@
  *     boot (`lib/daemon.ts` `daemonBoot`, over `lib/env.ts` `assertCleanBoot`)
  *     — belt-and-suspenders, since a plist that is clean today says nothing
  *     about how the process actually gets exec'd on a future edit.
+ *
+ *  3. THE BINARY COMES FROM THE INSTALL CHECKOUT, NEVER THE INVOKING ONE
+ *     (W1-T925, fb-1784913390318-1fcb63). `ProgramArguments[0]` used to be
+ *     `join(repoRoot, "bin", "rmd")` — `repoRoot` the git toplevel of
+ *     whichever tree `rmd daemon-plist`/`serve-plist`/`digest-plist`/
+ *     `deploy-plist` HAPPENED TO BE RUN FROM — so which checkout the fleet
+ *     actually executes was decided by a `cd`, once, and never revisited.
+ *     Every generator here now takes `installRoot` (W1-T924's
+ *     `resolveInstallRoot`, resolved by the caller) alongside `rmdBin`, and
+ *     throws {@link LaunchdPlistError} — same posture as the self-target and
+ *     ANTHROPIC-key gates — when `rmdBin` does not resolve inside
+ *     `installRoot`, or when the caller reports the install checkout does not
+ *     yet exist (`installRootExists: false`, resolved by the caller so this
+ *     module stays a pure string transform — no filesystem read here, the
+ *     same reason `isSelfTarget` is pre-resolved rather than shelled out to).
+ *     A missing `ProgramArguments[0]` is a spawn error launchd retries
+ *     forever — the crash-loop shape one level below the one this closes —
+ *     so generation refuses and names the remedy (`rmd install-checkout
+ *     --write`) rather than ever emitting that unit.
  */
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { loadDefaultPolicy } from "./policy.js";
 
 /** The launchd label this daemon unit is always generated under. */
@@ -51,8 +70,28 @@ export const DAEMON_LABEL = "com.remudero.daemon";
 export const DEFAULT_LAUNCHD_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 export interface LaunchdPlistOpts {
-  /** Absolute path to the `bin/rmd` launcher. Never resolved from PATH — launchd doesn't search it. */
+  /**
+   * Absolute path to the `bin/rmd` launcher. Never resolved from PATH — launchd doesn't search
+   * it. MUST resolve inside {@link installRoot} (W1-T925) — {@link generateLaunchdPlist} throws
+   * otherwise, the same posture as the self-target and ANTHROPIC-key gates below.
+   */
   rmdBin: string;
+  /**
+   * Absolute path to the daemon's dedicated install checkout (W1-T924's `resolveInstallRoot`,
+   * `lib/install-root.ts`) — resolved ONCE by the caller, never re-derived here. `rmdBin` must
+   * resolve inside it; a `rmdBin` that lands outside `installRoot` throws {@link
+   * LaunchdPlistError} at generation (W1-T925) rather than baking in whichever checkout the
+   * generator happened to be invoked from.
+   */
+  installRoot: string;
+  /**
+   * Whether {@link installRoot} exists on disk, pre-resolved by the caller (e.g.
+   * `existsSync(installRoot)`) so this generator stays a pure string transform — no filesystem
+   * read here, mirroring how {@link isSelfTarget} is resolved by the CLI layer rather than
+   * shelled out to from this module. `false` throws {@link LaunchdPlistError}: a unit whose
+   * `ProgramArguments[0]` points at a missing binary is a spawn-error launchd retries forever.
+   */
+  installRootExists: boolean;
   /** Workspace root (config.root, §4A) — absolute. WorkingDirectory + log files derive from it. */
   root: string;
   /** launchd label. Default {@link DAEMON_LABEL}. */
@@ -113,6 +152,48 @@ function assertAbsolute(value: string, field: string): void {
   }
 }
 
+/** True when `child` is `parent` itself, or nested under it. Both inputs are already asserted
+ *  absolute by the caller (see {@link assertAbsolute}), so a plain `relative()` compare — no
+ *  `resolve()` needed — is sufficient. Deliberately a LOCAL copy, not an import of
+ *  `lib/install-root.ts`'s equivalent `isPathInside`: this module stays a leaf (node:os +
+ *  node:path + policy.js only, see file header) with no dependency on the install-root module,
+ *  the same reason `SERVE_WILDCARD_HOSTS` below is its own copy rather than an import of
+ *  `lib/serve.ts`'s `WILDCARD_HOSTS` — a few lines of path arithmetic, not shared policy that
+ *  could drift the way the ANTHROPIC-key check would if reimplemented twice. */
+function isWithin(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * THE INSTALL-CHECKOUT GATES (W1-T925, fb-1784913390318-1fcb63) — same posture as the
+ * self-target and ANTHROPIC-key gates below: fail at generation, the cheapest layer, never at
+ * boot as a launchd spawn-error crash-loop. Shared by all four generators in this file so the
+ * refusal text (and the remedy it names) is written once, not reimplemented four times.
+ */
+function assertInstallRootExists(installRootExists: boolean, installRoot: string, context: string): void {
+  if (!installRootExists) {
+    throw new LaunchdPlistError(
+      `${context}: the install checkout does not exist at ${installRoot} — a unit whose ` +
+        `ProgramArguments[0] points at a missing binary would spawn-error at boot and launchd's ` +
+        `KeepAlive/StartInterval would retry it forever. Run \`rmd install-checkout --write\` to ` +
+        `provision the install checkout, then regenerate this unit.`,
+    );
+  }
+}
+
+function assertRmdBinWithinInstallRoot(rmdBin: string, installRoot: string, context: string): void {
+  if (!isWithin(installRoot, rmdBin)) {
+    throw new LaunchdPlistError(
+      `${context}: rmdBin (${rmdBin}) resolves OUTSIDE the install root (${installRoot}) — every ` +
+        `generated unit's launcher must come from the dedicated install checkout (W1-T924), never ` +
+        `whichever tree the generator happened to be invoked from. Run \`rmd install-checkout ` +
+        `--write\` to provision the install checkout, then regenerate this unit with an rmdBin ` +
+        `under it.`,
+    );
+  }
+}
+
 /**
  * Same billing-boundary check as `lib/env.ts`'s `buildWorkerEnv`, applied to a launchd unit's
  * own `EnvironmentVariables` block. EXPORTED (not module-private) so both {@link
@@ -150,14 +231,20 @@ function stringArray(values: string[]): string {
 /**
  * Generate the launchd .plist TEXT for the Remudero daemon (`rmd daemon`).
  * Pure function of its args — no filesystem write, no `launchctl` call (see
- * file header). Throws {@link LaunchdPlistError} if `rmdBin`/`root` aren't
- * absolute, or if the assembled `EnvironmentVariables` block carries an
- * `ANTHROPIC_*` key.
+ * file header). Throws {@link LaunchdPlistError} if `rmdBin`/`installRoot`/`root` aren't
+ * absolute, if `installRootExists` is false, if `rmdBin` resolves outside `installRoot`
+ * (W1-T925), or if the assembled `EnvironmentVariables` block carries an `ANTHROPIC_*` key.
  */
 export function generateLaunchdPlist(opts: LaunchdPlistOpts): string {
   assertAbsolute(opts.rmdBin, "rmdBin");
+  assertAbsolute(opts.installRoot, "installRoot");
   assertAbsolute(opts.root, "root");
   if (opts.home !== undefined) assertAbsolute(opts.home, "home");
+
+  // Install-checkout gates (W1-T925) — BEFORE the self-target gate too, for the same reason
+  // that one runs before any plist text is built: a refusal generates nothing.
+  assertInstallRootExists(opts.installRootExists, opts.installRoot, "generateLaunchdPlist");
+  assertRmdBinWithinInstallRoot(opts.rmdBin, opts.installRoot, "generateLaunchdPlist");
 
   // Self-target consent gate — FIRST, before any plist text is built, so a refusal generates
   // nothing (W1-T109: fail at generation, the cheapest layer, not at boot as a KeepAlive
@@ -326,8 +413,18 @@ export function serveLogPaths(root: string): { stdout: string; stderr: string } 
 }
 
 export interface ServeLaunchdPlistOpts {
-  /** Absolute path to the `bin/rmd` launcher. Never resolved from PATH — launchd doesn't search it. */
+  /**
+   * Absolute path to the `bin/rmd` launcher. Never resolved from PATH — launchd doesn't search
+   * it. MUST resolve inside {@link installRoot} (W1-T925) — {@link generateServeLaunchdPlist}
+   * throws otherwise.
+   */
   rmdBin: string;
+  /** Absolute path to the daemon's dedicated install checkout (W1-T924's `resolveInstallRoot`) —
+   *  see {@link LaunchdPlistOpts.installRoot} for the full rationale, identical here. */
+  installRoot: string;
+  /** Whether {@link installRoot} exists on disk, pre-resolved by the caller — see
+   *  {@link LaunchdPlistOpts.installRootExists}, identical here. */
+  installRootExists: boolean;
   /** Workspace root (config.root, §4A) — absolute. WorkingDirectory + log files derive from it. */
   root: string;
   /** TCP port baked into `ProgramArguments`. Resolved by the caller from `--port`/config. */
@@ -353,14 +450,18 @@ export interface ServeLaunchdPlistOpts {
 /**
  * Generate the launchd .plist TEXT for the operator console (`rmd serve`). Pure function of its
  * args — no filesystem write, no `launchctl` call (see this module's header). Throws
- * {@link LaunchdPlistError} if `rmdBin`/`root`/`home` aren't absolute, if `port` isn't an
- * integer in [1, 65535], if `hosts` is empty or names a wildcard, if `throttleSeconds` is under
- * 10, or if the assembled `EnvironmentVariables` block carries an `ANTHROPIC_*` key.
+ * {@link LaunchdPlistError} if `rmdBin`/`installRoot`/`root`/`home` aren't absolute, if
+ * `installRootExists` is false, if `rmdBin` resolves outside `installRoot` (W1-T925), if `port`
+ * isn't an integer in [1, 65535], if `hosts` is empty or names a wildcard, if `throttleSeconds`
+ * is under 10, or if the assembled `EnvironmentVariables` block carries an `ANTHROPIC_*` key.
  */
 export function generateServeLaunchdPlist(opts: ServeLaunchdPlistOpts): string {
   assertAbsolute(opts.rmdBin, "rmdBin");
+  assertAbsolute(opts.installRoot, "installRoot");
   assertAbsolute(opts.root, "root");
   if (opts.home !== undefined) assertAbsolute(opts.home, "home");
+  assertInstallRootExists(opts.installRootExists, opts.installRoot, "generateServeLaunchdPlist");
+  assertRmdBinWithinInstallRoot(opts.rmdBin, opts.installRoot, "generateServeLaunchdPlist");
 
   if (!Number.isInteger(opts.port) || opts.port < 1 || opts.port > 65535) {
     throw new LaunchdPlistError(
@@ -463,8 +564,18 @@ export const DIGEST_LABEL = "com.remudero.digest";
 export const DEFAULT_DIGEST_HOUR = 8;
 
 export interface DigestLaunchdPlistOpts {
-  /** Absolute path to the `bin/rmd` launcher. Never resolved from PATH — launchd doesn't search it. */
+  /**
+   * Absolute path to the `bin/rmd` launcher. Never resolved from PATH — launchd doesn't search
+   * it. MUST resolve inside {@link installRoot} (W1-T925) — {@link generateDigestLaunchdPlist}
+   * throws otherwise.
+   */
   rmdBin: string;
+  /** Absolute path to the daemon's dedicated install checkout (W1-T924's `resolveInstallRoot`) —
+   *  see {@link LaunchdPlistOpts.installRoot} for the full rationale, identical here. */
+  installRoot: string;
+  /** Whether {@link installRoot} exists on disk, pre-resolved by the caller — see
+   *  {@link LaunchdPlistOpts.installRootExists}, identical here. */
+  installRootExists: boolean;
   /** Workspace root (config.root, §4A) — absolute. WorkingDirectory + log files derive from it. */
   root: string;
   /** launchd label. Default {@link DIGEST_LABEL}. */
@@ -480,14 +591,19 @@ export interface DigestLaunchdPlistOpts {
 /**
  * Generate the launchd .plist TEXT for the daily `rmd digest` pulse. Pure function of its
  * args — no filesystem write, no `launchctl` call (see this module's header). Throws
- * {@link LaunchdPlistError} if `rmdBin`/`root` (or a given `home`) aren't absolute, if
- * `hour` is out of `[0, 23]`, or if the assembled `EnvironmentVariables` block carries an
- * `ANTHROPIC_*` key — the SAME checks {@link generateLaunchdPlist} applies to the daemon unit.
+ * {@link LaunchdPlistError} if `rmdBin`/`installRoot`/`root` (or a given `home`) aren't
+ * absolute, if `installRootExists` is false, if `rmdBin` resolves outside `installRoot`
+ * (W1-T925), if `hour` is out of `[0, 23]`, or if the assembled `EnvironmentVariables` block
+ * carries an `ANTHROPIC_*` key — the SAME checks {@link generateLaunchdPlist} applies to the
+ * daemon unit.
  */
 export function generateDigestLaunchdPlist(opts: DigestLaunchdPlistOpts): string {
   assertAbsolute(opts.rmdBin, "rmdBin");
+  assertAbsolute(opts.installRoot, "installRoot");
   assertAbsolute(opts.root, "root");
   if (opts.home !== undefined) assertAbsolute(opts.home, "home");
+  assertInstallRootExists(opts.installRootExists, opts.installRoot, "generateDigestLaunchdPlist");
+  assertRmdBinWithinInstallRoot(opts.rmdBin, opts.installRoot, "generateDigestLaunchdPlist");
 
   const label = opts.label ?? DIGEST_LABEL;
   const path = opts.path ?? DEFAULT_LAUNCHD_PATH;
@@ -561,8 +677,17 @@ export const SUPERVISOR_LABEL = "com.remudero.supervisor";
 export const DEFAULT_SUPERVISOR_INTERVAL_S = 120;
 
 export interface SupervisorLaunchdPlistOpts {
-  /** Absolute path to `bin/rmd`. Never resolved from PATH. */
+  /**
+   * Absolute path to `bin/rmd`. Never resolved from PATH. MUST resolve inside {@link
+   * installRoot} (W1-T925) — {@link generateSupervisorLaunchdPlist} throws otherwise.
+   */
   rmdBin: string;
+  /** Absolute path to the daemon's dedicated install checkout (W1-T924's `resolveInstallRoot`) —
+   *  see {@link LaunchdPlistOpts.installRoot} for the full rationale, identical here. */
+  installRoot: string;
+  /** Whether {@link installRoot} exists on disk, pre-resolved by the caller — see
+   *  {@link LaunchdPlistOpts.installRootExists}, identical here. */
+  installRootExists: boolean;
   /** Workspace root (config.root) — absolute. WorkingDirectory + logs derive from it. */
   root: string;
   /** launchd label. Default {@link SUPERVISOR_LABEL}. */
@@ -575,10 +700,17 @@ export interface SupervisorLaunchdPlistOpts {
   intervalSeconds?: number;
 }
 
+/** Throws {@link LaunchdPlistError} if `rmdBin`/`installRoot`/`root` (or a given `home`) aren't
+ *  absolute, if `installRootExists` is false, if `rmdBin` resolves outside `installRoot`
+ *  (W1-T925), if `intervalSeconds` is under 30, or if the assembled `EnvironmentVariables`
+ *  block carries an `ANTHROPIC_*` key — the SAME checks {@link generateLaunchdPlist} applies. */
 export function generateSupervisorLaunchdPlist(opts: SupervisorLaunchdPlistOpts): string {
   assertAbsolute(opts.rmdBin, "rmdBin");
+  assertAbsolute(opts.installRoot, "installRoot");
   assertAbsolute(opts.root, "root");
   if (opts.home !== undefined) assertAbsolute(opts.home, "home");
+  assertInstallRootExists(opts.installRootExists, opts.installRoot, "generateSupervisorLaunchdPlist");
+  assertRmdBinWithinInstallRoot(opts.rmdBin, opts.installRoot, "generateSupervisorLaunchdPlist");
 
   const label = opts.label ?? SUPERVISOR_LABEL;
   const path = opts.path ?? DEFAULT_LAUNCHD_PATH;

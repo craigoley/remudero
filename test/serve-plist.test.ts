@@ -42,7 +42,9 @@ import { main, servePlistCommand } from "../src/run-task.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 
 const VALID = {
-  rmdBin: "/Users/op/Remudero/remudero/bin/rmd",
+  rmdBin: "/Users/op/Remudero/daemon-install/bin/rmd",
+  installRoot: "/Users/op/Remudero/daemon-install",
+  installRootExists: true,
   root: "/Users/op/Remudero",
   port: 4317,
   hosts: ["127.0.0.1", "100.90.47.107"],
@@ -63,7 +65,7 @@ test("the serve unit runs `rmd serve` as a KeepAlive background service with the
   const args = plist.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1] ?? "";
   assert.deepEqual(
     [...args.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]),
-    ["/Users/op/Remudero/remudero/bin/rmd", "serve", "--port", "4317"],
+    [VALID.rmdBin, "serve", "--port", "4317"],
     "ProgramArguments is the absolute launcher + serve + the resolved port — launchd execs argv[0] directly",
   );
   assert.match(plist, /<key>WorkingDirectory<\/key>\s*<string>\/Users\/op\/Remudero<\/string>/);
@@ -123,14 +125,26 @@ test("logs land in the state/logs home this family uses, one file per stream", (
   });
 });
 
-test("DAEMON-INDEPENDENCE: the serve unit names no daemon label and no daemon path", () => {
+test("DAEMON-INDEPENDENCE: the serve unit names no daemon label, subcommand, or daemon-specific log path", () => {
   const plist = generateServeLaunchdPlist(VALID);
   assert.doesNotMatch(plist, new RegExp(DAEMON_LABEL.replace(/\./g, "\\.")));
-  // The invariant is about what launchd EXECUTES, not about prose: strip the XML comments
-  // (which legitimately cite the daemon generator this one is modelled on) and assert the
-  // directives themselves name no daemon label, argument or path.
+  // The invariant is about what launchd EXECUTES and what STATE it depends on, not about
+  // whether the two units' launcher binary happens to live under a shared install checkout
+  // whose directory name mentions "daemon" — W1-T925 has ALL FOUR units (daemon, serve,
+  // digest, supervisor) share ONE install root by design (`resolveInstallRoot`'s own default
+  // is `<root>/daemon-install`, lib/install-root.ts), so a blanket "no /daemon/i anywhere"
+  // check would now false-positive on that shared, INTENTIONAL path — not a real coupling.
+  // Strip the XML comments (which legitimately cite the daemon generator this one is modelled
+  // on) and assert the directives name no daemon LABEL, no `daemon` SUBCOMMAND, and no
+  // daemon-specific LOG path — the concrete ways a stopped daemon could blind the console.
   const directives = plist.replace(/<!--[\s\S]*?-->/g, "");
-  assert.doesNotMatch(directives, /daemon/i, "stopping the fleet for containment must never blind the operator's board");
+  assert.doesNotMatch(directives, new RegExp(DAEMON_LABEL.replace(/\./g, "\\.")), "never the daemon's own label");
+  assert.doesNotMatch(directives, /<string>daemon<\/string>/, "never runs `rmd daemon`");
+  assert.doesNotMatch(
+    directives,
+    /daemon\.(out|err)\.log/,
+    "stopping the fleet for containment must never blind the operator's board",
+  );
   assert.equal(launchdPlistPath(SERVE_LABEL, "/Users/op"), "/Users/op/Library/LaunchAgents/com.remudero.serve.plist");
   assert.notEqual(launchdPlistPath(SERVE_LABEL, "/Users/op"), launchdPlistPath(DAEMON_LABEL, "/Users/op"));
 });
@@ -142,6 +156,38 @@ test("relative paths and out-of-range ports are refused at GENERATION — the ch
   assert.throws(() => generateServeLaunchdPlist({ ...VALID, port: 0 }), LaunchdPlistError);
   assert.throws(() => generateServeLaunchdPlist({ ...VALID, port: 70000 }), LaunchdPlistError);
   assert.throws(() => generateServeLaunchdPlist({ ...VALID, port: 4317.5 }), LaunchdPlistError);
+});
+
+// ── W1-T925 (fb-1784913390318-1fcb63): the serve unit's binary comes from the install
+// checkout too — SAME gates generateLaunchdPlist applies to the daemon unit, reused rather
+// than reimplemented (this generator family's own header, lib/launchd.ts). ──────────────────
+
+test("generateServeLaunchdPlist: refuses when rmdBin resolves OUTSIDE installRoot, naming the remedy", () => {
+  assert.throws(
+    () => generateServeLaunchdPlist({ ...VALID, rmdBin: "/Users/op/some-operator-checkout/bin/rmd" }),
+    (e: unknown) =>
+      e instanceof LaunchdPlistError &&
+      /OUTSIDE the install root/.test((e as Error).message) &&
+      /rmd install-checkout --write/.test((e as Error).message),
+    "no plist string is ever returned for a binary path outside the install checkout",
+  );
+});
+
+test("generateServeLaunchdPlist: refuses when the install checkout does not exist, naming the remedy", () => {
+  assert.throws(
+    () => generateServeLaunchdPlist({ ...VALID, installRootExists: false }),
+    (e: unknown) =>
+      e instanceof LaunchdPlistError &&
+      /install checkout does not exist/.test((e as Error).message) &&
+      /rmd install-checkout --write/.test((e as Error).message),
+    "never emits a unit whose ProgramArguments[0] would be a missing binary",
+  );
+});
+
+test("generateServeLaunchdPlist embeds the SAME install-derived rmdBin the daemon/digest/supervisor units do, given the same {rmdBin, installRoot} (acceptance criterion 3)", () => {
+  const shared = { rmdBin: "/Users/op/Remudero/daemon-install/bin/rmd", installRoot: "/Users/op/Remudero/daemon-install", installRootExists: true };
+  const plist = generateServeLaunchdPlist({ ...VALID, ...shared });
+  assert.match(plist, new RegExp(`<string>${shared.rmdBin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</string>`));
 });
 
 test("a wildcard bind is refused, and the refusal set cannot drift from serve.ts's own", () => {
@@ -288,12 +334,19 @@ test("currentBranch reads the checkout's branch, and answers null rather than gu
 
 // ── The CLI edge: what the operator actually runs ─────────────────────────────────────────
 
-/** A throwaway HOME whose config.json is the one loadConfig() will read. */
+/** A throwaway HOME whose config.json is the one loadConfig() will read. ALSO provisions the
+ *  default install root (W1-T924's `resolveInstallRoot`: `<root>/daemon-install`, unset
+ *  `config.installRoot`) with a stub `bin/rmd`, so `generateServeLaunchdPlist`'s W1-T925
+ *  install-checkout-exists gate does not refuse these CLI-level fixtures — the same real
+ *  provisioning step `rmd install-checkout --write` performs, stood up by hand here since
+ *  these tests never shell out to git. */
 function servePlistTestHome(serve?: { host?: string; port?: number }): { home: string; root: string } {
   const home = mkdtempSync(join(tmpdir(), "rmd-serveplist-"));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, serve }));
+  mkdirSync(join(root, "daemon-install", "bin"), { recursive: true });
+  writeFileSync(join(root, "daemon-install", "bin", "rmd"), "#!/bin/sh\nexit 0\n");
   return { home, root };
 }
 
