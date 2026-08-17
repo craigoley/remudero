@@ -113,8 +113,11 @@
     PR's FILE LIST, which was the only surface that saw W1-T948 (#2042's
     `plan/tasks.d/W1-T948-specialist-tddstrict-trigger-unreachable.yaml`). Controls: `refs/rmd-id/`
     read 1 for the known-taken W1-T946; the shard-filename surface read 1 for the known-taken
-    W1-T947; the file-list extractor read W1-T948 out of #2042. **THE RESERVATION WAS NOT
-    OBTAINED**: the `refs/rmd-id/W1-T949` push used a unique orphan commit over the empty tree
+    W1-T947; the file-list extractor read W1-T948 out of #2042.
+    **THE RESERVATION WAS NOT OBTAINED** — and it is kept on ONE LINE here deliberately, because
+    this shard's own design clause (iii) is about single-line greps under-reporting across a wrap,
+    and an earlier draft of this very note split that phrase in two and broke the PR proof that
+    reads it. The `refs/rmd-id/W1-T949` push used a unique orphan commit over the empty tree
     (`4b825dc642cb6eb9a060e54bf8d69288fbee4904`) carrying nonce `vm-10928-1786968768800585221`, the
     refspec braced and the exit status captured into a variable, and FAILED with `HTTP 403`, exit 1;
     the readback confirmed the ref absent while the control `refs/rmd-id/W1-T946` read 1 line.
