@@ -1,0 +1,150 @@
+- id: W1-T951
+  title: "MERGE CREDIT IS RECONSTRUCTED FROM GITHUB PR RECORDS ON EVERY PROJECTION AND PERSISTED NOWHERE — 18 ids are credited by head branch alone, a ref GitHub deletes from the repository on merge, so any narrowing of that scan silently returns already-shipped tasks to the dispatch queue as `verify: auto` work"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 95.00
+  rationale: |
+    FILED FROM RECON at origin/main b419033, branch cut at 7bd6dc1. The figures in (2) and (5)
+    were established by that recon and are carried, not re-derived; every file:line in (1) and
+    (3) was re-read on this branch.
+
+    (1) THE GATE ORDER IS WHAT MAKES THIS LOAD-BEARING. `isDispatchEligible`
+    (src/lib/drain.ts) tests `isMerged(t.id)` FIRST, at drain.ts:362, and returns false with
+    reason "already-merged". The status gate does not run until drain.ts:380-383, and it tests
+    only `t.status === "blocked"`. So merge credit — not status, not the plan — is the single
+    thing standing between a shipped task and re-dispatch.
+
+    (2) CREDIT HAS TWO PATHS AND THEY DO NOT COVER EACH OTHER. Measured across 1596 closed PRs
+    (1516 merged): 638 ids credited by TRAILER, 588 by HEAD BRANCH, 656 by their UNION. The
+    union exceeding both sides is the whole point — 18 ids are credited by BRANCH ALONE, with
+    no trailer anywhere. Confirmed instances: W1-T455 via PR #1747 (head
+    run-W1-T455-1786649835883, merged 2026-08-13T20:32:23Z) and W1-T450 via PR #1695 (head
+    run-W1-T450-1786583139980, merged 2026-08-13T01:47:42Z). PR #1657 merged W1-T444 carrying
+    zero trailers at all.
+
+    (3) NOTHING PERSISTS EITHER PATH. `corroborateByBranch` (src/lib/status.ts:2148-2163) is the
+    branch rung; it resolves through `deps.mergedHeadBranches?.(task.id) ??
+    deps.github.findMergedByHeadBranch?.(task.id)` at status.ts:2154 and emits
+    `source: "head-branch"` at status.ts:2161. BOTH implementations of
+    `findMergedByHeadBranch` live in status.ts — the search-backed one at status.ts:3267 and the
+    single-fetch index one at status.ts:3721 — and both read GITHUB PR RECORDS. Neither consults
+    any local store, and no rung writes credit anywhere durable. Credit is therefore recomputed
+    from a remote, mutable source on every projection.
+
+    (4) AND THE BRANCH THAT CREDITS IS GONE. GitHub deletes the head ref from the repository on
+    merge, so the branch-credit path survives only inside the PR record, never in refs/. A scan
+    that reads refs instead of PR records, an API pagination limit, or a retention change each
+    convert already-shipped tasks into selectable work — silently, with no gate anywhere
+    observing the change.
+
+    (5) THE CONSEQUENCE IS MEASURED, NOT HYPOTHESISED. Forcing `isMerged` false in the real
+    selector returned 25 statusless shards as selectable in one call (W1-T281, 282, 283, 284,
+    285, 298-310, 312, 337, 351, 450, 454, 455, 457), because every one parses `verify: "auto"`
+    and `depends_on: []` and its status defaults to "queued" at src/lib/plan.ts:204. Two of
+    those 25 are exactly the branch-only-credited pair from (2). A worker then re-implements
+    shipped work against verify auto, and no gate stops it.
+  design: |
+    THE SHAPE: make credit DURABLE and make single-path credit VISIBLE. Two deliverables, one
+    determination before either.
+
+    (i) THE DETERMINATION COMES FIRST AND IT IS NOT OPTIONAL. Before writing anything, read from
+    SOURCE where `isMerged` is computed and what it actually reads — the construction sites
+    (status-board.ts:1325, panel-graph.ts:1018, run-task.ts:10621 and :12292 all read
+    `projection.merged`), the derivation behind them (`deriveStatus`, status.ts), and the two
+    rungs in (3). Record in writing which layer the durable record belongs at. An approach
+    chosen without that reading will persist the wrong thing at the wrong layer.
+
+    (ii) DELIVERABLE A — DURABLE, AUDITABLE CREDIT. Enumerate every id credited by branch alone,
+    and establish a persistent record of merge credit that does NOT depend on GitHub retaining
+    head refs, nor on PR-record scans remaining available in their present form. The enumeration
+    is an OUTPUT of the change, not a comment in it.
+
+    (iii) DELIVERABLE B — SINGLE-PATH CREDIT MUST BE DISCOVERABLE. When a task is credited by
+    exactly one of the two paths, emit a signal a person or a later query can find. The defect
+    in (2) is not that single-path credit exists — it is that it is indistinguishable from
+    double-path credit until it disappears.
+
+    (iv) A POSITIVE TEST ALONE PROVES NOTHING HERE, AND THIS IS THE TRAP. An implementation that
+    credits EVERYTHING satisfies "credit is found for a branch-only id" perfectly. The negative
+    control must run in the SAME suite invocation against an id with neither trailer nor branch
+    and observe NO credit, so one run carries both directions.
+
+    (v) AND THE MUTATION CHECK MUST BE FILE-SHA BRACKETED. A no-op mutation is indistinguishable
+    from a surviving mutant from the result alone. The check is: read the sha256 of the edited
+    file, remove the durable-credit lookup, read the sha256 again and require it to DIFFER, run
+    the suite and require the positive test to FAIL, restore, and require the sha to return to
+    the original.
+
+    (vi) OUT OF SCOPE, ENUMERATED, TO BE FILED SEPARATELY IF WANTED. The 25 shards carrying
+    neither `status:` nor `attempts:` are COSMETIC and are NOT this task — the loader defaults
+    status to "queued" at plan.ts:204 and all 25 are currently merge-credited, so nothing is
+    selectable on their account today. Also out of scope: the absence of any validator that
+    reads raw shard YAML before the loader defaults it. Neither is to be fixed here, and neither
+    is a reason to widen this task.
+  acceptance:
+    - claim: "the ids credited by head branch alone are enumerated as an output of the change"
+      proof: "unit test: W1-T951: the branch-only credited ids are enumerated by the change"
+    - claim: "a branch-only credited id resolves from the durable record without a PR-record read"
+      proof: "unit test: W1-T951: a branch-only id is credited from the durable record"
+    - claim: "an id with neither trailer nor branch is NOT credited, in the same run"
+      proof: "unit test: W1-T951: an id with neither trailer nor branch is not credited"
+    - claim: "removing the durable lookup fails the positive test, with the file sha read either side"
+      proof: "unit test: W1-T951: removing the durable credit lookup fails the positive test"
+    - claim: "a task credited by exactly one path emits a signal that can be found"
+      proof: "unit test: W1-T951: single-path credit emits a discoverable signal"
+  risk: high
+  origin: "recon#merge-credit-fragility-2026-08-17"
+  plan_refs: ["#1657", "#1695", "#1747"]
+  files: [src/lib/status.ts, src/lib/drain.ts, test/open-pr-corroboration.test.ts, test/dispatch-lifetime-breaker.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS SET UP FRONT AND IS THE POINT. A defect in this task re-dispatches work
+    that already shipped — the exact failure it exists to prevent — and design item (i) requires
+    a JUDGEMENT about which layer owns the durable record before any edit. `isDispatchEligible`
+    (src/lib/drain.ts) returns false at `t.verify !== "auto"` before the linter is consulted, so
+    this shard can never be picked up by the drain, which is the intended effect.
+
+    risk: high IS BOTH RULE 19'S SPAN AND REAL BLAST RADIUS, unusually. The span is four files
+    across two subsystems (status derivation, dispatch selection). The blast radius is genuine:
+    this changes what the fleet believes has already shipped, and an over-crediting bug silently
+    STOPS work while an under-crediting bug silently REPEATS it.
+
+    FILES DERIVED BY READING THE SOURCE AT 7bd6dc1, NOT GUESSED. `src/lib/status.ts` carries the
+    branch rung (`corroborateByBranch`, :2148-2163) AND both `findMergedByHeadBranch`
+    implementations (:3267, :3721) — the whole credit derivation is in that one module.
+    `src/lib/drain.ts` carries the consumption gate (`isDispatchEligible` :362, `MergedSet` :28).
+    Suites chosen by invocation count: test/open-pr-corroboration.test.ts is the direct exerciser
+    of the rung (findMergedByHeadBranch=2, head-branch=2), and test/dispatch-lifetime-breaker.
+    test.ts is the highest exerciser of the selection path (runnableCandidates=4, nextRunnable=9),
+    against a control suite reading 0 for both. `src/run-task.ts` is DELIBERATELY NOT DECLARED:
+    its two `isMerged` sites (:10621, :12292) only read `projection.merged` and add no derivation
+    of their own, and W1-T471 records that declaring the monolith serialises every task naming it.
+    A builder choosing a persistence layer outside these four will need to widen this list at that
+    point, and design item (i) is where that decision is made.
+
+    plan_refs CITES PULL REQUESTS, WHICH DEPARTS FROM CONVENTION, DELIBERATELY. Across 313 shards
+    the established shapes are "W1-TN" (575), "§N" (118) and "PN" (31), and NO shard cites a PR
+    number. The evidence for this task is three merges rather than three tasks, so the refs name
+    them. This is safe at every gate: plan.ts:131 calls plan_refs "DECLARATIVE metadata" and
+    task-linter.ts:1939 records that the parser DROPS the field entirely, so nothing validates it.
+
+    THE ID RESTS ON A FIVE-SURFACE SWEEP; THE RESERVATION WAS REFUSED. W1-T949 is contested (PRs
+    #2047 and #2048 both claimed it) and #2048 is being renumbered to W1-T950, so both were
+    avoided. W1-T951 read 0 against refs/rmd-id/*, main's shard filenames, the main tree, every
+    open PR's file list, and plan/tasks.yaml — each with a positive control reading 1 (W1-T949,
+    W1-T948, W1-T947, W1-T950, W1-T280 respectively). Highest id claimed on any surface was 950.
+    The gated push to refs/rmd-id/W1-T951 used an orphan commit over the empty tree
+    (4b825dc6) carrying a host-pid-nanosecond nonce, a braced refspec, and the exit code captured
+    in a variable rather than read through a pipe. It returned PUSH_EXIT_CODE=1, verbatim:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+    The readback found no ref, so the reservation does not exist and the sweep is the whole basis.
+    REFS ARE CORROBORATING, NEVER AUTHORITATIVE HERE: the namespace holds 47 refs against 563
+    taken ids, so a ref reading absent proves nothing on its own — which is why all five surfaces
+    were swept and why the tree, not the ref namespace, is the authority.
