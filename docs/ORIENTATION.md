@@ -1,35 +1,40 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-16T08:30:01.993Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-17T11:49:23.081Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-31 run(s) since the last retro marker. Verdicts: {"blocked":1,"blocked_ci":12,"blocked_isolation":1,"incomplete":4,"merged":8,"no_pr":2,"pr_attribution_failed":3}.
+27 run(s) since the last retro marker. Verdicts: {"blocked":2,"blocked_ci":13,"incomplete":2,"merged":9,"pr_attribution_failed":1}.
 
 ### Shipped since marker
-- W1-T502 → https://github.com/craigoley/remudero/pull/1856 (gate-side merge; run ended pr_attribution_failed)
-- W1-T503 → https://github.com/craigoley/remudero/pull/1863 (gate-side merge; run ended incomplete)
-- W1-T504 → https://github.com/craigoley/remudero/pull/1869
-- W1-T505 → https://github.com/craigoley/remudero/pull/1864 (gate-side merge; run ended incomplete)
-- W1-T506 → https://github.com/craigoley/remudero/pull/1879 (gate-side merge; run ended pr_attribution_failed)
-- W1-T508 → https://github.com/craigoley/remudero/pull/1878 (gate-side merge; run ended pr_attribution_failed)
-- W1-T510 → https://github.com/craigoley/remudero/pull/1881 (gate-side merge; run ended blocked_ci)
-- W1-T514 → https://github.com/craigoley/remudero/pull/1889
-- W1-T516 → https://github.com/craigoley/remudero/pull/1890
-- W1-T517 → https://github.com/craigoley/remudero/pull/1898
-- W1-T523 → https://github.com/craigoley/remudero/pull/1917
-- W1-T526 → https://github.com/craigoley/remudero/pull/1926
-- W1-T529 → https://github.com/craigoley/remudero/pull/1933
-- W1-T531 → https://github.com/craigoley/remudero/pull/1929
+- W1-T533 → https://github.com/craigoley/remudero/pull/1968 (gate-side merge; run ended blocked_ci)
+- W1-T905 → https://github.com/craigoley/remudero/pull/1948 (gate-side merge; run ended blocked_ci)
+- W1-T907 → https://github.com/craigoley/remudero/pull/1952 (gate-side merge; run ended blocked_ci)
+- W1-T908 → https://github.com/craigoley/remudero/pull/1969 (gate-side merge; run ended blocked_ci)
+- W1-T911 → https://github.com/craigoley/remudero/pull/1983
+- W1-T912 → https://github.com/craigoley/remudero/pull/1981 (gate-side merge; run ended pr_attribution_failed)
+- W1-T913 → https://github.com/craigoley/remudero/pull/1995 (gate-side merge; run ended blocked_ci)
+- W1-T914 → https://github.com/craigoley/remudero/pull/2010
+- W1-T915 → https://github.com/craigoley/remudero/pull/1985
+- W1-T918 → https://github.com/craigoley/remudero/pull/1982 (gate-side merge; run ended blocked_ci)
+- W1-T920 → https://github.com/craigoley/remudero/pull/1998
+- W1-T923 → https://github.com/craigoley/remudero/pull/2000
+- W1-T924 → https://github.com/craigoley/remudero/pull/2002 (gate-side merge; run ended blocked_ci)
+- W1-T925 → https://github.com/craigoley/remudero/pull/2011
+- W1-T929 → https://github.com/craigoley/remudero/pull/2006
+- W1-T930 → https://github.com/craigoley/remudero/pull/2008
+- W1-T931 → https://github.com/craigoley/remudero/pull/2013 (gate-side merge; run ended blocked_ci)
+- W1-T932 → https://github.com/craigoley/remudero/pull/2020 (gate-side merge; run ended incomplete)
+- W1-T936 → https://github.com/craigoley/remudero/pull/2026
 
 ## Next runnable task
 
-**W1-T905** — THE SWEEP REPAIRS THE INSTANCE AND NEVER FILES THE CLASS — every repair verb names a classified surface on its own `sweep.disposed` row and no recurring surface ever becomes a §7B feedback entry, so a category the fleet repairs fifteen times is rediscovered by hand each time
+**W1-T939** — nothing obligates a postmortem to leave a drill entry behind — `operator_impact: true` already forces a troubleshooting entry from the diff alone, and the identical rung for 'add it to the drill' does not exist, so the drill library only ever grows when somebody remembers
 
-- risk: high · depends_on: (none)
+- risk: high · depends_on: W1-T938
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
