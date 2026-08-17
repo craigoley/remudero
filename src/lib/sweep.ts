@@ -147,8 +147,12 @@ export type Disposition =
 
 /**
  * W1-T920 — a THREE-VALUED finding (design note iii): "unreadable" is a distinct outcome, never
- * collapsed into "unique". Only `"superseded"` may ever gate a close — see
- * {@link OpenPrView.supersessionVerdict} and the `DISPOSITION_RULES` row it feeds.
+ * collapsed into "unique". Only `"superseded"` may ever gate a CLOSE — see
+ * {@link OpenPrView.supersessionVerdict} and the `DISPOSITION_RULES` row it feeds. W1-T932:
+ * `"unique"` gained a SECOND, narrower consumer — a different `DISPOSITION_RULES` row may read
+ * it to let the bare-number `supersededBy` match YIELD (never to close anything itself; see that
+ * row's own doc and {@link SweepPolicy.conceptCoexistenceEnabled}) — so "never acts" below now
+ * describes `"indeterminate"` only, not `"unique"`.
  *
  *   - `"superseded"`  — another PR (open or merged) already covers this PR's task; evidence is
  *     REQUIRED (see {@link SupersessionEvidence}) — "superseded" alone is unauditable.
@@ -156,10 +160,9 @@ export type Disposition =
  *     "indeterminate": this is a POSITIVE finding, not a default.
  *   - `"indeterminate"` — the read itself failed or was inconclusive (a trailer scan threw, a diff
  *     query errored, a merged-by-trailer lookup was rate-limited, or the diff read back EMPTY with
- *     no corpus control to trust — design note iv). Behaves exactly like `"unique"` for the
- *     disposition (never acts), but is named separately so a caller can tell "checked, none found"
- *     from "could not check" — the same fail-open direction `readLiveState`'s `ok:false` already
- *     uses elsewhere in this module.
+ *     no corpus control to trust — design note iv). NEVER acts on any disposition — named
+ *     separately so a caller can tell "checked, none found" from "could not check", the same
+ *     fail-open direction `readLiveState`'s `ok:false` already uses elsewhere in this module.
  */
 export type SupersessionStatus = "superseded" | "unique" | "indeterminate";
 
@@ -422,6 +425,37 @@ export interface SweepPolicy {
    * for the row immediately below it, so it lives beside it.
    */
   supersessionDisposalEnabled: boolean;
+  /**
+   * W1-T932 — gates whether a `"unique"` {@link SupersessionVerdict} may let the BARE-NUMBER
+   * `stale` row in {@link DISPOSITION_RULES} YIELD, so a concept PR is not disposed stale merely
+   * because a higher-numbered sibling concept is also open (the arithmetic in `run-task.ts`'s
+   * `resolveOpenPrTaskId` sets `supersededBy` on EVERY lower-numbered peer sharing a task,
+   * unconditionally — see this task's own rationale (1)). `false` (the default) preserves
+   * today's behaviour byte-for-byte: the bare-number row matches on `supersededBy != null`
+   * alone, no matter what any verdict says.
+   *
+   * DELIBERATELY A SEPARATE FLAG FROM {@link supersessionDisposalEnabled} immediately above, not
+   * a second use of it: that flag governs whether a verdict may CLOSE a PR (row 0's own
+   * `"superseded"` match); this one governs whether a verdict may SAVE one from row 1's
+   * arithmetic instead. Two different blast radii — closing the wrong PR loses work outright,
+   * while wrongly sparing one merely leaves an ordinary duplicate open a sweep pass longer — so
+   * each gets its own row and its own gate (design note ii: "a guard that works for ordinary
+   * duplicate PRs must keep working").
+   *
+   * Reads ONLY `pr.supersessionVerdict?.status === "unique"` — the verdict's own POSITIVE
+   * "checked, found no supersession" finding (see {@link SupersessionStatus}'s own doc), never
+   * `"indeterminate"` (an unreadable read is not a finding, design note iii) and never an absent
+   * verdict. FAILS CLOSED: no verdict, or one whose `status` is not literally `"unique"`, leaves
+   * the bare-number row matching exactly as it does today — an ordinary duplicate PR (which
+   * carries no verdict at all) is still disposed stale by that row regardless of this flag.
+   *
+   * NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` (unlike
+   * `supersessionDisposalEnabled` above): this task's own declared file list is
+   * `src/lib/sweep.ts` + `test/sweep.test.ts` only, so this default lives as a hardcoded literal
+   * in {@link DEFAULT_SWEEP_POLICY} — mirrors how `pendingCeilingMinutes` (below) stays a
+   * literal rather than a collected policy row.
+   */
+  conceptCoexistenceEnabled: boolean;
 }
 
 /**
@@ -482,6 +516,9 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   repairFilingThreshold: POLICY_SWEEP.repairFilingThreshold,
   repairFilingWindowDays: POLICY_SWEEP.repairFilingWindowDays,
   supersessionDisposalEnabled: POLICY_SWEEP.supersessionDisposal,
+  // W1-T932: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
+  // literal, off, exactly like `pendingCeilingMinutes` above it in this same object.
+  conceptCoexistenceEnabled: false,
 };
 
 /**
@@ -607,18 +644,24 @@ export interface OpenPrView {
    * kind of IDENTITY match design note (ii) forbids relying on alone (the #1873/#1874 falsifier:
    * byte-identical titles and file lists, the better one decided by an ARGUED difference, never a
    * match). This field instead carries a REASON — evidence a detector is expected to have
-   * verified before ever claiming `"superseded"` — and the row it feeds reads ONLY `status`,
+   * verified before ever claiming `"superseded"` — and the rows it feeds read ONLY `status`,
    * never any of the PR's own fields, so two PRs identical in every OTHER respect are still
    * disposed however their OWN verdicts read.
    *
+   * TWO CONSUMER ROWS as of W1-T932, not one: the original CLOSE row (`status === "superseded"`,
+   * gated by `policy.supersessionDisposalEnabled`) and a second row that lets the bare-number
+   * `supersededBy` row YIELD when `status === "unique"`, gated separately by
+   * `policy.conceptCoexistenceEnabled` — see that field's own doc for why the gates are kept
+   * apart.
+   *
    * SCOPE (honest, mirrors how `pendingAnswer`/`isPlanFiling` shipped their mechanism ahead of
-   * their producer): this field, {@link SupersessionVerdict}, and its `DISPOSITION_RULES` row are
-   * the full MECHANISM, wired end-to-end and unit-tested here — but nothing in `run-task.ts`
+   * their producer): this field, {@link SupersessionVerdict}, and its `DISPOSITION_RULES` rows
+   * are the full MECHANISM, wired end-to-end and unit-tested here — but nothing in `run-task.ts`
    * populates it yet. THE DETECTOR (a trailer scan + diff comparison, per design note (iv)'s
    * corpus-control requirement) is a SEPARATE, out-of-scope shard (this task's own design note,
    * "WHAT MUST NOT BE BUILT") — `supersessionVerdict` is therefore always `undefined` in the real
-   * gateway today, so `sweep.supersessionDisposal` being ON changes nothing in production until
-   * that detector lands and wires a producer here. See `KNOWN_UNWIRED` (lib/producer-completeness.ts).
+   * gateway today, so neither flag being ON changes anything in production until that detector
+   * lands and wires a producer here. See `KNOWN_UNWIRED` (lib/producer-completeness.ts).
    */
   supersessionVerdict?: SupersessionVerdict;
   /** ISO-8601 timestamp of the PR's last activity (for the stale window). */
@@ -1582,7 +1625,15 @@ function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number):
  *      yet setting `supersessionVerdict` in the real gateway (a separate, out-of-scope detector
  *      shard), this row never matches in production regardless of the flag — see
  *      `OpenPrView.supersessionVerdict`'s own SCOPE note.
- *   1. SUPERSEDED  — a newer PR credits the same task: close regardless of review.
+ *   1. SUPERSEDED  — a newer PR credits the same task: close regardless of review. W1-T932: this
+ *      row now YIELDS (does not match) when `policy.conceptCoexistenceEnabled` is on AND this
+ *      PR's OWN `supersessionVerdict.status` reads `"unique"` — a detector's POSITIVE finding
+ *      that this PR is not actually superseded despite a higher-numbered peer sharing its task.
+ *      `false` (the default) and any other verdict shape (absent, `"indeterminate"`, or a
+ *      `"superseded"`/malformed one) leave this row matching exactly as before — an ordinary
+ *      duplicate PR, which carries no verdict at all, is untouched by this clause and is still
+ *      disposed stale here. See {@link SweepPolicy.conceptCoexistenceEnabled}'s own doc for why
+ *      this is a SEPARATE gate from row 0's `supersessionDisposalEnabled`.
  *   2. STALE       — no activity in >= policy.staleDays: abandoned, close.
  *   3. ANSWERED (W1-T78) — an operator answered a clarification question AND the
  *      answer-extended strike allowance is not itself exhausted -> blocked-fixable
@@ -1711,8 +1762,19 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
+    // W1-T932 — LETS THIS ROW YIELD, NEVER DISABLES IT (design note ii: "a guard that works for
+    // ordinary duplicate PRs must keep working"). An ordinary duplicate carries no
+    // `supersessionVerdict` at all, so the added clause below is false for it and this row
+    // matches exactly as it always has. Gated behind `conceptCoexistenceEnabled` — a SEPARATE
+    // flag from row 0's `supersessionDisposalEnabled` (see that field's own doc: different
+    // blast radii, one gate each). Reads ONLY `status === "unique"`, the verdict's own POSITIVE
+    // "checked, not superseded" finding (see {@link SupersessionStatus}'s own doc) — never
+    // `"indeterminate"` (an unreadable read is not a finding) and never an absent/malformed
+    // verdict: fail CLOSED, today's arithmetic-only behaviour is the default in every other case.
     disposition: "stale",
-    when: (pr) => pr.supersededBy != null,
+    when: (pr, policy) =>
+      pr.supersededBy != null &&
+      !(policy.conceptCoexistenceEnabled === true && pr.supersessionVerdict?.status === "unique"),
     reason: (pr) => `superseded-by #${pr.supersededBy}`,
   },
   {

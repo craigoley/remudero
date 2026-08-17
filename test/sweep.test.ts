@@ -467,6 +467,78 @@ test("W1-T920: the disposition records its evidence and its corpus control", () 
   assert.match(result.reason, /0 hunk/);
 });
 
+// ── W1-T932 — N concept PRs on one task must not kill each other by arithmetic ──────────────────
+
+test("W1-T932: a sibling concept survives a higher numbered peer", () => {
+  // The motivating shape: three concept PRs open one task. run-task.ts's arithmetic sets
+  // `supersededBy` on every lower-numbered peer unconditionally (rationale (1)) — here, a
+  // detector's OWN verdict positively asserts this PR is not actually superseded ("unique": the
+  // read completed and found no supersession), and the coexistence gate is ON.
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, conceptCoexistenceEnabled: true };
+  const siblingConcept = pr({
+    prNumber: 100,
+    supersededBy: 102, // a higher-numbered sibling concept PR is also open
+    supersessionVerdict: { status: "unique", detail: "argued distinct concept — not a duplicate" },
+  });
+  const result = deriveDisposition(siblingConcept, on, NOW);
+  assert.notEqual(result.disposition, "stale", "a 'unique' verdict + the gate on must let the bare-number row yield");
+  assert.doesNotMatch(result.reason, /superseded-by/);
+});
+
+test("W1-T932: an ordinary duplicate is still disposed stale", () => {
+  // Design note ii, verbatim: "a guard that works for ordinary duplicate PRs must keep working."
+  // An ordinary duplicate carries NO supersessionVerdict at all (no detector ever argued it is a
+  // distinct concept) — so even with the coexistence gate ON, the bare-number row must still
+  // fire exactly as it does today.
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, conceptCoexistenceEnabled: true };
+  const ordinaryDuplicate = pr({ prNumber: 100, supersededBy: 102 });
+  const result = deriveDisposition(ordinaryDuplicate, on, NOW);
+  assert.equal(result.disposition, "stale", "no verdict at all: the gate has nothing to act on, arithmetic still wins");
+  assert.match(result.reason, /superseded-by #102/);
+});
+
+test("W1-T932: an unreadable verdict changes no disposition", () => {
+  // Three-valued, not a falsy second value (mirrors W1-T920's own row 0 discipline): an
+  // "indeterminate" read is NOT a finding of coexistence and must not be collapsed into "unique".
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, conceptCoexistenceEnabled: true };
+  const indeterminate = pr({
+    prNumber: 100,
+    supersededBy: 102,
+    supersessionVerdict: { status: "indeterminate", detail: "diff query errored — rate limited" },
+  });
+  const withIndeterminate = deriveDisposition(indeterminate, on, NOW);
+  assert.equal(withIndeterminate.disposition, "stale", "indeterminate never lets the bare-number row yield");
+
+  // A malformed verdict (present but not literally "unique") behaves the same as absent — fail
+  // CLOSED, never guessing a finding the read cannot support.
+  const malformed = pr({ prNumber: 100, supersededBy: 102, supersessionVerdict: { status: "superseded" } as SupersessionVerdict });
+  assert.equal(deriveDisposition(malformed, on, NOW).disposition, "stale");
+
+  // And no verdict at all disposes IDENTICALLY to the indeterminate case — the same fail-open
+  // direction `readLiveState`'s `ok:false` already uses elsewhere in this module.
+  const absent = pr({ prNumber: 100, supersededBy: 102 });
+  assert.deepEqual(
+    deriveDisposition(indeterminate, on, NOW),
+    deriveDisposition(absent, on, NOW),
+    "an unreadable verdict disposes exactly like no verdict at all",
+  );
+});
+
+test("W1-T932: concept coexistence is off by default", () => {
+  assert.equal(DEFAULT_SWEEP_POLICY.conceptCoexistenceEnabled, false, "the flag defaults off");
+  // Even a 'unique' verdict must not save this PR while the flag sits at its shipped default —
+  // byte-for-byte today's arithmetic-only behaviour.
+  const siblingConcept = pr({
+    prNumber: 100,
+    supersededBy: 102,
+    supersessionVerdict: { status: "unique", detail: "argued distinct concept — not a duplicate" },
+  });
+  const withVerdict = deriveDisposition(siblingConcept, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(withVerdict.disposition, "stale", "flag off: a verdict alone never spares anything");
+  const withoutVerdict = deriveDisposition(pr({ prNumber: 100, supersededBy: 102 }), DEFAULT_SWEEP_POLICY, NOW);
+  assert.deepEqual(withVerdict, withoutVerdict, "flag off: a verdict must derive the identical disposition as no verdict at all");
+});
+
 test("deriveDisposition: failing review with strikes exhausted -> blocked-ambiguous", () => {
   const r = deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(r.disposition, "blocked-ambiguous");
