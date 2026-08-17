@@ -249,6 +249,181 @@ export function aggregateLearningsInjection(lines: LedgerLine[]): LearningsInjec
   };
 }
 
+// ── W1-T941: THE KNOWLEDGE BUDGET IS A DERIVED CAP, NOT A PICKED NUMBER ─────────────────────
+//
+// DEFAULT_KNOWLEDGE_BUDGET_CHARS (src/lib/learnings.ts) carried no derivation: 1800 was a
+// literal with no measurement behind it, while the observed effect was large (an
+// operator-reported spawn matched 16 entries and injected 3). The feedback that filed this
+// task said "measure, don't assume" — both halves already exist as machinery: PRESSURE is the
+// same `learnings.injected` ledger rows {@link aggregateLearningsInjection} above reads (not a
+// second traversal), joined against the corpus's own per-entry weight (a dropped COUNT alone,
+// which is all that aggregate totals, cannot size a char cap — the WEIGHT of what was refused
+// is the figure that matters); COST is the SAME cache arithmetic this file already exports
+// ({@link cacheHitRatio}) — §8A's stable-first/volatile-last ordering means only the Tier-1
+// block's own bytes are re-charged, so a marginal cap increase prices as `delta chars` at the
+// measured cache mix, never a whole-prompt re-render.
+
+/**
+ * One window's per-spawn DROPPED-FACT WEIGHT pressure (design note i): p50/p90 chars of
+ * matched-but-dropped fact the budget refused, per spawn — not a count, a WEIGHT.
+ */
+export interface KnowledgeBudgetPressure {
+  /** `learnings.injected` rows carrying at least one `dropped` id resolvable to a weight. */
+  spawnsMeasured: number;
+  /** Median per-spawn dropped-fact weight, in chars. */
+  droppedWeightP50: number;
+  /** 90th-percentile per-spawn dropped-fact weight, in chars — the figure {@link deriveKnowledgeBudgetCap} prices. */
+  droppedWeightP90: number;
+}
+
+/** Nearest-rank percentile (0 < p <= 100) over `values` — deterministic, dependency-free, and
+ *  exactly the two figures design note (i) asks for (p50, p90). Does not mutate `values`. */
+function percentile(values: number[], p: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.ceil((p / 100) * sorted.length);
+  const idx = Math.min(Math.max(rank - 1, 0), sorted.length - 1);
+  return sorted[idx];
+}
+
+/**
+ * PRESSURE SIDE (design note i): walks the SAME `learnings.injected` ledger rows {@link
+ * aggregateLearningsInjection} reads — not a second traversal shape — and for each row's
+ * `dropped` id array sums the matching chars out of `entryWeights` (an id -> weight lookup,
+ * e.g. src/lib/learnings.ts's `buildEntryWeightIndex` over the live corpus). An id absent from
+ * `entryWeights` (an entry since deleted/superseded/renamed) contributes zero — this is the
+ * best-available signal off the CURRENT corpus, not a perfect historical replay.
+ *
+ * `undefined` when no row has at least one resolvable dropped id — the same soft-compose
+ * convention {@link aggregateLearningsInjection}/{@link aggregateCacheHitTotals} keep above: no
+ * measurable pressure is a fact this function reports explicitly, never a fabricated zero.
+ */
+export function measureKnowledgeBudgetPressure(
+  lines: LedgerLine[],
+  entryWeights: Record<string, number>,
+): KnowledgeBudgetPressure | undefined {
+  const perSpawn: number[] = [];
+  for (const l of lines) {
+    if (l.step !== "learnings.injected" || !Array.isArray(l.dropped)) continue;
+    let weight = 0;
+    for (const id of l.dropped) {
+      if (typeof id === "string" && typeof entryWeights[id] === "number") weight += entryWeights[id];
+    }
+    if (weight > 0) perSpawn.push(weight);
+  }
+  if (perSpawn.length === 0) return undefined;
+  return {
+    spawnsMeasured: perSpawn.length,
+    droppedWeightP50: percentile(perSpawn, 50),
+    droppedWeightP90: percentile(perSpawn, 90),
+  };
+}
+
+/** English-text heuristic for pricing the marginal cap increase (design note ii): ~4 characters
+ *  per token. A deliberately coarse approximation — not a model-specific tokenizer count — same
+ *  as every other "roughly N tokens" figure this plan already estimates in. */
+export const CHARS_PER_TOKEN = 4;
+
+/**
+ * Below this many p90 dropped chars, the pressure is TRIVIAL (design note iv) — less than one
+ * typical dropped fact line (`entryBudgetWeight`'s rendered `- <fact> [src: learnings#<id>]`
+ * line is almost never under 40 chars even for the shortest real entry), so it is not worth
+ * pricing a raise over.
+ */
+export const TRIVIAL_DROPPED_WEIGHT_CHARS = 40;
+
+/**
+ * A derived recommendation for the knowledge-budget cap (design notes i-iv), carrying the
+ * INPUTS that produced it so the recommendation is auditable, not just the number.
+ */
+export interface KnowledgeBudgetDerivation {
+  currentCapChars: number;
+  pressure: KnowledgeBudgetPressure | undefined;
+  /** Proposed increase over `currentCapChars`, in chars — 0 unless `changed`. */
+  deltaChars: number;
+  /** `deltaChars` priced on the {@link CHARS_PER_TOKEN} heuristic. */
+  deltaTokens: number;
+  /** The {@link cacheHitRatio} the delta was priced at, or `undefined` when no cache-mix data was available to price it. */
+  cacheHitRatioUsed: number | undefined;
+  /** The cap this derivation recommends — equals `currentCapChars` unless `changed`. */
+  recommendedCapChars: number;
+  /** Whether this derivation recommends moving off `currentCapChars` at all. */
+  changed: boolean;
+  /** Human-readable justification — WHY changed is true/false, for the baseline file's record. */
+  reason: string;
+}
+
+/**
+ * THE derivation (design notes i-iv): combines {@link measureKnowledgeBudgetPressure}'s
+ * dropped-weight percentiles with `cacheMix` (any {@link CacheHitTokens} grain, e.g. a
+ * {@link CacheHitTotals} class/run total) to recommend a cap.
+ *
+ * "NO CHANGE" is explicitly legal and is the DEFAULT (design note iv) — this function only
+ * recommends raising the cap when BOTH: (a) p90 dropped weight is non-trivial (>=
+ * {@link TRIVIAL_DROPPED_WEIGHT_CHARS}), AND (b) there is cache-mix data to price the delta
+ * against (`cacheMix` is provided) — a non-trivial pressure with no cache data to price is left
+ * UNCHANGED too, because a raise that cannot be priced cannot be argued. When it does
+ * recommend raising, the new cap is `currentCapChars + droppedWeightP90` exactly (no headroom
+ * padding), so the baseline can be re-derived byte for byte from the same inputs.
+ */
+export function deriveKnowledgeBudgetCap(
+  pressure: KnowledgeBudgetPressure | undefined,
+  cacheMix: CacheHitTokens | undefined,
+  currentCapChars: number,
+): KnowledgeBudgetDerivation {
+  const cacheHitRatioUsed = cacheMix ? cacheHitRatio(cacheMix) : undefined;
+
+  if (!pressure) {
+    return {
+      currentCapChars,
+      pressure,
+      deltaChars: 0,
+      deltaTokens: 0,
+      cacheHitRatioUsed,
+      recommendedCapChars: currentCapChars,
+      changed: false,
+      reason: "no measurable dropped-fact weight in the window (no learnings.injected rows with a resolvable dropped id)",
+    };
+  }
+  if (pressure.droppedWeightP90 < TRIVIAL_DROPPED_WEIGHT_CHARS) {
+    return {
+      currentCapChars,
+      pressure,
+      deltaChars: 0,
+      deltaTokens: 0,
+      cacheHitRatioUsed,
+      recommendedCapChars: currentCapChars,
+      changed: false,
+      reason: `p90 dropped weight ${pressure.droppedWeightP90} chars is below the ${TRIVIAL_DROPPED_WEIGHT_CHARS}-char triviality floor`,
+    };
+  }
+  const deltaChars = pressure.droppedWeightP90;
+  const deltaTokens = Math.ceil(deltaChars / CHARS_PER_TOKEN);
+  if (cacheHitRatioUsed === undefined) {
+    return {
+      currentCapChars,
+      pressure,
+      deltaChars,
+      deltaTokens,
+      cacheHitRatioUsed,
+      recommendedCapChars: currentCapChars,
+      changed: false,
+      reason: `p90 dropped weight ${deltaChars} chars (${deltaTokens} tokens) is non-trivial, but no cache-mix data was available to price the delta — a raise that cannot be priced is not recommended`,
+    };
+  }
+  return {
+    currentCapChars,
+    pressure,
+    deltaChars,
+    deltaTokens,
+    cacheHitRatioUsed,
+    recommendedCapChars: currentCapChars + deltaChars,
+    changed: true,
+    reason:
+      `p90 dropped weight ${deltaChars} chars (${deltaTokens} tokens) priced at the measured ` +
+      `${(cacheHitRatioUsed * 100).toFixed(1)}% cache-hit ratio -- raising the cap by the measured pressure`,
+  };
+}
+
 export interface DigestSummary {
   sinceIso: string;
   merged: string[];
