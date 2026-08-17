@@ -2,7 +2,7 @@
   title: "a paused daemon exits for freshness before it ever reads state/PAUSE, so KeepAlive relaunches it into the same flag forever — PAUSE sits on the wrong side of the line STOP is already on"
   repo: remudero
   type: implement
-  verify: auto
+  verify: human
   risk: high
   principles: {tdd: strict}
   budget_usd: 30.00
