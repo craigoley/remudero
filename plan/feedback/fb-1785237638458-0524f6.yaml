@@ -17,5 +17,6 @@ raw: "TASK PRIORITY AS DATA — frontier order is tasks.yaml FILE ORDER (shards
   (early position ≠ priority)."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
