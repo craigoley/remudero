@@ -13,7 +13,7 @@
 //   4. the detector NEVER kills, signals, defers or strikes the run.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -293,6 +293,64 @@ test("runWorkerStallDetectorRung: no LIVE in-flight runs at all ⇒ no ledger to
     runWorkerStallDetectorRung("craigoley", "remudero", config, ledgerPath, "DAEMON-RUN", 60 * 60_000, NOOP_LOG, issues);
     assert.equal(issues.calls.length, 0);
     assert.deepEqual(readLedger(ledgerPath), []);
+  });
+});
+
+test("runWorkerStallDetectorRung: an unreadable tail (e.g. the tail path is itself a directory) degrades to '(no tail captured)' — the escalation still fires, never blocked by a bad tail read", () => {
+  withDir("worker-stall-tail-unreadable", (root) => {
+    const config = fakeConfig(root);
+    const ledgerPath = ledgerPathFor(config);
+    markLive(root, "W1-T1", "RUN-1");
+    const oldTs = new Date(Date.now() - 90 * 60_000).toISOString();
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({ ts: oldTs, run_id: "RUN-1", task_id: "W1-T1", step: WORKER_STATE_LEDGER_STEP, state: "quiet" }) + "\n",
+    );
+    // the tail PATH exists but is a directory, not a file — existsSync is true (so the early
+    // "absent" branch is skipped) but the readFileSync that follows throws (EISDIR), which is
+    // exactly the best-effort read's own catch branch this proves, not the "no file at all" one
+    // the earlier fire test already covers.
+    const runsDir = join(root, "state", "runs");
+    mkdirSync(join(runsDir, "RUN-1.tail"), { recursive: true });
+
+    const issues = fakeIssues();
+    assert.doesNotThrow(() =>
+      runWorkerStallDetectorRung("craigoley", "remudero", config, ledgerPath, "DAEMON-RUN", 60 * 60_000, NOOP_LOG, issues),
+    );
+    assert.equal(issues.calls.length, 1, "a bad tail read must never block the escalation itself (design note iv)");
+    assert.ok(
+      issues.calls[0].body.includes("(no tail captured)"),
+      "an unreadable tail degrades to the explicit 'no tail captured' marker, not a thrown error",
+    );
+  });
+});
+
+test("runWorkerStallDetectorRung: a real fs failure inside the rung (an unreadable inflight dir) is caught by its own try/catch and logged, never thrown out to the sweep hook around it", () => {
+  withDir("worker-stall-fs-throw", (root) => {
+    const config = fakeConfig(root);
+    const ledgerPath = ledgerPathFor(config);
+    markLive(root, "W1-T1", "RUN-1");
+    const inflightDir = join(root, "state", "inflight");
+    // 0o000 denies even the read+execute `readdirSync` needs to list `inflightDir`'s entries —
+    // a genuine fs failure INSIDE the try block, not a malformed-input case any inner function
+    // already swallows (readLedgerLines drops unparseable lines itself; this is the one layer
+    // above that has no such guard of its own).
+    chmodSync(inflightDir, 0o000);
+    const issues = fakeIssues();
+    const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const log = (step: string, extra?: Record<string, unknown>): void => {
+      logCalls.push({ step, extra });
+    };
+    try {
+      assert.doesNotThrow(() =>
+        runWorkerStallDetectorRung("craigoley", "remudero", config, ledgerPath, "DAEMON-RUN", 60 * 60_000, log, issues),
+      );
+      const errorCalls = logCalls.filter((c) => c.extra && "error" in c.extra);
+      assert.equal(errorCalls.length, 1, "the rung's own catch must log exactly the caught error, never crash the sweep hook around it");
+      assert.equal(issues.calls.length, 0, "a failure before judgement even runs must never file a spurious escalation");
+    } finally {
+      chmodSync(inflightDir, 0o755); // restore so withDir's own rmSync cleanup can traverse it
+    }
   });
 });
 
