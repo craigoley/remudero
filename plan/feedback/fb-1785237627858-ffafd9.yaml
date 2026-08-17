@@ -21,5 +21,6 @@ raw: "LIVE WORKER OBSERVABILITY — workers are opaque between spawn and verdict
   filing produces them."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null

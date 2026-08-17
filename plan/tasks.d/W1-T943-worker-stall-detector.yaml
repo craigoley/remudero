@@ -1,0 +1,88 @@
+- id: W1-T943
+  title: "A WORKER THAT HAS SAID NOTHING FOR AN HOUR REACHES NOBODY — the harness waits out the whole turn budget in silence, so quiet beyond a policy-data threshold must ledger worker.stalled ONCE and reach NEEDS ME with the last tail lines attached, and must NEVER kill the run"
+  repo: remudero
+  depends_on: ["W1-T942"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    FILED FROM fb-1785237627858-ffafd9 (2026-07-28, origin cli), item (2). W1-T942 produces the
+    states; this task is the only thing that JUDGES them.
+    A SENSOR NOBODY READS IS THE DEFECT THIS REPO KEEPS RE-FILING. W1-T316/W1-T317 (dispatch cap and
+    cost governor with no caller), W1-T916 (a guard never supplied its input) and W1-T929's own
+    framing ("ledgered but never read") are all the same shape: the signal exists, no consumer acts
+    on it. `worker.state` would join them the day it merges unless something is watching the clock.
+    THE COST OF SILENCE IS ALREADY MEASURED ELSEWHERE IN THE PLAN. W1-T465 documents five runs that
+    ended their turn awaiting a notification that a headless run can never receive — $29.85 and 411
+    turns for zero commits — and the fleet's only reaction was a `no_pr` verdict AFTER the fact. A
+    quiet-time signal is exactly what would have surfaced those five WHILE they were still running
+    and still cheap to stop.
+    THE THRESHOLD IS DATA, NOT A LITERAL. plan/policy.yaml is the fleet's policy-data home
+    (proofTimeoutMs, pollIntervalMs, sweep, drain, retro, headroom, costAnomaly …) read through
+    src/lib/policy.ts; a hard-coded minute count in src/ is the class W1-T330/W1-T331 already had to
+    unwind for the cost ceiling. Verified at filing: plan/policy.yaml carries NO worker-quiet row.
+  design: |
+    (i) LEVEL-TRIGGERED, DERIVED FROM THE ROW'S AGE — NOT AN EVENT THE WEDGED PROCESS MUST EMIT. The
+    detector reads the newest `worker.state` row for each LIVE in-flight run and compares its age to
+    the policy threshold. This direction is deliberate and is the W1-T130 polarity applied: a run
+    whose worker process is wedged, swapped or blocked on a dead socket may never emit anything
+    again, so a detector that waits for the run to announce its own stall cannot fire in exactly the
+    case it exists for. Liveness comes from the EXISTING `liveInflightRuns` read of
+    `state/inflight/*.lock` with its pid check (src/run-task.ts) — never a second, looser definition
+    of "in flight".
+    (ii) ONE ROW PER QUIET EPISODE, NOT ONE PER TICK. `worker.stalled` is appended ONCE when the
+    threshold is first crossed for a run and is not re-appended until that run has spoken again
+    (a later `worker.state` transition) — the escalation-dedup discipline W1-T195 established, here
+    keyed on run_id + the quiet-episode start. A per-tick row would turn NEEDS ME into wallpaper and
+    the operator would learn to skip it.
+    (iii) IT REACHES NEEDS ME THROUGH THE EXISTING ESCALATION MACHINERY (§4), never a second one, and
+    NEVER AS A BARE ALERT: the escalation names the observed evidence (run id, task id, how long
+    quiet, the last tail lines from `<root>/state/runs/<runId>.tail`) per W1-T186, and carries
+    ACTIONABLE OPTIONS — leave it running, or stop this run — because §4 refuses an escalation with no
+    options. The tail excerpt is capped at the attach site; a 2 MB issue body is its own outage.
+    (iv) IT NEVER ACTS ON THE RUN. No kill, no SIGTERM, no dispatch deferral, no strike, no budget
+    change. The feedback is explicit ("never auto-kill — the operator or a future paramedic verb
+    decides") and the repo has now paid six times for a bound firing on a healthy condition
+    (W1-T465's own count): a long compile, a 16-minute `--ci-parity` suite and a genuinely wedged
+    worker are indistinguishable from OUTSIDE, so the only safe act is to TELL SOMEONE.
+    (v) THE THRESHOLD ROW LIVES IN plan/policy.yaml under `workerStall`, read through
+    src/lib/policy.ts like every other row, with the same documented default and the same comment
+    discipline (the number's justification beside the number). Pick the default HIGH enough that a
+    known-long legitimate step — the ~16-minute `--ci-parity` suite W1-T463 measured — cannot trip it,
+    and say so in the comment; a first default that cries wolf gets the whole organ disabled.
+    (vi) EXPLICITLY OUT OF SCOPE: producing the states (W1-T942), rendering them (W1-T944/W1-T945),
+    any paramedic/kill/steer verb, and any change to turn budgets or dispatch governors.
+  acceptance:
+    - claim: "quiet beyond the policy threshold on a LIVE in-flight run appends worker.stalled, and the judgement is derived from the AGE of the newest worker.state row rather than from an event the wedged run must emit"
+      proof: "unit test: test/worker-stall-detector.test.ts"
+    - claim: "one worker.stalled per quiet episode — repeated ticks over the same silence append nothing further, and a run that speaks again re-arms the detector"
+      proof: "unit test: test/worker-stall-detector.test.ts"
+    - claim: "the escalation reaches NEEDS ME through the existing escalation machinery carrying the run id, the quiet duration, a CAPPED excerpt of the run's tail, and at least two actionable options — never a bare alert"
+      proof: "unit test: test/worker-stall-detector.test.ts"
+    - claim: "the detector NEVER kills, signals, defers or strikes the run — a stalled verdict changes nothing about the run's own lifecycle"
+      proof: "unit test: test/worker-stall-detector.test.ts"
+    - claim: "the threshold is a policy-data row, not a source literal"
+      proof: "grep: workerStall in plan/policy.yaml"
+  risk: high
+  origin: feedback#fb-1785237627858-ffafd9
+  plan_refs: ["§4", "§5D"]
+  files: [plan/policy.yaml, src/lib/policy.ts, src/lib/daemon.ts, test/worker-stall-detector.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high is Rule 19's SPAN (policy data + src/lib + test/). Blast radius argues DOWN hard: the
+    organ only ever appends a row and files an issue, and criterion 4 is the falsifier that keeps it
+    that way.
+    budget_usd 70 — one age comparison and one escalation call; the cost is the dedup fixture and the
+    defensible default.
+    THE CALL SITE IS DECLARED AS src/lib/daemon.ts BECAUSE THE DAEMON TICK IS THE FLEET'S EXISTING
+    LEVEL-TRIGGERED READER — RE-DERIVE IT FROM SOURCE BEFORE WIRING. If the honest seam turns out to be
+    the sweep pass or an escalate.ts helper, declare THAT path and drop any declared path left
+    untouched: inverseScopeUntouchedFiles fails a declared-but-untouched file just as
+    scopeViolationFiles fails an undeclared one.
+    depends_on W1-T942 is REAL, not stylistic: with no worker.state row in the ledger this detector
+    has nothing whose age it can measure, and shipping it first would be a guard with no input
+    (W1-T916's shape).
+    DELIBERATELY NOT DEPENDED ON: a paramedic/steering verb. None exists, and this task must not grow
+    one — the operator is the actuator in v1.
