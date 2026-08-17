@@ -87,6 +87,25 @@ export interface BoardRow extends StatusProjection {
    */
   liveSpendPending?: boolean;
   /**
+   * W1-T944: worker liveness, carried straight through from {@link StatusProjection.workerState}
+   * (deriveRunState's ledger scan — the SAME scan that produces `phase`/`startedAt`/`elapsedMs`
+   * above, never a second scan and never a client-side re-derivation). Re-declared here, beside
+   * the live spend fields, so the shape a NOW row actually renders is visible on ONE interface
+   * rather than only on the base projection it happens to inherit. Present only alongside `phase`
+   * (design note v — {@link isRunningRow}'s own `phase != null` definition governs, so a finished
+   * run's last known state can never linger as if current); absent while `phase` IS present means
+   * the run has emitted no `worker.state` row yet, and the console renders "state unknown" for
+   * that case rather than a blank or a healthy-looking default (design note iii).
+   */
+  workerState?: StatusProjection["workerState"];
+  /**
+   * ISO-8601 `ts` the run transitioned INTO its current `workerState` — carried straight through
+   * from {@link StatusProjection.workerStateSince}. Present only while `workerState === "quiet"`;
+   * the console ages a "quiet Nm" duration off it on the same 1s tick `elapsedMs` already uses
+   * (design note ii).
+   */
+  workerStateSince?: string;
+  /**
    * W1-T914 (feedback fb-1784901239119-1be356 clause c / fb-1784919225707-0fab8b): the row's
    * OWN `remudero-review` three-state, so a PR whose review has not run stops rendering
    * identically to one that passed. Present only alongside {@link StatusProjection.prUrl} — a

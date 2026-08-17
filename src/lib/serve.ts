@@ -2247,6 +2247,24 @@ export function renderShellHtml(
     const turns = t.liveTurns !== undefined ? \` / \${t.liveTurns} turns\` : "";
     return \` · spend: \${costLabel(t.liveSpendUsd)}\${turns}\`;
   }
+  // W1-T944: the NOW row's worker-liveness span, riding the SAME served BoardRow field
+  // (workerState/workerStateSince) phase/elapsed/spend already ride -- no second fetch, no
+  // client-side re-derivation of the state itself. Text always, never colour alone (design note
+  // iv): every branch below renders a WORD, and quiet's word is a DURATION ("quiet Nm") aged by
+  // tickElapsed() below off the SAME 1s clock elapsed already uses (design note ii). A row this
+  // is called for is ALREADY known in-flight (nowRowHtml only calls it for a \`t.phase\` row --
+  // design note v), so "no workerState" here means "no worker.state row yet", rendered as
+  // "state unknown" (design note iii) rather than a blank or a healthy-looking default.
+  function workerStateHtml(t) {
+    if (t.workerState === "quiet") {
+      const since = escapeHtml(t.workerStateSince ?? "");
+      return \` · worker: <span class="worker-state worker-quiet" data-worker-since="\${since}">quiet …</span>\`;
+    }
+    if (t.workerState === "working" || t.workerState === "tool-executing") {
+      return \` · worker: <span class="worker-state">\${escapeHtml(t.workerState)}</span>\`;
+    }
+    return \` · worker: <span class="worker-state worker-unknown">state unknown</span>\`;
+  }
   function nowRowHtml(t) {
     const key = statusColorKey(t);
     const threshold = phaseThresholdMs(t.phase);
@@ -2254,7 +2272,7 @@ export function renderShellHtml(
       \`<span class="task-id">\${escapeHtml(t.taskId)}</span>\${statusBadge(key)}\${liveIndicatorHtml()}\` +
       \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}" data-threshold-ms="\${threshold}">…</span>\` +
       \`<span class="anomaly-flag" hidden title="running longer than usual for this phase">⚠ long-running</span>\` +
-      \`\${liveSpendHtml(t)}\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
+      \`\${workerStateHtml(t)}\${liveSpendHtml(t)}\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
       rowChevronHtml()
     );
   }
@@ -2289,6 +2307,15 @@ export function renderShellHtml(
         const marker = row.querySelector(".anomaly-flag");
         if (marker) marker.hidden = !anomalous;
       }
+    });
+    // W1-T944: \`.worker-quiet[data-worker-since]\` ages "quiet Nm" the SAME way \`.elapsed\` ages
+    // elapsed above -- off THIS same 1s clock (design note ii), never a second timer. A frozen
+    // number here is exactly the "operator mistrusts the whole card" failure the design note
+    // warns against.
+    document.querySelectorAll(".worker-quiet[data-worker-since]").forEach((el) => {
+      const since = el.getAttribute("data-worker-since");
+      const quietMs = since ? now - Date.parse(since) : NaN;
+      el.textContent = Number.isFinite(quietMs) ? \`quiet \${formatElapsed(quietMs)}\` : "quiet";
     });
     // W1-T159: the GLANCE strip's anomaly banner and the daemon-health countdown both tick off
     // this SAME 1s clock -- never a second setInterval. The NOW-row anomaly flags above can flip
