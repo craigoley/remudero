@@ -24,5 +24,21 @@ raw: "NON-FUNCTIONAL COMPLIANCE PROGRAM — the gate wall is already strong
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2016
+summary:
+  headline: Six compliance gates missing; three are security risks
+  what_happened: Quality-gate audit found six gaps. Three are security-critical
+    (OSV-scanner silently skipping checks, no license or secrets-audit gates);
+    three are product-quality (perf-budget, A11Y, docs gates missing).
+  decision: Fix OSV-scanner skip and run secrets audit as P0; design license gate
+    as P0; defer A11Y, perf, and docs gates to next cycle.
+  options:
+    - label: Implement all six gates this cycle
+      consequence: Complete compliance but high delivery risk; likely delays or
+        partial rollout
+    - label: "Security-first: fix three security gaps now, defer others to next cycle"
+      consequence: Closes vulnerabilities within 1–2 weeks; remaining gates roll out
+        in 4–6 weeks without blocking deployment
+    - label: Defer all implementations to next cycle
+      consequence: Allows full design phase but leaves blind spots open; requires
+        interim manual code review
