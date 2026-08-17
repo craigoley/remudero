@@ -29,3 +29,96 @@ jobs:
         continue-on-error: true
         with:
           comment-summary-in-pr: always
+
+  # ── W1-T934: licence-only, BLOCKING gate (a strong-copyleft dep must not merge green) ───────
+  #
+  # A SECOND, DEDICATED job on the same pinned action, not a change to `dependency-review` above
+  # (design (iv)) — that job stays exactly as it is: warn-only, vulnerability + license findings
+  # both advisory-only by construction (`continue-on-error: true`). Promoting it wholesale would
+  # also silently promote its vulnerability arm to blocking and duplicate osv-scanner-pr.yml,
+  # reversing W1-T211's deliberate per-scanner advisory/blocking ruling as a side effect.
+  #
+  # `allow-licenses`, NEVER `deny-licenses` (design (ii)): the two are mutually exclusive
+  # (supplying both is a hard error), `deny-licenses` is deprecated upstream for possible removal,
+  # and a deny-list fails OPEN on every licence nobody thought to enumerate — the wrong shape for
+  # an ALLOWED-list with copyleft flagged as the consequence, not the enumeration.
+  #
+  # THE ALLOW-LIST, seeded exactly from the permissive family the originating feedback names
+  # (MIT / Apache-2.0 / BSD-2-Clause / BSD-3-Clause / ISC) and NOT silently widened (design (vi)).
+  # A `node_modules` scan of every installed package.json's `license` field on 2026-08-17 (301
+  # MIT, 28 ISC, 21 Apache-2.0, 3 BSD-3-Clause, 1 BSD-2-Clause, 1 0BSD — all five ON this list;
+  # plus, OUTSIDE it and reported rather than added: 2 MPL-2.0, 2 "SEE LICENSE IN LICENSE.md", 1
+  # "SEE LICENSE IN README.md", 1 Python-2.0, 1 CC-BY-4.0, 1 Unlicense, 1 BlueOak-1.0.0, 2
+  # "Apache-2.0 AND MIT" — 0 packages had no `license` field at all) is recorded in this PR's body,
+  # per design (vi). This job is diff-scoped (GitHub's own
+  # `/repos/{owner}/{repo}/dependency-graph/compare/{basehead}` API — verified against the pinned
+  # action's own `src/dependency-graph.ts` at this SHA — returns only dependencies ADDED or REMOVED
+  # between base and head, never the full tree), so none of those already-installed outliers can
+  # fail a PR that did not introduce them.
+  #
+  # THE UNKNOWN-LICENCE HOLE (design (iii)): verified against the PINNED action's own source at
+  # this exact SHA (action.yml, src/schemas.ts, src/config.ts) rather than assumed — NO
+  # `fail-on-unknown-license` input exists on this action, in this or any released version up to
+  # and including `main` as of 2026-08-17. That contradicts design (iii)'s named mechanism; the
+  # real behaviour, read from src/licenses.ts and src/main.ts at this SHA, is:
+  #   - a licence string that parses as valid SPDX but isn't on `allow-licenses` ("forbidden")
+  #     ALWAYS fails the job (`core.setFailed`, gated only by `warn-only`, which this job never
+  #     sets) — this is claim 1 (a strong-copyleft licence turns the gate red).
+  #   - a licence string present but NOT parseable as valid SPDX ("unresolved" — the vendor's own
+  #     term for "cannot be determined") ALWAYS fails the job UNCONDITIONALLY, per the action's own
+  #     code — this branch isn't even gated by `warn-only`. No extra flag is needed to close it.
+  #   - a dependency with NO licence string at all, and no resolvable licence via its source
+  #     repository either ("unlicensed"/`NOASSERTION`) is the ONE bucket the action itself never
+  #     fails on (`printNullLicenses` only logs it) — a genuine, verified vendor gap in this action
+  #     version, not a config a wrong flag name can fix. The follow-up step below closes it using
+  #     the action's OWN `invalid-license-changes` output (still diff-scoped, still not a bespoke
+  #     lockfile walker — design (i)) rather than papering over the gap.
+  license-review:
+    name: License Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: License Review
+        id: license-review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          vulnerability-check: false
+          license-check: true
+          allow-licenses: >-
+            MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC
+
+      # Runs even when the step above already failed (`if: always()`) — a forbidden/unresolved
+      # licence must not skip this check for the DIFFERENT "no licence at all" bucket, and a green
+      # step above must still be checked here before the job can pass.
+      - name: Fail on introduced dependencies with NO determinable licence, unless named with a reason
+        if: always()
+        env:
+          INVALID_LICENSE_CHANGES: ${{ steps.license-review.outputs.invalid-license-changes }}
+          # Packages the dependency graph could not attach ANY licence to (NOASSERTION/null),
+          # individually reviewed and exempted BY NAME with a reason (design (iii)) — empty today
+          # because the 2026-08-17 node_modules scan found zero such packages (see the job comment
+          # above). Add `{"name": "<pkg>", "reason": "<why>"}` per exemption, one per line (same
+          # one-entry-per-line convention as ci-gate.yml's REQUIRED/IGNORE, so concurrent additions
+          # append lines instead of colliding).
+          UNLICENSED_EXEMPTIONS: >-
+            []
+        run: |
+          set -euo pipefail
+          changes="${INVALID_LICENSE_CHANGES:-}"
+          if [ -z "${changes}" ]; then
+            echo "license-review: no invalid-license-changes output (step above did not run) — nothing to check."
+            exit 0
+          fi
+          unlicensed="$(jq -c '.unlicensed // []' <<< "${changes}")"
+          offenders="$(jq -c --argjson exempt "${UNLICENSED_EXEMPTIONS}" '
+            ($exempt | map(.name)) as $names
+            | [ .[] | select((.name as $n | $names | index($n)) == null) ]' <<< "${unlicensed}")"
+          offender_count="$(jq 'length' <<< "${offenders}")"
+          if [ "${offender_count}" -gt 0 ]; then
+            echo "::error::license-review: introduced dependencies with NO determinable licence, not named in UNLICENSED_EXEMPTIONS with a reason:"
+            jq -r '.[] | "  - \(.manifest) » \(.name)@\(.version) (licence: \(.license // "NOASSERTION"))"' <<< "${offenders}"
+            exit 1
+          fi
+          echo "license-review: no un-exempted, undeterminable-licence dependencies introduced."
