@@ -1,0 +1,129 @@
+- id: W1-T936
+  title: "a paused daemon exits for freshness before it ever reads state/PAUSE, so KeepAlive relaunches it into the same flag forever — PAUSE sits on the wrong side of the line STOP is already on"
+  repo: remudero
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "**THE PAUSE NEVER TOOK EFFECT BECAUSE THE FRESHNESS EXIT IS READ FIRST.** In `runDaemon`
+    (`src/lib/daemon.ts`) the tick order is `checkStop` -> `reloadPlan` -> the daily-cost-ceiling
+    reload -> `checkFreshness` -> `checkPause`. `deps.checkFreshness?.()` returning `{stale: true}`
+    logs `daemon_selfrestart_for_freshness` and RETURNS `summary(\"stale\")`; `daemonExitCode(\"stale\")`
+    is `DAEMON_EXIT_STALE` = 75. The `checkPause` block sits BELOW that return and is never reached.
+    Re-derived from source at 1c44f93 — the diagnosis is CONFIRMED, not assumed.
+
+    **THE CODE ALREADY KNOWS THIS IS WRONG, FOR STOP.** The freshness block's own comment says it is
+    placed 'directly after STOP — a hard STOP still wins outright, a deliberately halted fleet never
+    self-restarts for freshness — and before PAUSE/headroom/dispatch'. So the ordering is DELIBERATE
+    and PAUSE was deliberately left below it. The comment on the PAUSE block, eight lines later,
+    describes the exact outcome that placement now produces: 'PAUSE is an IN-PROCESS idle, never an
+    exit (the 2026-07-22 relaunch storm: returning here exited nonzero, and
+    KeepAlive{SuccessfulExit:false} relaunched into the same flag every ~10s until bootout)'. **THAT
+    STORM HAS RETURNED THROUGH A DIFFERENT DOOR.** The July fix stopped PAUSE itself from exiting; it
+    did not stop an earlier check from exiting while PAUSE was set.
+
+    **AND THE PREDICATE'S OWN STATED PRINCIPLE IS THE ONE BEING VIOLATED.**
+    `daemonFreshnessFromService` (`src/lib/self-sync.ts`) already refuses to report stale on a DIRTY
+    tree, and says why in terms: 'Restarting is only correct when a restart can actually CLEAR the
+    condition, and on a dirty tree it provably cannot.' A paused daemon on a checkout nothing
+    fast-forwards is the SAME family and was not enumerated: the restart cannot clear staleness
+    either, so the exit is a no-op that only pays the boot cost again.
+
+    **WHY THIS BITES ONE HOST AND NOT THE OTHER.** On the container, `deploy/entrypoint.sh` checks out
+    origin/main on EVERY boot, so a restart really does clear the condition and the loop self-limits.
+    On the mini nothing in the daemon's own boot fast-forwards its checkout: `serviceFreshnessGate`
+    (`src/run-task.ts`) only LEDGERS `daemon.stale_code` and runs `ensureInstallFresh` — it never
+    exits and never moves a ref — and `runDeployCycle` (`src/lib/deployer.ts`) fast-forwards only
+    behind a deploy trigger and an idle gap. So the condition persists and the exit repeats.
+
+    **THE ESCALATION SIDE WAS CORRECT NINE TIMES.** `detectDaemonCrashLoop` +
+    `escalateCrashLoop` opened nine `[BLOCKED] DAEMON` issues since 2026-08-14 — #2015, #2014, #2009,
+    #2007, #1915, #1884, #1818, #1809, #1806 — verified open via REST. #2015 records 40 boots inside
+    10 minutes at ~17s spacing. **THIS IS NOT A MISSING SIGNAL AND MUST NOT BE ANSWERED WITH ONE.**"
+  design: |
+    (i) SCOPE: ONE concern — move the PAUSE read ABOVE the freshness read in `runDaemon`, so a
+    deliberate hold is honoured before a restart decision is taken. NOT a change to the freshness
+    predicate, NOT a new ledger step, NOT a supervisor change, NOT a launchd change.
+    (ii) THE FRESHNESS EXIT IS NOT REMOVED AND NOT WEAKENED. It exists because a daemon ran stale for
+    ~13 hours reporting itself fresh. Under this change it is DEFERRED while paused and fires on the
+    first tick after `rmd resume` deletes the flag — the daemon still never dispatches on stale code,
+    because a paused daemon dispatches nothing at all.
+    (iii) THE ARGUMENT IS CONSISTENCY, NOT PREFERENCE. STOP and PAUSE are both deliberate operator
+    holds. STOP is already above the freshness exit and the comment there defends that placement. This
+    puts PAUSE on the same side, which is the smallest change that makes the two holds behave alike.
+    (iv) RANKED ALTERNATIVES, REJECTED, RECORDED SO THEY ARE NOT RE-PROPOSED. Suppressing the freshness
+    exit inside `daemonFreshnessFromService` reaches the same outcome but teaches a pure predicate
+    about fleet-control state and splits the hold logic across two modules. Teaching the deploy
+    supervisor about PAUSE is strictly larger — `src/lib/deployer.ts` references PAUSE zero times
+    against a control of 12 in `src/lib/fleet-control.ts` — and would not stop the daemon exiting on
+    its own. Neither is proposed here.
+    (v) THE ADJACENT DEFECT, NAMED AND NOT FILED HERE: an escalation cannot say WHICH HOST it
+    describes. `renderIssueBody` (`src/lib/escalate.ts`) emits Class/Task/Run/Head/Cause and no host
+    field, so #2015 carries only `Run: DAEMON-1786929845245` while counting boots from a different
+    machine's corpus. `os.hostname()` is already imported in six modules, so the absence is a choice
+    rather than a limitation. That is a SEPARATE concern and is deliberately out of this shard.
+    (vi) NAME THE CONSUMER OR DO NOT EMIT. This proposes no new emitter, no new route, no new queue and
+    no new ledger step. The consumer of this change is the daemon's own loop.
+  acceptance:
+    - claim: "a daemon whose checkout is behind origin/main idles instead of exiting while PAUSE is set"
+      proof: "unit test: W1-T936: a paused daemon never exits for freshness"
+    - claim: "the pause read is consulted before the freshness read on every tick"
+      proof: "unit test: W1-T936: PAUSE is read before the freshness check"
+    - claim: "the freshness restart still fires once the pause flag is gone"
+      proof: "unit test: W1-T936: clearing PAUSE lets the freshness exit fire"
+  origin: recon#daemon-pause-freshness-2026-08-17
+  plan_refs: ["W1-T126", "W1-T215", "W1-T915"]
+  files: [src/lib/daemon.ts, test/daemon-freshness.test.ts]
+  status: queued
+  attempts: 0
+  note: "**`risk: high` IS SET UP FRONT, AND THE BAND IS RULE 19'S *SPAN*, NOT BLAST RADIUS.** The
+    linter classes `src/lib/daemon.ts` and `test/daemon-freshness.test.ts` as two distinct concerns
+    (`daemon`, `daemon-freshness`) and refuses that pair at `risk:medium` — measured, not predicted:
+    the first lint of this shard returned exactly one violation, `[sizing] spans 2 distinct
+    subsystems/concerns (daemon, daemon-freshness) at risk:medium`. The pair is NOT decomposable,
+    because a guard and the suite that proves the guard are one concern in every sense but the
+    linter's. The actual blast radius is one reordering of two adjacent checks that both already exist
+    in that loop: no gate, disposition or policy value moves.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT (`git grep -cw`) AGAINST origin/main at 1c44f93.
+    `checkPause` scores `src/lib/daemon.ts` 4; `checkFreshness` scores `src/lib/daemon.ts` 5;
+    `daemon_selfrestart_for_freshness` scores `src/lib/daemon.ts` 3. `test/daemon-freshness.test.ts`
+    is the only suite scoring top on both freshness symbols (`checkFreshness` 10,
+    `daemon_selfrestart_for_freshness` 5) and it drives `runDaemon` directly 10 times, so the ordering
+    assertion belongs beside the STOP-vs-freshness test it already carries.
+    **`src/run-task.ts` IS DELIBERATELY NOT DECLARED**: it only WIRES `checkPause`/`checkFreshness`
+    into the deps object and the ordering being changed is not there — 103 of 277 shards declare it and
+    it serialises every task naming it (W1-T471). `src/lib/self-sync.ts` is NOT declared either: the
+    predicate is correct and is not being touched.
+
+    **THE COVERAGE GAP THAT LET THIS SHIP.** `test/daemon-freshness-wiring.test.ts` (54 `stale`
+    mentions) and `test/daemon-freshness.test.ts` (53) contain ZERO `pause` mentions, and the one
+    ordering assertion in `-wiring` pins only that an in-flight dispatch completes before the restart.
+    No test anywhere pins pause-against-freshness, which is why a reorder can be proved by a new test
+    rather than by re-reading the loop.
+
+    **ID PROVENANCE — FOUR SURFACES SWEPT AT 1c44f93, EACH WITH A KNOWN-TAKEN POSITIVE CONTROL.**
+    `refs/rmd-id/*` max 934 over 41 refs (control `refs/rmd-id/W1-T934` reads 1); shard FILENAMES on
+    origin/main max 934 over 315 files (control `W1-T933` reads 1); every OPEN PR's FILE LIST (#2018
+    adds `plan/tasks.d/W1-T935-...yaml`, #2013 adds 5 non-shard files); and every OPEN PR's TITLE —
+    **THE TITLE SWEEP IS WHAT FOUND W1-T935**, which #2018 holds and which neither the local shards nor
+    `refs/rmd-id/*` know about. Tree max is 934 and 935 is taken, so 936.
+    **THE RESERVATION DID NOT TAKE.** The `refs/rmd-id/W1-T936` push used a unique orphan commit over
+    the EMPTY TREE (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    `vm-19269-1786933078230009356`, the refspec braced, and the exit status captured into a variable
+    rather than read through a pipe: it FAILED with `HTTP 403`, exit 1. The readback confirms the ref
+    is ABSENT and does not carry our nonce, while the positive control `refs/rmd-id/W1-T934` reads 1
+    line. This host cannot write non-branch refs. **SO THIS ID RESTS ON THE FOUR-SURFACE SWEEP ALONE.**
+
+    PROOF NOTES: all three proofs are NAME-FILTERED titles, never pure paths, each under 100 characters
+    with ZERO commas and no `\"; \"` so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot
+    fail them, and each matches ZERO files today (`grep -rlF` over `test/`) against the control
+    `a hard STOP still wins outright over a pending freshness restart`, which matches exactly 1.
+
+    **WHAT THIS RECORD DOES NOT CLAIM.** It does not claim the freshness exit is wrong — it is right,
+    and removing it is explicitly out of scope. It does not claim the crash-loop detector failed: it
+    fired nine times and was correct every time. And it does not claim the five-day boot total is
+    known — `daemon.boot` is a health step retained only `HEALTH_STEP_RETENTION_WINDOW_MS` (15 minutes)
+    at rotation (`src/lib/ledger.ts`), so a live-file count of 252 is a FLOOR bounded by the last
+    rotation, not a five-day total, and the real figure needs the rotation union."
