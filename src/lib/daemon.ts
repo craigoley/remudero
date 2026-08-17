@@ -2079,12 +2079,34 @@ export async function runDaemon(
         log("daemon.cost_ceiling_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
       }
     }
-    // SELF-FRESHNESS (W1-T126): checked directly after STOP — a hard STOP still wins
-    // outright, a deliberately halted fleet never self-restarts for freshness — and
-    // before PAUSE/headroom/dispatch, so origin/main advancing past this process's own
-    // boot sha is noticed even while otherwise idle or paused. Never interrupts
-    // in-flight work: like `checkStop`/`checkPause`, this is only consulted between
-    // iterations. See `DaemonDeps.checkFreshness`'s doc for the full contract.
+    // PAUSE (W1-T11) is checked BEFORE SELF-FRESHNESS (W1-T936) — a deliberate operator
+    // hold must win against a restart decision, exactly like STOP already wins against it
+    // above. Before this reorder PAUSE sat below the freshness exit: a paused daemon on a
+    // checkout that never fast-forwards its own (nothing in the daemon's own boot moves its
+    // ref) hit `return summary("stale", ...)` on every tick, exited nonzero, and launchd's
+    // KeepAlive{SuccessfulExit:false} relaunched it straight back into the same PAUSE flag —
+    // the 2026-08-17 relaunch storm, the same shape as the 2026-07-22 storm PAUSE's own
+    // exit-vs-idle fix (below) already defends against, just arriving through the freshness
+    // check instead of PAUSE's own return. PAUSE is an IN-PROCESS idle, never an exit: one
+    // heartbeat per tick, sleep on the injected clock, re-poll — `rmd resume` deletes the
+    // flag and the very next tick of this SAME process proceeds, at which point
+    // SELF-FRESHNESS below fires immediately if origin/main moved while paused, so a stale
+    // checkout is never dispatched against — a paused daemon dispatches nothing at all.
+    // STOP (above) is still checked first, so a hard STOP still terminates a paused daemon
+    // cleanly (exit 0) instead of idling forever.
+    const paused = deps.checkPause?.();
+    if (paused) {
+      ticks++;
+      log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
+      await deps.sleep(pollIntervalMs);
+      continue;
+    }
+    // SELF-FRESHNESS (W1-T126): checked directly after STOP and PAUSE (W1-T936) — both are
+    // deliberate operator holds and both now win outright against a restart decision — and
+    // before headroom/dispatch, so origin/main advancing past this process's own boot sha is
+    // noticed on the very next tick where the daemon is neither stopped nor paused. Never
+    // interrupts in-flight work: like `checkStop`/`checkPause`, this is only consulted
+    // between iterations. See `DaemonDeps.checkFreshness`'s doc for the full contract.
     const freshness = deps.checkFreshness?.();
     if (freshness?.stale) {
       // W1-T151: install BEFORE the loop stops for restart — never after — so the
@@ -2098,20 +2120,6 @@ export async function runDaemon(
         `past this process's boot sha`;
       log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha });
       return summary("stale", detail);
-    }
-    // PAUSE is an IN-PROCESS idle, never an exit (the 2026-07-22 relaunch
-    // storm: returning here exited nonzero, and KeepAlive{SuccessfulExit:false}
-    // relaunched into the same flag every ~10s until bootout). Same shape as
-    // the headroom idle below: one heartbeat per tick, sleep on the injected
-    // clock, re-poll — `rmd resume` deletes the flag and the very next tick of
-    // this SAME process proceeds. STOP (above) is deliberately checked FIRST,
-    // so a hard STOP still terminates a paused daemon cleanly (exit 0).
-    const paused = deps.checkPause?.();
-    if (paused) {
-      ticks++;
-      log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
-      await deps.sleep(pollIntervalMs);
-      continue;
     }
 
     // CONSOLE "DRAIN NOW" (fb-1784988460437-9daa9b): consumed-once at the top of a
