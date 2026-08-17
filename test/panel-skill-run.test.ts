@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -254,6 +254,76 @@ test("groundClarifyRequest: against the SHIPPED .remudero/skills/plan.yaml + rea
   const masterPlanNote = notes.find((n) => n.source === "MASTER-PLAN.md");
   assert.ok(masterPlanNote, "expected a MASTER-PLAN.md grounding hit for W3-T8 (§5B names it directly)");
   assert.match(masterPlanNote!.excerpts.join("\n"), /W3-T8/);
+});
+
+// ── W1-T935: corrects W1-T933's framing (filed as its own record, W1-T933 not amended) and ──
+// widens `groundClarifyRequest` with a query + a source selector, refactoring the module's own
+// call site onto the wider signature. See plan/tasks.d/W1-T935-*.yaml for the full rationale.
+
+test("W1-T935: the correction cites the merged task instead of amending it", () => {
+  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const shardDir = join(repoRoot, "plan", "tasks.d");
+  const files = readdirSync(shardDir);
+  const w933 = files.find((f) => f.startsWith("W1-T933-"));
+  const w935 = files.find((f) => f.startsWith("W1-T935-"));
+  assert.ok(w933, "W1-T933's own shard must still exist on disk — merged, never deleted");
+  assert.ok(w935, "the correction must be filed as its own shard, not folded into W1-T933's");
+
+  const w933Body = readFileSync(join(shardDir, w933!), "utf8");
+  const w935Body = readFileSync(join(shardDir, w935!), "utf8");
+  // Standing rule 21 (`postMergeAmendmentViolations`, src/lib/task-linter.ts): a MERGED record is
+  // never edited in place to carry a later correction — W1-T933's own text must not reference
+  // W1-T935 at all.
+  assert.doesNotMatch(w933Body, /W1-T935/);
+  // The correction cites what it corrects instead of silently standing alone.
+  assert.match(w935Body, /W1-T933/);
+});
+
+test("W1-T935: the grounding lookup accepts a query", () => {
+  const root = tmpRoot();
+  writeSkillYaml(root, "plan"); // grounding_sources: [plan/tasks.yaml]
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "- id: W9-T9\n  title: unrelated\n  note: what do we know about diff-coverage\n");
+  const task = { id: "W9-T9", title: "unrelated" } as unknown as Task;
+
+  // Before W1-T935 the only key `groundClarifyRequest` could be asked was `task.id` — it could
+  // answer "which lines mention W9-T9" but had nowhere to put a different question.
+  const byTaskId = groundClarifyRequest(root, task);
+  assert.ok(!byTaskId.some((n) => n.excerpts.some((e) => e.includes("diff-coverage"))));
+
+  // A caller can now pass an explicit query instead — "what do we know about diff-coverage" —
+  // and get an answer to THAT question rather than only to "mentions of this task id".
+  const byQuery = groundClarifyRequest(root, task, "diff-coverage");
+  assert.equal(byQuery.length, 1);
+  assert.match(byQuery[0].excerpts[0], /diff-coverage/);
+});
+
+test("W1-T935: an undeclared source stays unsearched", () => {
+  const root = tmpRoot();
+  const dir = skillsDir(root);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "plan.yaml"),
+    "tools:\n  - Read\npermission_profile: implement\noutput_contract: a PR\ngrounding_sources:\n  - declared.md\ngate: ci\ntier: G-17\n",
+  );
+  writeFileSync(join(root, "declared.md"), "nothing relevant lives in this file\n");
+  // `undeclared.md` DOES contain a match for the query, but "plan.yaml" never names it under
+  // `grounding_sources` — a wider query parameter must not widen WHICH FILES get opened too.
+  writeFileSync(join(root, "undeclared.md"), "the target phrase is right here\n");
+  const task = { id: "irrelevant", title: "x" } as unknown as Task;
+
+  const notes = groundClarifyRequest(root, task, "the target phrase");
+  assert.deepEqual(notes, []);
+});
+
+test("W1-T935: the existing caller uses the wider signature", () => {
+  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const src = readFileSync(join(repoRoot, "src", "lib", "panel-skill-run.ts"), "utf8");
+  // `groundClarifyRequest`'s one production call site (buildRunSkillRoute's handler, per this
+  // module's own doc) must be refactored onto the wider (root, task, query, skillName) signature
+  // — naming the query and the skill explicitly — rather than left on the narrow 2-arg form the
+  // wider signature makes redundant.
+  assert.match(src, /groundClarifyRequest\(deps\.root,\s*task,\s*task\.id,\s*"plan"\)/);
 });
 
 // ── POST /v1/skills/run: scope + validation ──────────────────────────────────────────────────
