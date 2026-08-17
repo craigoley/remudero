@@ -17,5 +17,22 @@ raw: "RESILIENCE DRILL CADENCE — this week's incidents (binary husk, daemon
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2025
+summary:
+  headline: Establish periodic fault-injection drills to validate guards
+  what_happened: "Recent outages (binary husk, daemon crash-loop, rotation storm,
+    torn-review stalls) were caught by existing guards, but drills only happened
+    reactively after problems occurred. Proposal: schedule periodic automated
+    drills that deliberately inject known faults to test guards before live
+    incidents."
+  decision: Implement automatic periodic fault-injection drills to validate guard
+    systems.
+  options:
+    - label: Implement full cadence
+      consequence: Proactively tests guards every cycle; adds scheduler work and drill
+        library maintenance overhead.
+    - label: Pilot with limited scope
+      consequence: Tests concept with subset of failure modes; validates approach
+        before full rollout.
+    - label: Maintain reactive approach
+      consequence: No changes needed; guards remain tested only when incidents occur.
