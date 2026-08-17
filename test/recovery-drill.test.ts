@@ -21,6 +21,14 @@ const mod = (await import(DRILL_URL)) as {
   exerciseCircuitBreakerReset: (mode: "healthy" | "sabotaged", opts?: { maxDispatches?: number }) => ExerciseResult;
   exerciseDeployRollback: (mode: "healthy" | "sabotaged") => ExerciseResult;
   exerciseKeychainReprovision: (mode: "healthy" | "sabotaged", opts?: { faultStep?: string }) => ExerciseResult;
+  exerciseSpawnPreflightHusk: (
+    mode: "healthy" | "sabotaged",
+    opts?: { locations?: Array<{ label: string; resolve: () => string | undefined }> },
+  ) => ExerciseResult;
+  exerciseTornLedgerIndeterminate: (mode: "healthy" | "sabotaged", opts?: { maxDispatches?: number }) => ExerciseResult;
+  exerciseGithubGatewayDegrade: (mode: "healthy" | "sabotaged") => ExerciseResult;
+  exerciseDirtyTreeProceeds: (mode: "healthy" | "sabotaged") => ExerciseResult;
+  exerciseOrphanSweepSigkill: (mode: "healthy" | "sabotaged", opts?: { spawn?: (...args: unknown[]) => unknown }) => ExerciseResult;
   runDrill: (paths?: typeof mod.RECOVERY_PATHS) => {
     ok: boolean;
     results: Array<{
@@ -42,6 +50,11 @@ const {
   exerciseCircuitBreakerReset,
   exerciseDeployRollback,
   exerciseKeychainReprovision,
+  exerciseSpawnPreflightHusk,
+  exerciseTornLedgerIndeterminate,
+  exerciseGithubGatewayDegrade,
+  exerciseDirtyTreeProceeds,
+  exerciseOrphanSweepSigkill,
   runDrill,
   renderReport,
   main,
@@ -100,6 +113,71 @@ test("keychain re-provision: a failing add-generic-password throws a named Worke
   assert.equal(sabotaged.healthy, false, sabotaged.detail);
 });
 
+// ── W1-T938 — the SAME falsifier, both directions, for the five GUARDS that carried this fleet
+// through its past incidents but had never run on a cadence: the spawn preflight husk check, the
+// torn-ledger-tail indeterminate projection, the GitHub-gateway degrade, the dirty-tree PROCEED,
+// and the orphan sweep's real SIGKILL. ──────────────────────────────────────────────────────────
+
+test("spawn preflight husk: a real non-executable claude husk is refused with the EACCES reason class named, distinguishing it from a crashing binary", () => {
+  const healthy = exerciseSpawnPreflightHusk("healthy");
+  assert.equal(healthy.ran, true);
+  assert.equal(healthy.healthy, true, healthy.detail);
+});
+
+test("spawn preflight husk: an executability probe that swallows its errno (the pre-W1-T901 shape) loses the EACCES reason class — reported unhealthy", () => {
+  const sabotaged = exerciseSpawnPreflightHusk("sabotaged");
+  assert.equal(sabotaged.ran, true);
+  assert.equal(sabotaged.healthy, false, sabotaged.detail);
+});
+
+test("torn ledger tail: a real ledger file torn on disk mid-line, whose count regresses with no pr.opened to explain it, reads indeterminate — never a false clear", () => {
+  const healthy = exerciseTornLedgerIndeterminate("healthy");
+  assert.equal(healthy.ran, true);
+  assert.equal(healthy.healthy, true, healthy.detail);
+});
+
+test("torn ledger tail: a stale reader that never observed the tear masks the regression — reported unhealthy, the guard going quiet caught", () => {
+  const sabotaged = exerciseTornLedgerIndeterminate("sabotaged");
+  assert.equal(sabotaged.ran, true);
+  assert.equal(sabotaged.healthy, false, sabotaged.detail);
+});
+
+test("GitHub gateway degrade: a gateway that genuinely reports its read failed is marked indeterminate with a named reason — never rendered as a confirmed 'no PR'", () => {
+  const healthy = exerciseGithubGatewayDegrade("healthy");
+  assert.equal(healthy.ran, true);
+  assert.equal(healthy.healthy, true, healthy.detail);
+});
+
+test("GitHub gateway degrade: the same outage disguised as a successful empty read renders a false 'no PR' — reported unhealthy", () => {
+  const sabotaged = exerciseGithubGatewayDegrade("sabotaged");
+  assert.equal(sabotaged.ran, true);
+  assert.equal(sabotaged.healthy, false, sabotaged.detail);
+});
+
+test("dirty daemon tree proceeds: a real dirtied tracked file is ledgered as daemon.tree_dirty and the service call returns (proceeds), never refuses", () => {
+  const healthy = exerciseDirtyTreeProceeds("healthy");
+  assert.equal(healthy.ran, true);
+  assert.equal(healthy.healthy, true, healthy.detail);
+});
+
+test("dirty daemon tree proceeds: a predicate made to refuse instead of assess is caught — a refusal here is the crash-loop shape this guard exists to avoid", () => {
+  const sabotaged = exerciseDirtyTreeProceeds("sabotaged");
+  assert.equal(sabotaged.ran, true);
+  assert.equal(sabotaged.healthy, false, sabotaged.detail);
+});
+
+test("orphan sweep SIGKILL: a real spawned-then-SIGKILLed stray is reported killed AND independently re-verified dead via a real ps scan", () => {
+  const healthy = exerciseOrphanSweepSigkill("healthy");
+  assert.equal(healthy.ran, true);
+  assert.equal(healthy.healthy, true, healthy.detail);
+});
+
+test("orphan sweep SIGKILL: a no-op kill still reports 'killed' but the real process survives — a false clean caught by the independent re-check", () => {
+  const sabotaged = exerciseOrphanSweepSigkill("sabotaged");
+  assert.equal(sabotaged.ran, true);
+  assert.equal(sabotaged.healthy, false, sabotaged.detail);
+});
+
 // ── Each exercise's own "cannot run at all" branches, hit directly rather than only through
 // the orchestrator's synthetic-path tests below — these are the real fixture-init failure paths
 // (fixture dir creation, git absence, an unreachable breaker precondition, an unexpected
@@ -141,6 +219,53 @@ test("deploy rollback: git genuinely unavailable (PATH has none) is reported UNR
   } finally {
     process.env.PATH = originalPath;
   }
+});
+
+test("torn ledger tail: a fixture whose baseline never trips is reported UNREACHABLE, not silently skipped", () => {
+  // A maxDispatches far above the fixture's seven run.start lines means the FIRST (baseline)
+  // read never fires "tripped" — the guard this drill uses to refuse exercising a regression
+  // check whose prior observation was never armed in the first place.
+  const result = exerciseTornLedgerIndeterminate("healthy", { maxDispatches: 999 });
+  assert.equal(result.ran, false);
+  assert.match(result.reason ?? "", /did not first observe a tripped baseline/);
+});
+
+test("dirty daemon tree proceeds: git genuinely unavailable (PATH has none) is reported UNREACHABLE, not a false pass or a crash", () => {
+  const originalPath = process.env.PATH;
+  process.env.PATH = "";
+  try {
+    const result = exerciseDirtyTreeProceeds("healthy");
+    assert.equal(result.ran, false);
+    assert.match(result.reason ?? "", /git unavailable or fixture init failed/);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("spawn preflight husk: a candidate whose own resolve() throws surfaces as a raw (non-ClaudeToolchainBlockedError) throw — reported unhealthy by name, not mistaken for the husk refusal itself", () => {
+  const result = exerciseSpawnPreflightHusk("healthy", {
+    locations: [
+      {
+        label: "throws",
+        resolve: () => {
+          throw new Error("simulated resolve() failure, never the expected ClaudeToolchainBlockedError");
+        },
+      },
+    ],
+  });
+  assert.equal(result.ran, true);
+  assert.equal(result.healthy, false, result.detail);
+  assert.match(result.detail ?? "", /threw, but not the expected ClaudeToolchainBlockedError/);
+});
+
+test("orphan sweep SIGKILL: a spawn that throws (e.g. EPERM/ENOENT on the host) is reported UNREACHABLE, not a crash", () => {
+  const result = exerciseOrphanSweepSigkill("healthy", {
+    spawn: () => {
+      throw new Error("simulated spawn failure — no real child ever exists to leak");
+    },
+  });
+  assert.equal(result.ran, false);
+  assert.match(result.reason ?? "", /could not spawn a real throwaway child/);
 });
 
 test("keychain re-provision: sabotaging a DIFFERENT step (find-generic-password, a locked login keychain) still reports unhealthy — 'healthy' means the goal was reached, not merely which class was thrown", () => {
@@ -229,7 +354,7 @@ test("renderReport: an UNREACHABLE path's report line is textually distinct from
   assert.match(ranFailedBlock, /FAIL/);
 });
 
-test("main: exits 0 when every real recovery path discriminates healthy from sabotaged, and the report names all four", { timeout: 30_000 }, () => {
+test("main: exits 0 when every real path — recovery and guard alike — discriminates healthy from sabotaged, and the report names all nine", { timeout: 60_000 }, () => {
   const lines: string[] = [];
   const code = main({ log: (m) => lines.push(m) });
   const text = lines.join("\n");
@@ -240,7 +365,17 @@ test("main: exits 0 when every real recovery path discriminates healthy from sab
   assert.match(text, /^PASS/m);
 });
 
-test("RECOVERY_PATHS: exactly the four candidates the ruling names, each with a distinct key", () => {
+test("RECOVERY_PATHS: exactly the nine candidates the ruling names (four recovery paths, five guards), each with a distinct key", () => {
   const keys = RECOVERY_PATHS.map((p) => p.key).sort();
-  assert.deepEqual(keys, ["circuit-breaker-reset", "deploy-rollback", "keychain-reprovision", "stale-lock-reclaim"]);
+  assert.deepEqual(keys, [
+    "circuit-breaker-reset",
+    "deploy-rollback",
+    "dirty-tree-proceeds",
+    "github-gateway-degrade",
+    "keychain-reprovision",
+    "orphan-sweep-sigkill",
+    "spawn-preflight-husk",
+    "stale-lock-reclaim",
+    "torn-ledger-indeterminate",
+  ]);
 });

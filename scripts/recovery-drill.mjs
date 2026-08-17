@@ -46,15 +46,69 @@
  *
  * No candidate fails (c) — none is dropped from this drill.
  *
+ * THE POPULATION WIDENED (W1-T938): four RECOVERY paths were never the whole claim — a fleet
+ * also survives on its GUARDS, the refusals and degrades that never let a fault become an
+ * incident in the first place, and none of those had ever run on a cadence either, only in the
+ * incidents that discovered them. So this instrument's honest name is no longer "recovery
+ * paths" — it is THE PATHS THAT CARRY A FLEET PAST A FAILURE, recovery and guard alike, and the
+ * five entries below join the table on the SAME (a)/(b)/(c) qualification, never a second
+ * scheduler or a second drill:
+ *
+ *   5. SPAWN PREFLIGHT HUSK — worker.ts `resolveClaudeExecutable`'s executability probe (W1-T901).
+ *      (a) refuses cleanly, naming the EACCES reason, rather than crashing deep inside the SDK's
+ *          own spawn on a `claude` binary that exists but cannot run.
+ *      (b) the ordinary success path never probes a candidate that fails to execute at all.
+ *      (c) the thrown `ClaudeToolchainBlockedError`'s `searched[].cause.code` — independently
+ *          readable from the refusal itself, never re-derived.
+ *   6. TORN LEDGER TAIL -> INDETERMINATE — status.ts `evaluateDispatchBreakerDetailed`'s
+ *      count-REGRESSION branch (W1-T206), distinct from path 2's reset (see that exerciser's own
+ *      doc for why this is not a second copy of the same coverage).
+ *      (a) refuses to trust a freshly-computed count that fell with nothing in the ledger to
+ *          explain it, rather than reporting a false `"clear"` off a torn read.
+ *      (b) the ordinary success path only ever sees a count that holds or grows.
+ *      (c) the tri-state `"indeterminate"` verdict, re-derived fresh from a real ledger file torn
+ *          on disk mid-line.
+ *   7. GITHUB GATEWAY DEGRADE — status.ts `deriveStatus`'s W1-T119 fork: a genuinely failed
+ *      GitHub read must say the read could not decide, never a confirmed "no PR".
+ *      (a) marks the projection `indeterminate` with a named `unavailableReason`, rather than
+ *          silently rendering a gateway outage as ordinary absence.
+ *      (b) the ordinary success path never sets `readFailed()`.
+ *      (c) `indeterminate`/`unavailableReason`/`source`, read straight off the returned
+ *          projection.
+ *   8. DIRTY DAEMON TREE PROCEEDS — run-task.ts `serviceFreshnessGate` + self-sync.ts
+ *      `checkServiceFreshness` (W1-T255): the opposite of a recovery path, on purpose — the
+ *      service must LEDGER `daemon.tree_dirty` and keep running, never refuse.
+ *      (a) exists to survive the daemon's own uncommitted runtime exhaust without crash-looping
+ *          on every launchd restart (the #707 aftermath).
+ *      (b) the ordinary clean-tree success path never writes `daemon.tree_dirty` at all.
+ *      (c) the ledger line, independently re-read off disk, plus whether the call returned
+ *          (proceeded) or threw (refused).
+ *   9. ORPHAN SWEEP SIGKILL — worker-containment.ts `sweepOrphanWorkers` (W1-T117), driven
+ *      against a REAL spawned-then-SIGKILLed child, never a mocked process.
+ *      (a) terminates a stray survivor of an ended run so it cannot run unbounded past it.
+ *      (b) the ordinary success path never reaches an ended run's stray child at all.
+ *      (c) the pid's real liveness, independently re-polled with `isPidAlive` — never merely
+ *          trusted from the report's own `killed` list.
+ *
+ * SIGKILL MID-RUN's live/unattended twin (the crash-loop detector reacting to a daemon that
+ * itself got killed) is NOT built here — `detectDaemonCrashLoop` is already a pure function over
+ * `daemon.boot` timestamps with its own ledger-only wiring proof (test/daemon-crashloop-wiring.
+ * test.ts), so a real kill adds no coverage there, and the unattended live version is W1-T147's,
+ * not this one's.
+ *
  * NEVER TOUCHES A LIVE FLEET. Every exercise below runs against fixtures created fresh under
  * `os.tmpdir()` and torn down immediately after: a throwaway git repo pair (never the daemon's
- * real checkout) for the deploy rollback, a throwaway ledger file for the circuit breaker, a
- * throwaway lock file for the stale-lock reclaim, and a throwaway keychain store + a FAKE
- * `security(1)` runner (never the real binary, never the operator's real login keychain) for the
- * worker keychain. `launchctl`/`security`/network calls that would touch the real host are always
- * faked; git and the filesystem, which the fixture itself owns, are always real — "a rollback
- * covered only by tests that inject their own git seam proves the bookkeeping and not the
- * recovery" is this task's own rationale, so the git half here is never mocked.
+ * real checkout) for the deploy rollback AND the dirty-tree-proceeds entry, a throwaway ledger
+ * file for the circuit breaker AND the torn-ledger entry, a throwaway lock file for the
+ * stale-lock reclaim, a throwaway keychain store + a FAKE `security(1)` runner (never the real
+ * binary, never the operator's real login keychain) for the worker keychain, a real non-
+ * executable husk binary under a throwaway `$HOME` for the spawn preflight, a hand-built fake
+ * `GitHub` gateway for the degrade path, and a real throwaway child process (killed with a real
+ * `SIGKILL`, never a live daemon worker) for the orphan sweep. `launchctl`/`security`/network
+ * calls that would touch the real host are always faked; git, the filesystem, and the process
+ * table, which the fixture itself owns, are always real — "a rollback covered only by tests that
+ * inject their own git seam proves the bookkeeping and not the recovery" is this task's own
+ * rationale, so the git/fs/process half here is never mocked.
  *
  * DISCRIMINATES, ON PURPOSE (the falsifier this whole instrument exists to satisfy). Each
  * exercise runs TWICE per path: once against a HEALTHY fixture (the recovery precondition holds
@@ -73,16 +127,19 @@
  * NOT A REQUIRED CHECK, AND NOT A PR TRIGGER — see `.github/workflows/recovery-drill.yml`'s own
  * header for the polarity argument (mirrors clock-sweep.yml/mutation-nightly.yml).
  */
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { reclaimStaleLock } from "../src/lib/fs-race-safe.ts";
-import { createDispatchBreakerCache, evaluateDispatchBreaker } from "../src/lib/status.ts";
+import { createDispatchBreakerCache, deriveStatus, evaluateDispatchBreaker } from "../src/lib/status.ts";
 import { appendLedger } from "../src/lib/ledger.ts";
 import { ensureWorkerKeychain, workerKeychainPaths, WorkerKeychainError } from "../src/lib/worker-home.ts";
 import { readLastGoodBootSha, runDeployCycle } from "../src/lib/deployer.ts";
+import { ClaudeToolchainBlockedError, createClaudeExecutableCache, resolveClaudeExecutable } from "../src/lib/worker.ts";
+import { killProcessGroup, listProcessGroupMembers, sweepOrphanWorkers } from "../src/lib/worker-containment.ts";
+import { serviceFreshnessGate } from "../src/run-task.ts";
 
 /** One exercise's outcome: either it RAN (and is healthy or not), or it could not run at all —
  *  two shapes on purpose, so "ran and failed" is never confused with "could not even try". */
@@ -378,6 +435,358 @@ export function exerciseKeychainReprovision(mode, opts = {}) {
   });
 }
 
+// ── 5. Spawn preflight husk (worker.ts) ─────────────────────────────────────────────────────
+
+/**
+ * A real non-executable `claude` husk — the exact shape test/toolchain-refusal-errno.test.ts
+ * already builds (a real file, mode 0o644, no exec bit, regardless of umask) — pointed at as the
+ * ONLY resolvable candidate via `resolveClaudeExecutable`'s own injectable `locations`/`which`
+ * deps (env override and PATH both silenced so the fixture's husk is the sole candidate).
+ * `resolveClaudeExecutable`'s real `canExecute` probe is a genuine `execFileSync(path,
+ * ["--version"])` spawn (W1-T901): a non-executable file makes the OS itself refuse `execve` with
+ * `EACCES`, caught and named. HEALTHY: the real probe names `EACCES` on the thrown
+ * `ClaudeToolchainBlockedError`'s `searched[].cause.code`, distinguishing this husk from a binary
+ * that runs and crashes. SABOTAGED: `canExecute` swapped for the pre-W1-T901 `catch { return
+ * false }` shape — swallows the errno into a bare `false` — so the guard still refuses (the husk
+ * genuinely cannot run either way) but the refusal's reason class is lost, rendering a husk and a
+ * crasher indistinguishably, exactly the regression W1-T901 was filed to end.
+ */
+export function exerciseSpawnPreflightHusk(mode, opts = {}) {
+  return withFixtureDir("recovery-drill-husk-", (dir) => {
+    const huskPath = join(dir, "claude");
+    writeFileSync(huskPath, "#!/bin/sh\n# frozen mid-swap launcher, never finished writing\n".repeat(10));
+    chmodSync(huskPath, 0o644); // explicit: no exec bit, regardless of umask
+
+    const swallowingCanExecute = (path) => {
+      try {
+        execFileSync(path, ["--version"], { stdio: ["ignore", "ignore", "pipe"] });
+        return true;
+      } catch {
+        return false; // the pre-W1-T901 shape: swallows the errno, loses the reason class
+      }
+    };
+
+    const deps = {
+      env: {},
+      home: dir,
+      which: () => undefined, // never a real PATH lookup finding an unrelated real claude
+      // `opts.locations` is a fault-injection escape hatch (mirrors keychain-reprovision's own
+      // `opts.faultStep`) — the real RECOVERY_PATHS call site never passes it, so the drill's own
+      // scheduled run always exercises the genuine husk-vs-crasher distinction below. A test uses
+      // it to make a candidate's own `resolve` throw a RAW error, proving the "threw, but not the
+      // expected ClaudeToolchainBlockedError" branch is reported unhealthy rather than crashing
+      // the whole drill — distinct from the husk refusal itself, which always throws the named
+      // class.
+      locations: opts.locations ?? [{ label: "husk", resolve: () => huskPath }],
+      ...(mode === "sabotaged" ? { canExecute: swallowingCanExecute } : {}),
+    };
+
+    try {
+      resolveClaudeExecutable(createClaudeExecutableCache(), deps);
+      return ran(false, "resolveClaudeExecutable unexpectedly succeeded against a non-executable husk");
+    } catch (e) {
+      if (!(e instanceof ClaudeToolchainBlockedError)) {
+        return ran(false, `threw, but not the expected ClaudeToolchainBlockedError: ${String(e)}`);
+      }
+      const entry = e.searched?.find((s) => s.path === huskPath);
+      const namedEACCES = entry?.cause?.code === "EACCES";
+      return ran(namedEACCES, `existed=${entry?.existed} ran=${entry?.ran} cause.code=${entry?.cause?.code ?? "none"}`);
+    }
+  });
+}
+
+// ── 6. Torn ledger tail -> indeterminate (status.ts evaluateDispatchBreakerDetailed) ───────
+
+/**
+ * W1-T206's count-REGRESSION branch specifically (`evaluateDispatchBreakerDetailed`,
+ * status.ts:1540-1543) — checked against duplication with path 2 above (design's own
+ * requirement) and found DISTINCT, not a second copy: `exerciseCircuitBreakerReset`'s sabotage
+ * only ever drops the ledger's trailing `pr.opened` line, which never lowers `freshCount` below
+ * the cache's prior observation (it stays at the same tripped count), so that entry only ever
+ * proves "a torn read never falsely clears an already-tripped breaker" — the literal
+ * `"indeterminate"` verdict is never produced there. This entry drives the OTHER branch: a real
+ * ledger file torn on disk mid-line (a genuine crash-mid-write shape — see ledger.ts's own
+ * `appendLedger` doc), whose freshly-computed count REGRESSES below a real prior observation with
+ * no `pr.opened` in the fresh read to explain the drop. HEALTHY: the real (default) `ledgerFs`
+ * reads the genuinely shorter file and correctly reports `"indeterminate"` — DO NOT ACT, never a
+ * false `"clear"`. SABOTAGED: a `ledgerFs` whose read never observed the tear (a stale-reader
+ * class fault: it always returns the pre-tear bytes) so the regression the real bytes on disk
+ * would show is masked from the evaluator and the count never drops — the read silently missing
+ * the torn line, exactly the seam-misjudgment this entry exists to catch.
+ */
+export function exerciseTornLedgerIndeterminate(mode, opts = {}) {
+  // `opts.maxDispatches` defaults to evaluateDispatchBreaker's own DEFAULT_MAX_TASK_DISPATCHES
+  // (5) — the seven run.start lines below always trip it in real use. A test can override this
+  // to exercise the "fixture didn't first observe a tripped baseline" guard below
+  // deterministically, mirroring exerciseCircuitBreakerReset's own opts.maxDispatches escape
+  // hatch, without that guard ever firing in the drill's own real, unopinionated call.
+  const evalOpts = opts.maxDispatches !== undefined ? { maxDispatches: opts.maxDispatches } : {};
+  return withFixtureDir("recovery-drill-ledger-tear-", (dir) => {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const taskId = "RECOVERY-DRILL-TORN-TASK";
+    for (let i = 0; i < 7; i++) {
+      appendLedger(ledgerPath, { run_id: `drill-torn-${i}`, task_id: taskId, step: "run.start" });
+    }
+    const cache = createDispatchBreakerCache();
+    const baseline = evaluateDispatchBreaker(ledgerPath, taskId, cache, evalOpts);
+    if (baseline !== "tripped") {
+      return unreachable(`fixture did not first observe a tripped baseline (got "${baseline}") — cannot exercise the regression check`);
+    }
+
+    // Tear the ledger's real last line ON DISK — a genuine crash-mid-write shape, never a
+    // reimplementation of the guard's own torn-line detection (readLedgerLines' real JSON.parse
+    // catch does that work, exactly as it would for a real crash).
+    const pristine = readFileSync(ledgerPath, "utf8");
+    const lastLine = pristine.split("\n").filter((l) => l.length > 0).at(-1) ?? "";
+    const torn = pristine.slice(0, pristine.length - Math.ceil(lastLine.length / 2));
+    writeFileSync(ledgerPath, torn);
+
+    const ledgerFs =
+      mode === "healthy"
+        ? undefined // real fs: sees the genuinely torn tail on disk
+        : {
+            existsSync: (p) => existsSync(p),
+            readFileSync: () => pristine, // sabotaged: a stale reader that never observed the tear
+          };
+    const verdict = evaluateDispatchBreaker(ledgerPath, taskId, cache, { ...evalOpts, ...(ledgerFs ? { ledgerFs } : {}) });
+    return ran(verdict === "indeterminate", `post-tear verdict=${verdict} (want "indeterminate")`);
+  });
+}
+
+// ── 7. GitHub gateway degrade (status.ts deriveStatus) ──────────────────────────────────────
+
+function fakeGithub(overrides = {}) {
+  return {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => false,
+    ...overrides,
+  };
+}
+
+/**
+ * A hand-built `GitHub` gateway (the same fixture idiom test/status-blockers-live.test.ts already
+ * uses) fed straight into `deriveStatus` — never a real `gh` call. HEALTHY: the gateway genuinely
+ * reports the read failed (`readFailed() => true`, `readFailureReason() => "transport"`, the 500
+ * class), and `deriveStatus` must mark the projection `indeterminate` with that NAMED reason
+ * rather than resolve it as a confirmed "no PR" (W1-T119). SABOTAGED: the identical underlying
+ * outage arrives dressed as success — `readFailed() => false` with every lookup answering empty —
+ * so the read never surfaces as failed at all; the fault is the gateway failure "arriving as an
+ * empty-but-successful result", exactly the incident shape this guard exists to prevent (an
+ * outage silently rendered as "no PR" fact).
+ */
+export function exerciseGithubGatewayDegrade(mode) {
+  return withFixtureDir("recovery-drill-gh-gateway-", (dir) => {
+    const ledgerPath = join(dir, "ledger.ndjson"); // never written — an absent ledger reads fine
+    const task = {
+      id: "RECOVERY-DRILL-GH",
+      title: "recovery drill fixture task",
+      repo: "remudero",
+      depends_on: [],
+      type: "implement",
+      risk: "medium",
+      verify: "auto",
+      status: "queued",
+      attempts: 0,
+      pr: 999999,
+    };
+
+    const github =
+      mode === "healthy"
+        ? fakeGithub({ readFailed: () => true, readFailureReason: () => "transport" })
+        : fakeGithub({ readFailed: () => false, prByRef: () => null, findMergedByTrailer: () => null });
+
+    const proj = deriveStatus(task, { ledgerPath, github });
+    if (mode === "healthy") {
+      const healthy = proj.indeterminate === true && proj.unavailableReason === "transport" && proj.source !== "none";
+      return ran(healthy, `indeterminate=${proj.indeterminate} unavailableReason=${proj.unavailableReason} status=${proj.status} source=${proj.source}`);
+    }
+    // sabotaged: must be caught — a projection that renders the disguised outage as an ordinary,
+    // confirmed "no PR" (queued, source none, no indeterminate flag) is exactly the false clean
+    // this drill exists to notice.
+    const falseClean = proj.indeterminate !== true && proj.status === "queued" && proj.source === "none";
+    return ran(!falseClean, `indeterminate=${proj.indeterminate} status=${proj.status} source=${proj.source}`);
+  });
+}
+
+// ── 8. Dirty daemon tree proceeds (run-task.ts serviceFreshnessGate, self-sync.ts) ──────────
+
+/**
+ * A throwaway git checkout, one TRACKED file dirtied (the exact `-uno`-scoped shape
+ * `checkServiceFreshness` counts — test/self-sync.test.ts's own fixture idiom), driven through
+ * the REAL `serviceFreshnessGate`. This is a GUARD's opposite shape on purpose: the invariant is
+ * not "refuse", it is "never refuse" — a service crash-looping on its own uncommitted runtime
+ * exhaust was the #707 aftermath (self-sync.ts's own doc). HEALTHY: the real (unoverridden)
+ * `checkServiceFreshness` sees the genuine dirt, the gate LEDGERS `daemon.tree_dirty` (re-read
+ * off disk, never merely trusted from a non-throw), and — because the call returns rather than
+ * throwing — PROCEEDS. SABOTAGED: `checkServiceFreshness` swapped for a fixture that answers the
+ * way a regressed predicate would if it "refused" instead of assessing (throws) — a refusal here
+ * is exactly the nonzero exit `KeepAlive{SuccessfulExit:false}` turns into a crash loop, and this
+ * entry's job is to prove that regression would be caught, not silently pass.
+ *
+ * SCOPE FENCE: this entry owns ONE tracked-dirt shape exercised on a cadence; it does not rebuild
+ * W1-T924/W1-T925/W1-T926's operator-dirt topology/table and never edits
+ * scripts/operator-dirt-drill.mjs.
+ */
+export function exerciseDirtyTreeProceeds(mode) {
+  return withFixtureDir("recovery-drill-dirty-tree-", (dir) => {
+    let localDir;
+    try {
+      const originDir = join(dir, "origin.git");
+      execFileSync("git", ["init", "--quiet", "--bare", originDir], { stdio: ["ignore", "pipe", "pipe"] });
+      const seedDir = join(dir, "seed");
+      execFileSync("git", ["init", "--quiet", "-b", "main", seedDir], { stdio: ["ignore", "pipe", "pipe"] });
+      git(seedDir, ["config", "user.email", "recovery-drill@example.invalid"]);
+      git(seedDir, ["config", "user.name", "recovery-drill"]);
+      git(seedDir, ["remote", "add", "origin", originDir]);
+      writeFileSync(join(seedDir, "marker.txt"), "clean\n");
+      git(seedDir, ["add", "marker.txt"]);
+      git(seedDir, ["commit", "--quiet", "-m", "seed"]);
+      git(seedDir, ["push", "--quiet", "origin", "main"]);
+
+      localDir = join(dir, "local");
+      execFileSync("git", ["clone", "--quiet", "-b", "main", originDir, localDir], { stdio: ["ignore", "pipe", "pipe"] });
+      git(localDir, ["config", "user.email", "recovery-drill@example.invalid"]);
+      git(localDir, ["config", "user.name", "recovery-drill"]);
+      // Dirty ONE tracked file — the one shape checkServiceFreshness's `-uno` scan counts.
+      writeFileSync(join(localDir, "marker.txt"), "dirtied by recovery-drill fixture\n");
+    } catch (e) {
+      return unreachable(`git unavailable or fixture init failed: ${String(e?.message ?? e)}`);
+    }
+
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const cmd = "recovery-drill";
+    // `ensureInstallFresh` is a DIFFERENT W1-T151 concern (real npm install freshness) this entry
+    // is not about — stubbed out (in BOTH modes) so the fixture stays git-and-fs-only, like every
+    // other exercise in this file, and never shells out to a real `npm ci` against a bare fixture
+    // checkout with no package.json.
+    const deps = {
+      ledgerPath,
+      ensureInstallFresh: () => false,
+      ...(mode === "sabotaged"
+        ? {
+            checkServiceFreshness: () => {
+              throw new Error("simulated predicate refusal (recovery-drill fixture: the seam made to refuse rather than proceed)");
+            },
+          }
+        : {}),
+    };
+    let thrown;
+    try {
+      serviceFreshnessGate(
+        cmd,
+        localDir,
+        {}, // never real process.env — an empty env keeps isCiEnv/SELF_SYNC_GUARD_ENV both unset
+        deps,
+      );
+    } catch (e) {
+      thrown = e;
+    }
+
+    if (mode === "healthy") {
+      const lines = existsSync(ledgerPath)
+        ? readFileSync(ledgerPath, "utf8")
+            .split("\n")
+            .filter((l) => l.trim().length > 0)
+            .map((l) => JSON.parse(l))
+        : [];
+      const ledgered = lines.some((l) => l.step === "daemon.tree_dirty" && l.task_id === cmd.toUpperCase());
+      const healthy = !thrown && ledgered;
+      return ran(healthy, thrown ? `unexpectedly refused: ${String(thrown.message ?? thrown)}` : `ledgered=${ledgered}`);
+    }
+    // sabotaged: the injected refusal MUST be caught (a refused service is the crash-loop shape
+    // the daemon's freshness gate exists to avoid producing).
+    return ran(!thrown, thrown ? `caught the injected refusal: ${String(thrown.message ?? thrown)}` : "unexpectedly proceeded despite the injected refusal");
+  });
+}
+
+// ── 9. Orphan sweep SIGKILL (worker-containment.ts sweepOrphanWorkers) ──────────────────────
+
+/**
+ * Synchronous poll for a real pid's death — `sweepOrphanWorkers`'s exercisers below never trust
+ * the report alone, so this re-checks the OS directly, bounded, never a fixed sleep.
+ *
+ * Deliberately `listProcessGroupMembers` (a real `ps` scan, ZOMBIE-EXCLUDING per its own doc)
+ * rather than `isPidAlive` (`kill(pid, 0)`): `kill(pid, 0)` still succeeds against a zombie —
+ * exited, but not yet reaped — and reaping is Node's OWN async SIGCHLD handling, which a
+ * SYNCHRONOUS `Atomics.wait` busy-loop starves by construction (this drill's exercise functions
+ * are sync, matching the orchestrator's un-awaited `p.exercise(mode)` call). Polling via `ps`
+ * sidesteps that deadlock entirely: a zombie already reads as gone.
+ */
+function awaitProcessGroupGoneSync(pid, timeoutMs = 5000) {
+  const buf = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + timeoutMs;
+  while (listProcessGroupMembers(pid).length > 0 && Date.now() < deadline) {
+    Atomics.wait(buf, 0, 0, 25);
+  }
+  return listProcessGroupMembers(pid).length === 0;
+}
+
+/**
+ * A REAL throwaway child process (`sleep 300`, detached so its own pid is its own process-group
+ * leader — the shape `killProcessGroup`'s `-pid` signal targets), attributed as belonging to an
+ * ENDED run via seeded (never `ps`-scanned) `listCandidates`/`readMarkers` — `ps` output parsing
+ * is not this entry's fault surface, real termination is. HEALTHY: the real `killProcessGroup`
+ * sends a real `SIGKILL`; the report names the pid killed AND the process group is independently
+ * re-polled empty via a real `ps` scan — never merely trusted from the report's own `killed`
+ * list. SABOTAGED: `kill` swapped for a no-op — the sweep's attribution logic still runs and
+ * still LEDGERS `worker_orphan_killed` as if termination happened, but the real process
+ * survives: a false clean, exactly the shape this entry exists to catch (a sweep that reports
+ * success without actually ending the stray). The real child is unconditionally reaped in a
+ * `finally`, regardless of mode, so a sabotaged run never leaks a live process past this drill.
+ */
+export function exerciseOrphanSweepSigkill(mode, opts = {}) {
+  return withFixtureDir("recovery-drill-orphan-", (dir) => {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    // `opts.spawn` is a fault-injection escape hatch (mirrors the husk entry's own
+    // `opts.locations`) — the real RECOVERY_PATHS call site never passes it, so the drill's own
+    // scheduled run always spawns a genuine throwaway child. A test uses it to make the spawn
+    // itself throw, proving the "could not spawn a real throwaway child" UNREACHABLE branch is
+    // reported rather than crashing the whole drill.
+    const spawnFn = opts.spawn ?? spawn;
+    let child;
+    try {
+      child = spawnFn("/bin/sh", ["-c", "sleep 300"], { detached: true, stdio: "ignore" });
+    } catch (e) {
+      return unreachable(`could not spawn a real throwaway child: ${String(e?.message ?? e)}`);
+    }
+    const pid = child.pid;
+    if (!pid) return unreachable("spawned child reported no pid");
+    child.unref();
+
+    try {
+      const runId = "recovery-drill-orphan-run";
+      const taskId = "RECOVERY-DRILL-ORPHAN";
+      const report = sweepOrphanWorkers({
+        listCandidates: () => [{ pid, cmdline: "sleep 300 (recovery-drill fixture)" }],
+        readMarkers: (p) => (p === pid ? { runId, taskId } : undefined),
+        isRunActive: () => false, // the run this pid belongs to has already ended
+        kill: mode === "healthy" ? (p) => killProcessGroup(p) : () => {}, // sabotaged: reports killed, never actually signals
+        ledger: (line) =>
+          appendLedger(ledgerPath, {
+            run_id: line.run_id,
+            task_id: line.task_id,
+            step: "worker_orphan_killed",
+            pid: line.pid,
+            cmdline: line.cmdline,
+          }),
+      });
+
+      const reportedKilled = report.killed.some((k) => k.pid === pid);
+      const actuallyDead = awaitProcessGroupGoneSync(pid, mode === "healthy" ? 5000 : 500);
+      if (mode === "healthy") {
+        return ran(reportedKilled && actuallyDead, `reported-killed=${reportedKilled} actually-dead=${actuallyDead}`);
+      }
+      const falseClean = reportedKilled && !actuallyDead;
+      return ran(!falseClean, `reported-killed=${reportedKilled} actually-dead=${actuallyDead}`);
+    } finally {
+      killProcessGroup(pid); // best-effort real cleanup, regardless of mode or outcome above
+    }
+  });
+}
+
 // ── The drill orchestrator ──────────────────────────────────────────────────────────────────
 
 export const RECOVERY_PATHS = [
@@ -400,6 +809,31 @@ export const RECOVERY_PATHS = [
     key: "keychain-reprovision",
     label: "worker keychain re-provision (worker-home.ts ensureWorkerKeychain, fixture security runner)",
     exercise: exerciseKeychainReprovision,
+  },
+  {
+    key: "spawn-preflight-husk",
+    label: "spawn preflight husk (worker.ts resolveClaudeExecutable, real non-executable husk fixture)",
+    exercise: exerciseSpawnPreflightHusk,
+  },
+  {
+    key: "torn-ledger-indeterminate",
+    label: "torn ledger tail -> indeterminate (status.ts evaluateDispatchBreakerDetailed, real torn ledger fixture)",
+    exercise: exerciseTornLedgerIndeterminate,
+  },
+  {
+    key: "github-gateway-degrade",
+    label: "GitHub gateway degrade (status.ts deriveStatus, fixture gateway)",
+    exercise: exerciseGithubGatewayDegrade,
+  },
+  {
+    key: "dirty-tree-proceeds",
+    label: "dirty daemon tree proceeds (run-task.ts serviceFreshnessGate, real throwaway git fixture)",
+    exercise: exerciseDirtyTreeProceeds,
+  },
+  {
+    key: "orphan-sweep-sigkill",
+    label: "orphan sweep SIGKILL (worker-containment.ts sweepOrphanWorkers, real killed child fixture)",
+    exercise: exerciseOrphanSweepSigkill,
   },
 ];
 
