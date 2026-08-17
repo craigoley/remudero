@@ -21,11 +21,14 @@ const mod = (await import(DRILL_URL)) as {
   exerciseCircuitBreakerReset: (mode: "healthy" | "sabotaged", opts?: { maxDispatches?: number }) => ExerciseResult;
   exerciseDeployRollback: (mode: "healthy" | "sabotaged") => ExerciseResult;
   exerciseKeychainReprovision: (mode: "healthy" | "sabotaged", opts?: { faultStep?: string }) => ExerciseResult;
-  exerciseSpawnPreflightHusk: (mode: "healthy" | "sabotaged") => ExerciseResult;
+  exerciseSpawnPreflightHusk: (
+    mode: "healthy" | "sabotaged",
+    opts?: { locations?: Array<{ label: string; resolve: () => string | undefined }> },
+  ) => ExerciseResult;
   exerciseTornLedgerIndeterminate: (mode: "healthy" | "sabotaged", opts?: { maxDispatches?: number }) => ExerciseResult;
   exerciseGithubGatewayDegrade: (mode: "healthy" | "sabotaged") => ExerciseResult;
   exerciseDirtyTreeProceeds: (mode: "healthy" | "sabotaged") => ExerciseResult;
-  exerciseOrphanSweepSigkill: (mode: "healthy" | "sabotaged") => ExerciseResult;
+  exerciseOrphanSweepSigkill: (mode: "healthy" | "sabotaged", opts?: { spawn?: (...args: unknown[]) => unknown }) => ExerciseResult;
   runDrill: (paths?: typeof mod.RECOVERY_PATHS) => {
     ok: boolean;
     results: Array<{
@@ -237,6 +240,32 @@ test("dirty daemon tree proceeds: git genuinely unavailable (PATH has none) is r
   } finally {
     process.env.PATH = originalPath;
   }
+});
+
+test("spawn preflight husk: a candidate whose own resolve() throws surfaces as a raw (non-ClaudeToolchainBlockedError) throw — reported unhealthy by name, not mistaken for the husk refusal itself", () => {
+  const result = exerciseSpawnPreflightHusk("healthy", {
+    locations: [
+      {
+        label: "throws",
+        resolve: () => {
+          throw new Error("simulated resolve() failure, never the expected ClaudeToolchainBlockedError");
+        },
+      },
+    ],
+  });
+  assert.equal(result.ran, true);
+  assert.equal(result.healthy, false, result.detail);
+  assert.match(result.detail ?? "", /threw, but not the expected ClaudeToolchainBlockedError/);
+});
+
+test("orphan sweep SIGKILL: a spawn that throws (e.g. EPERM/ENOENT on the host) is reported UNREACHABLE, not a crash", () => {
+  const result = exerciseOrphanSweepSigkill("healthy", {
+    spawn: () => {
+      throw new Error("simulated spawn failure — no real child ever exists to leak");
+    },
+  });
+  assert.equal(result.ran, false);
+  assert.match(result.reason ?? "", /could not spawn a real throwaway child/);
 });
 
 test("keychain re-provision: sabotaging a DIFFERENT step (find-generic-password, a locked login keychain) still reports unhealthy — 'healthy' means the goal was reached, not merely which class was thrown", () => {

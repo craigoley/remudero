@@ -451,7 +451,7 @@ export function exerciseKeychainReprovision(mode, opts = {}) {
  * genuinely cannot run either way) but the refusal's reason class is lost, rendering a husk and a
  * crasher indistinguishably, exactly the regression W1-T901 was filed to end.
  */
-export function exerciseSpawnPreflightHusk(mode) {
+export function exerciseSpawnPreflightHusk(mode, opts = {}) {
   return withFixtureDir("recovery-drill-husk-", (dir) => {
     const huskPath = join(dir, "claude");
     writeFileSync(huskPath, "#!/bin/sh\n# frozen mid-swap launcher, never finished writing\n".repeat(10));
@@ -470,7 +470,14 @@ export function exerciseSpawnPreflightHusk(mode) {
       env: {},
       home: dir,
       which: () => undefined, // never a real PATH lookup finding an unrelated real claude
-      locations: [{ label: "husk", resolve: () => huskPath }],
+      // `opts.locations` is a fault-injection escape hatch (mirrors keychain-reprovision's own
+      // `opts.faultStep`) — the real RECOVERY_PATHS call site never passes it, so the drill's own
+      // scheduled run always exercises the genuine husk-vs-crasher distinction below. A test uses
+      // it to make a candidate's own `resolve` throw a RAW error, proving the "threw, but not the
+      // expected ClaudeToolchainBlockedError" branch is reported unhealthy rather than crashing
+      // the whole drill — distinct from the husk refusal itself, which always throws the named
+      // class.
+      locations: opts.locations ?? [{ label: "husk", resolve: () => huskPath }],
       ...(mode === "sabotaged" ? { canExecute: swallowingCanExecute } : {}),
     };
 
@@ -730,12 +737,18 @@ function awaitProcessGroupGoneSync(pid, timeoutMs = 5000) {
  * success without actually ending the stray). The real child is unconditionally reaped in a
  * `finally`, regardless of mode, so a sabotaged run never leaks a live process past this drill.
  */
-export function exerciseOrphanSweepSigkill(mode) {
+export function exerciseOrphanSweepSigkill(mode, opts = {}) {
   return withFixtureDir("recovery-drill-orphan-", (dir) => {
     const ledgerPath = join(dir, "ledger.ndjson");
+    // `opts.spawn` is a fault-injection escape hatch (mirrors the husk entry's own
+    // `opts.locations`) — the real RECOVERY_PATHS call site never passes it, so the drill's own
+    // scheduled run always spawns a genuine throwaway child. A test uses it to make the spawn
+    // itself throw, proving the "could not spawn a real throwaway child" UNREACHABLE branch is
+    // reported rather than crashing the whole drill.
+    const spawnFn = opts.spawn ?? spawn;
     let child;
     try {
-      child = spawn("/bin/sh", ["-c", "sleep 300"], { detached: true, stdio: "ignore" });
+      child = spawnFn("/bin/sh", ["-c", "sleep 300"], { detached: true, stdio: "ignore" });
     } catch (e) {
       return unreachable(`could not spawn a real throwaway child: ${String(e?.message ?? e)}`);
     }
