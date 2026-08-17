@@ -801,6 +801,15 @@ export interface SpawnWorkerArgs {
    * thrown-error verdict path, with no real claude binary involved.
    */
   queryFn?: typeof query;
+  /**
+   * W1-T942 (design note i): forwarded VERBATIM to {@link collectWorkerResult}'s own
+   * `streamObserver` — the ONE seam that turns the SDK message stream this call already
+   * consumes into per-message `working`/`tool-executing`/heartbeat events. Omitted (every
+   * caller before this task) ⇒ byte-identical behavior. run-task.ts wires the REAL observer
+   * here at its spawn call sites — see `buildWorkerStateSensor` — so `worker.state` is
+   * produced by live runs, never only by a test (Standing rule 14).
+   */
+  streamObserver?: WorkerStreamObserver;
 }
 
 /**
@@ -1015,6 +1024,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           // caller configured no cap, never a guessed value.
           maxTurns: args.maxTurns,
           lostGrants,
+          // W1-T942: forwarded verbatim — see SpawnWorkerArgs.streamObserver's doc.
+          streamObserver: args.streamObserver,
         }),
       teardownContained,
     );
@@ -1084,6 +1095,118 @@ export function openUsageProbeSession(runQuery?: UsageProbeQueryFn): UsageProbeS
   return q({ prompt: emptyUsagePrompt() });
 }
 
+/**
+ * The 3-value worker activity vocabulary (W1-T942 design note ii) — and no more. A fourth
+ * value invented here would have to be re-rendered by every consumer (W1-T943's stall
+ * detector, W1-T944's NOW card, W1-T945's `rmd peek`) and re-judged by the first of those, so
+ * the vocabulary is pinned at exactly these three:
+ *  - `working`        — assistant TEXT is arriving.
+ *  - `tool-executing`  — a `tool_use` content block has been seen with no subsequent message yet.
+ *  - `quiet`           — no message of ANY kind has arrived for longer than the quiet floor.
+ *
+ * DELIBERATELY NOT A LEDGERED VALUE ON ITS OWN: a run with no `worker.state` row yet is
+ * `UNKNOWN`, never defaulted to `working` (the W1-T130 cannot-observe polarity) — see
+ * {@link WorkerStateTracker.currentState}'s doc for how that is represented (`undefined`,
+ * never a 4th string).
+ */
+export type WorkerState = "working" | "tool-executing" | "quiet";
+
+/**
+ * One classified SDK stream event, as {@link collectWorkerResult}'s `streamObserver` sees it.
+ * `"working"`/`"tool-executing"` map 1:1 onto {@link WorkerState}; `"message"` covers every
+ * OTHER message the stream yields (a `system` event, the terminal `result` envelope, or an
+ * `assistant` message whose content carries neither a text nor a `tool_use` block) — a
+ * heartbeat that proves the worker is still alive without asserting either named state, so it
+ * still resets the quiet clock a {@link WorkerStateTracker} tracks.
+ */
+export interface WorkerStreamEvent {
+  kind: "working" | "tool-executing" | "message";
+  /** The injected clock's reading at the moment this event was observed — never `Date.now()`
+   *  read a second time downstream, so a test drives the whole sequence off one synthetic clock. */
+  tsMs: number;
+  /**
+   * The live-tail-worthy text this event carries — the assistant's own text for `"working"`,
+   * a short `[tool_use: <name>]` label for `"tool-executing"`, and ABSENT for `"message"` (a
+   * system/result envelope carries no worker-authored output worth tailing — see W1-T942
+   * design note iv, "the worker's recent output").
+   */
+  text?: string;
+}
+
+/** Callback shape {@link collectWorkerResult}'s optional `streamObserver` accepts — see
+ *  {@link SpawnWorkerArgs.streamObserver} for the injection seam `spawnWorker` forwards this
+ *  through, and run-task.ts's `buildWorkerStateSensor` for the real (ledger + tail) consumer. */
+export type WorkerStreamObserver = (event: WorkerStreamEvent) => void;
+
+/**
+ * Default quiet floor (W1-T942 design note ii): how long with NO message of any kind before a
+ * run reads `quiet`. Deliberately short — this is a raw ACTIVITY sensor ("has this worker said
+ * anything lately"), not a stall alarm (W1-T943's own, much longer, threshold): the two must
+ * stay decoupled or a slow-but-healthy tool call would misreport as the stall detector's own
+ * escalation-worthy condition before that detector even exists.
+ */
+export const DEFAULT_WORKER_QUIET_FLOOR_MS = 30_000;
+
+/**
+ * FOLD a stream of {@link WorkerStreamEvent}s (plus periodic quiet-floor checks) into the
+ * 3-value {@link WorkerState}, reporting only the TRANSITIONS — never one result per message
+ * (W1-T942 design note iii: a per-message ledger row would multiply ledger volume by the turn
+ * count and slow every reader in the repo).
+ *
+ * PURE: no fs, no ledger, no clock of its own — every timestamp is supplied by the caller (the
+ * SAME injected clock `collectWorkerResult` uses, or a test's synthetic one), so this is
+ * unit-testable against a synthetic event sequence with zero real time elapsed and no SDK
+ * stream at all. `worker.ts` still cannot reach the ledger (see this file's own header comment
+ * on `onSpawnError`) — appending the `worker.state` row is run-task.ts's job
+ * (`buildWorkerStateSensor`), consuming this tracker's return values.
+ */
+export class WorkerStateTracker {
+  private state: WorkerState | undefined; // undefined ⇒ nothing observed yet: UNKNOWN, never a row
+  private lastActivityMs: number | undefined;
+
+  constructor(private readonly quietFloorMs: number = DEFAULT_WORKER_QUIET_FLOOR_MS) {}
+
+  /**
+   * Fold one observed message-stream event. Returns the NEW {@link WorkerState} iff this event
+   * caused a transition (the caller ledgers it); `undefined` when the state is unchanged — a
+   * `"message"` heartbeat NEVER itself asserts `working`/`tool-executing` (it only resets the
+   * clock {@link check} reads), so it never returns a transition on its own.
+   */
+  observe(event: WorkerStreamEvent): WorkerState | undefined {
+    this.lastActivityMs = event.tsMs;
+    if (event.kind === "message") return undefined;
+    return this.transitionTo(event.kind, event.tsMs);
+  }
+
+  /**
+   * Call periodically (a live caller polls this on an interval WHILE a spawn is in flight —
+   * see run-task.ts's `buildWorkerStateSensor`) with the current clock reading. Transitions to
+   * `quiet` iff MORE than `quietFloorMs` has elapsed since the last observed event of ANY kind
+   * (design note ii: "no message of any kind for longer than the quiet floor"). A no-op
+   * (returns `undefined`) before any event has ever been observed (UNKNOWN, never `quiet` by
+   * default) or while already `quiet` (no repeat transition).
+   */
+  check(nowMs: number): WorkerState | undefined {
+    if (this.lastActivityMs === undefined) return undefined;
+    if (this.state === "quiet") return undefined;
+    if (nowMs - this.lastActivityMs > this.quietFloorMs) return this.transitionTo("quiet", nowMs);
+    return undefined;
+  }
+
+  /** Current state, or `undefined` iff nothing has ever been observed — UNKNOWN, never
+   *  defaulted to `working` (the W1-T130 cannot-observe polarity this task's own acceptance
+   *  criteria name). */
+  currentState(): WorkerState | undefined {
+    return this.state;
+  }
+
+  private transitionTo(next: WorkerState, _atMs: number): WorkerState | undefined {
+    if (next === this.state) return undefined; // same state — not a transition, no row
+    this.state = next;
+    return next;
+  }
+}
+
 export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
@@ -1099,6 +1222,18 @@ export async function collectWorkerResult(
     maxTurns?: number;
     /** See {@link WorkerResult.lostGrants} — mirrored verbatim, never re-derived here. */
     lostGrants?: WorkerHomeGrantOutcome[];
+    /**
+     * W1-T942: invoked per message, classified by kind, with THIS call's own injected clock
+     * reading (never a second `Date.now()` read) — the ONE observer seam the design calls for.
+     * Absent (every caller before this task, and every caller that omits it) ⇒ the loop below
+     * behaves BYTE-IDENTICALLY to before this existed: no new branch, no new SDK call, no
+     * second stream. See {@link WorkerStreamObserver}.
+     */
+    streamObserver?: WorkerStreamObserver;
+    /** W1-T942: the injected clock `streamObserver` timestamps are read from. Omitted ⇒
+     *  `Date.now`, exactly the discipline `worker_duration_ms` above already uses — a test
+     *  drives a synthetic clock so the quiet-floor logic needs no real elapsed time. */
+    now?: () => number;
   },
 ): Promise<WorkerResult> {
   // W1-T477: started BEFORE the first `for await` pull below — this function's body, start to
@@ -1123,6 +1258,7 @@ export async function collectWorkerResult(
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let modelUsage: Record<string, ModelUsageEntry> = {};
   const compactionEvents: CompactionEvent[] = [];
+  const nowFn = opts.now ?? Date.now;
 
   try {
     for await (const raw of messages) {
@@ -1133,6 +1269,9 @@ export async function collectWorkerResult(
         // same detector a fixture-driven unit test exercises (compaction.ts),
         // so "detected in a test" and "detected live" can never drift apart.
         compactionEvents.push(...detectCompactionEvents([raw]));
+        // W1-T942: a heartbeat — no worker-authored text, but still proof-of-life for the
+        // quiet floor (design note ii, "no message of ANY kind").
+        opts.streamObserver?.({ kind: "message", tsMs: nowFn() });
       } else if (msg.type === "assistant") {
         // Anthropic-side api error mid-stream (server_error / <synthetic> model /
         // isApiErrorMessage). A TRANSIENT — the envelope may still report success.
@@ -1140,13 +1279,33 @@ export async function collectWorkerResult(
         const model = (msg.message as { model?: string })?.model;
         if (rawAny.isApiErrorMessage === true || model === "<synthetic>") apiError = true;
         const content = (msg.message as { content?: unknown }).content;
+        // W1-T942: TOOL-USE BLOCKS USED TO BE DROPPED ENTIRELY HERE — this task's whole
+        // rationale. Classify EVERY block (never a second pass over `content`) so the SAME
+        // loop that already extracts `text` also emits the `tool-executing` signal, with no
+        // second stream and no extra SDK call (acceptance criterion 1).
+        let observedThisMessage = false;
         if (Array.isArray(content)) {
           for (const block of content) {
-            if (block && (block as { type?: string }).type === "text") {
-              blocks.push((block as { text: string }).text);
+            const blockType = block && (block as { type?: string }).type;
+            if (blockType === "text") {
+              const text = (block as { text: string }).text;
+              blocks.push(text);
+              opts.streamObserver?.({ kind: "working", tsMs: nowFn(), text });
+              observedThisMessage = true;
+            } else if (blockType === "tool_use") {
+              const toolName = (block as { name?: string }).name;
+              opts.streamObserver?.({
+                kind: "tool-executing",
+                tsMs: nowFn(),
+                text: toolName ? `[tool_use: ${toolName}]` : "[tool_use]",
+              });
+              observedThisMessage = true;
             }
           }
         }
+        // An assistant message with neither a text nor a tool_use block (e.g. thinking-only)
+        // is still a heartbeat — never silently drop the quiet clock's reset.
+        if (!observedThisMessage) opts.streamObserver?.({ kind: "message", tsMs: nowFn() });
       } else if (msg.type === "result") {
         const r = raw as {
           subtype: string;
@@ -1168,6 +1327,10 @@ export async function collectWorkerResult(
           modelUsage?: Record<string, Partial<ModelUsageEntry>>;
         };
         sawResult = true;
+        // W1-T942: the terminal envelope is a heartbeat too — a run that goes straight from
+        // spawn to a near-instant result (a synthetic test stream, or a genuinely trivial
+        // call) still resets the quiet clock rather than leaving it unset forever.
+        opts.streamObserver?.({ kind: "message", tsMs: nowFn() });
         subtype = r.subtype;
         isError = r.is_error;
         text = r.result ?? "";
