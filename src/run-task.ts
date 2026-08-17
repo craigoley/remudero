@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -586,6 +586,10 @@ import {
   type WorktreeReapSummary,
   openUsageProbeSession,
   type UsageProbeQueryFn,
+  WorkerStateTracker,
+  DEFAULT_WORKER_QUIET_FLOOR_MS,
+  type WorkerState,
+  type WorkerStreamObserver,
 } from "./lib/worker.js";
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
@@ -675,6 +679,178 @@ export function writeSyncLine(fd: 1 | 2, line: string): void {
  */
 export function ledgerPathFor(config: Config): string {
   return join(config.root, "state", "ledger.ndjson");
+}
+
+// ── WORKER STATE SENSOR (W1-T942) ───────────────────────────────────────────────────────────
+//
+// worker.ts CANNOT reach the ledger (see this file's own `worker.spawn_error` wiring comment
+// below for the same boundary applied to a different signal) — so the pure per-message
+// classification lives in worker.ts (`WorkerStateTracker`, `WorkerStreamEvent`) and everything
+// that touches disk — the `worker.state` ledger row and the bounded live tail — lives HERE,
+// wired at the real spawn call site rather than merely available (Standing rule 14).
+
+/** The ledger `step` a `worker.state` TRANSITION rides — see {@link buildWorkerStateSensor}.
+ *  Deliberately NOT added to `DECISION_RELEVANT_LEDGER_STEPS` (lib/ledger.ts): nothing in THIS
+ *  task decides off it (rendering/detection is explicitly W1-T943/944/945's job, design note
+ *  vii) — the moment one of those lands and reads it back, that task adds the entry, the same
+ *  "derived from consumers, not hardcoded" discipline `test/ledger-rotation.test.ts` already
+ *  enforces for every other step in that set. */
+export const WORKER_STATE_LEDGER_STEP = "worker.state";
+
+/** How often {@link WorkerStateSensor.startPolling}'s timer checks the quiet floor while a
+ *  spawn is in flight. Cheap: the check itself is a no-op unless the floor has genuinely
+ *  elapsed, so this only bounds how promptly a real silence gets ledgered, not any cost. */
+const WORKER_STATE_POLL_MS = 5_000;
+
+/** Byte AND line ceilings for the live tail (W1-T942 design note iv) — capped in BOTH
+ *  dimensions so a runaway transcript can neither bloat the disk with one enormous line nor
+ *  grow unboundedly in line count from a chatty worker emitting many short ones. */
+export const WORKER_TAIL_MAX_BYTES = 64 * 1024;
+export const WORKER_TAIL_MAX_LINES = 500;
+
+/** Shed the OLDEST lines first until `lines` fits both {@link WORKER_TAIL_MAX_LINES} and
+ *  {@link WORKER_TAIL_MAX_BYTES} — never a partial-line truncation, so every surviving line in
+ *  the tail is exactly what the worker emitted. Pure — no fs — so the ring-buffer arithmetic is
+ *  unit-testable with no file on disk at all. */
+export function capWorkerTailLines(
+  lines: readonly string[],
+  maxLines: number = WORKER_TAIL_MAX_LINES,
+  maxBytes: number = WORKER_TAIL_MAX_BYTES,
+): string[] {
+  let capped = lines.length > maxLines ? lines.slice(lines.length - maxLines) : [...lines];
+  while (capped.length > 0 && Buffer.byteLength(capped.join("\n"), "utf8") > maxBytes) {
+    capped = capped.slice(1);
+  }
+  return capped;
+}
+
+/** Best-effort, 0600, NEVER-THROWING write of the capped tail to `tailPath` (W1-T942 design
+ *  note iv: "an observability organ that can kill a worker is worse than the blindness it
+ *  cures"). Any failure — ENOSPC, a permissions problem, a torn concurrent write — is swallowed
+ *  silently: the tail simply stays stale, never the reason a run fails. */
+export function writeWorkerTailBestEffort(tailPath: string, lines: readonly string[]): void {
+  try {
+    mkdirSync(dirname(tailPath), { recursive: true });
+    writeFileSync(tailPath, lines.length ? lines.join("\n") + "\n" : "", { mode: 0o600 });
+  } catch {
+    /* best-effort — see this function's own doc */
+  }
+}
+
+/** One live sensor for ONE run (`run_id`+`task_id`-scoped) — built ONCE per {@link runTask}
+ *  invocation (never once per spawn: recon → implement → the DECISION_REQUEST resume are all
+ *  the SAME live run an operator watches, and a fresh tracker per spawn would seesaw the
+ *  console with a synthetic UNKNOWN→working "restart" that never actually happened). */
+export interface WorkerStateSensor {
+  /** Pass as `spawnWorker`'s `streamObserver` at every call site for this run. */
+  observer: WorkerStreamObserver;
+  /** Start the quiet-floor poll for the DURATION of one in-flight spawn call; returns the stop
+   *  function — call it (typically via `.finally`) the instant that spawn settles. Safe to call
+   *  again for the NEXT spawn in the same run: each call owns its own timer, `unref`'d so it
+   *  never keeps the process alive on its own. */
+  startPolling: () => () => void;
+}
+
+/**
+ * Build the real `worker.state` sensor for one run: a {@link WorkerStateTracker} folding the
+ * observed stream into the 3-value vocabulary, appending a `worker.state` ledger row (keyed by
+ * `run_id`+`task_id`, the SAME keys `deriveRunState`/board.ts already scan on) on every
+ * TRANSITION only, and best-effort mirroring the worker's own output onto the bounded live tail
+ * at `<root>/state/runs/<runId>.tail` — NEVER deleted here, or anywhere else this task touches
+ * (design note v: retained on exit for every verdict; the sweep-side retention extension lives
+ * in {@link sweepStaleWorkerTails}, called from the SAME `runTmpSweepRung` that already reclaims
+ * other run scratch).
+ */
+export function buildWorkerStateSensor(args: {
+  ledgerPath: string;
+  runId: string;
+  taskId: string;
+  root: string;
+  quietFloorMs?: number;
+  now?: () => number;
+  pollMs?: number;
+}): WorkerStateSensor {
+  const now = args.now ?? Date.now;
+  const tracker = new WorkerStateTracker(args.quietFloorMs ?? DEFAULT_WORKER_QUIET_FLOOR_MS);
+  const tailPath = join(args.root, "state", "runs", `${args.runId}.tail`);
+  let tailLines: string[] = [];
+
+  const recordTransition = (next: WorkerState): void => {
+    try {
+      appendLedger(args.ledgerPath, {
+        run_id: args.runId,
+        task_id: args.taskId,
+        step: WORKER_STATE_LEDGER_STEP,
+        state: next,
+      });
+    } catch {
+      // Best-effort (design note iv/note at end of the task file: "the design's best-effort,
+      // never-fatal contract for BOTH the observer and the tail write"). A ledger-append
+      // hiccup (an unwritable `state/` dir, a torn concurrent write) must never propagate out
+      // of the observer and take the worker it is trying to observe down with it.
+    }
+  };
+
+  const observer: WorkerStreamObserver = (event) => {
+    if (event.text) {
+      tailLines = capWorkerTailLines([...tailLines, event.text]);
+      writeWorkerTailBestEffort(tailPath, tailLines);
+    }
+    const next = tracker.observe(event);
+    if (next) recordTransition(next);
+  };
+
+  const startPolling = (): (() => void) => {
+    const timer = setInterval(() => {
+      const next = tracker.check(now());
+      if (next) recordTransition(next);
+    }, args.pollMs ?? WORKER_STATE_POLL_MS);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  };
+
+  return { observer, startPolling };
+}
+
+/** Retention window {@link sweepStaleWorkerTails} ages a `.tail` file out on — generously above
+ *  any realistic drain cadence, so a still-relevant tail (W1-T945's future `rmd peek`, an
+ *  operator re-reading a just-finished run) is never reclaimed out from under a live read;
+ *  bounded at all so the directory does not grow forever (design note v). */
+export const WORKER_TAIL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * AGE OUT stale `<root>/state/runs/*.tail` files — the sweep-side half of design note v ("the
+ * reaper/sweep path that reclaims run scratch must be extended to age these out on a stated
+ * retention, not to delete them at run end"). Wired into the daemon's poll cadence via
+ * {@link runWorkerTailSweepRung}, riding the SAME per-poll slot `runWorktreeReapRung`/
+ * `runInflightLockSweepRung`/`runTmpSweepRung` already occupy — no new schedule of its own.
+ * Best-effort throughout: a stat/unlink race with a live writer (another run's still-open
+ * tail) or a concurrent sweep is swallowed per-file, never fatal to the sweep tick.
+ */
+export function sweepStaleWorkerTails(root: string, opts: { maxAgeMs?: number; now?: () => number } = {}): { removed: string[] } {
+  const dir = join(root, "state", "runs");
+  const maxAgeMs = opts.maxAgeMs ?? WORKER_TAIL_RETENTION_MS;
+  const nowMs = (opts.now ?? Date.now)();
+  const removed: string[] = [];
+  let entries: string[];
+  try {
+    entries = existsSync(dir) ? readdirSync(dir) : [];
+  } catch {
+    return { removed }; // best-effort — an unreadable dir costs a skipped sweep, never a throw
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".tail")) continue;
+    const p = join(dir, entry);
+    try {
+      if (nowMs - statSync(p).mtimeMs > maxAgeMs) {
+        unlinkSync(p);
+        removed.push(entry);
+      }
+    } catch {
+      /* best-effort — see this function's own doc */
+    }
+  }
+  return { removed };
 }
 
 /**
@@ -5132,6 +5308,11 @@ async function runTask(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...extra });
 
+  // W1-T942: ONE worker-state sensor for THIS run's whole lifetime — recon, implement, and the
+  // DECISION_REQUEST resume below all share it (see `buildWorkerStateSensor`'s own doc for why
+  // a fresh tracker per spawn would misreport a restart the operator never actually saw).
+  const workerStateSensor = buildWorkerStateSensor({ ledgerPath, runId, taskId, root: config.root });
+
   /**
    * W1-T442: THE DESTINATION for a spawn's asynchronous 'error' event. Wrapping
    * the `spawn` dep ONCE here — rather than adding `onSpawnError` at each of
@@ -5146,9 +5327,14 @@ async function runTask(
    * had appeared that read them. `test/ledger-rotation.test.ts` re-derives the
    * set from consumer source, so it will refuse this the moment one appears
    * here too.)
+   *
+   * W1-T942: the SAME wrap-once shape now ALSO attaches `workerStateSensor.observer` — the
+   * real observer, wired at the real spawn path rather than merely available (Standing rule
+   * 14) — and polls the quiet floor for exactly the duration this ONE spawn is in flight.
    */
-  const spawn: typeof spawnWorker = (spawnArgs) =>
-    rawSpawn({
+  const spawn: typeof spawnWorker = (spawnArgs) => {
+    const stopPolling = workerStateSensor.startPolling();
+    return rawSpawn({
       ...spawnArgs,
       onSpawnError:
         spawnArgs.onSpawnError ??
@@ -5161,7 +5347,9 @@ async function runTask(
             path: err.path ?? null,
             error: String(err.message ?? err),
           })),
-    });
+      streamObserver: spawnArgs.streamObserver ?? workerStateSensor.observer,
+    }).finally(stopPolling);
+  };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
   // writes are why daemon.out.log sat empty for a whole live run (see writeSyncLine's doc).
@@ -16434,6 +16622,22 @@ export function runFeedbackDocketRung(
   }
 }
 
+/**
+ * The daemon's per-poll WORKER-TAIL retention rung (W1-T942 design note v) — ages out stale
+ * `<config.root>/state/runs/*.tail` files via {@link sweepStaleWorkerTails}, on the SAME
+ * per-poll cadence `runWorktreeReapRung`/`runInflightLockSweepRung`/`runTmpSweepRung` already
+ * ride (see `buildSweepHook`'s call site). Own try/catch so a sweep hiccup never masks — or is
+ * masked by — the rungs around it, the same discipline every sibling rung in this file follows.
+ */
+export function runWorkerTailSweepRung(config: Config, log: (step: string, extra?: Record<string, unknown>) => void): void {
+  try {
+    const swept = sweepStaleWorkerTails(config.root);
+    if (swept.removed.length > 0) log("daemon.worker_tail_sweep", { removed: swept.removed.length });
+  } catch (e) {
+    log("daemon.worker_tail_sweep", { error: String((e as Error)?.message ?? e) });
+  }
+}
+
 export function runTmpSweepRung(
   log: (step: string, extra?: Record<string, unknown>) => void,
   opts: TempSweepOpts = {},
@@ -16559,6 +16763,9 @@ export function buildSweepHook(
       // composite so it re-fires on a long-running healthy daemon, not only at boot. Own
       // try/catch (folded into runTmpSweepRung), same discipline as the reap rung above.
       runTmpSweepRung(log, tmpMaxAgeMs !== undefined ? { maxAgeMs: tmpMaxAgeMs } : {});
+      // W1-T942 — the worker-tail retention rung: ages out `state/runs/*.tail` files past
+      // WORKER_TAIL_RETENTION_MS. Rides this SAME per-poll cadence, own try/catch inside.
+      runWorkerTailSweepRung(config, log);
       // The in-flight lock sweep's PER-POLL rung — same argument as the tmp rung immediately
       // above (boot-only never re-fires on a healthy long-lived daemon), and now load-bearing
       // for `deriveStatus`'s lock-based liveness disjunct. Own try/catch inside the rung.
