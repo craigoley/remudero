@@ -1418,7 +1418,7 @@ export function calibrationTable(byType: TypeCalibration[]): string {
  * zero-merge divide-by-zero case (`value === null`) renders as an explicit
  * non-numeric marker — never a bare `0`, never `NaN`.
  */
-function perMergeCell(value: number | null, turnCoverage: number, mergedForDenominator: number): string {
+function perMergeCell(value: number | null, turnCoverage: number): string {
   if (value === null) return `n/a (0 merges)`;
   if (turnCoverage < MIN_TURN_COVERAGE_FOR_PER_MERGE) {
     return `${value} ⚠ ${(turnCoverage * 100).toFixed(0)}% coverage — DO NOT USE`;
@@ -1436,8 +1436,8 @@ export function classCalibrationTable(byClass: ClassCalibration[]): string {
     (c) =>
       `| ${c.taskClass} | ${c.runs} | ${c.merged} | ${(c.mergeRate * 100).toFixed(0)}% | $${c.avgCostUsd.toFixed(3)} | ${c.avgTurns} | $${c.totalCostUsd.toFixed(3)} | ` +
       `${c.totalOutputTokens} | ${c.mergeSource} (n=${c.mergedForDenominator}) | ` +
-      `${perMergeCell(c.turnsPerMerge, c.turnCoverage, c.mergedForDenominator)} | ` +
-      `${perMergeCell(c.outputTokensPerMerge, c.turnCoverage, c.mergedForDenominator)} |`,
+      `${perMergeCell(c.turnsPerMerge, c.turnCoverage)} | ` +
+      `${perMergeCell(c.outputTokensPerMerge, c.turnCoverage)} |`,
   );
   return [
     "| task_class | runs | merged | merge rate | avg $ | avg turns | total $ | output tokens | merge source | turns/merge | output tokens/merge |",
