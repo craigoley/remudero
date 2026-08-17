@@ -24,6 +24,7 @@ import { isHolderStale } from "./fs-race-safe.js";
 import {
   boardPrsRestArgs,
   type BoardPrRest,
+  combinedStatusRestArgs,
   fetchBoardPrsRest,
   type GhCallPacer,
   mapRestPr,
@@ -583,6 +584,33 @@ export interface GitHub {
    * fetch, so the two failure flags never conflate a PR outage with an issue-read outage.
    */
   issueReadFailed?(): boolean;
+  /**
+   * W1-T914: the `remudero-review` commit-status state for `prUrl`'s CURRENT head, three-valued
+   * plus `"none"` — the SAME vocabulary lib/review.ts's `PostableReviewState` posts
+   * (`"success" | "failure" | "pending"`) widened with `"none"` for "no `remudero-review` status
+   * has been posted at all", mirroring run-task.ts's own `reviewStateFromRollup`
+   * (`OpenPrView.reviewState`) rather than inventing a second taxonomy for the console
+   * (MASTER-PLAN's "ONE model" rule — see lib/board.ts's `BoardRow.reviewState`).
+   *
+   * READS THE SAME COMBINED-STATUS ENDPOINT open-prs-rest.ts's `combinedStatusRestArgs` already
+   * documents ("where `remudero-review` ... lives") — never a second, independently-shaped
+   * GitHub call. `"none"` is returned ONLY when the read succeeded and genuinely found no
+   * `remudero-review` entry in `statuses[]` (never synthesised from the endpoint's own
+   * roll-up-of-a-rollup top-level `state`, exactly like `rollupFromRest`'s own rule).
+   *
+   * `undefined` MEANS THE READ ITSELF COULD NOT BE TRUSTED — a `gh`/REST failure, or a `prUrl`
+   * this gateway cannot resolve a head ref for — and is NEVER collapsed into `"none"`: a caller
+   * that cannot tell "no review posted" from "GitHub could not be asked" would render an outage
+   * as a fact about the PR, exactly the merged-0/160 trap MASTER-PLAN's own fixture warns about.
+   * {@link BoardDeps} (lib/board.ts) tells the two apart via `readFailed()`, the same W1-T119
+   * split every other optional method on this interface already uses.
+   *
+   * OPTIONAL, like every other method added after the first {@link GitHub} fixtures were written
+   * — omitted ⇒ the console renders every row's review state as unresolved ("none"/unknown)
+   * rather than inventing a pending or green state it never observed, the same fail-soft
+   * discipline this whole interface already follows.
+   */
+  reviewState?(prUrl: string): "success" | "failure" | "pending" | "none" | undefined;
 }
 
 /** Reader for the append-only ledger; injectable for tests. */
@@ -3321,6 +3349,15 @@ export interface BatchedIssue {
  * no exit status, so without that branch this exact failure classified `"unknown"` and the
  * 2026-07-20 outage ran for hours with zero error lines anywhere.
  */
+
+/**
+ * The commit-status context the merge gate keys on (lib/review.ts's `REVIEW_CONTEXT`,
+ * run-task.ts's own `REVIEW_CTX`) — duplicated as a LOCAL literal rather than imported, exactly
+ * like run-task.ts already does, so this file never imports lib/review.ts (which itself imports
+ * `readLedgerLines` from HERE — an import the other way would be circular).
+ */
+const REVIEW_STATUS_CONTEXT = "remudero-review";
+
 export function buildBatchedGithub(
   owner: string,
   repo: string,
@@ -3403,6 +3440,14 @@ export function buildBatchedGithub(
   /** W1-T413: per-URL changed-file memo for {@link GitHub.changedFiles}. `null` records a read
    *  that FAILED, so one unreachable PR is read once per gateway rather than once per task. */
   const changedFilesByUrl = new Map<string, string[] | null>();
+  /**
+   * W1-T914: per-URL memo for {@link GitHub.reviewState}, TTL-matched to `index()`'s own
+   * `ttlMs` — DELIBERATELY NOT a forever-memo like {@link changedFilesByUrl}: an open PR's
+   * `remudero-review` context is exactly the value this feature exists to keep LIVE (pending ->
+   * success/failure while the row stays open), so caching it past `ttlMs` would silently freeze
+   * "review in progress" on the console long after GitHub reported the real outcome.
+   */
+  const reviewStateCache = new Map<string, { at: number; state: "success" | "failure" | "pending" | "none" }>();
   const fetchAll =
     opts.fetchAll ??
     (() => {
@@ -3652,6 +3697,40 @@ export function buildBatchedGithub(
     },
     autoMergeArmed(prUrl) {
       return index().byUrl.get(prUrl)?.autoMergeRequest != null;
+    },
+    reviewState(prUrl) {
+      // W1-T914: the console's three-state read, over the SAME combined-status endpoint
+      // open-prs-rest.ts's `combinedStatusRestArgs` already documents as where `remudero-review`
+      // lives — never a second, independently-shaped GitHub call. Keyed off the PR's own head
+      // BRANCH NAME (already resolved on this same batched index, zero extra list fetch) rather
+      // than its sha: the combined-status endpoint's `:ref` accepts any git ref, and this gateway
+      // never fetches a PR's `headRefOid` at all.
+      const headRef = index().byUrl.get(prUrl)?.headRefName;
+      if (!headRef) return undefined; // this prUrl isn't in the current index -> undetermined
+      const cached = reviewStateCache.get(prUrl);
+      if (cached && now() - cached.at < ttlMs) return cached.state;
+      try {
+        const raw = JSON.parse(run(combinedStatusRestArgs(owner, repo, headRef))) as {
+          statuses?: Array<{ context?: string; state?: string }>;
+        };
+        // Only a REAL `statuses[]` row becomes an entry (rollupFromRest's own rule) — the
+        // endpoint's top-level `state` is a roll-up-of-a-rollup that reports "pending" for a
+        // commit with zero statuses, and synthesising from it would invent a pending review
+        // GitHub never actually posted.
+        const entry = (raw.statuses ?? []).find((s) => s.context === REVIEW_STATUS_CONTEXT);
+        const raw_state = (entry?.state ?? "").toLowerCase();
+        const state: "success" | "failure" | "pending" | "none" = !entry
+          ? "none"
+          : raw_state === "success"
+            ? "success"
+            : raw_state === "failure" || raw_state === "error"
+              ? "failure"
+              : "pending";
+        reviewStateCache.set(prUrl, { at: now(), state });
+        return state;
+      } catch {
+        return undefined; // UNREADABLE — board.ts marks the row explicitly, never guesses "none".
+      }
     },
     issueByUrl(url) {
       const i = lookupIssue(url);
