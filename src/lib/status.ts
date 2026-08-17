@@ -21,6 +21,7 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
+import type { WorkerState } from "./worker.js";
 import {
   boardPrsRestArgs,
   type BoardPrRest,
@@ -262,6 +263,25 @@ export interface StatusProjection {
    * `phase`/`startedAt` are.
    */
   elapsedMs?: number;
+  /**
+   * W1-T944: the in-flight run's CURRENT `worker.state` (W1-T942's 3-value vocabulary --
+   * `"working" | "tool-executing" | "quiet"`), the newest such ledger row seen for the run
+   * `deriveRunState` just scanned `phase`/`startedAt` off -- ONE scan, not a second one. Present
+   * ONLY alongside `phase` (design note v: `isRunningRow`'s existing `phase != null` definition
+   * governs liveness for this field too, so a finished run's last known state can never linger on
+   * a card as if it were current) AND only once the run has actually emitted a `worker.state` row
+   * -- a run with no row yet (every run that started before W1-T942 shipped, or whose observer
+   * never fired) leaves this `undefined` so the console renders "state unknown" rather than a
+   * healthy-looking default (design note iii).
+   */
+  workerState?: WorkerState;
+  /**
+   * ISO-8601 `ts` of the ledger row that transitioned the run INTO its current `workerState` --
+   * present ONLY while `workerState === "quiet"` (design note i). The console ages a "quiet Nm"
+   * duration off this timestamp, on the SAME 1s tick that already ages `elapsedMs` (design note
+   * ii), rather than freezing at whatever value was true when the row last rendered.
+   */
+  workerStateSince?: string;
   /**
    * True when the task has an OPEN escalation (escalate.ts's `escalation.issue_opened`)
    * that no LATER `run.start` has superseded — a human has not yet acted, or the task
@@ -2303,6 +2323,31 @@ interface RunState {
    * `undefined` only when no line for this task carries a `ts` at all.
    */
   lastActivityTs?: string;
+  /**
+   * W1-T944: the newest `worker.state` row's `state` for THIS run, reset back to `undefined` on
+   * every fresh {@link LANE_START_STEPS} entry exactly like `phase` resets to `"recon"` -- an
+   * earlier run's last-observed state must never leak into a later run's, the same falsifier
+   * `phase`'s own reset already guards against.
+   */
+  workerState?: WorkerState;
+  /** `ts` of the ledger row that set {@link workerState} to its current value (a `worker.state`
+   *  row is only ever appended ON a transition -- see run-task.ts's `buildWorkerStateSensor` --
+   *  so the row's own `ts` IS the transition time, never a later heartbeat's). */
+  workerStateSince?: string;
+}
+
+/** The ledger `step` a `worker.state` transition rides -- run-task.ts's own
+ *  `WORKER_STATE_LEDGER_STEP` constant, mirrored here as a literal (not imported: run-task.ts
+ *  imports FROM this module, so the reverse import would be circular) exactly the way
+ *  {@link LANE_START_STEPS}/{@link LANE_TERMINAL_STEPS} above already mirror run-task.ts's other
+ *  ledger step literals. */
+const WORKER_STATE_STEP = "worker.state";
+
+/** Type guard for a `worker.state` ledger row's `state` field -- narrows an untyped ledger value
+ *  down to {@link WorkerState}'s closed 3-value vocabulary; a malformed/unrecognized value is
+ *  simply ignored (this run's `workerState` stays whatever it was, never a garbage 4th value). */
+function isWorkerState(value: unknown): value is WorkerState {
+  return value === "working" || value === "tool-executing" || value === "quiet";
 }
 
 /**
@@ -2376,6 +2421,8 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
   let phase: Phase | undefined;
   let startedAt: string | undefined;
   let lastActivityTs: string | undefined;
+  let workerState: WorkerState | undefined;
+  let workerStateSince: string | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (typeof line.ts === "string") lastActivityTs = line.ts;
@@ -2395,10 +2442,28 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
       inFlight = true;
       phase = "recon";
       startedAt = typeof line.ts === "string" ? line.ts : undefined;
+      // W1-T944: a fresh run.start resets worker.state exactly like phase resets to "recon" —
+      // an earlier run's last-observed liveness must never leak into a later run's row.
+      workerState = undefined;
+      workerStateSince = undefined;
       continue;
     }
     if (step !== undefined && LANE_TERMINAL_STEPS.has(step)) {
       inFlight = false;
+      continue;
+    }
+    // W1-T944: a worker.state row is only ever appended ON A TRANSITION (run-task.ts's
+    // buildWorkerStateSensor), so the row's own `ts` doubles as the transition timestamp --
+    // no separate "when did this change" bookkeeping is needed. The comparison below reads the
+    // bare local `step`, never the `line.step` property access directly against a quoted
+    // literal, for the same DECISION_RELEVANT_LEDGER_STEPS-harvesting reason the comment above
+    // this loop explains -- see WORKER_STATE_STEP's own doc for the literal this guards.
+    if (step === WORKER_STATE_STEP) {
+      const rawState = line.state;
+      if (isWorkerState(rawState)) {
+        workerState = rawState;
+        workerStateSince = typeof line.ts === "string" ? line.ts : undefined;
+      }
       continue;
     }
     switch (step) {
@@ -2419,7 +2484,7 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
         break;
     }
   }
-  return { inFlight, phase, startedAt, lastActivityTs };
+  return { inFlight, phase, startedAt, lastActivityTs, workerState, workerStateSince };
 }
 
 /**
@@ -2580,6 +2645,19 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
         if (runState.startedAt) {
           projection.startedAt = runState.startedAt;
           projection.elapsedMs = Math.max(0, now() - Date.parse(runState.startedAt));
+        }
+        // W1-T944: workerState rides the SAME "this row is running" gate as phase/startedAt
+        // above (design note v — isRunningRow's phase != null definition governs) so a
+        // finished/orphaned run can never carry a lingering worker-liveness word. Absent when
+        // the run has emitted no worker.state row yet — the console renders "state unknown"
+        // rather than treating a blank as a healthy default (design note iii).
+        if (runState.workerState) {
+          projection.workerState = runState.workerState;
+          // workerStateSince backs the client's "quiet Nm" ageing tick (design note ii) — only
+          // meaningful while the CURRENT state is quiet, so it stays sparse otherwise.
+          if (runState.workerState === "quiet" && runState.workerStateSince) {
+            projection.workerStateSince = runState.workerStateSince;
+          }
         }
       } else {
         // Dispatched, no terminal verdict, no open PR, no recent activity, and no live lock:
