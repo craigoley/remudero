@@ -1,0 +1,121 @@
+- id: W1-T935
+  title: "W1-T933 is framed as letting the corpus shrink when the measured problem is that spawned workers never had it, and the function it proposes freeing has no query parameter"
+  repo: remudero
+  type: implement
+  verify: auto
+  risk: medium
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "**THIS RECORD CORRECTS W1-T933'S FRAMING AND CITES IT RATHER THAN AMENDING IT.** W1-T933
+    merged as #2012; Standing rule 21 (`postMergeAmendmentViolations`) forbids editing a merged record
+    in place, so the correction is filed as its own task. **W1-T933'S MECHANISM IS NOT WITHDRAWN — ONLY
+    ITS FRAMING AND ITS SIZING.** Three findings, each re-derived at 723b250 with a positive control.
+
+    (1) **`settingSources: []` AGAINST THE SDK REQUIREMENT — SO WORKERS NEVER HAD THE CORPUS, AND THE
+    CASE IS ACCESS RATHER THAN SHRINKAGE.** `src/lib/worker.ts` sets `settingSources: []` in the
+    `Options` it hands the Agent SDK, and its own comment reads 'SDK isolation mode; never loads
+    ~/.claude/settings.json'. The SDK's doc for that exact option states: **'Must include `project` to
+    load CLAUDE.md files.'** `[]` does not. There is no second delivery path: `systemPrompt` appears
+    **0 times** in `src/lib/worker.ts`, and nothing in `src/` reads CLAUDE.md's CONTENT — its 10
+    mentions are rule ids (`src/lib/rule-efficacy.ts`), a lint warning (`src/lib/task-linter.ts`), a
+    target-repo detector (`src/lib/onboard/inventory.ts`), a docket description and help text.
+    Positive control on the same sweep and tool: `MASTER-PLAN` appears in **76** files.
+    **SO W1-T933'S 'LET A FACT LEAVE THE POCKET' IS AIMED AT THE WRONG CONTEXT.** The injected corpus
+    is the SESSION's; a spawned worker starts without it. The honest case for a lookup is that workers
+    have NO access to it at all, which is stronger than the one W1-T933 makes.
+
+    (2) **`groundClarifyRequest` IS PURE OVER `(root, task)` BUT HAS NO QUERY PARAMETER AND READS
+    `plan.yaml` ALONE — SO LIFTING IT BUYS REACHABILITY AND NO LOOKUP.** Its signature at 723b250 is
+    `groundClarifyRequest(root: string, task: Task): GroundingNote[]` — no request object, no token, no
+    service handle, so W1-T933 is RIGHT that it is not console-coupled at the function level. But it
+    hardcodes `loadSkill(join(skillsDir(root), \"plan.yaml\"))`, so it consults ONE skill's sources, and
+    its only key is `task.id`: for each source it keeps lines containing that id, takes the first three
+    and truncates each to 200 characters. **THERE IS NOWHERE TO PUT A QUESTION.** It can answer 'which
+    lines mention W1-T933'; it cannot answer 'what do we already know about diff-coverage'. Production
+    call sites: **1** (the `/v1/skills/run` handler in `src/lib/panel-skill-run.ts`), against a control
+    where `loadSkill` has callers in 4 files. **SO W1-T933'S DESIGN (i) — LIFT THE EXISTING LOOKUP OUT
+    OF THE PANEL PATH — IS NOT SUFFICIENT ON ITS OWN.**
+
+    (3) **`CLAUDE.md` IS GROUNDED BY 0 OF 7 SKILLS, AGAINST THREE CONTROLS.** Sweeping
+    `.remudero/skills/*.yaml`: `CLAUDE.md` **0 of 7**; controls `DECISIONS.md` **4 of 7**,
+    `LEARNINGS.md` **4 of 7**, `MASTER-PLAN` **6 of 7**. The string `CLAUDE` appears nowhere in the
+    registry at all, so this is a genuine absence and not a parse artifact. **THE SHELF HOLDS THE
+    DECISIONS BOOK AND NOT THE RULEBOOK** — and the rulebook is the corpus at 60965 bytes against a
+    61046 cap."
+  design: |
+    (i) SCOPE: correct the reading, and make the smallest change that turns the existing function into
+    something a caller can ask a question of. NOT an index, NOT embeddings, NOT a console surface, NOT
+    a new queue.
+    (ii) **WHOEVER BUILDS W1-T933 SHOULD READ IT AS MAKE A LOOKUP EXIST, NOT FREE THE EXISTING ONE.**
+    That is the one sentence this record exists to put on the record. The reachability half of W1-T933
+    is real and cheap; the retrieval half does not exist yet and its absence is not visible from that
+    record's text.
+    (iii) THE SMALLEST TWO STEPS, IN ORDER, EACH WITH ITS CONSUMER NAMED. FIRST: give the function a
+    query parameter and a source selector, so it can be asked something other than a task id — the
+    consumer is `groundClarifyRequest`'s existing single call site, refactored onto the wider signature
+    rather than left duplicating the narrow one. SECOND: add `CLAUDE.md` to a skill's
+    `grounding_sources`, which is one line and whose consumer is the same function. The second buys
+    almost nothing before the first, because a task-id filter over the rulebook matches nothing.
+    (iv) **THE OPEN GATE, RECORDED PLAINLY BECAUSE IT PRECEDES BOTH STEPS: WHETHER A SPAWNED WORKER CAN
+    LOAD A SKILL AT ALL NEEDS ONE REAL DISPATCH.** It is not answerable from source. Remudero never
+    passes the SDK's `skills` option, and that option's own doc says omitting it means 'the CLI's own
+    defaults still apply, so this is **not** skills off' — while `settingSources: []` (finding 1)
+    disables filesystem settings, and the SDK declarations do not say whether skill DISCOVERY is
+    governed by that. Reading the tool arrays cannot settle it either: a prior session measured `Skill`
+    in no worker tool array and concluded triggering was impossible, **AND THAT CONCLUSION WAS
+    RETRACTED** — the SDK doc states you do not add `Skill` to `allowedTools` yourself. **UNTIL THAT
+    DISPATCH IS RUN, BOTH THE MERGED SHARD AND THE GROUNDING-SOURCE STEP ARE BETS ON A SHELF NOBODY HAS
+    CONFIRMED A WORKER CAN OPEN.** A subagent spawned by a session is NOT a substitute — its tool
+    surface is not the fleet's, which a prior session correctly refused to conflate.
+    (v) NAME THE CONSUMER OR DO NOT EMIT. Eight mechanisms here are already built-and-unread —
+    `hasPushedRunBranch`, `armedButStalled`, `dispatch.stood_down`, `CiFailure.outsidePrRange`,
+    `dh-rate-limit`, `rareOverlapWarnings`, `rmd coverage-improve`, `supersessionVerdict` — the last
+    with no producer at all, only a completeness gate tracking its absence. This record proposes no new
+    emitter, no new route and no new queue, and it does not write to `plan/feedback/`.
+  acceptance:
+    - claim: "the corrected reading is recorded against the merged task rather than edited into it"
+      proof: "unit test: W1-T935: the correction cites the merged task instead of amending it"
+    - claim: "a caller can ask the grounding lookup a question rather than only a task id"
+      proof: "unit test: W1-T935: the grounding lookup accepts a query"
+    - claim: "a source no skill declares is still never searched"
+      proof: "unit test: W1-T935: an undeclared source stays unsearched"
+    - claim: "the existing single call site uses the wider signature"
+      proof: "unit test: W1-T935: the existing caller uses the wider signature"
+  origin: recon#access-not-shrinkage-2026-08-17
+  plan_refs: ["W1-T933", "W1-T420", "W1-T503"]
+  files: [src/lib/panel-skill-run.ts, test/panel-skill-run.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: medium` IS SET UP FRONT. Widening a signature and refactoring its one caller changes no
+    gate, no disposition and no policy; the declared span is one module and its own suite. It is not
+    `low` because the function is the fleet's only retrieval path and its single call site is a live
+    console route.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT (`git grep -cw`) AT 723b250.
+    `groundClarifyRequest` scores `test/panel-skill-run.test.ts` 12 and `src/lib/panel-skill-run.ts` 5;
+    `grounding_sources` scores `src/lib/panel-skill-run.ts` 12, `test/panel-skill-run.test.ts` 7,
+    `test/skill.test.ts` 5. **`src/lib/skill.ts` IS DELIBERATELY NOT DECLARED**: W1-T933 already claims
+    it, and the query parameter belongs to the search function rather than to the registry loader.
+    **`src/run-task.ts` IS NOT DECLARED** — 103 of 277 shards declare it and it serialises every task
+    naming it (W1-T471), and no part of this lives there.
+
+    **ID PROVENANCE, AND THE RESERVATION DID NOT TAKE.** Four surfaces swept at 723b250:
+    `refs/rmd-id/*` max 934 over 41 refs; shard FILENAMES on origin/main max 934 over 315 files
+    (control: W1-T933 appears exactly once); every OPEN PR's TITLE (2 open, max W1-T931 in #2013); and
+    every OPEN PR's FILE LIST (#2017 1 file, #2013 5 files, no shard paths; extractor control returns
+    933 on a synthetic shard path). Tree max across `plan/tasks.yaml` and every shard is 934, so 935.
+    The `refs/rmd-id/W1-T935` push used a unique orphan commit over the EMPTY TREE carrying nonce
+    `vm-3759-1786931731259082200`, the refspec variable braced, and the exit status captured into a
+    variable rather than read through a pipe: it FAILED with exit 1, and the readback confirms the ref
+    is ABSENT while the positive control `refs/rmd-id/W1-T934` reads 1 line. This host cannot write
+    non-branch refs. **SO THIS ID RESTS ON THE FOUR-SURFACE SWEEP ALONE.**
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, never pure paths, each under 100 characters
+    with no comma so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them, and each
+    matches ZERO files today against a control matching exactly one.
+
+    **WHAT THIS RECORD DOES NOT CLAIM.** It does not claim W1-T933 is wrong to want a lookup — it is
+    right, and the reachability finding it rests on re-derives cleanly. It does not claim workers cannot
+    read files: every worker tool set carries `Grep` and `Glob`. And it does not claim the byte ceiling
+    should rise; the ceiling constrains the SESSION's context, which finding (1) shows is a different
+    context from the worker's."
