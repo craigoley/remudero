@@ -5198,6 +5198,34 @@ function isProductPath(path: string): boolean {
 }
 
 /**
+ * ENTANGLEMENT-EXEMPT INSTRUMENTS (prerequisite for W1-T941, Standing rule 25's own deferred
+ * decision): {@link INSTRUMENT_SURFACE}'s doc names what the isolation rule protects — "the
+ * code's own falsifiers were graded by the very version of the instrument that shipped beside
+ * them", i.e. a GATE that decides OTHER PRs' pass/fail. A `scripts/*-baseline.json` matches the
+ * surface by filename alone, with no regard for whether anything in `.github/workflows/` actually
+ * READS it as a ratchet. A baseline nothing in CI reads has no grading power over anything — it is
+ * a recorded derivation an unrelated PINNED CONSTANT cites, falsified by its OWN test/ fixture in
+ * the SAME diff (exactly {@link detectInstrumentEntanglement}'s own "instrument + its own test/
+ * falsifier" sanctioned shape), except that pin is one product-code line, not a whole file, so it
+ * cannot be isolated into an instrument-only PR the way a full ratchet script/workflow pair can.
+ *
+ * EXACT PATHS, HAND-ENUMERATED, NEVER A PATTERN — the opposite failure mode from
+ * {@link INSTRUMENT_SURFACE} (W1-T402: a hand enumeration went stale by DROPPING coverage). This
+ * list can only ever NARROW what {@link INSTRUMENT_SURFACE} already claims for a named, reviewed
+ * path; a new baseline this list has never heard of gets the safe default — full entanglement
+ * blocking — never a silent gap on the other side. Adding an entry is a deliberate, reviewed
+ * decision, like every other line on the instrument surface; the day a `.github/workflows/` job
+ * starts reading a listed path as a pass/fail ratchet, remove it — the entanglement risk the rule
+ * exists to catch would then genuinely apply.
+ */
+export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
+  // W1-T941: the knowledge-budget cap's derivation record. No workflow job ratchets against it;
+  // its only reader is the pinned DEFAULT_KNOWLEDGE_BUDGET_CHARS constant (src/lib/learnings.ts)
+  // and test/knowledge-budget-derivation.test.ts's own falsifier, both landing beside it.
+  "scripts/knowledge-budget-baseline.json",
+]);
+
+/**
  * INSTRUMENT ISOLATION (W1-T297, Standing rule 25): true when `diffFiles`
  * contains at least one {@link INSTRUMENT_SURFACE} path AND at least one
  * {@link isProductPath} src/ path — the ENTANGLEMENT predicate, not mere
@@ -5206,11 +5234,18 @@ function isProductPath(path: string): boolean {
  * returns `entangled: false`; so does a src-only, plan-only, or docs-only
  * diff. `instrumentPaths`/`srcPaths` are the OBSERVED EVIDENCE named in the
  * failure text and the fix rung's escalation (W1-T186 emitter discipline).
+ *
+ * {@link ENTANGLEMENT_EXEMPT_INSTRUMENTS} is subtracted FIRST, before either array is built — a
+ * path on that list never counts as `instrumentPaths` evidence, exactly as if it were never on
+ * {@link INSTRUMENT_SURFACE} at all (it stays on that surface for every OTHER purpose: docs
+ * awareness, the completeness alarm, `USER_VISIBLE_SURFACE_RE`).
  */
 export function detectInstrumentEntanglement(
   diffFiles: string[],
 ): { entangled: boolean; instrumentPaths: string[]; srcPaths: string[] } {
-  const instrumentPaths = diffFiles.filter((f) => INSTRUMENT_SURFACE_RE.test(f));
+  const instrumentPaths = diffFiles.filter(
+    (f) => INSTRUMENT_SURFACE_RE.test(f) && !ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(f),
+  );
   // A PATH ON THE INSTRUMENT SURFACE IS NOT PRODUCT CODE, EVEN WHEN IT LIVES UNDER `src/`.
   //
   // WHY THIS SUBTRACTION EXISTS. `isProductPath` is unconditionally `src/` and not `test/`, so
