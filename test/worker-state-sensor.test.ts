@@ -15,7 +15,7 @@
 //      verdict shape, and a tail write failure never fails the run.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -30,6 +30,7 @@ import {
   buildWorkerStateSensor,
   capWorkerTailLines,
   ledgerPathFor,
+  runWorkerTailSweepRung,
   sweepStaleWorkerTails,
   WORKER_STATE_LEDGER_STEP,
   WORKER_TAIL_MAX_BYTES,
@@ -294,4 +295,72 @@ test("sweepStaleWorkerTails is best-effort against an absent state/runs director
     const swept = sweepStaleWorkerTails(root);
     assert.deepEqual(swept.removed, []);
   });
+});
+
+// ── The three arms CI's diff-coverage found unexercised ──────────────────────────────────────
+//
+// All three are FAILURE/TIMER paths the happy-path tests above cannot reach: the polling
+// callback never fires without a real tick, and both catch arms need their reader to actually
+// throw. Each is driven for real here — no stubbed sweep, no mocked timer module.
+
+test("W1-T942: the poll timer emits the quiet transition without any further stream event", async () => {
+  const root = tmpRoot("t942-poll");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  // Injected clock: the REAL interval only has to TICK, while `now` decides what it observes —
+  // so this asserts the polling path itself, never the host's timer accuracy.
+  let clock = 1_000;
+  const sensor = buildWorkerStateSensor({
+    ledgerPath,
+    runId: "T-run-poll",
+    taskId: "T-task-poll",
+    root,
+    quietFloorMs: 5,
+    pollMs: 1,
+    now: () => clock,
+  });
+
+  // One observed event so the tracker has a lastActivity to measure the gap FROM — `check`
+  // returns undefined forever without it (the cannot-observe polarity acceptance 3 pins), so
+  // this is required setup rather than incidental.
+  sensor.observer({ kind: "working", tsMs: clock });
+  clock += 5_000; // well past the 5ms quiet floor
+
+  const stop = sensor.startPolling();
+  try {
+    await new Promise((r) => setTimeout(r, 40));
+  } finally {
+    stop();
+  }
+
+  const states = readLedgerLines(ledgerPath)
+    .filter((l) => l.step === WORKER_STATE_LEDGER_STEP)
+    .map((l) => l.state);
+  // The quiet row can ONLY have come from the interval callback: no observer call was made
+  // after the clock advanced, so nothing else could have driven the transition.
+  assert.deepEqual(states, ["working", "quiet"], `expected working then a polled quiet, got ${JSON.stringify(states)}`);
+});
+
+test("W1-T942: an unreadable runs dir costs a skipped sweep never a throw", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t942-unreadable-"));
+  mkdirSync(join(dir, "state"), { recursive: true });
+  // `state/runs` as a FILE: `existsSync` is true so the guard passes, and `readdirSync` then
+  // throws ENOTDIR — the real shape of an unreadable dir, without needing root or chmod games.
+  writeFileSync(join(dir, "state", "runs"), "not a directory\n");
+
+  const out = sweepStaleWorkerTails(dir);
+
+  assert.deepEqual(out, { removed: [] }, "best-effort: a skipped sweep, never a propagated throw");
+});
+
+test("W1-T942: a throwing sweep is logged by the rung and never escapes the poll", () => {
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  // A malformed root makes `join` inside sweepStaleWorkerTails throw before any fs call — the
+  // rung's own catch is what must contain it, or one bad config takes the whole daemon poll down.
+  const config = { root: undefined as unknown as string } as Config;
+
+  assert.doesNotThrow(() => runWorkerTailSweepRung(config, (step, extra) => logged.push({ step, extra })));
+
+  assert.equal(logged.length, 1, "the rung logs exactly once on failure");
+  assert.equal(logged[0].step, "daemon.worker_tail_sweep");
+  assert.ok(typeof logged[0].extra?.error === "string" && logged[0].extra.error.length > 0, "the failure is NAMED, never a silent swallow");
 });
