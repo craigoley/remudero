@@ -12,6 +12,14 @@
 # SYMPTOM is operator-visible, obligating a matching docs/troubleshooting.md entry. The reviewer
 # rubric's `checkTroubleshootingCoverage` (src/lib/review.ts) flags a new `operator_impact: true`
 # entry added here with no matching docs/troubleshooting.md touch in the same diff.
+#
+# ALSO this shard's own `drill_obligating: true|false` (default false, W1-T939): marks a failure
+# whose GUARD carried the fleet through the incident and can be injected into a
+# `scripts/recovery-drill.mjs` fixture (`RECOVERY_PATHS`, W1-T366/W1-T938). `true` obligates a
+# matching drill-table touch in the same diff — the postmortem's last step becomes "add it to the
+# drill." The reviewer rubric's `checkDrillCoverage` (src/lib/review.ts) flags a new
+# `drill_obligating: true` entry added here with no matching scripts/recovery-drill.mjs touch in
+# the same diff.
 
 # ── Reviewer floor & stale criteria (PR #42, W1-T5) ──
 - id: reviewer-floor-casing-blind

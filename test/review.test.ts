@@ -1212,7 +1212,7 @@ test("rubric satisfied_by guard (W1-T58 acceptance 2): a planted worker diff tha
   assert.equal(checkSatisfiedByGuard(CLEAN_DIFF).pass, true);
 });
 
-test("judgeRubric: a clean single-concern diff passes ALL SIX items + the guard", () => {
+test("judgeRubric: a clean single-concern diff passes ALL SEVEN items + the guard", () => {
   const r = judgeRubric({ diff: CLEAN_DIFF, report: CLEAN_REPORT });
   assert.equal(r.pass, true, JSON.stringify(r.failures));
   assert.deepEqual(
@@ -1220,6 +1220,7 @@ test("judgeRubric: a clean single-concern diff passes ALL SIX items + the guard"
     [
       "callers-audited",
       "docs-awareness",
+      "drill-coverage",
       "one-concern",
       "refactor-honesty",
       "satisfied-by-guard",
