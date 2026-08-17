@@ -1,0 +1,196 @@
+- id: W1-T964
+  title: "THE FOLLOW-UP HARVEST'S IDEMPOTENCY RESTS ON TWO LEDGER STEPS THAT ROTATE INDEPENDENTLY OF EACH OTHER — neither the source row nor its harvest mark is pinned, so whichever rotates first decides whether a declared follow-up is re-minted as a fresh candidate or lost outright, and the module's own doc asserts it must survive exactly that window"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    FILED FROM RECON at origin/main 478d7d0; branch cut at 55bf8c5. Every membership figure below
+    was RE-DERIVED on the branch tree with the CORRECTED step names — see the note for why that
+    correction matters.
+
+    (1) THE HARVEST READS TWO STEPS TOGETHER AND NEITHER IS PINNED. `harvestFollowupsFromReport`
+    writes ONE `report.followups` row per dispatched task carrying a `## Follow-ups` section
+    (src/run-task.ts:4934). `mineFollowups` (src/lib/retro.ts:2139) reads every such row —
+    filtering at :2154 on `r.step !== "report.followups"` — and skips any entry already named by a
+    `followup.harvested`/`followup.deduped` mark, matched on `entryId` (`${runId}:${index}`).
+    Those marks are written by `recordFollowupHarvest` (src/lib/retro.ts:2198) from
+    src/run-task.ts:10736, with the step strings emitted at src/lib/retro.ts:2174 and :2177.
+
+    (2) MEMBERSHIP, TESTED BOUNDED TO EACH SET BODY, WITH IN-SET CONTROLS. Against
+    `DECISION_RELEVANT_LEDGER_STEPS` (src/lib/ledger.ts:377-499): `report.followups` 0,
+    `followup.harvested` 0, `followup.deduped` 0, against controls `verdict` 1 and `run.start` 1.
+    Against `RENDER_RELEVANT_LEDGER_STEPS` (src/lib/ledger.ts:551-651): all three 0, against a
+    control `daemon.headroom` reading 1. And `isHealthOrDeployStep` (src/lib/ledger.ts:511)
+    matches only `daemon.boot` or a `deploy.` prefix, which none of the three has. So all three
+    fall to the DEFAULT cap, `MAX_RETAINED_LINES_PER_STEP = 200` newest per step
+    (src/lib/ledger.ts:730), with everything older archived.
+
+    (3) THE DEFECT IS THE INDEPENDENCE, NOT THE CAP. The cap is per-STEP, and the two steps have
+    DIFFERENT VOLUMES: `report.followups` is written once per dispatched task that declares a
+    section, while `followup.harvested`/`followup.deduped` are written once per ENTRY inside such
+    a section, on a retro cadence rather than a dispatch cadence. Two independent counters against
+    one shared cap means they cross the 200-row boundary at different times, in either order:
+      - HARVEST MARK ROTATES FIRST, source row still live => `mineFollowups` no longer sees the
+        skip marker and RE-MINTS the entry as a fresh candidate, so the Architect is shown work it
+        already adjudicated.
+      - SOURCE ROW ROTATES FIRST => the entry is unmineable and LOST, silently, with its mark left
+        behind as an orphan.
+    Neither direction errors, and neither is observable from the console.
+
+    (4) THE MODULE'S OWN DOC ASSERTS THE PROPERTY THIS BREAKS. src/lib/retro.ts:2130-2134 states
+    that a follow-up "must survive PAST the marker window (a discovery from three retros ago is
+    still worth surfacing), so this module tracks it explicitly instead" of relying on
+    marker-scoping. That explicit tracking IS the two ledger steps — so the mechanism chosen to
+    outlive the marker window is itself unprotected against the rotation window, and the doc
+    records the intent without anything enforcing it.
+
+    (5) THIS IS A LIVE DEFECT IN SHIPPED CODE, INDEPENDENT OF ANY NEW FEATURE. It degrades the
+    W1-T105 harvest that already runs on every retro today. It is filed on its own rather than as
+    part of any research-agenda work precisely so it cannot be deferred behind a feature.
+  design: |
+    THE SHAPE: pin the three follow-up steps, but establish WHICH existing retention category is
+    correct before touching anything, and land the fix with a measured before-figure.
+
+    (i) DETERMINE THE CATEGORY FROM SOURCE — DO NOT ADD A FOURTH. Three categories already exist
+    and each has an explicit doctrine: `DECISION_RELEVANT_LEDGER_STEPS` is retained FOREVER and
+    src/lib/ledger.ts:527-531 warns in terms that a step added there "is retained FOREVER, not for
+    as long as the console actually needs it"; `RENDER_RELEVANT_LEDGER_STEPS` is recency-bounded
+    for console rendering; and `isHealthOrDeployStep` is window-bounded at
+    `HEALTH_STEP_RETENTION_WINDOW_MS` (src/lib/ledger.ts:519). Read all three dockets and their
+    doc blocks, then state IN THE PR which one the follow-up steps belong in and why the other two
+    are wrong. A fourth category is the outcome to justify hardest, not the default: the W1-T275
+    precedent recorded at src/lib/ledger.ts:524-531 is that widening the wrong set "would silently
+    trade one failure for another".
+
+    (ii) THE THREE STEPS MOVE TOGETHER OR NOT AT ALL. `report.followups`, `followup.harvested` and
+    `followup.deduped` must land in the SAME category. Pinning the source row without its marks
+    re-creates the re-mint direction of rationale (3); pinning the marks without the source row
+    re-creates the loss direction. A fix covering two of the three is the defect with a smaller
+    blast radius, not a fix.
+
+    (iii) DELIVERABLE A — PIN THEM, SCOPED. After the change, a rotation that archives more than
+    200 rows of each follow-up step must leave the harvest's idempotency intact: a re-mine yields
+    the SAME candidate set it yielded before the rotation.
+
+    (iv) DELIVERABLE B — REPORT THE LIVE EXPOSURE, SO THE FIX CARRIES A MEASURED BEFORE-FIGURE.
+    Count `report.followups` against `followup.harvested` across the LEDGER UNION on the daemon
+    host — both file forms, per CLAUDE.md's three-pattern idiom, or `rmd ledger-grep`, which
+    `ledgerRotationEntries` (src/lib/ledger-grep.ts) makes the sanctioned in-process reader. The
+    figure that matters is not either count alone but the count of `report.followups` entryIds
+    with NO surviving mark, and the count of marks with NO surviving source row — the two
+    directions of rationale (3), separately. A zero in either direction is only a result with a
+    positive control proving the query could see its corpus. Report the numbers with the date and
+    the host; do not carry them forward as a standing figure.
+
+    (v) A MEMBERSHIP ASSERTION IS NOT AN ACCEPTANCE TEST, AND THIS IS THE TRAP. A test asserting
+    the three steps appear in a retention list PASSES for a blanket "retain everything" change,
+    which would fix this defect by deleting rotation and reinstating the unbounded growth the cap
+    exists to prevent. Every criterion below is therefore PAIRED: the pinned behaviour and a
+    CONTROL rotation on a NON-pinned step that still archives, both in the SAME run, so one
+    invocation carries both directions and a blanket change fails the control half.
+
+    (vi) AND THE MUTATION CHECK MUST BE FILE-SHA BRACKETED. A no-op mutation is indistinguishable
+    from a surviving mutant from the result alone. Read the sha256 of the edited file, remove the
+    pinning, read it again and require it to DIFFER, run the suite and require the idempotency
+    test to FAIL, restore, and require the sha to return to the original.
+
+    (vii) OUT OF SCOPE, TO BE FILED SEPARATELY, BOTH NAMED SO THEY CANNOT BE ABSORBED.
+    FIRST, the INTRA-PASS DEDUP GAP: `mineFollowups` compares each entry only against
+    `openTitles` (`followupMatchesTitle`, src/lib/retro.ts:2117, threshold at :2122), never
+    against the other fresh candidates in the same pass, so two workers declaring the same
+    follow-up in one cycle yield two candidates. That is a dedup defect, not a retention one, and
+    fixing retention neither causes nor cures it.
+    SECOND, the DUPLICATED FOLLOW-UP UNION: `FollowupEntry.type` at src/lib/worker.ts:1607 and
+    `FollowupCandidate.type` at src/lib/retro.ts:2081 declare the same three kinds
+    independently, with a third re-validation at src/lib/retro.ts:2159, and nothing ties them
+    together. Adding a kind means editing all three. That is a drift hazard in the type system,
+    orthogonal to rotation.
+  acceptance:
+    - claim: "after a rotation archiving over 200 rows of each follow-up step, a re-mine yields the same candidate set"
+      proof: "unit test: W1-T964: a re-mine after rotation yields the same candidate set"
+    - claim: "a non-pinned step still archives in the same run, so the pinning is scoped not blanket"
+      proof: "unit test: W1-T964: a non-pinned step still archives in the same run"
+    - claim: "all three follow-up steps are pinned together, not two of the three"
+      proof: "unit test: W1-T964: all three follow-up steps are pinned together"
+    - claim: "removing the pinning fails the idempotency test, with the file sha read either side"
+      proof: "unit test: W1-T964: removing the pinning fails the idempotency test"
+  risk: high
+  origin: "recon#followup-ledger-rotation-2026-08-17"
+  plan_refs: ["W1-T105"]
+  files: [src/lib/ledger.ts, test/ledger-rotation.test.ts, test/followup-rotation-idempotency.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS SET UP FRONT. Design item (i) requires a JUDGEMENT no test can make — which of
+    three existing retention categories these steps belong in, against a recorded precedent
+    (src/lib/ledger.ts:524-531) that widening the wrong one trades one failure for another — and
+    item (iv) requires reading a live host. `isDispatchEligible` (src/lib/drain.ts) returns false at
+    `t.verify !== "auto"` before the linter is consulted, so this shard can never be picked up by
+    the drain.
+
+    risk: high IS SET UP FRONT, AND THE BAND IS RULE 19'S SPAN RATHER THAN BLAST RADIUS. The
+    instruction was to determine the band from the declared `files:`, and the determination is that
+    high is FORCED. `sizingViolation` (src/lib/task-linter.ts:193-204) exempts only
+    `task.risk === "high"` at :194 and returns clean only at `subsystems.size < 2`. Critically,
+    `subsystemsOf` (src/lib/task-linter.ts:175) derives ids from the `files:` list AND from the
+    ACCEPTANCE CRITERIA TEXT, matching `SUBSYSTEM_LEXICON` against it (:185-189) — so the count is
+    not bounded by the file list alone. This shard's criteria cannot be stated without naming both
+    the LEDGER (where rotation happens and where the fix lands) and the HARVEST/MINE side (whose
+    idempotency is the property being preserved), because the defect is precisely the coupling
+    between them. Two concerns is the threshold, not many, so no honest phrasing of this scope
+    passes at medium. Per the instruction, the band the rule requires is set rather than fought,
+    and the blast radius is genuinely SMALL: a retention-list change plus tests, touching no
+    dispatch, review or merge path.
+
+    FILES DERIVED BY READING THE SOURCE, NOT GUESSED, AT 55bf8c5. src/lib/ledger.ts is the ONLY
+    module that must be edited: it holds all three retention categories
+    (`DECISION_RELEVANT_LEDGER_STEPS` :377, `RENDER_RELEVANT_LEDGER_STEPS` :551,
+    `isHealthOrDeployStep` :511) and the cap `MAX_RETAINED_LINES_PER_STEP` :730.
+    test/ledger-rotation.test.ts EXISTS and is the established home for rotation behaviour.
+    test/followup-rotation-idempotency.test.ts does NOT exist and is declared as a NEW path:
+    forward-referencing a PATH is safe where forward-referencing a SYMBOL would be a guess, and
+    CLAUDE.md requires a coverage-load-bearing test to sit in its own file rather than being
+    appended to a shared one. src/lib/retro.ts is deliberately NOT declared — `mineFollowups` is
+    the READER whose idempotency is asserted, not an edit target; a builder who concludes the fix
+    belongs there must amend this shard first. src/run-task.ts is likewise NOT declared, which
+    keeps this task clear of the W1-T471 serialisation that every task naming the monolith incurs.
+
+    A CORRECTION TO THE BRIEF THIS SHARD WAS FILED FROM, RECORDED BECAUSE IT CHANGES WHAT WAS
+    MEASURED. The brief's membership table named the step `followups.harvested` (plural). The code
+    writes `followup.harvested` (SINGULAR) at src/lib/retro.ts:2177. The plural string appears in
+    NO source file (`grep -rl` over src/ returns 0, against a control of 4 hits for the singular in
+    retro.ts and 2 files for `report.followups`), so the brief's 0 was a true reading of a string
+    that does not exist rather than a measurement of the real step. The membership was therefore
+    RE-DERIVED with the correct names, and the finding survives unchanged: all three real steps
+    read 0 in both sets, against in-set controls reading 1. The correction is recorded rather than
+    silently absorbed because a shard citing a step name that does not exist would send its
+    implementer to the wrong grep.
+
+    THE ID RESTS ON A FIVE-SURFACE SWEEP WITH COVERAGE ASSERTED SEPARATELY FROM READABILITY.
+    W1-T964 read 0 on all five: refs/rmd-id (positive control refs/rmd-id/W1-T953 = 1, negative
+    W1-T99999 = 0; 62 refs enumerated), shard filenames on main (control W1-T963 = 1; 332 files
+    enumerated against 332 expected), the main tree as a filed id (`^\s*- id: W1-T964$` = 0 files
+    against a control of W1-T963 = 1 file and a negative of W1-T99999 = 0 files; W1-T964 appears
+    NOWHERE in the tree in any form), open-PR file lists, and plan/tasks.yaml (control W1-T280 = 1).
+    964 IS THE LOWEST FREE ID ABOVE 963: refs/rmd-id reserves 1000-1003 and 100000 above it, none
+    of which is 964. COVERAGE WAS ASSERTED, NOT ASSUMED: surface 4 enumerated 0 open PRs and
+    captured 0 file lists with 0 failures, and that zero was CONTROLLED — the same endpoint with
+    `state=closed` returned 5 rows headed by #2086 — so the empty set is real rather than a failed
+    query.
+
+    THE RESERVATION WAS REFUSED. The gated push to refs/rmd-id/W1-T964 used an orphan commit over
+    the empty tree (4b825dc6) carrying a host-pid-nanosecond nonce, a braced refspec, and the exit
+    code captured in a variable rather than read through a pipe. PUSH_EXIT_CODE=1, verbatim:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+    The readback returned 0 lines and did not contain the nonce commit, while a control readback of
+    refs/rmd-id/W1-T953 returned its sha — so the ref genuinely does not exist and the query that
+    checked was working. The reservation does not exist and the five-surface sweep is the whole
+    basis. Same credential limit W1-T518 files; recorded rather than treated as blocking. Refs
+    BLOCK in the present direction only: the namespace holds 62 refs against 332 filed shards, and
+    W1-T952 is filed with no ref at all, so a ref reading absent proves nothing.
