@@ -1,0 +1,162 @@
+- id: W1-T952
+  title: "A HAND-OPENED PR WITH NO ACCEPTANCE BLOCK FAILS REVIEW WITH EVERY CI CHECK GREEN — the diagnostic that would catch it exists and is reachable only from a manual verb no author is obliged to run, so the defect is discovered one full CI cycle and one wasted head after the body was written"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    FILED FROM the #2040/#2042/#2050/#2053 sequence. Branch cut at a34ceb8; every file:line and
+    every invocation count below was re-read on this branch, and the cost figures are carried
+    from that sequence rather than re-derived.
+
+    (1) THE FAILURE PRESENTS AS THE WRONG THING. A PR body with no `## Acceptance` block and no
+    `Remudero-Task:` trailer gives `reviewCommand` nothing to resolve criteria from, and it fails
+    CLOSED — correctly. What the author sees is `remudero-review: FAIL` sitting beside a wall of
+    green checks, so the failure reads as a diff problem when it is a body problem. Measured on
+    #2042: 20 checks `success`, one `neutral`, two still running, ZERO failed, and the review
+    refused with `no acceptance criteria to judge (fail closed)`.
+
+    (2) THE COST IS A HEAD, NOT A MINUTE, AND THAT IS WHY IT IS WORTH GATING. A posted verdict is
+    bound to its head sha and is never re-judged on the same one: the post-review row in
+    `DISPOSITION_RULES` (src/lib/sweep.ts) fires at `reviewState` "none" or a stale pending, and
+    `blockedStateFor` returns undefined once it is "failure". So repairing the body clears
+    nothing — the fix is a NEW HEAD plus a full CI cycle. #2040 and #2042 each paid that. #2053,
+    opened with the block already present, reviewed green on its first head.
+
+    (3) THE EMITTER COVERS ONLY THE FLEET PATH. `renderAcceptanceBlock` (src/lib/plan-pr-emitter.ts,
+    8 references in its own module and 12 in test/plan-pr-emitter.test.ts) is guaranteed to
+    round-trip through the parser. Every PR opened around it — REST by hand, `gh pr create`, or an
+    MCP client — carries hand-authored markdown that nothing checks before it is posted. That
+    module's own doc at src/run-task.ts:8277-8282 already says so in terms.
+
+    (4) THE MECHANISM EXISTS AND IS NOT UNROUTED — IT IS ROUTED TO THE WRONG PLACE, AND THE
+    DISTINCTION MATTERS FOR THE FIX. `acceptanceBlockDiagnostics` (src/lib/review.ts:4568, 4
+    references there) has EXACTLY ONE call site: `checkAcceptanceCommand` at src/run-task.ts:8299,
+    the manual `rmd check-acceptance <body-file>` verb. That verb works and is not the defect. The
+    defect is that it is OPT-IN — an author who does not already know the trap will not run it —
+    and that NO PR-OPEN path calls it. A builder who reads "unrouted" and adds a first call site
+    will have missed that the routing decision is about WHICH path, not whether one exists.
+
+    (5) AND THE DIAGNOSIS, NOT THE DETECTION, WAS THE EXPENSIVE PART. `acceptanceBlockDiagnostics`
+    already distinguishes absent header, dropped bullets, truncation and empty proofs
+    (`AcceptanceBlockDiagnostics`, src/lib/review.ts:4527-4541). The review surfaces none of that
+    — it reports only that criteria came to zero. Recovering the cause meant reading the parser.
+  design: |
+    THE SHAPE: move the existing check from opt-in to on-the-open-path, and make what it reports
+    specific enough to act on. One determination first.
+
+    (i) ENUMERATE THE AUTHORING PATHS BEFORE CHOOSING ANYTHING, AND STATE COVERAGE EXPLICITLY.
+    Read from SOURCE every path by which a PR body is authored in this repo — at minimum
+    `openPlanPr` (src/run-task.ts, 6 references), `ratifyPrCreateRestArgs`
+    (src/lib/plan-pr-emitter.ts:368), `gh pr create` in src/lib/feedback-landing.ts:270, the POST
+    at src/lib/feedback.ts:784, and the onboard opener in src/lib/onboard/synthesize.ts — then
+    write down which the fix COVERS and which it CANNOT. This is the load-bearing item: an
+    in-repo check cannot reach a PR opened by a human over REST, by `gh pr create` directly, or
+    by an MCP client, because none of those execute repo code. The determination must state
+    plainly whether leaving those uncovered is ACCEPTABLE, or whether a server-side check is
+    required — and if acceptable, why. A fix that silently covers only the in-repo path and
+    claims the defect closed is the failure this item exists to prevent.
+
+    (ii) DELIVERABLE A — CALL IT AT AUTHOR TIME. On whichever paths (i) establishes as coverable,
+    a block-less or unparseable body must be caught BEFORE the PR is opened, not after a CI cycle
+    and a discarded head.
+
+    (iii) DELIVERABLE B — NAME THE DEFECT, NOT THE FAILURE. The diagnostic must say WHICH of the
+    four it is: no `## Acceptance` header, no `Remudero-Task:` trailer, proofs that do not parse,
+    or proofs that are empty. Per rationale (5) the observed cost was diagnosis time, not
+    detection time, so a generic refusal moves the cost rather than removing it.
+
+    (iv) A REJECTION TEST ALONE PROVES NOTHING, AND THIS IS THE TRAP. An implementation that
+    refuses EVERY body satisfies "a block-less body is rejected" perfectly. The positive control
+    must run in the SAME suite invocation over a well-formed body and observe it ACCEPTED, so one
+    run carries both directions.
+
+    (v) AND THE MUTATION CHECK MUST BE FILE-SHA BRACKETED. A no-op mutation is indistinguishable
+    from a surviving mutant from the result alone. Read the sha256 of the edited file, remove the
+    diagnostics call, read the sha256 again and require it to DIFFER, run the suite and require
+    the rejection test to FAIL, restore, and require the sha to return to the original.
+
+    (vi) OUT OF SCOPE, ENUMERATED. Any change to `reviewCommand`'s fail-closed behaviour — it is
+    CORRECT and this task depends on it staying that way; a body that resolves no criteria must
+    keep failing. And any change to the sha-binding of posted verdicts. Neither is to be touched
+    here, and neither is a reason to widen this task.
+  acceptance:
+    - claim: "every PR-authoring path is enumerated, with coverage stated for each"
+      proof: "unit test: W1-T952: every PR-authoring path is enumerated with its coverage stated"
+    - claim: "a body with no acceptance header is refused before the PR is opened"
+      proof: "unit test: W1-T952: a body with no acceptance header is refused at author time"
+    - claim: "a well-formed body is accepted, in the same run as the refusal above"
+      proof: "unit test: W1-T952: a well-formed body is accepted in the same run"
+    - claim: "removing the diagnostics call fails the refusal test, with the file sha read either side"
+      proof: "unit test: W1-T952: removing the diagnostics call fails the refusal test"
+    - claim: "the diagnostic names which of the four defects it found rather than failing generically"
+      proof: "unit test: W1-T952: the diagnostic names the specific defect not a generic failure"
+  risk: high
+  origin: "recon#author-time-acceptance-check-2026-08-17"
+  plan_refs: ["#2040", "#2042", "#2053"]
+  files: [src/lib/review.ts, src/lib/plan-pr-emitter.ts, src/run-task.ts, test/acceptance-block-diagnostics.test.ts, test/plan-pr-emitter.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS SET UP FRONT. Design item (i) requires a JUDGEMENT that no test can make —
+    whether leaving hand-REST and MCP-client PRs uncovered is acceptable or whether a server-side
+    check is needed — and that judgement must be recorded before any edit.
+    `isDispatchEligible` (src/lib/drain.ts) returns false at `t.verify !== "auto"` before the
+    linter is consulted, so this shard can never be picked up by the drain.
+
+    risk: high OVERRIDES AN EXPLICIT INSTRUCTION OF risk: medium, AND THE REASON IS MEASURED, NOT
+    PREFERRED. Filed first at risk:medium exactly as instructed, `rmd lint-plan` returned ONE
+    BLOCKING ROW against this record, verbatim:
+      ✗ W1-T952: 1 violation(s)
+          [sizing] spans 4 distinct subsystems/concerns (acceptance-block-diagnostics,
+          plan-pr-emitter, review, run-task) at risk:medium — Rule 19: raise to risk:high or
+          decompose into one task per concern
+    `sizingViolation` (src/lib/task-linter.ts:193-204) exempts ONLY `task.risk === "high"` at :194
+    and fires at `subsystems.size < 2` returning undefined — i.e. TWO concerns is the threshold,
+    not four. So no `files:` list satisfying this shard's own scope can pass at risk:medium: the
+    two modules it must name at minimum (the diagnostic and the emitter) are already two concerns.
+    Raising the band is the remedy the gate itself names first and the one CLAUDE.md's standing
+    rule prescribes. THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS — the blast radius really is
+    medium: this adds a pre-open refusal and touches neither what the review decides nor when a
+    verdict binds, both of which design item (vi) puts out of scope. An operator who wants
+    risk:medium recorded must decompose this into one task per concern, which contradicts filing
+    it as a single shard; that trade is the operator's to make and is flagged rather than buried.
+
+    FILES DERIVED BY INVOCATION COUNT AT a34ceb8, NOT GUESSED. `acceptanceBlockDiagnostics`:
+    src/lib/review.ts=4 (definition), src/run-task.ts=2 (the manual verb),
+    test/acceptance-block-diagnostics.test.ts=7. `renderAcceptanceBlock`:
+    src/lib/plan-pr-emitter.ts=8, test/plan-pr-emitter.test.ts=12, src/run-task.ts=1.
+    `ratifyPrCreateRestArgs`: src/lib/plan-pr-emitter.ts=2. `openPlanPr`: src/run-task.ts=6.
+    Control: `routeSpecialists` reads 0 in both source modules, so the counts discriminate.
+    src/run-task.ts IS DECLARED AND THE COST IS ACCEPTED IN WRITING — it holds BOTH the opener
+    (`openPlanPr`) and the existing manual verb (`checkAcceptanceCommand`), so an author-time
+    check cannot be wired without it. W1-T471 records that declaring the monolith serialises every
+    task naming it, and this shard will wait behind those. src/lib/feedback-landing.ts,
+    src/lib/feedback.ts and src/lib/onboard/synthesize.ts are NOT declared: they are additional
+    opener paths design item (i) must enumerate, but whether the fix reaches them is exactly the
+    determination that item defers, and a builder choosing to cover them will widen this list at
+    that point.
+
+    THE ID RESTS ON A FIVE-SURFACE SWEEP WITH COVERAGE ASSERTED SEPARATELY FROM READABILITY.
+    W1-T949 is claimed by open PR #2047, W1-T950 and W1-T951 are on main, so all three were
+    avoided. W1-T952 read 0 on every surface, each with a control reading 1 — refs/rmd-id
+    (control W1-T949), shard filenames (W1-T951), the main tree (W1-T950), open-PR file lists
+    (W1-T949), plan/tasks.yaml (W1-T280). COVERAGE WAS ASSERTED, NOT ASSUMED: 329 shard files
+    enumerated against 329 expected, and 5 open-PR file lists captured against 5 enumerated with
+    0 failures. That check exists because the previous filing's sweep silently captured 5 of 6
+    file lists — an unopened input reports the same absence as an opened one. One surface-4 match
+    above 951 was investigated rather than trusted: `W1-T999` appears only in patch content, as
+    the synthetic runId `W1-T999-1786970000000` in test/worker-peek.test.ts on PR #2055, and is
+    not a filed id.
+    THE RESERVATION WAS REFUSED. The gated push to refs/rmd-id/W1-T952 used an orphan commit over
+    the empty tree (4b825dc6) carrying a host-pid-nanosecond nonce, a braced refspec, and the exit
+    code captured in a variable rather than read through a pipe. PUSH_EXIT_CODE=1, verbatim:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+    The readback found no ref, so the reservation does not exist and the sweep is the whole basis.
+    Refs are CORROBORATING ONLY: the namespace holds 47 refs against 565 taken ids, so a ref
+    reading absent proves nothing on its own.
