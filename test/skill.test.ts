@@ -307,6 +307,24 @@ test("W1-T933: an undeclared source is never searched", () => {
   });
 });
 
+test("W1-T933: a declared source that cannot be read is skipped not fatal", () => {
+  withTempDir((dir) => {
+    writeFileSync(join(dir, "present.md"), "W9-T3 is here\nunrelated\n");
+    // "absent.md" is DECLARED but never written — the shape a skill hits when a grounding
+    // source is renamed or has not landed yet. `readFileSync` throws and the loop's `continue`
+    // swallows it; before this test that catch arm never executed, so a `throw` where the
+    // `continue` sits would have shipped and taken the whole lookup down on one missing file.
+    const skill = validateSkill({ ...goodRaw(), grounding_sources: ["absent.md", "present.md"] }, "plan");
+
+    const notes = searchGroundingSources(dir, skill, "W9-T3");
+
+    // Skipped, not fatal, and NOT silently empty: the readable sibling still answers.
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].source, "present.md");
+    assert.deepEqual(notes[0].excerpts, ["W9-T3 is here"]);
+  });
+});
+
 test("W1-T933: the lookup stays deterministic and offline", () => {
   withTempDir((dir) => {
     writeFileSync(join(dir, "notes.md"), "W9-T2 appears once\nW9-T2 appears twice\nirrelevant\n");
@@ -320,6 +338,12 @@ test("W1-T933: the lookup stays deterministic and offline", () => {
     let first: ReturnType<typeof searchGroundingSources>;
     let second: ReturnType<typeof searchGroundingSources>;
     try {
+      // POSITIVE CONTROL ON THE POISON ITSELF. Without it this test asserts a zero it never
+      // proved it could see: a fake assigned to the wrong global (or silently dropped by the
+      // cast) leaves `fetch` unarmed, `searchGroundingSources` makes no call either way, and
+      // "deterministic and offline" passes vacuously. Firing it once proves the trap is live
+      // BEFORE the real assertion leans on it never firing.
+      assert.throws(() => (globalThis.fetch as unknown as () => unknown)(), /never make a network\/model call/);
       first = searchGroundingSources(dir, skill, "W9-T2");
       second = searchGroundingSources(dir, skill, "W9-T2");
     } finally {
