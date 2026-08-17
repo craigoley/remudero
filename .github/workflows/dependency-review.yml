@@ -29,3 +29,82 @@ jobs:
         continue-on-error: true
         with:
           comment-summary-in-pr: always
+
+  # ── W1-T934: licence-only, BLOCKING gate (a strong-copyleft dep must not merge green) ───────
+  #
+  # A SECOND, DEDICATED job, not a change to `dependency-review` above (design (iv)) — that job
+  # stays exactly as it is: warn-only, vulnerability + license findings both advisory-only by
+  # construction (`continue-on-error: true`). Promoting it wholesale would also silently promote
+  # its vulnerability arm to blocking and duplicate osv-scanner-pr.yml, reversing W1-T211's
+  # deliberate per-scanner advisory/blocking ruling as a side effect.
+  #
+  # ROUND 1 of this gate used actions/dependency-review-action (pinned a1d282b, v5.0.0) here,
+  # keyed on GitHub's own `GET /repos/{owner}/{repo}/dependency-graph/compare/{basehead}` API.
+  # That API returns 403 ("Dependency review is not supported on this repository... ensure
+  # Dependency graph is enabled") on THIS repository — reproduced directly via `gh api repos/
+  # {owner}/{repo}/dependency-graph/compare/...` (403) and `.../dependency-graph/sbom` (404, "not
+  # enabled for this repository"), and the vendor action has NO fallback that avoids this call
+  # (verified against its pinned source: `src/dependency-graph.ts`'s `compare()` is the ONLY
+  # source of dependency changes in `src/main.ts`, in this or any released version through
+  # `main`). Flipping Dependency graph on is an org/repo `administration`-scope admin action this
+  # worker's token does not carry — so this job now computes the diff itself, WITHOUT calling
+  # that API at all, via `test/helpers/check-dependency-licences.mjs` (its own header carries the
+  # same verification trail, INCLUDING why it lives under `test/` rather than `scripts/` — MASTER-
+  # PLAN Standing rule 25 would otherwise force this very diff to an unsuppressible review failure
+  # for entangling a NEW `scripts/*.mjs` gate script with the `.github/workflows/` change wiring
+  # it in, in the same PR).
+  #
+  # `allow-licenses`, NEVER a deny-list (design (ii)): a deny-list fails OPEN on every licence
+  # nobody thought to enumerate — the wrong shape for an ALLOWED-list with copyleft flagged as the
+  # consequence, not the enumeration. `test/helpers/check-dependency-licences.mjs` only ever takes
+  # an allow-list (`ALLOW_LICENSES`), mirroring that choice; there is no deny-list input to misuse.
+  #
+  # THE ALLOW-LIST, seeded exactly from the permissive family the originating feedback names
+  # (MIT / Apache-2.0 / BSD-2-Clause / BSD-3-Clause / ISC) and NOT silently widened (design (vi)).
+  # A `node_modules` scan of every installed package.json's `license` field on 2026-08-17 (301
+  # MIT, 28 ISC, 21 Apache-2.0, 3 BSD-3-Clause, 1 BSD-2-Clause, 1 0BSD — all five ON this list;
+  # plus, OUTSIDE it and reported rather than added: 2 MPL-2.0, 2 "SEE LICENSE IN LICENSE.md", 1
+  # "SEE LICENSE IN README.md", 1 Python-2.0, 1 CC-BY-4.0, 1 Unlicense, 1 BlueOak-1.0.0, 2
+  # "Apache-2.0 AND MIT" — 0 packages had no `license` field at all) is recorded in this PR's body,
+  # per design (vi). This job is diff-scoped by `checkout`'s own `fetch-depth: 0` plus the PR's
+  # real `base.sha`/`head.sha` (never a filesystem snapshot of the WHOLE tree), so none of those
+  # already-installed outliers can fail a PR that did not introduce them (script's own `diffAdded`
+  # is unit-tested against that exact property, test/dependency-licence-policy.test.ts claim 4).
+  #
+  # THE UNKNOWN-LICENCE HOLE (design (iii)): an npm lockfileVersion-3 `packages` entry's `license`
+  # field is either a valid-SPDX-shaped string (classified allowed/forbidden against the allow-
+  # list), a present-but-unparseable string ("unresolved" — e.g. "SEE LICENSE IN LICENSE.md"), or
+  # entirely absent ("no-license"). "forbidden" ALWAYS fails, with no exemption escape hatch — a
+  # genuinely disallowed licence is the exact case this gate exists to catch. "unresolved" and
+  # "no-license" are the two undeterminable buckets; both fail UNLESS the package is named, with a
+  # reason, in `LICENSE_EXEMPTIONS` below (reviewed individually, never silently papered over).
+  license-review:
+    name: License Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: License Review
+        env:
+          ALLOW_LICENSES: >-
+            MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC
+          # Packages whose licence could not be determined at all ("no-license") or does not parse
+          # as an SPDX id/expression ("unresolved"), individually reviewed and exempted BY NAME
+          # with a reason (design (iii)) — empty today because the 2026-08-17 node_modules scan
+          # (job comment above) found zero such packages. A recognized-but-disallowed licence
+          # (copyleft) is NEVER exemptable here — add `{"name": "<pkg>", "reason": "<why>"}` per
+          # exemption, one per line (same one-entry-per-line convention as ci-gate.yml's REQUIRED/
+          # IGNORE, so concurrent additions append lines instead of colliding).
+          LICENSE_EXEMPTIONS: >-
+            []
+        run: |
+          node test/helpers/check-dependency-licences.mjs \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}"

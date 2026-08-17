@@ -99,6 +99,15 @@ jobs:
       # check-run name is namespaced by GitHub as `<caller job> / <reusable workflow job>` because
       # osv-scanner-pr.yml calls google/osv-scanner-action's reusable workflow instead of running
       # inline (verified against a live PR's check-runs API response, not assumed from the yaml).
+      # `License Review` (W1-T934, §5 §5C §6A "a dependency-licence allow-list gate") added: a
+      # NATIVE job in dependency-review.yml (not a `uses:` reusable-workflow caller), so — same as
+      # the existing `dependency-review` job's own `name: Review` in that same file, already relied
+      # on by test/scanner-gate-config.test.ts — its registered check-run name is simply its own
+      # `name:` field, not the job id `license-review`. Same UNCONDITIONAL shape as every entry
+      # above: no path filter, no `if:`, runs every PR; unlike the pre-existing `dependency-review`
+      # / `Review` job (kept warn-only, `continue-on-error: true`, NOT in this list), `License
+      # Review` carries no continue-on-error and fails on a disallowed, unresolved, or (via its own
+      # follow-up step) undeterminable-licence dependency introduced by the PR.
       # One entry per line (JSON array, folded-scalar YAML) so concurrent PRs each adding a new
       # required check append a line instead of both editing the same line — avoiding the merge
       # conflict that a single-line array forces on every simultaneous gate addition.
@@ -116,7 +125,8 @@ jobs:
         "commitlint",
         "api-client-drift",
         "no-hand-rolled-fetch",
-        "scan-pr / osv-scan"
+        "scan-pr / osv-scan",
+        "License Review"
         ]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
