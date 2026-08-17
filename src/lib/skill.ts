@@ -122,6 +122,59 @@ export function loadSkillRegistry(dir: string): Skill[] {
   return filenames.map((f) => loadSkill(join(dir, f)));
 }
 
+// ── searchGroundingSources: the declared-corpus lookup primitive (W1-T933) ────────────────────
+//
+// W1-T933's shard: "a caller can search a skill's declared grounding sources without the console
+// path." Every `.remudero/skills/<name>.yaml` already declares `grounding_sources` — the corpus
+// its GROUND step is supposed to read. `groundClarifyRequest` (`src/lib/panel-skill-run.ts`)
+// already implemented exactly this search inline, reachable only through the console panel path
+// (bound to 127.0.0.1:4317, no published port). This lifts that search into a reusable primitive
+// any caller can invoke directly against an already-`loadSkill`ed registry entry, so "what does
+// the declared corpus already say about X" no longer requires going through the panel.
+//
+// Deliberately NOT an index, NOT embeddings, NOT a store to keep in sync (see the shard's
+// rationale (vi) for why: a derived index the markdown can drift from is the wrong trade for a
+// fleet whose console has no published port). It reads only the paths `skill.grounding_sources`
+// names — nothing else is ever searched — and makes NO model call: a plain substring filter over
+// files already on disk, so it is deterministic and offline by construction, the same trade
+// `src/lib/knowledge-dedup.ts` already made and documented for intake.
+
+/** One `grounding_sources` file that mentions `query` — the source path plus its matching lines. */
+export interface GroundingNote {
+  /** Repo-relative path, verbatim from the skill's declared `grounding_sources`. */
+  source: string;
+  /** The matching line(s), trimmed and capped so a huge file never blows up the caller's text. */
+  excerpts: string[];
+}
+
+/**
+ * Search `skill.grounding_sources` — and ONLY `skill.grounding_sources`; a source the skill does
+ * not declare is never opened — for lines containing `query`, relative to `root`. Per-source
+ * results cap at 3 excerpts of 200 chars each, matching the console panel's existing
+ * `groundClarifyRequest` shape (unchanged by this lift). A missing or unreadable source file
+ * degrades to "found nothing there" rather than throwing — a caller must still get an answer
+ * against a half-populated repo. Deterministic and offline: no model call, no network, a plain
+ * substring filter over files already on disk.
+ */
+export function searchGroundingSources(root: string, skill: Skill, query: string): GroundingNote[] {
+  const notes: GroundingNote[] = [];
+  for (const source of skill.grounding_sources) {
+    let text: string;
+    try {
+      text = readFileSync(join(root, source), "utf8");
+    } catch {
+      continue;
+    }
+    const excerpts = text
+      .split("\n")
+      .filter((line) => line.includes(query))
+      .slice(0, 3)
+      .map((line) => line.trim().slice(0, 200));
+    if (excerpts.length > 0) notes.push({ source, excerpts });
+  }
+  return notes;
+}
+
 /** Render `rmd skill list`'s human-readable listing — one block per skill, every field resolved. */
 export function renderSkillList(skills: Skill[]): string {
   if (skills.length === 0) {

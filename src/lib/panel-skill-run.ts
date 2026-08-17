@@ -45,13 +45,12 @@
  * every other W3-T* panel module's header draws.
  */
 
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadPlan, type Task } from "./plan.js";
 import { lintTask, type LintResult } from "./task-linter.js";
 import { captureFeedback, setFeedbackStatus, type FeedbackEntry } from "./feedback.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
-import { loadSkill, loadSkillRegistry, skillsDir, type Skill } from "./skill.js";
+import { loadSkill, loadSkillRegistry, searchGroundingSources, skillsDir, type GroundingNote, type Skill } from "./skill.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 
@@ -84,21 +83,22 @@ export interface PanelSkillRunDeps {
 // target task. The §5C linter result is layered ON TOP below (still useful, still deterministic)
 // — never a substitute for the plan skill's own grounding step.
 
-/** One `grounding_sources` file (from `.remudero/skills/plan.yaml`) that mentions the task under Refine. */
-export interface GroundingNote {
-  /** Repo-relative path, verbatim from the plan skill's `grounding_sources`. */
-  source: string;
-  /** The matching line(s), trimmed and capped so a huge file never blows up the grill text. */
-  excerpts: string[];
-}
+/**
+ * One `grounding_sources` file (from `.remudero/skills/plan.yaml`) that mentions the task under
+ * Refine — re-exported from `lib/skill.ts` (W1-T933) so existing callers/imports of
+ * `GroundingNote` from this module keep working unchanged.
+ */
+export type { GroundingNote };
 
 /**
  * GROUND step: read the "plan" skill's registry entry and search every file it declares under
  * `grounding_sources` for mentions of `task.id` — the SAME corpus `.remudero/skills/plan.yaml`
  * names, resolved via `lib/skill.ts`'s `loadSkill` (the identical primitive `rmd skill list`
- * uses), never a hand-picked substitute. A missing registry entry or a missing/unreadable source
- * file degrades to "found nothing" rather than throwing — Refine must still be able to grill even
- * against a half-populated repo.
+ * uses), never a hand-picked substitute. A missing registry entry degrades to "found nothing"
+ * rather than throwing — Refine must still be able to grill even against a half-populated repo.
+ * The actual search is `lib/skill.ts`'s `searchGroundingSources` (W1-T933) — lifted out of this
+ * function so the SAME declared-corpus lookup is reachable without the console panel path this
+ * function is bound to; this is now a thin wrapper naming which skill and which query.
  */
 export function groundClarifyRequest(root: string, task: Task): GroundingNote[] {
   let planSkill: Skill;
@@ -107,22 +107,7 @@ export function groundClarifyRequest(root: string, task: Task): GroundingNote[] 
   } catch {
     return [];
   }
-  const notes: GroundingNote[] = [];
-  for (const source of planSkill.grounding_sources) {
-    let text: string;
-    try {
-      text = readFileSync(join(root, source), "utf8");
-    } catch {
-      continue;
-    }
-    const excerpts = text
-      .split("\n")
-      .filter((line) => line.includes(task.id))
-      .slice(0, 3)
-      .map((line) => line.trim().slice(0, 200));
-    if (excerpts.length > 0) notes.push({ source, excerpts });
-  }
-  return notes;
+  return searchGroundingSources(root, planSkill, task.id);
 }
 
 // ── GRILL: the plan skill's own grounding PLUS the §5C deterministic linter ─────────────────
