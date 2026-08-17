@@ -22,5 +22,22 @@ raw: "LIVE WORKER OBSERVABILITY — workers are opaque between spawn and verdict
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2031
+summary:
+  headline: Enable live visibility of worker activity during runs
+  what_happened: Workers are invisible between spawn and completion—operators see
+    only elapsed time and cost. Proposal adds state tracking
+    (working/idle/quiet), stall alerts, and live transcript viewing.
+  decision: "Implement live worker observability: state sensor on NOW card, stall
+    detector routing to NEEDS-ME alerts (no auto-kill), and live transcript
+    viewing capability. Persist output for all verdicts."
+  options:
+    - label: Implement all three components
+      consequence: Full observability in single release; operators see state+spend,
+        stall alerts with context, live transcripts; higher initial cost.
+    - label: "Phase: state sensor and transcript viewing first"
+      consequence: Faster initial release; operators can inspect manually; stall
+        detection added later when policy thresholds refined.
+    - label: Reject; defer to later roadmap
+      consequence: Status quo persists; workers remain opaque; no mechanism to detect
+        hung jobs; lower near-term engineering cost.
