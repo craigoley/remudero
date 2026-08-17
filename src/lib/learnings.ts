@@ -148,6 +148,16 @@ const AUTONOMY_SRC = "learnings#standing-rule-8";
  * Default KNOWLEDGE BUDGET: the max chars of MATCHED-learning fact lines injected
  * per prompt. The two doctrine lines above are mandatory and NOT counted against
  * it — only the growing, file-matched corpus is capped.
+ *
+ * PINNED, NOT PICKED (W1-T941): this figure must equal
+ * scripts/knowledge-budget-baseline.json's `capChars` — the recorded output of
+ * src/lib/digest.ts's `deriveKnowledgeBudgetCap` (measured dropped-fact weight
+ * at p50/p90 over `learnings.injected` ledger rows, joined against
+ * {@link buildEntryWeightIndex}, and priced in tokens against the measured
+ * cache-hit mix). test/knowledge-budget-derivation.test.ts's drift test fails
+ * if this constant and the baseline's `capChars` ever disagree — raising it is
+ * a reviewed diff to that baseline file, backed by its own arithmetic, never a
+ * bare edit of the literal here.
  */
 export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800;
 
@@ -523,6 +533,22 @@ export function loadLearningsCorpus(dir: string): LearningEntry[] {
  */
 export function entryBudgetWeight(entry: LearningEntry): number {
   return renderLearningLine(entry).length;
+}
+
+/**
+ * id -> {@link entryBudgetWeight} (+1 for the joining "\n", same convention `selectLearnings`/
+ * `computeLayerBudgetUsage` fold in) for every entry in `entries` (W1-T941). A `learnings.injected`
+ * ledger row only carries dropped entry IDS, never their weight — this is the lookup
+ * src/lib/digest.ts's `measureKnowledgeBudgetPressure` joins those IDs against to size the
+ * dropped-fact WEIGHT a budget derivation needs, without digest.ts importing this module's
+ * corpus-loading machinery.
+ */
+export function buildEntryWeightIndex(entries: LearningEntry[]): Record<string, number> {
+  const index: Record<string, number> = {};
+  for (const entry of entries) {
+    index[entry.id] = entryBudgetWeight(entry) + 1;
+  }
+  return index;
 }
 
 /**

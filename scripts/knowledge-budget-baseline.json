@@ -1,0 +1,10 @@
+{
+  "_comment": "Knowledge budget INJECTION cap derivation baseline (W1-T941, MASTER-PLAN §8A). Captured by running src/lib/digest.ts's measureKnowledgeBudgetPressure + deriveKnowledgeBudgetCap -- the PRESSURE side needs `learnings.injected` ledger rows (state/ledger.ndjson), and that file is RUNTIME STATE, not version-controlled, so at capture time this worktree had zero traversable rows (git-tracked history carries none). The feedback that filed this task (fb-1785237596465-45d06d) cites one operator-reported spawn (W1-T84: 16 matched, 3 injected) -- a single anecdote, not a percentile-worthy sample, and the feedback's own instruction was 'measure, don't assume': one data point cannot size a char cap any more honestly than the original unexamined 1800 could. With no traversable ledger history, measuredDroppedWeightP50Chars/P90Chars are null and deriveKnowledgeBudgetCap's own 'no measurable pressure' branch applies (design note iv: 'NO CHANGE is a legal result and must be recordable') -- capChars stays UNCHANGED at 1800, WITH this evidence recorded, per the task's own falsifier (a fixture with negligible/absent dropped weight must derive the current figure unchanged, not a raise). This is a derivation recording an ABSENCE of evidence, not a guess dressed as one: re-run the same two functions against real learnings.injected ledger rows (emitted on every spawn since W1-T940) once enough spawn history accumulates in a live ledger, and land a reviewed diff here if the measured p90 dropped weight crosses TRIVIAL_DROPPED_WEIGHT_CHARS (40 chars, src/lib/digest.ts) and cache-mix data is available to price the delta. Never raise capChars without both: a re-measured pressure figure AND a priced delta in this file's history.",
+  "capturedAt": "2026-08-17",
+  "measuredDroppedWeightP50Chars": null,
+  "measuredDroppedWeightP90Chars": null,
+  "spawnsMeasured": 0,
+  "cacheHitRatioUsed": null,
+  "pricedDeltaTokens": 0,
+  "capChars": 1800
+}
