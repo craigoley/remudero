@@ -21,9 +21,11 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import { buildPeekRoute } from "../src/lib/serve.js";
+import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import {
   capWorkerTailLines,
   isValidRunId,
+  main,
   peekCommand,
   readWorkerTail,
   RUN_ID_SHAPE,
@@ -227,6 +229,29 @@ test("rmd peek <runId>: an unknown run id prints a NAMED reason and still exits 
   }
 });
 
+test("rmd peek <runId>: a FOUND but EMPTY tail prints the honest empty-tail line, never silent output", async () => {
+  const root = tmpRoot();
+  try {
+    writeTail(root, "W1-T650-1786000000000", []); // exists, zero lines recorded yet
+    const realLog = console.log;
+    const logs: string[] = [];
+    console.log = (...a: unknown[]) => void logs.push(a.map(String).join(" "));
+    let code = -1;
+    try {
+      code = await peekCommand(["W1-T650-1786000000000"], { root });
+    } finally {
+      console.log = realLog;
+    }
+    assert.equal(code, 0);
+    const out = logs.join("\n");
+    assert.match(out, /FINISHED/);
+    assert.match(out, /last 0 line\(s\)/);
+    assert.match(out, /tail is empty — no output recorded yet/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rmd peek: missing <runId> refuses with a usage error and exit 2, spawning/printing no tail", async () => {
   const realErr = console.error;
   const errs: string[] = [];
@@ -329,6 +354,86 @@ test("rmd peek --follow: an already-FINISHED run never enters the poll loop at a
     assert.equal(slept, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rmd peek --follow: re-renders when the tail's CONTENT changes between polls, not only on a liveness flip", async () => {
+  const root = tmpRoot();
+  try {
+    writeTail(root, "W1-T750-1786000000000", ["first line"]);
+    writeInflightLock(root, "W1-T750", { pid: 222, run_id: "W1-T750-1786000000000" });
+
+    const realLog = console.log;
+    const logs: string[][] = [];
+    console.log = (...a: unknown[]) => void logs.push(a.map(String));
+    let ticks = 0;
+    let code = -1;
+    try {
+      code = await peekCommand(["W1-T750-1786000000000", "--follow"], {
+        root,
+        isPidAlive: () => true,
+        maxFollowIterations: 5,
+        pollMs: 0,
+        sleep: async () => {
+          ticks++;
+          if (ticks === 1) {
+            // the run is STILL live, but new output landed — must re-render on content alone.
+            writeTail(root, "W1-T750-1786000000000", ["first line", "second line"]);
+          }
+          if (ticks === 2) rmSync(join(root, "state", "inflight", "W1-T750.lock"));
+        },
+      });
+    } finally {
+      console.log = realLog;
+    }
+    assert.equal(code, 0);
+    const out = logs.map((l) => l.join(" ")).join("\n");
+    // "second line" only exists after tick 1's mid-follow write, so its presence proves the
+    // loop rendered AGAIN off a content change while `result.live` never flipped.
+    assert.match(out, /second line/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── main()'s CLI dispatch: `cmd === "peek"` must actually route to peekCommand (not just exist
+// as a registry entry — help-registry.test.ts already proves the latter, statically, without
+// ever running main()). Same throwing-process.exit-mock shape run-task.test.ts's onboard/
+// wipe-test dispatch tests use, duplicated locally so this file doesn't reach into another
+// test file's helper.
+class PeekProcessExitCalled extends Error {
+  constructor(public code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+test("main(): `rmd peek` with no <runId> dispatches to peekCommand and exits 2 (fail loud, no config/fs work)", async (t) => {
+  const exitMock = ((code?: number): never => {
+    throw new PeekProcessExitCalled(code);
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+  const errSpy = t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", () => {});
+
+  const originalArgv = process.argv;
+  process.argv = ["node", "run-task.js", "peek"];
+  const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
+  try {
+    let caught: unknown;
+    await main().catch((e) => {
+      caught = e;
+    });
+    assert.ok(caught instanceof PeekProcessExitCalled, "main() must reach process.exit via peekCommand's return value");
+    assert.equal((caught as PeekProcessExitCalled).code, 2);
+    assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /<runId> is required/);
+  } finally {
+    process.argv = originalArgv;
+    if (originalGuardEnv === undefined) {
+      delete process.env[SELF_SYNC_GUARD_ENV];
+    } else {
+      process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
+    }
   }
 });
 
