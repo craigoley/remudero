@@ -4,8 +4,8 @@
 matters most — and they were once copied into the tree **out-of-band (scp)**,
 which is how a dirty, unreviewed version arrived with no provenance and no
 diff to inspect. That never happens again: **plan edits land exactly like code,
-through a reviewable PR against `main`, gated by the same `ci` +
-`remudero-review` checks as every other change.** No file arrives by
+through a reviewable PR against `main`, gated by the same `ci-gate` +
+`remudero-review` required checks as every other change.** No file arrives by
 scp/rsync/manual copy.
 
 ## The flow
@@ -18,9 +18,11 @@ scp/rsync/manual copy.
    nothing auto-posts `remudero-review` for it, so the PR body must contain an
    `Acceptance:` block (claim + observable proof per line) before running
    `rmd review <pr-number>` to post the required status.
-4. **Gate.** The PR merges only when both `ci` and `remudero-review` are
-   green — identical bar to a code PR. A plan change with no stated,
-   substantiated acceptance criteria **fails closed**.
+4. **Gate.** The PR merges only when both required contexts — `ci-gate` and
+   `remudero-review` — are green; `ci` and `coverage-ratchet` are not required
+   contexts themselves, they gate transitively through `ci-gate`'s aggregation.
+   Identical bar to a code PR. A plan change with no stated, substantiated
+   acceptance criteria **fails closed**.
 5. **Merge.** Once green, merge through GitHub like any other PR. The merge
    commit *is* the provenance record: who changed the plan, what changed, and
    why, all in `git log` — never reconstructable from an scp'd file with no
@@ -36,7 +38,8 @@ flow **is** the plan-sync mechanism, not a placeholder for one.
   file that silently appeared in the tree.
 - **Same gate, no exceptions.** The plan is not special-cased below the code
   quality bar (Standing rule 15/16 territory) — it goes through the identical
-  `ci` + `remudero-review` gate.
+  `ci-gate` + `remudero-review` gate, and so inherits every check `ci-gate`
+  aggregates.
 - **Reviewable diffs.** A plan edit as a PR diff is inspectable line-by-line,
   the same way a code diff is — an scp'd file replacement is not.
 
