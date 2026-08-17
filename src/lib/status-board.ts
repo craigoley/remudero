@@ -60,7 +60,15 @@ import {
   type CrashLoopWindow,
 } from "./daemon.js";
 import { COST_ANOMALY_STEP } from "./cost-anomaly.js";
-import { aggregateCacheHitTotals, cacheHitRatio, formatCacheHitFigure, type CacheHitGrain, type CacheHitTotals } from "./digest.js";
+import {
+  aggregateCacheHitTotals,
+  aggregateLearningsInjection,
+  cacheHitRatio,
+  formatCacheHitFigure,
+  type CacheHitGrain,
+  type CacheHitTotals,
+  type LearningsInjectionTotals,
+} from "./digest.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { runnableCandidates, type MergedSet } from "./drain.js";
@@ -462,6 +470,19 @@ export interface CacheHitSection {
 }
 
 /**
+ * W1-T940: LEARNINGS INJECTION DROP PRESSURE (feedback fb-1785237596465-45d06d, MASTER-PLAN
+ * §8A) — the SAME read ledger window {@link buildStatusBoard}'s other sections already opened,
+ * aggregated by digest.ts's {@link aggregateLearningsInjection}: ONE traversal, so `rmd status`
+ * can never disagree with the digest on which `learnings.injected` rows count. `found: false`
+ * when the window carries no `learnings.injected` rows at all (design note (iv) — a spawn-free
+ * window renders explicit absence, never a fabricated `dropped: 0`).
+ */
+export interface LearningsInjectionSection {
+  found: boolean;
+  totals?: LearningsInjectionTotals;
+}
+
+/**
  * W1-T931 COST-ANOMALY SENTINEL (fb-1785237559155-feef92, item 4) — one un-dismissed
  * `cost.anomaly` ledger row (`src/lib/cost-anomaly.ts`'s `recordCostAnomalies`, hung off
  * `src/lib/sweep.ts`'s `runSweep`): a run that cost more than `multiplier` times its own task
@@ -503,6 +524,7 @@ export interface StatusBoardModel {
   inbox: InboxSection;
   headroom: HeadroomSection;
   cacheHit: CacheHitSection;
+  learningsInjection: LearningsInjectionSection;
   needsMe: NeedsMeSection;
 }
 
@@ -1699,6 +1721,15 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const cacheHitTotals = aggregateCacheHitTotals(lines);
   const cacheHit: CacheHitSection = { found: cacheHitTotals !== undefined, totals: cacheHitTotals };
 
+  // ── W1-T940: LEARNINGS INJECTION — same `lines` window every other section above already
+  // read, one extra traversal (digest.ts's aggregateLearningsInjection), no second ledger
+  // read. ──────────────────────────────────────────────────────────────────────────────────
+  const learningsInjectionTotals = aggregateLearningsInjection(lines);
+  const learningsInjection: LearningsInjectionSection = {
+    found: learningsInjectionTotals !== undefined,
+    totals: learningsInjectionTotals,
+  };
+
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
   const needsMe = deriveNeedsMe(lines);
@@ -1713,6 +1744,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     inbox,
     headroom,
     cacheHit,
+    learningsInjection,
     needsMe,
   };
 }
@@ -1929,6 +1961,32 @@ function renderCacheHitBlock(c: CacheHitSection): string[] {
   return out;
 }
 
+/**
+ * W1-T940 — the drop-pressure lines: `matched`/`dropped`/`rows` totals, every distinct
+ * `budget_chars` value seen (design note (i): NOT averaged into one number, so a mid-window
+ * constant change stays visible), and any `global_refused_reason` strings NAMED VERBATIM on
+ * their own line, deduped with a count — never folded into `dropped` (design note (iii): a
+ * refusal is a layer contributing ZERO entries, a drop is a ranked entry losing a tie). `found:
+ * false` renders explicit absence rather than a fabricated `dropped: 0` (design note (iv)).
+ */
+function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
+  const out = ["── LEARNINGS INJECTION ──────────────────────────────────"];
+  if (!s.found || !s.totals) {
+    out.push("no injection rows in this window");
+    return out;
+  }
+  const t = s.totals;
+  out.push(`matched: ${t.matched}  dropped: ${t.dropped}  rows: ${t.rows}`);
+  out.push(`budget_chars: ${t.budgetChars.length ? t.budgetChars.join(", ") : "unknown"}`);
+  const reasons = Object.keys(t.globalRefusedReasons).sort();
+  out.push(
+    `global artifact refused: ${
+      reasons.length ? reasons.map((r) => `${r} (${t.globalRefusedReasons[r]})`).join(", ") : "none"
+    }`,
+  );
+  return out;
+}
+
 /** W1-T931 — one line per un-dismissed `cost.anomaly` row, naming the run, its class, its cost,
  *  and the median it exceeded (this task's own acceptance criterion, verbatim). `nothing needs
  *  you` on an empty set, matching this module's "no rule matches, no line" doctrine elsewhere. */
@@ -1960,6 +2018,7 @@ export function renderStatusBoardText(model: StatusBoardModel): string {
   lines.push(...renderInboxBlock(model.inbox), "");
   lines.push(...renderHeadroomBlock(model.headroom), "");
   lines.push(...renderCacheHitBlock(model.cacheHit), "");
+  lines.push(...renderLearningsInjectionBlock(model.learningsInjection), "");
   lines.push(...renderNeedsMeBlock(model.needsMe));
   return lines.join("\n");
 }
