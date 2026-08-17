@@ -13,7 +13,7 @@
 //   4. the detector NEVER kills, signals, defers or strikes the run.
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -331,26 +331,27 @@ test("runWorkerStallDetectorRung: a real fs failure inside the rung (an unreadab
     const ledgerPath = ledgerPathFor(config);
     markLive(root, "W1-T1", "RUN-1");
     const inflightDir = join(root, "state", "inflight");
-    // 0o000 denies even the read+execute `readdirSync` needs to list `inflightDir`'s entries —
-    // a genuine fs failure INSIDE the try block, not a malformed-input case any inner function
-    // already swallows (readLedgerLines drops unparseable lines itself; this is the one layer
-    // above that has no such guard of its own).
-    chmodSync(inflightDir, 0o000);
+    // ENOTDIR, NOT A CHMOD (test/deploy-idle-unknown.test.ts's own fixture, and
+    // test/host-capability-fixtures.test.ts's preferred uid-independent remedy): mode 0o000 does
+    // not deny root, and this container runs as uid 0, so a chmod-based fixture here would prove
+    // nothing. A regular FILE where a directory is expected throws ENOTDIR for every uid, which
+    // reaches the SAME `readdirSync` failure inside the try block deterministically — a genuine
+    // fs failure, not a malformed-input case any inner function already swallows (readLedgerLines
+    // drops unparseable lines itself; this is the one layer above that has no such guard of its
+    // own).
+    rmSync(inflightDir, { recursive: true, force: true });
+    writeFileSync(inflightDir, "not a directory");
     const issues = fakeIssues();
     const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
     const log = (step: string, extra?: Record<string, unknown>): void => {
       logCalls.push({ step, extra });
     };
-    try {
-      assert.doesNotThrow(() =>
-        runWorkerStallDetectorRung("craigoley", "remudero", config, ledgerPath, "DAEMON-RUN", 60 * 60_000, log, issues),
-      );
-      const errorCalls = logCalls.filter((c) => c.extra && "error" in c.extra);
-      assert.equal(errorCalls.length, 1, "the rung's own catch must log exactly the caught error, never crash the sweep hook around it");
-      assert.equal(issues.calls.length, 0, "a failure before judgement even runs must never file a spurious escalation");
-    } finally {
-      chmodSync(inflightDir, 0o755); // restore so withDir's own rmSync cleanup can traverse it
-    }
+    assert.doesNotThrow(() =>
+      runWorkerStallDetectorRung("craigoley", "remudero", config, ledgerPath, "DAEMON-RUN", 60 * 60_000, log, issues),
+    );
+    const errorCalls = logCalls.filter((c) => c.extra && "error" in c.extra);
+    assert.equal(errorCalls.length, 1, "the rung's own catch must log exactly the caught error, never crash the sweep hook around it");
+    assert.equal(issues.calls.length, 0, "a failure before judgement even runs must never file a spurious escalation");
   });
 });
 
