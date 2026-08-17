@@ -67,7 +67,7 @@
   risk: high
   origin: feedback#fb-1785237627858-ffafd9
   plan_refs: ["§4", "§5D"]
-  files: [plan/policy.yaml, src/lib/policy.ts, src/lib/daemon.ts, test/worker-stall-detector.test.ts]
+  files: [plan/policy.yaml, src/lib/policy.ts, src/run-task.ts, test/worker-stall-detector.test.ts, test/policy.test.ts]
   status: queued
   attempts: 0
   note: |
@@ -86,3 +86,14 @@
     (W1-T916's shape).
     DELIBERATELY NOT DEPENDED ON: a paramedic/steering verb. None exists, and this task must not grow
     one — the operator is the actuator in v1.
+    RE-DERIVED AT IMPLEMENTATION TIME, PER THIS NOTE'S OWN INSTRUCTION: src/lib/daemon.ts's
+    `runDaemon` IS the per-tick level-triggered loop, but the concrete per-poll rungs it drives
+    (runWorktreeReapRung, runInflightLockSweepRung, runWorkerTailSweepRung — W1-T942's own tail
+    retention rung among them) all live in src/run-task.ts's `buildSweepHook`, wired as
+    `DaemonDeps.sweep` and invoked once per tick from daemon.ts's loop. That is the honest seam
+    this task's own note anticipated ("the sweep pass"): runWorkerStallDetectorRung joins those
+    SAME sibling rungs, same file, same cadence, same try/catch discipline. files: now declares
+    src/run-task.ts in place of src/lib/daemon.ts (untouched — the loop itself needed no change,
+    only the sweep hook it already calls), plus test/policy.test.ts (the pre-existing exhaustive
+    top-level-field/origin-kind fixtures there needed the new `workerStall` row or they'd fail
+    red on this task's own change, unrelated to any behavior test/policy.test.ts itself covers).

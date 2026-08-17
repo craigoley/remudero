@@ -82,6 +82,33 @@ fixStrikeCap:
   min: 1
   max: 10
 
+# W1-T943 (WORKER-STALL DETECTOR). How long a LIVE in-flight run's newest `worker.state` row
+# (W1-T942) may age before src/run-task.ts's `runWorkerStallDetectorRung` judges that run
+# stalled, ledgers `worker.stalled` ONCE, and escalates through the existing §4 machinery — it
+# never kills, signals, or defers the run itself (design note iv).
+#
+# NET-NEW — no prior source literal ever measured a worker-quiet threshold; this task's own
+# filing verified plan/policy.yaml carried zero rows for it. The DEFAULT (3600000, 60 min) is
+# this task's own title's illustrative duration ("A WORKER THAT HAS SAID NOTHING FOR AN HOUR
+# REACHES NOBODY") and is deliberately measured against the one legitimate long step this
+# fleet's own workers run: the 23-step `--ci-parity` suite, ~16 minutes of a 61-minute lane
+# (W1-T465's own measurement, itself citing W1-T463/#1744's "has failed twice ever, once
+# WRONGLY"). 60 min clears that measured figure by 3.75x — design note v's own requirement ("a
+# known-long legitimate step ... cannot trip it") — with headroom to spare, so a first firing on
+# a healthy run cannot be the thing that gets this organ disabled (design note v's own warning:
+# "a first default that cries wolf gets the whole organ disabled").
+#
+# min (1200000, 20 min) sits above the SAME 16-minute `--ci-parity` figure with its own margin,
+# so a tighter operator retune still cannot regress under the one known-long legitimate step.
+# max (7200000, 2h) is the SAME ceiling worktreeReapGraceMs.max above already uses for a
+# similarly-generous reclaim/observe window — a slower host can widen this far without the
+# detector going arbitrarily silent.
+workerStall:
+  value: 3600000
+  origin: "net-new"
+  min: 1200000
+  max: 7200000
+
 sweep:
   staleDays:
     value: 14

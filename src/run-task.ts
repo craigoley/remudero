@@ -13371,6 +13371,10 @@ export async function daemonCommand(
           policy.values.sweep.tmpMaxAgeMs,
           undefined,
           createGhCallPacer(),
+          // W1-T943: the policy-data quiet threshold — see runWorkerStallDetectorRung's own doc
+          // and plan/policy.yaml's `workerStall` row for the ~16-minute `--ci-parity` default's
+          // headroom rationale.
+          policy.values.workerStall,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -16656,6 +16660,206 @@ export function runTmpSweepRung(
   }
 }
 
+// ── WORKER STALL DETECTOR (W1-T943) ─────────────────────────────────────────────────────────
+//
+// W1-T942 produces `worker.state`; nothing judged it until now — the exact shape W1-T316/
+// W1-T317/W1-T916 already paid for (a signal with no reader). LEVEL-TRIGGERED (design note i):
+// reads the AGE of the newest `worker.state` row for each LIVE in-flight run (`liveInflightRuns`'s
+// own pid-checked lock read — never a second, looser "in flight"), never an event the run itself
+// must emit — a wedged, swapped, or dead-socket worker may never emit anything again, so a
+// detector waiting for it to announce its own stall cannot fire in exactly the case it exists for.
+
+/** Ledger step a worker-stall verdict rides — appended ONCE per quiet episode (design ii), never
+ *  once per tick. */
+export const WORKER_STALLED_LEDGER_STEP = "worker.stalled";
+
+/** DEFAULT quiet threshold, mirrored from `plan/policy.yaml`'s `workerStall` row for a caller
+ *  with no policy in hand (test fixtures, primarily) — production always threads the real
+ *  `policy.values.workerStall` through {@link buildSweepHook} instead of relying on this. See
+ *  that row's own comment for why 60 minutes is the default (design note v: comfortably above
+ *  the ~16-minute `--ci-parity` suite W1-T463/W1-T465 measured). */
+export const DEFAULT_WORKER_STALL_MS = 3_600_000;
+
+/** One live in-flight run whose newest `worker.state` row has aged past the policy `workerStall`
+ *  threshold, per {@link findStalledWorkers}. */
+export interface WorkerStallCandidate {
+  runId: string;
+  taskId: string;
+  /** ms of quiet since this run's newest `worker.state` transition. */
+  quietMs: number;
+  /** the run's newest recorded `worker.state` value, when one exists. */
+  lastState: string | undefined;
+}
+
+/**
+ * Pure judgement (design i/ii): which of `liveRuns` have gone quiet past `thresholdMs`, derived
+ * from the AGE of each run's own newest `worker.state` ledger row — never a second, event-driven
+ * definition of "stalled". A live run with NO `worker.state` row at all is skipped outright:
+ * there is nothing whose age this can measure yet (the W1-T942 dependency's own shape — shipping
+ * this detector before it would be a guard with no input, W1-T916's class of defect).
+ *
+ * DEDUP, ONE ROW PER QUIET EPISODE (design ii): a run is excluded when it already carries a
+ * `worker.stalled` row NEWER than its own newest `worker.state` row — that quiet episode was
+ * already reported and nothing has changed since. The moment the run speaks again (a fresh
+ * `worker.state` transition postdating the last `worker.stalled` row), the comparison flips and
+ * a LATER quiet stretch re-arms this check — never a per-tick re-fire, and never permanently
+ * silenced either.
+ *
+ * Pure — no fs, no clock read of its own (`nowMs` is a parameter) — so the whole dedup/re-arm
+ * shape is unit-testable against synthetic ledger lines with no file on disk at all
+ * (test/worker-stall-detector.test.ts).
+ */
+export function findStalledWorkers(
+  liveRuns: readonly Pick<LiveInflightRun, "runId" | "taskId">[],
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  thresholdMs: number,
+  nowMs: number,
+): WorkerStallCandidate[] {
+  const out: WorkerStallCandidate[] = [];
+  for (const run of liveRuns) {
+    let lastStateTs: number | undefined;
+    let lastState: string | undefined;
+    let lastStalledTs: number | undefined;
+    for (const line of ledgerLines) {
+      if (line.run_id !== run.runId) continue;
+      const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+      if (!Number.isFinite(ts)) continue;
+      if (line.step === WORKER_STATE_LEDGER_STEP && (lastStateTs === undefined || ts > lastStateTs)) {
+        lastStateTs = ts;
+        lastState = typeof line.state === "string" ? line.state : undefined;
+      }
+      if (line.step === WORKER_STALLED_LEDGER_STEP && (lastStalledTs === undefined || ts > lastStalledTs)) {
+        lastStalledTs = ts;
+      }
+    }
+    if (lastStateTs === undefined) continue; // nothing to measure yet (W1-T942 dependency)
+    if (lastStalledTs !== undefined && lastStalledTs > lastStateTs) continue; // mid-episode — already reported
+    const quietMs = nowMs - lastStateTs;
+    if (quietMs < thresholdMs) continue;
+    out.push({ runId: run.runId, taskId: run.taskId, quietMs, lastState });
+  }
+  return out;
+}
+
+/** Bound the worker-stall escalation's tail excerpt is capped to AT THE ATTACH SITE (design
+ *  note iii: "a 2 MB issue body is its own outage") — deliberately TIGHTER than the tail FILE's
+ *  own {@link WORKER_TAIL_MAX_LINES}/{@link WORKER_TAIL_MAX_BYTES} ceiling: an issue body is read
+ *  by a human deciding "wedged or just busy", not grepped, and a shorter excerpt is already
+ *  enough evidence for that judgment. */
+export const WORKER_STALL_TAIL_ATTACH_MAX_LINES = 100;
+export const WORKER_STALL_TAIL_ATTACH_MAX_BYTES = 8 * 1024;
+
+/** Best-effort, never-throwing read of a run's live tail for the stall escalation's evidence
+ *  attachment — the read-side mirror of {@link writeWorkerTailBestEffort}. An absent/unreadable
+ *  tail degrades to an empty array: the escalation still fires — W1-T942's own tail write is
+ *  best-effort too, and a missing tail must never block the ONLY thing this detector is allowed
+ *  to do (tell someone, design note iv). */
+function readWorkerTailBestEffort(tailPath: string): string[] {
+  try {
+    if (!existsSync(tailPath)) return [];
+    return readFileSync(tailPath, "utf8")
+      .split("\n")
+      .filter((l) => l.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The daemon's per-poll WORKER-STALL rung (W1-T943) — appends `worker.stalled` ONCE per quiet
+ * episode ({@link findStalledWorkers}) and escalates through the EXISTING §4 machinery
+ * ({@link tryEscalate}), never a second one. NEVER acts on the run itself (design iv): no kill,
+ * no signal, no dispatch deferral, no strike, no budget change — appending a ledger row and
+ * filing/deduping an issue are the only two things this function does, full stop. Rides the SAME
+ * per-poll cadence `runWorktreeReapRung`/`runInflightLockSweepRung`/`runWorkerTailSweepRung`
+ * already occupy (see `buildSweepHook`'s call site) — own try/catch so a hiccup here never masks,
+ * or is masked by, the rungs around it.
+ */
+export function runWorkerStallDetectorRung(
+  owner: string,
+  repo: string,
+  config: Config,
+  ledgerPath: string,
+  runId: string,
+  thresholdMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  issues?: IssueGateway,
+  // Injectable clock (tests) — same discipline as sweepStaleWorkerTails'/DaemonDeps' own `now`,
+  // so the age comparison + the episode-boundary re-arm are provable without a real wall-clock
+  // wait (Rule 18). Omitted ⇒ the real wall clock, unchanged production behavior.
+  now: () => number = Date.now,
+): void {
+  try {
+    const inflightDir = join(config.root, "state", "inflight");
+    const liveRuns = liveInflightRuns(inflightDir);
+    if (liveRuns.length === 0) return;
+    const ledgerLines = readLedgerLines(ledgerPath);
+    const stalled = findStalledWorkers(liveRuns, ledgerLines, thresholdMs, now());
+    for (const candidate of stalled) {
+      const quietMinutes = Math.round(candidate.quietMs / 60_000);
+      // Ledgered BEFORE the escalation call, mirroring escalateCircuitBreak/
+      // escalateLifetimeCapExceeded's "the dedup marker is written whether or not delivery
+      // succeeds" discipline — the row IS the dedup key `findStalledWorkers` reads back next
+      // tick, so a `gh` failure below must never leave this episode un-marked and re-firing on
+      // the very next poll.
+      appendLedger(ledgerPath, {
+        run_id: candidate.runId,
+        task_id: candidate.taskId,
+        step: WORKER_STALLED_LEDGER_STEP,
+        quiet_ms: candidate.quietMs,
+        last_state: candidate.lastState ?? null,
+      });
+      const tailPath = join(config.root, "state", "runs", `${candidate.runId}.tail`);
+      const tail = capWorkerTailLines(
+        readWorkerTailBestEffort(tailPath),
+        WORKER_STALL_TAIL_ATTACH_MAX_LINES,
+        WORKER_STALL_TAIL_ATTACH_MAX_BYTES,
+      ).join("\n");
+      const issueUrl = tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: candidate.taskId,
+          // The STALLED run's own id — the evidence an operator needs to act on "stop this run"
+          // — never the daemon's own coordinating run id (see EscalateDeps.runId below for that).
+          runId: candidate.runId,
+          summary: `${candidate.taskId}: worker run ${candidate.runId} has said nothing for ${quietMinutes} min`,
+          detail:
+            `W1-T943: run ${candidate.runId} (task ${candidate.taskId}) has produced no \`worker.state\` ` +
+            `transition for ${quietMinutes} minute(s) — past the policy \`workerStall\` threshold. This can be ` +
+            `a genuinely wedged worker OR a long healthy step the fixed threshold misjudged: never auto-killed ` +
+            `either way (design note iv) — the operator, or a future paramedic verb, decides. Last recorded ` +
+            `state: ${candidate.lastState ?? "unknown"}.\n\n` +
+            `Last tail lines from this run:\n\`\`\`\n${tail || "(no tail captured)"}\n\`\`\``,
+          options: [
+            {
+              label: "leave it running",
+              detail:
+                "Take no action. A long but legitimate step (a full local suite, a slow spawn) can look " +
+                "identical to a wedge from the outside — silence alone is not proof.",
+            },
+            {
+              label: "stop this run",
+              detail: `Interrupt run ${candidate.runId} yourself and let the fleet redispatch ${candidate.taskId} fresh — this detector never does so itself.`,
+            },
+          ],
+          recommendation: "leave it running",
+        },
+        // `runId` HERE is the escalating daemon's OWN run — the escalation-machinery dedup/
+        // failure-ledger actor, distinct from `e.runId` (the stalled run) immediately above.
+        { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId },
+      );
+      log("daemon.worker_stall", {
+        run_id: candidate.runId,
+        task_id: candidate.taskId,
+        quiet_ms: candidate.quietMs,
+        issue_url: issueUrl,
+      });
+    }
+  } catch (e) {
+    log("daemon.worker_stall", { error: String((e as Error)?.message ?? e) });
+  }
+}
+
 /**
  * The daemon's per-iteration sweep hook (acceptance 4: the SAME runSweep the CLI
  * uses). Best-effort by the DaemonDeps.sweep contract — swallows its own errors so
@@ -16685,6 +16889,10 @@ export function buildSweepHook(
   // test included) is unaffected; omitted ⇒ no pacing, exactly the pre-W1-T468 behavior. The
   // daemon's real (non-test) wiring is the only caller that constructs and passes one.
   pacer?: GhCallPacer,
+  // W1-T943: the resolved `policy.values.workerStall` the real daemon command threads through to
+  // {@link runWorkerStallDetectorRung} below — optional and trailing so every existing caller
+  // (tests included) that predates W1-T943 is unaffected; omitted ⇒ {@link DEFAULT_WORKER_STALL_MS}.
+  workerStallMs?: number,
 ): () => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -16770,6 +16978,11 @@ export function buildSweepHook(
       // above (boot-only never re-fires on a healthy long-lived daemon), and now load-bearing
       // for `deriveStatus`'s lock-based liveness disjunct. Own try/catch inside the rung.
       runInflightLockSweepRung(config, log);
+      // W1-T943 — the worker-stall detector's PER-POLL rung: judges every LIVE in-flight run's
+      // newest `worker.state` row against the policy `workerStall` threshold and escalates a
+      // quiet one through §4 (never kills/signals it — see runWorkerStallDetectorRung's own
+      // doc). Own try/catch inside the rung.
+      runWorkerStallDetectorRung(owner, repo, config, ledgerPath, runId, workerStallMs ?? DEFAULT_WORKER_STALL_MS, log);
       // W1-T436 — the weekly feedback docket rung: gathers the five human-feedback capture
       // surfaces and files at most one inbox proposal per rolling 7-day window. Own
       // try/catch inside the rung; a `state/last-feedback-docket.json` marker keeps this a
