@@ -1336,10 +1336,12 @@ function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect"
  * W1-T125: arm auto-merge the INSTANT a run's own PR opens — deliberately
  * UNGATED by any ledger verdict, because none can possibly exist yet (review
  * hasn't run at PR-open time). This is safe ONLY because GitHub's own
- * required-status contract (the `ci` check AND the REQUIRED `remudero-review`
- * commit status) is what actually gates the merge, never this call — arming
- * merely REGISTERS INTENT; GitHub will not merge until every required check
- * reports success.
+ * required-status contract (`[ci-gate, remudero-review]`) is what actually
+ * gates the merge, never this call — arming merely REGISTERS INTENT; GitHub
+ * will not merge until every required check reports success. `ci` and
+ * `coverage-ratchet` are NOT themselves required contexts: they gate
+ * transitively, because `ci-gate` aggregates them in its own REQUIRED list
+ * (.github/workflows/ci-gate.yml).
  *
  * The one shape this does NOT cover on its own: a CAPPED verdict (zero proofs
  * executed) still posts `remudero-review: success` (see
@@ -6382,11 +6384,13 @@ async function runTask(
     // PR exists — not after CI wait + review, which measured 2-8 minutes of dead
     // time (own-repo PRs #251/#245/#240/#249; #274 NEVER reached the old
     // post-review arm call because its fix-rung loop was still running). Safe
-    // because GitHub's required-status contract (ci + the REQUIRED
-    // remudero-review status) is what actually gates the merge — see
-    // armAutoMergeAtOpen's doc. The one gap this leaves (a CAPPED verdict that
-    // still posts remudero-review=success) is closed below by disarmAutoMerge,
-    // right where the capped-refusal decision is made.
+    // because GitHub's required-status contract (ci-gate + remudero-review) is
+    // what actually gates the merge — `ci` and `coverage-ratchet` gate
+    // transitively, aggregated by ci-gate's own REQUIRED list, never as
+    // required contexts themselves — see armAutoMergeAtOpen's doc. The one gap
+    // this leaves (a CAPPED verdict that still posts remudero-review=success)
+    // is closed below by disarmAutoMerge, right where the capped-refusal
+    // decision is made.
     const armAtOpenOutcome = armAutoMergeAtOpen(prUrl);
     log("automerge.armed", { at: "open", outcome: armAtOpenOutcome });
 
