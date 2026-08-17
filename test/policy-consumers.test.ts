@@ -95,7 +95,12 @@ test("W1-T330: sweep.ts's DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd reads plan/po
 // ── launchd.ts: ThrottleInterval (net-new — emission-from-policy, not literal-removal) ──
 
 test("W1-T253: generateLaunchdPlist's ThrottleInterval reads plan/policy.yaml's launchd.throttleIntervalS by default, and a caller-supplied value overrides it", () => {
-  const VALID = { rmdBin: "/Users/op/Remudero/bin/rmd", root: "/Users/op/Remudero" };
+  const VALID = {
+    rmdBin: "/Users/op/Remudero/daemon-install/bin/rmd",
+    installRoot: "/Users/op/Remudero/daemon-install",
+    installRootExists: true,
+    root: "/Users/op/Remudero",
+  };
   const defaulted = generateLaunchdPlist(VALID);
   assert.match(
     defaulted,

@@ -21,6 +21,9 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   buildSweepLightHook,
   daemonCommand,
   daemonPlistCommand,
+  deployPlistCommand,
+  digestPlistCommand,
+  servePlistCommand,
   realArmDeps,
   type ArmDeps,
   DEFAULT_BUDGET_USD,
@@ -7307,11 +7310,18 @@ test("daemonCommand: builds the real daemon deps (sweep + sweepLight wiring) the
 // (this checkout's own origin is craigoley/remudero) and threads them through, so a self-target
 // invocation really does refuse without the flag and really does succeed with it — not just the
 // pure generator in isolation.
+// ALSO provisions the default install root (W1-T924's `resolveInstallRoot`: `<root>/daemon-
+// install`, unset `config.installRoot`) with a stub `bin/rmd`, so `generateLaunchdPlist`'s
+// W1-T925 install-checkout-exists gate never fires ahead of the self-target gate these tests
+// are actually exercising — the same provisioning `rmd install-checkout --write` performs for
+// real, stood up by hand here since these tests never shell out to git.
 function daemonPlistTestHome(): { home: string; root: string } {
   const home = mkdtempSync(join(tmpdir(), "rmd-daemonplist-"));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "daemon-install", "bin"), { recursive: true });
+  writeFileSync(join(root, "daemon-install", "bin", "rmd"), "#!/bin/sh\nexit 0\n");
   return { home, root };
 }
 
@@ -7382,6 +7392,83 @@ test("daemonPlistCommand: a NON-self --repo needs no --allow-self-target and the
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T925 (fb-1784913390318-1fcb63): "which checkout is production?" must never be answered
+// by a `cd` — every generated unit's ProgramArguments[0] comes from the RESOLVED INSTALL ROOT
+// (W1-T924's `resolveInstallRoot`, config-derived), never `repoRoot` (the git toplevel of
+// whichever tree this CLI process happened to be invoked from). ──────────────────────────────
+
+test("daemonPlistCommand: ProgramArguments[0] is the install root's bin/rmd, never THIS invoking checkout's own repoRoot/bin/rmd (acceptance criterion 1)", async () => {
+  const { home, root } = daemonPlistTestHome();
+  const installRoot = join(root, "daemon-install"); // resolveInstallRoot's default: config.installRoot unset
+  const expectedBin = join(installRoot, "bin", "rmd");
+  const printed: string[] = [];
+  const oldLog = console.log;
+  console.log = (...a: unknown[]) => void printed.push(a.join(" "));
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const code = await daemonPlistCommand(["--repo", "remudero-sandbox"]);
+    assert.equal(code, 0);
+  } finally {
+    console.log = oldLog;
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+  const out = printed.join("\n");
+  assert.match(out, new RegExp(`<string>${expectedBin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</string>`));
+  // THIS repo's real toplevel (what `repoRoot` resolves to for this very process) is a
+  // COMPLETELY different tree from the throwaway fixture's install root above — proving the
+  // generated unit tracks config, never the checkout this test (or `rmd daemon-plist` for real)
+  // happened to run from.
+  const thisCheckoutRoot = execFileSync("git", ["-C", process.cwd(), "rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+  }).trim();
+  const cwdDerivedBin = join(thisCheckoutRoot, "bin", "rmd");
+  assert.notEqual(cwdDerivedBin, expectedBin, "the fixture's install root must differ from this checkout's own root for the negative assertion below to mean anything");
+  assert.doesNotMatch(
+    out,
+    new RegExp(cwdDerivedBin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "never bakes in whichever checkout the generator happened to be invoked from",
+  );
+});
+
+test("daemon-plist, deploy-plist, digest-plist and serve-plist ALL bake the SAME install-derived rmdBin from the SAME config — no one unit is left on a cwd-derived path (acceptance criterion 3)", async () => {
+  const { home, root } = daemonPlistTestHome();
+  const expectedBin = join(root, "daemon-install", "bin", "rmd");
+  const needle = new RegExp(`<string>${expectedBin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</string>`);
+  const oldHome = process.env.HOME;
+  const oldEnvHost = process.env.RMD_SERVE_HOST;
+  process.env.HOME = home;
+  delete process.env.RMD_SERVE_HOST;
+  const printed: string[] = [];
+  const oldLog = console.log;
+  console.log = (...a: unknown[]) => void printed.push(a.join(" "));
+  try {
+    printed.length = 0;
+    assert.equal(await daemonPlistCommand(["--repo", "remudero-sandbox"]), 0);
+    assert.match(printed.join("\n"), needle, "daemon-plist");
+
+    printed.length = 0;
+    assert.equal(await deployPlistCommand([]), 0);
+    assert.match(printed.join("\n"), needle, "deploy-plist");
+
+    printed.length = 0;
+    assert.equal(await digestPlistCommand([]), 0);
+    assert.match(printed.join("\n"), needle, "digest-plist");
+
+    printed.length = 0;
+    assert.equal(await servePlistCommand([]), 0);
+    assert.match(printed.join("\n"), needle, "serve-plist");
+  } finally {
+    console.log = oldLog;
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldEnvHost !== undefined) process.env.RMD_SERVE_HOST = oldEnvHost;
     rmSync(home, { recursive: true, force: true });
   }
 });

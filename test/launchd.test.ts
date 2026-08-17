@@ -14,13 +14,29 @@ import {
   parseSupervisorStartInterval,
 } from "../src/lib/launchd.js";
 
-const VALID = { rmdBin: "/Users/op/Remudero/bin/rmd", root: "/Users/op/Remudero" };
+const VALID = {
+  rmdBin: "/Users/op/Remudero/daemon-install/bin/rmd",
+  installRoot: "/Users/op/Remudero/daemon-install",
+  installRootExists: true,
+  root: "/Users/op/Remudero",
+};
+
+/** Escapes a literal string for embedding in a `RegExp` — used below so an assertion tracks
+ *  `VALID.rmdBin` (W1-T925: now the install-derived path) rather than restating it as a
+ *  hand-typed literal that could silently drift from the fixture it is supposed to prove. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 test("generates a well-formed plist carrying the label, absolute paths, and RunAtLoad/KeepAlive", () => {
   const plist = generateLaunchdPlist(VALID);
   assert.match(plist, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
   assert.match(plist, /<key>Label<\/key>\s*<string>com\.remudero\.daemon<\/string>/);
-  assert.match(plist, /<string>\/Users\/op\/Remudero\/bin\/rmd<\/string>/, "the launcher's absolute path is embedded");
+  assert.match(
+    plist,
+    new RegExp(`<string>${escapeRegExp(VALID.rmdBin)}</string>`),
+    "the launcher's absolute path is embedded",
+  );
   assert.match(plist, /<string>daemon<\/string>/, "ProgramArguments includes the `daemon` subcommand");
   assert.match(
     plist,
@@ -112,6 +128,43 @@ test("throws LaunchdPlistError when a caller-supplied home is not absolute", () 
   );
 });
 
+test("throws LaunchdPlistError when installRoot is not absolute", () => {
+  assert.throws(
+    () => generateLaunchdPlist({ ...VALID, installRoot: "Remudero/daemon-install" }),
+    (e) => e instanceof LaunchdPlistError && /installRoot must be an absolute path/.test(e.message),
+  );
+});
+
+// ── W1-T925 (fb-1784913390318-1fcb63): the generator refuses a unit whose ProgramArguments[0]
+// would point OUTSIDE the install checkout, or at a checkout that does not yet exist — the same
+// fail-at-generation posture as the self-target and ANTHROPIC-key gates above. ──────────────────
+
+test("generateLaunchdPlist: refuses when rmdBin resolves OUTSIDE installRoot, naming the remedy", () => {
+  assert.throws(
+    () => generateLaunchdPlist({ ...VALID, rmdBin: "/Users/op/some-operator-checkout/bin/rmd" }),
+    (e) =>
+      e instanceof LaunchdPlistError &&
+      /OUTSIDE the install root/.test(e.message) &&
+      /rmd install-checkout --write/.test(e.message),
+    "no plist string is ever returned for a binary path outside the install checkout",
+  );
+});
+
+test("generateLaunchdPlist: refuses when the install checkout does not exist, naming the remedy", () => {
+  assert.throws(
+    () => generateLaunchdPlist({ ...VALID, installRootExists: false }),
+    (e) =>
+      e instanceof LaunchdPlistError &&
+      /install checkout does not exist/.test(e.message) &&
+      /rmd install-checkout --write/.test(e.message),
+    "never emits a unit whose ProgramArguments[0] would be a missing binary",
+  );
+});
+
+test("generateLaunchdPlist: a rmdBin that IS the install root's bin/rmd (the intended shape) never refuses on that account", () => {
+  assert.doesNotThrow(() => generateLaunchdPlist(VALID));
+});
+
 test("--poll-ms threads through to ProgramArguments as `daemon --poll-ms <n>`", () => {
   const plist = generateLaunchdPlist({ ...VALID, pollIntervalMs: 30000 });
   assert.match(plist, /<string>daemon<\/string>\s*<string>--poll-ms<\/string>\s*<string>30000<\/string>/);
@@ -193,6 +246,8 @@ test("generateLaunchdPlist: --allow-self-target is neither required nor baked fo
 test("generateLaunchdPlist: a non-self --repo target's output is BYTE-IDENTICAL to before W1-T109, plus W1-T253's ThrottleInterval (regression lock)", () => {
   const plist = generateLaunchdPlist({
     rmdBin: "/Users/op/Remudero/bin/rmd",
+    installRoot: "/Users/op/Remudero",
+    installRootExists: true,
     root: "/Users/op/Remudero",
     home: "/Users/op",
     repo: "remudero-sandbox",
@@ -217,7 +272,11 @@ test("generates a well-formed daily digest plist: label, absolute paths, Program
   assert.match(plist, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
   assert.match(plist, /<key>Label<\/key>\s*<string>com\.remudero\.digest<\/string>/);
   assert.equal(DIGEST_LABEL, "com.remudero.digest");
-  assert.match(plist, /<string>\/Users\/op\/Remudero\/bin\/rmd<\/string>\s*<string>digest<\/string>/, "ProgramArguments is exactly [rmdBin, digest]");
+  assert.match(
+    plist,
+    new RegExp(`<string>${escapeRegExp(VALID.rmdBin)}</string>\\s*<string>digest</string>`),
+    "ProgramArguments is exactly [rmdBin, digest]",
+  );
   assert.match(
     plist,
     /<key>WorkingDirectory<\/key>\s*<string>\/Users\/op\/Remudero<\/string>/,
@@ -300,6 +359,29 @@ test("generateDigestLaunchdPlist throws LaunchdPlistError when rmdBin/root are n
   );
 });
 
+// ── W1-T925: the digest unit's binary comes from the install checkout too — SAME gates, SAME
+// generator family (generateLaunchdPlist's own module doc), reused rather than reimplemented. ──
+
+test("generateDigestLaunchdPlist: refuses when rmdBin resolves outside installRoot, naming the remedy", () => {
+  assert.throws(
+    () => generateDigestLaunchdPlist({ ...VALID, rmdBin: "/Users/op/some-operator-checkout/bin/rmd" }),
+    (e) =>
+      e instanceof LaunchdPlistError &&
+      /OUTSIDE the install root/.test(e.message) &&
+      /rmd install-checkout --write/.test(e.message),
+  );
+});
+
+test("generateDigestLaunchdPlist: refuses when the install checkout does not exist, naming the remedy", () => {
+  assert.throws(
+    () => generateDigestLaunchdPlist({ ...VALID, installRootExists: false }),
+    (e) =>
+      e instanceof LaunchdPlistError &&
+      /install checkout does not exist/.test(e.message) &&
+      /rmd install-checkout --write/.test(e.message),
+  );
+});
+
 test("launchdPlistPath honors DIGEST_LABEL the same generic way it does DAEMON_LABEL", () => {
   const p = launchdPlistPath(DIGEST_LABEL, "/Users/op");
   assert.equal(p, "/Users/op/Library/LaunchAgents/com.remudero.digest.plist");
@@ -313,10 +395,11 @@ test("launchdPlistPath honors DIGEST_LABEL the same generic way it does DAEMON_L
 
 test("generated plist fixture -> StartCalendarInterval at the given hour, EnvironmentVariables exactly {PATH, HOME}, ProgramArguments end [rmd, digest]; an ANTHROPIC_* injection fixture throws (the W1-T12b assertion reused)", () => {
   const rmdBin = "/Users/op/Remudero/bin/rmd";
+  const installRoot = "/Users/op/Remudero";
   const root = "/Users/op/Remudero";
   const home = "/Users/op";
   const hour = 6;
-  const plist = generateDigestLaunchdPlist({ rmdBin, root, home, hour });
+  const plist = generateDigestLaunchdPlist({ rmdBin, installRoot, installRootExists: true, root, home, hour });
 
   // StartCalendarInterval at the given hour, :00.
   const calBlock = plist.match(/<key>StartCalendarInterval<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? "";
@@ -342,6 +425,44 @@ test("generated plist fixture -> StartCalendarInterval at the given hour, Enviro
     () => assertNoAnthropicKeys({ ...env, ANTHROPIC_API_KEY: "sneaky" }, "generateDigestLaunchdPlist"),
     (e) => e instanceof LaunchdPlistError && /billing-boundary violation/.test(e.message) && /ANTHROPIC_API_KEY/.test(e.message),
   );
+});
+
+// ── W1-T925: the deploy-supervisor unit's binary comes from the install checkout too — SAME
+// gates, SAME generator family, reused rather than reimplemented. ────────────────────────────
+
+test("generateSupervisorLaunchdPlist: refuses when rmdBin resolves outside installRoot, naming the remedy", () => {
+  assert.throws(
+    () => generateSupervisorLaunchdPlist({ ...VALID, rmdBin: "/Users/op/some-operator-checkout/bin/rmd" }),
+    (e) =>
+      e instanceof LaunchdPlistError &&
+      /OUTSIDE the install root/.test(e.message) &&
+      /rmd install-checkout --write/.test(e.message),
+  );
+});
+
+test("generateSupervisorLaunchdPlist: refuses when the install checkout does not exist, naming the remedy", () => {
+  assert.throws(
+    () => generateSupervisorLaunchdPlist({ ...VALID, installRootExists: false }),
+    (e) =>
+      e instanceof LaunchdPlistError &&
+      /install checkout does not exist/.test(e.message) &&
+      /rmd install-checkout --write/.test(e.message),
+  );
+});
+
+// ── ALL FOUR units share the SAME install-derived binary (acceptance criterion 3) — the same
+// {rmdBin, installRoot} pair is accepted by every generator in this family and embedded
+// byte-identically, so no one unit is left on a cwd-derived path while the rest move. ──────────
+
+test("daemon, digest, and supervisor all embed the SAME install-derived rmdBin, given the same {rmdBin, installRoot}", () => {
+  const shared = { rmdBin: "/Users/op/Remudero/daemon-install/bin/rmd", installRoot: "/Users/op/Remudero/daemon-install", installRootExists: true, root: "/Users/op/Remudero" };
+  const needle = new RegExp(`<string>${escapeRegExp(shared.rmdBin)}</string>`);
+  assert.match(generateLaunchdPlist(shared), needle, "the daemon unit");
+  assert.match(generateDigestLaunchdPlist(shared), needle, "the digest unit");
+  assert.match(generateSupervisorLaunchdPlist(shared), needle, "the deploy-supervisor unit");
+  // The serve unit takes the same {rmdBin, installRoot} shape (plus port/hosts) — its own copy
+  // of this exact assertion lives in test/serve-plist.test.ts, over generateServeLaunchdPlist,
+  // the file that already owns every other serve-unit fixture (port/hosts VALID shape).
 });
 
 test("parseSupervisorStartInterval reads back the StartInterval it just generated (W1-T301)", () => {

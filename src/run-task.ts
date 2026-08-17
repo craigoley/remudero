@@ -13292,8 +13292,23 @@ export async function daemonPlistCommand(rest: string[]): Promise<number> {
   const self = resolveOwnerRepo();
   // Absent --repo defaults to self at runtime (resolveDaemonTarget) — so it's self-target here too.
   const isSelfTarget = (repo ?? self.repo) === self.repo;
-  const rmdBin = join(repoRoot, "bin", "rmd");
-  const plist = generateLaunchdPlist({ rmdBin, root: config.root, pollIntervalMs, repo, isSelfTarget, allowSelfTarget });
+  // W1-T925: the install checkout (W1-T924's resolveInstallRoot), NEVER repoRoot — repoRoot is
+  // whichever tree THIS invocation of `rmd daemon-plist` happened to be run from, and baking
+  // that in is the exact defect this closes. installRootExists is resolved here (a plain
+  // existsSync) so lib/launchd.ts stays a pure string transform with no filesystem read of its
+  // own, mirroring how isSelfTarget above is resolved by this CLI layer, not the generator.
+  const installRoot = resolveInstallRoot(config);
+  const rmdBin = join(installRoot, "bin", "rmd");
+  const plist = generateLaunchdPlist({
+    rmdBin,
+    installRoot,
+    installRootExists: existsSync(installRoot),
+    root: config.root,
+    pollIntervalMs,
+    repo,
+    isSelfTarget,
+    allowSelfTarget,
+  });
   const plistPath = launchdPlistPath();
 
   if (rest.includes("--write")) {
@@ -13381,8 +13396,9 @@ async function deployRunCommand(rest: string[]): Promise<number> {
  * `rmd install-checkout [--write]` — provision or refuse the daemon's dedicated install
  * checkout (W1-T924, design note iii), mirroring `daemon-plist`'s W1-T12d boundary: prints by
  * default, `--write` actually provisions. Never runs `launchctl` and never regenerates the
- * launchd units itself (that's W1-T925, deliberately out of scope — every plist generator bakes
- * `join(repoRoot, "bin", "rmd")` and that is a separate refusal with its own suite).
+ * launchd units itself — regenerating is the migration sequence's own step 2/3 below, done by
+ * running `daemon-plist`/`deploy-plist`/`digest-plist`/`serve-plist` again (W1-T925: every plist
+ * generator now bakes THIS resolved install root's `bin/rmd`, not `repoRoot`'s).
  *
  * MIGRATION IS A FIRST-CLASS OUTPUT (design note v): the mini is running the shared checkout
  * today, so the default (no `--write`) print names the exact sequence for an EXISTING install —
@@ -13434,7 +13450,7 @@ async function installCheckoutCommand(rest: string[]): Promise<number> {
  * launchd unit (a periodic `rmd deploy-run`). Mirrors `daemon-plist`: prints by
  * default, `--write` installs it; loading it is an operator action.
  */
-async function deployPlistCommand(rest: string[]): Promise<number> {
+export async function deployPlistCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("deploy-plist", rest, ["--interval"], ["--write"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -13442,8 +13458,16 @@ async function deployPlistCommand(rest: string[]): Promise<number> {
   }
   const config = loadConfig();
   const iv = flagValue(rest, "--interval");
-  const rmdBin = join(repoRoot, "bin", "rmd");
-  const plist = generateSupervisorLaunchdPlist({ rmdBin, root: config.root, intervalSeconds: iv ? Number(iv) : undefined });
+  // W1-T925: install-derived, never repoRoot — see daemonPlistCommand's identical comment above.
+  const installRoot = resolveInstallRoot(config);
+  const rmdBin = join(installRoot, "bin", "rmd");
+  const plist = generateSupervisorLaunchdPlist({
+    rmdBin,
+    installRoot,
+    installRootExists: existsSync(installRoot),
+    root: config.root,
+    intervalSeconds: iv ? Number(iv) : undefined,
+  });
   const plistPath = launchdPlistPath(SUPERVISOR_LABEL);
   if (rest.includes("--write")) {
     mkdirSync(dirname(plistPath), { recursive: true });
@@ -13472,7 +13496,7 @@ async function deployPlistCommand(rest: string[]): Promise<number> {
  * write, never a `launchctl` call. Actually LOADING it (so the pulse survives
  * logout/reboot) is an operator action, mirroring `daemon-plist`'s W1-T12d boundary.
  */
-async function digestPlistCommand(rest: string[]): Promise<number> {
+export async function digestPlistCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("digest-plist", rest, ["--hour"], ["--write"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -13481,8 +13505,16 @@ async function digestPlistCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const hourRaw = flagValue(rest, "--hour");
   const hour = hourRaw !== undefined ? Number(hourRaw) : undefined;
-  const rmdBin = join(repoRoot, "bin", "rmd");
-  const plist = generateDigestLaunchdPlist({ rmdBin, root: config.root, hour });
+  // W1-T925: install-derived, never repoRoot — see daemonPlistCommand's identical comment above.
+  const installRoot = resolveInstallRoot(config);
+  const rmdBin = join(installRoot, "bin", "rmd");
+  const plist = generateDigestLaunchdPlist({
+    rmdBin,
+    installRoot,
+    installRootExists: existsSync(installRoot),
+    root: config.root,
+    hour,
+  });
   const plistPath = launchdPlistPath(DIGEST_LABEL);
 
   if (rest.includes("--write")) {
@@ -13532,8 +13564,17 @@ export async function servePlistCommand(rest: string[]): Promise<number> {
     console.error(`### rmd serve-plist — ${(e as Error).message}\n${USAGE}`);
     return 2;
   }
-  const rmdBin = join(repoRoot, "bin", "rmd");
-  const plist = generateServeLaunchdPlist({ rmdBin, root: config.root, port, hosts });
+  // W1-T925: install-derived, never repoRoot — see daemonPlistCommand's identical comment above.
+  const installRoot = resolveInstallRoot(config);
+  const rmdBin = join(installRoot, "bin", "rmd");
+  const plist = generateServeLaunchdPlist({
+    rmdBin,
+    installRoot,
+    installRootExists: existsSync(installRoot),
+    root: config.root,
+    port,
+    hosts,
+  });
   const plistPath = launchdPlistPath(SERVE_LABEL);
   const logs = serveLogPaths(config.root);
 
