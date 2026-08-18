@@ -1492,3 +1492,62 @@ narrows the operator's own access — he needs it. The question is only whether 
 inherit it, and that is a decision about provisioning, not about this verb.
 
 **Rollback:** delete this entry. It changes no behaviour, so nothing else moves.
+
+## 2026-08-18 — RULING: remudero is BRING-YOUR-OWN-SUBSCRIPTION; customers are a direction, not a current target (OPERATOR-RULED)
+
+*Operator-ruled direction record, recorded at the operator's instruction. It records intent and takes
+no architectural decision of its own; the shape below is a direction, not a design.*
+
+**THE NEAR-TERM GOAL IS THE BEST POSSIBLE HARNESS FOR ONE OPERATOR.** In the operator's words: *"If we
+make an amazing harness that works this well for me, the sales should come easy."*
+
+**THE OPERATIVE CONSTRAINT, AND THE MOST IMPORTANT LINE IN THIS ENTRY: DO NOT FORECLOSE THAT
+DIRECTION; DO NOT BUILD FOR IT YET.**
+
+**THE SHAPE, WHEN IT COMES.** Per-customer VMs on the operator's Azure — the VM is the isolation
+boundary, not tenancy inside one process. The customer supplies their own Claude Code subscription
+credential and their own GitHub PAT directly into their own VM, so the operator never holds either
+credential in transit. Billing is on compute, not on inference. Claude Code first; other harnesses
+later, and pay-as-you-go via API and OpenRouter is a later phase. The model router is the multiplier —
+the daemon choosing model, effort and turn budget is what lets one subscription carry a fleet, and it
+is the seam through which cheap open models later augment it.
+
+**TWO QUESTIONS ARE OPEN, AND NEITHER BLOCKS ANYTHING TODAY.** (1) Whether Anthropic permits a third
+party operating infrastructure that customers authenticate subscriptions into. Running Claude Code on
+one's own remote server is permitted — it is Anthropic's own product, built for scripted use, and
+`claude setup-token` issues a one-year OAuth token scoped to inference only for exactly that. The
+third-party-host shape is a different question and needs an answer from Anthropic, not from a session.
+(2) Whether subscription rate limits carry a fleet-shaped workload below Max 20x. The operator has
+measured his own case and does not hit caps on Max 20x while running a fleet that notionally spent $184
+in a day — that is one operator, one fleet, one 20x plan, and lower tiers are unmeasured. Both are
+recorded so a later reader does not treat either as decided.
+
+**WHAT THIS SUPERSEDES.** MASTER-PLAN §6's open-core stance lists *"Pro candidates (post-traction, not
+before WS-6): hosted relay/sync for mobile push without self-managed tailnet, multi-project portfolio
+views, team/multi-operator seats, hosted question inbox, hosted org-brain sync…"* That describes hosted
+multi-operator convenience layered on one operator's infrastructure — a different shape from one
+isolated VM per customer carrying the customer's own credential. **The list is superseded as the
+commercial shape and is NOT deleted**: standing rule 21 governs amendment, so §6 is cited and marked
+in place.
+
+**IT SETTLES A QUESTION A RECON COULD NOT.** A 2026-08-18 recon found the three-stage arc already
+recorded in four places and flagged one thing the documents could not resolve: *"whether the operator
+considers §6A's Pro list the same thing as 'others use and pay'."* The answer is **no**. (That
+quotation is verbatim; the list it names sits in §6, not §6A.)
+
+**`billing_mode` IS PLANNED, NOT ORPHANED.** Derived in `src/lib/env.ts` as `engaged ? "api" :
+"subscription"`, with 0 sites comparing or switching on it against a control of 36 occurrences in
+`src/`, every value reading `subscription`. MASTER-PLAN §9 already assigns it two consumers — metering
+when `billing_mode == api`, and the conditional cap guard where *"no dollar cap is VALID ONLY while
+`billing_mode == subscription`."* Under this ruling it is the BYO-subscription-versus-pay-as-you-go
+axis. **Do not retire it as a built-and-unread field.**
+
+**THE WS-2 GATE IS UNCHANGED.** Second-repo expansion still waits until *"the console is feature-rich
+and looks good"* — operator-judged, not a metric. This ruling changes the destination, not that gate.
+
+**ONE CONSEQUENCE, NAMED AND NOT SCOPED IN.** The fleet authors every PR as `cao825, User` — the
+operator's own account — so under bring-your-own-subscription a customer's fleet would author as the
+customer, and their gate config would be editable by their own fleet exactly as his is today. W1-T990
+(#2136) files that; this entry only names it.
+
+**Rollback:** delete this entry and the §6 pointer. It changes no behaviour, so nothing else moves.

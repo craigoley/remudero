@@ -2761,7 +2761,10 @@ honestly and could not defend it, which is precisely the position P43 exists to 
   public commons — is **Apache-2.0 forever**. Pro candidates (post-traction, not before WS-6):
   hosted relay/sync for mobile push without self-managed tailnet, multi-project portfolio views,
   team/multi-operator seats, hosted question inbox, **hosted org-brain sync** (private
-  cross-project knowledge, §Self-improvement). Commitment for community trust: **nothing open ever
+  cross-project knowledge, §Self-improvement). **SUPERSEDED AS THE COMMERCIAL SHAPE** by
+  DECISIONS.md's 2026-08-18 bring-your-own-subscription ruling — per-customer VMs carrying the
+  customer's own credential, not hosted multi-operator convenience. The list above is retained as the
+  record of what it replaced, per standing rule 21. Commitment for community trust: **nothing open ever
   moves behind the paywall**; Pro lives in a separate repo so DCO contributions to core never need
   relicensing.
 - **Public support posture (G-6 RESOLVED)**: README carries a pre-alpha banner ("APIs and files
