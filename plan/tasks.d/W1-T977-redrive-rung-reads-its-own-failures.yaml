@@ -1,0 +1,179 @@
+- id: W1-T977
+  title: "THE RE-DRIVE RUNG IS BLIND EXACTLY WHEN IT IS NEEDED — runPostFixReverification matches on the shared snapshot's ciFailures, which buildOpenPrViews leaves undefined whenever aggregate checksState is pending, so CI_GATE_TIMEOUT_FIX_CLASS cannot fire during the only condition that produces a ci-gate timeout: a sibling check still running"
+  repo: remudero
+  risk: high
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    MEASURED ON THIS HOST AT origin/main 9b93f6c, 2026-08-18. The remedy this task unblocks is
+    already built, already wired and already running; it has simply never been able to see its
+    own trigger.
+
+    (1) THE MECHANISM EXISTS END TO END. `CI_GATE_TIMEOUT_FIX_CLASS` (src/lib/sweep.ts) matches a
+    failing check named `ci-gate` whose `logTail` matches /timed out waiting for required
+    check\(s\)/i. `runPostFixReverification` re-drives a matched PR, and its wired call site
+    `sweepPostFixReverification` (src/run-task.ts) mints a fresh head through the same
+    `pushEmptyCommit` leaf the ABSENT remedy already uses — which is precisely the remedy
+    `ci-gate` itself prints: "a NEW sha is the only remedy, re-running this same sha will not
+    help".
+
+    (2) IT RUNS, AND IT NEVER FIRES. 143 `sweep.post_fix_reverification.summary` rows on this
+    host. The last two, at 01:50:57 and 02:04:58, examined 6 and 7 open PRs and BOTH reported
+    `redriven: 0`. Across all time `sweep.post_fix_redriven` reads 2, against a control of 2055
+    `sweep.disposed` rows in the same file — so the rung is reached constantly and acts almost
+    never.
+
+    (3) THE CAUSE IS ONE TERNARY, AT TWO SITES IN src/run-task.ts.
+    `ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, pr.statusCheckRollup) : undefined`
+    — carried in the comment as "the ci-log fix mode's input — only worth fetching when checks are
+    actually red". While ANY required check is still running the AGGREGATE `checksState` is
+    `pending`, not red, so `ciFailures` is undefined and
+    `(pr.ciFailures ?? []).some(...)` in `matchesFailure` is false. The class is structurally
+    unable to match.
+
+    (4) AND PENDING IS THE ONLY STATE IN WHICH A ci-gate TIMEOUT EXISTS. `ci-gate` times out
+    BECAUSE a sibling has not finished. So the one disposition the class was written for is the
+    one disposition during which its input is guaranteed absent. This is not a rare race; it is
+    the definition of the failure.
+
+    (5) OBSERVED LIVE, ON THREE PRs, IN ONE EVENING. #2097, #2098 and #2101 each sat in `wait`
+    for 31 to 40 minutes — the ledger reads "checks pending 37m (< 60m ceiling) — waiting,
+    re-deriving next sweep" — while `ci-gate` had ALREADY failed on each and its log ALREADY
+    contained the matching string. The blocking sibling was wedged on one step, "Install
+    Playwright's Chromium", which a successful run 20 minutes earlier completed in 77 seconds.
+    Two of the three later flipped to `blocked-fixable` ("required checks red — ci-log fix,
+    strike 1/2"), which routes to a fix WORKER asked to change code — and there was no code
+    defect on any of the three. An operator cleared all three by hand.
+
+    (6) THE READ IS CHEAP AND ALREADY EXISTS. `fetchCiFailures` is an exported pure function over
+    a `statusCheckRollup` the caller already holds; nothing new has to be fetched from GitHub that
+    the rung's own caller is not already positioned to supply.
+  design: |
+    (i) THE RUNG GETS ITS OWN READ, AS AN INJECTED DEP — the shape this module already uses.
+    `PostFixReverificationDeps` already injects every effect (`redrive`'s own doc: "this module
+    never calls `gh`/git directly", and three separate comments state the module never talks to
+    GitHub). Add an OPTIONAL reader to that interface, defaulted to absent so every existing
+    caller and fixture is untouched, and have `runPostFixReverification` consult it when a PR's
+    snapshot `ciFailures` is undefined. Omitted, behaviour is byte-identical to today.
+
+    (ii) THE WIRING LIVES AT THE EXISTING CALL SITE. `sweepPostFixReverification` (src/run-task.ts)
+    supplies the real reader, exactly as it already supplies `pushEmptyCommit` and
+    `isMergedByNumber`. That is why src/run-task.ts is declared — see the note, which accepts the
+    serialization cost in writing rather than pretending it is free.
+
+    (iii) DO NOT WIDEN `checksState`, AND THIS IS THE LOAD-BEARING CONSTRAINT. Making
+    `buildOpenPrViews` populate `ciFailures` while checks are pending would ALSO feed the fix
+    rung, which spends a strike per dispatch — so a PR whose siblings are merely slow would start
+    burning its two strikes before anything has actually failed. That is the opposite of the
+    intent. The read added here is scoped to THIS rung and must not change what any other rung
+    observes; criterion 4 is the falsifier for that and must fail if the fix rung's strike
+    accounting moves at all.
+
+    (iv) NO NEW SIGNAL, AND THE READER IS NAMED. This task adds no ledger step, no field and no
+    new class. The reader is `CI_GATE_TIMEOUT_FIX_CLASS`, which already exists, is already in
+    `DEFAULT_FIX_CLASSES`, and is already tested in test/post-fix-reverification.test.ts. The
+    existing `sweep.post_fix_redriven` row is the observable outcome; if this task is right, that
+    row's rate goes up and nothing else changes.
+
+    (v) THE DEDUP AND ORDERING GUARANTEES STAY. The head-keyed `pr@headSha@class` redrive key is
+    untouched, so a PR is still re-driven exactly once per head. The rung still runs BEFORE
+    `runSweep` and its caller still excludes `outcome === "redriven"` PRs from the list it hands
+    `runSweep`, so a PR this rung acts on is not also disposed in the same pass.
+
+    (vi) THE UNMATCHED PATH MUST STAY HONEST. A PR whose failure matches no merged class must
+    still return `outcome: "unmatched"` with no redrive and no ledger line. Criterion 2 is that
+    falsifier: without it, "the rung now fires" is satisfied by a rung that fires on everything,
+    which is a blanket re-run of every open PR and strictly worse than the current silence.
+
+    (vii) EXPLICITLY OUT OF SCOPE.
+      - WIDENING `checksState` OR `buildOpenPrViews` — see (iii).
+      - ANY NEW LEDGER STEP OR FIELD — see (iv).
+      - THE `ci-gate` WAIT CAP ITSELF (.github/workflows/ci-gate.yml). Raising it would reduce
+        how often the timeout occurs but would not make the rung able to see it, and the cap has
+        its own history (W1-T312). Different change, different falsifier.
+      - THE WEDGED-CHECK CONDITION. A required check stuck at 40x its historical median is a
+        distinct signal with no reader today; naming it here would be a signal without a
+        consumer, which this repo has nine of already.
+      - THE LIGHT-PASS DEFERRAL that left `blocked-fixable` at `acted:false`. Real, adjacent,
+        separately observed, and not this.
+  acceptance:
+    - claim: "the rung matches a ci-gate timeout on a pr whose aggregate checks are still pending which is the only state that failure occurs in"
+      proof: "unit test: W1-T977: the redrive rung matches a ci-gate timeout while a sibling is pending"
+    - claim: "a pr whose failure matches no merged class is still returned unmatched with no redrive and no ledger line"
+      proof: "unit test: W1-T977: a pr matching no merged class is still left untouched by the rung"
+    - claim: "the rung reads failures through its own injected reader rather than the shared snapshot field"
+      proof: "unit test: W1-T977: the rung reads failures through its own injected reader"
+    - claim: "no other rung's view changes and the fix rung's strike accounting is identical before and after"
+      proof: "unit test: W1-T977: the fix rung strike accounting is unchanged by the rung's own read"
+    - claim: "omitting the reader leaves the rung's behaviour byte-identical to today so every existing caller is untouched"
+      proof: "unit test: W1-T977: omitting the reader leaves the rung's behaviour unchanged"
+  origin: "oper#redrive-rung-blind-to-pending-2026-08-18"
+  plan_refs: ["W1-T124", "W1-T474", "W1-T123", "W1-T100", "W1-T471"]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/post-fix-reverification.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    src/run-task.ts IS DECLARED, AND THE COST IS ACCEPTED IN WRITING RATHER THAN WAVED AWAY.
+    Design (i) puts the reader behind an injected dep because src/lib/sweep.ts states three
+    separate times that it never talks to GitHub; the real reader therefore has to be supplied by
+    `sweepPostFixReverification`, which lives in src/run-task.ts. That file is declared by 103 of
+    277 shards and W1-T471 serializes every task naming it, so this shard will not batch with any
+    of them. There is no smaller declaration that still wires the dep: a sweep.ts-only change
+    would leave the dep permanently undefined and the rung exactly as blind as it is today.
+
+    AND IT OVERLAPS AN OPEN PR TODAY. #2106 ("fix(sweep): make a risk-judge escalation survive
+    the next sweep pass") declares BOTH src/lib/sweep.ts and src/run-task.ts. These two cannot be
+    dispatched concurrently. That is the partitioner working correctly on a real shared file, not
+    a filing defect — but it is stated here so an implementer does not discover it as a conflict.
+
+    FILES DERIVED BY READING, NOT GUESSED. `runPostFixReverification`,
+    `PostFixReverificationDeps`, `FixClass`, `DEFAULT_FIX_CLASSES` and
+    `CI_GATE_TIMEOUT_FIX_CLASS` are all declared in src/lib/sweep.ts. `sweepPostFixReverification`
+    and both `ciFailures: checksState === "red" ? ... : undefined` sites are in src/run-task.ts.
+    test/post-fix-reverification.test.ts exists today at 22966 bytes and is the suite that already
+    covers this rung — the criteria extend it rather than opening a second home for the same
+    behaviour.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN. `moduleIdFromPath` strips `.test`, so the
+    three declared paths resolve to the distinct subsystem ids `sweep`, `run-task` and
+    `post-fix-reverification` — three, above `sizingViolation`'s threshold of two, so no file list
+    satisfying this task's own scope passes at risk:medium. Blast radius argues DOWN: one optional
+    dep and one conditional read, with the omitted-dep path byte-identical to today (criterion 5).
+
+    NO NEW SIGNAL IS PROPOSED AND THE READER IS NAMED — design (iv). This repo carries nine
+    mechanisms that merged green with no consumer (`hasPushedRunBranch`, `armedButStalled`,
+    `dispatch.stood_down`, `CiFailure.outsidePrRange`, `dh-rate-limit`, `rareOverlapWarnings`,
+    `rmd coverage-improve`, `supersessionVerdict`, `risk_judge.escalated`). This task is the
+    inverse shape: a consumer that exists, is wired, is exercised 143 times, and cannot see its
+    input. Nothing is added for something else to read later.
+
+    PROOF NOTES. ALL FIVE criteria use the NAME-FILTERED `unit test:` form with a bare title, never
+    the pure-path form — a path proof against test/post-fix-reverification.test.ts would pass on
+    any of that suite's existing tests and prove nothing about this change. Every title is plain
+    prose under 100 characters with ZERO commas, no `"; "` and no regex metacharacter, so
+    `looksLikeScenarioNarrative` cannot fail proof-resolvability. All five were checked with
+    `grep -rlF` over test/ to match 0 files today against a control title that matches 1 — they
+    are forward references to titles this task creates, and they are titles rather than symbol
+    names, so nothing here guesses an identifier.
+    THERE IS DELIBERATELY NO `grep:` CRITERION. A first draft carried one naming this shard's own
+    path, and `rmd lint-plan` refused it with `proof-scope`: that path is outside the task's
+    declared `files:`, and `scopeGuardOutOfScopeFiles` (run-task.ts) would refuse the implementer's
+    branch for it AFTER the work was done. Repointing it at an in-scope file is no better — the
+    only tokens that would discriminate head from base are identifiers this task has not written
+    yet, and forward-referencing a SYMBOL NAME is a guess where forward-referencing a test TITLE is
+    not. The claim it encoded ("no new signal, the reader already exists") is a design statement and
+    lives in design (iv), which is where it belongs.
+
+    ID PROVENANCE — FOUR SURFACES, EACH CONTROLLED, PLUS A RESERVATION MINTED WITH THE PLAIN
+    REFSPEC. W1-T977 read 0 on all four at 9b93f6c: refs/rmd-id/* (73 refs, control
+    refs/rmd-id/W1-T946 = 1), shard filenames on origin/main and ids declared under plan/ (control
+    W1-T965 = filename 1 / declared 4), EVERY OPEN PR'S FILE LIST and EVERY OPEN PR'S TITLE
+    (control W1-T972 = 2, this session's own open PR, so the empty result is a real absence and
+    not a failed query). 967 through 976 are all reserved, so 977 is the first free id above that
+    block. THE MINT USED THE FORM CLAUDE.md NOW REQUIRES — no `+`, no `--force-with-lease`: orphan
+    anchor over the empty tree with ZERO parents, plain refspec, exit status into a variable,
+    MINT_EXIT_CODE=0 with `* [new reference]`, and the readback of refs/rmd-id/W1-T977 returned
+    exactly the nonce commit ddb74be40adff357847bf4f47fb27a266abf1553.
