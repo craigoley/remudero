@@ -25,23 +25,5 @@ raw: "LOCAL GATE INVOCATION MUST BE BYTE-IDENTICAL TO CI's — a session's own
   matches CI's, this is a documentation gap rather than a tooling one."
 attachments: []
 origin: cli
-status: proposed
-proposal_pr: https://github.com/craigoley/remudero/pull/2130
-summary:
-  headline: Enforce byte-identical local validation gate execution with CI
-  what_happened: Retrospective found 5 of 6 errors from developers running
-    approximate versions of CI gates locally—different grep flags, wrong glob
-    patterns—instead of exact commands. Code passes local validation but fails
-    in CI review.
-  decision: Audit all six documented local gates, report divergences from CI
-    invocations, and implement unified entry point that shells to CI's exact
-    commands.
-  options:
-    - label: Full reconnaissance + unified entry point
-      consequence: Eliminates all failure modes; requires audit and refactor of dev workflow
-    - label: Documentation audit only
-      consequence: Determines documentation vs. tooling gap; minimal effort; may defer
-        true fix
-    - label: Targeted entry point for high-risk gates
-      consequence: Addresses observed errors; partial solution; other gates remain
-        potentially misaligned
+status: new
+proposal_pr: null
