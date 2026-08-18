@@ -1809,11 +1809,19 @@ test("W1-T1005: a rate-limited call widens the gap for the other gateway too", (
   // What THIS gateway-level test must prove is narrower and different: that gateway B's `wait()`
   // observes the widened state gateway A's `recordResult` set, which only holds if both routed
   // through the identical shared instance.
+  //
+  // NOT asserted on a fixed count of gateway A's own `wait()`/`recordResult()` calls: W1-T1007
+  // added a bounded RETRY loop inside `paceGhEntry` itself, so one rate-limited `fetchAll` now
+  // drives several wait()/recordResult(true) rounds on gateway A alone before it gives up — a
+  // count this test must stay agnostic to, since that retry count is `paceGhEntry`'s own policy,
+  // not this gateway-sharing test's concern.
   let widened = false;
   const widenedAtWait: boolean[] = [];
+  const recordedRateLimited: boolean[] = [];
   const sharedFake: GhCallPacer = {
     wait: () => widenedAtWait.push(widened),
     recordResult: (rateLimited) => {
+      recordedRateLimited.push(rateLimited);
       if (rateLimited) widened = true;
     },
   };
@@ -1829,13 +1837,15 @@ test("W1-T1005: a rate-limited call widens the gap for the other gateway too", (
       },
     });
     assert.doesNotThrow(() => ghA.findMergedByTrailer("W1-T1"), "a classified rate-limit failure is caught, not rethrown");
+    assert.equal(widenedAtWait[0], false, "gateway A's very first wait() had not observed any widening yet");
+    assert.ok(recordedRateLimited.includes(true), "at least one of gateway A's attempts recorded rateLimited=true");
     const ghB = buildBatchedGithub("o", "r-b", { fetchAll: () => [] });
     ghB.findMergedByTrailer("W1-T1");
-    assert.deepEqual(
-      widenedAtWait,
-      [false, true],
-      "gateway A's wait() saw the gap not yet widened; gateway B's wait() — AFTER A's rate-limit " +
-        "result was recorded — saw it widened, proving the two share one pacer's state",
+    assert.equal(
+      widenedAtWait[widenedAtWait.length - 1],
+      true,
+      "gateway B's wait() — the very next one after A's rate-limit result was recorded — saw the " +
+        "gap already widened, proving the two share one pacer's state",
     );
   } finally {
     resetDefaultGhCallPacerForTest(undefined);
