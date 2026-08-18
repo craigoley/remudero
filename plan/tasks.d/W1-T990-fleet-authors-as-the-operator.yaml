@@ -1,0 +1,161 @@
+- id: W1-T990
+  title: "THE FLEET OPENS EVERY PULL REQUEST AS THE OPERATOR'S OWN ACCOUNT — every autonomous PR is authored by cao825 type User, so no platform rule can tell a fleet change from a human one and both of W1-T204's allowed shapes collapse on one shared identity: establish what it would take for the fleet to author as a distinct actor and what breaks when it does"
+  repo: remudero
+  risk: high
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: |
+    MEASURED AT origin/main d9c3c57, 2026-08-18. Every figure re-taken at that head; none carried
+    from an earlier session.
+
+    (1) THE FLEET AUTHORS AS THE OPERATOR. Sampled across weeks of PR history, autonomous branches
+    included: #2060 head `run-W1-T941-1786978387157` author `cao825` type User; #2024 head
+    `run-W1-T934-1786934225604` author `cao825` type User; #2100, #1300, #700 and #520 the same.
+    The PR author is the same GitHub account the operator uses.
+
+    (2) A BOT-AUTHORED PR IS POSSIBLE ON THIS REPO, WHICH IS WHAT MAKES THIS A GAP RATHER THAN A
+    PLATFORM LIMIT. #1900, head `claude/arm-session-prs`, reads author `claude[bot]` type Bot. So
+    the repo already accepts a PR authored by a non-User actor; the fleet simply does not use one.
+
+    (3) W1-T203 SOLVED THE OTHER HALF, AND IT IS A DIFFERENT ACTOR. That task separated who POSTS
+    THE VERDICT: `REVIEWER_IDENTITY_ENV` (`REMUDERO_REVIEWER_LOGIN`) and `REVIEWER_TOKEN_ENV`
+    (`REMUDERO_REVIEWER_TOKEN`) in src/lib/review.ts, with `postReviewStatus` overriding `GH_TOKEN`
+    for that one call. IT SHIPS DARK AND STILL IS: both variables read unset in BOTH running
+    containers (presence checked, values never printed), against a control of `GH_TOKEN` set in
+    each. Its own doc says so in terms — "this ships DARK until an operator provisions the identity
+    and sets both env vars" — and a second comment records "it is DARK in production". Provisioning
+    it would change who signs the verdict. It would not change who opens the pull request.
+
+    (4) SO BOTH OF W1-T204's ALLOWED SHAPES COLLAPSE ON THE SAME IDENTITY. Documentation is
+    explicit that individual user accounts cannot be named as ruleset bypass actors — bypass is by
+    role, team, GitHub App or Dependabot — and that a pull request author cannot approve their own
+    pull request. With one authoring account, a path-scoped required-review rule on the gate files
+    blocks the fleet and the operator identically, and an operator-only push path grants the fleet
+    the same permission it grants the operator. Neither is a gate; both are walls.
+
+    (5) THE CHOKE POINT ALREADY EXISTS AND IS SINGULAR. `ghPrCreateFillCommand` (src/run-task.ts)
+    builds the fleet's `gh pr create` argv and carries a comment naming itself the LIVE-WRITE GUARD
+    "at the BUILDER, not at each of its four executors". Word-bounded invocation counts: 8 in
+    src/run-task.ts, 1 in src/lib/git-push.ts. One builder, four executors — so whatever identity
+    decision is made has exactly one place to be expressed, mirroring how `postReviewStatus` became
+    the single site for W1-T203's credential.
+
+    (6) IT MATTERS MORE UNDER THE ARC THAN IT DOES TODAY. On this box the collapse costs a gate
+    nobody can express. Under the product arc it is the same collapse with a customer's name on it:
+    a fleet that authors as the customer cannot be distinguished from the customer by any platform
+    control, in their audit log or anyone else's. That is a property of the design, not of this
+    installation, and it does not improve by waiting.
+  design: |
+    (i) THIS TASK ESTABLISHES; IT DOES NOT WIRE. The deliverable is a written disposition naming
+    the candidate actors, what each costs, and what breaks — not a credential and not a code
+    change. The shape follows W1-T360's recon precedent (`type: implement`, a docs deliverable,
+    `verify: human`), because the output is a decision record the operator rules on.
+
+    (ii) THE CANDIDATES TO PRICE, EACH AGAINST THE SAME QUESTIONS. At minimum: a GitHub App
+    installation token; a dedicated machine account holding its own credential; and whatever third
+    option the recon finds — the list must be derived, not inherited from this shard. For each:
+    can it open a PR on this repo, does the repo accept it (rationale (2) says a Bot author is
+    accepted), what does it cost to provision, and what does it hold that a worker must never read.
+
+    (iii) WHAT BREAKS IS THE HALF THAT MATTERS, AND IT IS NOT HYPOTHETICAL. `cao825` currently owns
+    the checkout, the token and the merge. Splitting the author identity must be priced against all
+    three: whether a distinct author can still push the run branch the checkout produces; whether
+    merge credit still resolves, since `findMergedByTrailer` and the `run-<taskId>-<epochMs>` head
+    match are what credit a task at all; whether auto-merge arming still works when the arming
+    identity and the authoring identity differ; and whether the worker containment property holds,
+    since src/lib/env.ts's ALLOWLIST passes `GH_TOKEN` into a worker's environment today. A new
+    credential that workers can read separates nothing.
+
+    (iv) THE RECON MUST STATE WHAT IT CANNOT SEE. A prior pass read HTTP 403 on org teams and HTTP
+    401 on the installation endpoint with the available token, and enumerated Apps indirectly
+    through check-run owners instead. Any claim about what actors exist must name which surface it
+    read and which it could not, rather than reporting a token limit as an absence.
+
+    (v) EXPLICITLY OUT OF SCOPE.
+      - THE RULESET CONFIGURATION. Downstream of this and already ruled accept-and-record until a
+        distinct actor exists. W1-T204 is the CONSUMER of this task's answer, not its sibling, and
+        no ruleset, branch protection or repository setting is proposed, changed or designed here.
+      - W1-T203's REVIEWER IDENTITY. Solved, merged as #508 on 2026-07-21, dark by design. This
+        task must not re-file it, re-band it, or fold its provisioning into its own scope — see the
+        note for how the two relate.
+      - THE TWO-PR INSTRUMENT SEQUENCE. `INSTRUMENT_SURFACE` covers the gate paths but the checker
+        lives in a product path absent from that list, so Rule 25 converts a one-PR attack into a
+        two-PR sequence. Real, adjacent, separately observed, and not this.
+      - ANY CREDENTIAL PROVISIONING. That is an operator act. This task produces the disposition he
+        rules on, and stops.
+  acceptance:
+    - claim: "the record names each candidate authoring actor with what it costs to provision and what it must never let a worker read"
+      proof: "demonstration: operator confirms the record prices each candidate actor and states its containment"
+    - claim: "the record states what breaks in merge credit when the authoring identity differs from the operator"
+      proof: "demonstration: operator confirms the record states what breaks in merge credit under a split author"
+    - claim: "the record states whether a distinct author can still push the run branch and still arm auto-merge"
+      proof: "demonstration: operator confirms the record states whether a split author can still push and arm"
+    - claim: "every surface the recon could not read is named as unread rather than reported as empty"
+      proof: "demonstration: operator confirms every unreadable surface is named as unread rather than empty"
+  origin: "oper#fleet-authors-as-the-operator-2026-08-18"
+  plan_refs: ["W1-T204", "W1-T203", "W1-T471"]
+  files: [docs/fleet-authoring-identity.md]
+  status: queued
+  attempts: 0
+  note: |
+    W1-T204 IS THE CONSUMER, W1-T203 IS THE SIBLING THAT SOLVED THE OTHER HALF. W1-T204 asks for
+    path-scoped protection or an operator-only push path over the gate files; a prior recon measured
+    that both collapse because the fleet and the operator share one authoring account, and its
+    standing disposition is accept-and-record until that changes. THIS TASK IS THE THING THAT WOULD
+    CHANGE IT. W1-T203 is the nearest neighbour and is NOT a duplicate: it separated the verdict
+    POSTER and merged as #508 on 2026-07-21 (6 files, +424/-3, head `run-W1-T203-1784658054990`,
+    anchored trailer), with `hooks/deny-floor.sh`, `test/deny-floor.test.ts`,
+    `test/review-status-provenance.test.ts` and `docs/review-gate.md` all confirmed present on main
+    against an absent negative control. Verdict-poster and PR-author are different actors; solving
+    one does not solve the other, and this shard declares no file either of them declares.
+
+    files: IS A DOC BECAUSE THE DELIVERABLE IS A DISPOSITION, NOT A WIRING. `docs/fleet-authoring-
+    identity.md` does not exist today, which is the point — the task creates the record. This
+    follows W1-T360's precedent exactly (`type: implement`, `verify: human`,
+    `files: [docs/flight-control-disposition.md]`), the repo's established shape for a task whose
+    output is a decision the operator rules on. src/run-task.ts is DELIBERATELY NOT DECLARED even
+    though `ghPrCreateFillCommand` lives there with 8 word-bounded references: nothing is wired by
+    this task, and declaring that file would serialize it against the ~103 of 277 shards already
+    naming it (W1-T471) for a change that touches no code. An implementer who concludes the wiring
+    belongs here must amend this shard to declare it first rather than overrunning.
+
+    verify: human IS THE LOAD-BEARING CHOICE, NOT A FORMALITY. The output is a recommendation
+    between credential shapes with real operational cost, and provisioning any of them is an
+    operator act outside the repo. `isDispatchEligible` (src/lib/drain.ts) returns false at
+    `t.verify !== "auto"` before the linter is consulted, so this shard can never be picked up by
+    the drain — the intended effect rather than a side effect.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN AS THE DESIGN STATES IT, NOT BLAST RADIUS. The
+    file list resolves to a single subsystem id, so `sizingViolation` would pass at medium on the
+    paths alone; the band is set high because design (iii) requires pricing against the checkout,
+    the token and the merge credit simultaneously — three coupled subsystems whose interaction is
+    the whole question — and because a wrong answer here is provisioned outside the repo where a
+    linter cannot catch it. Blast radius of the shard itself is one new document.
+
+    PROOF NOTES — AND A CORRECTED FIRST DRAFT. All four criteria use `demonstration:`, matching
+    W1-T360's and W1-T370's shape for an operator-ruled deliverable. THE FIRST DRAFT USED
+    NAME-FILTERED `unit test:` PROOFS AND THAT WAS WRONG: this task's output is a written
+    disposition, so a unit test can never substantiate "the record names each candidate actor". It
+    would have parsed, matched zero tests, and capped the review — precisely the theatre CLAUDE.md's
+    dialect rule names for `verify: human` tasks ("Do NOT rewrite proofs on verify: human tasks").
+    `rmd lint-plan` passed the draft at 0 failing / 0 warnings, so the linter did not catch it; the
+    rule did. THERE IS DELIBERATELY NO `grep:` CRITERION either: the only tokens that would
+    discriminate head from base are strings this task has not written yet, and a `grep:` naming this
+    shard's own path is refused by `proof-scope` as outside the declared files.
+
+    ID PROVENANCE — FOUR SURFACES, EACH CONTROLLED, PLUS A MINT THAT PROVED ITS OWN GATE. W1-T990
+    read 0 on all four at d9c3c57: refs/rmd-id/* (85 refs enumerated, control refs/rmd-id/W1-T946 =
+    1), shard filenames on origin/main and ids declared anywhere under plan/ (control W1-T965 =
+    filename 1 / declared 8), EVERY OPEN PR'S FILE LIST and EVERY OPEN PR'S TITLE (the open-PR query
+    returned 4 lines, so the empty result is a real absence and not a failed call). 980 through 989
+    are reserved, so 990 is the first free id above that block.
+    THE MINT USED THE PLAIN REFSPEC — no `+`, no `--force-with-lease`: orphan anchor over the empty
+    tree with ZERO parents, exit status into a variable, MINT_EXIT_CODE=0 with `* [new reference]`,
+    readback of refs/rmd-id/W1-T990 returning exactly the nonce commit
+    2c7c88f225759db343f21fbeed7a45592b208ee1. AND THE GATE WAS PROVED ON THE SAME INVOCATION: a
+    second orphan pushed by the identical plain form at the TAKEN ref refs/rmd-id/W1-T946 returned
+    PROBE_EXIT_CODE=1 with `! [rejected]`, and that ref still reads its original commit — the
+    rejection is the gate, demonstrated rather than asserted.
