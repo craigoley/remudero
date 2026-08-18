@@ -28,7 +28,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { buildBatchedGithub } from "../src/lib/status.js";
-import { createGhCallPacer, DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS } from "../src/lib/open-prs-rest.js";
+import {
+  createGhCallPacer,
+  DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS,
+  DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION,
+} from "../src/lib/open-prs-rest.js";
 import { DEFAULT_BOARD_POLL_TTL_MS } from "../src/lib/serve.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
@@ -140,16 +144,28 @@ test("W1-T999: a rate limited board fetch backs off through the pacer", () => {
   // enforcement from cache-freshness as the reason a second fetch would or would not fire.
   const github = buildBatchedGithub("o", "r", { pacer, ttlMs: 0, fetchAll, now: () => clock });
 
-  assert.equal(github.readFailed?.(), true, "the first (rate-limited) fetch is classified failed");
-  assert.equal(sleeps.length, 0, "the FIRST guarded call never waits -- nothing came before it");
-
-  assert.equal(github.readFailed?.(), false, "the second fetch succeeds once the pacer lets it through");
-  assert.deepEqual(
-    sleeps,
-    [DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS],
-    "the SECOND guarded call must wait the pacer's widened rate-limit gap before it is allowed to " +
-      "run -- this is the backoff replacing 'retried into a limit it was holding open': a caller " +
-      "with no pacer (or one that ignores recordResult) would have fired call 2 with sleeps == []",
+  // W1-T1007 (open-prs-rest.ts's `paceGhEntry`, merged since this test was first written):
+  // a rate_limit-classified refusal no longer just widens the gap for a LATER guarded call and
+  // rethrows this one -- it retries THIS SAME call through the pacer's own `sleepSync` seam, so
+  // "the caller still sees exactly ONE outcome per `paceGhEntry` call" (that module's own doc).
+  // A single `readFailed()` here already contains both the refusal and its retry.
+  assert.equal(
+    github.readFailed?.(),
+    false,
+    "the refusal is retried and the retry succeeds -- it never reaches the caller as a failure",
+  );
+  assert.equal(calls, 2, "fetchAll must have been retried exactly once after the first refusal");
+  assert.equal(
+    sleeps.length,
+    1,
+    "exactly one backoff sleep -- the retry's own pacer.wait() finds the widened gap already " +
+      "spent by that same sleep, so it adds nothing further",
+  );
+  assert.ok(
+    sleeps[0] >= DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS &&
+      sleeps[0] < DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS * (1 + DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION),
+    `the backoff sleep must sit in [floorMs, floorMs*(1+jitter)) -- this IS the pacer backoff: ` +
+      `saw ${sleeps[0]}ms against a floor of ${DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS}ms`,
   );
 });
 
