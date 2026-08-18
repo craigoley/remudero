@@ -276,6 +276,32 @@ forensic detail, so the narrative does not need to live here.
   happened WITH the allocator live. Sweep `refs/rmd-id/*` alongside shards and open PRs — only that
   sees a RESERVED-BUT-UNFILED id (531/532 were) — then re-sweep on a fresh fetch immediately before
   pushing. *(#1388: returned W1-T379 right after #1388 filed it, true max 380)*
+- **Mint a reservation by hand with the PLAIN refspec — `git push origin <orphan-sha>:refs/rmd-id/<id>`
+  — and NEVER with `+` or `--force-with-lease`. `+` SILENTLY DEFEATS THE LEASE, so a hand-push that
+  looks gated has no gate at all.** The CAS is a property of the PAYLOAD, not the namespace: the
+  anchor is an orphan `commit-tree` over the empty tree with no `-p`, so no two writers ever share a
+  sha and the second push is structurally a non-fast-forward. This is the form
+  `gitRemoteRefReserver.attempt` (`src/lib/task-id-reservation.ts`) already uses — the code allocator
+  is correct and this rule only stops hand-mints from diverging from it. MEASURED against the real
+  remote tonight, one probe ref, four forms: plain refspec onto an ABSENT ref → rc=0
+  `* [new reference]`; plain refspec onto an EXISTING ref holding an unrelated orphan → **rc=1
+  `! [rejected] (non-fast-forward)`**; `+<sha>:<ref>` onto that same existing ref → rc=0
+  `(forced update)`; and `--force-with-lease=<ref>:<DELIBERATELY WRONG SHA>` **combined with `+`** →
+  **rc=0 `(forced update)`, the lease ignored outright**. CONTROL isolating the cause: that identical
+  lease WITHOUT `+` rejects with `! [rejected] (stale info)`. W1-T509's own header comment reached
+  (1)–(4) — tag-is-not-a-lock, lease-elided-on-same-sha, `update-ref` is local-only, orphan+plain
+  push works — but never tested `+`, and `+` is the case that actually clobbers. Read the EXIT CODE
+  into a variable; `* [new reference]` prints ONLY on creation, so a forced update is visually
+  distinguishable but not detectable by grep for that string alone. A non-zero exit means the id is
+  TAKEN — renumber, never re-push.
+- **A reservation ref is the allocation record, so NEVER delete a contested one and never assume an
+  unfiled reservation is free — the LOSER of a race renumbers.** An id can be reserved with no shard
+  anywhere; that is a held id, not an abandoned one, and deleting the ref re-opens the race it
+  settled. Reclaiming one is an operator decision, not an agent's. *(2026-08-18: two hosts minted
+  `refs/rmd-id/W1-T967` 5.76s apart — the first push reported rc=0 with a matching nonce readback and
+  a re-read after the PR opened returned the other host's commit, because the first push carried `+`.
+  The ONLY reason the loser could name the winner is that the reservation message embeds
+  pid+host+time; the ref itself carries no identity field.)*
 - **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
   `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
   Decomposing a predicate from its own falsifier is not a real decomposition. **And NEVER file an
