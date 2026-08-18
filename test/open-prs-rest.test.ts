@@ -13,6 +13,9 @@ import {
   DEFAULT_GH_PACE_LOW_WATER_FRACTION,
   DEFAULT_GH_PACE_MIN_GAP_MS,
   DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS,
+  DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS,
+  DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS,
+  defaultGhRetryAfterSeconds,
   fetchMergeConflictEvidence,
   fetchOpenPrsRest,
   fetchSinglePrRest,
@@ -571,6 +574,9 @@ test("paceGhEntry: a thrown call is classified via `isRateLimited` and RETHROWN 
   const seen: string[] = [];
   const pacer = { wait: () => seen.push("wait"), recordResult: (r: boolean) => seen.push(`result:${r}`) };
   const boom = new Error("rate limited");
+  // maxAttempts: 1 — this test is about IDENTITY (the exact same error object comes back
+  // unwrapped), which is orthogonal to W1-T1007's bounded refusal-backoff retry loop below;
+  // pinning one attempt keeps that identity assertion isolated from the retry count.
   assert.throws(
     () =>
       paceGhEntry(
@@ -579,6 +585,7 @@ test("paceGhEntry: a thrown call is classified via `isRateLimited` and RETHROWN 
         () => {
           throw boom;
         },
+        { maxAttempts: 1 },
       ),
     (err: unknown) => err === boom,
   );
@@ -598,6 +605,157 @@ test("paceGhEntry: a NON-rate-limit throw reports back rateLimited=false, so an 
     ),
   );
   assert.deepEqual(seen, ["wait", "result:false"]);
+});
+
+// ── W1-T1007: NOTHING STOPS AFTER A SECONDARY-LIMIT REFUSAL. Pre-this-task, a `rate_limit`
+// classified refusal only widened the GAP `recordResult` enforces before the NEXT, DIFFERENT
+// guarded call — it never stopped, slowed, or retried the call that was JUST refused; it
+// rethrew immediately, at a fixed 10s gap, straight through the refusal. These tests exercise the
+// bounded retry-with-backoff `paceGhEntry` now performs for that ONE class, using
+// `createGhCallPacer`'s real pacer (so the backoff sleeps through the SAME injected fake clock
+// `wait()` already uses — see `GhCallPacer.sleepSync`'s own doc for why that is what keeps a
+// hand-rolled `GhCallPacer` double, built before this task, from ever blocking for real). ──
+
+/** A `gh`-shaped rate-limit failure, exactly `isGhRateLimitError`'s (lib/status.ts) own shape —
+ *  `stderr` carrying the classifier's regex match — with an optional `Retry-After`-style line
+ *  appended, the way a future header-capturing call site would render one into that same text. */
+function rateLimitError(retryAfterLine?: string): Error {
+  const stderr = `gh: API rate limit exceeded for user ID 4397075. (HTTP 403)${retryAfterLine ? `\n${retryAfterLine}` : ""}`;
+  return Object.assign(new Error("Command failed: gh api"), { status: 1, stderr });
+}
+
+test("W1-T1007: a refusal carrying a retry-after waits at least that long before retrying", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+  let calls = 0;
+  const err = rateLimitError("Retry-After: 45");
+  assert.equal(defaultGhRetryAfterSeconds(err), 45, "sanity: the default extractor actually reads this fixture's own text");
+
+  const result = paceGhEntry(
+    pacer,
+    () => true,
+    () => {
+      calls += 1;
+      if (calls === 1) throw err;
+      return "ok";
+    },
+    { random: () => 0 }, // zero jitter: isolates the HONOURED value from the additive spread
+  );
+
+  assert.equal(result, "ok", "the retried call succeeded and its result is returned, not swallowed");
+  assert.equal(calls, 2, "exactly one retry ran, after the one refusal");
+  assert.deepEqual(clock.sleeps, [45_000], "the wait honoured the carried retry-after (45s) exactly, at zero jitter");
+});
+
+test("W1-T1007: a refusal with no retry-after waits at least the floor before retrying", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+  let calls = 0;
+  const err = rateLimitError(); // no retry-after text at all — today's actual production shape
+
+  const result = paceGhEntry(
+    pacer,
+    () => true,
+    () => {
+      calls += 1;
+      if (calls === 1) throw err;
+      return "ok";
+    },
+    { random: () => 0 }, // zero jitter: isolates the FLOOR from the additive spread
+  );
+
+  assert.equal(result, "ok");
+  assert.equal(calls, 2);
+  assert.deepEqual(
+    clock.sleeps,
+    [DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS],
+    "absent a retry-after, the wait is exactly the exported one-minute floor at zero jitter",
+  );
+  assert.ok(DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS >= 60_000, "the floor really is at least one minute");
+});
+
+test("W1-T1007: successive refusals back off exponentially with jitter", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+  const err = rateLimitError(); // no retry-after — the exponential-floor path this criterion covers
+  // Two DIFFERENT jitter draws, so identical exponential bases (60s, then 120s) come out spread
+  // apart rather than merely doubled — the falsifier a fixed multiplier would fail.
+  const draws = [0.1, 0.9];
+  let drawIdx = 0;
+  const random = () => draws[drawIdx++];
+
+  assert.throws(
+    () =>
+      paceGhEntry(
+        pacer,
+        () => true,
+        () => {
+          throw err;
+        },
+        { random, maxAttempts: 3 },
+      ),
+    (e: unknown) => e === err,
+  );
+
+  assert.equal(clock.sleeps.length, 2, "two backoff waits ran, between the three bounded attempts");
+  const [first, second] = clock.sleeps;
+  const floor = DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS;
+  assert.ok(first >= floor && first < floor * 1.25, `first wait ${first} sits in [floor, floor*1.25)`);
+  assert.ok(second >= floor * 2 && second < floor * 2 * 1.25, `second wait ${second} sits in [2*floor, 2*floor*1.25)`);
+  assert.ok(second > first * 1.5, "GROWTH: the second base has genuinely doubled, not just carried the same jitter forward");
+  const firstJitter = first - floor;
+  const secondJitter = second - floor * 2;
+  assert.notEqual(firstJitter, secondJitter, "SPREAD: two different jitter draws produced two different extra amounts, not lockstep");
+});
+
+test("W1-T1007: the retry count is bounded and the last refusal throws", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+  let calls = 0;
+  const err = rateLimitError();
+
+  assert.throws(
+    () =>
+      paceGhEntry(
+        pacer,
+        () => true,
+        () => {
+          calls += 1;
+          throw err;
+        },
+        { random: () => 0, maxAttempts: 2 },
+      ),
+    (e: unknown) => e === err,
+    "the FINAL refusal reaches the caller unchanged — never swallowed into an infinite retry",
+  );
+
+  assert.equal(calls, 2, "exactly the bounded attempt count ran — one try plus one backoff retry, no more");
+  assert.deepEqual(clock.sleeps, [DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS], "only ONE backoff wait ran, between the two bounded attempts");
+});
+
+test("W1-T1007: a bounded refusal still spends exactly the strike it spent before this task — one thrown call, not more", () => {
+  // design (v): MAX_TRANSIENT_RETRIES / policy.strikeCap are untouched by this task, because this
+  // backoff sits INSIDE one guarded call and is invisible above it. Proven here structurally: a
+  // caller wrapping paceGhEntry in its OWN try/catch (exactly how every real call site uses it —
+  // see run-task.ts's fetchOpenPrsRest call and lib/status.ts's two board-gateway reads) sees the
+  // catch fire exactly ONCE no matter how many internal attempts this call made.
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+  const err = rateLimitError();
+  let outerCatches = 0;
+  try {
+    paceGhEntry(
+      pacer,
+      () => true,
+      () => {
+        throw err;
+      },
+      { random: () => 0, maxAttempts: 3 },
+    );
+  } catch {
+    outerCatches += 1;
+  }
+  assert.equal(outerCatches, 1, "the caller's own catch — where a strike is spent — fires exactly once per paceGhEntry call");
 });
 
 // ── W1-T525: `ghJson` becomes the metered entry point. There is no real `gh` binary driving

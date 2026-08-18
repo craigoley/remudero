@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
-import type { GhCallPacer } from "../src/lib/open-prs-rest.js";
+import { DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS, type GhCallPacer } from "../src/lib/open-prs-rest.js";
 import {
   buildBatchedGithub,
   classifyGhFailure,
@@ -1677,7 +1677,15 @@ test("W1-T468: a rate-limit-classified PR-list failure is reported back to the p
   });
   const gh = buildBatchedGithub("o", "r", { fetchAll: () => { throw rateLimitError; }, pacer });
   assert.doesNotThrow(() => gh.findMergedByTrailer("W1-T1"));
-  assert.deepEqual(calls, ["wait", "result:true"], "a rate-limit-classified throw reports rateLimited=true, never false");
+  // W1-T1007: a rate-limit-classified refusal no longer rethrows after ONE report — paceGhEntry
+  // now retries the same refused call, bounded by DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS (4),
+  // reporting rateLimited=true on every one of the bounded attempts (this fixture's `fetchAll`
+  // always throws, so every attempt is refused) before finally giving up. This `pacer` fixture
+  // implements only `wait`/`recordResult` — no `sleepSync` — so paceGhEntry's optional-chained
+  // backoff wait is a no-op here and this stays instantaneous; see GhCallPacer.sleepSync's own
+  // doc (lib/open-prs-rest.ts) for why a fixture written before that task can never hang on it.
+  const expected = Array.from({ length: DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS }, () => ["wait", "result:true"]).flat();
+  assert.deepEqual(calls, expected, "a rate-limit-classified throw reports rateLimited=true on every bounded attempt, never false");
 });
 
 test("W1-T468: a NON-rate-limit PR-list failure reports back rateLimited=false, so an unrelated outage never widens the pacer's gap", () => {
