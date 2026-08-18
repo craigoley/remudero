@@ -1,0 +1,166 @@
+- id: W1-T978
+  title: "A REPLACED CONTAINER CAN NEVER RECLAIM ITS OWN ABANDONED LOCK — isHolderStale's rung 1 returns not-stale for any host that is not this one, and os.hostname() inside a container IS the container id, so every restart mints a new identity and the previous instance's drain.lock reads as a foreign machine's live lock forever: the daemon refused every boot until a human deleted the file"
+  repo: remudero
+  risk: high
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    MEASURED DURING A LIVE OUTAGE ON THE AZURE HOST, 2026-08-18, origin/main 8257809.
+
+    (1) THE PREDICATE. `isHolderStale` (src/lib/fs-race-safe.ts) opens with rung 1, added by
+    W1-T396: `if (held.host !== myHost) return false;` — "unverifiable from here, so not stale".
+    Its own comment explains the ordering: every rung below reasons about THIS machine's process
+    table, which describes the recorded holder only when the recorded holder ran here.
+
+    (2) THE IDENTITY IT COMPARES IS PER-CONTAINER, NOT PER-MACHINE. `acquireDrainLock`
+    (src/lib/drain-lock.ts) records `host: opts.info?.host ?? hostname()`. Inside a container
+    `os.hostname()` returns the CONTAINER ID. VERIFIED DIRECTLY: `hostname` run inside the
+    long-running `remudero-serve` container prints `6d7656019997`, which is that container's own
+    id. Docker mints a new id on every container replacement, so the daemon's identity changes
+    under it while `state/` — a bind mount — keeps the old lock.
+
+    (3) THE OUTAGE, AS OBSERVED. state/drain.lock held
+    `{"pid":46,"host":"5efb86ede91b","startedAt":"2026-08-18T02:04:23.465Z"}`. Container
+    `5efb86ede91b` returned ZERO matches in `docker ps -a` — it no longer existed. The replacement
+    container was `eae16667008a`. Rung 1 compared `5efb86ede91b` against `eae16667008a`, found
+    them different, and returned NOT STALE. Every boot then printed
+    "rmd daemon REFUSED — a drain/daemon is already running (pid 46 on 5efb86ede91b …)" and
+    exited. It never self-cleared, and could not have: the comparison can only ever fail again.
+
+    (4) AND THE FAILURE SPENT THE WRONG BUDGET. The refusal exits 1, not the freshness code 75, so
+    the entrypoint's in-container freshness loop — which absorbs routine restarts precisely so
+    they do not spend docker's allowance — never applied. Every attempt went straight to docker's
+    count. `RestartCount` reached 5 of `on-failure:5`, docker stopped restarting, and the fleet
+    stayed down until an operator removed the file by hand.
+
+    (5) IT CANNOT HAPPEN ON THE MINI, WHICH IS WHY IT SURVIVED. Under launchd the hostname is
+    stable (`Craigs-Mac-mini`), so a relaunched daemon compares its own identity against itself,
+    rung 1 passes through, and rungs 2 and 3 adjudicate normally. The defect is reachable only
+    where the recorded host is ephemeral — that is, only in a container.
+
+    (6) THE REPO ALREADY KNOWS HOW TO ASK THIS QUESTION. `resolveHostPole`
+    (src/lib/host-parity.ts) takes `inContainer: boolean` as an INJECTED input — "Injected rather
+    than stat'ed here so this module never touches the filesystem; the runner passes the real
+    check" — keyed on Docker's own `/.dockerenv` marker. So a container-aware discriminator is
+    established prior art in this codebase, not a new idea.
+  design: |
+    (i) WHAT THE FIX MUST NOT DO — REMOVE OR WEAKEN RUNG 1. The foreign-host caution is CORRECT
+    for real machines and W1-T396 added it deliberately: this machine's process table says nothing
+    about a pid that ran somewhere else, and asking it anyway is how a live holder on another host
+    gets its lock stolen. Rung 1 must keep returning not-stale for a genuinely different machine.
+    Criterion 2 is that falsifier and must fail if the check is simply dropped.
+
+    (ii) AND IT MUST NOT SIMPLY FALL THROUGH TO PID LIVENESS IN A CONTAINER. This is the
+    attractive wrong fix. A container has its OWN PID NAMESPACE and pids restart from 1 — MEASURED
+    HERE: the abandoned lock named pid 46 and the replacement daemon came up as pid 49. So a
+    stale lock's recorded pid very plausibly names a LIVE, UNRELATED process in the new container,
+    and rung 2 would report it alive; worse, in the other direction, skipping straight to rung 2
+    would let a lock be reclaimed on the strength of a pid that means nothing across the boundary.
+    Rung 3 (`startedAt` vs the pid's real start time) narrows this but cannot carry it alone: it
+    returns `null` when the probe is indeterminate and the function then falls through to
+    not-stale. Criterion 3 is the falsifier for this arm.
+
+    (iii) WHAT IS NEEDED IS A DISCRIMINATOR THAT SEPARATES "ANOTHER MACHINE" FROM "A REPLACED
+    CONTAINER SHARING THIS STATE DIRECTORY". The two cases are indistinguishable from `held.host`
+    alone, which is the whole defect. The substrate that actually distinguishes them is the one
+    the lock already lives on: `state/` is a bind mount, so a holder that wrote into THIS state
+    directory was, by construction, this cell — whatever container id it happened to carry. An
+    implementer may key on that, or on a stable cell identity persisted beside the lock, or on
+    `/.dockerenv` plus the state root; what the choice must satisfy is criteria 1 through 3
+    together, which no single-rung shortcut does.
+
+    (iv) THE SEAM ALREADY EXISTS AND IS ADDITIVE. `IsHolderStaleOpts` already carries optional
+    injected `getProcessStartTime` and `hostname`, each documented as injectable so a test can
+    simulate a condition it cannot create for real. A further optional input follows that shape
+    exactly, defaulted to the real probe so no call site changes. That default is what keeps this
+    change to two files — see the note.
+
+    (v) THE MODULE MAY DO ITS OWN PROBE, UNLIKE host-parity.ts. `resolveHostPole` injects
+    `inContainer` because that module has NO imports and values purity. `fs-race-safe.ts` already
+    imports `node:fs` (`statSync`, `readFileSync`, `openSync`) and `node:os`, so a defaulted probe
+    here costs nothing this module was not already paying. Criterion 4 covers the default arm,
+    because a seam every test injects ships its real implementation unexercised.
+
+    (vi) EXPLICITLY OUT OF SCOPE.
+      - `src/lib/inflight-lock.ts` AND `src/lib/review.ts`, which record `host` the same way and
+        share the exposure. Because (iv) makes the new input DEFAULTED, both inherit the corrected
+        predicate without being edited. If an implementer finds they must be touched, they must
+        amend this shard to declare them first rather than overrunning.
+      - THE EXIT CODE. Rationale (4) is a real compounding factor — a refusal exiting 1 spends
+        docker's budget where 75 would not — but changing which code the refusal exits with is a
+        different decision with a different blast radius, and it does not fix the lock. Named here
+        so it is not silently absorbed.
+      - THE DOCKER RESTART POLICY (`on-failure:5`). The operator's, deliberately left alone; the
+        entrypoint's own header explains why an unbounded policy is not wanted.
+      - HOST IDENTITY ON LEDGER ROWS AND ESCALATION BODIES — that is W1-T972, the sibling. See the
+        note for how the two relate.
+  acceptance:
+    - claim: "a lock left by a replaced container that wrote into this same state directory is reclaimed rather than read as foreign"
+      proof: "unit test: W1-T978: a replaced container's own abandoned lock is reclaimable"
+    - claim: "a lock recorded by a genuinely different machine is still never reclaimed so the foreign-host caution survives"
+      proof: "unit test: W1-T978: a lock from a genuinely different machine is still never reclaimed"
+    - claim: "a live unrelated process that happens to reuse the recorded pid does not by itself make the lock reclaimable"
+      proof: "unit test: W1-T978: a live process reusing the recorded pid does not make a lock reclaimable"
+    - claim: "the discriminator runs its real probe when nothing is injected so the default arm is exercised"
+      proof: "unit test: W1-T978: the container discriminator runs its real probe when nothing is injected"
+  origin: "oper#container-lock-unreclaimable-2026-08-18"
+  plan_refs: ["W1-T396", "W1-T972", "W1-T509"]
+  files: [src/lib/fs-race-safe.ts, test/stale-lock-host-ordering.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    W1-T972 IS THE SIBLING, NOT THE DUPLICATE, AND THIS IS THE SAME ABSENCE SEEN FROM A THIRD
+    SURFACE. W1-T972 (open as #2098) files that a ledger row and an escalation body carry no host
+    identity at all. This one is narrower and worse: the lock DOES carry a host field, and the
+    value it carries is ephemeral, so the field actively misleads a predicate that depends on it.
+    Neither subsumes the other — W1-T972 adds an identity where none exists, this one makes an
+    existing identity usable across a container boundary — and the two share no declared file.
+
+    FILES ARE TIGHT BECAUSE THE NEW INPUT IS DEFAULTED. `isHolderStale` is DECLARED in
+    src/lib/fs-race-safe.ts, which is where the rung-1 comparison lives; word-bounded invocation
+    counts put its consumers at src/lib/inflight-lock.ts = 9, src/lib/status.ts = 5,
+    src/lib/worker.ts = 4, src/lib/drain-lock.ts = 3 and src/run-task.ts = 1, and design (iv)
+    keeps every one of them unedited. The suite is test/stale-lock-host-ordering.test.ts — it is
+    named for rung 1 and carries 38 host-rung references against 22 in
+    test/lock-holder-identity.test.ts, which owns a different question. src/run-task.ts is NOT
+    declared: nothing about this change reaches it, and declaring it would serialize this task
+    against the 103 of 277 shards that already name it (W1-T471) for no benefit.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `moduleIdFromPath` strips
+    the `.test` segment, so the two declared paths resolve to the distinct subsystem ids
+    `fs-race-safe` and `stale-lock-host-ordering` — two, which is `sizingViolation`'s threshold,
+    so no file list satisfying this task's own scope passes at risk:medium. Blast radius argues
+    DOWN: one added optional input and one narrowed branch, with every existing call site
+    untouched by construction.
+
+    THE MEASUREMENT IS REPRODUCIBLE WITHOUT RE-BREAKING ANYTHING. `hostname` inside any container
+    on this host prints that container's id — checked against `remudero-serve`, which printed
+    `6d7656019997` matching `docker inspect --format '{{.Id}}'`. The live drain.lock written by the
+    recovered daemon reads `{"pid":49,"host":"eae16667008a",...}`, the CURRENT container id, so the
+    pattern is visible in a healthy fleet and needs no outage to confirm.
+
+    PROOF NOTES. All four criteria use the NAME-FILTERED `unit test:` form with a bare title, never
+    the pure-path form — a path proof against test/stale-lock-host-ordering.test.ts would pass on
+    any of that suite's existing rung-1 tests and prove nothing about this change. Each title is
+    plain prose under 100 characters with ZERO commas, no `"; "` and no regex metacharacter, so
+    `looksLikeScenarioNarrative` cannot fail proof-resolvability, and the executor compiles a bare
+    title as an ESCAPED LITERAL so no character in them acts as a wildcard. All four were checked
+    with `grep -rlF` over test/ to match 0 files today against a control title matching 1 — forward
+    references to titles this task creates, and titles rather than symbol names, so nothing here
+    guesses an identifier. THERE IS DELIBERATELY NO `grep:` CRITERION: the only tokens that would
+    discriminate head from base are identifiers this task has not written yet, and a `grep:` naming
+    this shard's own path is refused by `proof-scope` as outside the declared `files:`.
+
+    ID PROVENANCE — FOUR SURFACES, EACH CONTROLLED, PLUS A RESERVATION MINTED WITH THE PLAIN
+    REFSPEC. W1-T978 read 0 on all four at 8257809: refs/rmd-id/* (75 refs, control
+    refs/rmd-id/W1-T946 = 1), shard filenames on origin/main and ids declared under plan/ (control
+    W1-T965 = filename 1 / declared 4), EVERY OPEN PR'S FILE LIST and EVERY OPEN PR'S TITLE
+    (control W1-T977 = 2, this session's own open PR, so the empty result is a real absence rather
+    than a failed query). 967 through 977 are all reserved, so 978 is the first free id above that
+    block. THE MINT USED THE FORM CLAUDE.md REQUIRES — no `+`, no `--force-with-lease`: orphan
+    anchor over the empty tree with ZERO parents, plain refspec, exit status captured into a
+    variable, MINT_EXIT_CODE=0 with `* [new reference]`, and the readback of refs/rmd-id/W1-T978
+    returned exactly the nonce commit 3c8cbdd2ea915914340a2685aa10120baa7e71f3.
