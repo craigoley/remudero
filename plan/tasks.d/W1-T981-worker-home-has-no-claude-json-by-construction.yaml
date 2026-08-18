@@ -1,0 +1,143 @@
+- id: W1-T981
+  title: "'Claude configuration file not found at worker-home-<uuid>/.claude.json' is not a race and nothing restores it — every spawn gets a FRESH home that the allowlist never grants a .claude.json into, so the CLI writes one from scratch and drops its backup into the SHARED granted .claude: pin that as deliberate, or seed the config, but stop reading the recurrence as an unfixed defect"
+  repo: remudero
+  depends_on: ["W1-T505"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    FILED FROM feedback#fb-1785775974389-e25033, which reported 14 recon runs (12 haiku, 2 sonnet)
+    between 2026-08-03T00:54Z and 12:03Z carrying `Claude configuration file not found at
+    .../worker-home-<uuid>/.claude.json` in stderr, hypothesised a "WORKER-HOME CONFIG RACE" in which
+    "something writes a backup and the config is transiently absent when the worker reads it", and set
+    the falsifier "if the message recurs after 2026-08-03T16:00Z, it was never fixed".
+
+    THE RACE HYPOTHESIS IS REFUTED FROM SOURCE, and that refutation is most of this filing. Four
+    citations, each re-read on this branch:
+      (1) `spawnWorker` gives EVERY spawn its own home — `const workerHome =
+          perRunWorkerHomeDir(workerHomeRoot, args.runId)` (src/lib/worker.ts:862, generator at
+          src/lib/worker-home.ts:364, falling back to a fresh `randomUUID()` when no runId is
+          threaded — which is exactly the `worker-home-<uuid>` shape the report saw).
+      (2) That home is REAPED on every exit path, including a thrown error —
+          `reapWorkerHome(workerHomeRoot, workerHome)` in the `finally` (src/lib/worker.ts:1039).
+          So each of those 14 runs read a home that was seconds old and is now gone.
+      (3) What `materializeWorkerHome` (src/lib/worker-home.ts:246) actually PUTS in a fresh home is
+          exhaustive and short: eight zero-byte rc files (`WORKER_HOME_RC_FILES`, :71-80, rewritten
+          empty every time at :257-261) and four symlinks (`WORKER_HOME_SYMLINKS`, :109-125) —
+          `.claude`, `.config/gh`, `.gitconfig`, `Library/Keychains/login.keychain-db`.
+          `.claude.json` IS NOT ON THAT LIST and never has been.
+      (4) NOTHING IN THIS REPO WRITES EITHER FILE. A repo-wide search for `backups` / `.backup.`
+          across src/ returns ZERO hits; the only `backup` matches anywhere are deploy/host-update.sh's
+          state-volume warning and W1-T234's unrelated state-backup organ.
+    So the config is not "transiently absent" — it is absent BY CONSTRUCTION at the instant the CLI
+    starts, in every per-run home, on every spawn. The CLI emits the notice, writes its own
+    `.claude.json`, and its backup lands at `.claude/backups/.claude.json.backup.<epoch>` which
+    resolves THROUGH the granted `.claude` symlink into the operator's real, SHARED `.claude`. There
+    is no restore to be automatic, and no gap that can widen under load, because there is no window.
+
+    THE FEEDBACK'S FALSIFIER IS INVERTED AND MUST BE RECORDED AS SUCH. Recurrence after 16:00Z is the
+    EXPECTED observation, not evidence of a non-fix; the four hours of silence it distrusted are the
+    anomaly, and feedback#fb-1785785017959-c23215 (19:23Z the same day) supplies the likely reason —
+    `ls -d ~/Remudero/worker-home-*` returned only the persistent `worker-home-usage-probe`, i.e. runs
+    in that window were not producing per-run homes at all. Left unrecorded, this line will be
+    re-triaged as a race every time a recon reads a stderr tail.
+
+    WHAT IS ACTUALLY WORTH DECIDING, since the alarm itself is void. Two consequences follow from the
+    same mechanism and neither is currently pinned by any test:
+      (a) SHARED-DIRECTORY WRITE AND UNBOUNDED ACCUMULATION. Every spawn's throwaway config produces a
+          `.claude.json.backup.<epoch>` in ONE operator-owned directory shared by every worker. That
+          is the same class of shared-state coupling W1-T505 is narrowing the `.claude` grant to end,
+          and nothing reaps those backups — the per-run reap at worker.ts:1039 removes the HOME, not
+          writes that escaped through a symlink out of it.
+      (b) EVERY WORKER RUNS WITH A VIRGIN CLI CONFIG. FINDINGS.md:263-266 records what
+          `~/.claude.json` holds — `hasAvailableSubscription`, `cachedUsageUtilization`,
+          `modelAccessCache`, `autoCompactWindowsCache`, `machineID`, `oauthAccount` — none of which
+          any worker ever has. This is stated as a QUESTION, not a defect: `resolveActiveAccountId`
+          (src/lib/worker.ts:657) defaults to `join(homedir(), ".claude.json")` and therefore reads
+          the PARENT's real home, not the worker's, so the identity path is unaffected. Whether the
+          per-spawn config churn touches the headroom blindness W1-T417 measured (`cachedUsageUtilization`
+          absent from `~/.claude.json` in a container) is the one thing here that is genuinely open.
+
+    NOT PREVIOUSLY DECIDED, checked before filing: W1-T239 audits the symlink FAMILY and notes "plus a
+    real .claude.json" observed beside it, but decides nothing about who writes it; W1-T505 narrows the
+    `.claude` grant's TARGET and never touches `.claude.json`; W1-T170's per-run homes introduced the
+    condition without recording this consequence. MASTER-PLAN, DECISIONS.md and LEARNINGS.md say
+    nothing about the notice.
+  design: |
+    (i) PIN THE MECHANISM AS A TEST, NOT AS PROSE. A freshly materialised per-run home must have its
+    `.claude.json` state ASSERTED — today it is an emergent property of an allowlist that happens not
+    to mention the file, which is why the absence read as a race. Whatever disposition (ii) picks, a
+    test in `test/worker-home.test.ts` states it, so a future reader gets the answer from the suite.
+    (ii) CHOOSE THE DISPOSITION ON THE EVIDENCE, AND ONLY THESE THREE ARE IN SCOPE.
+      (A) ACCEPT AND DOCUMENT — a virgin config per spawn is the isolation this module exists to
+          manufacture (an operator's `.claude.json` carries `mcpServers`, history and caches; granting
+          it back would be the wholesale-HOME mistake `WORKER_HOME_SYMLINKS` was built against). Name
+          the slot in source, state that the CLI creates it, and stop there.
+      (B) SEED IT — `materializeWorkerHome` writes a minimal `.claude.json` into each home so the CLI
+          finds one. Only justified if (iii) shows the virgin config COSTS something measurable.
+      (C) GRANT IT — add `.claude.json` to `WORKER_HOME_SYMLINKS`. Presumed WRONG and must be argued
+          against explicitly rather than silently skipped: it re-shares a mutable operator file across
+          every concurrent worker, which is W1-T170's own concurrency finding in a new slot.
+    (iii) MEASURE (b) BEFORE (ii) DECIDES. Establish whether a worker running with no `.claude.json`
+    loses anything the fleet reads — specifically the `cachedUsageUtilization` / subscription context
+    W1-T417 found missing. A null result is a real answer and selects (A); it must be RECORDED, not
+    left implicit.
+    (iv) DO NOT LET BACKUPS ACCUMULATE SILENTLY, whichever disposition wins. Either the backups stop
+    landing in the shared granted directory or their growth is bounded/observable — an unbounded write
+    into the operator's `.claude` from every spawn is the concrete cost here, independent of the
+    stderr notice that prompted the filing.
+    (v) FALSIFIER, BOTH DIRECTIONS. Removing whatever (ii) lands must fail the pinning test; and a
+    home built with the credential-only grant absent (W1-T505's fallback path) must still spawn — this
+    task may not add a second way for a home to refuse.
+    (vi) EXPLICITLY NOT IN SCOPE: the `.claude` grant's TARGET (W1-T505 owns it), the symlink-family
+    audit (W1-T239), the headroom governor's own source selection (W1-T417), suppressing or filtering
+    worker stderr generally, and anything about `worker-home-usage-probe`'s allocation — that is
+    feedback#fb-1785785017959-c23215's question, not this one.
+  acceptance:
+    - claim: "a freshly materialised per-run worker home's .claude.json state is asserted by a test rather than left as an emergent property of the allowlist"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "the worker-home module names the .claude.json slot and states in source what creates it and where the CLI's backup lands"
+      proof: "grep: CLAUDE_CONFIG_REL in src/lib/worker-home.ts"
+    - claim: "the CLI's per-spawn config backups no longer accumulate unbounded and unobserved in the shared granted .claude directory"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "a home built while the credential-only grant is absent still materialises and spawns, so this change adds no new refusal path"
+      proof: "unit test: test/worker-home.test.ts"
+  risk: medium
+  origin: feedback#fb-1785775974389-e25033
+  plan_refs: ["§7B", "W1-T170", "W1-T505"]
+  files: [src/lib/worker-home.ts, test/worker-home.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    TRIAGED, NOT RELAYED. The feedback asked for recon into "what creates a worker home's .claude.json,
+    what writes the backup, whether the restore is automatic, and whether the gap can widen under
+    load". Three of those four are answered in the rationale from source citations and a zero-hit
+    search, so this task is NOT that recon — it is the disposition of what the answers leave open. A
+    worker that re-derives the race hypothesis has wasted its budget.
+
+    depends_on W1-T505 IS DELIBERATE. It rewires the same `.claude` grant these backups travel through
+    and declares the same two files, so landing this first would either conflict or pin behaviour
+    W1-T505 then moves. If W1-T505 is abandoned, re-grade this to depends_on [] rather than inheriting
+    its fate — nothing here needs the narrowing to be correct, only to be settled.
+
+    risk:medium — ONE module by Rule 19's count (`moduleIdFromPath` folds `test/worker-home.test.ts`
+    and `src/lib/worker-home.ts` to the same `worker-home` id). It argues UP toward high because
+    `materializeWorkerHome` runs before every spawn and a mistake there is the W1-T235/W1-T505 blast
+    radius; it argues DOWN because disposition (A) is a comment, a constant and a test. Medium is the
+    honest middle, and a worker choosing (B) or (C) should re-grade before implementing.
+
+    budget_usd 45.00 — below the 60 house default on purpose: the expensive half (establishing the
+    mechanism) is already paid and cited above.
+
+    `files:` DERIVED, NOT GUESSED. `WORKER_HOME_SYMLINKS`, `WORKER_HOME_RC_FILES` and
+    `materializeWorkerHome` all live in `src/lib/worker-home.ts`, which is the entire mechanism;
+    `test/worker-home.test.ts` is the home suite by weight (the same derivation W1-T505's note records
+    against `worker-home-poisoned-slot` and `worker-home-per-run`). `src/lib/worker.ts` is NOT declared
+    — its call sites at :862/:918/:1039 are cited as evidence and need no edit, and declaring an
+    untouched file fails `inverseScopeUntouchedFiles`. The proofs run the WHOLE existing suite file
+    rather than name titles, so they parse today and execute whatever the implementation adds.
+
+    ONE PROOF IS A GREP AND IT NAMES A SYMBOL THAT DOES NOT EXIST YET (`CLAUDE_CONFIG_REL`, the
+    sibling of the existing `CLAUDE_REL` at src/lib/worker-home.ts:187) — that is the point: it fails
+    until the slot is actually named in source, which is the minimum every disposition owes.
