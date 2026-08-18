@@ -34,7 +34,7 @@
  * PAGE, which `JSON.parse` rejects outright, and the `--slurp` that fixes that cannot be
  * combined with `--jq`.
  */
-import type { MergeState } from "./sweep.js";
+import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./sweep.js";
 
 export function openPrsRestArgs(owner: string, repo: string): string[] {
   return ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`];
@@ -910,6 +910,144 @@ export function hydrateMergeStates(
       if (state !== undefined) out.set(n, state);
     } catch {
       /* best-effort: this PR keeps the pre-existing undefined, the pass continues */
+    }
+  }
+  return out;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * CONFLICT EVIDENCE (W1-T984 — the `mergeConflict` half of the row directly above's own header:
+ * "the mergeConflict half of the SAME row was left unwired and is this task").
+ *
+ * `OpenPrView.mergeConflict` (lib/sweep.ts) has had NO PRODUCER since W1-T106 declared it:
+ * `isPureConcurrentAddition` opens with `files.length > 0`, so an empty/absent evidence list fails
+ * CLOSED to escalation rather than a wrong auto-resolution — but the escalation itself then always
+ * reads "files: none captured", 9 times out of 9 across the whole recorded corpus (W1-T984
+ * rationale (2)), because nothing ever populated the field to name real paths from.
+ *
+ * THE SHAPE, mirroring `hydrateMergeStates` immediately above (design note ii): fetch ONLY for a
+ * PR already known `mergeState === "dirty"` — a small set, six PRs over a measured 7-day window —
+ * and reuse {@link MERGE_STATE_HYDRATION_CAP} rather than a second, independently-tuned ceiling.
+ * Best-effort per PR: a throw leaves that PR's evidence `undefined`, byte-identical to every PR
+ * today, and the pass continues.
+ *
+ * WHY REST COMPARE, NOT `git` (design note iii). Nothing in the sweep path shells to git
+ * (`grep -c 'await git(' src/run-task.ts` = 0), so the evidence has to come from GitHub's own
+ * compare API: `GET /repos/{o}/{r}/compare/{base}...{head}` reports the MERGE BASE commit plus the
+ * file/commit diff FROM that merge base TO `head` — exactly `git diff $(git merge-base
+ * base head) head` and `git log base..head`, without a checkout. Two calls give both sides:
+ *   1. compare(targetBranch...prHead)   -> the merge-base sha, PLUS "ours" side per-file deletions
+ *      and commit log (the diff from merge-base to this PR's own head).
+ *   2. compare(mergeBaseSha...targetBranch) -> "theirs" side, the SAME shape from merge-base to
+ *      the target branch's current tip.
+ *
+ * THE INTERSECTION IS DELIBERATE, AND OVER-APPROXIMATES IN THE SAFE DIRECTION (design note iii,
+ * verbatim). A real git conflict can only occur on a path BOTH sides touched since the merge base,
+ * so only filenames present in BOTH compare responses become a {@link ConflictFileDiff} — but
+ * REST's "touched since merge base" is broader than "git would conflict here" (e.g. two sides that
+ * edited disjoint regions of the same file merge cleanly with no conflict at all). That makes this
+ * evidence set a SUPERSET of git's real conflict set, which makes {@link isPureConcurrentAddition}
+ * STRICTER, never looser: more candidate files means more chances one carries a deletion, so the
+ * approximation can never manufacture a false TRUE from a genuine deletion. It CAN still return
+ * TRUE on a genuine add/add collision (rationale (5)) — that is `mergeConflictAdmissionEnabled`'s
+ * (lib/sweep.ts) reason for existing, not a defect in this producer. A LATER READER MUST NOT
+ * "narrow" this to an exact git-conflict set without re-deriving this safety argument.
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** The compare argv — GitHub's own merge-base-relative diff, never a raw two-tip diff. */
+export function compareRestArgs(owner: string, repo: string, base: string, head: string): string[] {
+  return ["api", `repos/${owner}/${repo}/compare/${base}...${head}`];
+}
+
+/** One file entry in a compare response — the wire shape, never {@link ConflictFileDiff}. */
+interface RestCompareFile {
+  filename?: string;
+  deletions?: number;
+}
+
+/** One commit entry in a compare response — enough to build a `git log`-shaped one-liner. */
+interface RestCompareCommit {
+  sha?: string;
+  commit?: { message?: string };
+}
+
+/** The compare endpoint's response, narrowed to what this producer reads. */
+interface RestCompareResponse {
+  merge_base_commit?: { sha?: string };
+  files?: RestCompareFile[];
+  commits?: RestCompareCommit[];
+}
+
+/**
+ * `git log <since>..<until>`'s one-line-per-commit shape ({@link MergeConflictEvidence.oursLog}'s
+ * own doc), built from a compare response's `commits[]` rather than shelling to git — REST already
+ * carries the SHA and message, so no second fetch is needed.
+ */
+function logFromCompareCommits(commits: RestCompareCommit[] | undefined): string {
+  return (commits ?? []).map((c) => `${(c.sha ?? "").slice(0, 7)} ${(c.commit?.message ?? "").split("\n")[0]}`).join("\n");
+}
+
+/**
+ * One PR's conflict evidence, over REST — the {@link MergeConflictEvidence} producer W1-T984
+ * wires. Throws on a failed/malformed read (no retry, same discipline as {@link rollupFor}); the
+ * caller ({@link hydrateMergeConflictEvidence}) catches it per PR.
+ */
+export function fetchMergeConflictEvidence(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  headRefOid: string,
+  fetch: GhApiFetcher,
+): MergeConflictEvidence {
+  const ours = fetch(compareRestArgs(owner, repo, targetBranch, headRefOid)) as RestCompareResponse;
+  const mergeBaseSha = ours.merge_base_commit?.sha;
+  if (!mergeBaseSha) throw new Error("conflict evidence compare carried no merge_base_commit.sha");
+  const theirs = fetch(compareRestArgs(owner, repo, mergeBaseSha, targetBranch)) as RestCompareResponse;
+
+  const oursDeletions = new Map((ours.files ?? []).filter((f) => f.filename).map((f) => [f.filename as string, f.deletions ?? 0]));
+  const theirsDeletions = new Map((theirs.files ?? []).filter((f) => f.filename).map((f) => [f.filename as string, f.deletions ?? 0]));
+  const files: ConflictFileDiff[] = [];
+  for (const [path, oursDeleted] of oursDeletions) {
+    const theirsDeleted = theirsDeletions.get(path);
+    // INTERSECTION ONLY — see this section's own header doc for why a path touched on just one
+    // side is never a candidate git could actually conflict on.
+    if (theirsDeleted === undefined) continue;
+    files.push({ path, oursDeleted, theirsDeleted });
+  }
+
+  return {
+    files,
+    oursLog: logFromCompareCommits(ours.commits),
+    theirsLog: logFromCompareCommits(theirs.commits),
+  };
+}
+
+/**
+ * Fetch conflict evidence for up to {@link MERGE_STATE_HYDRATION_CAP} already-`dirty` PRs,
+ * returning a map from PR number to {@link MergeConflictEvidence}. Absent from the map ⇒ caller
+ * leaves `mergeConflict` `undefined` — the pre-existing value every PR has always carried.
+ *
+ * BEST-EFFORT, PER PR — the SAME discipline {@link hydrateMergeStates} uses immediately above: a
+ * throw on one PR (rate limit, a 404 on a PR closed mid-pass, a network blip, a merge-base compare
+ * this repo's history cannot resolve) skips THAT PR and continues, never propagates. `cap` reuses
+ * {@link MERGE_STATE_HYDRATION_CAP} rather than a second ceiling (design note ii) — callers pass
+ * only PRs already confirmed `mergeState === "dirty"`, a set this repo has measured at six over a
+ * whole 7-day window, so the cap is defensive headroom, not an expected truncation.
+ */
+export function hydrateMergeConflictEvidence(
+  owner: string,
+  repo: string,
+  targetBranch: string,
+  dirtyPrs: readonly { number: number; headRefOid: string }[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+): Map<number, MergeConflictEvidence> {
+  const out = new Map<number, MergeConflictEvidence>();
+  for (const p of dirtyPrs.slice(0, cap)) {
+    try {
+      out.set(p.number, fetchMergeConflictEvidence(owner, repo, targetBranch, p.headRefOid, fetch));
+    } catch {
+      /* best-effort: this PR keeps the pre-existing undefined mergeConflict, the pass continues */
     }
   }
   return out;

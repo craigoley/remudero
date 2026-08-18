@@ -208,10 +208,12 @@ export const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
   mergeableState:
     "single-PR-only REST field, the raw GitHub string W1-T186 wants quoted verbatim in an " +
     "escalation. Same producer gap as mergeable above; #1082 carried only the narrowed mergeState.",
-  mergeConflict:
-    "needs per-file conflict EVIDENCE (both sides' log since merge-base, W1-T94 design note iii), " +
-    "which no producer captures. isPureConcurrentAddition returns false on an empty list, so the " +
-    "absence fails closed to escalation rather than to a wrong auto-resolution.",
+  // mergeConflict WIRED by W1-T984: buildOpenPrViews (run-task.ts) now assigns it via
+  // lib/open-prs-rest.ts's hydrateMergeConflictEvidence, scoped to PRs already read
+  // mergeState === "dirty" — removed here per this file's own "removing a field from this list
+  // means wiring it" rule. isPureConcurrentAddition itself stays byte-identical, and the
+  // `conflicted` disposition row it feeds is gated off by default (mergeConflictAdmissionEnabled,
+  // lib/sweep.ts) — see that flag's own doc for why.
   // pendingAnswer WIRED by W1-T435: buildOpenPrViews (run-task.ts) now assigns it via
   // lib/sweep.ts's operatorVerdictEvidence, reading the operator_feedback ledger step and
   // plan/questions.ndjson — removed here per this file's own "removing a field from this list

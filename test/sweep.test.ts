@@ -1107,9 +1107,19 @@ test("isPureConcurrentAddition: zero deletions on both sides across every file -
   assert.equal(isPureConcurrentAddition([]), false, "no captured file evidence never defaults to safe");
 });
 
+// W1-T984: the `conflicted` row now carries a `mergeConflictAdmissionEnabled` conjunct (default
+// FALSE — a real evidence producer landed in that same task, and the predicate below cannot tell
+// a genuine pure-concurrent-addition from an add/add collision, so admission stays an explicit
+// opt-in). These two tests exercise the row's PREDICATE/DISPATCH mechanics, which W1-T106 already
+// owns and this task does not change — so they opt the fixture IN via policy, the same explicit
+// shape `supersessionDisposalEnabled`'s own tests already use, rather than asserting on the new
+// default (that default is `deriveDisposition acceptance 3` below, and
+// test/sweep-conflicted-disposition.test.ts's own suite).
+const CONFLICT_ADMISSION_POLICY: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true };
+
 test("deriveDisposition acceptance 1 — the #170 fixture (green checks, review PASS, mergeState dirty) dispositions CONFLICTED — the mergeable rule (row 8) cannot match a dirty PR, a regression lock ABOVE it", () => {
   const seeded = conflictedPurePr();
-  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  const r = deriveDisposition(seeded, CONFLICT_ADMISSION_POLICY, NOW);
   assert.equal(r.disposition, "conflicted");
   assert.notEqual(r.disposition, "mergeable", "a dirty PR is NEVER armed no matter how green");
   assert.match(r.reason, /mergeState dirty/);
@@ -1119,16 +1129,16 @@ test("deriveDisposition acceptance 1 — the #170 fixture (green checks, review 
   // mergeable row's own predicate (never a second, independently-hardcoded
   // check) — it must never positively match a dirty PR.
   const mergeableRow = DISPOSITION_RULES.find((row) => row.disposition === "mergeable")!;
-  assert.equal(mergeableRow.when(seeded, DEFAULT_SWEEP_POLICY, 0, NOW), true, "sanity: checks green + review success alone WOULD match");
+  assert.equal(mergeableRow.when(seeded, CONFLICT_ADMISSION_POLICY, 0, NOW), true, "sanity: checks green + review success alone WOULD match");
   const conflictedRow = DISPOSITION_RULES.find((row) => row.disposition === "conflicted")!;
-  assert.equal(conflictedRow.when(seeded, DEFAULT_SWEEP_POLICY, 0, NOW), true, "the conflicted row matches FIRST, ordered above mergeable");
+  assert.equal(conflictedRow.when(seeded, CONFLICT_ADMISSION_POLICY, 0, NOW), true, "the conflicted row matches FIRST, ordered above mergeable");
 });
 
 test("runSweep acceptance 2 — a pure-concurrent-addition conflict dispatches ONE merge-conflict-mode fix worker, carrying the conflicting files + both sides' log, never a reviewer-unmet/ci-log mix", async () => {
   const deps = fakeDeps();
   const seeded = conflictedPurePr();
 
-  const summary = await runSweep([seeded], deps);
+  const summary = await runSweep([seeded], deps, CONFLICT_ADMISSION_POLICY);
 
   assert.equal(summary.byDisposition.conflicted, 1);
   assert.equal(deps.fixed.length, 1, "exactly ONE spawn");

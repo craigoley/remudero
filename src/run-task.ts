@@ -157,6 +157,7 @@ import {
   createGhCallPacer,
   fetchOpenPrsRest,
   fetchSinglePrRest,
+  hydrateMergeConflictEvidence,
   hydrateMergeStates,
   liveStateFromRest,
   mapRestPr,
@@ -15392,6 +15393,14 @@ export function buildOpenPrViews(
     fetch,
   );
 
+  // CONFLICT EVIDENCE (W1-T984 — the `mergeConflict` half of the row directly above's own
+  // "third instance of the single-PR-only field class" header): a SECOND bounded follow-up fetch,
+  // scoped to the PRs the FIRST one just confirmed `mergeState === "dirty"` — never the whole
+  // `raw` list, so a healthy sweep pays nothing extra. "main" is this repo's one merge target,
+  // the same literal `ghPrCreateFillCommand`'s own `--base` argv already hardcodes.
+  const dirtyPrs = raw.filter((p) => mergeStates.get(p.number) === "dirty").map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
+  const mergeConflicts = hydrateMergeConflictEvidence(owner, repo, "main", dirtyPrs, fetch);
+
   // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
   const byTask = new Map<string, number[]>();
   for (const pr of raw) {
@@ -15497,6 +15506,12 @@ export function buildOpenPrViews(
       // Absent from the map ⇒ GitHub had not computed it (or we could not ask) ⇒ undefined, the
       // pre-existing value. Only a DEFINITE observed "dirty" ever reaches the conflicted rows.
       mergeState: mergeStates.get(pr.number),
+      // W1-T984: the mergeConflict producer — populated ONLY for a PR the line above just read
+      // "dirty" (mergeConflicts was fetched for exactly that subset). Absent from the map ⇒ the
+      // fetch was never attempted (not dirty) or failed best-effort ⇒ undefined, the pre-existing
+      // value every PR has always carried — see lib/sweep.ts's DISPOSITION_RULES for how the
+      // policy-gated `conflicted` row and the `blocked-ambiguous` row beneath it each read this.
+      mergeConflict: mergeConflicts.get(pr.number),
       // W1-T435: `pendingAnswer`'s long-promised producer (see that field's own "SCOPE" doc,
       // lib/sweep.ts) — an operator's steering note on a `wrong`/`needs-follow-up` verdict, or an
       // answered clarification from the console, either re-arms the `blocked-fixable` disposition
