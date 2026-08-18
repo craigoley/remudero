@@ -1,0 +1,191 @@
+- id: W1-T988
+  title: "THE DISPATCHER NEVER READS WHICH REPO A TASK BELONGS TO AND A CROSS-REPO TASK IS ALREADY IN THE PLAN — drain.ts and daemon.ts read a task's repo 0 times against controls of 61 and 37 id reads, while repo is required and validated on all 617 tasks: add one eligibility predicate so a foreign-repo task is refused instead of handed to a worker in the wrong checkout"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    THIS IS A SAFETY GUARD ON A SINGLE-TARGET DAEMON, NOT MULTI-REPO SUPPORT, AND NOT THE ROUTING
+    STAGE 2 NEEDS. Saying so is the first clause because the shape invites the wrong build. The
+    architecture path the recon actually found is a SECOND DAEMON WITH ITS OWN `config.root` —
+    nearly free today, because `config.root` already parameterises every global thing (the ledger
+    path, `state/`, the locks, the reservation store). THAT IS THE OPERATOR'S DECISION AND NOT THIS
+    TASK'S. This task makes the CURRENT daemon refuse work that is not its own.
+
+    RE-DERIVED AT origin/main cc008b7a, in a scratch worktree of that sha rather than a session
+    checkout. Every figure below was re-taken; two came back different and are corrected in the
+    note.
+
+    (1) THE DISPATCH PATH IS BLIND TO `repo`. `src/lib/drain.ts` reads a task's `repo` ZERO times —
+    zero for `t.repo`/`task.repo` AND zero for the bare word anywhere in the module — against
+    controls of 61 id reads and 1 verify read in the same file. `src/lib/daemon.ts` is likewise
+    ZERO against a control of 37 id reads. A deliberately absent symbol scores 0 in the same
+    window, so the zeros discriminate.
+
+    (2) `isDispatchEligible` (`src/lib/drain.ts`) GATES ON FIVE THINGS AND REPO IS NOT ONE OF THEM:
+    `isMerged(t.id)` → `already-merged`; `opts.excludeIds?.has(t.id)` → `continued-this-pass`;
+    `t.verify !== "auto"` → `verify-not-auto`; `t.status === "blocked"` → `blocked`; and
+    `unmetDependencies(...)` → `unmet-deps`. Each returns false through `opts.onFiltered?.(t,
+    reason)`.
+
+    (3) YET `repo` IS REQUIRED AND VALIDATED ON EVERY TASK. `src/lib/plan.ts` declares
+    `repo: string` and enforces it with `req(e.repo, "repo", id)`. Across 617 tasks: `remudero`
+    615, `remudero-site` 1, `none` 1. THE PLAN IS ALREADY THE FLEET'S PLAN, NOT THIS REPO'S.
+
+    (4) SO THE FAILURE IS A PLAUSIBLE-LOOKING PULL REQUEST, NOT AN ERROR. A `remudero-site` task
+    handed to a worker whose worktree is a `remudero` checkout edits the wrong tree and opens a
+    pull request against the wrong repository, and nothing on the path flags it. The only reason it
+    has not happened is that `W12-T1` carries `verify: human`, which parks it before the linter is
+    ever consulted. 57 of 617 tasks are `verify: human` — A PROPERTY OF THOSE TASKS, NOT A FENCE.
+
+    (5) THE TARGET IS ALREADY KNOWN AND ALREADY RECORDED. The live daemon runs
+    `./bin/rmd daemon --repo remudero --allow-self-target`. `resolveDaemonTarget` (`src/run-task.ts`)
+    returns `DaemonTarget { owner, repo, planPath, isSelf, dryRun }` — its own doc calls it PURE and
+    unit-testable precisely so a guard can be tested — and `daemonCommand` ledgers
+    `daemon.target` with `repo: target.repo` beside `gateway: owner/repo`. That row appears 155
+    times in the ledger.
+
+    (6) THE TWO SPELLINGS ARE THE ROW'S TWO FIELDS, NOT A DATA DEFECT, AND THE CANONICAL FORM IS
+    MEASURED. The ledger's 1,073 bare `remudero` values come from `repo:` and the 5
+    `craigoley/remudero` values from `gateway:` — the same row carries both. THE PLAN IS 100% BARE:
+    zero slug-form `repo:` entries across `plan/tasks.yaml` and every shard, against a control of
+    349 files carrying the bare form. So the BARE REPO NAME IS CANONICAL, and normalisation means
+    reducing a slug to its last path segment before comparing — never the reverse, because a task
+    never carries an owner to compare against.
+
+    (7) DAEMON.TS DOES NOT CURRENTLY KNOW THE TARGET, WHICH IS WHY THREE MODULES ARE IN SCOPE.
+    `resolveDaemonTarget` scores 5 in `src/run-task.ts` and ZERO in both `src/lib/daemon.ts` and
+    `src/lib/drain.ts`; `daemon.ts` carries no reference to `DaemonTarget`, `target.repo` or a
+    `targetRepo` of any spelling. The value is resolved in `run-task.ts` and must cross into the
+    opts `daemon.ts` already builds for the drain.
+  design: |
+    THE SHAPE: one predicate inside the gate that already exists, one value threaded to it, one new
+    refusal reason. Additive and removable.
+
+    (i) NOT MULTI-REPO SUPPORT — SEE RATIONALE'S FIRST CLAUSE. A builder who starts routing work to
+    a second checkout, partitioning the ledger, or scoping credentials has left this task. Those
+    three are each named irreversible-ish by the recon and each is its own ruling.
+
+    (ii) ONE PREDICATE IN `isDispatchEligible`, ORDERED WITH THE OTHERS. A task whose normalised
+    `repo` does not equal the daemon's normalised target is not eligible, refused through the SAME
+    `opts.onFiltered?.(t, reason)` channel every other decline already uses.
+
+    (iii) NORMALISE BEFORE COMPARING, BARE FORM CANONICAL. Rationale (6). A guard that compared raw
+    strings would strand every task the moment an operator passed `--repo owner/name`, which
+    `resolveDaemonTarget`'s own doc documents as an accepted input. The normaliser is a pure
+    function and belongs beside the predicate so the falsifier can reach it directly.
+
+    (iv) ABSENT TARGET MUST MEAN NO GUARD, NOT REFUSE-ALL. The opts field is OPTIONAL: when the
+    caller supplies no target the predicate must not fire at all, so every existing caller —
+    `runnableCandidates`, the panel, every test that builds opts by hand — keeps byte-identical
+    behaviour. A guard that defaults to refusing is the shape that stops the fleet.
+
+    (v) THE LOSER STAYS ELIGIBLE FOR A DIFFERENTLY-TARGETED DAEMON. Not marked done, no strike, no
+    escalation, no status change — a refusal here is exactly as inert as `verify-not-auto` is
+    today.
+
+    (vi) THE READER IS THE ROW THAT ALREADY EXISTS, AND THE PANEL IS DELIBERATELY NOT TOUCHED.
+    `daemon.ts` feeds `idleReasons.onFiltered` and ledgers `daemon.idle_reasons` with
+    `idleReasons.snapshot()`; `src/lib/idle-reasons-panel.ts` reads that row. THE PRECEDENT FOR
+    ADDING A REASON WITHOUT TOUCHING THE PANEL IS ALREADY IN THE TREE: `DispatchFilterReason`
+    carries FIVE members while `IDLE_REASON_ORDER` lists only FOUR — `continued-this-pass` is in
+    the union and not in the panel's order, and nothing breaks. THAT ASYMMETRY IS LOAD-BEARING AND
+    MUST BE PRESERVED: the panel iterates `IDLE_REASON_ORDER` and returns `kind: "unknown"` the
+    moment any listed key is missing from a row, so adding the new key to that order would make
+    EVERY HISTORICAL ROW unreadable. The new reason goes in the union and the snapshot; the panel's
+    order is left alone.
+
+    (vii) NO NEW STEP AND NO NEW SIGNAL. Nothing is minted. Ten measured mechanisms have merged
+    green with no reader — `billing_mode` the most recent at 36 write sites, 0 comparisons and
+    every value `subscription` — and a `dispatch.wrong_repo` step nobody reads would be the
+    eleventh.
+
+    (viii) `--allow-self-target` IS UNTOUCHED AND CRITERION 3 PINS IT. That flag lives in
+    `src/lib/launchd.ts` and gates the daemon targeting its OWN repo; `DaemonTarget.isSelf` is a
+    separate axis from "does this task belong to my target". The fleet runs with the flag, so a
+    guard that interacted with it would take the fleet down.
+  acceptance:
+    - claim: "a task matching the target is eligible while a task naming another repo is refused in the same run"
+      proof: "unit test: W1-T988: a matching task is eligible and a foreign repo task is refused in one run"
+    - claim: "a task carrying the owner slug spelling still matches a daemon targeting the bare name"
+      proof: "unit test: W1-T988: an owner slug spelling still matches a daemon targeting the bare name"
+    - claim: "the self target consent flag behaves exactly as it does today"
+      proof: "unit test: W1-T988: the self target consent flag is unaffected by the repo guard"
+    - claim: "a refused task keeps its status and spends no strike so another daemon can still take it"
+      proof: "unit test: W1-T988: a repo refusal marks nothing done and spends no strike"
+    - claim: "the refusal is counted in the row that already carries every other decline"
+      proof: "unit test: W1-T988: the repo refusal is counted in the daemon idle reasons row"
+    - claim: "this guard is not multi-repo support and must not be read as routing"
+      proof: "grep: this guard is not multi-repo support and must not be read as routing in plan/tasks.d/W1-T988-dispatch-never-reads-a-tasks-repo.yaml"
+  risk: high
+  origin: "oper#dispatch-never-reads-a-tasks-repo-2026-08-18"
+  plan_refs: ["W1-T471", "W12-T1"]
+  files: [src/lib/drain.ts, src/lib/daemon.ts, src/run-task.ts, test/dispatch-repo-guard.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    TWO BRIEFING FIGURES ARE CORRECTED HERE RATHER THAN CARRIED. `isDispatchEligible` has FIVE
+    refusal reasons, not four — `continued-this-pass` sits between `already-merged` and
+    `verify-not-auto` and is missing from every summary of this gate, INCLUDING the panel's own
+    order, which is exactly the precedent design (vi) relies on. And the shard count is 349 files
+    under plan/ carrying the bare repo form, not the ~346 quoted; the id space has also moved,
+    since `W1-T985`, `W1-T986` and `W1-T987` were all taken between the briefing and this filing.
+
+    src/run-task.ts MUST BE DECLARED AND THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING.
+    Rationale (7) is the reason and it was measured, not assumed: `resolveDaemonTarget` scores 5 in
+    run-task.ts and 0 in both drain.ts and daemon.ts, and daemon.ts holds no reference to the
+    target under any spelling, so the value cannot reach the gate without crossing that file. It is
+    the most-declared path in the plan, so this shard serialises against a large share of the queue
+    under `overlappingPaths`. That is the price of where the target is resolved, recorded rather
+    than dodged by under-declaring.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT cc008b7a. `isDispatchEligible`: drain.ts 9,
+    daemon.ts 5, run-task.ts 1 — all three participate in the gate. `DispatchFilterReason`:
+    drain.ts 7, daemon.ts 2 — the union and its consumer. `NextRunnableOpts`: drain.ts 11,
+    daemon.ts 3, run-task.ts 2 — the carrier for the new optional field. `resolveDaemonTarget`:
+    run-task.ts 5, elsewhere 0. `IDLE_REASON_ORDER`: idle-reasons-panel.ts 3, and ZERO in all three
+    declared modules — WHICH IS WHY `src/lib/idle-reasons-panel.ts` IS NOT DECLARED, per design
+    (vi). CONTROL: an absent symbol reads 0 in every one of these files.
+
+    test/dispatch-repo-guard.test.ts IS NEW AND DECLARED AS NEW. `test/drain.test.ts` exists and
+    covers the gate, but this repo's own rule sends a coverage-load-bearing test to its own file,
+    and the falsifier here drives a new opts field rather than the existing shape.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (`src/lib/task-linter.ts`) exempts only risk high, and `subsystemsOf` derives subsystems from
+    the acceptance-criteria text as well as from `files:`; this shard spans three source modules
+    and a suite, and its criteria name eligibility, spelling normalisation, a consent flag and a
+    ledger row.
+
+    PROOF NOTES. Five criteria use the name-filtered `unit test:` form. Every title was measured
+    against test/ with `grep -rlF` and matched ZERO files, against a control title lifted from the
+    real drain suite that matched one. Each is plain prose under 100 characters with no comma, no
+    semicolon-space and no regex metacharacter. The sixth is a single-line `grep:` with an explicit
+    path, verified with the executor's own invocation against this changeset's own head as well as
+    the merge base, and kept on ONE PHYSICAL LINE — wrapped prose reads hits 0 and `executed_fail`,
+    which fails the review outright rather than merely capping it.
+
+    ONE ADVISORY IS ACCEPTED KNOWINGLY. `rmd lint-plan` emits a single finding against this shard, a
+    `proof-scope` WARNING that criterion 6's grep names this shard's own path while `files:` does not
+    list it. It is advisory and never blocking — the run carried 179 blocking tasks and NOT ONE names
+    W1-T988. Both remedies are worse: declaring the shard's own path would put the filing inside its
+    own implementation scope, and repointing the grep at src/lib/drain.ts would name a file this
+    changeset does not touch, which reads hits 0 and `executed_fail` and fails the review outright.
+
+    ID PROVENANCE — FOUR SURFACES, EACH CONTROLLED, SWEPT FOR THE EXACT ID RATHER THAN A PREFIX.
+    Prefixes in use are wider than W1: W1-T 603, W3-T 10, W2-T 3, W12-T 1. W1-T988 read 0 on all
+    four: refs/rmd-id/* (control refs/rmd-id/W1-T985 = 1, negative W1-T999999 = 0), shard filenames
+    on origin/main (control W1-T986 = 1), ids declared anywhere under plan/ (control W1-T986 = 2),
+    and every open pull request's file list and title. THE OPEN-PR SET WAS EMPTY, AND THAT ZERO WAS
+    CONTROLLED RATHER THAN ASSUMED: the same endpoint with `state=closed` returned 5 rows, so the
+    empty set is real and not a failed query. SURFACE 1 EARNED ITS PLACE TWICE: W1-T987, the next
+    free number by every other surface, was already reserved.
+
+    THE RESERVATION USED THE PLAIN REFSPEC AND THE GATE WAS PROVEN ON THE SAME INVOCATION. An
+    orphan commit over the empty tree (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-17911-1787066318856322000, exit status captured into a variable, ref re-read
+    and matched. Free id: PUSH_EXIT_CODE=0, `* [new reference]  d984acb6… -> refs/rmd-id/W1-T988`.
+    The IDENTICAL plain refspec against the TAKEN refs/rmd-id/W1-T987: TAKEN_EXIT_CODE=1,
+    `! [rejected] … (fetch first)`, and that ref still points at its original owner ab37e42c —
+    so the rejection is the gate and no reservation was clobbered.
