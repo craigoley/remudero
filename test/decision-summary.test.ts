@@ -19,7 +19,7 @@
 //      render never invokes the summarizer.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
@@ -371,12 +371,14 @@ test("W1-T313 criterion 2: renderIssueBody puts the decision summary ABOVE the r
   const detailIdx = withSummary.indexOf(e.detail);
   assert.ok(headlineIdx >= 0 && headlineIdx < detailIdx, "the summary sits above the raw detail");
 
-  // Without a decisionSummary, the body is EXACTLY what it was before this task (no drift).
+  // Without a decisionSummary, the body is EXACTLY what it was before this task (no drift),
+  // aside from the `**Host:**` line W1-T972 now writes unconditionally on every issue.
   assert.equal(
     withoutSummary,
     [
       `**Class:** ${e.class}`,
       `**Task:** ${e.taskId}`,
+      `**Host:** ${hostname()}`,
       "",
       e.detail,
       "",

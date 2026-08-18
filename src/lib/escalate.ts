@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -651,12 +652,22 @@ export function prReferentFromIssueText(text: string | undefined): number | unde
  * repeated inside the summary block: the "## Options" section below already renders `e.options`
  * verbatim, and {@link summarizeEscalation} guarantees any decisionSummary's own `options`
  * equal that same list — duplicating them here would just be the same text twice.
+ *
+ * W1-T972: `**Host:**` names the machine whose process rendered THIS body — unconditional,
+ * never optional like Run/Head/Cause below, because the defect it fixes is a reader on one
+ * host unable to tell an issue about theirs from an issue about the other cell's (rationale
+ * (2)/(3)): nine correct crash-loop escalations were followed to a healthy unit because
+ * nothing on the issue said which machine it described. `os.hostname()` is called directly
+ * (the same identity primitive the lock-holder records in drain-lock.ts/inflight-lock.ts/
+ * review.ts already key `host` on) rather than threaded through `Escalation`, since the
+ * value describes the RENDERING process, not a fact the caller composes.
  */
 export function renderIssueBody(e: Escalation): string {
   const decisionSummary = validateDecisionSummary(e.decisionSummary ?? null);
   const lines = [
     `**Class:** ${e.class}`,
     `**Task:** ${e.taskId}`,
+    `**Host:** ${hostname()}`,
     e.runId ? `**Run:** ${e.runId}` : undefined,
     // W1-T195: round-trip the composite dedup key's optional dimensions the SAME
     // way `**Task:**` already round-trips — {@link escalate}'s dup search reads
