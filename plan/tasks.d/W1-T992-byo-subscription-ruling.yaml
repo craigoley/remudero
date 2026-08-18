@@ -1,0 +1,171 @@
+- id: W1-T992
+  title: "RULING — REMUDERO IS BRING-YOUR-OWN-SUBSCRIPTION: the operator hosts compute, the customer brings the intelligence, each customer on their own VM on the operator's Azure, pasting their own Claude Code OAuth token and their own GitHub PAT into that VM so the operator never holds either credential in transit, billed on compute rather than inference — record it in DECISIONS.md and mark §6A's hosted-Pro framing superseded without deleting it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THIS IS A RULING RECORD. The operator has decided; this task writes the decision down. It does
+    not re-open it, does not add options, and takes no architectural decision of its own.
+
+    (1) THE RULING, AS GIVEN.
+      - REMUDERO IS BRING-YOUR-OWN-SUBSCRIPTION. THE OPERATOR HOSTS COMPUTE; THE CUSTOMER BRINGS THE
+        INTELLIGENCE.
+      - EACH CUSTOMER GETS THEIR OWN VM on the operator's Azure. The per-customer VM IS the isolation
+        boundary — NOT tenancy inside one process.
+      - THE CUSTOMER SUPPLIES THEIR OWN CLAUDE CODE SUBSCRIPTION CREDENTIAL AND THEIR OWN GITHUB PAT,
+        PASTED DIRECTLY INTO THEIR OWN VM. THE OPERATOR NEVER HOLDS EITHER CREDENTIAL IN TRANSIT. The
+        mechanism exists and is sanctioned: `claude setup-token` prints a ONE-YEAR OAuth token, is not
+        saved anywhere by the command, is set as `CLAUDE_CODE_OAUTH_TOKEN` wherever the user wants to
+        authenticate, requires a Pro/Max/Team/Enterprise plan, and is SCOPED TO INFERENCE ONLY.
+      - BILLING IS ON COMPUTE, NOT ON INFERENCE. The operator's marginal cost is the VM.
+      - CLAUDE CODE FIRST. Codex and other harnesses later. Pay-as-you-go via API and OpenRouter is a
+        LATER PHASE, NOT NOW.
+      - THE MODEL ROUTER IS THE MULTIPLIER, NOT AN AFTERTHOUGHT: the daemon choosing model, effort and
+        turn budget per task is what makes a single subscription carry a fleet, and it is the seam
+        through which a customer later augments with cheap open models.
+
+    (2) WHAT IT SUPERSEDES. MASTER-PLAN §6's open-core stance lists, verbatim: "Pro candidates
+    (post-traction, not before WS-6): hosted relay/sync for mobile push without self-managed tailnet,
+    multi-project portfolio views, team/multi-operator seats, hosted question inbox, hosted org-brain
+    sync". THAT LIST DESCRIBES A DIFFERENT SHAPE THAN PER-CUSTOMER VMs — it is hosted multi-operator
+    convenience layered on one operator's infrastructure; this ruling is one isolated VM per customer
+    carrying the customer's own credential. THE LIST IS SUPERSEDED AS THE COMMERCIAL SHAPE AND IS NOT
+    DELETED. Standing rule 21 governs amendment, and a record that erases what it replaces destroys
+    the reader's ability to see the change; §6A is CITED and MARKED, never removed.
+
+    (3) IT SETTLES A QUESTION A RECON COULD NOT. A 2026-08-18 recon established that the three-stage
+    arc is already recorded in four places, and flagged exactly one thing the documents could not
+    resolve: "whether the operator considers §6A's Pro list the same thing as 'others use and pay'."
+    THIS RULING IS THAT ANSWER, AND THE ANSWER IS NO.
+
+    (4) IT REFRAMES `billing_mode` FROM UNREAD FIELD TO NAMED AXIS. Derived in `src/lib/env.ts` as
+    engaged ? "api" : "subscription", written on 1,288 rows across 8 steps, with 0 sites comparing or
+    switching on it and every value reading `subscription`. RE-VERIFIED at this filing: 0 comparison
+    or switch sites against a control of 36 `billing_mode` occurrences in src/. MASTER-PLAN §9 already
+    assigns it two planned consumers — metering when `billing_mode == api`, and the conditional cap
+    guard where "no dollar cap is VALID ONLY while `billing_mode == subscription`". UNDER THIS RULING
+    IT IS THE BYO-SUBSCRIPTION-VERSUS-PAY-AS-YOU-GO AXIS, ALREADY NAMED AND ALREADY EMITTED. IT IS
+    PLANNED, NOT ORPHANED, AND MUST NOT BE RETIRED AS A BUILT-AND-UNREAD FIELD — which is exactly how
+    it reads to anyone who has not seen this ruling.
+
+    (5) IT DOES NOT DISTURB THE WS-2 GATE. DECISIONS.md already rules that second-repo expansion waits
+    until "the console is feature-rich and looks good" — operator-judged, not a metric. THIS RULING
+    CHANGES THE DESTINATION, NOT THAT GATE. The gate stands exactly as written.
+
+    (6) TWO QUESTIONS THE RULING LEAVES OPEN. BOTH ARE RECORDED AS OPEN AND NEITHER IS ANSWERED HERE.
+      (a) WHETHER ANTHROPIC PERMITS A THIRD PARTY OPERATING INFRASTRUCTURE THAT CUSTOMERS AUTHENTICATE
+      SUBSCRIPTIONS INTO. Running Claude Code on one's own remote server is permitted — it is
+      Anthropic's own product, built for scripted use. THE THIRD-PARTY-HOST SHAPE IS A DIFFERENT
+      QUESTION AND NEEDS AN ANSWER FROM ANTHROPIC, NOT FROM A SESSION. This is an operator action and
+      it is unresolved.
+      (b) WHETHER SUBSCRIPTION RATE LIMITS CARRY A FLEET-SHAPED WORKLOAD FOR A CUSTOMER. THE EVIDENCE
+      AND ITS SCOPE: the operator has measured his own case and reports not hitting caps on Max 20x
+      while running a fleet that notionally spent $184 in a day. That is ONE OPERATOR, ONE FLEET, ONE
+      20x PLAN. A CUSTOMER ON A LOWER TIER IS UNMEASURED, and the router is the mitigation the
+      operator names.
+
+    (7) WHAT STAGE 2 ALREADY HAS — CARRIED, NOT RE-MEASURED, so nobody re-derives it. `repo` is
+    required and validated on every Task and the plan already holds `W12-T1` with `repo:
+    remudero-site` (re-verified at this filing); `--allow-self-target` means non-self-targeting is the
+    assumed shape; `.remudero/mounts.yaml` is repo-root so a second repo brings its own model table
+    free; `config.root` already parameterizes every global thing, which is why a second daemon is
+    nearly free (192 references in src/, re-verified); and `spawnWorker` builds EXACTLY ONE
+    `const options: Options` literal (re-verified: 1 in src/lib/worker.ts) through which 20 CALLER
+    MODULES funnel (re-verified) — the single choke point for model, credential and billing selection,
+    and therefore the router's home.
+
+    (8) ONE CONSEQUENCE THIS RULING MAKES NEWLY URGENT, NAMED AND NOT SCOPED IN. The fleet authors
+    every PR as the operator's own account (11 of the last 12 commits on origin/main read `Craig
+    Oley`). Under bring-your-own-subscription A CUSTOMER'S FLEET WOULD AUTHOR AS THE CUSTOMER, and
+    their gate configuration would be editable by their own fleet exactly as the operator's is today.
+    That is a consequence of this ruling, not a task inside it.
+  design: |
+    (i) THE ENTRY GOES IN DECISIONS.md AND MATCHES THAT FILE'S OWN PROVENANCE CONVENTION. Measured at
+    this filing: five `(OPERATOR-RULED)` headings exist, and the three RULING-shaped ones take the form
+    `## <date> — RULING: <one line> (OPERATOR-RULED)` followed by a blank line and an ITALIC
+    ATTRIBUTION LINE — "Operator-ruled direction record, recorded at the operator's instruction."
+    THE ENTRY MUST CARRY BOTH THE HEADING MARKER AND THE ATTRIBUTION LINE. It must NOT carry the
+    machine auto-choose provenance marker that appears 48 times elsewhere in that file; this decision
+    is the operator's and must not be stamped as a session's.
+
+    (ii) §6A IS MARKED, NOT EDITED AWAY. MASTER-PLAN.md gains a pointer at the open-core stance saying
+    the Pro-candidates list is superseded as the commercial shape by this ruling, naming the DECISIONS
+    entry. The list text stays. A reader arriving at §6A must not be able to read it as current
+    without meeting the pointer.
+
+    (iii) THE CONSISTENCY GATE IS WHY test/licence-boundary.test.ts IS DECLARED. That suite exists to
+    stop the commercial-boundary declarations drifting apart silently — it already reads both
+    MASTER-PLAN and DECISIONS, and its own header records that the only thing which caught the last
+    licence divergence was a human reading the diff. The pointer in (ii) and the entry in (i) are two
+    declarations of one fact; this is the file whose job is to keep them agreeing.
+
+    (iv) SCOPE — INTENT, NOT ARCHITECTURE. THIS TASK DESIGNS NOTHING. Not the router, not VM
+    provisioning, not the credential paste flow, not pricing. Each is its own later task. A builder
+    who adds a design section has exceeded the ruling.
+
+    (v) NOTHING IS WIRED. `billing_mode` is described, not switched on. No new ledger step, no new
+    field, no new config key.
+  acceptance:
+    - claim: "the ruling entry carries the operator-ruled heading marker and the italic attribution line"
+      proof: "unit test: W1-T992: the ruling entry carries the operator-ruled marker and an attribution line"
+    - claim: "the superseded pro-candidates list is still present and is marked rather than removed"
+      proof: "unit test: W1-T992: the superseded pro list is cited in place and not deleted"
+    - claim: "a reader arriving at the master plan section meets a pointer to the ruling"
+      proof: "unit test: W1-T992: the master plan section points to the ruling that supersedes it"
+    - claim: "both unresolved questions are recorded as open rather than given an answer"
+      proof: "unit test: W1-T992: the two open questions are recorded as open and not answered"
+  risk: high
+  origin: "oper#byo-subscription-ruling-2026-08-18"
+  plan_refs: ["W1-T431", "W1-T439", "W12-T1"]
+  files: [DECISIONS.md, MASTER-PLAN.md, test/licence-boundary.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIS TASK PARKS, DELIBERATELY, AND THE GATE IS NAMED. `DECISIONS_LOG_PATH` is "DECISIONS.md" in
+    src/lib/task-linter.ts, and the `[ruling-verify]` check fires at severity BLOCK whenever a task
+    declares that path at anything other than verify:human: "a ruling-shaped task must be verify:
+    human — the operator judges rulings; isDispatchEligible parks it until then." `verify: human` is
+    therefore set UP FRONT, and DECISIONS.md is KEPT in files: — dropping it to satisfy the linter
+    would delete the durable home this record exists to create. RE-TAKEN AT THIS FILING: 58 of 619
+    tasks are already verify:human (9%), so this joins a queue only the operator can drain. IT WILL
+    NOT BE PICKED UP BY THE DRAIN.
+
+    FILES ARE TIGHT AND OWN PATH IS ABSENT. DECISIONS.md is the durable home. MASTER-PLAN.md carries
+    the supersession pointer, because the ruling's whole risk is a reader treating §6A as current.
+    test/licence-boundary.test.ts is the existing consistency gate over exactly these two files. No
+    src/ path is declared because nothing is wired — design (v).
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN. `sizingViolation` (src/lib/task-linter.ts)
+    exempts risk === "high" outright, and `subsystemsOf` derives ids from `moduleIdFromPath` over
+    files: AND from a lexicon scan of the ACCEPTANCE-CRITERIA TEXT; three declared paths already yield
+    three module ids before the criteria are read. Blast radius argues DOWN: this task changes no
+    behaviour at all.
+
+    PROOF NOTES. All four proofs are the NAME-FILTERED `unit test:` form and every title is PREFIXED
+    WITH THIS TASK'S OWN ID, which makes each self-attributing — a 2026-08-18 audit of all 57
+    verify:human tasks found that an id-prefixed title is the only artifact that survives the
+    "who created this" test without commit archaeology, because a bare suite path is satisfied by
+    whichever task happened to create the file first. Each title is plain prose under 100 characters
+    with no comma, no "; " and no regex metacharacter. All four were verified to match ZERO files
+    today by `grep -rlF` over test/ against a same-invocation control matching 1.
+
+    ID PROVENANCE — FOUR SURFACES, WITH A COVERAGE CONTROL ON THE GITHUB ONE. W1-T992 read 0 on all
+    four at 36c64c49e: refs/rmd-id/* (86 refs), shard filenames on origin/main (349), ids declared
+    anywhere under plan/ (7,116 mentions), and every OPEN PR's file list AND title. THE GITHUB SURFACE
+    CARRIES A COVERAGE CONTROL, NOT ONLY AN EXECUTION ONE: open_issues_count reads 5 and decomposes
+    exactly into 2 enumerated open PRs plus 3 open non-PR issues, and a single 100-row page holds all
+    of them, so no paged window floor is in play. Positive controls on the same corpus: W1-T990 = 5,
+    W1-T989 = 3, W1-T986 = 7, W1-T977 = 14, and cross-prefix W12-T1 = 10.
+    W1-T991 WAS TAKEN BETWEEN THE FIRST LOCAL SCAN AND THE MINT — it read 0 on the three local
+    surfaces earlier in this session and 3 on the re-sweep minutes later, which is why the sweep is
+    re-taken immediately before pushing rather than carried.
+    THE RESERVATION USED THE PLAIN REFSPEC AND THE REJECTION IS THE GATE. Orphan payload over the
+    empty tree (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-46569-1787071486917060000, no `+` and no `--force-with-lease`, exit status into a
+    variable: PUSH RC=0, `* [new reference] 844e0a111eba61619e6a05a520bcd25e46a21663 ->
+    refs/rmd-id/W1-T992`, readback equal and nonce matched. THE GATE WAS PROVEN ARMED ON THE SAME
+    INVOCATION: a plain push of a fresh orphan at the already-taken refs/rmd-id/W1-T991 returned RC=1
+    with `! [rejected]` and left that ref unchanged at 4199ec88ee408c6773b68dbe95b56244356f2d10.
