@@ -1,0 +1,250 @@
+- id: W1-T971
+  title: "FLEET WORKERS DO SEE, DO LOAD AND DO SPONTANEOUSLY USE BUNDLED CLAUDE CODE SKILLS ON THE IMPLEMENT LANE — six measured invocations, preserved only by an accident of the worker-home symlink, and the evidence for this finding expires from disk and cannot be re-derived after it does: record it durably and pin the four premises it rests on"
+  repo: remudero
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    THIS SHARD IS THE RECORD. It is written to be sufficient on its own, because the primary
+    evidence is on a ~30-DAY DELETION CLOCK and will be gone before most readers arrive.
+
+    (0) WHY THE URGENCY IS REAL AND NOT RHETORICAL. The evidence lives in Claude Code session
+    transcripts under `~/.claude/projects/`, which the CLI prunes on roughly a 30-day cycle. The
+    session that found it watched the mini's project-directory count fall from 2639 to 2549 WHILE
+    IT WORKED, and TWO OF THE SIX HITS DISAPPEARED MID-SESSION. RE-MEASURED THE NEXT DAY,
+    2026-08-18: 2548 directories, 2398 worker-shaped, and the two 2026-07-17 hits (W1-T78,
+    W1-T100) ARE GONE; the remaining four still carry their `Skill` tool_use, each against a
+    same-invocation `Bash` control of 2 or 3 files. AFTER ROUGHLY 2026-09-05 EVERY ONE OF THEM IS
+    GONE AND A RE-DERIVATION RETURNS ZERO. That zero will read as a contradiction of this record.
+    IT IS NOT ONE. It is the retention window closing, and this paragraph is the reason nobody
+    should reopen the question on the strength of it.
+
+    (1) THE PRESERVATION MECHANISM IS AN ACCIDENT AND IS THE FIRST THING TO RECORD.
+    `workerHomePlan` (src/lib/worker-home.ts) redirects a worker's HOME to a per-run scratch dir
+    and SYMLINKS the `.claude` slot back to the operator's real `~/.claude`. The CLI writes its
+    session transcript to `$HOME/.claude/projects/<sanitized-cwd>/`, so it writes THROUGH that
+    symlink into the operator's real home. `reapWorkerHome` then removes the per-run home — THE
+    SYMLINK, NOT THE TARGET. Nothing in the fleet intends to retain worker transcripts; they
+    survive because a grant meant for credentials also carries the transcript writer. THE W1-T505
+    NARROWING IS INERT: `workerHomePlan` prefers `<realHome>/.claude-fleet` when it exists, and
+    `~/.claude-fleet` IS ABSENT ON BOTH HOSTS, so the grant falls back to the whole `~/.claude`.
+
+    (2) THE CORPUS, MEASURED. Mini: 2487 worker-shaped project directories over 3184 transcripts
+    at the time of the sweep. Azure fleet host: 498 directories over 681 transcripts, with
+    `/home/craigoleyagent/.claude` on the host and `/home/node/.claude` inside the container being
+    the SAME bind mount (both report 498).
+
+    (3) THE SIX HITS, VERBATIM. Every one carries `"entrypoint":"sdk-ts"`, a cwd of
+    `<root>/worktrees/run-<taskId>-<epoch>`, and a `budget_usd` attachment — these are fleet spawns
+    through `spawnWorker`, NOT an operator typing inside a worktree. No `is_error` on any
+    `tool_result`.
+      W1-T78   2026-07-17  CLI 2.1.212  Skill(code-review, "high")    -> Launching skill: code-review
+      W1-T100  2026-07-17  CLI 2.1.212  Skill(code-review, "medium")  -> Launching skill: code-review
+      W1-T105  2026-07-24  CLI 2.1.219  Skill(simplify)               -> Launching skill: simplify
+      W1-T113  2026-07-24  CLI 2.1.219  Skill(simplify, "<brief>")    -> Launching skill: simplify
+      W1-T294  2026-08-03  CLI 2.1.220  Skill(simplify)               -> Launching skill: simplify
+      W1-T349  2026-08-05  CLI 2.1.222  Skill(claude-api, "…")        -> Launching skill: claude-api
+    W1-T294 RAN ON CLI 2.1.220, THE VERSION THE FLEET RUNS TODAY. This is not stale evidence about
+    an older platform. Sweep controls over the same 3184 transcripts with the same tool and flags:
+    `Bash` 2987 files, `Read` 1154 files.
+
+    (4) LISTED, LOADED AND TRIGGERED ARE THREE DIFFERENT CLAIMS AND THE EVIDENCE IS ASYMMETRIC.
+    Conflating them is how this gets marked answered and stays unusable.
+      TRIGGERED — ESTABLISHED, and it was expected to be the weakest. W1-T105's prompt (6254
+      characters) and W1-T113's (17298 characters) contain NEITHER `skill` NOR `simplify` NOR
+      `code-review`, case-insensitive. The worker reached for it unprompted. W1-T294's and
+      W1-T349's prompts DO contain "skill", but both mentions are prose about Remudero's own
+      `.remudero/skills` registry — A NAMESPACE COLLISION, NOT AN INSTRUCTION.
+      LOADED — ESTABLISHED. The message immediately after `Launching skill: simplify` in W1-T113
+      is the skill's OWN BODY, including its Efficiency section verbatim. The contents reached the
+      model, not merely the name.
+      LISTED — ESTABLISHED BY IMPLICATION ONLY, AND THAT LIMIT IS RECORDED RATHER THAN GLOSSED.
+      The transcript persists no system prompt and no init manifest: the message types present are
+      `assistant`, `user`, `attachment`, `ai-title`, `last-prompt` and `queue-operation` — there is
+      no `system`/`init` record. A search for the skills-listing text returned 0 AND THAT ZERO WAS
+      DISCARDED AS A CONTAMINATED CONTROL, its only whole-corpus match being the searching
+      session's own transcript. WHAT STANDS: an invocation returning `Launching skill: X` rather
+      than a no-such-tool error, followed by the body, cannot happen against an unlisted skill.
+
+    (5) SCOPE LIMIT ONE — ONLY LANES PASSING NO `tools:` ARRAY ARE COVERED. `spawnWorker` sets
+    `options.tools` only under `if (args.tools)`. RE-MEASURED at origin/main 3040d33: THIRTEEN
+    call sites pass an explicit array, not four — src/lib/escalate.ts, src/lib/feedback.ts twice,
+    src/lib/flight-judge.ts, src/lib/isolation.ts, src/lib/onboard/recon.ts, src/lib/risk-judge.ts,
+    src/lib/specialist-panel.ts and src/run-task.ts five times. AND THE ARRAYS DEMONSTRABLY BIND:
+    the triage lane has 77 transcripts and a `Bash` tool_use count of ZERO because
+    `TRIAGE_WORKER_TOOLS` omits Bash, against the implement lane's 1134 of 1229. So those lanes are
+    almost certainly skill-less — BUT THAT IS INFERENCE, NOT MEASUREMENT. Nothing in them ever
+    attempted a `Skill` call, so there is no error row to point at, and this record does not claim
+    one.
+
+    (6) SCOPE LIMIT TWO — ONLY BUNDLED SKILLS ARE PROVEN. `code-review`, `simplify` and
+    `claude-api` all ship with Claude Code itself. `spawnWorker` passes `settingSources: []`, this
+    repo tracks ZERO files under `.claude/` (control: 1495 tracked files in total at 3040d33), and
+    the Azure host's `~/.claude/skills` holds ZERO entries. A SKILL SHIPPED AS A REPO FILE UNDER
+    `.claude/skills/` IS NOT COVERED BY ANY OF THIS AND IS THE LIKELIEST THING TO SILENTLY NOT
+    WORK. It is also the path a retrieval seam is most likely to want.
+
+    (7) THE SMALLEST FIX IF A LANE NEEDS SKILLS, AND THE ONE THING SOURCE CANNOT SETTLE.
+    `spawnWorker` builds exactly ONE `const options: Options` literal — one hit across all of src/
+    — and makes the fleet's only worker `query()` call; src/lib/spawn-guard.ts documents it as THE
+    primitive every lane funnels through. Fleet-wide is ONE LINE, `skills: "all"`; per-lane is two.
+    WHAT SOURCE CANNOT SETTLE: whether `skills` overrides a restricted `tools:` array. The SDK
+    doc's promise concerns `allowedTools`, WHICH REMUDERO NEVER SETS (0 hits across src/, against a
+    control of `settingSources` reading 1 file); it sets `Options.tools`, described in the shipped
+    declarations as "the base set of available built-in tools" — a different option. AND THE
+    SHIPPED BUNDLE CARRIES NO `--skills` AND NO `--setting-sources` LITERAL, against controls
+    `--tools`, `--allowedTools`, `--disallowedTools` and `--managed-settings` all present, so the
+    option travels by a channel that cannot be traced from the bundle. THE REMAINING PROBE IS
+    THEREFORE ONE DISPATCH, and its shape is recorded in the design so nobody has to re-derive it.
+
+    (8) TWO INSTRUMENT TRAPS RETURNED CONFIDENT FALSE ZEROS AND ARE RECORDED BECAUSE THE CONTROLS
+    ARE THE ONLY REASON THE SIX HITS WERE FOUND AT ALL. First: the harness `grep` is a ugrep
+    wrapper with `-I` injected and read ZERO for `"name":"Bash"` across 3184 transcripts that
+    `/usr/bin/grep` scored 2987 — NUL-byte blindness over an UNTRACKED corpus that the W1-T438
+    gate does not cover, so that gate's tracked-population guarantee does not help here. Second:
+    `xargs -a` IS UNSUPPORTED ON macOS; with `2>/dev/null` it consumed the entire file list and
+    returned a clean zero for every pattern INCLUDING BOTH CONTROLS. Either trap alone would have
+    reported "no worker has ever used a skill" with total confidence.
+  design: |
+    THE SHAPE: write the finding where it survives the transcripts, then pin the premises it rests
+    on so it cannot silently go stale. No new mechanism, no new ledger step, no console route, and
+    nothing added to any worker tool array.
+
+    (i) THE PROSE HOME IS DECISIONS.md. The finding is a durable statement about how this fleet
+    behaves, which is what that file is for. It must carry the six hits, the three-way
+    listed/loaded/triggered split with its asymmetry, both scope limits, and the deletion date —
+    not a pointer to this shard, because a reader who reaches DECISIONS.md should not have to
+    reach anything else.
+
+    (ii) THE PIN IS FOUR PREMISES, NOT A RE-PROOF. This task does NOT re-measure the transcripts;
+    it asserts the four source facts the record depends on, so that a change to any of them
+    reddens a test instead of quietly invalidating a written finding. The premises: the worker-home
+    `.claude` grant still points at a real directory rather than being dropped; reaping a per-run
+    home removes the home and not the grant target; the single spawn site still passes
+    `settingSources: []` and still passes no `skills` option; and every lane that passes an
+    explicit `tools:` array still omits `Skill`. Criterion 5 pins the second scope limit by
+    asserting the repo still tracks no skill file under a `.claude` directory.
+
+    (iii) THE PIN GOES IN ITS OWN SUITE FILE. Appending to test/worker-home.test.ts would mix a
+    documentation pin into a behavioural suite, and this repo's own rule is that a
+    coverage-load-bearing test gets its own file. A NEW test file is therefore declared.
+
+    (iv) THE PIN MUST NOT BECOME AN ENFORCEMENT. Asserting that no lane grants `Skill` is a
+    STATEMENT OF THE RECORD'S SCOPE, not a policy that skills must never be granted. A builder who
+    later wants a lane to have skills should change the assertion and the record together; the
+    test exists to make that change deliberate and visible, never to forbid it. Say so in the test
+    itself, or the next reader will treat a documentation pin as a prohibition.
+
+    (v) THE REMAINING PROBE IS RECORDED, NOT RUN. One `spawnWorker` call with today's
+    `settingsFile` and `settingSources: []`, `tools: TRIAGE_WORKER_TOOLS`, `skills: "all"`, a repo
+    skill placed at `.claude/skills/probe/SKILL.md`, and a prompt saying only "list every skill you
+    can see, then invoke probe." That single dispatch settles both open halves at once — whether
+    the option overrides a restricted array, and whether a repo-resident skill is discoverable
+    under `settingSources: []`. THIS TASK DOES NOT RUN IT; running a real worker against a live
+    repo is the operator's call.
+
+    (vi) WHAT THIS RECORD DOES NOT SETTLE, STATED SO IT CANNOT BE OVERREAD. It settles the bet for
+    the IMPLEMENT LANE AND FOR BUNDLED SKILLS ONLY. It does not settle the thirteen lanes that pass
+    an explicit tools array, and it does not settle repo-resident skills. Any downstream reader
+    who treats "workers can use skills" as unqualified has misread it.
+  acceptance:
+    - claim: "the worker home grant still points at a real directory so a transcript written through it outlives the reap"
+      proof: "unit test: W1-T971: the worker home grants the real claude directory so a transcript outlives the reap"
+    - claim: "reaping a per run worker home removes the home and never the directory the grant points at"
+      proof: "unit test: W1-T971: reaping a per run worker home never removes the grant target"
+    - claim: "the fleet's one spawn site still passes empty setting sources and still passes no skills option"
+      proof: "unit test: W1-T971: the one spawn site still passes empty setting sources and no skills option"
+    - claim: "every lane that passes an explicit tools array still omits the Skill tool so the scope limit stays true"
+      proof: "unit test: W1-T971: every lane passing an explicit tools array omits the Skill tool"
+    - claim: "the repository still tracks no skill file under a claude directory so the bundled-only limit stays true"
+      proof: "unit test: W1-T971: this repo tracks no skill file under a claude directory"
+    - claim: "the evidence for this finding expires from disk and cannot be re-derived after it does"
+      proof: "grep: the evidence for this finding expires from disk and cannot be re-derived after it does in plan/tasks.d/W1-T971-workers-do-load-bundled-skills.yaml"
+  risk: high
+  origin: "oper#record-worker-skill-surface-2026-08-18"
+  plan_refs: ["W1-T933", "W1-T935", "W1-T505", "W1-T438"]
+  files: [DECISIONS.md, test/worker-skill-surface-premises.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIS SETTLES THE BET FOR THE IMPLEMENT LANE AND NOT FOR THE OTHERS, AND BOTH CITED SHARDS ARE
+    CITED RATHER THAN RE-FILED. W1-T935
+    (plan/tasks.d/W1-T935-w1-t933-is-framed-as-shrinkage-when-the-measured-problem-is-access.yaml)
+    states in writing that "UNTIL THAT DISPATCH IS RUN, BOTH THE MERGED SHARD AND THE
+    GROUNDING-SOURCE STEP ARE BETS ON A SHELF NOBODY HAS CONFIRMED A WORKER CAN OPEN", and W1-T933
+    (plan/tasks.d/W1-T933-facts-can-only-be-injected-never-looked-up.yaml) is the merged shard it
+    corrects. NEITHER IS RE-FILED AND NEITHER IS EDITED. What this record supplies them is the
+    implement-lane half: a worker CAN open the shelf. It supplies nothing about the thirteen
+    tools-array lanes and nothing about a repo-resident skill, and W1-T933's own seam concerns
+    `.remudero/skills/` — REMUDERO'S OWN YAML REGISTRY, A DIFFERENT NAMESPACE FROM A CLAUDE CODE
+    SKILL — which is precisely the collision that produced two of the six prompts' misleading
+    "skill" mentions.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only `risk === "high"`, and `subsystemsOf` derives subsystems
+    from the ACCEPTANCE-CRITERIA TEXT as well as from `files:`. This shard's files span the
+    decisions record and a new suite, and its criteria name worker-home grants, spawn options,
+    tool arrays and tracked-file scope, so no list satisfying its own scope reaches clean at
+    medium. The band is set where the rule requires rather than trimmed to look small.
+
+    FILES ARE TIGHT AND OWN PATH IS ABSENT. DECISIONS.md is the durable prose home per design (i).
+    test/worker-skill-surface-premises.test.ts is NEW and is declared as new; the existing
+    worker-home suites are deliberately NOT declared, because appending a documentation pin to
+    test/worker-home.test.ts would mix concerns and this repo's own rule sends a
+    coverage-load-bearing test to its own file. src/lib/worker.ts and src/lib/worker-home.ts are
+    NOT declared: the pin READS them and must not modify them — a builder who edits either has
+    changed the premise instead of recording it, and must amend this shard first.
+
+    NOTHING IS ADDED TO ANY WORKER TOOL ARRAY AND NO `skills` OPTION IS INTRODUCED. Design clause
+    (iv) is load-bearing: the assertion that no lane grants `Skill` records the record's SCOPE and
+    is not a prohibition. This repo carries eight measured mechanisms that merged green and nothing
+    calls, and a pin misread as policy would be a ninth kind of dead weight.
+
+    PROOF NOTES. Five criteria use the name-filtered `unit test:` form rather than a whole-file
+    path, so each names the behaviour it proves. Every title was measured against test/ with
+    `grep -rlF` and matched ZERO files, against a control title lifted from the real worker-home
+    suite that matched one. Each is plain prose under 100 characters with no comma, no
+    semicolon-space and no regex metacharacter, so `looksLikeScenarioNarrative` cannot fail them
+    and `parseTestTarget`'s escaped-literal match has nothing to mishandle. The sixth is a
+    single-line `grep:` with an explicit path, driven from the criterion's own text rather than a
+    path slug, verified by hand with the executor's real invocation to read hits at head and zero
+    at the merge base.
+
+    ONE ADVISORY IS ACCEPTED KNOWINGLY. `rmd lint-plan` warns `proof-scope` because criterion 6's
+    grep names this shard's own path while `files:` does not list it. It is advisory and never
+    blocking. Both remedies are worse: declaring the shard's own path would place the filing inside
+    its own implementation scope, and repointing the grep at a declared path would name a file this
+    change does not touch, so the pattern would read zero at head and the criterion would fail
+    executed rather than merely being unscoped.
+
+    verify: human IS SET BY A GATE, NOT BY REFLEX, AND THE GATE IS NAMED. This shard was first
+    filed at verify: auto and `rmd lint-plan` REFUSED IT BLOCKING with `[ruling-verify] task
+    W1-T971 declares files: including DECISIONS.md at verify:auto — a ruling-shaped task must be
+    verify: human — the operator judges rulings`. That is correct and is recorded rather than
+    worked around by dropping DECISIONS.md from `files:`, which would have satisfied the linter by
+    removing the durable home this record exists to create. The consequence is intended:
+    `isDispatchEligible` (src/lib/drain.ts) returns false at `t.verify !== "auto"` BEFORE the
+    linter is consulted, so this shard parks until an operator picks it up and can never be
+    drained into a worker.
+
+    ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN CONTROL, SWEPT SECONDS BEFORE THE RESERVATION.
+    W1-T971 read 0 on all four at origin/main 3040d33: refs/rmd-id/* (67 refs enumerated; control
+    refs/rmd-id/W1-T968 = 1, negative refs/rmd-id/W1-T999999 = 0), shard filenames on origin/main
+    (334 shards; control W1-T965 = 1), ids declared anywhere under plan/ (control W1-T965 = 1),
+    every OPEN PR's file list (control W1-T970 = 1) and every OPEN PR's title (control W1-T970 =
+    1). Five PRs were open and the closed-state endpoint returned rows, so the open set is real
+    rather than a failed query. SURFACE 3 IS NOT DECORATION: on 2026-08-18 it caught W1-T966, an id
+    the tree and the refs both reported free, claimed by an open PR's file list.
+
+    THE RESERVATION SUCCEEDED, WHICH CONTRADICTS THE STANDING EXPECTATION AND IS RECORDED RATHER
+    THAN SMOOTHED OVER. The gated push used an orphan commit over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-56016-1787017109786822000, a braced refspec, and the exit status captured into
+    a variable rather than read through a pipe. PUSH_EXIT_CODE=0, stderr
+    `* [new reference]  ac994f33... -> refs/rmd-id/W1-T971`, and the readback returned that exact
+    sha. THE SESSION CREDENTIAL DOES NOT 403 ON refs/rmd-id/* TODAY — measured four times across
+    two filings on 2026-08-18. So this id does NOT rest on the sweep alone; it is genuinely
+    reserved. THE REFSPEC CARRIES NO `+`, DELIBERATELY: a forced refspec earlier the same evening
+    silently overwrote a live reservation for W1-T967 that a concurrent host had minted between the
+    sweep and the push, and a non-forced push would have been refused instead.
