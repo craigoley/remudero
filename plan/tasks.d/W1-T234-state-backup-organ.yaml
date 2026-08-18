@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
   rationale: "MASTER-PLAN section 10 WS-7 describes a nightly state backup with a documented and drilled
