@@ -1,0 +1,173 @@
+- id: W1-T983
+  title: "THE REVIEW-ORPHAN CAP IS CORRECT AND ITS ESCALATION IS DESIGNED NOT TO REACH ANYONE — five green PRs in three days hit the cap, every one with zero red checks and no review ever posted, and each escalated at a class src/lib/escalate.ts deliberately excludes from notify(), so the PR sits until a human happens to look"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    FILED FROM RECON at origin/main 3af512a. Every figure below was measured on that tree or over
+    the GitHub REST API on 2026-08-18; none is carried from a brief.
+
+    (1) THE CAP IS CORRECT AND IS NOT WHAT THIS TASK TOUCHES. `reviewOrphanCap`
+    (`src/lib/sweep.ts`, default 2) stops the sweep re-reviewing a PR whose verdict keeps being
+    orphaned by a new push. Two failed re-reviews genuinely does mean a human is needed, and the
+    cap exists to stop indefinite retrying. Raising it moves the wall without removing it.
+
+    (2) THE ESCALATION FIRES, OPENS A REAL ISSUE, AND IS INAUDIBLE BY DESIGN. The sweep's escalate
+    closure in `src/run-task.ts` passes `class: "BLOCKED"`. `src/lib/escalate.ts` gates its only
+    `notify()` call on `cls === "MANUAL" || cls === "HARD_STOP"`, and `src/lib/notify.ts`'s own
+    header states iMessage is "reserved for MANUAL + HARD_STOP escalations (MASTER-PLAN §4);
+    BLOCKED and ..." are excluded. So the row is written, the issue is opened, and nothing pings.
+    THE ISSUE DOES EXIST — this is NOT the worse defect of a reason string that says "escalating"
+    while opening nothing. MEASURED: issue #2112, still OPEN, ZERO comments, labels
+    `needs-human, escalation-blocked, needs-question`, body first line `**Class:** BLOCKED`,
+    naming PR #2097 and quoting the cap reason verbatim.
+
+    (3) THE POPULATION IS FIVE, NOT TWO, AND ITS PRECISION IS PERFECT. Over the `needs-question`
+    label, all states, ONE page of 48 issues (48 < 100, so exhaustive; 0 HTTP failures; positive
+    control "needs a clarification" = 46, negative control = 0), FIVE carry the cap's reason
+    string: #2112/PR #2097, #1966/PR #1955, #1963/PR #1954, #1918/PR #1902, #1911/PR #1886 —
+    2026-08-15 through 2026-08-18. ALL FIVE PRs read zero red checks and no `remudero-review`
+    posted: 21-22 successes plus one neutral each, combined status `pending` with `total_count: 0`.
+    Three were merged by hand (`cao825`); two were closed. So hitting this cap has NEVER once meant
+    the code was wrong — the rate is ~1.7/day and the false-positive rate is ZERO of five.
+
+    (4) A BLANKET TIER CHANGE IS DISQUALIFIED BY ITS OWN NUMBERS, AND THAT MATTERS BECAUSE IT IS
+    THE OBVIOUS FIX. Across 464 `needs-human` issues (5 pages, 0 HTTP failures), the class split is
+    BLOCKED 452, MANUAL 8, HARD_STOP 1, GRILL 1, none 2. BLOCKED averages 15.6/day over 29 distinct
+    days and peaked at 20 on 2026-08-17. Reclassifying the CLASS would ping ~16 times a day, which
+    is worse than silence and would train the operator to ignore the channel — the exact failure
+    that left nine correct `[BLOCKED]` crash-loop issues unread for five days. Reclassifying only
+    THIS DISPOSITION is 5 issues in 3 days.
+
+    (5) THE TWO CHEAPER ALTERNATIVES WERE COSTED AND BOTH LOSE, ONE OF THEM CONTRARY TO
+    EXPECTATION. The console's needs-me queue already renders every open escalation
+    (`isBlockedRow`, `renderNeedsMe`, `src/lib/board.ts`, with an `escalationTitle` fallback so a
+    row with no plan task still renders) — but `rmd serve` binds `DEFAULT_SERVE_HOST` `127.0.0.1`
+    on `DEFAULT_SERVE_PORT` 4317 (`src/lib/serve.ts`) with no published port, which W1-T915 files.
+    That answer is BLOCKED UPSTREAM and is cited, not re-filed. AND THE DAEMON-SUMMARY ANSWER DOES
+    NOT WORK EITHER, WHICH THE RECON EXPECTED TO BE THE CHEAP WIN: `renderDaemonSummary`
+    (`src/run-task.ts`) is printed from exactly one call site, in `daemonCommand`'s RETURN path.
+    A daemon that never exits never prints it, and the sweep has no per-pass console surface of
+    its own. So a summary line reaches the terminal only when the fleet stops — precisely not when
+    a PR is stranded.
+  design: |
+    THE SHAPE: change WHICH CLASS this one disposition escalates at, and nothing else. Two
+    determinations first, both from source.
+
+    (i) DETERMINE THE PREDICATE FROM SOURCE AND KEEP IT PURE. The condition is already computed:
+    green checks, no review posted, `priorReviewOrphans` at `reviewOrphanCap`. Establish from
+    `src/lib/sweep.ts` which fields express it exactly — `reviewOrphanedByPush`,
+    `priorReviewOrphans`, the checks/review state the post-review row already reads — and express
+    the class decision as a PURE exported predicate in that module, unit-testable with no spawn
+    and no GitHub. The wiring in `src/run-task.ts` then reads it. A class literal edited inline at
+    the call site is the shape to avoid: it cannot be tested without driving the whole sweep.
+
+    (ii) DETERMINE THE TARGET CLASS AGAINST THE MEASURED VOLUME, NOT BY PREFERENCE. Rationale (4)
+    gives 15.6/day for the class and ~1.7/day for this disposition. State in the PR which class is
+    chosen and what the projected ping rate is, computed the same way. If the chosen class would
+    exceed a few pings a day, the change is wrong and must be reported as such rather than shipped.
+
+    (iii) DELIVERABLE — THE NARROW RECLASSIFICATION. Only a disposition that is BOTH review-orphan-
+    capped AND green-with-no-review changes class. Every other blocked-ambiguous escalation keeps
+    the class it has today. A green PR that will never merge without a human is terminal FOR THAT
+    PR — nothing else will move it — which is the argument for the higher tier; a red PR is not,
+    because the fix rung can still act.
+
+    (iv) WHAT MUST NOT CHANGE, ENUMERATED, BECAUSE EACH IS A RULED-OUT FIX. The cap value stays.
+    The verdict stays SHA-PINNED and the cap stays keyed to the PR, never to body content — a body
+    edit that removes a false claim genuinely changes what is judged, and the repo has already
+    measured what sha-versus-PR keying costs when #1931 shipped a lookup that matched nothing. No
+    capped PR is auto-merged: `assertLiveWriteAllowed` fences `gh-pr-merge`, and DECISIONS.md's
+    ratified axis is gate on irreversibility, not outwardness. And `escalate.ts`'s own
+    MANUAL/HARD_STOP gate is NOT widened — this task changes what one caller passes, never who is
+    let through.
+
+    (v) A REACHABILITY TEST ALONE PROVES NOTHING, AND THIS IS THE TRAP. An implementation that
+    escalates EVERY blocked-ambiguous disposition at the higher class satisfies "the capped green
+    PR pings" perfectly and reinstates the 15.6/day flood. Every criterion is therefore PAIRED with
+    a control in the SAME run: the capped-green case at the new class, AND an ordinary
+    blocked-ambiguous case still at its existing class. One run carries both directions.
+
+    (vi) AND THE MUTATION CHECK MUST BE FILE-SHA BRACKETED. Read the sha256 of the edited file,
+    invert the predicate, read it again and require it to DIFFER, run the suite and require the
+    paired control to FAIL, restore, and require the sha to return to the original.
+
+    (vii) OUT OF SCOPE, TO BE FILED SEPARATELY. Publishing the console so the needs-me queue is
+    reachable — that is W1-T915 and this task must not absorb it. The window in which
+    `remudero-review` reads as 'Expected' between heads — W1-T913. The PR-versus-head keying of
+    the escalate dedup gate — W1-T514. None of the three is this defect, and this task depends on
+    none of them landing first.
+  acceptance:
+    - claim: "a capped review-orphaned PR that is green with no review escalates at the reaching class"
+      proof: "unit test: W1-T983: a capped green review-orphaned PR escalates at the reaching class"
+    - claim: "an ordinary blocked-ambiguous escalation keeps its existing class, in the same run"
+      proof: "unit test: W1-T983: an ordinary blocked-ambiguous escalation keeps its class"
+    - claim: "the class decision is a pure predicate callable with no spawn and no GitHub"
+      proof: "unit test: W1-T983: the class decision is pure and callable without a spawn"
+    - claim: "inverting the predicate fails the paired control, with the file sha read either side"
+      proof: "unit test: W1-T983: inverting the predicate fails the paired control"
+  risk: high
+  origin: "recon#review-orphan-escalation-tier-2026-08-18"
+  plan_refs: ["W1-T915", "W1-T913", "W1-T514"]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/review-orphan-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS SET UP FRONT. Design item (ii) is an ESCALATION-TIER POLICY CHOICE — which
+    class an operator wants woken for — and no test can make it. `isDispatchEligible`
+    (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` before the linter is consulted, so
+    this shard can never be picked up by the drain.
+
+    risk: high IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) exempts only
+    `task.risk === "high"` and returns clean only below two subsystems, and `subsystemsOf` derives
+    ids from the `files:` list AND the acceptance text. This scope names the sweep (where the
+    predicate lives) and run-task (the one wiring site) at minimum, so two concerns is structural
+    and no phrasing passes at medium. Blast radius is genuinely small: one class literal becomes
+    one predicate, touching no cap, no arm path and no merge gate.
+
+    FILES DERIVED BY WORD-BOUNDARY INVOCATION COUNT AT 3af512a, NOT GUESSED.
+    `reviewOrphanCap`: sweep=8 run-task=1 escalate=0 notify=0. `priorReviewOrphans`: sweep=7
+    run-task=3 escalate=0 notify=0. `EscalationClass`: sweep=0 run-task=4 escalate=3 notify=0.
+    `escalationCause`: sweep=0 run-task=5 escalate=2 notify=0. Negative control `routeSpecialists`
+    reads 0 in all four, so the counts discriminate rather than matching everything.
+    `test/review-orphan-wiring.test.ts` ALREADY EXISTS and already covers this wiring, so no new
+    test file is invented. `src/lib/escalate.ts` and `src/lib/notify.ts` are DELIBERATELY NOT
+    DECLARED: design item (iv) forbids widening their gate, so an implementer touching either has
+    left this shard's scope and must amend it first.
+    `src/run-task.ts` IS DECLARED AND THE COST IS ACCEPTED IN WRITING. It holds the sweep's
+    escalate closure — the single site that passes the class — so the wiring cannot land without
+    it. W1-T471 records that declaring the monolith serialises every task naming it, and 200 of
+    336 shards already do; this shard will wait behind them, and that queue cost is accepted here
+    rather than dodged by leaving the wiring undeclared.
+
+    THE ID RESTS ON A FOUR-SURFACE SWEEP WITH COVERAGE ASSERTED SEPARATELY FROM READABILITY.
+    W1-T983 read 0 on all four: refs/rmd-id (80 refs enumerated; above 982 only 1000-1003, 100000
+    and 1000000; positive control W1-T953 = 1, negative W1-T99999 = 0), shard filenames on
+    origin/main (344 enumerated against 344 expected, max 981, control W1-T977 = 1), ids declared
+    ANYWHERE under plan/ rather than filenames only (580 distinct, max 981, control W1-T977 = 1
+    file), and every open PR's FILE LIST and TITLE (2 open PRs enumerated, 2 file lists opened, 0
+    failures — W1-T982 is claimed by #2120's file list and W1-T981 by #2122's title, which is why
+    983 and not 982 is the lowest free id). Against a mirrored control, W1-T981 reads 1 on
+    surfaces 2, 3 and 4.
+
+    THE GATE WAS PROVED ON THE SAME INVOCATION AS THE MINT, AND THE TWO OUTCOMES DIFFER. A fresh
+    orphan pushed with a PLAIN refspec at the ALREADY-TAKEN refs/rmd-id/W1-T953 returned rc=1 with
+    a real ref-level refusal, verbatim:
+      ! [rejected]        31566816f1ebfc5c2cc5f89c61afdf9c0cbdf4ac -> refs/rmd-id/W1-T953 (fetch first)
+    and that ref read fba95299cbd655085b504bd915612c57e6a8189e both BEFORE and AFTER — UNCHANGED.
+    So the plain refspec's gate demonstrably refuses to clobber a taken id.
+    THE MINT ITSELF WAS REFUSED FOR A DIFFERENT REASON, AND THE DIFFERENCE IS THE EVIDENCE. The
+    push to refs/rmd-id/W1-T983 returned rc=1 with NO rejection line at all, verbatim:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+    The taken-ref probe reached a REF-LEVEL decision while this one died at the TRANSPORT, so the
+    403 is the credential limit W1-T518 files and not evidence that 983 is taken. Readback returned
+    0 lines and did not carry the nonce, while a control readback of refs/rmd-id/W1-T953 returned
+    its sha — the query worked and the ref genuinely does not exist. The four-surface sweep is
+    therefore the whole basis, and refs BLOCK only in the present direction: the namespace holds 80
+    refs against 344 filed shards.
