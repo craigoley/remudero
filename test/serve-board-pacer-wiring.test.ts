@@ -31,7 +31,7 @@ import { buildBatchedGithub } from "../src/lib/status.js";
 import {
   createGhCallPacer,
   DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS,
-  DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION,
+  DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS,
 } from "../src/lib/open-prs-rest.js";
 import { DEFAULT_BOARD_POLL_TTL_MS } from "../src/lib/serve.js";
 
@@ -113,10 +113,17 @@ test("W1-T999: the board poll interval is derived from the sweep distribution", 
   );
 });
 
-test("W1-T999: a rate limited board fetch backs off through the pacer", () => {
-  // A REAL createGhCallPacer, built the same way serveCommand's does -- only `now`/`sleepSync`
-  // are injected (the pacer's own designed test seam) so the gap arithmetic is observable
-  // without a real sleep.
+/** A throw shaped exactly like a real `gh` secondary-limit refusal — status.ts's
+ *  `classifyGhFailure` reads `stderr` for the `rate limit|quota|secondary rate limit` pattern. */
+function rateLimitedThrow(): never {
+  const err = new Error("boom") as NodeJS.ErrnoException & { stderr?: string };
+  err.stderr = "You have exceeded a secondary rate limit. Please wait a few minutes.";
+  throw err;
+}
+
+/** A gateway built with the exact shape `serveCommand` now uses, with the pacer's own designed
+ *  `now`/`sleepSync` seam injected so the gap arithmetic is observable without a real sleep. */
+function pacedBoard(fetchAll: () => never | []) {
   let clock = 0;
   const sleeps: number[] = [];
   const pacer = createGhCallPacer({
@@ -126,46 +133,71 @@ test("W1-T999: a rate limited board fetch backs off through the pacer", () => {
       clock += ms;
     },
   });
-
-  let calls = 0;
-  const fetchAll = (): never | [] => {
-    calls += 1;
-    if (calls === 1) {
-      // Shaped exactly like a real `gh` rate-limit throw (status.ts's classifyGhFailure reads
-      // `stderr` for the `rate limit|quota|secondary rate limit` pattern).
-      const err = new Error("boom") as NodeJS.ErrnoException & { stderr?: string };
-      err.stderr = "You have exceeded a secondary rate limit. Please wait a few minutes.";
-      throw err;
-    }
-    return [];
-  };
-
-  // ttlMs: 0 -- every call re-checks the cache as stale, isolating the pacer's OWN gap
-  // enforcement from cache-freshness as the reason a second fetch would or would not fire.
+  // ttlMs: 0 -- every call re-checks the cache as stale, isolating the pacer's OWN behaviour
+  // from cache-freshness as the reason a second fetch would or would not fire.
   const github = buildBatchedGithub("o", "r", { pacer, ttlMs: 0, fetchAll, now: () => clock });
+  return { github, sleeps };
+}
 
-  // W1-T1007 (open-prs-rest.ts's `paceGhEntry`, merged since this test was first written):
-  // a rate_limit-classified refusal no longer just widens the gap for a LATER guarded call and
-  // rethrows this one -- it retries THIS SAME call through the pacer's own `sleepSync` seam, so
-  // "the caller still sees exactly ONE outcome per `paceGhEntry` call" (that module's own doc).
-  // A single `readFailed()` here already contains both the refusal and its retry.
+// W1-T999 FILED THIS TEST AGAINST A `paceGhEntry` THAT RETHREW ON THE FIRST REFUSAL, and W1-T1007
+// (#2157, merged eleven minutes after #2155) replaced that contract with a bounded RETRY. Both PRs
+// were green: #2157's base sha 57479141 does not contain this file, so its CI never ran the
+// assertion its change inverts. The subject of this test is unchanged -- a rate-limited board fetch
+// must BACK OFF through the shared pacer rather than re-firing on the next 15s tick -- but the
+// observable it asserts is now the retry-with-backoff, not the rethrow.
+test("W1-T999 + W1-T1007: a rate limited board fetch backs off through the pacer, then retries", () => {
+  let calls = 0;
+  const { github, sleeps } = pacedBoard(() => {
+    calls += 1;
+    if (calls === 1) rateLimitedThrow();
+    return [];
+  });
+
   assert.equal(
     github.readFailed?.(),
     false,
-    "the refusal is retried and the retry succeeds -- it never reaches the caller as a failure",
+    "the retry inside paceGhEntry succeeds, so this fetch is NOT classified failed -- the " +
+      "pre-W1-T1007 contract rethrew here and the gateway marked the read failed",
   );
-  assert.equal(calls, 2, "fetchAll must have been retried exactly once after the first refusal");
+  assert.equal(
+    calls,
+    2,
+    "the refusal is RETRIED on the same call rather than rethrown (W1-T1007 design i) -- a caller " +
+      "with no pacer, or a pacer that ignores recordResult, would have fired exactly once",
+  );
+  assert.equal(sleeps.length, 1, "exactly one wait -- the refusal backoff before the retry");
+  assert.ok(
+    sleeps[0] >= DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS,
+    `the backoff must be at least the floor (${DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS}ms); jitter is ` +
+      `ADDITIVE ONLY, so a lower bound is the assertion the jitter cannot make flaky -- got ${sleeps[0]}`,
+  );
+});
+
+// THE OTHER HALF OF THE SAME CONTRACT, and the one that keeps the retry from hiding an outage:
+// a refusal that never clears must still reach the gateway's failure marking, or W1-T181's
+// "I could not read GitHub" vs "GitHub says zero PRs" distinction is lost again.
+test("W1-T999 + W1-T1007: a board fetch refused past the retry bound is still classified failed", () => {
+  let calls = 0;
+  const { github, sleeps } = pacedBoard(() => {
+    calls += 1;
+    rateLimitedThrow();
+  });
+
+  assert.equal(github.readFailed?.(), true, "an exhausted retry bound rethrows, and the gateway marks the read failed");
+  assert.equal(
+    calls,
+    DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS,
+    `the bound is total tries, not extra ones -- ${DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS} attempts then rethrow`,
+  );
   assert.equal(
     sleeps.length,
-    1,
-    "exactly one backoff sleep -- the retry's own pacer.wait() finds the widened gap already " +
-      "spent by that same sleep, so it adds nothing further",
+    DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS - 1,
+    "one backoff BETWEEN each pair of attempts, and none after the last -- an exhausted bound must " +
+      "not spend a wait it will not use",
   );
   assert.ok(
-    sleeps[0] >= DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS &&
-      sleeps[0] < DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS * (1 + DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION),
-    `the backoff sleep must sit in [floorMs, floorMs*(1+jitter)) -- this IS the pacer backoff: ` +
-      `saw ${sleeps[0]}ms against a floor of ${DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS}ms`,
+    sleeps[1] > sleeps[0],
+    `successive refusals back off further, not flat -- got ${JSON.stringify(sleeps)}`,
   );
 });
 
