@@ -164,8 +164,9 @@ test("every KNOWN_UNWIRED entry carries a substantive reason, not a TODO", () =>
   // W1-T435 wired pendingAnswer (buildOpenPrViews now assigns it via operatorVerdictEvidence),
   // shrinking the count again, six -> five. W1-T920 added supersessionVerdict — its DETECTOR is a
   // separate, out-of-scope shard (that task's own design note), so the field stays unwired here
-  // until that shard lands and wires a producer — five -> six.
-  assert.equal(Object.keys(KNOWN_UNWIRED).length, 6, "the six fields still unwired");
+  // until that shard lands and wires a producer — five -> six. W1-T984 wired mergeConflict
+  // (buildOpenPrViews now assigns it via hydrateMergeConflictEvidence) — six -> five.
+  assert.equal(Object.keys(KNOWN_UNWIRED).length, 5, "the five fields still unwired");
   for (const [field, reason] of Object.entries(KNOWN_UNWIRED)) {
     assert.ok(reason.length >= 80, `${field}: a one-word reason launders 'nobody looked' into 'this is fine'`);
     assert.doesNotMatch(reason, /^\s*(TODO|FIXME|tbd)\b/i, `${field}: name the reason`);

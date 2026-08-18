@@ -457,6 +457,28 @@ export interface SweepPolicy {
    * literal rather than a collected policy row.
    */
   conceptCoexistenceEnabled: boolean;
+  /**
+   * W1-T984 — GATES THE `conflicted` DISPOSITION ROW, MIRRORING `supersessionDisposalEnabled`
+   * EXACTLY (a policy-as-data flag, default FALSE, that a row's `when` conjuncts on). Wiring a
+   * real per-PR conflict-evidence producer (`hydrateMergeConflictEvidence`, lib/open-prs-rest.ts)
+   * makes {@link OpenPrView.mergeConflict} populated for the first time in production — but
+   * {@link isPureConcurrentAddition} counts DELETIONS ONLY, so it CANNOT distinguish a genuine
+   * pure-concurrent-addition from an add/add collision (two sides adding the SAME PATH with
+   * DIFFERENT content, where the merge-base has no version of the file at all, so both deletion
+   * counts are structurally zero — see that predicate's own doc). Admitting on that untrusted
+   * signal is a judgement call this task has no evidence to make (rationale (5)/(6)): the design
+   * intends the dispatched fix worker to be the SECOND, semantic gate, but that refusal path has
+   * never once been exercised, and the only two reconstructible admits on record are BOTH
+   * semantic collisions. `false` (the default) keeps disposition byte-for-byte what it was before
+   * evidence ever flowed: a dirty PR still falls to the `blocked-ambiguous` row beneath this one,
+   * now naming the real conflicting paths instead of "none captured", but never auto-dispatched.
+   * `true` is a LATER task's call (design note viii(b)), once the semantic predicate exists.
+   *
+   * NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` — the same choice
+   * `conceptCoexistenceEnabled` immediately above already made and recorded: a hardcoded literal
+   * in {@link DEFAULT_SWEEP_POLICY}, which keeps `plan/policy.yaml` out of this task's `files:`.
+   */
+  mergeConflictAdmissionEnabled: boolean;
 }
 
 /**
@@ -520,6 +542,9 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // W1-T932: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
   // literal, off, exactly like `pendingCeilingMinutes` above it in this same object.
   conceptCoexistenceEnabled: false,
+  // W1-T984: NOT sourced from plan/policy.yaml (see the field's own doc, above) — a hardcoded
+  // literal, off, the same choice `conceptCoexistenceEnabled` just above already made.
+  mergeConflictAdmissionEnabled: false,
 };
 
 /**
@@ -1901,8 +1926,18 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // conflicting file — both sides purely ADDED, neither deleted anything
     // the other still relies on. The deletion-involved / no-evidence-captured
     // case falls through to the very next row, never here.
+    //
+    // W1-T984: gated behind `policy.mergeConflictAdmissionEnabled` (default FALSE — see that
+    // field's own doc) — the SAME shape row 0's `supersessionDisposalEnabled` conjunct already
+    // uses. `hydrateMergeConflictEvidence` (lib/open-prs-rest.ts) now populates real evidence in
+    // production for the first time, but `isPureConcurrentAddition` cannot tell a genuine
+    // pure-concurrent-addition from an add/add collision (both score TRUE — rationale (5)), so
+    // admitting on the predicate alone is a judgement call this task declines to make. With the
+    // flag off, this row never matches no matter what evidence flows, and a dirty PR falls to the
+    // very next row exactly as it always has.
     disposition: "conflicted",
-    when: (pr) => pr.mergeState === "dirty" && isPureConcurrentAddition(pr.mergeConflict?.files ?? []),
+    when: (pr, policy) =>
+      policy.mergeConflictAdmissionEnabled === true && pr.mergeState === "dirty" && isPureConcurrentAddition(pr.mergeConflict?.files ?? []),
     reason: (pr) =>
       `merge conflict (mergeState dirty) — pure concurrent addition on ` +
       `${(pr.mergeConflict?.files ?? []).map((f) => f.path).join(", ")} — dispatching the merge-conflict fix mode`,
@@ -1916,13 +1951,20 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // every other ambiguous block already routes through (never a
     // reimplementation), naming the conflicting files so the operator does
     // not have to go re-derive them by hand.
+    //
+    // W1-T984: with the row above gated off by default, THIS is the row every dirty PR reaches —
+    // so the escalation naming the real conflicting paths AND each side's deletion count (not
+    // just the path) is the user-visible fix this task delivers. `files: none captured` now means
+    // exactly what it says (evidence genuinely could not be read) rather than "no producer ever
+    // tried".
     disposition: "blocked-ambiguous",
     when: (pr) => pr.mergeState === "dirty",
     reason: (pr) => {
-      const files = (pr.mergeConflict?.files ?? []).map((f) => f.path);
+      const files = pr.mergeConflict?.files ?? [];
+      const fileList = files.map((f) => `${f.path} (ours -${f.oursDeleted}, theirs -${f.theirsDeleted})`).join(", ");
       return (
         `merge conflict (mergeState dirty) involves a deletion (or no file evidence was captured) — ` +
-        `never auto-resolved — files: ${files.length > 0 ? files.join(", ") : "none captured"} — escalating`
+        `never auto-resolved — files: ${files.length > 0 ? fileList : "none captured"} — escalating`
       );
     },
   },

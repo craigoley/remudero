@@ -4869,7 +4869,13 @@ test("routeFix: a conflicted PR (mergeState dirty, pure concurrent addition) dis
   };
   const pr = fixPr({ reviewState: "success", checksState: "green", mergeState: "dirty", mergeConflict });
 
-  const result = await routeFix("OPEN", pr, deps);
+  // W1-T984: the `conflicted` row now carries a `mergeConflictAdmissionEnabled` conjunct (default
+  // FALSE — a real REST evidence producer landed alongside the flag, and the predicate cannot
+  // tell a genuine pure-concurrent-addition from an add/add collision). This test exercises the
+  // row's DISPATCH mechanics, which W1-T106 already owns and this task does not change, so it
+  // opts the fixture IN via policy — the same explicit shape `supersessionDisposalEnabled`'s own
+  // tests already use — rather than asserting on the new default.
+  const result = await routeFix("OPEN", pr, deps, { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true });
 
   assert.equal(result.outcome, "fixed");
   assert.equal(deps.fixed.length, 1);

@@ -7,16 +7,20 @@ import { join } from "node:path";
 import {
   checkRunsRestArgs,
   combinedStatusRestArgs,
+  compareRestArgs,
   createGhCallPacer,
   DEFAULT_GH_PACE_FLOOR_FRACTION,
   DEFAULT_GH_PACE_LOW_WATER_FRACTION,
   DEFAULT_GH_PACE_MIN_GAP_MS,
   DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS,
+  fetchMergeConflictEvidence,
   fetchOpenPrsRest,
   fetchSinglePrRest,
   GhPaceFloorStandDownError,
+  hydrateMergeConflictEvidence,
   liveStateFromRest,
   mapRestPr,
+  MERGE_STATE_HYDRATION_CAP,
   openPrsRestArgs,
   paceGhEntry,
   prStateFromRest,
@@ -1157,4 +1161,145 @@ test("W1-T529: three passes over the same failing attempt spend one attempt, not
   // freezing the PR forever.
   await runSweep([t529bPr({ headSha: "beef530" })], t529bDeps(lp, throwsRateLimit(seen)), DEFAULT_SWEEP_POLICY);
   assert.deepEqual(seen, ["cafe529", "beef530"], "a new head re-earns one attempt of its own");
+});
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * W1-T984 — CONFLICT EVIDENCE: hydrateMergeConflictEvidence / fetchMergeConflictEvidence /
+ * compareRestArgs. Mirrors the hydrateMergeStates coverage this same module already carries —
+ * bounded, best-effort, per already-dirty PR, and never a hard failure of the sweep.
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+test("compareRestArgs requests the three-dot merge-base-relative compare, never a raw two-tip diff", () => {
+  assert.deepEqual(compareRestArgs(OWNER, REPO, "main", "deadbeef"), ["api", "repos/craigoley/remudero/compare/main...deadbeef"]);
+});
+
+/** A compare response fake keyed by its `base...head` argv suffix, mirroring the shape of the
+ *  fixtures already used for check-runs/combined-status above. */
+function compareFake(byPair: Record<string, unknown>): GhApiFetcher {
+  return (args: string[]) => {
+    const path = args[args.length - 1] ?? "";
+    const m = /\/compare\/([^./][^.]*)\.\.\.(.+)$/.exec(path);
+    if (!m) throw new Error(`unexpected compare fetch: ${path}`);
+    const key = `${m[1]}...${m[2]}`;
+    if (!(key in byPair)) throw new Error(`no fixture for ${key}`);
+    return byPair[key];
+  };
+}
+
+test("fetchMergeConflictEvidence composes two compares into the INTERSECTION of both sides' changed files, over-approximating in the safe direction", () => {
+  const fetch = compareFake({
+    "main...deadbeef": {
+      merge_base_commit: { sha: "base123" },
+      files: [
+        { filename: "src/lib/sweep.ts", deletions: 0 },
+        { filename: "only-ours.ts", deletions: 3 }, // touched on ONE side only — never a candidate
+      ],
+      commits: [{ sha: "abc1234000", commit: { message: "add REQUIRED entry for #177\n\nbody" } }],
+    },
+    "base123...main": {
+      merge_base_commit: { sha: "base123" },
+      files: [
+        { filename: "src/lib/sweep.ts", deletions: 2 },
+        { filename: "only-theirs.ts", deletions: 1 }, // touched on ONE side only — never a candidate
+      ],
+      commits: [{ sha: "def5678000", commit: { message: "remove a stale entry" } }],
+    },
+  });
+
+  const ev = fetchMergeConflictEvidence(OWNER, REPO, "main", "deadbeef", fetch);
+  assert.deepEqual(ev.files, [{ path: "src/lib/sweep.ts", oursDeleted: 0, theirsDeleted: 2 }], "only the path BOTH sides touched survives");
+  assert.equal(ev.oursLog, "abc1234 add REQUIRED entry for #177", "one line per commit, first line of the message only");
+  assert.equal(ev.theirsLog, "def5678 remove a stale entry");
+});
+
+test("fetchMergeConflictEvidence throws when the compare response carries no merge_base_commit.sha, so the caller's best-effort catch can degrade cleanly", () => {
+  const fetch = compareFake({ "main...deadbeef": { files: [] } });
+  assert.throws(() => fetchMergeConflictEvidence(OWNER, REPO, "main", "deadbeef", fetch), /merge_base_commit/);
+});
+
+test("hydrateMergeConflictEvidence: a per-PR failure leaves that PR's evidence undefined rather than aborting the pass — the same best-effort discipline hydrateMergeStates uses", () => {
+  const fetch = compareFake({
+    "main...good": {
+      merge_base_commit: { sha: "base1" },
+      files: [{ filename: "a.ts", deletions: 0 }],
+      commits: [],
+    },
+    "base1...main": { merge_base_commit: { sha: "base1" }, files: [{ filename: "a.ts", deletions: 0 }], commits: [] },
+    // no fixture for "main...bad" -> compareFake throws, exactly like a 404/rate-limit read.
+  });
+  const out = hydrateMergeConflictEvidence(
+    OWNER,
+    REPO,
+    "main",
+    [
+      { number: 1, headRefOid: "good" },
+      { number: 2, headRefOid: "bad" },
+    ],
+    fetch,
+  );
+  assert.deepEqual(out.get(1)?.files, [{ path: "a.ts", oursDeleted: 0, theirsDeleted: 0 }]);
+  assert.equal(out.has(2), false, "the failing PR is skipped, not fatal — it keeps the pre-existing undefined");
+});
+
+test("hydrateMergeConflictEvidence is bounded by a hard cap — it reuses MERGE_STATE_HYDRATION_CAP rather than a second, independently-tuned ceiling", () => {
+  const many = Array.from({ length: 60 }, (_, i) => ({ number: 2000 + i, headRefOid: `sha${i}` }));
+  let calls = 0;
+  const fetch: GhApiFetcher = () => {
+    calls++;
+    throw new Error("never resolves — only the CALL COUNT matters here");
+  };
+  hydrateMergeConflictEvidence(OWNER, REPO, "main", many, fetch);
+  // Every fetch throws on the FIRST compare call, so each attempted PR costs exactly one call —
+  // the cap bounds PRs attempted (never more than 25 of the 60 candidates), not calls per PR.
+  assert.equal(calls, MERGE_STATE_HYDRATION_CAP, "never more than the cap's worth of PRs attempted");
+});
+
+test("buildOpenPrViews wires mergeConflict ONLY for a PR already read mergeState dirty — a clean/unknown PR pays no extra request", async () => {
+  const { buildOpenPrViews } = await import("../src/run-task.js");
+  const dir = mkdtempSync(join(tmpdir(), "rmd-mergeconflict-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  appendFileSync(ledgerPath, "");
+
+  const compareCalls: string[] = [];
+  const fetch: GhApiFetcher = (args: string[]) => {
+    const path = args[args.length - 1] ?? "";
+    if (/\/pulls\?/.test(path) || /state=open/.test(path)) {
+      return [
+        {
+          number: 1,
+          html_url: "https://github.com/craigoley/remudero/pull/1",
+          head: { ref: "feat/dirty", sha: "dirtysha" },
+          updated_at: "2026-08-18T00:00:00.000Z",
+          body: "Remudero-Task: W1-T1",
+          auto_merge: null,
+          state: "open",
+        },
+        {
+          number: 2,
+          html_url: "https://github.com/craigoley/remudero/pull/2",
+          head: { ref: "feat/clean", sha: "cleansha" },
+          updated_at: "2026-08-18T00:00:00.000Z",
+          body: "Remudero-Task: W1-T2",
+          auto_merge: null,
+          state: "open",
+        },
+      ];
+    }
+    if (/\/pulls\/1$/.test(path)) return { mergeable: false, mergeable_state: "dirty" };
+    if (/\/pulls\/2$/.test(path)) return { mergeable: true, mergeable_state: "clean" };
+    if (/\/compare\//.test(path)) {
+      compareCalls.push(path);
+      return { merge_base_commit: { sha: "base1" }, files: [{ filename: "x.ts", deletions: 0 }], commits: [] };
+    }
+    return []; // check-runs / statuses
+  };
+
+  const views = buildOpenPrViews(OWNER, REPO, ledgerPath, { fetch, requiredContexts: () => ["ci-gate"] });
+
+  const dirty = views.find((v) => v.prNumber === 1)!;
+  const clean = views.find((v) => v.prNumber === 2)!;
+  assert.deepEqual(dirty.mergeConflict?.files, [{ path: "x.ts", oursDeleted: 0, theirsDeleted: 0 }], "the dirty PR's evidence is wired");
+  assert.equal(clean.mergeConflict, undefined, "the clean PR pays no compare fetch at all");
+  assert.equal(compareCalls.some((p) => p.includes("dirtysha")), true, "the compare call targets the DIRTY pr's own head");
+  assert.equal(compareCalls.some((p) => p.includes("cleansha")), false, "the clean PR's head is never compared");
 });

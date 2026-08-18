@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, isPureConcurrentAddition, type ConflictFileDiff, type OpenPrView } from "../src/lib/sweep.js";
 import { hydrateMergeStates, mergeStateFromRest, MERGE_STATE_HYDRATION_CAP } from "../src/lib/open-prs-rest.js";
 
 /**
@@ -199,4 +199,118 @@ test("buildOpenPrViews WIRES the hydrator: a dirty PR arrives at the sweep carry
   );
   // …and that view dispositions as conflicted rather than mergeable.
   assert.equal(deriveDisposition(views[0], DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+});
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * W1-T984 — THE mergeConflict EVIDENCE PRODUCER. `isPureConcurrentAddition` opens with
+ * `files.length > 0` and, until this task, NOTHING ever populated `OpenPrView.mergeConflict` in
+ * production, so every dirty PR fell through the `conflicted` row and escalated with
+ * "files: none captured" — 9 of 9 across the whole recorded corpus (rationale (2)). This wires
+ * the evidence WITHOUT turning admission on: `isPureConcurrentAddition` counts deletions only, so
+ * it cannot tell a genuine pure-concurrent-addition from an add/add collision (rationale (5)), and
+ * that judgement call is explicitly out of this task's scope (design note viii).
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** One conflict-evidence fixture: a PR number, its file diffs, and the recorded predicate value —
+ *  the FIVE real, reconstructible cases from the task's own rationale (5), replayed against main
+ *  as it stood at each escalation's own timestamp. */
+function reconstructedConflict(files: ConflictFileDiff[]): OpenPrView {
+  return greenPr({
+    mergeState: "dirty",
+    mergeConflict: { files, oursLog: "abc1234 (reconstructed)", theirsLog: "def5678 (reconstructed)" },
+  });
+}
+
+test("W1-T984 acceptance 3 — the five reconstructed conflicts reproduce their recorded predicate values, including the add/add case reading TRUE", () => {
+  // #1775: test/daemon.test.ts, 0 ours-deleted / 5 theirs-deleted — FALSE, refusal correct.
+  assert.equal(isPureConcurrentAddition([{ path: "test/daemon.test.ts", oursDeleted: 0, theirsDeleted: 5 }]), false, "#1775");
+
+  // #1830: two files, 0/26 and 6/1 — FALSE, refusal correct.
+  assert.equal(
+    isPureConcurrentAddition([
+      { path: "deploy/entrypoint.sh", oursDeleted: 0, theirsDeleted: 26 },
+      { path: "src/lib/daemon.ts", oursDeleted: 6, theirsDeleted: 1 },
+    ]),
+    false,
+    "#1830",
+  );
+
+  // #1912: src/lib/sweep.ts + test/sweep.test.ts, 0/0 both — TRUE (a real `CONFLICT (content)`
+  // git itself refuses to merge, per the task's own `git merge-tree` control).
+  assert.equal(
+    isPureConcurrentAddition([
+      { path: "src/lib/sweep.ts", oursDeleted: 0, theirsDeleted: 0 },
+      { path: "test/sweep.test.ts", oursDeleted: 0, theirsDeleted: 0 },
+    ]),
+    true,
+    "#1912",
+  );
+
+  // #1960: plan/tasks.d/W1-T908-*.yaml, 0/0 — TRUE, and THE FALSIFIER: an add/add collision (no
+  // stage-1/merge-base version at all) where the predicate can never structurally read FALSE.
+  assert.equal(
+    isPureConcurrentAddition([
+      { path: "plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml", oursDeleted: 0, theirsDeleted: 0 },
+    ]),
+    true,
+    "#1960 (add/add)",
+  );
+
+  // #2120: plan/feedback/fb-1785775974389-e25033.yaml, 2/2 — FALSE, refusal correct.
+  assert.equal(
+    isPureConcurrentAddition([{ path: "plan/feedback/fb-1785775974389-e25033.yaml", oursDeleted: 2, theirsDeleted: 2 }]),
+    false,
+    "#2120",
+  );
+});
+
+test("W1-T984 acceptance 2 — with mergeConflictAdmissionEnabled OFF (the default), ALL FIVE reconstructed conflicts dispose blocked-ambiguous, including the two that read TRUE", () => {
+  const cases: OpenPrView[] = [
+    reconstructedConflict([{ path: "test/daemon.test.ts", oursDeleted: 0, theirsDeleted: 5 }]),
+    reconstructedConflict([
+      { path: "deploy/entrypoint.sh", oursDeleted: 0, theirsDeleted: 26 },
+      { path: "src/lib/daemon.ts", oursDeleted: 6, theirsDeleted: 1 },
+    ]),
+    reconstructedConflict([
+      { path: "src/lib/sweep.ts", oursDeleted: 0, theirsDeleted: 0 },
+      { path: "test/sweep.test.ts", oursDeleted: 0, theirsDeleted: 0 },
+    ]),
+    reconstructedConflict([
+      { path: "plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml", oursDeleted: 0, theirsDeleted: 0 },
+    ]),
+    reconstructedConflict([{ path: "plan/feedback/fb-1785775974389-e25033.yaml", oursDeleted: 2, theirsDeleted: 2 }]),
+  ];
+  assert.equal(DEFAULT_SWEEP_POLICY.mergeConflictAdmissionEnabled, false, "sanity: the flag defaults off");
+  for (const pr of cases) {
+    const d = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(d.disposition, "blocked-ambiguous", `${pr.mergeConflict?.files.map((f) => f.path).join(",")} must refuse, never auto-admit`);
+  }
+
+  // Turning the flag ON is a LATER task's call (design note viii(b)) — proved here only so the
+  // conjunct is demonstrably load-bearing, not dead code: the #1912 fixture (a genuine TRUE) DOES
+  // admit once opted in, while the flag stays off in every other test in this suite.
+  const admitPolicy = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true };
+  assert.equal(deriveDisposition(cases[2], admitPolicy, NOW).disposition, "conflicted", "the gate is real, not inert");
+});
+
+test("W1-T984 acceptance 4 — a dirty PR escalation names the real conflicting paths and per-side deletion counts, never 'none captured'", () => {
+  const seeded = reconstructedConflict([
+    { path: "deploy/entrypoint.sh", oursDeleted: 0, theirsDeleted: 26 },
+    { path: "src/lib/daemon.ts", oursDeleted: 6, theirsDeleted: 1 },
+  ]);
+  const d = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(d.disposition, "blocked-ambiguous");
+  assert.doesNotMatch(d.reason, /none captured/, "real evidence flowed — this must not lie about it being absent");
+  assert.match(d.reason, /deploy\/entrypoint\.sh \(ours -0, theirs -26\)/, "names the first path AND its per-side deletion counts");
+  assert.match(d.reason, /src\/lib\/daemon\.ts \(ours -6, theirs -1\)/, "names the second path AND its per-side deletion counts");
+});
+
+test("W1-T984 — a genuinely uncaptured evidence read still renders 'none captured', so the wording stays honest about WHICH empty it is", () => {
+  // W1-T487 (#1815, out of scope here per design note viii(c)) already distinguishes "never
+  // collected" from "collected and genuinely empty" — this locks that a dirty PR with NO evidence
+  // at all (the fetch failed, or never ran) still reads the pre-existing wording, unchanged.
+  const seeded = greenPr({ mergeState: "dirty" });
+  const d = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(d.disposition, "blocked-ambiguous");
+  assert.match(d.reason, /files: none captured/);
 });
