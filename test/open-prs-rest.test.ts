@@ -1461,3 +1461,161 @@ test("buildOpenPrViews wires mergeConflict ONLY for a PR already read mergeState
   assert.equal(compareCalls.some((p) => p.includes("dirtysha")), true, "the compare call targets the DIRTY pr's own head");
   assert.equal(compareCalls.some((p) => p.includes("cleansha")), false, "the clean PR's head is never compared");
 });
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * W1-T1008 — THE FLOOR CAN NOW FIRE. Every test above that exercises `GhPaceFloorStandDownError`
+ * (the "W1-T529: …" block starting near this file's `fakeClock`/`fakeGhExec` helpers) either
+ * hand-builds a `GhBudgetReading` and feeds it straight to `pacer.recordResult` itself, or throws
+ * `GhPaceFloorStandDownError` directly from a sweep dep — proving the MECHANISM, never the WIRING
+ * (design (iv): "a test that only asserts the throw passes on code that always throws"). These
+ * four tests drive the real chain end to end instead: real `X-Ratelimit-*` header TEXT, through the
+ * real `ghJson` -> `fetchOpenPrsRest` -> `paceGhEntry` composition `run-task.ts`'s own (byte-for-
+ * byte unedited) `buildOpenPrViews` already uses — never a hand-fed reading anywhere below.
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+test("W1-T1008: a budget at the floor makes the guarded call throw the stand-down", () => {
+  // Design (iii): BOTH directions in ONE run. Call 1 carries a HEALTHY reading and must not arm
+  // anything; call 2 carries a reading AT the floor (on its own response) and must still itself
+  // run and return data — arming happens for the NEXT `wait()`, never retroactively; call 3 is the
+  // one this test is named for.
+  const healthy = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4000\r\nX-Ratelimit-Resource: core\r\n\r\n[]';
+  const atFloor = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 20\r\nX-Ratelimit-Resource: core\r\n\r\n[]';
+  assert.ok(20 <= 5000 * DEFAULT_GH_PACE_FLOOR_FRACTION, "the fixture must actually sit at/below the exported floor fraction");
+  const { exec, calls } = fakeGhExec([healthy, atFloor]);
+  const fetch: GhApiFetcher = (args, onRateLimit) => ghJson(args, onRateLimit, exec);
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+
+  // NOTE: `first`/`second` are the REAL `OpenPrRest[]` `fetchOpenPrsRest` returned, with a budget
+  // reading attached via a non-enumerable-to-JSON, non-enumerable-to-`Object.keys` symbol key (see
+  // `withBudgetReading`'s own doc) — `assert.deepEqual`/`deepStrictEqual` DO compare own symbol
+  // keys, so `.length` is asserted directly rather than comparing the whole array to a bare `[]`.
+  const first = paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch));
+  assert.equal(first.length, 0, "call 1 (healthy) ran for real and returned its actual (empty) result");
+
+  const second = paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch));
+  assert.equal(second.length, 0, "call 2 (at the floor, on ITS OWN response) still ran — the arm is for what follows, not itself");
+
+  assert.throws(
+    () => paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch)),
+    (err: unknown) => err instanceof GhPaceFloorStandDownError,
+    "call 3 stands down — armed by call 2's own response, with NOTHING hand-fed to recordResult anywhere in this test",
+  );
+  assert.equal(calls.length, 2, "the refused third call was never actually issued to gh — nothing more was spent chasing an exhausted bucket");
+});
+
+test("W1-T1008: a budget above the floor does not throw and the call runs", () => {
+  // Design (iii) again, from the other end: prime the floor for real, consume the one throw it
+  // owes, and prove the VERY NEXT call — now reporting a healthy budget on its own response — is
+  // neither refused again nor silently skipped: it actually reaches gh and returns real data.
+  const atFloor = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 20\r\nX-Ratelimit-Resource: core\r\n\r\n[]';
+  const healthy = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 4000\r\nX-Ratelimit-Resource: core\r\n\r\n[]';
+  const { exec, calls } = fakeGhExec([atFloor, healthy]);
+  const fetch: GhApiFetcher = (args, onRateLimit) => ghJson(args, onRateLimit, exec);
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+
+  paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch)); // primes the floor for real
+  assert.throws(
+    () => paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch)),
+    (err: unknown) => err instanceof GhPaceFloorStandDownError,
+    "the trip this test's own claim is about to exercise recovery from",
+  );
+
+  const recovered = paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch));
+  assert.equal(recovered.length, 0, "the call after the refused one ran for real — a healthy reading neither throws nor is skipped");
+  assert.equal(calls.length, 2, "exactly the two real gh calls that ran (priming + recovery) — the refused attempt spent nothing");
+});
+
+test("W1-T1008: the guarded call supplies a budget from its own response headers", () => {
+  // NEGATIVE CONTROL: a fetcher that never reads its second argument — every fixture written
+  // before this task, and every fixture in the two tests above until they deliberately opt in —
+  // arms nothing. There is no hidden second source the pacer already knew about.
+  const blind: GhApiFetcher = () => [];
+  const blindClock = fakeClock();
+  const blindPacer = createGhCallPacer({ now: blindClock.now, sleepSync: blindClock.sleepSync });
+  paceGhEntry(blindPacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, blind));
+  assert.doesNotThrow(
+    () => paceGhEntry(blindPacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, blind)),
+    "a fetcher that never surfaces a reading arms nothing",
+  );
+
+  // POSITIVE: real header TEXT, two DIFFERENT buckets in sequence (mirrors "W1-T525: the rate
+  // limit header is parsed off the response that carried it" above), so this cannot pass on
+  // stale/shared state. A FULL `search` bucket first — small absolute numbers that would look
+  // alarming read as a bare count — proves the comparison stays IN-BUCKET: only the SECOND call's
+  // `core` reading, genuinely at ITS OWN floor, arms anything.
+  const searchFull = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 30\r\nX-Ratelimit-Remaining: 30\r\nX-Ratelimit-Resource: search\r\n\r\n[]';
+  const coreAtFloor = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 20\r\nX-Ratelimit-Resource: core\r\n\r\n[]';
+  assert.ok(30 > 30 * DEFAULT_GH_PACE_FLOOR_FRACTION, "the search fixture must NOT sit at/below its own floor share");
+  assert.ok(20 <= 5000 * DEFAULT_GH_PACE_FLOOR_FRACTION, "the core fixture must sit at/below its own floor share");
+  const { exec, calls } = fakeGhExec([searchFull, coreAtFloor]);
+  const fetch: GhApiFetcher = (args, onRateLimit) => ghJson(args, onRateLimit, exec);
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+
+  paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch)); // search, full — arms nothing
+  paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch)); // core, at floor — arms the THIRD call
+  assert.throws(
+    () => paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch)),
+    (err: unknown) => err instanceof GhPaceFloorStandDownError,
+    "the SECOND call's own core reading — not the first call's healthy search one — is what armed this THIRD call's stand-down",
+  );
+  assert.equal(calls.length, 2, "no probe call anywhere, and no third real call either — exactly the two real list calls issued");
+});
+
+test("W1-T1008: the sweep branch receives the stand-down it already handles", async () => {
+  // Every existing W1-T529 sweep test throws `new GhPaceFloorStandDownError(...)` directly from a
+  // sweep dep (see e.g. "W1-T529: a floor stand-down leaves the fix strike unspent" above) — that
+  // proves `budgetFloorStandDown` (lib/sweep.ts) classifies the error correctly, never that
+  // anything real produces one. Here, ONE real `fetchOpenPrsRest` call — mirroring the enumeration
+  // `buildOpenPrViews` runs earlier in the SAME tick, sharing the SAME pacer instance (module doc:
+  // "one instance threaded through every guarded site") — arms the floor from a real response, and
+  // the review lane's OWN guarded call (simulating whatever real `gh` call `postReview` makes)
+  // inherits that arm and throws for itself. Nothing in this test constructs
+  // `GhPaceFloorStandDownError` by hand.
+  const atFloor = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 20\r\nX-Ratelimit-Resource: core\r\n\r\n[]';
+  const { exec } = fakeGhExec([atFloor]);
+  const fetch: GhApiFetcher = (args, onRateLimit) => ghJson(args, onRateLimit, exec);
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+
+  // The enumeration's own guarded call — arms the floor for real off its own response.
+  paceGhEntry(pacer, () => false, () => fetchOpenPrsRest(OWNER, REPO, fetch));
+
+  const lp = w1t529LedgerPath();
+  const ungatedGreen = w1t529Pr({ reviewState: "none", checksState: "green" });
+  const attempts: OpenPrView[] = [];
+  const deps: SweepDeps = {
+    arm: () => {},
+    close: () => {},
+    dispatchFix: () => {},
+    escalate: () => {},
+    postReview: (p) => {
+      attempts.push(p);
+      // The review lane's own guarded gh call, sharing the SAME pacer the enumeration just armed —
+      // `wait()` throws GhPaceFloorStandDownError here, for real, before any `call` would run.
+      paceGhEntry(pacer, () => false, () => "posted");
+    },
+    ledgerPath: lp,
+    runId: "SWEEP-W1T1008",
+    now: () => W1T529_SWEEP_NOW,
+  };
+  const summary = await runSweep([ungatedGreen], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(attempts.length, 1, "the post-review lane was actually attempted this pass");
+
+  const lines = readLedgerLines(lp);
+  const disposed = lines.find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed?.acted, false, "sweep.ts's existing branch recognised the error and declined to credit it as acted");
+  assert.match(
+    String(disposed?.stand_down_reason ?? ""),
+    /gh budget at or below the stand-down floor \(core at 20\/5000\)/,
+    "the reading that armed the floor — read off THIS test's own real response, not hand-built — is the one sweep.ts's branch named",
+  );
+  assert.equal(
+    lines.filter((l) => l.step === "sweep.action_failed").length,
+    0,
+    "the branch this task's reader already has treats it as a stand-down, not a failure",
+  );
+  assert.equal(summary.actionsFailed, 0);
+});
