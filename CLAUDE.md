@@ -266,16 +266,34 @@ forensic detail, so the narrative does not need to live here.
   2026-08-14)*
 - **`rmd next-task-id` reads the LOCAL checkout — `git pull` first or it returns an id you filed
   minutes ago.** It DOES account for open PRs once current. **NO LOCK COVERS THE TRIAGE RUNG, WHICH
-  MINTS UNATTENDED WHILE YOU TYPE**: `state/triage.lock` excludes triage-against-triage only, and
+  MINTS UNATTENDED WHILE YOU TYPE**: `state/triage.lock` is triage-against-triage only and
   `state/task-id-reservations` is LOCAL, so neither sees another host's unpushed filing. TWICE a
-  double-mint has made `loadPlan` REFUSE `origin/main`, taking every plan-reading verb with it —
-  W1-T488 on 2026-08-14 (#1816/#1817; repair #1820 merged only behind a temporary `enforce_admins`
-  toggle) and **W1-T533+W1-T534 on 2026-08-16, repaired by RENUMBERING the loser to W1-T911/W1-T912
-  (#1964)**. **AND `refs/rmd-id/` RESERVATION (W1-T509) DOES NOT CLOSE IT** — `reserveTaskIdRemote`
-  has ONE call site, the triage mint, so a hand-filed shard bypasses it and the second collision
-  happened WITH the allocator live. Sweep `refs/rmd-id/*` alongside shards and open PRs — only that
-  sees a RESERVED-BUT-UNFILED id (531/532 were) — then re-sweep on a fresh fetch immediately before
-  pushing. *(#1388: returned W1-T379 right after #1388 filed it, true max 380)*
+  double-mint made `loadPlan` REFUSE `origin/main`, taking every plan-reading verb with it — W1-T488
+  (#1816/#1817; repair #1820 merged only behind a temporary `enforce_admins` toggle) and
+  W1-T533+W1-T534, repaired by RENUMBERING the loser to W1-T911/W1-T912 (#1964). Sweep
+  `refs/rmd-id/*` alongside shards and open PRs — only that sees a RESERVED-BUT-UNFILED id (531/532
+  were) — then re-sweep on a fresh fetch immediately before pushing. *(#1388: returned W1-T379 right
+  after #1388 filed it, true max 380)*
+- **Hand-mint with the PLAIN refspec — `git push origin <orphan-sha>:refs/rmd-id/<id>` — never `+`
+  and never `--force-with-lease`: `+` SILENTLY DEFEATS THE LEASE, so a push that looks gated has no
+  gate at all.** The CAS is a property of the PAYLOAD, not the namespace: an orphan `commit-tree`
+  over the empty tree with no `-p` gives every writer a unique sha, so a second push is structurally
+  a non-fast-forward — the form `gitRemoteRefReserver.attempt` (`src/lib/task-id-reservation.ts`)
+  already uses, and this rule only stops hand-mints diverging from it. `reserveTaskIdRemote` has ONE
+  call site, the triage mint, so a hand-filed shard bypasses it entirely (W1-T509 does NOT close the
+  double-mint above; the second collision happened with it live). MEASURED on the real remote, one
+  probe ref: plain onto an ABSENT ref → rc=0 `* [new reference]`; plain onto an EXISTING ref holding
+  an unrelated orphan → **rc=1 `! [rejected] (non-fast-forward)`**; `+` → rc=0 `(forced update)`; a
+  deliberately WRONG `--force-with-lease` combined with `+` → rc=0, the lease ignored outright;
+  CONTROL, that identical lease WITHOUT `+` → `! [rejected] (stale info)`. W1-T509's header never
+  tested `+`, and `+` is the case that clobbers. Read the EXIT CODE into a variable — non-zero means
+  the id is TAKEN; renumber, never re-push.
+- **A contested reservation is never deleted and an unfiled one is never free — the
+  LOSER of a race renumbers.** A reserved id with no shard anywhere is HELD, not abandoned; deleting
+  the ref re-opens the race it settled, and reclaiming one is an operator decision. *(2026-08-18: two
+  hosts minted `refs/rmd-id/W1-T967` 5.76s apart; the first read back its own nonce, and a re-read
+  after the PR opened returned the other host's commit, because it carried `+`. The loser could name
+  the winner only because the message embeds pid+host+time — the ref carries no identity field.)*
 - **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
   `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
   Decomposing a predicate from its own falsifier is not a real decomposition. **And NEVER file an
