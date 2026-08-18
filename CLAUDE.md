@@ -26,24 +26,12 @@ forensic detail, so the narrative does not need to live here.
 
 ## Before you push
 
-- **Run the diff-coverage gate LOCALLY before pushing any PR that adds source lines.** It runs in
-  seconds; `coverage-ratchet` blocked three consecutive PRs on first push, each costing a full
-  amend + force-push + CI round-trip.
-  `node --test --experimental-test-coverage --enable-source-maps --test-reporter=lcov --test-reporter-destination=/tmp/x.lcov --import tsx --import ./test/setup/tmp-hygiene.ts <touched test files>`
-  then `node scripts/diff-coverage.mjs --lcov /tmp/x.lcov --diff <(git diff --cached origin/main -- <touched src files>)`.
-  COMMIT FIRST and prefer `git diff origin/main...HEAD` over `--cached` — the staged form only
-  agrees with the same-tree rule below ("Coverage traps") when everything is staged. *(#768, #773, #777)*
-- **A local lcov is not predictive in EITHER direction — calibrate it before trusting a local block
-  or a local pass.** CI builds its lcov from the full suite and reaches paths a scoped run never
-  does (one local run flagged 13 lines where CI flagged 3; it also cannot prove absence). Calibrate
-  by running `scripts/diff-coverage.mjs` with your lcov against a recently-merged, CI-green commit
-  (`git show <sha> -- src/… > /tmp/x.diff`). If that blocks too, your lcov under-reports and a
-  local block means "investigate", not "stop". **And never QUOTE a coverage percentage from a local
-  run** — carried figures must come from CI's own logs: one local attempt produced a 2.06pt spread
-  on a static tree against CI's ~0.14pt, another measured the same after-tree twice and reported it
-  as a before/after delta. The local instrument decides "investigate vs proceed"; CI's log is the
-  only citable number.
-  *(#981; #973/#975 both blocked locally yet merged green; local-spread instances 2026-08-14)*
+- **Run the shipped local gate before your FIRST push, not every commit.**
+  `rmd preflight --ci-parity` (W1-T294, `src/lib/ci-parity.ts`) shells CI's OWN commands, one
+  entry per `.github/workflows/ci.yml` job -- its `ci` entry runs `npm run test:ci`, the SAME
+  full-suite command the coverage-ratchet job runs, so a green run is the real signal, not a
+  scoped approximation. Run the gate itself, never a proxy for what it does -- the next local
+  check this repo adds inherits this rule too. *(W1-T294, W1-T338)*
 - **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
   each follow-up commit.** `bodyContradictsDiff` (`src/lib/review.ts`, W1-T274) OPENS THE DIFF and
   FAILS the PR — MEASURED 2026-08-12: #1685 refused with *"body contradicts its own diff: claimed

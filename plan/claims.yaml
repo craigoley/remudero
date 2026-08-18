@@ -120,6 +120,22 @@
   plan_section: "CLAUDE.md#writing-proofs-and-acceptance-criteria"
   assertion: 'node --test --import tsx --import ./test/setup/tmp-hygiene.ts --test-name-pattern "ACCEPTANCE #1: check-proof reports the SAME no-match verdict" test/check-proof-executor-parity.test.ts'
 
+# Added by W1-T986 (fb-1785780032614-be23bf): CLAUDE.md's "Before you push" section prescribed a
+# hand-rolled scoped-lcov + `git diff --cached` recipe instead of naming the shipped single entry
+# point (`rmd preflight --ci-parity`, W1-T294) that shells CI's own commands -- the documented
+# recipe diverged from ci.yml in coverage scope and diff base, and was measured reporting
+# `diff-coverage: OK` over zero added lines. This claim is bidirectional so the correction cannot
+# silently drift back in EITHER direction: red if CLAUDE.md stops naming the parity invocation,
+# and red if the hand-rolled `diff-coverage.mjs --lcov` recipe reappears as the prescribed local
+# check.
+
+- id: local-gate-invocation-parity
+  claim: "CLAUDE.md's 'Before you push' section documents the shipped `rmd preflight --ci-parity`
+    entry point as the local pre-push check -- not a hand-rolled scoped-lcov + `git diff --cached`
+    recipe that approximates CI rather than running it."
+  plan_section: "CLAUDE.md#before-you-push"
+  assertion: 'grep -qF "preflight --ci-parity" CLAUDE.md && ! grep -qE "diff-coverage\.mjs --lcov [^ ]+ --diff" CLAUDE.md'
+
 # Added by W1-T409 (the offline half of W1-T392's split): MASTER-PLAN.md's "## SHIPPED log"
 # section and its not-shipped prose ("not shipped"/"unbuilt"/"did not ship") are two lists a
 # machine can cross offline. W1-T149 shipped (PR #349) but the SHIPPED log entry was never
