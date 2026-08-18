@@ -1,5 +1,5 @@
 - id: W1-T992
-  title: "RULING — REMUDERO IS BRING-YOUR-OWN-SUBSCRIPTION: the operator hosts compute, the customer brings the intelligence, each customer on their own VM on the operator's Azure, pasting their own Claude Code OAuth token and their own GitHub PAT into that VM so the operator never holds either credential in transit, billed on compute rather than inference — record it in DECISIONS.md and mark §6A's hosted-Pro framing superseded without deleting it"
+  title: "RULING — REMUDERO IS BRING-YOUR-OWN-SUBSCRIPTION: the operator hosts compute, the customer brings the intelligence, each customer on their own VM on the operator's Azure, pasting their own Claude Code OAuth token and their own GitHub PAT into that VM so the operator never holds either credential in transit, billed on compute rather than inference — record it in DECISIONS.md and mark §6's hosted-Pro framing superseded without deleting it"
   repo: remudero
   depends_on: []
   type: implement
@@ -27,19 +27,22 @@
         turn budget per task is what makes a single subscription carry a fleet, and it is the seam
         through which a customer later augments with cheap open models.
 
-    (2) WHAT IT SUPERSEDES. MASTER-PLAN §6's open-core stance lists, verbatim: "Pro candidates
+    (2) WHAT IT SUPERSEDES. MASTER-PLAN §6's open-core stance (the "Open-core stance (D-8)" bullet) lists five Pro
+    candidates — quoted here with the source's bold markers dropped and its trailing parenthetical
+    ("(private cross-project knowledge, §Self-improvement)") elided: "Pro candidates
     (post-traction, not before WS-6): hosted relay/sync for mobile push without self-managed tailnet,
     multi-project portfolio views, team/multi-operator seats, hosted question inbox, hosted org-brain
     sync". THAT LIST DESCRIBES A DIFFERENT SHAPE THAN PER-CUSTOMER VMs — it is hosted multi-operator
     convenience layered on one operator's infrastructure; this ruling is one isolated VM per customer
     carrying the customer's own credential. THE LIST IS SUPERSEDED AS THE COMMERCIAL SHAPE AND IS NOT
     DELETED. Standing rule 21 governs amendment, and a record that erases what it replaces destroys
-    the reader's ability to see the change; §6A is CITED and MARKED, never removed.
+    the reader's ability to see the change; §6 is CITED and MARKED, never removed.
 
     (3) IT SETTLES A QUESTION A RECON COULD NOT. A 2026-08-18 recon established that the three-stage
     arc is already recorded in four places, and flagged exactly one thing the documents could not
     resolve: "whether the operator considers §6A's Pro list the same thing as 'others use and pay'."
-    THIS RULING IS THAT ANSWER, AND THE ANSWER IS NO.
+    THIS RULING IS THAT ANSWER, AND THE ANSWER IS NO. (That quotation is left verbatim; the list it
+    names actually sits in §6, not §6A — see the note's section-citation correction.)
 
     (4) IT REFRAMES `billing_mode` FROM UNREAD FIELD TO NAMED AXIS. Derived in `src/lib/env.ts` as
     engaged ? "api" : "subscription", written on 1,288 rows across 8 steps, with 0 sites comparing or
@@ -91,9 +94,9 @@
     machine auto-choose provenance marker that appears 48 times elsewhere in that file; this decision
     is the operator's and must not be stamped as a session's.
 
-    (ii) §6A IS MARKED, NOT EDITED AWAY. MASTER-PLAN.md gains a pointer at the open-core stance saying
+    (ii) §6 IS MARKED, NOT EDITED AWAY. MASTER-PLAN.md gains a pointer at the open-core stance saying
     the Pro-candidates list is superseded as the commercial shape by this ruling, naming the DECISIONS
-    entry. The list text stays. A reader arriving at §6A must not be able to read it as current
+    entry. The list text stays. A reader arriving at §6 must not be able to read it as current
     without meeting the pointer.
 
     (iii) THE CONSISTENCY GATE IS WHY test/licence-boundary.test.ts IS DECLARED. That suite exists to
@@ -133,8 +136,27 @@
     tasks are already verify:human (9%), so this joins a queue only the operator can drain. IT WILL
     NOT BE PICKED UP BY THE DRAIN.
 
+    SECTION-CITATION CORRECTION, MADE UNDER REVIEW AND RECORDED SO IT IS NOT REVERTED. This shard
+    first cited the superseded list as §6A. IT IS IN §6. Measured on this branch: MASTER-PLAN.md
+    carries BOTH `## 6. Open-source packaging` and `## 6A. Open-source governance & the commercial
+    boundary`, and the "Open-core stance (D-8)" bullet holding "Pro candidates (post-traction, not
+    before WS-6)" sits under §6 — one hit for that phrase in the file, and the nearest preceding
+    heading is §6. The title, design (ii) and this note now say §6; the ONE remaining §6A is inside a
+    verbatim quotation of the earlier recon, left unaltered because rewriting a quotation to fix its
+    error is worse than annotating it. THIS MATTERED RATHER THAN BEING COSMETIC: design (ii) tells a
+    builder where to put the supersession pointer, and pointing it at §6A would have left §6's list —
+    the one this ruling supersedes — unmarked, which is precisely the failure the shard exists to
+    prevent.
+
+    THE QUOTE IS NO LONGER CLAIMED AS VERBATIM, FOR THE SAME REASON. Rationale (2) said "verbatim"
+    over a string that drops the source's bold markers around `**hosted org-brain sync**` and elides
+    its trailing "(private cross-project knowledge, §Self-improvement)" — measured: zero verbatim
+    matches for the quoted string in MASTER-PLAN.md, against a control of one hit for "Pro
+    candidates". The framing now names both departures instead of asserting an identity that does not
+    hold.
+
     FILES ARE TIGHT AND OWN PATH IS ABSENT. DECISIONS.md is the durable home. MASTER-PLAN.md carries
-    the supersession pointer, because the ruling's whole risk is a reader treating §6A as current.
+    the supersession pointer, because the ruling's whole risk is a reader treating §6 as current.
     test/licence-boundary.test.ts is the existing consistency gate over exactly these two files. No
     src/ path is declared because nothing is wired — design (v).
 
