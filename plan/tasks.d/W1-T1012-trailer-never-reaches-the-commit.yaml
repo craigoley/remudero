@@ -1,0 +1,158 @@
+- id: W1-T1012
+  title: "THE MERGE-CREDIT TRAILER IS WRITTEN TO THE PR BODY AND NEVER TO THE COMMIT, SO THE SQUASH DISCARDS IT — 373 of 538 trailered merges (69%) reach origin/main carrying no Remudero-Task line at all, and `rmd autonomy-rate` mines its whole merge corpus from exactly that record: write the trailer into the final commit at the harness, for implementation runs only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THE BRIEFED PREMISE DOES NOT SURVIVE MEASUREMENT AND THE CORRECTION IS THE FIRST CLAUSE. #2117
+    was cited as carrying NEITHER a `Remudero-Task:` trailer NOR a `(W1-T978)` subject suffix. It
+    carries the trailer: its stored body holds exactly one anchored `^Remudero-Task: W1-T978$` line
+    (control, the same regex for W1-T203 on that body: 0), and its head ref is
+    `run-W1-T978-1787031092026`, the exact `run-<id>-<epoch>` shape `findMergedByHeadBranch` credits.
+    BOTH credit paths fired. What is true of #2117 is narrower and, it turns out, general: the
+    SQUASH COMMIT it merged as carries no `W1-T` token anywhere — zero trailer lines, zero subject
+    suffix — while the PR body it was composed beside carries one.
+
+    (1) THE POPULATION, RE-DERIVED AT origin/main 39efeddb OVER ALL 1,603 MERGED PRs AND ALL 1,638
+    COMMITS ON THE REF. Anchored `^Remudero-Task:\s*W1-T\d+\s*$`, multiline, run against both
+    records: 538 merged PR BODIES carry it (520 distinct ids); 170 COMMITS on origin/main carry it
+    (162 distinct ids). THREE HUNDRED AND SEVENTY-THREE MERGED PRs CARRY THE TRAILER IN THE BODY AND
+    NOT IN THE COMMIT — 69%. Restricted to fleet-built merges (the commit's own
+    `Co-authored-by: remudero-worker` line, a marker independent of every credit surface): 143
+    fleet-built merges, 88 with a body trailer, 27 with a commit trailer, 61 lost at the squash —
+    the same 69%. This is not a truncation and not a recent regression: retention reads 75/671 in
+    2026-07 and 95/967 in 2026-08 on the commit side against 261/659 and 277/944 on the body side.
+
+    (2) THE MECHANISM, AND IT IS ORDINARY. `src/lib/compaction.ts` tells the worker where the trailer
+    goes, in one line: "Include this exact trailer as the LAST line of the PR body:
+    Remudero-Task: <id>". THE PR BODY, AND ONLY THE PR BODY. The commit contract it sits beside,
+    `commitMessageContractLines()` in the same module, governs the SUBJECT — Conventional Commits,
+    the 100-character header, the lower-case rule — and its worked example carries the id as a
+    parenthesised suffix, `feat(serve): add fuzzy search to the board (W1-T157)`, which is a
+    DIFFERENT convention and is nowhere required. The body is then authored or repaired after the
+    commit already exists, and every merge in this repo runs through
+    `gh pr merge --squash` with no `--subject` and no `--body` (`src/run-task.ts`, `src/lib/worker.ts`,
+    `src/lib/feedback-landing.ts` — three call sites, none supplying either flag), so GitHub composes
+    the squash message from the branch's commits — the squash keeps the commit and discards the body.
+    `commitMessageContractLines` says as much in its own prose — "branch commits never reach main" —
+    but draws the opposite conclusion from it, treating the discarded half as the safe one.
+
+    (3) THE CONSUMER THIS BIASES IS SHIPPED, WIRED AND NAMED. `zeroTouchMergeRate` (`src/lib/autonomy.ts`,
+    W1-T437) is the QUANTITY figure — "what fraction of shipped changes went out with ZERO human
+    steering". Its corpus is stated in its own module doc as "every commit on the target ref whose
+    body carries an anchored `Remudero-Task: <id>` trailer", mined by `parseTrailerMerges` over
+    `defaultVerdictCalibrationGitLog`'s `git log --format=…%b… origin/main`. THAT IS THE 170, NOT THE
+    538. The reader is `rmd autonomy-rate` (`src/run-task.ts`), a live verb whose help text promises a
+    rate "over every Remudero-Task-trailer-bearing merge on the read git history". It is computed over
+    31% of its own population and prints no coverage figure that would reveal it. The module is
+    scrupulous about the OTHER corpus — it refuses to report a rate at all when the ledger archives
+    are missing, naming a 3.1x undercount as the reason — and then reads its merge corpus from the
+    record that loses two thirds of its rows.
+
+    (4) THE DISPATCHER IS NOT BIASED, AND SAYING SO IS PART OF THE SCOPE. `deriveStatus`
+    (`src/lib/status.ts`) resolves credit at rung (c) from "a merged PR whose BODY carries the trailer",
+    ownership-asserted against the task's own `run-<id>-*` head, plus a head-branch rung — the GitHub
+    record, not the git one. So `projectPlan`, `isDispatchEligible`'s already-merged predicate and the
+    board read the 538, and no task can be re-dispatched because of this. `verdict-calibration.ts` reads
+    the same git dump but joins on sha and never on the trailer (`Remudero-Task` occurrences: 0 there
+    against 5 in autonomy.ts). ONE CONSUMER IS AFFECTED. The claim that a rebuilt task is the headline
+    was tested and is not supported.
+
+    (5) WHAT IT COSTS TO MEASURE FROM THE WRONG RECORD, OVER THE LEDGER UNION (666 gz + 6 plain + the
+    live file; per-form `verdict` match counts 179710 / 1283 / 200 as the coverage control, every form
+    non-zero; live file read directly, last row 2026-08-18T22:03:05Z). 613 distinct costed runs,
+    $3,631.58, 404 tasks. Against the full five-surface credit union, 37 tasks holding $196.47 have no
+    credit anywhere — and they are dominated by pre-convention ids (W3-T3, W2-T3, W1-T20c, W1-T54b),
+    not by today's lane. Against the GIT-ONLY union — the record `autonomy-rate` actually reads — 78
+    tasks holding $543.98 read as uncredited. THE CORPUS CHOICE ALONE ACCOUNTS FOR $347.51 OF APPARENT
+    WASTE THAT IS NOT WASTE. The briefed figure of $201.68 across 34 tasks is confirmed in substance —
+    37 tasks and $196.47 here — but its 18% share is not: the denominator that yields 18% is roughly
+    $1,120, and total costed spend over the retained union is $3,631.58, so the honest share is 5.4%.
+
+    (6) THE FIX IS AT THE WRITE, AND THE WRITE IS HARNESS-SIDE. Both implement-lane PRs are opened by
+    `ghPrCreateFillCommand` (`src/run-task.ts`), which the harness calls with
+    `lastCommitSubject(worktreePath)` — it already READS the worker's final commit at exactly the moment
+    the task id is in hand. Appending the trailer to that commit there makes the credit survive the
+    squash by construction, rather than by asking a worker to remember a second place to put it.
+    `commitMessageContractLines()` is updated in the same change because that module's own doc says the
+    two literals are kept in sync deliberately.
+
+    (7) AND THE PREDICATE MUST NOT BE "ALWAYS". A plan-FILING PR must carry NO trailer — `plan-pr-emitter.ts`
+    states it on its own `taskId` option, "OMIT for a plan-FILING PR … no argument means no trailer, never
+    a wrong one", and W1-T1004 (#2143, merged) exists because that rule was violated and seven records were
+    wrongly credited. THIS TASK IS THAT ONE'S MIRROR AND DOES NOT RE-FILE IT: W1-T1004 is filings crediting
+    work they did not do; this is implementations crediting nothing. The two implement/retro call sites are
+    already the non-filing ones — the filing lanes open their PRs through the emitter, not through this
+    builder — so the split is structural rather than a new predicate, and criterion 2 pins it.
+  acceptance:
+    - claim: "an implementation run's final commit carries the task trailer before the PR is opened"
+      proof: "unit test: W1-T1012: an implementation run commits the task trailer before the pr opens"
+    - claim: "a plan filing run's commit is left with no task trailer"
+      proof: "unit test: W1-T1012: a plan filing run commits no task trailer"
+    - claim: "a commit that already carries the trailer is not given a second one"
+      proof: "unit test: W1-T1012: a commit that already carries the trailer is left alone"
+    - claim: "the worker contract names the commit and not only the PR body as the trailer's home"
+      proof: "unit test: W1-T1012: the worker contract names the commit as the trailer home"
+    - claim: "the squash discards the record the trailer was written into"
+      proof: "grep: the squash keeps the commit and discards the body in plan/tasks.d/W1-T1012-trailer-never-reaches-the-commit.yaml"
+  risk: high
+  origin: "oper#trailer-never-reaches-the-commit-2026-08-18"
+  plan_refs: ["W1-T1004", "W1-T437", "W1-T485", "W1-T327"]
+  files: [src/run-task.ts, src/lib/compaction.ts, test/commit-trailer-survives-squash.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL
+    LINE inside rationale (2), is not on line 2 of the file, and reads 0 across the entire tree at the
+    merge base — so it discriminates head from base and cannot be downgraded to `executed_stale`.
+
+    src/run-task.ts MUST BE DECLARED AND THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING. It is
+    declared by 223 of 362 shards, so this task serialises against most of the pool under
+    `overlappingPaths`. It is unavoidable: `ghPrCreateFillCommand` is defined there and both
+    implement-lane executors are there (word-bounded counts at 39efeddb — run-task.ts 8, git-push.ts 1
+    and that one is a doc mention). src/lib/compaction.ts is declared by 12 shards and holds both the
+    body-trailer instruction and `commitMessageContractLines`, the two literals this change keeps in
+    sync. CONTROL: an absent path reads 0 shards.
+
+    src/lib/autonomy.ts IS NOT DECLARED, DELIBERATELY, AND THIS IS THE SCOPE LINE. It is the biased
+    consumer and would have been cheap (4 shards), but a write-side fix cannot repair the 373 merges
+    already on the ref, and repairing them is reconciliation — explicitly out of scope. Making
+    `zeroTouchMergeRate` report its own corpus completeness is a real and separate task; it is NOT filed
+    here because one shard spanning the write and the reader fails Rule 19's span, and because the
+    honest sequencing is that the record be correct before a figure is drawn from it.
+
+    THE CONSOLE IS THE DOWNSTREAM CONSUMER AND THIS SHOULD LAND FIRST. W1-T437's own title puts the
+    zero-touch rate "on the board and in retro". No console statistics are proposed here: a board that
+    renders a rate computed over 31% of its population displays a wrong number beautifully, and the fix
+    for that is upstream of the board.
+
+    NO MOUNT, CAP OR THRESHOLD IS TOUCHED. The build lane runs one arm and there is nothing to compare.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (`src/lib/task-linter.ts`) exempts only risk high, and `subsystemsOf` derives subsystems from the
+    acceptance text as well as from `files:`; the criteria name a commit write, a prompt contract and a
+    filing/implementation split.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form. Each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted verbatim from test/commit-message.test.ts that matched one; each is
+    plain prose under 100 characters, with no comma, no `; ` and no regex metacharacter, since a bare
+    title is compiled through `escapeRegExp` and matched literally. The fifth is doc-shaped and takes a
+    `grep:` with an explicit path.
+
+    ID PROVENANCE — GIT SURFACES FIRST, GITHUB LAST AND SERIAL, `/rate_limit` NEVER CALLED. W1-T1012
+    read 0 on all four surfaces: `refs/rmd-id/*` (104 enumerated; the three out-of-range sentinel
+    reservations were excluded from the max by range, not by name), shard FILENAMES (max W1-T1011 —
+    the filename IS the existence test), ids mentioned under plan/ (advisory only; its own control is
+    that it returns a documented six-digit token from W1-T509's prose that is not an id at all), and
+    the open-PR titles, heads and file lists. THE OPEN-PR SET WAS READ, NOT UNREAD: two open pull
+    requests were enumerated (#2159, #2160) and both file lists fetched; their ids are W1-T1005 and
+    W1-T1009, both below the frontier. THE REFS WERE RE-SWEPT IMMEDIATELY BEFORE PUSHING because a
+    lane is minting and two collisions happened in two sessions.
+    THE GATE PROOF IS GENUINE, NOT AN AUTH FAILURE. Plain refspec, no `+` and no lease. Free id:
+    rc=0, `* [new reference] 39efeddb… -> refs/rmd-id/W1-T1012`. The IDENTICAL refspec at the taken
+    refs/rmd-id/W1-T1011: rc=1, `! [rejected] … (non-fast-forward)`, that ref still 2d5b83f8…, and
+    `could not read Username` occurrences: 0 on BOTH pushes.
