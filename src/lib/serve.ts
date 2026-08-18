@@ -4630,10 +4630,16 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   // W1-T333: `root` defaults to the SAME fleetControlRoot every other console write surface
   // already resolves `state/` against (daemonHealthDeps.diskPath above follows the identical
   // "assembler wires the real root, a test injects its own" split).
+  //
+  // W1-T997: `accountFilePath` is likewise RESOLVED here rather than left undefined — see
+  // {@link resolveAccountFilePath}'s own doc for the precedence and for why an install that sets
+  // neither an explicit override nor RMD_ACCOUNT_FILE_PATH renders byte-identical to before this
+  // task (the console still reads `readAccountUsageFile`'s own `homedir()` default).
   const accountUsageDeps: AccountUsageDeps = {
     ...deps.accountUsage,
     ledgerPath: deps.ledgerPath,
     root: deps.accountUsage?.root ?? deps.fleetControlRoot,
+    accountFilePath: resolveAccountFilePath(deps.accountUsage?.accountFilePath),
   };
 
   const routes = [
@@ -4910,6 +4916,48 @@ export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = proce
  */
 export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = process.env): string {
   return resolveServeHosts(rest, env)[0] as string;
+}
+
+/**
+ * W1-T997: the env var an operator sets to point `GET /v1/account-usage` at a readable copy of
+ * `~/.claude.json` — see {@link resolveAccountFilePath}'s own doc for why this exists at all.
+ */
+export const ACCOUNT_FILE_PATH_ENV = "RMD_ACCOUNT_FILE_PATH";
+
+/**
+ * W1-T997: resolve the path `GET /v1/account-usage` reads for the console's usage panel.
+ *
+ * THE DEFECT THIS CLOSES. `readAccountUsageFile` (account-usage.ts) defaults to
+ * `join(homedir(), ".claude.json")`, and `AccountUsageDeps.accountFilePath` already exists to
+ * override that default — but nothing upstream of {@link buildServeRoutes} ever supplied a
+ * value, so every request resolved under the SERVE process's own home, which is where
+ * `remudero-serve`'s container mounts `~/.claude/` (a directory) but not the sibling
+ * `~/.claude.json` FILE that sits beside it outside every mount. The panel therefore always read
+ * `unreadable`, even though the identical file exists, fresh, in `remudero-daemon`.
+ *
+ * SAME PRECEDENCE SHAPE {@link resolveServeHosts} already uses for `--host` — explicit override
+ * first, then an env var, then the default — minus the CLI-flag and config-file tiers: argv
+ * parsing and `config.json` reading both live in run-task.ts's `serveCommand`, which this task
+ * (W1-T997) deliberately does not touch (raised to `risk: high` specifically so the reader and
+ * this wiring stay one shard rather than splitting a supplier from nothing to supply). An
+ * explicit caller override (`ServeDeps.accountUsage.accountFilePath` — the SAME "an assembler
+ * wires the real thing, a test injects a fake" seam every other optional field on that type
+ * already follows) stands in for the flag tier; {@link ACCOUNT_FILE_PATH_ENV} stands in for the
+ * config tier an operator can set without a code or CLI change at all. Neither set ⇒ `undefined`,
+ * which is exactly what flowed through before this task — `readAccountUsageFile`'s OWN default
+ * parameter resolves it, so an install that sets neither renders BYTE-IDENTICAL to today.
+ *
+ * CONTAINMENT (design note iv): this only ever WIDENS what the route may READ, never what it may
+ * write — `readAccountUsageFile` opens the path with `readFileSync` and projects a handful of
+ * scalar fields out of it (see that function's own doc); nothing here grants the console write
+ * access to the operator's Claude Code state or serializes any key beyond the ones already
+ * named there.
+ */
+export function resolveAccountFilePath(
+  explicit: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  return explicit ?? env[ACCOUNT_FILE_PATH_ENV];
 }
 
 /**
