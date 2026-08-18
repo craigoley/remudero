@@ -25,5 +25,6 @@ raw: "LOCAL GATE INVOCATION MUST BE BYTE-IDENTICAL TO CI's — a session's own
   matches CI's, this is a documentation gap rather than a tooling one."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
