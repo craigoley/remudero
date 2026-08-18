@@ -1,0 +1,182 @@
+- id: W1-T1014
+  title: "TWO PRs WITH NO PATH OVERLAP CAN EACH BE GREEN AND JOINTLY RED, AND NOTHING IN THE FLEET LOOKS FOR IT — #2155 added a test asserting a contract #2157 replaced eleven minutes later, neither could have run the other's evidence, six PRs inherited a red main for up to an hour with no escalation; MEASURE the three remedies and rule, do not let a shard pick one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-18/19 AT origin/main 6495ebe8 AND ON THE LIVE BRANCH PROTECTION. No
+    `/rate_limit` call was made.
+
+    (1) THE INSTANCE, WITH ITS TIMESTAMPS.
+      - #2155 (W1-T999) merged 21:39:02Z and ADDED `test/serve-board-pacer-wiring.test.ts`, whose
+        third case asserts `paceGhEntry`'s then-current contract: a rate-limited call is RETHROWN,
+        the board gateway marks `readFailed() === true`, and the NEXT call waits the pacer gap.
+      - #2157 (W1-T1007) merged 21:50:30Z and REPLACED exactly that contract. Its own doc states
+        it: a `rate_limit`-classified refusal "no longer just widens the gap for LATER calls and
+        rethrows THIS one: it retries THIS SAME call."
+      Eleven minutes and twenty-eight seconds apart. Both green on their own merge refs.
+
+    (2) NEITHER COULD HAVE CAUGHT IT, AND THAT IS THE POINT RATHER THAN AN EXCUSE.
+    #2157's base sha is 57479141 and `git cat-file -e 57479141:test/serve-board-pacer-wiring.test.ts`
+    FAILS — the test file did not exist in its base, so its CI never ran the assertion its change
+    inverts. #2155 could not have run #2157's change for the mirror reason. The conflict exists in
+    NO DIFF: it is a proposition about two diffs that were never composed before merge.
+
+    (3) THE BLAST RADIUS WAS MEASURED, NOT ESTIMATED. Six PRs (#2159, #2160, #2161, #2162, #2163,
+    #2164) each failed `ci` on EXACTLY ONE test — `# fail 1` in all six, the same test — for up to
+    an hour, with no escalation raised by anything. Two of the six (#2161, #2164) are plan-only:
+    their entire diff is one YAML shard and cannot reach a pacer, which is what identifies the
+    failure as base-caused rather than six independent defects. Repaired by #2167 (test-only).
+
+    (4) IT IS A FAMILY, NOT AN INSTANCE — THREE SIBLINGS, CITED AND NOT ABSORBED.
+      (i) `partitionByFileOverlap` (`src/lib/dispatch-overlap.ts`) serialises candidates purely on
+          DECLARED FILE PATHS via `overlappingPaths`. W1-T999 declares
+          `[src/run-task.ts, src/lib/serve.ts, test/serve-board-pacer-wiring.test.ts]`; W1-T1007
+          declares `[src/lib/open-prs-rest.ts, test/open-prs-rest.test.ts]`. ZERO overlap, declared
+          OR actual (#2155 touched 3 files, #2157 touched 3, intersection empty). The partitioner
+          would have admitted both to one batch — CORRECTLY, by its own contract. THIS SHARD DOES
+          NOT PROPOSE WIDENING IT; that is a design question and this task is a measurement.
+      (ii) W1-T985 files the overlap advisory that three of the four minting lanes never reach
+          (`triageCommandLocked`, `planCommand`, `approveCommand` score 0 for every advisory
+          symbol; the only reader is an operator typing `rmd next-task-id`). Even the advisory
+          that DOES exist for path overlap is unread on three lanes.
+      (iii) A PLAN-FILING PR's DIFF NEVER CONTAINS THE IMPLEMENTATION FILES IT DECLARES. A shard
+          declaring `src/lib/open-prs-rest.ts` ships a diff touching only `plan/tasks.d/*.yaml`.
+          So no reviewer of a filing PR — human or `judgeReview` — is looking at the code the task
+          will later change, and no path-based check can see the future collision at filing time.
+      THE COMMON SHAPE: every guard this repo owns reads ONE changeset. The defect is a relation
+      BETWEEN two changesets, and nothing computes that relation before either merges.
+  design: |
+    THE DELIVERABLE IS A MEASUREMENT AND A RULING, NOT A CHOICE MADE HERE. Three remedies are
+    recorded below with their measured cost. THIS SHARD RANKS NONE OF THEM.
+
+    (i) THE MEASUREMENT INPUTS, ALL RE-DERIVABLE.
+      - MERGE RATE, per UTC day on origin/main: 08-09=26, 08-10=29, 08-11=42, 08-12=86, 08-13=58,
+        08-14=71, 08-15=89, 08-16=73, 08-17=54, 08-18=63.
+      - INTER-MERGE INTERVAL over the last 200 merges (a 70.5-hour span): min 1s, p10 17s,
+        MEDIAN 775s, p90 3036s, max 15268s, mean 1275s. Heavily bursty — the p10 and the max
+        differ by four orders of magnitude, so a Poisson approximation understates the bad case.
+      - RE-VALIDATION WALL-CLOCK, max(completed) − min(started) across every check-run on a merged
+        PR head, deduped to the latest attempt per name, n=58: p50 754s, p75 919s, p90 1282s,
+        p95 1377s, max 3435s (#2150, the 44-minute Playwright stall — an outlier with a known,
+        separately-filed cause in W1-T1009).
+      - BILLABLE COST OF ONE RE-VALIDATION, summing job durations (median 23 check-runs per head),
+        billed ceil-per-job: p50 57 min, p90 73 min, max 85 min.
+      - CONCURRENTLY OPEN PRs, sampled every 10 minutes over 7 days (n=1008 samples, 300 PRs):
+        p50 1, p90 4, p99 9, max 12, mean 1.5.
+
+    (ii) THE DEADLOCK QUESTION, ANSWERED DIRECTLY: NOT A PERMANENT DEADLOCK, BUT A THROUGHPUT
+    CEILING THE FLEET HAS ALREADY EXCEEDED. Median re-validation (754s) sits at 0.97x the median
+    inter-merge interval (775s) — the boundary, essentially exactly. At the p90 window (1282s) the
+    ratio is 1.65x, and there a PR IS invalidated faster than it re-validates. THAT CASE IS NOT
+    HYPOTHETICAL: over the same 58 heads, 33 (57%) had at least one merge land on main DURING
+    their own check window, median 1, p90 3, max 5. It does not deadlock permanently only because
+    the merge process is bursty and leaves long quiet stretches (max observed gap 4.2 hours).
+    The binding consequence is the SERIALISED CEILING: under strict, merges become one per
+    re-validation window — 115/day at the p50 window, 67/day at the p90 window. Observed demand
+    reached 86, 71, 89 and 73 on four of the last eleven days, so the p90 ceiling is BELOW the
+    observed rate on 4 of 11 days. Any ruling that turns strict on is accepting that ceiling.
+
+    (iii) OPTION (a) — `required_status_checks_strict: true`. The operator ALREADY HAS THIS SETTING
+    AND IT IS OFF: the live protection on `main` reads `required_status_checks: {strict: false,
+    contexts: ["remudero-review","ci-gate"]}`. Turning it on costs ZERO engineering. It costs the
+    ceiling in (ii), plus one extra full re-validation per invalidated PR — at 57 observed
+    invalidations per 100 check windows and 57 billed CI-minutes each, roughly 32 extra CI-minutes
+    per merge at today's concurrency. IT WOULD HAVE CAUGHT THIS INCIDENT: #2157 would have been
+    forced to re-validate against a main containing #2155's test.
+
+    (iv) OPTION (b) — RE-RUN CI ON EVERY OPEN PR WHEN MAIN ADVANCES. Same arithmetic, different
+    bill, and it is entirely CI-minutes rather than latency: open PRs x merges/day x 57 billed
+    minutes. At p50 concurrency (1) that is ~3,600 CI-min/day (60 h); at p90 (4) ~14,400
+    (239 h); at p99 (9) ~32,300 (539 h); at the observed max (12) ~43,100 (718 h). It imposes NO
+    throughput ceiling and needs no protection change, but it DETECTS rather than PREVENTS — the
+    red arrives after the merge that caused it, so the six-PR blast radius still happens and is
+    merely surfaced sooner. Whether that is enough is part of the ruling.
+
+    (v) OPTION (c) — GITHUB'S MERGE QUEUE. THE PRIOR ANALYSIS DID NOT CONSIDER THIS AND IT IS THE
+    ONLY OPTION THAT TESTS THE COMPOSITION RATHER THAN RE-TESTING THE PARTS. The queue builds a
+    speculative branch (main + the queued PR, and optionally the ones ahead of it) and runs the
+    required checks THERE, so #2155 and #2157 would have been composed before either landed.
+    ADOPTION COST, MEASURED RATHER THAN ASSUMED, AND IT IS NOT SMALL:
+      - `merge_group` appears ZERO times across all workflow files (positive control: `pull_request`
+        appears in 12 of them). Every required workflow needs the trigger added. `.github/workflows/`
+        is `INSTRUMENT_SURFACE`, so that change must RIDE ALONE under Rule 25 — no `src/` beside it.
+      - THE BLOCKER IS `remudero-review`, AND IT IS SPECIFIC TO THIS REPO. It is a COMMIT STATUS
+        POSTed to `repos/<o>/<r>/statuses/<sha>` by this fleet's own review lane, which the sweep
+        runs over OPEN PRs. A merge-queue entry is not a PR and its speculative branch carries a
+        different sha, so `remudero-review` would never exist on the sha the queue is gating —
+        a required context that can never go green. Adopting the queue therefore requires either
+        re-homing the review onto the merge_group event or removing it from the required set, and
+        BOTH are rulings in their own right.
+      - No merge queue is configured today (`repository.mergeQueue` is null).
+
+    (vi) WHAT THIS TASK MUST NOT DO.
+      - IT MUST NOT PICK ONE. The operator asked for the arithmetic; three defensible options with
+        very different failure modes are exactly the shape that needs a ruling and not a default.
+      - IT MUST NOT PROPOSE WIDENING `partitionByFileOverlap` — rationale (4)(i). That partitioner
+        is CORRECT on its own contract and the change would be a design question, not a measurement.
+      - IT MUST NOT ABSORB W1-T985 OR THE FILING-DIFF GAP. They are cited as family members with
+        their own ids and their own scope; folding them in here would hide three separate decisions
+        behind one.
+  acceptance:
+    - claim: "the shard records the inter-merge interval and the re-validation wall-clock against each other, so the deadlock question is answered from data rather than asserted"
+      proof: "grep: sits at 0\\.97x the median in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+    - claim: "the shard records the serialised throughput ceiling turning strict on would impose, and how often observed demand already exceeds it"
+      proof: "grep: BELOW the observed rate on 4 of 11 days in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+    - claim: "the shard costs option (b) in CI-minutes at every measured concurrency rather than calling it expensive"
+      proof: "grep: 43,100 in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+    - claim: "the merge queue is named as a third option with the repo-specific reason it cannot simply be switched on"
+      proof: "grep: AND IT IS SPECIFIC TO THIS REPO in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+    - claim: "the three family members are cited with their own scope rather than folded into this task"
+      proof: "grep: IT MUST NOT ABSORB W1-T985 OR THE FILING-DIFF GAP in plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml"
+  risk: high
+  origin: "oper#cross-pr-semantic-staleness-2026-08-18"
+  plan_refs: ["W1-T999", "W1-T1007", "W1-T985", "W1-T1009", "W1-T983"]
+  files: [plan/tasks.d/W1-T1014-cross-pr-semantic-staleness.yaml]
+  status: queued
+  attempts: 0
+  note: |
+    THIS TASK IS SATISFIED BY ITS OWN TEXT ON MERGE, AND THAT IS DELIBERATE RATHER THAN A DODGE.
+    The operator asked for a measurement of the remedies, not for one to be built. The measurement
+    IS the deliverable, so all five criteria are `grep:` proofs against this file and pass the
+    moment it lands. WHAT REMAINS AFTER THAT IS THE RULING, and `verify: human` is the mechanism
+    that parks it for the operator: `isDispatchEligible` (`src/lib/drain.ts`) returns false at
+    `t.verify !== "auto"` before the linter is consulted, so no lane can pick this up and pick an
+    option on his behalf. This is the same shape as W1-T484 and it is named here so a later reader
+    does not mistake it for an unimplemented task.
+
+    `files:` DECLARES ONLY THIS SHARD, WHICH IS THE HONEST LIST. The deliverable is this text; no
+    `src/` file changes. That also keeps the task out of every other lane's way —
+    `partitionByFileOverlap` will serialise it against nothing, which is correct for a record.
+    NOTE THE IRONY AND DO NOT MISREAD IT: declaring a plan path means `rule15FilingViolation` would
+    fire if this were `verify: auto` with an out-of-plan-scope path beside it. It is neither.
+
+    THE MEASUREMENT IS RE-DERIVABLE AND THE COMMANDS ARE THE POINT, NOT THE NUMBERS.
+    Merge rate / interval: `TZ=UTC git log origin/main -200 --format=%ct`.
+    Re-validation wall-clock and billable minutes: `gh api repos/<o>/<r>/commits/<sha>/check-runs`
+    per merged head, deduped to the latest attempt per name (the same `group_by(name) |
+    max_by(started_at)` rule `.github/workflows/ci-gate.yml` already applies).
+    Concurrency: `gh api "repos/<o>/<r>/pulls?state=all"` and sample open intervals.
+    Live protection: `gh api repos/<o>/<r>/branches/main/protection`.
+    Merge queue: `gh api graphql -f query='{repository(...){mergeQueue{id}}}'`.
+    EVERY FIGURE HERE IS DATED 2026-08-18/19 AND WILL DRIFT; re-run the query rather than quoting
+    the number, exactly as the ledger-union rule requires.
+
+    ID PROVENANCE — THREE GIT SURFACES FIRST, THEN THE OPEN-PR SURFACE, ZERO `/rate_limit` CALLS.
+    W1-T1014 read 0 on all four at 6495ebe8: `refs/rmd-id/*`, shard FILENAMES under
+    `plan/tasks.d/` on origin/main, DECLARED ids under `plan/` on origin/main, and every open PR's
+    title and file list. Positive control: `refs/rmd-id/W1-T1013` reads 1. Mention-trap control:
+    `W1-T999999` reads 0 refs and 0 filenames while reading 13 plan MENTIONS — the existence test
+    is the filename and the anchored declaration, never a mention.
+    THE MINT USED THE PLAIN REFSPEC: orphan payload over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce t1014-1787094838-87931, no `+` and no lease:
+    PUSH RC=0, `* [new reference] 3db1c15826813ac4625525d4df7a5e196e85650f -> refs/rmd-id/W1-T1014`,
+    readback equal.
+    AND THE GATE PROOF WAS VERIFIED TO BE A REFUSAL RATHER THAN AN AUTH FAILURE. A plain push of a
+    fresh orphan at the already-taken `refs/rmd-id/W1-T1013` returned rc=1 with `! [rejected] …
+    (non-fast-forward)`, ZERO occurrences of `could not read Username`, and left that ref unchanged
+    at 39efeddb87f3c0180e35244b3891a1fc2edf14d7. An exit code of 128 with an auth message would
+    have proven nothing about the gate.
