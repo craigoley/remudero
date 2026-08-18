@@ -16586,11 +16586,26 @@ export async function sweepPostFixReverification(
     classes?: readonly FixClass[];
     pushEmptyCommit?: typeof gitPushEmptyCommit;
     isMergedByNumber?: (prNumber: number) => boolean;
+    readCiFailures?: (pr: OpenPrView) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
   } = {},
 ): Promise<PostFixReverificationSummary> {
   const classes = opts.classes ?? DEFAULT_FIX_CLASSES;
   const pushEmptyCommitImpl = opts.pushEmptyCommit ?? gitPushEmptyCommit;
   const isMergedByNumber = opts.isMergedByNumber ?? ((n) => ghLiveStateByNumber(owner, repo, n) === "MERGED");
+  // W1-T977: the rung's own read for a PR still pending — see `PostFixReverificationDeps.
+  // readCiFailures`'s own doc (sweep.ts) for why the shared `OpenPrView.ciFailures` snapshot is
+  // undefined for exactly this case. Mirrors the `fetchCiFailures` dep already wired below (line
+  // ~16332) for the ci-log fix mode: same `gh pr view --json statusCheckRollup` read, same
+  // `fetchCiFailures(owner, repo, ...)` leaf, just keyed off this rung's own PR argument instead
+  // of a bare `prUrl` string.
+  const readCiFailuresImpl =
+    opts.readCiFailures ??
+    ((pr: OpenPrView) => {
+      const v = ghJson(["pr", "view", pr.prUrl, "--json", "statusCheckRollup"]) as {
+        statusCheckRollup?: RollupCheck[];
+      };
+      return fetchCiFailures(owner, repo, v.statusCheckRollup);
+    });
 
   const mergedFixPrNumbers = new Set<number>();
   for (const fixPrNumber of new Set(classes.map((c) => c.fixPrNumber))) {
@@ -16620,6 +16635,7 @@ export async function sweepPostFixReverification(
         );
         return {};
       },
+      readCiFailures: readCiFailuresImpl,
       ledgerPath,
       runId,
       log,
