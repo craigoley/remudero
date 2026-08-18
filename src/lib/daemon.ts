@@ -1915,7 +1915,20 @@ export async function runDaemon(
     planForBatch: Plan,
     task: Task,
     result: RunResult,
+    isMerged: MergedSet,
   ): Promise<{ kind: "merged" } | { kind: "continue" } | { kind: "genuine_blocker"; detail: string }> => {
+    // W1-T976: `result.verdict` describes how THIS RUN ended, not whether the task's pull
+    // request is merged — a PR that merges gate-side (GitHub's required-status contract)
+    // AFTER the run stopped leaves `result.merged` false even though the task is done. The
+    // tick's already-resolved merged projection (`isMerged`, threaded in from `deps.refreshMerged()`
+    // — never a second GitHub lookup, see this function's own call site) answers the question
+    // block-reasoning is actually trying to ask. A task the projection credits as merged takes
+    // the SAME `{ kind: "merged" }` path a merged `result` always took; a genuinely unmerged task
+    // reaches `reasonAboutBlock` exactly as before.
+    if (!result.merged && isMerged(task.id)) {
+      merged.push(task.id);
+      return { kind: "merged" };
+    }
     if (!result.merged) {
       // BLOCK-REASONING (W1-T46, supersedes v1's blunt stop-on-block): reuse
       // W1-T7's transient/strike taxonomy + the plan's DAG (block-reason.ts)
@@ -3002,7 +3015,7 @@ export async function runDaemon(
     // bookkeeping (retry state, fix dispatch, independent-failure flag, merge) still runs.
     let blockedDetail: string | undefined;
     for (const { task, result } of toProcess) {
-      const outcome = await processDispatchResult(planForBatch, task, result);
+      const outcome = await processDispatchResult(planForBatch, task, result, isMerged);
       if (outcome.kind === "genuine_blocker" && blockedDetail === undefined) {
         blockedDetail = outcome.detail;
       }
