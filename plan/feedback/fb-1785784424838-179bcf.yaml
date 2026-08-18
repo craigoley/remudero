@@ -18,5 +18,20 @@ raw: "WORKER SPAWN DEPENDS ON THE ADMIN ACCOUNT'S NODE — a live worker process
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2135
+summary:
+  headline: Worker Node binary depends on admin account's nvm installation
+  what_happened: Live worker runs Node from /Users/craigoley/.nvm/... while entire
+    fleet runs as craigoleyagent. If admin home or nvm is lost, all worker
+    spawns fail with unclear error.
+  decision: Run recon to determine if migration to craigoleyagent account is needed.
+  options:
+    - label: Falsifying check first
+      consequence: Verify daemon uses craigoleyagent's PATH; close if cross-account
+        dependency is startup artifact
+    - label: Full recon and migration
+      consequence: Map path resolution method, test failure scenario, plan migration
+        to craigoleyagent-owned Node
+    - label: Accept current setup
+      consequence: Document admin-dependency constraint as known risk; schedule
+        quarterly validation checks
