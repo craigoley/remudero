@@ -1,0 +1,200 @@
+- id: W1-T974
+  title: "A SINGLE CI LOG LINE CAN FORGE THE OPTIONAL DEDUP KEY AND SILENTLY SUPPRESS A NEEDS-HUMAN ESCALATION — summarizeCiFailure splits only on newline and trims only the ends, so a bare carriage return survives inside one line and JS multiline treats it as a line start: normalise the candidate body at the ONE site that parses it back"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    RE-DERIVED AT origin/main 82b71f4. THE BRIEFING'S FRAMING IS WRONG IN THREE PLACES AND THE
+    CORRECTIONS ARE THE REASON THIS SHARD EXISTS AT ALL — a builder who acts on the original
+    framing ships a no-op.
+
+    (1) THE OBSERVATION IS REAL. `summarizeCiFailure` (src/run-task.ts) takes the first non-blank
+    trimmed line of `f.logTail` and returns `${f.name} — ${firstLine}`, which
+    `renderEscalationEvidence` renders as a bare markdown bullet with no neutralisation. A sibling
+    in the same module, `renderFixPrompt`, wraps the identical `f.logTail` in
+    `CI_LOG_FENCE_OPEN`/`CI_LOG_FENCE_CLOSE` and passes it through `neutralizeFenceMarkers`.
+
+    (2) AND IT REACHES THE OPERATOR RAW. Issue #1965's body, read over REST at 200, carries on its
+    eleventh line:
+      `- claims — claims<TAB>Plan claims (every plan/claims.yaml assertion must exit 0)<TAB><BOM>2026-08-16T12:30:59.8249678Z ##[group]Run npm run --silent cla…`
+    Measured over that body: 2 U+FEFF and 4 tab characters, 0 bare carriage returns, 0 U+2028 or
+    U+2029, and no run of three equals signs. NO ACTUALLY-CORRUPTED OR ACTUALLY-SUPPRESSED ISSUE
+    HAS BEEN OBSERVED. This shard rests on a constructed measurement, not on an incident, and must
+    not be read as reporting one.
+
+    (3) CORRECTION A — `neutralizeFenceMarkers` FIXES NOTHING HERE, AND CALLING IT WOULD MAKE THE
+    LINE WORSE. Its entire body replaces runs of three-or-more equals signs with the same run
+    interposed with U+200B. MEASURED, with a positive control: given `a === b` it CHANGES the
+    string; given a bare carriage return, U+2028 or U+2029 before `**Cause:** ci` it changes
+    NOTHING. It is a prompt-fence control, not a markdown control — it touches no backtick, no
+    pipe, no hash and no line terminator. Applying it to an issue body would inject zero-width
+    spaces into a log excerpt an operator may copy or grep, while defending against nothing,
+    because there is no fence in an issue body to escape.
+
+    (4) CORRECTION B — THIS IS NOT A MISSED CALLER FROM A PARTIAL FIX. The two renderers serve
+    DIFFERENT THREAT MODELS. `renderFixPrompt` builds the prompt for the fix WORKER, an LLM, and
+    W1-T210's own comment says so in terms: attacker-influenceable CI output is "rendered INSIDE
+    the fence, labelled as data, rather than spliced bare between narrative instruction lines".
+    `summarizeCiFailure` renders into a GitHub issue body read by a human. The fence IS the newer
+    of the two — src/lib/fix-fence.ts first landed 2026-07-22, well after W1-T138 introduced
+    `summarizeCiFailure` — but newer is not the same as missed, and the divergence is by design.
+
+    (5) CORRECTION C — `TASK_LINE_RE` AND `CLASS_LINE_RE` CANNOT BE BROKEN, SO THE BRIEFING'S
+    HEADLINE RISK IS NOT THE RISK. `renderIssueBody` (src/lib/escalate.ts) emits `**Class:**` and
+    `**Task:**` as the FIRST TWO LINES of the body, and every one of the four readers uses
+    `.exec(body)?.[1]`, which returns the FIRST match. A forged line inside `e.detail` — which is
+    emitted after them — is SHADOWED. MEASURED BOTH WAYS against the real exported
+    `renderIssueBody`: with an honest detail and with a forged one, `Task` parses `W1-T500` and
+    `Class` parses `needs-human` in both.
+
+    (6) THE REAL DEFECT IS THE OPTIONAL LINES, AND IT IS CORRECTNESS. `renderIssueBody` emits
+    `**Head:**` and `**Cause:**` ONLY when the escalation set them, so on an escalation that set
+    neither there is NO honest line to shadow a forged one. And a forged one survives the
+    producer: `summarizeCiFailure` splits on newline ONLY and `String.prototype.trim` strips the
+    ENDS only, so a bare carriage return — or U+2028, or U+2029 — sitting INSIDE one log line
+    passes straight through, and JavaScript's multiline flag treats all three as line starts.
+    MEASURED end to end against the real `renderIssueBody` and the four regexes exactly as
+    src/lib/escalate.ts declares them, in the referent-less dedup branch with `e.cause` unset and
+    the titles differing:
+      HONEST detail  -> Cause parses undefined -> dedup does NOT match -> the escalation opens.
+      FORGED detail  -> Cause parses "ci"      -> dedup MATCHES        -> the escalation is
+                                                  SILENTLY SUPPRESSED.
+    A needs-human issue that is never opened is the failure this taxonomy exists to prevent.
+
+    (7) REACHABILITY, STATED HONESTLY IN BOTH DIRECTIONS. Accidentally: essentially never — it
+    needs a bare carriage return followed by the literal `**Cause:** <token>` in the FIRST
+    non-blank line of a failing check's tail. Deliberately: reachable by anyone who can make this
+    repo's CI print a line, which on a pull-request branch is its author. And the two forgeable
+    dimensions differ in severity: a forged `**Head:**` makes `matchesOptionalDimension` VETO a
+    match that would otherwise have deduped, which opens a DUPLICATE issue — noisy but safe; the
+    referent-less `**Cause:**` branch makes it MATCH, which suppresses. The severe direction is
+    the one criterion 1 closes.
+
+    (8) THE SWEEP FOR OTHER SINKS. Exactly ONE site parses an issue body with these regexes:
+    `findDuplicateEscalation`'s `const body = issue.body ?? ""`. The other `logTail` reader,
+    `environmentFaultCheckName` (src/lib/sweep.ts), CLASSIFIES on the tail and renders none of it.
+    But `detail:` occurs 207 times across 32 files under src/, so `summarizeCiFailure` is one of
+    MANY producers of the free text that reaches `renderIssueBody` — which is precisely why this
+    shard fixes the READER and not that one producer. A producer-side fix would leave the class
+    open and would repair nothing already on GitHub.
+  design: |
+    THE SHAPE: normalise the candidate body once, where it is read. No sanitisation layer, no
+    change to any producer, no new signal.
+
+    (i) ONE LINE, AT THE PARSE SITE. `findDuplicateEscalation` (src/lib/escalate.ts) resolves
+    `const body = issue.body ?? ""` and then runs all four regexes over it. Normalising there
+    covers EVERY producer at once AND every issue ALREADY OPEN ON GITHUB — a producer-side fix
+    cannot reach a body that was written last week, and there are open needs-human issues today.
+
+    (ii) NORMALISE THE THREE NON-NEWLINE TERMINATORS ONLY. Carriage return, U+2028 and U+2029
+    become an innocuous character; the newline MUST survive, because the honest named lines are
+    newline-separated and blanket-stripping them would make every dedup read fail. Criterion 2 is
+    the falsifier for exactly that mistake.
+
+    (iii) DO NOT CALL `neutralizeFenceMarkers` AND DO NOT ADD A LAYER. Rationale (3) measured that
+    it changes none of the three characters that matter. A builder who reaches for it has fixed
+    nothing and has degraded the operator's log excerpt. And a general-purpose sanitiser is
+    refused: the invariant is narrow — a body parsed with line-anchored patterns must contain no
+    line start the renderer did not put there.
+
+    (iv) DO NOT CHANGE `renderIssueBody`, AND DO NOT MAKE THE OPTIONAL DIMENSIONS REQUIRED.
+    `matchesOptionalDimension`'s permissive contract is load-bearing for every un-migrated caller
+    (W1-T195) and criterion 4 pins it: a GENUINE disagreement must still veto. A fix that closes
+    the forgery by disabling the dimension passes criterion 1 and fails criterion 4.
+
+    (v) NOTHING IS EMITTED. No ledger step, no console line, no new field. Nine mechanisms in this
+    repo already merged green with no reader — `risk_judge.escalated` the most recent — and a
+    "suppressed forgery detected" signal with no consumer would be the tenth. If the normalisation
+    ever needs to be observable, that is a separate filing with a named consumer.
+
+    (vi) WHAT THE TESTS ASSERT, AND WHY THE FALSIFIERS ARE PAIRED. Criterion 1 is the defect: a
+    fixture `logTail` whose first line carries a bare carriage return followed by a forged cause
+    line, rendered through the real `renderIssueBody`, must no longer be read as that issue's
+    cause. Criterion 2 is the falsifier against a blanket newline strip. Criterion 3 is the
+    falsifier the briefing asked for — an INNOCENT log line must reach the body UNCHANGED, so a
+    blanket-escaping implementation fails. Criterion 4 is the falsifier against simply dropping
+    the dimension. Criteria 1 and 3 must run in the SAME suite invocation: an implementation that
+    mangles everything passes 1 and fails 3, and one that mangles nothing does the reverse.
+  acceptance:
+    - claim: "a forged cause line carried in a ci log tail no longer makes the duplicate search match"
+      proof: "unit test: W1-T974: a forged cause line inside a ci log tail no longer matches the dedup"
+    - claim: "an honest cause line in a body whose detail spans several lines still parses unchanged"
+      proof: "unit test: W1-T974: an honest cause line in a multi line detail still parses unchanged"
+    - claim: "an innocent ci log line still reaches the issue body byte for byte unchanged"
+      proof: "unit test: W1-T974: an innocent ci log line reaches the issue body unchanged"
+    - claim: "a genuine disagreement on the cause dimension still vetoes the duplicate match"
+      proof: "unit test: W1-T974: a genuine cause disagreement still vetoes the dedup match"
+    - claim: "the suppression direction is the severe one and the duplicate direction is the mild one"
+      proof: "grep: the suppression direction is the severe one and the duplicate direction is the mild one in plan/tasks.d/W1-T974-ci-log-line-poisons-escalation-dedup.yaml"
+  risk: high
+  origin: "oper#ci-log-poisons-escalation-dedup-2026-08-18"
+  plan_refs: ["W1-T195", "W1-T210", "W1-T138", "W1-T345"]
+  files: [src/lib/escalate.ts, test/escalate.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    src/run-task.ts IS DELIBERATELY NOT DECLARED, AND THAT IS A SCOPE DECISION WITH A REASON RATHER
+    THAN AN OMISSION. `summarizeCiFailure` lives there and is the producer that surfaced this, but
+    the fix belongs at the single reader in src/lib/escalate.ts — see rationale (8): there are 207
+    `detail:` occurrences across 32 files under src/, so producer-side patching leaves the class
+    open, and it cannot repair the bodies of issues already open on GitHub. THE HAPPY CONSEQUENCE
+    IS RECORDED HONESTLY: because src/run-task.ts is not declared, this shard does NOT pay the
+    W1-T471 serialisation cost that 198 of 334 shards pay. That is a genuine benefit of fixing the
+    reader, not a reason for it.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT 82b71f4. `findDuplicateEscalation`:
+    escalate.ts 5, run-task.ts 0, sweep.ts 0, fix-fence.ts 0 — the fix has exactly one home.
+    `TASK_LINE_RE` escalate.ts 3 and `CAUSE_LINE_RE` escalate.ts 4, zero in all three other
+    modules, so all four patterns live in the file being changed. `renderIssueBody` escalate.ts 11,
+    run-task.ts 2 — read by the tests, not modified. `summarizeCiFailure` run-task.ts 2,
+    escalate.ts 0. `neutralizeFenceMarkers` run-task.ts 6, fix-fence.ts 1, escalate.ts 0 — it never
+    touched this path and this shard does not introduce it. CONTROL: an absent symbol reads 0 in
+    all four files, so these counts discriminate. test/escalate.test.ts exists today and already
+    covers the dedup, so the falsifiers have a home that is not test/run-task.test.ts, whose
+    file-level coverage crashes are documented.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only risk high and `subsystemsOf` derives subsystems from the
+    acceptance-criteria text as well as from `files:`; this shard spans a library module and a
+    suite, and its criteria name dedup matching, body rendering and log-tail passthrough.
+
+    NO ACTUALLY-SUPPRESSED ESCALATION HAS BEEN OBSERVED AND THE SHARD SAYS SO TWICE. Rationale (2)
+    records what issue #1965 actually carries — 2 U+FEFF, 4 tabs, and none of the three line
+    terminators — and rationale (7) states the accidental path is essentially unreachable. The
+    correctness claim rests on a measurement constructed against the real exported
+    `renderIssueBody`, not on an incident. A reader who cites this as a production failure has
+    overstated it.
+
+    PROOF NOTES. Four criteria use the name-filtered `unit test:` form rather than a whole-file
+    path. Every title was measured against test/ with `grep -rlF` and matched ZERO files, against a
+    control title lifted from the real escalate suite that matched one. Each is plain prose under
+    100 characters with no comma, no semicolon-space and no regex metacharacter, so
+    `looksLikeScenarioNarrative` cannot fail them and `parseTestTarget`'s escaped-literal match has
+    nothing to mishandle. The fifth is a single-line `grep:` with an explicit path, verified with
+    the executor's real invocation AGAINST THIS CHANGESET'S OWN HEAD — a proof naming a file the
+    changeset does not touch reads hits 0 and `executed_fail`, which fails the review outright.
+
+    ONE ADVISORY IS ACCEPTED KNOWINGLY. `rmd lint-plan` emits a single finding against this shard,
+    a `proof-scope` WARNING that criterion 5's grep names this shard's own path while `files:` does
+    not list it. It is advisory and never blocking — the run carried 179 blocking tasks and NOT ONE
+    names W1-T974. Both remedies are worse: declaring the shard's own path would place the filing
+    inside its own implementation scope, and repointing the grep at src/lib/escalate.ts would name
+    a file this changeset does not touch, which reads hits 0 and `executed_fail` and FAILS THE
+    REVIEW OUTRIGHT rather than merely being unscoped.
+
+    ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN CONTROL. W1-T974 read 0 on all of them:
+    refs/rmd-id/* (control refs/rmd-id/W1-T971 = 1, negative W1-T999999 = 0), shard filenames on
+    origin/main (control W1-T968 = 1), ids declared anywhere under plan/ (control W1-T968 = 1),
+    every open PR's file list (control W1-T972 = 1) and every open PR's title (control W1-T971 =
+    1). SURFACE 1 EARNED ITS PLACE ON THIS FILING: W1-T973, the next free number by every other
+    surface, IS ALREADY RESERVED — a tree-and-PR sweep would have collided.
+
+    THE RESERVATION USED THE PLAIN REFSPEC. Orphan commit over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce
+    Craigs-Mac-mini-62463-1787017941936517000, exit captured into a variable rather than read
+    through a pipe, then the ref re-read and matched against the pushed sha. PUSH_EXIT_CODE=0,
+    stderr `* [new reference]  009d0ed6... -> refs/rmd-id/W1-T974`, readback identical. NO `+` AND
+    NO LEASE: a forced refspec silently overwrote a live reservation for W1-T967 earlier the same
+    evening, and the plain form's non-fast-forward rejection is the gate that would have caught it.
