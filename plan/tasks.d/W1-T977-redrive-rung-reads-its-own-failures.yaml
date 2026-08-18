@@ -1,5 +1,5 @@
 - id: W1-T977
-  title: "THE RE-DRIVE RUNG IS BLIND EXACTLY WHEN IT IS NEEDED — runPostFixReverification matches on the shared snapshot's ciFailures, which buildOpenPrViews leaves undefined whenever aggregate checksState is pending, so CI_GATE_TIMEOUT_FIX_CLASS cannot fire during the only condition that produces a ci-gate timeout: a sibling check still running"
+  title: "THE RE-DRIVE RUNG WAITS OUT THE WHOLE CI ROUND BEFORE IT CAN SEE ITS OWN TRIGGER — while ANY sibling check is still running the aggregate checksState is pending, so buildOpenPrViews leaves ciFailures undefined and CI_GATE_TIMEOUT_FIX_CLASS cannot match; the rung DOES fire once the round concludes, but by then the fix rung has already claimed the PR and spent a strike"
   repo: remudero
   risk: high
   depends_on: []
@@ -8,49 +8,69 @@
   principles: {tdd: strict}
   budget_usd: 55.00
   rationale: |
-    MEASURED ON THIS HOST AT origin/main 9b93f6c, 2026-08-18. The remedy this task unblocks is
-    already built, already wired and already running; it has simply never been able to see its
-    own trigger.
+    RETRACTED CLAIM — "structurally unable to match" — DO NOT RE-IMPORT THIS SENTENCE.
+    The original filing (#2108, merged 2026-08-18T04:26:06Z) said CI_GATE_TIMEOUT_FIX_CLASS "cannot
+    fire" and was "structurally unable to match". THAT IS FALSE AND IS RETRACTED HERE. The rung
+    fires. RE-MEASURED 2026-08-18: FOUR `sweep.post_fix_redriven` rows at 02:49:01.563Z,
+    02:49:02.700Z, 02:49:03.814Z and 02:49:04.938Z, every one keyed
+    `ci-gate-required-check-timeout`, for PRs 2101, 2098, 2097 and 2096 — the very PRs the original
+    rationale offered as proof it could never match. Those redrives pushed the
+    `chore(ci): re-trigger checks` commits that minted the heads those PRs then merged on. Any
+    later reader who reaches for "impossible", "cannot fire" or "structurally unable" for this rung
+    is re-importing a retracted claim.
 
-    (1) THE MECHANISM EXISTS END TO END. `CI_GATE_TIMEOUT_FIX_CLASS` (src/lib/sweep.ts) matches a
-    failing check named `ci-gate` whose `logTail` matches /timed out waiting for required
-    check\(s\)/i. `runPostFixReverification` re-drives a matched PR, and its wired call site
-    `sweepPostFixReverification` (src/run-task.ts) mints a fresh head through the same
-    `pushEmptyCommit` leaf the ABSENT remedy already uses — which is precisely the remedy
-    `ci-gate` itself prints: "a NEW sha is the only remedy, re-running this same sha will not
-    help".
+    SECOND RETRACTION — "2 all time" WAS A STALE SNAPSHOT, NOT A MEASUREMENT. The original filing
+    quoted `sweep.post_fix_redriven` at 2. RE-TAKEN ON THE SAME CORPUS: 16 rows — 8 distinct
+    redrives, each written twice — spanning 2026-08-17T23:37:09Z to 2026-08-18T04:08:52Z across
+    PRs 2089, 2101, 2098, 2097, 2096, 2111, 2108 and 2096 again. It was already 16 when 2 was
+    quoted. CLAUDE.md names this failure exactly: NAME THE QUERY, NEVER ITS ANSWER — a count of
+    this rung does not survive the hour it was taken in. The figure is therefore given here with
+    its timestamp and its re-run query, and a reader who needs it must re-take it.
 
-    (2) IT RUNS, AND IT NEVER FIRES. 143 `sweep.post_fix_reverification.summary` rows on this
-    host. The last two, at 01:50:57 and 02:04:58, examined 6 and 7 open PRs and BOTH reported
-    `redriven: 0`. Across all time `sweep.post_fix_redriven` reads 2, against a control of 2055
-    `sweep.disposed` rows in the same file — so the rung is reached constantly and acts almost
-    never.
+    WHAT SURVIVES, AND IT IS A LATENCY CLAIM RATHER THAN AN IMPOSSIBILITY ONE.
 
-    (3) THE CAUSE IS ONE TERNARY, AT TWO SITES IN src/run-task.ts.
-    `ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, pr.statusCheckRollup) : undefined`
-    — carried in the comment as "the ci-log fix mode's input — only worth fetching when checks are
-    actually red". While ANY required check is still running the AGGREGATE `checksState` is
-    `pending`, not red, so `ciFailures` is undefined and
-    `(pr.ciFailures ?? []).some(...)` in `matchesFailure` is false. The class is structurally
-    unable to match.
+    (1) THE MECHANISM EXISTS END TO END AND IS UNCHANGED. `CI_GATE_TIMEOUT_FIX_CLASS`
+    (src/lib/sweep.ts) matches a failing check named `ci-gate` whose `logTail` matches
+    /timed out waiting for required check\(s\)/i. `runPostFixReverification` re-drives a matched
+    PR, and its wired call site `sweepPostFixReverification` (src/run-task.ts) mints a fresh head
+    through the same `pushEmptyCommit` leaf — which is the remedy `ci-gate` itself prints: "a NEW
+    sha is the only remedy, re-running this same sha will not help".
 
-    (4) AND PENDING IS THE ONLY STATE IN WHICH A ci-gate TIMEOUT EXISTS. `ci-gate` times out
-    BECAUSE a sibling has not finished. So the one disposition the class was written for is the
-    one disposition during which its input is guaranteed absent. This is not a rare race; it is
-    the definition of the failure.
+    (2) THE BLINDNESS IS REAL BUT IT IS BOUNDED BY THE CI ROUND, NOT PERMANENT.
+    `ciFailures: checksState === "red" ? fetchCiFailures(...) : undefined` at two sites in
+    src/run-task.ts. While ANY required check is still running the AGGREGATE `checksState` is
+    `pending`, not red, so `ciFailures` is undefined and `(pr.ciFailures ?? []).some(...)` in
+    `matchesFailure` is false. The class cannot match FOR AS LONG AS THE ROUND IS PENDING. When the
+    round concludes red, `ciFailures` populates and the class matches — which is why the rung has
+    16 rows rather than none.
 
-    (5) OBSERVED LIVE, ON THREE PRs, IN ONE EVENING. #2097, #2098 and #2101 each sat in `wait`
-    for 31 to 40 minutes — the ledger reads "checks pending 37m (< 60m ceiling) — waiting,
-    re-deriving next sweep" — while `ci-gate` had ALREADY failed on each and its log ALREADY
-    contained the matching string. The blocking sibling was wedged on one step, "Install
-    Playwright's Chromium", which a successful run 20 minutes earlier completed in 77 seconds.
-    Two of the three later flipped to `blocked-fixable` ("required checks red — ci-log fix,
-    strike 1/2"), which routes to a fix WORKER asked to change code — and there was no code
-    defect on any of the three. An operator cleared all three by hand.
+    (3) THE COST IS THE WAIT, AND THE WAIT WAS RE-MEASURED RATHER THAN CARRIED. The original
+    filing said "50+ minutes"; that figure is NOT reproduced and is not used. RE-TAKEN over
+    2026-08-18T01:30Z..03:00Z from the `checks pending Nm` reasons on `sweep.disposed`, the
+    LONGEST wait observed per PR was: #2101 40m, #2097 39m, #2098 37m, #2096 35m. So the bound is
+    35-40 minutes on this evidence, not 50+.
 
-    (6) THE READ IS CHEAP AND ALREADY EXISTS. `fetchCiFailures` is an exported pure function over
-    a `statusCheckRollup` the caller already holds; nothing new has to be fetched from GitHub that
-    the rung's own caller is not already positioned to supply.
+    (4) AND THE FIX RUNG GETS THERE FIRST, WHICH IS THE ACTUAL HARM. Two PRs flipped to
+    `blocked-fixable` while waiting — #2097 from 02:11:43Z and #2101 from 02:23:35Z, both
+    "required checks red — ci-log fix, strike 1/2". That routes a fix WORKER at a PR whose only
+    defect was a slow sibling, and it spends one of two strikes. The redrive that would have been
+    the correct action arrived afterwards. THE ORDERING IS THE DEFECT: whichever rung sees a
+    populated `ciFailures` first claims the PR, and the fix rung is not scoped to wait.
+
+    (5) DO NOT CREDIT THE 02:49 CLEARING TO THE RUNG NOTICING SOMETHING NEW. It followed a DAEMON
+    RESTART. The daemon lane went silent after 02:29:05Z, with the largest contiguous gap
+    02:40:20Z -> 02:48:07Z (7.8 minutes) carrying only the supervisor's own `cli.invoked` rows;
+    `daemon.start`/`daemon.boot`/`daemon.lock_sweep` then landed at 02:48:20Z and ALL FOUR redrives
+    fired between 02:49:01Z and 02:49:04Z — within 45 seconds of the daemon coming back. The
+    operator reports the cause as a stale `state/drain.lock`; SEE THE NOTE, that cause is NOT
+    verified here.
+
+    (6) AND DO NOT CITE THE SAME-SHA RERUNS AS EVIDENCE OF ANYTHING. On #2097 the superseded head
+    `ed73dbe79` has `ci-gate` concluding FAILURE at 08:47:39Z — forty minutes AFTER the pull
+    request had already merged at 08:07:41Z on the newer head `c726153aa`, whose own `ci` and
+    `ci-gate` both succeeded at 02:57:03Z and 03:00:51Z. A check concluding on a sha nothing is
+    waiting on proves nothing in either direction. That new head is the one the 02:49:03Z redrive
+    minted, which is the cleanest available evidence that the rung works when it can see.
   design: |
     (i) THE RUNG GETS ITS OWN READ, AS AN INJECTED DEP — the shape this module already uses.
     `PostFixReverificationDeps` already injects every effect (`redrive`'s own doc: "this module
@@ -124,10 +144,12 @@
     of them. There is no smaller declaration that still wires the dep: a sweep.ts-only change
     would leave the dep permanently undefined and the rung exactly as blind as it is today.
 
-    AND IT OVERLAPS AN OPEN PR TODAY. #2106 ("fix(sweep): make a risk-judge escalation survive
-    the next sweep pass") declares BOTH src/lib/sweep.ts and src/run-task.ts. These two cannot be
-    dispatched concurrently. That is the partitioner working correctly on a real shared file, not
-    a filing defect — but it is stated here so an implementer does not discover it as a conflict.
+    THE OVERLAP NOTE IS SPENT AND IS CORRECTED RATHER THAN LEFT STANDING. The original filing
+    said this shard "OVERLAPS AN OPEN PR TODAY" naming #2106. RE-CHECKED 2026-08-18: #2106 is
+    CLOSED and MERGED, so that contention is gone. The general point survives — anything declaring
+    both src/lib/sweep.ts and src/run-task.ts serializes against this — but the specific PR named
+    is no longer a live conflict, and a reader must re-take the open-PR set rather than trust this
+    sentence.
 
     FILES DERIVED BY READING, NOT GUESSED. `runPostFixReverification`,
     `PostFixReverificationDeps`, `FixClass`, `DEFAULT_FIX_CLASSES` and
@@ -147,8 +169,9 @@
     mechanisms that merged green with no consumer (`hasPushedRunBranch`, `armedButStalled`,
     `dispatch.stood_down`, `CiFailure.outsidePrRange`, `dh-rate-limit`, `rareOverlapWarnings`,
     `rmd coverage-improve`, `supersessionVerdict`, `risk_judge.escalated`). This task is the
-    inverse shape: a consumer that exists, is wired, is exercised 143 times, and cannot see its
-    input. Nothing is added for something else to read later.
+    inverse shape: a consumer that exists, is wired, is exercised on every sweep pass (751 summary
+    rows as of 2026-08-18, re-take before quoting), and is blind for the length of a CI round.
+    Nothing is added for something else to read later.
 
     PROOF NOTES. ALL FIVE criteria use the NAME-FILTERED `unit test:` form with a bare title, never
     the pure-path form — a path proof against test/post-fix-reverification.test.ts would pass on
@@ -168,7 +191,8 @@
     lives in design (iv), which is where it belongs.
 
     ID PROVENANCE — FOUR SURFACES, EACH CONTROLLED, PLUS A RESERVATION MINTED WITH THE PLAIN
-    REFSPEC. W1-T977 read 0 on all four at 9b93f6c: refs/rmd-id/* (73 refs, control
+    REFSPEC. W1-T977 read 0 on all four at 9b93f6c (a SNAPSHOT — refs/rmd-id/* reads 80 today,
+    so re-take rather than quote): refs/rmd-id/* (73 refs at that sha, control
     refs/rmd-id/W1-T946 = 1), shard filenames on origin/main and ids declared under plan/ (control
     W1-T965 = filename 1 / declared 4), EVERY OPEN PR'S FILE LIST and EVERY OPEN PR'S TITLE
     (control W1-T972 = 2, this session's own open PR, so the empty result is a real absence and
