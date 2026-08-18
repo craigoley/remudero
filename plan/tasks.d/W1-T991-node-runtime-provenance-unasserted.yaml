@@ -1,0 +1,96 @@
+- id: W1-T991
+  title: "the node runtime the whole fleet executes is INHERITED and never asserted — a daemon booted from another account's nvm install is invisible until that install is pruned, and then every spawn fails at once with no named cause"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "OBSERVED 2026-08-03T19:12Z (fb-1785784424838-179bcf). A live worker process (pid 74384, run
+    W1-T309-1785783002827) was running /Users/craigoley/.nvm/versions/node/v22.22.1/bin/node while the fleet
+    runs as craigoleyagent — a runtime owned by a DIFFERENT account, at a version-pinned nvm path, and at a
+    version that is not the one this repo pins.
+    THE RESOLUTION CHAIN IS INHERITANCE ALL THE WAY DOWN, verified from source in this tree.
+    bin/rmd is a bash wrapper whose last line is exec of node_modules/.bin/tsx — a shebang script — so the
+    daemon's own node is whatever PATH resolved at exec time, never an absolute path anyone chose.
+    launchd.ts sets EnvironmentVariables as a CLOSED allowlist of PATH plus HOME, with DEFAULT_LAUNCHD_PATH =
+    /usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin, which contains NO nvm directory.
+    env.ts's ALLOWLIST copies PATH from the parent into every worker child, and worker.ts resolves only the
+    CLAUDE binary explicitly (resolveClaudeExecutable, W1-T113) — nothing anywhere resolves, pins, records or
+    checks NODE.
+    SO THE FALSIFYING CHECK LANDS HALFWAY, WHICH IS WHY THIS IS FILED SMALL. The feedback's own falsifier was
+    'if the daemon resolves node from craigoleyagent's own PATH, there is nothing here'. Under launchd it
+    does exactly that (homebrew, per the plist PATH above; FINDINGS.md records node v22.22.3 at /opt/homebrew
+    as the pinned ground truth, matching .nvmrc and engines). An nvm node under /Users/craigoley can only
+    have arrived from a PATH that is not the plist's — i.e. a hand-started daemon inheriting the admin's
+    login shell. So the observation IS an artifact of how that daemon was started, and there is no missing
+    dependency to add. What is missing is that NOTHING MAKES THAT ARTIFACT VISIBLE: the plist-clean case and
+    the foreign-account case boot identically, log identically, and are distinguishable only by reading a
+    live process listing, which is how this was found.
+    THE FAILURE SHAPE IS THE ARGUMENT, NOT THE URGENCY. Not currently broken. But if that nvm version is
+    pruned or upgraded, PATH resolution of node fails for the daemon and, through the inherited PATH, for
+    every spawn simultaneously — the ENOENT-with-no-obvious-cause shape that W1-T113 exists to have already
+    eliminated for the claude binary and that the binary-husk outage cost a night to diagnose. The runtime
+    is the ONE toolchain component still resolved by accident after that whole ladder shipped.
+    NOT COVERED BY WHAT IS ALREADY FILED. W1-T236 pins the CLAUDE binary's content/version; W1-T239 audits
+    the worker-home symlink family; W1-T925 bakes the install checkout's bin/rmd into the generated units.
+    None of the three reads process.execPath, and grep over plan/ finds no task naming node, nvm, .nvmrc or
+    execPath as a runtime-provenance concern."
+  design: |
+    THE SIBLING OF assertCleanBoot, IN THE SAME PLACE AND THE SAME POSTURE. env.ts's assertCleanBoot already
+    exists to catch exactly this class — its own doc says env_clean false means 'the daemon was booted from a
+    contaminated shell rather than launchd's clean one', logged loudly as a canary and never a hard gate. A
+    foreign-account node is the same canary over a different reading, so extend BootAssertion rather than
+    inventing a second boot-check mechanism.
+    (1) RECORD THE READING. Add the running runtime's absolute path (process.execPath) and version to
+        BootAssertion, and surface both in daemon.ts's daemon.boot ledger line beside env_clean and
+        billing_mode. This alone answers the question that took a live process listing to answer.
+    (2) NAME THE DRIFT, DO NOT REFUSE ON IT. Report a named drift reason when the resolved runtime is
+        outside the roots the daemon's OWN account can rely on — under a different user's home, or a version
+        that disagrees with the .nvmrc/engines pin. Advisory, ledgered, boots anyway. Same ruling W1-T236
+        records for the binary pin: a swap must be VISIBLE and INTENTIONAL, never impossible, and a daemon
+        that refuses to boot over a runtime nit is a worse outage than the one being prevented.
+    (3) DERIVE THE ROOTS, NEVER HARDCODE THIS HOST. The container lane runs as a different user under a
+        different prefix entirely (deploy/), so 'foreign' must be computed from the daemon's own homedir plus
+        the system/homebrew prefixes, not from a literal /Users path. A check that fires on every Linux boot
+        is noise that will be muted and then ignored.
+    (4) ESTABLISH THE WORKER LEG FROM SOURCE BEFORE ASSUMING ONE ASSERTION COVERS BOTH. The claim this task
+        rests on is that a worker's runtime IS the daemon's — the SDK execs the CLI under the parent's own
+        interpreter, and buildWorkerEnv copies the parent's PATH. Verify that against the installed SDK
+        rather than reading it here; if the SDK resolves an interpreter independently of the parent, the same
+        reading is needed at the spawn boundary too and this task should say so explicitly.
+    (5) EXPLICITLY OUT OF SCOPE: installing a node under the fleet's account, editing the live plist,
+        rewriting bin/rmd to an absolute interpreter path, or making the runtime a config value. The plist
+        PATH already names the intended runtime and the repo already pins the version twice; adding a third
+        pin before anything can even OBSERVE which runtime is live would be pinning blind.
+  acceptance:
+    - claim: "the daemon.boot ledger line records the running runtime's absolute path and version, so which node the fleet executes is observable without reading a live process listing"
+      proof: "unit test: test/node-runtime-provenance.test.ts"
+    - claim: "a runtime resolved under a different account's home, or at a version disagreeing with the repo's pin, is reported with a named drift reason; one inside the daemon account's own roots at the pinned version reports none"
+      proof: "unit test: test/node-runtime-provenance.test.ts"
+    - claim: "drift is advisory — a daemon on a drifting runtime still boots, and the expected roots are derived from the daemon's own home and system prefixes rather than hardcoded host paths"
+      proof: "unit test: test/node-runtime-provenance.test.ts"
+    - claim: "the reading is wired into the real boot line, not merely exported"
+      proof: "grep: node_path in src/lib/daemon.ts"
+  risk: high
+  origin: feedback#fb-1785784424838-179bcf
+  plan_refs: ["§4A", "WS-7"]
+  files: [src/lib/env.ts, src/lib/daemon.ts, test/node-runtime-provenance.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-18 from fb-1785784424838-179bcf. Citations verified in this worktree: bin/rmd:20
+    (exec of node_modules/.bin/tsx, a shebang script), launchd.ts:70 DEFAULT_LAUNCHD_PATH (no nvm entry) and
+    launchd.ts:296-305 (EnvironmentVariables is a closed PATH+HOME allowlist), env.ts:89 ALLOWLIST copies
+    PATH into the child, env.ts:229-260 assertCleanBoot/BootAssertion, daemon.ts:1605-1610 the daemon.boot
+    log line, FINDINGS.md:15 (node v22.22.3 at /opt/homebrew, pinned in .nvmrc + engines).
+    ANSWERS THE FEEDBACK'S STANDING QUESTION DIRECTLY: NO, the fleet should not take a new dependency on a
+    node installed under the agent account. The runtime it is SUPPOSED to use is already named by the plist's
+    PATH and pinned twice in-repo; the observed nvm node is drift from that intent, produced by a hand-start,
+    not by any resolution the code performs. The gap is observability, so the fix is a boot-time reading and
+    a named drift reason — not new plumbing.
+    risk:high is Rule 19's arithmetic, not this change's danger — env.ts plus daemon.ts plus a new test file
+    spans two subsystems and a test, the same count that graded W1-T310 up. The behaviour added is two
+    ledger fields and one advisory string.
+    NOT URGENT and filed unpromoted: latent by construction, and it should not displace live-queue work. It
+    becomes live the moment that nvm install is pruned or upgraded, at which point every spawn fails together
+    — so the cheap boot line is worth having BEFORE that, which is the whole case for filing it at all."
