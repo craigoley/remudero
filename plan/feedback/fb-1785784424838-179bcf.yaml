@@ -17,5 +17,6 @@ raw: "WORKER SPAWN DEPENDS ON THE ADMIN ACCOUNT'S NODE — a live worker process
   of how it was started, there is nothing here."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
