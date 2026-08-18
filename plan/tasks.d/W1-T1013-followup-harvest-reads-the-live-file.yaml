@@ -1,0 +1,162 @@
+- id: W1-T1013
+  title: "THE FOLLOW-UP HARVEST DELIBERATELY UN-SCOPES FROM THE MARKER WINDOW AND THEN READS THE LIVE LEDGER FILE ALONE, SO ROTATION DESTROYS BOTH ITS CORPUS AND ITS OWN DEDUP MARKS — 1231 declared entries and 549 marks sit in the archives while the live file holds 0 of each, and a retro run today would mine nothing: give mineFollowups the ledger UNION that resolveLedgerUnion already builds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THE BRIEFED DEFECT IS REAL AND IT IS SECOND. `mineFollowups` (`src/lib/retro.ts`) does key on
+    `entryId = ${runId}:${index}`, and recon, implement and the fix rung do each call
+    `harvestFollowupsFromReport` under one `run_id` restarting the index at 0 — four call sites in
+    `src/run-task.ts` against a control of one doc mention elsewhere. What the measurement changes is
+    the ORDER: a perfect key on a corpus of zero recovers nothing, and the corpus really is zero.
+
+    (1) THE CORPUS READ, RE-DERIVED AT origin/main 39efeddb. `retroCommand` builds the gather's only
+    ledger input as `existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : ""` — `ledgerPathFor`
+    resolves the LIVE FILE, and nothing on that path consults `resolveLedgerUnion`,
+    `ledgerRotationEntries` or `ledgerCorpusFiles`. `buildGather` parses that one string and hands the
+    records to every miner. So `mineFollowups`' corpus is the live file, and only the live file.
+
+    (2) AND THE MODULE'S OWN DESIGN NOTE MAKES THAT THE EXACT WRONG READ. The call site says it in
+    terms: "the FULL ledger, never `scoped` — a followup must survive past the marker window
+    (idempotency comes from the followup.harvested/deduped marks mineFollowups reads back, not from
+    marker-scoping)". Un-scoping from the marker is the deliberate act; the un-scoping buys nothing when the corpus is the live file, because rotation
+    truncates that file per step long before the marker ever would. Both halves die together — the
+    declarations AND the marks that make the pass idempotent.
+
+    (3) THE MEASUREMENT, OVER THE RETAINED UNION, PER-FORM COVERAGE CONTROL FIRST (666 gz, 6 plain, 1
+    live; `report.followups` matches per form 365 / 173 / 0; deduped on the FULL LINE, 538 raw and 538
+    distinct, so the forms are disjoint here rather than overlapping). The live form's ZERO is real
+    absence and not an unreadable file: the same live file scores 200 `verdict` and 200 `run.start`
+    rows across 8,860 lines. 538 `report.followups` rows, 333 distinct runs, 1,231 entries passing
+    `mineFollowups`' own type/text filter. `followup.harvested` per form: 395 / 157 / 0, and
+    `followup.deduped` 2 / 0 / 0 — 549 distinct mark rows, ALSO none in the live file.
+    SO A RETRO RUN RIGHT NOW MINES 0 OF 1,231. Not because the entries were harvested: because the
+    only file it opens no longer holds them.
+
+    (4) WHAT WAS ACTUALLY LOST, AND IT IS NOT THE KEY. 170 of the 333 runs that declared a follow-up
+    received NO mark of any kind — 51%. Only 6 runs were harvested INCOMPLETELY, losing 8 entries
+    between them. Marks total 549 against 1,231 entries declared, so at most 549 were ever surfaced
+    and 682 (55%) never were. The dominant loss is runs the harvester never saw at all, which is the
+    corpus, not the key.
+
+    (5) AND THE KEY'S REAL SIGNATURE IS THE OPPOSITE OF UNREACHABILITY ON THE FIRST PASS. 132 entry
+    ids carry more than one mark, up to four. Every one of the 145 consecutive re-mark gaps is 0.0
+    seconds — SAME PASS, not a race between passes and not rotation. The mechanism is visible in the
+    loop: `processed` is built once from the ledger and nothing is added to it while minting, so two
+    entries sharing an id both mint. 130 of those 132 ids carry DIFFERENT texts, which is the proof
+    that the first pass surfaces them rather than dropping them; only 2 duplicate one entry. The
+    permanent skip the briefing describes is the SECOND pass, and it bites only entries that arrive
+    after their run's id was first marked.
+
+    (6) THE CADENCE IS NOT THE BINDING CONSTRAINT AND THE BRIEFING'S FIGURE DOES NOT HOLD HERE. The
+    retro is automated, not operator-run: `evaluateRetroTrigger` (`src/lib/retro.ts`) fires on
+    merges-since-marker >= `retro.mergesThreshold` (25) OR days-since-marker >= `retro.daysThreshold`
+    (7), whichever crosses first, both schema-bounded in `plan/policy.yaml`. This host's union holds
+    EIGHTEEN distinct `RETRO-*` runs between 2026-07-14 and 2026-08-12, about one every 1.7 days —
+    not five all-time. Cadence is deliberate, reviewed and adequate.
+
+    (7) A CAVEAT ON WHERE THESE ROWS LIVE, STATED RATHER THAN GLOSSED. The briefing's worst case
+    `W1-T513-1786818104512` reads ZERO across all three forms on this host, and no `W1-T513` run
+    exists here at all — while the same query shape finds `DAEMON-1784929088440` in all three
+    (376/72/12). This host's `report.followups` rows stop at 2026-08-12T23:51Z and its marks at
+    2026-08-12T12:30Z, the same day as its last retro, so the recent lane is running against a ledger
+    this host does not hold. Every figure above is this host's retained union and is stated as such.
+
+    (8) WHY THIS ORDERING IS CHEAP AND THE OTHER IS NOT. Changing the KEY invalidates every existing
+    mark, so all 404 marked entry ids stop matching and are re-proposed once. Changing the CORPUS
+    changes no key at all: the 404 marks are read back from the archives and every one keeps
+    suppressing exactly what it always suppressed. Nothing is re-proposed, nothing is backfilled, and
+    no ledger row is rewritten — the rows are append-only and already on disk.
+  acceptance:
+    - claim: "the follow-up harvest reads the rotation archives and not the live ledger file alone"
+      proof: "unit test: W1-T1013: the follow-up harvest reads the rotation archives not the live file alone"
+    - claim: "a state dir with no archives degrades loudly rather than harvesting from the live file in silence"
+      proof: "unit test: W1-T1013: a state dir with no archives degrades loudly instead of harvesting silently"
+    - claim: "the marker-scoped miners keep the corpus they already read"
+      proof: "unit test: W1-T1013: the marker scoped miners keep the corpus they already read"
+    - claim: "an entry whose harvest mark survives only in an archive is not proposed a second time"
+      proof: "unit test: W1-T1013: an entry marked in an archived row is not proposed again"
+    - claim: "un-scoping from the marker window achieves nothing while the corpus is truncated by rotation"
+      proof: "grep: the un-scoping buys nothing when the corpus is the live file in plan/tasks.d/W1-T1013-followup-harvest-reads-the-live-file.yaml"
+  risk: high
+  origin: "oper#followup-harvest-corpus-2026-08-18"
+  plan_refs: ["W1-T105", "W1-T160", "W1-T437", "W1-T444"]
+  files: [src/run-task.ts, src/lib/retro.ts, test/followup-harvest-corpus.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL
+    LINE inside rationale (2), is not on line 2 of the file, and reads 0 files across the whole tree
+    at the merge base against a control phrase from `buildGather`'s own comment that reads 1 — so it
+    discriminates head from base and cannot be downgraded to `executed_stale`.
+
+    SCOPE IS THE CORPUS, NOT THE KEY, AND THE KEY IS NOT FOLDED IN. One concern per shard, and these
+    are two: this task changes WHICH ROWS the miner sees; a phase discriminator in `entryId` changes
+    WHAT A ROW IS CALLED. Rationale (5) records everything a later filing needs — the 132 doubly
+    marked ids, the 0.0-second gaps, the 130-of-132 differing texts, and the missing
+    `processed.add(entryId)` — and rationale (8) records why the key must come SECOND: it invalidates
+    404 marks and re-proposes them once, which is only tolerable on a harvester that can already see
+    its corpus. THE DISCRIMINATOR IS AVAILABLE AT BOTH ENDS WHEN THAT TASK IS FILED:
+    `harvestFollowupsFromReport` already holds `ctx.label` (recon / implement / the fix rung) and
+    spends it only on the `say()` line, and the ledger row carries `ts` today — measured keys on a
+    real row are exactly `entries, pr_url, run_id, step, task_id, ts`.
+
+    src/run-task.ts MUST BE DECLARED AND THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING. It is
+    declared by 224 of 363 shards, so this task serialises against most of the pool under
+    `overlappingPaths`. It is unavoidable: the live-file read is `retroCommand`'s own line and there
+    is no other site that composes the gather's ledger input.
+
+    src/lib/retro.ts IS DECLARED (18 shards) BECAUSE THE NARROW FIX NEEDS IT. Handing `buildGather` a
+    union-backed string wholesale would silently re-corpus every other miner it feeds, including
+    `mutationGateLifetime`, which also reads the FULL records; a second, explicit input consumed only
+    by `mineFollowups` keeps the marker-scoped miners on the corpus they already read, which
+    criterion 3 pins. src/lib/ledger-grep.ts is NOT declared: `resolveLedgerUnion` and
+    `ledgerRotationEntries` are already exported and already correct, and declaring an unchanged file
+    to look thorough pays a serialisation cost for nothing.
+
+    NO SIGNAL IS ADDED. `report.followups` and `followup.harvested` both already exist and both
+    already have a reader; this changes a READ, writes no new step, and needs no
+    `DECISION_RELEVANT_LEDGER_STEPS` entry — which is worth stating, because neither mark is in that
+    set today (control: `run.start`, `review.posted` and `sweep.absent_repush` all are). Adding them
+    there is the OTHER available repair and is deliberately not proposed: it would pin two unbounded
+    step families in the never-rotated core to fix a reader that should simply read the archives, and
+    `resolveLedgerUnion` exists precisely so a reader can.
+
+    NOTHING IS ROUTED INTO plan/feedback/. `captureFeedback`'s origin is a closed enum plus
+    `issue#`/`alert#`/`repair#`, and `followup` reads 0 in `src/lib/feedback.ts` against a control of
+    40 `origin` occurrences in that same file. The terminus staying a list a human reads is the
+    DESIGN: `harvestFollowupsFromReport` says "Rule 15 stays intact: this ledgers raw declarations, it
+    never files a task itself" and `renderFollowupCandidates` heads its output "PROPOSAL CANDIDATES,
+    never auto-filed (rule 15)". No intake is raised and no threshold is moved.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (`src/lib/task-linter.ts`) exempts only risk high, and `subsystemsOf` derives subsystems from the
+    acceptance text as well as from `files:`; the criteria name a corpus resolution, a degrade path, a
+    scoping invariant and a dedup lifetime.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form; each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted verbatim from test/retro.test.ts that matched one. Each is plain
+    prose under 100 characters with no comma, no `; ` and no regex metacharacter, because a bare title
+    is compiled through `escapeRegExp` and matched literally. The fifth is doc-shaped and takes a
+    `grep:` with an explicit path.
+
+    ID PROVENANCE — GIT AND LEDGER SURFACES FIRST, GITHUB LAST AND SERIAL, `/rate_limit` NEVER
+    CALLED. W1-T1013 read 0 on all four surfaces: `refs/rmd-id/*` (105 enumerated; control
+    refs/rmd-id/W1-T1012 = 1, negative refs/rmd-id/W1-T444444 = 0; the three out-of-range sentinel
+    reservations excluded by range, not by name), shard FILENAMES via `git ls-tree -r` (363 files;
+    control W1-T1011 = 1, W1-T1012 = 0 and W1-T1013 = 0 — the FILENAME is the existence test), ids
+    mentioned under plan/ (ADVISORY only; its control is W1-T509 matching 8 files, proving the surface
+    can match and is therefore not evidence of absence), and the open-PR titles, heads and file lists.
+    THE OPEN-PR SET WAS READ, NOT UNREAD: five open pull requests were enumerated (#2159, #2160,
+    #2161, #2162, #2163) and all five file lists fetched; the only plan/tasks path among them is
+    #2161's W1-T1012 shard. THE REFS WERE RE-SWEPT IMMEDIATELY BEFORE PUSHING because lanes are
+    minting and two collisions happened in two sessions.
+    THE GATE PROOF IS GENUINE, NOT AN AUTH FAILURE, AND EVERY REFSPEC VARIABLE IS BRACED. Plain
+    refspec, no `+` and no lease. Free id: rc=0, `* [new reference] 39efeddb… -> refs/rmd-id/W1-T1013`.
+    The same plain refspec carrying a DIFFERENT sha at the taken refs/rmd-id/W1-T1012: rc=1,
+    `! [rejected] … (non-fast-forward)`, that ref still 39efeddb…, and `could not read Username`
+    occurrences: 0 on BOTH pushes.
