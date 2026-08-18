@@ -6,14 +6,24 @@ conceptual map of how the pieces fit together — not a generated API reference
 (that is Tier A, §12A of `MASTER-PLAN.md`, not built yet), but the mental model
 a reader needs before touching `src/lib/*`.
 
+> **Two hosts.** This document describes the planes, not the deployment. The
+> fleet runs on two independent hosts with disjoint state, and that topology —
+> along with the daemon loop and the idea→deployed path — is drawn from measured
+> symbols in [system-diagrams.md](system-diagrams.md). It is deliberately not
+> restated here.
+
 ## The three planes
 
-**Plan plane — what to do.** `MASTER-PLAN.md` (narrative intent) and
-`plan/tasks.yaml` (the machine-readable DAG, loaded by `src/lib/plan.ts`) are
-the source of truth for *what* work exists. A task carries an `id`, acceptance
-criteria (`claim`/`proof` pairs), `depends_on`, `risk`, and provenance
-(`origin`/`plan_refs`). The control plane flips a task's `status`; humans and
-the Architect edit the narrative and criteria. Both files land through the
+**Plan plane — what to do.** `MASTER-PLAN.md` (narrative intent) and the task
+corpus are the source of truth for *what* work exists. That corpus is **not one
+file**: since W1-T122 `loadPlan` (`src/lib/plan.ts`) reads `plan/tasks.yaml`
+**plus every `plan/tasks.d/*.yaml` shard**, and the shards now hold the large
+majority of tasks — a sweep that reads only the monolith sees a small fraction
+of the plan. A task carries an `id`, acceptance criteria (`claim`/`proof`
+pairs), `depends_on`, `risk`, and provenance (`origin`/`plan_refs`). **Nothing
+flips a task's stored `status` on merge** — that field is decorative and real
+merge-state is derived from GitHub; see [task-lifecycle.md](task-lifecycle.md).
+Humans and the Architect edit the narrative and criteria. Both land through the
 **same PR gate as code** — see [plan-sync.md](plan-sync.md) — never scp'd in.
 
 **Control plane — when to run it, and how far.** Three layers, each built on

@@ -10,14 +10,35 @@ stopped.
 
 ## Status shape
 
-A task's declared `status` (`src/lib/plan.ts`) moves through:
+The ladder below is the **derived** lifecycle — the stages a run actually moves
+through, each named by the `verdict` its `RunResult` carries:
 
 ```
 queued → recon → prompted → running → review → fixing / diagnosing → blocked | merged → done
 ```
 
-`merged`/`done` are the only statuses `unmetDependencies` treats as satisfied
-— a dependent task cannot build on work that is merely `running` or `review`.
+**The stored `status:` field in `plan/tasks.yaml` does not walk it, and is not
+meant to.** `plan/tasks.yaml` annotates the field in place:
+
+```
+status: queued           # decorative — real merge-state is DERIVED FROM GITHUB
+```
+
+That is W1-T367's ruling, not this document's. Measured across the monolith and
+every shard by `loadPlan` (`src/lib/plan.ts`), the stored field takes exactly
+three values and never the intermediate ones — no task has ever been observed
+stored as `recon`, `prompted`, `running`, `review` or `fixing`.
+
+**Real merge-state comes from GitHub**, resolved by `findMergedByTrailer` and
+`findMergedByHeadBranch` (`src/lib/status.ts`) — the `Remudero-Task:` trailer on
+a merged PR, and the `run-<taskId>-<epochMs>` head-branch form, which credit
+independently. Neither reads the stored field.
+
+`unmetDependencies` (`src/lib/plan.ts`) takes its merge test as an **injected**
+`MergedResolver`. Its `yamlStatusMerged` default reads the stored field, but no
+production caller uses that default — `drain.ts`, `inbox.ts` and `panel-graph.ts`
+each pass a resolver of their own, so a dependency is satisfied by derived
+merge-state rather than by anything written in the YAML.
 
 ## The guard chain (in order — each one fails closed)
 
