@@ -142,6 +142,22 @@ export interface WorkerHomePlan {
    * nothing and touches no filesystem.
    */
   outcomes?: WorkerHomeGrantOutcome[];
+  /**
+   * W1-T981: whatever the `.claude` grant resolves to for THIS plan — the operator's whole
+   * `.claude`, or W1-T505's narrowed credential-only sibling when populated. This is where the
+   * CLI's own `.claude.json` backups land (see {@link CLAUDE_CONFIG_REL}), so
+   * {@link materializeWorkerHome} sweeps it via {@link sweepClaudeConfigBackups}. Optional only
+   * so a hand-built literal (e.g. a fixture testing {@link lostWorkerHomeGrants} in isolation)
+   * need not carry it — {@link workerHomePlan} and {@link materializeWorkerHome} both always
+   * populate it.
+   */
+  claudeGrantTarget?: string;
+  /**
+   * W1-T981: the outcome of sweeping `claudeGrantTarget`'s `.claude.json` backups, so that
+   * bound is OBSERVABLE on every materialization rather than a silent background effect.
+   * Populated by {@link materializeWorkerHome}; absent on the pure {@link workerHomePlan}.
+   */
+  claudeConfigBackupSweep?: ClaudeConfigBackupSweepSummary;
 }
 
 /**
@@ -186,6 +202,44 @@ const LOGIN_KEYCHAIN_REL = join("Library", "Keychains", "login.keychain-db");
 /** The HOME-relative slot the `.claude` grant occupies — the one W1-T505 narrows. */
 const CLAUDE_REL = ".claude";
 
+/**
+ * W1-T981: the HOME-relative slot the CLI's OWN config file occupies — the sibling of
+ * {@link CLAUDE_REL} that is DELIBERATELY ABSENT from {@link WORKER_HOME_SYMLINKS} and
+ * {@link WORKER_HOME_RC_FILES} alike. Disposition (A), "ACCEPT AND DOCUMENT", chosen over
+ * seeding (B) or granting it back (C):
+ *
+ *   - Every per-run redirected HOME (perRunWorkerHomeDir) starts this slot empty, because
+ *     nothing in this module writes it and it is not in the allowlist above. The CLI itself
+ *     notices, on first use, and creates a fresh `.claude.json` from scratch — the
+ *     "Claude configuration file not found at worker-home-<uuid>/.claude.json" notice every
+ *     spawn logs IS that creation, not a transiently-lost file and not a race: the slot was
+ *     never populated in the first place, on every spawn, by construction. See this task's
+ *     filing (feedback#fb-1785775974389-e25033) for the four source citations that refute the
+ *     race hypothesis.
+ *   - GRANTING it back (option C, symlinking this slot the way {@link CLAUDE_REL} is) is
+ *     REJECTED: unlike the credential file `.claude` already narrows toward (W1-T505), a real
+ *     operator `.claude.json` carries mutable, per-process state
+ *     (`hasAvailableSubscription`, `cachedUsageUtilization`, `modelAccessCache`,
+ *     `autoCompactWindowsCache`, `machineID`, `oauthAccount` — FINDINGS.md:263-266) that every
+ *     concurrent worker would then read AND WRITE through one shared inode — the same
+ *     class of coupling W1-T170 introduced per-run homes to end, in a new slot.
+ *   - SEEDING it (option B) is not done here either: nothing measured shows a worker loses
+ *     capability running with no `.claude.json` — `resolveActiveAccountId`
+ *     (src/lib/worker.ts:657) already defaults to the PARENT's real
+ *     `join(homedir(), ".claude.json")`, never the worker's redirected one, so account/identity
+ *     resolution is unaffected by this slot being virgin.
+ *
+ * WHERE THE CLI'S OWN BACKUP OF THE FILE IT REPLACES LANDS: `<claudeGrantTarget>/backups/
+ * .claude.json.backup.<epoch>` (see {@link CLAUDE_CONFIG_BACKUP_PREFIX}), where
+ * `claudeGrantTarget` is whatever the `.claude` grant currently resolves to — the operator's
+ * whole `.claude`, or W1-T505's narrowed sibling once populated. Because that grant is a
+ * symlink OUT of the redirected worker home into a directory every concurrent worker shares,
+ * the backup write lands there too, not inside the throwaway worker home the per-run reap
+ * (`reapWorkerHome`, src/lib/worker.ts:1039) already cleans up. {@link sweepClaudeConfigBackups}
+ * is what keeps that shared, otherwise-unbounded write bounded and observable.
+ */
+export const CLAUDE_CONFIG_REL = ".claude.json";
+
 export function workerHomePlan(opts: {
   workerHome: string;
   realHome: string;
@@ -227,7 +281,86 @@ export function workerHomePlan(opts: {
       }
       return { from: join(opts.workerHome, s.relPath), to, reason: s.reason };
     }),
+    claudeGrantTarget: narrowedClaudeTarget,
   };
+}
+
+/** Filename prefix the CLI's own backup writer uses when it replaces `.claude.json`:
+ *  `<prefix><epoch-ms>` under `<claudeGrantTarget>/backups/` (see {@link CLAUDE_CONFIG_REL}'s
+ *  doc for the full mechanism). Named here so {@link sweepClaudeConfigBackups} can recognise
+ *  and bound them; this module never WRITES one — only observes and reaps what the CLI leaves
+ *  behind. */
+export const CLAUDE_CONFIG_BACKUP_PREFIX = ".claude.json.backup.";
+
+/** Where the CLI's own `.claude.json` backups land for a given `.claude`-grant target —
+ *  `backups/` underneath it, SHARED across every concurrent worker because the grant target
+ *  is (today's wholesale operator `.claude`, or W1-T505's narrowed sibling once populated). */
+export function claudeConfigBackupDir(claudeGrantTarget: string): string {
+  return join(claudeGrantTarget, "backups");
+}
+
+/** Default bound for {@link sweepClaudeConfigBackups}: keep the newest 20 backups, reap the
+ *  rest. A count cap rather than an age cap (unlike {@link DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS})
+ *  on purpose — these are written on every spawn, not once per boot, so an age-only bound would
+ *  still grow without limit inside a single busy day. */
+export const DEFAULT_CLAUDE_CONFIG_BACKUP_MAX_KEEP = 20;
+
+export interface ClaudeConfigBackupSweepSummary {
+  removed: string[];
+  kept: string[];
+}
+
+const claudeConfigBackupFsOps = { readdirSync, rmSync };
+type ClaudeConfigBackupFsOps = typeof claudeConfigBackupFsOps;
+
+/**
+ * W1-T981 design point (iv): bound and OBSERVE the CLI's `.claude.json` backups instead of
+ * letting them accumulate silently in the shared granted `.claude` directory. Keeps the
+ * `maxKeep` NEWEST backups (by the epoch embedded in each filename — the CLI's own ordering,
+ * cheaper and more precise than an `mtime` stat per file) and reaps the rest. Best-effort and
+ * never throws: an absent `backups/` directory (nothing has spawned against this grant target
+ * yet) is a silent, correct no-op — the same discipline {@link sweepStaleWorkerHomes} already
+ * applies to its own boot sweep, so this adds no new refusal path (design point (v)).
+ */
+export function sweepClaudeConfigBackups(
+  claudeGrantTarget: string,
+  opts: { maxKeep?: number; fsImpl?: Partial<ClaudeConfigBackupFsOps> } = {},
+): ClaudeConfigBackupSweepSummary {
+  const f = { ...claudeConfigBackupFsOps, ...opts.fsImpl };
+  const maxKeep = opts.maxKeep ?? DEFAULT_CLAUDE_CONFIG_BACKUP_MAX_KEEP;
+  const dir = claudeConfigBackupDir(claudeGrantTarget);
+  const removed: string[] = [];
+  const kept: string[] = [];
+
+  let entries: string[];
+  try {
+    entries = f.readdirSync(dir);
+  } catch {
+    return { removed, kept }; // no backups dir yet — nothing to bound, best-effort
+  }
+
+  const byEpochDesc = entries
+    .filter((name) => name.startsWith(CLAUDE_CONFIG_BACKUP_PREFIX))
+    .map((name) => {
+      const epoch = Number(name.slice(CLAUDE_CONFIG_BACKUP_PREFIX.length));
+      return { name, epoch: Number.isFinite(epoch) ? epoch : 0 };
+    })
+    .sort((a, b) => b.epoch - a.epoch);
+
+  byEpochDesc.forEach(({ name }, i) => {
+    if (i < maxKeep) {
+      kept.push(name);
+      return;
+    }
+    try {
+      f.rmSync(join(dir, name), { force: true });
+      removed.push(name);
+    } catch {
+      kept.push(name); // a permissions hiccup on one entry never blocks the rest
+    }
+  });
+
+  return { removed, kept };
 }
 
 /**
@@ -332,7 +465,13 @@ export function materializeWorkerHome(opts: {
     }
   }
 
-  return { ...plan, outcomes };
+  // W1-T981 design point (iv): bound the CLI's own `.claude.json` backups at the SAME
+  // resolved grant target this call just symlinked `.claude` toward, so the sweep tracks
+  // W1-T505's narrowing automatically rather than needing a second update when it lands.
+  // `workerHomePlan` (called just above via `plan = workerHomePlan(opts)`) always sets this.
+  const claudeConfigBackupSweep = sweepClaudeConfigBackups(plan.claudeGrantTarget!);
+
+  return { ...plan, outcomes, claudeConfigBackupSweep };
 }
 
 // ── W1-T170: per-run/per-spawn worker HOMES (the singleton does not survive concurrency) ──

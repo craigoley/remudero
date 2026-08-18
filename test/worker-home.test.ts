@@ -1,15 +1,29 @@
 import assert from "node:assert/strict";
-import fs, { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  CLAUDE_CONFIG_BACKUP_PREFIX,
+  CLAUDE_CONFIG_REL,
   WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH,
   WORKER_HOME_RC_FILES,
   WORKER_HOME_SYMLINKS,
   ensureWorkerKeychain,
   keychainProvisionLockPath,
   materializeWorkerHome,
+  sweepClaudeConfigBackups,
   workerHomePlan,
   workerKeychainPaths,
 } from "../src/lib/worker-home.js";
@@ -319,5 +333,118 @@ test("W1-T339: the steady-state path (present, identity-matching, unexpired stor
     assert.ok(!existsSync(lockPath), "no provisioning lock file is left behind");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T981: `.claude.json` is absent by construction, disposition (A) — pinned ────
+//
+// "Claude configuration file not found at worker-home-<uuid>/.claude.json" is not a race:
+// every per-run redirected HOME starts this slot empty because nothing in this module
+// writes it and it is not on the WORKER_HOME_SYMLINKS allowlist. These tests pin that as
+// the deliberate, tested behaviour rather than an emergent property nobody asserts, and
+// bound the one real cost the mechanism has — the CLI's own backup of the file it
+// replaces landing, unbounded, in the shared granted `.claude` directory.
+
+test("W1-T981: .claude.json is absent by construction after materialization — disposition (A), never seeded or granted back", () => {
+  const workerHome = tmp();
+  const realHome = tmp();
+  try {
+    // Even when the real HOME carries a populated .claude.json, disposition (A) means the
+    // worker's own slot for it stays untouched by this module — the CLI creates its own
+    // fresh one on first use, which is the notice this task pins as deliberate, not a race.
+    writeFileSync(join(realHome, CLAUDE_CONFIG_REL), '{"hasAvailableSubscription":true}');
+
+    materializeWorkerHome({ workerHome, realHome });
+
+    assert.equal(
+      existsSync(join(workerHome, CLAUDE_CONFIG_REL)),
+      false,
+      "materializeWorkerHome must not create or seed .claude.json in the redirected HOME",
+    );
+    assert.ok(
+      !WORKER_HOME_SYMLINKS.some((s) => s.relPath === CLAUDE_CONFIG_REL),
+      "disposition (A): .claude.json must never be added to the symlink allowlist — that is option " +
+        "(C), rejected because it would re-share a mutable operator file across every concurrent worker",
+    );
+    assert.ok(
+      !WORKER_HOME_RC_FILES.includes(CLAUDE_CONFIG_REL),
+      "disposition (A) is ACCEPT, not SEED (option B) — .claude.json is not among the files this module writes",
+    );
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("W1-T981: sweepClaudeConfigBackups bounds the CLI's per-spawn .claude.json backups instead of letting them accumulate unbounded", () => {
+  const realHome = tmp();
+  try {
+    const claudeDir = join(realHome, ".claude");
+    const backupsDir = join(claudeDir, "backups");
+    mkdirSync(backupsDir, { recursive: true });
+    const epochs = Array.from({ length: 25 }, (_, i) => 1_700_000_000_000 + i * 1000);
+    for (const epoch of epochs) {
+      writeFileSync(join(backupsDir, `${CLAUDE_CONFIG_BACKUP_PREFIX}${epoch}`), "{}");
+    }
+
+    const summary = sweepClaudeConfigBackups(claudeDir, { maxKeep: 20 });
+
+    assert.equal(summary.kept.length, 20, "only the newest maxKeep backups survive");
+    assert.equal(summary.removed.length, 5, "the rest are reaped, not left to accumulate forever");
+    assert.equal(readdirSync(backupsDir).length, 20, "the backups directory itself reflects the bound on disk");
+
+    const removedEpochs = summary.removed
+      .map((n) => Number(n.slice(CLAUDE_CONFIG_BACKUP_PREFIX.length)))
+      .sort((a, b) => a - b);
+    assert.deepEqual(removedEpochs, epochs.slice(0, 5), "the OLDEST backups are the ones removed, newest kept");
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("W1-T981: sweepClaudeConfigBackups is a silent no-op, never throws, when no backups directory exists yet", () => {
+  const realHome = tmp();
+  try {
+    const claudeDir = join(realHome, ".claude"); // no backups/ subdir at all
+    assert.doesNotThrow(() => sweepClaudeConfigBackups(claudeDir));
+    assert.deepEqual(sweepClaudeConfigBackups(claudeDir), { removed: [], kept: [] });
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("W1-T981: materializeWorkerHome runs and OBSERVES the backup sweep against the resolved .claude grant target, not silently", () => {
+  const workerHome = tmp();
+  const realHome = tmp();
+  try {
+    const backupsDir = join(realHome, ".claude", "backups");
+    mkdirSync(backupsDir, { recursive: true });
+    writeFileSync(join(backupsDir, `${CLAUDE_CONFIG_BACKUP_PREFIX}1700000000000`), "{}");
+
+    const plan = materializeWorkerHome({ workerHome, realHome });
+
+    assert.ok(plan.claudeConfigBackupSweep, "the sweep outcome must be observable on the returned plan");
+    assert.deepEqual(
+      plan.claudeConfigBackupSweep!.kept,
+      [`${CLAUDE_CONFIG_BACKUP_PREFIX}1700000000000`],
+      "a single backup, well under the bound, is kept and reported",
+    );
+    assert.deepEqual(plan.claudeConfigBackupSweep!.removed, []);
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("W1-T981: materialization still succeeds with neither the credential-only grant nor any .claude directory present — the backup sweep adds no new refusal path", () => {
+  const workerHome = tmp();
+  const realHome = tmp(); // nothing at all — falsifier (v): no second way to refuse a spawn
+  try {
+    assert.doesNotThrow(() => materializeWorkerHome({ workerHome, realHome }));
+    const plan = materializeWorkerHome({ workerHome, realHome });
+    assert.deepEqual(plan.claudeConfigBackupSweep, { removed: [], kept: [] });
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
   }
 });
