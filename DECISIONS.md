@@ -1551,3 +1551,73 @@ customer, and their gate config would be editable by their own fleet exactly as 
 (#2136) files that; this entry only names it.
 
 **Rollback:** delete this entry and the §6 pointer. It changes no behaviour, so nothing else moves.
+
+## 2026-08-18 — RULING: `src/run-task.ts` stays one file and the fleet accepts ONE EFFECTIVE DISPATCH LANE (W1-T471) (OPERATOR-RULED)
+
+*Operator-ruled architecture record, recorded at the operator's instruction.* The ruling — one
+effective lane is accepted, splitting is refused, re-scoping is refused — is the operator's. The
+measurements below were gathered to support that decision, not to make it, and W1-T471's own shard
+states in terms that it *"does not propose splitting the file"* and records its three options *"with
+their evidence and NOT ranked."* This entry supplies the ranking the shard withheld.
+
+**THE RULING.** `src/run-task.ts` is not split. Tasks are not re-scoped to avoid declaring it. The
+fleet runs with one effective dispatch lane, and that is an accepted operating condition rather than
+an outstanding defect.
+
+**SPLITTING IS REFUSED, AND THE FILE'S OWN STRUCTURE IS THE REASON.** The eleven section banners do
+not correspond to separable concerns. Assigning every top-level definition to its enclosing section
+and counting identifier references that cross a boundary gives **640 cross-section references**, with
+**128 of 368 symbols (35%) referenced from outside the section that defines them**. `main`, `repoRoot`
+and `ledgerPathFor` are each reached from **seven of the ten other sections**; `USAGE` from six;
+`waitForCiGreen` and `runReview` from five. Exactly one section has no traffic in either direction and
+it owns zero definitions — a banner above a taxonomy, not a concern. A split along those lines would
+have to break 640 references and re-home a foundation most of the file calls. That is a large
+judgement, not a mechanical refactor, and it is declined.
+
+**RE-SCOPING IS REFUSED, AND THE OVER-DECLARATION IS IN THE WRONG PLACE TO HELP.** Over ten trailered
+merges, 16 of 55 declared paths (29%) went untouched — but **13 of those 16 are test files**. Declared
+`src/` paths are touched **15 of 17 times (88%)**, and on the hot file itself `src/run-task.ts` is 4/5.
+Trimming defensive `files:` therefore recovers parallelism only at the margins: it would not have
+unblocked the deferred lanes, because their collisions are on source files those tasks genuinely edit.
+Anyone proposing a `files:` audit as the remedy should be shown this paragraph first.
+
+**THE MEASURED COST — A QUEUE, NOT A LEAK.** `dispatch.serialized` carries **30 distinct rows** over
+**8 days** (2026-08-05 → 2026-08-12), every one `reason: file-overlap`, with **`src/run-task.ts` named
+in 21 of 30 (70%)**. **Every one of the 30 deferrals resolved — zero starvation.** The wait a deferral
+actually cost, joined to each task's next `run.start`: **median 44.4 minutes**, mean 53.6, range
+2.2–154.4. Summed, **26.8 deferred lane-hours across the window — about 3.4 a day — of which 21.4
+hours (80%) are attributable to this one file.** Nothing is lost; work is delayed and then runs. That
+distinction is the ruling's whole basis, and a later reader should not restate the 3.4 hours as
+throughput the fleet failed to deliver.
+
+**THE FALSIFIER, WHICH RE-OPENS THIS RULING WITHOUT FURTHER ARGUMENT.** Either of two observations
+converts the queue into a leak: **a deferral that never resolves** — a task deferred and never
+subsequently started — **or a median wait that crosses the length of a lane's own run**. The first
+means starvation has begun; the second means a lane spends longer waiting than working, at which point
+the delay is throughput the fleet did not deliver. Either one re-opens the question and this entry
+stops governing.
+
+**WHAT THIS ENDS: THE RITUAL SENTENCE IS NO LONGER REQUIRED.** In the absence of a ruling, shards began
+carrying the sentence *"THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING"* as a condition of
+declaring the file. It reads on **six shards on `origin/main`** — first appearing 2026-08-16, with four
+of the six landing on 2026-08-18 — and on two more in PRs open as this is written, three of the eight
+authored in a single session tonight. **That is a convention that grew because nobody had ruled, and
+the ruling is now here: the phrase is NOT required, and a new shard declaring `src/run-task.ts` should
+simply declare it.** The existing occurrences are left in place — standing rule 21 governs amendment,
+and they are accurate statements of a cost this entry has now accepted on the fleet's behalf. What
+ends is the obligation, not the text.
+
+**PROVENANCE, STATED BECAUSE A COUNT IS ONLY A CLAIM ABOUT ITS CORPUS.** Every figure above is this
+host's retained ledger union (all three file forms, deduplicated on the full line; positive control
+`sweep.pass` = 1,897; negative control, a non-existent path, 0 rows). W1-T471's shard records that an
+Azure census reported the same total of 30 over a **different population and different days**, which is
+why the per-path split is stated as this host's and not as the fleet's. `src/run-task.ts` is declared
+by **224 of 632 task records** at `6495ebe8`.
+
+**WHAT THIS ENTRY DOES NOT DO.** It does not close W1-T471, whose shard remains `status: queued` at
+`verify: human`; closing or retiring it is a separate act. It moves no mount, cap or threshold, changes
+no dispatch code, and takes no position on `partitionByFileOverlap`'s behaviour, which is correct as
+written — the collisions it reports are real.
+
+**Rollback:** delete this entry. It changes no behaviour, so nothing else moves; the ritual sentence
+would then be neither required nor forbidden, exactly as before.
