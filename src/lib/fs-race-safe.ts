@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, fstatSync, openSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { hostname } from "node:os";
 
 /**
@@ -321,6 +321,13 @@ export interface IsHolderStaleOpts {
    *  injectable so a test can simulate "the lock names a different host" without controlling the
    *  real machine name. */
   hostname?: () => string;
+  /** W1-T978. True when THIS process is running inside a container — Docker's own `/.dockerenv`
+   *  marker, the same signal `resolveHostPole` (host-parity.ts) is keyed on, established prior
+   *  art for "container-aware" in this codebase. Defaults to {@link defaultInContainer}.
+   *  Injectable so a test can simulate the condition without a real container. See rung 1's own
+   *  doc for why this exists: `os.hostname()` inside a container is the CONTAINER id, so it is
+   *  useless as a per-machine identity there — every replacement mints a new one. */
+  inContainer?: () => boolean;
 }
 
 /** A live pid's start time is trusted to within this many ms of the lock's own `startedAt`
@@ -328,6 +335,17 @@ export interface IsHolderStaleOpts {
  *  resolution, while `startedAt` is an ISO timestamp with milliseconds — NOT a clock-skew
  *  allowance (the host check already refuses to compare start times across hosts at all). */
 const STALE_START_TOLERANCE_MS = 2000;
+
+/** Docker's own container id shape: a lowercase-hex string, 64 characters (the full id) or 12
+ *  (the short form — the SAME length `os.hostname()` actually returns inside a container;
+ *  MEASURED against the outage this fixes, `5efb86ede91b` and `eae16667008a`, both 12). Used by
+ *  {@link isHolderStale}'s rung 1 to require that a mismatched `held.host`, while this process is
+ *  containerised, is actually SHAPED like a container id before treating it as this cell's own
+ *  prior history — an arbitrary or human-named `host` (`"boxA"`, a hand-built test fixture) must
+ *  stay exactly as unverifiable in a container as it always was off one. */
+function looksLikeContainerId(host: string): boolean {
+  return /^[0-9a-f]{12}$/.test(host) || /^[0-9a-f]{64}$/.test(host);
+}
 
 /**
  * Is `held` stale — safe to reclaim, sweep, or treat as not-running — rather than a genuinely
@@ -337,10 +355,47 @@ const STALE_START_TOLERANCE_MS = 2000;
  *
  * THREE RUNGS, in order, each ANSWERING what it can and DEFERRING what it can't:
  *   1. `held.host` names a DIFFERENT host than this one ⇒ NOT stale, whatever the local
- *      process table says. A pid is only ever meaningful on the host that assigned it, so
- *      every probe below answers a question about OUR machine that says nothing about the
- *      recorded holder. Unresolvable from here ⇒ never reap (the same direction of caution
- *      `reclaimStaleLock`'s own "lost" outcome already takes).
+ *      process table says — UNLESS this process is running inside a CONTAINER, in which case
+ *      a mismatch means something else entirely. See "W1-T978" below. A pid is only ever
+ *      meaningful on the host that assigned it, so every probe below answers a question about
+ *      OUR machine that says nothing about the recorded holder. Unresolvable from here ⇒ never
+ *      reap (the same direction of caution `reclaimStaleLock`'s own "lost" outcome already takes).
+ *
+ *      W1-T978 — A REPLACED CONTAINER COULD NEVER RECLAIM ITS OWN LOCK, because `os.hostname()`
+ *      inside a container IS THE CONTAINER ID: Docker mints a new one on every replacement, so
+ *      `held.host` (written by the PREVIOUS container) never again equals `myHost` (this one's),
+ *      even though nothing genuinely foreign ever touched the lock. MEASURED during a live outage
+ *      (2026-08-18): `state/drain.lock` held `{"pid":46,"host":"5efb86ede91b",...}`; container
+ *      `5efb86ede91b` no longer existed; the replacement was `eae16667008a`; rung 1 compared the
+ *      two, found them different, and refused to boot — forever, since the comparison can only
+ *      ever fail again the same way.
+ *
+ *      THE DISCRIMINATOR IS TWO-PART, DELIBERATELY, NOT "AM I IN A CONTAINER" ALONE. `state/`
+ *      (wherever this lock lives) is a bind mount: nothing OTHER than a process on THIS machine
+ *      could ever have written to it, so once we know we are running IN a container, a `host`
+ *      mismatch CAN mean "an earlier container of this same cell" — but "am I in a container"
+ *      says nothing about whether `held.host` is actually a container id at all. `host` is a
+ *      free-form field: a lock that genuinely predates containerisation, a hand-edited fixture,
+ *      or a future writer on a differently-shaped identity could all put an ARBITRARY string
+ *      there, and none of those is "an earlier me" merely because this process happens to be
+ *      containerised today. So the second half checks that `held.host` is actually SHAPED like
+ *      what `os.hostname()` returns inside a container — {@link looksLikeContainerId}, Docker's
+ *      own hex id format — before treating the mismatch as this cell's own history. Only BOTH
+ *      together clear the bar: a foreign, human-named, or synthetic `host` stays exactly as
+ *      unverifiable in a container as it always was off one.
+ *
+ *      ONLY THEN is the lock treated as stale directly, WITHOUT consulting rungs 2/3. That
+ *      omission is deliberate, not an oversight: a container has its OWN PID NAMESPACE, and pids
+ *      restart from 1 (measured: the abandoned lock's pid 46 came back as pid 49 in the
+ *      replacement) — so the recorded pid is exactly as likely to collide with a live, UNRELATED
+ *      local process as to look cleanly dead, and trusting that collision in EITHER direction is
+ *      answering a question the new namespace cannot answer.
+ *
+ *      On a real (non-containerised) machine, or on any `host` that is not container-id-shaped,
+ *      none of this applies and rung 1 behaves exactly as it always has — the discriminator only
+ *      ever WIDENS what a container can reclaim of ITS OWN prior identities, never what a bare
+ *      machine can, and never a foreign host that merely happens to be read from inside a
+ *      container.
  *
  *      W1-T396 MOVED THIS RUNG, and the order is the correctness property. It previously sat
  *      BELOW the pid probe, where it could only ever be reached when a foreign pid number
@@ -368,17 +423,23 @@ const STALE_START_TOLERANCE_MS = 2000;
  * same-host reused pid that starts within `STALE_START_TOLERANCE_MS` of the original is
  * indistinguishable from the original (rung 3's whole-second `ps` resolution).
  *
- * AND HONEST ABOUT WHAT RUNG 1 NOW COSTS, since it is reached far more often than before: a
- * foreign-host lock is now unreclaimable by this process in EVERY case, not just when its pid
- * collides locally. That is the correct direction — the alternative is stealing a live holder's
- * task — but it makes `host`'s STABILITY load-bearing. It is written as `os.hostname()` by
- * every acquire path (`inflight-lock`, `drain-lock`, `review`, `task-id-reservation`) and
- * compared against the same `os.hostname()` default here, so the two agree by construction. A
- * machine whose hostname CHANGES between acquire and reclaim would, however, see its own older
- * locks as foreign and therefore permanently unreclaimable, recoverable only by deleting the
- * lock file. Recording a stable per-machine identity instead of a hostname would remove that
- * exposure; it is deliberately not done here because it changes what four writers RECORD rather
- * than how this predicate READS, which is a different concern and a different changeset.
+ * AND HONEST ABOUT WHAT RUNG 1 NOW COSTS, since it is reached far more often than before: on a
+ * REAL (non-containerised) machine, a foreign-host lock is unreclaimable by this process in
+ * EVERY case, not just when its pid collides locally. That is the correct direction — the
+ * alternative is stealing a live holder's task — but it makes `host`'s STABILITY load-bearing
+ * there. It is written as `os.hostname()` by every acquire path (`inflight-lock`, `drain-lock`,
+ * `review`, `task-id-reservation`) and compared against the same `os.hostname()` default here,
+ * so the two agree by construction. A bare-metal/VM machine whose hostname CHANGES between
+ * acquire and reclaim would still see its own older locks as foreign and therefore permanently
+ * unreclaimable, recoverable only by deleting the lock file. Recording a stable per-machine
+ * identity instead of a hostname would remove that exposure; it is deliberately not done here
+ * because it changes what four writers RECORD rather than how this predicate READS, which is a
+ * different concern and a different changeset.
+ *
+ * W1-T978 NARROWS THIS COST TO NON-CONTAINERS ONLY. Inside a container the analogous exposure —
+ * `host` changing on every restart — is exactly the defect this task fixes, and rung 1's new
+ * container branch answers it directly rather than accepting it the way the paragraph above
+ * accepts it for a real machine.
  */
 export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): boolean {
   // RUNG 1 — HOST FIRST, and the order is the whole point (W1-T396). Every rung below
@@ -387,7 +448,17 @@ export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): bo
   // question nobody posed.
   if (held.host !== undefined) {
     const myHost = (opts.hostname ?? hostname)();
-    if (held.host !== myHost) return false; // unverifiable from here, so not stale
+    if (held.host !== myHost) {
+      // W1-T978: a mismatch on a real machine is still unverifiable and never reaped. A
+      // mismatch INSIDE A CONTAINER, on a `host` actually SHAPED like a container id, can only
+      // be an earlier container of this same bind-mounted cell (see the doc above) — reclaimed
+      // directly, never via the pid/startedAt rungs below, which a fresh pid namespace cannot
+      // answer meaningfully either way. A `host` that is not container-id-shaped stays exactly
+      // as unverifiable as it always was — the shape check is what keeps an arbitrary or
+      // human-named foreign host from being swept in just because THIS process is containerised.
+      const inContainer = (opts.inContainer ?? defaultInContainer)();
+      return inContainer && looksLikeContainerId(held.host);
+    }
   }
 
   if (!opts.isPidAlive(held.pid)) return true; // rung 2
@@ -449,4 +520,25 @@ export function defaultGetProcessStartTime(
   }
   const elapsedMs = parseEtimeToMs(raw);
   return elapsedMs === null ? null : Date.now() - elapsedMs;
+}
+
+/** The one syscall {@link defaultInContainer} makes, injectable so a test can drive it without a
+ *  real container (mirrors {@link FsRaceSyscalls} and {@link ProcessStartTimeSyscalls}). */
+export interface ContainerProbeSyscalls {
+  existsSync: typeof existsSync;
+}
+
+const defaultContainerProbeSyscalls: ContainerProbeSyscalls = { existsSync };
+
+/**
+ * Default {@link IsHolderStaleOpts.inContainer}: `/.dockerenv`, Docker's own container marker —
+ * the SAME signal `resolveHostPole` (host-parity.ts) is keyed on and the SAME path
+ * `scripts/host-parity.ts` passes it (`existsSync("/.dockerenv")`), so this is established prior
+ * art rather than a new detection strategy. Unlike `resolveHostPole`, which takes the marker as
+ * an INJECTED boolean because that module has NO imports at all and values purity above
+ * everything, this module already imports `node:fs` for the syscalls above it in this file, so a
+ * defaulted probe here costs nothing this module was not already paying (W1-T978 design note v).
+ */
+export function defaultInContainer(sysImpl: ContainerProbeSyscalls = defaultContainerProbeSyscalls): boolean {
+  return sysImpl.existsSync("/.dockerenv");
 }
