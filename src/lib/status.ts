@@ -21,11 +21,13 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
+import { isTestRunner } from "./live-write-guard.js";
 import type { WorkerState } from "./worker.js";
 import {
   boardPrsRestArgs,
   type BoardPrRest,
   combinedStatusRestArgs,
+  createGhCallPacer,
   fetchBoardPrsRest,
   type GhCallPacer,
   mapRestPr,
@@ -3480,6 +3482,41 @@ export interface BatchedIssue {
  */
 const REVIEW_STATUS_CONTEXT = "remudero-review";
 
+/**
+ * W1-T1005: the process-lifetime {@link GhCallPacer} every {@link buildBatchedGithub} gateway
+ * shares when its caller omits `opts.pacer`. Lazily created on first use, never rebuilt — module
+ * scope, not function scope, is what makes "shared" true: a pacer built fresh inside
+ * `buildBatchedGithub` on every call would give each gateway its own gap-tracking state, which is
+ * exactly today's defect (independently-polite callers still collide at second zero) under a new
+ * name. See lib/open-prs-rest.ts's `GhCallPacer` doc for why one instance, not one per site, is
+ * what actually prevents the collision, and this function's own `pacer` option doc for why an
+ * EXPLICIT `opts.pacer` (every test fixture that passes one) still wins over this default.
+ *
+ * ITS `sleepSync` IS REAL EVERYWHERE EXCEPT UNDER THE NODE TEST RUNNER. `createGhCallPacer`'s
+ * default gap is `DEFAULT_GH_PACE_MIN_GAP_MS` (1,500ms) and this default is a MODULE singleton,
+ * so every one of a test file's unpaced `buildBatchedGithub` calls that reaches a real fetch
+ * shares it and blocks on the SAME real clock — measured on test/status.test.ts alone: 1.3s
+ * before this default existed, 64.4s with a plain `createGhCallPacer()` default (48x). `gapMs`
+ * still moves and `recordResult` still runs unconditionally; only the actual blocking wait is
+ * skipped, via `isTestRunner()` (lib/live-write-guard.ts) — the same established, presence-
+ * tested signal `spawn-guard.ts` already reuses for the identical "real effect in every process
+ * except the one the test runner itself is" split, so this adds no new test-detection mechanism.
+ */
+let defaultGhCallPacer: GhCallPacer | undefined;
+
+/**
+ * TEST-ONLY (W1-T1005). Installs or clears the module-scoped {@link defaultGhCallPacer} so
+ * test/status.test.ts's own suite can prove the DEFAULT is shared/overridable without depending
+ * on load order across the file's other ~140 tests (many of which build an unpaced gateway and
+ * would otherwise be the ones that lazily create — and thereby pin — the real default first).
+ * No production code path calls this: a real daemon process never resets its own default, since
+ * module scope is what makes the sharing real. Called from a test's own body, never from a
+ * `beforeEach` here, so each of the four W1-T1005 tests below states its own setup explicitly.
+ */
+export function resetDefaultGhCallPacerForTest(pacer?: GhCallPacer): void {
+  defaultGhCallPacer = pacer;
+}
+
 export function buildBatchedGithub(
   owner: string,
   repo: string,
@@ -3520,14 +3557,21 @@ export function buildBatchedGithub(
      * `fetchAllIssues`) against the daemon's OTHER burst call site, run-task.ts's
      * `buildOpenPrViews` (W1-T468) — see lib/open-prs-rest.ts's `GhCallPacer` doc for why one
      * shared instance, not independent per-call backoff, is what actually prevents the collision.
-     * OPTIONAL and omitted by every existing caller/fixture: absent ⇒ both reads fire with no
-     * gap, exactly the pre-W1-T468 behavior. The daemon's real wiring (run-task.ts's
-     * `buildSweepHook`) is the only caller that constructs and threads one through.
+     * OPTIONAL: an explicit value here (`run-task.ts`'s `buildSweepHook`, or any test fixture)
+     * always wins and is used exactly as given. OMITTED ⇒ W1-T1005's {@link defaultGhCallPacer},
+     * a single instance shared by EVERY gateway built in this process without one of its own — not
+     * a fresh pacer per construction (which would leave independently-polite gateways colliding at
+     * second zero again, design (ii)) and not the old no-op (pre-W1-T1005, every construction but
+     * `buildSweepHook`'s left both reads unpaced with no gap and no ledger row).
      */
     pacer?: GhCallPacer;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
+  // W1-T1005: an explicit `opts.pacer` always wins (design iii); omitted, every gateway built in
+  // this process falls back to the SAME module-scoped instance (created once, on whichever
+  // gateway needs it first) rather than each discovering the secondary rate limit on its own.
+  const pacer = opts.pacer ?? (defaultGhCallPacer ??= createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {}));
   const now = opts.now ?? (() => Date.now());
   const log = opts.log ?? (() => {});
   const slug = `${owner}/${repo}`;
@@ -3643,9 +3687,10 @@ export function buildBatchedGithub(
     if (!issueCache || now() - issueCache.at >= ttlMs) {
       let all: BatchedIssue[];
       try {
-        // W1-T468: waits its turn on the shared pacer (a no-op absent one) BEFORE the real call,
-        // and reports back whether it was rate-limited — see the `pacer` opt's doc above.
-        all = paceGhEntry(opts.pacer, isGhRateLimitError, fetchAllIssues);
+        // W1-T468/W1-T1005: waits its turn on the shared pacer (an explicit `opts.pacer`, or
+        // else the module-scoped default resolved above) BEFORE the real call, and reports back
+        // whether it was rate-limited — see the `pacer` opt's doc above.
+        all = paceGhEntry(pacer, isGhRateLimitError, fetchAllIssues);
         lastIssueFetchFailed = false;
         lastIssueFetchFailureReason = undefined;
         log("board_gateway.issue_fetch_ok", { issueCount: all.length });
@@ -3699,7 +3744,7 @@ export function buildBatchedGithub(
         // W1-T468: same shared-pacer guard as `fetchAllIssues` above — one pacer instance across
         // BOTH of this gateway's reads (and run-task.ts's sweep enumeration) is what actually
         // keeps three independently-polite callers from colliding at second zero.
-        all = paceGhEntry(opts.pacer, isGhRateLimitError, fetchAll);
+        all = paceGhEntry(pacer, isGhRateLimitError, fetchAll);
         lastFetchFailed = false;
         lastFetchFailureReason = undefined;
         log("board_gateway.fetch_ok", { prCount: all.length });

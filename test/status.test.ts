@@ -21,6 +21,7 @@ import {
   buildGitLogSupersessionSearch,
   readLedgerLines,
   readLedgerTail,
+  resetDefaultGhCallPacerForTest,
   DEFAULT_MAX_TASK_DISPATCHES,
   type BatchedIssue,
   type BatchedPr,
@@ -1711,11 +1712,134 @@ test("W1-T468: buildBatchedGithub's issue-list fetch is paced through the SAME p
   assert.deepEqual(calls, ["wait", "result:false"], "the issue fetch is gated and reported exactly like the PR fetch");
 });
 
-test("W1-T468: omitting the pacer leaves buildBatchedGithub's reads untouched — no gap, nothing recorded, the exact pre-W1-T468 behavior", () => {
+test("W1-T468: omitting the pacer still runs the fetch exactly once — W1-T1005 changed WHO paces an unpaced gateway, never how many times its fetch fires", () => {
   let fetchCalls = 0;
   const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetchCalls++; return []; } });
   gh.findMergedByTrailer("W1-T1");
   assert.equal(fetchCalls, 1, "the fetch still runs exactly once with no pacer wired");
+});
+
+// ── W1-T1005: `paceGhEntry` opens `if (!pacer) return call()`, so a construction that omits
+// `opts.pacer` used to run completely unpaced — no throw, no ledger row, no degraded mode, and
+// (per the task's own rationale) 15 of 16 real gateway constructions omitted it. These four
+// prove `buildBatchedGithub` now defaults `opts.pacer` to a MODULE-SCOPED shared instance instead
+// of leaving that construction to discover the secondary limit on its own — reached via
+// `resetDefaultGhCallPacerForTest` (test-only; see its own doc in lib/status.ts) so each test
+// controls exactly which pacer the DEFAULT resolves to, independent of the ~140 other tests in
+// this file that also build unpaced gateways. Every test restores the default to `undefined` in a
+// `finally`, so a later, unrelated test still gets the file's own once-lazily-created real default
+// rather than a stale fake left behind here. ──
+
+test("W1-T1005: a gateway built with no pacer is paced by default", () => {
+  const calls: string[] = [];
+  const fakeDefault: GhCallPacer = {
+    wait: () => calls.push("wait"),
+    recordResult: (rateLimited) => calls.push(`result:${rateLimited}`),
+  };
+  resetDefaultGhCallPacerForTest(fakeDefault);
+  try {
+    // NO `pacer` in opts — this is the exact construction shape that, pre-W1-T1005, left
+    // `opts.pacer` `undefined` all the way into `paceGhEntry`, which takes its `if (!pacer)`
+    // branch and never touches a pacer at all.
+    const gh = buildBatchedGithub("o", "r", { fetchAll: () => [] });
+    gh.findMergedByTrailer("W1-T1");
+    assert.deepEqual(
+      calls,
+      ["wait", "result:false"],
+      "an unpaced construction's real fetch is gated through the default pacer, not run bare",
+    );
+  } finally {
+    resetDefaultGhCallPacerForTest(undefined);
+  }
+});
+
+test("W1-T1005: an explicitly supplied pacer is not replaced by the default", () => {
+  const defaultCalls: string[] = [];
+  const explicitCalls: string[] = [];
+  const fakeDefault: GhCallPacer = {
+    wait: () => defaultCalls.push("wait"),
+    recordResult: (rateLimited) => defaultCalls.push(`result:${rateLimited}`),
+  };
+  const explicitPacer: GhCallPacer = {
+    wait: () => explicitCalls.push("wait"),
+    recordResult: (rateLimited) => explicitCalls.push(`result:${rateLimited}`),
+  };
+  resetDefaultGhCallPacerForTest(fakeDefault);
+  try {
+    const gh = buildBatchedGithub("o", "r", { fetchAll: () => [], pacer: explicitPacer });
+    gh.findMergedByTrailer("W1-T1");
+    assert.deepEqual(explicitCalls, ["wait", "result:false"], "the explicit pacer gates the real fetch");
+    assert.deepEqual(defaultCalls, [], "the default the caller never asked for is never touched");
+  } finally {
+    resetDefaultGhCallPacerForTest(undefined);
+  }
+});
+
+test("W1-T1005: two gateways in one process share one pacer", () => {
+  const calls: string[] = [];
+  const sharedFake: GhCallPacer = {
+    wait: () => calls.push("wait"),
+    recordResult: (rateLimited) => calls.push(`result:${rateLimited}`),
+  };
+  resetDefaultGhCallPacerForTest(sharedFake);
+  try {
+    // Two SEPARATE buildBatchedGithub constructions, neither given a pacer — exactly the shape
+    // design (ii) falsifies: "a fresh pacer per construction would restore exactly today's
+    // defect under a new name: three politely-spaced gateways that each know only about
+    // themselves still collide at second zero."
+    const ghA = buildBatchedGithub("o", "r-a", { fetchAll: () => [] });
+    const ghB = buildBatchedGithub("o", "r-b", { fetchAll: () => [] });
+    ghA.findMergedByTrailer("W1-T1");
+    ghB.findMergedByTrailer("W1-T1");
+    assert.deepEqual(
+      calls,
+      ["wait", "result:false", "wait", "result:false"],
+      "both gateways' real fetches are gated through the SAME default instance, in order — a " +
+        "per-construction default would leave the second gateway's `calls` entries missing here",
+    );
+  } finally {
+    resetDefaultGhCallPacerForTest(undefined);
+  }
+});
+
+test("W1-T1005: a rate-limited call widens the gap for the other gateway too", () => {
+  // A minimal STATEFUL fake — not the real `createGhCallPacer` — deliberately: the arithmetic
+  // behind widening/narrowing the gap is `GhCallPacer`'s own semantics, already owned by
+  // test/open-prs-rest.test.ts's `paceGhEntry` suite (per this task's own file-scoping note).
+  // What THIS gateway-level test must prove is narrower and different: that gateway B's `wait()`
+  // observes the widened state gateway A's `recordResult` set, which only holds if both routed
+  // through the identical shared instance.
+  let widened = false;
+  const widenedAtWait: boolean[] = [];
+  const sharedFake: GhCallPacer = {
+    wait: () => widenedAtWait.push(widened),
+    recordResult: (rateLimited) => {
+      if (rateLimited) widened = true;
+    },
+  };
+  resetDefaultGhCallPacerForTest(sharedFake);
+  try {
+    const rateLimitError = Object.assign(new Error("Command failed: gh pr list"), {
+      status: 1,
+      stderr: "gh: API rate limit exceeded for user ID 123456. (HTTP 403)",
+    });
+    const ghA = buildBatchedGithub("o", "r-a", {
+      fetchAll: () => {
+        throw rateLimitError;
+      },
+    });
+    assert.doesNotThrow(() => ghA.findMergedByTrailer("W1-T1"), "a classified rate-limit failure is caught, not rethrown");
+    const ghB = buildBatchedGithub("o", "r-b", { fetchAll: () => [] });
+    ghB.findMergedByTrailer("W1-T1");
+    assert.deepEqual(
+      widenedAtWait,
+      [false, true],
+      "gateway A's wait() saw the gap not yet widened; gateway B's wait() — AFTER A's rate-limit " +
+        "result was recorded — saw it widened, proving the two share one pacer's state",
+    );
+  } finally {
+    resetDefaultGhCallPacerForTest(undefined);
+  }
 });
 
 test("W1-T181: a batched-gateway fetch FAILURE projects indeterminate/throttled through deriveStatus — never the bare merged=false/source=none shape a genuine absence produces (the signal W1-T179's github_unobservable marking is designed to consume)", () => {
