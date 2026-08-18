@@ -247,6 +247,38 @@ test("acceptance 4: a PROCEED decision is ALSO ledgered verbatim (not just escal
   assert.equal(decisionLine!.extra?.confidence, 0.88);
 });
 
+// ── W1-T970: the escalated row is sha-keyed — sweep.ts's priorActionsFromLedger reads
+// pr_number/head_sha straight off THIS ledger line to build its riskRefused set. ────────
+
+test("W1-T970: the escalated row carries the pr number and head sha", async () => {
+  const input = baseInput({ prNumber: 970, headSha: "d00dfeed" });
+  const log: { step: string; extra?: Record<string, unknown> }[] = [];
+  const deps: RiskJudgeOrchestratorDeps = {
+    judge: async () => verdict({ verdict: "high", confidence: 0.95 }),
+    escalate: async () => "https://github.com/craigoley/remudero/issues/970",
+    log: (step, extra) => log.push({ step, extra }),
+  };
+  await runRiskJudge(input, deps);
+
+  const escalatedLine = log.find((l) => l.step === "risk_judge.escalated");
+  assert.ok(escalatedLine, "a risk_judge.escalated line must be ledgered");
+  assert.equal(escalatedLine!.extra?.pr_number, 970);
+  assert.equal(escalatedLine!.extra?.head_sha, "d00dfeed");
+  assert.equal(escalatedLine!.extra?.issue_url, "https://github.com/craigoley/remudero/issues/970");
+});
+
+test("W1-T970: an input with no identifiers supplied ledgers byte-identical to before — pr_number/head_sha are optional, never required", async () => {
+  const log: { step: string; extra?: Record<string, unknown> }[] = [];
+  const deps: RiskJudgeOrchestratorDeps = {
+    judge: async () => verdict({ verdict: "high", confidence: 0.95 }),
+    escalate: async () => "https://github.com/owner/repo/issues/1",
+    log: (step, extra) => log.push({ step, extra }),
+  };
+  await runRiskJudge(baseInput(), deps);
+  const escalatedLine = log.find((l) => l.step === "risk_judge.escalated");
+  assert.deepEqual(Object.keys(escalatedLine!.extra ?? {}).sort(), ["issue_url"], "no pr_number/head_sha keys when the caller supplies none");
+});
+
 // ── acceptance 5: STABLE on unchanged input (W1-T178 doctrine) + cheapest
 // (haiku-class) mount resolved from mounts.yaml (W1-T5) ───────────────────
 

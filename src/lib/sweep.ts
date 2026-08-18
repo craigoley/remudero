@@ -2857,6 +2857,20 @@ interface PriorActions {
    */
   postReviewed: Set<string>;
   /**
+   * W1-T970 — `${prNumber}@${headSha}` keys, built off the risk judge's OWN step
+   * (`risk_judge.escalated`), the SAME shape `postReviewed` above takes off `review.posted`/
+   * `review.post_refused`: a set built from another lane's own ledger line, never from
+   * `sweep.disposed`. PR-NUMBER-KEYED, NOT TASK-ID-KEYED — deliberately unlike `postReviewed`:
+   * the sibling sets `armed`/`fixed`/`escalated` already key on `pr_number`, the sweep has
+   * `pr.prNumber` in hand at the lookup, and `runRiskJudge` (risk-judge.ts) now emits it, so
+   * there is no `??` fallback anywhere on this path — the exact `${pr.taskId ?? ""}@${pr.headSha}`
+   * collapse that shipped a matching-nothing row in #1931 has no equivalent here by construction.
+   * A refusal expires on a NEW head sha (the key itself) or an explicit operator override
+   * (`cappedOverrideFromLedger` — see the `mergeable` arm of `alreadyDone`'s switch below); it is
+   * never cleared by time.
+   */
+  riskRefused: Set<string>;
+  /**
    * ABSENT-check-suite re-push history, read from this module's OWN `sweep.absent_repush`
    * ledger step. TWO keys because one is not enough: `shas` (`<pr>@<oldHead>`) gives
    * same-head idempotence exactly like {@link PriorActions.fixed}, and `count` (per PR) is
@@ -2938,6 +2952,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const escalated = new Set<string>();
   const depReviewed = new Set<string>();
   const postReviewed = new Set<string>();
+  const riskRefused = new Set<string>();
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   for (const line of lines) {
     // W1-T254: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
@@ -2945,6 +2960,16 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     if (line.step === "review.posted" || line.step === "review.post_refused") {
       if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
         postReviewed.add(`${line.task_id}@${line.head_sha}`);
+      }
+      continue;
+    }
+    // W1-T970: OUTCOME-KEYED off the risk judge's OWN step, exactly like `postReviewed` above —
+    // never `sweep.disposed`. PR-NUMBER-KEYED, NOT TASK-ID-KEYED (see PriorActions.riskRefused's
+    // doc for why) — both fields are REQUIRED, no `??` fallback, so a pre-W1-T970 escalation row
+    // (written before `runRiskJudge` emitted these fields) is never matched.
+    if (line.step === "risk_judge.escalated") {
+      if (typeof line.pr_number === "number" && typeof line.head_sha === "string") {
+        riskRefused.add(`${line.pr_number}@${line.head_sha}`);
       }
       continue;
     }
@@ -2996,7 +3021,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       // `review.posted`/`review.post_refused` branch above.
     }
   }
-  return { armed, fixed, closed, escalated, depReviewed, postReviewed, absentRepushes };
+  return { armed, fixed, closed, escalated, depReviewed, postReviewed, riskRefused, absentRepushes };
 }
 
 // ── W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half) ──
@@ -3450,12 +3475,26 @@ export async function runSweep(
     // Is this action already true (deduped)? Keyed per disposition.
     let alreadyDone: boolean;
     switch (disposition) {
-      case "mergeable":
+      case "mergeable": {
         // PREFER OBSERVED STATE: GitHub's own `autoMergeArmed` is the authority for
         // "already armed". The sweep's own memory is only a fallback, and now sha-keyed so a
         // new head re-earns the attempt rather than being deduped on a stale success.
-        alreadyDone = pr.autoMergeArmed === true || prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
+        //
+        // W1-T970: a head the risk judge escalated is refused HERE, in `alreadyDone`, NOT in
+        // this rule's own `when` predicate and NOT in the merge path — see PriorActions.riskRefused's
+        // doc. Marking it `alreadyDone` (rather than a distinct branch) gives it the SAME
+        // non-action shape every other dedup in this switch already has: `acted:false`, no
+        // escalation, no strike, re-derived whole next pass. It clears on a NEW head sha (the
+        // key itself, checked first so a fresh head never pays for a stale override lookup) OR
+        // an explicit operator override — reusing `cappedOverrideFromLedger` VERBATIM (the SAME
+        // verb, the SAME head-bound read-back the CAPPED-verdict override already uses; design
+        // (v) is explicit that this is not a second override vocabulary).
+        const refused =
+          prior.riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
+          !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) !== undefined);
+        alreadyDone = pr.autoMergeArmed === true || prior.armed.has(`${pr.prNumber}@${pr.headSha}`) || refused;
         break;
+      }
       case "blocked-fixable":
       case "conflicted": // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
         alreadyDone = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`);
