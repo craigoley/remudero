@@ -13379,6 +13379,21 @@ export async function daemonCommand(
     // `bootHeadSha` per that param's own "no positional caller shifts" discipline) — see the
     // shared `sweepFeedbackLandingRung` closure defined above this call.
     sweepFeedbackLandingRung,
+    // W1-T991: `undefined` ⇒ daemonBoot's own default (THIS process's real
+    // process.execPath/version) — never overridden here, only in tests.
+    undefined,
+    // W1-T991: the repo's declared node pin (.nvmrc, trimmed), read relative to THIS MODULE —
+    // never cwd, same discipline as `defaultBinaryPinDeps` reading deploy/Dockerfile above,
+    // since the daemon/CLI/worker all run from different directories and only the module path
+    // is stable across them. Best-effort: an unreadable .nvmrc omits the version-pin check
+    // rather than throwing (the account/roots check above still runs either way).
+    (() => {
+      try {
+        return readFileSync(fileURLToPath(new URL("../.nvmrc", import.meta.url)), "utf8").trim();
+      } catch {
+        return undefined;
+      }
+    })(),
   );
 
   const runDaemonFn = deps.runDaemon ?? runDaemon;

@@ -1601,11 +1601,28 @@ export function daemonBoot(
    * behavior unchanged from before W1-T530.
    */
   sweepFeedbackLanding?: () => LandFeedbackResult,
+  /**
+   * W1-T991: the runtime reading `assertCleanBoot`'s `BootAssertion` now also carries —
+   * defaults to THIS process's own `process.execPath`/`process.version` so a real boot
+   * needs no caller change at all; a test overrides it to prove drift without a real
+   * foreign-account install. Appended after `sweepFeedbackLanding` per this function's own
+   * "no positional caller shifts" discipline.
+   */
+  nodeRuntime: { execPath: string; version: string } = { execPath: process.execPath, version: process.version },
+  /**
+   * The repo's declared node pin (`.nvmrc` content, trimmed), read by the CALLER before
+   * invoking `daemonBoot` — this module never touches the filesystem (see file header).
+   * Omitted ⇒ no version-pin comparison is made; the own-account-roots check still runs.
+   */
+  declaredNodeVersion?: string,
 ): BootAssertion {
-  const assertion = assertCleanBoot(env, allowApiKey);
+  const assertion = assertCleanBoot(env, allowApiKey, nodeRuntime, declaredNodeVersion);
   log("daemon.boot", {
     env_clean: assertion.env_clean,
     billing_mode: assertion.billing_mode,
+    node_path: assertion.node_path,
+    node_version: assertion.node_version,
+    ...(assertion.node_drift ? { node_drift: assertion.node_drift } : {}),
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
   });
   // BOOT-RATE INVARIANT (W1-T215): the SHAPE-not-cause check — see this
