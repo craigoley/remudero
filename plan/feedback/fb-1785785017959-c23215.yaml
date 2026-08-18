@@ -20,5 +20,6 @@ raw: "A DISPATCHED WORKER IS RUNNING IN THE USAGE PROBE'S HOME — at
   nothing here."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
