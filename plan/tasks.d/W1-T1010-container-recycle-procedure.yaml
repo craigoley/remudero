@@ -1,0 +1,192 @@
+- id: W1-T1010
+  title: "THE CONTAINER RECYCLE IS A SEVEN-STEP PROCEDURE THAT EXISTS ONLY IN CHAT AND OMITTING ONE STEP TOOK THE FLEET DOWN TWICE TODAY — a recycle without clearing the drain lock spent docker's on-failure:5 to count=5 exited, one without pausing first found three workers mid-run, and today's docker pull failed with authentication required and silently relaunched the cached image: give it a host-side script whose REFUSALS are the deliverable, and a gated runbook section"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    Measured at origin/main 10f719b on the Azure host, from `docker inspect`, the container's own
+    logs, and word-bounded `git grep`. Every count below is a query, not a number to carry.
+
+    (1) TWO INCIDENTS TODAY, BOTH FROM AN OMITTED STEP. A recycle that did not clear
+    `state/drain.lock` left it holding `pid 46 on 5efb86ede91b` — a container `docker ps -a` no
+    longer knew. Every boot printed `rmd daemon REFUSED — a drain/daemon is already running`,
+    exited **1, not the freshness 75**, and so spent docker's `on-failure:5` budget to
+    `count=5 exited`. A human read the lock, confirmed the container was gone, and deleted it. A
+    second recycle, without pausing first, found **three workers mid-run**; killing them would have
+    lost the work and stranded `state/inflight/*.lock`.
+
+    (2) THE ORDER IS LOAD-BEARING, AND EACH CONSTRAINT HAS A DIFFERENT REASON. The token must be
+    captured BEFORE `docker rm`, because it exists only in the container's environment and is
+    unrecoverable afterwards without an operator. The pause must go on BEFORE the wait, or the wait
+    watches a fleet that is still admitting work. And it must come off BEFORE the start, because the
+    new container reads the SAME bind mount and would otherwise come up paused — the marker is a
+    file in the shared state directory, not process state.
+
+    (3) IT BELONGS IN `deploy/`, AS A HOST-INVOKED SCRIPT, AND THE CODEBASE HAS ALREADY DECIDED
+    THIS. Word-bounded, `docker` appears **104 times in `deploy/`, 7 in `scripts/`, and 11 in all of
+    `src/` — and every one of those 11 is a COMMENT, zero are code** (each classified individually,
+    against the 104 as the positive control). `src/lib/launchd.ts` reads 0. The existing boundary is
+    that `src/` DECIDES and a shell script EXECUTES at the docker edge: `decideDeployTrigger`
+    (`src/lib/deployer.ts`) decides, `deployRunCommand` promotes, `generateLaunchdPlist` WRITES a
+    unit — none of them shell docker.
+
+    (4) AND AN `rmd` VERB CANNOT RUN WHERE A RECYCLE MUST. Measured: `remudero-daemon` has **no
+    docker binary and 0 docker socket mounts** (control: 2 mounts total), so a verb inside the
+    container cannot recycle it. On the host, `node`/`npm`/`docker` all exist — but **the only
+    checkout on this host IS the daemon's own bind mount**, and every `rmd` verb runs
+    `checkCliFreshness` (`src/lib/self-sync.ts`), which executes `git(["merge", "--ff-only",
+    "origin/main"])` before the verb's own work. A recycle verb would therefore fast-forward the
+    checkout of the daemon it is about to replace, from inside that daemon's tree, sharing its
+    `node_modules`. `deploy/verify-image.sh`'s own header states the rule this task inherits:
+    *"PLAIN BASH AND DOCKER, deliberately … this runs on a host that may have no node, no rmd and no
+    checkout, and it must keep working when the thing it is inspecting is broken."*
+
+    (5) THE PULL FAILURE IS NOT HYPOTHETICAL AND ITS PRECEDENT IS ALREADY IN THIS DIRECTORY. Today's
+    `docker pull` failed with `authentication required` and the recycle silently relaunched the
+    CACHED image; the operator believed he had the new build and did not. `deploy/verify-image.sh`
+    exists for exactly this shape — its header records the same confusion on 2026-08-08, where a
+    failed pull left a stale image answering a question about a change it predated, and states the
+    rule: *"NEVER REPORT A VERDICT ON AN IMAGE YOU HAVE NOT CONFIRMED YOU JUST OBTAINED."* A pull
+    that fails must not fall through to a start.
+
+    (6) W1-T978 HAS SHIPPED, AND THE BRIEF THIS TASK CAME FROM SAID IT HAD NOT — SO THE LOCK STEP IS
+    NARROWER THAN IT LOOKS. `isHolderStale` (`src/lib/fs-race-safe.ts`) now carries W1-T978 by name:
+    a foreign `held.host` that is container-id-SHAPED, read from a process that is itself in a
+    container, is reclaimed directly. It merged today as #2117 and IS LIVE — the daemon's checkout
+    is at the same sha and its copy carries `looksLikeContainerId` (3 occurrences, control
+    `isHolderStale` = 4). Its shard still reads `status: queued`, which is a credit gap, not an
+    implementation gap. **BUT IT DOES NOT HELP A HOST-SIDE SCRIPT.** `defaultInContainer` is
+    `existsSync("/.dockerenv")`, absent on the host, so the guard short-circuits and a previous
+    container's lock still reads NOT stale from outside. The daemon will now reclaim it on its own
+    next boot; the script, standing on the host, cannot decide and must not try.
+
+    (7) THE DOC HALF IS UNGATED TODAY AND THAT IS MEASURABLE. `REQUIRED_PROCEDURES`
+    (`src/lib/runbook-coverage.ts`) holds exactly four entries — `supervisor-restart`,
+    `token-rotation`, `first-run-setup`, `billing-boundary` — and a container recycle is not among
+    them. **The word `docker` appears 0 times in `docs/operator-guide.md`**, against a control of all
+    four required headings present at 1 each and a deliberately absent heading reading 0. That file
+    is written entirely for the mini's launchd world. The module's own doc states the obligation:
+    *"a procedure missing from this list is invisible to the check by construction, so the list is
+    the whole obligation."*
+  design: |
+    (i) A HOST-INVOKED SHELL SCRIPT UNDER `deploy/`, NEVER RUN FROM INSIDE THE IMAGE. `deploy/Dockerfile`
+    carries `COPY --chown=node:node . .`, so this file WILL land in the image's `/app` like every
+    other tracked path. That copy is incidental and must never be the invocation path: a recycle
+    executed inside the container it removes cannot outlive `docker rm`. The script's own header
+    must say so. It is NOT baked to a `PATH` location — only `deploy/entrypoint.sh` gets
+    `COPY … /usr/local/bin/rmd-entrypoint`, and that one IS baked, which is why a merged fix to it
+    sat unshipped for 276 commits until an `acr-build` dispatch.
+
+    (ii) THE REFUSALS ARE THE DELIVERABLE, NOT THE STEPS. Four, each with a different thing it
+    prevents:
+      - **NO `GH_TOKEN` CAPTURED → REFUSE BEFORE TOUCHING ANYTHING.** Prevents the unrecoverable
+        state: a container removed and then discovered to have carried the only copy of the
+        credential. This refusal must fire before the first mutating command, not before `docker rm`.
+      - **WORKERS STILL RUNNING PAST A BOUNDED WAIT → REFUSE, AND REMOVE THE PAUSE ON THE WAY OUT.**
+        Prevents killing live work and stranding `state/inflight/*.lock`. The pause must not be left
+        behind by a refusal, or the refusal itself halts the fleet.
+      - **`docker pull` NON-ZERO → REFUSE. NEVER FALL THROUGH TO A START.** Prevents the silent
+        cached-image relaunch of (5).
+      - **IMAGE ID AFTER START ≠ THE PULLED DIGEST → REPORT IT AS A FAILED RECYCLE.**
+        `docker inspect --format '{{.Image}}'` against the digest actually pulled is the only proof
+        the recycle took; a started container is not that proof.
+
+    (iii) THE LOCK IS PRINTED, NEVER DECIDED. Every lock under `state/` that would block a boot is
+    displayed in full — holder pid, host, startedAt — and the script stops there. It does not delete
+    and does not judge. Per (6) this is not a temporary limitation waiting on W1-T978: it is
+    permanent for a host-side caller, because the staleness predicate is container-scoped by
+    construction. The script MAY state that the daemon will reclaim a container-shaped holder on its
+    own next boot; it may not act on that.
+
+    (iv) THE RUNBOOK SECTION IS GATED, NOT MERELY WRITTEN. A new `REQUIRED_PROCEDURES` entry is
+    appended in `src/lib/runbook-coverage.ts` — never by editing `checkRunbookCoverage`, which that
+    module forbids in terms — with a `headingPattern` and a matching `exampleHeading`, and the
+    `docs/operator-guide.md` section written to satisfy it including the `MIN_WORDS` floor, so a stub
+    heading fails the same as a missing one. Without this append the section is invisible to the
+    check and rots silently, which is the whole reason the doc half is in scope.
+
+    (v) THE HONEST COST OF NOT BEING A VERB, STATED RATHER THAN GLOSSED. A verb would earn
+    `checkVerbCoverage` (`test/docs-claims.test.ts`) — every `COMMANDS` entry must appear as
+    `rmd <verb>` in the operator guide or the test fails — and a generated `docs/cli-reference.md`
+    entry via `scripts/generate-cli-reference.mjs`. A script earns neither. (iv) is the deliberate
+    substitute. It is also why the verb was reconsidered and refused rather than never considered:
+    `COMMANDS` lives in `src/run-task.ts`, which **221 shards already declare** (W1-T471), so the
+    verb shape would serialize this against all of them for a change that shells docker — something
+    `src/` does zero times.
+
+    (vi) RULE 25, RE-DERIVED AGAINST `detectInstrumentEntanglement` ITSELF, NOT ASSUMED. Run on the
+    real predicate with five controls:
+      `scripts/coverage-baseline.json` alone            -> instrument=[that], src=[], FALSE
+      `docs/ORIENTATION.md` + a shard                   -> both empty, FALSE
+      a shard alone                                     -> both empty, FALSE
+      `src/lib/review.ts` alone                         -> src=[that], FALSE
+      `scripts/coverage-baseline.json` + `src/lib/review.ts` -> **TRUE** (the positive control)
+      THIS TASK'S PATHS                                 -> instrument=[], src=[runbook-coverage], FALSE
+    So `deploy/` is neither instrument nor product, and `src/lib/runbook-coverage.ts` is product with
+    no instrument beside it. **NO ENTANGLEMENT.** Had this been a verb, adding any workflow or
+    ratchet path would flip it: `src/run-task.ts` + `.github/workflows/ci.yml` reads TRUE on the same
+    predicate, which would have split this into two shards. It does not, so it stays one.
+
+    (vii) OUT OF SCOPE, NAMED RATHER THAN DISCOVERED.
+      - **THE CONSOLE ROUTE, WHICH CANNOT BE BUILT TODAY AND THE MEASUREMENTS SAY WHY.**
+        `remudero-serve` has **0 docker socket mounts** against a control of 2 mounts total, and its
+        sibling container has no docker binary at all. So the console could only ever REQUEST a
+        recycle, never perform one — a request/executor split, of which `com.remudero.supervisor`
+        running `rmd deploy-run` on a tick is the existing precedent. The tier would be at least
+        `/v1/inbox/approve`'s `tier: "high"` (`src/lib/panel-graph.ts`, *"moves code"*), since a
+        recycle can drop a running worker. **Recorded as a sibling; no route, no tier and no
+        executor is designed here.**
+      - W1-T978's shard status, which reads `queued` for shipped work — a credit gap, cited not fixed.
+      - The `on-failure:5` policy on the operator's `docker run`, deliberately unchanged.
+      - `deploy/host-update.sh` and `deploy/verify-image.sh`, which own reclaim-then-pull and
+        prove-the-pull respectively and are REUSED rather than re-implemented.
+    NO NEW SIGNAL IS ADDED. Eleven mechanisms have merged green with no reader; this emits no ledger
+    step, no field and no config key. Its only outputs are an exit code and text an operator reads.
+  acceptance:
+    - claim: "a recycle with no captured credential refuses before it mutates anything"
+      proof: "unit test: W1-T1010: a recycle with no captured credential refuses before mutating"
+    - claim: "workers still running past the bounded wait refuse the recycle and remove the pause"
+      proof: "unit test: W1-T1010: live workers past the wait refuse and the pause is removed"
+    - claim: "a failed image pull refuses instead of starting the cached image"
+      proof: "unit test: W1-T1010: a failed pull refuses instead of starting the cached image"
+    - claim: "a started container whose image id differs from the pulled digest reports a failed recycle"
+      proof: "unit test: W1-T1010: a started container on the wrong image reports a failed recycle"
+    - claim: "every blocking lock is printed in full and none is deleted by the script"
+      proof: "unit test: W1-T1010: every blocking lock is printed and none is deleted"
+    - claim: "the runbook coverage check requires the recycle procedure rather than merely allowing it"
+      proof: "unit test: W1-T1010: runbook coverage requires the container recycle procedure"
+  risk: high
+  origin: "oper#container-recycle-procedure-2026-08-18"
+  plan_refs: ["W1-T978", "W1-T213", "W1-T490", "W1-T498", "W1-T404"]
+  files: [deploy/recycle-container.sh, docs/operator-guide.md, src/lib/runbook-coverage.ts, test/runbook-coverage.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` WAS SET BY THE LINTER, NOT ASSERTED BY THE AUTHOR. A first draft filed at
+    `medium` and `rmd lint-plan --base origin/main` refused it, exit 1, verbatim:
+    *"[sizing] spans 3 distinct subsystems/concerns (operator-guide, recycle-container,
+    runbook-coverage) at risk:medium — Rule 19: raise to risk:high or decompose into one task
+    per concern"*. Raised on that refusal. Decomposition is the rule's other option and is
+    declined with a reason: a script with no runbook section is undiscoverable, a section with
+    no `REQUIRED_PROCEDURES` entry is ungated and rots (rationale 7), and an entry with no
+    section fails its own check on the first run. The three are one procedure.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT, not by guess. `REQUIRED_PROCEDURES` reads 4 in
+    `src/lib/runbook-coverage.ts` and 14 in `test/runbook-coverage.test.ts`; `checkRunbookCoverage`
+    reads 5 and 12. Both are declared because the append and its fixture are one change. The script's
+    own new path is declared because it is the deliverable. **`src/run-task.ts` IS NOT DECLARED** —
+    it holds `COMMANDS` and is declared by 221 shards (W1-T471), and design (v) refuses the verb
+    shape that would have required it. `deploy/entrypoint.sh` is NOT declared either: 11 shards name
+    it, it is the BAKED path, and this task changes nothing in it.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive with `git grep -woF <symbol> -- <path>`, `docker inspect
+    --format '{{len .Mounts}}'`, and the real `detectInstrumentEntanglement` import — never from the
+    numbers written above, which move.
+
+    ONE PREMISE OF THE ORIGINATING BRIEF WAS WRONG AND IS CORRECTED IN RATIONALE (6) RATHER THAN
+    CARRIED: W1-T978 was described as unbuilt; it merged today as #2117 and is live on the mount.
+    The lock refusal survives that correction, but for a different reason — a host-side caller can
+    never satisfy `defaultInContainer`, so the limitation is structural rather than pending.
