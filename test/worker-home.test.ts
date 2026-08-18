@@ -448,3 +448,48 @@ test("W1-T981: materialization still succeeds with neither the credential-only g
     rmSync(realHome, { recursive: true, force: true });
   }
 });
+
+test("W1-T981: one backup that refuses to be removed is kept and never blocks the reaping of the rest", () => {
+  const realHome = tmp();
+  try {
+    const claudeDir = join(realHome, ".claude");
+    const backupsDir = join(claudeDir, "backups");
+    mkdirSync(backupsDir, { recursive: true });
+    // Six backups, maxKeep 2 -> the four OLDEST are reaping candidates. The unlucky one is in
+    // the middle of that group, so a catch that swallowed the whole forEach would be visible as
+    // the entries AFTER it going unreaped, not merely as the failing one surviving.
+    const epochs = Array.from({ length: 6 }, (_, i) => 1_700_000_000_000 + i * 1000);
+    for (const epoch of epochs) {
+      writeFileSync(join(backupsDir, `${CLAUDE_CONFIG_BACKUP_PREFIX}${epoch}`), "{}");
+    }
+    const unremovable = `${CLAUDE_CONFIG_BACKUP_PREFIX}${epochs[1]}`;
+
+    const summary = sweepClaudeConfigBackups(claudeDir, {
+      maxKeep: 2,
+      fsImpl: {
+        rmSync: (target, ...rest) => {
+          // A permissions hiccup on exactly ONE entry — the real EACCES shape, injected rather
+          // than simulated by chmod, which root ignores on a CI runner.
+          if (String(target).endsWith(unremovable)) {
+            throw Object.assign(new Error(`EACCES: permission denied, unlink '${String(target)}'`), { code: "EACCES" });
+          }
+          return rmSync(target as Parameters<typeof rmSync>[0], ...(rest as [Parameters<typeof rmSync>[1]]));
+        },
+      },
+    });
+
+    // The refusal is absorbed: the entry is REPORTED as kept rather than lost or thrown.
+    assert.ok(summary.kept.includes(unremovable), "an entry that could not be removed is reported kept, not silently dropped");
+    assert.ok(!summary.removed.includes(unremovable), "an entry that threw is never reported as removed");
+
+    // ...and the rest of the sweep still ran — this is the claim the catch arm exists to make.
+    const expectedRemoved = [epochs[0], epochs[2], epochs[3]].map((e) => `${CLAUDE_CONFIG_BACKUP_PREFIX}${e}`);
+    assert.deepEqual(summary.removed.sort(), expectedRemoved.sort(), "every other over-limit backup is still reaped");
+    assert.equal(summary.kept.length, 3, "the two newest, plus the one that refused");
+
+    // The on-disk state agrees with the summary, so this is not a bookkeeping-only assertion.
+    assert.deepEqual(readdirSync(backupsDir).sort(), summary.kept.sort());
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
