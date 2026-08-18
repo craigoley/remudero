@@ -1,0 +1,220 @@
+- id: W1-T996
+  title: "THE ACCESS JWT PROVIDER IS BUILT, TESTED AND HAS ZERO PRODUCTION CALL SITES — cloudflareAccessIdentityProvider and createCloudflareAccessKeyCache both score 0 src invocations against controls of 2 and 2, so every console request already carries a verified identity the server discards and the tab still reads READ-ONLY: wire the existing provider at the serve call site"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    THIS SHARD IS THE GRANT, NOT THE INBOX. It makes the door the credential. It does NOT disable
+    `enforceWriteTiers`, does NOT widen the bearer token's scope, and does NOT build a role model.
+    Re-derived at origin/main d9c3c573 in a scratch worktree of that sha.
+
+    (1) THE SEAM SHIPPED AND SO DID THE PROVIDER — THE WIRING IS WHAT IS MISSING. W1-T531 landed
+    `IdentityProvider` in `src/lib/service.ts` (18 word-bounded hits) with
+    `test/identity-provider-seam.test.ts` at 379 lines (control: `test/drain.test.ts` 1689). But the
+    same module ALSO already holds the whole Cloudflare Access implementation:
+    `CloudflareAccessJwk`, `CloudflareAccessKeyCache`, `CloudflareAccessOptions`,
+    `CloudflareAccessClaims`, `verifyCloudflareAccessAssertion`,
+    `cloudflareAccessIdentityProvider` and `createCloudflareAccessKeyCache`.
+
+    (2) AND NOTHING CALLS EITHER OF THEM. Counting invocation-shaped occurrences (the name followed
+    by an open paren, excluding the definition): `cloudflareAccessIdentityProvider` src=0 test=4;
+    `createCloudflareAccessKeyCache` src=0 test=0 — no caller anywhere, not even a fixture. CONTROLS
+    on the same instrument in the same files: `bearerTokenProvider` src=2, `tailscaleIdentityProvider`
+    src=2. So the zeros discriminate, and this is an ELEVENTH built-and-unread mechanism.
+
+    (3) THE ONE PRODUCTION CALL SITE PASSES NO PROVIDERS. `createService` is constructed in
+    `src/lib/serve.ts` with `tokens`, `identity`, `routes`, `sse`, `log` and
+    `enforceWriteTiers: true` — and no `providers` key. `enforceWriteTiers` being on in production
+    is confirmed from that same literal.
+
+    (4) THE SYNCHRONOUS-GRANT CONSTRAINT IS ALREADY SOLVED, WHICH IS WHY THIS IS SMALL.
+    `grant(req: IncomingMessage, allowQueryToken: boolean): ReadonlySet<Scope> | undefined` returns
+    a plain set, never a promise — so JWKS COULD NOT be fetched inline. The module's answer is
+    already in the tree: `CloudflareAccessOptions.keys` is a `CloudflareAccessKeyCache` whose
+    `keys()` is a synchronous read of whatever `refresh()` last stored, and
+    `createCloudflareAccessKeyCache` returns `CloudflareAccessKeyCache & { refresh(): Promise<void> }`
+    which fetches `{TEAM_DOMAIN}/cdn-cgi/access/certs` ENTIRELY OFF the request path. The caching
+    shape this task needs is the shape the module already supports; nothing new is designed.
+
+    (5) THE ORDERING IS AN APPEND AND THE APPEND IS SAFE — MEASURED, NOT ASSUMED. `createService`
+    composes `[...(opts.identity ? [tailscaleIdentityProvider(opts.identity)] : []),
+    bearerTokenProvider(opts.tokens), ...(opts.providers ?? [])]`, and `grantedScopes` walks it and
+    returns on the FIRST provider whose grant is not `undefined`. So an appended provider sits after
+    the bearer token. THAT IS CORRECT HERE, and the reason is `bearerTokenProvider`'s own body: with
+    no token it returns `undefined` (`if (!token) return undefined`), and for an unrecognised token
+    it also returns `undefined`. IT DOES NOT SHADOW. A browser request carrying no Authorization
+    header falls through to the appended provider, while a caller that DOES present a token is still
+    served by the token first — so `rmd console-url --write` and every CLI caller keep working
+    byte-identically, which is criterion 4.
+
+    (6) THE VOCABULARY REACHES, SO NO ROLE MODEL IS NEEDED. `Scope` is exactly `"read" | "write"`,
+    `tenant` reads 0 files across src/ (control: `scope` reads 55 files), and the provider's own doc
+    states the ruling in terms: "a verified assertion maps to a scope + write tier and NOTHING else
+    — no role/admin layer; Scope stays exactly read | write". Its grant returns `READ_WRITE` on a
+    verified assertion. THAT IS THE WHOLE GRANT.
+
+    (7) AND THE OPERATOR-IDENTITY CHECK LIVES IN THE ACCESS POLICY, NOT IN THE VERIFIER — WORTH
+    STATING BECAUSE IT IS EASY TO MISREAD. `verifyCloudflareAccessAssertion` checks the signature
+    against the cached key set, the `alg` against an RS256/384/512 allowlist, `kid`, `aud` against
+    the configured application tag, `iss` against the team domain, and `exp`. IT CHECKS NO EMAIL,
+    and `CloudflareAccessClaims` does not even name one. The `aud` tag pins an assertion to THAT
+    Access application, whose policy allows one email — so "the Access-verified email matches the
+    operator" is enforced by the application policy and inherited through `aud`. A builder must not
+    add an email comparison and call it a role model.
+
+    (8) ABSENT MUST MEAN NOTHING, AND IT ALREADY DOES. The provider reads
+    `req.headers["cf-access-jwt-assertion"]` and returns `undefined` when it is missing — commented
+    in the tree as "not my credential -- try the next provider". `undefined` is explicitly NOT a
+    denial in this seam's contract, so a local `127.0.0.1` request, a CLI caller, or a request that
+    bypassed Access grants nothing and simply falls through. The whole grant body is additionally
+    wrapped so it can never throw, because `grant` runs inside `createService`'s unawaited IIFE
+    where a throw kills the process rather than denying the request.
+
+    (9) WHAT THE GRANT ACTUALLY UNLOCKS, AND THE BRIEFING FOR THIS FILING HAD THE HEADLINE ROUTE
+    WRONG. `WriteTier` is `"low" | "middle" | "high"` ranked 1/2/3 with `granted >= required`, and
+    the provider declares `writeTier: "middle"`. Route tiers measured by pairing each `path:` with
+    its `tier:`: LOW 10, MIDDLE 6, HIGH 5. So a middle grant reaches SIXTEEN write routes and not
+    the five high ones. `/v1/inbox/approve` is `tier: "high"` (`src/lib/panel-graph.ts`) — IT DOES
+    NOT BECOME USABLE, and browser approval keeps requiring the tailnet until someone rules on that
+    tier, which is not this task. `/v1/inbox/reframe`, `/v1/questions/answer`,
+    `/v1/operator-notes/add`, `/v1/escalation/mark-handled`, `/v1/feedback*` and `/v1/peek` are all
+    LOW and do become reachable.
+
+    (10) AND TWO OF THEM STILL HAVE NO UI, SO THIS SHARD ALONE DOES NOT GIVE THE OPERATOR A WORKING
+    INBOX. SAY IT PLAINLY. `/v1/questions/answer` scores 0 references in `src/lib/serve.ts` and
+    `/v1/operator-notes/add` scores 0, against controls of `/v1/inbox/approve` 5,
+    `/v1/escalation/mark-handled` 3 and `/v1/inbox/reframe` 2 in the same file. So the grant makes
+    `reframe` and `mark-handled` work from the browser immediately, leaves `approve` blocked by
+    tier, and leaves `questions/answer` and `operator-notes/add` reachable but unrendered. A SECOND
+    SHARD MUST FOLLOW FOR THE UI.
+  design: |
+    THE SHAPE: construct the key cache, start its refresh off the request path, append the existing
+    provider at the one call site, and read two config values. No new provider, no new verifier, no
+    new step.
+
+    (i) `src/lib/service.ts` IS DELIBERATELY NOT DECLARED. Every symbol this task needs already
+    exists there and is already unit-tested by `test/identity-provider-seam.test.ts`. A builder who
+    edits that module is rebuilding what shipped in W1-T531 rather than wiring it, and must amend
+    this shard first.
+
+    (ii) THE APPEND POSITION IS THE CORRECT ONE — rationale (5). Pass the provider through
+    `ServiceOptions.providers` so it lands after the bearer token. Do NOT reorder the built-in
+    array: the token-first order is the pre-seam W1-T371 contract, and preserving it is what keeps
+    every CLI caller unaffected.
+
+    (iii) THE REFRESH IS OUT OF BAND AND MUST STAY THERE. `createCloudflareAccessKeyCache`'s
+    `refresh()` returns a promise; it is started and re-armed by the serve lifecycle, never awaited
+    from inside `grant`. Criterion 5 is the falsifier: a cache miss must deny THIS request and let
+    the next refresh fix the next one.
+
+    (iv) TWO CONFIG VALUES, AND THEY ARE OPERATOR-INSTANCE VALUES. `teamDomain` and `audience` are
+    per-install, not plan constants — the same class `.remudero/mounts.yaml`'s own header sends to
+    `rmd init` config rather than the plan. `src/lib/config.ts` carries no `teamDomain`/`audience`
+    field today (control: `serve` reads 12 there), so the field is new. ABSENT CONFIG MUST MEAN THE
+    PROVIDER IS NOT COMPOSED AT ALL — never composed-with-empty-audience, which would verify
+    nothing and grant on any assertion.
+
+    (v) NO NEW SIGNAL. The provider already logs `service.access_jwt_error` on its own failure path.
+    Nothing else is emitted. Ten measured mechanisms have merged green with no reader and this task
+    exists because the Access provider is the eleventh; adding a twelfth would be the same mistake.
+
+    (vi) THE CONSUMERS ARE FILED AND ARE NOT ABSORBED. `plan/feedback/fb-1784770111145-cf7c24.yaml`
+    and `plan/feedback/fb-1784988460437-9daa9b.yaml` are the decision-queue and
+    write-actions-on-UP-NEXT entries that this grant unblocks, and
+    `plan/feedback/fb-1784756096314-a6f58b.yaml` is the third. THEY ARE THE CONSUMERS OF THIS WORK,
+    NOT PART OF IT — this shard renders no UI and changes no route.
+
+    (vii) OUT OF SCOPE, EACH WITH ITS REASON. `enforceWriteTiers` stays on (the point is the
+    credential, not the lock). The bearer token's `writeTier: "low"` is unchanged. The HIGH tier on
+    `/v1/inbox/approve` is a separate ruling. And no role/admin/tenant dimension is introduced —
+    rationale (6) shows the vocabulary already reaches.
+  acceptance:
+    - claim: "the access provider is composed after the bearer token at the one production call site"
+      proof: "unit test: W1-T996: the access provider is composed after the bearer token at the serve call site"
+    - claim: "a request carrying no access header grants nothing and falls through to the next provider"
+      proof: "unit test: W1-T996: a request with no access header falls through instead of being granted write"
+    - claim: "a verified assertion grants write at the middle tier and reaches no high tier route"
+      proof: "unit test: W1-T996: a verified assertion grants write at the middle tier and not the high tier"
+    - claim: "a caller presenting a bearer token is still served by the token exactly as before"
+      proof: "unit test: W1-T996: the bearer token keeps working for a caller that presents one"
+    - claim: "the key set refresh stays off the request path so a cache miss denies only that request"
+      proof: "unit test: W1-T996: the key cache refresh never runs on the request path"
+    - claim: "this shard is the grant and not the inbox and renders no console interface"
+      proof: "grep: this shard is the grant and not the inbox and renders no console interface in plan/tasks.d/W1-T996-wire-the-access-jwt-grant.yaml"
+  risk: high
+  origin: "oper#wire-the-access-jwt-grant-2026-08-18"
+  plan_refs: ["W1-T531", "W1-T404", "W1-T371"]
+  files: [src/lib/serve.ts, src/lib/config.ts, test/serve-access-jwt-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THREE BRIEFING FIGURES ARE CORRECTED HERE RATHER THAN CARRIED. FIRST AND MOST IMPORTANT:
+    `/v1/inbox/approve` is `tier: "high"`, so it is NOT among the routes this grant unlocks — the
+    briefing listed it as one. A middle grant reaches the 10 LOW and 6 MIDDLE routes and none of the
+    5 HIGH. SECOND: the three named feedback entries are not at `status: new` —
+    fb-1784756096314-a6f58b is `rejected` and both fb-1784770111145-cf7c24 and
+    fb-1784988460437-9daa9b are `accepted`. THIRD: the undrained reservoir is 60 of 150 entries at
+    `status: new`, not 62. Each conclusion the figures support still holds, which is why they had to
+    be re-taken rather than trusted for agreeing.
+
+    THE MOST USEFUL FINDING IS THAT THE PROVIDER ALREADY EXISTS. The briefing framed this as
+    accepting the JWT as a grant; the tree already accepts it, verifies it, tiers it and tests it.
+    What it does not do is CONSTRUCT it. That is why `src/lib/service.ts` is excluded from `files:`
+    and why the budget is a wiring budget.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT d9c3c573. `cloudflareAccessIdentityProvider`
+    service.ts 6, serve.ts 0, run-task.ts 0, config.ts 0. `createCloudflareAccessKeyCache`
+    service.ts 3, elsewhere 0. `CloudflareAccessOptions` service.ts 3, elsewhere 0 — all three
+    reachable by import, which is why service.ts needs no edit. `createService` service.ts 9,
+    serve.ts 8 — SERVE.TS IS THE CALL SITE AND THEREFORE THE HOME. `bearerTokenProvider`
+    service.ts 4, serve.ts 1. src/lib/config.ts is declared for the two operator-instance values per
+    design (iv). CONTROL: an absent symbol reads 0 in every one of these files.
+    src/run-task.ts IS NOT DECLARED — every Access symbol reads 0 there — so this shard does NOT pay
+    the W1-T471 serialisation cost.
+
+    test/serve-access-jwt-wiring.test.ts IS NEW AND DECLARED AS NEW.
+    `test/identity-provider-seam.test.ts` is W1-T531's and tests the provider in ISOLATION; this
+    task's subject is the composition at the call site, a different shape, and this repo's own rule
+    sends a coverage-load-bearing test to its own file.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (`src/lib/task-linter.ts`) exempts only risk high, and `subsystemsOf` derives subsystems from the
+    acceptance-criteria text as well as from `files:`; this shard spans the serve wiring, the config
+    surface and a suite, and its criteria name provider ordering, header absence, write tiers and a
+    refresh lifecycle.
+
+    PROOF DIALECT WAS CHOSEN BEFORE WRITING, DELIBERATELY. Five criteria are mechanical and use the
+    name-filtered `unit test:` form. The sixth is doc-shaped — a scope statement about what this
+    shard is not — so it takes a `grep:` rather than a `unit test:` that would parse, match zero and
+    cap the review at a criterion no test can ever satisfy. `demonstration:` is refused outright by
+    `check-proof` and appears nowhere here. Every `unit test:` title was measured against test/ with
+    `grep -rlF` and matched ZERO files, against a control title lifted from the real seam suite that
+    matched one; each is plain prose under 100 characters with no comma, no semicolon-space and no
+    regex metacharacter. The `grep:` proof is on ONE PHYSICAL LINE and was verified against this
+    changeset's own head as well as the merge base.
+
+    ONE ADVISORY IS ACCEPTED KNOWINGLY. `rmd lint-plan` emits a single finding against this shard, a
+    `proof-scope` WARNING that criterion 6's grep names this shard's own path while `files:` does not
+    list it. It is advisory and never blocking — the run carried 179 blocking tasks and NOT ONE names
+    W1-T996. Both remedies are worse: declaring the shard's own path would place the filing inside its
+    own implementation scope, and repointing the grep at src/lib/serve.ts would name a file this
+    changeset does not touch, which reads hits 0 and `executed_fail` and fails the review outright.
+
+    ID PROVENANCE — FOUR SURFACES, EACH CONTROLLED, SWEPT FOR THE EXACT ID. Prefixes in use are
+    wider than W1 (W1-T, W2-T, W3-T, W12-T), so the sweep matched the full id rather than a prefix.
+    W1-T996 read 0 on all four: refs/rmd-id/* (control refs/rmd-id/W1-T995 = 1, negative
+    W1-T999999 = 0), shard filenames on origin/main (control W1-T988 = 1), ids declared anywhere
+    under plan/ (control W1-T988 = 1), and the one open pull request's file list and title (control
+    W1-T992 = 1 in both; the closed-state endpoint returned 5 rows, so the single-PR open set is a
+    real reading). THE RESERVED RANGE MOVED DURING THIS SESSION — 985-990 on the first sweep and
+    985-995 on the second — so the id was re-swept immediately before pushing.
+
+    THE RESERVATION USED THE PLAIN REFSPEC AND THE GATE WAS PROVEN ON THE SAME INVOCATION. Orphan
+    commit over the empty tree (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce
+    Craigs-Mac-mini-68327-1787075746182406000, exit captured into a variable, ref re-read and
+    matched. Free id: PUSH_EXIT_CODE=0, `* [new reference]  81d79a52… -> refs/rmd-id/W1-T996`. The
+    IDENTICAL plain refspec against the TAKEN refs/rmd-id/W1-T995: TAKEN_EXIT_CODE=1,
+    `! [rejected] … (fetch first)`, and that ref still points at 2cc4b8b7 — its owner's commit,
+    unclobbered. No `+` and no lease: the rejection is the gate.
