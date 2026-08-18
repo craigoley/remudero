@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ import {
   type AccountUsageInput,
   type AccountUsageSnapshot,
 } from "../src/lib/account-usage.js";
-import { renderShellHtml } from "../src/lib/serve.js";
+import { ACCOUNT_FILE_PATH_ENV, renderShellHtml, resolveAccountFilePath } from "../src/lib/serve.js";
 
 /**
  * The console's ACCOUNT strip — which Anthropic account the fleet is spending, and how much of
@@ -41,6 +41,40 @@ const FIXTURE = fileURLToPath(new URL("./fixtures/account-usage/claude-json.json
 
 /** The fixture's own `fetchedAtMs`, so "now" in these tests is relative to the real capture. */
 const CAPTURED_AT = 1785516413209;
+
+/** Invoke a built route's handler against a fake `ServerResponse` and parse the JSON body —
+ *  shared by the pre-existing "GET /v1/account-usage answers 200..." test and the W1-T997 tests
+ *  below, so none of them re-derives the fake response object on its own. */
+async function invokeRoute(route: ReturnType<typeof buildAccountUsageRoute>): Promise<{ status: number; parsed: AccountUsageSnapshot }> {
+  let status = 0;
+  let body = "";
+  const res = {
+    writeHead(code: number) {
+      status = code;
+    },
+    end(chunk: string) {
+      body = chunk;
+    },
+  } as unknown as ServerResponse;
+  await route.handler({} as never, res, { params: {} });
+  return { status, parsed: JSON.parse(body) as AccountUsageSnapshot };
+}
+
+/** Run `fn` with `$HOME` pointed at `dir` for the duration of the call, then restore it — so a
+ *  test can prove what `readAccountUsageFile`'s own `join(homedir(), ".claude.json")` default
+ *  resolves to without touching the operator's real home directory. ALWAYS async (awaits `fn`
+ *  itself, sync or not) so the restore in `finally` can never run before a promise `fn` returns
+ *  has actually settled — the exact ordering bug an unawaited `finally` would risk here. */
+async function withHome<T>(dir: string, fn: () => T | Promise<T>): Promise<T> {
+  const real = process.env.HOME;
+  process.env.HOME = dir;
+  try {
+    return await fn();
+  } finally {
+    if (real === undefined) delete process.env.HOME;
+    else process.env.HOME = real;
+  }
+}
 
 /** The newest REAL `daemon.headroom` line on this host — verbatim, including its `enforced:
  *  false` and the 77% reading that belongs to the account the operator switched AWAY from. */
@@ -340,24 +374,134 @@ test("GET /v1/account-usage answers 200 from its real defaults — the real file
   assert.equal(route.path, "/v1/account-usage");
   assert.equal(route.scope, "read", "READ-scoped: this panel adds no write surface");
 
-  let status = 0;
-  let body = "";
-  const res = {
-    writeHead(code: number) {
-      status = code;
-    },
-    end(chunk: string) {
-      body = chunk;
-    },
-  } as unknown as ServerResponse;
-  await route.handler({} as never, res, { params: {} });
-
+  const { status, parsed } = await invokeRoute(route);
   assert.equal(status, 200);
-  const parsed = JSON.parse(body) as AccountUsageSnapshot;
   assert.equal(parsed.accountEmail, "operator@example.com", "the real file reader ran, against the captured fixture");
   assert.equal(parsed.governor, "armed", "the real ledger reader ran, against a real-shaped heartbeat line");
   // The age policy runs end-to-end through the route, not just in the unit.
   assert.equal(parsed.usageUnknownReason, "too-old");
   assert.equal(parsed.fiveHour, undefined, "and a too-old reading is still withheld through the route, not just in the unit");
+});
+
+// ── W1-T997: the route accepted an injectable `accountFilePath` all along
+// (`AccountUsageDeps.accountFilePath`, honoured by the `?? readAccountUsageFile(deps.
+// accountFilePath)` fallback above) but nothing upstream of it ever supplied a value, so every
+// request resolved under the SERVE process's own `homedir()` -- a path `remudero-serve`'s
+// container mounts don't cover (see account-usage.ts's module header and this task's own
+// rationale). serve.ts's `resolveAccountFilePath` closes that gap; these four tests lock in the
+// reader's existing precedence/guard behaviour so wiring a real value into it can never regress
+// the checks design note (iii) says must not be touched.
+
+test("W1-T997: the account usage route reads the supplied path not the home default", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "account-usage-home-"));
+  // A DIFFERENT identity than FIXTURE's `operator@example.com` -- so a route that fell through
+  // to the home default, rather than the explicitly supplied path, is trivially distinguishable.
+  writeFileSync(
+    join(homeDir, ".claude.json"),
+    JSON.stringify({
+      oauthAccount: { emailAddress: "home-default@example.com", accountUuid: "aaaaaaaa-0000-0000-0000-000000000000" },
+      cachedUsageUtilization: {
+        accountUuid: "aaaaaaaa-0000-0000-0000-000000000000",
+        fetchedAtMs: CAPTURED_AT,
+        utilization: { five_hour: { utilization: 99, resets_at: "2099-01-01T00:00:00Z" } },
+      },
+    }),
+  );
+  const routeDir = mkdtempSync(join(tmpdir(), "account-usage-route-"));
+
+  await withHome(homeDir, async () => {
+    const route = buildAccountUsageRoute({
+      ledgerPath: join(routeDir, "ledger.ndjson"),
+      accountFilePath: FIXTURE,
+      now: () => CAPTURED_AT,
+    });
+    const { status, parsed } = await invokeRoute(route);
+    assert.equal(status, 200);
+    assert.equal(parsed.accountEmail, "operator@example.com", "the SUPPLIED path's identity, not the home default's");
+    assert.notEqual(parsed.accountEmail, "home-default@example.com");
+    assert.deepEqual(parsed.fiveHour, { percentUsed: 3, resetsAt: "2026-07-31T20:49:59.209107+00:00" }, "the supplied path's own window, not the home default's 99%");
+  });
+});
+
+test("W1-T997: a readable path renders windows and an absent path reads unreadable", () => {
+  // READABLE — the supplied path's own five-hour and seven-day windows render.
+  const readable = readAccountUsageFile(FIXTURE);
+  const good = deriveAccountUsage(readable, [], CAPTURED_AT);
+  assert.deepEqual(good.fiveHour, { percentUsed: 3, resetsAt: "2026-07-31T20:49:59.209107+00:00" });
+  assert.deepEqual(good.sevenDay, { percentUsed: 0, resetsAt: "2026-08-02T04:59:59.209129+00:00" });
+  assert.equal(good.usageUnknownReason, undefined);
+
+  // ABSENT, in the SAME run — never a bare "unknown"; the reason must be the specific one this
+  // path failure produces.
+  const absent = readAccountUsageFile(join(tmpdir(), "w1-t997-definitely-does-not-exist.json"));
+  assert.deepEqual(absent, { unreadable: true });
+  const bad = deriveAccountUsage(absent, [], CAPTURED_AT);
+  assert.equal(bad.usageUnknownReason, "unreadable");
+  assert.equal(bad.fiveHour, undefined);
+  assert.equal(bad.sevenDay, undefined);
+});
+
+test("W1-T997: omitting the supplied path leaves the home default unchanged", async () => {
+  // Neither an explicit override nor the env var set -> resolves to undefined, EXACTLY what
+  // flowed into readAccountUsageFile before this task's wiring existed.
+  assert.equal(resolveAccountFilePath(undefined, {}), undefined);
+
+  // That `undefined` isn't just A value, it is the SAME default `readAccountUsageFile`'s own
+  // parameter resolves -- point $HOME at a fixture-carrying temp dir and confirm the resolved
+  // (undefined) path reads byte-identically to calling the reader with no argument at all.
+  const homeDir = mkdtempSync(join(tmpdir(), "account-usage-home-default-"));
+  writeFileSync(join(homeDir, ".claude.json"), readFileSync(FIXTURE, "utf8"));
+  await withHome(homeDir, () => {
+    const resolved = resolveAccountFilePath(undefined, {});
+    assert.deepEqual(readAccountUsageFile(resolved), readAccountUsageFile(), "an omitted override changes nothing about the default read");
+  });
+
+  // An explicit caller override still wins over the env var -- the same "flag beats env" order
+  // resolveServeHosts already uses for --host.
+  assert.equal(
+    resolveAccountFilePath("/explicit/path.json", { [ACCOUNT_FILE_PATH_ENV]: "/env/path.json" }),
+    "/explicit/path.json",
+    "an explicit override beats the env var",
+  );
+  // With no explicit override, the env var is honoured -- the SECOND way an install can point the
+  // console at a readable copy, set purely in the deployment environment.
+  assert.equal(
+    resolveAccountFilePath(undefined, { [ACCOUNT_FILE_PATH_ENV]: "/env/path.json" }),
+    "/env/path.json",
+    "the env var is honoured when nothing more explicit overrides it",
+  );
+});
+
+test("W1-T997: the too old and account mismatch guards still refuse a bad cache", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "account-usage-guards-"));
+
+  // TOO OLD, read through the ROUTE via the newly-wired injectable path — not just the pure
+  // projection — so pointing the reader at a readable file is proven not to have loosened this.
+  const tooOldRoute = buildAccountUsageRoute({
+    ledgerPath: join(dir, "ledger.ndjson"),
+    accountFilePath: FIXTURE,
+    now: () => CAPTURED_AT + USAGE_CACHE_MAX_AGE_MS + 1,
+  });
+  const tooOld = await invokeRoute(tooOldRoute);
+  assert.equal(tooOld.parsed.usageUnknownReason, "too-old");
+  assert.equal(tooOld.parsed.fiveHour, undefined, "a too-old window is still withheld through the route");
+
+  // ACCOUNT MISMATCH, from a captured file whose cache belongs to a DIFFERENT account than the
+  // identity in the same file — the switch guard must still refuse it end-to-end through the
+  // route, exactly as it does when driven directly against the pure projection.
+  const mismatched = JSON.parse(readFileSync(FIXTURE, "utf8")) as Record<string, unknown>;
+  const cache = mismatched.cachedUsageUtilization as Record<string, unknown>;
+  cache.accountUuid = "99999999-8888-7777-6666-555555555555";
+  const mismatchedPath = join(dir, "mismatched-claude-json.json");
+  writeFileSync(mismatchedPath, JSON.stringify(mismatched));
+  const mismatchRoute = buildAccountUsageRoute({
+    ledgerPath: join(dir, "ledger.ndjson"),
+    accountFilePath: mismatchedPath,
+    now: () => CAPTURED_AT,
+  });
+  const mismatch = await invokeRoute(mismatchRoute);
+  assert.equal(mismatch.parsed.usageUnknownReason, "account-mismatch");
+  assert.equal(mismatch.parsed.fiveHour, undefined, "a mismatched window is still withheld through the route");
+  assert.equal(mismatch.parsed.accountUuid, "00000000-1111-2222-3333-444444444444", "identity is still the CURRENT account, not the cache's");
 });
 
