@@ -1566,6 +1566,125 @@ test("W1-T174: a FIXABLE genuine blocker with NO dispatchFix wired still halts +
   assert.equal(escalations[0].task.id, "B");
 });
 
+// ── W1-T976: block reasoning must consult the tick's OWN merged projection before ──
+// ── trusting `result.verdict` — a PR that merges gate-side after the run stopped ──
+// ── must not be classed a fixable blocker, spend a strike, or hold dependents.    ──
+
+test("W1-T976: a task whose pull request already merged is not treated as blocked", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const clock = fakeClock();
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id): Promise<RunResult> => {
+        if (id === "B") {
+          // The PR merged gate-side (GitHub's required-status contract) AFTER this run's
+          // own bounded check stopped — the tick's merged projection now credits B even
+          // though this result still says unmerged, exactly the rationale's case (3)/(4).
+          merged.add("B");
+          return { taskId: "B", runId: "B-run", merged: false, costUsd: 0.2, verdict: "blocked_ci", prUrl: "https://github.com/o/r/pull/600" };
+        }
+        merged.add(id);
+        return okResult(id);
+      },
+      dispatchFix: async () => {},
+      escalateBlock: async () => {},
+      sleep: clock.sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 4 },
+  );
+  assert.equal(s.stopReason, "max_reached", "an already-merged task never routes into block reasoning's halt path");
+  assert.ok(!lines.some((l) => l.step === "daemon.blocked"), "never the halt+escalate genuine-blocker line");
+  assert.ok(s.merged.includes("B"), "credited merged, exactly like a task whose result.merged was true");
+});
+
+test("W1-T976: an already merged task does not block its dependents", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const clock = fakeClock();
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id): Promise<RunResult> => {
+        ran.push(id);
+        if (id === "B") {
+          merged.add("B");
+          return { taskId: "B", runId: "B-run", merged: false, costUsd: 0.2, verdict: "blocked_ci", prUrl: "https://github.com/o/r/pull/601" };
+        }
+        merged.add(id);
+        return okResult(id);
+      },
+      dispatchFix: async () => {},
+      escalateBlock: async () => {},
+      sleep: clock.sleep,
+    },
+    { max: 4 },
+  );
+  assert.ok(ran.includes("C"), "C — B's transitive dependent — still gets dispatched, never held");
+  assert.deepEqual(s.merged, ["A", "B", "C", "D"]);
+  assert.equal(s.stopReason, "max_reached");
+});
+
+test("W1-T976: no fix rung is dispatched for a task that already merged", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const dispatches: unknown[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const clock = fakeClock();
+  await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id): Promise<RunResult> => {
+        if (id === "B") {
+          merged.add("B");
+          return { taskId: "B", runId: "B-run", merged: false, costUsd: 0.2, verdict: "blocked_ci", prUrl: "https://github.com/o/r/pull/602" };
+        }
+        merged.add(id);
+        return okResult(id);
+      },
+      dispatchFix: async (info) => { dispatches.push(info); },
+      sleep: clock.sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 4 },
+  );
+  assert.equal(dispatches.length, 0, "the fix rung is never reached — the task was already merged, not a fixable blocker");
+  assert.ok(!lines.some((l) => l.step === "daemon.block.fixable_dispatch"), "no strike-spending ledger line for an already-merged task");
+});
+
+test("W1-T976: a task that genuinely did not merge still blocks", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const escalations: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
+  const clock = fakeClock();
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    runOne: async (id): Promise<RunResult> => {
+      if (id === "B") {
+        // Genuinely unmerged — never added to the projection — so this is the falsifier:
+        // block reasoning must still run and still hold C, exactly as before this task.
+        return { taskId: "B", runId: "B-run", merged: false, costUsd: 0.2, verdict: "blocked_budget" };
+      }
+      merged.add(id);
+      return okResult(id);
+    },
+    escalateBlock: async (info) => { escalations.push(info); },
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "blocked", "a genuinely unmerged task still halts — block reasoning is not disabled");
+  assert.match(s.stopDetail ?? "", /B → blocked_budget/);
+  assert.equal(escalations.length, 1);
+  assert.equal(escalations[0].task.id, "B");
+  assert.ok(!s.merged.includes("B"), "never credited as merged");
+});
+
 // ── the PERSISTENT difference from `rmd drain`: it polls instead of stopping ─
 
 test("no runnable task right now: the daemon PACES itself (injected clock) and keeps polling instead of stopping", async () => {
