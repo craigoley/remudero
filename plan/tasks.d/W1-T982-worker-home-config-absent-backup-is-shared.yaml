@@ -1,0 +1,118 @@
+- id: W1-T982
+  title: "a per-run worker HOME has no .claude.json of its own while the .claude it is granted is everyone's, so the CLI opens every worker by reporting its config missing and printing a cp that would restore a FOREIGN config into that home — and it fired again on 2026-08-17, fourteen days after the window it was assumed to have closed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "THE FILING FEEDBACK'S OWN FALSIFYING CHECK WAS RUN AT TRIAGE AND IT FIRED. fb-1785775974389-e25033
+    set the condition itself: 'if the message recurs after 2026-08-03T16:00Z, it was never fixed.' It recurred.
+    `$ROOT/state/ledger.2026-08-17T12-36-10-583Z.ndjson` line 12663 is a `recon.done` line (lane `run-task`,
+    subtype `error_max_turns`, 21 turns, $0.87) whose `stderr_excerpt` carries the message TWICE in one run:
+    'Claude configuration file not found at: /home/node/Remudero/worker-home-7884bc35-c8a6-4f06-9052-e65d10fa9877/.claude.json'
+    followed by 'A backup file exists at: <that same home>/.claude/backups/.claude.json.backup.1786968181800'
+    and the `cp` the CLI prints to restore it. So the four-hour quiet window WAS sample size, and the retirement
+    of the haiku recon cell (#1199, merged 12:20:36Z) is excluded as the fix exactly as the entry suspected —
+    this is now reproducing on a different host generation entirely (a Linux container HOME, `/home/node`, not
+    the mini the entry described).
+
+    THE CONFIG IS NOT TRANSIENTLY ABSENT — IT IS ABSENT BY CONSTRUCTION, AND THAT IS THE PART THE ENTRY COULD
+    NOT SEE. `WORKER_HOME_SYMLINKS` (`src/lib/worker-home.ts`) grants back exactly four paths — `.claude`,
+    `.config/gh`, `.gitconfig`, `Library/Keychains/login.keychain-db` — and `.claude.json` is NOT among them.
+    Nothing in `src/` writes one into a worker home either: every `.claude.json` reference in `src/` is a READ
+    of `join(homedir(), '.claude.json')` (`resolveActiveAccountId` in worker.ts:657, `readAccountUsageFile` in
+    account-usage.ts:528, plus tier.ts/init.ts), and those run in the daemon's own HOME, never a worker's. A
+    fresh `worker-home-<uuid>` therefore has no `.claude.json` at all, and `materializeWorkerHome` writes only
+    the eight empty rc files and the four symlinks. W1-T239's note recorded 'plus a real .claude.json' observed
+    in a worker home on the mini, which means something creates one — the CLI is the only candidate left
+    standing, and establishing that is question one below rather than an assumption inside this filing.
+
+    THE BACKUP IS NOT THIS HOME'S — IT IS SHARED, WHICH IS WHY 'a backup already present' ACCOMPANIES EVERY
+    OCCURRENCE. `.claude` IS granted wholesale: W1-T505's narrowing prefers `<realHome>/.claude-fleet` and falls
+    back to the operator's whole `.claude` when that sibling is absent, and on this host it IS absent
+    (`/home/node/.claude-fleet` does not exist). So `worker-home-<uuid>/.claude/backups` resolves through the
+    symlink to the ONE shared `/home/node/.claude/backups`, which at filing holds five
+    `.claude.json.backup.<epoch>` files, the newest (1787038024990) written seconds before this triage began.
+    Per-home config, shared backup directory: the asymmetry alone predicts the message on essentially every
+    fresh home once any backup has ever been written, which fits 14 occurrences across 12 haiku and 2 sonnet
+    runs better than a race does.
+
+    WHY IT MATTERS THOUGH NOTHING HAS FAILED. The CLI does not merely warn — it prints a `cp` that would copy a
+    FOREIGN `.claude.json` backup into a per-run home. If anything ever performs it (the CLI itself, a retry
+    path, or a worker that reads its own stderr and follows the instruction), the operator's or another run's
+    config lands in this run's HOME, and that file is precisely the account-identity source `resolveActiveAccountId`
+    feeds to `ensureWorkerKeychain`. That is the shared-state path W1-T265 partitioned per account deliberately,
+    and the same one fb-1785785017959-c23215 flagged from the other direction. WHETHER ANY RESTORE IS AUTOMATIC
+    IS UNVERIFIED AND IS STATED AS UNVERIFIED RATHER THAN AS NO — it is question three below.
+
+    WHAT NO EXISTING RECORD ANSWERS. Grepped at filing: MASTER-PLAN.md, DECISIONS.md, LEARNINGS.md and every
+    plan shard mention `.claude.json` only as the daemon-side tier/usage/identity source. W1-T239 audits the
+    SYMLINK family and predates the container. W1-T505 narrows WHICH `.claude` is granted and never touches the
+    HOME-level config file. Neither says what creates a worker home's `.claude.json`, what writes the backup, or
+    whether the two can drift apart under load."
+  design: |
+    (i) ESTABLISH PROVENANCE BEFORE CHANGING ANYTHING. Against a THROWAWAY home — never a live one — record
+    what creates `worker-home-<uuid>/.claude.json`, at what point relative to spawn, what writes
+    `.claude/backups/.claude.json.backup.<epoch>`, and which process owns each write. One measurement is
+    already in hand and should be confirmed or refuted rather than re-derived from scratch: backup epoch
+    1786968181800 lands about 29 seconds after the id epoch of run W1-T944-1786968153030, so 'written mid-run
+    by the worker's own CLI, into the shared grant' is the leading candidate.
+    (ii) ANSWER WHETHER ANY RESTORE HAPPENS WITHOUT BEING ASKED. The printed `cp` is a suggestion; whether the
+    CLI, a retry, or anything else ever executes it decides whether this is cosmetic noise or a cross-run
+    config bleed. A negative answer is a real answer and must be recorded as one.
+    (iii) ANSWER 'CAN THE GAP WIDEN UNDER LOAD' WITH A TEST, NOT A GUESS. Materialize two per-run homes
+    concurrently against ONE shared `.claude` grant and assert what each sees in the config slot and in the
+    backups directory. If the shared-backups asymmetry above is the whole mechanism, load changes the
+    frequency and not the outcome, and the test should say so.
+    (iv) THE REMEDY SPACE IS NAMED, NONE OF IT PRE-CHOSEN. (a) seed a per-home config slot at materialisation
+    so the CLI is never told its config is missing; (b) keep the `.claude` grant but stop a per-run home from
+    seeing another context's `backups/`; (c) conclude it is benign, and record WHY together with the answer to
+    (ii) — a documented no-op is a legitimate outcome here, and recording it is what stops this being triaged
+    a third time. WHATEVER IS CHOSEN, W1-T505'S PASS CONDITION IS RESTATED AND BINDING: `subscription_type`
+    and `rate_limits_available` must read as they do today, or the headroom governor has gone blind and the
+    change is refused.
+    (v) COORDINATE WITH W1-T505, DO NOT DUPLICATE IT. If its narrowing lands and the credential-only sibling
+    carries no `backups/`, the 'a backup exists' half of the message dissolves while the 'config not found'
+    half does not. Record which half each change closes instead of assuming either closes both.
+    (vi) NOT IN SCOPE, named so it is not folded in: the credential grant's read-write requirement, the
+    container credential mount, per-account keychain partitioning (W1-T265), and which home a dispatched run
+    is allocated (fb-1785785017959-c23215's question, which is a different one).
+  acceptance:
+    - claim: "a freshly materialized per-run worker home no longer opens with its Claude config reported missing"
+      proof: "unit test: test/worker-home-claude-json.test.ts"
+    - claim: "what creates the worker home config file, what writes the backup beside it, and whether any restore happens unasked are each recorded with the evidence behind them"
+      proof: "unit test: test/worker-home-claude-json.test.ts"
+    - claim: "two per-run homes materialized at the same time against one shared grant are never shown each other's config backup"
+      proof: "unit test: test/worker-home-claude-json.test.ts"
+    - claim: "the module that makes the grant states what it does about the backups directory rather than leaving it implicit"
+      proof: "grep: backups in src/lib/worker-home.ts"
+  risk: high
+  origin: feedback#fb-1785775974389-e25033
+  plan_refs: ["§7B", "WS-2", "WS-7", "W1-T505", "W1-T239", "W1-T265"]
+  files: [src/lib/worker-home.ts, test/worker-home-claude-json.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT, for two reasons. Rule 19: `files:` spans two module ids
+    (`worker-home` and `worker-home-claude-json`), which `sizingViolation` (`src/lib/task-linter.ts`) blocks
+    below this band. Independently warranted: any remedy edits `materializeWorkerHome`, the HOME provisioning
+    EVERY spawn runs through — W1-T505 graded the same file high for the same reason, and a wrong change here
+    takes down recon, containment and triage at once.
+
+    A SEPARATE TEST FILE IS DELIBERATE. `test/worker-home.test.ts` is W1-T505's declared scope; giving this
+    task its own file keeps the two from colliding in one file while `overlappingPaths` still (correctly)
+    refuses to co-dispatch them, since both must edit `src/lib/worker-home.ts`. Sequence after W1-T505 if both
+    are open — design point (v) explains why its outcome changes what is left to fix here — but NO hard
+    `depends_on:` is declared: the falsifier has already fired twice-in-one-run on the current tree, and
+    parking this behind a queued task would keep it firing.
+
+    PROOF NOTES. The three `unit test:` proofs use the WHOLE-FILE path form on a file that does not exist yet,
+    which parses now and executes once written. The `grep:` proof matches ZERO occurrences in
+    `src/lib/worker-home.ts` today (verified at filing) and is remedy-NEUTRAL: it is satisfied by seeding a
+    config slot, by excluding the shared backups directory, or by recording in that module why neither was
+    done — it forces the decision to be written down where the grant is made, not which decision is taken.
+
+    EVIDENCE LOCATIONS FOR THE IMPLEMENTER, so none of it is re-derived: the recurrence is
+    `$ROOT/state/ledger.2026-08-17T12-36-10-583Z.ndjson` line 12663; the shared backup directory is
+    `<realHome>/.claude/backups/`; `<realHome>/.claude-fleet` does not exist on this host, so the W1-T505
+    narrowing is currently in its fallback branch."

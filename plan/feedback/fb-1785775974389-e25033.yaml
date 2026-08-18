@@ -15,5 +15,6 @@ raw: "WORKER-HOME CONFIG RACE — 14 recon runs between 2026-08-03T00:54Z and
   check: if the message recurs after 2026-08-03T16:00Z, it was never fixed."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null
