@@ -1,0 +1,211 @@
+- id: W1-T999
+  title: "THE SERVE PROCESS'S BOARD GATEWAY IS THE ONE UNPACED CONSTRUCTION AND IT EXHAUSTED GITHUB'S SECONDARY LIMIT FOR TWO HOURS — serveCommand builds buildBatchedGithub without the pacer the daemon threads, at a 15s TTL, and 423 of 423 board fetches in the log failed while it retried into a limit it was holding open: thread the existing pacer and derive the TTL from the sweep distribution"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    THE INCIDENT, AND WHY IT IS URGENT. This is the first measured cost of the console being
+    always-on rather than loopback-bound. It took the fleet down for over an hour, `remudero-serve`
+    was stopped by hand and is still stopped — `Exited (137)` — and THE OPERATOR CANNOT RESTART IT
+    UNTIL THIS LANDS. Re-derived from the stopped container's own logs, which persist after
+    `docker stop`, at origin/main eb60b55c.
+
+    (1) THE CADENCE AND THE TWO CALLS, MEASURED. `docker logs remudero-serve` holds 1,277 lines.
+    The board gateway makes exactly two reads per poll:
+      repos/craigoley/remudero/pulls?state=open&sort=updated&direction=desc&per_page=30&page=1   (212 occurrences)
+      repos/craigoley/remudero/issues?labels=needs-human&state=all&per_page=100 --paginate --slurp (211 occurrences)
+    212 PR-fetch attempts across 15:30:39Z–17:30:11Z (119.5 minutes). BUSIEST 30-MINUTE WINDOW: 76
+    polls, one every 23.7 seconds. Inter-poll gap median 22s, minimum 15s, maximum 1,337s.
+
+    (2) EVERY BOARD FETCH IN THAT LOG FAILED. 423 board-gateway lines and ZERO of them lack the word
+    `failed` — measured as 0 non-failing lines against a control of 423 total. `rate_limit` appears
+    on 423 lines; `board_gateway.fetch_ok` and `fetch_bytes` appear ZERO times. It retried into a
+    limit it was itself holding open for two hours.
+
+    (3) THE FINDING, IN ONE LINE: the mechanism already exists and the serve process bypasses it.
+    THE MECHANISM ALREADY EXISTS AND THE SERVE PROCESS BYPASSES IT. `buildBatchedGithub`
+    (`src/lib/status.ts`) already paces both reads — `paceGhEntry(opts.pacer, isGhRateLimitError,
+    fetchAllIssues)` and the same wrapper around `fetchAll` — and reports back through
+    `GhCallPacer.recordResult`. But `pacer?` is OPTIONAL, and that option's own doc says it plainly:
+    "OPTIONAL and omitted by every existing caller/fixture: absent ⇒ both reads fire with no gap,
+    exactly the pre-W1-T468 behavior. The daemon's real wiring (run-task.ts's `buildSweepHook`) is
+    the only caller that constructs and threads one through."
+    MEASURED, counted with `-l` so a zero is visible, and controlled: `pacer`, `GhCallPacer`,
+    `createGhCallPacer` and `paceGhEntry` all read ZERO in `src/lib/serve.ts`, against a control of
+    `createService` reading 1 in that same file. `createGhCallPacer()` has ONE call site in src/ and
+    it is inside `daemonCommand`. And the two board-gateway constructions in `src/run-task.ts` differ
+    exactly here: the one inside `buildSweepHook` passes `{ log, pacer }`; the one inside
+    `serveCommand` passes `{ log }`. SO THE UNPACED CONSTRUCTION IS THE SERVE ONE, AND IT IS THE ONE
+    POLLING EVERY 15 SECONDS FROM AN ALWAYS-ON CONSOLE.
+
+    (4) THE INTERVAL IS ONE DEFAULT AND IT IS ALREADY CONFIGURABLE. `buildBatchedGithub` opens with
+    `const ttlMs = opts.ttlMs ?? 15_000;`. Nothing in the serve construction overrides it, and
+    `src/lib/serve.ts` carries `DEFAULT_BOARD_PREWARM_MS` whose own comment says it "Matches
+    buildBatchedGithub's own default TTL". 15 seconds against a full sweep whose median is 2.6
+    minutes means THE BOARD CANNOT CHANGE FASTER THAN THE THING IT WATCHES — it re-asks roughly ten
+    times per sweep and can only ever learn the same answer.
+
+    (5) THE RETRY IS WHAT TURNED A LIMIT INTO AN OUTAGE, AND THE CLASSIFICATION IS NOT THE PROBLEM.
+    The gateway DOES classify: `classifyGhFailure` reads 12 times in status.ts, the reason is stored
+    in `lastFetchFailureReason`/`lastIssueFetchFailureReason`, ledgered as
+    `board_gateway.fetch_failed`, AND READ BACK — `readFailed()`'s accessor returns it, so this is
+    NOT a twelfth built-and-unread label. WHAT IS MISSING IS BACKOFF: `retry-after`, `Retry-After`
+    and `retryAfter` all read ZERO in both `src/lib/status.ts` and `src/lib/open-prs-rest.ts`,
+    against a control of `classifyGhFailure` reading 12 in status.ts. NOTHING ON THIS PATH HONOURS
+    GITHUB'S OWN RETRY HEADER. The pacer is where the waiting already lives — `sleep` reads 7 times
+    in open-prs-rest.ts and `setTimeout` once — which is why reusing it beats building a second
+    mechanism and is why this shard is small.
+
+    (6) THE `state=all` COST IS REAL, GROWS FOREVER, AND IS NOT A FREE FIX. `labelledIssuesRestArgs`
+    (`src/lib/escalate.ts`) builds `labels=…&state=…&per_page=100` with `--paginate --slurp`, and
+    `src/lib/status.ts` calls it with `"all"` while `src/lib/escalate.ts` calls it with `"open"`.
+    MEASURED THIS FILING: page 1 of the `state=all` query returns 100 rows of which 98 ARE CLOSED and
+    2 are open, AND THE RESPONSE CARRIES A `rel="next"` LINK — so `--paginate` walks at least two
+    pages, at least three requests per poll rather than two, to surface two open items. THE OPEN
+    QUEUE IS 2 ISSUES, BOTH ONE DAY OLD. But `state=open` is NOT free: `GitHub.issueByUrl` returns
+    `{ state: string }` and the escalation-lifecycle read in status.ts consumes it to tell a HANDLED
+    (closed) escalation from an unresolvable one, FAILING CLOSED when it cannot. Dropping the closed
+    rows would blind that read. RECORDED AS MEASURED AND SCOPED OUT — see design (v).
+
+    (7) CONDITIONAL REQUESTS ARE POSSIBLE WITH THE INSTALLED TOOL, WHICH THE BRIEFING FOR THIS FILING
+    DID NOT EXPECT — AND THEY DO NOT FIX THIS INCIDENT. `gh` is 2.63.2 in the image and `gh api
+    --help` carries THREE relevant flags: `--cache duration` ("Cache the response"), `-H,
+    --header key:value`, and `-i, --include` ("Include HTTP response status line and headers"). So an
+    ETag CAN be captured with `-i` and replayed with `-H 'If-None-Match: …'` — conditional requests
+    do NOT require replacing `gh` with a real HTTP client. BUT THE GUARANTEE IS NARROWER THAN THE
+    PROBLEM: GitHub's documentation exempts a 304 from the PRIMARY rate limit and says NOTHING about
+    the SECONDARY limit, and the secondary limit is what this incident hit — the log never once names
+    `secondary`, it only says `rate_limit`, 423 times. A 304 IS STILL AN HTTP REQUEST. ETAGS WOULD
+    NOT HAVE PREVENTED THIS. Scoped out — design (v).
+
+    (8) WEBHOOKS ARE THE EVENTUAL ANSWER AND ARE NOT THIS TASK. GitHub recommends them over polling
+    and they would genuinely fix it, but they need a public endpoint and the console only became
+    reachable today. Named, left.
+  design: |
+    THE SHAPE: two arguments at ONE call site, both of which the gateway already accepts. No new
+    mechanism, no new signal, no new ledger step, and the board is made cheap rather than turned off.
+
+    (i) THREAD THE EXISTING PACER INTO `serveCommand`'S CONSTRUCTION. `buildBatchedGithub` already
+    takes `pacer?: GhCallPacer` and already calls `paceGhEntry` around both reads; `createGhCallPacer`
+    already exists in `src/lib/open-prs-rest.ts`. The serve construction passes `{ log }` and must
+    pass a pacer too. THIS IS A REUSE, NOT A BUILD — rationale (3).
+
+    (ii) ONE INSTANCE PER PROCESS, MATCHING THE DAEMON'S OWN DISCIPLINE. The pacer's value is a
+    SHARED gap across call sites, so the serve process constructs one and threads it, exactly as
+    `buildSweepHook` does. Constructing one per request would pace nothing.
+
+    (iii) DERIVE THE TTL FROM THE SWEEP DISTRIBUTION, NOT A ROUND NUMBER. The sweep's median is 2.6
+    minutes and its p90 is 17 minutes. A TTL at or just under the MEDIAN means the board is never
+    more than one sweep behind while re-asking roughly once per sweep instead of ten times:
+    150_000 ms. THE LATENCY THE OPERATOR PAYS IS THE HONEST HALF OF THIS — a board fact can be up to
+    2.5 minutes stale, against an underlying sweep that changes every 2.6 minutes at the median, so
+    the staleness is bounded BELOW the rate at which the watched thing moves. The p90 of 17 minutes
+    is the reason NOT to go further: a TTL past the median would still be correct but would make the
+    board feel dead during the long tail. Choose the value against that distribution and say so.
+
+    (iv) THE BACKOFF IS THE PACER'S, NOT A NEW ONE. `GhCallPacer.recordResult` already exists to be
+    told a call was rate-limited, and the sleeping already lives in that module. The failure path
+    must report through it rather than immediately re-polling on the next tick. A builder who writes
+    a fresh retry loop, a fresh timer, or a `retry-after` parser in status.ts has built the second
+    mechanism this task exists to avoid.
+
+    (v) OUT OF SCOPE, EACH WITH ITS MEASURED REASON. `state=all` → rationale (6): the closed rows
+    feed `issueByUrl`'s state read and dropping them blinds a fail-closed consumer; a separate
+    ruling. ETag/`--cache` → rationale (7): possible with the installed `gh`, but exempt only from
+    the PRIMARY limit, so it does not address this incident; a separate shard if wanted. Webhooks →
+    rationale (8). AND NOT THIS: disabling the board, removing the poller, or reducing what the
+    needs-me queue renders. The operator wants the console working; this makes it cheap.
+
+    (vi) THE DAEMON PATH MUST NOT MOVE. `buildSweepHook` already threads its own pacer and already
+    works. Criterion 4 pins it: whatever the serve wiring gains, the daemon's instance and its
+    behaviour stay as they are.
+
+    (vii) NO NEW SIGNAL. `board_gateway.fetch_failed` already carries the reason and
+    `readFailed()` already surfaces it — rationale (5). Eleven measured mechanisms have merged green
+    with no reader, `cloudflareAccessIdentityProvider` the most recent at 0 src calls against controls
+    of 2, and a "pacer engaged" row nobody reads would be the twelfth.
+  acceptance:
+    - claim: "the serve construction receives the shared pacer rather than omitting it"
+      proof: "unit test: W1-T999: the serve board gateway is constructed with the shared call pacer"
+    - claim: "the board poll interval comes from the sweep distribution rather than the fifteen second default"
+      proof: "unit test: W1-T999: the board poll interval is derived from the sweep distribution"
+    - claim: "a rate limited fetch waits through the pacer instead of re-polling on the next tick"
+      proof: "unit test: W1-T999: a rate limited board fetch backs off through the pacer"
+    - claim: "the daemon sweep hook's own pacer instance and behaviour are unchanged"
+      proof: "unit test: W1-T999: the daemon sweep hook keeps its own pacer instance unchanged"
+    - claim: "the mechanism already exists and the serve process bypasses it"
+      proof: "grep: the mechanism already exists and the serve process bypasses it in plan/tasks.d/W1-T999-serve-board-poll-unpaced.yaml"
+  risk: high
+  origin: "oper#serve-board-poll-unpaced-2026-08-18"
+  plan_refs: ["W1-T468", "W1-T529", "W1-T415"]
+  files: [src/run-task.ts, src/lib/serve.ts, test/serve-board-pacer-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    src/run-task.ts MUST BE DECLARED AND THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING. Both
+    board-gateway constructions live there — `serveCommand`'s unpaced one and `buildSweepHook`'s paced
+    one — and `createGhCallPacer` is invoked there and nowhere else in src/. Measured counts:
+    run-task.ts carries `buildBatchedGithub` 31, `serveCommand` 3, `GhCallPacer` 4,
+    `createGhCallPacer` 2, `paceGhEntry` 2, `ttlMs` 2. RE-DERIVED AT THIS FILING: 214 of 353 shards
+    declare src/run-task.ts, so this shard serialises against a large share of the queue under
+    `overlappingPaths`. That is the price of where the two constructions live, recorded rather than
+    dodged by under-declaring.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT eb60b55c. src/lib/serve.ts is declared because
+    `DEFAULT_BOARD_PREWARM_MS` reads 5 there and 0 elsewhere and its own comment ties it to the
+    gateway's default TTL — the interval in design (iii) cannot move without that constant being in
+    scope. src/lib/status.ts is NOT declared: it already accepts both `pacer` and `ttlMs` as options
+    (`GhCallPacer` 4, `ttlMs` 12 there) so the gateway needs no edit, and a builder who changes it is
+    rebuilding W1-T468 rather than wiring it. src/lib/open-prs-rest.ts is NOT declared: it owns the
+    pacer implementation (`GhCallPacer` 10, `createGhCallPacer` 3) which this task reuses unchanged.
+    src/lib/escalate.ts is NOT declared — that is where `state=all` lives, and rationale (6) scopes it
+    out. CONTROL: an absent symbol reads 0 in every one of these files.
+
+    test/serve-board-pacer-wiring.test.ts IS NEW AND DECLARED AS NEW. test/open-prs-rest.test.ts and
+    test/daemon-gateway-injection.test.ts both exist and cover the pacer and gateway injection
+    respectively, but this task's subject is the SERVE construction specifically, and this repo's own
+    rule sends a coverage-load-bearing test to its own file.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (`src/lib/task-linter.ts`) exempts only risk high, and `subsystemsOf` derives subsystems from the
+    acceptance-criteria text as well as from `files:`; this shard spans the serve wiring, a serve
+    constant and a suite, and its criteria name pacing, an interval, a backoff and a daemon path.
+
+    PROOF DIALECT WAS CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form; each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted from the real pacer suite that matched one, and each is plain prose
+    under 100 characters with no comma, no semicolon-space and no regex metacharacter. The fifth is
+    doc-shaped — the finding itself — so it takes a `grep:`, on ONE PHYSICAL LINE, whose pattern sits
+    in rationale (3) and NOT only in the title, verified against this changeset's own head as well as
+    the merge base. `demonstration:` is refused outright by `check-proof` and appears nowhere here.
+
+    A BRIEFING FIGURE DID NOT SURVIVE AND IS CORRECTED. The needs-human queue was described as 63
+    open with the oldest at 26 days; MEASURED THIS FILING it is 2 open issues, both 1 day old, and a
+    single page of the open query suffices. The COST argument is unchanged and in fact sharper: the
+    expense is the 98 CLOSED rows on page one of `state=all` plus at least one more page, not the
+    open set. Two other figures were re-derived and moved slightly: the busiest window is 76 polls at
+    23.7s (not 71 at ~25s), and the W1-T471 share is 214 of 353 (not ~209 of 349).
+
+    ID PROVENANCE — THE THREE GIT SURFACES FIRST, THE GITHUB SURFACE LAST AND SERIALLY, BECAUSE THE
+    COMPONENT THIS SHARD IS ABOUT EXHAUSTED THE SECONDARY LIMIT TODAY. `/rate_limit` WAS NOT CALLED
+    AT ALL: it is exempt from the primary limit but counts against the secondary, and there is no way
+    to check secondary status. W1-T999 read 0 on all four: `git ls-remote refs/rmd-id/*` (95 refs;
+    control refs/rmd-id/W1-T997 = 1, negative W1-T888888 = 0), shard FILENAMES via `git ls-tree -r`
+    (353 files; control W1-T997 = 1), ids declared under plan/, and every open pull request's file
+    list and title (4 open PRs fetched one at a time, each checked for secondary-limit language before
+    the next; controls W1-T992 = 1 and W1-T1004 = 1). No 403 was returned at any point.
+    THE `git grep` SURFACE IS NOT AN EXISTENCE TEST AND THIS FILING PROVED IT TWICE: `W1-T999999`
+    returns 8 plan hits because shards quote it as their own negative control, and `W1-T999` itself
+    returns 13 because it is a SUBSTRING of `W1-T999999`. THE FILENAME MATCH IS THE TEST.
+    THE RESERVATION USED THE PLAIN REFSPEC, RE-SWEPT IMMEDIATELY BEFORE PUSHING because a lane took
+    W1-T991 three minutes after it read free today: refs read 0 on the re-sweep, then an orphan commit
+    over the empty tree (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-80113-1787077698429841000 pushed with no `+` and no lease, exit into a variable —
+    RC=0, `* [new reference] 3a490541… -> refs/rmd-id/W1-T999`, readback equal. THE GATE WAS PROVEN
+    ARMED ON THE SAME INVOCATION: the identical plain refspec at the taken refs/rmd-id/W1-T997
+    returned RC=1 `! [rejected] … (fetch first)` and left that ref unchanged at b489ab20.
+    AND THIS FILING CARRIES NO TRAILER AND SITS ON A `chore/` BRANCH, NOT `run-W1-T999-*`, because
+    both of those credit a task as IMPLEMENTED on merge and two filing PRs did exactly that today.
