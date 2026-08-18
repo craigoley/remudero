@@ -1,4 +1,4 @@
-- id: W1-T967
+- id: W1-T972
   title: "NINE TRUE ESCALATIONS COULD NOT SAY WHICH MACHINE THEY WERE ABOUT — every ledger row and every escalation body is written without any identity of the writer, so a reader on one host followed nine correct crash-loop issues about the OTHER host, found a healthy unit and concluded noise: stamp one identity at appendLedger and name it in renderIssueBody"
   repo: remudero
   risk: high
@@ -132,13 +132,13 @@
         correct for what they describe (rationale (3)) and are not touched.
   acceptance:
     - claim: "a ledger row written through the ordinary append path carries the identity of the machine that wrote it"
-      proof: "unit test: W1-T967: a ledger row carries the identity of the machine that wrote it"
+      proof: "unit test: W1-T972: a ledger row carries the identity of the machine that wrote it"
     - claim: "two ledger roots driven in one run through two distinct injected identities each stamp their own so a fixed constant fails both directions"
-      proof: "unit test: W1-T967: two identities in one run stamp their own rows not a constant"
+      proof: "unit test: W1-T972: two identities in one run stamp their own rows not a constant"
     - claim: "the rendered escalation body names the machine it describes which the ledger stamp alone does not accomplish"
-      proof: "unit test: W1-T967: the rendered escalation body names the machine it describes"
+      proof: "unit test: W1-T972: the rendered escalation body names the machine it describes"
     - claim: "the default identity reader runs with nothing injected and yields a non-empty value so the default arm is executed"
-      proof: "unit test: W1-T967: the default identity reader runs and yields a non-empty value"
+      proof: "unit test: W1-T972: the default identity reader runs and yields a non-empty value"
     - claim: "the append path reads the identity from node os rather than reconstructing or hardcoding it"
       proof: "grep: hostname in src/lib/ledger.ts"
   origin: "oper#escalation-cannot-name-its-machine-2026-08-18"
@@ -202,19 +202,24 @@
     only match on head, so it cannot be downgraded to `executed_stale`. It is single-line, its pattern
     is file text rather than a path slug, and it carries no `" in "` inside the pattern.
 
-    ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN POSITIVE CONTROL, PLUS A RESERVATION THAT
-    ACTUALLY LANDED. W1-T967 read 0 on all four at 3d91969: refs/rmd-id/* (63 refs enumerated,
-    control refs/rmd-id/W1-T946 = 1), shard filenames and declared ids under plan/ (control
-    W1-T965 = filename 1 / declared 11), EVERY OPEN PR'S FILE LIST, and EVERY OPEN PR'S TITLE.
-    THE FILE-LIST SURFACE EARNED ITS PLACE ON THIS SWEEP: W1-T966 reads 0 in every plan/ path, 0 in
-    refs, and 0 across open PR TITLES, yet reads 1 in an open PR's FILE LIST (#2094) — so the file
-    list was the ONLY surface that showed it taken, and a sweep without it would have re-used a
-    live id. Surface coverage was controlled rather than assumed: the open-PR query returned two
-    PRs and four filenames, so the empty result for W1-T967 is a real absence and not a failed call.
-    THE GATED PUSH SUCCEEDED, WHICH THE BRIEF DID NOT EXPECT. Orphan payload over the empty tree
-    4b825dc642cb6eb9a060e54bf8d69288fbee4904, nonce Remudero-4078723-1787016416053720608, braced
-    refspec, `--force-with-lease` with an empty expected value so the push could only create a ref
-    that did not already exist, and the exit status captured into a variable rather than read
-    through a pipe: PUSH_EXIT_CODE=0. The readback `git ls-remote origin refs/rmd-id/W1-T967`
-    returned exactly the nonce commit b3608f5a79149950c5b6ef5995a584551ab0ae0b, matching. So this id
-    does NOT rest on the sweep alone — it holds a real reservation ref as well.
+    ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN POSITIVE CONTROL, PLUS A RESERVATION MINTED
+    WITH THE PLAIN REFSPEC. This shard was renumbered on 2026-08-18 after another host's forced
+    refspec overwrote the reservation it was first filed under; that ref is left exactly as its
+    holder set it, because the ref is the allocation record and deleting it would re-open the race
+    it settled. The full account is in this shard's PR body.
+    W1-T972 read 0 on all four surfaces at 3040d33: refs/rmd-id/* (68 refs enumerated, control
+    refs/rmd-id/W1-T946 = 1), shard filenames on origin/main and ids declared anywhere under plan/
+    (control W1-T965 = filename 1 / declared 1), EVERY OPEN PR'S FILE LIST, and EVERY OPEN PR'S
+    TITLE (both controlled by this PR's own two entries under its prior id, so the empty result for
+    W1-T972 is a real absence and not a failed query).
+    THE FILE-LIST SURFACE EARNED ITS PLACE: W1-T966 read 0 in every plan/ path, 0 in refs, and 0
+    across open PR TITLES, yet 1 in an open PR's FILE LIST (#2094) — the only surface that showed it
+    taken, and a sweep without it would have re-used a live id.
+    THE MINT USED THE ALLOCATOR'S OWN SHAPE — NO `+`, NO `--force-with-lease`, the form
+    `gitRemoteRefReserver.attempt` (src/lib/task-id-reservation.ts) already uses. Orphan payload over
+    the empty tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904 with ZERO parents, plain refspec, exit
+    status captured into a variable: MINT_EXIT_CODE=0 with `* [new reference]`. The readback
+    `git ls-remote origin refs/rmd-id/W1-T972` returned exactly the nonce commit
+    e48fea9f135cd1dd03ee1975f077c8abcb4ed6fd, matching. Because the anchor has no parent it is an
+    ancestor of nothing, so a second writer on this id is refused as a non-fast-forward instead of
+    silently clobbering it — the gate a forced push discards.
