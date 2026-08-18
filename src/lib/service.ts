@@ -317,14 +317,16 @@ export interface ServiceOptions {
   /** One ledger line per auth decision / SSE lifecycle event / handler error. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /**
-   * W1-T404: turns ON the {@link Route.tier} + second-factor mechanism below — OFF by default,
-   * so labeling the real 20 write routes with a tier (required for
+   * W1-T404: turns ON the {@link Route.tier} + second-factor mechanism below — OFF by default
+   * IN THIS LIBRARY, so labeling the real write routes with a tier (required for
    * {@link writeRoutesMissingTier}'s completeness check) never changes what a caller can reach
-   * until this is set. `rmd serve`'s own production wiring does not set it yet: flipping it on
-   * is paired follow-up work with the console's own tier-aware nonce round trip (design vi) —
-   * without that client-side half, an operator's existing single write token would silently
-   * start 403ing on buttons the shipped client has no way to unblock. The mechanism itself is
-   * real and fully exercised over HTTP by `test/write-tier-*.test.ts`, which turn this on.
+   * until this is set. THAT DEFAULT IS THE LIBRARY'S, NOT PRODUCTION'S: `rmd serve` PASSES
+   * `enforceWriteTiers: true` (see `buildServeServer` in `src/lib/serve.ts`), shipped by W1-T500,
+   * so tier enforcement IS live on the real console. The client-side half this doc once called
+   * unshipped paired work — the console's tier-aware nonce round trip — shipped in that same
+   * change: {@link makeConfirmNonceRoute} is mounted, so a HIGH-tier refusal is now satisfiable
+   * rather than a dead end. The mechanism is also exercised over HTTP by
+   * `test/write-tier-*.test.ts`, which turn this on explicitly.
    */
   enforceWriteTiers?: boolean;
   /**
@@ -472,9 +474,12 @@ function validateConfirmNonceRequest(body: unknown): { error: string } | Confirm
  * exact `{method, path, payload}` a subsequent HIGH-tier call will make, and gets back a nonce
  * that one specific call must present (`X-Confirm-Nonce`) to satisfy the second factor. Plain
  * write scope, no tier of its own — requesting a nonce for an action grants nothing by itself;
- * the target route's own tier + nonce check (createService's dispatch) is the real gate. Not
- * mounted by `rmd serve` today (see {@link ServiceOptions.enforceWriteTiers}); exported so a
- * caller that turns enforcement on has the matching issuance route ready to mount.
+ * the target route's own tier + nonce check (createService's dispatch) is the real gate. MOUNTED
+ * by `rmd serve` since W1-T500 — `buildServeRoutes` (`src/lib/serve.ts`) mounts it as
+ * `POST /v1/confirm` with an explicit `tier: "low"`, because this route declares no tier of its
+ * own and `assertWriteTiersComplete` requires every write-scoped route to carry one. Still
+ * exported separately so another caller that turns enforcement on has the issuance route ready
+ * to mount.
  */
 export function makeConfirmNonceRoute(store: ConfirmNonceStore): Route {
   return {
@@ -958,7 +963,8 @@ export function createService(opts: ServiceOptions): Server {
 
       // W1-T404: the tier + second-factor gate, entirely additive to the scope check above and
       // a no-op unless BOTH `enforceWriteTiers` is on AND this route declared a tier — see
-      // ServiceOptions.enforceWriteTiers's doc for why that is off by default in production.
+      // ServiceOptions.enforceWriteTiers's doc. It is OFF by default in this library and ON in
+      // `rmd serve`'s own wiring, so on the real console this branch is reached.
       if (enforceWriteTiers && route?.tier) {
         if (!writeTierSatisfies(granted.tier, route.tier)) {
           log("service.forbidden_tier", { method, path, required_tier: route.tier, granted_by: granted.provider, granted_tier: granted.tier });
@@ -973,8 +979,9 @@ export function createService(opts: ServiceOptions): Server {
           // told to expect, so a handler reached past this point must not also read `req` as a
           // stream (a second `.on("data")` sees nothing — the body is already gone). Read
           // `ctx`/the already-parsed input instead, or accept this route never needs its own
-          // body. `enforceWriteTiers` off (today's default) never reaches this line at all, so
-          // no existing handler is affected yet.
+          // body. `enforceWriteTiers` off — this library's default, but NOT `rmd serve`'s, which
+          // sets it true — never reaches this line at all; under the real console it is reached,
+          // so a future HIGH-tier handler must honour the caveat above rather than assume it.
           const ok = nonce ? confirmNonces.consume(nonce, { method, path, payload: await readRawBody(req) }) : false;
           if (!ok) {
             log("service.confirm_nonce_refused", { method, path });
