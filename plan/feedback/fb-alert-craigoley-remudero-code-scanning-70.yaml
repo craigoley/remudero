@@ -8,5 +8,6 @@ raw: >-
   https://github.com/craigoley/remudero/security/code-scanning/70
 attachments: []
 origin: alert#code-scanning-70
-status: new
+status: rejected
 proposal_pr: null
+summary: null
