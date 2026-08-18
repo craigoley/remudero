@@ -1,0 +1,162 @@
+- id: W1-T1008
+  title: "THE THIRD HALF, NOT A DUPLICATE OF W1-T1005 OR W1-T1007 — W1-T529's rate floor is BUILT-AND-UNREACHABLE: two optional parameters in series gate its only input, `ghJson`'s `onRateLimit` is omitted by all eleven call sites and `recordResult`'s `budget` by the only production caller, so `standDown` is never armed and a reviewed, merged safety with a live reader in sweep.ts can never once execute"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    THIS IS THE THIRD AND DIFFERENT HALF. W1-T1005 (#2147) fixes DISTRIBUTION — one of sixteen
+    gateway constructions gets a pacer. W1-T1007 (#2149) fixes WHAT HAPPENS AFTER A REFUSAL —
+    backoff instead of pacing through. THIS ONE IS THE STOP THAT EXISTS AND CANNOT FIRE. All three
+    are separate: a fleet where every gateway is paced and every refusal backs off still has a floor
+    that never once executes.
+
+    RE-DERIVED 2026-08-18 AT origin/main c0e5f3378. No `/rate_limit` call was made.
+
+    (1) THE CHAIN, AND IT IS TWO OPTIONAL PARAMETERS IN SERIES.
+      `ghJson(args, onRateLimit?, exec?)` (src/lib/worker.ts) appends `-i` on an API call, splits the
+      header block, and calls `parseGhRateLimitHeaders` — which reads `X-Ratelimit-Remaining`,
+      `-Used`, `-Limit`, `-Reset` and `-Resource`. THE PARSER IS BUILT AND CORRECT. Its own doc
+      records the gap in terms: "`onRateLimit` is optional — every existing call site (all 11 today)
+      omits it".
+      `recordResult(rateLimited, budget?)` (src/lib/open-prs-rest.ts) arms two outcomes from
+      DIFFERENT inputs: `gapMs` from `rateLimited`, and `standDown` ONLY from `budget`. `paceGhEntry`
+      is the only production caller and passes `recordResult(false)` / `recordResult(isRateLimited(err))`
+      with no second argument.
+      SO: no caller asks for the reading, and no caller passes it on. `standDown` is always
+      `undefined`, `wait()` never throws, and `GhPaceFloorStandDownError` cannot be produced.
+
+    (2) THE READER IS LIVE AND CANNOT BE FED. src/lib/sweep.ts imports `GhPaceFloorStandDownError`
+    and branches `if (!(e instanceof GhPaceFloorStandDownError)) return undefined;`. A filed, merged,
+    reviewed safety with a real consumer that nothing can reach. NOT built-and-unread — the eleven
+    catalogued instances (`hasPushedRunBranch`, `armedButStalled`, `dispatch.stood_down`,
+    `CiFailure.outsidePrRange`, `dh-rate-limit`, `rareOverlapWarnings`, `rmd coverage-improve`,
+    `supersessionVerdict`, `risk_judge.escalated`, `billing_mode`,
+    `cloudflareAccessIdentityProvider`) all EMIT INTO SILENCE. THIS ONE CANNOT EMIT.
+
+    (3) THE ARGUMENT IS MISSING, NOT WITHHELD, AND W1-T529'S OWN SHARD PROVES IT. Its design clause
+    (i) reads: "READ THE HEADER AT THE CALL, NOT THE PROBE. The guarded call passes `-i`/`--include`
+    and the pacer parses `x-ratelimit-remaining` off the response it already made. NO EXTRA CALL."
+    And its acceptance criterion [2] is "the remaining count is read from the call's own response
+    rather than a separate probe". NEITHER SHIPPED: `openPrsRestArgs` returns
+    `["api", "repos/<o>/<r>/pulls?state=open&per_page=100"]` with no `-i` and no `--include`, and the
+    guarded fetch never asks `ghJson` for a reading. The design named the source; the wiring stopped
+    one link short. W1-T529 is still `status: queued`, so this is an unfinished wiring whose partial
+    product merged, not a deliberate deferral.
+
+    (4) A CORRECTION TO AN EARLIER MEASUREMENT OF MINE, BECAUSE IT CHANGES THE FIX. A prior recon
+    reported `x-ratelimit` at 0 across `src/` and concluded the input did not exist. THAT ZERO WAS A
+    CASE-MISMATCH FALSE NEGATIVE: the header names in `parseGhRateLimitHeaders` are `X-Ratelimit-*`
+    with a lower-case `l`, which neither `x-ratelimit` nor `X-RateLimit` matches under a
+    case-sensitive grep. THE INPUT EXISTS AND IS ALREADY PARSED. That makes this a wiring task rather
+    than a build task, and it is why the fix is "pass the argument that is already declared".
+
+    (5) IT IS TWO LINKS OF ONE CHAIN, NOT A CATEGORY — MEASURED BEFORE CLAIMING ONE. A mechanical
+    sweep of every `class *Error extends Error` in `src/` (37 classes) counting `new X(` against
+    `instanceof X` found NO class with a reader and zero producers: the minimum producer count among
+    classes with a reader is 1. So there is no population of never-constructed error classes. What
+    there is, is one dead path gated twice.
+    AND `producer-completeness.ts` CANNOT CATCH THIS SHAPE. It tracks `OpenPrView` FIELDS that no
+    producer assigns, and its own doc gives the reason it can be exact: "an `OpenPrView` can only be
+    built by an object literal that satisfies its required fields" — an ENUMERABLE arrival path. An
+    optional FUNCTION PARAMETER has no enumerable arrival path; TypeScript is satisfied by omission
+    at every call site and there is no literal to anchor on. Extending it is not in scope here.
+  design: |
+    (i) THE FIX IS TO PASS THE ARGUMENT THAT IS ALREADY DECLARED. Both parameters exist, both are
+    typed, and the parser they feed is written and tested. The guarded fetch asks for a reading and
+    hands it to `recordResult`. NO NEW SIGNAL: the reader already exists in src/lib/sweep.ts and the
+    error class already exists.
+
+    (ii) SCOPE IS REACHABILITY, NOT POLICY. `DEFAULT_GH_PACE_FLOOR_FRACTION`,
+    `DEFAULT_GH_PACE_LOW_WATER_FRACTION`, `DEFAULT_GH_PACE_MIN_GAP_MS` and
+    `DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS` ARE NOT TO BE RETUNED. W1-T529 chose them and they are
+    untested in production precisely because the path is dead; the honest order is to make it fire,
+    observe it, and tune it afterwards with evidence. A builder who changes a threshold in this
+    change has made the observation impossible.
+
+    (iii) THE FALSIFIER MUST PROVE REACHABILITY BOTH WAYS IN ONE RUN. A test that only asserts the
+    throw passes on code that always throws. Criterion 1 requires a budget AT the floor to throw
+    `GhPaceFloorStandDownError`; criterion 2 requires a budget ABOVE the floor not to throw and the
+    guarded call to run. They must run in the same invocation.
+
+    (iv) AND THE WIRING ITSELF MUST BE PROVEN, NOT INFERRED. Criterion 3 asserts the guarded call
+    supplies a budget derived from its OWN response rather than a probe — W1-T529's design (i) and
+    its unshipped criterion [2], restated as a test rather than as prose. Without it, criteria 1 and
+    2 pass against a hand-fed pacer while production stays exactly as dead as today.
+
+    (v) CRITERION 4 CLOSES THE LOOP AT THE READER. The value of the throw is that src/lib/sweep.ts's
+    existing branch receives it. Asserting the throw in isolation would leave the same gap this task
+    exists to close, one layer up.
+
+    (vi) EXPLICITLY OUT OF SCOPE.
+      - RETUNING ANY THRESHOLD — see (ii).
+      - THE SECONDARY LIMIT. The floor reads a fraction of `budget.limit`, which is the PRIMARY
+        quota. The secondary limit does not move that number; W1-T1007 is the task for that path.
+      - EXTENDING `producer-completeness.ts` TO OPTIONAL PARAMETERS — see rationale (5); no
+        enumerable arrival path, and one chain does not justify a new gate.
+      - THE WORKER HALF. W1-T529's design (vii) ranks the `PreToolUse` hook for worker calls and
+        explicitly does not take it. Unchanged here.
+  acceptance:
+    - claim: "a budget reading at the floor makes the next guarded call throw the stand-down"
+      proof: "unit test: W1-T1008: a budget at the floor makes the guarded call throw the stand-down"
+    - claim: "a budget reading above the floor does not throw and the guarded call still runs"
+      proof: "unit test: W1-T1008: a budget above the floor does not throw and the call runs"
+    - claim: "the guarded call derives the budget from its own response rather than a separate probe"
+      proof: "unit test: W1-T1008: the guarded call supplies a budget from its own response headers"
+    - claim: "the existing sweep branch receives the stand-down it already knows how to handle"
+      proof: "unit test: W1-T1008: the sweep branch receives the stand-down it already handles"
+  risk: high
+  origin: "oper#floor-unreachable-2026-08-18"
+  plan_refs: ["W1-T529", "W1-T1005", "W1-T1007", "W1-T525"]
+  files: [src/lib/open-prs-rest.ts, test/open-prs-rest.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIS SHARD SERIALISES AGAINST W1-T1007 AND THAT IS ACCEPTED IN WRITING. W1-T1007 declares
+    src/lib/open-prs-rest.ts and test/open-prs-rest.test.ts; so does this. `partitionByFileOverlap`
+    will therefore never admit them in the same batch. THAT IS CORRECT RATHER THAN UNFORTUNATE: both
+    change behaviour inside `paceGhEntry` — one adds a wait policy after a refusal, the other supplies
+    the budget that arms the stand-down before one — and building them concurrently would put two
+    lanes in the same function. A NARROWER HOME WAS LOOKED FOR AND DOES NOT EXIST: the budget has to
+    reach `recordResult`, `recordResult` is defined in that module, and `paceGhEntry` is the only
+    caller. Declaring less would leave the argument unpassable. W1-T1005 declares src/lib/status.ts
+    and test/status.test.ts and does NOT overlap either of them.
+
+    FILES DERIVED BY INVOCATION COUNT WITH WORD BOUNDARIES, OWN PATH ABSENT.
+    `GhPaceFloorStandDownError`: open-prs-rest.ts=6, sweep.ts=3, status.ts=0, run-task.ts=0.
+    `GhBudgetReading`: open-prs-rest.ts=4, everywhere else 0.
+    `paceGhEntry`: open-prs-rest.ts=2, status.ts=3, run-task.ts=2.
+    test/open-prs-rest.test.ts is the suite that owns this module: GhPaceFloorStandDownError=8,
+    createGhCallPacer=19, paceGhEntry=14.
+    src/lib/worker.ts is NOT declared: `ghJson`, `parseGhRateLimitHeaders` and `splitGhHeaderBlock`
+    are all EXPORTED and already correct — this task consumes them and changes none of them. IF AN
+    IMPLEMENTER FINDS `ghJson` MUST CHANGE, THEY MUST AMEND THIS SHARD TO DECLARE IT rather than
+    overrunning. src/lib/sweep.ts is NOT declared: its branch already handles the error and does not
+    change. src/run-task.ts is NOT declared, avoiding W1-T471's serialisation against ~209 of 349
+    shards.
+    CONTROL: `routeSpecialists` reads 0 in open-prs-rest.ts, so these counts discriminate.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN. `sizingViolation` (src/lib/task-linter.ts)
+    exempts risk === "high" outright. Blast radius argues DOWN: one argument passed, one derivation
+    added, no threshold moved.
+
+    ID PROVENANCE — THREE GIT SURFACES FIRST, THEN THE OPEN-PR SURFACE, ZERO `/rate_limit` CALLS.
+    W1-T1008 read 0 on all four at c0e5f3378: refs/rmd-id/* (100 refs), shard FILENAMES on
+    origin/main (355), DECLARED ids under plan/ (603 anchored `- id:` records), and every open PR's
+    title and file list (4 PRs). THE EXISTENCE TEST IS THE FILENAME AND THE ANCHORED DECLARATION,
+    NEVER A plan/ MENTION: `W1-T999999` reads 9 files as a mention and 0 as filename, 0 as declared,
+    0 as ref. Positive controls: W1-T1004 reads ref=1 file=1 decl=1; W1-T1005, W1-T1006 and W1-T1007
+    each read ref=1 file=0 decl=0 because their filing PRs are still open, and W1-T1007 reads 1 on
+    surface 4, which is what that surface is for. The ref was RE-SWEPT immediately before the push and
+    read 0 rows — two collisions in two sessions is why.
+    THE MINT USED THE PLAIN REFSPEC: orphan payload over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce Craigs-Mac-mini-99468-1787080886661288000, no
+    `+` and no lease: PUSH RC=0, `* [new reference] 4269ddacda013d8933151e20a1e3b10978df51f9 ->
+    refs/rmd-id/W1-T1008`, readback equal and nonce matched.
+    AND THE GATE PROOF WAS VERIFIED TO BE A REFUSAL RATHER THAN AN AUTH FAILURE. A plain push of a
+    fresh orphan at the already-taken refs/rmd-id/W1-T1007 returned rc=1 with `! [rejected] …
+    (non-fast-forward)`, ZERO occurrences of `could not read Username`, and left that ref unchanged at
+    858367f83df5e2b74f0b8680af4c6398665a2865. An exit code of 128 with an auth message would have
+    proven nothing about the gate.
