@@ -16,5 +16,17 @@ raw: "WORKER-HOME CONFIG RACE — 14 recon runs between 2026-08-03T00:54Z and
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2119
+summary:
+  headline: Config file briefly missing — no jobs failed
+  what_happened: From midnight to noon today, workers reported missing config
+    files 14 times, though backups existed and no actual jobs failed. No errors
+    in the past 4 hours.
+  decision: Monitor through 16:00Z; escalate to investigation if error recurs.
+  options:
+    - label: Continue monitoring only
+      consequence: Watch until 16:00Z; escalate if error message reappears
+    - label: Investigate now
+      consequence: Assign team to trace config creation logic and backup/restore mechanisms
+    - label: Close as transient issue
+      consequence: Archive incident; reopen only if error pattern resurfaces
