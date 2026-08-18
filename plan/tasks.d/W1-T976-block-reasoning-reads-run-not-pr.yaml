@@ -1,0 +1,179 @@
+- id: W1-T976
+  title: "THE DAEMON DECIDES A TASK IS BLOCKED FROM A FIELD THAT DESCRIBES THE RUN — this is the VERDICT field, not W1-T968's arm phrase: processDispatchResult feeds RunResult.verdict to reasonAboutBlock, so a task whose pull request already merged gate-side is classed a fixable blocker, spends a fix-rung strike and holds its dependents, while the merged projection that would answer correctly is already computed in the same tick"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    THE BOUNDARY, FIRST: W1-T968 fixes `armReportPhrase`, the ARM REPORT's wording. THIS IS THE
+    `verdict` FIELD AND ITS BEHAVIOURAL READER. They share a sentence — the report describes the
+    call while the reader asks about the pull request — and they are not the same defect, do not
+    touch the same symbol, and W1-T968's `files:` (src/run-task.ts, src/lib/ledger.ts,
+    test/arm-outcome-five-sites.test.ts) shares nothing with this shard's.
+
+    (1) THE MEASUREMENT, RE-DERIVED OVER 2026-08-17T02:07Z .. 2026-08-18T02:07Z ON THE FLEET
+    LEDGER (72905 deduped rows; corpus gate `run.start` = 145 against a `cli.invoked` control of
+    118 and 174 distinct step names). ELEVEN `verdict` rows, EXACTLY ONE reading `merged`:
+    `blocked_ci` 4, `pr_attribution_failed` 4, `blocked` 2, `merged` 1. TWELVE distinct tasks were
+    dispatched in that window and ALL TWELVE landed a merged pull request.
+
+    (2) THE GITHUB SIDE, WITH BOTH SANCTIONED PATHS AND A CONTROL THAT PASSES. Over 1551 merged
+    pull requests pulled by REST, each of the twelve resolved to exactly one merged PR by the
+    ANCHORED trailer `^Remudero-Task: <id>$` AND independently by the `run-<id>-<digits>` head
+    branch, agreeing in every case: W1-T933 #2019, W1-T934 #2024, W1-T935 #2027, W1-T936 #2026,
+    W1-T938 #2030, W1-T939 #2052, W1-T940 #2033, W1-T941 #2060, W1-T942 #2037, W1-T943 #2051,
+    W1-T944 #2049, W1-T945 #2055. CONTROL: `W1-T999999` returns empty on BOTH paths, and W1-T936
+    (the one `merged` verdict) returns #2026 on both. A FIRST ATTEMPT AT THIS CONTROL FAILED —
+    an unanchored match over flattened bodies returned a hit for `W1-T999999` because shards quote
+    that id as their own negative control — so the anchored form is not a stylistic preference
+    here, it is the difference between a working query and a broken one.
+
+    (3) SO THE FIELD IS UNDERSTATING SHIPPED WORK BY ROUGHLY TWELVE TO ONE IN THIS WINDOW. This is
+    the GATE-SIDE MERGE PATH CLAUDE.md already documents: a pull request merges on GitHub's own
+    required-status contract after the run that opened it has stopped. THE FIELD IS NOT WRONG
+    ABOUT WHAT IT DESCRIBES — the run really did end `blocked_ci`. It is wrong for the question
+    every reader is actually asking.
+
+    (4) AND ONE READER DOES NOT MERELY REPORT — IT ACTS, WHICH IS THE WHOLE REASON THIS IS FILED.
+    `processDispatchResult` (src/lib/daemon.ts) branches on `if (!result.merged)` and calls
+    `reasonAboutBlock(planForBatch, task.id, result.verdict, state)`. `verdictIsFixable`
+    (src/lib/block-reason.ts) returns TRUE for `blocked_ci`, so the disposition is
+    `fixable_blocker`: a bounded fix attempt is dispatched and a STRIKE is spent, and
+    `transitiveDependents` are held. On the measured window that is four tasks whose pull requests
+    had already merged. A wrong number in a report costs judgement; this one costs spend and
+    stalls the DAG.
+
+    (5) THE REPORTING READERS ARE ALREADY PART-FIXED AND ARE NOT THIS TASK. src/lib/retro.ts
+    already carries the W1-T51 SHIPPED union (ledger UNION GitHub-trailer-matched, `shippedSince`
+    / `ledgerOnlyShipped`), and W1-T930 threaded it into `aggregateByClass(runs, shipped?)` whose
+    own doc says the ledger-only path was "undercounting real ships by more than half". Its single
+    production call site passes the union. Ledger-only `verdict === "merged"` reads remain in
+    recap.ts, board.ts, digest.ts and status.ts's `isMergeCreditLine`, and those are REPORTS. THE
+    BEHAVIOURAL READER IS THE ONE WITH NO UNION AT ALL.
+
+    (6) THE ANSWER COSTS NOTHING TO FETCH, WHICH IS WHY THIS IS A READ AND NOT A ROW.
+    `runDaemon` already executes `const isMerged = deps.refreshMerged();` ONCE PER TICK, before
+    dispatch and before the sweep, and `processDispatchResult` is declared inside that same
+    function with `deps` in scope. The projection behind it is the batched one — W1-T257 collapsed
+    `findMergedByHeadBranch` to a single `gh pr list --state merged`, and status.ts's REST path
+    uses `/search/issues` explicitly rather than `gh pr list --search`. SO THE CORRECT ANSWER IS
+    ALREADY IN MEMORY AT THE MOMENT THE WRONG ONE IS USED, AND CONSULTING IT ADDS ZERO GITHUB
+    CALLS. That matters: GraphQL has been exhausted six times in four days.
+
+    (7) THE COVERAGE LIMIT, MEASURED AND STATED HONESTLY. Across ALL 1551 merged pull requests the
+    anchored trailer covers 675 (43%), the head-branch form 641, and their UNION 700 (45%) — 851
+    carry neither. THAT DENOMINATOR IS THE WRONG ONE FOR THIS TASK and saying so is part of the
+    finding: it counts every hand PR, dependabot bump and filing PR that never had a task. The
+    denominator that matters is dispatched tasks, and there the union was 12 of 12. A builder must
+    NOT read the 45% as this predicate's expected accuracy, and must NOT widen the union to chase
+    it — the residual is PRs with no task, not tasks with no PR.
+  design: |
+    (i) THE FIX IS ONE PREDICATE AT ONE CALL SITE. In `processDispatchResult`, before the
+    `if (!result.merged)` branch reaches `reasonAboutBlock`, consult the tick's already-resolved
+    merged projection for `task.id`. A task the projection credits as merged takes the existing
+    `{ kind: "merged" }` path; everything else behaves exactly as today. NO NEW LEDGER ROW, NO NEW
+    GITHUB CALL, NO NEW MECHANISM.
+
+    (ii) THE FIELD IS NOT RENAMED, AND THAT IS A DECISION RATHER THAN AN OMISSION. The alternative
+    considered was to rescope `verdict` so it plainly means "how this run ended" and give the
+    outcome its own field. REJECTED. `verdict` is already correct for what it describes; the
+    defect is entirely in one reader asking it the wrong question. A rename touches every writer,
+    and `verdict` and `verdict.merged` are BOTH in src/lib/ledger.ts's retained set (control:
+    `automerge.armed` and `risk_judge.decision` both read 0 there) — so the name is load-bearing
+    for rows that survive rotation and for every historical row already written under it. Fixing
+    one reader cannot invalidate history; renaming a retained step can.
+
+    (iii) THE RESOLVER MUST BE THE ONE THE TICK ALREADY HOLDS, NEVER A SECOND LOOKUP. Calling
+    `findMergedByTrailer` directly from this call site would reintroduce the per-task
+    `gh pr list --search` that W1-T257 batched away, on a path that runs once per dispatched task
+    per tick. The projection is a dep (`refreshMerged`) precisely so callers share one derivation.
+
+    (iv) THE FALSIFIER IS A PAIR AND BOTH HALVES MUST RUN IN ONE INVOCATION. "An already-merged
+    task is not blocked" is satisfied perfectly by never blocking anything; criterion 4 fails that
+    by requiring a genuinely unmerged task to still reach `reasonAboutBlock` and still hold its
+    dependents. A builder who ships only the first three has disabled block reasoning.
+
+    (v) NOTHING NEW IS EMITTED. Nine mechanisms in this repo have merged green with no consumer.
+    If a builder concludes a distinguishing row is needed to tell "not blocked because already
+    merged" from "not blocked at all", ITS READER MUST LAND IN THE SAME PULL REQUEST. The
+    preferred shape emits nothing: the existing `{ kind: "merged" }` path already logs what it
+    logs.
+
+    (vi) OUT OF SCOPE, EACH WITH ITS REASON. src/lib/block-reason.ts is NOT declared — the
+    predicate is correct for the input it is given and the defect is the input, not the taxonomy.
+    src/run-task.ts is NOT declared — see the note. The reporting readers in recap.ts, board.ts,
+    digest.ts and status.ts's `isMergeCreditLine` are NOT declared: they cost judgement rather
+    than behaviour, retro.ts is already part-fixed by W1-T51 and W1-T930, and folding them in
+    would make this two concerns.
+  acceptance:
+    - claim: "a task whose pull request already merged is not routed into block reasoning at all"
+      proof: "unit test: W1-T976: a task whose pull request already merged is not treated as blocked"
+    - claim: "such a task does not hold its transitive dependents"
+      proof: "unit test: W1-T976: an already merged task does not block its dependents"
+    - claim: "no fix rung is dispatched and no strike is spent for a task that already merged"
+      proof: "unit test: W1-T976: no fix rung is dispatched for a task that already merged"
+    - claim: "a task that genuinely did not merge still blocks exactly as before"
+      proof: "unit test: W1-T976: a task that genuinely did not merge still blocks"
+  risk: high
+  origin: "oper#verdict-describes-the-run-2026-08-18"
+  plan_refs: ["W1-T968", "W1-T930", "W1-T51", "W1-T257"]
+  files: [src/lib/daemon.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    src/run-task.ts IS DELIBERATELY NOT DECLARED, AND THAT IS THE POINT OF PUTTING THE CHANGE HERE.
+    MEASURED AT 9b93f6cbf: 200 of 336 shards declare it and W1-T471 records that every task naming
+    it serialises against every other, so avoiding it is worth real scheduling. It is avoidable
+    because the counts say the change does not live there: `reasonAboutBlock` reads 0 in
+    src/run-task.ts and 10 in src/lib/daemon.ts; `processDispatchResult` reads 0 there and 4 in
+    daemon.ts. `refreshMerged` does read 17 in run-task.ts — that is its PRODUCTION WIRING, which
+    already exists and does not change; the dep is consumed, not rewired. AN IMPLEMENTER WHO FINDS
+    THE WIRING MUST CHANGE MUST AMEND THIS SHARD TO DECLARE IT FIRST rather than overrunning.
+
+    FILES DERIVED BY INVOCATION COUNT WITH WORD BOUNDARIES, OWN PATH ABSENT.
+    `reasonAboutBlock`: daemon.ts=10, block-reason.ts=1 (its own definition), run-task.ts=0.
+    `processDispatchResult`: daemon.ts=4, everywhere else 0.
+    `refreshMerged`: daemon.ts=4, run-task.ts=17 (wiring, unchanged), block-reason.ts=0.
+    `runDaemon`: test/daemon.test.ts=79, the highest of any suite, which is why that file is the
+    declared home rather than test/block-reason.test.ts (reasonAboutBlock=23 there, but it drives
+    the PURE predicate, which this task does not change).
+    CONTROL: `routeSpecialists` reads 0 in daemon.ts, so these counts discriminate rather than
+    matching everything.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN. `sizingViolation`
+    (src/lib/task-linter.ts) exempts `risk === "high"` outright, and `subsystemsOf` derives ids
+    from `moduleIdFromPath` over `files:` AND from a lexicon scan of the ACCEPTANCE-CRITERIA TEXT.
+    Two declared paths already yield two module ids before the criteria are read, and four criteria
+    naming merges, blocking, dependents and fix rungs can only add lexicon tags.
+
+    NOT A DUPLICATE OF TONIGHT'S SHARDS — EACH CHECKED, NOT ASSUMED. W1-T968 (armReportPhrase;
+    run-task.ts, ledger.ts), W1-T970 (durable risk-judge refusal; sweep.ts, risk-judge.ts,
+    ledger.ts, run-task.ts), W1-T971, W1-T972, W1-T974 (escalate.ts), W1-T975 (defer the arm;
+    run-task.ts, arm-at-open.test.ts) and W1-T963 (triage.ts, review.ts, run-task.ts). NONE
+    declares src/lib/daemon.ts or src/lib/block-reason.ts, and none names `reasonAboutBlock` or
+    `processDispatchResult`. The nearest neighbour is W1-T968 and the boundary is stated in the
+    first clause of the rationale.
+
+    PROOF NOTES: all four proofs are the NAME-FILTERED `unit test:` form, never the whole-file path
+    form. Each title is plain prose under 100 characters with no comma, no "; " and no regex
+    metacharacter, so `looksLikeScenarioNarrative` cannot fail them and `parseTestTarget`'s
+    escaped-literal match has nothing to mis-handle. Each was verified to match ZERO files today by
+    `grep -rlF` over test/ against a same-invocation control matching 3 files. They are FORWARD
+    references to titles this task will create; test/daemon.test.ts exists today.
+
+    ID PROVENANCE — FOUR SURFACES AT 9b93f6cbf, W1-T976 READ 0 ON ALL FOUR, EVERY ZERO CONTROLLED.
+    refs/rmd-id/* (72 refs), shard FILENAMES on origin/main (338), ids DECLARED anywhere under
+    plan/ on origin/main (6720 mentions), and every OPEN PR's title AND file list (6 PRs, 12
+    files). Controls on the same corpus, the whole taken band: W1-T967=3, W1-T968=13, W1-T970=22,
+    W1-T971=5, W1-T972=4, W1-T974=11, W1-T975=8.
+    THE RESERVATION USED THE PLAIN REFSPEC AND THE REJECTION IS THE GATE. Orphan payload over the
+    empty tree (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-85424-1787020520545944000, no `+` and no `--force-with-lease`, exit status
+    captured into a variable rather than read through a pipe: PUSH RC=0,
+    `* [new reference] 2ac665320d4ea286b7357eb7b1fdd7573cbd6cd1 -> refs/rmd-id/W1-T976`, readback
+    equal and nonce matched. THE GATE WAS PROVEN ARMED ON THE SAME INVOCATION: a plain push of a
+    fresh orphan at the already-taken refs/rmd-id/W1-T975 returned RC=1 with
+    `! [rejected] … (non-fast-forward)` and that ref was byte-identical before and after at
+    33454875a784a6dea99ce8dc9b7488301315e662. So RC=0 here means genuinely absent, not clobbered.
