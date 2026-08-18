@@ -1,0 +1,189 @@
+- id: W1-T975
+  title: "A RUN ARMS AUTO-MERGE AS ITS FIRST ACT AND ABANDONS THE PR STILL ARMED WHEN IT EXITS BEFORE ITS VERDICT — and because an already-armed PR short-circuits the sweep's arming decision, that standing arm is a permanent bypass around the one predicate a refusal can ever live in: do not arm until the run commits to a verdict"
+  repo: remudero
+  depends_on: ["W1-T970"]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    RE-DERIVED AT origin/main db8eb08fe. Every ordering claim below was re-measured on that head
+    and is cited BY SYMBOL, because the line numbers the source recon used drift.
+
+    (1) THE ORDER INSIDE `runTask`, RE-DERIVED. `armAutoMergeAtOpen` is invoked FIRST. The
+    `ci !== "green"` exit that `say`s `verdict: blocked_ci (ci …) — PR left OPEN` returns AFTER it
+    with NO `disarmAutoMerge` between them. The fix-rung `exhausted` and `stood down` exits return
+    after it, also with no disarm. The FIRST `disarmAutoMerge` in the function appears only
+    immediately before the CAPPED exit; the SECOND is inside the risk-judge escalate closure.
+    MEASURED CALL-SITE COUNTS: `armAutoMergeAtOpen(` = 1 across src/, `disarmAutoMerge(` = 2 across
+    src/ (both inside `runTask`), `runRiskJudge(` = 1. So three early exits leave the arm standing
+    and two do not, and the asymmetry is exactly that.
+
+    (2) THE ARM AT OPEN IS DELIBERATE AND ITS REASONING IS CARRIED, NOT OVERRIDDEN.
+    `armAutoMergeAtOpen`'s own doc states it is "deliberately UNGATED by any ledger verdict,
+    because none can possibly exist yet", and that this is "safe ONLY because GitHub's own
+    required-status contract (`[ci-gate, remudero-review]`) is what actually gates the merge, never
+    this call — arming merely REGISTERS INTENT". Its call site adds the measurement that bought it:
+    arming after CI wait and review "measured 2-8 minutes of dead time (own-repo PRs
+    #251/#245/#240/#249; #274 NEVER reached the old post-review arm call because its fix-rung loop
+    was still running)". THAT BENEFIT IS REAL AND THIS TASK DOES NOT DISPUTE IT.
+
+    (3) BUT THE DOC NAMES ONE UNCOVERED SHAPE AND THE MEASUREMENT FINDS MORE. It says in terms:
+    "The one shape this does NOT cover on its own: a CAPPED verdict … `runTask`'s own
+    capped-refusal branch closes that gap by calling `disarmAutoMerge` BEFORE escalating." The
+    ci-not-green exit is the SAME SHAPE — a local orchestrator decision to stop, with no
+    GitHub-visible signal, leaving a standing arm — and it has no such closing call. Measured on
+    the fleet ledger: 43 unjudged PRs did enter `runTask` and 40 of them merged; terminal states
+    `blocked_ci` 32, no verdict row 9, `blocked` 2.
+
+    (4) THERE ARE TWO `blocked_ci` EXITS AND ONLY ONE IS A DEFECT. THIS DISTINCTION IS LOAD-BEARING
+    AND A BUILDER WHO MISSES IT WILL BREAK A DELIBERATE BEHAVIOUR. The LATE exit, after
+    `pollToGate`, carries its own comment: "Blocked: leave the PR open (auto-merge stays armed; it
+    will land later if the check goes green)". By that point the review HAS been posted and the
+    risk judge HAS run and passed, because an escalation returns earlier. THAT EXIT IS CORRECT AND
+    MUST KEEP ITS ARM. The EARLY exit — `waitForCiGreen` returning non-green, before the review is
+    posted and before the judge — is the one that leaves an unexamined arm.
+
+    (5) WHY THE STANDING ARM IS WORSE THAN A LATE MERGE, AND THIS IS THE WHOLE REASON THE TASK
+    EXISTS. The sweep's dedup reads
+    `alreadyDone = pr.autoMergeArmed === true || prior.armed.has(...)` for the `mergeable`
+    disposition. So a PR GitHub already reports as armed makes `alreadyDone` true and the sweep's
+    arming decision IS NEVER EVALUATED FOR IT. That decision is the single place a durable refusal
+    can sit — it is exactly where W1-T970 (#2100) installs one. A standing arm from an abandoned
+    run therefore routes the merge around the refusal permanently, not merely early. The merge
+    fires from GitHub's side on an arm that no predicate ever re-examines.
+
+    (6) AND A DISARM WOULD NOT HOLD, WHICH IS WHY THIS IS NOT A DISARM TASK. Measured: seven
+    risk-judge escalations, seven merges, zero prevented; five disarms won the race by 175-2004
+    seconds and were nullified when `sweep.disposed`'s "review success, required checks green —
+    arming auto-merge" re-armed the PR. The arming predicate is
+    `when: (pr) => pr.checksState === "green" && pr.reviewState === "success"`, and `risk_judge`
+    occurs 0 times in src/lib/sweep.ts against same-file controls `reviewState` 34 and
+    `checksState` 56. A disarm on the ci-not-green exit would be re-armed at the exact moment CI
+    goes green, which is the exact moment it matters.
+  design: |
+    THE CHOICE, ARGUED BOTH WAYS, ONE PICKED.
+
+    (i) REJECTED — DISARM ON EARLY EXIT. It is the smaller change and it matches an idiom already
+    in the file: the capped-refusal branch calls `disarmAutoMerge` before returning, so a third
+    call before the ci-not-green return would read as consistent. IT IS REJECTED FOR TWO REASONS,
+    the second decisive. First, rationale (6): the sweep re-arms on green-plus-success, so the
+    withdrawal is undone at the moment it would matter, and the risk judge has already paid for
+    that lesson seven times out of seven. Second, a disarm does not restore the property that
+    matters — it removes an arm and then lets the sweep put an identical one back through its own
+    predicate, which is fine, but it does nothing about the WINDOW between the abandoned exit and
+    the next sweep pass, during which GitHub may merge on the original standing arm.
+
+    (ii) CHOSEN — DO NOT ARM UNTIL THE RUN COMMITS TO A VERDICT. The arm moves from PR-open to the
+    point where the run has a verdict it is willing to stand behind. A run that reaches that point
+    arms exactly as today. A run that exits at ci-not-green, fix-rung exhaustion or stand-down arms
+    nothing, so there is no standing arm to bypass anything, and the PR's only remaining route to a
+    merge is the sweep's `mergeable` decision — the one place W1-T970's refusal can be consulted.
+    THE POINT IS NOT THAT ARMING LATER IS SAFER IN ITSELF. It is that every merge then passes
+    through a predicate, and a predicate can be taught to refuse; a standing arm cannot.
+
+    (iii) WHAT IS GIVEN UP, STATED PLAINLY RATHER THAN MINIMISED. W1-T125 bought the removal of 2-8
+    minutes of dead time and, in #274's shape, an arm that would never have been placed at all
+    because the run was still looping. A deferred arm returns part of that cost: a PR that becomes
+    mergeable while its run is gone now waits for a sweep pass instead of merging immediately. The
+    measured sweep cadence is a 2-minute median with a tail to 274 minutes, so the typical wait is
+    small and the worst case is hours. THAT TRADE IS THE OPERATOR'S TO MAKE, WHICH IS WHY
+    `verify: human` IS SET.
+
+    (iv) THE LATE `blocked_ci` EXIT KEEPS ITS ARM, EXPLICITLY. See rationale (4). A builder who
+    moves or removes the arm behind `pollToGate` has changed a documented, intended behaviour on a
+    path where the judge has already passed. The two exits share a verdict string and are NOT the
+    same case; distinguishing them is part of the work, not an incidental detail.
+
+    (v) NO NEW SIGNAL WITHOUT A READER, AND PREFERABLY NO NEW SIGNAL. Nine mechanisms in this repo
+    have merged green with no consumer. This change should emit nothing new: the existing
+    `automerge.armed` row simply moves to where the arm now happens, and its `at:` field stops
+    reading `open` on runs that never reached a verdict. If a builder concludes a distinguishing
+    row IS needed, its reader must land in the same PR.
+
+    (vi) OUT OF SCOPE, NAMED. src/lib/sweep.ts is NOT declared: the sweep's arming predicate and
+    its durable refusal are W1-T970's, and a second refusal mechanism is explicitly not wanted
+    here. This task only ensures that predicate is REACHED.
+  acceptance:
+    - claim: "a run that exits before it has a verdict leaves the pull request with no auto-merge arm"
+      proof: "unit test: W1-T975: a run that exits before its verdict leaves no auto-merge arm"
+    - claim: "a run that does reach its verdict still arms auto-merge so the dead-time saving survives"
+      proof: "unit test: W1-T975: a run that reaches its verdict still arms auto-merge"
+    - claim: "the ci-not-green exit taken before the review is posted arms nothing at all"
+      proof: "unit test: W1-T975: the ci-not-green exit before review arms nothing"
+  risk: high
+  origin: "oper#arm-survives-abandoned-run-2026-08-18"
+  plan_refs: ["W1-T970", "W1-T125"]
+  files: [src/run-task.ts, test/arm-at-open.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    depends_on: W1-T970 IS ORDERING, NOT COMPILATION, AND THE DIFFERENCE IS STATED SO NOBODY
+    MISREADS IT. This change builds and passes on its own. What it cannot do on its own is produce
+    a benefit: deferring the arm routes an abandoned PR through the sweep's `mergeable` decision,
+    and until W1-T970 makes a refusal durable in that decision, the sweep will arm it on
+    green-plus-success exactly as before. So the merge still happens; it merely happens through a
+    predicate instead of around one. Building this first is not wrong, it is early.
+
+    verify: human IS SET UP FRONT AND THE REASON IS SPECIFIC. This task proposes to give back part
+    of a latency property W1-T125 bought with measurements (2-8 minutes of dead time, four named
+    PRs). No unit test can decide whether a 2-minute median wait with a 274-minute tail is an
+    acceptable price for closing the window. `isDispatchEligible` (src/lib/drain.ts) returns false
+    at `t.verify !== "auto"` BEFORE the linter is consulted, so this shard cannot be picked up by
+    the drain until an operator rules — the intended effect, not a side effect.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN. `sizingViolation`
+    (src/lib/task-linter.ts) exempts `risk === "high"` outright, and `subsystemsOf` derives ids
+    from `moduleIdFromPath` over `files:` AND from a lexicon scan of the ACCEPTANCE-CRITERIA TEXT.
+    Two declared paths already yield two module ids before the criteria are scanned at all, and
+    criteria naming arming, verdicts and CI can only add lexicon tags. No file list satisfying this
+    task's own scope reaches risk:medium, so the band is set where the rule requires.
+
+    FILES DERIVED BY INVOCATION COUNT WITH WORD BOUNDARIES AT db8eb08fe, OWN PATH ABSENT.
+    `armAutoMergeAtOpen`: run-task.ts=9, arm-at-open.test.ts=11, sweep.ts=0.
+    `disarmAutoMerge`: run-task.ts=12, arm-at-open.test.ts=20, sweep.ts=0.
+    `pollToGate`: run-task.ts=5, arm-at-open.test.ts=8, sweep.ts=0.
+    CONTROL: `routeSpecialists` reads 0 in run-task.ts, so these counts discriminate rather than
+    matching everything. src/lib/sweep.ts reads 0 on every arm symbol and is deliberately NOT
+    declared — see design (vi).
+
+    src/run-task.ts IS DECLARED AND THE COST IS ACCEPTED IN WRITING. MEASURED AT db8eb08fe: 200 of
+    336 shards already declare it, and W1-T471 records that every task naming it serialises against
+    every other. There is no version of this task that avoids it: `armAutoMergeAtOpen`'s only call
+    site, all five early exits, both `disarmAutoMerge` calls and `pollToGate` are all inside
+    `runTask` in that file. Declaring anything less would be a scope claim the change cannot honour.
+
+    PROOF NOTES: all three proofs are the NAME-FILTERED `unit test:` form, never the whole-file path
+    form. Each title is plain prose under 100 characters with no comma, no "; " and no regex
+    metacharacter, so `looksLikeScenarioNarrative` cannot fail them and `parseTestTarget`'s
+    escaped-literal match — which treats the body as a LITERAL substring, not a pattern — has
+    nothing to mis-handle. Each was verified to match ZERO files today via `grep -rlF` over test/
+    against a same-invocation control matching 2 files. They are FORWARD references to titles this
+    task will create; `test/arm-at-open.test.ts` exists today.
+    CRITERION 2 IS THE FALSIFIER AND IS NOT DECORATION. "Exits before its verdict arms nothing" is
+    satisfied perfectly by deleting the arm entirely; criterion 2 fails that, and the two must run
+    in the same suite invocation so one run carries both directions.
+
+    SIBLINGS NAMED, NEITHER SCOPED IN. COVERAGE: 68 source-changing PRs merged unjudged in ten days,
+    40 through this door and 28 armed by lanes that never enter `runTask` at all. Widening the judge
+    is a model call on every armed merge at a measured median of 25.4 seconds and is the operator's
+    ruling, not this task's. SILENCE: there is no `risk_judge.skipped`, no `.not_run` and no
+    `.gated`, while the repo writes `auto_triage.skipped`, `automerge.arm_skipped` and
+    `dispatch.skipped` — it knows how and does not here, so from outside a change nobody vetted
+    looks exactly like one that passed. Both are real; neither is this shard.
+
+    ID PROVENANCE — FOUR SURFACES AT db8eb08fe, EACH READ 0 FOR W1-T975, EVERY ZERO CONTROLLED.
+    refs/rmd-id/* (71 refs), shard FILENAMES on origin/main (336), ids DECLARED anywhere under
+    plan/ on origin/main (6672 mentions), and every OPEN PR's title AND file list (7 PRs). Controls
+    on the same corpus: W1-T970 = 13, W1-T967 = 1, W1-T966 = 4, W1-T965 = 17. Candidates 971, 972,
+    973 and 974 all read non-zero and were rejected; 975 is the first free id above 974.
+    THE RESERVATION USED THE PLAIN REFSPEC AND THE REJECTION IS THE GATE. Orphan payload over the
+    empty tree (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-66482-1787018536748592000, no `+` and no `--force-with-lease`, exit status
+    captured into a variable rather than read through a pipe: PUSH RC=0,
+    `* [new reference] 33454875a784a6dea99ce8dc9b7488301315e662 -> refs/rmd-id/W1-T975`, and the
+    readback returned that same sha with the nonce matching the payload commit message.
+    THE GATE WAS PROVEN ARMED ON THE SAME INVOCATION: a plain push of a fresh orphan at the ALREADY
+    TAKEN refs/rmd-id/W1-T970 returned RC=1 with `! [rejected] … (non-fast-forward)` and left that
+    ref unchanged at 18023ca5. So RC=0 here means the ref was genuinely absent, not silently
+    overwritten — which is the failure a `+` or a lease-plus-`+` would have hidden.
