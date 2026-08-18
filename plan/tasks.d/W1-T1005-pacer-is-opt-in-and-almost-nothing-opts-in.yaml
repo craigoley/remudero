@@ -1,0 +1,169 @@
+- id: W1-T1005
+  title: "THE GITHUB CALL PACER IS OPT-IN PER CONSTRUCTION AND ONE CONSTRUCTION IN SIXTEEN OPTS IN — paceGhEntry opens with `if (!pacer) return call()`, so omitting it silently disables spacing with no error and no ledger row: default the pacer inside buildBatchedGithub so every gateway in a process shares one, instead of every lane discovering the secondary limit separately"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    RE-DERIVED 2026-08-18 AT origin/main cc1cd68b0, over 84,031 deduped fleet-ledger rows (CONTROL
+    `run.start` = 154, `cli.invoked` = 149). No `/rate_limit` call was made at any point — that
+    endpoint is exempt from the primary limit but counts against the SECONDARY one, which is the
+    limit at issue here.
+
+    (1) THE MECHANISM IS ALREADY RIGHT, AND ITS OWN DOC IS THE BEST STATEMENT OF THE PROBLEM.
+    `src/lib/open-prs-rest.ts`'s pacing header (W1-T468) says it plainly: "GitHub's SECONDARY rate
+    limit fires on REQUEST RATE, not on either quota bucket's remaining volume — measured at filing,
+    core and graphql both sat comfortable while it tripped… GitHub documents the secondary limit as a
+    signal to SLOW DOWN, never to retry — this repo has the proof, a session tripping it BY polling
+    rapidly and then again retrying — so the fix is spacing, not a retry loop." THIS TASK ADDS NO NEW
+    IDEA. It widens the reach of that one.
+
+    (2) THE DEFECT IS COVERAGE, AND IT IS COUNTABLE. `paceGhEntry` (src/lib/open-prs-rest.ts) opens
+    `if (!pacer) return call();` and `buildBatchedGithub`'s option is declared `pacer?:` — so a
+    construction that omits it is SILENTLY UNPACED: no throw, no ledger row, no degraded mode. In
+    `src/run-task.ts`, `buildBatchedGithub(` is constructed 10 times and EXACTLY ONE passes a pacer
+    (`buildBatchedGithub(owner, repo, { log, pacer })`); `ghGateway(` is constructed 6 more times and
+    takes no pacer at all. `createGhCallPacer()` has ONE construction site in the whole tree, inside
+    `daemonCommand`. So one of sixteen gateway constructions is paced, and the pacer's lifetime is one
+    daemon process.
+
+    (3) THE MEASURED COST, RE-DERIVED AND LARGER THAN REPORTED. The densest 30-minute window of
+    board-gateway failures is 2026-08-18T17:01:48.956Z .. 17:31:30.629Z carrying 164 failures —
+    reported as 140, measured at 164 — every one classified `rate_limit`. THE RETRY CADENCE IN THAT
+    WINDOW HAS A MEDIAN INTER-ARRIVAL OF 1.8 SECONDS (min 0.0s, max 78.3s), not the ~25s reported.
+    That is not a poll cadence; that is a hot loop against a limit it was holding open. Over the
+    retained corpus `board_gateway.fetch_failed` reads 309 and `board_gateway.issue_fetch_failed`
+    reads 303.
+
+    (4) AND THE SAME ROOT ACCOUNTS FOR THE TRIAGE FAILURES. Of 31 `triage.error` rows, 15 are GitHub
+    commands failing: `gh pr create` 8, `gh pr view` 5, `gh pr diff` 2. NONE of those paths is paced —
+    `paceGhEntry` reads 0 in `src/lib/triage.ts` against a control of 8 in `src/`. So the two largest
+    measured failure groups — the 164-failure window and the 15 command failures — are one root:
+    calls made outside the one paced construction.
+
+    (5) WHY THE PROACTIVE INPUT CANNOT SEE IT, STATED SO NOBODY RE-DERIVES IT. The pacer's
+    forward-looking signal is a bucket reading (`remaining` / `limit`, with `resource` naming which
+    bucket), and it widens at `DEFAULT_GH_PACE_LOW_WATER_FRACTION` (0.1) and stands down at
+    `DEFAULT_GH_PACE_FLOOR_FRACTION` (0.02). THE SECONDARY LIMIT DOES NOT MOVE THAT NUMBER — the
+    operator measured `core` at 4,993/5,000 throughout the incident. The pacer's own header already
+    says so. The signal that DOES work is the reactive one: a call classified `rate_limit` widens the
+    shared gap to `DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS` (10,000ms). That signal is only shared by
+    callers holding the SAME pacer instance, which is the whole point of this task.
+
+    (6) NOTHING HONOURS `retry-after`. MEASURED: `x-ratelimit` and `retry-after` (either case) read
+    0 across all of `src/`, against a control of 26 `GhCallPacer` hits. AND `withGhMeter` DOES NOT
+    EXIST — 0 in src/, 0 in test/, 0 in the whole tree, against a control of 5 `createGhCallPacer`
+    hits. Any brief citing it is citing a symbol this repo does not have.
+  design: |
+    (i) DEFAULT THE PACER INSIDE THE BUILDER, DO NOT EDIT SIXTEEN CALL SITES. `buildBatchedGithub` is
+    defined in `src/lib/status.ts`. Giving its `pacer` option a module-lifetime default means every
+    gateway built in a process shares one pacer without any caller changing. THAT IS WHY
+    `src/run-task.ts` IS NOT DECLARED: the sixteen constructions live there, and touching them would
+    serialise this against ~209 of 349 shards for no behavioural gain over defaulting once.
+
+    (ii) THE DEFAULT MUST BE SHARED, NOT PER-CALL. A fresh pacer per construction would restore
+    exactly today's defect under a new name: three politely-spaced gateways that each know only about
+    themselves still collide at second zero, which is the reasoning `GhCallPacer`'s own doc gives for
+    being one instance threaded through every guarded site. Criterion 3 is the falsifier for that and
+    criterion 4 proves the sharing carries the reactive signal.
+
+    (iii) AN EXPLICIT PACER MUST STILL WIN. Callers that already pass one — and every test that
+    injects a fake — must be unaffected. Criterion 2 is that falsifier; without it, "default a pacer"
+    is satisfied by a change that overrides injection and breaks the suite's control over timing.
+
+    (iv) NO NEW SIGNAL AND NO NEW MECHANISM. No ledger step, no field, no config key, no new module.
+    Eleven mechanisms in this repo have merged green with no reader; this adds no twelfth. The
+    observable outcome is the EXISTING `board_gateway.fetch_failed` rate falling.
+
+    (v) THIS IS A PREDICATE AND A DEFAULT, NOT AN ARCHITECTURE. No new daemon, no queue, no durable
+    execution, no cross-process state. Cross-PROCESS sharing is deliberately OUT — see (vi).
+
+    (vi) EXPLICITLY OUT OF SCOPE, EACH WITH ITS REASON.
+      - CROSS-PROCESS / CROSS-CONTAINER HEALTH STATE. `state/` is a shared bind mount and could hold
+        one, but a stale "upstream down" marker would park the fleet indefinitely, and W1-T978 has
+        already established that a replaced container cannot reclaim its own lock on that substrate
+        today. A marker with no safe expiry is a worse failure than the one being fixed. IF IT IS
+        EVER BUILT IT MUST FAIL OPEN — an idle fleet is recoverable by the operator; a banned
+        integration is not, but neither is a fleet that will not start. The in-process default here
+        needs no expiry at all because it dies with the process, which is why it is the safe half.
+      - HONOURING `retry-after` AND EXPONENTIAL BACKOFF WITH JITTER. Real, measured absent in (6),
+        and a change to the retry policy rather than to who is paced. Separate falsifier.
+      - CHECKPOINT AND RESUME. The triage lane mints its id before doing the work and no step named
+        checkpoint, resume or dead-letter exists — the only near neighbours are
+        `daemon.block.transient_retry`, `implement.resumed` and `recon.retry`, against a control of
+        174 distinct steps. Separate concern.
+      - A DEAD-LETTER EXIT FOR THE FEEDBACK RESERVOIR. 149 entries, 59 at `status: new`, and
+        `triage.filed` reads 0. Separate concern.
+      - ANTHROPIC-SIDE OUTAGES. NOT MEASURABLE FROM THIS CORPUS — see the note.
+  acceptance:
+    - claim: "a gateway constructed without an explicit pacer is paced anyway"
+      proof: "unit test: W1-T1005: a gateway built with no pacer is paced by default"
+    - claim: "a caller that supplies its own pacer keeps it and the default does not override it"
+      proof: "unit test: W1-T1005: an explicitly supplied pacer is not replaced by the default"
+    - claim: "two gateways built in one process pace against one another rather than separately"
+      proof: "unit test: W1-T1005: two gateways in one process share one pacer"
+    - claim: "a rate-limited call on one gateway widens the gap the other gateway then observes"
+      proof: "unit test: W1-T1005: a rate-limited call widens the gap for the other gateway too"
+  risk: high
+  origin: "oper#pacer-opt-in-coverage-2026-08-18"
+  plan_refs: ["W1-T468", "W1-T525", "W1-T529", "W1-T978"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    src/run-task.ts IS DELIBERATELY NOT DECLARED, AND DESIGN (i) IS WHY. All sixteen gateway
+    constructions live there, and W1-T471 records that naming that file serialises every task naming
+    it (~209 of 349 shards). Defaulting once inside `buildBatchedGithub` — which is defined in
+    `src/lib/status.ts` — reaches all sixteen without editing any. AN IMPLEMENTER WHO FINDS THE
+    DEFAULT CANNOT BE INSTALLED IN THE BUILDER MUST AMEND THIS SHARD TO DECLARE run-task.ts rather
+    than overrunning.
+
+    FILES DERIVED BY INVOCATION COUNT WITH WORD BOUNDARIES, OWN PATH ABSENT. `buildBatchedGithub` is
+    DEFINED in src/lib/status.ts. `paceGhEntry`: status.ts=3, open-prs-rest.ts=2, run-task.ts=2,
+    serve.ts=0. `GhCallPacer`: open-prs-rest.ts=10, status.ts=4, run-task.ts=4, serve.ts=0.
+    `createGhCallPacer`: open-prs-rest.ts=3 (its definition), run-task.ts=2, status.ts=0, serve.ts=0.
+    src/lib/open-prs-rest.ts is NOT declared: `paceGhEntry`'s `if (!pacer)` arm and the pacer's own
+    semantics do not change — only who is given one. test/status.test.ts is the declared suite
+    (`GhCallPacer` 7 hits there); test/open-prs-rest.test.ts owns the pacer's own semantics
+    (`paceGhEntry` 14 hits) and is deliberately left to keep owning them.
+    CONTROL: `routeSpecialists` reads 0 in status.ts, so these counts discriminate.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN. `sizingViolation` (src/lib/task-linter.ts)
+    exempts risk === "high" outright, and `subsystemsOf` derives ids from `moduleIdFromPath` over
+    `files:` AND from a lexicon scan of the ACCEPTANCE-CRITERIA TEXT. Blast radius argues DOWN: one
+    default on one option.
+
+    ANTHROPIC OUTAGES COULD NOT BE MEASURED, AND THAT IS RECORDED RATHER THAN GUESSED. The operator
+    reports an Anthropic outage today. The retained ledger shows NO worker-side model failure of any
+    kind: `run.error` reads 9 in total and all seven rows matching an upstream-failure signature name
+    a GITHUB command, not a model call; no step name matches overload, 529 or anthropic against a
+    control of 174 distinct steps. Either the outage never reached a spawn, or a model-side failure is
+    not ledgered distinguishably. EITHER WAY THIS SHARD CANNOT COVER IT, and a sibling would first
+    have to establish whether the fleet can even see such a failure.
+
+    ONE REPORTED FIGURE DID NOT REPRODUCE AND THE MEASURED ONE IS USED. The board-gateway incident was
+    reported as 140 failures retrying every ~25s; re-measured it is 164 failures in the densest
+    30-minute window with a MEDIAN INTER-ARRIVAL OF 1.8 SECONDS. The correction makes the case
+    stronger, not weaker, which is why it is stated rather than smoothed. The triage attribution also
+    differed: 15 GitHub-command failures reproduce exactly, but they resolve to 6 distinct entries
+    with 2 repeats on this corpus rather than the reported 13 and 7 — the entry key differs and the
+    lower number is used.
+
+    ID PROVENANCE — THREE GIT SURFACES FIRST, THEN THE OPEN-PR SURFACE, ZERO `/rate_limit` CALLS.
+    W1-T1005 read 0 on all four at cc1cd68b0: refs/rmd-id/* (96 refs), shard FILENAMES on origin/main
+    (355), DECLARED ids under plan/ (603 anchored `- id:` records), and every open PR's title and file
+    list (3 PRs, 10 files).
+    THE EXISTENCE TEST IS THE FILENAME AND THE ANCHORED DECLARATION, NEVER A plan/ MENTION: `W1-T999999`
+    reads 9 files as a mention — other shards cite it as their own negative control — and 0 as a
+    filename, 0 as a declared id and 0 as a ref. Positive controls: W1-T1004, W1-T997 and W1-T996 each
+    read ref=1 file=1 decl=1, and W1-T992 reads ref=1 file=0 decl=0 because its filing PR is still
+    open, which is exactly what surface 4 is for (it reads 1 there).
+    THE MINT USED THE PLAIN REFSPEC: orphan payload over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce Craigs-Mac-mini-93152-1787079948495545000, no
+    `+` and no lease, exit status into a variable: PUSH RC=0, `* [new reference]
+    f936f456a276dde3296a647a016c4abff4eb4f06 -> refs/rmd-id/W1-T1005`, readback equal and nonce
+    matched. THE GATE WAS PROVEN ARMED ON THE SAME INVOCATION: a plain push of a fresh orphan at the
+    already-taken refs/rmd-id/W1-T1004 returned RC=1 with `! [rejected] … (non-fast-forward)` and left
+    that ref unchanged at e545135c71cf3bbe9be2f49cbe546a62c11df54b.
