@@ -1,0 +1,182 @@
+- id: W1-T985
+  title: "THE OVERLAP ADVISORY SHIPPED INTO A COMMAND THREE OF THE FOUR MINTING LANES NEVER TYPE — triageCommandLocked, planCommand and approveCommand mint in-process and score 0 for every advisory symbol against controls that score 2 and 1, so the only reader is an operator at the CLI: wire the three lanes to the advisory that already exists"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    MEASURED AT origin/main 08a206b8. EVERY FIGURE BELOW WAS RE-TAKEN AT THAT SHA AGAINST A
+    WORKTREE OF origin/main, NOT A SESSION CHECKOUT — an earlier reading of the same numbers came
+    from a stale working tree and was wrong in four places, corrected in the note.
+
+    (1) THE READER CHAIN ENDS AT ONE COMMAND. `rareOverlapWarnings` (`src/lib/dispatch-overlap.ts`)
+    is reached only through `overlapWarningLinesFor` → `overlapAdvisoryLines` → `nextTaskIdCommand`
+    (`src/run-task.ts`). That command has exactly ONE non-test caller: the CLI dispatch line
+    `process.exit(await nextTaskIdCommand(rest))`. Nothing else in `src/` calls it. So the advisory
+    is reachable only when a human types `rmd next-task-id`.
+
+    (2) THREE LANES MINT WITHOUT EVER CROSSING IT. Counted over each function's own line span at
+    08a206b8, with each lane's own mint symbols as the same-invocation control:
+      triageCommandLocked  advisory 0/0/0/0/0   controls mintNextTaskIdWithHistory 2, reserveTaskIdFrom 1, reserveTaskIdRemote 1
+      planCommand          advisory 0/0/0/0/0   controls mintNextTaskIdWithHistory 1
+      approveCommand       advisory 0/0/0/0/0   controls mintNextTaskIdWithHistory 1
+      nextTaskIdCommand    overlapAdvisoryLines 1   — the sole reader, same instrument
+    The five advisory symbols counted are `overlapAdvisoryLines`, `overlapWarningLinesFor`,
+    `rareOverlapWarnings`, `openPrFileScopes` and `candidateFilesFromArgs`. A deliberately absent
+    symbol scores 0 in the same window, so the zeros discriminate rather than matching everything.
+
+    (3) THE RESERVE CHAIN IS TRIAGE-ONLY, WHICH THE BRIEFING FOR THIS FILING HAD WRONG. Only
+    `triageCommandLocked` carries `reserveTaskIdFrom` AND `reserveTaskIdRemote`; `planCommand` and
+    `approveCommand` mint through `mintNextTaskIdWithHistory` and reserve NEITHER locally nor
+    remotely. Any wiring that assumes one shape across the three lanes is wiring against a lane
+    that does not exist.
+
+    (4) THE SECOND GATE IS THE EMPTY CANDIDATE LIST, AND IT IS WHY A CALL SITE ALONE IS NOT ENOUGH.
+    `overlapWarningLinesFor`'s FIRST statement is `if (candidateFiles.length === 0) return []` —
+    before the plan read, before any network call, before any threshold. And `candidateFilesFromArgs`
+    measured directly: `[]` → `[]`, `["--files","a,b"]` → `["a","b"]`, `["--files",""]` → `[]`. So a
+    lane that calls the advisory with nothing to compare gets silence, and reproducing that at three
+    new call sites would ship the same defect three more times.
+
+    (5) THE LANES DO NOT SHARE A SEAM, AND THIS WAS MEASURED RATHER THAN ASSUMED. At MINT time no
+    shard exists yet — the worker writes it afterwards — so the mint itself is the wrong place to
+    read candidate files. `triageCommandLocked` has a measured post-filing point: it calls
+    `worktreeChangedFiles(worktreePath)` and `lintFiledTasks(worktreePath, [reservedTaskId], …)`
+    once the worker has returned, with the reserved id in scope (`reservedTaskId` occurs 7 times in
+    that body). `planCommand` and `approveCommand` carry NEITHER symbol — both score 0 — so their
+    post-filing points exist but have a different shape, and the builder must establish each one
+    rather than copy triage's.
+
+    (6) WHAT IS ALREADY CORRECT AND MUST NOT BE TOUCHED. The rarity policy is sound. It is
+    `DEFAULT_OVERLAP_WARNING_POLICY = { rareDeclarationRatioCeiling: 0.05 }` — a RATIO, and at
+    `plan.tasks.length` of 615 that is 30.8 shards. `src/lib/worker-home.ts`, the module the two
+    duplicate filings both declared, is named by 9 shards — 1.46%, comfortably inside the ceiling —
+    while `src/run-task.ts` at 222 shards (36.10%) is correctly outside it. THE THRESHOLD WAS NEVER
+    THE OBSTACLE, and this task retunes nothing.
+
+    (7) ATTRIBUTION. `rareOverlapWarnings` shipped 2026-08-16 as W1-T533 (#1968) with zero callers
+    outside its own module; the reader shipped the same day as W1-T917 (#1986). This task is the
+    third step, and it exists because W1-T533's own design clause — that a warning must print where
+    a filer already reads or it is not worth building — is still unmet for every lane that files
+    without a human at a terminal.
+  design: |
+    THE SHAPE: three call sites for an advisory that already exists. No new predicate, no new
+    policy, no new signal, and no change to where the comparison gets its open-PR scope.
+
+    (i) THE SCOPE SOURCE IS EXPLICITLY OUT OF BOUNDS. `openPrFileScopes` reads each open pull
+    request's ACTUAL CHANGED FILES, and its own doc says that provenance is deliberate — both races
+    it was built for were trailerless branches with no shard. THIS TASK DOES NOT CHANGE IT. A
+    builder who edits that function has left this task.
+
+    (ii) AND THEREFORE THIS SHARD DOES NOT CLOSE THE DUPLICATE-WORK CASE. Say it plainly, because
+    the filing that prompted this will be read as its cause: a filing pull request's diff contains
+    a feedback entry and a shard, never the implementation files the shard DECLARES, so two
+    filings against the same module stay invisible to each other under the current scope source no
+    matter where the call site sits. Making that pair visible means reading `files:` out of the
+    shard inside an open pull request's diff — the very provenance `openPrFileScopes` rejected —
+    and that is a separate operator ruling, not a line of this task. NOBODY SHOULD READ THIS SHARD
+    AS PREVENTING A REPEAT OF THAT PAIR.
+
+    (iii) THE CALL SITE IS AFTER FILING, NEVER AT THE MINT. Rationale (5) is the reason: at mint
+    time the shard does not exist, so the candidate list would be empty and rationale (4)'s guard
+    would return immediately. Each lane's site is the point where the filed shard is on disk and
+    its declared `files:` can be read.
+
+    (iv) THE LANES ARE WIRED INDIVIDUALLY, NOT THROUGH ONE HELPER FORCED TO FIT ALL THREE. Triage's
+    seam is measured; plan's and approve's are not, and inventing a shared abstraction across a
+    shape nobody has established is how a wrong assumption gets three call sites at once. A small
+    exported helper taking an explicit candidate list is fine; a helper that goes looking for the
+    shard on each lane's behalf is not.
+
+    (v) ADVISORY MEANS ADVISORY, AND CRITERION 4 PINS IT. The existing reader cannot refuse a mint,
+    change an id, or alter an exit code, and degrades to silence on any failure. The lanes SPEND
+    MONEY — the triage lane's own comment puts a worker at a median of $0.96 — so an advisory that
+    can throw inside them is strictly worse than none. Every new site inherits the same
+    fail-to-silence contract.
+
+    (vi) NO NEW SIGNAL. Nothing is ledgered, no console route is added, no field is introduced.
+    This task adds READERS for lines a shipped function already returns. A "lane advisory fired"
+    row with no consumer would be another built-and-unread mechanism, which is the class this
+    repo keeps paying for.
+  acceptance:
+    - claim: "the triage lane prints the advisory once its shard is on disk rather than at the mint"
+      proof: "unit test: W1-T985: the triage lane prints the overlap advisory after the shard is filed"
+    - claim: "the plan lane prints the advisory for the shard it filed"
+      proof: "unit test: W1-T985: the plan lane prints the overlap advisory for its filed shard"
+    - claim: "the approve lane prints the advisory for the shard it filed"
+      proof: "unit test: W1-T985: the approve lane prints the overlap advisory for its filed shard"
+    - claim: "an advisory that fails leaves the minted id and the lane's exit code untouched"
+      proof: "unit test: W1-T985: an advisory failure leaves the minted id and the exit code unchanged"
+    - claim: "a filed shard declaring no files produces no advisory line rather than a bare heading"
+      proof: "unit test: W1-T985: a lane whose filed shard declares no files prints no advisory line"
+    - claim: "this shard does not close the duplicate-work case and must not be read as doing so"
+      proof: "grep: this shard does not close the duplicate-work case and must not be read as doing so in plan/tasks.d/W1-T985-mint-lanes-never-type-the-advisory.yaml"
+  risk: high
+  origin: "oper#mint-lanes-never-type-the-advisory-2026-08-18"
+  plan_refs: ["W1-T917", "W1-T533", "W1-T984"]
+  files: [src/run-task.ts, test/mint-lane-overlap-advisory.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    W1-T984 DOES NOT ALREADY COVER THIS, AND IT WAS CHECKED BEFORE FILING RATHER THAN ASSUMED.
+    `plan/tasks.d/W1-T984-conflict-evidence-has-no-producer.yaml` carries a row naming #2120 and
+    `plan/feedback/fb-1785775974389-e25033.yaml`, but that row is merge-conflict replay evidence for
+    `isPureConcurrentAddition` — `#2120 … 2/2 FALSE — refusal correct` — inside a task about the
+    conflicted disposition row having no producer. It records nothing about the mint lanes, the
+    advisory, or its readers. Different concern, cited here so the overlap is visible rather than
+    rediscovered.
+
+    FOUR FIGURES FROM THE BRIEFING FOR THIS FILING ARE CORRECTED HERE RATHER THAN CARRIED, ALL FOUR
+    TRACEABLE TO A READING TAKEN AGAINST A SESSION CHECKOUT INSTEAD OF origin/main. `plan.tasks.length`
+    is 615, not 574; the ceiling is therefore 30.8 shards, not 28.7; `src/lib/worker-home.ts` is
+    declared by 9 shards at 1.46%, not 8 at 1.39%; and `src/run-task.ts` is 222 at 36.10%. The
+    conclusion each figure supports is unchanged — the path is rare, the hub is not — which is
+    exactly why the numbers had to be re-taken rather than trusted for agreeing.
+
+    AND THE THRESHOLD NAMES IN CIRCULATION DO NOT EXIST. `maxDeclaringShards` and `minOtherShards`
+    both read 0 across src/, test/, plan/ and scripts/, against a control of `rareDeclarationRatioCeiling`
+    reading 3 files. Nothing in this shard cites them, and a builder who finds them in a brief should
+    treat that brief as stale.
+
+    src/run-task.ts MUST BE DECLARED AND THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING. All
+    three lanes and the sole existing reader live in that one file, so no list that omits it covers
+    the change. It is the most-declared path in the plan — 222 of 615 tasks name it — so this shard
+    will serialise against a large share of the queue under `overlappingPaths`. That is the price of
+    the lanes living where they live, and it is recorded rather than dodged by under-declaring.
+    `src/lib/dispatch-overlap.ts` is NOT declared: the predicate and its policy are correct per
+    rationale (6) and must not move.
+
+    test/mint-lane-overlap-advisory.test.ts IS NEW AND IS DECLARED AS NEW.
+    `test/next-task-id-overlap-warning.test.ts` is W1-T917's and asserts the VERB's console output;
+    this task's subject is three lanes, which is a different shape, and this repo's own rule sends a
+    coverage-load-bearing test to its own file rather than into a shared suite.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN. `sizingViolation`
+    (`src/lib/task-linter.ts`) exempts only risk high, and `subsystemsOf` derives subsystems from the
+    acceptance-criteria text as well as from `files:`; the criteria name three separate lanes plus a
+    failure-containment contract.
+
+    PROOF NOTES. Five criteria use the name-filtered `unit test:` form. Every title was measured
+    against test/ with `grep -rlF` and matched ZERO files, against a control title lifted from
+    W1-T917's real suite that matched one. Each is plain prose under 100 characters with no comma,
+    no semicolon-space and no regex metacharacter. The sixth is a single-line `grep:` with an
+    explicit path, verified with the executor's own invocation against THIS changeset's head as well
+    as the merge base — a proof naming a file the changeset does not touch reads hits 0 and
+    `executed_fail`, which fails the review outright.
+
+    ONE ADVISORY IS ACCEPTED KNOWINGLY. `rmd lint-plan` emits a single finding against this shard, a
+    `proof-scope` WARNING that criterion 6's grep names this shard's own path while `files:` does not
+    list it. It is advisory and never blocking — the run carried 179 blocking tasks and NOT ONE names
+    W1-T985. Both remedies are worse: declaring the shard's own path would put the filing inside its
+    own implementation scope, and repointing the grep at src/run-task.ts would name a file this
+    changeset does not touch, which reads hits 0 and `executed_fail` and fails the review outright.
+
+    ID PROVENANCE — FOUR SURFACES, EACH CONTROLLED. W1-T985 read 0 on all of them: refs/rmd-id/*
+    (control refs/rmd-id/W1-T982 = 1, negative W1-T999999 = 0), shard filenames on origin/main
+    (control W1-T984 = 1), ids declared anywhere under plan/ (control W1-T984 = 1), and one open
+    pull request's file list and title (control W1-T977 = 1 in both). The reservation used the PLAIN
+    refspec with no `+` and no lease, an orphan commit over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-51495-1787053484146610000, the exit status captured into a variable, and the ref
+    re-read and matched: PUSH_EXIT_CODE=0, `* [new reference]  109c7ebe… -> refs/rmd-id/W1-T985`.
