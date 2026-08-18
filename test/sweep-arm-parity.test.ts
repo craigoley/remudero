@@ -266,3 +266,96 @@ test("the review.posted ledger projection carries plan_only, so the sweep can te
     partially_executed: false,
   });
 });
+
+// ── 7. W1-T970: A RISK-JUDGE ESCALATION IS A DURABLE REFUSAL ────────────────
+//
+// The judge disarms auto-merge (see run-task.ts's runRiskJudge escalate dep) and this
+// independent reconciler — EXACTLY the PR #800 shape above, a different cause — re-armed
+// the SAME head minutes later, because `alreadyDone` for `mergeable` never consulted
+// anything the risk judge wrote. `risk_judge.escalated` (risk-judge.ts, W1-T970) now
+// carries `pr_number`/`head_sha`, and `priorActionsFromLedger` reads it into a
+// `riskRefused` set consulted right beside `prior.armed` — see PriorActions.riskRefused's
+// own doc for why the key is pr-number-and-sha, never task-and-sha.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** One `risk_judge.escalated` ledger line, exactly as risk-judge.ts (W1-T970) writes it. */
+function riskEscalatedLine(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ts: "2026-07-28T17:48:00.000Z",
+    run_id: "RUN-800",
+    task_id: TASK,
+    step: "risk_judge.escalated",
+    issue_url: "https://github.com/craigoley/remudero/issues/900",
+    pr_number: 800,
+    head_sha: HEAD,
+    ...over,
+  };
+}
+
+test("W1-T970: a risk-judge escalation blocks arming for that head", async () => {
+  const deps = fakeDeps([riskEscalatedLine()]);
+  const summary = await runSweep([greenPr()], deps);
+  assert.deepEqual(deps.armed, [], "deps.arm must never fire — the risk judge already refused exactly this head");
+  assert.equal(summary.byDisposition.mergeable, 1, "the DISPOSITION is untouched — only the ACTION stands down (parity with the CAPPED-refusal shape above)");
+  assert.equal(summary.actions[0].acted, false);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1, "the one-ledger-line-per-PR invariant still holds");
+  assert.equal(disposed[0].acted, false);
+});
+
+test("W1-T970: a new head clears the risk-judge refusal", async () => {
+  const deps = fakeDeps([riskEscalatedLine()]);
+  // The SAME PR, but pushed to a NEW head — the refusal was keyed to the OLD head only.
+  const summary = await runSweep([greenPr({ headSha: OTHER_HEAD })], deps);
+  assert.deepEqual(
+    deps.armed.map((p) => p.prNumber),
+    [800],
+    "a new head genuinely deserves a fresh judgement — it must not inherit a stale head's refusal",
+  );
+  assert.equal(summary.actions[0].acted, true);
+});
+
+test("W1-T970: an operator override clears the risk-judge refusal", async () => {
+  const grant = {
+    task_id: TASK,
+    step: "automerge.capped_override_granted",
+    by: "craig",
+    reason: "read the diff by hand — arming anyway",
+    head_sha: HEAD,
+  };
+  const deps = fakeDeps([riskEscalatedLine(), grant]);
+  const summary = await runSweep([greenPr()], deps);
+  assert.deepEqual(
+    deps.armed.map((p) => p.prNumber),
+    [800],
+    "design (v): the SAME override verb/read-back the CAPPED-verdict refusal already honours clears the risk refusal too — no second override vocabulary",
+  );
+  assert.equal(summary.actions[0].acted, true);
+});
+
+test("an override granted against a DIFFERENT head never clears a risk-judge refusal — the W1-T219 head binding is inherited, not re-implemented", async () => {
+  const staleGrant = {
+    task_id: TASK,
+    step: "automerge.capped_override_granted",
+    by: "craig",
+    reason: "granted against an older push",
+    head_sha: OTHER_HEAD,
+  };
+  const deps = fakeDeps([riskEscalatedLine(), staleGrant]);
+  const summary = await runSweep([greenPr()], deps);
+  assert.deepEqual(deps.armed, []);
+  assert.equal(summary.actions[0].acted, false);
+});
+
+test("W1-T970: a refusal for one head does not block a different pr", async () => {
+  const otherPr = greenPr({ prNumber: 801, prUrl: "https://github.com/craigoley/remudero/pull/801", taskId: "W1-T801" });
+  const deps = fakeDeps([riskEscalatedLine()]); // refuses PR 800 only
+  const summary = await runSweep([otherPr], deps);
+  assert.deepEqual(
+    deps.armed.map((p) => p.prNumber),
+    [801],
+    "a refusal ledgered for PR 800 must never leak onto an unrelated PR 801, even at the same head sha",
+  );
+  assert.equal(summary.actions[0].acted, true);
+});

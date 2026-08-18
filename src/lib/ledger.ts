@@ -334,6 +334,15 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              W1-T124 post-fix re-verification reconciler —
  *                                              losing this line re-earns and re-fires the same
  *                                              redrive (and its strike-credit) on every rotation.
+ *   - "risk_judge.escalated"                → sweep.ts's priorActionsFromLedger builds a
+ *                                              sha-keyed `riskRefused` set off this exact step
+ *                                              (W1-T970), consulted where `alreadyDone` is
+ *                                              computed for `disposition: "mergeable"`. Losing
+ *                                              this line across a rotation is the SAME defect
+ *                                              this task closes under a new name: the sweep
+ *                                              reads the refusal as gone and re-arms a head a
+ *                                              risk judge explicitly refused — "the line IS the
+ *                                              bound; it must survive rotation" applies verbatim.
  *
  * Deliberately EXCLUDES pure telemetry/polling noise (`ci.polling`, `pr.polling`,
  * `ops.alerts_polled`, `issues.polled`, `inbox.polled`, ...) — exactly the high-frequency,
@@ -451,6 +460,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // rotation would otherwise drop exactly the lines that explain a long idle.
   "daemon.idle_reasons",
   "sweep.post_fix_redriven",
+  // W1-T970: `priorActionsFromLedger`'s `riskRefused` set (sweep.ts) reads these back,
+  // sha-keyed, to withhold auto-merge arming from a head the risk judge already refused —
+  // see the doc block above for the rotation-survival reasoning.
+  "risk_judge.escalated",
   // W1-T186's ABSENT remedy: `priorActionsFromLedger` counts these lines to enforce
   // ABSENT_REPUSH_CAP. Archived away, the count reads zero and every rotation re-earns the
   // PR another empty commit — an unbounded re-push loop, which is precisely the failure the

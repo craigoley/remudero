@@ -6812,10 +6812,17 @@ async function runTask(
     // to ESCALATE inside assessRisk itself — this call site never has to remember that
     // rule. Runs on the cheapest configured (haiku-class) mount, resolved fresh from
     // mounts.yaml (W1-T5) rather than any mount already resolved for the task's own work.
+    // W1-T970: the identifiers a refusal needs to be sha-keyed — captured HERE, at input
+    // construction, never re-read later. `prUrl` is already in scope (used above in
+    // `change.description`) and `review.headSha` is the SAME head `cappedOverrideFromLedger`
+    // read a few statements earlier — the head this candidate change was actually assessed at,
+    // not whatever `gh pr view` would report if re-read after the judge returns.
     const riskJudgeInput: RiskJudgeInput = {
       change: { description: `${task.title} — ${prUrl}`, files: task.files },
       gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
       planContext: { taskId: task.id, title: task.title, taskType: task.type },
+      prNumber: prNumberFromRef(prUrl),
+      headSha: review.headSha,
     };
     const riskJudgeMount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {

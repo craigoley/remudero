@@ -106,11 +106,27 @@ export interface RiskJudgePlanContext {
   [key: string]: unknown;
 }
 
-/** The reusable input shape (acceptance criterion 6): `{change, gatesState, planContext}`. */
+/** The reusable input shape (acceptance criterion 6): `{change, gatesState, planContext}`.
+ *
+ * `prNumber`/`headSha` (W1-T970) are OPTIONAL and dispatch-only — never rendered into the
+ * judge's prompt ({@link buildRiskJudgePrompt} reads only `change`/`gatesState`/`planContext`,
+ * unchanged) and never required by a reuse site (P28's caller simply omits them, exactly as
+ * acceptance-6's "callable with only {change, gatesState, planContext}" test already pins).
+ * They exist so {@link runRiskJudge} can write a SHA-KEYED `risk_judge.escalated` row: the
+ * sweep's arming predicate (src/lib/sweep.ts's `priorActionsFromLedger`) has no other way to
+ * learn which PR/head a refusal binds to, and a refusal it cannot bind to a head is a refusal
+ * the next sweep pass silently erases. THE CALLER MUST SUPPLY THE HEAD IT ACTUALLY ASSESSED —
+ * never a re-read at write time — because a refusal keyed to a head the judge never saw is
+ * worse than none. */
 export interface RiskJudgeInput {
   change: RiskJudgeChange;
   gatesState: RiskJudgeGatesState;
   planContext: RiskJudgePlanContext;
+  /** The PR number this candidate change belongs to, when the caller has one. */
+  prNumber?: number;
+  /** The head sha this candidate change was assessed at, when the caller has one — MUST be the
+   *  exact head {@link assessRisk} judged, not a value re-read later. */
+  headSha?: string;
 }
 
 // ── The fresh judge prompt (never shown the static risk: field) ──────────
@@ -422,7 +438,16 @@ export async function runRiskJudge(
 
   if (action.kind === "escalate") {
     const url = await deps.escalate(verdict, action);
-    log("risk_judge.escalated", { issue_url: url });
+    // W1-T970: pr_number/head_sha ride onto the SAME row the sweep's `priorActionsFromLedger`
+    // reads back into its `riskRefused` set — see RiskJudgeInput's own doc for why these are
+    // read straight off `input` rather than re-derived here. Omitted (not just `undefined`)
+    // when the caller supplies neither, so a caller with no identifiers (e.g. a future P28
+    // caller) ledgers byte-identical to before this task.
+    log("risk_judge.escalated", {
+      issue_url: url,
+      ...(input.prNumber === undefined ? {} : { pr_number: input.prNumber }),
+      ...(input.headSha === undefined ? {} : { head_sha: input.headSha }),
+    });
     return { verdict, action, escalationUrl: url };
   }
   return { verdict, action };
