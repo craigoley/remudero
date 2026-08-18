@@ -1,0 +1,145 @@
+- id: W1-T986
+  title: "the byte-identical local entry point SHIPPED and the doc every session loads never names it — CLAUDE.md `Before you push` still prescribes a scoped lcov plus a hand-filtered two-dot diff, the exact recipe that reported diff-coverage OK over ZERO lines"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: low
+  rationale: |
+    FILED FROM fb-1785780032614-be23bf, whose OWN falsifying check names this branch: "if every
+    documented local invocation already matches CIs, this is a documentation gap rather than a
+    tooling one." The recon was run at intake and the tooling half is ALREADY DECIDED AND BUILT.
+    The gap that survives is the documented invocation, and it is measured.
+
+    THE TOOLING HALF, ESTABLISHED FROM SOURCE, SO NOTHING HERE RE-DECIDES IT.
+    - The single entry point that shells out to CIs own commands EXISTS: `rmd preflight --ci-parity`
+      (W1-T294). `src/lib/ci-parity.ts` carries `CI_PARITY_TABLE`, one entry per .github/workflows/ci.yml
+      job, each running CIs own npm script, plus a `ci-parity:drift` step that goes RED the moment
+      `parseCiJobNames` finds a job the table lacks. It is live enough to have been repaired in place
+      (W1-T338/#1327 fixed `defaultPreflightSpawn`s missing maxBuffer, which false-FAILed it fleet-wide).
+    - The check-proof divergence the feedback measured (`grep -qF` locally vs the executors
+      `grep -arn --` basic regex) was CLOSED by W1-T387: `checkProofCommand` was collapsed onto
+      `execWhitelistedProof`, `test/check-proof-executor-parity.test.ts` asserts the printed
+      `argv: grep -arn --` line and a hit count, and plan/claims.yaml carries
+      `check-proof-collapsed-onto-review-executor` so the correction cannot drift back.
+    - `bodyContradictsDiff` has no local runner and that is a RULING, not an oversight: W1-T373 clause
+      (vii) excludes it from preflight with a stated reason (it needs a PR body, which does not exist
+      at pre-push time) and rules its home is PR-OPEN time.
+
+    THE DOCUMENTED INVOCATION, MEASURED IN THIS CHECKOUT, AND IT IS NOT CIs.
+    `grep -c` over CLAUDE.md returns ZERO occurrences of `preflight` and ZERO of `ci-parity`; the
+    only local-gate verb it ever names is `check-proof` (6 occurrences). Its `Before you push`
+    section instead prescribes, in full:
+      `node --test --experimental-test-coverage --enable-source-maps ... <touched test files>`
+      then `node scripts/diff-coverage.mjs --lcov /tmp/x.lcov --diff <(git diff --cached origin/main -- <touched src files>)`
+    That diverges from ci.yml in BOTH of the ways W1-T294s own rationale already recorded: the
+    coverage run is SCOPED to touched test files while the coverage-ratchet job runs the whole
+    `test/**/*.test.ts` glob with `--test-coverage-exclude=test/**`, and the diff is a TWO-DOT diff
+    against whatever `origin/main` this checkout last fetched while the job diffs `"$BASE_SHA"...HEAD`
+    from a `fetch-depth: 0` checkout. The very next bullet then institutionalises the approximation
+    ("A local lcov is not predictive in EITHER direction — calibrate it").
+
+    THE SECOND SUB-FINDING IS THIS RECIPES OWN PATHSPEC. `-- <touched src files>` is where the
+    feedbacks `src/**/*.ts` footgun came from: a pathspec that matches nothing yields an EMPTY diff,
+    and `scripts/diff-coverage.mjs` prints `diff-coverage: OK -- every added source line lcov
+    instruments is covered.` over zero added lines with no count in the line. CLAUDE.md already
+    carries the manual antidote ("prove the lcov INSTRUMENTS the changed files -- `grep -c
+    ^SF:<path>$ <lcov>` must be non-zero", #1399) — a prose workaround for a defect the shipped verb
+    does not have, which is precisely LEARNINGS PR-407 doctrine that a gap named only in prose leaks.
+
+    WHY A DOC EDIT IS THE RIGHT SIZE OF FIX. CLAUDE.md is loaded into EVERY session in this repo,
+    worker and hand alike, so its recipe is not passive documentation: it is the instruction that
+    produced the measured error. The feedbacks own summary — "be careful catches none of these, run
+    the consumers exact invocation catches all of them" — is satisfiable here by deleting a recipe
+    and naming a verb that already exists.
+  design: |
+    ONE CONCERN: make the DOCUMENTED local invocation be the shipped one, and register that as a
+    claim so it cannot silently drift back. No gate changes, no new command, no src/ change.
+
+    (i) THE SECTION NAMES THE VERB. `Before you push` points at `rmd preflight --ci-parity` as the
+    local invocation for the CI check set, because that mode shells CIs own commands rather than
+    approximating them. Name the cost honestly in the same breath — its `ci` entry shells
+    `npm run test:ci`, the full glob (W1-T373s measured premise) — so the rule reads as "before the
+    FIRST push", never "before every commit", which is the shape a reader would ignore.
+
+    (ii) THE HAND RECIPE GOES, OR IS LABELLED. Delete the scoped-lcov + `git diff --cached` recipe.
+    If any local approximation is kept at all, it must be labelled a NON-PARITY probe and carry its
+    two named divergences (scoped coverage scope; unrefreshed two-dot base) on the same bullet, so it
+    can never read as the gate. An unlabelled approximation beside a real verb is worse than either.
+
+    (iii) STATE THE RULE GENERALLY, WITH A STABLE ANCHOR. One line, so the NEXT gate inherits it
+    rather than needing its own bullet: run the gate itself, never a proxy for what it does. The
+    sentence must contain the literal `never a proxy` — an acceptance criterion greps that anchor, so
+    a rewrite that drops the general rule and keeps only the command swap is visible.
+
+    (iv) REGISTER IT AS A CLAIM, WHICH IS THE HALF THAT MAKES IT STICK. Add ONE plan/claims.yaml
+    entry, id `local-gate-invocation-parity`, `plan_section: "CLAUDE.md#before-you-push"`, modelled
+    exactly on W1-T387s `check-proof-collapsed-onto-review-executor` entry beside it. Its assertion
+    must fail in BOTH directions and be cheap, offline and deterministic: RED if CLAUDE.md stops
+    naming the parity invocation, and RED if the hand-rolled `scripts/diff-coverage.mjs --lcov`
+    recipe reappears as the prescribed local check. A one-directional assertion is satisfied by a
+    doc that names the verb AND keeps the recipe, which is todays defect with an extra line.
+
+    (v) THE BYTE BUDGET IS A HARD CONSTRAINT, NOT A COURTESY. W1-T933 measured CLAUDE.md at 60965
+    bytes — 99.87% of its budget, 81 bytes of headroom. This edit must be NET-NEGATIVE: the deleted
+    recipe pays for the verb line and the anchor sentence. Record the measured before/after byte
+    count in the PR body rather than asserting the file "got shorter".
+
+    (vi) NOT IN SCOPE, EACH FOR A STATED REASON, BECAUSE EVERY ONE OF THESE IS ALREADY RULED:
+      - Building or changing any gate or parity step. The entry point shipped (W1-T294,
+        src/lib/ci-parity.ts) and this task must not touch it.
+      - `rmd preflight --fast` and the `cli-reference:check` parity hole — W1-T373, queued, owns both.
+        A later doc line naming `--fast` is that tasks to write; depending on it here would gate a
+        documentation repair behind an unrelated queue.
+      - The worker prompt contract requiring a green parity run before the first push — W1-T295.
+      - Making `scripts/diff-coverage.mjs` print its own denominator. This is P48(ii) (no naked zero),
+        whose FIRST TRANCHE is scoped by a stated criterion — a recorded census instance AND no second
+        channel at head — and which explicitly "forbids further bespoke silent-zero filings outside the
+        criterion". diff-coverages measured instance (#1399) was caught by coverage-ratchet, a second
+        channel at head, so it does not qualify and is NOT re-filed here.
+      - A local runner for `bodyContradictsDiff`. W1-T373 clause (vii) already ruled the home is
+        PR-open time, not preflight; W1-T952 is the live task on that surface.
+  acceptance:
+    - claim: "the pre-push section names the shipped parity invocation, so the documented local run is CIs own command set rather than a hand recipe"
+      proof: "grep: preflight --ci-parity in CLAUDE.md"
+    - claim: "the rule is stated generally rather than as a one-off command swap, with a stable anchor the next gate inherits"
+      proof: "grep: never a proxy in CLAUDE.md"
+    - claim: "the correction is registered as a plan claim whose assertion goes red in both directions — if the doc stops naming the parity invocation, and if the hand-rolled diff-coverage recipe returns as the prescribed local check"
+      proof: "grep: local-gate-invocation-parity in plan/claims.yaml"
+  origin: feedback#fb-1785780032614-be23bf
+  plan_refs: ["§5C", "§12A", "W1-T294", "W1-T373", "W1-T387"]
+  files: [CLAUDE.md, plan/claims.yaml]
+  status: queued
+  attempts: 0
+  note: |
+    FILED FROM fb-1785780032614-be23bf. The feedback asked for a recon over every locally-run gate and
+    then for a single entry point. The recon was run at intake and reported in the rationale: the entry
+    point is BUILT (W1-T294 / src/lib/ci-parity.ts), the check-proof divergence is CLOSED (W1-T387), and
+    the bodyContradictsDiff one is RULED to PR-open (W1-T373 vii). The only unfiled residue is the one
+    this shard carries, and it is the branch the feedbacks own falsifier names.
+    verify:auto — all three criteria are greps over two tracked files, decidable in-process with no
+    network and no operator; the fourth enforcement leg is the existing `claims` CI job, which runs the
+    new assertion on this PR itself.
+    risk:low and RULE 19 SIZING CHECKED, NOT ASSUMED: `subsystemsOf` discounts `plan/claims.yaml` as a
+    plan-data artifact (DATA_ARTIFACT_CLASSES, `^plan/` + `.yaml`), so the declared set resolves to ONE
+    subsystem (`claude`) and `sizingViolation` cannot fire below risk:high. Blast radius is honestly
+    low-but-not-zero: the one new claims assertion runs on every PR, so a wrong assertion blocks the
+    fleet — which is why (iv) requires it cheap, offline and deterministic, the schema plan/claims.yaml
+    states for itself.
+    FILES ARE THE CHANGESET AND NOTHING ELSE. CLAUDE.md is the doc that carries the divergent recipe;
+    plan/claims.yaml is where W1-T387 already put the last CLAUDE.md correction of exactly this shape.
+    No src/, no test/, no scripts/ path is declared, because clause (vi) forbids touching a gate.
+    ON THE PROOFS — all three are `grep:` with an explicit path, and every path is INSIDE `files:`, so
+    `proofScopeViolations` is silent and `scopeGuardOutOfScopeFiles` cannot refuse the branch after the
+    work is done (W1-T309s postmortem). NO metacharacter appears in any pattern (`[ * ^ $` are refused;
+    none is used) and no apostrophe, so the executors `grep -arn -- <pattern> <path>` argv is exact.
+    EACH DISCRIMINATES HEAD FROM BASE, verified in this checkout rather than assumed: `preflight` and
+    `ci-parity` each return ZERO occurrences in CLAUDE.md today, `proxy` returns ZERO, and
+    `local-gate-invocation-parity` appears nowhere in plan/claims.yaml — so none can be downgraded to
+    executed_stale, the trap `grep:` proofs carry and `unit test:` proofs do not.
+    NO `unit test:` PROOF IS USED and that is deliberate: adding `test/claims-check.test.ts` to prove
+    the claims runner still fails loudly would put a SECOND code subsystem in `files:` and force
+    risk:high on a two-file documentation repair. That falsifier already exists and is already run by
+    the `claims` job; re-declaring it here would buy nothing and cost the sizing raise.
