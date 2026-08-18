@@ -1,0 +1,203 @@
+- id: W1-T1009
+  title: "EVERY CI JOB IS UNBOUNDED, SO A HUNG STEP IS STRUCTURALLY GUARANTEED TO BE MISATTRIBUTED — `timeout-minutes` reads 0 across all 15 workflow files, so every job inherits GitHub's 360-minute default, 9x ci-gate's own WAIT_CAP_SECONDS: 2400; two jobs hung on the same `npx playwright install` five minutes apart on 2026-08-18 and both required a human with Actions-API write access to end"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    MEASURED 2026-08-18 AT origin/main 10f719bd. No `/rate_limit` call was made.
+
+    (1) THE ZERO, WITH ITS CONTROL. `timeout-minutes` appears in NONE of the 15 files under
+    `.github/workflows/`. Positive control on the same file set with the same tool: `runs-on` is
+    present in 13 of the 15 (the two `osv-scanner*.yml` call reusable workflows and declare no
+    runner of their own), so the query could see its corpus. Every job therefore inherits GitHub's
+    default job timeout of 360 minutes.
+
+    (2) WHY THAT NUMBER IS THE DEFECT AND NOT MERELY GENEROUS. `.github/workflows/ci-gate.yml` sets
+    `WAIT_CAP_SECONDS: "2400"` and fails the PR when its required siblings have not reached a
+    terminal state inside that window. 360 minutes is 9x that cap. The ordering is not bad luck, it
+    is arithmetic: ANY stall long enough to matter outlives ci-gate, so the failure is ALWAYS
+    attributed to `ci-gate` and NEVER to the job that actually hung. The gate then reports a timeout
+    with no log, because the culprit job is still running and its log cannot be read — `gh run view
+    --job 95836707477 --log` returns "job 95836707477 is still in progress; logs will be available
+    when it is complete", measured verbatim during this incident.
+
+    (3) TWO INSTANCES, FIVE MINUTES APART, BOTH ON THE SAME STEP.
+      - run 32175161548, job `ci` (PR #2148): step `Install Playwright's Chromium` ran
+        19:11:17Z -> 20:18:45Z. Job 19:10:56Z -> 20:18:47Z = 4071s (67m51s).
+      - run 32175608790, job `coverage-ratchet` (PR #2150): the same step ran 19:16:00Z -> 20:00:07Z.
+        Job 19:15:40Z -> 20:00:09Z = 2669s (44m29s).
+      BOTH FIGURES ARE LOWER BOUNDS, NOT DURATIONS — neither job ended on its own; each was cancelled
+      by hand, so the true runtime is unknown and the 360-minute default is what would have bounded
+      them.
+
+    (4) IT WAS A STALL, NOT SLOWNESS, AND THE COMPARISON IS ON AN IDENTICAL TREE. Re-running the
+    cancelled `coverage-ratchet` job on the SAME sha f543b9a1 with no other change, the same
+    `npx playwright install --with-deps chromium` step ran 20:00:48Z -> 20:01:13Z = 25 seconds. The
+    `ci` job in the very same run 32175608790 had already cleared the identical step and finished
+    green at 19:25:27Z while its sibling hung. A ~106x spread on an unchanged tree is a hung
+    download, not a slow one.
+
+    (5) NEITHER ENDED WITHOUT A HUMAN WHO HAD ACTIONS-API WRITE ACCESS. Both were cleared by
+    `POST /actions/runs/{id}/cancel`, and #2150 additionally by `gh run rerun --failed` plus a re-run
+    of ci-gate — which then went green on the UNCHANGED sha. `grep -arn
+    "actions/runs\|actions/jobs\|actions/workflows" src/` returns exactly ONE hit repo-wide and it is
+    a doc comment describing a job URL as "the ci-log mode's log source" (src/run-task.ts). rmd's
+    only relationship to the Actions API is reading a completed job's log via `gh run view --job
+    <id> --log-failed`. There is no cancel and no re-run anywhere in `src/`, so this class of stall
+    cannot be ended by the harness at all — which is why the bound has to live in the workflow.
+
+    (6) NAMED, DELIBERATELY NOT SCOPED IN — TWO SEPARATE DEFECTS THIS INCIDENT ALSO EXPOSED.
+      (a) ci-gate's own error text asserts "a NEW sha is the only remedy, re-running this same sha
+          will not help". That holds when a required check never registers or never completes. It
+          did NOT hold here: the sibling was made to complete and the SAME-SHA ci-gate re-run went
+          `success` at 20:12:55Z, measured. The message states as universal something true only of
+          the never-completes case, and it points the reader — and any lane reading that log — at
+          the expensive remedy.
+      (b) The sweep would have classified this `blocked-fixable`. `ci-gate`'s FAILURE is in
+          `REQUIRED_CHECK_FAIL` (src/lib/sweep.ts), so `isBlockedCi` goes true and `deriveDisposition`
+          returns "required checks red — ci-log fix, strike 1/2" — dispatching a code worker at an
+          infrastructure stall, on a PR whose entire diff was one YAML line, twice (`strikeCap: 2`,
+          plan/policy.yaml) before escalating. There is no infra-vs-code classifier for a check-run,
+          though the repo has exactly that distinction for worker failures (`classifyFailure(...) ===
+          "transient"`, src/run-task.ts) and for the post-review lane
+          (`POST_REVIEW_STALL_THRESHOLD = 8`, src/lib/sweep.ts).
+      NEITHER IS TAKEN HERE. (a) edits ci-gate.yml, which this task also touches, but it is a
+      correctness claim about a message rather than a bound and deserves its own falsifier. (b) is
+      `src/` and CANNOT ride with this diff at all — see the note.
+
+    (7) THIS IS NOT THE PLAYWRIGHT PIN PROBLEM. A known separate failure mode is a Playwright
+    version bump leaving a host without the pinned Chromium, which fails ~100% of browser tests with
+    one repeated message. That is a wrong-build defect and its remedy is the environment. This is an
+    install that never returns, on a runner that had no problem 8 minutes later. Do not fix it by
+    touching the pin.
+  design: |
+    (i) TWO BANDS, BOTH DERIVED FROM OBSERVED DURATIONS — NOT PICKED. Sample: every job of the 40
+    most recent completed `ci` workflow runs, 07:15Z-20:43Z on 2026-08-18, 520 job-runs. Success-only
+    seconds (n=38 per heavy job after excluding 4 non-success and the hangs):
+      ci                min 384  median 504  p95 865   max 1108
+      coverage-ratchet  min 496  median 721  p95 1028  max 1320
+      the other 11 jobs n=440, max 46
+    A job that legitimately FAILS runs LONGER than one that passes and its log is the whole point of
+    letting it finish: the longest non-hung job-run in the sample is a FAILING `ci` at 1637s (27m17s,
+    run 32170770096), with a failing `coverage-ratchet` at 1288s beside it. So the real ceiling to
+    clear is 1637s, not the healthy max.
+    THE GAP IS EMPTY BETWEEN 1637s AND THE FIRST HANG AT 2647s. Nothing was observed in between.
+    HEAVY BAND (`ci`, `coverage-ratchet`) = 35 minutes (2100s): inside that empty gap, 28% above the
+    observed non-hung maximum, 2.0x coverage-ratchet's healthy p95 and 1.6x its healthy max. This is
+    the same derivation shape `POST_REVIEW_STALL_THRESHOLD` already uses in src/lib/sweep.ts — put
+    the bound in a gap the data leaves empty, and say what would move it.
+    LIGHT BAND (the other 11 jobs) = 10 minutes (600s): 13x their observed maximum of 46s over 440
+    samples. THIS HALF IS PROPHYLACTIC AND HAS NO OBSERVED INSTANCE — it is included because those
+    jobs run the same networked `actions/setup-node` and `npm ci` steps in the same file and the
+    mechanism is one line each, not because anything measured them hanging. It is severable: dropping
+    it changes nothing about criteria 1 and 3.
+
+    (ii) THE CAP IS JOINTLY CONSTRAINED AND THAT COUPLING MUST BE WRITTEN DOWN IN THE FILE. It has to
+    exceed the real tail (1637s) AND stay strictly BELOW ci-gate's `WAIT_CAP_SECONDS` (2400s). Below
+    the tail it kills honest work; at or above 2400 it changes NOTHING, because ci-gate still times
+    out first and the attribution defect returns intact. A future edit that raises one number without
+    the other silently re-creates this incident, so the constraint belongs in a comment beside the
+    value — a bare number invites exactly that edit. This is why criterion 3 exists.
+
+    (iii) WHAT IT COSTS A LEGITIMATELY SLOW RUN, STATED PLAINLY. A run that genuinely exceeds 2100s
+    is killed and must be re-run; its work is lost. In this sample that would have happened ZERO
+    times in 78 heavy job-runs, with 463s (7m43s) of headroom over the worst legitimate observation.
+    But the sample is ONE DAY (13.5h) on one runner tier, so the tail is not fully characterised: a
+    larger suite, a slower tier, or a heavier install could grow it. The failure mode when the cap is
+    wrong is a LOUD, correctly-attributed job failure naming its own step plus a re-run — not a wrong
+    verdict and not a silent pass, which is strictly better than today's 360-minute silence. Re-derive
+    the value if the suite grows; do not raise it past 2400 (see (ii)).
+
+    (iv) THE FALSIFIER MUST FAIL FOR BOTH REASONS SEPARATELY. A test asserting only "the field is
+    present" passes on a value of 400 minutes, which fixes nothing. Criterion 1 requires the field on
+    every job; criterion 3 requires the heavy value to be strictly less than the `WAIT_CAP_SECONDS`
+    that ci-gate.yml actually declares, READ FROM THAT FILE rather than hardcoded — a test carrying
+    its own copy of 2400 goes stale the moment W1-T312's cap is retuned and would then assert
+    agreement with a number nobody uses.
+
+    (v) EXPLICITLY OUT OF SCOPE.
+      - ci-gate's "a NEW sha is the only remedy" wording — rationale (6)(a). It is wrong, it is in a
+        file this task edits, and it still gets its own task; a message correctness claim needs its
+        own falsifier and should not be smuggled in under a sizing change.
+      - ANY infra-vs-code classifier for the sweep — rationale (6)(b). That is `src/` and cannot
+        share this diff under Rule 25 at all.
+      - RETUNING `WAIT_CAP_SECONDS` ITSELF. W1-T312 derived 2400 from this repo's own p95 wall-clock
+        and it is not this task's to move; this task fits underneath it.
+      - THE PLAYWRIGHT PIN, the browser cache, and any change to what the install downloads —
+        rationale (7).
+      - THE OTHER 14 WORKFLOW FILES. Only `ci.yml` carries a measured hang and only `ci-gate.yml`'s
+        cap is read here. Bounding codeql/semgrep/scorecard/etc. is the same one-line mechanism and
+        would be welcome, but it has no measurement behind it and would widen an instrument-surface
+        diff for no evidence.
+  acceptance:
+    - claim: "every job defined in ci.yml declares a timeout-minutes, so none can inherit the 360-minute default"
+      proof: "unit test: W1-T1009: every ci.yml job declares a timeout-minutes"
+    - claim: "the two jobs that carry the Playwright install are bounded at the derived heavy-band value"
+      proof: "unit test: W1-T1009: the Playwright-carrying jobs are bounded at the derived value"
+    - claim: "the heavy-band bound is strictly below the WAIT_CAP_SECONDS that ci-gate.yml itself declares, read from that file rather than hardcoded"
+      proof: "unit test: W1-T1009: the bound is strictly below ci-gate's own declared wait cap"
+    - claim: "the value carries the coupling to ci-gate's cap in the file, so a later raise cannot silently restore the defect"
+      proof: "grep: WAIT_CAP_SECONDS in .github/workflows/ci.yml"
+  risk: high
+  origin: "oper#unbounded-workflow-step-2026-08-18"
+  plan_refs: ["W1-T312", "W1-T261", "W1-T153"]
+  files: [.github/workflows/ci.yml, test/workflow-job-timeouts.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIS MUST RIDE ALONE — NO `src/` PATH MAY ENTER THIS DIFF, AND THAT IS A GATE, NOT A PREFERENCE.
+    `.github/workflows/` is the first entry of `INSTRUMENT_SURFACE` (src/lib/review.ts), and
+    `detectInstrumentEntanglement` returns `entangled` when `instrumentPaths.length > 0 &&
+    srcPaths.length > 0` — Rule 25. So a single `src/` file alongside `ci.yml` fails the PR. This is
+    also why rationale (6)(b)'s sweep classifier cannot be folded in however related it looks.
+    `test/` IS SAFE: `isProductPath` is "under src/ and not a test file", and the design's own
+    carve-out exists precisely so an instrument-only PR can carry the fixture that proves it. So
+    `test/workflow-job-timeouts.test.ts` may ride and MUST — criterion 1 has no other home.
+
+    DOCS-AWARENESS WILL FIRE AND THE BUILDER SHOULD EXPECT IT. `USER_VISIBLE_SURFACE_RE` includes
+    every `INSTRUMENT_SURFACE` pattern, so touching `.github/workflows/` makes `checkDocsAwareness`
+    demand either a `docs/` change or a STATED reason in the report — `STATED_REASON_RE` requires the
+    "no docs update" phrase to be FOLLOWED by an actual reason. `docs/` is neither `src/` nor an
+    instrument path, so updating it is Rule-25-safe if the builder prefers that arm.
+
+    A NEW TEST FILE IS DELIBERATE, NOT LAZINESS. House rule: a coverage-load-bearing test goes in its
+    own `test/*.test.ts` rather than being appended to a shared file that can crash at file level
+    under `--experimental-test-coverage` and zero the record for everything in it.
+    `test/workflow-job-timeouts.test.ts` does not exist at 10f719bd; the path is a forward reference,
+    which is safe, and no symbol name is guessed.
+
+    DIFF-COVERAGE IS NOT AT RISK HERE: the diff adds no `src/` lines at all, so there is nothing for
+    `diff-coverage` to instrument. That is a consequence of Rule 25, not an exemption claimed.
+
+    risk: high IS SET FOR RULE 19'S SPAN, NOT FOR BLAST RADIUS — AND IT WAS MEASURED, NOT ASSUMED.
+    Filed first at risk:medium, `lint-plan` refused in as many words: "[sizing] spans 2 distinct
+    subsystems/concerns (ci, workflow-job-timeouts) at risk:medium — Rule 19: raise to risk:high or
+    decompose into one task per concern". `subsystemsOf` (src/lib/task-linter.ts) derives those two
+    tags from the two declared paths, so the span is an artifact of a bound and the falsifier proving
+    the bound living in different trees. THEY ARE NOT TWO CONCERNS AND DECOMPOSING THEM WOULD BE
+    THEATRE — criterion 1 has no home except a test file, and a test file with no workflow to read
+    asserts nothing. Blast radius argues DOWN, hard: the diff adds no `src/` line, changes no
+    behaviour any product code can observe, and its worst failure mode is a job that stops early and
+    says why.
+
+    ID PROVENANCE — THREE GIT SURFACES FIRST, THEN THE OPEN-PR SURFACE, ZERO `/rate_limit` CALLS.
+    W1-T1009 read 0 on all four at 10f719bd: `refs/rmd-id/*`, shard FILENAMES under
+    `plan/tasks.d/` on origin/main, DECLARED ids under `plan/` on origin/main, and every open PR's
+    title and file list. THE OPEN-PR SURFACE WAS GENUINELY EMPTY RATHER THAN UNREAD — the repo had
+    ZERO open PRs at mint time (#2150 and #2148 both merged), which is stated because an empty
+    surface and an unqueried one are indistinguishable in a report that only prints 0.
+    THE EXISTENCE TEST IS THE FILENAME AND THE ANCHORED DECLARATION, NEVER A `plan/` MENTION.
+    Positive control: W1-T1008 reads ref=1 and 7 declared lines. Mention-trap control: `W1-T999999`
+    reads 0 refs, 0 filenames, 0 declarations.
+    THE MINT USED THE PLAIN REFSPEC: orphan payload over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce t1009-1787087392-35036, no `+` and no lease:
+    PUSH RC=0, `* [new reference] ee419f2c31fd83a01536eafbb95dc0e79329e67c ->
+    refs/rmd-id/W1-T1009`, readback equal.
+    AND THE GATE PROOF WAS VERIFIED TO BE A REFUSAL RATHER THAN AN AUTH FAILURE. A plain push of a
+    fresh orphan at the already-taken `refs/rmd-id/W1-T1008` returned rc=1 with `! [rejected] …
+    (fetch first)`, ZERO occurrences of `could not read Username`, and left that ref unchanged at
+    4269ddacda013d8933151e20a1e3b10978df51f9. An exit code of 128 with an auth message would have
+    proven nothing about the gate.
