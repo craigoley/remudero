@@ -1,0 +1,172 @@
+- id: W1-T997
+  title: "THE CONSOLE'S USAGE PANEL READS A FILE ITS OWN CONTAINER CANNOT SEE — every field renders unknown (unreadable) because readAccountUsageFile falls back to ~/.claude.json and that path is absent in remudero-serve, while the same file in remudero-daemon carries a fresh five_hour and seven_day block: supply the injectable path the route already accepts"
+  repo: remudero
+  risk: high
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    MEASURED AT origin/main c8568c2, 2026-08-18. Every figure taken this session; none carried
+    from an earlier one.
+
+    (1) THE PANEL'S SOURCE IS A FILE, NOT THE LEDGER. `readAccountUsageFile`
+    (src/lib/account-usage.ts) reads `~/.claude.json` and projects
+    `cachedUsageUtilization` down to the panel's input; that module's own doc says usage "comes from
+    `~/.claude.json`'s `cachedUsageUtilization`". Its first unknown reason is `unreadable` —
+    "the file was missing or unparseable. Nothing is known." That is the state the operator sees:
+    rate limit, current account, 5h window, 7d window and usage-as-of all unknown, marked
+    unreadable.
+
+    (2) THE FILE IS ABSENT IN THE CONTAINER THAT SERVES THE CONSOLE, AND PRESENT IN THE OTHER ONE.
+    Measured in both, `HOME=/home/node` in each:
+      remudero-serve  : ~/.claude.json ABSENT   ~/.claude/ PRESENT
+      remudero-daemon : ~/.claude.json PRESENT  ~/.claude/ PRESENT
+    The reason is a mount boundary, not a missing feature. `remudero-serve`'s mounts are
+    `/home/craigoleyagent/.claude -> /home/node/.claude` and
+    `/home/craigoleyagent/rmd-state2 -> /home/node/Remudero`. `~/.claude` is a mounted DIRECTORY;
+    `~/.claude.json` is a FILE sitting beside it, outside every mount, so it is container-local.
+    The daemon has one because Claude Code processes run there and write it. The host has one too
+    (43,879 bytes). The console's container has never had one.
+
+    (3) THE DATA IS REAL, CURRENT AND COMPLETE WHERE IT DOES EXIST. The daemon's copy carries
+    `cachedUsageUtilization` with `fetchedAtMs`, `accountUuid` and a `utilization` block holding
+    `five_hour` (utilization 5, resets 2026-08-18T20:00:00Z) and `seven_day` (utilization 26, resets
+    2026-08-23T05:00:00Z), plus a `limits[]` array naming session / weekly_all / weekly_scoped with
+    per-window percent and severity. So every field the panel renders unknown is present in the
+    file it is already written to read.
+
+    (4) AND THE PROBE THAT FEEDS IT IS HEALTHY, SO THIS IS NOT A COLLECTION FAILURE. `claude -p
+    "/usage"` inside remudero-daemon returns EXIT=0 with 770 bytes on stdout and 0 on stderr,
+    naming the session and weekly windows with their reset times. The ledger's own `daemon.headroom`
+    rows are current and agree with it — 124 rows on the measured day, newest carrying
+    `percent_used: 26` and `resets_at: 2026-08-23T05:00:00.000Z`, matching the live reading exactly
+    — against ZERO rows of `daemon.headroom.degraded`, `daemon.headroom.unavailable` and
+    `usage.probe_failed`. NOTE FOR W1-T417: that task's premise is that the `/usage` path no longer
+    emits. It emits. This shard does not re-file or re-band W1-T417; it records the measurement
+    beside it.
+
+    (5) THE SEAM ALREADY EXISTS AND NOTHING SUPPLIES IT. `readAccountUsageFile` is declared
+    `(path: string = join(homedir(), ".claude.json"))`, and `buildAccountUsageRoute`'s deps carry an
+    optional `accountFilePath` consumed as
+    `deps.readAccount ?? (() => readAccountUsageFile(deps.accountFilePath))`. Word-bounded,
+    `accountFilePath` appears exactly TWICE in all of src/ — the type declaration and that fallback.
+    No caller sets it, so the default resolves under `homedir()` on every request and the route can
+    only ever read a path the serve container does not have. An injectable edge with no supplier.
+  design: |
+    (i) SUPPLY THE PATH THE ROUTE ALREADY ACCEPTS. `accountFilePath` exists on `AccountUsageDeps`
+    and is honoured. The change is to give `serve.ts`'s `accountUsageDeps` a resolved value instead
+    of leaving it undefined, so the console reads a path its own container can open. Omitted, the
+    behaviour stays byte-identical to today — the default under `homedir()` — so no existing caller
+    or fixture shifts.
+
+    (ii) WHERE THE VALUE COMES FROM IS THE DECISION, AND IT MUST BE DERIVED RATHER THAN GUESSED.
+    Two shapes are available and only one is a code change:
+      - A PATH SUPPLIED TO THE CONSOLE, resolved the way every other console input already is
+        (flag > env > config > default, the shape `resolveServeHosts` uses). This is the code
+        change and it is what this task is scoped to.
+      - AN OPERATOR MOUNT of the host's `~/.claude.json` into the serve container. That needs no
+        code at all and is an operator act; it is named here so it is weighed rather than
+        discovered, and NOT proposed as this task's deliverable.
+    An implementer must state which it recommends and why, with the containment note in (iv).
+
+    (iii) THE FRESHNESS AND MISMATCH POLICY IS ALREADY CORRECT AND MUST NOT BE TOUCHED.
+    `deriveAccountUsage` checks `unreadable`, then `no-cache`, then `account-mismatch`, then
+    `too-old` against `USAGE_CACHE_MAX_AGE_MS`. Pointing the reader at a readable file exercises
+    those checks for the first time; it must not weaken any of them. In particular the
+    account-mismatch guard exists so a stale cache is never rendered against a newly switched
+    account, and a path change is not a reason to relax it.
+
+    (iv) CONTAINMENT IS THE CONSTRAINT ON EVERY OPTION. `~/.claude.json` is not a usage file — it
+    carries `oauthAccount` and project history beside `cachedUsageUtilization`, 43,879 bytes of it
+    on this host. Whatever path is supplied, the console needs READ access to a usage reading and
+    nothing more; a shape that grants the console write access to the operator's Claude Code state,
+    or that exposes account internals it does not render, is worse than the blank panel it fixes.
+    State the access mode explicitly.
+
+    (v) THE FALSIFIER IS A READABLE PATH AND AN UNREADABLE ONE IN THE SAME RUN. "the panel renders
+    a window" is satisfied by a fixture that hardcodes one; "the panel says unknown" is satisfied by
+    a reader that never works. Both directions must be asserted together, and the unknown REASON
+    must be the specific one — `unreadable` for an absent path — never a bare unknown.
+
+    (vi) EXPLICITLY OUT OF SCOPE.
+      - CHANGING WHERE `daemon.headroom` ROWS GO, or teaching the panel to read the ledger instead.
+        The rows are healthy and already have their own reader in `deriveGovernorPosture`; adding a
+        second path to the same number is not this task.
+      - W1-T417. Its premise is refuted by rationale (4) and its disposition is its own to make.
+      - THE `/usage` PROBE, the SDK reading, and `readUsageSnapshotPreferSdk`. All measured healthy;
+        untouched.
+      - ANY DOCKER MOUNT, IMAGE OR RUN-COMMAND CHANGE. Operator acts, named in design (ii) and not
+        performed or designed here.
+  acceptance:
+    - claim: "the console route reads the account file from the supplied path rather than the process home default"
+      proof: "unit test: W1-T997: the account usage route reads the supplied path not the home default"
+    - claim: "a readable path renders the five hour and seven day windows and an absent path renders unknown for the unreadable reason in the same run"
+      proof: "unit test: W1-T997: a readable path renders windows and an absent path reads unreadable"
+    - claim: "omitting the supplied path leaves the reader on its home default so every existing caller is unchanged"
+      proof: "unit test: W1-T997: omitting the supplied path leaves the home default unchanged"
+    - claim: "the staleness and account mismatch guards still refuse a cache that is too old or belongs to another account"
+      proof: "unit test: W1-T997: the too old and account mismatch guards still refuse a bad cache"
+  origin: "oper#console-cannot-read-usage-cache-2026-08-18"
+  plan_refs: ["W1-T417", "W1-T915", "W1-T333"]
+  files: [src/lib/account-usage.ts, src/lib/serve.ts, test/account-usage.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT c8568c2, OWN PATH ABSENT.
+    `readAccountUsageFile`: src/lib/account-usage.ts = 5 (its home), test/account-usage.test.ts = 11,
+    plus one comment reference each in src/lib/worker-home.ts and src/lib/worker.ts which are prose
+    and NOT calls — neither is declared. `deriveAccountUsage`: src/lib/account-usage.ts = 6,
+    test/account-usage.test.ts = 21, src/lib/analytics-route.ts = 1 comment, src/lib/ledger.ts = 1.
+    `buildAccountUsageRoute` is imported and wired in src/lib/serve.ts, which is why that file is
+    declared — the missing supplier lives at that wiring site, not in the reader.
+    src/run-task.ts is NOT declared: its only reference is a comment naming
+    `buildAccountUsageRoute`/`ceilingPolicy` as an existing pattern, and declaring it would serialize
+    this task against the many shards already naming it (W1-T471) for no benefit.
+
+    risk: high IS RULE 19'S SPAN, AND THE LINTER DECIDED IT RATHER THAN THE AUTHOR. A first draft
+    filed this at medium; `lint-plan`'s changed-tasks pass refused it in as many words —
+    "[sizing] spans 2 distinct subsystems/concerns (account-usage, serve) at risk:medium — Rule 19:
+    raise to risk:high or decompose into one task per concern" — because `moduleIdFromPath` strips
+    the `.test` segment and the three declared paths resolve to the ids `account-usage` and `serve`,
+    which is exactly the threshold. Raised on that refusal, not on judgement, and recorded here so
+    the band reads as enforced rather than chosen. DECOMPOSITION IS THE OTHER OPTION THE RULE OFFERS
+    AND IT IS REFUSED ON PURPOSE: the reader and the wiring that fails to supply it are one defect,
+    and splitting them would file a supplier with nothing to supply. Blast radius genuinely argues
+    low: one supplied value, one conditional read, and the omitted path leaves today's behaviour
+    byte-identical (criterion 3).
+
+    THE PANEL IS NOT THE ONLY THING DOWN RIGHT NOW, AND THAT IS RECORDED HERE RATHER THAN FOLDED IN.
+    At the time of measurement `remudero-serve` was EXITED with code 137, having stopped at
+    17:30:39Z after its board gateway logged a GitHub rate-limit 403 for user id 4397075;
+    `OOMKilled=false`, `RestartCount=0`, restart policy `unless-stopped`. So the console was
+    unreachable for a second, unrelated reason while this gap was being measured. That is an
+    operational event for the operator, not a scope item, and this task neither diagnoses nor fixes
+    it.
+
+    PROOF NOTES. All four criteria use the NAME-FILTERED `unit test:` form with a bare title, never
+    the pure-path form — a path proof against test/account-usage.test.ts would pass on any of that
+    suite's existing tests and prove nothing about this change. Each title is plain prose under 100
+    characters with ZERO commas, no `"; "` and no regex metacharacter, so
+    `looksLikeScenarioNarrative` cannot fail proof-resolvability, and the executor compiles a bare
+    title as an ESCAPED LITERAL so nothing in them acts as a wildcard. All four were checked with
+    `grep -rlF` over test/ to match 0 files today against a control title matching 1 — forward
+    references to titles this task creates, and titles rather than symbol names, so nothing here
+    guesses an identifier. THERE IS DELIBERATELY NO `grep:` CRITERION: the tokens that would
+    discriminate head from base are identifiers this task has not written yet, and a `grep:` naming
+    this shard's own path is refused by `proof-scope` as outside the declared files.
+
+    ID PROVENANCE — FOUR SURFACES, EACH CONTROLLED, PLUS A MINT THAT PROVED ITS OWN GATE. W1-T997
+    read 0 on all four at c8568c2: refs/rmd-id/* (92 refs enumerated, control refs/rmd-id/W1-T946 =
+    1), shard filenames on origin/main and ids declared anywhere under plan/ (control W1-T965 =
+    filename 1 / declared 9), EVERY OPEN PR'S FILE LIST and EVERY OPEN PR'S TITLE (the open-PR query
+    returned 3 lines, so the empty result is a real absence and not a failed call). 985 through 996
+    are reserved, so 997 is the first free id above that block.
+    THE MINT USED THE PLAIN REFSPEC — no `+`, no `--force-with-lease`: orphan anchor over the empty
+    tree with ZERO parents, exit status into a variable, MINT_EXIT_CODE=0 with `* [new reference]`,
+    readback of refs/rmd-id/W1-T997 returning exactly the nonce commit
+    b489ab204fda6553978033ba3360363b1db1e12f. AND THE GATE WAS PROVED ON THE SAME INVOCATION: a
+    second orphan pushed by the identical plain form at the TAKEN ref refs/rmd-id/W1-T946 returned
+    PROBE_EXIT_CODE=1 with `! [rejected]`, and that ref still reads its original commit — the
+    rejection is the gate, demonstrated rather than asserted.
