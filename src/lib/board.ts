@@ -43,6 +43,7 @@ import { bearerTokenId } from "./panel-actions.js";
 import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
+import { buildStatusBoard, type BlockedPrBlocker } from "./status-board.js";
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
 export const DEFAULT_POLL_MS = 250;
@@ -158,6 +159,27 @@ export interface BoardSnapshot {
    *  second ledger read/reduction. */
   spend: GlanceSpend;
   tasks: BoardRow[];
+  /**
+   * W1-T1006: THE SIXTH NEEDS-ME ROW SOURCE — a PR the sweep reconciler already disposed into a
+   * non-progressing class (`blocked-fixable`/`blocked-ambiguous`/`conflicted`/`stale`), reaching
+   * the console through this SAME snapshot (design (i): "one snapshot, one `generated_at`, and
+   * the counts and rows can never disagree") rather than a second fetch the way NEEDS ME's
+   * feedback/inbox rows arrive. Sourced VERBATIM from status-board.ts's `buildStatusBoard`
+   * (its own `blockers.rows`, filtered to `kind === "blocked_pr"`) — see
+   * {@link deriveBoardBlockedPrs} — NEVER a second derivation over the ledger; status-board.ts
+   * itself is unread by this task. Always an array (`[]`, never `undefined`), so a render never
+   * has to special-case "not fetched yet" — exactly like {@link tasks} above.
+   */
+  blockedPrs: BlockedPrBlocker[];
+  /**
+   * W1-T1006 design (iii): set ONLY when live GitHub state could not be checked THIS render (no
+   * reachable gateway, or the gateway's own read failed) — carried straight through from
+   * status-board.ts's `BlockersSection.blockedPrsUnverifiedReason`. When set, {@link blockedPrs}
+   * is EMPTY (every raw candidate withheld rather than replayed as current) — the console must
+   * show this distinction, an unverified withholding, rather than let it read as "nothing
+   * blocked" (an unknown that looks healthy is the exact failure this field exists to name).
+   */
+  blockedPrsUnverifiedReason?: string;
 }
 
 export interface BoardDeps extends DeriveDeps {
@@ -182,6 +204,69 @@ function lastActivityByTask(lines: Array<Record<string, unknown>>): Map<string, 
     }
   });
   return out;
+}
+
+/**
+ * W1-T1006: the sixth NEEDS-ME row source, reusing status-board.ts's `buildStatusBoard` VERBATIM
+ * for the blocked-PR derivation — design (i)'s own text: "the data comes from `buildStatusBoard`'s
+ * existing `blockers.rows` and NOT from a second derivation over the ledger", because
+ * `status-board.ts` is READ, NOT CHANGED, by this task and none of its blockers-deriving
+ * functions (`rawBlockedPrCandidates`/`deriveBlockedPrBlockers`/`deriveBlockers`) are exported —
+ * `buildStatusBoard` is the only door in.
+ *
+ * `plan` IS DELIBERATELY OMITTED (never `deps.plan`) — this is the load-bearing choice, not an
+ * oversight. `buildStatusBoard` unconditionally re-derives QUEUE HEAD/INBOX via its own INTERNAL
+ * `projectPlanOnce`/`projectPlan` pass, which is a SECOND, genuinely duplicate batch of `github`
+ * calls on top of the one {@link computeBoardSnapshot} already ran a few lines above — MEASURED:
+ * test/board.test.ts's own cache-recompute suite counts `github.prByRef` calls as its "did a
+ * real recompute happen" proxy, and passing `deps.plan` through doubled that count (2 vs the
+ * expected 1) the first time this was wired, because a plan task's `pr:` field forces a
+ * `prByRef` call on EVERY `projectPlan` pass. `deriveBlockers`'s `blocked_pr` class (the ONLY
+ * class this board keeps, filtered below) needs no `projections` at all — only `indeterminate`
+ * does — so `plan: undefined` makes `projectPlanOnce` short-circuit before touching `github` a
+ * second time (see its own `if (!plan) return { unknownReason: … }` rung), while QUEUE
+ * HEAD/INBOX degrade to a stated `unknownReason` this board never reads. `blockedPrs`' OWN
+ * `github` calls (`deriveBlockedPrBlockers`'s per-PR-number `prByRef`, keyed off the ledger's
+ * `sweep.disposed` lines, never off a task's `pr:` field) still run in full and are a genuinely
+ * NEW read no earlier pass in this file makes — that cost is real and unavoidable, not a
+ * duplicate of anything.
+ *
+ * EVERY OTHER SECTION `buildStatusBoard` computes (liveness/latches/queue head/inbox/headroom/
+ * cache-hit/learnings-injection/needs-me-cost-anomaly) is irrelevant to this board and
+ * deliberately starved of real IO here, so this call costs CPU only, never new file/process
+ * reads beyond `blockedPrs`' own: `queryService` is an inert stub (LIVENESS is discarded),
+ * `resolveOriginMainSha` is forced to `undefined` (skips a `git rev-parse` neither LATCHES' nor
+ * BLOCKERS needs), `grepAnchorTrue`/`readProposalRegistry`/`readDraftCache` are inert (INBOX is
+ * discarded regardless), and `readLedger` is overridden to hand back the SAME already-parsed
+ * `lines` {@link computeBoardSnapshot} read above — never a second ledger file read.
+ *
+ * The `root`/`repoDir` strings below are never dereferenced by anything this board keeps: every
+ * consumer that would use them (LATCHES' file reads, `tryLoadDefaultPlan`'s fallback for an
+ * omitted `plan` — never reached since `github`/`readLedger` already resolve everything BLOCKERS
+ * needs, the default `grepAnchorTrue`/`resolveOriginMainSha`) is stubbed out above or fails soft
+ * to `undefined`/`[]`/`{}` on a path that cannot exist. A clearly-bogus sentinel, not `""`, so a
+ * test run from a directory that happens to hold a real `state/`/`plan/` tree can never
+ * accidentally pick up real files for a section this board discards anyway.
+ */
+const BLOCKED_PR_ROOT_SENTINEL = "/nonexistent-rmd-board-root";
+
+function deriveBoardBlockedPrs(
+  deps: BoardDeps,
+  lines: Array<Record<string, unknown>>,
+): { blockedPrs: BlockedPrBlocker[]; blockedPrsUnverifiedReason?: string } {
+  const model = buildStatusBoard(BLOCKED_PR_ROOT_SENTINEL, deps.ledgerPath, {
+    queryService: () => ({ running: false, pid: null }),
+    repoDir: BLOCKED_PR_ROOT_SENTINEL,
+    readLedger: () => lines,
+    resolveOriginMainSha: () => undefined,
+    github: deps.github,
+    now: deps.now,
+    grepAnchorTrue: () => false,
+    readProposalRegistry: () => [],
+    readDraftCache: () => ({}),
+  });
+  const blockedPrs = model.blockers.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
+  return { blockedPrs, blockedPrsUnverifiedReason: model.blockers.blockedPrsUnverifiedReason };
 }
 
 /**
@@ -239,12 +324,15 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
   // so "0 merged" is never rendered as fact during an outage.
   const github_unreachable = safeReadFailed(deps.github);
   const now = deps.now ?? Date.now;
+  const { blockedPrs, blockedPrsUnverifiedReason } = deriveBoardBlockedPrs(deps, lines);
   return {
     generated_at: new Date().toISOString(),
     github_unreachable,
     counts: summarizeCounts(tasks, github_unreachable),
     spend: computeGlanceSpend(lines, now()),
     tasks,
+    blockedPrs,
+    blockedPrsUnverifiedReason,
   };
 }
 
