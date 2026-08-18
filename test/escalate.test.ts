@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -134,6 +134,20 @@ test("renderIssueBody lists every option AND calls out the recommendation", () =
   assert.match(body, /\*\*retry\*\* — resume the run with a fresh worker/);
   assert.match(body, /\*\*abandon\*\* — drop the task and re-plan/);
   assert.match(body, /## Recommendation\nretry/);
+});
+
+test("W1-T972: the rendered escalation body names the machine it describes", () => {
+  // Unconditional (never optional like Run/Head/Cause) — a reader on one host must be able to
+  // tell an issue about theirs from an issue about the other cell's on sight, the exact
+  // distinction whose absence sent a reader chasing nine correct crash-loop issues about a
+  // healthy unit on the OTHER machine and concluding noise.
+  const body = renderIssueBody(escalation());
+  assert.match(body, /^\*\*Host:\*\* \S+$/m, "the body must carry an unconditional, non-blank Host line");
+  assert.match(
+    body,
+    new RegExp(`^\\*\\*Host:\\*\\* ${hostname().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"),
+    "the Host line must name THIS process's real machine, not a placeholder",
+  );
 });
 
 // ── W1-T346: classifyAsk — every needs-me item is an ACTION or a QUESTION ───────────────

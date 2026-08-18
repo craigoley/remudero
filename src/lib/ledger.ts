@@ -1,10 +1,11 @@
 import { closeSync, existsSync, mkdirSync, openSync, readSync, renameSync, statSync, writeSync } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 /**
  * Append-only NDJSON ledger (MASTER-PLAN §9). Records the run's step timeline,
  * keyed by task id, so a run's provenance is inspectable after the fact. Every
- * line is one JSON object; `ts` is stamped here at write time.
+ * line is one JSON object; `ts` and `host` are stamped here at write time.
  *
  * W1-T6: every WORKER call (recon, implement, implement.resumed) and every
  * BRAIN-PLANE call (the advisory reviewer, the retro Architect) logs the same
@@ -135,9 +136,24 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
   return evidence.workerRan && evidence.judgmentPosted;
 }
 
-export function appendLedger(path: string, line: LedgerLine, opts: { ceilingBytes?: number } = {}): void {
+/**
+ * W1-T972: every ledger row is written by SOME process on SOME machine, and until this task
+ * nothing on the row said which — the SAME "no writer identity" gap this repo's lock-holder
+ * records (drain-lock.ts, inflight-lock.ts, review.ts, all keyed `host: ... ?? hostname()`)
+ * already close for a different surface. `identity` is that same primitive, reused rather than
+ * reinvented, so a row stamped here JOINS to those holder records on the identical key. It is an
+ * OPTIONAL param appended LAST on `appendLedger`'s existing `opts` bag (never a new positional
+ * param, so no caller shifts) and defaults to the real `hostname()` — injectable ONLY so a test
+ * can drive two DISTINCT identities through two ledger roots in one process, which `os.hostname()`
+ * itself (constant per-process) cannot produce; every real caller gets the true machine name.
+ */
+export function appendLedger(
+  path: string,
+  line: LedgerLine,
+  opts: { ceilingBytes?: number; identity?: () => string } = {},
+): void {
   mkdirSync(dirname(path), { recursive: true });
-  const record = { ts: new Date().toISOString(), ...line };
+  const record = { ts: new Date().toISOString(), host: (opts.identity ?? hostname)(), ...line };
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
   const fd = openSync(path, "a");
   try {
