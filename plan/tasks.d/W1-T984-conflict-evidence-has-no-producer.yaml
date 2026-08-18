@@ -1,0 +1,202 @@
+- id: W1-T984
+  title: "THE CONFLICTED DISPOSITION ROW HAS NEVER ONCE FIRED AND CANNOT — isPureConcurrentAddition returns false on an empty list, no producer ever fills OpenPrView.mergeConflict, so every dirty PR falls to the refusal row and escalates with 'files: none captured', 9 times out of 9 across the whole recorded corpus: wire the evidence so the escalation stops lying, and keep admission shut until someone can tell an add/add collision from a disjoint addition"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    FILED FROM RECON at origin/main adebe6e6. Every figure was measured on that tree or over the
+    GitHub REST API on 2026-08-18; none is carried from a brief. The ledger was NOT consulted — it
+    is unreachable from the recon host (`run.start` reads 0 across all three rotation forms with a
+    working two-sided control), so nothing here rests on a ledger count.
+
+    (1) THE ROW IS UNREACHABLE, AND THE REPO ALREADY SAYS SO IN ITS OWN VOICE.
+    `DISPOSITION_RULES` (`src/lib/sweep.ts`) gates the `conflicted` row on
+    `isPureConcurrentAddition(pr.mergeConflict?.files ?? [])`, and that predicate opens with
+    `files.length > 0`. `OpenPrView.mergeConflict` has NO PRODUCER. The allowlist in
+    `src/lib/producer-completeness.ts` states it verbatim: "needs per-file conflict EVIDENCE (both
+    sides' log since merge-base, W1-T94 design note iii), which no producer captures.
+    isPureConcurrentAddition returns false on an empty list, so the absence fails closed to
+    escalation rather than to a wrong auto-resolution." So the row's `when` can never be true and
+    EVERY dirty PR falls through to the `blocked-ambiguous` refusal row beneath it.
+    CONTROLS: `grep -c mergeConflict src/lib/open-prs-rest.ts` = 0 against `mergeState` = 6;
+    `git log -S'mergeConflict' -- src/lib/open-prs-rest.ts` = 0 commits EVER against `mergeState`
+    = 1. The allowlist entry dates to #1083 (7e48317) and has never been revisited.
+
+    (2) 9 OF 9, ACROSS TWO INDEPENDENT NON-OVERLAPPING CORPORA. Live 7-day window (GitHub REST,
+    77 issues, total_count 77, 77 distinct): SIX merge-conflict escalations — #1672/PR 1669,
+    #1776/PR 1775, #1831/PR 1830, #1922/PR 1912, #1962/PR 1960, #2121/PR 2120. Frozen
+    `test/fixtures/needs-human-corpus.json` (377 entries): THREE more — PRs 1114, 1127, 1134.
+    ALL NINE carry `files: none captured`. ZERO ever named a file. CONTROLS: `files: ` matches 6
+    titles in the live corpus while the broader `escalating` matches 45; the fixture matches
+    `risk judge ESCALATED` 8 and `fix rung exhausted` 59, so both corpora are readable.
+
+    (3) THE COST IS A DIFFERENTIAL, NOT A HARM STORY, AND THE HARM STORY WAS WRONG.
+    Over the same window 473 of 499 PRs merged (94.8%). Of the six PRs that hit a merge-conflict
+    escalation, TWO merged — 33%. That ~3x differential is the whole measured cost.
+    AN EARLIER DRAFT OF THIS SHARD CLAIMED #1912 AND #1960 WERE LOST WORK. THAT IS FALSE AND IS
+    CORRECTED HERE SO IT IS NOT RE-IMPORTED. #1912 re-implemented `armedButStalled`, which shipped
+    as a strict superset in #1914 (7ff79b65, same two files `src/lib/sweep.ts` +
+    `test/sweep.test.ts`) and was extended again by #1931; the symbol is on main today. #1960 added
+    `plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml`, and THE IDENTICAL PATH
+    landed via #1961 (abe6d892). Both were closed as SUPERSEDED on the operator's ruling. Nothing
+    was lost. This task rests on (1) and (2) — the mechanism and the differential — and claims no
+    rescued work.
+
+    (4) THIS IS THE FOURTH INSTANCE OF A DEFECT CLASS THIS FILE HAS ALREADY PAID FOR TWICE.
+    `src/lib/open-prs-rest.ts`'s own MERGE-STATE HYDRATION header calls itself "the third instance
+    of the single-PR-only field class" and records the sibling defect verbatim: "`OpenPrView`.
+    `mergeState` was ALWAYS `undefined` after the REST migration, the sweep's two `mergeState ===
+    'dirty'` disposition rows were unreachable, and a conflicted PR fell through to the
+    `mergeable` catch-all" — PR #1074 dispositioned `mergeable` FIVE CONSECUTIVE TIMES while
+    GitHub reported `mergeable_state: "dirty"`, and a human rebased it by hand. #1017 was the same
+    shape on `merged` and cost a five-dispatch runaway at real model spend. #1082 fixed
+    `mergeState`; the `mergeConflict` half of the SAME row was left unwired and is this task.
+
+    (5) THE PREDICATE CANNOT TELL A SAME-PATH COLLISION FROM A DISJOINT ADDITION, AND THAT IS WHY
+    THIS TASK DOES NOT TURN THE ROW ON. `isPureConcurrentAddition` counts DELETIONS ONLY, so two
+    PRs that ADD THE SAME PATH WITH DIFFERENT CONTENT score TRUE. For an add/add conflict there is
+    no merge-base version of the file at all, so `oursDeleted` and `theirsDeleted` are
+    STRUCTURALLY zero — the predicate can never return FALSE on that shape.
+    MEASURED ON THE REAL OBJECTS, all five reconstructible cases replayed against main as it stood
+    at each escalation's own timestamp (`git rev-list -1 --before=<T> origin/main`):
+      #1775  test/daemon.test.ts                              0/5    FALSE — refusal correct
+      #1830  deploy/entrypoint.sh, src/lib/daemon.ts          0/26, 6/1  FALSE — refusal correct
+      #1912  src/lib/sweep.ts, test/sweep.test.ts             0/0, 0/0  TRUE
+      #1960  plan/tasks.d/W1-T908-….yaml                      0/0    TRUE
+      #2120  plan/feedback/fb-1785775974389-e25033.yaml       2/2    FALSE — refusal correct
+    BOTH TRUE CASES ARE CONFLICTS GIT ITSELF REFUSES TO MERGE. `git merge-tree --write-tree`
+    exits 1 on each (control: main-vs-main exits 0). #1912 is `CONFLICT (content)` with stages
+    1/2/3 present on both files. #1960 is `CONFLICT (add/add)` with NO STAGE 1 — and the tree git
+    writes for it carries THREE conflict-marker regions over two different authorings of the same
+    task (stage2 14077 bytes, stage3 7786 bytes, sha256 NOT equal: different titles, different
+    bodies). So the answer to "what would auto-resolution do there" is: git produces a CONFLICTED
+    TREE and resolves nothing. It does not clobber and it does not concatenate.
+
+    (6) THE SEMANTIC REFUSAL EXISTS BUT ONLY INSIDE THE WORKER PROMPT, WHICH HAS NEVER RUN.
+    W1-T94's mode table (`plan/tasks.yaml`) states the discipline as TWO clauses: "resolve toward
+    the union ONLY where merge-base analysis shows pure concurrent addition, REFUSE into escalate
+    when either side deleted OR THE CONFLICT IS SEMANTIC (a wrong auto-resolution is worse than a
+    strand)". `renderFixPrompt`'s merge-conflict arm (`src/run-task.ts`) carries both clauses to
+    the worker verbatim. `isPureConcurrentAddition` implements the DELETION clause only; there is
+    no semantic test anywhere in the gate (`grep -c semantic src/lib/sweep.ts` = 4, all four in
+    unrelated comments about check semantics and re-drive). The design intends the worker to be
+    the second gate — but because the row has never fired, that refusal path has never once been
+    exercised, and the only two PRs it would admit are both semantic collisions. Turning the row
+    on today would make a 2-for-2 sample of exactly the case the untested refusal must catch.
+  design: |
+    THE SHAPE: make the EVIDENCE real and leave the DECISION exactly where it is. Honest without
+    becoming wrong. W1-T106 design note iii governs: "a wrong auto-resolution is worse than a
+    strand."
+
+    (i) DO NOT MODIFY `isPureConcurrentAddition`. Not its body, not its threshold, not its
+    signature. Rationale (5) shows it is wrong for add/add, and rationale (6) shows the missing
+    clause is SEMANTIC — a judgement this task has no evidence to encode. Weakening OR tightening
+    it here would be guessing. It stays byte-identical.
+
+    (ii) WIRE THE PRODUCER AS A BOUNDED CONDITIONAL PER-PR FOLLOW-UP, THE SHAPE THIS FILE ALREADY
+    USES TWICE. `mergeState` and `ciFailures` are both best-effort follow-up fetches off the list
+    row, capped (`MERGE_STATE_HYDRATION_CAP` = 25) and never a hard failure of the sweep. Fetch
+    conflict evidence ONLY for a PR already known `mergeState === "dirty"` — that is a small set
+    (the whole 7-day window produced six) — and reuse the existing cap rather than inventing a
+    second one. On any failure leave the field `undefined`, which is byte-identical to today.
+
+    (iii) THE REST COMPARE SET OVER-APPROXIMATES, AND THAT IS THE SAFE DIRECTION — SAY SO IN
+    SOURCE. Nothing in the sweep path shells to git (`grep -c 'await git(' src/run-task.ts` = 0),
+    so the evidence must come from REST: the merge-base plus two compares give per-file additions
+    and deletions for each side. The INTERSECTION of both sides' changed files is a SUPERSET of
+    what git would actually conflict on. That makes `isPureConcurrentAddition` STRICTER, never
+    looser — more files considered means more chances one carries a deletion — so the
+    approximation cannot manufacture a false TRUE from a genuine deletion. It CAN still return
+    TRUE on an add/add collision, which is (i)'s reason for the flag in (iv). Record this
+    asymmetry in the producer's own doc comment; a later reader must not "improve" it into a
+    narrower set without re-deriving the safety argument.
+
+    (iv) GATE ADMISSION DEFAULT-OFF, MIRRORING `supersessionDisposalEnabled` EXACTLY. The
+    `conflicted` row gains one conjunct — a policy flag defaulting FALSE — so that with real
+    evidence flowing, disposition stays byte-for-byte what it is today and the row still admits
+    nothing. Precedent: `when: (pr, policy) => policy.supersessionDisposalEnabled === true && …`
+    (`src/lib/sweep.ts`, W1-T920). Keep the default a LITERAL in `DEFAULT_SWEEP_POLICY` rather
+    than a `plan/policy.yaml` row — the same choice W1-T932 made and recorded, and it keeps
+    `plan/policy.yaml` out of this task's `files:`. The flag is the deliverable's honesty: it
+    makes "we now know, and we still decline" a stated position rather than an accident of an
+    empty list.
+
+    (v) THE ESCALATION IS THE USER-VISIBLE WIN AND MUST BE ASSERTED. With the field populated, a
+    dirty PR's `blocked-ambiguous` reason names the real conflicting paths and their per-side
+    deletion counts instead of "files: none captured", and `renderFixPrompt`'s `fileList` fallback
+    ("no conflicting file detail was captured") stops being the only branch reachable. Pin BOTH in
+    tests, using the reconstructed fixtures from rationale (5).
+
+    (vi) FIVE REAL FIXTURES WITH KNOWN ANSWERS — USE THEM, DO NOT INVENT. #1775, #1830, #2120 must
+    read FALSE; #1912 and #1960 must read TRUE; and with the flag off ALL FIVE must dispose
+    `blocked-ambiguous`. #1960 is the add/add case and is the falsifier that matters: it proves
+    the predicate says TRUE where git says CONFLICT. A suite that only exercises deletion-involved
+    conflicts has not tested this task.
+
+    (vii) REMOVE THE ALLOWLIST ENTRY IN THE SAME PR. `src/lib/producer-completeness.ts` states its
+    own rule: "removing a field from this list means wiring it". Leaving the entry once a producer
+    exists trips `staleAllowlist` and is the gate's designed failure.
+
+    (viii) OUT OF SCOPE, NAMED SO IT IS NOT RE-FILED HERE. (a) The SEMANTIC predicate — deciding
+    when a textual union is safe — is a separate task and needs its own evidence; this shard
+    deliberately leaves the flag off rather than pre-empting it. (b) Turning the flag ON is that
+    task's call, not this one's. (c) W1-T487 (MERGED as #1815) already fixed the escalation's
+    WORDING for an empty evidence list; its design note (ii) asks the reader be told "the evidence
+    was never collected, versus it was collected and is genuinely empty" — this task makes the
+    FIRST case stop happening and must not re-edit that rendering. (d) The other five allowlisted
+    unwired fields (`checksPendingSince`, `isPlanFiling`, `mergeable`, `mergeableState`,
+    `supersessionVerdict`) are untouched.
+  acceptance:
+    - claim: "a dirty PR's conflict evidence is captured by a producer instead of the field being left undefined forever"
+      proof: "grep: mergeConflict in src/lib/open-prs-rest.ts"
+    - claim: "the conflicted row admits nothing while its new flag is off, so disposition is byte-identical to today"
+      proof: "unit test: test/sweep-conflicted-disposition.test.ts"
+    - claim: "the five reconstructed conflicts reproduce their recorded predicate values including the add/add case reading TRUE"
+      proof: "unit test: test/sweep-conflicted-disposition.test.ts"
+    - claim: "a dirty PR escalation names the real conflicting paths and per-side deletion counts rather than none captured"
+      proof: "unit test: test/sweep-conflicted-disposition.test.ts"
+    - claim: "mergeConflict no longer sits on the producer-completeness allowlist once a producer assigns it"
+      proof: "unit test: test/producer-completeness.test.ts"
+    - claim: "the evidence fetch is bounded and a failed read leaves the field undefined rather than failing the sweep"
+      proof: "unit test: test/open-prs-rest.test.ts"
+  risk: high
+  origin: recon
+  plan_refs: ["W1-T94", "W1-T106", "W1-T920", "W1-T932", "§5D"]
+  files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/lib/producer-completeness.ts, src/run-task.ts, test/open-prs-rest.test.ts, test/sweep-conflicted-disposition.test.ts, test/producer-completeness.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high SET UP FRONT, AND THE BAND IS RULE 19's SPAN, NOT BLAST RADIUS. The `files:` list
+    crosses three concerns that cannot be decomposed without breaking the deliverable: the REST
+    producer, the disposition row it feeds, and the completeness gate that fails the build the
+    moment a producer appears. Splitting them would land a producer whose only consumer still
+    reads an empty list, or an allowlist removal with nothing wiring the field — each individually
+    red. Blast radius is deliberately LOW: with the flag off, disposition is byte-identical.
+
+    `files:` DERIVED FROM SOURCE, NOT GUESSED. `mergeStateFromRest` and the hydration cap live in
+    `src/lib/open-prs-rest.ts`, which is where the sibling field was wired by #1082;
+    `buildOpenPrViews` (`src/run-task.ts`) is where a producer is ASSIGNED, the same seam W1-T435
+    used for `pendingAnswer`; `DISPOSITION_RULES`, `ConflictFileDiff`, `isPureConcurrentAddition`
+    and `DEFAULT_SWEEP_POLICY` are all in `src/lib/sweep.ts`; the allowlist is in
+    `src/lib/producer-completeness.ts`. Each declared source file has its owning suite declared
+    beside it. `plan/policy.yaml` is deliberately NOT declared — design (iv) keeps the default a
+    literal, the choice W1-T932 already recorded. `src/lib/escalate.ts` is NOT declared: the
+    escalation string is built from the disposition reason inside `sweep.ts` and needs no edit
+    there, and declaring an untouched file fails `inverseScopeUntouchedFiles`.
+
+    ONE PROOF IS A GREP NAMING A SYMBOL THAT DOES NOT EXIST YET in that file (`mergeConflict` in
+    `src/lib/open-prs-rest.ts`, which reads 0 today against a `mergeState` control of 6). That is
+    the point: it stays red until a producer genuinely lands in the module where the sibling field
+    was wired, which is the minimum this task owes. The remaining proofs run whole existing suite
+    files rather than naming titles, so they parse today and execute whatever the implementation
+    adds — the same form W1-T981 used and merged.
+
+    THIS TASK DELIBERATELY SHIPS A CHANGE THAT ALTERS NO BEHAVIOUR. That is not an oversight and a
+    reviewer should not ask it to prove a behavioural delta. The measured position is that the
+    evidence is missing (rationale 1-2) AND that the predicate which would consume it is wrong for
+    the only shape it would admit (rationale 5-6). Wiring evidence while declining to act on it is
+    the only move that improves the artifact a human reads without betting on an untested refusal.
+    A worker that turns the flag on to make the diff feel substantial has inverted the task.
