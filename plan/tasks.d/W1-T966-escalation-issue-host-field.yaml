@@ -1,0 +1,174 @@
+- id: W1-T966
+  title: "AN ESCALATION ISSUE CANNOT NAME THE MACHINE THAT OPENED IT — renderIssueBody writes Class, Task, Run, Head and Cause and no host, so on a multi-host fleet an issue reaching the operator is unattributable to a unit and cross-issue timestamp analysis cannot be pinned to one respawn clock: add a Host line sourced from os.hostname()"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    FILED FROM A RECON AT origin/main 1ca2ba5. Every path and count below was READ ON THAT
+    COMMIT, not inherited from the brief.
+
+    (1) THE FIELD IS ABSENT, AND THAT WAS MEASURED RATHER THAN ASSUMED. `renderIssueBody`
+    (src/lib/escalate.ts) builds its header block as `**Class:**`, `**Task:**`, and the three
+    optional lines `**Run:**`, `**Head:**`, `**Cause:**` — nothing else. A scan for an existing
+    host-shaped line (`**Host:**`, `**Machine:**`, `**Node:**`) over that module returns 0, against
+    a same-invocation control of `**Class:**` reading 2. The zero is real, not a failed query.
+
+    (2) THE COST IS ATTRIBUTION, AND IT IS CONCRETE. The fleet runs on more than one host. An
+    escalation issue arriving in front of the operator therefore names the task, the run and the
+    head sha, but never the unit that produced it. The downstream consequence is that timestamp
+    analysis ACROSS escalation issues cannot be pinned to a single unit — respawn-interval
+    reasoning over those timestamps is unsound, because two issues minutes apart may be two
+    machines rather than one machine relaunching.
+
+    (3) THE INGREDIENT ALREADY SHIPS SIX TIMES OVER, SO THIS IS ADDITIVE AND CHEAP. `hostname` is
+    imported from `node:os` by EXACTLY SIX modules today — src/lib/drain-lock.ts,
+    src/lib/fleet-control.ts, src/lib/fs-race-safe.ts, src/lib/inflight-lock.ts,
+    src/lib/review.ts and src/lib/task-id-reservation.ts. COUNTED by the import form itself, not by
+    the bare word: src/lib/worker.ts and src/lib/relay-client.ts mention "hostname" and do NOT
+    import it, which is why a word-only scan would have reported eight. src/lib/escalate.ts imports
+    `node:os` 0 times, so this task adds the repo's OWN established import, not a new dependency.
+
+    (4) THE DEDUP KEY IS NOT AT RISK, AND THIS IS THE ONE THING THAT COULD HAVE MADE THE CHANGE
+    UNSAFE. `escalate()`'s dup search does NOT compare rendered bodies; it parses named lines back
+    out of a candidate open issue with TASK_LINE_RE, CLASS_LINE_RE, HEAD_SHA_LINE_RE and
+    CAUSE_LINE_RE, and combines them through `matchesOptionalDimension`. A new body line that has
+    no readback regex is therefore invisible to dedup by construction. See design (iv) for the
+    constraint this places on the implementer.
+  design: |
+    THE SHAPE: one line added to one rendered block, one injectable reader, no behaviour change
+    anywhere else.
+
+    (i) ONE LINE IN THE EXISTING HEADER BLOCK. `renderIssueBody` gains a `**Host:** <hostname>`
+    entry in the same `lines` array that already carries Class/Task/Run/Head/Cause, following the
+    established `**Field:** <value>` shape those five use. Placement within the block is the
+    implementer's call; what is NOT open is the shape, because the whole point is that a reader
+    already scanning that block finds it where the others are.
+
+    (ii) UNCONDITIONAL, UNLIKE Run/Head/Cause. Those three render only when the caller set the
+    field, and that discipline exists so un-migrated callers produce byte-identical issues. Host
+    has no caller to migrate — it is a property of the process doing the rendering, always
+    available — so it renders on every issue. An optional Host is worse than none: an absent line
+    would be indistinguishable from an old issue and would defeat the cross-issue analysis in
+    rationale (2).
+
+    (iii) THE READER MUST BE INJECTABLE AND MUST DEFAULT TO THE REAL ONE. Take an optional
+    hostname reader defaulted to `hostname()` from `node:os`, appended LAST so no positional
+    caller shifts. This repo's own rule applies directly: when every test injects a fake, the
+    default implementation is unreachable and ships uncovered — so criterion 4 exists to execute
+    the DEFAULT arm with nothing injected, separately from the injected-value criterion.
+
+    (iv) THE HOST LINE MUST NOT BECOME A DEDUP DIMENSION. Do NOT add a HOST_LINE_RE, and do not
+    extend the composite key. Rationale (4) establishes that dedup parses only named lines, so an
+    unread line is inert. If Host were made a dimension, one escalation condition seen by two
+    hosts would open two issues instead of being deduped into one — a regression of the exact
+    #178/#180 duplicate that W1-T104 put dedup in the transport to fix.
+
+    (v) HOW A REVIEWER CONFIRMS IT AGAINST A REAL RENDERED ISSUE. This is recorded here rather than
+    as an acceptance criterion on purpose: this task is `verify: auto`, and Rule 18's
+    headless-fitness lexicon is applied to the acceptance criteria of auto tasks, so a criterion
+    written as a human-confirmation procedure is the wrong instrument. The procedure is: take any
+    escalation issue opened after this lands, read its body back over the REST API
+    (`gh api repos/craigoley/remudero/issues/<n> --jq .body`), and confirm the `**Host:**` line is
+    present and equals the `hostname` of the unit whose ledger carries the matching `run_id` — the
+    `**Run:**` line already on that same issue is the join key that makes the comparison possible.
+    A reviewer wanting a pre-merge check instead renders a body in-process and reads the line back;
+    that is what criteria 1 and 4 already execute.
+
+    (vi) EXPLICITLY OUT OF SCOPE, EACH WITH ITS REASON.
+      - src/lib/daemon.ts — NOT declared and NOT to be touched. W1-T936 already claims that module
+        together with test/daemon-freshness.test.ts, and two shards claiming one file cannot batch.
+        This task needs nothing from it: the hostname is read at render time, not at start-up.
+      - BOOT-PATH ORDERING — out of scope entirely. Nothing here runs at boot, and no start-up
+        sequence is read, moved or depended upon.
+      - ESCALATION TRIAGE AND ROUTING — out of scope. Which escalations open, where they are
+        routed, how they are labelled and how they are reconciled are all untouched; this task
+        changes what ONE renderer emits and nothing about who receives it.
+      - THE DEDUP KEY — see (iv). Adding a dimension is a different task with a different risk.
+  acceptance:
+    - claim: "the rendered escalation body carries a Host line and its value is the real hostname"
+      proof: "unit test: W1-T966: the rendered escalation body carries a Host line with the hostname"
+    - claim: "the Host line renders the injected reader's value rather than a hardcoded string"
+      proof: "unit test: W1-T966: the Host line renders the injected hostname not a fixed string"
+    - claim: "the Host line renders on an escalation carrying none of the optional Run or Head or Cause fields"
+      proof: "unit test: W1-T966: the Host line renders when every optional field is absent"
+    - claim: "the default reader with nothing injected produces a non-empty host so the default arm is executed"
+      proof: "unit test: W1-T966: the default hostname reader runs and yields a non-empty value"
+    - claim: "every line the renderer already emitted is unchanged so existing issues stay parseable"
+      proof: "unit test: W1-T966: the existing rendered lines are byte-identical beside the new one"
+    - claim: "the module reads the hostname from node os rather than reconstructing it"
+      proof: "grep: hostname in src/lib/escalate.ts"
+  risk: medium
+  origin: "oper#escalation-host-field-2026-08-18"
+  plan_refs: ["§4", "W1-T104", "W1-T195", "W1-T345"]
+  files: [src/lib/escalate.ts, test/escalate.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILES DERIVED BY READING, NOT GUESSED. `renderIssueBody` is declared at src/lib/escalate.ts and
+    is exported from there and nowhere else — a tree-wide search for the symbol returns hits in
+    src/lib/escalate.ts (declaration plus its own doc references), src/run-task.ts (two comment
+    references only, no call), and four test files. The corresponding suite is
+    test/escalate.test.ts: it is the module's own suite at 1729 lines with 8 `renderIssueBody`
+    references, the highest of any test file. test/decision-summary.test.ts (6 refs) and
+    test/triage.test.ts (4 refs) also import the symbol but are each scoped to another task's
+    behaviour, so neither is declared — an implementer who finds a genuine need to touch one must
+    amend this shard to declare it rather than overrunning.
+
+    risk: medium IS CORRECT AND WAS CHECKED AGAINST THE RULE, NOT ASSUMED. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only `risk: "high"` and blocks at two or more subsystems.
+    `moduleIdFromPath` strips the `.test` segment, so src/lib/escalate.ts and test/escalate.test.ts
+    BOTH resolve to the single id `escalate` — one subsystem, not two. `subsystemsOf` also adds a
+    tag per SUBSYSTEM_LEXICON hit over the acceptance claim and proof text, and that lexicon holds
+    exactly three patterns: daemon, launchd/launchctl, and chaos-drill/crash-recovery. None appears
+    in any criterion above, which is deliberate — this shard is explicitly out of scope for
+    src/lib/daemon.ts, and naming it in a criterion would ALSO have raised the tally to two and
+    forced the band to high for no real widening of scope.
+
+    depends_on IS EMPTY BECAUSE NO UNMET DEPENDENCY WAS FOUND, NOT BY DEFAULT. The change needs
+    only `hostname` from `node:os`, which six modules already import today (rationale (3)), and the
+    render site itself, which exists and ships. W1-T936 was checked SPECIFICALLY because it is the
+    nearest neighbour: it claims src/lib/daemon.ts and test/daemon-freshness.test.ts, is
+    `verify: human` and `status: queued`, and intersects this shard's file list in ZERO files. It
+    is not a dependency and it is not a conflict — the two can be built in either order.
+
+    PROOF NOTES. Five criteria use the NAME-FILTERED `unit test:` form with a bare title, never the
+    `path::title` form the executor cannot match, and never the whole-file path form — a path proof
+    against test/escalate.test.ts would pass on any of that suite's 1729 lines and prove nothing
+    about this change. Every title is plain prose under 100 characters with zero commas, no `"; "`
+    and no regex metacharacter, so `looksLikeScenarioNarrative` cannot fail proof-resolvability and
+    the executor's escaped-literal match has nothing to mishandle. All five are FORWARD REFERENCES
+    to titles this task creates, which is legitimate for an unimplemented task — what must hold
+    today is that they PARSE, and they are titles rather than symbol names, so nothing here is a
+    guess about an identifier.
+
+    THE GREP PROOF DISCRIMINATES, AND THAT WAS MEASURED WITH THE EXECUTOR'S OWN INVOCATION.
+    `grep -arn -- 'hostname' src/lib/escalate.ts` returns 0 on merge-base 1ca2ba5, against a
+    same-invocation control `grep -arn -- 'renderIssueBody' src/lib/escalate.ts` returning 11. The
+    pattern therefore MISSES the base and can only match on head, so it cannot be downgraded to
+    `executed_stale` under W1-T273. The pattern carries no `" in "` and the proof names an explicit
+    path, so `parseDialectGrep` splits it correctly.
+
+    CRITERION 4 EXISTS BECAUSE OF THIS REPO'S OWN COVERAGE TRAP, NOT AS PADDING. Criteria 1, 2, 3
+    and 5 can all be satisfied with an injected reader, which would leave the DEFAULT `hostname()`
+    arm unexecuted and uncovered — the shape CLAUDE.md names as "when every test injects a fake,
+    the seam's default implementation is unreachable". Criterion 4 runs it with nothing injected.
+    It asserts NON-EMPTINESS rather than a literal, because a test pinning a specific machine name
+    would pass on one unit and fail on every other — the precise unattributability this task exists
+    to fix would otherwise be re-introduced inside the suite.
+
+    ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN POSITIVE CONTROL. W1-T966 read 0 on all four
+    at 1ca2ba5: ids declared anywhere under plan/ (0, control W1-T965 = 11), shard FILENAMES under
+    plan/tasks.d/ (0 of 334, control W1-T965 = 1), refs/rmd-id/* on origin (0, control
+    refs/rmd-id/W1-T946 = 1), and the file list of every OPEN PR. SURFACE 4'S ZERO IS CONTROLLED
+    RATHER THAN ASSUMED: there is exactly ONE open PR (#2093), the same query returned its file
+    list non-empty, and that list holds a single plan/feedback/ entry and no shard — so the empty
+    set is real rather than a failed query. The tree max across plan/tasks.yaml and every
+    plan/tasks.d/ shard is 965, so 966 is both free and the next contiguous id.
+
+    NO RESERVATION REF WAS PUSHED. This shard rests on the four-surface sweep above alone. Refs are
+    blocking-but-not-authoritative in the absent direction in any case — they cover a small
+    fraction of declared ids, so a ref reading absent proves nothing on its own and the tree
+    remains the authority.
