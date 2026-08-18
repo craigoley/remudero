@@ -1,0 +1,212 @@
+- id: W1-T968
+  title: "THE ARM REPORT ANSWERS ABOUT THE CALL WHILE THE OPERATOR IS ASKING ABOUT THE PR — armReportPhrase is a pure function of one enum, so a PR the review lane armed three seconds earlier prints NOT armed the moment the redundant second gh pr merge --auto returns arm-error-ignored: consult the arm the ledger already recorded for this head before choosing the phrase"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    FILED FROM A RECON RE-DERIVED AT origin/main 3d91969 (six commits past the b316693e the
+    briefing read). EVERY CLAIM BELOW WAS RE-READ AT 3d91969; three briefing claims did NOT
+    survive and are corrected in the note.
+
+    (1) THE PHRASE IS A PURE FUNCTION OF ONE ENUM. `armReportPhrase` (src/run-task.ts) is a
+    single expression — `armOutcomeArmed(outcome) ? "armed (…)" : "NOT armed (…)"` — with no
+    ledger read, no PR read and no argument other than the outcome of the call that just
+    returned. It has five call sites, all the same shape: the dep-review lane, `retroCommand`,
+    `triageCommand`, the plan lane and `rmd approve`. VERIFIED: six word-bounded hits in
+    src/run-task.ts and zero in src/lib/ledger.ts, src/lib/sweep.ts, src/lib/status.ts and
+    src/lib/analytics-route.ts, against a control symbol reading zero in all five.
+
+    (2) THE MECHANISM, READ FROM SOURCE RATHER THAN INFERRED. In `triageCommand` the sequence is
+    `waitForCiGreen` then `reviewCommand(prNum)` then `armAndLogOutcome(prUrl, taskId, log)` then
+    the `say` carrying `armReportPhrase`. `reviewCommand` reaches `runReview`, whose body calls
+    `armIfVerdictPermits`; on a full PASS that already arms and already ledgers through
+    `logArmAttribution` with `lane: "review"`, `head_sha`, `task_id`, `pr_number` and `pr_url`.
+    The later `armAndLogOutcome` therefore issues a SECOND `gh pr merge --auto` against a PR that
+    is already armed. `attemptArm` catches the resulting error, `armFailureAction` classifies it
+    as not the clean-status case, and the branch returns `arm-error-ignored` — glossed in
+    `armOutcomeReason` as treated as transient and left for the next sweep pass. `armOutcomeArmed`
+    (src/lib/sweep.ts) is TRUE only for `armed` and `direct-merged`, so the phrase renders NOT
+    armed for a pull request that is armed.
+
+    (3) THE DISTINCTION IS THE WHOLE DESIGN, AND IT IS NOT A BUG IN `armOutcomeArmed`. That
+    predicate is correct: `arm-error-ignored` genuinely means THIS CALL armed nothing, and the
+    sweep depends on that reading to retry. The defect is that the console line describes the CALL
+    while the operator reading it is asking about the PULL REQUEST. Nothing else changes.
+
+    (4) THE REPORTING PATH CAN REACH THE LEDGER, AND THE COST WAS MEASURED. All five sites live in
+    src/run-task.ts and each already holds `ledgerPath` as a local — every one builds a lane
+    closure of the form `appendLedger(ledgerPath, …)`. `readLedgerLines` (src/lib/status.ts) is
+    already imported into that module and already invoked on this exact path: `realArmDeps`
+    supplies `ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig()))`, which
+    `armAutoMerge` calls before it ever reaches `attemptArm`. So the marginal cost is ONE
+    additional full read of the LIVE ledger file per lane invocation — `readLedgerLines` reads the
+    live path only and JSON-parses every line, measured on this host at 8055 lines and 2254162
+    bytes. It is PER CALL, not per pass; but each of the five sites runs once per command
+    invocation rather than inside a per-PR loop, so it is not a hot path in the sweep sense.
+
+    (5) THE WINDOW IS THE HEAD SHA, NOT A CLOCK, AND THERE IS ONE MEASURED OBSTACLE. Keying on the
+    head is the repo's own idiom — `decideArmFromLedgerVerdict` and `cappedOverrideFromLedger`
+    both take `headSha` — and it needs no recency bound: a prior arm on THIS head is the fact, and
+    a new head genuinely deserves a fresh attempt. THE OBSTACLE: the row the operator lanes write
+    carries NO head sha. `armAndLogOutcome` passes `{ outcome }` as its whole extra, while
+    `armIfVerdictPermits` passes `head_sha` explicitly; and `armAutoMerge` resolves the head
+    internally through `deps.headSha` and DISCARDS it. The reporting site must therefore obtain
+    the head itself. `readHeadShaRest` is exported from the same module and its own doc states it
+    reads over REST and never `gh --json`, which is the call to use.
+
+    (6) `arm-error-ignored` IS NOT THE ONLY OUTCOME WITH THIS SHAPE. `armOutcomeArmed` maps five
+    outcomes to false. `head-unavailable` has the SAME shape: it is returned when `deps.headSha`
+    throws, before any arm is attempted, and a failed head read says nothing whatever about
+    whether the pull request is armed — a PR the review lane armed seconds earlier reports NOT
+    armed. The remaining three do not: `ledger-refused` fires only when no `review.posted` matches
+    the current head, which cannot co-occur with a review-lane arm ON that head; `no-task-id`
+    returns before any attempt and every one of the five sites passes the same task id it used
+    moments earlier; and `direct-merge-failed` arises from the clean-status branch, a different
+    state. Both lying outcomes are corrected by the same read, which is why this task scopes to
+    the read and not to an outcome list.
+
+    (7) THE REGISTRATION IS A HARD BUILD CONSTRAINT, MEASURED. `DECISION_RELEVANT_LEDGER_STEPS`
+    (src/lib/ledger.ts) does NOT contain `automerge.armed` today — it carries
+    `automerge.capped_override_granted` and nothing else from that family. And
+    test/ledger-rotation.test.ts re-derives the expected set from a `consumerFiles` list that
+    INCLUDES `../src/run-task.ts`, scanning it with a regex over `.step === "…"`. So the moment
+    this task writes such a comparison in src/run-task.ts, that test fails unless the step is
+    registered. Two consumers already read the step without it being registered —
+    src/lib/autonomy.ts and src/lib/verdict-calibration.ts — so the gap predates this task; this
+    task must not inherit it silently.
+  design: |
+    THE SHAPE: one predicate over lines the ledger already carries, consulted at the five sites
+    that already print the phrase. No new mechanism, no new ledger step, no console route.
+
+    (i) ONE EXPORTED PREDICATE, PURE OVER LINES. Something of the form
+    `priorArmOnHead(lines, prUrl, headSha)` — given already-read ledger lines, does a
+    `automerge.armed` row exist for this pull request on this head. PURE and EXPORTED so the
+    falsifiers assert on the predicate rather than on a mock's call count, exactly as
+    `armReportPhrase`'s own doc says it was made pure for that reason.
+
+    (ii) THE PHRASE GAINS THE FACT, NOT A SECOND RULE. `armReportPhrase` keeps its enum argument
+    and gains the prior-arm fact as an additional input. It must NOT re-derive which outcomes
+    count as armed — that rule lives in exactly one place, `armOutcomeArmed`, and this task does
+    not touch it. A builder who edits `armOutcomeArmed` has changed what the sweep retries and is
+    no longer building this task.
+
+    (iii) THE KEY IS THE PULL REQUEST PLUS THE HEAD. `pr_url` is present on every row
+    `logArmAttribution` writes; `head_sha` is present on the review-lane row, which is the row
+    that matters because it is the one that actually armed. Matching on `pr_url` alone would claim
+    arming across a re-head, which criterion 3 exists to refuse.
+
+    (iv) THE HEAD IS READ OVER REST. `readHeadShaRest` is already exported from src/run-task.ts.
+    A builder must not substitute `gh pr view --json`: that path is GraphQL, and this account's
+    GraphQL budget has been exhausted repeatedly.
+
+    (v) THE STEP MUST BE REGISTERED IN THE SAME CHANGE. See rationale (7). Criterion 5 tests the
+    registration directly rather than leaving it to be discovered when the rotation test reddens.
+
+    (vi) THE FALSIFIER IS A TRIPLE AND MUST RUN IN ONE INVOCATION. A function that always answers
+    armed passes criterion 1 and fails criterion 2; one that never answers armed does the reverse;
+    one that ignores the head passes both and fails criterion 3. All three must run in the same
+    suite invocation or the pair is unverified.
+
+    (vii) OUT OF SCOPE, WITH REASONS. src/lib/sweep.ts is NOT declared: `armOutcomeArmed` lives
+    there and must not move. The `lane` field having exactly one reader across src/ is ADJACENT
+    and deliberately left alone — see the note. And no new ledger step is introduced; this task
+    reads what the arm already writes.
+  acceptance:
+    - claim: "a prior arm on this head makes the phrase report armed even though this call returned arm-error-ignored"
+      proof: "unit test: W1-T968: a prior arm on this head reports armed despite an arm error ignored"
+    - claim: "a ledger carrying no prior arm still makes the phrase report not armed"
+      proof: "unit test: W1-T968: no prior arm reports not armed"
+    - claim: "a prior arm recorded against a different head sha still makes the phrase report not armed"
+      proof: "unit test: W1-T968: a prior arm on a different head reports not armed"
+    - claim: "the head-unavailable outcome is corrected by the same read rather than left lying"
+      proof: "unit test: W1-T968: head unavailable with a prior arm on this head reports armed"
+    - claim: "the step the new read consults is registered so a rotation cannot archive the evidence"
+      proof: "unit test: W1-T968: automerge armed is registered in the decision relevant ledger steps"
+    - claim: "the phrase must answer about the pull request rather than about the call"
+      proof: "grep: the phrase must answer about the pull request rather than about the call in plan/tasks.d/W1-T968-arm-report-describes-the-call.yaml"
+  risk: high
+  origin: "oper#arm-report-describes-the-call-2026-08-18"
+  plan_refs: ["W1-T449", "W1-T230"]
+  files: [src/run-task.ts, src/lib/ledger.ts, test/arm-outcome-five-sites.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THREE BRIEFING CLAIMS DID NOT SURVIVE RE-DERIVATION AND ARE CORRECTED HERE RATHER THAN
+    CARRIED. (a) The briefing said the session credential 403s on refs/rmd-id/* and to expect
+    exit 1. MEASURED TWICE at 2026-08-18: exit 0 both times, the ref was created, and the readback
+    matched the pushed nonce. The reservation is real, not a sweep-only claim. (b) The briefing
+    said 103 of 277 shards declare src/run-task.ts. RE-DERIVED: 198 of 334, against a control
+    file that no shard declares reading 0. (c) The briefing located the review-lane arm in
+    `reviewCommand`; the call to `armIfVerdictPermits` is in `runReview`, which `reviewCommand`
+    reaches. The mechanism is unchanged; the symbol is not.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only risk high, and `subsystemsOf` derives subsystems from
+    the acceptance-criteria text as well as from `files:`. This shard spans the run-task reporting
+    sites, the ledger step registry and one suite, and its criteria name arming, head shas and
+    rotation retention, so no list satisfying its own scope reaches clean at medium.
+
+    src/run-task.ts MUST BE DECLARED AND THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING.
+    All five reporting sites, `armReportPhrase`, `armAndLogOutcome`, `logArmAttribution` and
+    `readHeadShaRest` are in that one file; a list omitting it would not cover the change. 198 of
+    334 shards already declare it, so this shard will serialise against a large share of the
+    queue under `overlappingPaths`. That is the price of the file being what it is, and it is
+    recorded rather than dodged by under-declaring.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT 3d91969, NOT GUESSED. `armReportPhrase`:
+    run-task.ts 6, everywhere else 0. `logArmAttribution`: run-task.ts 5, elsewhere 0.
+    `armAndLogOutcome`: run-task.ts 11, elsewhere 0. `readHeadShaRest`: run-task.ts 4, elsewhere
+    0. `DECISION_RELEVANT_LEDGER_STEPS`: ledger.ts 9, which is why that file is declared.
+    `armOutcomeArmed`: sweep.ts 3 — AND THAT IS EXACTLY WHY src/lib/sweep.ts IS NOT DECLARED, since
+    the rule it owns must not move. CONTROL: a symbol absent from the module set reads 0 in all
+    five files, so these counts discriminate rather than matching everything.
+    test/arm-outcome-five-sites.test.ts exists today and already exercises `armReportPhrase`, so
+    the falsifiers have a home that is not test/run-task.test.ts, whose file-level coverage
+    crashes are documented.
+
+    ADJACENT AND DELIBERATELY LEFT: the ledger `lane` field is written from 15 distinct closure
+    sites and READ by exactly one module across all of src/, src/lib/analytics-route.ts. Controls
+    taken in the same invocation: `.step` is read in 31 files and `head_sha` in 8, so that one is
+    a real finding and not a broken query. It is a different concern — attribution generally —
+    and this task does not widen into it.
+
+    NO NEW LEDGER STEP AND NO CONSOLE ROUTE. The arm already ledgers through `logArmAttribution`;
+    this task adds a READER, which is why criterion 5 registers the step it reads. This repo has
+    eight measured mechanisms that merged green and nothing calls, and a new emission with no
+    named consumer would be the ninth.
+
+    PROOF NOTES. Five criteria use the name-filtered `unit test:` form rather than a whole-file
+    path, so each names the behaviour it proves. Each title was measured against test/ with
+    `grep -rlF` and matched ZERO files, against a control title lifted from the real suite that
+    matched one. Every title is plain prose under 100 characters with no comma, no semicolon-space
+    and no regex metacharacter, so `looksLikeScenarioNarrative` cannot fail them and
+    `parseTestTarget`'s escaped-literal match has nothing to mishandle. The sixth is a
+    single-line `grep:` with an explicit path, driven from the full bullet text rather than a path
+    slug, verified by hand to read one hit at head and zero at the merge base.
+
+    ONE ADVISORY IS ACCEPTED KNOWINGLY RATHER THAN SILENCED. `rmd lint-plan` emits exactly one
+    finding against this shard, a `proof-scope` WARNING that criterion 6's grep names this shard's
+    own path while `files:` does not list it. It is advisory, never blocking — the run carried 618
+    warnings and 179 blocking tasks and NOT ONE blocking line names W1-T968. The warning is
+    accepted rather than fixed because both remedies are worse: adding the shard's own path to
+    `files:` would put the filing inside its own implementation scope, and repointing the grep at
+    a declared source path would name a file this change does not touch, so the pattern would read
+    zero at head and the criterion would fail executed rather than merely being unscoped. The
+    builder does not need to touch this path, so the scope guard the warning predicts will not
+    fire on the implementation branch.
+
+    ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN CONTROL. W1-T968 read 0 on all four
+    seconds before the reservation: refs/rmd-id/* (control refs/rmd-id/W1-T965 = 1, negative
+    refs/rmd-id/W1-T999999 = 0), shard filenames on origin/main (334 enumerated, control
+    W1-T965 = 1), every OPEN PR's file list (control W1-T966 = 1), and every OPEN PR's title
+    (2 readable titles; the closed-state endpoint returned 5 rows, so the open set is real
+    rather than a failed query). SURFACE 3 EARNED ITS PLACE: W1-T966, the id the tree and the
+    refs both said was free, is CLAIMED by open PR 2094's file list. A tree-and-refs sweep would
+    have collided.
+
+    ONE SURFACE-2 QUERY READ 0 WITH A FAILING CONTROL AND WAS DISCARDED RATHER THAN BELIEVED. A
+    word-bounded `git grep -lE '\bW1-T965\b'` over plan/ at origin/main returned 0 files for an id
+    that is declared there; the same query without the boundary assertions, and the fixed-string
+    form, both returned 1. The fixed-string form is what the sweep above used.
