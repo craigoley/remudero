@@ -5172,6 +5172,23 @@ export interface PostFixReverificationDeps {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Preview only: derive matches, take no effects, write no ledger lines. */
   dryRun?: boolean;
+  /**
+   * OPTIONAL reader for a PR's currently-failing required checks (W1-T977), consulted ONLY when
+   * this pass's own snapshot carries `ciFailures: undefined` AND `checksState === "pending"` —
+   * the one state {@link CI_GATE_TIMEOUT_FIX_CLASS} exists to match and the one state
+   * `buildOpenPrViews` (run-task.ts) never populates `OpenPrView.ciFailures` for: that producer
+   * only fetches `ciFailures` when the AGGREGATE `checksState` is `"red"`, but a `ci-gate`
+   * timeout is BY DEFINITION observed while a sibling required check is still running, i.e.
+   * `checksState === "pending"` — so the class was structurally unable to see its own trigger.
+   * Never consulted when `checksState` is `"green"`/`"none"` (nothing failing to read) or
+   * already `"red"` (the snapshot's own `ciFailures` already carries it) — narrowly scoped to
+   * the one gap this task closes, never a blanket re-fetch, and never widening what
+   * `buildOpenPrViews` itself populates (design note iii — no other rung's view changes).
+   * OMITTED (the default), behaviour is BYTE-IDENTICAL to before this dep existed: every
+   * existing caller/fixture that doesn't supply it sees a pending PR's `ciFailures` stay
+   * `undefined` exactly as today (criterion 5).
+   */
+  readCiFailures?: (pr: OpenPrView) => CiFailure[] | undefined | Promise<CiFailure[] | undefined>;
 }
 
 /** One PR's outcome this pass. */
@@ -5225,7 +5242,24 @@ export async function runPostFixReverification(
   let redriven = 0;
 
   for (const pr of openPrs) {
-    const cls = classes.find((c) => mergedFixPrNumbers.has(c.fixPrNumber) && c.matchesFailure(pr));
+    // W1-T977: the shared snapshot's own `ciFailures` is undefined for a PENDING PR by
+    // construction (`buildOpenPrViews` only fetches it when `checksState === "red"`) — but a
+    // `ci-gate` required-check timeout is observed EXACTLY while a sibling is still pending, so
+    // matching on the snapshot field alone can never fire for the one class this loop exists to
+    // catch. Consult the injected reader ONLY in that gap (undefined + pending) — never for a
+    // green/none PR (nothing failing) and never overriding an already-populated red snapshot —
+    // so every other rung's view of `pr` stays untouched (design note iii).
+    let extraCiFailures: CiFailure[] | undefined;
+    if (pr.ciFailures === undefined && pr.checksState === "pending" && deps.readCiFailures) {
+      try {
+        extraCiFailures = await deps.readCiFailures(pr);
+      } catch {
+        // Best-effort, mirrors fetchCiFailures' own degrade-to-nothing contract: a failed read
+        // just leaves this PR unmatched this pass rather than aborting the whole reconciliation.
+      }
+    }
+    const matchPr: OpenPrView = extraCiFailures !== undefined ? { ...pr, ciFailures: extraCiFailures } : pr;
+    const cls = classes.find((c) => mergedFixPrNumbers.has(c.fixPrNumber) && c.matchesFailure(matchPr));
     if (!cls) {
       results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "unmatched" });
       continue;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -510,4 +510,177 @@ test("a custom class table is honored — covering a new systemic fix is a row, 
     [customClass],
   );
   assert.equal(summary2.results[0].outcome, "unmatched");
+});
+
+// ── W1-T977 — THE RUNG IS BLIND EXACTLY WHEN IT IS NEEDED. `buildOpenPrViews` only fetches
+// `OpenPrView.ciFailures` when the AGGREGATE `checksState` is `"red"`, but a `ci-gate` required-
+// check timeout is BY DEFINITION observed while a sibling required check is still running — i.e.
+// `checksState === "pending"` — so the shared snapshot's `ciFailures` is undefined in the one
+// state this class exists to catch. `PostFixReverificationDeps.readCiFailures` closes that gap:
+// an OPTIONAL reader, consulted only for `undefined` + `"pending"`, never touching what any other
+// rung observes off the same `OpenPrView`. ──────────────────────────────────────────────────────
+
+/** A PR blocked the same way `ciGateTimeoutPr` is, EXCEPT the sibling this task's rationale
+ *  describes is still running: the aggregate `checksState` is `"pending"` (not `"red"`), so
+ *  `buildOpenPrViews` never populated `ciFailures` — the shared snapshot is exactly what the
+ *  rung sees BEFORE this task's reader exists. */
+function pendingCiGateTimeoutPr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return pr({
+    reviewState: "success",
+    checksState: "pending",
+    ciFailures: undefined,
+    ...over,
+  });
+}
+
+/** The evidence a live `readCiFailures` reader would return for the pending PR above — the SAME
+ *  ci-gate-timeout shape `ciGateTimeoutPr` carries directly in its snapshot. */
+const CI_GATE_TIMEOUT_EVIDENCE = [
+  {
+    name: "ci-gate",
+    logTail: "ci-gate: timed out waiting for required check(s) to complete: mutation-ratchet",
+  },
+];
+
+test("W1-T977: the redrive rung matches a ci-gate timeout while a sibling is pending", async () => {
+  const deps = fakeDeps({ readCiFailures: () => CI_GATE_TIMEOUT_EVIDENCE });
+  const merged = new Set([820]);
+
+  const summary = await runPostFixReverification([pendingCiGateTimeoutPr()], merged, deps);
+
+  assert.equal(summary.redriven, 1, "a pending ci-gate timeout must now be redriven, not silently skipped");
+  assert.equal(summary.results[0].outcome, "redriven");
+  assert.equal(summary.results[0].fixClassId, CI_GATE_TIMEOUT_FIX_CLASS.id);
+  assert.equal(deps.redriveCalls.length, 1);
+});
+
+test("W1-T977: a pr matching no merged class is still left untouched by the rung", async () => {
+  const deps = fakeDeps({
+    // A pending PR whose reader turns up a REAL, unrelated failure — never ci-gate-timeout-shaped.
+    readCiFailures: () => [{ name: "commitlint", logTail: "header-max-length: 108 chars exceeds the 100 cap" }],
+  });
+  const merged = new Set([820]);
+
+  const summary = await runPostFixReverification([pendingCiGateTimeoutPr()], merged, deps);
+
+  assert.equal(summary.results[0].outcome, "unmatched");
+  assert.equal(summary.redriven, 0);
+  assert.equal(deps.redriveCalls.length, 0, "no redrive call for an unmatched pr");
+  const lines = readLedgerLines(deps.ledgerPath);
+  assert.equal(lines.filter((l) => l.step === "sweep.post_fix_redriven").length, 0, "no ledger line either");
+});
+
+test("W1-T977: the rung reads failures through its own injected reader", async () => {
+  const readCalls: OpenPrView[] = [];
+  const candidate = pendingCiGateTimeoutPr();
+  const deps = fakeDeps({
+    readCiFailures: (p) => {
+      readCalls.push(p);
+      return CI_GATE_TIMEOUT_EVIDENCE;
+    },
+  });
+  const merged = new Set([820]);
+
+  const summary = await runPostFixReverification([candidate], merged, deps);
+
+  assert.equal(readCalls.length, 1, "the injected reader is consulted exactly once for this pr");
+  assert.equal(readCalls[0].prNumber, candidate.prNumber);
+  assert.equal(summary.results[0].outcome, "redriven", "the match came from the reader, not the (undefined) snapshot field");
+  // The reader's result is never written back into the shared snapshot object this rung was
+  // handed — matching it never widens what any other rung observes off the same `OpenPrView`.
+  assert.equal(candidate.ciFailures, undefined, "the caller's own pr object is never mutated");
+});
+
+test("W1-T977: the fix rung strike accounting is unchanged by the rung's own read", async () => {
+  let unrelatedReaderCalled = false;
+  const matchedPending = pendingCiGateTimeoutPr({ prNumber: 7, prUrl: "url/7", priorStrikes: 2 });
+  const unrelatedRed = unrelatedRedPr({ priorStrikes: 2 });
+  const originalUnrelatedCiFailures = unrelatedRed.ciFailures;
+  const deps = fakeDeps({
+    readCiFailures: (p) => {
+      // The reader must be scoped to the pending+undefined gap this task closes — an already-red
+      // pr's `ciFailures` came straight off the shared snapshot and must never be re-read here.
+      if (p.prNumber === unrelatedRed.prNumber) unrelatedReaderCalled = true;
+      return CI_GATE_TIMEOUT_EVIDENCE;
+    },
+  });
+  const merged = new Set([820]);
+
+  const summary = await runPostFixReverification([matchedPending, unrelatedRed], merged, deps);
+
+  assert.equal(unrelatedReaderCalled, false, "the reader is never consulted for an already-red pr");
+  const matchedResult = summary.results.find((r) => r.prNumber === matchedPending.prNumber);
+  const unrelatedResult = summary.results.find((r) => r.prNumber === unrelatedRed.prNumber);
+  assert.equal(matchedResult?.outcome, "redriven");
+  assert.equal(matchedResult?.strikesCredited, 2, "this rung's own credit-back is unaffected by the added read");
+  assert.equal(unrelatedResult?.outcome, "unmatched", "an unrelated red pr's disposition path is untouched");
+  // The unrelated pr's own ciFailures — what the fix rung's ci-log mode and strike ladder read —
+  // is byte-identical to what buildOpenPrViews handed in; this task never widens it.
+  assert.deepEqual(unrelatedRed.ciFailures, originalUnrelatedCiFailures);
+});
+
+test("W1-T977: omitting the reader leaves the rung's behaviour unchanged", async () => {
+  // No `readCiFailures` supplied at all — every existing caller/fixture in this suite (and every
+  // caller of runPostFixReverification before this task) takes this path.
+  const deps = fakeDeps();
+  const merged = new Set([820]);
+
+  const summary = await runPostFixReverification([pendingCiGateTimeoutPr()], merged, deps);
+
+  assert.equal(summary.results[0].outcome, "unmatched", "byte-identical to before the reader existed: still blind");
+  assert.equal(summary.redriven, 0);
+  assert.equal(deps.redriveCalls.length, 0);
+});
+
+// ── W1-T977: `sweepPostFixReverification`'s OWN default `readCiFailures` — every test above
+// drives `runPostFixReverification` (lib/sweep.ts) directly with a hand-supplied reader; none of
+// them execute the real call site's fallback (`ghJson(["pr","view",…,"statusCheckRollup"])` +
+// `fetchCiFailures`) that fires when the real caller (`runSweep`'s daemon wiring, run-task.ts
+// line ~16443/~17140) omits `opts.readCiFailures` entirely. A PATH-stubbed `gh` (the same
+// pattern test/check-wait-progress.test.ts uses for `waitForCiGreen`) drives that fallback for
+// real, with zero network and no real `gh` binary.
+test("BEHAVIORAL (W1-T977): sweepPostFixReverification's own default reader does a live gh read for a pending PR and redrives the ci-gate-timeout match", async () => {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "post-fix-reverify-default-reader-bin-"));
+  writeFileSync(
+    join(fakeBinDir, "gh"),
+    [
+      "#!/bin/bash",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      "  echo '{\"statusCheckRollup\":[{\"name\":\"ci-gate\",\"conclusion\":\"TIMED_OUT\"," +
+        "\"detailsUrl\":\"https://github.com/o/r/actions/runs/1/job/42\"}]}'",
+      "  exit 0",
+      "fi",
+      "if [[ \"$1\" == 'run' && \"$2\" == 'view' ]]; then",
+      "  echo 'ci-gate: timed out waiting for required check(s) to complete: mutation-ratchet'",
+      "  exit 0",
+      "fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(fakeBinDir, "gh"), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  try {
+    const pushes: Array<{ branch: string; head: string }> = [];
+    const candidate = pendingCiGateTimeoutPr({ prNumber: 1977, prUrl: "url/1977", headRefName: "run-W1-T1977-1" });
+
+    const summary = await sweepPostFixReverification("o", "r", [candidate], ledgerPath(), "SWEEP-WIRE-977", () => {}, {
+      isMergedByNumber: (n) => n === 820,
+      pushEmptyCommit: (_repoRoot, branch, head) => {
+        pushes.push({ branch, head });
+        return "newsha";
+      },
+      // Deliberately NO `readCiFailures` override — this drives the module's own default.
+    });
+
+    assert.equal(summary.redriven, 1, "the live gh read must surface the ci-gate timeout the pending snapshot hid");
+    assert.equal(summary.results[0].outcome, "redriven");
+    assert.equal(summary.results[0].fixClassId, CI_GATE_TIMEOUT_FIX_CLASS.id);
+    assert.equal(pushes.length, 1);
+    assert.equal(pushes[0].branch, "run-W1-T1977-1");
+  } finally {
+    process.env.PATH = savedPath;
+  }
 });
