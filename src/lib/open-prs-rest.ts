@@ -179,6 +179,21 @@ export interface GhCallPacer {
    * with two different responses.
    */
   recordResult(rateLimited: boolean, budget?: GhBudgetReading): void;
+  /**
+   * W1-T1007 — OPTIONAL. Block the calling thread for exactly `ms`, using the SAME clock `wait()`
+   * already blocks on (a real pacer's real `sleepSync`/`now`, Atomics.wait-backed by default; a
+   * test's injected fake). {@link paceGhEntry}'s bounded refusal backoff calls this to wait out a
+   * `Retry-After` or the exponential-with-jitter floor between one `rate_limit`-classified
+   * refusal and its retry — REUSING this pacer's own clock rather than adding a second,
+   * uninjectable one.
+   *
+   * OPTIONAL, and absent on a hand-rolled `GhCallPacer` object that implements only
+   * `wait`/`recordResult` (every fixture written before this task, in this suite and
+   * test/status.test.ts's W1-T468 fixtures): `paceGhEntry` calls this through `?.`, so such a
+   * fixture still gets the bounded retry LOOP (the count of `wait()`/`recordResult()` calls it
+   * makes changes), it just never actually sleeps — no fixture built before this task can hang.
+   */
+  sleepSync?(ms: number): void;
 }
 
 /**
@@ -243,6 +258,7 @@ export function createGhCallPacer(
       // one (there is no "widen forever" state for either input to inherit).
       standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;
     },
+    sleepSync,
   };
 }
 
@@ -258,32 +274,136 @@ function defaultBlockingSleepSync(ms: number): void {
 }
 
 /**
+ * W1-T1007 — floor wait (ms) {@link paceGhEntry}'s bounded refusal backoff uses when a
+ * `rate_limit`-classified refusal carries no parseable `Retry-After`. ONE MINUTE: GitHub's own
+ * guidance for the secondary limit is a signal to slow down, never to retry (module doc, rationale
+ * (3)) — a shorter floor is still "pacing through a refusal at a fixed gap", which is the exact
+ * defect this task closes. {@link DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS} (10s) stays what it was: the
+ * gap {@link GhCallPacer.recordResult} widens future DIFFERENT guarded calls to. This is a
+ * separate, much longer wait for retrying the SAME refused call.
+ */
+export const DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS = 60_000;
+
+/**
+ * W1-T1007 — the bounded TOTAL attempt count {@link paceGhEntry} allows for one guarded call,
+ * counting the first try. `execFileSync` is synchronous (module doc above: "the daemon's one
+ * thread is already parked"), so an unbounded retry converts a refusal into a hang (design iv).
+ * 4 (one try plus up to three backoff waits) tops out around ~7 minutes of worst-case wait before
+ * jitter (60s + 120s + 240s) for ONE guarded call, and then THROWS — so the caller's existing
+ * strike/escalation handling (design v) still sees exactly the one failed call it already expects,
+ * never fewer, never more.
+ */
+export const DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS = 4;
+
+/**
+ * W1-T1007 — additive-only jitter, as a fraction of the base wait (design iii: "jitter is not
+ * decoration here" — several independently-built call sites can land in the same wall-clock
+ * second, and jitter is what stops them re-colliding on the retry). ADDITIVE ONLY, never
+ * subtracted, so an honoured `Retry-After` or the floor stays a true LOWER bound (criteria 1 & 2)
+ * — jitter can only push a wait longer, never shorter than what was promised or required.
+ */
+export const DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION = 0.25;
+
+/**
+ * Parse a `Retry-After` value, in seconds, off whatever text a failing `gh` invocation actually
+ * surfaced. W1-T1007 rationale (5): the failing path here carries stderr TEXT, never a captured
+ * header — `gh api -i` reads 0 in this module — so this is a text parse, not an HTTP header
+ * reader, and returns `undefined`, never a manufactured wait, for the overwhelming majority of
+ * refusals that carry no such text today. Design (ii): "the extractor is an injected function
+ * ... defaulted to a parse of what the CLI already surfaces" — a caller that DOES capture a real
+ * header (a future `gh api -i` site) passes its own `backoff.retryAfterSeconds` instead.
+ */
+export function defaultGhRetryAfterSeconds(err: unknown): number | undefined {
+  const e = err as { stderr?: string | Buffer; message?: string } | null | undefined;
+  const text = `${e?.stderr ?? ""}\n${e?.message ?? ""}`;
+  const match = /retry-after\s*:?\s*(\d+)/i.exec(text);
+  if (!match) return undefined;
+  const seconds = Number(match[1]);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+/**
+ * W1-T1007 — {@link paceGhEntry}'s injectable refusal-backoff policy. Every field defaults to the
+ * production behaviour documented on the constants/function above; a test overrides whichever it
+ * needs to assert deterministically (mirrors {@link createGhCallPacer}'s own `now`/`sleepSync`
+ * injection seam).
+ */
+export interface GhRefusalBackoffOpts {
+  /** Defaults to {@link defaultGhRetryAfterSeconds}. */
+  retryAfterSeconds?: (err: unknown) => number | undefined;
+  /** Source of jitter in `[0, 1)`. Defaults to `Math.random`. */
+  random?: () => number;
+  /** Defaults to {@link DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS}. */
+  floorMs?: number;
+  /** Defaults to {@link DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS}. */
+  maxAttempts?: number;
+}
+
+/**
+ * The wait (ms) before retrying after the `attempt`-th refusal (0 for the very first). Honours
+ * `retryAfterSeconds(err)` when it resolves one (criterion 1); otherwise exponential off
+ * `floorMs`, doubling per successive refusal (criterion 3). Jitter is layered on top,
+ * ADDITIVE ONLY (see {@link DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION}'s own doc).
+ */
+function ghRefusalBackoffMs(
+  attempt: number,
+  err: unknown,
+  opts: { retryAfterSeconds: (err: unknown) => number | undefined; floorMs: number; random: () => number },
+): number {
+  const afterSeconds = opts.retryAfterSeconds(err);
+  const base = afterSeconds !== undefined ? Math.max(0, afterSeconds) * 1000 : opts.floorMs * 2 ** attempt;
+  return Math.round(base + opts.random() * base * DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION);
+}
+
+/**
  * Guard one `gh` ENTRY POINT with a {@link GhCallPacer} (W1-T468): waits its turn, runs `call`,
  * and reports the outcome back to the pacer via `isRateLimited` — `true` when the thrown error
  * classifies as `rate_limit` (design (iii)), so a LATER guarded call on the same pacer slows down
  * rather than colliding again. `pacer` is OPTIONAL and, when omitted, `call` runs immediately with
  * no gap and no result recorded — the exact pre-W1-T468 behavior, so every existing caller that
- * does not pass a pacer is unaffected byte-for-byte. Rethrows `call`'s own error unchanged (never
- * wraps it), so a caller's existing catch/classify logic keeps working verbatim.
+ * does not pass a pacer is unaffected byte-for-byte.
  *
- * W1-T529: `pacer.wait()` is called OUTSIDE this function's own `try` — deliberately, so a
- * {@link GhPaceFloorStandDownError} it throws propagates straight out of THIS call, un-caught and
- * un-rewrapped, before `call` ever runs. That is the stand-down: nothing here classifies it,
- * counts it as a `rate_limit` result, or feeds it back to `recordResult` a second time (it was
- * already the reading `recordResult` armed the floor from). A caller sees exactly the same shape
- * it already handles for any other thrown `gh` failure — see this module's own header doc ("a
- * fetch failure still throws exactly as `ghJson` throws today").
+ * W1-T1007 — A `rate_limit`-classified refusal no longer just widens the gap for LATER calls and
+ * rethrows THIS one: it retries THIS SAME call, honouring a `Retry-After` when `backoff` can read
+ * one off the error, otherwise waiting {@link DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS} and backing off
+ * exponentially with jitter on each further refusal (design i), bounded by
+ * {@link DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS} total tries. Every OTHER error class — and an
+ * exhausted bound — rethrows immediately, exactly as before this task: the caller still sees
+ * exactly ONE outcome per `paceGhEntry` call, never wrapped, so its existing catch/classify logic
+ * (and the strike/escalation cost it spends) keeps working verbatim (design v).
+ *
+ * W1-T529: EVERY `pacer.wait()` call here — the first, and each retry's — sits OUTSIDE this
+ * function's own `try` — deliberately, so a {@link GhPaceFloorStandDownError} any of them throws
+ * propagates straight out of THIS call, un-caught and un-rewrapped, before `call` runs (or runs
+ * again). That is the stand-down: nothing here classifies it, counts it as a `rate_limit` result,
+ * or feeds it back to `recordResult` a second time.
  */
-export function paceGhEntry<T>(pacer: GhCallPacer | undefined, isRateLimited: (err: unknown) => boolean, call: () => T): T {
+export function paceGhEntry<T>(
+  pacer: GhCallPacer | undefined,
+  isRateLimited: (err: unknown) => boolean,
+  call: () => T,
+  backoff: GhRefusalBackoffOpts = {},
+): T {
   if (!pacer) return call();
+  const floorMs = backoff.floorMs ?? DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS;
+  const maxAttempts = backoff.maxAttempts ?? DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS;
+  const retryAfterSeconds = backoff.retryAfterSeconds ?? defaultGhRetryAfterSeconds;
+  const random = backoff.random ?? Math.random;
   pacer.wait();
-  try {
-    const result = call();
-    pacer.recordResult(false);
-    return result;
-  } catch (err) {
-    pacer.recordResult(isRateLimited(err));
-    throw err;
+  let attempt = 0;
+  for (;;) {
+    try {
+      const result = call();
+      pacer.recordResult(false);
+      return result;
+    } catch (err) {
+      const limited = isRateLimited(err);
+      pacer.recordResult(limited);
+      if (!limited || attempt + 1 >= maxAttempts) throw err;
+      pacer.sleepSync?.(ghRefusalBackoffMs(attempt, err, { retryAfterSeconds, floorMs, random }));
+      attempt += 1;
+    }
+    pacer.wait();
   }
 }
 
