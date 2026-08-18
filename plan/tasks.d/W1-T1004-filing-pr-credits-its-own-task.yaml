@@ -1,0 +1,151 @@
+- id: W1-T1004
+  title: "A PLAN-ONLY FILING PR CAN CREDIT THE TASK IT JUST FILED AS IMPLEMENTED — the merged-credit path in src/lib/status.ts has no filing-PR awareness at all, so seven queued tasks are credited merged by a PR that only added their own shard, and each then leaves the queue through an optional callback that writes no ledger row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    MEASURED 2026-08-18 AT origin/main e5ef4317c, over all 1,620 commits on main joined against 1,582
+    merged PR records (#1..#2134 — coverage control passes, the lowest is #1, so no paged window
+    floor). The sweep is git-only except the open-PR surface.
+
+    (1) BOTH CREDIT PATHS OVER-CREDIT A FILING, AND THE POPULATION IS BIGGER THAN TWO.
+    TRAILER PATH: 5 commits whose diff touches ONLY `plan/` carry an anchored `Remudero-Task:`
+    trailer — #1621/W1-T426, #1477/W1-T404, #1475/W1-T403, #1293/W1-T314, #84/W1-T24b — out of 546
+    plan-only commits and 174 commits carrying any anchored trailer.
+    BRANCH PATH: 10 more sit on a `run-<id>-<epoch>` head with NO trailer — #2134/W1-T988,
+    #2129/W1-T985, #2104/W1-T974, #2101/W1-T971, #2099/W1-T968, #1804/W1-T485, #1801/W1-T463,
+    #1794/W1-T483, #1789/W1-T480, #1784/W1-T478.
+
+    (2) BUT ONLY SEVEN ARE HARMFUL, AND THE DIFFERENCE IS THE WHOLE POINT OF THIS TASK. Of the 15,
+    two are CORRECT — W1-T426's own `files:` are three plan shards and W1-T314's is its own shard, so
+    a plan-only PR is exactly the right thing to credit them. Five more are HARMLESS: W1-T404,
+    W1-T463, W1-T485, W1-T483 and W1-T480 each ALSO have a genuine implementing PR (#1709, #1775 and
+    #1813, #1807, #1798, #1795), so the extra credit is redundant rather than damaging. One is
+    INDETERMINATE (W1-T24b declares no `files:`). THE HARMFUL SET IS SEVEN, EACH CREDITED ONLY BY A
+    PLAN-ONLY PR AND EACH STILL `status: queued`: W1-T403 (#1475, trailer), W1-T478 (#1784),
+    W1-T968 (#2099), W1-T971 (#2101), W1-T974 (#2104), W1-T985 (#2129), W1-T988 (#2134).
+
+    (3) THE CONSEQUENCE IS QUIETER THAN IT LOOKS, AND THE LEDGER PROVES IT. `isDispatchEligible`
+    (src/lib/drain.ts) filters a credited task at `if (isMerged(t.id)) { opts.onFiltered?.(t,
+    "already-merged"); ... }` — AN OPTIONAL CALLBACK, NOT A LEDGER ROW. The row named
+    `dispatch.refused_already_merged` is a DIFFERENT, LATER SITE the task never reaches. MEASURED over
+    83,369 deduped ledger rows: that row fires 24 times in total and **0 times for any of the seven**,
+    against a `run.start` control of 153. So a falsely-credited task does not even produce the refusal
+    an operator might notice; it is filtered at selection and writes nothing at all.
+
+    (4) THE RULE IS RECORDED AND IS ENFORCED ONLY BY OMISSION AT ONE EMITTER.
+    `src/lib/plan-pr-emitter.ts` states it on its own `taskId` option: "OMIT for a plan-FILING PR (the
+    correctness rule above) — no argument means no trailer, never a wrong one", and the trailer is
+    appended only `if (taskId)`. `resolveOpenPrTaskId` (src/run-task.ts) cites #1527 for the same
+    rule. NOTHING REFUSES A TRAILER THAT ARRIVES ANY OTHER WAY: measured `Remudero-Task` occurrences
+    are 0 in src/lib/task-linter.ts, 0 in commitlint.config.mjs and 0 in .github/workflows/ci.yml,
+    against 6 in src/lib/review.ts — all of which are prose, and one of which actively ADVISES adding
+    a trailer "so merge credit resolves".
+
+    (5) AND THE BRANCH SHAPE HAS NO GUARD AT ALL ON THE MERGED PATH. `resolveOpenPrTaskId` DOES
+    withhold the head-ref fallback for a filing PR — `if (isPlanOnlyFilingPr(ledger, pr.url)) return
+    undefined;` — but that function serves OPEN PRs, and the trailer is consulted FIRST and returns
+    unconditionally, so it would not have stopped #1475 either. The merged-credit path is
+    `findMergedByTrailer` and `findMergedByHeadBranch` in src/lib/status.ts, where `isPlanOnlyFilingPr`
+    reads 0 and `plan_only` reads 0, against a `findMergedByHeadBranch` control of 12 in that same
+    file. There is no guard there to bypass; there is no guard there.
+  design: |
+    (i) THE PREDICATE GOES WHERE THE CREDIT IS DECIDED — src/lib/status.ts, alongside
+    `findMergedByTrailer` and `findMergedByHeadBranch`. It must distinguish THREE cases, not two.
+
+    (ii) THE SIGNAL IS THE EMITTER'S OWN POSITIVE RECORD, NEVER THE DIFF. `isPlanOnlyFilingPr`'s doc
+    already forbids the obvious shortcut in terms: the classification is taken from the `pr.opened`
+    line carrying `plan_only: true` that the filing flows write, "never inferred from the diff
+    touching only `plan/**` (a hand-authored plan PR would misclassify)". A DIFF-BASED PREDICATE IS
+    EXPLICITLY OUT — and rationale (2) shows why: it would refuse the two credits that are correct.
+
+    (iii) NO NEW MECHANISM AND NO NEW SIGNAL. The marker already exists and is already written.
+    src/lib/status.ts already reads the ledger (`readLedgerLines`, 14 invocations there), so the
+    record is reachable without a new dep, a new row or a new field. Eleven mechanisms in this repo
+    have merged green with no reader; this task adds no twelfth.
+
+    (iv) THE FALSIFIER IS FOUR CASES IN ONE RUN, AND A REFUSE-EVERYTHING PREDICATE FAILS IT. A filing
+    PR with a trailer must NOT credit; an IMPLEMENTATION PR with a trailer MUST credit; a filing PR on
+    a `run-<id>-*` branch must NOT credit; and a filing whose own declared deliverable is plan text
+    MUST still credit. Criteria 2 and 4 are the halves a blanket refusal breaks, and they must run in
+    the same invocation as criteria 1 and 3.
+
+    (v) OUT OF SCOPE, EACH WITH ITS REASON. src/run-task.ts is NOT declared — see the note; the
+    predicate is implementable in status.ts because the ledger is already read there, and declaring
+    run-task.ts would serialise this against ~209 of 349 shards for no gain. The OPEN-PR path
+    (`resolveOpenPrTaskId`) is NOT changed: it already withholds the branch fallback, and its
+    trailer-first ordering is a separate question. And NOTHING HERE RETIRES OR RE-CREDITS AN EXISTING
+    RECORD — see the note.
+  acceptance:
+    - claim: "a filing pull request that carries a trailer does not credit the task it filed"
+      proof: "unit test: W1-T1004: a filing pull request carrying a trailer does not credit its task"
+    - claim: "an implementation pull request carrying a trailer is credited exactly as today"
+      proof: "unit test: W1-T1004: an implementation pull request carrying a trailer still credits its task"
+    - claim: "a filing pull request opened from a run branch does not credit the task on that branch"
+      proof: "unit test: W1-T1004: a filing pull request on a run branch does not credit its task"
+    - claim: "a filing whose task genuinely delivers plan text is still credited by it"
+      proof: "unit test: W1-T1004: a filing whose own deliverable is plan text still credits its task"
+  risk: high
+  origin: "oper#filing-pr-credits-own-task-2026-08-18"
+  plan_refs: ["W1-T453", "W1-T471"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE SEVEN WRONGLY CREDITED RECORDS ARE NAMED AND NOT TOUCHED. W1-T403, W1-T478, W1-T968, W1-T971,
+    W1-T974, W1-T985 and W1-T988 are credited merged today by a PR that only added their own shard.
+    CORRECTING THEM IS THE OPERATOR'S ACTION AND `postMergeAmendmentViolations` GOVERNS IT. This task
+    stops the next one; it does not re-credit or retire any existing record, and a builder who amends
+    one has exceeded it.
+
+    src/run-task.ts IS DELIBERATELY NOT DECLARED, AND THAT IS LOAD-BEARING. It is declared by roughly
+    209 of 349 shards and W1-T471 serialises every task naming it. It is avoidable because the counts
+    say so: `findMergedByTrailer` reads 16 in src/lib/status.ts against 10 in run-task.ts,
+    `findMergedByHeadBranch` 12 against 1, and — decisively — `readLedgerLines` reads 14 in status.ts,
+    so the `pr.opened{plan_only:true}` marker is already reachable there without exporting or moving
+    `isPlanOnlyFilingPr` (7 invocations, all in run-task.ts). AN IMPLEMENTER WHO FINDS THE PREDICATE
+    CANNOT BE BUILT WITHOUT run-task.ts MUST AMEND THIS SHARD TO DECLARE IT rather than overrunning.
+    CONTROL: `routeSpecialists` reads 0 in status.ts, so these counts discriminate.
+    test/status.test.ts is the declared suite: `findMergedBy` reads 28 there, the highest of any test
+    file, against 0 in test/filing-forward-reference.test.ts.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN. `sizingViolation` (src/lib/task-linter.ts)
+    exempts risk === "high" outright, and `subsystemsOf` derives ids from `moduleIdFromPath` over
+    `files:` AND from a lexicon scan of the ACCEPTANCE-CRITERIA TEXT; two declared paths already give
+    two module ids before four criteria naming credit, trailers, branches and filings are read. Blast
+    radius argues DOWN: one predicate consulted at two existing call sites.
+
+    THE POPULATION WAS SIZED BEFORE ANY FIX WAS PROPOSED, AND IT SHRANK TWICE. The raw shape — a
+    plan-only diff that credits a task — matches 15. Removing the two whose task genuinely delivers
+    plan text leaves 13. Removing the five that ALSO have a real implementing PR leaves 7, and one
+    more is indeterminate. A shard filed this weekend claimed lost work that turned out to be
+    correctly-closed duplicates; the same discipline is applied here and it is why this says seven
+    rather than fifteen.
+
+    PROOF NOTES. The dialect was chosen before the criteria were written: these are BEHAVIOURAL, so
+    all four are the NAME-FILTERED `unit test:` form with an id-prefixed title, which makes each
+    self-attributing — a 2026-08-18 audit of 57 verify:human tasks found an id-prefixed title is the
+    only artifact that survives the "who created this" test, because a bare suite path is satisfied by
+    whichever task created the file first. A `demonstration:` proof would be refused outright by
+    `check-proof`, and a doc-shaped `unit test:` proof would parse, match zero and cap the review.
+    Every title is plain prose under 100 characters with no comma, no "; " and no regex metacharacter.
+    All four were verified to match ZERO files today by `grep -rlF` over test/ against a
+    same-invocation control matching 98.
+
+    ID PROVENANCE — THREE GIT SURFACES FIRST, THEN THE OPEN-PR SURFACE, ZERO `/rate_limit` CALLS.
+    W1-T1004 read 0 on all four at e5ef4317c: refs/rmd-id/* (94 refs), shard filenames on origin/main
+    (352), ids declared anywhere under plan/ (7,176 mentions), and every OPEN PR's title AND file list
+    (2 PRs, 2 files). Positive controls on the same corpus: W1-T992 = 4, W1-T996 = 12, W1-T988 = 14,
+    W1-T977 = 14. 993 through 1003 all read non-zero and were rejected.
+    THE REF WAS RE-SWEPT IMMEDIATELY BEFORE PUSHING — `git ls-remote refs/rmd-id/W1-T1004` returned 0
+    rows — because a lane took W1-T991 between two sweeps three minutes apart today.
+    THE MINT USED THE PLAIN REFSPEC: orphan payload over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-76471-1787077170121032000, no `+` and no lease, exit status into a variable:
+    PUSH RC=0, `* [new reference] e545135c71cf3bbe9be2f49cbe546a62c11df54b -> refs/rmd-id/W1-T1004`,
+    readback equal and nonce matched. THE GATE WAS PROVEN ARMED ON THE SAME INVOCATION: a plain push
+    of a fresh orphan at the already-taken refs/rmd-id/W1-T996 returned RC=1 with `! [rejected]` and
+    left that ref unchanged at 81d79a52c91d9015b131afbc92b5538e2e2c5fc9.
