@@ -16,5 +16,19 @@ raw: "WORKER-HOME CONFIG RACE — 14 recon runs between 2026-08-03T00:54Z and
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2120
+summary:
+  headline: Config loss vanished—investigate or close?
+  what_happened: 14 recon runs logged missing .claude.json Aug 3 over 11 hours,
+    despite backups existing and live files intact. Stopped at 12:03Z; hasn't
+    recurred in 15 days.
+  decision: Close this incident as resolved or escalate for root-cause investigation.
+  options:
+    - label: Close incident; add stderr alert for config unavailability
+      consequence: Treats issue as resolved; adds monitoring but no investigation
+    - label: Escalate for investigation of backup/restore race condition
+      consequence: Prevents future production impact; higher effort even if issue was
+        environmental
+    - label: Keep watch; escalate only if error message recurs
+      consequence: Lowest cost; validates fix actually works before investing in
+        investigation
