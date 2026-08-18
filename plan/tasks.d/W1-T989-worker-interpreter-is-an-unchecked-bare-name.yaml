@@ -1,0 +1,179 @@
+- id: W1-T989
+  title: "the JS RUNTIME every worker spawn execs is a BARE NAME resolved from an inherited PATH — the SDK defaults `executable` to `\"node\"`, `buildWorkerEnv` copies PATH wholesale, and nothing preflights, records or pins it, so whichever node the daemon happened to start with silently becomes the fleet's interpreter and its disappearance is a spawn error the diagnosis line reports as `unresolved`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    FILED FROM fb-1785784424838-179bcf (2026-08-03, origin cli), which observed a live worker
+    process running a node binary under the ADMIN account's home at a version-pinned nvm path
+    while the fleet runs as the agent account, and asked how the daemon resolves node for a worker
+    spawn, what the failure looks like if that path disappears, and whether the fleet should depend
+    on a node under the agent account instead.
+
+    THE RECON THE FEEDBACK ASKED FOR, ANSWERED FROM SOURCE IN THIS TREE AT TRIAGE — and it is
+    NEITHER of the two shapes the feedback guessed. It is not an absolute path in a plist and not a
+    deliberate pin in the constructed worker env. IT IS A BARE NAME, THREE HOPS DEEP:
+      1. `bin/rmd` (bash) ends `exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"` —
+         the tsx shim carries a `#!/usr/bin/env node` shebang, so the DAEMON's own interpreter is
+         whatever `node` the PATH it was started with resolves to. Nothing records which.
+      2. `src/lib/env.ts` `ALLOWLIST` is `["PATH","HOME","TMPDIR","LANG","USER",
+         "CLAUDE_CODE_OAUTH_TOKEN","GH_TOKEN"]` — PATH is COPIED FROM THE PARENT BY NAME, verbatim.
+         The allowlist's own doc calls these "base variables a worker legitimately needs"; PATH's
+         CONTENT has never been the subject of a check.
+      3. The installed SDK defaults the runtime to a BARE NAME. Read from
+         `node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs`: `executable: Oe = yi() ? "bun" :
+         "node"`, with `executable?: 'bun' | 'deno' | 'node'` in `sdk.d.ts` — a RUNTIME NAME, not a
+         path, so the option cannot even carry an absolute one. `spawnWorker` (`src/lib/worker.ts`)
+         builds `options` with `pathToClaudeCodeExecutable`, `env`, `settings`, `settingSources`
+         and the custom spawn — and sets NEITHER `executable` NOR `executableArgs`. That bare name
+         reaches `spawnDetachedGroup`'s `spawn(opts.command, opts.args, { env: opts.env, ... })`
+         (`src/lib/worker-containment.ts`) and is resolved by the OS against a PATH, never by us.
+
+    SO THE PRECEDENT THE PLAN ALREADY SET FOR THE CLI WAS NEVER EXTENDED TO THE RUNTIME THAT RUNS
+    IT. MASTER-PLAN §14 finding 3 rules "daemon resolves the binary from config, never PATH", and
+    W1-T113/W1-T357 built exactly that for `claude`: `resolveClaudeExecutable` walks env override →
+    live PATH → the install table, probes `exists` AND `canExecute` on every candidate, and throws
+    `ClaudeToolchainBlockedError` (`reasonClass: "blocked_toolchain"`, routed by `daemon.ts`'s
+    `isSpawnInfraBlocked`, kept off the strike ledger by `ledger.ts`) rather than letting a raw
+    ENOENT surface from inside the SDK. W1-T236 added a VERSION pin for the same binary
+    (`readBinaryPin`/`checkBinaryPin`, ledgered as `preflight.binary_pin`). THE INTERPRETER GETS
+    NONE OF IT: it is not a candidate in that table, not probed, not version-checked, not recorded.
+
+    AND THE FAILURE SHAPE THE FEEDBACK PREDICTED IS WORSE THAN IT GUESSED, because the diagnosis
+    instrument is structurally unable to speak here. `describeSpawnTarget` renders
+    `command=… exists=… executable=…`, and `commandExists`/`commandExecutable`
+    (`src/lib/worker-containment.ts`) BOTH open with `if (!command.includes("/")) return
+    "unresolved"` — W1-T119's honest rule that a probe which could not look must not say no. For a
+    bare `node` that is every field: the no-pid line reads `command=node exists=unresolved
+    executable=unresolved`, and the async errno callback (W1-T442) carries an ENOENT for a name
+    with no path attached to it. A spawn error with no obvious cause — the feedback's own phrase,
+    and the same diagnostic shape as the 2026-07-23 claude-husk outage (W1-T901).
+
+    THE FEEDBACK'S FALSIFIER IS HALF-CONFIRMED, AND THE FILING SAYS SO RATHER THAN OVERSELLING.
+    `DEFAULT_LAUNCHD_PATH` (`src/lib/launchd.ts`) is
+    `/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` — no nvm anywhere, and every
+    generator sets `EnvironmentVariables.PATH` explicitly rather than inheriting launchd's default.
+    So a daemon booted from a GENERATED unit cannot pick up an admin-home nvm node, and the
+    observed process is most likely an artifact of how that daemon was started (a dev shell, a
+    hand-written unit, or a caller passing `path:`). THE ALARM AS WRITTEN IS PROBABLY FALSIFIED.
+    WHAT SURVIVES IT IS THE STRUCTURE: nothing in the repo can tell those two worlds apart, because
+    the interpreter is never resolved, never recorded and never checked. The feedback found the
+    fleet running an interpreter nobody chose, and the reason it could is still true.
+  design: |
+    (i) RESOLVE THE INTERPRETER THE SAME WAY THE CLI IS ALREADY RESOLVED, AND EXPORT IT UNDER THE
+    NAME `resolveWorkerInterpreter` from `src/lib/worker.ts` (the acceptance greps for that call
+    site, so the name is part of the contract, not a suggestion). It answers an ABSOLUTE path plus
+    the evidence it used, resolved against THE CHILD ENV that will actually carry the spawn — never
+    against `process.env` by a second route, because a resolver that reads a different PATH than
+    the spawn does is a lie that tests will happily agree with. Reuse the existing probe discipline
+    rather than inventing a second one: exists + runnable, every candidate recorded with its
+    outcome, and W1-T901's errno-carrying cause where that has landed.
+
+    (ii) THE REFUSAL IS THE EXISTING ONE, NOT A NEW CLASS. When no interpreter resolves, fail with
+    the SAME `blocked_toolchain` shape `resolveClaudeExecutable` already throws, so `daemon.ts`'s
+    `isSpawnInfraBlocked` escalation and `ledger.ts`'s strike-ledger exemption cover it with no new
+    wiring — no worker ran, nothing was billed, and that is already the settled classification for
+    this failure class (W1-T91/W1-T113/W1-T127). A second parallel error type would need every one
+    of those consumers taught about it, which is how a refusal ends up unrouted.
+
+    (iii) THE DIAGNOSIS LINE MUST STOP SAYING `unresolved` FOR A NAME IT COULD HAVE RESOLVED.
+    `commandExists`/`commandExecutable` keep the W1-T119 rule for a name that genuinely cannot be
+    looked up, but a bare command spawned with a known env is resolvable: `describeSpawnTarget`
+    must name what the PATH lookup found (or that the lookup found nothing) instead of returning
+    three `unresolved` fields. NEVER PRINT THE ENV — that is the billing boundary and carries
+    credentials (the standing W1-T442 rule); the searched DIRECTORIES are not the env.
+
+    (iv) RECORD WHAT WAS RESOLVED, AND MAKE THE CROSS-ACCOUNT DEPENDENCE VISIBLE RATHER THAN
+    JUDGED. The resolved interpreter path and version belong on the same evidence surface the
+    binary pin already writes to, so an operator can ask "which node is the fleet running, and
+    whose is it?" and get an answer from the ledger instead of from `ps`. A path that resolves
+    OUTSIDE the fleet account's own reach is worth NAMING in that record — it is exactly the
+    condition this feedback had to discover by hand — but it is EVIDENCE, not a refusal: an
+    interpreter that runs today is not a failure today, and a fleet that grounds itself over a
+    directory-ownership heuristic is a worse outcome than the risk it models.
+
+    (v) NO MACHINE PATHS, NO ACCOUNT NAMES, NO VERSION LITERALS IN COMMITTED SOURCE. MASTER-PLAN
+    §14 (findings 5/6/7, deleted as setup-day residue) is explicit: node belongs to
+    `engines`/`.nvmrc`, machine layout to the gitignored overlay and `~/.config/remudero/`, and "a
+    plan that restates a moving number or machine path teaches the reader to trust something that
+    is wrong". Everything here is derived from config and env at runtime. The nvm path and the two
+    account names in the originating feedback are QUOTED PROVENANCE and must not appear in code,
+    tests or fixtures.
+
+    (vi) RE-DERIVE BEFORE BUILDING — three readings this filing made that can move underneath it:
+    whether the SDK still defaults `executable` to a bare `"node"` at the pinned version and
+    whether a candidate that resolves to a NATIVE claude binary bypasses the JS runtime entirely
+    (in which case the interpreter is simply not in that spawn's path and the resolver must say so
+    rather than invent a dependency); whether `spawn`'s PATH lookup for a bare name uses the CHILD
+    env passed as `env:` or the parent's — assert this against a real spawn with a doctored PATH,
+    never from a reading of libuv; and whether the running daemon's PATH matches
+    `DEFAULT_LAUNCHD_PATH` (design (i) is correct either way, but the answer decides whether the
+    originating observation was a live exposure or a start-method artifact).
+
+    (vii) EXPLICITLY NOT IN SCOPE, each with its reason:
+      - WHICH NODE THE HOST INSTALLS, and whether one should be provisioned under the fleet
+        account. That is host configuration, not repo code — the same boundary W1-T901 drew for the
+        host's global CLI updater and MASTER-PLAN §14 drew for machine layout. This task makes the
+        answer VISIBLE and the failure LEGIBLE; the provisioning decision is the operator's and
+        needs no code to be made.
+      - PINNING A NODE VERSION or refusing on a mismatch. `engines` + `.nvmrc` already declare the
+        requirement; adding a second enforcement point that can ground the fleet is not what a
+        not-currently-broken risk buys.
+      - `resolveClaudeExecutable`'s candidate ORDER, table or cache (W1-T113), the CLI version pin
+        (W1-T236), the errno enrichment (W1-T901), and the install checkout (W1-T924/W1-T925) —
+        four adjacent surfaces this task consumes and must not re-litigate.
+      - The launchd generators and `DEFAULT_LAUNCHD_PATH`. They are already correct: explicit PATH,
+        no inheritance. Touching them would be treating the one part that got this right.
+  acceptance:
+    - claim: "the JS runtime a worker spawn will exec is resolved to an absolute path against the same child env the spawn carries, with every searched candidate recorded as found or missing"
+      proof: "unit test: test/worker-interpreter-resolution.test.ts"
+    - claim: "an env whose PATH contains no runnable interpreter is refused before any spawn, as the same blocked_toolchain infrastructure class the missing-CLI refusal already uses, naming what was searched"
+      proof: "unit test: test/worker-interpreter-resolution.test.ts"
+    - claim: "the no-pid spawn diagnosis names what the lookup of a bare command found instead of reporting the command, its existence and its executability all as unresolved"
+      proof: "unit test: test/worker-interpreter-resolution.test.ts"
+    - claim: "neither the refusal nor the diagnosis carries the child environment, and no machine path, account name or version literal appears in the committed source or fixtures"
+      proof: "unit test: test/worker-interpreter-resolution.test.ts"
+    - claim: "the resolver is wired into the real spawn path rather than exported unused"
+      proof: "grep: resolveWorkerInterpreter( in src/lib/worker.ts"
+  risk: high
+  origin: feedback#fb-1785784424838-179bcf
+  plan_refs: ["§14", "W1-T113", "W1-T119", "W1-T236", "W1-T357", "W1-T442", "W1-T901"]
+  files: [src/lib/worker.ts, src/lib/worker-containment.ts, test/worker-interpreter-resolution.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — every branch is a resolution, a refusal or a rendered string over injected inputs,
+    assertable with a doctored PATH and a real temp directory. Nothing here needs a live service or
+    an operator ruling: the one QUESTION the feedback asked that a human must answer (which node the
+    host should install) is design (vii)'s first exclusion, and it needs no code either way.
+    risk:high is Rule 19's SPAN plus a genuinely live surface — `subsystemsOf` reads `files:` plus
+    acceptance text, this set crosses `src/lib` and `test/`, and the surface is on the path of EVERY
+    worker spawn on every host running a daemon. A resolver that wrongly rejects a good interpreter
+    grounds the whole fleet, which is the same argument W1-T901 made about `resolveClaudeExecutable`
+    one module over. The change itself is one resolver, one refusal and one render.
+    `src/run-task.ts` IS DELIBERATELY NOT DECLARED. The refusal reuses the existing
+    `blocked_toolchain` class, which `daemon.ts` and `ledger.ts` already route, so no call site there
+    needs to change — and declaring that file serialises this task behind every other one naming it
+    (`partitionByFileOverlap`, W1-T471; the cost W1-T924's note spells out). If design (iv)'s
+    evidence record turns out to need a new ledger rung in `run-task.ts`, that is a scope-guard flag
+    and a re-file, not a quiet widening: `scopeViolationFiles` fails an undeclared path.
+    `test/worker.test.ts` IS DELIBERATELY NOT DECLARED and was checked: it seeds its own
+    `locations:` table for the CLI resolver and asserts nothing about the interpreter or about
+    `describeSpawnTarget`'s field set. If the implementation finds it goes red,
+    `inverseScopeUntouchedFiles`/`scopeViolationFiles` will say so — re-file rather than edit it
+    undeclared. (`test/spawn-nopid-diagnosis.test.ts` is the other candidate and was checked the same
+    way; if design (iii) moves its assertions, declare it in the re-file.)
+    THE FALSIFIER MUST DRIVE A REAL PATH LOOKUP, not a stubbed resolver: a temp directory holding a
+    real executable file, a PATH pointing at it, and a second case where the directory is removed
+    between resolution and spawn. A test that stubs "the interpreter is missing" cannot tell the fix
+    from the defect — the whole defect is that the lookup never happens.
+    NOTHING IN THE RATIONALE SHOULD BE QUOTED FORWARD AS CURRENT FACT: the SDK line, the allowlist,
+    the shim, the two `unresolved` guards and `DEFAULT_LAUNCHD_PATH` were read in this working tree
+    at triage, and the pid, run id and nvm path are the FEEDBACK's observations of 2026-08-03.
+    Re-derive per design (vi).
+    LATENT, NOT LIVE, AND THE FILING SAYS SO: the originating observation is probably a start-method
+    artifact (see the rationale's falsifier paragraph). Filed anyway because the structure that let
+    an unchosen interpreter run the fleet is real, unguarded, and invisible from inside the repo.
