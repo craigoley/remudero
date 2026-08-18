@@ -1,0 +1,219 @@
+- id: W1-T970
+  title: "A RISK-JUDGE ESCALATION IS UNDONE BY THE NEXT SWEEP PASS — the judge disarms auto-merge and the sweep re-arms the same head minutes later because the arming predicate reads only check state and review state and has never been told a judge refused this head: give the refusal a sha-keyed home the arming decision consults, so a refusal survives the pass that currently erases it"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: |
+    FILED FROM A LEDGER RECON WHOSE FIGURES ARE TAKEN AS GIVEN, PLUS A SOURCE RE-DERIVATION AT
+    3d919695b THAT THE RECON DELIBERATELY DID NOT DO. Measured over the fleet ledger at
+    /home/craigoleyagent/rmd-state2/state (71439 distinct rows, 2026-08-08 to 2026-08-18, coverage
+    control cli.invoked = 113 on the same pipe): SEVEN ESCALATIONS, SEVEN MERGES. The risk judge
+    has never once prevented a merge.
+
+    (1) THE CAUSE IS NOT LATENCY, IT IS THAT THE DISARM IS NOT DURABLE. Two of the seven disarms
+    fired after the merge had already completed and were no-ops by construction: PR 1505 by 1.7s,
+    PR 1844 by 62.6s. The other FIVE won the race by 175 to 2004 seconds and were then undone:
+    PRs 1722, 1766, 1777, 2027, 2033. The ledger shows the re-arm explicitly on PR 2033:
+      06:27:03.477Z automerge.disarmed   risk judge escalated - auto-merge refused
+      06:30:00.230Z automerge.armed      armed
+      06:30:00.230Z sweep.disposed       review success, required checks green - arming auto-merge
+      merged_at (GitHub) 06:29:58Z
+    PR 1722 shows the sweep re-arming on a ~100s cadence for thirty-plus minutes after the disarm,
+    until the merge landed. A judge that decided in zero seconds on every PR would still be undone
+    by the next pass.
+
+    (2) THE RE-ARM IS UNAWARE, NOT UNCONDITIONAL, AND THOSE NEED DIFFERENT FIXES. RE-DERIVED FROM
+    SOURCE at 3d919695b, which the recon was instructed not to read. The arming row in
+    src/lib/sweep.ts is `disposition: "mergeable"` with
+    `when: (pr) => pr.checksState === "green" && pr.reviewState === "success"` and
+    `reason: () => "review success, required checks green - arming auto-merge"` - the exact string
+    the ledger carries. It reads TWO fields. MEASURED in that file: `risk_judge` occurs 0 times,
+    against same-file controls `reviewState` 34 and `checksState` 56; the only three `risk` hits are
+    prose inside comments. The sweep is not overriding a refusal it knows about - it has never been
+    given one. So the fix is an INPUT the predicate can consult, not a condition removed from it.
+
+    (3) NOTHING READS THE ESCALATION. `risk_judge.escalated` has exactly ONE site in src/: the
+    write, `log("risk_judge.escalated", { issue_url: url })` in `runRiskJudge`
+    (src/lib/risk-judge.ts). Every other occurrence in the tree is in test/arm-at-open.test.ts
+    asserting the row was WRITTEN. Zero readers. POSITIVE CONTROL on the same sweep: `sweep.disposed`
+    reads 54 hits in src/ with real consumers in src/run-task.ts. This is the NINTH measured
+    built-and-unread mechanism in this repo after hasPushedRunBranch, armedButStalled,
+    dispatch.stood_down, CiFailure.outsidePrRange, dh-rate-limit, rareOverlapWarnings,
+    rmd coverage-improve and supersessionVerdict - AND THE ONLY ONE WHOSE ABSENCE LETS A HIGH-RISK
+    PR THROUGH. The other eight cost information; this one costs the gate.
+
+    (4) THE ROW CANNOT BE KEYED TODAY, AND THAT IS PART OF THIS TASK. MEASURED: src/lib/risk-judge.ts
+    contains `headSha` 0, `head_sha` 0, `prNumber` 0, `pr_number` 0, against a same-file control of
+    `verdict` 61. The module does not know which PR or which head it is judging. The disarm emitted
+    beside it in the `escalate` closure (src/run-task.ts) logs only
+    `{ reason: "risk judge escalated - auto-merge refused" }`, which is why the recon could not
+    attribute 27 of 59 disarms to a PR at all. The identifiers ARE in scope at that call site -
+    `prUrl` is used in the same object literal and `review.headSha` is read a few statements earlier
+    by `cappedOverrideFromLedger` - so this is a supply, not a derivation.
+
+    (5) A DURABLE REFUSAL ALREADY HAS A HOME AND THIS IS ONE PREDICATE, NOT A MECHANISM.
+    `priorActionsFromLedger` (src/lib/sweep.ts) already builds sha-keyed sets consulted by the
+    dispatch switch: `armed` and `fixed` and `escalated` are keyed `${pr}@${head_sha}`, and
+    `postReviewed` is keyed off ANOTHER LANE'S OWN STEPS - its branch reads `review.posted` and
+    `review.post_refused` under the comment "OUTCOME-KEYED, off the review lane's OWN ledger lines
+    - never sweep.disposed". That is precisely the shape this task needs: a set built from the risk
+    judge's own step, sha-keyed, consulted where `alreadyDone` is computed for the `mergeable`
+    disposition. The `mergeable` arm's own comment already states the invariant this task extends:
+    "A new head must re-earn the attempt."
+
+    (6) THE STEP WOULD BE ARCHIVED BEFORE IT COULD BE READ. MEASURED: `risk_judge` occurs 0 times in
+    src/lib/ledger.ts, against a control of 3 for `automerge.capped_override_granted`. So
+    `risk_judge.escalated` is NOT decision-relevant and `rotateLedger` retains only the newest
+    lines per step. A sweep reading it back across a rotation would find the refusal gone and re-arm
+    - reproducing the exact defect under a new name. That file documents this discipline for
+    `sweep.absent_repush` in its own words, "The line IS the bound; it must survive rotation", and
+    the same sentence applies verbatim here.
+  design: |
+    THE SHAPE: emit the identifiers, retain the row, read it into a sha-keyed set, consult that set
+    in the arming decision, and give the operator the SAME override the CAPPED verdict already has.
+    Four edits and two suites. No new mechanism.
+
+    (i) EMIT. `runRiskJudge` (src/lib/risk-judge.ts) writes `pr_number` and `head_sha` onto the
+    `risk_judge.escalated` row. They arrive on `RiskJudgeInput`, which is a caller-populated literal
+    in src/run-task.ts holding `prUrl` already; `review.headSha` is in scope in the same function.
+    THE SUPPLIED VALUE MUST BE THE HEAD THE JUDGE ACTUALLY ASSESSED, not a re-read at write time -
+    a refusal keyed to a head the judge never saw is worse than none.
+
+    (ii) RETAIN. `risk_judge.escalated` joins the decision-relevant list in src/lib/ledger.ts,
+    beside `automerge.capped_override_granted` and `sweep.absent_repush`, for the reason rationale
+    (6) measures. Omitting this makes every other part of the task correct and still ineffective
+    after the first rotation, which is the hardest failure to notice.
+
+    (iii) READ. `priorActionsFromLedger` gains a `riskRefused` set keyed `${pr_number}@${head_sha}`,
+    built from `risk_judge.escalated` rows in its own branch, exactly as the `review.posted` branch
+    is built. THE KEY IS PR-NUMBER-AND-SHA, NOT TASK-AND-SHA. `postReviewed` uses
+    `${pr.taskId ?? ""}@${pr.headSha}` and sweep.ts's own comment records that a task-id-less PR
+    collapses to a `@sha` key; #1931 shipped exactly that defect by writing
+    `task_id: taskId ?? "SWEEP"` against a `${pr.taskId ?? ""}@${pr.headSha}` lookup and recording a
+    row that MATCHED NOTHING. The sibling sets `armed`/`fixed`/`escalated` already key on
+    `pr_number`, the sweep has `pr.prNumber` in hand at the lookup, and the judge now emits it - so
+    there is no `??` fallback anywhere on this path, by construction.
+
+    (iv) REFUSE, IN THE ARMING DECISION AND NOWHERE ELSE. The refusal belongs where `alreadyDone` is
+    computed for `disposition: "mergeable"`, beside
+    `pr.autoMergeArmed === true || prior.armed.has(...)`. IT MUST NOT GO IN THE MERGE PATH:
+    `assertLiveWriteAllowed` fences `gh-pr-merge`, and DECISIONS.md's ratified axis is gate on
+    irreversibility rather than outwardness - a merge is the least reversible act the fleet takes,
+    so a second opinion arriving there is already too late by design. A BUILDER WHO PUTS IT IN THE
+    `when` PREDICATE INSTEAD MUST SAY WHY IN THE PR: removing the row's match sends the PR falling
+    through to whichever later row matches next, which is a different and unexamined disposition.
+
+    (v) WHAT CLEARS THE REFUSAL, STATED RATHER THAN DISCOVERED. TWO THINGS AND NOTHING ELSE. A NEW
+    HEAD SHA - the key expires by construction, which is the whole safety: a PR-keyed refusal would
+    silence a PR permanently, and a new head genuinely deserves a fresh judgement, which is how
+    #1919's repair earned its re-review. AND AN EXPLICIT OPERATOR OVERRIDE, reusing the vocabulary
+    that already exists rather than inventing a second one: `rmd review <n> --override-capped-by
+    <name> --override-capped-reason <text>` is already an explicit ledgered, sha-keyed override read
+    back by `cappedOverrideFromLedger(ledgerLines, taskId, headSha)` and already registered
+    decision-relevant as `automerge.capped_override_granted`. This task extends that SAME verb and
+    that SAME read-back shape to the risk refusal. NO SECOND OVERRIDE VOCABULARY, NO NEW VERB.
+    TIME CLEARS NOTHING - a refusal that lapses on a timer is a refusal the fleet can outwait, which
+    is the defect being fixed.
+
+    (vi) THE COST IS OWNED HERE. Between those two exits, a refused head cannot merge unattended.
+    That is the intended behaviour and it is a real cost: the escalation issue `runRiskJudge` already
+    opens becomes load-bearing rather than advisory, because it is the operator's only notification
+    that a PR is now waiting on them. On the measured corpus this would have held 5 PRs (1722, 1766,
+    1777, 2027, 2033) pending an operator, and would have changed nothing for 1505 and 1844, whose
+    merges completed before the judge decided - LATENCY, NOT DURABILITY, IS WHY THOSE TWO ARE
+    UNREACHABLE FROM THIS TASK.
+
+    (vii) THE NEW SIGNAL HAS ITS READER IN THE SAME PR, WHICH IS THE WHOLE POINT. The two fields
+    added in (i) are consumed by (iii) in the same change. A builder who ships the emit without the
+    read has produced a tenth built-and-unread row and made the defect worse by making it look
+    fixed.
+
+    (viii) OUT OF SCOPE, EACH WITH ITS REASON, AND BOTH ARE DOWNSTREAM OF THIS ONE.
+    COVERAGE: the judge produced a decision on only 54 of 243 armed PRs, so 189 were never judged.
+    LATENCY: no decision has ever landed in under 15.564 seconds, median 25.410, against a
+    PASS-merge floor of 1 second, and on the 16 judged PRs that merged inside the judge's own median
+    the merge won 15 times. BOTH ARE REAL AND BOTH WAIT, because neither changes the outcome while
+    the refusal is erasable: a judge running on 100% of PRs in two seconds would still be undone by
+    the next pass's re-arm. Durability is the precondition that makes the other two worth buying.
+    AND BOTH ARE CURRENTLY UNMEASURABLE TO A FIX'S STANDARD, WHICH IS THEIR OWN PREREQUISITE: there
+    is NO `risk_judge.start` row and NO duration field - the decision row carries only ts, run_id,
+    task_id, step, verdict, reasons, confidence, action, reason - so every latency figure above is
+    an arm-to-decision UPPER BOUND; and `risk_judge.decision` carries no PR number at all (0 of 54,
+    against a control of `automerge.armed` carrying one on 245 of 352). THOSE INSTRUMENTATION GAPS
+    ARE NAMED HERE AS PREREQUISITES FOR THOSE TWO SHARDS AND ARE NOT BUILT BY THIS ONE. This task
+    adds identifiers to the ESCALATED row only, because that row is the one its own predicate reads.
+  acceptance:
+    - claim: "a head the risk judge escalated is not armed by a later sweep pass"
+      proof: "unit test: W1-T970: a risk-judge escalation blocks arming for that head"
+    - claim: "a new head sha clears the refusal so the PR re-earns a judgement"
+      proof: "unit test: W1-T970: a new head clears the risk-judge refusal"
+    - claim: "the escalated row carries the identifiers the refusal is keyed on"
+      proof: "unit test: W1-T970: the escalated row carries the pr number and head sha"
+    - claim: "an explicit operator override lets a refused head arm again"
+      proof: "unit test: W1-T970: an operator override clears the risk-judge refusal"
+    - claim: "a refusal is scoped to its own pull request and does not leak to another"
+      proof: "unit test: W1-T970: a refusal for one head does not block a different pr"
+  risk: high
+  origin: "oper#durable-risk-judge-refusal-2026-08-17"
+  plan_refs: ["W1-T514", "W1-T254"]
+  files: [src/lib/sweep.ts, src/lib/risk-judge.ts, src/lib/ledger.ts, src/run-task.ts, test/sweep-arm-parity.test.ts, test/risk-judge.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only `risk === "high"`, and this shard's files span four
+    subsystems - the sweep's dispatch dedup, the judge's emit, the ledger retention list and the
+    CLI wiring - plus two suites. No list satisfying this task's own scope could pass at
+    risk:medium, and trimming the list would not lower the count: `subsystemsOf` derives subsystems
+    from ACCEPTANCE-CRITERIA TEXT as well as from `files:`, and five criteria naming arming,
+    identifiers, override and per-PR scoping can only raise it.
+
+    FILES DERIVED BY INVOCATION COUNT WITH WORD BOUNDARIES AT 3d919695b, NOT GUESSED.
+    `priorActionsFromLedger`: sweep.ts=11, risk-judge.ts=0, run-task.ts=0 - the read has one home.
+    `alreadyDone`: sweep.ts=13, 0 in both others - so does the refusal point.
+    `runRiskJudge`: risk-judge.ts=5, run-task.ts=2, sweep.ts=0 - the emit has one home and one
+    caller, and that caller is why run-task.ts is declared.
+    `risk_judge.escalated`: risk-judge.ts=1, everywhere else 0.
+    CONTROL: `disposition` reads 131 in sweep.ts, so these counts discriminate rather than matching
+    everything.
+
+    src/run-task.ts IS DECLARED RELUCTANTLY AND THE CHANGE GENUINELY LIVES THERE. W1-T471 records
+    that naming it serialises every task that does. It is declared because `RiskJudgeInput` is a
+    caller-populated literal and the identifiers exist only in the caller's scope - `prUrl` in the
+    same literal, `review.headSha` a few statements earlier - and because the operator-override flag
+    pair is parsed there. THERE IS NO VERSION OF THIS TASK THAT OMITS IT: deriving a PR number by
+    parsing it back out of `change.description`, which today holds `${task.title} - ${prUrl}`, would
+    be exactly the guessed key #1931 shipped. An implementer who finds a supply path that does not
+    touch run-task.ts MUST AMEND THIS SHARD rather than silently narrowing.
+
+    src/lib/ledger.ts IS DECLARED AND IS NOT OPTIONAL. See design (ii): omitting it leaves every
+    other part correct and ineffective after one rotation.
+
+    PROOF NOTES: all five proofs are the NAME-FILTERED `unit test:` form, never the whole-file path
+    form, so each names the behaviour it proves rather than a file that would pass on any test in
+    it. Each title is plain prose well under 100 characters with no comma, no "; " and no regex
+    metacharacter, so `looksLikeScenarioNarrative` cannot fail them and `parseTestTarget`'s escaped
+    literal match - which treats the body as a LITERAL substring, not a pattern - has nothing to
+    mis-handle. Each was verified to match ZERO files today via `grep -rlF` over test/ against a
+    same-invocation control matching exactly one file. They are FORWARD references to titles this
+    task will create; both named suites exist today.
+
+    ID PROVENANCE - FOUR SURFACES SWEPT AT 3d919695b, EACH READ 0 FOR W1-T970, WITH A POSITIVE
+    CONTROL ON THE SAME INVOCATION. refs/rmd-id/* (66 refs enumerated), shard filenames and declared
+    ids on origin/main (335 shard paths), every OPEN PR's file list, and every OPEN PR's title.
+    Controls: W1-T965 = 13 hits, W1-T969 = 1, W1-T524 = 1; candidates W1-T966 through W1-T969 all
+    read 1 and were rejected, W1-T970 read 0. SURFACE 4's ZERO IS CONTROLLED RATHER THAN ASSUMED:
+    there are 2 open PRs and the same paginated REST query returned their file lists, in which
+    W1-T966 does appear - so the endpoint was working and the absence of W1-T970 is real.
+    THE RESERVATION LANDED, WHICH IS A DEPARTURE FROM THE EXPECTED REFUSAL AND IS RECORDED AS SUCH.
+    The gated push used an orphan commit over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    Craigs-Mac-mini-53313-1787016676150344000, a braced refspec, and the exit status captured into a
+    variable rather than read through a pipe. PUSH RC=0, not the 403 the operator brief anticipated:
+      * [new reference]   18023ca5370789945565fa0a9208980e58c3c554 -> refs/rmd-id/W1-T970
+    The readback `git ls-remote origin refs/rmd-id/W1-T970` returned the same sha and the nonce
+    matched the payload commit message (1 hit), against control readbacks of refs/rmd-id/W1-T969 and
+    refs/rmd-id/W1-T524 returning 1 row each. So this id rests on the four-surface sweep AND a
+    durable reservation ref, not on the sweep alone.
