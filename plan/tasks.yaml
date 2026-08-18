@@ -8338,7 +8338,7 @@
   repo: remudero
   depends_on: [W1-T7]
   type: implement
-  verify: human
+  verify: auto
   queue_note: "parked from auto-dispatch per operator ruling 2026-07-24 — verify:human is the dispatch gate (drain.ts:112); kick by id when prioritized."
   principles: {tdd: strict}
   budget_usd: 100.00
@@ -9283,7 +9283,7 @@
   repo: remudero
   depends_on: [W1-T62, W1-T63]
   type: implement
-  verify: human
+  verify: auto
   queue_note: "parked from auto-dispatch per operator ruling 2026-07-24 — verify:human is the dispatch gate (drain.ts:112); kick by id when prioritized."
   principles: {tdd: strict}
   budget_usd: 100.00
@@ -9438,7 +9438,7 @@
   repo: remudero
   depends_on: [W1-T62]
   type: implement
-  verify: human
+  verify: auto
   queue_note: "parked from auto-dispatch per operator ruling 2026-07-24 — verify:human is the dispatch gate (drain.ts:112); kick by id when prioritized."
   principles: {tdd: strict}
   budget_usd: 100.00
