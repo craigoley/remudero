@@ -68,11 +68,15 @@ test("throws if ANTHROPIC_API_KEY is injected via extra WITHOUT allowApiKey — 
 });
 
 test("assertCleanBoot: billing_mode is DERIVED, gated on BOTH the config intent and the key", () => {
-  // Key present but no config intent ⇒ subscription (matches what workers bill).
-  assert.deepEqual(
-    assertCleanBoot({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-daemon" }),
-    { env_clean: false, billing_mode: "subscription" },
-  );
+  // Key present but no config intent ⇒ subscription (matches what workers bill). The
+  // runtime/declaredNodeVersion params are omitted here, so this only pins the billing
+  // fields it was written to prove — the node_path/node_version/node_drift readings this
+  // same call also returns are checked precisely by test/node-runtime-provenance.test.ts.
+  const clean = assertCleanBoot({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-daemon" });
+  assert.equal(clean.env_clean, false);
+  assert.equal(clean.billing_mode, "subscription");
+  assert.equal(clean.node_path, process.execPath);
+  assert.equal(clean.node_version, process.version);
   // Both factors ⇒ api. env_clean is the honest canary (key intentionally present).
   const engaged = assertCleanBoot({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-daemon" }, true);
   assert.equal(engaged.billing_mode, "api", "a daemon booted with the valve records api");

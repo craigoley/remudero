@@ -108,7 +108,11 @@ test("daemonBoot: a clean env logs daemon.boot with env_clean=true, billing_mode
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
   const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv);
-  assert.deepEqual(result, { env_clean: true, billing_mode: "subscription" });
+  // W1-T991: result also carries node_path/node_version (and possibly node_drift) —
+  // checked precisely by the dedicated test/node-runtime-provenance.test.ts suite, so this
+  // pre-existing test only pins the billing fields it was written to prove.
+  assert.equal(result.env_clean, true);
+  assert.equal(result.billing_mode, "subscription");
   assert.equal(lines.length, 1);
   assert.equal(lines[0].step, "daemon.boot");
   assert.equal(lines[0].extra.env_clean, true);
@@ -119,7 +123,8 @@ test("daemonBoot: a NON-valve ANTHROPIC_* (e.g. BASE_URL) still logs env_clean=f
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const dirtyEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_BASE_URL: "https://example.invalid" };
   const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), dirtyEnv);
-  assert.deepEqual(result, { env_clean: false, billing_mode: "subscription" });
+  assert.equal(result.env_clean, false);
+  assert.equal(result.billing_mode, "subscription");
   assert.equal(lines[0].extra.env_clean, false);
   assert.equal(lines[0].extra.billing_mode, "subscription", "only the sanctioned ANTHROPIC_API_KEY valve flips billing to api");
 });
@@ -128,7 +133,8 @@ test("daemonBoot: the KEY ALONE (no config intent) stays subscription — an inh
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const keyEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_API_KEY: "sk-ant-daemon" };
   const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), keyEnv); // allowApiKey defaults false
-  assert.deepEqual(result, { env_clean: false, billing_mode: "subscription" });
+  assert.equal(result.env_clean, false);
+  assert.equal(result.billing_mode, "subscription");
 });
 
 test("daemonBoot: BOTH factors (config intent allowApiKey=true + the key) log env_clean=false AND billing_mode=api (overnight-on-credits, W1-T258)", () => {
@@ -145,7 +151,8 @@ test("daemonBoot: BOTH factors (config intent allowApiKey=true + the key) log en
     undefined,
     true,
   );
-  assert.deepEqual(result, { env_clean: false, billing_mode: "api" });
+  assert.equal(result.env_clean, false);
+  assert.equal(result.billing_mode, "api");
   assert.equal(lines[0].extra.billing_mode, "api", "the daemon deliberately drains on API credits");
 });
 

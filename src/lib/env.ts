@@ -232,6 +232,18 @@ export interface BootAssertion {
   /** `api` iff the daemon booted with the sanctioned `ANTHROPIC_API_KEY` valve engaged
    * (overnight-on-credits, W1-T258), else `subscription` — the default this repo expects. */
   billing_mode: BillingMode;
+  /** Absolute path of the node runtime executing THIS process (`process.execPath`) —
+   * W1-T991: the reading that answers "which node does the fleet execute" without
+   * reading a live process listing. Always present (unlike `node_drift` below), so the
+   * ledger records the running interpreter on every boot, drifting or not. */
+  node_path: string;
+  /** `process.version` of the running runtime, e.g. `"v22.22.3"`. */
+  node_version: string;
+  /** Named drift reason — present ONLY when `node_path` falls outside the daemon
+   * account's own roots (its HOME plus the system/homebrew prefixes), or `node_version`
+   * disagrees with the repo's declared `.nvmrc` pin. Advisory: its presence never blocks
+   * boot (W1-T991 design part 2 — same ruling as {@link checkBinaryPin}'s drift). */
+  node_drift?: string;
 }
 
 /**
@@ -251,12 +263,99 @@ export interface BootAssertion {
 export function assertCleanBoot(
   env: NodeJS.ProcessEnv = process.env,
   allowApiKey = false,
+  /**
+   * The runtime reading (W1-T991) — defaults to THIS process's own execPath/version so a
+   * real boot needs no caller change; a test overrides to prove drift without a real
+   * foreign-account install. See {@link checkNodeRuntimeProvenance} for the drift logic.
+   */
+  runtime: { execPath: string; version: string } = { execPath: process.execPath, version: process.version },
+  /**
+   * The repo's declared node pin (`.nvmrc` content, trimmed) — read by the CALLER before
+   * calling this (this module never touches the filesystem, see file header). Omitted ⇒
+   * no version-pin comparison; the own-roots check below still runs.
+   */
+  declaredNodeVersion?: string,
 ): BootAssertion {
   // The valve is engaged only under BOTH factors (config intent + the key), so a
   // daemon that merely inherited the key from a shell — with overflow off — still
   // reports subscription, matching what its workers will actually bill.
   const engaged = allowApiKey && typeof env[SANCTIONED_KEY] === "string" && env[SANCTIONED_KEY] !== "";
-  return { env_clean: isBillingClean(env), billing_mode: engaged ? "api" : "subscription" };
+  const provenance = checkNodeRuntimeProvenance(runtime.execPath, runtime.version, env.HOME, declaredNodeVersion);
+  return {
+    env_clean: isBillingClean(env),
+    billing_mode: engaged ? "api" : "subscription",
+    node_path: runtime.execPath,
+    node_version: runtime.version,
+    ...(provenance.reason ? { node_drift: provenance.reason } : {}),
+  };
+}
+
+// ── Node runtime provenance (W1-T991) ───────────────────────────────────────
+//
+// THE SIBLING READING assertCleanBoot's own doc names above: env_clean catches a daemon
+// booted from a contaminated SHELL; this catches a daemon EXECUTING a foreign RUNTIME —
+// same canary, same advisory posture, over process.execPath/version instead of
+// ANTHROPIC_* keys. bin/rmd's last line execs node_modules/.bin/tsx, a shebang script, so
+// the daemon's own node is whatever PATH resolved at exec time, never a path anyone
+// chose; nothing before this read it, pinned it, or recorded it (see the task's rationale
+// — a live worker was observed running a DIFFERENT account's nvm-installed node, invisible
+// until that install is eventually pruned or upgraded out from under every spawn at once).
+
+/**
+ * System/package-manager roots node commonly installs under, independent of any ONE
+ * user's home — combined with the daemon's OWN homedir (`env.HOME`) below to decide
+ * whether a resolved runtime is inside "this account's own roots". Never a single
+ * hardcoded host path: the container lane runs as a different user under a different
+ * prefix entirely (`deploy/`), so a check keyed to one literal `/Users/...` path would
+ * fire on every non-macOS boot and get muted, then ignored (design part 3).
+ */
+const SYSTEM_NODE_ROOTS = ["/usr/local", "/opt/homebrew", "/usr", "/bin", "/opt"] as const;
+
+function isUnderRoot(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
+/**
+ * Read the running node runtime's provenance against the daemon's own roots and the
+ * repo's declared version pin. Pure — takes every reading as an argument rather than
+ * touching `process`/the filesystem itself (same discipline as {@link checkBinaryPin}),
+ * so it is unit-testable with a fake execPath/home/pin and no real foreign install.
+ *
+ * Returns `{drift: false}` (no `reason`) when the runtime sits under the daemon's own
+ * home or a system prefix AND (no declared pin, or the version matches it) — the common
+ * case, which passes silently. Otherwise returns a NAMED reason: an out-of-roots path is
+ * reported before a version mismatch (design part 2) — it is the stronger claim, and a
+ * foreign-account runtime is rarely also coincidentally version-pinned right.
+ */
+export function checkNodeRuntimeProvenance(
+  execPath: string,
+  version: string,
+  ownHome: string | undefined,
+  declaredNodeVersion?: string,
+): { drift: boolean; reason?: string } {
+  const ownRoots = [...(ownHome ? [ownHome] : []), ...SYSTEM_NODE_ROOTS];
+  const inOwnRoots = ownRoots.some((root) => isUnderRoot(execPath, root));
+  if (!inOwnRoots) {
+    return {
+      drift: true,
+      reason:
+        `node runtime ${execPath} is outside the daemon account's own roots ` +
+        `(${ownHome ? `home ${ownHome}, ` : ""}system prefixes ${SYSTEM_NODE_ROOTS.join(", ")}) — ` +
+        `likely inherited from a different account's install (W1-T991)`,
+    };
+  }
+  if (declaredNodeVersion) {
+    const bare = (v: string) => v.replace(/^v/, "");
+    if (bare(version) !== bare(declaredNodeVersion)) {
+      return {
+        drift: true,
+        reason:
+          `node runtime is ${version} but the repo's .nvmrc pins ${declaredNodeVersion} — ` +
+          `this host is running an undeclared node version (W1-T991)`,
+      };
+    }
+  }
+  return { drift: false };
 }
 
 // ── Binary content pin (W1-T236) ────────────────────────────────────────
