@@ -1,0 +1,203 @@
+- id: W1-T1006
+  title: "THE CONSOLE'S DECISION QUEUE IS ESCALATION-GATED, SO A PR THE FLEET CORRECTLY STOPPED AT IS INVISIBLE UNLESS AN ISSUE WAS OPENED — renderNeedsMe has five row sources and blocked_pr is not one, 31 of 74 PRs ever disposed blocked-ambiguous never got an acted:true row, and PR#2097 carries 303 disposals with ZERO escalation.issue_opened lines: give the console the BlockedPrBlocker rows status-board.ts already builds and live-verifies"
+  repo: remudero
+  depends_on: [W1-T999]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THE OPERATOR'S REQUIREMENT: every PR awaiting his judgement should reach him through the console
+    inbox, GitHub last. What the queue surfaces today is ESCALATIONS — things the fleet could not
+    decide. The requirement names a different population: PRs the fleet DECIDED CORRECTLY and
+    STOPPED AT, because stopping was right. Measured at origin/main cc1cd68 on the Azure host.
+
+    (1) THE QUEUE IS ESCALATION-GATED, AND THAT IS THE WHOLE FINDING. `renderNeedsMe`
+    (`src/lib/serve.ts`) has exactly FIVE row sources, in order: `needsHuman`, `verifyHumanPending`,
+    feedback `grilling`/`proposed`, inbox `ready`, inbox `drafting`. A PR reaches that list ONLY
+    through `needsHuman`, which `deriveStatus` (`src/lib/status.ts`) sets ONLY from an OPEN
+    `escalation.issue_opened` ledger line. PR-shaped rows like `PR-1692` arrive as W1-T283's
+    task-less escalations — SO THEY ARE ESCALATIONS, NOT A DECISION QUEUE. No escalation issue, no
+    row. There is no other path.
+
+    (2) THE POPULATION THAT FALLS THROUGH, MEASURED. Over the full ledger union — 6 plain rotations
+    + the live file, 0 `.gz` files on this host, per-form file counts run as the coverage control —
+    13,655 `sweep.disposed` rows, EVERY ONE carrying a non-empty `reason`, spanning 611 distinct
+    (disposition, reason) pairs over 6 dispositions.
+      74 distinct PRs were ever disposed `blocked-ambiguous`.
+      43 of them ever got an `acted: true` row.
+      31 NEVER DID — classified, given a specific named reason, and never acted on.
+    PR#2097 is the worked example: 303 `sweep.disposed` rows across 01:32:03Z–08:06:54Z (6h34m, not
+    the 53m an earlier brief carried), 253 of them `blocked-ambiguous acted: false`, 255 reading
+    "review orphaned by a push, again — the sweep has already re-reviewed this PR 2 time(s) (>= 2
+    cap) — escalating" — and **ZERO `escalation.issue_opened` lines** against a positive control of
+    7 for `PR-1692`. It never entered the queue. A human found it and merged it.
+
+    (3) FIVE POPULATIONS, EACH A CORRECT STOP, SIZED BY DISTINCT PR. Reason-family counts over the
+    same union (rows / distinct PRs / PRs that ever saw an acted:true):
+      green with no review posted   408 /15 /14   "not positively mergeable — checks green, review none"
+      orphan-cap stranding          990 /10 / 6   "review orphaned by a push, again — … (>= 2 cap)"
+      fix strikes exhausted          95 / 8 / 5   "fix strikes exhausted (2/2) — <check> failed on <sha>"
+      criteria unrecoverable        160 /13 / 2   "no Remudero-Task: trailer to resolve them from"
+      review contradictory          680 /13 / 5   "failing with no actionable unmet criteria"
+    THE FIFTH IS "criteria unrecoverable" — 13 PRs, only 2 ever acted on, the least-acted family
+    here. It is a stop the fleet is RIGHT to make: it cannot invent acceptance criteria. It is
+    reported here because the four populations this task was briefed on did not include it.
+
+    (4) CAPPED VERDICTS ARE COMPUTED, LEDGERED, AND STRUCTURALLY INVISIBLE TO THE CONSOLE. 65
+    `review.posted` rows carry `capped: true` over 20 distinct subjects, 7 of them on 2026-08-18
+    (`PR-2131`, `PR-2096`, `PR-2095`, `PR-2093`, `PR-2092`, `PR-2091`, `PR-2090`), each with
+    `capped_reason` or `proof_exec` naming why (155 `not_executable`, 63 `executed_stale`).
+    Word-bounded, `capped` appears 95 times in `src/lib/review.ts` and **0 times in
+    `src/lib/status.ts`** — the projection has no field for it — against a control of 13
+    `reviewState` occurrences in `src/lib/board.ts`. `board.ts`'s and `serve.ts`'s only `capped`
+    hits are unrelated prose about list length caps. A capped PR IS precisely an awaiting-operator
+    PR and the fleet is right to stop: `decideAutoMergeArm` refuses to arm without executed proof
+    or a ledgered override, because "a keyword match is a claim, never evidence".
+
+    (5) THE BOARD ALSO CANNOT SEE WHETHER CHECKS ARE GREEN. Word-bounded `checksState`: 58 in
+    `src/lib/sweep.ts`, **0 in `src/lib/board.ts`, 0 in `src/lib/serve.ts`**. So "green with no
+    review posted" is not merely unrendered — half of it is not on the wire. `reviewState` IS
+    carried (13 sites in `board.ts`) and renders as a badge beside the PR link
+    (`reviewBadge(t.reviewState)`, one site in `serve.ts`), never as a queue row.
+
+    (6) AND THE MODEL THAT HAS ALL OF THIS ALREADY EXISTS. `BlockedPrBlocker`
+    (`src/lib/status-board.ts`) is `{kind, taskId?, prNumber, prUrl?, disposition, reason}` — its
+    own doc says it "RENDERS the vocabulary its own `sweep.disposed` ledger line already minted (the
+    W1-T186 named-reason doctrine), never a second taxonomy", and `reason` reads "reason not named"
+    rather than blank when the line carries none. W1-T306 made it a claim about NOW: those rows are
+    re-derived against live GitHub merge state every render, and a candidate whose live state could
+    not be checked is WITHHELD under `blockedPrsUnverifiedReason` rather than printed on the
+    ledger's stale opinion. IT HAS NO ROUTE. `buildStatusBoard` is called 6 times in
+    `src/run-task.ts` (the `rmd status` CLI), 3 in `src/lib/digest.ts`, 5 in its own module, and
+    **0 times in `src/lib/serve.ts`, `src/lib/board.ts` or `src/lib/panel-graph.ts`**. Its own
+    header names the console as the intended second renderer — "the console's future Now tab
+    (fb-1784770111145-cf7c24) can never disagree with the terminal". That tab never arrived.
+
+    (7) WHY THIS IS NOT A NEW SIGNAL. Eleven measured mechanisms have merged green with no reader;
+    this task adds none. `sweep.disposed` is written today, `BlockedPrBlocker` is built today, the
+    live re-verification runs today, the withholding rule is written today. The only thing missing
+    is a reader on the console side. That is the cheapest true form of this fix and the reason it
+    is filed as one task rather than a new sensor.
+  design: |
+    (i) THE CONSOLE QUEUE GAINS A BLOCKED-PR GROUP, FED BY THE EXISTING MODEL. `renderNeedsMe`'s
+    five sources become six. The sixth is `BlockedPrBlocker`-shaped and reaches the browser through
+    the board's own wire — `src/lib/board.ts` — so there is ONE snapshot, one `generated_at`, and
+    the counts and rows can never disagree (`computeBoardSnapshot`'s own discipline). Whether that
+    is a new field on `BoardSnapshot` or a sibling route is the implementer's call; what is fixed is
+    that the data comes from `buildStatusBoard`'s existing `blockers.rows` and NOT from a second
+    derivation over the ledger. `src/lib/status-board.ts` is READ, NOT CHANGED, and is deliberately
+    absent from `files:` for that reason.
+
+    (ii) EVERY ROW CARRIES ITS OWN `disposition` AND `reason`, VERBATIM. This is the operator
+    directive fb-1784770111145-cf7c24 ("translate, summarize and separate") applied to the one
+    surface where the text already exists. Sixty-three identical rows are a list; a row reading
+    "review orphaned by a push, again — the sweep has already re-reviewed this PR 2 time(s) (>= 2
+    cap)" is a decision. NO NEW TAXONOMY AND NO REWORDING: the vocabulary is the ledger's, per the
+    W1-T186 named-reason doctrine `BlockedPrBlocker` already cites. `blocked-ambiguous` alone spans
+    at least eight distinct families (§3 above plus merge-conflict-with-deletion and stale-pending),
+    so collapsing them to the disposition word alone would reproduce the defect this task fixes.
+
+    (iii) THE WITHHOLDING RULE IS INHERITED, NOT RE-DECIDED. A candidate whose live GitHub state
+    could not be checked this cycle is already withheld from `rows` and summarised in
+    `blockedPrsUnverifiedReason`. THE CONSOLE MUST SHOW THAT SAME DISTINCTION RATHER THAN AN EMPTY
+    GROUP — an unknown that looks healthy is the exact failure the status-board header names. The
+    falsifier runs both directions in one test: a checkable candidate rendering its reason, and an
+    uncheckable one rendering the withheld note, in the same run.
+
+    (iv) THE EXISTING GROUPS ARE UNTOUCHED. The `needsHuman` escalation loop keeps its "view issue"
+    / "mark handled" affordance and its `escalationOpenedAt` ordering; the `verifyHumanPending`
+    group W1-T507 added keeps its own pass. A blocked-PR row is a THIRD distinct kind, grouped
+    separately for exactly the reason W1-T507's own design note gives — so a caller "groups by it
+    rather than flattening two different reasons a row needs a person into one flag". Widening
+    `needsHuman` to cover blocked PRs is REFUSED here: it would render the view-issue affordance
+    with nothing to click, which is the defect that note exists to prevent.
+
+    (v) A BLOCKED-PR ROW MUST NOT OFFER A CARD LINK THAT 404s. `computeTaskCard`
+    (`src/lib/task-card.ts`) opens with `deps.plan.byId.get(taskId)` and returns undefined — a 404 —
+    for any id the plan does not hold. MEASURED: of 51 distinct ids ever naming an
+    `escalation.issue_opened` line, 27 are in the plan and **24 are not** — 17 `PR-…`, 3 `RETRO-…`,
+    3 `TRIAGE-…`, and `daemon` — and every one of those 24 404s on `/v1/task`, which is the
+    `card fetch failed: GET /v1/task?id=TRIAGE-… -> 404` the operator saw in the live console. The
+    new rows are PR-shaped and would join that set. So this task's rows offer no card affordance
+    they cannot serve. FIXING THE 24 EXISTING ROWS IS OUT OF SCOPE AND NAMED IN (vii).
+
+    (vi) SEQUENCING, STATED SO NOBODY BUILDS A QUEUE FOR A DARK SURFACE. THE CONSOLE IS SWITCHED
+    OFF RIGHT NOW: `remudero-serve` exhausted GitHub's secondary limit and took the fleet down for
+    over an hour, and it stays stopped until W1-T999 lands — hence `depends_on: [W1-T999]`, which
+    `isDispatchEligible` enforces at the unmet-deps rung. W1-T996 wires the Access JWT so WRITE
+    actions work at all; it is the sibling in the sequence but NOT a dependency here, because every
+    row this task adds is READ-ONLY and needs no write grant. THIS TASK IS THIRD.
+
+    (vii) DELIBERATELY OUT OF SCOPE, EACH NAMED RATHER THAN DISCOVERED LATER.
+      - THE CARD 404 FOR THE 24 EXISTING CARDLESS IDS. A `/v1/task` concern in `task-card.ts`, a
+        third subsystem, and a separate filing. (v) only stops this task ADDING to that set.
+      - PUTTING `capped` OR `checksState` ON THE PROJECTION. Both are real gaps (§4, §5) and both
+        widen `StatusProjection`, which `openapi/daemon.yaml` mirrors and `packages/api-client`
+        consumes — a far larger blast radius, and unnecessary here because `BlockedPrBlocker`
+        already reaches the same conclusion from the sweep's own disposal.
+      - ANY ACTION ON A ROW, AND THIS IS AN OPERATOR RULING, NOT A WIRING TASK. `/v1/inbox/approve`
+        is `tier: "high"` in `src/lib/panel-graph.ts` with the reason stated —
+        "W1-T404: HIGH — moves code (hands off to a detached rmd spawn: ratify/merge)" — while the
+        Cloudflare Access provider grants `writeTier: "middle"` (`src/lib/service.ts`), so
+        APPROVING FROM A BROWSER STAYS REFUSED EVEN AFTER W1-T996 LANDS. AND MERGE IS NOT A CONSOLE
+        VERB AT ALL: `assertLiveWriteAllowed("gh-pr-merge", …)` is fenced in `worker.ts`,
+        `run-task.ts` and `feedback-landing.ts`, and **0 routes in `serve.ts` or `panel-graph.ts`
+        expose it**. "Merge this green PR from the inbox" does not exist. Both are the operator's
+        calls to make and neither is designed here.
+      - THE `rmd status` TEXT AND `--json` RENDERERS, which already project this model correctly.
+      - W1-T983 (#2123, MERGED) FILES THE ESCALATION TIER for the green-with-no-review case. It is
+        CITED, NOT RE-FILED: it changes WHEN an escalation opens; this task changes what the queue
+        can see when one does not.
+  acceptance:
+    - claim: "a PR the sweep disposed non-progressing reaches the console queue with no escalation issue opened"
+      proof: "unit test: W1-T1006: a disposed PR with no escalation issue reaches the console queue"
+    - claim: "each blocked PR row carries its own disposition and reason verbatim from the ledger line"
+      proof: "unit test: W1-T1006: a blocked PR row carries its disposition and reason verbatim"
+    - claim: "a candidate whose live state could not be checked renders the withheld note and a checkable one renders its reason in the same run"
+      proof: "unit test: W1-T1006: an unverified candidate renders withheld and a checkable one renders its reason"
+    - claim: "the escalation group and the verify human group keep their own rows and affordances unchanged"
+      proof: "unit test: W1-T1006: the escalation and verify human groups keep their rows unchanged"
+    - claim: "a blocked PR row offers no card affordance for an id the plan does not hold"
+      proof: "unit test: W1-T1006: a blocked PR row offers no card link for a cardless id"
+    - claim: "the board wire names the blocked PR kind so the queue reads one snapshot rather than a second derivation"
+      proof: "grep: blocked_pr in src/lib/board.ts"
+  risk: high
+  origin: "oper#console-decision-queue-2026-08-18"
+  plan_refs: ["W1-T999", "W1-T996", "W1-T983", "W1-T507", "W1-T306", "W1-T283", "W1-T186"]
+  files: [src/lib/board.ts, src/lib/serve.ts, test/console-blocked-pr-queue.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — the declared paths reach
+    two distinct concerns (board, serve), which `sizingViolation` refuses at medium. Decomposition
+    is the rule's other option and is declined with a reason: the wire that lacks the field and the
+    renderer that lacks the row are one defect, and splitting them would file a supplier with
+    nothing to supply and a renderer with nothing to render.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT, not by guess. `computeBoardSnapshot` reads 7
+    in `src/lib/board.ts` (its home) and 1 in `src/lib/task-card.ts`; `renderNeedsMe` and
+    `needsMeTaskRowHtml` live only in `src/lib/serve.ts`. `src/lib/status-board.ts` is NOT declared
+    because nothing in it changes — `buildStatusBoard`, `BlockedPrBlocker` and `BlockersSection` are
+    already exported — and declaring an unchanged file would serialize the 15 shards that name it
+    for no reason. **`src/run-task.ts` IS NOT DECLARED**: it holds 6 of the 12 `buildStatusBoard`
+    references, but the symbol's HOME is `src/lib/status-board.ts`, so the marker is reachable
+    without it, and 217 shards already declare `src/run-task.ts` (W1-T471) — every one of which this
+    task would serialize against. `src/lib/serve.ts` is declared by 47 shards and is accepted in
+    writing: the queue cannot be changed without it.
+
+    THE MEASUREMENTS ARE QUERIES, NOT NUMBERS TO CARRY. Every count above is re-derivable over the
+    ledger union (`zgrep -h '<pat>' state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson`,
+    all three patterns, per-form file counts as the coverage control) and by word-bounded `git grep`
+    on the named symbols. They will move; the symbol names are the check.
+
+    ONE CONSUMER IS REJECTED AND THAT IS RECORDED RATHER THAN GLOSSED. Read at origin/main:
+    `fb-1784770111145-cf7c24` is **accepted** (translate/summarize/separate — the directive (ii)
+    serves), `fb-1784988460437-9daa9b` is **accepted** (write-actions on UP NEXT — out of scope per
+    (vii)), and `fb-1784756096314-a6f58b` (needs-me decision-queue UX) is **rejected**, with no
+    reason recorded in the file and 0 ledger rows naming it against a control of 0 for cf7c24 —
+    so the ledger simply does not carry either decision. IT IS NAMED, NOT ABSORBED, AND ITS CLAUSES
+    ARE NOT SMUGGLED IN: its ask (a) grouping by arc, (c) one-tap batch close, and (d) inline
+    options are all absent from this design on purpose. Its clause (b) — derive live resolution
+    state per escalation — is what W1-T306 already built and (iii) inherits. An implementer must not
+    read this task as reviving a rejected item.
