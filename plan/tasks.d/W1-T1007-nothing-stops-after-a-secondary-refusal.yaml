@@ -1,0 +1,150 @@
+- id: W1-T1007
+  title: "NO CALL PATH CAN STOP AFTER A SECONDARY-LIMIT REFUSAL — recordResult arms the widening from `rateLimited` and the stand-down from `budget`, and the only production caller passes no budget at all, so the one stop that exists can never fire: honour retry-after when present and back off exponentially with jitter when absent, bounded, instead of pacing through a refusal at a fixed gap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    RE-DERIVED 2026-08-18 AT origin/main c0e5f3378. No `/rate_limit` call was made — that endpoint is
+    exempt from the primary limit but counts against the SECONDARY one, which is the limit at issue.
+
+    (1) THE ANSWER TO "CAN ANYTHING STOP" IS NO, AND THE REASON IS ONE LINE PAIR. In
+    `createGhCallPacer` (src/lib/open-prs-rest.ts) `recordResult` sets:
+      gapMs     = rateLimited || lowWater ? rateLimitGapMs : minGapMs;
+      standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;
+    THE WIDENING IS ARMED FROM `rateLimited`; THE STOP IS ARMED ONLY FROM `budget`. A refusal — the
+    thing that actually happens when the secondary limit engages — can therefore only ever slow the
+    next call to `DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS` (10,000ms). It can never stop one.
+
+    (2) AND THE STOP CANNOT FIRE AT ALL TODAY, WHICH IS WORSE THAN THE QUESTION ASSUMED.
+    `paceGhEntry` is the ONLY production caller of `recordResult`, and it calls
+    `pacer.recordResult(false)` and `pacer.recordResult(isRateLimited(err))` — with NO second
+    argument. `budget` is declared `budget?: GhBudgetReading`, so it is `undefined` on every
+    production call, so `standDown` is always `undefined`, so `wait()` never throws.
+    `GhPaceFloorStandDownError` HAS A READER — src/lib/sweep.ts imports it and branches on
+    `if (!(e instanceof GhPaceFloorStandDownError)) return undefined;` — but nothing can ever produce
+    it. This is not a built-and-unread mechanism; it is a built-and-UNREACHABLE one, and W1-T529's
+    floor is inert in production. NAMED HERE, NOT FIXED HERE — wiring the budget is a different
+    change with a different falsifier, and it addresses the PRIMARY bucket, not this limit.
+
+    (3) SPACING ALONE COULD NOT HAVE PREVENTED THE MEASURED INCIDENT. The board gateway's densest
+    30-minute window carried 164 failures at a 1.8-second MEDIAN inter-arrival, every one classified
+    `rate_limit`. Once the limit is engaged, a 1.5s or even 10s fixed gap is still a request stream
+    into a refusal; what GitHub asks for is a wait proportional to the refusal, not a slightly wider
+    metronome. W1-T468's own header states the doctrine already — the secondary limit is "a signal to
+    SLOW DOWN, never to retry" — and this task is what implements the second half of that sentence.
+
+    (4) NOTHING READS GITHUB'S OWN BACKOFF INSTRUCTION. MEASURED: `retry-after` (either case) reads 0
+    across all of `src/`, and `x-ratelimit` reads 0, against a control of 26 `GhCallPacer` hits.
+
+    (5) AND THE CLASSIFIER CANNOT TELL THE TWO LIMITS APART, WHICH BOUNDS WHAT THIS TASK CAN CLAIM.
+    `isGhRateLimitError` (src/lib/status.ts) delegates to `classifyGhFailure`, which matches
+    `/rate limit|quota|secondary rate limit/i` against STDERR TEXT and returns one class,
+    `rate_limit`, for both. There is no header capture on the failing path — `gh api -i` reads 0 in
+    src/lib/open-prs-rest.ts — so a `Retry-After` value is only available if it appears in the text
+    the CLI already surfaces. THIS TASK MUST THEREFORE TREAT THE HEADER AS OPTIONAL BY CONSTRUCTION
+    rather than assuming it is present; see design (ii).
+  design: |
+    (i) THE CHANGE IS A WAIT POLICY AT THE REFUSAL, IN THE MODULE THAT ALREADY OWNS THE REFUSAL.
+    `paceGhEntry` already sees the thrown error and already classifies it. It gains a bounded
+    retry-with-backoff around the guarded call for the `rate_limit` class ONLY: honour a
+    `Retry-After` if one can be read from the error, otherwise wait a floor of at least one minute,
+    then back off exponentially with jitter, and THROW after a bounded attempt count. Every other
+    error class rethrows immediately exactly as today.
+
+    (ii) THE HEADER IS OPTIONAL BY CONSTRUCTION, NOT ASSUMED. Rationale (5) establishes that the
+    failing path surfaces stderr text, not headers. The extractor is therefore an injected function
+    from the error to an optional seconds value, defaulted to a parse of what the CLI already
+    surfaces. Criterion 1 proves the honouring path with an error that carries one; criterion 2
+    proves the floor path when it does not. A design that only worked when the header was present
+    would be untestable against today's production surface and would silently never fire.
+
+    (iii) JITTER IS NOT DECORATION HERE. The measured failure is several independently-built call
+    sites landing in the same wall-clock second — the exact reason `GhCallPacer` is one shared
+    instance. Deterministic backoff re-synchronises them on the retry; jitter is what stops the
+    second collision. Criterion 3 must assert spread, not merely growth.
+
+    (iv) THE BOUND IS THE SAFETY. An unbounded wait-and-retry converts a refusal into a hang, and
+    `execFileSync` is SYNCHRONOUS on this path — src/lib/status.ts's own timeout doc records that a
+    call which never returns "parks the daemon's only thread". So the retry count is bounded and the
+    last refusal THROWS, reaching the caller's existing handling. Criterion 4 is that falsifier.
+
+    (v) NO EXISTING BUDGET IS WEAKENED, AND THIS IS A HARD CONSTRAINT. `MAX_TRANSIENT_RETRIES` (3, in
+    src/lib/classify.ts) and `policy.values.*.strikeCap` are untouched: this backoff sits INSIDE one
+    guarded call and is invisible above it. A refusal that exhausts the bound still surfaces as one
+    failed call to the caller, which spends exactly the strike it spends today — not fewer, not more.
+
+    (vi) EXPLICITLY OUT OF SCOPE.
+      - CROSS-PROCESS HEALTH STATE. A stale marker parks the fleet, and W1-T978 establishes the
+        `state/` substrate cannot be reclaimed safely yet. Not proposed.
+      - WIRING `budget` SO THE EXISTING STAND-DOWN CAN FIRE. Real (rationale 2), separate falsifier,
+        and it addresses the PRIMARY bucket rather than the secondary limit.
+      - SPLITTING `classifyGhFailure`'s single `rate_limit` class into primary and secondary. Would
+        let the two get different policies; it is a classifier change, not a wait policy.
+      - WHO HOLDS A PACER AT ALL. That is W1-T1005, the sibling — see the note.
+  acceptance:
+    - claim: "a refusal that carries a retry-after value waits at least that long before retrying"
+      proof: "unit test: W1-T1007: a refusal carrying a retry-after waits at least that long"
+    - claim: "a refusal with no retry-after waits at least the one-minute floor before retrying"
+      proof: "unit test: W1-T1007: a refusal with no retry-after waits at least the floor before retrying"
+    - claim: "successive refusals grow the wait exponentially and spread it with jitter"
+      proof: "unit test: W1-T1007: successive refusals back off exponentially with jitter"
+    - claim: "the attempt count is bounded and the final refusal throws to the caller"
+      proof: "unit test: W1-T1007: the retry count is bounded and the last refusal throws"
+  risk: high
+  origin: "oper#stop-after-secondary-refusal-2026-08-18"
+  plan_refs: ["W1-T468", "W1-T529", "W1-T1005", "W1-T978"]
+  files: [src/lib/open-prs-rest.ts, test/open-prs-rest.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    W1-T1005 IS THE SIBLING AND NEITHER SUBSUMES THE OTHER. W1-T1005 fixes DISTRIBUTION — the pacer is
+    opt-in per construction and one of sixteen gateway constructions opts in. THIS TASK FIXES WHAT
+    HAPPENS AFTER A REFUSAL. A fleet where every gateway is paced still paces THROUGH a refusal at a
+    fixed gap; a fleet that backs off correctly still leaves fifteen constructions unpaced. They
+    compose and they do not overlap: W1-T1005 declares src/lib/status.ts and test/status.test.ts;
+    this declares src/lib/open-prs-rest.ts and test/open-prs-rest.test.ts. NO DECLARED PATH IS SHARED,
+    so the partitioner will not serialise them against each other.
+
+    FILES DERIVED BY INVOCATION COUNT WITH WORD BOUNDARIES, OWN PATH ABSENT.
+    `paceGhEntry`: open-prs-rest.ts=2 (its definition and doc), status.ts=3, run-task.ts=2.
+    `createGhCallPacer`: open-prs-rest.ts=3, run-task.ts=2, status.ts=0.
+    `GhPaceFloorStandDownError`: open-prs-rest.ts=6, sweep.ts=3, status.ts=0, run-task.ts=0.
+    test/open-prs-rest.test.ts is the suite that owns this module's semantics: paceGhEntry=14,
+    createGhCallPacer=19, GhPaceFloorStandDownError=8, against 1/0/0 in test/status.test.ts.
+    src/run-task.ts IS NOT DECLARED — the wait policy lives inside `paceGhEntry`, which is defined in
+    the declared module, so none of that file's call sites changes and W1-T471's serialisation cost
+    against ~209 of 349 shards is avoided. src/lib/sweep.ts is NOT declared: it reads
+    `GhPaceFloorStandDownError` and that reading does not change.
+    CONTROL: `routeSpecialists` reads 0 in open-prs-rest.ts, so these counts discriminate.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN. `sizingViolation` (src/lib/task-linter.ts)
+    exempts risk === "high" outright, and `subsystemsOf` derives ids from `moduleIdFromPath` over
+    `files:` AND from a lexicon scan of the acceptance text. Blast radius argues DOWN: one wait
+    policy inside one already-guarded call, invisible to every caller above it.
+
+    NO NEW SIGNAL IS PROPOSED. No ledger step, no field, no config key, no new module. The observable
+    outcome is the EXISTING `board_gateway.fetch_failed` rate falling and its inter-arrival rising.
+    Eleven mechanisms in this repo have merged green with no reader — and rationale (2) documents a
+    twelfth shape, a mechanism with a reader that nothing can reach. Adding another would be worse
+    than the defect.
+
+    ID PROVENANCE — THREE GIT SURFACES FIRST, THEN THE OPEN-PR SURFACE, ZERO `/rate_limit` CALLS.
+    W1-T1007 read 0 on all four at c0e5f3378: refs/rmd-id/* (98 refs), shard FILENAMES on origin/main
+    (355), DECLARED ids under plan/ (603 anchored `- id:` records), and every open PR's title and file
+    list (3 PRs). THE EXISTENCE TEST IS THE FILENAME AND THE ANCHORED DECLARATION, NEVER A plan/
+    MENTION: `W1-T999999` reads 9 files as a mention and 0 as filename, 0 as declared id, 0 as ref.
+    Positive controls: W1-T1004 and W1-T997 each read ref=1 file=1 decl=1; W1-T1005 reads ref=1
+    file=0 decl=0 because its filing PR is still open, which is what surface 4 is for.
+    W1-T1006 WAS TAKEN MID-SWEEP AND THIS FILING WAS RENUMBERED. It read free on an earlier title
+    check and, minutes later, ref=1 with an open PR (#2148) carrying it in both title and file list.
+    That is the second such collision in two sessions, and it is why the ref is re-swept immediately
+    before the push rather than carried from the first scan.
+    THE MINT USED THE PLAIN REFSPEC: orphan payload over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce Craigs-Mac-mini-96577-1787080415281465000, no
+    `+` and no lease, exit status into a variable: PUSH RC=0, `* [new reference]
+    858367f83df5e2b74f0b8680af4c6398665a2865 -> refs/rmd-id/W1-T1007`, readback equal and nonce
+    matched. THE GATE WAS PROVEN ARMED ON THE SAME INVOCATION against the just-taken
+    refs/rmd-id/W1-T1006: RC=1, `! [rejected]`, and that ref unchanged at 395168cf.
