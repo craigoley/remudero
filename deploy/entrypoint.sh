@@ -347,8 +347,10 @@ cd "$TREE"
 # changes is only WHICH exits are charged to it.
 #
 # THE FRESHNESS LOOP IS ITSELF BOUNDED, so nothing here is unbounded in either direction. It retries
-# at most `RMD_FRESHNESS_RESTART_MAX` times (default 20) and sleeps the SAME throttle between
-# attempts, so a pathological restart-storm is rate-limited exactly as before and then falls through
+# at most `RMD_FRESHNESS_RESTART_MAX` times (default 100) and sleeps `FRESHNESS_RESTART_PAUSE_S`
+# between attempts — NOT the crash throttle. That clause read "the SAME throttle" until 2026-08-18
+# and had been wrong since the separate pause was introduced in the block below; the two statements
+# contradicted each other in one file. A pathological restart-storm is still rate-limited and falls through
 # to a real exit, handing the container back to docker's count. Rate here, count there, still — the
 # only difference is that routine freshness no longer spends the count.
 #
@@ -386,11 +388,35 @@ log "restart throttle: a NON-ZERO exit will sleep ${RESTART_THROTTLE_S}s before 
 # loadable then. `test/entrypoint-boot.test.ts` greps this file for the constant and fails if the two
 # ever drift, so the duplication is pinned rather than merely commented.
 DAEMON_EXIT_STALE=75
-FRESHNESS_RESTART_MAX="${RMD_FRESHNESS_RESTART_MAX:-20}"
+# ── WHY 100, MEASURED 2026-08-18 (was 20, sized against a merge rate the fleet has outgrown) ──
+# The note above sizes this budget from a freshness restart happening "ONCE PER MERGE (14 rows in
+# 24 hours)". That rate is gone. MEASURED over the eight complete UTC days ending 2026-08-18, via
+# the REST pulls API: 29, 41, 54, 58, 63, 71, 73, 86 merges per day — median 63 (4.5x the sizing
+# assumption) and even the quietest day, 29, is 2.1x it. 56 merges landed in the US-Eastern day of
+# 2026-08-17 alone. At 20 the budget is spent inside a single day, after which a ROUTINE freshness
+# exit falls through and spends `--restart=on-failure:5` instead — re-creating the exact
+# conflation of "stale" with "crash" that this whole block exists to undo.
+#
+# THE WORST CASE THIS NUMBER CREATES, STATED PLAINLY RATHER THAN LEFT TO BE DERIVED:
+#   FRESHNESS_RESTART_MAX x FRESHNESS_RESTART_PAUSE_S = 100 x 5s = 500s (8m20s)
+# of in-container ceiling before a freshness exit reaches docker's count. The multiplier is the
+# PAUSE below, never `RESTART_THROTTLE_S` (120s in production) — the freshness path does not sleep
+# the crash throttle, which is what the corrected sentence above now says.
+#
+# AND IT HAS A PRICE, NOT ONLY A CEILING. Every restart re-runs `sync_tree`, whose first act is a
+# real `git fetch --prune origin`. 100 restarts is 100 fetches against the origin. That cost is
+# accepted deliberately for the headroom; it is recorded here so the next person raising this number
+# knows what they are buying and does not have to re-derive it from the loop body.
+#
+# WHY THE DEFAULT MOVED RATHER THAN THE OPERATOR KEEPING AN ENV VAR: 100 was being carried only as
+# `-e RMD_FRESHNESS_RESTART_MAX=100` on `docker run`, so any container rebuilt without that flag
+# silently reverted to 20 with nothing reporting the regression. A default that has to be
+# re-supplied by hand on every rebuild is not a default.
+FRESHNESS_RESTART_MAX="${RMD_FRESHNESS_RESTART_MAX:-100}"
 case "$FRESHNESS_RESTART_MAX" in
   '' | *[!0-9]*)
-    log "RMD_FRESHNESS_RESTART_MAX is not a whole number — ignoring it and using 20"
-    FRESHNESS_RESTART_MAX=20
+    log "RMD_FRESHNESS_RESTART_MAX is not a whole number — ignoring it and using 100"
+    FRESHNESS_RESTART_MAX=100
     ;;
 esac
 

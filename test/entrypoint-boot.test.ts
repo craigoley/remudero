@@ -530,7 +530,10 @@ test("W1-T490 DIRECTION 1: a FRESHNESS exit restarts IN-CONTAINER, so docker's b
   // THE ASSERTION THAT IS THE WHOLE POINT: the container exits 0. `--restart=on-failure` does not
   // restart on 0 and does not count it, so RestartCount is untouched by a routine merge.
   assert.equal(run.status, 0, "a freshness restart must not surface as a non-zero container exit");
-  assert.match(run.stderr, /freshness\) — restart 1\/20 IN-CONTAINER/);
+  // The number is the DEFAULT `FRESHNESS_RESTART_MAX` this test deliberately does not override, so it moves
+  // with that default: 20 until 2026-08-18, 100 after. Kept exact rather than loosened to \d+ —
+  // matching any number would stop proving the log names the budget actually in force.
+  assert.match(run.stderr, /freshness\) — restart 1\/100 IN-CONTAINER/);
   assert.match(run.stderr, /budget is not spent/);
 });
 
