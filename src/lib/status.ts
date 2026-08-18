@@ -2030,6 +2030,32 @@ function hasAnchoredTrailer(body: string | undefined, taskId: string): boolean {
 }
 
 /**
+ * PLAN-ONLY-FILING REFUSAL (W1-T1004) — was `prUrl` opened by a plan-only FILING run (the
+ * retro/triage/`rmd plan` flows), per THAT run's own positive ledger record, never inferred
+ * from the diff? Mirrors `isPlanOnlyFilingPr` (src/run-task.ts, #1527) exactly: true iff the
+ * ledger carries a `pr.opened` line for THIS exact `pr_url` with `plan_only: true` — the line
+ * those three filing flows write themselves right after their own deterministic plan-only-diff
+ * guard passes (run-task.ts's `log("pr.opened", { pr_url, plan_only: true, ... })` call sites).
+ *
+ * WHY A SEPARATE COPY, NOT A SHARED IMPORT (design note v): `isPlanOnlyFilingPr` stays private to
+ * run-task.ts — this task deliberately does not declare that file (see the shard's note: it is
+ * named by ~209 of 349 shards and W1-T471 serialises every task that touches it). status.ts
+ * already reads the ledger for every other rung below (`readLedgerLines`), so the marker this
+ * reads is already in hand — no new signal, no new field, no new dependency.
+ *
+ * WHY THIS CREDITS A TASK WHOSE OWN DELIVERABLE IS GENUINELY PLAN TEXT (design iv, criterion 4):
+ * a task's ordinary implement run opens its PR via the plain `pr.opened` call at run-task.ts:6550,
+ * which never carries `plan_only` at all — that field is written ONLY by the three filing flows,
+ * which propose OTHER tasks rather than build the one dispatched. So a task like W1-T426 or
+ * W1-T314, whose own declared `files:` are plan shards, still reads false here (its PR was opened
+ * by its OWN dispatched run, not a filing flow) and credits exactly as before — the diff is never
+ * read to tell the two apart.
+ */
+function isPlanOnlyFilingPr(ledgerLines: Array<Record<string, unknown>>, prUrl: string): boolean {
+  return ledgerLines.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
+}
+
+/**
  * Derive one task's PR-precedence merge-state from GitHub (the correction/ledger/
  * pr-field/trailer rungs), in the fixed precedence — the logic `deriveStatus` carried
  * before W1-T155. Takes the ledger already read (its caller reads it once and reuses
@@ -2155,7 +2181,14 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     if (!cands) return undefined; // null (read failed → W1-T119) or method absent (fixture) — skip
     const debunked = debunkedTrailerUrls(ledgerLines, task.id);
     const hit = cands.find(
-      (pr) => pr.state.toUpperCase() === "MERGED" && ownsBranch(pr.headRefName, task.id) && !debunked.has(pr.url),
+      (pr) =>
+        pr.state.toUpperCase() === "MERGED" &&
+        ownsBranch(pr.headRefName, task.id) &&
+        !debunked.has(pr.url) &&
+        // W1-T1004: this rung had NO plan-only guard at all before — a filing PR dispatched
+        // from this task's OWN run-<taskId>-* worktree (the retro/triage/plan flows reuse the
+        // dispatched task's worktree) would otherwise credit the task it just filed unconditionally.
+        !isPlanOnlyFilingPr(ledgerLines, pr.url),
     );
     return hit
       ? { taskId: task.id, source: "head-branch", ...fromPrState(hit.state), prNumber: hit.number, prUrl: hit.url, prState: hit.state }
@@ -2196,7 +2229,17 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
     const body = deps.github.prBody(trailerPr.url);
-    // W1-T413: the PLAN-ONLY refusal, checked only for a hit that would otherwise credit.
+    const wouldCredit = creditsByAnchoredTrailer(trailerPr.state, head, body, task.id);
+    // W1-T1004: the ledger-backed plan-only-FILING refusal — checked BEFORE and INDEPENDENTLY of
+    // `ownsOwnRunBranch`, unlike the W1-T413 diff-based refusal below. A filing PR (retro/triage/
+    // `rmd plan`) dispatched from this task's OWN `run-<taskId>-*` worktree sits on that task's own
+    // run branch too, so `ownsOwnRunBranch` would otherwise wave it through as "an implementation by
+    // construction" without ever consulting the ledger — exactly the hole rationale (5) names ("the
+    // branch shape has no guard at all"). The ledger read is free (already in hand, no gh call), so
+    // paying it unconditionally costs nothing.
+    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url);
+    // W1-T413: the DIFF-BASED plan-only refusal, checked only for a hit that would otherwise credit
+    // AND that the ledger check above did not already refuse.
     // ORDER IS THE COST CONTROL, not a style choice. `ownsOwnRunBranch` is free — the head ref is
     // already in hand — and a worker's own `run-<taskId>-*` PR is an implementation by
     // construction, so it credits without ever reading a file list. Only the residual case pays:
@@ -2204,14 +2247,15 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // 2026-07-30 ruling admitted (seven merged PRs whose branches were `feat-*`/`fix/*`) and
     // exactly where a filing PR lands. That bound is what keeps this off the O(N) path the retro
     // gather was measured paying — see `changedFiles`'s own doc for the fail-open direction.
-    const planOnlyRefusal =
-      creditsByAnchoredTrailer(trailerPr.state, head, body, task.id) && !ownsOwnRunBranch(head, task.id)
+    const planOnlyDiffRefusal =
+      wouldCredit && !planOnlyFilingRefusal && !ownsOwnRunBranch(head, task.id)
         ? (() => {
             const files = deps.github.changedFiles?.(trailerPr.url);
             return files !== undefined && isPlanOnlyChangeset(files);
           })()
         : false;
-    if (!planOnlyRefusal && creditsByAnchoredTrailer(trailerPr.state, head, body, task.id)) {
+    const planOnlyRefusal = planOnlyFilingRefusal || planOnlyDiffRefusal;
+    if (!planOnlyRefusal && wouldCredit) {
       return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
     }
     // Rejected: a branch claiming ANOTHER task, a non-merged PR off a foreign branch,

@@ -587,6 +587,90 @@ test("classifyGhFailure: an unrecognized stderr still classifies as unknown, nev
   assert.equal(classifyGhFailure(1, "gh: something unexpected happened"), "unknown");
 });
 
+// ── W1-T1004: a plan-only FILING PR must never credit the task it just filed ──────────────────
+// Both merged-credit rungs — rung (c)'s trailer search and rung (c2)'s head-branch corroboration
+// — read the ledger's own `pr.opened{plan_only:true}` marker (the SAME positive record
+// run-task.ts's `isPlanOnlyFilingPr` reads, mirrored here rather than imported so this task never
+// has to declare src/run-task.ts). The marker is written ONLY by the retro/triage/`rmd plan`
+// filing flows — a task's own ordinary implement run opens its PR via a plain `pr.opened` line
+// that never carries the field — so the four cases below are decided by that one ledger line,
+// never by reading the diff.
+
+test("W1-T1004: a filing pull request carrying a trailer does not credit its task", () => {
+  // The #1475/W1-T403 shape: a plan-only FILING run opened this PR from a hand-named branch, and
+  // the filed task's id ended up as the PR's trailer. The filing flow's own `pr.opened` ledger
+  // line carries `plan_only: true` for this exact pr_url.
+  const url = "https://github.com/craigoley/remudero/pull/1475";
+  const github = fakeGitHub({
+    byTrailer: { "W1-T403": { number: 1475, url, state: "MERGED" } },
+    headRefByUrl: { [url]: "claude/file-w1-t403" },
+    bodyByUrl: { [url]: "Remudero-Task: W1-T403\n" },
+  });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "TRIAGE-1", pr_url: url, plan_only: true }]);
+  const proj = deriveStatus(task({ id: "W1-T403" }), { ledgerPath, github });
+  assert.equal(proj.merged, false, "a plan-only filing PR must not credit the task it filed");
+  assert.equal(proj.status, "queued");
+  assert.equal(proj.source, "none");
+  assert.deepEqual(proj.rejected_candidates, [{ pr: url, reason: "plan-only-changeset" }]);
+});
+
+test("W1-T1004: an implementation pull request carrying a trailer still credits its task", () => {
+  // Same shape as above (trailer, hand-named branch, MERGED) EXCEPT the ledger's `pr.opened` line
+  // for this pr_url carries no `plan_only` field at all — the shape a task's own ordinary
+  // implement run produces (run-task.ts:6550). The credit must stand: this task is not refused
+  // by a marker some OTHER pr_url or run happened to write.
+  const url = "https://github.com/craigoley/remudero/pull/1709";
+  const github = fakeGitHub({
+    byTrailer: { "W1-T404": { number: 1709, url, state: "MERGED" } },
+    headRefByUrl: { [url]: "claude/implement-w1-t404" },
+    bodyByUrl: { [url]: "Remudero-Task: W1-T404\n" },
+  });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-T404", pr_url: url }]);
+  const proj = deriveStatus(task({ id: "W1-T404" }), { ledgerPath, github });
+  assert.equal(proj.merged, true, "an implementation PR's trailer credit is unaffected by the new refusal");
+  assert.equal(proj.source, "trailer");
+  assert.equal(proj.prNumber, 1709);
+});
+
+test("W1-T1004: a filing pull request on a run branch does not credit its task", () => {
+  // The hole rationale (5) names: a filing PR dispatched from the task's OWN `run-<taskId>-*`
+  // worktree sits on that task's own run branch, so `ownsOwnRunBranch` would otherwise wave it
+  // through as "an implementation by construction" without ever reading the ledger. No trailer
+  // search hit at all here (byTrailer empty) — this credit can ONLY come from rung (c2)'s
+  // head-branch corroboration, the rung rationale (5) says "has no guard at all".
+  const url = "https://github.com/craigoley/remudero/pull/2099";
+  const github = fakeGitHub({
+    byTrailer: {},
+    byHeadBranch: {
+      "W1-T968": [{ number: 2099, url, state: "MERGED", headRefName: "run-W1-T968-1787000000000" }],
+    },
+  });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-T968", pr_url: url, plan_only: true }]);
+  const proj = deriveStatus(task({ id: "W1-T968" }), { ledgerPath, github });
+  assert.equal(proj.merged, false, "a filing PR on the task's own run branch must not credit it");
+  assert.equal(proj.source, "none");
+});
+
+test("W1-T1004: a filing whose own deliverable is plan text still credits its task", () => {
+  // The W1-T426/W1-T314 shape (rationale (2)): the task's OWN declared deliverable genuinely is
+  // plan text, built by its own dispatched run — so its `pr.opened` ledger line carries no
+  // `plan_only` field (the ordinary implement-run shape), even though the PR itself only touches
+  // plan/**. Credited via the SAME rung (c2) head-branch path as the refusal test above, proving
+  // the new guard discriminates rather than refusing everything on that rung.
+  const url = "https://github.com/craigoley/remudero/pull/1293";
+  const github = fakeGitHub({
+    byTrailer: {},
+    byHeadBranch: {
+      "W1-T314": [{ number: 1293, url, state: "MERGED", headRefName: "run-W1-T314-1786000000000" }],
+    },
+  });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-T314", pr_url: url }]);
+  const proj = deriveStatus(task({ id: "W1-T314" }), { ledgerPath, github });
+  assert.equal(proj.merged, true, "a task whose genuine deliverable is plan text is still credited");
+  assert.equal(proj.source, "head-branch");
+  assert.equal(proj.prNumber, 1293);
+});
+
 test("W1-T119: a throttled read is classified unavailable and never reads as not-merged — unit test over an injected gateway whose read fails with a rate-limit exit status and stderr: deriveStatus returns an indeterminate projection carrying the classified reason, and asserts NOT merged=false/source=none, the exact shape that mis-filed W1-T116", () => {
   // INJECTED GATEWAY: the real `ghGateway` implementation, with its raw `gh`
   // exec swapped for a fake that THROWS the exact shape a rate-limited `gh`
