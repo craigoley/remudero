@@ -216,6 +216,28 @@ export interface ServeDeps {
 export const DEFAULT_BOARD_PREWARM_MS = 15_000;
 
 /**
+ * W1-T999 — the serve board gateway's poll TTL, DERIVED FROM THE SWEEP DISTRIBUTION rather than
+ * matching {@link buildBatchedGithub}'s bare 15s default the way {@link DEFAULT_BOARD_PREWARM_MS}
+ * does. THE INCIDENT: `serveCommand` (run-task.ts) built its board gateway at that bare 15s
+ * default against an always-on console, re-asking roughly ten times per sweep pass for an answer
+ * that could not have changed between asks — 423 of 423 board fetches in the incident log failed,
+ * retrying into the very secondary rate limit that outage held open for two hours.
+ *
+ * THE NUMBER. Re-measured at filing: the sweep's median pass is 2.6 minutes (156_000 ms) and its
+ * p90 is 17 minutes. 150_000 ms sits AT (just under) the median — the board is never more than one
+ * sweep behind while re-asking roughly once per sweep instead of ten times, and staying well under
+ * the p90 keeps the board from reading as dead through the long tail. A round number was
+ * deliberately NOT chosen; this is the median rounded down to keep the "never worse than one
+ * sweep late" property exact rather than approximate.
+ *
+ * `serveCommand` threads this into BOTH `buildBatchedGithub`'s `ttlMs` and this module's own
+ * `ServeDeps.boardGithubRefreshMs` (see {@link buildServeServer}), so the gateway's cache staleness
+ * bound and the background prewarm cadence that re-warms it stay the SAME number rather than
+ * drifting apart the way two independent literals would.
+ */
+export const DEFAULT_BOARD_POLL_TTL_MS = 150_000;
+
+/**
  * W1-T183 default anomaly thresholds — how long a phase normally takes before a still-running
  * row is worth a second look. NOT a liveness verdict (W1-T179 owns "is this actually running");
  * purely a visual "this one is taking unusually long" flag. Keyed by status.ts's {@link Phase}

@@ -216,6 +216,7 @@ import {
   currentBranch,
   DEFAULT_BIND_ATTEMPTS,
   DEFAULT_BIND_RETRY_MS,
+  DEFAULT_BOARD_POLL_TTL_MS,
   DEFAULT_SERVE_PORT,
   ensureLogFileMode,
   listenWithReapWait,
@@ -14634,7 +14635,17 @@ export async function serveCommand(
   // `bindRetry` narrows the reap-wait window so a test can drive the LOSING side of the port
   // race (retry, then give up) in milliseconds instead of the real 10s — production passes
   // nothing and gets listenWithReapWait's own defaults.
-  deps: { branch?: (repoDir: string) => string | null; bindRetry?: { attempts?: number; delayMs?: number } } = {},
+  // `buildBatchedGithub`/`boardPacer` (W1-T999) are injectable the SAME way `StatusDeps` already
+  // does (status.ts's `statusCommand`): real callers omit both and get the actual gateway wired
+  // to the actual shared pacer below; a test supplies a spy factory to observe the options this
+  // construction passes (the pacer, the derived TTL) or a fake pacer to observe `wait()`/
+  // `recordResult()` without shelling out to `gh`.
+  deps: {
+    branch?: (repoDir: string) => string | null;
+    bindRetry?: { attempts?: number; delayMs?: number };
+    buildBatchedGithub?: typeof buildBatchedGithub;
+    boardPacer?: GhCallPacer;
+  } = {},
 ): Promise<number> {
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
   // validator's value-flag list — so `rmd serve --host <addr>` exited 2 on its own documented
@@ -14701,8 +14712,27 @@ export async function serveCommand(
   // W1-T181: `log` wires the gateway's fetch-size/fetch-failure observability into the SAME
   // ledger every other SERVE step writes to — the pre-fix silence (hours of outage, zero
   // serve.log error lines) is why this exists; see buildBatchedGithub's own doc for detail.
-  const boardGithub = buildBatchedGithub(self.owner, self.repo, { log });
+  //
+  // W1-T999 (the two-hour secondary-limit outage): this construction used to omit BOTH the pacer
+  // and a TTL override — `buildBatchedGithub`'s `pacer?` opt is documented "OPTIONAL and omitted
+  // by every existing caller/fixture", and this call site is exactly what made that true, and its
+  // bare 15s default `ttlMs` re-asked the board roughly ten times per sweep pass (sweep median
+  // 2.6 minutes) for an answer that could not have changed. `boardPacer` is ONE instance for this
+  // process's whole life (mirrors `buildSweepHook`'s own once-per-daemon-start pacer, run-task.ts
+  // — a pacer built per request would pace nothing), threaded through so a rate-limited fetch
+  // backs off via `GhCallPacer.recordResult`/`wait()` instead of re-polling on the very next tick.
+  // `DEFAULT_BOARD_POLL_TTL_MS` (lib/serve.ts) is the sweep-distribution-derived interval — see
+  // its own doc for the median/p90 math — threaded into BOTH this gateway's `ttlMs` and
+  // `boardGithubRefreshMs` below so the cache's own staleness bound and the background prewarm
+  // cadence never drift apart.
+  const boardPacer = deps.boardPacer ?? createGhCallPacer();
+  const boardGithub = (deps.buildBatchedGithub ?? buildBatchedGithub)(self.owner, self.repo, {
+    log,
+    pacer: boardPacer,
+    ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
+  });
   const server = buildServeServer({
+    boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
     // lock directory — the same `<config.root>/state/inflight` path `acquireInflightLock` writes
     // and the sweep rung reaps, never a second notion of where locks live. Without this the
