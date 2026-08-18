@@ -1,0 +1,165 @@
+- id: W1-T1011
+  title: "THE TRIAGE LANE TAKES A PERMANENT REMOTE ID RESERVATION BEFORE IT KNOWS THE WORK WILL HOLD — 21 of 64 minted ids in the retained union belong to a run that then errored, the local handle is released and the remote ref never can be, so every failed triage run burns an id forever: take the remote ref when the verdict is PROPOSED, not before the spawn"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THIS IS THE ORDERING, NOT THE FAILURES, AND THE DISTINCTION IS THE FIRST CLAUSE. Fifteen of the
+    thirty-one `triage.error` rows are GitHub commands failing, and three filed shards already own
+    that: W1-T1005 (the pacer distributed to 1 of 16 constructions), W1-T1007 (nothing stops after a
+    refusal) and W1-T1008 (the floor that cannot fire). THEY ARE CITED AND NOT RE-FILED. What
+    remains, and what nothing else covers, is that the id is taken BEFORE the work is known to hold.
+
+    (1) THE ORDER, RE-DERIVED AT origin/main 5747914. `triageCommandLocked` (`src/run-task.ts`) runs
+    `mintNextTaskIdWithHistory` → `reserveTaskIdFrom` (LOCAL) → `reserveTaskIdRemote` via
+    `gitRemoteRefReserver` (the PERMANENT `refs/rmd-id/<id>` ref) → `spawn`. The reservation is
+    complete before the worker starts, and therefore long before any verdict exists.
+
+    (2) THE STATED REASON FOR RESERVING EARLY IS SOUND AND MUST SURVIVE. The code says it in terms:
+    the reservation is "Taken BEFORE `spawn` on purpose: a reservation that cannot be written throws
+    TaskIdReservationError out of this command, and the paid worker (median $0.96) is never started
+    — a minter that cannot reserve must not spend." THAT PROPERTY IS NOT NEGOTIABLE and criterion 4
+    pins it. This task does not remove the pre-spawn check; it moves only the PERMANENT half.
+
+    (3) THE TWO RESERVATIONS HAVE OPPOSITE LIFETIMES, AND ONLY ONE IS RECOVERABLE. The LOCAL handle
+    is released on every exit path — `reservationHandle?.release()` in `triageCommandLocked` — and
+    `TaskIdReservationHandle.release()` is documented idempotent. The REMOTE ref has NO release path
+    at all: zero delete sites across `src/` against a control of three `reserveTaskIdRemote` sites,
+    and #2102's never-delete rule is absolute and correct — the ref IS the allocation record and
+    removing it re-opens the race it settled. Put plainly:
+    the answer is not deletion because the ref is the allocation record — it is not taking the ref
+    until the work holds.
+
+    (4) THE COST, MEASURED OVER THE RETAINED UNION (7 plain rotations + the live file, 0 gz — the
+    per-form file count run as the coverage control). Keyed by `run_id`: 69 distinct triage runs, 64
+    of which minted an id, 26 of which errored, and TWENTY-ONE OF WHICH MINTED AND THEN ERRORED.
+    That is 21 of 64 minted ids — 33% — belonging to a run that produced nothing. Five errored runs
+    never minted at all, which is the `not status:new` class failing before the mint, and is the
+    control showing the mint is not universal.
+
+    (5) THE COST IS THE ID AND THE HEAD-OF-QUEUE BLOCK, NOT MONEY, AND OVERSELLING SPEND WOULD BE
+    WRONG. A failed attempt costs about $0.0026 — roughly 300x below triage's ~$0.88 median — because
+    the worker barely runs before the failure. The expense is a permanently burned reservation and a
+    feedback entry that stays selectable.
+
+    (6) A FAILED ENTRY IS RE-SELECTED FOREVER, WHICH IS WHY THE BURN REPEATS. `decideAutoTriage`
+    fires on `candidates[0]` from `newFeedbackIdsOldestFirst`, oldest-first over `status: new`, and
+    `status: new` is the only drainable state. Nothing ages an entry out and there is no dead-letter
+    path: `triage.filed` reads ZERO rows across the whole union against a control of 68
+    `triage.id_minted`. `fb-1785785017959-c23215` failed twice seventeen minutes apart, each attempt
+    taking its own id.
+
+    (7) AND IT IS NOT ALREADY FIXED — THIS WAS THE GATE ON FILING AT ALL, AND IT DID NOT CLOSE. Two
+    triage runs late today resolved correctly, and `triage.error` last fired at 17:25:46Z with the
+    18Z and 19Z hours clean. But the union's own history shows clean stretches of four and five
+    hours between error clusters, so two clean hours is ordinary variance rather than evidence. THE
+    DECIDING MEASUREMENT: all three shards that would explain a fix are UNBUILT — W1-T1005, W1-T1007
+    and W1-T1008 each read `status: queued` with NO `Remudero-Task:` trailer and NO `run-<id>-<digits>`
+    head on any merged pull request, against a control of W1-T977 which IS credited that way. Nothing
+    has changed in the code, so nothing has been fixed.
+  design: |
+    THE SHAPE: split the two reservations that today happen together, and move only the permanent
+    one behind the verdict. No new step, no new status, no new signal.
+
+    (i) THE LOCAL RESERVATION STAYS EXACTLY WHERE IT IS. It is what makes rationale (2)'s property
+    true — an id that cannot be claimed still throws before the worker is spawned — and it is
+    already releasable on every exit path. Criterion 4 is the falsifier: a builder who moves the
+    pre-spawn check has broken the one guarantee this task must preserve.
+
+    (ii) THE REMOTE REF IS TAKEN WHEN THE VERDICT IS PROPOSED. `decideTriage` (`src/lib/triage.ts`)
+    already returns the action, and the lane already branches on `decision.action === "propose"` for
+    its own filed/not-filed bookkeeping. That branch is where the permanent ref belongs. A run that
+    errors before a verdict, or resolves ALREADY_DECIDED, takes no ref and burns nothing.
+
+    (iii) THE TRADE-OFF IS REAL AND IS NAMED RATHER THAN HIDDEN. Moving the remote ref later narrows
+    the cross-host protection from the whole run to the filing moment — a window of roughly the
+    worker's runtime during which another host could take the same id. THAT IS ACCEPTABLE AND THE
+    REASON IS MEASURED: contention ADVANCES rather than refuses (`src/lib/triage.ts` says so, and
+    `firstUnreservedAtOrAbove` walks upward past a holder), so losing that race costs a renumber,
+    never a failure. A builder must state this trade-off in the PR rather than presenting the change
+    as free.
+
+    (iv) NOTHING IS DELETED, EVER. #2102's rule is inherited unchanged. Ids already burned stay
+    burned; this task only stops new ones being taken by runs that produce nothing.
+
+    (v) NO NEW SIGNAL AND NO NEW STATUS. `triage.id_minted` already records the mint and moving it
+    changes when that row is written, not whether. A dead-letter status for a repeatedly-failing
+    entry is a real idea and is DELIBERATELY OUT OF SCOPE — `status: new` is the only drainable
+    state, so a new one needs a reader in the same change, and this task has none to offer. Eleven
+    mechanisms here have merged green with no reader; a twelfth would be worse than the burn.
+
+    (vi) OUT OF SCOPE, EACH NAMED. The GitHub-command failures — W1-T1005, W1-T1007, W1-T1008, all
+    filed and unbuilt. The verdict-parser failure that produced seven of the thirty-one errors: it
+    is a worker-output contract, a different concern, and moving the mint makes its cost an id
+    cheaper without pretending to fix it. And the head-of-queue block from rationale (6), which
+    needs the dead-letter reader (v) declines to invent.
+  acceptance:
+    - claim: "a run that errors before a verdict exists takes no permanent remote reservation"
+      proof: "unit test: W1-T1011: a triage run that fails before a verdict takes no remote reservation"
+    - claim: "a proposed verdict still takes the reservation before the shard filename is written"
+      proof: "unit test: W1-T1011: a proposed verdict reserves the id before the shard is written"
+    - claim: "an already decided verdict files nothing and leaves the id available"
+      proof: "unit test: W1-T1011: an already decided verdict takes no remote reservation"
+    - claim: "an unwritable reservation still refuses before the paid worker is ever started"
+      proof: "unit test: W1-T1011: a reservation that cannot be written still refuses before any spend"
+    - claim: "the answer is not deletion because the ref is the allocation record"
+      proof: "grep: the answer is not deletion because the ref is the allocation record in plan/tasks.d/W1-T1011-triage-mints-before-work-holds.yaml"
+  risk: high
+  origin: "oper#triage-mints-before-work-holds-2026-08-18"
+  plan_refs: ["W1-T1005", "W1-T1007", "W1-T1008", "W1-T509"]
+  files: [src/run-task.ts, test/triage-remote-reservation-timing.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE PHRASE THIS SHARD'S GREP PROOF MATCHES APPEARS IN RATIONALE (3) AS PROSE, NOT ONLY IN THE
+    ACCEPTANCE BLOCK, AND NOT ON THE TITLE LINE — so the proof matches an argument rather than its
+    own declaration.
+
+    src/run-task.ts MUST BE DECLARED AND THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING, AND
+    THE BRIEFING'S GUESS OF `src/lib/triage.ts` DOES NOT SURVIVE MEASUREMENT. Word-bounded counts at
+    5747914: `reserveTaskIdRemote` run-task.ts 2, triage.ts 0; `gitRemoteRefReserver` run-task.ts 2,
+    triage.ts 0; `mintNextTaskIdWithHistory` run-task.ts 6, triage.ts 0; `triageCommandLocked`
+    run-task.ts 2. The permanent reservation is not in triage.ts at all — that module holds
+    `decideTriage` (6) and `parseTriageVerdict` (2), the verdict half this task branches on but does
+    not change. So the ordering cannot be moved without run-task.ts, which 221 of 361 shards declare;
+    this shard serialises against them under `overlappingPaths` and that is the price of where the
+    call site lives. CONTROL: an absent symbol reads 0 in every file counted.
+
+    src/lib/task-id-reservation.ts IS NOT DECLARED — declared by only 4 shards, so it would have been
+    cheap, but nothing in it changes: `reserveTaskIdFrom`, `reserveTaskIdRemote` and
+    `TaskIdReservationHandle.release()` are already exported and already correct. Declaring an
+    unchanged file to look thorough is how a serialisation cost gets paid for nothing.
+
+    test/triage-remote-reservation-timing.test.ts IS NEW AND DECLARED AS NEW.
+    test/task-id-reservation.test.ts exists and covers the reservation primitive itself; this task's
+    subject is WHEN the lane calls it, a different shape, and this repo's rule sends a
+    coverage-load-bearing test to its own file.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN. `sizingViolation` (`src/lib/task-linter.ts`)
+    exempts only risk high, and `subsystemsOf` derives subsystems from the acceptance text as well as
+    from `files:`; the criteria name a reservation lifetime, a verdict branch, a spend guard and a
+    failure path.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form; each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted from the real reservation suite that matched one, and each is
+    plain prose under 100 characters with no comma and no regex metacharacter. The fifth is
+    doc-shaped and takes a `grep:` on ONE PHYSICAL LINE, verified against this changeset's own head
+    as well as the merge base.
+
+    ID PROVENANCE — GIT SURFACES FIRST, GITHUB LAST AND SERIAL, `/rate_limit` NEVER CALLED. W1-T1011
+    read 0 on all four: refs (103 enumerated; control refs/rmd-id/W1-T1010 = 1, negative
+    refs/rmd-id/W1-T444444 = 0), shard FILENAMES via git ls-tree -r (361; control W1-T1009 = 1), ids
+    under plan/ (advisory only — the control for that surface is that a quoted six-digit example
+    returns 13 files, proving it is not an existence test), and the open-PR file list and title.
+    THE OPEN-PR SET WAS READ, NOT UNREAD: one open pull request was enumerated and its files
+    fetched, so surface four's zero is an EMPTY match over a READ set. THE REFS WERE RE-SWEPT
+    IMMEDIATELY BEFORE PUSHING because one lane is minting right now and two collisions happened in
+    two sessions.
+    THE GATE PROOF IS GENUINE, NOT AN AUTH FAILURE. Plain refspec, no `+` and no lease. Free id:
+    rc=0, `* [new reference] 2d5b83f8… -> refs/rmd-id/W1-T1011`. The IDENTICAL refspec at the taken
+    refs/rmd-id/W1-T1010: rc=1, `! [rejected] … (fetch first)`, that ref still ac1dc402, and
+    `could not read Username` occurrences: 0 on BOTH pushes.
