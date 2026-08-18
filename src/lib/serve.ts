@@ -4943,7 +4943,8 @@ export const ACCOUNT_FILE_PATH_ENV = "RMD_ACCOUNT_FILE_PATH";
  * explicit caller override (`ServeDeps.accountUsage.accountFilePath` — the SAME "an assembler
  * wires the real thing, a test injects a fake" seam every other optional field on that type
  * already follows) stands in for the flag tier; {@link ACCOUNT_FILE_PATH_ENV} stands in for the
- * config tier an operator can set without a code or CLI change at all. Neither set ⇒ `undefined`,
+ * config tier: an operator sets it directly in the deployment environment, entirely outside this
+ * file and the CLI parser. Neither set ⇒ `undefined`,
  * which is exactly what flowed through before this task — `readAccountUsageFile`'s OWN default
  * parameter resolves it, so an install that sets neither renders BYTE-IDENTICAL to today.
  *

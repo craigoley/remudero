@@ -464,7 +464,7 @@ test("W1-T997: omitting the supplied path leaves the home default unchanged", as
     "an explicit override beats the env var",
   );
   // With no explicit override, the env var is honoured -- the SECOND way an install can point the
-  // console at a readable copy without a code change.
+  // console at a readable copy, set purely in the deployment environment.
   assert.equal(
     resolveAccountFilePath(undefined, { [ACCOUNT_FILE_PATH_ENV]: "/env/path.json" }),
     "/env/path.json",
