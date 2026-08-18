@@ -1,0 +1,225 @@
+- id: W1-T972
+  title: "NINE TRUE ESCALATIONS COULD NOT SAY WHICH MACHINE THEY WERE ABOUT — every ledger row and every escalation body is written without any identity of the writer, so a reader on one host followed nine correct crash-loop issues about the OTHER host, found a healthy unit and concluded noise: stamp one identity at appendLedger and name it in renderIssueBody"
+  repo: remudero
+  risk: high
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: |
+    RE-DERIVED AT origin/main 3d91969, SIX COMMITS AHEAD OF THE RECON'S b316693e. Every number
+    below was re-measured on 3d91969 with its own positive control; where the brief's figure did
+    not reproduce, the measured figure is used and the difference is named.
+
+    (1) NO ROW CAN NAME ITS WRITER, AND THE CONTROL PROVES THE ZERO IS REAL. Over the unioned
+    ledger corpus on this host (71172 deduped rows, 2026-08-08 to 2026-08-18): rows carrying a
+    `host` key = 0, rows carrying `hostname` = 0, against same-invocation controls of `ts` = 71172
+    and `run_id` = 71172. `LedgerLine` (src/lib/ledger.ts) declares only `run_id`, `task_id`,
+    `step` and an index signature, and `appendLedger` composes its record as
+    `{ ts: new Date().toISOString(), ...line }` — `ts` is the ONLY field it stamps of its own
+    accord.
+
+    (2) THE ESCALATION BODY CANNOT NAME IT EITHER. `renderIssueBody` (src/lib/escalate.ts) emits
+    `**Class:**` and `**Task:**` unconditionally and `**Run:**`, `**Head:**`, `**Cause:**` when
+    set. Host-shaped header lines in that module = 0, against a same-file control of `**Class:**`
+    = 2. The module imports `node:os` 0 times, against a control of 1 in src/lib/drain-lock.ts.
+
+    (3) THE ONE HOSTNAME THAT REACHES AN OPERATOR TODAY IS A LOCK-HOLDER FIELD, NOT A WRITER
+    IDENTITY — AND A NAIVE GREP MISSES IT TWICE OVER. `grep -c hostname src/run-task.ts` reads 0,
+    and a single-line `grep -cE 'already running.*host' src/run-task.ts` also reads 0, because the
+    token is `.host` rather than `hostname` AND the message is split across concatenated string
+    literals. A MULTILINE SCAN WAS USED AND IS NAMED HERE AS THE METHOD: `perl -0777` over the
+    whole file finds the wrapped message once, and the `.host` token resolves to TWO call sites in
+    src/run-task.ts plus siblings in src/lib/inflight-lock.ts. All three of drain-lock.ts,
+    inflight-lock.ts and review.ts store `host: opts.info?.host ?? hostname()` on a HOLDER record.
+    PRECISION THE BRIEF DID NOT HAVE: because rationale (4) establishes the two cells share no
+    locks, that holder is always the local unit — so the field is not "the other machine's name",
+    it is a LOCK-CONTENTION field that surfaces only when a lock is contended and never reaches a
+    ledger row or an issue body. The defect is absence on those two surfaces, not a wrong value on
+    this one.
+
+    (4) THE TWO CELLS ARE DISJOINT BY DESIGN AND MUST STAY SO. W1-T433's falsifier (iv), read
+    verbatim from plan/tasks.d/W1-T433-wild-trails-cell-pilot.yaml, requires "the two consoles
+    report DISJOINT state (a task dispatched in one never appears in the other's ledger, status or
+    inflight)" and that "a shared anything" fails it. THIS TASK PROPOSES NO BRIDGE. It adds a
+    self-describing field to a row each cell already writes locally. Corroboration from the corpus:
+    `daemon.crashloop.escalated` reads 0 live AND 0 in the union on this host, exactly as
+    disjointness predicts for an incident that happened on the other unit, against a `run.start`
+    control of 144 live and 165 union.
+
+    (5) THIS IS NOT AN UNREAD-SIGNAL FILING, AND THE DISTINCTION IS THE WHOLE POINT. Eight
+    mechanisms in this repo are built and unread — `hasPushedRunBranch`, `armedButStalled`,
+    `dispatch.stood_down`, `CiFailure.outsidePrRange`, `dh-rate-limit`, `rareOverlapWarnings`,
+    `rmd coverage-improve`, and `supersessionVerdict` which has no producer at all — and a ninth
+    would be indefensible. THESE ESCALATIONS WERE NOT UNREAD FOR LACK OF EMISSION. They emitted
+    NINE TIMES, were delivered, were opened, and were read; every one was correct. The consumer
+    already exists and already looked. What it could not do was decide which unit the message
+    described. This adds a discriminator to a signal with a proven reader, not a signal with none.
+  design: |
+    (i) ONE STAMP SITE, CHOSEN BECAUSE IT IS THE ONLY CHOKE POINT. `appendLedger` is invoked from
+    NINETEEN modules under src/ — 48 times in src/run-task.ts alone, 11 in src/lib/sweep.ts, 9 in
+    src/lib/retro.ts, 4 in src/lib/escalate.ts, and so on. Stamping inside `appendLedger`, beside
+    the `ts` it already adds, gives every row the field with ZERO call sites changed. Stamping at
+    callers would be nineteen edits and would guarantee drift. This is also why src/run-task.ts is
+    NOT declared in `files:` — see the note.
+
+    (ii) THE ESCALATION BODY IS A SECOND WRITER AND GETS ITS OWN LINE. `renderIssueBody` does not
+    read the ledger; it renders an `Escalation`. A stamp on the row therefore does NOT put a host
+    on the issue, and a host on the issue does NOT put one on the row. Both are in scope precisely
+    because a fix to one is not a fix to the other, and criteria 1 and 3 assert them separately.
+
+    (iii) IDENTITY IS `os.hostname()`. ONE VALUE, NOT TWO, AND HERE IS WHY IT BEATS THE ROOT.
+      - IT IS ALREADY THIS REPO'S IDENTITY PRIMITIVE. Six modules import `hostname` from `node:os`
+        (drain-lock, fleet-control, fs-race-safe, inflight-lock, review, task-id-reservation) and
+        three of them store it under the key `host` on a holder record. A row stamped with the
+        same primitive JOINS to those records. A root-derived id would be a SECOND identity
+        vocabulary that cannot be joined to the three that exist, which is the two-identities
+        outcome this task is required to avoid.
+      - THE CONSUMER IS A HUMAN READING AN ISSUE. `Craigs-Mac-mini` and `Remudero` are legible in
+        an issue body at a glance. That is the exact failure being fixed: a person read nine
+        correct issues and could not tell which unit they described.
+      - A ROOT DOES NOT RELIABLY DISCRIMINATE, AND LEAKS. Both cells are conventionally rooted at
+        a `Remudero` directory under the service user's home, so the basename collides and only
+        the absolute path differs — which puts a local filesystem layout into a GitHub issue body
+        to buy a distinction the hostname already makes cleanly.
+      - THE COST IS NAMED, NOT HIDDEN: hostname does not distinguish two cells on ONE machine.
+        That topology does not exist today (rationale (4): one cell per host) and the day it does,
+        the reader below is the seam that changes, not nineteen call sites.
+
+    (iv) THE READER IS INJECTABLE AND DEFAULTS TO THE REAL ONE, WHICH IS WHAT MAKES THE FALSIFIER
+    POSSIBLE. `os.hostname()` is constant within one process, so a test cannot produce two real
+    values in one run. The identity reader is therefore an optional parameter defaulted to
+    `hostname()` from `node:os`, appended LAST so no positional caller shifts. Criterion 2 drives
+    two ledger roots in a single run through two DISTINCT injected identities and asserts each row
+    carries its own — which a hardcoded constant fails in both directions, and which a test
+    asserting merely that "some identity appears" cannot detect. Criterion 4 exercises the DEFAULT
+    arm with nothing injected, because when every test injects a fake the default ships
+    unreachable and uncovered. It asserts NON-EMPTINESS rather than a literal: a test pinning one
+    machine's name would pass on that unit and fail on every other, re-creating inside the suite
+    the unattributability this task exists to remove.
+
+    (v) THE ROTATION EXPOSURE BOUNDS THE VALUE OF THE LEDGER HALF, AND IS NAMED HERE AND LEFT
+    ALONE. Retention has three categories in src/lib/ledger.ts: `DECISION_RELEVANT_LEDGER_STEPS`
+    (kept indefinitely), `isHealthOrDeployStep` (`daemon.boot` plus the `deploy.` prefix, bounded
+    by `HEALTH_STEP_RETENTION_WINDOW_MS`), and `RENDER_RELEVANT_LEDGER_STEPS` (bounded by
+    `RENDER_STEP_RETENTION_WINDOW_MS`); everything else is capped at `MAX_RETAINED_LINES_PER_STEP`
+    and archived. MEASURED ACROSS BOTH PROTECTED SETS: members whose step ends `.error` = 0 and
+    members beginning `worker.` = 0, out of 48 quoted members, against controls of `run.start`
+    present in the decision set and `daemon.headroom` present in the render set. SO THE ROWS AN
+    OPERATOR MOST WANTS MID-INCIDENT ARE THE ONES WITH NO RETENTION PROTECTION, and a host stamp
+    on those ages out with them.
+    THE BRIEF'S FIGURE DID NOT FULLY REPRODUCE AND THE MEASURED ONE IS USED: `*.error` reads 14
+    live against 117 in the union — not zero live. Those 14 are simply rows written since the last
+    rotation and carry no protection; the SET membership is the durable claim, not the live count.
+    `worker.stalled` reads 0 live AND 0 union, which is a step with no emissions rather than one
+    rotated away — the `plan.start` shape src/lib/ledger.ts's own comment already warns about.
+    WHAT THIS MEANS FOR SCOPE: the ledger half is worth most on the fifteen decision-relevant steps
+    that never rotate — among them `escalation.issue_opened`, `verdict`, `sweep.disposed` and
+    `run.start` — and least on the unprotected majority. THE ESCALATION HALF IS NOT SUBJECT TO
+    THIS AT ALL: a GitHub issue body is never rotated, which is why criterion 3 is the durable one
+    and why the two halves are not redundant. RETENTION SETS ARE NOT THIS TASK'S CONCERN and must
+    not be widened into; adding a step to a retention set is a separate filing with its own
+    falsifier, and `test/ledger-rotation.test.ts` re-derives that set from its consumers.
+
+    (vi) EXPLICITLY OUT OF SCOPE, EACH WITH ITS REASON.
+      - ANY CROSS-HOST READ, MERGE, RELAY OR SHARED STORE. Rationale (4). The scope is identity ON
+        THE ROW, not cross-host anything.
+      - A CONSOLE ROUTE OR ANY CONSOLE RENDER. The console binds 127.0.0.1:4317 with no published
+        port; a route is downstream of W1-T915 and is not this.
+      - RETENTION SET MEMBERSHIP. Named in (v), left alone.
+      - THE LOCK-HOLDER `host` FIELDS in drain-lock.ts, inflight-lock.ts and review.ts. They are
+        correct for what they describe (rationale (3)) and are not touched.
+  acceptance:
+    - claim: "a ledger row written through the ordinary append path carries the identity of the machine that wrote it"
+      proof: "unit test: W1-T972: a ledger row carries the identity of the machine that wrote it"
+    - claim: "two ledger roots driven in one run through two distinct injected identities each stamp their own so a fixed constant fails both directions"
+      proof: "unit test: W1-T972: two identities in one run stamp their own rows not a constant"
+    - claim: "the rendered escalation body names the machine it describes which the ledger stamp alone does not accomplish"
+      proof: "unit test: W1-T972: the rendered escalation body names the machine it describes"
+    - claim: "the default identity reader runs with nothing injected and yields a non-empty value so the default arm is executed"
+      proof: "unit test: W1-T972: the default identity reader runs and yields a non-empty value"
+    - claim: "the append path reads the identity from node os rather than reconstructing or hardcoding it"
+      proof: "grep: hostname in src/lib/ledger.ts"
+  origin: "oper#escalation-cannot-name-its-machine-2026-08-18"
+  plan_refs: ["W1-T915", "W1-T433", "W1-T268", "W1-T471"]
+  files: [src/lib/ledger.ts, src/lib/escalate.ts, test/ledger-host-identity.test.ts, test/escalate.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIS SUPERSEDES W1-T966 (#2094), WHICH IS OPEN AND UNMERGED AS THIS IS FILED. That shard covers
+    ONLY the `renderIssueBody` half and declares src/lib/escalate.ts + test/escalate.test.ts. It was
+    filed before the ledger half was established. Two open shards declaring src/lib/escalate.ts
+    serialize against each other under W1-T471, and splitting the two writers across two shards is
+    the concrete mechanism by which TWO identity vocabularies get emitted — the outcome design (iii)
+    exists to prevent, since each shard would choose its own reader. #2094 SHOULD BE CLOSED
+    UNMERGED IN FAVOUR OF THIS ONE. This is flagged rather than assumed: the operator gates it.
+
+    W1-T915 (#1976) IS THE SIBLING, NOT THE DUPLICATE. That files the console's unreachability —
+    a surface an operator cannot get to. This is the other half: a surface that IS reachable, and
+    a message on it that still cannot say which machine it describes. Neither subsumes the other,
+    and this task declares no file W1-T915 declares.
+
+    src/run-task.ts IS DELIBERATELY NOT DECLARED, AND THAT IS A SCOPE DECISION WITH A MEASURED
+    BASIS. It invokes `appendLedger` 48 times — the highest of any module — but design (i) puts
+    the stamp INSIDE `appendLedger`, so not one of those 48 sites changes. Its only `renderIssueBody`
+    hits are 2 comment references, not calls. Declaring it would serialize this task against the
+    103 of 277 shards that already name it (W1-T471) and buy nothing. If an implementer finds the
+    change genuinely must live there, they must amend this shard to declare it and accept that
+    serialization cost in writing rather than overrunning into it.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT 3d91969, OWN PATH ABSENT.
+    `appendLedger`: src/lib/ledger.ts = 9 (its home), then 19 other modules. `renderIssueBody`:
+    src/lib/escalate.ts = 11 (its home), src/run-task.ts = 2 comments. For the escalation half the
+    suite is test/escalate.test.ts — 8 word-bounded `renderIssueBody` hits, the highest of any test
+    file, against test/decision-summary.test.ts at 6 and test/triage.test.ts at 4, both scoped to
+    other tasks. For the ledger half THERE IS NO test/ledger.test.ts: ledger.ts is covered by eight
+    concern-scoped suites (ledger-account-dimension, ledger-atomic, ledger-corpus-both-forms,
+    ledger-grep, ledger-render-retention, ledger-repo-scope, ledger-rotation-convergence,
+    ledger-rotation), so a new concern takes a NEW concern-scoped file — test/ledger-host-identity.test.ts
+    — following that established pattern. test/ledger-rotation.test.ts is deliberately NOT declared:
+    it owns the retention doctrine with 33 word-bounded hits on `DECISION_RELEVANT_LEDGER_STEPS` and
+    `rotateLedger` against a control of 0 in test/escalate.test.ts, and retention is out of scope
+    per design (v).
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. `moduleIdFromPath`
+    strips the `.test` segment, so the four declared paths resolve to the subsystem ids `ledger`,
+    `escalate` and `ledger-host-identity` — three, above `sizingViolation`'s threshold of two, so no
+    file list satisfying this task's own scope could pass at risk:medium. Blast radius argues DOWN:
+    one added field on an append and one added line in a render. The band is where the rule puts it.
+
+    PROOF NOTES. Four criteria use the NAME-FILTERED `unit test:` form with a bare title — never the
+    pure-path form, which against test/escalate.test.ts would pass on any of that suite's 1729 lines
+    and prove nothing about this change. Each title is plain prose, under 100 characters, with ZERO
+    commas, no `"; "` and no regex metacharacter, so `looksLikeScenarioNarrative` cannot fail
+    proof-resolvability. All four were verified with `grep -rlF` over test/ to match 0 files today
+    against a control title that matches 1 — they are forward references to titles this task creates,
+    and they are titles rather than symbol names, so nothing here guesses an identifier.
+    THE GREP PROOF'S DISCRIMINATION WAS CHECKED BY HAND WITH THE EXECUTOR'S OWN INVOCATION, because
+    no local verb reports a stale match: `grep -arn -- 'hostname' src/lib/ledger.ts` returns 0 at the
+    merge base, against same-invocation controls of `grep -arn -- 'appendLedger' src/lib/ledger.ts`
+    = 9 and `grep -arn -- 'hostname' src/lib/drain-lock.ts` = 2. It therefore MISSES the base and can
+    only match on head, so it cannot be downgraded to `executed_stale`. It is single-line, its pattern
+    is file text rather than a path slug, and it carries no `" in "` inside the pattern.
+
+    ID PROVENANCE — FOUR SURFACES, EACH WITH ITS OWN POSITIVE CONTROL, PLUS A RESERVATION MINTED
+    WITH THE PLAIN REFSPEC. This shard was renumbered on 2026-08-18 after another host's forced
+    refspec overwrote the reservation it was first filed under; that ref is left exactly as its
+    holder set it, because the ref is the allocation record and deleting it would re-open the race
+    it settled. The full account is in this shard's PR body.
+    W1-T972 read 0 on all four surfaces at 3040d33: refs/rmd-id/* (68 refs enumerated, control
+    refs/rmd-id/W1-T946 = 1), shard filenames on origin/main and ids declared anywhere under plan/
+    (control W1-T965 = filename 1 / declared 1), EVERY OPEN PR'S FILE LIST, and EVERY OPEN PR'S
+    TITLE (both controlled by this PR's own two entries under its prior id, so the empty result for
+    W1-T972 is a real absence and not a failed query).
+    THE FILE-LIST SURFACE EARNED ITS PLACE: W1-T966 read 0 in every plan/ path, 0 in refs, and 0
+    across open PR TITLES, yet 1 in an open PR's FILE LIST (#2094) — the only surface that showed it
+    taken, and a sweep without it would have re-used a live id.
+    THE MINT USED THE ALLOCATOR'S OWN SHAPE — NO `+`, NO `--force-with-lease`, the form
+    `gitRemoteRefReserver.attempt` (src/lib/task-id-reservation.ts) already uses. Orphan payload over
+    the empty tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904 with ZERO parents, plain refspec, exit
+    status captured into a variable: MINT_EXIT_CODE=0 with `* [new reference]`. The readback
+    `git ls-remote origin refs/rmd-id/W1-T972` returned exactly the nonce commit
+    e48fea9f135cd1dd03ee1975f077c8abcb4ed6fd, matching. Because the anchor has no parent it is an
+    ancestor of nothing, so a second writer on this id is refused as a non-fast-forward instead of
+    silently clobbering it — the gate a forced push discards.
