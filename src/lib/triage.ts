@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
+import { diffEmptyAgainstScope } from "./review.js";
 import { feedbackEntryRepoPath } from "./feedback.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
@@ -459,6 +460,56 @@ export function nonPlanFilesInDiff(diff: string): string[] {
 /** Whether a diff carries the `feedback#<id>` provenance token the PROPOSED contract requires. */
 export function diffCitesFeedback(diff: string, feedbackId: string): boolean {
   return diff.includes(`feedback#${feedbackId}`);
+}
+
+// ── W1-T963: the empty-diff-triage-merge incident (#2075/#2077/#2078) ───────────────────────────
+//
+// Three triage PRs for the SAME feedback entry merged and PASSED REVIEW despite changing nothing:
+// `gh pr diff`/`nonPlanFilesInDiff` above compare a triage branch against its OWN (frozen,
+// fork-point) merge-base, so they stay non-empty even once a SIBLING triage PR for the identical
+// entry has already landed the SAME change on `origin/main` — the branch's own history never
+// shows that, only a diff against the LIVE default branch tip does. See `diffEmptyAgainstScope`'s
+// own doc (lib/review.js) for the structural check; this is the triage-specific SCOPE + DISPOSITION
+// wired around it.
+
+/**
+ * The declared SCOPE of a `no_task`/`grill` triage decision — the ONE path its entire
+ * contribution is: the feedback entry's own status flip. Deliberately NOT used for `propose`
+ * (its contribution also includes a NEW plan/tasks.d/ shard, so an empty diff against this
+ * narrower scope would never discriminate a genuinely-new proposal from a duplicate one).
+ */
+export function triageDeclaredScope(feedbackId: string): string[] {
+  return [feedbackEntryRepoPath(feedbackId)];
+}
+
+/** The terminal outcome a triage merge gate takes once it knows whether the LIVE diff against
+ *  {@link triageDeclaredScope} is empty — CLOSE (never merge; design (v): a refusal that leaves
+ *  the PR open forever is not the outcome either), or PROCEED to the ordinary review/arm gate. */
+export interface TriageEmptyScopeDisposition {
+  action: "close" | "proceed";
+  /** Present only for `action: "close"` — the `gh pr close --comment` text naming WHY. */
+  comment?: string;
+}
+
+/**
+ * Decide whether to CLOSE this triage PR (its declared scope is empty against the LIVE default
+ * branch — a sibling already did the work) or let it PROCEED to the ordinary review/arm gate.
+ * Pure: `liveDiffFiles` is the caller's OWN fresh `git diff --name-only origin/main HEAD -- <scope>`
+ * read (never this function's concern — a live git read cannot be pure), so this is trivially
+ * testable without spawning git at all.
+ */
+export function triageEmptyScopeDisposition(
+  liveDiffFiles: readonly string[],
+  scopeFiles: readonly string[],
+): TriageEmptyScopeDisposition {
+  if (!diffEmptyAgainstScope(liveDiffFiles, scopeFiles)) return { action: "proceed" };
+  return {
+    action: "close",
+    comment:
+      `rmd triage: closing, not merging — this PR's diff against the current \`origin/main\` is empty ` +
+      `for its declared scope (${scopeFiles.join(", ")}); a sibling triage PR already landed this ` +
+      `same change (W1-T963).`,
+  };
 }
 
 // ── Commit message / PR body authorship (harness-owned, deterministic) ──────────────────────

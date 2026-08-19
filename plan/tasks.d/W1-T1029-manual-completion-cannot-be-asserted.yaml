@@ -1,0 +1,145 @@
+- id: W1-T1029
+  title: "A TASK THE OPERATOR COMPLETES BY HAND CAN NEVER SATISFY A CREDIT-BASED depends_on, SO IT PARKS EVERY TASK BEHIND IT FOREVER — four records are structurally uncreditable and three verify:auto tasks sit behind them, and the fix is NOT a new channel: deriveStatus already has a hand-execution rung and two of the four cases cannot express themselves in it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THE GATE IS CORRECT AND STAYS. W1-T12d is live commissioning — launchctl load, overnight drain,
+    kill-and-recover. If W1-T165 dispatched before it happened a worker would build against an
+    uncommissioned daemon. THE DEFECT IS THAT THERE IS NO WAY TO SAY IT HAPPENED, not that the check
+    exists. Nothing here weakens `depends_on` and no edge is edited.
+
+    (1) THE CLASS, SIZED FIRST, AND IT IS SMALL. Over 644 records: `type: manual` reads 3 and
+    `repo: ≠ remudero` reads 2, overlapping in one — FOUR structurally uncreditable tasks. W1-T12d and
+    W1-T12e (`type: manual`), W1-T13 (`type: manual` AND `repo: none`), and W12-T1
+    (`repo: remudero-site`). All four read FALSE on every credit path over 1,642 merged PRs — anchored
+    `Remudero-Task:` trailer, `run-<id>-<epoch>` head, and non-filing `(W<n>-T<n>)` subject suffix —
+    against a control of W1-T978 reading TRUE on two of the three.
+
+    (2) WHAT THEY PARK, WHICH IS THE WHOLE JUSTIFICATION. Transitively they block five tasks, of which
+    THREE ARE `verify: auto`: W1-T165 and W1-T188 behind W1-T12d, and W1-T49 behind W12-T1. W1-T12e and
+    W1-T13 block nothing at all. Against an approximate dispatchable pool of sixteen that is three of
+    nineteen. SCOPE SMALL AND SAY SO: this is a four-task class, not a twenty-task one, and the shard
+    is sized to it.
+
+    (3) `status: done` IS REFUSED AS THE SIGNAL, EXPLICITLY. `plan/tasks.yaml`'s own header says
+    "`status:` is DECORATIVE / initial-state only. The runner NEVER writes it back. Real merge-state is
+    DERIVED FROM GITHUB by deriveStatus(taskId)". MEASURED: `done` reads 2 of 644 records, and both are
+    uncreditable tasks — so trusting the field would credit exactly those two and leave every genuinely
+    credited task reading incomplete. An implementer who reaches for it has misread this shard.
+
+    (4) A COMPLETION PR CARRYING THE TRAILER IS RULED OUT ON EVIDENCE, NOT ON PREFERENCE, AND THE
+    EVIDENCE IS THAT IT WAS ALREADY TRIED. PR #69 records the commissioning — "plan: record W1-T12d
+    commissioning (done); mark WS-1 COMPLETE" — and it DOES carry an anchored trailer. It reads
+    `Remudero-Task: W1-T12D-RECORD`: an uppercase D and a `-RECORD` suffix, a synthetic id that is not
+    a task. Its author deliberately made the record NON-crediting. Independently,
+    `isPlanOnlyFilingPr` cannot tell a filing from a completion record: it keys on a
+    `pr.opened{plan_only:true}` line THE EMITTER ITSELF WROTE, so a hand-authored plan PR produces no
+    signal in either direction, and its own doc records that diff-based inference was rejected because
+    "a hand-authored plan PR would misclassify". Two independent reasons; the shard keeps both.
+
+    (5) AND THE MECHANISM ALREADY EXISTS, WHICH IS WHY THIS IS A WIDENING RATHER THAN A NEW CHANNEL.
+    `StatusSource` (`src/lib/status.ts`) already lists `"pr-field"`, and `deriveStatus` reads
+    `task.pr` at rung (b) for exactly "tasks executed by hand, pre-ledger" — three records use it
+    today, and the projection already reads a hand-execution rung and two of the four cases cannot express themselves in it:
+      - W1-T12d and W1-T13 need NOTHING NEW — their completion PR exists and the task simply carries no
+        `pr:` value. That is the operator's immediate workaround, named in (8), not this task.
+      - W12-T1 CANNOT use it: `ghGateway(owner, repo, …)` is constructed per repository and
+        `deps.github.prByRef(task.pr)` resolves the number against THIS repo, so a `remudero-site` PR
+        is unreachable by number alone.
+      - W1-T12e CANNOT use it: the drill has not happened, so there is no PR to name and never will be.
+    THE TASK IS THEREFORE TWO NARROW EXTENSIONS OF ONE RUNG: let the hand-execution credit name a PR in
+    a stated repository, and let a completion with no PR be asserted at all.
+
+    (6) THE NO-PR ASSERTION IS A LEDGER ROW, AND ITS ROTATION EXPOSURE IS A CRITERION RATHER THAN A
+    COMMENT. `deriveStatus` already reads ledger lines at rung (a), so the reader exists and no new
+    consumer is invented — `isDispatchEligible`'s unmet-deps predicate is the ultimate consumer and is
+    untouched. The row must carry ACTOR and TIME, because current practice is unanimous that a human
+    task completes by an explicit recorded signal and never by inference. AND THE STEP MUST BE
+    REGISTERED IN `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`) IN THE SAME CHANGE: a decision
+    reads it, so a rotation archiving it would silently re-park every task behind the assertion — the
+    trap `sweep.absent_repush` and `MUTATION_GATE_VERDICT_STEP` have already paid for twice.
+
+    (7) FALSIFIABLE IN ONE RUN, WHICH IS WHAT KEEPS THE TEST HONEST. A task with an assertion resolves
+    a merged projection naming its own source; a task without one resolves `source: "none"`. The two
+    are structurally different in the same pass, so a test cannot pass on an implementation that
+    satisfies everything — the shape criterion 3 pins.
+
+    (8) AN ERRONEOUS ASSERTION IS REVERSIBLE, AND THE MACHINERY IS ALREADY THERE. Asserting completion
+    for work that did not happen dispatches against a false premise — a worker building on an
+    uncommissioned daemon. `StatusSource` already carries `"correction"` and `deriveStatus` is
+    documented as "correction-aware (a `correction.provenance` line debunking this exact credit is
+    honored)", so a wrong assertion is retracted by a correction row rather than by deleting the
+    assertion, which keeps the record of both. THE OPERATOR'S IMMEDIATE WORKAROUND, NAMED AND NOT
+    PROPOSED AS THE FIX: give W1-T12d its existing completion PR through the `pr:` field, which unparks
+    W1-T165 and W1-T188 today through a channel the projection already reads and does nothing for
+    W12-T1 or W1-T12e. EDITING `depends_on` EDGES IS NOT THE WORKAROUND AND IS NOT PROPOSED — Rule 15
+    forbids a worker doing it and it discards the record of why the edge existed.
+  acceptance:
+    - claim: "a completion PR in another repository satisfies a credit-based dependency"
+      proof: "unit test: W1-T1029: a completion pr in another repo satisfies a credit based dependency"
+    - claim: "a manual task that produces no PR at all can be asserted complete with actor and time"
+      proof: "unit test: W1-T1029: a manual task with no pr at all can be asserted complete"
+    - claim: "a task with no assertion still reads unmerged in the same run"
+      proof: "unit test: W1-T1029: a task with no assertion still reads unmerged in the same run"
+    - claim: "the completion step is registered so a rotation cannot re-park the tasks behind it"
+      proof: "unit test: W1-T1029: the completion step survives a ledger rotation"
+    - claim: "this widens an existing hand-execution rung rather than adding a channel"
+      proof: "grep: the projection already reads a hand-execution rung and two of the four cases cannot express themselves in it in plan/tasks.d/W1-T1029-manual-completion-cannot-be-asserted.yaml"
+  risk: high
+  origin: "oper#manual-completion-cannot-be-credited-2026-08-19"
+  plan_refs: ["W1-T12d", "W1-T12e", "W1-T13", "W12-T1", "W1-T367", "W1-T1004"]
+  files: [src/lib/status.ts, src/lib/ledger.ts, test/manual-completion-assertion.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL
+    LINE inside rationale (5), is not on line 2 of the file, and reads 0 files across the whole tree at
+    the merge base against a control ("tasks executed by hand") that reads 1 — so it discriminates head
+    from base and cannot be downgraded to `executed_stale`.
+
+    NO NEW CONSUMER IS INVENTED. `deriveStatus` already reads ledger lines at rung (a) and already
+    exposes a `pr-field` source; `isDispatchEligible`'s unmet-deps predicate (`src/lib/drain.ts`) is the
+    ultimate reader and needs no change, which is why drain.ts is NOT declared. The whole task is that
+    the projection reads one rung more widely.
+
+    src/run-task.ts IS NOT DECLARED, AND THAT IS DELIBERATE. It carries 237 of 377 records, and
+    DECISIONS.md's 2026-08-18 ruling accepts one effective lane as the standing cost of naming it — so
+    avoiding it where the marker is reachable elsewhere is worth doing. Both halves live under
+    `src/lib/`: the rung in status.ts (50 shards) and the step registration in ledger.ts (37 shards).
+    If an implementer finds the assertion cannot be read without touching a run-task.ts call site, that
+    widening must be ratified before it is made, not disclosed afterwards.
+
+    THE FOUR-TASK CLASS IS NAMED IN plan_refs SO A LATER READER CAN CHECK THE SIZING RATHER THAN TRUST
+    IT. W1-T12d, W1-T12e, W1-T13 and W12-T1 are the whole population at this sha; if the count grows,
+    the sizing argument in rationale (2) is the thing to re-derive, not this shard's scope.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. The criteria name a cross-repo
+    credit lookup, a new assertion source, a negative case and a rotation-retention registration across
+    two lib modules; `sizingViolation` (`src/lib/task-linter.ts`) derives subsystems from `files:` plus
+    the acceptance text and would refuse medium on that span.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form; each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted verbatim from the ledger-rotation suite that matched two. Each is
+    plain prose under 100 characters with no comma, no `; ` and no regex metacharacter, because a bare
+    title is compiled through `escapeRegExp` and matched literally. The fifth is doc-shaped and takes a
+    `grep:` with an explicit path.
+
+    ID PROVENANCE — MINTED THIS SESSION, PLAIN REFSPEC, EVERY VARIABLE BRACED. An orphan anchor over the
+    empty tree (0 parent lines, 0 tree entries) naming host, pid and a nanosecond nonce. Free id: rc=0,
+    `* [new reference] 4fbd1cb0… -> refs/rmd-id/W1-T1029`, readback equal to the anchor. NEGATIVE
+    CONTROL, the identical plain refspec carrying a DIFFERENT sha at the taken refs/rmd-id/W1-T1027:
+    rc=1, `! [rejected] … (non-fast-forward)`, that ref still 96bd26dc…. `could not read Username`
+    occurrences 0 and `403` occurrences 0 on BOTH pushes, so the gate proof is genuine rather than an
+    auth artefact. THE REFS WERE RE-SWEPT IMMEDIATELY BEFORE MINTING.
+    FOUR SURFACES SWEPT, GIT AND LEDGER FIRST AND REST LAST AND SERIAL, `/rate_limit` NEVER CALLED: the
+    reservation; shard FILENAMES via `git ls-tree -r` (376 files, W1-T1029 = 0, control W1-T1027 = 1 —
+    THE FILENAME IS THE EXISTENCE TEST, and the `- id:` line is unindented); ids mentioned under plan/
+    (ADVISORY only, 0 here against a control of 4 files for W1-T12d); and the open-PR titles, heads and
+    file lists. THE OPEN-PR SET WAS READ, NOT UNREAD: four open pull requests were enumerated (#2199,
+    #2203, #2204, #2205) and all four file lists fetched; the only plan/tasks path among them is
+    #2203's, and none carries this id.

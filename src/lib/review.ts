@@ -2872,6 +2872,32 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
   return out;
 }
 
+/**
+ * Whether `diffFiles` is EMPTY against its own DECLARED SCOPE — the specific paths a PR claims to
+ * touch, never the whole tree (W1-T963, the empty-diff-triage-merge incident: #2075/#2077/#2078
+ * merged and passed review despite changing nothing, because nothing downstream ever asked this
+ * question). `scopeFiles` absent/empty means nothing was declared, so there is nothing to check —
+ * this NEVER manufactures a refusal for an ordinary PR with no declared scope, only for a caller
+ * that explicitly names one (a triage PR's own feedback entry, e.g.).
+ *
+ * `bodyContradictsDiff` above answers a DIFFERENT question — "does the body's PROSE contradict
+ * `diffFiles`" — and is vacuously satisfied when `diffFiles` is empty (nothing to contradict). This
+ * is the complement: a purely structural check with no report/prose involved at all, so an empty
+ * diff can be refused even when the body never claims anything about the changeset.
+ *
+ * SCOPED, NOT WHOLE-TREE (design (iv)): `nonPlanFilesInDiff`/`diffCitesFeedback` (lib/triage.js)
+ * are the closest existing precedent — both already inspect a triage diff structurally, never via
+ * prose. This generalizes their shape to "touches none of its own declared paths" rather than
+ * "touches something outside plan/", which is the complementary structural gap those two leave
+ * open: a diff can be simultaneously plan-only, feedback-citing (in the STALE PR-body sense) AND
+ * empty against the one path that actually matters, which is exactly what happened live.
+ */
+export function diffEmptyAgainstScope(diffFiles: readonly string[], scopeFiles: readonly string[]): boolean {
+  if (scopeFiles.length === 0) return false;
+  const touched = new Set(diffFiles);
+  return !scopeFiles.some((f) => touched.has(f));
+}
+
 // ── SHIPS-UNWIRED advisory floor (W1-T322) ─────────────────────────────────
 
 const WIRED_AT_RE = /\bWIRED-AT:\s*([^\s:]+)::(\w+)/g;
@@ -4715,6 +4741,204 @@ export function acceptanceBlockDiagnostics(body: string): AcceptanceBlockDiagnos
     defective: !headerFound || parsed.length !== bulletsWritten || emptyProofs > 0,
   };
 }
+
+// ── AUTHOR-TIME acceptance check (W1-T952) ──────────────────────────────────
+
+/** Anchored, same shape run-task.ts's own trailer readers use (`reviewTaskIdFromBody`,
+ *  `Remudero-Task:` extraction) — duplicated here rather than imported so this module never
+ *  depends on run-task.ts (review.ts is the leaf; run-task.ts already imports FROM it). */
+const TASK_TRAILER_RE = /^Remudero-Task:\s*(\S+)\s*$/m;
+
+/** The four defects {@link acceptanceAuthorTimeCheck} names — design item (iii), W1-T952:
+ *  "the diagnostic must say WHICH of the four it is", never a generic refusal. */
+export type AcceptanceAuthorTimeDefect = "no-header" | "no-trailer" | "unparseable" | "empty-proofs";
+
+/** {@link acceptanceAuthorTimeCheck}'s verdict. */
+export interface AcceptanceAuthorTimeResult {
+  /** false ⇒ `remudero-review` will fail CLOSED on this body ("no acceptance criteria to judge"). */
+  ok: boolean;
+  /** Which of the four, only when `!ok`. */
+  defect?: AcceptanceAuthorTimeDefect;
+  /** Human-readable — names the defect, not just that one exists (rationale (5)). */
+  message: string;
+}
+
+/**
+ * THE AUTHOR-TIME ENTRY POINT (design item ii, W1-T952) onto {@link acceptanceBlockDiagnostics} —
+ * the same diagnostic `rmd check-acceptance` already prints, callable BEFORE a PR pays for a CI
+ * cycle + review's generic "no acceptance criteria to judge (fail closed)" to discover the same
+ * thing. See `PR_AUTHORING_PATHS` below for WHICH of this repo's PR-authoring paths this can
+ * actually run on before the PR is judged — design item (i)'s recorded coverage statement.
+ *
+ * TWO CALL SHAPES, matching the two ways `reviewCommand` (src/run-task.ts) itself resolves
+ * criteria (never changed here — design item vi):
+ *
+ *   1. `opts.expectedTaskId` GIVEN — the caller already knows which task this PR is for (e.g.
+ *      `dispatchAlertFixRun`, which mints a synthetic id that never resolves in `plan/tasks.yaml`,
+ *      so the body is the ONLY thing review can ever judge from). The `Remudero-Task:` trailer is
+ *      checked FIRST and independently of the body's own Acceptance block: a PR whose body has a
+ *      healthy Acceptance block but the WRONG (or no) trailer for `expectedTaskId` is still a
+ *      defect — `findMergedByTrailer` credits merge-done off that trailer, so a silent mismatch
+ *      is a different failure (permanent non-credit) from a review-time refusal, and is named
+ *      as its own category (`no-trailer`) rather than folded into the body checks below.
+ *   2. `opts.expectedTaskId` OMITTED — the general case (`rmd check-acceptance`'s own population,
+ *      and any trailer-bearing body whose plan lookup this function cannot see): ANY resolvable
+ *      `Remudero-Task:` trailer is accepted at face value (plan-side resolution is out of scope
+ *      here — design item vi, and re-deriving `loadPlan`'s own lookup would duplicate
+ *      `reviewCommand`'s logic rather than read it), else the body's own Acceptance block must be
+ *      judgeable (the #277/#280 "manual plan/doc PR, no task id" shape `parseAcceptanceBlock`'s
+ *      own doc names is legitimate and must not be flagged).
+ *
+ * Priority when more than one defect is present, in the SAME order rationale (1) states them:
+ * no-header, no-trailer, unparseable, empty-proofs.
+ */
+export function acceptanceAuthorTimeCheck(body: string, opts: { expectedTaskId?: string } = {}): AcceptanceAuthorTimeResult {
+  const text = body ?? "";
+  const trailerMatch = TASK_TRAILER_RE.exec(text);
+
+  if (opts.expectedTaskId !== undefined) {
+    if (trailerMatch?.[1] === opts.expectedTaskId) {
+      return { ok: true, message: `Remudero-Task: ${opts.expectedTaskId} trailer present — credits this task on merge` };
+    }
+    return {
+      ok: false,
+      defect: "no-trailer",
+      message:
+        `no "Remudero-Task: ${opts.expectedTaskId}" trailer line (` +
+        (trailerMatch ? `found "Remudero-Task: ${trailerMatch[1]}" instead` : "none found") +
+        `) — findMergedByTrailer will never credit ${opts.expectedTaskId} on merge, even if review itself ` +
+        "passes off a body-level Acceptance block.",
+    };
+  }
+
+  if (trailerMatch) {
+    return { ok: true, message: `Remudero-Task: ${trailerMatch[1]} trailer present — criteria resolve from plan/tasks.yaml` };
+  }
+
+  const d = acceptanceBlockDiagnostics(text);
+  if (!d.headerFound) {
+    return {
+      ok: false,
+      defect: "no-header",
+      message:
+        "no `## Acceptance` header and no `Remudero-Task:` trailer — review has nothing to resolve criteria " +
+        "from and fails CLOSED. Add a bare `## Acceptance` (or `Acceptance:`) header followed by bullets, or " +
+        "a `Remudero-Task: <id>` trailer line.",
+    };
+  }
+  if (d.truncatedAtBullet !== undefined) {
+    return {
+      ok: false,
+      defect: "unparseable",
+      message:
+        `${d.bulletsWritten} bullet(s) written but only ${d.criteriaParsed} parsed — the block ends before ` +
+        `bullet ${d.truncatedAtBullet}. A claim WRAPPED onto a second line truncates everything after it; ` +
+        "keep each claim on ONE line.",
+    };
+  }
+  if (d.emptyProofs > 0 || d.criteriaParsed === 0) {
+    return {
+      ok: false,
+      defect: "empty-proofs",
+      message: `${d.emptyProofs || d.bulletsWritten} criterion/criteria have no proof — a claim with nothing to execute.`,
+    };
+  }
+  return { ok: true, message: "Acceptance block is judgeable" };
+}
+
+/** One PR-authoring path's coverage — design item (i), W1-T952: "write down which the fix COVERS
+ *  and which it CANNOT... A fix that silently covers only the in-repo path and claims the defect
+ *  closed is the failure this item exists to prevent." */
+export interface PrAuthoringPathCoverage {
+  /** Stable, short identifier — the function/flow this row is about. */
+  path: string;
+  /** Can an in-repo, author-time check technically run on this path's PR body before CI/review? */
+  reachable: boolean;
+  /** Does THIS change (W1-T952) actually call {@link acceptanceAuthorTimeCheck} on this path? */
+  wiredByThisChange: boolean;
+  /** Why, cited against source — never asserted. */
+  reason: string;
+}
+
+/**
+ * EVERY PATH BY WHICH A PR BODY IS AUTHORED IN THIS REPO, read from source (design item i,
+ * W1-T952), with coverage stated for each rather than assumed. `reachable: false` rows are the
+ * load-bearing ones: an in-repo check cannot reach a PR opened by a human over REST, `gh pr
+ * create` directly, or an MCP client, because none of those execute repo code — no future change
+ * closes that gap without a SERVER-SIDE check (out of scope here, design item vi's boundary
+ * extended: this task adds a pre-open-adjacent refusal, not a new gate).
+ *
+ * `reachable: true, wiredByThisChange: false` rows are DELIBERATE, not an oversight: `openPlanPr`
+ * and the retro sync PR are already judgeable/repaired by construction (see their own reasons),
+ * and `runTask`'s implement-dispatch path (the vast majority of task PRs, including the one that
+ * filed this very task) resolves criteria from `plan/tasks.yaml` via the `Remudero-Task:` trailer
+ * `ensureTaskTrailer` already stamps unconditionally — so a defective body is USUALLY harmless
+ * there (the plan is authoritative), and wiring a second check into that large, already
+ * heavily-depended-on function for a residual case is left as a follow-up rather than widening
+ * this one-concern diff (Standing rule — one concern per PR).
+ */
+export const PR_AUTHORING_PATHS: readonly PrAuthoringPathCoverage[] = [
+  {
+    path: "openPlanPr (src/run-task.ts) — rmd approve's plan-ratification PR",
+    reachable: true,
+    wiredByThisChange: false,
+    reason:
+      "body is assembled by buildPlanPrBody/renderAcceptanceBlock (lib/plan-pr-emitter.ts), " +
+      "GUARANTEED to round-trip through parseAcceptanceBlock by construction (renderAcceptanceBlock " +
+      "throws on an empty criteria list rather than ever emitting an unjudgeable block) — a dynamic " +
+      "check here could only ever pass, so wiring one adds cost without added coverage.",
+  },
+  {
+    path: "rmd retro's plan-only sync PR (repairRetroAcceptanceBlock, src/run-task.ts)",
+    reachable: true,
+    wiredByThisChange: false,
+    reason:
+      "ALREADY WIRED, pre-existing (not this change): fetches the just-opened PR body and repairs it " +
+      "via ensureJudgeableBody, using the same bodyNeedsAcceptanceRepair predicate this task's check " +
+      "composes with — ensureJudgeableBody REPAIRS (appends a fallback claim); this task's diagnostic " +
+      "instead NAMES the defect without rewriting the author's text, a deliberate difference (see the " +
+      "alert-fix row below).",
+  },
+  {
+    path: "rmd alert-fix's ephemeral single-alert fix PR (dispatchAlertFixRun, src/run-task.ts)",
+    reachable: true,
+    wiredByThisChange: true,
+    reason:
+      "THIS CHANGE'S DELIVERABLE. alertTaskId (alertFixPrompt) mints a synthetic id that NEVER " +
+      "resolves in plan/tasks.yaml, so the worker-authored body is the ONLY source review can judge " +
+      "from — nothing checked it before review paid for a CI cycle to find out. Wired right after " +
+      "ensureTaskTrailer (the one point this lane already reads the PR back), calling " +
+      "acceptanceAuthorTimeCheck and NAMING the defect rather than silently repairing it: this is a " +
+      "fully-automated, unattended lane with no human reading the body before merge, so fabricating a " +
+      "fallback claim (retro's approach) would misrepresent the fix rather than merely fail to praise it.",
+  },
+  {
+    path: "runTask's implement-task dispatch (src/run-task.ts) — the standard `rmd run`/drain path",
+    reachable: true,
+    wiredByThisChange: false,
+    reason:
+      "reachable (the orchestrator reads the worker-opened PR back via ensureTaskTrailer/ " +
+      "checkPrOwnership before CI-wait/review), but NOT wired here: ensureTaskTrailer unconditionally " +
+      "stamps a Remudero-Task trailer for a REAL, plan-filed task id, and reviewCommand's own plan " +
+      "lookup (loadPlan already merges plan/tasks.d/ shards) resolves criteria from there regardless " +
+      "of body shape — so a defective body is usually harmless on this path, and the residual risk " +
+      "(the filed task's own plan record missing or empty acceptance:) is a plan-authoring defect, " +
+      "not a PR-authoring one. Left as a follow-up rather than widening this diff into run-task.ts's " +
+      "largest, most-depended-on function for a case this task's own filing does not reproduce.",
+  },
+  {
+    path: "a human or agent running `gh pr create` (or the REST endpoint) directly, outside any rmd command",
+    reachable: false,
+    wiredByThisChange: false,
+    reason: "executes no repo code before the PR exists — an in-repo check cannot run before a call that never entered this repo's process.",
+  },
+  {
+    path: "an MCP client opening a PR directly against the GitHub API",
+    reachable: false,
+    wiredByThisChange: false,
+    reason: "same as the hand-gh-cli row: a third-party client speaking the GitHub API never invokes this repo's code, in-repo or otherwise.",
+  },
+];
 
 // ── The reviewer RUBRIC (MASTER-PLAN §5 layer 2 — advisory judgment) ────────
 /**

@@ -1621,3 +1621,58 @@ written — the collisions it reports are real.
 
 **Rollback:** delete this entry. It changes no behaviour, so nothing else moves; the ritual sentence
 would then be neither required nor forbidden, exactly as before.
+## 2026-08-19 — RULING: five automation rulings — the fleet files, arms and merges without asking (OPERATOR-RULED)
+
+*Operator-ruled record, recorded at the operator's instruction.* The five rulings below are the
+operator's; the measurements were gathered to support them, not to make them. The through-line is
+automation: each says what the fleet may now do without asking.
+
+**1 — THE FLEET KEEPS FILING ITS OWN BACKLOG. NO CAP.** Filed-versus-implementation-merged per UTC
+day reads 21/24, 30/30, 27/30, 28/30, 21/18, 31/15, 9/9. Filing tracks the build rate; the one gap is
+2026-08-18, the night main was red for an hour. There is no runaway to govern, and `plan/policy.yaml`
+bounds only `autoTriage`. THE WATCH METRIC IS SHARDS BUILT VERSUS SHARDS FILED, never shards filed
+against nothing — today reads 8 merged and 0 built, which is noise at one day and a signal at a week.
+
+**2 — RMD ARMS AND MERGES EVERY GREEN, REVIEWED PR, INCLUDING HAND-FILED ONES.** The operator's
+words: *"rmd daemon should do this automatically, if everything is green. I don't want hand-filed PRs
+to require this."* W1-T1027 files the mechanism; its design is not restated here. THIS WIDENS WHICH
+PRs ARE CONSIDERED, NOT WHAT IS PERMITTED: an irreversible diff, a non-green PR, a draft, and a
+CAPPED verdict without a ledgered override still never arm. That clause may not be softened by an
+implementer. `sweep.armSessionPrs` already exists in `plan/policy.yaml` at `true` (W1-T516, #1890) —
+no new flag. The console toggle is a later sibling, blocked on W1-T996's Access-JWT grant.
+
+**3 — `/v1/inbox/approve` STAYS `tier: "high"`.** Its own reason holds: *"W1-T404: HIGH — moves code
+(hands off to a detached rmd spawn: ratify/merge)"*. This file already ratifies gating on
+irreversibility rather than outwardness, and Access proves who you are, not that a merge is
+reversible. So after W1-T996 lands, reframe and mark-handled work from a browser and approve does
+not. THAT IS THE INTENDED OUTCOME, NOT A GAP.
+
+**4 — THE RISK JUDGE'S COVERAGE IS DEFERRED UNTIL W1-T1027 BUILDS, THEN REVISITED.** `runRiskJudge`
+has one production call site, inside `runTask`, so the review, sweep, triage and operator lanes never
+reach it; 259 of 475 PRs since 2026-08-08 carry a head shape that never enters `runTask`. THE
+QUESTION CHANGED BECAUSE RULING 2 CHANGED IT: that majority was tolerable while it needed the
+operator's hand, and under ruling 2 it becomes the half that self-merges. Deferred, not decided. The
+trigger is W1-T1027 building — not a date.
+
+**5 — `mergeConflictAdmissionEnabled` STAYS FALSE.** Re-affirmed unchanged.
+`isPureConcurrentAddition` cannot return false on an add/add collision, because there is no
+merge-base version and both deletion counts are structurally zero. There is also no supply to act on:
+no open PR is currently dirty.
+
+**THREE MEASUREMENT CORRECTIONS, RECORDED SO NOBODY RE-DERIVES THE ALARM.** (i) THE 63-ITEM
+ESCALATION BACKLOG IS GONE — two open, both under two days, with closed rows showing a steady drain;
+a console figure from 2026-08-18 is stale. (ii) `status:` IS 100% DECORATIVE, NOT MOSTLY — all 583
+credited tasks read `status:` other than `done`. W1-T367 ruled it stale by design; this confirms it
+absolutely, and any reader using that field for merge state is wrong by construction. (iii) NO SINGLE
+CREDIT PATH SUFFICES — all four together credit 583 of 643, with marginal contributions of 12 ids
+found only by the `run-<id>-<epoch>` head ref (including W1-T447), 2 only by the PR-body trailer, 1
+only by the commit trailer, and 0 only by the subject suffix.
+
+**AND ONE STRUCTURAL FINDING, NAMED AND NOT SCOPED IN.** A `type: manual` task can never be credited,
+so it can never satisfy a credit-based `depends_on`. W1-T12d is the live instance: PR #69 records
+*"W1-T12d commissioning (verify:human done); mark WS-1 COMPLETE"*, it reads `status: done`, and it is
+uncredited by all four paths — because no worker built it, so no trailer, head ref or subject suffix
+exists to find. It blocks W1-T165, which blocks W1-T188; W12-T1 blocks W1-T49 the same way. That is
+three of roughly fifteen dispatchable tasks parked on a paperwork gap rather than on work. Recorded
+as an observation and a candidate shard; whether manual completion should be assertable is its own
+concern and is not decided here.
