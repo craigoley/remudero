@@ -1,0 +1,76 @@
+- id: W1-T1000003
+  title: "A PULL REQUEST THE OPERATOR HELD IS INVISIBLE ON THE BOARD — deriveBlockers and deriveNeedsMe read no arm state at all, so a request that is deliberately not merging lands in no blocker class and no needs-me bucket and looks exactly like one still waiting on checks: render the hold as its own row, keyed on the ledgered hold state W1-T1000002 writes"
+  repo: remudero
+  depends_on: ["W1-T1000002"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    FILED FROM fb-1785792944591-e0473c ALONGSIDE W1-T1000002, WHICH OWNS THE MECHANISM. The feedback
+    argued a hold expressed as a withdrawal kills the invisibility problem because a held request is
+    a RECORDED state rather than an absence. That is true of the LEDGER and false of the BOARD, and
+    the difference is the whole of this shard.
+
+    MEASURED IN THIS WORKTREE: `src/lib/status-board.ts` contains ZERO occurrences of
+    `autoMergeArmed`, against same-file controls `blockers` and `needsMe` which are both real
+    sections with real derivations (`deriveBlockers`, `deriveNeedsMe`). `src/lib/status.ts` does
+    carry an `armedAwaitingMerge` projection flag set from the gateway's `autoMergeArmed(prUrl)`, so
+    the board's absence is a GAP IN THE SURFACE, not an absence of the underlying fact.
+
+    THE CONSEQUENCE, STATED PLAINLY: once W1-T1000002 lands, an operator can hold the fleet's merges
+    and then read a board that shows nothing about it. A hold that is invisible is a stall waiting to
+    be diagnosed as something else — and the fleet-wide-stall direction is exactly the cost
+    W1-T1000002's design (vii) owns and hands here.
+  design: |
+    ONE ROW, KEYED ON A STATE THAT ALREADY EXISTS. This shard adds NO new state, NO new ledger step
+    and NO new gateway read: it consumes the hold reader W1-T1000002 introduces.
+
+    (i) WHERE IT GOES. A held request is NOT an ordinary in-progress state — nothing will move it
+    without a human — so it belongs in the operator-facing sections, rendered with the hold's AUTHOR
+    and REASON carried through from the ledger row. A hold row with no reason is a bare alert and is
+    refused by the same standard MASTER-PLAN section 4 applies to escalations.
+
+    (ii) IT MUST NOT MINT A SECOND TAXONOMY. The board's own design fence (its blockers section
+    comment) is that the board mints no blocker taxonomy of its own. The hold is ONE row derived from
+    the hold state, never a re-derivation of "why is this not merging" from check or review fields.
+
+    (iii) THE QUIET CASE IS FREE. No hold engaged yields no row at all. A surface that prints a line
+    per open request every render is the noise floor that makes a board unreadable — the same reason
+    `armedButStalled` fires on two facts and not one.
+
+    (iv) RELEASE CLEARS IT WITH NOTHING ELSE TO DO. The row is derived per render from the current
+    hold state, so a release removes it on the next render — no marker, no acknowledgement, no
+    second lifecycle to keep in sync with the ledger.
+
+    EXPLICITLY NOT IN SCOPE: the hold mechanism itself, the withdrawal, the ledger retention and the
+    operator verb (all W1-T1000002); any change to what arms.
+  acceptance:
+    - claim: "with a hold engaged the board renders exactly one row naming the held request, its author and its reason"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "with no hold engaged the board renders no hold row at all, so the quiet case stays quiet"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "a released hold disappears from the next render with no acknowledgement step"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "the board reads the hold state rather than re-deriving a reason from check or review fields"
+      proof: "grep: mergeHeld in src/lib/status-board.ts"
+  risk: medium
+  origin: feedback#fb-1785792944591-e0473c
+  plan_refs: ["W1-T1000002"]
+  files: [src/lib/status-board.ts, test/status-board.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk: medium — ONE subsystem by Rule 19's count (both declared paths share the `status-board`
+    module id). It argues DOWN toward low: a read-only render over state another shard owns, no
+    dispatch path, no write, no spend. It argues UP only because a wrong render of a merge hold
+    misinforms the operator about whether work is moving; medium is the honest middle.
+
+    depends_on W1-T1000002 IS REAL AND NOT DECORATIVE: the hold reader and its ledger rows do not
+    exist until that shard lands, and building this first would produce a renderer with nothing to
+    render — the built-and-unread shape W1-T970's rationale counts nine of.
+
+    PROOF NOTES: the three behavioural proofs name the EXISTING whole file `test/status-board.test.ts`,
+    which is where this module's tests already live, so they execute on day one. The `grep:` proof
+    names a symbol that reads ZERO times in `src/lib/status-board.ts` today — a forward reference
+    that discriminates rather than matching prose already present.

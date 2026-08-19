@@ -1,0 +1,184 @@
+- id: W1-T1000002
+  title: "AN OPERATOR MERGE HOLD IS A LEDGERED REFUSAL THE SWEEP CONSULTS, NOT A BARE DISARM AND NOT A POLICY ROW GATING EIGHT ARM SITES — a disarm alone is undone by the next sweep pass because the arming dedup reads only GitHub's live armed bit and the sweep's own sha-keyed memory, so give the hold the same durable, ledgered, operator-written home the CAPPED override already has, and let the sweep's converging pass withdraw arms it did not place"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 120.00
+  rationale: |
+    FILED FROM fb-1785792944591-e0473c, WHOSE OWN FALSIFYING CHECK WAS RUN AGAINST SOURCE IN THIS
+    WORKTREE AND FIRED. The feedback proposed costing an operator merge hold as a DISARM REASON
+    rather than as the #1182 recon's arm gate (a new bounded policy row gating EIGHT arm sites, a
+    resume path to arm the backlog, and console work), and pre-committed the killer question: "would
+    the sweep's post-review lane RE-ARM what a hold disarms on its next pass? If yes a disarm-based
+    hold flickers." IT WOULD. The naive form is dead; what survives is cheaper than either.
+
+    (1) THE RE-ARM IS PROVEN FROM SOURCE, NOT INFERRED. `src/lib/sweep.ts` holds one arming row —
+    `disposition: "mergeable"`, `when: (pr) => pr.checksState === "green" && pr.reviewState ===
+    "success"` — and its dedup is
+    `alreadyDone = pr.autoMergeArmed === true || prior.armed.has(`${pr.prNumber}@${pr.headSha}`) ||
+    refused`. A disarm sets the FIRST term false by construction. The SECOND term is seeded ONLY by
+    the sweep's OWN `sweep.disposed` rows with `acted: true` and `disposition: mergeable`
+    (`priorActionsFromLedger`) — the at-open arm (`armAutoMergeAtOpen` -> `attemptArm`, run-task.ts)
+    writes `automerge.armed`, which that function never reads. So for the COMMON case — a worker PR
+    armed at open, then held — BOTH dedup terms are false and the very next pass arms it again, with
+    no operator action anywhere. That is the feedback's own stated falsifier, and it fires.
+
+    (2) THE SAME DEFECT IS ALREADY MEASURED LIVE UNDER ANOTHER NAME. W1-T970 recorded seven
+    risk-judge escalations and seven merges, with the re-arm printed on PR 2033: `automerge.disarmed`
+    at 06:27:03.477Z, `automerge.armed` plus `sweep.disposed "review success, required checks green -
+    arming auto-merge"` at 06:30:00.230Z. A disarm in this system IS NOT A STATE — it is one API call
+    against a level-triggered reconciler that re-derives arming from two fields every pass. Any hold
+    expressed only as a disarm inherits that result exactly.
+
+    (3) WHAT THE FEEDBACK GOT RIGHT, AND WHY THE ANSWER IS STILL CHEAP. `disarmAutoMerge(prUrl, deps)`
+    (src/run-task.ts) is exported, takes a bare url, calls a real `gh pr merge --disable-auto` and
+    NEVER THROWS when nothing is armed — so it is reachable outside a verdict path and needs no
+    "is it armed" probe. MEASURED in this worktree: `disarm` occurs 0 times in src/lib/sweep.ts,
+    against a same-file control of `autoMergeArmed` = 4. The sweep already consumes
+    `OpenPrView.autoMergeArmed` as GitHub's own authority. The effector exists; only DURABILITY and
+    the AT-OPEN RACE are missing.
+
+    (4) DURABILITY HAS A SHIPPED SHAPE IN THIS REPO AND IT IS ONE PREDICATE, NOT A SUBSYSTEM. An
+    operator's CAPPED override is written as `automerge.capped_override_granted` by
+    `rmd review <pr> --override-capped-by/--override-capped-reason`, read back by
+    `cappedOverrideFromLedger` (src/lib/review.ts), consulted by BOTH the run flow and the sweep's
+    `alreadyDone`, and listed decision-relevant in src/lib/ledger.ts so rotation cannot drop it
+    ("losing this line silently revokes a human's decision"). W1-T970's `riskRefused` set is the same
+    shape from the other direction. A HOLD IS THAT SHAPE WITH THE SIGN FLIPPED — and its code is
+    already present in src/lib/sweep.ts at this worktree's HEAD (the W1-T970 shard still reads
+    `status: queued`; treat the shard status as unverified, the source as the fact).
+
+    (5) THE AT-OPEN RACE IS WHY A CONVERGING DISARM CANNOT BE THE ONLY GUARD. `armAutoMergeAtOpen`
+    fires about 16s after the PR exists and consults no verdict; run-task.ts records PR #969 merging
+    TWO SECONDS after a status post. A sweep that disarms on a roughly 93-second cadence loses that
+    race for any PR opened while the hold stands. One check at `attemptArm` closes it. That is ONE
+    site, not eight — every other arm path either flows through it or is caught by the converging
+    disarm on the next pass.
+
+    (6) RECON QUESTION (3), ANSWERED: YES, IT BYPASSES. `src/lib/feedback-landing.ts` runs
+    `gh(["pr", "merge", prUrl, "--auto", "--squash"])` inline, reaching neither `attemptArm` nor
+    `armAutoMerge` nor any disarm. An arm-gate design would have to patch it as a NINTH site; under
+    this design it needs the same one-line predicate, and even an implementer who forgets it is
+    caught by the converging disarm rather than merging unattended.
+
+    (7) THE RESUME PATH THE #1182 RECON COSTED IS FREE HERE, AND THE REASON IS THE DEFECT ITSELF.
+    Because `alreadyDone` reads GitHub's LIVE armed bit, a released PR that is green and reviewed
+    re-arms on the sweep's next pass with no backlog walk and no operator action. The behaviour that
+    kills the naive hold is exactly the behaviour that pays for the release.
+  design: |
+    THE SHAPE: one ledgered fleet-scoped hold state, one refusal at the sweep's arming dedup, one
+    converging disarm in the same lane, one check where arms ORIGINATE, and rotation retention. No
+    new policy row, no arm-gate table, no resume walker.
+
+    (i) THE STATE IS A LEDGER ROW PAIR, LAST-ONE-WINS, WRITTEN BY AN OPERATOR VERB.
+    `automerge.hold_engaged` / `automerge.hold_released`, each carrying WHO and WHY, recovered by a
+    reader beside `cappedOverrideFromLedger` in src/lib/review.ts using the SAME "scan, last one
+    wins" idiom every precedence helper here already uses. The verb reuses the existing override
+    vocabulary style rather than inventing a second one. A hold with no author and no reason is
+    refused at write time: the row is the only notification anyone gets.
+
+    (ii) IT IS PR-SCOPED-OR-FLEET-SCOPED, AND IT IS NEVER SHA-KEYED. This is the ONE place it must
+    NOT copy `riskRefused`. That set expires on a new head sha deliberately — a new head deserves a
+    fresh judgement. A HOLD MUST SURVIVE A PUSH: a hold that a routine `git push` silently lifts is
+    worse than no hold, because the operator believes it stands. Cleared by an explicit release row
+    and by nothing else. TIME CLEARS NOTHING — a hold that lapses on a timer is a hold the fleet can
+    outwait.
+
+    (iii) REFUSE IN `alreadyDone`, NOT IN THE `when` PREDICATE. The refusal belongs beside
+    `pr.autoMergeArmed === true || prior.armed.has(...) || refused` for `disposition: "mergeable"`,
+    exactly where W1-T970 put the risk refusal and for its stated reason: removing the row's MATCH
+    would send the PR falling through to whichever later row matches next, which is a different and
+    unexamined disposition. `acted: false`, so no dedup key is seeded and the pass re-derives whole
+    (the W1-T527 stand-down property, reused not reimplemented).
+
+    (iv) CONVERGE: DISARM WHAT THIS LANE DID NOT ARM. In the same lane, when the hold stands and
+    `pr.autoMergeArmed === true`, call `disarmAutoMerge(pr.prUrl)` through an INJECTED dep (the
+    sweep's existing dep-object idiom — a test must assert the withdrawal is ISSUED without mocking
+    `gh`). It is safe when not armed and never throws, so no extra probe per PR per pass. Ledger the
+    withdrawal naming the PR, the head and the hold's author — an unattributable disarm is what made
+    27 of 59 disarms unattributable in W1-T970's recon, and this task must not add more.
+
+    (v) GATE WHERE ARMS ORIGINATE, WHICH IS TWO CALL SITES, NOT EIGHT. `attemptArm` (the shared
+    completion `armAutoMergeAtOpen` and the gated path both reach) and the inline
+    `gh pr merge --auto --squash` in src/lib/feedback-landing.ts. Both consult the SAME reader from
+    (i) — never a second copy of the rule; two copies of exactly this rule are how the sweep and the
+    run flow diverged before. COORDINATION, STATED: W1-T947 (queued) builds an irreversibility gate
+    at this same seam. WHICHEVER LANDS SECOND CONSUMES THE FIRST'S SEAM rather than adding a parallel
+    one; an implementer who finds W1-T947 already merged must extend its gate, not duplicate it.
+
+    (vi) RETAIN THROUGH ROTATION OR THE WHOLE TASK IS INERT. Both hold steps join the
+    decision-relevant list in src/lib/ledger.ts beside `automerge.capped_override_granted`, for the
+    reason that file already states in its own words: losing the line silently revokes a human's
+    decision. Omitting this leaves every other part correct and ineffective after the first rotation,
+    which is the hardest failure to notice.
+
+    (vii) THE COST IS OWNED HERE. While a hold stands, nothing merges unattended — that is the point,
+    and the operator's only notice that work is queued behind them is the hold row plus the surface
+    W1-T1000003 adds. A hold left engaged is a fleet-wide stall, so the row is deliberately loud
+    rather than quiet.
+
+    (viii) RANKED ALTERNATIVES, REJECTED, RECORDED SO THEY ARE NOT RE-PROPOSED.
+    (a) HOLD AS A BARE DISARM, NO LEDGER ROW — DEAD, killed by rationale (1)+(2): the sweep re-arms
+    within roughly 93 seconds and the hold flickers. This is the feedback's own falsifier and it is
+    recorded here precisely so the idea is not raised a third time.
+    (b) THE #1182 ARM-GATE POLICY ROW GATING EIGHT SITES — rejected as strictly more expensive for
+    the same guarantee: eight gated sites still miss anything that arms outside them (it already
+    misses feedback-landing.ts), still needs a resume walker, and still leaves a never-armed PR
+    invisible. THE TWO DESIGNS ARE MUTUALLY EXCLUSIVE — if an operator rules for the policy row, this
+    shard is struck rather than shipped alongside it.
+    (c) A `mergeable` `when`-predicate change — rejected in (iii): it silently re-dispositions the PR.
+
+    EXPLICITLY NOT IN SCOPE: the board/needs-me surface (W1-T1000003, which depends on this);
+    changing WHICH verdicts arm; any timer, expiry or auto-release.
+  acceptance:
+    - claim: "a held pull request is not armed by a later sweep pass, and the pass records the refusal rather than acting"
+      proof: "unit test: test/automerge-hold.test.ts"
+    - claim: "an open pull request already armed when the hold is engaged has that arm withdrawn on the pass that observes it"
+      proof: "unit test: test/automerge-hold.test.ts"
+    - claim: "a pull request opened while the hold stands is never armed at open, so the withdrawal is not racing the merge"
+      proof: "unit test: test/automerge-hold.test.ts"
+    - claim: "a push to a held pull request does not lift the hold, and only an explicit release does"
+      proof: "unit test: test/automerge-hold.test.ts"
+    - claim: "after a release the eligible backlog re-arms on the next pass with no separate resume path"
+      proof: "unit test: test/automerge-hold.test.ts"
+    - claim: "a landing call that arms auto-merge inline honours the same hold reader as the shared arm path"
+      proof: "unit test: test/automerge-hold.test.ts"
+    - claim: "the hold rows are decision-relevant, so rotation cannot silently revoke a human's hold"
+      proof: "grep: automerge.hold in src/lib/ledger.ts"
+    - claim: "the sweep owns a withdrawal call site, which it has none of today"
+      proof: "grep: disarmAutoMerge( in src/lib/sweep.ts"
+  risk: high
+  origin: feedback#fb-1785792944591-e0473c
+  plan_refs: ["W1-T970", "W1-T947", "W1-T125"]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/review.ts, src/lib/ledger.ts, src/lib/feedback-landing.ts, test/automerge-hold.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk: high IS SET UP FRONT, on Rule 19's SPAN rather than blast radius: the arming dedup, the
+    withdrawal effector, the ledger retention list, the CLI write path and the landing bypass are
+    five subsystems, and `sizingViolation` exempts only `risk === "high"`. It is ALSO honestly high
+    on consequence — this is the merge path, and the dangerous direction is a bug that holds
+    everything forever or lifts a hold nobody meant to lift.
+
+    FILES DERIVED BY READING THE SOURCE IN THIS WORKTREE, NOT GUESSED.
+    src/lib/sweep.ts — the `mergeable` row, `alreadyDone`, `priorActionsFromLedger`; `autoMergeArmed`
+    reads 4 here and `disarm` reads 0, which is the gap this task closes.
+    src/run-task.ts — `disarmAutoMerge`, `attemptArm`, `armAutoMergeAtOpen` and the CLI flag parsing
+    all live here. DECLARED RELUCTANTLY: W1-T471 records that naming it serialises every task that
+    does, and there is no version of this task that omits it, because the at-open gate has nowhere
+    else to go.
+    src/lib/review.ts — home of `cappedOverrideFromLedger`, the reader idiom this one mirrors, and
+    already imported by sweep.ts.
+    src/lib/ledger.ts — retention; see design (vi), not optional.
+    src/lib/feedback-landing.ts — the inline `gh pr merge --auto --squash`; recon question (3).
+
+    PROOF NOTES: the six behavioural proofs use the WHOLE-FILE `unit test:` path form against a suite
+    this task creates — a forward reference that parses today and executes once the file exists. The
+    two `grep:` proofs each name a call site that reads ZERO times in that file today, so both
+    discriminate rather than passing on prose already present.
+
+    NO depends_on: nothing blocks this. W1-T1000003 (the surface) depends on IT, not the reverse, and
+    W1-T947 is a seam-sharing coordination note in design (v) rather than a dependency — either
+    order works.

@@ -1,0 +1,139 @@
+- id: W1-T1030
+  title: "`declaredScopeViolation` BLOCKS THREE RECORDS THE DISPATCHER CAN NEVER REACH — its whole rationale is `overlappingPaths` at dispatch, but `isDispatchEligible` refuses at `verify !== \"auto\"` BEFORE any path is read, so a `type: manual` task is judged by a rule about a code path it does not enter; #2213 is blocked on this and the violation pre-dates it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    MEASURED 2026-08-19 AT origin/main ff205051, 645 tasks through `loadPlan`. No `/rate_limit`
+    call was made.
+
+    (1) THE RULE JUDGES A TASK BY A PATH IT CANNOT ENTER. `declaredScopeViolation`
+    (`src/lib/task-linter.ts`) returns a `block` for any task whose `files:` is absent or empty, and
+    its own module comment gives the reason in terms: `overlappingPaths` (`src/lib/dispatch-overlap.ts`)
+    is fail-closed on an undeclared scope, so such a task "overlaps every co-dispatched candidate at
+    the dispatcher" and serialises the lane. THAT REASON IS SOUND AND IS NOT DISPUTED HERE.
+    What it cannot reach is a task the dispatcher never considers. `isDispatchEligible`
+    (`src/lib/drain.ts`) refuses at `t.verify !== "auto"` and returns `false` BEFORE any path is
+    read — that function references `overlappingPaths` ZERO times — and `partitionByFileOverlap` is
+    called on `candidates`, a set already filtered by that eligibility. So the harm the rule names
+    is unreachable for a task that is not `verify: auto`.
+
+    (2) THE POPULATION IS SMALL AND THE TWO CANDIDATE PREDICATES DIFFER BY EXACTLY FIVE RECORDS.
+      `type: manual`                       3   (W1-T12d, W1-T13, W1-T12e)
+        declaring `files:`                 0
+        all three are also `verify: human` 3
+      `verify: human`                      45
+        declaring `files:`                 37
+        NOT declaring `files:`             8   (W1-T10, W1-T12d, W1-T13, W2-T2, W3-T4, W12-T1,
+                                                W3-T7, W1-T12e)
+      tasks with no `files:` AT ALL        80  — by type/verify:
+                                               implement/auto 71, implement/human 5,
+                                               manual/human 3, diagnose/auto 1
+      THE DISCRIMINATOR: `type: manual` with `verify: auto` is ZERO today, so `type: manual` is a
+      strict SUBSET of `verify: human`. The two predicates differ by the five `implement/human`
+      records with no `files:` — W1-T10, W2-T2, W3-T4, W12-T1, W3-T7.
+
+    (3) WHICH PREDICATE THE RULE'S OWN RATIONALE IMPLIES. `verify: human` is the field
+    `isDispatchEligible` actually gates on, so it is the exact complement of "reaches the
+    dispatcher". `type: manual` only coincides with it TODAY, at a count of 3 and 0; a single
+    `type: manual, verify: auto` record would make that proxy wrong, and nothing prevents one being
+    filed. RECORDED AS AN ESTABLISHMENT, NOT A CHOICE THIS SHARD IS ENTITLED TO MAKE ALONE — the
+    acceptance criteria below pin the BEHAVIOUR, and either predicate can satisfy them.
+
+    (4) AND THE ARGUMENT AGAINST THE BROADER PREDICATE IS REAL, WITH ITS ANSWER MEASURED. A
+    `verify: human` task can be RE-BANDED to `auto` later — seventeen were, in two changes on
+    2026-08-18/19 — and an exempted record with no `files:` would then become exactly the
+    undeclared-scope `auto` task this rule exists to refuse. THE ANSWER IS THAT THE FLIP RE-LINTS:
+    CI runs `npm run --silent lint-plan -- --base "$BASE_SHA"` (`.github/workflows/ci.yml`), the
+    changed-tasks pass, so any PR touching a task's record re-evaluates it and the violation
+    surfaces at the moment of the re-band. That is exactly how it surfaced here.
+
+    (5) THE LIVE INSTANCE, AND IT IS NOT SELF-INFLICTED. #2213 sets `pr: 69` on `W1-T12d` — the
+    sanctioned `deriveStatus` channel — and is blocked because touching the record made the
+    changed-tasks pass evaluate it. THE VIOLATION PRE-DATES THAT EDIT: run at origin/main before
+    it, `W1-T12d` reads `files= undefined` and `declaredScopeViolation` returns
+    `block declared-scope`. `lint-plan` is in `ci-gate`'s REQUIRED list, so the block is a merge
+    block. Nothing in #2213 created it; the changed-tasks pass simply never evaluates a record no
+    PR touches.
+  design: |
+    (i) EXEMPT ONLY WHAT THE DISPATCHER CANNOT REACH. The rule keeps its `block` for every task the
+    dispatcher can consider. THE 71 `implement/auto` RECORDS WITH NO `files:` MUST STILL BLOCK, and
+    criterion 2 pins that — an exemption that also frees them would delete the rule rather than
+    scope it.
+
+    (ii) THE ACCEPTANCE CRITERIA PIN BEHAVIOUR, NOT THE PREDICATE. Rationale (3) establishes that
+    `verify: human` is the field the dispatcher gates on and `type: manual` is today a strict subset
+    of it. An implementer may take either, or both, and must record which and why — but must satisfy
+    all four criteria, which together admit only a scoping and never a weakening.
+
+    (iii) THE RE-BAND SAFETY PROPERTY IS A CRITERION, NOT AN ASSUMPTION. Criterion 3 requires that a
+    task exempted while human STOPS being exempt the moment it reads `auto`, in the same run as
+    criterion 1. Without it, an exemption plus a later re-band reproduces the undeclared-scope
+    dispatch hazard silently.
+
+    (iv) OUT OF SCOPE, DELIBERATELY.
+      - `W1-T1029` (#2207) — a hand-completed task cannot satisfy a credit-based `depends_on`. It
+        touches `src/lib/status.ts` and `src/lib/ledger.ts` and mentions `declaredScopeViolation`
+        ZERO times. Same three records, different mechanism; neither absorbs the other.
+      - ADDING `files:` TO ANY TASK RECORD. Rule 15 forbids a worker rewriting a task's scope, and a
+        manual commissioning drill touches no repo path — a value invented to satisfy a linter is
+        the theatre this shard exists to remove.
+      - `overlappingPaths`'s OWN FAIL-CLOSED BEHAVIOUR. It is correct; the defect is which tasks are
+        judged by it.
+  acceptance:
+    - claim: "a task the dispatcher can never reach no longer draws a blocking declared-scope violation for an absent files:"
+      proof: "unit test: W1-T1030: an unreachable task no longer blocks on an absent files"
+    - claim: "an ordinary dispatchable task with no files: still blocks, in the same run"
+      proof: "unit test: W1-T1030: an ordinary dispatchable task still blocks on an absent files"
+    - claim: "an exempted record stops being exempt the moment its verify reads auto"
+      proof: "unit test: W1-T1030: the exemption lapses when the task becomes dispatchable"
+    - claim: "the exemption is decided by the field the dispatcher actually gates on rather than by a proxy"
+      proof: "unit test: W1-T1030: the exemption predicate matches the dispatcher gate"
+  risk: high
+  origin: "oper#declared-scope-manual-exemption-2026-08-19"
+  plan_refs: ["W1-T504", "W1-T476", "W1-T1029", "W1-T12d"]
+  files: [src/lib/task-linter.ts, test/declared-scope-unreachable-task.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    #2213 IS BLOCKED ON THIS AND IS CITED, NOT ABSORBED. That PR carries three operator rulings, a
+    re-band of W1-T472/W1-T446, and the `pr: 69` field on W1-T12d; its `lint-plan` check fails on
+    the violation described in rationale (5). Unblocking it is a consequence of this task, not its
+    deliverable, and this shard proposes no edit to #2213.
+
+    THE POPULATION FIGURES WERE RE-TAKEN AFTER A WRONG-TREE READING, AND THE FIRST READING IS
+    RETRACTED. An initial measurement ran in a pre-existing worktree at `60aa95c4` (branch
+    `plan/file-drafted-scope-unblocks-t504`) because `git worktree add` had refused a path that
+    already existed and the command continued anyway; it reported 538 tasks against origin/main's
+    645 and would have understated every count. Every figure in rationale (2) comes from a worktree
+    freshly cut at ff205051 and verified with `git rev-parse` against `origin/main` before use.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus acceptance text, and this set
+    crosses `src/` and `test/`. Blast radius argues DOWN: one predicate gains a guard, 71
+    dispatchable records keep their block, and the failure mode of a wrong fix is a linter that
+    refuses a record it should have passed — the status quo.
+
+    A NEW TEST FILE IS DELIBERATE. `test/task-linter.test.ts` is the obvious host, but the house
+    rule is that a coverage-load-bearing test goes in its own file.
+    `test/declared-scope-unreachable-task.test.ts` does not exist at ff205051; the path is a forward
+    reference and no symbol name is guessed.
+
+    ID PROVENANCE — THREE GIT SURFACES FIRST, THEN THE OPEN-PR SURFACE, ZERO `/rate_limit` CALLS.
+    W1-T1030 read 0 on all four at ff205051: `refs/rmd-id/*`, shard FILENAMES under
+    `plan/tasks.d/` on origin/main, DECLARED ids under `plan/`, and every open PR's title AND file
+    list (ten open PRs enumerated). Positive controls: `refs/rmd-id/W1-T1029` and
+    `refs/rmd-id/W1-T1028` each read 1. Mention-trap control: `W1-T999999` reads 0 refs and 0
+    filenames.
+    THE MINT USED THE PLAIN REFSPEC WITH EVERY VARIABLE BRACED: orphan payload over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce
+    Craigs-Mac-mini-56516-1787146675876532000, no `+` and no lease: PUSH RC=0, `* [new reference]
+    46a590b891a256cd8e4972bce8a8dfac8261e086 -> refs/rmd-id/W1-T1030`, readback equal, `HTTP 403`
+    count 0.
+    AND THE GATE PROOF WAS VERIFIED TO BE A REFUSAL RATHER THAN A TRANSPORT FAILURE. A plain push of
+    a fresh orphan at the already-taken `refs/rmd-id/W1-T1029` returned rc=1 with `! [rejected] …
+    (fetch first)`, ZERO occurrences of `could not read Username`, ZERO of `HTTP 403`, and left that
+    ref unchanged at 4fbd1cb0d308af95ea52f388cae3ae8dc7aa16ec.
