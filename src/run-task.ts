@@ -1371,6 +1371,54 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
 }
 
 /**
+ * W1-T1012 (THE FIX IS AT THE WRITE): append the `Remudero-Task: <id>` trailer to the
+ * worktree's CURRENT last commit — the record `gh pr merge --squash` actually keeps.
+ * Every merge in this repo runs through that squash with no `--subject`/`--body`
+ * (run-task.ts, worker.ts, feedback-landing.ts), so GitHub composes the merged commit
+ * from the branch's own commits and discards the PR body outright — a trailer written
+ * only by `ensureTaskTrailer` into the body (below) never reaches origin/main. Measured
+ * at 39efeddb: 373 of 538 trailered merges (69%) carry the trailer in the body and not
+ * in the commit.
+ *
+ * Called ONLY at the two non-filing `ghPrCreateFillCommand`/`lastCommitSubject` call
+ * sites (implement's `runTask`, retro's `retroCommand`) — never at the triage/plan
+ * PR-create sites, which open plan-FILING PRs and must credit no task at all
+ * (`plan-pr-emitter.ts`'s own `taskId` doc: "OMIT for a plan-FILING PR … no argument
+ * means no trailer, never a wrong one"; W1-T1004 exists because that rule was once
+ * violated). Those two filing sites pass `commitMessage.split("\n")[0]` straight to
+ * `ghPrCreateFillCommand` rather than `lastCommitSubject`, which is the SAME structural
+ * marker that keeps this function out of their path.
+ *
+ * IDEMPOTENT: a commit that already carries THIS id's anchored trailer is left alone —
+ * untouched sha, no amend, no push — so a worker that already wrote the trailer itself
+ * (or a resumed/retried run) never pays a second amend+force-push for nothing. Returns
+ * `false` on any git failure (no commit to read/amend) rather than throwing, the same
+ * best-effort contract {@link lastCommitSubject} already keeps at this exact call site —
+ * a trailer nuance must never crash an otherwise-successful run.
+ *
+ * Amending REWRITES the tip sha. By the time either call site reaches this point the
+ * branch has already been pushed to origin (both `runTask` and `retroCommand` push
+ * before ever building a `ghPrCreateFillCommand` argv), so the caller MUST force-push
+ * again when this returns `true` — force is safe here specifically because a
+ * `run-<id>-<epochMs>` branch is owned exclusively by this one run.
+ */
+export function appendTaskTrailerToCommit(worktreePath: string, taskId: string): boolean {
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const trailerRe = new RegExp(`^Remudero-Task:\\s*${escaped}\\s*$`, "m");
+  try {
+    const message = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%B"], {
+      encoding: "utf8",
+    });
+    if (trailerRe.test(message)) return false; // already carries THIS task's trailer — left alone
+    const newMessage = `${message.replace(/\n+$/, "")}\n\nRemudero-Task: ${taskId}\n`;
+    execFileSync("git", ["-C", worktreePath, "commit", "--amend", "-m", newMessage], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides.
  *
  * W1-T230 (THE ARM DECISION): this is the SOLE choke point every arm call
@@ -6773,6 +6821,15 @@ async function runTask(
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       gitPushRunBranch(worktreePath);
     }
+    // W1-T1012: append the `Remudero-Task:` trailer to the branch's actual tip commit HERE —
+    // after both push paths above (the worker's own sandbox push, or the orchestrator
+    // fallback just above) have already landed it on origin, and before EITHER PR path below
+    // (the worker's own already-reported `prUrl`, or the `gh pr create --fill` fallback) can
+    // read that tip. `appendTaskTrailerToCommit` amends only when the trailer is missing, so
+    // an already-trailered commit (a worker that wrote it itself) pays no second amend.
+    if (appendTaskTrailerToCommit(worktreePath, taskId)) {
+      gitPushRunBranch(worktreePath, { force: true });
+    }
     if (!prUrl) {
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
       const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
@@ -11264,6 +11321,16 @@ async function retroCommand(
     }
     if (!onOrigin || orientationCommitted || planIndexCommitted) {
       gitPushRunBranch(worktreePath);
+    }
+
+    // W1-T1012: append the `Remudero-Task: <runId>` trailer to the branch's tip commit HERE —
+    // after the branch is confirmed on origin (the ensure-push just above, or the Architect's
+    // own push) and before either PR path below can read that tip: the Architect's own
+    // reported `prUrl`, or the `gh pr create --fill` fallback. Idempotent — see
+    // `appendTaskTrailerToCommit`'s own doc — so an Architect that already wrote the trailer
+    // pays no second amend.
+    if (appendTaskTrailerToCommit(worktreePath, runId)) {
+      gitPushRunBranch(worktreePath, { force: true });
     }
 
     let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;

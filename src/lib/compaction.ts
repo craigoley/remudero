@@ -96,6 +96,17 @@ export function commitMessageContractLines(): string[] {
     "    and `URL round-trips` are both REJECTED. Lower-case it (`sse …`) or reword. No final `.`.",
     "  * Wrap every BODY line at <= 100 characters, with a blank line after the header.",
     "  * Example: `feat(serve): add fuzzy search to the board (W1-T157)`",
+    // W1-T1012: THE TRAILER'S HOME, CORRECTED. Until this line the contract taught a worker
+    // ONLY that the `Remudero-Task: <id>` trailer belongs in the PR body — and this repo's
+    // `gh pr merge --squash` (no `--subject`/`--body`) composes the squashed commit from the
+    // BRANCH'S OWN COMMITS and discards the PR body outright, so a trailer written only there
+    // never reaches origin/main (measured: 373 of 538 trailered merges, 69%). The harness now
+    // appends the trailer to this commit itself, right before opening the PR
+    // (`appendTaskTrailerToCommit`, run-task.ts), idempotently — so the two bullets below are
+    // a safety net (a worker that writes it first pays no second amend), not a new obligation.
+    "  * The `Remudero-Task: <id>` trailer belongs on THIS COMMIT too, not only the PR body —",
+    "    the squash-merge keeps this commit and discards the PR body, so a trailer written only",
+    "    into the body never reaches origin/main.",
   ];
 }
 
