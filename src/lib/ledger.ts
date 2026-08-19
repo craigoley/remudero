@@ -1,4 +1,18 @@
-import { closeSync, existsSync, mkdirSync, openSync, readSync, renameSync, statSync, writeSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeSync,
+} from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -1089,4 +1103,203 @@ export function rotateLedger(
     archivedLineCount,
     retainedLineCount: keptLines.length,
   };
+}
+
+// ── W1-T234: STATE BACKUP/RESTORE ORGAN (MASTER-PLAN §10 WS-7) ──────────────────────────────
+//
+// state/ holds the ledger above, the run locks (drain.lock, inflight/), the worker-keychain
+// service tokens, and the proposals register (inbox-proposals.json, gained P37-P45 on one
+// disk this session) — and until this task, none of it was backed up. Lives here rather than
+// a new module because it reuses this file's own atomic-write/dated-archive idiom
+// (`writeFileAtomic`/`datedArchivePath`, W1-T209 above) for the SAME reason that idiom exists:
+// a backup that is half-written when the process dies must never be mistaken for a whole one.
+//
+// SCOPE (design note i): back up what is IRREPLACEABLE, not everything in the directory.
+// `STATE_BACKUP_EXCLUDED_RELPATHS` is the one file this task's own rationale explicitly proves
+// rederivable (`status.json`) — every other entry under `state/`, including the ledger's own
+// W1-T209 rotation archives (`ledger.<stamp>.ndjson`, picked up here for free by walking the
+// directory rather than hardcoding one filename — the coordination design note iii calls for),
+// is treated as authoritative until this comment names an equally explicit rederivability
+// proof for it, per the same design note's instruction not to guess.
+//
+// VERIFY, DON'T TRUST (design note ii): `snapshotState` re-lists the STAGED copy from disk
+// after copying and refuses to publish (rename into place) a snapshot that is empty or that
+// dropped the ledger/proposals register the source actually had — see its own doc.
+//
+// FAILURE ESCALATES LOUDLY (design note iv): every failure path here is a THROWN
+// {@link StateBackupError}, never a caught-and-logged no-op — a caller (a launchd-scheduled
+// `rmd state-backup` run, per the W1-T152/W1-T169 launchd lineage design note iii names as the
+// obvious scheduler) that lets it propagate exits non-zero, which launchd's own
+// `StandardErrorPath` and exit-status observability surface loudly. Wiring that CLI
+// entrypoint/plist is left to a follow-up (see this task's PR) — the functions below are the
+// tested, load-bearing primitives that entrypoint would call.
+
+/** Loud, typed failure for every state-backup/restore operation — always THROWN, never
+ *  swallowed (design note iv, above). `cause` carries the underlying fs error when there is
+ *  one, so a caller/log line keeps the original stack without this class re-deriving it. */
+export class StateBackupError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "StateBackupError";
+  }
+}
+
+/** Relative path (from `state/`) of the ledger this module treats as authoritative-by-name
+ *  when verifying a snapshot — mirrors `ledgerPathFor`'s own basename (run-task.ts:
+ *  `join(config.root, "state", "ledger.ndjson")`), duplicated as a bare string here rather
+ *  than imported so this file never takes a dependency on run-task.ts (a CLI entrypoint) for
+ *  one constant. */
+export const STATE_BACKUP_LEDGER_RELPATH = "ledger.ndjson";
+
+/** Relative path (from `state/`) of the proposals register this module treats as
+ *  authoritative-by-name — mirrors the inbox registry's own basename (run-task.ts:
+ *  `join(config.root, "state", "inbox-proposals.json")`), the file this task's rationale
+ *  names as having gained nine entries (P37-P45) that exist on exactly one disk. */
+export const STATE_BACKUP_PROPOSALS_REGISTER_RELPATH = "inbox-proposals.json";
+
+/**
+ * Relative paths under `state/` excluded from every snapshot because they are cheaply
+ * rederivable, not because they merely look unimportant. `status.json` is the only entry —
+ * this task's own rationale states outright "status.json is rederivable and does not
+ * matter". See this section's header comment for why nothing else is excluded by default.
+ */
+export const STATE_BACKUP_EXCLUDED_RELPATHS: ReadonlySet<string> = new Set(["status.json"]);
+
+/** One completed snapshot. */
+export interface StateBackupSnapshot {
+  /** Absolute path to the finished, verified snapshot directory. */
+  archiveDir: string;
+  /** Relative paths of every file the snapshot copied, sorted, relative to `state/`. */
+  entries: string[];
+}
+
+/** Recursively lists every FILE (never a directory itself) under `root`, as paths relative
+ *  to `root`, sorted, skipping any relative path in `excluded`. Shared by both the staging
+ *  and the post-copy verification read in {@link snapshotState}, and by {@link restoreState} —
+ *  ONE walk, so a future exclusion/traversal fix applies to snapshot, verify, and restore
+ *  alike rather than drifting across three hand-written copies. */
+function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set()): string[] {
+  const out: string[] = [];
+  const walk = (relDir: string): void => {
+    const absDir = relDir ? join(root, relDir) : root;
+    for (const name of readdirSync(absDir).sort()) {
+      const rel = relDir ? join(relDir, name) : name;
+      if (excluded.has(rel)) continue;
+      const abs = join(absDir, name);
+      const st = statSync(abs);
+      if (st.isDirectory()) walk(rel);
+      else if (st.isFile()) out.push(rel);
+    }
+  };
+  walk("");
+  return out.sort();
+}
+
+/** Copies `relPaths` from `srcRoot` to `dstRoot`, creating destination directories as
+ *  needed and preserving each source file's permission bits (chmod, best-effort) — the
+ *  service-token files under `state/` are 0600 by design (worker-home.ts's
+ *  `workerKeychainPaths`) and a backup that silently widened them on restore would be a
+ *  regression this task exists to prevent, not one it introduces. */
+function copyStateFiles(srcRoot: string, dstRoot: string, relPaths: readonly string[]): void {
+  for (const rel of relPaths) {
+    const src = join(srcRoot, rel);
+    const dst = join(dstRoot, rel);
+    mkdirSync(dirname(dst), { recursive: true });
+    const srcStat = statSync(src);
+    cpSync(src, dst, { force: true });
+    try {
+      chmodSync(dst, srcStat.mode);
+    } catch {
+      // best-effort — an fs that refuses chmod (e.g. some network mounts) still has the
+      // bytes copied correctly; permission preservation is a hardening, not the contract.
+    }
+  }
+}
+
+function datedStateBackupDir(backupsRoot: string, now: Date): string {
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  return join(backupsRoot, `state-backup.${stamp}`);
+}
+
+/**
+ * Snapshots `stateDir` into a freshly-created, dated directory under `backupsRoot`.
+ * ATOMIC PUBLISH: stages every copy into a temp dir under `backupsRoot` first, verifies the
+ * staged copy from disk (never trusts the in-memory copy list), and only then `renameSync`s
+ * it into its final dated name — mirroring `writeFileAtomic`/`rotateLedger` above, so a
+ * process death mid-copy leaves at most an orphaned temp dir, never a partial archive at a
+ * name a restore would trust. `backupsRoot` is deliberately never inside `stateDir` itself
+ * (it would otherwise recurse into its own prior backups on the very next run).
+ *
+ * VERIFICATION (design note ii — "a snapshot that is not verified is not a backup"): refuses
+ * to publish, throwing {@link StateBackupError}, when the staged copy is empty, or when the
+ * source contained {@link STATE_BACKUP_LEDGER_RELPATH} or
+ * {@link STATE_BACKUP_PROPOSALS_REGISTER_RELPATH} and the staged copy does not — the two
+ * files this task's own acceptance names by name. A verification failure is cleaned up (the
+ * temp dir is removed) rather than left behind as an empty or partial archive.
+ */
+export function snapshotState(stateDir: string, backupsRoot: string, opts: { now?: () => Date } = {}): StateBackupSnapshot {
+  const now = opts.now ?? (() => new Date());
+  let tmpDir: string | undefined;
+  try {
+    if (!existsSync(stateDir)) {
+      throw new StateBackupError(`state backup: source state dir does not exist: ${stateDir}`);
+    }
+    mkdirSync(backupsRoot, { recursive: true });
+    tmpDir = mkdtempSync(join(backupsRoot, ".state-backup-tmp-"));
+    const sourceEntries = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS);
+    copyStateFiles(stateDir, tmpDir, sourceEntries);
+
+    const staged = listStateFiles(tmpDir);
+    if (staged.length === 0) {
+      throw new StateBackupError(`state backup: snapshot of ${stateDir} would be an empty archive — refusing to publish it`);
+    }
+    const missing = [STATE_BACKUP_LEDGER_RELPATH, STATE_BACKUP_PROPOSALS_REGISTER_RELPATH].filter(
+      (rel) => sourceEntries.includes(rel) && !staged.includes(rel),
+    );
+    if (missing.length > 0) {
+      throw new StateBackupError(
+        `state backup: snapshot of ${stateDir} is missing ${missing.join(", ")}, present in the source — refusing to publish it`,
+      );
+    }
+
+    const archiveDir = datedStateBackupDir(backupsRoot, now());
+    renameSync(tmpDir, archiveDir);
+    tmpDir = undefined;
+    return { archiveDir, entries: staged };
+  } catch (err) {
+    if (err instanceof StateBackupError) throw err;
+    throw new StateBackupError(`state backup: snapshot of ${stateDir} failed: ${(err as Error).message}`, { cause: err });
+  } finally {
+    if (tmpDir !== undefined && existsSync(tmpDir)) {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * Restores every file under a snapshot directory (as produced by {@link snapshotState}) into
+ * `targetStateDir`, byte-for-byte (permission bits preserved best-effort, same as the
+ * snapshot side — see {@link copyStateFiles}). THE RESTORE IS A VERB, NOT A RUNBOOK
+ * PARAGRAPH (design note iii): this is the one command an operator mid-incident runs, not a
+ * paragraph describing what they should do. Refuses (throws {@link StateBackupError}) an
+ * absent or empty archive rather than silently no-op'ing over an existing state dir.
+ */
+export function restoreState(archiveDir: string, targetStateDir: string): void {
+  try {
+    if (!existsSync(archiveDir)) {
+      throw new StateBackupError(`state backup: restore source does not exist: ${archiveDir}`);
+    }
+    const entries = listStateFiles(archiveDir);
+    if (entries.length === 0) {
+      throw new StateBackupError(`state backup: refusing to restore from an empty archive: ${archiveDir}`);
+    }
+    mkdirSync(targetStateDir, { recursive: true });
+    copyStateFiles(archiveDir, targetStateDir, entries);
+  } catch (err) {
+    if (err instanceof StateBackupError) throw err;
+    throw new StateBackupError(
+      `state backup: restore into ${targetStateDir} from ${archiveDir} failed: ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
 }
