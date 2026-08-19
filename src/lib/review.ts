@@ -1254,13 +1254,61 @@ let browserPreflightDone = false;
  * spawns the runner at all; timing that would only prove it was quick. */
 export type ProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => string;
 
-/** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout. Exported (W1-T387)
- *  so `checkProofCommand` (src/run-task.ts) can wrap it to CAPTURE the raw stdout/exit status
- *  {@link execWhitelistedProof} observes — for its own diagnostics (argv, exit code, hit count)
- *  only, never for the verdict, which stays exactly what execWhitelistedProof decides. */
+/**
+ * The ONLY env vars {@link defaultProofSpawner} lets through from whatever process happens to be
+ * running the reviewer into a proof's child (W1-T499). `PATH` — a proof runs `node --test` in a
+ * fresh worktree and shells out to `npm ci`, `grep` and a pinned Playwright CLI, all of which need
+ * it to even be found (see {@link defaultProofSpawner}'s own doc for the "not `env: {}`" warning).
+ * `HOME` — npm/git config and cache resolution (`~/.npmrc`, `~/.cache`, `~/.gitconfig`). The four
+ * `GIT_CONFIG_*` names and `GIT_TERMINAL_PROMPT` — the git-identity variables
+ * `test/entrypoint-boot.test.ts` already sets DELIBERATELY (see its `NO_GUESSED_IDENTITY` and its
+ * `GIT_CONFIG_NOSYSTEM`/`GIT_TERMINAL_PROMPT` overrides) so that suite's own env narrowing keeps
+ * working exactly as designed, rather than this allowlist silently shadowing it.
+ *
+ * Everything else — every `RMD_*` var a daemon happens to carry (e.g. `RMD_RESTART_THROTTLE_S`,
+ * set by `deploy/host-update.sh` and read by `deploy/entrypoint.sh`, but present in NO GitHub
+ * Actions workflow) chief among them — is EXCLUDED BY DEFAULT. That is the actual fix: a proof now
+ * runs in a DECLARED environment instead of inheriting whichever orchestrator happened to launch
+ * it, so the reviewer and CI can no longer reach different verdicts on the same sha for a reason
+ * that has nothing to do with the diff.
+ */
+export const PROOF_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "GIT_CONFIG_NOSYSTEM",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_KEY_0",
+  "GIT_CONFIG_VALUE_0",
+  "GIT_TERMINAL_PROMPT",
+] as const;
+
+/** Build the DECLARED child environment {@link defaultProofSpawner} passes to a proof's process:
+ * copies ONLY the {@link PROOF_ENV_ALLOWLIST} keys present on `parent` (default: this process's own
+ * `process.env`, i.e. whatever orchestrator — daemon or a bare CLI invocation — is running the
+ * reviewer), never `parent` wholesale. Exported so a test can compare the declared env two
+ * differently-shaped orchestrator environments produce, without needing two real orchestrators. */
+export function buildProofEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const child: NodeJS.ProcessEnv = {};
+  for (const key of PROOF_ENV_ALLOWLIST) {
+    const val = parent[key];
+    if (typeof val === "string") child[key] = val;
+  }
+  return child;
+}
+
+/** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout, and — since W1-T499 —
+ *  a DECLARED env ({@link buildProofEnv}) rather than an implicit inherit of `process.env` whole.
+ *  Before W1-T499 this passed no `env` key at all, so a proof silently inherited every variable the
+ *  orchestrator happened to carry (daemon-only `RMD_*` vars chief among them — see
+ *  {@link PROOF_ENV_ALLOWLIST}'s doc), which is exactly how the reviewer and CI could disagree on
+ *  an identical sha. Exported (W1-T387) so `checkProofCommand` (src/run-task.ts) can wrap it to
+ *  CAPTURE the raw stdout/exit status {@link execWhitelistedProof} observes — for its own
+ *  diagnostics (argv, exit code, hit count) only, never for the verdict, which stays exactly what
+ *  execWhitelistedProof decides. */
 export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) =>
   execFileSync(command, args as string[], {
     cwd,
+    env: buildProofEnv(),
     stdio: ["ignore", "pipe", "ignore"],
     timeout: timeoutMs,
     encoding: "utf8",
