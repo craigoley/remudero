@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DECISION_RELEVANT_LEDGER_STEPS,
@@ -19,6 +21,7 @@ import type { IssueGateway } from "../src/lib/escalate.js";
 import { isRatifiedInLedger } from "../src/lib/inbox.js";
 import { priorEscalatedAlertIds } from "../src/lib/ops.js";
 import { alreadyFiledForSignature } from "../src/lib/coverage-improvement.js";
+import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
 
 // ── W1-T209: "the ledger grows unbounded with no archival, and any rotation that hides a
 // decision-relevant line silently zeroes the dispatch breaker it also backs" (RECON R-9,
@@ -715,4 +718,83 @@ test("FALSIFIER — W1-T470 coverage-improvement dedupe: dropping the coverage.i
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── W1-T964 DESIGN (vi): THE FILE-SHA-BRACKETED MUTATION CHECK ──────────────────────────────
+//
+// "Read the sha256 of the edited file, remove the pinning, read it again and require it to
+// DIFFER, run the suite and require the idempotency test to FAIL, restore, and require the sha
+// to return to the original." (design note (vi), verbatim.) A positive test alone proves
+// nothing: test/followup-rotation-idempotency.test.ts's "a re-mine after rotation yields the
+// same candidate set" could in principle pass for reasons that have nothing to do with the
+// three follow-up steps actually being pinned in DECISION_RELEVANT_LEDGER_STEPS — this test
+// mutates the REAL, checked-out `src/lib/ledger.ts` on disk (restored in a `finally`, verified
+// byte-identical by its own sha256 afterward) to remove exactly the three added lines, and
+// spawns a REAL child `node --test` process, narrowed to ONLY that one positive test — the SAME
+// house-dialect proof-execution shape `remudero-review`'s own `parseWhitelistedProof`/
+// `narrowNameFilteredArgs` build for a bare `unit test: <name>` acceptance proof, and the SAME
+// mutate/spawn/restore shape test/dispatch-lifetime-breaker.test.ts's own W1-T951 mutation
+// check already established.
+//
+// Deliberately spawned from THIS file, targeting a DIFFERENT one:
+// test/followup-rotation-idempotency.test.ts. Spawning that file from inside itself would
+// re-enter this very mutation test recursively (the target file would spawn itself spawning
+// itself...) — the same reason W1-T951's check lives in dispatch-lifetime-breaker.test.ts
+// rather than inside open-pr-corroboration.test.ts, the file it actually mutates a consumer of.
+test("W1-T964: removing the pinning fails the idempotency test", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const ledgerTsPath = join(repoRoot, "src", "lib", "ledger.ts");
+  const targetTestFile = "test/followup-rotation-idempotency.test.ts";
+  const positiveTestName = "W1-T964: a re-mine after rotation yields the same candidate set";
+
+  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  const original = readFileSync(ledgerTsPath, "utf8");
+  const originalSha = sha256(original);
+
+  const needle = '  "report.followups",\n  "followup.harvested",\n  "followup.deduped",\n]);';
+  const occurrences = original.split(needle).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    "sanity: the three pinned follow-up steps must appear EXACTLY once, immediately before the " +
+      "Set literal's close, or this mutation is not targeting the real pin",
+  );
+  const mutated = original.replace(needle, "]); // W1-T964 MUTATION: follow-up step pinning removed");
+
+  const whitelisted = parseWhitelistedProof(`unit test: ${positiveTestName}`);
+  assert.ok(whitelisted, "sanity: the proof text must parse as a name-filtered `unit test:` dialect proof");
+  assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
+  const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
+
+  let childResult: ReturnType<typeof spawnSync> | undefined;
+  try {
+    writeFileSync(ledgerTsPath, mutated);
+    const mutatedSha = sha256(readFileSync(ledgerTsPath, "utf8"));
+    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change ledger.ts's bytes");
+
+    // `NODE_TEST_CONTEXT` (set by node's OWN test runner on the process running THIS test) is
+    // inherited by a plain `spawnSync` env by default — and node's test runner treats its
+    // presence as "this is a recursive `run()` call" and SKIPS running any files at all, exiting
+    // 0 having executed nothing. Strip it so the child is a genuinely independent `node --test`
+    // invocation, not a no-op that would make this check pass for the wrong reason (a silently-
+    // skipped child looks identical to a clean exit).
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+  } finally {
+    // RESTORED REGARDLESS of what the child run did — a throw, a timeout, or a pass must never
+    // leave the real checked-out source mutated.
+    writeFileSync(ledgerTsPath, original);
+    const restoredSha = sha256(readFileSync(ledgerTsPath, "utf8"));
+    assert.equal(restoredSha, originalSha, "ledger.ts must be restored byte-for-byte after the mutation check");
+  }
+
+  assert.ok(childResult, "sanity: the child process must actually have been spawned");
+  assert.notEqual(
+    childResult!.status,
+    0,
+    `removing the follow-up step pinning must fail the idempotency test — child exited ${childResult!.status}\n` +
+      `stdout:\n${childResult!.stdout}\nstderr:\n${childResult!.stderr}`,
+  );
 });
