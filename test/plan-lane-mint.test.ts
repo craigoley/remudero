@@ -136,6 +136,9 @@ interface HarnessCtx {
   configRoot: string;
   /** The directory the lane's reservations land in — the thing under test. */
   reservationsDir: string;
+  /** The throwaway bare origin every push in this run lands on — W1-T949: exposed so a caller
+   *  can read back `refs/rmd-id/*` after the run, not just the local reservation directory. */
+  bareOrigin: string;
 }
 
 /** Run `body` with HOME/PATH/config pointed at throwaway fixtures; returns the parsed ledger. */
@@ -168,7 +171,7 @@ async function withHarness(body: (ctx: HarnessCtx) => Promise<void>): Promise<Ar
     writeGhShim(shimDir);
     process.env.PATH = `${shimDir}:${savedPath}`;
 
-    await body({ configRoot, reservationsDir: taskIdReservationsDir(configRoot) });
+    await body({ configRoot, reservationsDir: taskIdReservationsDir(configRoot), bareOrigin: bare });
 
     const p = join(configRoot, "state", "ledger.ndjson");
     return existsSync(p)
@@ -194,6 +197,36 @@ function idsOnDisk(dir: string): number[] {
 }
 
 const BRIEF = ["--mode=create", "a", "fixture", "brief", "for", "the", "plan", "lane", "mint"];
+
+/**
+ * Install a `pre-receive` hook on the bare origin that refuses ONLY `refs/rmd-id/*`, leaving
+ * every ordinary branch push working — so a run reaches the reservation and fails THERE rather
+ * than dying earlier for an unrelated reason.
+ *
+ * MEASURED against the real reserver rather than assumed: a hook-refused push prints
+ * `! [remote rejected]`, which `classifyPushFailure` reads as `taken` (its pattern includes
+ * `rejected`), so `reserveTaskIdRemote` advances to the next id, exhausts its `maxScan` range
+ * and throws a `TaskIdReservationError` carrying `outcome: "exhausted"` and NO `ref` — the
+ * exhausted arm names a starting id but no single ref, since it is the RANGE that ran out. A
+ * plain branch push against the same hooked origin still exits 0, and the identical scan against
+ * an unhooked origin reserves successfully.
+ */
+function refuseIdReservations(bareOrigin: string): void {
+  const hooks = join(bareOrigin, "hooks");
+  mkdirSync(hooks, { recursive: true });
+  writeFileSync(
+    join(hooks, "pre-receive"),
+    [
+      "#!/bin/sh",
+      "while read -r _old _new ref; do",
+      '  case "$ref" in refs/rmd-id/*) echo "fixture: refusing id reservations" >&2; exit 1;; esac',
+      "done",
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
 
 test("plan lane reserves its task ids BEFORE the paid worker spawns", async () => {
   let seenAtSpawn: number[] = [];
@@ -221,6 +254,47 @@ test("plan lane reserves its task ids BEFORE the paid worker spawns", async () =
   for (const n of seenAtSpawn) {
     assert.ok(promptSeen.includes(`W1-T${n}`), `the prompt names reserved id W1-T${n}`);
   }
+});
+
+// ── W1-T949: THE REMOTE HALF — every reserved id gets its OWN ref on the shared origin, not
+// just the first. Before this the plan lane reserved a full LOCAL block (the test above) but
+// called `reserveTaskIdRemote` nowhere at all, so a plan run filing five tasks pushed ZERO refs
+// any other writer could see (rationale (3)). This drives the REAL lane end to end (a real `git
+// push` against the fixture's own bare origin, exactly `test/live-write-guard-command-sites.ts`'s
+// shape) and reads the refs back off that origin — the substrate every writer actually shares,
+// not the worker-sandbox-local reservation directory the test above already covers.
+test("plan lane pushes ONE remote ref PER reserved id, not just the first", async () => {
+  let seenAtSpawn: number[] = [];
+
+  const ledger = await withHarness(async ({ reservationsDir, bareOrigin }) => {
+    await planCommand(BRIEF, {
+      spawn: async (args: { cwd: string }) => {
+        seenAtSpawn = idsOnDisk(reservationsDir);
+        fileTaskAsShard(args.cwd, `W1-T${seenAtSpawn[0]}`, "filed by the fixture worker");
+        return fakeWorker(`PROPOSED: file W1-T${seenAtSpawn[0]} for the plan-lane remote-mint fixture`);
+      },
+    }).catch(() => undefined);
+
+    const refs = execFileSync("git", ["-C", bareOrigin, "for-each-ref", "--format=%(refname)", "refs/rmd-id/"], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .filter(Boolean);
+    assert.equal(
+      refs.length,
+      PLAN_MAX_NEW_TASKS,
+      `expected one refs/rmd-id/* ref per reserved id (${PLAN_MAX_NEW_TASKS}), the shared remote saw ${JSON.stringify(refs)}`,
+    );
+    for (const n of seenAtSpawn) {
+      assert.ok(refs.includes(`refs/rmd-id/W1-T${n}`), `W1-T${n}'s own ref must have reached the shared origin`);
+    }
+  });
+
+  assert.equal(ledger.filter((l) => l.step === "plan.id_minted").length, 1);
+  assert.ok(
+    Array.isArray((ledger.find((l) => l.step === "plan.id_minted") as { remote_refs?: unknown })?.remote_refs),
+    "plan.id_minted must ledger the pushed refs, not just the local reservation",
+  );
 });
 
 test("plan lane releases EVERY reserved id, including the ones the worker declined to use", async () => {
@@ -398,4 +472,66 @@ test("the reservation path works with an EMPTY config file — CI's normal state
     process.env.HOME = savedHome;
     for (const d of [home, dir]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// ── W1-T949 design (iv): A REFUSAL MUST LEAVE A DURABLE, QUERYABLE RECORD ────────────────────
+// The reservation is the one thing standing between two writers and a duplicate id, and it can
+// fail for reasons an operator has to tell apart — an unreachable origin, an exhausted range,
+// a local store fault. Folded into the generic free-text error field it would be unqueryable and
+// unprotected from rotation; the lane logs its own step carrying the machine-readable id, ref
+// and outcome instead. This drives the REAL lane into that failure through the real reserver.
+
+test("plan lane ledgers plan.id_reservation_failed when the shared remote refuses every reservation", async () => {
+  let spawned = 0;
+
+  const ledger = await withHarness(async ({ bareOrigin }) => {
+    refuseIdReservations(bareOrigin);
+    await planCommand(BRIEF, {
+      spawn: async () => {
+        spawned += 1;
+        return fakeWorker("PROPOSED: the worker should never have been reached");
+      },
+    }).catch(() => undefined);
+  });
+
+  const failed = ledger.filter((l) => l.step === "plan.id_reservation_failed");
+  assert.equal(
+    failed.length,
+    1,
+    `exactly one durable refusal row is expected; the run ledgered ${JSON.stringify(ledger.map((l) => l.step))}`,
+  );
+  assert.equal(failed[0]?.outcome, "exhausted", "the MACHINE-READABLE outcome, not a stringified message");
+  assert.match(String(failed[0]?.id), /^W1-T\d+$/, "the row names the id the scan started from");
+  assert.equal(failed[0]?.ref, null, "the exhausted arm names no single ref — it is the RANGE that ran out, not one id");
+  assert.match(String(failed[0]?.error), /no free task id/, "and it carries the reserver's own message alongside the fields");
+
+  // THE POINT OF FAILING HERE: a minter that cannot reserve must not spend. The refusal is
+  // raised before the paid worker is started, so nothing is billed for a run that cannot file.
+  assert.equal(spawned, 0, "the paid worker must never start once the reservation has refused");
+  assert.equal(ledger.filter((l) => l.step === "plan.id_minted").length, 0, "and nothing may be ledgered as minted");
+});
+
+test("plan lane CONTROL: the same run mints normally when the remote accepts the reservation", async () => {
+  // The paired half of the test above. Without it, that assertion would pass just as well
+  // against a lane that always refused — the hook has to be what makes the difference.
+  let spawned = 0;
+
+  const ledger = await withHarness(async ({ reservationsDir }) => {
+    await planCommand(BRIEF, {
+      spawn: async (args: { cwd: string }) => {
+        spawned += 1;
+        const ids = idsOnDisk(reservationsDir);
+        fileTaskAsShard(args.cwd, `W1-T${ids[0]}`, "filed by the control fixture worker");
+        return fakeWorker(`PROPOSED: file W1-T${ids[0]} for the plan-lane reservation control`);
+      },
+    }).catch(() => undefined);
+  });
+
+  assert.equal(ledger.filter((l) => l.step === "plan.id_reservation_failed").length, 0, "no refusal without the hook");
+  assert.equal(ledger.filter((l) => l.step === "plan.id_minted").length, 1, "the mint row the refusing run never reaches");
+  // The paid worker DOES start here — the paired half of `spawned === 0` above. Asserted as
+  // "at least one" rather than an exact count: this lane spawns THREE times on a normal run
+  // (measured — an exact `=== 1` failed CI with `3 !== 1`), and how many workers the lane runs
+  // is not this test's claim. What discriminates the two runs is started-at-all versus never.
+  assert.ok(spawned >= 1, `the paid worker must start once the ids are safely held; saw ${spawned}`);
 });

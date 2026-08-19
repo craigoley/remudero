@@ -145,8 +145,23 @@ export function missingFeedbackMessage(
  * old "run this grep and pick the next integer" instruction was an instruction it could not
  * execute, leaving id selection to eyeballing the files it happened to read. When present,
  * the prompt HANDS the id over instead of describing how to compute one.
+ *
+ * `additionalReservedIds` (W1-T949 design (ii)): the REST of a reserved block, beyond
+ * `mintedId` itself — the harness now reserves a block up front (`reserveTaskIdBlock` +
+ * `reserveTaskIdBlockRemote`) exactly as `rmd plan` already does, so a multi-task filing has
+ * every id it might use ALREADY held on the shared remote, not merely `mintedId`. As long as
+ * this prompt told the worker to "number them upward" instead of naming the reserved set, a
+ * reserved block and a filed set could diverge by construction — the harness could hold five
+ * ids while the worker invented a sixth. Defaults to empty so every existing caller that passes
+ * only `mintedId` (a single reservation, or none at all) is BYTE-IDENTICAL to before this
+ * parameter existed; only a caller that actually reserved more states the fuller instruction.
  */
-export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: string): string {
+export function triagePrompt(
+  entry: FeedbackEntry,
+  runId: string,
+  mintedId?: string,
+  additionalReservedIds: string[] = [],
+): string {
   return [
     "You are the REMUDERO ARCHITECT running an INTAKE TRIAGE (MASTER-PLAN §7B) over one captured",
     "feedback entry. You ride a HIGHER tier than implement workers (G-17). You do NOT have a Bash",
@@ -213,8 +228,20 @@ export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: str
           `  ID SELECTION for any NEW task: USE EXACTLY \`${mintedId}\` — the harness already minted it`,
           "  from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, and the ids open plan",
           "  PRs have already minted. Do NOT pick your own id and do NOT 'correct' this one: a colliding",
-          "  id is refused pre-push, so a wrong pick means NO proposal opens. If the feedback needs MORE",
-          `  than one new task, number them upward from ${mintedId} (${mintedId}, then the next integers).`,
+          "  id is refused pre-push, so a wrong pick means NO proposal opens.",
+          ...(additionalReservedIds.length > 0
+            ? [
+                `  The harness has ALSO RESERVED ${additionalReservedIds.join(", ")} for this run, on the`,
+                "  SAME shared remote store — if the feedback needs MORE than one new task, use them IN",
+                "  THIS ORDER after the first. Do NOT invent an id yourself and do NOT renumber past this",
+                "  reserved set: an id you choose yourself is unreserved, and another lane may be filing",
+                "  it at this very moment. Filing fewer than the reserved count is normal and costs",
+                `  nothing; you may file AT MOST ${1 + additionalReservedIds.length} new task(s) this run.`,
+              ]
+            : [
+                `  If the feedback needs MORE than one new task, number them upward from ${mintedId}`,
+                `  (${mintedId}, then the next integers).`,
+              ]),
         ]
       : [
           "  ID SELECTION for any NEW task: ids live in BOTH plan/tasks.yaml AND plan/tasks.d/*.yaml",

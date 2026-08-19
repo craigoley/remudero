@@ -1,13 +1,17 @@
 import { strict as assert } from "node:assert";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   classifyPushFailure,
   firstUnreservedAtOrAbove,
   gitRemoteRefReserver,
   reserveTaskIdRemote,
+  reserveTaskIdBlockRemote,
   taskIdReservationRef,
   type RemoteRefReserver,
   type RemoteReserveOutcome,
@@ -17,7 +21,11 @@ import {
   taskIdReservationPath,
   taskIdReservationsDir,
   TaskIdReservationError,
+  idReservationFailureFields,
+  withIdReservationLogging,
 } from "../src/lib/task-id-reservation.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, rotateLedger } from "../src/lib/ledger.js";
+import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
 
 /**
  * The property this module exists for: a minted id is unusable by anyone else from the moment it
@@ -357,4 +365,310 @@ test("the git-backed reserver pushes an orphan payload to the id's own ref", () 
   assert.equal(reserver.attempt("W1-T509", anchor), "created");
   const push = calls.find((c) => c[0] === "push");
   assert.deepEqual(push, ["push", "origin", "ORPHAN:refs/rmd-id/W1-T509"]);
+});
+
+// ── W1-T949: EVERY ID A FILING CREATES GETS A REF, NOT JUST THE FIRST ───────────────────────
+//
+// `reserveTaskIdRemote` alone has exactly one call site and reserves exactly one ref, while
+// triage's own prompt tells the worker to "number them upward" for a second/third id, and the
+// plan/approve lanes only ever reserved a block LOCALLY (a worker-sandbox path nobody else
+// shares). `reserveTaskIdBlockRemote` is the remote-substrate twin of `reserveTaskIdBlock`,
+// pushing one ref PER reserved id rather than one ref total.
+
+test("W1-T949: a filing that creates N ids reserves N refs", () => {
+  const remote = fakeRemote();
+  const N = 4;
+  const block = reserveTaskIdBlockRemote(1000, N, remote.reserverFor("writer-A"));
+
+  assert.equal(block.ids.length, N);
+  assert.equal(block.taskIds.length, N);
+  assert.equal(block.refs.length, N);
+  assert.deepEqual(block.ids, [1000, 1001, 1002, 1003], "contiguous from the start id — no contention here");
+  assert.equal(
+    remote.refs.size,
+    N,
+    `a filing that creates ${N} ids must push ${N} refs to the remote, one per id — not one fixed ref regardless of N`,
+  );
+  for (const id of block.ids) {
+    assert.ok(remote.refs.has(taskIdReservationRef(`W1-T${id}`)), `W1-T${id}'s own ref must be pushed`);
+  }
+});
+
+test("W1-T949: a filing that creates one id reserves exactly one ref", () => {
+  // THE PAIRED FALSIFIER (design (v)): the test above alone is satisfied by an implementation
+  // that always pushes a FIXED block regardless of the requested count — calling with count=1 is
+  // what catches that: a fixed-N implementation would push N refs here too, not 1.
+  const remote = fakeRemote();
+  const block = reserveTaskIdBlockRemote(2000, 1, remote.reserverFor("writer-B"));
+
+  assert.equal(block.ids.length, 1);
+  assert.deepEqual(block.ids, [2000]);
+  assert.equal(remote.refs.size, 1, "exactly one ref for a one-id filing — never a fixed block size regardless of N");
+});
+
+test("W1-T949: reserveTaskIdBlockRemote refuses a non-positive count instead of silently reserving nothing", () => {
+  const remote = fakeRemote();
+  assert.throws(() => reserveTaskIdBlockRemote(1, 0, remote.reserverFor("writer-C")), TypeError);
+  assert.throws(() => reserveTaskIdBlockRemote(1, 1.5, remote.reserverFor("writer-C")), TypeError);
+  assert.equal(remote.refs.size, 0);
+});
+
+// ── W1-T949 DESIGN (vi): THE FILE-SHA-BRACKETED MUTATION CHECK ───────────────────────────────
+//
+// "A positive test alone proves nothing here, and this is the trap." An implementation that
+// reserves only the FIRST id and silently no-ops the rest would still show ONE ref landing —
+// the check is: read the sha256 of the edited file, remove the per-id reservation, read the
+// sha256 again and require it to DIFFER, run the suite and require the N-ref test to FAIL,
+// restore, and require the sha to return to the original (design note (vi), verbatim).
+//
+// This mutates the REAL, checked-out `src/lib/task-id-reservation.ts` on disk (restored in a
+// `finally`, verified byte-identical by its own sha256 afterward), then spawns a REAL child
+// `node --test` process — the same house-dialect proof-execution shape `remudero-review`'s own
+// `parseWhitelistedProof`/`narrowNameFilteredArgs` build for a bare `unit test: <name>`
+// acceptance proof (test/dispatch-lifetime-breaker.test.ts's W1-T951 mutation test is the model
+// this one follows) — narrowed via `--test-name-pattern` to ONLY the "N ids reserves N refs"
+// test above, in this SAME file. That narrowing is what makes same-file safe: the pattern
+// matches that one test's name and no other's, so THIS test (a different name) is never invoked
+// by the child and no recursive re-entry occurs.
+
+test("W1-T949: removing the per id reservation fails the N ref test", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const srcPath = join(repoRoot, "src", "lib", "task-id-reservation.ts");
+  const targetTestFile = "test/task-id-reservation.test.ts";
+  const positiveTestName = "W1-T949: a filing that creates N ids reserves N refs";
+
+  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  const original = readFileSync(srcPath, "utf8");
+  const originalSha = sha256(original);
+
+  // THE PER-ID RESERVATION: reserveTaskIdBlockRemote's loop, which calls reserveTaskIdRemote
+  // ONCE PER id in the block. Mutated to loop exactly once regardless of `count`, so a block of
+  // N collapses to reserving only the first id — the exact defect this task exists to close,
+  // reintroduced on purpose to prove the positive test actually catches it.
+  const needle = "  for (let i = 0; i < count; i++) {\n    const h = reserveTaskIdRemote(next, reserver, opts);\n";
+  const occurrences = original.split(needle).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    "sanity: the per-id remote-reservation loop must appear EXACTLY once, or this mutation is not targeting the real rung",
+  );
+  const mutated = original.replace(
+    needle,
+    "  for (let i = 0; i < 1; i++) { // W1-T949 MUTATION: per-id reservation removed, always reserves ONE\n" +
+      "    const h = reserveTaskIdRemote(next, reserver, opts);\n",
+  );
+
+  const whitelisted = parseWhitelistedProof(`unit test: ${positiveTestName}`);
+  assert.ok(whitelisted, "sanity: the proof text must parse as a name-filtered `unit test:` dialect proof");
+  assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
+  const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
+
+  let childResult: ReturnType<typeof spawnSync> | undefined;
+  try {
+    writeFileSync(srcPath, mutated);
+    const mutatedSha = sha256(readFileSync(srcPath, "utf8"));
+    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change task-id-reservation.ts's bytes");
+
+    // `NODE_TEST_CONTEXT` (set by node's OWN test runner on the process running THIS test) is
+    // inherited by a plain `spawnSync` env by default — node's test runner treats its presence
+    // as "this is a recursive `run()` call" and SKIPS running any files at all, exiting 0 having
+    // executed nothing. Strip it so the child is a genuinely independent `node --test`
+    // invocation, not a silently-skipped no-op that would make this check pass for the wrong
+    // reason (test/dispatch-lifetime-breaker.test.ts's W1-T951 mutation test notes the same trap).
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+  } finally {
+    // RESTORED REGARDLESS of what the child run did — a throw, a timeout, or a pass must never
+    // leave the real checked-out source mutated.
+    writeFileSync(srcPath, original);
+    const restoredSha = sha256(readFileSync(srcPath, "utf8"));
+    assert.equal(restoredSha, originalSha, "task-id-reservation.ts must be restored byte-for-byte after the mutation check");
+  }
+
+  assert.ok(childResult, "sanity: the child process must actually have been spawned");
+  assert.notEqual(
+    childResult!.status,
+    0,
+    `removing the per-id reservation must fail the N-ref test — child exited ${childResult!.status}\n` +
+      `stdout:\n${childResult!.stdout}\nstderr:\n${childResult!.stderr}`,
+  );
+});
+
+// ── W1-T949 DESIGN (iv): A REFUSAL TO RESERVE MUST BE READABLE A WEEK LATER ──────────────────
+//
+// Before this, `reserveTaskIdRemote`'s `TaskIdReservationError` landed only as a stringified
+// message inside a lane's generic `*.error` field — no id, no ref, no outcome discriminator —
+// and `DECISION_RELEVANT_LEDGER_STEPS` carried zero `*.error` steps, so `rotateLedger` archived
+// those rows on the ordinary schedule and the evidence a reservation was refused was gone
+// (rationale (6)). This proves both halves: the thrown error carries the structured fields a
+// lane's catch logs, and the ledger step each lane logs them under survives a rotation that
+// archives everything around it.
+
+test("W1-T949: a failed reservation leaves a durable ledger event", () => {
+  const dead: RemoteRefReserver = { mintAnchor: () => "anchor", attempt: () => "unreachable" };
+
+  let caught: TaskIdReservationError | undefined;
+  try {
+    reserveTaskIdBlockRemote(700, 3, dead);
+    assert.fail("an unreachable remote must throw, never return a partial block");
+  } catch (e) {
+    assert.ok(e instanceof TaskIdReservationError);
+    caught = e as TaskIdReservationError;
+  }
+
+  // THE STRUCTURE a lane's catch logs (run-task.ts's triage/plan/approve reservation catches) —
+  // the id it could not reserve, the ref, and the classified outcome, never just the message.
+  assert.equal(caught!.taskId, "W1-T700");
+  assert.equal(caught!.ref, taskIdReservationRef("W1-T700"));
+  assert.equal(caught!.outcome, "unreachable");
+
+  // REGISTERED FOR RETENTION: each lane's own failure step is in DECISION_RELEVANT_LEDGER_STEPS,
+  // so rotateLedger keeps it rather than archiving it away with the rest of the run's noise.
+  for (const step of ["triage.id_reservation_failed", "plan.id_reservation_failed", "approve.id_reservation_failed"]) {
+    assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(step), `${step} must be retained across a ledger rotation`);
+  }
+
+  // DURABLE END TO END: append the exact shape a lane logs, pad well past the rotation ceiling
+  // with ordinary polling noise, rotate, and read the live file back.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-idres-ledger-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  appendLedger(
+    ledgerPath,
+    {
+      run_id: "r0",
+      task_id: "TRIAGE-fb-durable-test",
+      step: "triage.id_reservation_failed",
+      id: caught!.taskId,
+      ref: caught!.ref,
+      outcome: caught!.outcome,
+      error: caught!.message,
+    },
+    { ceilingBytes: Number.MAX_SAFE_INTEGER },
+  );
+  for (let n = 0; n < 250; n++) {
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({ step: "ci.polling", run_id: `noise-${n}`, task_id: "W1-NOISE", detail: "x".repeat(64) }) + "\n",
+      { flag: "a" },
+    );
+  }
+  const ceiling = 2000;
+  const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
+  assert.equal(result.rotated, true, "sanity: the padded ledger must actually cross the rotation ceiling");
+
+  const survivors = readFileSync(ledgerPath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+  const failure = survivors.find((l) => l.step === "triage.id_reservation_failed");
+  assert.ok(failure, "the reservation-refusal event must survive the rotation that archived the noise around it");
+  assert.equal(failure!.id, "W1-T700");
+  assert.equal(failure!.ref, taskIdReservationRef("W1-T700"));
+  assert.equal(failure!.outcome, "unreachable");
+});
+
+// ── W1-T949 design (iv): THE REFUSAL RECORD IS ONE POLICY, NOT THREE COPIES ──────────────────
+// Three filing lanes reserve remote ids — triage, plan and approve — and each needs the identical
+// durable record when the reservation refuses: the id, the ref, the machine-classified outcome,
+// and the message, never the message alone (an operator has to tell an unreachable origin from an
+// exhausted range from a local store fault, and free text is not queryable). Written as a `catch`
+// per lane it was three places to drift AND unreachable from a unit test, since each lived inside
+// a `run-task.ts` lane body. Both arms are exercised directly here; `test/plan-lane-mint.test.ts`
+// carries the end-to-end half, driving a real lane into a real remote refusal.
+
+/** Records every ledger row a run emits, so a test asserts the CALL and its fields. */
+function logRecorder(): { rows: Array<{ step: string; extra?: Record<string, unknown> }>; log: (step: string, extra?: Record<string, unknown>) => void } {
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  return { rows, log: (step, extra) => void rows.push({ step, extra }) };
+}
+
+test("withIdReservationLogging returns the body's value and ledgers NOTHING when it does not throw", () => {
+  const rec = logRecorder();
+  assert.equal(withIdReservationLogging(rec.log, "triage.id_reservation_failed", () => 42), 42);
+  assert.deepEqual(rec.rows, [], "a successful reservation must never write a refusal row");
+});
+
+test("withIdReservationLogging ledgers the id, ref and outcome and rethrows the SAME error", () => {
+  const rec = logRecorder();
+  const err = new TaskIdReservationError("cannot reach origin", {
+    taskId: "W1-T7",
+    ref: taskIdReservationRef("W1-T7"),
+    outcome: "unreachable",
+  });
+
+  let thrown: unknown;
+  try {
+    withIdReservationLogging(rec.log, "triage.id_reservation_failed", () => {
+      throw err;
+    });
+  } catch (e) {
+    thrown = e;
+  }
+
+  assert.equal(thrown, err, "the SAME error object propagates — never swallowed, never re-wrapped");
+  assert.equal(rec.rows.length, 1, "exactly one row per refusal");
+  assert.equal(rec.rows[0].step, "triage.id_reservation_failed", "under the step the LANE names, not a shared one");
+  assert.deepEqual(rec.rows[0].extra, {
+    id: "W1-T7",
+    ref: "refs/rmd-id/W1-T7",
+    outcome: "unreachable",
+    error: "cannot reach origin",
+  });
+});
+
+test("withIdReservationLogging records an absent ref as null rather than omitting the key", () => {
+  // The exhausted arm names a starting id but NO single ref — it is the range that ran out. The
+  // key must still be present: to a later `zgrep` over the ledger, a missing key and a key that
+  // is genuinely empty read identically, and only one of them is a fact about the failure.
+  const rec = logRecorder();
+  const exhausted = new TaskIdReservationError("no free task id in W1-T5..W1-T54", { taskId: "W1-T5", outcome: "exhausted" });
+  assert.throws(() => withIdReservationLogging(rec.log, "plan.id_reservation_failed", () => {
+    throw exhausted;
+  }), TaskIdReservationError);
+  assert.deepEqual(Object.keys(rec.rows[0].extra!).sort(), ["error", "id", "outcome", "ref"]);
+  assert.equal(rec.rows[0].extra!.ref, null);
+  assert.deepEqual(idReservationFailureFields(exhausted), {
+    id: "W1-T5",
+    ref: null,
+    outcome: "exhausted",
+    error: "no free task id in W1-T5..W1-T54",
+  });
+});
+
+test("withIdReservationLogging leads with the caller's own field and never lets it shadow the error's", () => {
+  const rec = logRecorder();
+  const err = new TaskIdReservationError("cannot reach origin", { taskId: "W1-T7", outcome: "unreachable" });
+
+  assert.throws(() => withIdReservationLogging(rec.log, "approve.id_reservation_failed", () => {
+    throw err;
+  }, { proposal_id: "P45" }), TaskIdReservationError);
+  assert.deepEqual(Object.keys(rec.rows[0].extra!), ["proposal_id", "id", "ref", "outcome", "error"], "the lane's field leads the row");
+
+  rec.rows.length = 0;
+  assert.throws(() => withIdReservationLogging(rec.log, "approve.id_reservation_failed", () => {
+    throw err;
+  }, { id: "SHADOW" }), TaskIdReservationError);
+  assert.equal(rec.rows[0].extra!.id, "W1-T7", "a colliding caller key must never displace the error's own id");
+});
+
+test("withIdReservationLogging passes any OTHER error through unlogged", () => {
+  // The negative control for every assertion above. Without it they would all hold just as well
+  // for a wrapper that ledgered a refusal for any failure at all — which would file a reservation
+  // incident for, say, a filesystem error in the worktree, and send triage at the wrong organ.
+  const rec = logRecorder();
+  const other = new TypeError("something else entirely");
+
+  let thrown: unknown;
+  try {
+    withIdReservationLogging(rec.log, "triage.id_reservation_failed", () => {
+      throw other;
+    });
+  } catch (e) {
+    thrown = e;
+  }
+
+  assert.equal(thrown, other, "it propagates unchanged");
+  assert.deepEqual(rec.rows, [], "and is NOT ledgered as a reservation refusal");
 });
