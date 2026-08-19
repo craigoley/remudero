@@ -1,0 +1,319 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
+
+/**
+ * `deploy/recycle-container.sh` REPLACES THE RUNNING `remudero-daemon` CONTAINER. W1-T1010: the
+ * seven-step recycle existed only in chat, and skipping any one step took the fleet down TWICE in
+ * one day — a recycle that never cleared `state/drain.lock` spent docker's `on-failure:5` budget to
+ * `count=5 exited`; a recycle run without pausing first found three workers mid-run; a failed
+ * `docker pull` was followed by a `docker run` that silently relaunched the stale cached image.
+ *
+ * THIS SCRIPT'S REFUSALS ARE THE DELIVERABLE, so this suite drives each one directly rather than
+ * reading the source for it — the same technique test/host-update-reclaim.test.ts and
+ * test/verify-image-probes.test.ts use: stub `docker` and `az` on PATH, run the REAL script, record
+ * every invocation in order, and assert on the recording. NO DOCKER DAEMON IS REQUIRED, which is the
+ * point — a live rehearsal of "kill three mid-run workers" is not something a test should risk.
+ */
+
+interface Call {
+  bin: string;
+  argv: string[];
+}
+
+interface Run {
+  status: number;
+  stdout: string;
+  stderr: string;
+  calls: Call[];
+}
+
+/**
+ * Write the `docker` and `az` stubs. `STUB_MODE` selects the branch:
+ *   good          — container exists, carries GH_TOKEN, pull succeeds, started image matches pulled
+ *   no-token      — container exists but carries no GH_TOKEN, and the shell has none either
+ *   pull-fail     — GH_TOKEN present; the pull is rejected for authentication
+ *   wrong-image   — everything succeeds up to start, but the started container's image id disagrees
+ *                   with the digest this run pulled
+ *   no-container  — no container by this name exists yet (first-ever run)
+ */
+function writeStubs(dir: string): void {
+  const docker = [
+    "#!/usr/bin/env bash",
+    'rec() { printf "%s" "docker" >> "$STUB_REC/calls"; for a in "$@"; do printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"; }',
+    'rec "$@"',
+    'case "$1" in',
+    "  image)",
+    '    if [ "$2" = "inspect" ]; then echo "sha256:PULLEDID"; exit 0; fi',
+    "    exit 0 ;;",
+    "  inspect)",
+    "    shift",
+    '    fmt=""',
+    '    if [ "$1" = "--format" ]; then fmt="$2"; shift 2; fi',
+    '    if [ -z "$fmt" ]; then',
+    '      case "$STUB_MODE" in no-container) exit 1 ;; *) exit 0 ;; esac',
+    "    fi",
+    '    case "$fmt" in',
+    "      *Config.Env*)",
+    '        case "$STUB_MODE" in no-token) : ;; *) echo "GH_TOKEN=captured-token-value" ;; esac',
+    "        exit 0 ;;",
+    "      *.Image}}*)",
+    '        case "$STUB_MODE" in wrong-image) echo "sha256:WRONGID" ;; *) echo "sha256:PULLEDID" ;; esac',
+    "        exit 0 ;;",
+    "    esac",
+    "    exit 0 ;;",
+    "  pull)",
+    '    case "$STUB_MODE" in',
+    '      pull-fail) echo "unauthorized: authentication required" >&2; exit 1 ;;',
+    "    esac",
+    '    echo "Status: Downloaded newer image"; exit 0 ;;',
+    "  stop|rm|run) exit 0 ;;",
+    "esac",
+    "exit 0",
+    "",
+  ].join("\n");
+
+  const az = [
+    "#!/usr/bin/env bash",
+    'printf "%s" "az" >> "$STUB_REC/calls"; for a in "$@"; do printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"',
+    '[ "$STUB_MODE" = auth-fail ] && { echo "AADSTS700082: refresh token expired" >&2; exit 1; }',
+    "exit 0",
+    "",
+  ].join("\n");
+
+  writeFileSync(join(dir, "docker"), docker, { mode: 0o755 });
+  writeFileSync(join(dir, "az"), az, { mode: 0o755 });
+  chmodSync(join(dir, "docker"), 0o755);
+  chmodSync(join(dir, "az"), 0o755);
+}
+
+interface RunOpts {
+  scriptPath?: string;
+  stateDir?: string;
+  extraEnv?: Record<string, string>;
+}
+
+function runRecycle(mode: string, opts: RunOpts = {}): Run {
+  const dir = mkdtempSync(join(tmpdir(), "recycle-stub-"));
+  const rec = mkdtempSync(join(tmpdir(), "recycle-rec-"));
+  const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "recycle-state-"));
+  writeStubs(dir);
+  const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PATH: `${dir}:${process.env.PATH ?? ""}`,
+      STUB_REC: rec,
+      STUB_MODE: mode,
+      RMD_STATE_DIR: state,
+      RMD_RECYCLE_WAIT_S: "1",
+      RMD_RECYCLE_POLL_S: "1",
+      GH_TOKEN: "",
+      // Points at a path that (almost certainly) does not exist, so section 1's guard does not fire
+      // merely because the TEST RUNNER itself is sandboxed inside a container — that is a fact about
+      // this suite's own environment, not about the script under test. The dedicated guard test below
+      // overrides this deliberately to point at a real file.
+      RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
+      ...opts.extraEnv,
+    },
+  });
+  let calls: Call[] = [];
+  try {
+    calls = readFileSync(join(rec, "calls"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => {
+        const [bin, ...argv] = l.split("\t");
+        return { bin, argv };
+      });
+  } catch {
+    calls = [];
+  }
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", calls };
+}
+
+const isPull = (c: Call) => c.bin === "docker" && c.argv[0] === "pull";
+const isStop = (c: Call) => c.bin === "docker" && c.argv[0] === "stop";
+const isRm = (c: Call) => c.bin === "docker" && c.argv[0] === "rm";
+const isRun = (c: Call) => c.bin === "docker" && c.argv[0] === "run";
+
+// ── ACCEPTANCE 1: no captured credential refuses before mutating anything ───────────────────────
+
+test("W1-T1010: a recycle with no captured credential refuses before mutating", () => {
+  const run = runRecycle("no-token");
+  assert.notEqual(run.status, 0, "no GH_TOKEN anywhere must refuse");
+  assert.match(run.stderr, /REFUSING — no GH_TOKEN could be captured/);
+  assert.equal(run.calls.filter(isPull).length, 0, "must not even attempt the pull");
+  assert.equal(run.calls.filter(isStop).length, 0, "must not stop the container");
+  assert.equal(run.calls.filter(isRm).length, 0, "must not remove the container");
+  assert.equal(run.calls.filter(isRun).length, 0, "must not start a replacement");
+});
+
+test("W1-T1010: MUTANT: dropping the credential refusal lets the run reach the pull, and the guard catches it", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const anchor = '  echo "  Export GH_TOKEN in this shell and re-run." >&2\n  exit 1\nfi\n';
+  assert.equal(src.split(anchor).length - 1, 1, "the mutation target must be unique");
+  const dir = mkdtempSync(join(tmpdir(), "recycle-mutant-"));
+  const mutant = join(dir, "recycle-container.sh");
+  writeFileSync(mutant, src.replace(anchor, '  echo "  Export GH_TOKEN in this shell and re-run." >&2\nfi\n'), { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const run = runRecycle("no-token", { scriptPath: mutant });
+  assert.ok(run.calls.filter(isPull).length > 0, "the mutant must actually reach the pull, or this proves nothing about the guard");
+  // …and the real script must not — the same claim the first test makes, restated as one property.
+  assert.equal(runRecycle("no-token").calls.filter(isPull).length, 0);
+});
+
+// ── ACCEPTANCE 2: live workers past the wait refuse the recycle and remove the pause ────────────
+
+test("W1-T1010: live workers past the wait refuse and the pause is removed", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const inflightDir = join(state, "state", "inflight");
+  mkdirSync(inflightDir, { recursive: true });
+  writeFileSync(
+    join(inflightDir, "W1-T404.lock"),
+    JSON.stringify({ pid: 123, run_id: "run-abc", host: "5efb86ede91b", startedAt: "2026-08-18T22:00:00Z" }),
+  );
+
+  const run = runRecycle("good", { stateDir: state });
+  assert.notEqual(run.status, 0, "a worker still in flight past the bounded wait must refuse");
+  assert.match(run.stderr, /REFUSING — 1 worker\(s\) still in flight/);
+  assert.match(run.stderr, /W1-T404\.lock/, "the holder must be named");
+  assert.equal(run.calls.filter(isStop).length, 0, "the container must not be stopped");
+  assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed");
+  assert.equal(run.calls.filter(isRun).length, 0, "no replacement may start");
+  assert.ok(!existsSync(join(state, "state", "PAUSE")), "the pause this refusal set must not survive it");
+  assert.match(run.stdout, /PAUSE engaged/, "the pause must actually have been set, not merely never removed");
+  assert.match(run.stderr, /pause removed/, "and the removal must be visible, not silent");
+});
+
+test("W1-T1010: with no in-flight workers the wait clears immediately and the recycle proceeds", () => {
+  const run = runRecycle("good");
+  assert.equal(run.status, 0, `expected success, got status ${run.status}: ${run.stderr}`);
+  assert.ok(run.calls.filter(isStop).length > 0, "the old container must be stopped");
+  assert.ok(run.calls.filter(isRm).length > 0, "the old container must be removed");
+  assert.ok(run.calls.filter(isRun).length > 0, "a replacement must start");
+});
+
+// ── ACCEPTANCE 3: a failed image pull refuses instead of starting the cached image ──────────────
+
+test("W1-T1010: a failed pull refuses instead of starting the cached image", () => {
+  const run = runRecycle("pull-fail");
+  assert.notEqual(run.status, 0, "an authentication-rejected pull must refuse");
+  assert.match(run.stderr, /REFUSING — the pull FAILED/);
+  assert.equal(run.calls.filter(isStop).length, 0, "the running container must not be stopped");
+  assert.equal(run.calls.filter(isRm).length, 0, "the running container must not be removed");
+  assert.equal(run.calls.filter(isRun).length, 0, "NOTHING may start on the stale cached image — the exact 2026-08-18 defect");
+});
+
+test("W1-T1010: MUTANT: reinstating pull-then-run without a guard relaunches the stale cached image", () => {
+  // The exact regression named in the task: a failed pull followed by a run anyway. Reinstate it by
+  // deleting just the refusal's `exit 1` and prove the mutant actually falls through to `docker run`.
+  const src = readFileSync(SCRIPT, "utf8");
+  const anchor =
+    '  echo "  failure of this exact kind silently relaunched the STALE cached image instead." >&2\n  exit 1\nfi\n';
+  assert.equal(src.split(anchor).length - 1, 1, "the mutation target must be unique");
+  const mutated = src.replace(
+    anchor,
+    '  echo "  failure of this exact kind silently relaunched the STALE cached image instead." >&2\nfi\n',
+  );
+  const dir = mkdtempSync(join(tmpdir(), "recycle-mutant-pull-"));
+  const mutant = join(dir, "recycle-container.sh");
+  writeFileSync(mutant, mutated, { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const run = runRecycle("pull-fail", { scriptPath: mutant });
+  assert.ok(run.calls.filter(isRun).length > 0, "the mutant must actually reach docker run, or this proves nothing about the guard");
+  // …and the real script must not — restated as one property about the guard rather than two facts.
+  assert.equal(runRecycle("pull-fail").calls.filter(isRun).length, 0);
+});
+
+// ── ACCEPTANCE 4: a started container on the wrong image reports a failed recycle ───────────────
+
+test("W1-T1010: a started container on the wrong image reports a failed recycle", () => {
+  const run = runRecycle("wrong-image");
+  assert.notEqual(run.status, 0, "a mismatched image id must not report success");
+  assert.match(run.stderr, /FAILED RECYCLE/);
+  assert.match(run.stderr, /sha256:WRONGID/);
+  assert.match(run.stderr, /sha256:PULLEDID/, "the digest actually pulled must be named for comparison");
+  // The container DID start — this check catches a mismatch, it does not prevent the start (the
+  // mismatch can only be observed after `docker run` has already happened).
+  assert.ok(run.calls.filter(isRun).length > 0, "a container was started — the failure is in what it started ON");
+});
+
+// ── ACCEPTANCE 5: every blocking lock is printed and none is deleted ────────────────────────────
+
+test("W1-T1010: every blocking lock is printed and none is deleted", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  mkdirSync(join(state, "state", "inflight"), { recursive: true });
+  const drainLock = join(state, "state", "drain.lock");
+  const inflightLock = join(state, "state", "inflight", "W1-T404.lock");
+  writeFileSync(drainLock, JSON.stringify({ pid: 46, host: "5efb86ede91b", startedAt: "2026-08-18T22:23:40Z" }, null, 2));
+  writeFileSync(
+    inflightLock,
+    JSON.stringify({ pid: 99, run_id: "run-xyz", host: "5efb86ede91b", startedAt: "2026-08-18T22:24:00Z" }, null, 2),
+  );
+
+  // "no-token" refuses immediately after printing — chosen so this test measures ONLY the print step,
+  // never the wait/stop/rm path (which reads the same inflight dir for a different reason).
+  const run = runRecycle("no-token", { stateDir: state });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stdout, /state\/drain\.lock is PRESENT/);
+  assert.match(run.stdout, /"pid": 46/, "the holder pid must be printed in full");
+  assert.match(run.stdout, /5efb86ede91b/, "the holder host must be printed in full");
+  assert.match(run.stdout, /W1-T404\.lock is PRESENT/);
+  assert.match(run.stdout, /"pid": 99/);
+
+  assert.ok(existsSync(drainLock), "drain.lock must still exist — this script never deletes it");
+  assert.ok(existsSync(inflightLock), "the inflight lock must still exist — this script never deletes it");
+  assert.deepEqual(
+    JSON.parse(readFileSync(drainLock, "utf8")),
+    { pid: 46, host: "5efb86ede91b", startedAt: "2026-08-18T22:23:40Z" },
+    "the lock content must be byte-identical — not merely present",
+  );
+});
+
+test("W1-T1010: this script never issues rm/unlink against a lock file — asserted from the source, not a fixture", () => {
+  // A fixture can only prove the locks IT created survive; this proves the script contains no code
+  // path that could delete one at all, for any lock this repo names.
+  const src = readFileSync(SCRIPT, "utf8");
+  const lines = src.split("\n").filter((l) => !l.trim().startsWith("#"));
+  const deletesALock = lines.some((l) => /\brm\s+-f\s+"\$\{(DRAIN_LOCK|INFLIGHT_DIR)/.test(l) || /unlink/.test(l));
+  assert.equal(deletesALock, false, "no line may unlink drain.lock or anything under the inflight dir");
+});
+
+// ── NEGATIVE CONTROL: a genuinely first-ever run (no container yet) still refuses cleanly ────────
+
+test("NEGATIVE CONTROL: no container yet and no GH_TOKEN anywhere still refuses, not crashes", () => {
+  const run = runRecycle("no-container");
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /REFUSING — no GH_TOKEN could be captured/);
+});
+
+// ── NEVER RUN FROM INSIDE THE IMAGE ──────────────────────────────────────────────────────────────
+
+test("W1-T1010: refuses outright when the container marker is present, before anything else runs", () => {
+  const marker = mkdtempSync(join(tmpdir(), "recycle-dockerenv-"));
+  const markerPath = join(marker, "dockerenv");
+  writeFileSync(markerPath, "");
+
+  const run = runRecycle("good", { extraEnv: { RMD_RECYCLE_DOCKERENV_PATH: markerPath } });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /REFUSING — this is running INSIDE a container/);
+  assert.equal(run.calls.length, 0, "no docker command of any kind may run once this guard fires");
+});
+
+test("W1-T1010: the real, un-overridden /.dockerenv check is still the literal source — the override is test-only plumbing", () => {
+  // The override above proves the BEHAVIOUR; this proves the DEFAULT still matches the real marker,
+  // so the override cannot silently change what ships when RMD_RECYCLE_DOCKERENV_PATH is unset.
+  const src = readFileSync(SCRIPT, "utf8");
+  assert.match(src, /DOCKERENV_PATH="\$\{RMD_RECYCLE_DOCKERENV_PATH:-\/\.dockerenv\}"/);
+});
