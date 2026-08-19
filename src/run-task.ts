@@ -1622,6 +1622,12 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
  * is never registered for a change that cannot cleanly be taken back. Defaulted `false` so
  * every call site that predates this task (and the sweep/ledger re-arm paths this task does not
  * touch — see `decideArmFromLedgerVerdict`'s own doc) keeps today's ungated-at-open behavior.
+ *
+ * W1-T975: `runTask`'s OWN call site no longer fires "the INSTANT this run's PR exists" — it
+ * moved to the point the run has a verdict it stands behind (right before `pollToGate`; see
+ * that call site's own comment). This primitive is UNCHANGED by that move: still ungated by
+ * any ledger verdict, still safe only because GitHub's required-status contract is what
+ * actually gates the merge, never this call. Only WHEN `runTask` calls it moved.
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
@@ -6796,20 +6802,13 @@ async function runTask(
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
 
-    // ── ARM AT OPEN (W1-T125): register GitHub auto-merge the INSTANT this run's
-    // PR exists — not after CI wait + review, which measured 2-8 minutes of dead
-    // time (own-repo PRs #251/#245/#240/#249; #274 NEVER reached the old
-    // post-review arm call because its fix-rung loop was still running). Safe
-    // because GitHub's required-status contract (ci-gate + remudero-review) is
-    // what actually gates the merge — see armAutoMergeAtOpen's doc. The one gap
-    // this leaves (a CAPPED verdict that still posts remudero-review=success)
-    // is closed below by disarmAutoMerge, right where the capped-refusal
-    // decision is made.
-    //
-    // W1-T947 (W1-T919 ruling): computed ONCE, reused below at the post-review decision gate too.
+    // ── IRREVERSIBILITY SIGNAL (W1-T947, W1-T919 ruling): computed ONCE, right
+    // after the PR exists, and reused at BOTH arm-time gates below — the
+    // post-review decision gate and the deferred arm call itself (W1-T975; see
+    // the "── ARM" block further down, right before pollToGate). Kept here
+    // rather than re-derived at either later site: a re-derive could disagree
+    // with itself on the identical diff if either read failed differently.
     const irreversible = irreversibleSignalForWorktree(worktreePath);
-    const armAtOpenOutcome = armAutoMergeAtOpen(prUrl, undefined, irreversible);
-    log("automerge.armed", { at: "open", outcome: armAtOpenOutcome, irreversible });
 
     // The implement worker's own optional '## Follow-ups' section (§2 OUTPUT CONTRACT,
     // outputContractLines in lib/compaction.ts).
@@ -7031,11 +7030,14 @@ async function runTask(
     // W1-T919 ruling exactly like the at-open one just did.
     const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra), irreversible);
     if (!armDecision.arm) {
-      // W1-T125: withdraw the early arm-at-open BEFORE escalating — GitHub already
-      // (or is about to) see ci=success + remudero-review=success (capped verdicts
-      // still post state:"success", see postReviewStatusGuarded) on an
-      // ALREADY-armed PR; without this it could auto-merge despite the capped
-      // refusal below.
+      // W1-T125 primitive, retargeted by W1-T975: this run itself never arms until
+      // AFTER this check passes (see the deferred arm call further down, right
+      // before pollToGate), so there is usually nothing here to withdraw. Kept as
+      // a defensive no-op against the KNOWN RESIDUAL GAP named a few lines above
+      // (sweep.ts's own "checks green + review success" arming predicate reacting
+      // to this same capped verdict's posted `success` status before this
+      // decision lands) — if the sweep armed the PR in that window, this
+      // withdraws it before escalating.
       disarmAutoMerge(prUrl);
       // W1-T947: CAPPED and IRREVERSIBLE are different facts about the PR — the reason below,
       // and the escalation it feeds, must name the one that actually fired (design clause iii).
@@ -7128,8 +7130,12 @@ async function runTask(
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
       judge: realRiskJudge({ mount: riskJudgeMount, cwd: worktreePath, settingsFile, spawn }),
       escalate: (verdict, action) => {
-        // W1-T125 shape, reapplied to a NEW cause: withdraw the early arm-at-open
-        // BEFORE escalating — GitHub must never merge a PR the risk judge refused.
+        // W1-T125 shape, retargeted by W1-T975: this run itself never arms until
+        // AFTER the risk judge proceeds (see the deferred arm call further down),
+        // so there is usually nothing here to withdraw — kept as the same
+        // defensive no-op against a sweep race as the capped-refusal branch
+        // above, in case the sweep armed the PR in the window between the review
+        // posting and this decision.
         disarmAutoMerge(prUrl);
         log("automerge.disarmed", { reason: "risk judge escalated — auto-merge refused" });
         return escalate(
@@ -7166,14 +7172,40 @@ async function runTask(
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
     }
 
+    // ── ARM (W1-T125, DEFERRED BY W1-T975): register GitHub auto-merge only NOW —
+    // the FIRST point this run has a verdict it is willing to stand behind: ci
+    // went green, the review passed (or the fix rung earned a pass), the
+    // capped-verdict gate above did not refuse, and the risk judge above did not
+    // escalate. Every earlier exit (ci-not-green before review, fix-rung
+    // exhausted, stood down, a capped refusal, a risk-judge escalation) RETURNS
+    // before this line, so it leaves the PR with NO standing arm.
+    //
+    // WHY THIS MOVED (W1-T975): an already-armed PR short-circuits the sweep's
+    // own arming decision (`alreadyDone = pr.autoMergeArmed === true`,
+    // lib/sweep.ts) — the ONE place a durable risk-judge refusal (W1-T970) can
+    // ever be consulted. Arming at PR-open (the old W1-T125 site) left every
+    // early exit above with a standing arm that routed a would-be merge AROUND
+    // that predicate, permanently, not merely early — and a disarm on those
+    // exits would not have closed the gap: the sweep RE-ARMS on
+    // checks-green + review-success (lib/sweep.ts), which nullified five of
+    // five measured disarm races. Deferring the arm to here means an abandoned
+    // PR's only remaining route to a merge is the sweep's `mergeable` decision,
+    // so a durable refusal installed there is never bypassed.
+    //
+    // The LATE blocked_ci exit below (after pollToGate) still keeps its arm —
+    // by the time this line runs the review HAS been posted and the risk judge
+    // HAS passed, so that exit is unaffected: it polls an already-armed PR,
+    // exactly as before this task.
+    const armOutcome = armAutoMergeAtOpen(prUrl, undefined, irreversible);
+    log("automerge.armed", { at: "verdict", outcome: armOutcome, irreversible });
+
     // ── POLL to the gate (W1-T1B).
-    // W1-T125: auto-merge was already armed at PR-OPEN (see armAutoMergeAtOpen,
-    // above, right after `pr.opened`) — this block no longer arms; it only
-    // observes. The runner NEVER force-merges: GitHub merges only when the
-    // required check is green. If checks go red or the poll times out, the PR
-    // is LEFT OPEN and the verdict is blocked_ci — pending is treated as
-    // blocked, never as pass. No Action arms a PR; only this code, only on PRs
-    // it opened.
+    // Auto-merge was armed immediately above, now that this run has a verdict it
+    // stands behind — this block only observes. The runner NEVER force-merges:
+    // GitHub merges only when the required check is green. If checks go red or
+    // the poll times out, the PR is LEFT OPEN and the verdict is blocked_ci —
+    // pending is treated as blocked, never as pass. No Action arms a PR; only
+    // this code, only on PRs it opened.
     const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra));
 
     if (outcome.merged) {

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { writeMutantModule } from "./helpers/mutant-module.js";
 import {
   COMMIT_BODY_MAX_LINE,
   acceptanceCriterionLines,
@@ -15,7 +15,6 @@ import {
 import {
   execWhitelistedProof,
   judgeCriterion,
-  narrowNameFilteredArgs,
   parseAcceptanceBlock,
   parseWhitelistedProof,
 } from "../src/lib/review.js";
@@ -232,21 +231,17 @@ test("W1-T963: the triage proof fails at base and passes at head", () => {
 // pattern becomes the bare, always-present `status:` and matches the base fixture too. A REAL
 // child `node --test` process, narrowed to ONLY the test above by name, must then FAIL: the
 // base-side "must FAIL at the merge base" assertion observes a match it should not.
-test("W1-T963: removing the discrimination fails the base-side test", () => {
+test("W1-T963: removing the discrimination makes the proof match the BASE too", async () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const triageTsPath = join(repoRoot, "src", "lib", "triage.ts");
-  const targetTestFile = "test/triage-proof-dialect.test.ts";
-  const positiveTestName = "W1-T963: the triage proof fails at base and passes at head";
-
   const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
   const original = readFileSync(triageTsPath, "utf8");
   const originalSha = sha256(original);
 
   const needle = "  return `grep: status: ${status} in ${feedbackEntryRepoPath(feedbackId)}`;\n";
-  const occurrences = original.split(needle).length - 1;
   assert.equal(
-    occurrences,
+    original.split(needle).length - 1,
     1,
     "sanity: triageAcceptanceProof's return line must appear EXACTLY once, or this mutation is not targeting the real emitter",
   );
@@ -254,35 +249,60 @@ test("W1-T963: removing the discrimination fails the base-side test", () => {
     needle,
     "  return `grep: status: in ${feedbackEntryRepoPath(feedbackId)}`; // W1-T963 MUTATION: destination-state interpolation removed\n",
   );
+  assert.notEqual(sha256(mutated), originalSha, "the mutation must actually change the bytes it is applied to");
 
-  const whitelisted = parseWhitelistedProof(`unit test: ${positiveTestName}`);
-  assert.ok(whitelisted, "sanity: the proof text must parse as a name-filtered `unit test:` dialect proof");
-  assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
-  const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
+  // THE COPY, NEVER THE CHECKED-OUT FILE. This check used to `writeFileSync` the mutant over the
+  // real `src/lib/triage.ts` and run a child `node --test` against it. Node runs test FILES in
+  // parallel, so for the width of that window every OTHER file importing `src/lib/triage.js` — in
+  // practice `test/triage.test.ts` — loaded the mutated emitter and saw a proof with no
+  // destination state. MEASURED: four assertions in that sibling file (`/grilling/`, `/proposed/`,
+  // `/rejected/`, and the seeded ambiguous case) failed on PRs whose diffs touched neither triage
+  // nor tests at all, including one carrying only three workflow-YAML version bumps. The failures
+  // read as flake because the race is timing-dependent — the same head passed `ci` and failed
+  // `coverage-ratchet`. `writeMutantModule` writes the copy under `test/` and rewrites its sibling
+  // specifiers to the REAL modules, so the falsifier still exercises the real collaborators while
+  // no other suite can ever observe a mutated source file.
+  const mutantPath = writeMutantModule("triage.ts", mutated);
+  const mutant = (await import(mutantPath)) as typeof import("../src/lib/triage.js");
 
-  let childResult: ReturnType<typeof spawnSync> | undefined;
+  const feedbackId = GENERATED_ID;
+  const relPath = feedbackEntryRepoPath(feedbackId);
+  const baseDir = mkdtempSync(join(tmpdir(), "w1-t963-mut-base-"));
+  const headDir = mkdtempSync(join(tmpdir(), "w1-t963-mut-head-"));
   try {
-    writeFileSync(triageTsPath, mutated);
-    const mutatedSha = sha256(readFileSync(triageTsPath, "utf8"));
-    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change triage.ts's bytes");
+    writeFeedbackEntry(baseDir, relPath, "new"); // the merge base — pre-flip
+    writeFeedbackEntry(headDir, relPath, "rejected"); // the PR head — post-flip
 
-    // Strip NODE_TEST_CONTEXT (see test/dispatch-lifetime-breaker.test.ts's W1-T951 mutation
-    // check): inherited by default, it makes node's OWN test runner treat this as a recursive
-    // `run()` and skip every file — a silent no-op that would pass for the wrong reason.
-    const childEnv = { ...process.env };
-    delete childEnv.NODE_TEST_CONTEXT;
-    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+    const mutantProof = parseWhitelistedProof(mutant.triageAcceptanceProof(feedbackId, "rejected"));
+    assert.ok(mutantProof, "sanity: the mutant's proof must still parse — otherwise this proves only that it is malformed");
+    assert.equal(
+      execWhitelistedProof(mutantProof!, headDir),
+      "pass",
+      "the mutant is not simply broken: it still matches at the head",
+    );
+    assert.equal(
+      execWhitelistedProof(mutantProof!, baseDir),
+      "pass",
+      "THE DEFECT the interpolation exists to prevent: with no destination state the pattern is the " +
+        "always-present bare `status:`, so it matches the merge base too and discriminates nothing",
+    );
+
+    // THE PAIRED CONTROL, same fixtures and same executor: the COMMITTED emitter refuses the base.
+    // Without it the assertion above would hold just as well against a base fixture that matched
+    // everything, or an executor that returned "pass" unconditionally.
+    const realProof = parseWhitelistedProof(triageAcceptanceProof(feedbackId, "rejected"));
+    assert.ok(realProof);
+    assert.equal(
+      execWhitelistedProof(realProof!, baseDir),
+      "fail",
+      "the committed emitter DOES discriminate — the mutant's base-side pass is the mutation, not the fixture",
+    );
   } finally {
-    // RESTORED REGARDLESS of what the child run did.
-    writeFileSync(triageTsPath, original);
-    const restoredSha = sha256(readFileSync(triageTsPath, "utf8"));
-    assert.equal(restoredSha, originalSha, "triage.ts must be restored byte-for-byte after the mutation check");
+    rmSync(baseDir, { recursive: true, force: true });
+    rmSync(headDir, { recursive: true, force: true });
   }
 
-  assert.ok(childResult, "sanity: the child process must actually have been spawned");
-  assert.notEqual(
-    childResult!.status,
-    0,
-    `the base-side test must FAIL once the discrimination is removed (child stdout: ${childResult!.stdout})`,
-  );
+  // The real source was never written at all — asserted rather than assumed, since the whole point
+  // of this rewrite is that no other suite can observe a mutated `src/lib/triage.ts`.
+  assert.equal(sha256(readFileSync(triageTsPath, "utf8")), originalSha, "the checked-out source must be byte-identical");
 });

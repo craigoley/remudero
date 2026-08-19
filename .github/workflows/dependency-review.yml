@@ -93,17 +93,43 @@ jobs:
 
       - name: License Review
         env:
+          # SEEDED FIVE (2026-08-17) plus THREE RULED IN BY THE OPERATOR ON 2026-08-19. The three
+          # additions were each ALREADY IN THIS TREE and were being re-flagged on every version
+          # bump, because the gate is diff-scoped: a bump re-adds the package's lockfile entry, so
+          # an already-accepted licence reads as newly introduced. MEASURED on main's own
+          # package-lock.json at ff20505: MPL-2.0 on `@axe-core/playwright@4.12.1` and
+          # `axe-core@4.12.1`; CC-BY-4.0 on `caniuse-lite@1.0.30001806`; BlueOak-1.0.0 on
+          # `minimatch@10.2.5`. Dependabot PRs #2208 and #2209 were both held by the dep-review
+          # lane on exactly these, introducing no licence the project did not already carry.
+          # STILL OUT, deliberately, and asserted by test/dependency-licence-policy.test.ts:
+          # Python-2.0, Unlicense and 0BSD — measured in the tree, not ruled on, so not added.
           ALLOW_LICENSES: >-
-            MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC
+            MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC,
+            MPL-2.0, CC-BY-4.0, BlueOak-1.0.0
           # Packages whose licence could not be determined at all ("no-license") or does not parse
           # as an SPDX id/expression ("unresolved"), individually reviewed and exempted BY NAME
-          # with a reason (design (iii)) — empty today because the 2026-08-17 node_modules scan
-          # (job comment above) found zero such packages. A recognized-but-disallowed licence
-          # (copyleft) is NEVER exemptable here — add `{"name": "<pkg>", "reason": "<why>"}` per
-          # exemption, one per line (same one-entry-per-line convention as ci-gate.yml's REQUIRED/
-          # IGNORE, so concurrent additions append lines instead of colliding).
+          # with a reason (design (iii)). A recognized-but-disallowed licence (copyleft) is NEVER
+          # exemptable here — add `{"name": "<pkg>", "reason": "<why>"}` per exemption, one per
+          # line (same one-entry-per-line convention as ci-gate.yml's REQUIRED/IGNORE, so
+          # concurrent additions append lines instead of colliding).
+          #
+          # The nine entries below are Anthropic's own SDK and its per-platform binaries, which
+          # ship their licence as TEXT (`SEE LICENSE IN LICENSE.md`, and `README.md` on the root
+          # package) rather than as an SPDX id, so the script classifies them "unresolved" rather
+          # than forbidden. This harness is built on that SDK; the packages were already installed
+          # at 0.3.226 before the bump that surfaced them.
           LICENSE_EXEMPTIONS: >-
-            []
+            [
+            {"name": "@anthropic-ai/claude-agent-sdk", "reason": "first-party Anthropic SDK this harness is built on; licence ships as text in README.md, not as an SPDX id"},
+            {"name": "@anthropic-ai/claude-agent-sdk-darwin-arm64", "reason": "per-platform binary of the first-party SDK above; licence ships as text in LICENSE.md"},
+            {"name": "@anthropic-ai/claude-agent-sdk-darwin-x64", "reason": "per-platform binary of the first-party SDK above; licence ships as text in LICENSE.md"},
+            {"name": "@anthropic-ai/claude-agent-sdk-linux-arm64", "reason": "per-platform binary of the first-party SDK above; licence ships as text in LICENSE.md"},
+            {"name": "@anthropic-ai/claude-agent-sdk-linux-arm64-musl", "reason": "per-platform binary of the first-party SDK above; licence ships as text in LICENSE.md"},
+            {"name": "@anthropic-ai/claude-agent-sdk-linux-x64", "reason": "per-platform binary of the first-party SDK above; licence ships as text in LICENSE.md"},
+            {"name": "@anthropic-ai/claude-agent-sdk-linux-x64-musl", "reason": "per-platform binary of the first-party SDK above; licence ships as text in LICENSE.md"},
+            {"name": "@anthropic-ai/claude-agent-sdk-win32-arm64", "reason": "per-platform binary of the first-party SDK above; licence ships as text in LICENSE.md"},
+            {"name": "@anthropic-ai/claude-agent-sdk-win32-x64", "reason": "per-platform binary of the first-party SDK above; licence ships as text in LICENSE.md"}
+            ]
         run: |
           node test/helpers/check-dependency-licences.mjs \
             --base "${{ github.event.pull_request.base.sha }}" \
