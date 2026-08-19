@@ -200,6 +200,17 @@ const DECLARED: readonly Declared[] = [
   },
   {
     kind: "chmod",
+    file: "state-backup.test.ts",
+    key: "0o600",
+    count: 1,
+    reason:
+      "not a denial fixture at all — it seeds a service-token file at the mode worker-home.ts itself uses, so " +
+      "restoreState can be shown to PRESERVE it (the test asserts the restored mode is 0o600). Nothing is asserted " +
+      "to fail, and statSync(...).mode & 0o777 reads the same for every uid, so root changes no outcome here. " +
+      "CHMOD_REMEDY does not apply: there is no denial to replace with EISDIR/ENOTDIR.",
+  },
+  {
+    kind: "chmod",
     file: "check-proof-base.test.ts",
     key: "0o200",
     count: 1,
