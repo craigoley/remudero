@@ -60,7 +60,12 @@ import {
   type ReconFsDeps,
   type ReconGhGateway,
 } from "./lib/onboard/recon.js";
-import { SPECIALIST_TOOLS, type SpecialistName } from "./lib/specialist-panel.js";
+import {
+  routeSpecialists,
+  SPECIALIST_TOOLS,
+  taskMetadataFromPrinciples,
+  type SpecialistName,
+} from "./lib/specialist-panel.js";
 import {
   loadOnboardSessionState,
   parseSessionArgs,
@@ -6884,6 +6889,20 @@ async function runTask(
     // UNARMED, but a later sweep poll could still arm it via that separate
     // path. Left for a follow-up task rather than widened here unreviewed.
     const tddStrict = isTddStrict(task.principles);
+    // W1-T948: the specialist panel's testing trigger (specialist-panel.ts)
+    // reads the SAME `principles` this line just did, through the panel's one
+    // real production call path — `taskMetadataFromPrinciples` wraps the same
+    // `isTddStrict` read above, so the two can never disagree. Observability
+    // only (a log line): no diff content is sourced, since only the testing
+    // trigger is in this task's scope (specialist-panel.ts's own W1-T948
+    // determination doc explains why the diff is deliberately empty-files).
+    const specialistTriggers = routeSpecialists({
+      diff: { files: [] },
+      task: taskMetadataFromPrinciples(task.principles),
+    });
+    if (specialistTriggers.length > 0) {
+      log("specialist.panel", { triggers: specialistTriggers.map((t) => t.specialist) });
+    }
     // W1-T219: head-bound — an override granted against a DIFFERENT head than
     // this exact verdict's is never honoured (see cappedOverrideFromLedger).
     const cappedOverride = review.capped

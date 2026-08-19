@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   anySpecialistConcern,
@@ -12,12 +14,15 @@ import {
   routeSpecialists,
   securityTrigger,
   SPECIALIST_TOOLS,
+  taskMetadataFromPrinciples,
+  TDD_STRICT_TRIGGER_DETERMINATION,
   testingTrigger,
   type SpecialistName,
   type SpecialistPanelInput,
 } from "../src/lib/specialist-panel.js";
 import type { DiffSummary } from "../src/lib/risk-score.js";
 import type { Mount } from "../src/lib/mounts.js";
+import { writeMutantModule } from "./helpers/mutant-module.js";
 
 function diffOf(...files: { path: string; content?: string }[]): DiffSummary {
   return { files: files.map((f) => ({ path: f.path, additions: 1, deletions: 0, content: f.content })) };
@@ -187,4 +192,102 @@ test("anySpecialistConcern / renderSpecialistPanelComment fold verdicts without 
   assert.match(rendered, /security.*PASS/i);
   assert.match(rendered, /containment.*CONCERN/i);
   assert.match(rendered, /settings typo risk/);
+});
+
+// ── W1-T948: the tdd:strict testing trigger is reachable from production ──
+//
+// Recon (plan/tasks.d/W1-T948-*.yaml) found TWO things wrong: `testingTrigger`
+// branched on a field (`tddStrict`) nothing in src/ ever assigned, AND
+// `routeSpecialists` itself had no production caller at all — a builder who
+// only populated the field would still ship a path nothing reaches, with a
+// green test hiding it. The determination recorded below is POPULATE: the
+// field mirrors review.ts's own `isTddStrict` gate read, so it stays; what
+// was missing was `taskMetadataFromPrinciples` (the builder) and
+// run-task.ts's call through it (the caller). Both are proven here.
+
+test("W1-T948: the determination between populating and removing is recorded", () => {
+  // POPULATE, not REMOVE: `tddStrict` mirrors review.ts's `isTddStrict` gate
+  // read (the same `principles: {tdd: strict}` property), and the testing
+  // rubric already promises to flag an unreproducible red->green claim —
+  // exactly what a tdd:strict task declares. Removing it would delete a
+  // signal the module's own design (§4B) names on purpose. The missing piece
+  // was a production CALLER, supplied below, not the field itself.
+  assert.equal(TDD_STRICT_TRIGGER_DETERMINATION, "populate");
+});
+
+test("W1-T948: the testing trigger fires from production-constructed metadata", () => {
+  // `taskMetadataFromPrinciples` is the SAME builder run-task.ts calls with a
+  // real task's `principles` — not a hand-built `{ tddStrict: true }` literal.
+  const metadata = taskMetadataFromPrinciples({ tdd: "strict" });
+  assert.equal(testingTrigger(metadata)?.specialist, "testing");
+});
+
+test("W1-T948: a task without the declaration does not fire the testing trigger", () => {
+  // Same run as the positive case above: a task whose `principles` never
+  // declare `tdd: strict` (a different value, or no `principles` at all)
+  // must NOT fire — the negative control the recon record required.
+  assert.equal(testingTrigger(taskMetadataFromPrinciples({ tdd: "encouraged" })), null);
+  assert.equal(testingTrigger(taskMetadataFromPrinciples(undefined)), null);
+});
+
+test("W1-T948: removing the assignment fails the positive test", async () => {
+  // Mutating the SOURCE proves the positive test above is carried by the
+  // assignment under test, not by some neighbouring accident (a no-op
+  // mutation would be indistinguishable from a surviving mutant by result
+  // alone). The substitution target is asserted UNIQUE first.
+  const specialistPanelUrl = new URL("../src/lib/specialist-panel.ts", import.meta.url);
+  const src = readFileSync(specialistPanelUrl, "utf8");
+  const target = "return { tddStrict: isTddStrict(principles) };";
+  const occurrences = src.split(target).length - 1;
+  assert.equal(occurrences, 1, "the substitution target must be UNIQUE or the mutant proves nothing");
+
+  // The file-sha check, read either side of the mutation (design item (iv)):
+  // the ORIGINAL content's sha must differ from the MUTATED content's sha —
+  // otherwise the substitution silently failed to apply and nothing below
+  // would be measuring the assignment at all.
+  const originalSha = createHash("sha256").update(src).digest("hex");
+  const mutatedSrc = src.replace(target, "return {};");
+  const mutatedSha = createHash("sha256").update(mutatedSrc).digest("hex");
+  assert.notEqual(mutatedSha, originalSha, "the mutation must actually change the file content");
+
+  // The copy lives under test/ (writeMutantModule), never os.tmpdir() — a
+  // copy outside the project root re-enters the real src/lib graph and
+  // destroys the coverage record of modules this suite never mentions
+  // (test/helpers/mutant-module.ts carries the measurement).
+  const mutantPath = writeMutantModule("specialist-panel.ts", mutatedSrc);
+  const mutant = (await import(mutantPath)) as typeof import("../src/lib/specialist-panel.js");
+  const mutantMetadata = mutant.taskMetadataFromPrinciples({ tdd: "strict" });
+  assert.equal(
+    mutant.testingTrigger(mutantMetadata),
+    null,
+    "the mutant must fail to fire the testing trigger — otherwise this proves nothing",
+  );
+
+  // The real, on-disk file was never touched by the mutant copy: its sha
+  // reads identical before and after the check ran.
+  const shaAfter = createHash("sha256").update(readFileSync(specialistPanelUrl, "utf8")).digest("hex");
+  assert.equal(shaAfter, originalSha, "the real file must read unchanged either side of the mutation check");
+
+  // And the real, unmutated module still fires — the positive test this
+  // mutant was verifying actually passes against the committed source.
+  assert.equal(testingTrigger(taskMetadataFromPrinciples({ tdd: "strict" }))?.specialist, "testing");
+});
+
+test("W1-T948: the specialist router is reached from a production call path", () => {
+  // run-task.ts must call routeSpecialists through taskMetadataFromPrinciples
+  // — the SAME builder tested above — not through a hand-built test literal.
+  const runTaskSrc = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  assert.match(
+    runTaskSrc,
+    /routeSpecialists\(\s*\{\s*diff:\s*\{\s*files:\s*\[\]\s*\},\s*task:\s*taskMetadataFromPrinciples\(task\.principles\)/,
+    "run-task.ts must reach routeSpecialists via taskMetadataFromPrinciples(task.principles), " +
+      "not a hand-built metadata literal",
+  );
+  // And the SAME builder-constructed input functionally reaches the trigger
+  // — the call path is real, not merely textually present.
+  const triggers = routeSpecialists({ diff: { files: [] }, task: taskMetadataFromPrinciples({ tdd: "strict" }) });
+  assert.deepEqual(
+    triggers.map((t) => t.specialist),
+    ["testing"],
+  );
 });

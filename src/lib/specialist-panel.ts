@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import type { DiffSummary, RiskBand } from "./risk-score.js";
 import type { Mount } from "./mounts.js";
+import { isTddStrict } from "./review.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
 /**
@@ -143,6 +144,40 @@ export function testingTrigger(task?: SpecialistTaskMetadata): SpecialistTrigger
     return { specialist: "testing", reason: "new code path(s) declared without an accompanying test" };
   }
   return null;
+}
+
+// ── W1-T948 determination: `tddStrict` is POPULATED, not removed ────────────
+//
+// `tddStrict` mirrors a real, load-bearing task property — `principles: {tdd:
+// strict}` (plan/tasks.yaml), the SAME property review.ts's `isTddStrict`
+// reads for the auto-merge arm gate — and `SPECIALIST_RUBRIC.testing` already
+// promises to flag "any claimed red->green proof that is not actually
+// pasted/reproducible", exactly what a `tdd: strict` task is declaring.
+// Deleting the branch would delete a signal this module's own design (the
+// header doc, MASTER-PLAN §4B) names on purpose; nothing about the trigger
+// itself was wrong. What was actually missing was a CALLER: no code in src/
+// ever built a `SpecialistTaskMetadata` from a real task record, and
+// `routeSpecialists` had no production caller at all (recon rationale (2)).
+// `taskMetadataFromPrinciples` below is that caller's builder, kept as a pure
+// function per the codebase's established "arg-builder carries the testable
+// contract, the call site stays thin" split (mirrors run-task.ts's
+// `buildFixRungDispatchArgs`). It reads the SAME `principles` shape
+// `isTddStrict` (review.ts) already reads for the arm gate, so the two
+// readings of `tdd: strict` can never drift apart. run-task.ts calls it at
+// the SAME point it already computes `tddStrict` for the arm decision (the
+// `specialist.panel` log line) — with an EMPTY-files diff, deliberately: only
+// the testing trigger is being made reachable here (design item (v): no
+// widening of the panel beyond it), so security/design/containment never see
+// diff content this task was never asked to source.
+export const TDD_STRICT_TRIGGER_DETERMINATION = "populate" as const;
+
+/** Build a {@link SpecialistTaskMetadata} from a task's `principles` record —
+ * the SAME shape (`plan/tasks.yaml`'s `principles: {tdd: strict}`) review.ts's
+ * `isTddStrict` reads for the auto-merge arm gate, so the two never diverge.
+ * This is the one production call path into {@link routeSpecialists}'s
+ * testing trigger (see run-task.ts's `specialist.panel` log line, W1-T948). */
+export function taskMetadataFromPrinciples(principles?: Record<string, unknown>): SpecialistTaskMetadata {
+  return { tddStrict: isTddStrict(principles) };
 }
 
 // ── Specialist 3: design <- crosses a layer boundary or adds an abstraction ──
