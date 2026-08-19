@@ -7,6 +7,33 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { main, nextTaskIdCommand, triageCommand } from "../src/run-task.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import type { WorkerResult } from "../src/lib/worker.js";
+
+/** A minimal, byte-cheap `WorkerResult` — only the fields the harness actually reads matter, the
+ *  rest are filler so the type checks. */
+function mintFakeWorker(text: string): WorkerResult {
+  return {
+    sessionId: "MINT-SESSION",
+    costUsd: 0,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    model: "claude-opus-5",
+    effort: "high",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    totalCostUsd: 0,
+    billingMode: "subscription",
+    verdict: "success",
+    qualitySuspect: false,
+    compactionEvents: [],
+    childEnvKeys: [],
+  } as unknown as WorkerResult;
+}
 
 // THE WIRING, not just the helper: `mintNextTaskId` is proven in isolation by test/task-id.test.ts,
 // but the falsifier for the 2/2 collision class (W1-T256->257 #770, W1-T260->261 #775) is that
@@ -45,8 +72,16 @@ function makeOriginWithPlan(feedbackId: string): string {
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
-  writeFileSync(join(seed, "plan", "tasks.yaml"), "- id: W1-T4\n  title: \"a\"\n- id: W1-T5\n  title: \"b\"\n");
-  writeFileSync(join(seed, "plan", "tasks.d", "W1-T9-shard.yaml"), "- id: W1-T9\n  title: \"shard-owned\"\n");
+  // Full task shape (not just id/title): once W1-T1011 moved `triage.id_minted` to fire only on
+  // a PROPOSED verdict, this seed plan is now actually LOADED by the propose-path collision guard
+  // (assertProposedPlanLoads) and linted (lintFiledTasks) — a bare id/title pair fails BOTH with
+  // "missing required field", which is not the thing under test here.
+  const taskFields = ["  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
+  writeFileSync(
+    join(seed, "plan", "tasks.yaml"),
+    `- id: W1-T4\n  title: "a"\n${taskFields}\n- id: W1-T5\n  title: "b"\n${taskFields}\n`,
+  );
+  writeFileSync(join(seed, "plan", "tasks.d", "W1-T9-shard.yaml"), `- id: W1-T9\n  title: "shard-owned"\n${taskFields}\n`);
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
     [
@@ -68,7 +103,7 @@ function makeOriginWithPlan(feedbackId: string): string {
   return bare;
 }
 
-test("TRIAGE ID MINT (the #770/#775 collision class): `rmd triage` derives the id across tasks.yaml, the tasks.d shards, AND open plan PRs, and ledgers it before spawning", async () => {
+test("TRIAGE ID MINT (the #770/#775 collision class): `rmd triage` derives the id across tasks.yaml, the tasks.d shards, AND open plan PRs, and ledgers it once the verdict is PROPOSED", async () => {
   const feedbackId = `fb-mint-wiring-${Date.now()}`;
   const bare = makeOriginWithPlan(feedbackId);
   const home = mkdtempSync(join(tmpdir(), "mint-home-"));
@@ -77,8 +112,8 @@ test("TRIAGE ID MINT (the #770/#775 collision class): `rmd triage` derives the i
   const savedHome = process.env.HOME;
   const savedPath = process.env.PATH;
   try {
-    // A complete config so loadConfig() takes its read path (no `which claude` shell-out), with
-    // claudeBin pointed at /usr/bin/true — the spawn after the mint must never run a real worker.
+    // A complete config so loadConfig() takes its read path (no `which claude` shell-out) — the
+    // `spawn` this test injects below is what actually stands in for the worker.
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(
       join(home, ".config", "remudero", "config.json"),
@@ -93,16 +128,24 @@ test("TRIAGE ID MINT (the #770/#775 collision class): `rmd triage` derives the i
     const repoDir = join(configRoot, "repos", repoName);
     mkdirSync(dirname(repoDir), { recursive: true });
     execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
 
     // `gh` shimmed: the mint's open-PR read returns ONE open PR that already minted W1-T12 — an
     // id that exists in NO plan file anywhere, which is exactly the #770 gap (an id reserved by a
-    // PR that has not merged). Any other `gh` subcommand fails, so nothing here reaches GitHub.
+    // PR that has not merged). `pr create`/`--json headRefName`/`pr diff` are answered too, only
+    // so the run can reach the PROPOSED branch the `triage.id_minted` row now lives behind
+    // (W1-T1011) — this proof cares about the mint's provenance, not what happens after.
     writeFileSync(
       join(shimDir, "gh"),
       [
         "#!/bin/sh",
         'case "$*" in',
         '  *"pr list"*) echo \'[{"title":"chore(plan): file W1-T12","body":"adds W1-T12","headRefName":"run-TRIAGE-x"}]\' ;;',
+        '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/999" ;;',
+        `  *"--json headRefName"*) git -C ${bare} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
+        "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
+        '  *"pr diff"*) echo "" ;;',
         "  *) exit 1 ;;",
         "esac",
         "",
@@ -111,16 +154,50 @@ test("TRIAGE ID MINT (the #770/#775 collision class): `rmd triage` derives the i
     );
     process.env.PATH = `${shimDir}:${savedPath}`;
 
-    // The spawn (claudeBin=/usr/bin/true) yields no verdict, so the run ends non-zero or throws —
-    // either way the mint has ALREADY happened and ledgered, which is what this asserts.
-    await triageCommand([feedbackId]).catch(() => undefined);
+    // Since W1-T1011, `triage.id_minted` is written once — when `decideTriage` returns
+    // `propose` — rather than unconditionally before `spawn`. So this proof must actually file a
+    // clean task under the reserved id and return PROPOSED to observe the row at all; a worker
+    // that never resolves a verdict (this test's old `/usr/bin/true` stub) now ledgers nothing.
+    await withLiveWritesAllowed(() =>
+      triageCommand([feedbackId], {
+        spawn: async (args: { cwd: string; prompt: string; tools?: string[] }) => {
+          if ((args.tools ?? []).length === 0) {
+            return mintFakeWorker("{}"); // the decision-summary rung — content unused by this proof
+          }
+          const id = /USE EXACTLY `(W\d+-T\d+)`/.exec(args.prompt)?.[1];
+          assert.ok(id, `triage prompt must name the reserved id; got: ${args.prompt.slice(0, 200)}`);
+          const dir = join(args.cwd, "plan", "tasks.d");
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(
+            join(dir, `${id}-fixture.yaml`),
+            [
+              `- id: ${id}`,
+              `  title: "a clean task filed for the triage id-mint wiring proof"`,
+              "  repo: remudero",
+              "  origin: architect",
+              "  depends_on: []",
+              "  type: implement",
+              "  verify: auto",
+              "  status: queued",
+              "  attempts: 0",
+              "  files: [test/triage-id-mint.test.ts]",
+              "  acceptance:",
+              '    - claim: "the thing holds"',
+              '      proof: "unit test: test/triage-id-mint.test.ts"',
+              "",
+            ].join("\n"),
+          );
+          return mintFakeWorker(`PROPOSED: file ${id} for feedback#${feedbackId}`);
+        },
+      }),
+    ).catch(() => undefined); // diff-provenance/ci-gate steps have no real backend in this fixture
 
     const ledger = readFileSync(join(configRoot, "state", "ledger.ndjson"), "utf8")
       .split("\n")
       .filter(Boolean)
       .map((l) => JSON.parse(l) as Record<string, unknown>);
     const minted = ledger.filter((l) => l.step === "triage.id_minted");
-    assert.equal(minted.length, 1, "the mint is ledgered exactly once per triage run");
+    assert.equal(minted.length, 1, "the mint is ledgered exactly once per triage run, once the verdict is PROPOSED");
     assert.equal(minted[0].minted_id, "W1-T13", "max is the OPEN PR's W1-T12 — above both the monolith (5) and the shard (9)");
     assert.equal(minted[0].source_monolith, 5);
     assert.equal(minted[0].source_shards, 9, "the shard source is what a monolith-only read misses (#775)");
