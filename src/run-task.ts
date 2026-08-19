@@ -18641,57 +18641,27 @@ async function triageCommandLocked(
     localIdBlock = reserveTaskIdBlock(mint.n, TRIAGE_MAX_NEW_TASKS, taskIdReservationsDir(config.root), {
       info: { purpose: `rmd triage ${feedbackId} (run ${runId})` },
     });
-    // W1-T509/W1-T949: AND RESERVE THE WHOLE BLOCK WHERE EVERY OTHER WRITER CAN SEE IT. The local
-    // reservation above is O_EXCL-atomic and correct, but `taskIdReservationsDir` resolves under
-    // this process's own `config.root` — inside a worker that is a sandbox path discarded on
-    // exit, so two writers on two hosts never observe each other. This second reserve is the SAME
-    // create-if-absent policy against the one store every writer shares: the remote's ref
-    // namespace, one ref PER RESERVED ID rather than only the first. Contention advances exactly
-    // as it does locally; an unreachable origin THROWS rather than falling through, and the paid
-    // worker is still unstarted when it does — caught below so the refusal leaves a durable
-    // ledger event naming the id/ref/outcome, never just a stringified message.
-    // W1-T949 design (iv): the refusal record is `withIdReservationLogging`'s, not this lane's —
-    // one policy, both arms unit-tested, rather than a hand-written `catch` per lane.
-    // Read the start id HERE, not inside the closure below: the compiler cannot know an arrow
-    // is called immediately, so `localIdBlock` widens back to `| undefined` inside it (TS18048).
-    const triageReserveFrom = localIdBlock.ids[0];
-    const remoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "triage.id_reservation_failed", () =>
-      reserveTaskIdBlockRemote(
-        triageReserveFrom,
-        TRIAGE_MAX_NEW_TASKS,
-        gitRemoteRefReserver({
-          run: (args) => {
-            // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention),
-            // and a throwing runner would make it indistinguishable from an unreachable remote —
-            // the exact conflation `classifyPushFailure` exists to prevent.
-            // `worktreePath`, NOT the module-level `repoRoot`: the reservation must be pushed to
-            // the SAME `origin` this filing will push its branch to. Building it from the install
-            // root sent it at whatever remote the install happened to point at — which, under a
-            // test driving a fixture origin, is a different server entirely.
-            const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
-            return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-          },
-        }),
-      ),
-    );
-    // The ids the WORKER is told to use — the REMOTE reservation's, which equal the local ones
-    // whenever no other writer held any of them (the overwhelmingly common case). The remote is
-    // the authority because it is the only store every writer can see.
-    const reservedIds = remoteIdBlock.taskIds;
+    // W1-T1011: THE REMOTE HALF OF THIS RESERVATION IS TAKEN LATER — once `decideTriage` has
+    // actually returned `propose`, at the `decision.action === "propose"` branch below — NOT
+    // here, and NOT before `spawn`. Before this task both halves were taken together, right
+    // here, pre-spawn: measured over the retained ledger union, 21 of 64 minted ids belonged to
+    // a run that then errored, and the permanent `refs/rmd-id/<id>` ref this second half writes
+    // has NO release path (task-id-reservation.ts's own "NOTHING RELEASES A RESERVATION"
+    // doctrine — the answer is not deletion because the ref IS the allocation record), so every
+    // one of those 21 burned a remote id forever for a run that filed nothing. The LOCAL block
+    // just above is UNCHANGED and still taken before `spawn`: it is what makes the "a minter
+    // that cannot reserve must not spend" guarantee true regardless of when the remote half
+    // moves — an unwritable local store still throws `TaskIdReservationError` right here, and
+    // the paid worker is never started.
+    //
+    // THE TRADE-OFF THIS NARROWS, NAMED RATHER THAN HIDDEN: the worker below is told the LOCAL
+    // id, not a remote one, so cross-host protection during the run shrinks from "the whole run"
+    // to "the filing moment" below — roughly the worker's own runtime, during which another host
+    // could take the same-looking id. That is acceptable because contention only ever ADVANCES,
+    // never refuses (reserveTaskIdRemote's own doc), so losing that narrower race costs a
+    // renumber at proposal time, never a failure.
+    const reservedIds = localIdBlock.ids.map((n) => `W1-T${n}`);
     const reservedTaskId = reservedIds[0];
-    log("triage.id_minted", {
-      minted_id: reservedTaskId,
-      reserved_ids: reservedIds,
-      mint_id: mint.id,
-      reserved_above_mint: localIdBlock.ids[0] !== mint.n,
-      remote_refs: remoteIdBlock.refs,
-      max_seen: mint.maxSeen,
-      source_monolith: mint.sources.monolith,
-      source_shards: mint.sources.shards,
-      source_open_prs: mint.sources.openPrs,
-      source_history: mint.historyMax,
-      degraded: mint.degraded.map((d) => d.source),
-    });
     say(`next task id: ${describeMintWithHistory(mint)}`);
     if (localIdBlock.ids[0] !== mint.n)
       say(`reserved ${reservedTaskId} instead — ${mint.id} is held by a live minter`);
@@ -18794,6 +18764,54 @@ async function triageCommandLocked(
         worktreeRemove(repoDir, worktreePath);
         return 1;
       }
+    }
+
+    // W1-T1011: THE PERMANENT REMOTE RESERVATION, TAKEN HERE — the verdict is PROPOSED (checked
+    // above, past the collision guard) and this is immediately BEFORE the commit below writes
+    // the shard into git history. A run that errored, or resolved no_task/grill, never reaches
+    // this line and takes no permanent ref — see the LOCAL-reservation comment above for the
+    // full rationale. Same policy `rmd plan`/`rmd approve` use for their own remote halves: one
+    // refusal record via `withIdReservationLogging`, both arms unit-tested, never a hand-written
+    // `catch` per lane.
+    if (decision.action === "propose") {
+      // Read the start id HERE, not inside the closure below: the compiler cannot know an arrow
+      // is called immediately, so `localIdBlock` widens back to `| undefined` inside it (TS18048).
+      const proposeReserveFrom = localIdBlock!.ids[0];
+      const remoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "triage.id_reservation_failed", () =>
+        reserveTaskIdBlockRemote(
+          proposeReserveFrom,
+          TRIAGE_MAX_NEW_TASKS,
+          gitRemoteRefReserver({
+            run: (args) => {
+              // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention),
+              // and a throwing runner would make it indistinguishable from an unreachable remote —
+              // the exact conflation `classifyPushFailure` exists to prevent.
+              // `worktreePath`, NOT the module-level `repoRoot`: the reservation must be pushed to
+              // the SAME `origin` this filing will push its branch to. Building it from the install
+              // root sent it at whatever remote the install happened to point at — which, under a
+              // test driving a fixture origin, is a different server entirely.
+              const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+              return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+            },
+          }),
+        ),
+      );
+      // `triage.id_minted` — the SAME ledger event this lane has always written, moved to when
+      // it is now taken rather than duplicated (design (v)): the row records the remote block
+      // that is now the durable allocation, not a second event alongside it.
+      log("triage.id_minted", {
+        minted_id: remoteIdBlock.taskIds[0],
+        reserved_ids: remoteIdBlock.taskIds,
+        mint_id: mint.id,
+        reserved_above_mint: localIdBlock!.ids[0] !== mint.n,
+        remote_refs: remoteIdBlock.refs,
+        max_seen: mint.maxSeen,
+        source_monolith: mint.sources.monolith,
+        source_shards: mint.sources.shards,
+        source_open_prs: mint.sources.openPrs,
+        source_history: mint.historyMax,
+        degraded: mint.degraded.map((d) => d.source),
+      });
     }
 
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
