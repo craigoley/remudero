@@ -47,7 +47,25 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Install Playwright's Chromium (W1-T153 shell a11y/responsive tests need a real headless browser — Lighthouse-equivalent axe-core scan, 390px/1440px no-hscroll, fleet-control read-back/STOP-confirm interaction)
-        run: npx playwright install --with-deps chromium
+        # W1-T492 round 1 (ci-log): this step's `apt-get update` (run internally by `--with-deps`)
+        # has hung INDEFINITELY on this exact runner fleet -- observed live across four
+        # consecutive attempts on this PR, always stalled right after fetching
+        # noble-security's InRelease with no further progress, and the SAME step already hung
+        # twice before on independent PRs (#2148, #2150 per the `coverage-ratchet` comment
+        # below). `timeout-minutes: 35` above only bounds the whole JOB after the fact --
+        # nothing inside this single step ever gave up and retried on a fresh connection. A
+        # bounded per-attempt timeout + retry (mirrors the whole-command retry `npm run
+        # test:ci` already does for the `Test` step below, W1-T255) turns an indefinite mirror
+        # stall into at most 3 * 6m = 18m, leaving room for Typecheck/Test inside the 35m cap.
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 360 npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt mirror stall) -- retrying"
+          done
+          echo "::error::playwright install failed after 3 attempts"
+          exit 1
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement --
         # tsconfig.json has `strict: true`, and a strict-mode violation anywhere in src/**/test/**
@@ -175,7 +193,17 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
-        run: npx playwright install --with-deps chromium
+        # W1-T492 round 1 (ci-log): same bounded retry as the `ci` job's identical step above --
+        # see that step's comment for the live-observed hang this guards against.
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 360 npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt mirror stall) -- retrying"
+          done
+          echo "::error::playwright install failed after 3 attempts"
+          exit 1
       - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
         # W1-T220 defect 1: this step used to run with ONLY --test-reporter=lcov, whose destination
         # is a file, so a failing run's CI log carried zero test output -- just
