@@ -88,6 +88,19 @@ jobs:
         # they cannot re-arm) and force-killing any already-running instance of the services
         # removes the holder outright instead of racing it, closing the gap for good rather than
         # narrowing it again.
+        #
+        # PR-2218 round 2, re-checked against the live push: the apt-daily stop/kill above did
+        # NOT fully clear it -- the re-run's log shows attempt 1 genuinely mirror-stalling for
+        # the full 360s (the pre-existing, unrelated W1-T492 stall the retry already tolerates),
+        # then attempts 2 AND 3 both immediately hit `Could not get lock /var/lib/apt/lists/lock.
+        # It is held by process 2237 (apt-get)` -- the SAME pid both times, one attempt apart.
+        # `timeout 360` only signals the `npx`/node process it directly spawned; playwright's own
+        # `sudo apt-get update` grandchild is not in that process group and survives the timeout,
+        # left running in the background still holding the lock when the next attempt starts. A
+        # bounded wait can never win against a lock held by OUR OWN still-running previous
+        # attempt, so each retry now force-reaps any leftover apt-get/dpkg process before trying
+        # again -- safe because the apt-daily units above are already stopped, so nothing else on
+        # this runner legitimately owns those binaries mid-job.
         run: |
           sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
           sudo systemctl kill --kill-who=all apt-daily.service >/dev/null 2>&1 || true
@@ -99,11 +112,17 @@ jobs:
             sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
             sudo flock -w 300 /var/lib/apt/lists/lock true 2>/dev/null || true
           }
+          reap_orphaned_apt() {
+            sudo pkill -9 -x apt-get >/dev/null 2>&1 || true
+            sudo pkill -9 -x apt-get.real >/dev/null 2>&1 || true
+            sudo pkill -9 -x dpkg >/dev/null 2>&1 || true
+          }
           for attempt in 1 2 3; do
             wait_for_apt_lock
             if timeout 360 npx playwright install --with-deps chromium; then
               exit 0
             fi
+            reap_orphaned_apt
             echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt mirror stall) -- retrying"
           done
           echo "::error::playwright install failed after 3 attempts"
@@ -251,6 +270,10 @@ jobs:
         # PR-2218 round 2 (ci-log): same `apt-daily`/`apt-daily-upgrade` stop-and-kill fix as the
         # `ci` job's identical step above, applied here too -- see that step's comment for the
         # live-observed `/var/lib/apt/lists/lock` failure this closes.
+        #
+        # PR-2218 round 2, re-checked against the live push: same orphaned-process reap as the
+        # `ci` job's identical step above, applied here too -- see that step's comment for the
+        # live-observed same-pid-two-attempts-running failure this closes.
         run: |
           sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
           sudo systemctl kill --kill-who=all apt-daily.service >/dev/null 2>&1 || true
@@ -262,11 +285,17 @@ jobs:
             sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
             sudo flock -w 300 /var/lib/apt/lists/lock true 2>/dev/null || true
           }
+          reap_orphaned_apt() {
+            sudo pkill -9 -x apt-get >/dev/null 2>&1 || true
+            sudo pkill -9 -x apt-get.real >/dev/null 2>&1 || true
+            sudo pkill -9 -x dpkg >/dev/null 2>&1 || true
+          }
           for attempt in 1 2 3; do
             wait_for_apt_lock
             if timeout 360 npx playwright install --with-deps chromium; then
               exit 0
             fi
+            reap_orphaned_apt
             echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt mirror stall) -- retrying"
           done
           echo "::error::playwright install failed after 3 attempts"
