@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   DECISION_RELEVANT_LEDGER_STEPS,
   LedgerLine,
+  MAX_RETAINED_LINES_PER_STEP,
   appendLedger,
   ledgerExceedsRotationCeiling,
   rotateLedger,
@@ -97,6 +98,163 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
     `DECISION_RELEVANT_LEDGER_STEPS is missing step(s) a real consumer reads to decide ` +
       `something (derived from source, not from the hardcoded list itself): ${missing.join(", ")}`,
   );
+});
+
+// ── W1-T1017: `review.unwired_advisory` (W1-T322's SHIPS-UNWIRED advisory floor) was absent
+// from DECISION_RELEVANT_LEDGER_STEPS, so rotation dropped it like any other analytical-only
+// step — measured live 4 rows against 83 rotations, 4.6% survival, against a `review.posted`
+// control of live 219 / rotations 390. UNLIKE the derived-from-consumers test above, this step's
+// deciding reader is a HUMAN (the operator adjudicating W1-T323's advisory-versus-blocking flip
+// against this exact corpus), so it can never appear in that test's source-scanned consumer set
+// — it has to be proven directly, here. ─────────────────────────────────────────────────────
+test("W1-T1017: an advisory row survives a rotation that would have evicted it", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const taskId = "W1-ADVISORY-SURVIVES";
+
+    appendLedger(
+      ledgerPath,
+      { run_id: "r0", task_id: taskId, step: "review.unwired_advisory", reason_code: "scope_violation" } as LedgerLine,
+      { ceilingBytes: Number.MAX_SAFE_INTEGER },
+    );
+    // The counterfactual: an ANALOGOUS step of identical shape, minted only for this test, that
+    // is NOT in DECISION_RELEVANT_LEDGER_STEPS — exactly what review.unwired_advisory itself
+    // looked like before this task. Proves registration, not the line's shape or size, is what
+    // preserves the real advisory row.
+    appendLedger(
+      ledgerPath,
+      { run_id: "r1", task_id: taskId, step: "review.still_unregistered_test_step", reason_code: "scope_violation" } as LedgerLine,
+      { ceilingBytes: Number.MAX_SAFE_INTEGER },
+    );
+    for (let n = 0; n < 250; n++) {
+      writeFileSync(ledgerPath, noiseLine(n) + "\n", { flag: "a" });
+    }
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "test setup sanity: padded past the ceiling");
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
+    assert.equal(result.rotated, true);
+
+    const linesAfter = readLedgerLines(ledgerPath);
+    assert.ok(
+      linesAfter.some((l) => l.task_id === taskId && l.step === "review.unwired_advisory"),
+      "review.unwired_advisory must survive rotation now that it is decision-relevant",
+    );
+    assert.ok(
+      !linesAfter.some((l) => l.task_id === taskId && l.step === "review.still_unregistered_test_step"),
+      "FALSIFIER: an unregistered step of the identical shape is evicted by the same rotation — " +
+        "proving registration, not the line's shape, is what kept the advisory row alive",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1017: the registered advisory step is still bounded by the per step cap", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const taskId = "W1-ADVISORY-CAPPED";
+    const total = MAX_RETAINED_LINES_PER_STEP + 50;
+
+    // Measure the byte size right at the cap boundary (the first MAX_RETAINED_LINES_PER_STEP
+    // rows) and at the full uncapped count, then pick a ceiling strictly between the two —
+    // derived from measurement, not a hardcoded guess (this file's own doctrine, see the
+    // "rotateLedger: every decision-relevant step survives" test above) — so the capped-to-200
+    // core comfortably fits under the ceiling (no further shedding by the convergence invariant)
+    // while the full 250-row core does not (a real rotation is actually forced).
+    let cappedCoreBytes = 0;
+    for (let i = 0; i < total; i++) {
+      appendLedger(
+        ledgerPath,
+        { run_id: `r${i}`, task_id: taskId, step: "review.unwired_advisory", marker: i } as LedgerLine,
+        { ceilingBytes: Number.MAX_SAFE_INTEGER },
+      );
+      if (i === MAX_RETAINED_LINES_PER_STEP - 1) cappedCoreBytes = statSync(ledgerPath).size;
+    }
+    const fullCoreBytes = statSync(ledgerPath).size;
+    const ceiling = cappedCoreBytes + Math.floor((fullCoreBytes - cappedCoreBytes) / 2);
+
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "test setup sanity: padded past the ceiling");
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
+    assert.equal(result.rotated, true);
+
+    const linesAfter = readLedgerLines(ledgerPath);
+    const advisoryLines = linesAfter.filter((l) => l.task_id === taskId && l.step === "review.unwired_advisory");
+    assert.equal(
+      advisoryLines.length,
+      MAX_RETAINED_LINES_PER_STEP,
+      `registration must not create an unbounded core — the per-step cap (${MAX_RETAINED_LINES_PER_STEP}) still bites`,
+    );
+
+    const markers = advisoryLines.map((l) => l.marker as number).sort((a, b) => a - b);
+    assert.equal(markers[0], total - MAX_RETAINED_LINES_PER_STEP, "the cap drops the OLDEST excess rows, not the newest");
+    assert.equal(markers[markers.length - 1], total - 1, "the newest row must always survive the cap");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1017: previously decision relevant steps keep their retention unchanged", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const taskId = "W1-PRIOR-STEP-UNCHANGED";
+    const priorStep = "run.start";
+    assert.ok(
+      DECISION_RELEVANT_LEDGER_STEPS.has(priorStep),
+      "sanity: run.start was already decision-relevant before this task",
+    );
+
+    const priorCount = 30;
+    for (let i = 0; i < priorCount; i++) {
+      appendLedger(
+        ledgerPath,
+        { run_id: `p${i}`, task_id: taskId, step: priorStep, marker: i } as LedgerLine,
+        { ceilingBytes: Number.MAX_SAFE_INTEGER },
+      );
+    }
+    const advisoryCount = 30;
+    for (let i = 0; i < advisoryCount; i++) {
+      appendLedger(
+        ledgerPath,
+        { run_id: `a${i}`, task_id: taskId, step: "review.unwired_advisory", marker: i } as LedgerLine,
+        { ceilingBytes: Number.MAX_SAFE_INTEGER },
+      );
+    }
+
+    // Same derived-ceiling discipline as the sibling test above: comfortably larger than this
+    // core's own measured size so padding past it forces a real rotation without the
+    // convergence invariant shedding any of this core's own (well-under-cap) rows.
+    const coreBytes = statSync(ledgerPath).size;
+    const ceiling = coreBytes * 4;
+    for (let n = 0; n < 250; n++) {
+      writeFileSync(ledgerPath, noiseLine(n) + "\n", { flag: "a" });
+    }
+
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "test setup sanity: padded past the ceiling");
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
+    assert.equal(result.rotated, true);
+
+    const linesAfter = readLedgerLines(ledgerPath);
+    const priorLines = linesAfter.filter((l) => l.task_id === taskId && l.step === priorStep);
+    const advisoryLines = linesAfter.filter((l) => l.task_id === taskId && l.step === "review.unwired_advisory");
+
+    assert.equal(
+      priorLines.length,
+      priorCount,
+      "run.start (already decision-relevant before this task) retains every row exactly as before — " +
+        "registering review.unwired_advisory changes nothing about its retention",
+    );
+    assert.equal(
+      advisoryLines.length,
+      advisoryCount,
+      "review.unwired_advisory now survives too, in the very same rotation, without displacing run.start's rows",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("ledgerExceedsRotationCeiling: a ledger over the ceiling with no archived roll present reports true (FAILS the check)", () => {
