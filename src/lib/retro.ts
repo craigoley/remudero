@@ -24,6 +24,7 @@ import type { Lifecycle, LearningEntry } from "./learnings.js";
 import { resolveMountForClass, type Mounts } from "./mounts.js";
 import type { Task } from "./plan.js";
 import { findExportDefinition, isExportReachable } from "./reachability.js";
+import { REPLAY_RESULT_STEP } from "./replay.js";
 import { utcWeekWindowMs } from "./sweep.js";
 import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
@@ -1228,6 +1229,60 @@ export function renderMutationGateLifetime(r: MutationGateLifetimeReport): strin
   ].join("\n");
 }
 
+// ── §5A/§9 replay pass-rate (W1-T165) — the missing Self-Harness leg ────────
+//
+// READ ONLY, like the mutation-gate rung above: never runs a golden, never touches sandbox;
+// folds whatever {@link REPLAY_RESULT_STEP} lines replay.ts's `recordReplayResults` already
+// wrote. Scoped to THIS CYCLE (`sinceTs`), not lifetime — the task's own rewritten proof asks
+// for "the replay pass-rate ... for the cycle", the same per-cycle framing `mast`/`verdicts`
+// already use, deliberately unlike `mutationGateLifetime`'s all-time figure.
+
+/** `n passed / n goldens` for the cycle, folded over {@link REPLAY_RESULT_STEP} ledger lines.
+ *  `ranThisCycle: false` (P48: no naked zero) means NO replay line was recorded in this
+ *  window at all — an unmeasured cycle, never to be read as "0% pass rate". */
+export interface ReplayCalibration {
+  ranThisCycle: boolean;
+  total: number;
+  passed: number;
+  rate: number;
+}
+
+/**
+ * Fold `REPLAY_RESULT_STEP` lines within `sinceTs` (the cycle window, `undefined` ⇒ all-time —
+ * the first retro) into the cycle's replay pass-rate. Ignores every other ledger step, and
+ * tolerates a `passed` field of any non-boolean shape (a hand-built fixture, a torn line) by
+ * simply not counting it, same "never throw on an unexpected shape" discipline every other
+ * reducer in this file already keeps.
+ */
+export function replayPassRateForCycle(records: LedgerRecord[], sinceTs?: string): ReplayCalibration {
+  const lines = records.filter((r) => {
+    if (r.step !== REPLAY_RESULT_STEP || typeof r.passed !== "boolean") return false;
+    if (!sinceTs) return true;
+    return typeof r.ts === "string" && r.ts > sinceTs;
+  });
+  const total = lines.length;
+  const passed = lines.filter((r) => r.passed === true).length;
+  return { ranThisCycle: total > 0, total, passed, rate: total ? passed / total : 0 };
+}
+
+/** Render the replay-pass-rate section (markdown) — printed by `--dry-run` and fed to the
+ *  Architect, alongside the other calibration tables. */
+export function renderReplayCalibration(r: ReplayCalibration): string {
+  if (!r.ranThisCycle) {
+    return [
+      "## Replay pass-rate (golden-task regression suite, W1-T165) — the Self-Harness leg",
+      "",
+      "No replay run recorded this cycle — NOT a confirmed 0% (P48: no naked zero); the golden " +
+        "suite simply did not run against a candidate harness this cycle.",
+    ].join("\n");
+  }
+  return [
+    "## Replay pass-rate (golden-task regression suite, W1-T165) — the Self-Harness leg",
+    "",
+    `Replay pass-rate this cycle: ${r.passed}/${r.total} goldens (${(r.rate * 100).toFixed(0)}%)`,
+  ].join("\n");
+}
+
 export interface RetroGather {
   sinceTs?: string;
   totalRuns: number;
@@ -1292,6 +1347,9 @@ export interface RetroGather {
   /** W1-T393/D-10: `mutation-ratchet`'s LIFETIME kill/survive/escape record, folded over the
    *  FULL ledger (never `scoped` — see {@link mutationGateLifetime}'s doc for why). */
   mutationGateLifetime: MutationGateLifetimeReport;
+  /** W1-T165: the golden-task replay pass-rate FOR THIS CYCLE (`sinceTs`-scoped, unlike
+   *  `mutationGateLifetime` above — see {@link replayPassRateForCycle}'s doc for why). */
+  replay: ReplayCalibration;
 }
 
 /**
@@ -1395,6 +1453,10 @@ export function buildGather(opts: {
     // window" reasoning as `followups` immediately above, because a LIFETIME figure truncated to
     // one retro cycle is not a lifetime figure.
     mutationGateLifetime: mutationGateLifetime(records),
+    // W1-T165: `opts.sinceTs`-scoped (the cycle), the opposite choice from `mutationGateLifetime`
+    // immediately above — see `replayPassRateForCycle`'s doc for why a per-cycle figure is what
+    // the task's own proof asks for.
+    replay: replayPassRateForCycle(records, opts.sinceTs),
   };
 }
 
@@ -1494,6 +1556,8 @@ export function renderGather(g: RetroGather): string {
     "",
     "## Calibration (BY TASK CLASS, W1-T167) — is the docs/plan-lint routing discount paying off",
     classCalibrationTable(g.byClass),
+    "",
+    renderReplayCalibration(g.replay),
     "",
     ...(g.weeklyBurnByModelClass
       ? [
