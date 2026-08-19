@@ -1,0 +1,143 @@
+- id: W1-T1019
+  title: "W1-T300'S DUPLICATE-TRIAGE GUARD SHIPPED UNWIRED AND HAS NEVER ONCE EXECUTED — both isFeedbackOpenPr and readFeedbackLiveState are declared and consumed in daemon.ts and supplied by NOTHING in src/, so openPrNumber is always undefined, inFlight is always false, and the ledger reads 77 auto_triage.fired against 0 skipped_inflight and 0 stood_down: wire both at the construction site the shard never declared"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    Found by a runtime sweep of every step literal in `src/` against the deduped Azure ledger union
+    (per-form control: `run.start` 790 plain / 165 live / 0 `.gz`), not by static analysis — which
+    passes, because both deps are imported types with real consumption sites.
+
+    (1) THE GUARD IS INERT, AND THE CHAIN IS THREE LINES LONG. In `src/lib/daemon.ts`:
+        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId);
+        let inFlight = openPrNumber !== undefined;
+        if (inFlight && openPrNumber !== undefined) { ... liveState ... }
+        if (inFlight) { log("auto_triage.skipped_inflight", ...) } else { log("auto_triage.fired", ...) }
+    `isFeedbackOpenPr` is optional-called with `?.` and NO `??` fallback. Unsupplied, it returns
+    `undefined`, so `openPrNumber` is `undefined`, so `inFlight` is `false` on every pass, so the
+    whole in-flight block is skipped and `auto_triage.fired` fires unconditionally.
+
+    (2) NEITHER DEP IS SUPPLIED ANYWHERE IN `src/`, MEASURED WITH A CONTROL.
+        isFeedbackOpenPr        src/ = 3 refs (declaration, a doc line, the consumption)   test/ = 7
+        readFeedbackLiveState   src/ = 2 refs (declaration, the consumption)               test/ = 3
+        CONTROL `consumeDrainNow`-shaped dep that IS wired: `consumeDrainNow` src/ = 7 refs
+    Three and two references are the declaration-plus-use floor. There is no third site for either,
+    which is what "supplied by nothing" means here.
+
+    (3) THE LEDGER AGREES, OVER SIXTEEN DAYS. Deduped on the full line across the union:
+        auto_triage.fired            77 rows
+        auto_triage.skipped_inflight  0 rows
+        auto_triage.stood_down        0 rows
+    Both zeros have a working positive control in the same query — the third row of the same
+    `if/else` fired 77 times, so the query can see this code path. The guard has never refused a
+    single fire.
+
+    (4) IT SHIPPED GREEN BECAUSE THE TEST SUPPLIES WHAT PRODUCTION DOES NOT. W1-T300 merged
+    2026-08-03 as #1201 (`fix(daemon): guard auto-triage against re-firing an in-flight feedback
+    id`), `verify: auto`, `risk: low`. Its own falsifier `test/triage-inflight-dedup.test.ts`
+    references `isFeedbackOpenPr` 7 times and `readFeedbackLiveState` 3 times — it injects both, so
+    every assertion passes over a guard that cannot run outside the test. This is CLAUDE.md's
+    every-test-injects-a-fake trap with the harder edge: there is no default implementation to fall
+    back to, because the call is `?.` rather than `?? realDefault`.
+
+    (5) AND THE SHARD'S OWN `files:` IS THE STRUCTURAL CAUSE, NOT AN ASIDE. W1-T300 declared
+    `files: [src/lib/daemon.ts]`. The construction site for these deps is in `src/run-task.ts`,
+    where the sibling optional deps are wired in the same object literal (`pendingKicks`,
+    `clearKick`, `consumeDrainNow`, `now`, `sleep`, `reloadPlan`). A W1-T300 implementer who tried
+    to wire them there would have been REFUSED by the scope guard for touching an undeclared path.
+    The guard could not have been wired under that declaration — so this is a filing-shape defect
+    that produced a runtime one, and re-filing it with the right `files:` is the actual repair.
+
+    (6) WHY THE FLEET FEELS THIS. W1-T300 exists to stop the auto-triage rung re-firing a feedback
+    id that already has an open triage PR — the #1184/#1185 duplicate-triage race its own comment
+    cites. With the guard inert, nothing in the daemon prevents that recurrence; the only thing
+    standing between the fleet and a duplicate is `decideAutoTriage`'s own `status: new` read, which
+    the comment explicitly says is insufficient: *"`decideAutoTriage` only knows the entry's own
+    `status: new` — it cannot see an already-open PR carrying this id's `origin: feedback#<id>`
+    provenance, so that read happens here."* That read happens nowhere.
+  design: |
+    (i) WIRE BOTH DEPS AT THE DAEMON CONSTRUCTION SITE IN `src/run-task.ts`, in the same object
+    literal that already supplies `pendingKicks`, `clearKick` and `consumeDrainNow`. That is the one
+    place the daemon's optional deps are bound to real implementations, and the one place W1-T300
+    could not reach under its own declared scope.
+
+    (ii) THE IMPLEMENTATIONS ARE A QUESTION THIS TASK DOES NOT ANSWER, AND MUST NOT GUESS.
+    `isFeedbackOpenPr(feedbackId) -> number | undefined` needs an open-PR lookup keyed on the
+    `origin: feedback#<id>` provenance, and `readFeedbackLiveState(feedbackId, prNumber) -> string |
+    undefined` needs a confirming live read of that PR's state. Both shapes already exist elsewhere
+    in the codebase for the TASK lane — the comment says so: *"the SAME shape as the task lane's
+    `isOpenPr`/`readLiveState` pair above, keyed on feedback id instead of task id."* An implementer
+    reuses those readers rather than writing new ones, and states which it reused. **No new GitHub
+    call shape and no new gateway.**
+
+    (iii) THE FALSIFIER MUST FAIL BEFORE THE FIX AND PASS AFTER, AGAINST THE REAL CONSTRUCTION —
+    not against an injected fake. `test/triage-inflight-dedup.test.ts` already proves the guard
+    LOGIC with fakes and keeps passing either way; it is not evidence and must not be treated as
+    such. The new test asserts the DEPS OBJECT the real wiring builds actually carries both keys,
+    the same way `test/daemon.test.ts` covers the construction today. A test that injects them
+    proves nothing about this defect.
+
+    (iv) BOTH DEPS, NOT ONE. Wiring only `readFeedbackLiveState` changes nothing: `inFlight` is
+    gated on `isFeedbackOpenPr` first, so the stand-down branch stays unreachable behind it. The two
+    are one guard and the task is not done with either alone.
+
+    (v) OUT OF SCOPE, NAMED.
+      - **CHANGING THE GUARD'S SEMANTICS.** The `?.`-with-no-default call shape, the stand-down
+        rule and the ledger vocabulary are W1-T300's contract and are untouched. This wires what is
+        already written.
+      - **W1-T300'S RECORD.** Whether that task should be reopened, re-credited or amended is the
+        operator's call; standing rule 21 governs any edit to it. This task cites it and files
+        beside it rather than rewriting it.
+      - **THE OTHER UNWIRED-DEP CANDIDATES FROM THE SAME SWEEP.** `fetchPrDiffFiles` and
+        `updatePrBody` looked identical on reference count (2 each) and are NOT this defect — both
+        use `?? fetchPrDiffFilesViaGh` / `?? updatePrBodyViaGh`, so the default runs when the dep is
+        absent. Recorded here so a later reader does not re-flag them: the discriminator is `?.`
+        with no fallback, never the reference count.
+      - **THE AUTO-TRIAGE CAP AND CADENCE.** `autoTriage.maxPerDay` and the depth-scaled interval
+        are untouched; this task changes what the rung REFUSES, never how often it runs.
+  acceptance:
+    - claim: "the daemon construction supplies the feedback open-pr lookup so the in-flight guard can evaluate"
+      proof: "unit test: W1-T1019: the daemon construction supplies the feedback open pr lookup"
+    - claim: "the daemon construction supplies the confirming live-state read so the stand-down branch is reachable"
+      proof: "unit test: W1-T1019: the daemon construction supplies the confirming live state read"
+    - claim: "an auto-triage decision whose feedback id already has an open pr is refused rather than fired"
+      proof: "unit test: W1-T1019: an auto triage decision with an open pr is refused not fired"
+    - claim: "a cached in-flight read that is no longer open stands the guard down instead of parking the entry"
+      proof: "unit test: W1-T1019: a stale cached in flight read stands the guard down"
+    - claim: "the wiring site names both deps rather than one"
+      proof: "grep: readFeedbackLiveState in src/run-task.ts"
+  risk: high
+  origin: "oper#unwired-triage-guard-2026-08-19"
+  plan_refs: ["W1-T300", "W1-T298", "W1-T177", "W1-T276"]
+  files: [src/run-task.ts, test/daemon-triage-guard-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` WAS SET BY THE LINTER, NOT ASSERTED. A draft at `medium` was refused, exit 1,
+    verbatim: *"[sizing] spans 3 distinct subsystems/concerns (daemon, daemon-triage-guard-wiring,
+    run-task) at risk:medium — Rule 19: raise to risk:high or decompose into one task per
+    concern"*. Raised on that refusal. Decomposition is declined with a reason: the two deps are
+    one guard (design iv), and separating the supply from its falsifier would file a wiring with
+    nothing proving it landed — the exact shape that let W1-T300 ship green and inert.
+
+    `files:` DERIVED FROM THE DEFECT'S LOCATION, NOT ITS SYMPTOM. The inert guard is IN
+    `src/lib/daemon.ts`, but nothing there is wrong — the code is correct and covered. The missing
+    supply is in `src/run-task.ts`, which is where every sibling optional dep is bound.
+    **`src/lib/daemon.ts` IS DELIBERATELY NOT DECLARED**: 49 shards already name it, and this task
+    changes nothing in it. **`src/run-task.ts` IS DECLARED AND THE COST IS ACCEPTED IN WRITING**:
+    225 shards declare it (W1-T471), so this serializes against all of them — unavoidable, because
+    that file is the only construction site and declaring anything else reproduces exactly the
+    scope-guard trap that left W1-T300 unwired (rationale 5).
+
+    A NEW TEST FILE RATHER THAN `test/triage-inflight-dedup.test.ts`. That file is W1-T300's, it
+    injects both deps, and it passes with the defect present — appending to it would put the new
+    assertion beside the fakes that hid the bug. `test/daemon.test.ts` is the existing home for
+    construction-shape assertions but is declared by other shards; a dedicated file keeps the
+    falsifier legible and is the CLAUDE.md coverage-trap guidance applied.
+
+    THE MEASUREMENTS ARE QUERIES. `git grep -woF <dep> -- src/` and `-- test/`, and the three
+    `auto_triage.*` counts over the ledger union read per form with a full-line dedupe. They move;
+    the symbol names are the check.
