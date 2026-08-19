@@ -1,4 +1,4 @@
-- id: W1-T1027
+- id: W1-T1028
   title: "THE OPERATOR HAS RULED THAT A GREEN REVIEWED HAND-FILED PR SHOULD NOT NEED HIS MERGE — and the arming rule and its flag BOTH already exist and are both on, so the surviving gap is one disagreement: the sweep's own gate fails OPEN on absent ledger evidence and the handoff it calls fails CLOSED on the same absence, which is exactly the population a hand-filed PR falls in"
   repo: remudero
   depends_on: [W1-T1020]
@@ -78,15 +78,15 @@
     which is the opposite end of the timing question from W1-T125's early arm.
   acceptance:
     - claim: "a green reviewed PR with no run branch reaches the arm instead of being refused for its id"
-      proof: "unit test: W1-T1027: a green reviewed pr with no run branch reaches the arm"
+      proof: "unit test: W1-T1028: a green reviewed pr with no run branch reaches the arm"
     - claim: "the sweep's arm carries the head-bound decision it already made"
-      proof: "unit test: W1-T1027: the sweep arm carries its own head bound decision"
+      proof: "unit test: W1-T1028: the sweep arm carries its own head bound decision"
     - claim: "a capped verdict with no ledgered override still refuses on the widened path"
-      proof: "unit test: W1-T1027: a capped verdict still refuses on the widened path"
+      proof: "unit test: W1-T1028: a capped verdict still refuses on the widened path"
     - claim: "an irreversible diff still refuses on the widened path"
-      proof: "unit test: W1-T1027: an irreversible diff still refuses on the widened path"
+      proof: "unit test: W1-T1028: an irreversible diff still refuses on the widened path"
     - claim: "the two gates disagree on absent evidence rather than no rule matching"
-      proof: "grep: the sweep decides to arm and the handoff refuses for evidence it never needed in plan/tasks.d/W1-T1027-handfiled-pr-never-reaches-the-arm.yaml"
+      proof: "grep: the sweep decides to arm and the handoff refuses for evidence it never needed in plan/tasks.d/W1-T1028-handfiled-pr-never-reaches-the-arm.yaml"
   risk: high
   origin: "oper#hand-filed-pr-should-not-need-my-merge-2026-08-19"
   plan_refs: ["W1-T1020", "W1-T516", "W1-T975", "W1-T125", "W1-T230"]
@@ -138,13 +138,24 @@
     is compiled through `escapeRegExp` and matched literally. The fifth is doc-shaped and takes a
     `grep:` with an explicit path.
 
-    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK AGAINST ITS EXPECTED SHA BEFORE FILING.
-    `refs/rmd-id/W1-T1027` resolves to `96bd26dcd81881cb…`, matching the operator's stated
-    `96bd26dc…` (negative control `refs/rmd-id/W1-T444444` reads 0; positive control
-    `refs/rmd-id/W1-T1021` resolves). Four surfaces swept anyway, GIT AND LEDGER FIRST AND REST LAST
-    AND SERIAL, `/rate_limit` never called: the reservation; shard FILENAMES via `git ls-tree -r` (374
-    files, W1-T1027 = 0, control W1-T1021 = 1 — THE FILENAME IS THE EXISTENCE TEST, and the shard's
-    `- id:` line is unindented); ids mentioned under plan/ (ADVISORY only, 0 here against a control of
-    6 files for W1-T516); and the open-PR titles, heads and file lists. THE OPEN-PR SET WAS READ, NOT
-    UNREAD: three open pull requests were enumerated (#2196, #2199, #2201) and their ids are W1-T949,
-    W1-T952 and W1-T1026, none of them this one.
+    ID PROVENANCE — RENUMBERED W1-T1027 -> W1-T1028 AFTER A COLLISION THIS FILING DID NOT CAUSE.
+    THIS SHARD HELD THE RESERVATION AND LOST THE ID ANYWAY. `refs/rmd-id/W1-T1027` was reserved at
+    12:21:57Z by this filing's own host and still resolves to `96bd26dcd81881cb…`; the original
+    four-surface sweep was real and is not retracted (shard FILENAMES via `git ls-tree -r`, 374 files,
+    W1-T1027 = 0 against a control of W1-T1021 = 1; ids mentioned under plan/, advisory only; and the
+    open-PR titles, heads and file lists — #2196, #2199 and #2201, whose ids are W1-T949, W1-T952 and
+    W1-T1026). WHAT DEFEATED IT WAS TIMING, NOT METHOD: #2202 filed the SAME id WITHOUT HOLDING THE
+    RESERVATION and merged at 12:29:48Z, two minutes and sixteen seconds before this shard's commit at
+    12:32:04Z, so the filename surface was swept against an origin/main that predated it. The rule the
+    sweep needed is the one CLAUDE.md already states — re-sweep on a FRESH FETCH immediately before
+    pushing — and the reservation surface it did hold was never consulted by the other lane. That is
+    W1-T1011's and W1-T949's subject, not this task's.
+    THE LOSER RENUMBERS BECAUSE THE WINNER IS ALREADY MERGED, which is the same call the operator made
+    on 2026-08-16 for W1-T533/W1-T534 (renumbered to W1-T911/W1-T912). Renumbering the merged shard
+    instead would be a post-merge amendment.
+    THE REPLACEMENT ID WAS MINTED ON FOUR SURFACES, ALL 0: `refs/rmd-id/W1-T1028`, shard filenames on
+    origin/main, declared ids under plan/, and every open PR's title and file list. Positive controls
+    `refs/rmd-id/W1-T1027` and `refs/rmd-id/W1-T1026` each read 1; the mention trap `W1-T999999` reads
+    0 refs and 0 filenames. Plain refspec with every variable braced, no `+` and no lease: PUSH RC=0,
+    `* [new reference] ad83a2102ce824df5f0161ac24e37533fe5ba159 -> refs/rmd-id/W1-T1028`, readback
+    equal, `HTTP 403` count 0, `could not read Username` count 0.
