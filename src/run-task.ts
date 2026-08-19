@@ -244,18 +244,20 @@ import { assertProposedPlanLoads,
   parseTriageArgs,
   parseTriageVerdict,
   triageCommitMessage,
+  triageDeclaredScope,
+  triageEmptyScopeDisposition,
   triagePrompt,
 } from "./lib/triage.js";
 import { mintNextTaskId, type MintDegradation, type MintSources } from "./lib/task-id.js";
 import {
   firstUnreservedAtOrAbove,
   reserveTaskIdBlock,
+  reserveTaskIdBlockRemote,
   gitRemoteRefReserver,
-  reserveTaskIdFrom,
-  reserveTaskIdRemote,
+  withIdReservationLogging,
+  type RemoteReservationBlock,
   type TaskIdReservationBlock,
   taskIdReservationsDir,
-  type TaskIdReservationHandle,
 } from "./lib/task-id-reservation.js";
 import {
   applyPlanProposalCommit,
@@ -18418,6 +18420,17 @@ export function worktreeChangedFiles(worktreePath: string): string[] {
  * likelier because the operator cannot see the daemon is about to fire. Both paths take the same
  * lock, so whichever is second REFUSES LOUDLY instead of racing.
  */
+/**
+ * How many task ids `rmd triage` reserves before spawning, mirroring {@link PLAN_MAX_NEW_TASKS}'s
+ * shape but scoped to what ONE feedback item plausibly produces rather than an open-ended brief:
+ * triage's own prompt has always told a worker filing "MORE than one new task" to continue
+ * upward from the minted id, and the overwhelming majority of runs file exactly one. A declared
+ * CEILING, not a prediction — every unused id in the block is released in the same `finally` as
+ * the used ones, so reserving above the common case costs nothing but a slightly wider (still
+ * bounded) remote scan.
+ */
+export const TRIAGE_MAX_NEW_TASKS = 3;
+
 export async function triageCommand(
   rest: string[],
   opts: { spawn?: typeof spawnWorker; config?: Config } = {},
@@ -18519,7 +18532,7 @@ async function triageCommandLocked(
   // Declared OUTSIDE the try so the finally releases it on EVERY exit — success, throw, or the
   // catch arm's rethrow. A reservation that outlived its run would burn the id permanently, which
   // is the phantom-id class this must not add to (W1-T199/224/247/263 already exist).
-  let reservationHandle: TaskIdReservationHandle | undefined;
+  let localIdBlock: TaskIdReservationBlock | undefined;
   try {
     // Read the entry from the FRESH worktree (origin/main snapshot), not repoRoot, which may be
     // a stale checkout — same discipline retro's next-task read follows.
@@ -18562,50 +18575,67 @@ async function triageCommandLocked(
       repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
     });
-    // RESERVE the minted id before spending anything. The mint above is a SNAPSHOT and reserves
-    // nothing, so a THIRD caller (the lock #1069 added covers only triage's own two paths — not
-    // `rmd plan --mode=create`, not a second machine, not a cross-repo instance filing into this
-    // plan) can mint the same number. Contention ADVANCES rather than refusing, so this only ever
-    // moves the id upward, never blocks. Taken BEFORE `spawn` on purpose: a reservation that
-    // cannot be written throws TaskIdReservationError out of this command, and the paid worker
-    // (median $0.96) is never started — a minter that cannot reserve must not spend.
-    const reservation = reserveTaskIdFrom(mint.n, taskIdReservationsDir(config.root), {
+    // RESERVE the minted id (and TRIAGE_MAX_NEW_TASKS-1 more, as a BLOCK) before spending
+    // anything. The mint above is a SNAPSHOT and reserves nothing, so a THIRD caller (the lock
+    // #1069 added covers only triage's own two paths — not `rmd plan --mode=create`, not a
+    // second machine, not a cross-repo instance filing into this plan) can mint the same number.
+    // Contention ADVANCES rather than refusing, so this only ever moves the id upward, never
+    // blocks. Taken BEFORE `spawn` on purpose: a reservation that cannot be written throws
+    // TaskIdReservationError out of this command, and the paid worker (median $0.96) is never
+    // started — a minter that cannot reserve must not spend.
+    //
+    // A BLOCK, NOT ONE ID (W1-T949 design (i)): triage's own prompt tells a worker filing more
+    // than one task to "number them upward" from the minted id — so a single-id reservation left
+    // every id past the first unreserved on any store, local or remote (W1-T949 rationale (2)).
+    // `rmd plan` already reserves a block LOCALLY for exactly this reason; this makes triage do
+    // the same, and closes the remote half `reserveTaskIdBlock`'s own doc names but does not fix.
+    localIdBlock = reserveTaskIdBlock(mint.n, TRIAGE_MAX_NEW_TASKS, taskIdReservationsDir(config.root), {
       info: { purpose: `rmd triage ${feedbackId} (run ${runId})` },
     });
-    reservationHandle = reservation;
-    // W1-T509: AND RESERVE IT WHERE EVERY OTHER WRITER CAN SEE IT. The local reservation above is
-    // O_EXCL-atomic and correct, but `taskIdReservationsDir` resolves under this process's own
-    // `config.root` — inside a worker that is a sandbox path discarded on exit, so two writers on
-    // two hosts never observe each other. This second reserve is the SAME create-if-absent policy
-    // against the one store every writer shares: the remote's ref namespace. Contention advances
-    // exactly as it does locally; an unreachable origin THROWS rather than falling through, and
-    // the paid worker is still unstarted when it does.
-    const remoteReservation = reserveTaskIdRemote(
-      reservation.id,
-      gitRemoteRefReserver({
-        run: (args) => {
-          // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention),
-          // and a throwing runner would make it indistinguishable from an unreachable remote —
-          // the exact conflation `classifyPushFailure` exists to prevent.
-          // `worktreePath`, NOT the module-level `repoRoot`: the reservation must be pushed to
-          // the SAME `origin` this filing will push its branch to. Building it from the install
-          // root sent it at whatever remote the install happened to point at — which, under a
-          // test driving a fixture origin, is a different server entirely.
-          const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
-          return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-        },
-      }),
+    // W1-T509/W1-T949: AND RESERVE THE WHOLE BLOCK WHERE EVERY OTHER WRITER CAN SEE IT. The local
+    // reservation above is O_EXCL-atomic and correct, but `taskIdReservationsDir` resolves under
+    // this process's own `config.root` — inside a worker that is a sandbox path discarded on
+    // exit, so two writers on two hosts never observe each other. This second reserve is the SAME
+    // create-if-absent policy against the one store every writer shares: the remote's ref
+    // namespace, one ref PER RESERVED ID rather than only the first. Contention advances exactly
+    // as it does locally; an unreachable origin THROWS rather than falling through, and the paid
+    // worker is still unstarted when it does — caught below so the refusal leaves a durable
+    // ledger event naming the id/ref/outcome, never just a stringified message.
+    // W1-T949 design (iv): the refusal record is `withIdReservationLogging`'s, not this lane's —
+    // one policy, both arms unit-tested, rather than a hand-written `catch` per lane.
+    // Read the start id HERE, not inside the closure below: the compiler cannot know an arrow
+    // is called immediately, so `localIdBlock` widens back to `| undefined` inside it (TS18048).
+    const triageReserveFrom = localIdBlock.ids[0];
+    const remoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "triage.id_reservation_failed", () =>
+      reserveTaskIdBlockRemote(
+        triageReserveFrom,
+        TRIAGE_MAX_NEW_TASKS,
+        gitRemoteRefReserver({
+          run: (args) => {
+            // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention),
+            // and a throwing runner would make it indistinguishable from an unreachable remote —
+            // the exact conflation `classifyPushFailure` exists to prevent.
+            // `worktreePath`, NOT the module-level `repoRoot`: the reservation must be pushed to
+            // the SAME `origin` this filing will push its branch to. Building it from the install
+            // root sent it at whatever remote the install happened to point at — which, under a
+            // test driving a fixture origin, is a different server entirely.
+            const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+            return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+          },
+        }),
+      ),
     );
-    // The id the WORKER is told to use — the REMOTE reservation's, which equals the local one
-    // whenever no other writer held it (the overwhelmingly common case). The remote is the
-    // authority because it is the only store every writer can see.
-    const reservedTaskId = remoteReservation.taskId;
+    // The ids the WORKER is told to use — the REMOTE reservation's, which equal the local ones
+    // whenever no other writer held any of them (the overwhelmingly common case). The remote is
+    // the authority because it is the only store every writer can see.
+    const reservedIds = remoteIdBlock.taskIds;
+    const reservedTaskId = reservedIds[0];
     log("triage.id_minted", {
       minted_id: reservedTaskId,
+      reserved_ids: reservedIds,
       mint_id: mint.id,
-      reserved_above_mint: remoteReservation.id !== mint.n,
-      remote_ref: remoteReservation.ref,
-      remote_attempts: remoteReservation.attempts,
+      reserved_above_mint: localIdBlock.ids[0] !== mint.n,
+      remote_refs: remoteIdBlock.refs,
       max_seen: mint.maxSeen,
       source_monolith: mint.sources.monolith,
       source_shards: mint.sources.shards,
@@ -18614,7 +18644,7 @@ async function triageCommandLocked(
       degraded: mint.degraded.map((d) => d.source),
     });
     say(`next task id: ${describeMintWithHistory(mint)}`);
-    if (reservation.id !== mint.n)
+    if (localIdBlock.ids[0] !== mint.n)
       say(`reserved ${reservedTaskId} instead — ${mint.id} is held by a live minter`);
 
     // impl-FU — THE RELINT LOOP. Spawn, lint what was actually filed with the REAL linter, hand the
@@ -18625,8 +18655,8 @@ async function triageCommandLocked(
     let worker!: WorkerResult;
     const loop = await runRelintLoop({
       lane: "triage",
-      filedIds: [reservedTaskId],
-      initialPrompt: triagePrompt(entry, runId, reservedTaskId),
+      filedIds: reservedIds,
+      initialPrompt: triagePrompt(entry, runId, reservedTaskId, reservedIds.slice(1)),
       log,
       run: async (prompt, attempt) => {
         worker = await spawn({
@@ -18654,7 +18684,7 @@ async function triageCommandLocked(
       },
       filed: (r) => r.decision.action === "propose",
       lint: () =>
-        lintFiledTasks(worktreePath, [reservedTaskId], {
+        lintFiledTasks(worktreePath, reservedIds, {
           newMonolithIds: newMonolithIdsAgainstBase(worktreePath),
         }),
     });
@@ -18663,7 +18693,7 @@ async function triageCommandLocked(
     // FAIL EARLY, AND SAY WHY. Before this, a violating filing became a PR that opened, burned CI,
     // and reported only "ci failure" — indistinguishable from a flake.
     if (loop.violations.length > 0) {
-      const reason = relintRefusalMessage("triage", [reservedTaskId], loop.violations, loop.attempts, loop.stop);
+      const reason = relintRefusalMessage("triage", reservedIds, loop.violations, loop.attempts, loop.stop);
       log("triage.relint_refused", {
         stop: loop.stop,
         attempts: loop.attempts,
@@ -18791,6 +18821,46 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
+
+    // W1-T963 (empty-diff-triage-merge incident: #2075/#2077/#2078 merged and passed review
+    // despite changing nothing). `diff` above is `gh pr diff` — frozen against THIS branch's own
+    // fork point, so it stays non-empty even once a SIBLING triage PR for the SAME feedback entry
+    // has already landed the identical change on `origin/main`. Re-diff the declared scope (the
+    // feedback entry this decision writes) against a FRESH fetch of the LIVE default branch tip
+    // instead — `no_task`/`grill` only: a `propose` decision's entire contribution is never just
+    // this one file (it also adds a new plan/tasks.d/ shard), so this narrower scope would refuse
+    // a genuinely-new proposal whose feedback-file edit happens to look identical to a sibling's.
+    if (decision.action !== "propose") {
+      const scopeFiles = triageDeclaredScope(feedbackId);
+      let liveDiffFiles: string[] | undefined;
+      try {
+        execFileSync("git", ["-C", worktreePath, "fetch", "origin", "main"], { stdio: "inherit" });
+        liveDiffFiles = execFileSync(
+          "git",
+          ["-C", worktreePath, "diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles],
+          { encoding: "utf8" },
+        )
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean);
+      } catch (e) {
+        // Fail OPEN, never a false positive (mirrors buildBaseProofDir's own "unresolvable base ⇒
+        // no staleness signal"): an unreadable/unfetchable live tip is never treated as "already done".
+        log("triage.live_scope_check_error", { error: String((e as Error)?.message ?? e) });
+      }
+      const disposition = liveDiffFiles !== undefined ? triageEmptyScopeDisposition(liveDiffFiles, scopeFiles) : undefined;
+      if (disposition?.action === "close") {
+        log("triage.already_done", { scope: scopeFiles });
+        say(
+          `triage PR's declared scope (${scopeFiles.join(", ")}) is EMPTY against the LIVE origin/main — ` +
+            `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`,
+        );
+        execFileSync("gh", ["pr", "close", prUrl, "--comment", disposition.comment!], { stdio: "inherit" });
+        worktreeRemove(repoDir, worktreePath);
+        return 0; // terminal, deliberate — the work is already done, not a failure (design (v))
+      }
+    }
+
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
     // W1-T230: reviewCommand resolved this PR's task id off its own
@@ -18811,9 +18881,12 @@ async function triageCommandLocked(
     throw e;
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
-    // The id is now either ON an open PR (where the mint's openPrs source sees it) or unused and
-    // free to reissue. Either way holding the file longer protects nothing.
-    reservationHandle?.release();
+    // Every LOCAL id is now either ON an open PR (where the mint's openPrs source sees it) or
+    // unused and free to reissue. Either way holding the file longer protects nothing — release
+    // the WHOLE block, used or not, exactly as `rmd plan`'s block does (a hole is not a defect;
+    // see task-id-reservation.ts's own doctrine). The REMOTE half is never released — nothing
+    // releases a remote reservation, deliberately (same module, same doctrine).
+    localIdBlock?.releaseAll();
   }
 }
 
@@ -18928,11 +19001,35 @@ export async function planCommand(
     planIdBlock = reserveTaskIdBlock(mint.n, PLAN_MAX_NEW_TASKS, taskIdReservationsDir(config.root), {
       info: { purpose: `rmd plan --mode=${mode} (run ${runId})` },
     });
-    const reservedIds = planIdBlock.ids.map((n) => `W1-T${n}`);
+    // W1-T949: AND RESERVE THE SAME BLOCK WHERE EVERY OTHER WRITER CAN SEE IT — the local block
+    // above resolves under this process's own `config.root`, a worker-sandbox path discarded on
+    // exit; two writers on two hosts never observe each other there. `reserveTaskIdBlockRemote`
+    // is the remote-substrate twin of `reserveTaskIdBlock`, one ref pushed per reserved id. An
+    // unreachable origin THROWS (caught below, a durable ledger event, never just a stringified
+    // message) rather than falling through — the paid worker is still unstarted when it does.
+    // Same closure-narrowing reason as the triage lane above.
+    const planReserveFrom = planIdBlock.ids[0];
+    const planRemoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () =>
+      reserveTaskIdBlockRemote(
+        planReserveFrom,
+        PLAN_MAX_NEW_TASKS,
+        gitRemoteRefReserver({
+          // Same `spawnSync`-over-`worktreePath` shape triage's own remote reserve uses — a
+          // rejected push is NORMAL here (contention), so a throwing runner would make it
+          // indistinguishable from an unreachable remote.
+          run: (args) => {
+            const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+            return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+          },
+        }),
+      ),
+    );
+    const reservedIds = planRemoteIdBlock.taskIds;
     log("plan.id_minted", {
       reserved: reservedIds,
       mint_id: mint.id,
       reserved_above_mint: planIdBlock.ids[0] !== mint.n,
+      remote_refs: planRemoteIdBlock.refs,
       max_seen: mint.maxSeen,
       degraded: mint.degraded.map((d) => d.source),
     });
@@ -19643,7 +19740,33 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
             idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
               info: { purpose: `rmd approve ${payload.proposalId} (run ${runId})` },
             });
-            return idBlock;
+            // Same closure-narrowing reason as the triage and plan lanes.
+            const approveReserveFrom = idBlock.ids[0];
+            // W1-T949: AND RESERVE THE SAME BLOCK REMOTELY — this closure is the ONLY thing
+            // `materializeDraftTaskIds` (lib/inbox.ts) sees; `reserveBlock` there is an INJECTED
+            // callback (`DraftTaskIdMintDeps.reserveBlock`), so the remote half threads through
+            // it right here without inbox.ts needing to know the local store even exists. Caught
+            // and re-thrown here (rather than left to inbox.ts's own catch, which folds ANY
+            // reservation failure into a free-text `reason` string) so a genuine
+            // `TaskIdReservationError` still leaves a durable, structured ledger event before
+            // `materializeDraftTaskIds` reduces it to prose.
+            const remote = withIdReservationLogging(
+              log,
+              "approve.id_reservation_failed",
+              () =>
+                reserveTaskIdBlockRemote(
+                  approveReserveFrom,
+                  count,
+                  gitRemoteRefReserver({
+                    run: (args) => {
+                      const r = spawnSync("git", ["-C", worktreePath as string, ...args], { encoding: "utf8" });
+                      return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+                    },
+                  }),
+                ),
+              { proposal_id: payload.proposalId },
+            );
+            return { ids: remote.ids };
           },
         },
       );

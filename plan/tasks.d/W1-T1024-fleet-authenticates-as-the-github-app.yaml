@@ -1,0 +1,174 @@
+- id: W1-T1024
+  title: "THE FLEET AND THE OPERATOR'S SESSIONS SHARE ONE GITHUB RATE-LIMIT POOL AND A SESSION CAN STARVE THE FLEET — daemon.quota read graphql remaining 0 while core held 4289, the HARD_STOP escalation then failed because gh issue create is itself graphql, and it has recurred on three separate days: authenticate the fleet as the installed GitHub App, whose pool is measured separate, by refreshing the token the existing consumers already read at call time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    Measured on the Azure host over the deduped ledger union (per-form control: `run.start` 964
+    plain / 178 live / 0 `.gz`). Every count is a query; the symbol names are the check.
+
+    (1) THE INCIDENT, AND IT IS NOT A ONE-OFF. `daemon.quota` at 2026-08-19T11:31:48Z read
+    `bucket: graphql, remaining: 0` while the same second's `core` row read `remaining: 4289` — the
+    two buckets are independent and only one was exhausted. Two seconds later, at 11:31:50Z,
+    `escalation.failed` recorded `class: HARD_STOP` with
+    `Command failed: gh issue create … [HARD_STOP] daemon: gh api rate_limit graphql bucket
+    exhausted`. **THE ESCALATION CHANNEL IS ITSELF GRAPHQL, SO IT FAILS ON EXACTLY THE CONDITION IT
+    EXISTS TO REPORT.** The system diagnosed itself perfectly and had no way to say so.
+    `escalation.failed` holds 10 rows and `daemon.quota_exhausted.escalated` 7 — the same
+    HARD_STOP shape recurs on **2026-08-16, 2026-08-17 and 2026-08-19**. Meanwhile
+    `escalation.issue_opened`'s newest row is 2026-08-19T02:25:39Z, so nothing has escalated
+    successfully since.
+
+    (2) THE SPEND IS NOT THE FLEET'S. The exhausted pool belongs to the user account, and the
+    daemon's own graphql traffic in that window is negligible against a 5,000 limit. The drain is
+    concurrent interactive lanes on the same account. **A SEPARATE POOL IS THE FIX; RATE-LIMITING
+    THE FLEET HARDER IS NOT** — the fleet is not the spender.
+
+    (3) THE CREDENTIAL EXISTS AND ITS SEPARATION IS MEASURED, NOT ASSUMED. An installation token
+    minted minutes after the user pool was exhausted read `core 5000/5000` and `graphql 5000/5000`.
+    Both build inputs are confirmed in the running container rather than carried from a brief:
+    the private key is readable as `node:node`, mode `600`, 1675 bytes with a PEM header (content
+    never printed, and never to be), arriving through the existing `~/.claude` bind mount with **NO
+    MOUNT CHANGE**; and `typeof crypto.sign === "function"` under Node v22.23.2, so the JWT signs
+    in-process — **NO `openssl` SHELL-OUT AND NO NEW DEPENDENCY.**
+
+    (4) AND THE HARD PART — THE HOURLY EXPIRY — TURNS OUT TO HAVE A SEAM ALREADY. Installation
+    tokens live one hour; `GH_TOKEN` today is a process-start env var. But **NOTHING CAPTURES IT AT
+    MODULE LOAD.** Word-bounded, `GH_TOKEN` has three runtime sites in `src/`:
+      `src/lib/env.ts`      — a name in `ALLOWLIST`, copied from `process.env` AT WORKER SPAWN
+      `src/lib/review.ts`   — `{ ...process.env, GH_TOKEN: reviewerToken }`, spread AT CALL TIME
+      `src/lib/project-init.ts` — a generated workflow template, not a runtime read
+    And git does not read it from source at all: `deploy/entrypoint.sh` installs a credential helper
+    stored with `$GH_TOKEN` **UNEXPANDED**, which git's own shell expands per invocation — its own
+    comment says *"the token is read from the environment AT CALL TIME, so it is never written
+    anywhere."* So refreshing `process.env.GH_TOKEN` inside the daemon reaches every `gh` spawn,
+    every `git` push, and every worker, **WITH ZERO CALL-SITE CHANGES.**
+
+    (5) WHICH MEANS THE BAKED PATH DOES NOT MOVE. `deploy/entrypoint.sh` needs no edit, so this
+    ships on the mount and needs **NO `acr-build` DISPATCH**. That removes the image-drift hazard
+    from this task's path entirely. (The general rule still holds for anything that does touch the
+    entrypoint; it simply does not apply here.)
+
+    (6) AUTHORING AS THE APP BREAKS NO CREDIT PATH, CHECKED WITH A CONTROL. All three paths are
+    string matches, none keys on author: the anchored `Remudero-Task: <id>` trailer reads the PR
+    BODY; the head-branch path is `/^run-(.+)-\d+$/` against `headRefName`; the subject-suffix path
+    reads the commit subject. In `src/lib/status.ts` — the module that owns credit — `author` reads
+    **0** occurrences and `login` reads **1**, and that one is an auth-failure classifier regex
+    (`bad credentials|… |gh auth login|401 unauthorized`), against a control of **32**
+    `headRefName` occurrences in the same file. The query can see the file; the author is simply
+    not consulted.
+
+    (7) AND THE REVIEW PATH IS SAFE TODAY FOR A STRUCTURAL REASON. `remudero-review` is a COMMIT
+    STATUS — `REVIEW_CONTEXT` posted to `…/statuses/<sha>` — **not a pull-request approval.** GitHub's
+    "authors cannot approve their own pull requests" rule governs approvals, so it does not bite
+    even when the PR and the status come from the same App. The only
+    `required_pull_request_reviews: { required_approving_review_count: 1 }` in the tree is inside
+    `src/lib/project-init.ts`, the template this repo GENERATES for new projects — not this repo's
+    own live protection. **Under W1-T204's path-scoped rule it stops being neutral and becomes the
+    enabler**: a distinct authoring actor is precisely what makes that separation expressible, which
+    is what W1-T990 (#2136) files. **BOTH ARE CITED AND NEITHER IS RE-FILED.**
+  design: |
+    (i) MINT IN-PROCESS AND REFRESH INTO `process.env.GH_TOKEN`. A new module exporting
+    `refreshInstallationToken` signs the App JWT with
+    `crypto.sign` (no `openssl`, no dependency), exchanges it for an installation token, and the
+    daemon command refreshes it on a margin well inside the one-hour life. Every existing consumer
+    picks it up because all three read at call or spawn time (rationale 4). **NO CALL SITE CHANGES,
+    NO NEW CHOKE POINT, AND `ghJson`/`paceGhEntry` ARE NOT THE SEAM** — `git push` never passes
+    through either, and `execFileSync` is invoked from dozens of modules, so a per-call mint would
+    have to be threaded everywhere. The env var is the one place they already agree.
+
+    (ii) THE APP ID, INSTALLATION ID AND KEY PATH ARE CONFIG, NEVER SOURCE. Three env vars, one of
+    them a PATH to the mounted key — the same shape `GH_TOKEN` has today. **NO SECRET IN THE TREE,
+    NO KEY CONTENT IN ANY LOG OR LEDGER ROW, AND NO TOKEN VALUE EITHER — not even a prefix.** A
+    ledger row may name the bucket, the expiry and the outcome; never the material.
+
+    (iii) EXPIRY MID-RUN IS THE FAILURE THIS MUST NOT CREATE, AND THE WORKER IS THE EXPOSED CASE.
+    The daemon can refresh itself on a margin, but a worker receives the token **at spawn** through
+    `ALLOWLIST` and holds that copy for its whole run. Runs exceeding an hour are ordinary here, so
+    a long worker can outlive its token and take a **401 mid-push — strictly worse than the rate
+    limit this replaces.** The design must state which it chose and why: refresh margin alone does
+    not cover the worker, so either the worker re-reads a credential file, or the push path retries
+    once on 401 with a fresh mint, or long runs keep the static fallback. **AN IMPLEMENTER WHO
+    LEAVES THIS UNSTATED HAS NOT FINISHED THE TASK.**
+
+    (iv) FALL BACK TO `GH_TOKEN`, NEVER REFUSE TO BOOT. Clock skew, a revoked installation, an
+    unreadable key or a failed exchange must leave the existing static token in place and ledger a
+    named reason. **REFUSING AT BOOT IS THE LARGER BLAST RADIUS**: a plan-integrity failure did
+    exactly that last night — a duplicate task id made `loadPlan` refuse `origin/main`, and
+    `lint-plan` reported *"the base plan at origin/main does not itself load … the base needs
+    repairing"* while every plan-reading verb degraded with it. A credential path must not acquire
+    that property. Degrade to the old pool, say so, keep running.
+
+    (v) PERMISSIONS ARE SUFFICIENT FOR EVERY HOT PATH, AND THE GAPS ARE NAMED. Swept from the
+    fleet's real call shapes. Covered by the grant: `pulls*` and `pulls/<n>/files` (Pull requests),
+    `statuses/<sha>` and `commits/<sha>/status` (Commit statuses), `commits/<sha>/check-runs`
+    (Checks), `issues?state=open` and `milestones` (Issues), `contents/<path>`, `git/ref*` and
+    `compare/` (Contents). **FIVE FALL OUTSIDE IT:**
+      `branches/<b>/protection`                     — Administration, granted NONE
+      `branches/<b>/protection/required_status_checks` — Administration, granted NONE
+      `code-scanning/alerts`, `dependabot/alerts`, `secret-scanning/alerts` — alert scopes, not granted
+    The three alert endpoints live in `src/lib/ops.ts` and feed the alert lane, which is **DARK**:
+    `alert-lane.decided`, `alert-lane.dispatched` and `alert-fix.dispatching` each read **0** rows
+    against a control of 178 `run.start`. The protection reads are the ones on a live path
+    (`src/lib/status.ts`), and one of them **ALREADY 403s** under today's container PAT and fails
+    soft — so the App does not regress it. **AN IMPLEMENTER MUST CONFIRM THE SOFT-FAIL HOLDS FOR A
+    403 FROM THE APP TOO**, because a missing scope presents as a 403 that reads like a rate limit,
+    which is the confusion this session has already paid for twice.
+
+    (vi) SEPARATION IS THE POINT, SO THE INTERACTIVE LANES STAY WHERE THEY ARE. **DO NOT MOVE
+    OPERATOR SESSIONS ONTO THE APP.** The fleet gets its own pool precisely so a session cannot
+    drain it; putting both back on one credential rebuilds the defect under a new name.
+
+    (vii) OUT OF SCOPE, NAMED. The escalation channel's own graphql dependence — a HARD_STOP that
+    cannot be delivered is a real second defect and a separate filing; this task makes it rarer, not
+    impossible. W1-T204's ruleset configuration and W1-T990's authoring-identity disposition are
+    cited, not absorbed. No change to `paceGhEntry`, the pacer's budget, or `autoTriage` cadence.
+  acceptance:
+    - claim: "a refreshed installation token reaches a spawned child through the environment without any call site change"
+      proof: "unit test: W1-T1024: a refreshed token reaches a spawned child through the environment"
+    - claim: "the jwt is signed in process without shelling out to openssl"
+      proof: "unit test: W1-T1024: the app jwt is signed in process without an openssl shell out"
+    - claim: "a failed exchange leaves the existing static token in place and ledgers a named reason"
+      proof: "unit test: W1-T1024: a failed exchange falls back to the static token with a reason"
+    - claim: "no ledger row or log line carries the private key or the token value"
+      proof: "unit test: W1-T1024: no ledger row or log line carries the key or token value"
+    - claim: "the refresh happens on a margin strictly inside the one hour token life"
+      proof: "unit test: W1-T1024: the refresh margin is strictly inside the token life"
+    - claim: "the daemon command actually calls the refresher so the module cannot ship unreached"
+      proof: "grep: refreshInstallationToken( in src/run-task.ts"
+  risk: high
+  origin: "oper#github-app-credential-2026-08-19"
+  plan_refs: ["W1-T990", "W1-T204", "W1-T203", "W1-T492"]
+  files: [src/lib/github-app.ts, src/run-task.ts, test/github-app.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — the declared paths reach
+    two concerns (github-app, run-task) and `sizingViolation` refuses that at medium. Decomposition
+    is declined with a reason: a credential module with nothing supplying it to the process is the
+    ships-unwired shape this fleet has already measured, so the mint and its wiring are one change.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT. `GH_TOKEN`'s three runtime sites are
+    `src/lib/env.ts`, `src/lib/review.ts` and `src/lib/project-init.ts` — **NONE IS DECLARED,
+    because none changes**: the refresh works precisely by leaving every reader alone. The new
+    module is declared because it is the deliverable; `src/run-task.ts` is declared because the
+    daemon command is where a process-lifetime refresher starts. **`src/run-task.ts` COSTS 232
+    SHARDS OF SERIALIZATION (W1-T471) AND THAT IS ACCEPTED IN WRITING** — the refresher must live in
+    the daemon's own process for `process.env` to mean anything to its children, and there is no
+    narrower path that satisfies that. **`deploy/entrypoint.sh` IS NOT DECLARED**: the credential
+    helper already re-reads the variable per call, so it needs no edit, and this therefore ships on
+    the mount with no image rebuild.
+
+    TWO CITATIONS FROM THE ORIGINATING BRIEF WERE CHECKED AND DO NOT HOLD, SO THEY ARE NOT CARRIED.
+    W1-T1018 was cited as filing the boot-refusal blast radius; it is
+    `W1-T1018-review-retry-budget-should-be-backoff.yaml` and files the review-orphan cap counting
+    distinct pushed heads. W1-T1021 was cited as filing image drift; it has a reservation ref but
+    **no shard and no declaration** (filename 0, declared 0, against a control of 1 for W1-T1018),
+    so it files nothing yet. Design (iv) therefore cites the observed `loadPlan` refusal directly
+    rather than a shard id that does not carry it.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive with `git grep -woF <symbol> -- src/`, the per-form
+    ledger read, and `docker exec … stat` for the key's mode — never by quoting the numbers here.

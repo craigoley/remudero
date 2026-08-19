@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
+import { diffEmptyAgainstScope } from "./review.js";
 import { feedbackEntryRepoPath } from "./feedback.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
@@ -145,8 +146,23 @@ export function missingFeedbackMessage(
  * old "run this grep and pick the next integer" instruction was an instruction it could not
  * execute, leaving id selection to eyeballing the files it happened to read. When present,
  * the prompt HANDS the id over instead of describing how to compute one.
+ *
+ * `additionalReservedIds` (W1-T949 design (ii)): the REST of a reserved block, beyond
+ * `mintedId` itself — the harness now reserves a block up front (`reserveTaskIdBlock` +
+ * `reserveTaskIdBlockRemote`) exactly as `rmd plan` already does, so a multi-task filing has
+ * every id it might use ALREADY held on the shared remote, not merely `mintedId`. As long as
+ * this prompt told the worker to "number them upward" instead of naming the reserved set, a
+ * reserved block and a filed set could diverge by construction — the harness could hold five
+ * ids while the worker invented a sixth. Defaults to empty so every existing caller that passes
+ * only `mintedId` (a single reservation, or none at all) is BYTE-IDENTICAL to before this
+ * parameter existed; only a caller that actually reserved more states the fuller instruction.
  */
-export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: string): string {
+export function triagePrompt(
+  entry: FeedbackEntry,
+  runId: string,
+  mintedId?: string,
+  additionalReservedIds: string[] = [],
+): string {
   return [
     "You are the REMUDERO ARCHITECT running an INTAKE TRIAGE (MASTER-PLAN §7B) over one captured",
     "feedback entry. You ride a HIGHER tier than implement workers (G-17). You do NOT have a Bash",
@@ -213,8 +229,20 @@ export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: str
           `  ID SELECTION for any NEW task: USE EXACTLY \`${mintedId}\` — the harness already minted it`,
           "  from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, and the ids open plan",
           "  PRs have already minted. Do NOT pick your own id and do NOT 'correct' this one: a colliding",
-          "  id is refused pre-push, so a wrong pick means NO proposal opens. If the feedback needs MORE",
-          `  than one new task, number them upward from ${mintedId} (${mintedId}, then the next integers).`,
+          "  id is refused pre-push, so a wrong pick means NO proposal opens.",
+          ...(additionalReservedIds.length > 0
+            ? [
+                `  The harness has ALSO RESERVED ${additionalReservedIds.join(", ")} for this run, on the`,
+                "  SAME shared remote store — if the feedback needs MORE than one new task, use them IN",
+                "  THIS ORDER after the first. Do NOT invent an id yourself and do NOT renumber past this",
+                "  reserved set: an id you choose yourself is unreserved, and another lane may be filing",
+                "  it at this very moment. Filing fewer than the reserved count is normal and costs",
+                `  nothing; you may file AT MOST ${1 + additionalReservedIds.length} new task(s) this run.`,
+              ]
+            : [
+                `  If the feedback needs MORE than one new task, number them upward from ${mintedId}`,
+                `  (${mintedId}, then the next integers).`,
+              ]),
         ]
       : [
           "  ID SELECTION for any NEW task: ids live in BOTH plan/tasks.yaml AND plan/tasks.d/*.yaml",
@@ -432,6 +460,56 @@ export function nonPlanFilesInDiff(diff: string): string[] {
 /** Whether a diff carries the `feedback#<id>` provenance token the PROPOSED contract requires. */
 export function diffCitesFeedback(diff: string, feedbackId: string): boolean {
   return diff.includes(`feedback#${feedbackId}`);
+}
+
+// ── W1-T963: the empty-diff-triage-merge incident (#2075/#2077/#2078) ───────────────────────────
+//
+// Three triage PRs for the SAME feedback entry merged and PASSED REVIEW despite changing nothing:
+// `gh pr diff`/`nonPlanFilesInDiff` above compare a triage branch against its OWN (frozen,
+// fork-point) merge-base, so they stay non-empty even once a SIBLING triage PR for the identical
+// entry has already landed the SAME change on `origin/main` — the branch's own history never
+// shows that, only a diff against the LIVE default branch tip does. See `diffEmptyAgainstScope`'s
+// own doc (lib/review.js) for the structural check; this is the triage-specific SCOPE + DISPOSITION
+// wired around it.
+
+/**
+ * The declared SCOPE of a `no_task`/`grill` triage decision — the ONE path its entire
+ * contribution is: the feedback entry's own status flip. Deliberately NOT used for `propose`
+ * (its contribution also includes a NEW plan/tasks.d/ shard, so an empty diff against this
+ * narrower scope would never discriminate a genuinely-new proposal from a duplicate one).
+ */
+export function triageDeclaredScope(feedbackId: string): string[] {
+  return [feedbackEntryRepoPath(feedbackId)];
+}
+
+/** The terminal outcome a triage merge gate takes once it knows whether the LIVE diff against
+ *  {@link triageDeclaredScope} is empty — CLOSE (never merge; design (v): a refusal that leaves
+ *  the PR open forever is not the outcome either), or PROCEED to the ordinary review/arm gate. */
+export interface TriageEmptyScopeDisposition {
+  action: "close" | "proceed";
+  /** Present only for `action: "close"` — the `gh pr close --comment` text naming WHY. */
+  comment?: string;
+}
+
+/**
+ * Decide whether to CLOSE this triage PR (its declared scope is empty against the LIVE default
+ * branch — a sibling already did the work) or let it PROCEED to the ordinary review/arm gate.
+ * Pure: `liveDiffFiles` is the caller's OWN fresh `git diff --name-only origin/main HEAD -- <scope>`
+ * read (never this function's concern — a live git read cannot be pure), so this is trivially
+ * testable without spawning git at all.
+ */
+export function triageEmptyScopeDisposition(
+  liveDiffFiles: readonly string[],
+  scopeFiles: readonly string[],
+): TriageEmptyScopeDisposition {
+  if (!diffEmptyAgainstScope(liveDiffFiles, scopeFiles)) return { action: "proceed" };
+  return {
+    action: "close",
+    comment:
+      `rmd triage: closing, not merging — this PR's diff against the current \`origin/main\` is empty ` +
+      `for its declared scope (${scopeFiles.join(", ")}); a sibling triage PR already landed this ` +
+      `same change (W1-T963).`,
+  };
 }
 
 // ── Commit message / PR body authorship (harness-owned, deterministic) ──────────────────────

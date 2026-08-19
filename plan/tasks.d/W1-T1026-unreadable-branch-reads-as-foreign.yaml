@@ -1,0 +1,184 @@
+- id: W1-T1026
+  title: "AN UNREADABLE HEAD REF AND A FOREIGN ONE REACH THE SAME TERMINAL DISPOSITION, SO A GRAPHQL EXHAUSTION MAKES A RUN ABANDON ITS OWN FINISHED PR — 16 of 29 instances were unreadable, 13 of those on the run's OWN run-<task>-<epoch> head, and seven W1-T1 runs closed unmerged in one day; the VERDICT is correct and must not change, the DISPOSITION is the defect"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    MEASURED 2026-08-19 AT origin/main 0b333622, over the ledger union (all three forms, per-form
+    control below). No `/rate_limit` call was made.
+
+    (1) THE COMPOSITION IS THE DEFECT, AND BOTH HALVES ARE CORRECT ALONE.
+    `checkPrOwnership` (`src/run-task.ts`) decides in three lines:
+      `const claimedBranch = gateway.headRefName(prUrl) ?? null;`
+      `if (claimedBranch === ownBranch) return null;`
+      ... otherwise `verdict: "pr_attribution_failed"`.
+    `null !== ownBranch`, so an unresolved read falls through to the failure. THAT IS DELIBERATE and
+    its own doc says so: "including an unresolved head ref, which counts as NOT owned rather than
+    assumed honest."
+    `ghPrHeadGateway` resolves the field with `ghJson(["pr","view",prUrl,"--json","headRefName"])`
+    — `gh pr view --json` is GRAPHQL — and wraps it in `catch { return undefined }`. That is ALSO
+    deliberate: "a `gh` hiccup fails CLOSED (never merged) rather than silently assuming the claim
+    is honest."
+    FAIL-SOFT READ + FAIL-CLOSED GUARD = A RATE LIMIT IS INDISTINGUISHABLE FROM A HOSTILE BRANCH.
+    Neither half is wrong; the composition loses finished work.
+
+    (2) THE TRANSPORT IS THE ONE BUCKET KNOWN TO EXHAUST HERE. CLAUDE.md records it as a standing
+    condition of this account — GraphQL exhaustion is "frequent on this account while REST/core
+    stays healthy" — and it exhausted twice on 2026-08-18. So the guard's only reader is the
+    transport most likely to be unavailable, while a REST reader for the SAME FIELD sits in the
+    same codebase (see design (i)).
+
+    (3) THE POPULATION, DEDUPED ON THE FULL LINE. Per-form coverage control first: the token reads
+    9,971 / 28 / 4 across `.gz` / plain-rotation / live, with `run.start` on the same invocation at
+    259,405 / 1,314 / 200 — every form readable. 10,003 RAW LINES DEDUPE TO 74 DISTINCT, which is
+    why a raw count of this corpus is meaningless.
+      - 55 distinct rows carry `verdict=pr_attribution_failed`; 26 are DAEMON echo rows with every
+        field null, leaving 29 REAL per-run instances (2026-07-19 .. 2026-08-13), $83.36 of worker
+        spend.
+      - 16 of 29 (55%) had `claimed_branch: null` — UNREADABLE. 13 of 29 (45%) had a readable
+        branch and were genuine mismatches: 9 a stale same-task older run, 4 a foreign branch
+        (`ws1/t1-proto-runner`, `fix/w1t64-both-tests`, `feat-api-key-overflow`,
+        `w1-t449-arm-site-attribution-ledger-line`). THE GUARD DOES REAL WORK AND MUST KEEP DOING IT.
+      - OF THE 16 UNREADABLE, 13 CARRIED A HEAD REF OF THE FORM `run-<task>-<epoch>` — the run's
+        OWN branch. The fleet refused its own work because a read failed.
+      - 9 of the 16 merged later anyway (recovered by a subsequent run or a human). SEVEN CLOSED
+        UNMERGED — #253, #256, #257, #261, #262, #263, #265, every one W1-T1 on 2026-07-19 on its
+        own `run-W1-T1-*` branch, ~$12.30 of finished work abandoned in a single day across seven
+        consecutive runs.
+
+    (4) W1-T372 PREDICTED THIS IN TERMS. Its escalation text reads: "a run that finishes its work
+    and then cannot open or update its own PR at this bucket's exhaustion loses that work silently."
+    The prediction is now measured, and it is not a one-off.
+
+    (5) W1-T62 IS WHY THE VERDICT MUST NOT CHANGE. Run W1-T54b-1784151420811 was ledgered
+    `verdict=merged` via PR #80 — Dependabot's own PR, not that run's — because attribution had no
+    ownership check at all. Assuming honest on an unreadable read restores exactly that inversion.
+    THIS TASK MUST NOT PROPOSE IT (design (v)).
+
+    (6) A SECOND COST, RECORDED AND DELIBERATELY NOT SCOPED IN.
+    `NON_HALTING_VERDICTS` (`src/lib/drain.ts`) is
+    `new Set(["blocked_ci","no_pr","blocked_illformed","task_already_merged"])` and
+    `isHalting(result)` is `!NON_HALTING_VERDICTS.has(result.verdict)`. `pr_attribution_failed` is
+    NOT a member, so ONE transient GraphQL failure HALTS THE WHOLE DRAIN PASS. That is a drain
+    policy question with its own blast radius; see design (vi).
+
+    (7) THERE IS NO RETRY ANYWHERE ON THIS PATH. `grep -cE 'retry|attempt|backoff'` over the whole
+    region from `PrHeadGateway` through `checkPrOwnership` reads 0, and all FOUR call sites
+    (`src/run-task.ts`, the implement / retro / triage / propose paths) do the identical three
+    things: `log`, `say`, `return`. No re-read, no re-queue, no escalation.
+  design: |
+    SCOPE IS THE DISPOSITION, NEVER THE VERDICT. A PR whose ownership cannot be established must
+    still not be credited, stamped, gated, reviewed or armed. What must change is that
+    "I could not read it" stops being recorded and acted on as "it is someone else's".
+
+    (i) THE TWO CANDIDATE REMEDIES, SIZED AGAINST THE TREE RATHER THAN ESTIMATED.
+      (a) A REST SECOND READ before concluding unreadable. `ghPrHeadGateway` is TWELVE LINES in
+          `src/run-task.ts`. `singlePrRestArgs(owner, repo, prNumber)` ALREADY EXISTS in
+          `src/lib/open-prs-rest.ts` and returns `["api", "repos/<o>/<r>/pulls/<n>"]`; `run-task.ts`
+          ALREADY IMPORTS that module (5 references). So the change is one function body plus a
+          falsifier — no new dependency, no signature change, no new verdict, no consumer audit.
+      (b) A DISTINCT NON-TERMINAL DISPOSITION. Requires a new member in the `RunResult` verdict
+          union (`src/lib/run-result.ts`), a membership decision in `NON_HALTING_VERDICTS`
+          (`src/lib/drain.ts`), and an audit of the 31 references to the existing verdict spread
+          across 18 FILES (`run-task.ts`, `drain.ts`, `status.ts`, `block-reason.ts`, `retro.ts`,
+          `run-result.ts`, eleven test files and one fixture corpus).
+      MEASURED ANSWER: (a) IS THE SMALLER CHANGE BY A WIDE MARGIN — one function against a
+      six-source-file verdict surface.
+
+    (ii) AND THE SIZING IS NOT THE WHOLE ANSWER, WHICH THIS SHARD SAYS RATHER THAN HIDES. (a)
+    closes the MEASURED population, because the documented failure mode is GraphQL exhausted while
+    REST stays healthy (rationale 2). It does NOT close the case where BOTH transports are
+    unavailable: there the verdict is still terminal and still halts. (b) is the only one that
+    fixes that residue, and it is the larger change. They compose; (a) does not foreclose (b).
+
+    (iii) THE ACCEPTANCE CRITERIA ARE ABOUT BEHAVIOUR, NOT ABOUT WHICH REMEDY. Every criterion
+    below is satisfiable by (a), by (b), or by both. An implementer who reads (i) as an instruction
+    has misread it: (i) is evidence for the operator and for the size estimate, not a choice made
+    here.
+
+    (iv) THE FALSIFIER MUST SEPARATE THE TWO CAUSES IN ONE RUN. A test that only proves the
+    unreadable path recovers would pass on code that has stopped refusing foreign branches
+    altogether — which would re-open W1-T62. Criterion 2 requires a READABLE FOREIGN branch to
+    still reach `pr_attribution_failed`, in the same invocation as criterion 1.
+
+    (v) EXPLICITLY FORBIDDEN.
+      - ASSUMING HONEST ON AN UNREADABLE READ. Rationale (5); this is the inversion the guard
+        exists to prevent and no amount of transient-failure pressure justifies it.
+      - REMOVING OR WEAKENING THE FAIL-CLOSED VERDICT for a branch that reads and differs.
+      - MAKING `catch { return undefined }` THROW instead. The fail-soft read is load-bearing for
+        every other caller; the fix belongs after the read, not inside it.
+
+    (vi) EXPLICITLY OUT OF SCOPE.
+      - `NON_HALTING_VERDICTS` MEMBERSHIP — rationale (6). Whether an attribution failure should
+        halt a drain pass is a separate policy question with its own blast radius, and folding it
+        in would put a drain-policy change inside a read-reliability fix.
+      - THE OTHER THREE CALL SITES' surrounding flow (retro / triage / propose). They share
+        `checkPrOwnership` and inherit the fix; none of their own logic changes.
+      - RECOVERING THE ALREADY-ABANDONED PRs, including #2199 — see the note.
+  acceptance:
+    - claim: "an unreadable head ref no longer reaches the same terminal disposition as a foreign one"
+      proof: "unit test: W1-T1026: an unreadable head ref does not reach the foreign-branch disposition"
+    - claim: "a readable branch that is genuinely not this run's own still fails closed, in the same run"
+      proof: "unit test: W1-T1026: a readable foreign branch still fails closed"
+    - claim: "the run's own branch is still credited when the head ref reads correctly"
+      proof: "unit test: W1-T1026: the run's own branch is still recognised as owned"
+    - claim: "the unreadable path is exercised against a reader that fails the way the live transport fails"
+      proof: "unit test: W1-T1026: the unreadable path is driven by a throwing reader"
+  risk: high
+  origin: "oper#attribution-unreadable-disposition-2026-08-19"
+  plan_refs: ["W1-T62", "W1-T372", "W1-T952", "W1-T471"]
+  files: [src/run-task.ts, test/attribution-unreadable-branch.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    #2199 IS LIVE EVIDENCE AND IS NAMED, NOT ABSORBED. W1-T952's run opened it at 11:56:14Z on
+    2026-08-19 and immediately refused it — `pr_attribution_failed — claimed PR #2199 (branch
+    unresolved)`. Its head ref is `run-W1-T952-1787139310786`, WHICH IS THE RUN'S OWN BRANCH, and it
+    reads cleanly now: 4 files, +482/-6 across `src/lib/review.ts`, `src/run-task.ts`,
+    `test/acceptance-block-diagnostics.test.ts`, `test/run-task.test.ts`, with an anchored
+    `Remudero-Task:` trailer present. `remudero-review` is ABSENT (never reviewed), `auto_merge` is
+    none (never armed), and W1-T952 reads `status: queued` with zero `(W1-T952)` subject citations
+    on main. ITS `ci` IS RED AT THE PLAYWRIGHT CHROMIUM INSTALL STEP — an infrastructure failure,
+    not a defect in its diff. THE WORK IS RECOVERABLE RATHER THAN DESTROYED: the branch shape and
+    the trailer mean both credit paths fire the moment it merges. RECOVERING IT IS NOT THIS TASK —
+    this task stops the next one being abandoned.
+
+    `src/run-task.ts` IS DECLARED AND THE COST IS ACCEPTED BY RULING, NOT OVERLOOKED. W1-T471
+    measured that this file serialises roughly 209 of 349 shards, and DECISIONS.md
+    ("2026-08-18 — RULING: `src/run-task.ts` stays one file and the fleet accepts ONE EFFECTIVE
+    DISPATCH LANE (W1-T471)") settled it: splitting refused, re-scoping refused, one lane accepted.
+    `ghPrHeadGateway` and `checkPrOwnership` both live in that file, so there is no narrower home.
+
+    A NEW TEST FILE IS DELIBERATE. The obvious host, `test/run-task.test.ts`, already invokes
+    `checkPrOwnership` nine times — but the house rule is that a coverage-load-bearing test goes in
+    its own file, because that one crashes at FILE level under `--experimental-test-coverage` and
+    zeroes the record for everything in it. `test/attribution-unreadable-branch.test.ts` does not
+    exist at 0b333622; the path is a forward reference, and no symbol name is guessed.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus acceptance text, and this set
+    crosses `src/` and `test/`. Blast radius argues DOWN: one twelve-line function changes, no
+    verdict is added, no consumer is audited, and the failure mode of a wrong fix is a refusal that
+    is already the status quo.
+
+    ID PROVENANCE — THREE GIT SURFACES FIRST, THEN THE OPEN-PR SURFACE, ZERO `/rate_limit` CALLS.
+    W1-T1026 read 0 on all four at 0b333622: `refs/rmd-id/*`, shard FILENAMES under
+    `plan/tasks.d/` on origin/main, DECLARED ids under `plan/`, and every open PR's title AND file
+    list. Positive controls: `refs/rmd-id/W1-T1025` and `refs/rmd-id/W1-T1024` each read 1.
+    Mention-trap control: `W1-T999999` reads 14 plan MENTIONS but 0 filenames and 0 refs — the
+    existence test is the filename and the anchored declaration, never a mention.
+    THE MINT USED THE PLAIN REFSPEC WITH EVERY VARIABLE BRACED (`"${ANCHOR}:refs/rmd-id/${ID}"`) —
+    zsh's `:r` modifier mangled an unbraced one on 2026-08-18 into a failure that reads exactly like
+    an allocation refusal. Orphan payload over the empty tree
+    (4b825dc642cb6eb9a060e54bf8d69288fbee4904), nonce
+    Craigs-Mac-mini-18450-1787141332668574000, no `+` and no lease: PUSH RC=0, `* [new reference]
+    cc34133fa92a33b6dd52687eb2c82fb04df694a5 -> refs/rmd-id/W1-T1026`, readback equal, `HTTP 403`
+    count 0.
+    AND THE GATE PROOF WAS VERIFIED TO BE A REFUSAL RATHER THAN A TRANSPORT FAILURE. A plain push
+    of a fresh orphan at the already-taken `refs/rmd-id/W1-T1025` returned rc=1 with
+    `! [rejected] … (fetch first)`, ZERO occurrences of `could not read Username`, ZERO occurrences
+    of `HTTP 403`, and left that ref unchanged at bccfb4b68c2f8769fd3bae81cf6895a504d816df. A
+    transport 403 reserves nothing and would have proven nothing about the gate.

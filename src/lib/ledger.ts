@@ -554,6 +554,48 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // reproduce that exact bug one module later: the next red-band CI run reads "not yet filed"
   // and re-files the same debt profile, the unbounded-refile loop this dedupe exists to prevent.
   "coverage.improvement.filed",
+  // W1-T949: the reservation-REFUSAL record for each id-filing lane (triage/plan/approve).
+  // Before this, `reserveTaskIdRemote`'s `TaskIdReservationError` landed only as a stringified
+  // message inside the lane's generic `*.error` line — no id, no ref, no outcome discriminator,
+  // and nothing separating "could not reach origin" from any other lane failure (rationale (6)).
+  // These three carry `id`/`ref`/`outcome` (task-id-reservation.ts's `TaskIdReservationError`
+  // fields) as their OWN structured fields, so an operator auditing "why did this filing open no
+  // PR" a week later can query them directly instead of grepping a rotated-away free-text field.
+  // UNLIKE most of this Set, the deciding reader is a HUMAN (the same "review.unwired_advisory"
+  // shape above), not code — so these will never appear in the derived-from-consumers test's
+  // scanned `.step === "..."` corpus below, and that is expected, not a gap: see that test's own
+  // doc for why a step no automated consumer reads still needs a human-adjudicated registration.
+  "triage.id_reservation_failed",
+  "plan.id_reservation_failed",
+  "approve.id_reservation_failed",
+  // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: the mutation check in
+  // test/ledger-rotation.test.ts anchors on those three lines followed by `]);` and asserts the
+  // needle occurs EXACTLY once. A block appended after them silently breaks that anchor — this
+  // merge did exactly that once, and the sanity assertion is what caught it.
+  // W1-T964: `report.followups` (run-task.ts's `harvestFollowupsFromReport`, one line per
+  // dispatched task's `## Follow-ups` section) and its two harvest marks, `followup.harvested`/
+  // `followup.deduped` (retro.ts's `recordFollowupHarvest`, one line per entry within such a
+  // section) — mined together by `mineFollowups` (retro.ts:2139), which matches a mark back to
+  // its source entry by `entryId` (`${runId}:${index}`) to decide whether to mint a fresh
+  // candidate for the Architect or skip an already-adjudicated one. DECISION-RELEVANT, NOT
+  // RENDER OR HEALTH: `mineFollowups`'s own doc (retro.ts:2131-2134) states a followup "must
+  // survive PAST the marker window (a discovery from three retros ago is still worth
+  // surfacing)" — ruling out both RENDER_RELEVANT_LEDGER_STEPS's 30-minute window
+  // (RENDER_STEP_RETENTION_WINDOW_MS) and isHealthOrDeployStep's 15-minute one
+  // (HEALTH_STEP_RETENTION_WINDOW_MS), neither of which could hold a discovery from three
+  // retro cycles ago; RENDER_RELEVANT_LEDGER_STEPS is for OPERATOR-VISIBLE HISTORY the console
+  // renders, not a decision this codebase makes, so it is the wrong category on its own terms
+  // too (the W1-T275 precedent immediately above: widening the wrong set "would silently trade
+  // one failure for another"). All three MUST land here TOGETHER — a rotation that keeps
+  // `report.followups` live while `followup.harvested`/`followup.deduped` are not RE-MINTS the
+  // entry as a fresh candidate on the next mine (the Architect is shown work it already
+  // adjudicated); the reverse (marks retained, source dropped) LOSES the entry silently, mark
+  // left behind as an orphan. Before this line, all three read ZERO membership in every
+  // retention category and were archived unconditionally on the very next rotation regardless
+  // of volume — see test/followup-rotation-idempotency.test.ts.
+  "report.followups",
+  "followup.harvested",
+  "followup.deduped",
 ]);
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,
