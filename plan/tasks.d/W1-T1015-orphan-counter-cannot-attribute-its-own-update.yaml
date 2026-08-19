@@ -1,0 +1,185 @@
+- id: W1-T1015
+  title: "THE REVIEW-ORPHAN COUNTER CANNOT TELL A SWEEP-INITIATED UPDATE FROM A FOREIGN PUSH — it counts distinct prior reviewed heads and nothing else, so every branch update the sweep performs spends an orphan strike against the cap it also enforces, and widening the update lane past armed PRs would strand each one it touched"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: |
+    FILED FROM RECON at origin/main 02d5b89. Every symbol, count and control below was re-read on
+    that tree. THE LEDGER SURFACE WAS UNAVAILABLE — this host carries no `state/` directory, so no
+    figure here is ledger-derived and none is presented as such.
+
+    (1) THE UPDATE LANE ALREADY EXISTS AND IS NOT WITHDRAWN — ESTABLISH THAT BEFORE READING THE
+    REST. `updateBranch` is LIVE: `buildSweepEffects` (`src/run-task.ts`) wires
+    `updateBranch: (pr) => updateBranchImpl(pr)`, and `runSweep` (`src/lib/sweep.ts`) calls it at
+    most once per pass on the single PR `selectUpdateBranchTarget` chose. It shipped as
+    `feat(sweep): update one armed-and-behind PR per pass, oldest head first`. It is disabled in
+    EXACTLY ONE caller, `runSweepLightPass`, whose own comment gives the reason verbatim:
+    *"`runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently … so N single-PR
+    calls here could each pick 'the oldest of one' and update-branch N PRs in one tick, exactly the
+    N+(N-1)+…+1 cost this shard exists to prevent."* THAT REASON STILL HOLDS — the light pass is
+    still per-PR concurrent — so nothing here re-enables it there, and a builder must not.
+
+    (2) THE COUNTER KEYS ON SHA AND CARRIES NO ACTOR. `reviewOrphansFor` (`src/run-task.ts`)
+    derives both `reviewOrphanedByPush` and `priorReviewOrphans` from one ledger scan: it collects
+    `review.posted`/`review.post_refused` lines for this task id whose `head_sha` differs from the
+    current head, and counts the DISTINCT prior heads. There is no actor field, no source, and no
+    notion of who minted the new head. A sweep-initiated update and a human force-push are the same
+    event to it. `armedButStalled`'s own doc states the mechanism it is subject to: *"updating mints
+    a NEW head and a verdict is sha-pinned … so every update discards the verdict it was waiting
+    on."*
+
+    (3) SO THE ANSWER TO "CAN IT DISTINGUISH ITS OWN UPDATES" IS NO, AND THAT IS THE PREREQUISITE.
+    The cap (`reviewOrphanCap`, default 2) escalates to `blocked-ambiguous` awaiting a human. An
+    update lane that ran on more than the armed-and-behind set would therefore spend a strike per
+    PR it touched and hand each one to a human at the second touch — the lane would manufacture the
+    stranding it was built to relieve.
+
+    (4) BUT THE DATA TO ATTRIBUTE ALREADY EXISTS AND IS SIMPLY NOT JOINED — THIS IS NOT A MISSING
+    FIELD. `runSweep` writes `sweep.update_branch.attempted` before the call and
+    `sweep.update_branch.<outcome>` after it, each carrying `pr_number`, `pr_url` and
+    `head_sha: target.headSha`. That sha is the head the sweep updated FROM — precisely the head
+    that becomes a prior reviewed head one poll later. So the join is: a prior head that appears as
+    `head_sha` on a `sweep.update_branch.*` row for this task is a head THE SWEEP ITSELF superseded
+    and must not count as a foreign orphan. NOTE WHAT IS NOT RECORDED: the NEW sha is never written,
+    because GitHub's update-branch response carries a message rather than a sha and nothing re-reads
+    it. The attribution must therefore key on the OLD sha, which is the one actually present.
+
+    (5) AND THOSE ROWS ROTATE, SO THE JOIN IS NOT DURABLE AS IT STANDS. Membership tested bounded to
+    the set body of `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`):
+    `sweep.update_branch.attempted` 0 and `sweep.update_branch.error` 0, against in-set controls
+    `review.posted` 1 and `verdict` 1. `reviewOrphansFor`'s own doc records why that matters for the
+    other half of this join — both review steps are in the set, *"which is what stops a rotation
+    from archiving the lines and silently resetting `priorReviewOrphans` to zero — the line IS the
+    bound."* The update rows carry no such bound, so an attribution built on them decays.
+
+    (6) THE OBSERVED POPULATION IS SMALL, WHICH IS THE COST ARGUMENT RATHER THAN A COUNTER-ARGUMENT.
+    At the time of this recon, 8 open PRs, all 8 opened and read serially (0 failures): every one
+    `mergeable_state: blocked`, ZERO `behind`, 4 armed. That zero is NOT structural — 16
+    `Merge branch 'main' into …` commits exist in history, so `behind` is reachable and the button
+    has been pressed. All 16 are dated 2026-08-15 and predate the lane's own ship, so there is no
+    git evidence the SHIPPED lane has yet fired. COULD NOT VERIFY whether `required_status_checks`
+    is strict, which governs how often GitHub reports `behind` at all: the branch-protection
+    endpoint returned HTTP 403 for this token. THE ACCESS THAT WOULD SETTLE IT: a read of
+    `branches/main/protection` with a token carrying admin scope.
+  design: |
+    THE SHAPE: teach the orphan counter which prior heads the sweep itself superseded, and make that
+    evidence survive rotation. Nothing else.
+
+    (i) DETERMINE THE JOIN KEY FROM SOURCE BEFORE WRITING ANYTHING. Rationale (4) states that the
+    only sha on a `sweep.update_branch.*` row is the OLD head. Confirm that from source rather than
+    from this shard, and state in the PR whether the join is sound for a PR updated TWICE (two rows,
+    two distinct old heads, both of which must be excluded) and for a PR whose update FAILED
+    (`conflict`/`error` — no new head was minted, so nothing was orphaned and the row must NOT
+    suppress a later genuine orphan). Those two cases are where a naive join goes wrong.
+
+    (ii) DELIVERABLE A — ATTRIBUTE. A prior reviewed head that the sweep recorded itself updating
+    from must not increment `priorReviewOrphans`, and must not set `reviewOrphanedByPush`.
+
+    (iii) DELIVERABLE B — MAKE IT DURABLE. The rows the join reads must survive rotation, by the
+    same mechanism and for the same stated reason the two review steps already do. Establish which
+    retention category is correct rather than adding a new one.
+
+    (iv) FAIL CLOSED, NEVER OPEN. If the evidence is absent — rotated, never written, or a row with
+    no `head_sha` — the head must count as a FOREIGN orphan exactly as today. An attribution that
+    fails open would silently disable the cap, which is the one protection against re-reviewing a
+    PR forever. `reviewOrphansFor`'s own doc already refuses to treat an absent sha as a distinct
+    head; this must refuse in the same direction.
+
+    (v) A SUPPRESSION TEST ALONE PROVES NOTHING, AND THIS IS THE TRAP. An implementation that
+    suppresses EVERY orphan satisfies "a sweep-updated head does not count" perfectly and deletes
+    the cap. Every criterion is PAIRED with its control in the SAME run: a sweep-updated head
+    suppressed AND a foreign push still counted; a failed update still counted; and an absent row
+    still counted.
+
+    (vi) THE MUTATION CHECK IS FILE-SHA BRACKETED. Read the sha256 of the edited file, invert the
+    attribution, read it again and require it to DIFFER, run the suite and require the paired
+    foreign-push control to FAIL, restore, and require the sha to return.
+
+    (vii) OUT OF SCOPE, ENUMERATED, EACH A SIBLING RATHER THAN A PART OF THIS.
+    WIDENING THE LANE ITSELF: `armedButStalled` (`src/lib/sweep.ts`) requires BOTH
+    `autoMergeArmed === true` AND `mergeState === "behind"`, so an unarmed stale PR is never
+    updated. Widening that set is what the operator ultimately wants and it is BLOCKED ON THIS
+    TASK, not delivered by it — a wider lane without attribution strands what it touches.
+    THE INFRASTRUCTURE-INCIDENT GAP: the fix rung sees only PR-level CI failures and dispatches
+    nothing for a red main, a wedged toolchain install, a secondary rate limit or a stale lock.
+    That is repair generally; this is the rebase prerequisite. Do not absorb it.
+    RE-ENABLING `updateBranch` IN `runSweepLightPass`: refused, for the reason quoted in rationale
+    (1), which still holds.
+    AND THREE APPROACHES THE OPERATOR HAS ALREADY REJECTED ON GROUND TRUTH, recorded so no
+    implementer re-derives them: `required_status_checks_strict: true`; a main-red dispatch gate;
+    and a merge queue (`merge_group` appears in no workflow, and `remudero-review` is posted to
+    `statuses/<sha>` over open PRs, so it can never go green on a speculative branch).
+  acceptance:
+    - claim: "a prior head the sweep recorded updating from does not increment the orphan count"
+      proof: "unit test: W1-T1015: a sweep-updated prior head does not increment the orphan count"
+    - claim: "a foreign push still increments the count, in the same run as the suppression above"
+      proof: "unit test: W1-T1015: a foreign push still increments the orphan count"
+    - claim: "a failed update suppresses nothing, because no new head was ever minted"
+      proof: "unit test: W1-T1015: a failed update suppresses no orphan"
+    - claim: "absent attribution evidence counts the head as foreign, never as suppressed"
+      proof: "unit test: W1-T1015: absent evidence counts the head as foreign"
+    - claim: "inverting the attribution fails the foreign-push control, with the file sha read either side"
+      proof: "unit test: W1-T1015: inverting the attribution fails the foreign-push control"
+  risk: high
+  origin: "recon#sweep-rebase-orphan-attribution-2026-08-18"
+  plan_refs: ["W1-T520", "W1-T528", "W1-T983"]
+  files: [src/run-task.ts, src/lib/ledger.ts, test/review-orphan-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify: human IS SET UP FRONT. Design item (i) is a JUDGEMENT about join soundness across two
+    edge cases, and item (iv) is a fail-direction ruling whose wrong answer silently deletes a cap.
+    `isDispatchEligible` (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` before the
+    linter is consulted, so this shard can never be picked up by the drain.
+
+    risk: high IS SET UP FRONT AND IS FORCED. `sizingViolation` (`src/lib/task-linter.ts`) exempts
+    only `task.risk === "high"` and returns clean only below two subsystems, and `subsystemsOf`
+    derives ids from the `files:` list AND the acceptance text. This scope names run-task (where
+    `reviewOrphansFor` lives) and ledger (where the retention category lives), which is already two.
+    Blast radius is genuinely small: one scan gains an exclusion and three step names gain a
+    retention category — no dispatch, arm or merge path is touched.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT 02d5b89. `reviewOrphansFor`: run-task=3
+    sweep=0 ledger=0. `isReviewPostedStep`: run-task=2 sweep=0 ledger=0. `priorReviewOrphans`:
+    run-task=3 sweep=7 ledger=0. `reviewOrphanedByPush`: run-task=1 sweep=10 ledger=0. Negative
+    control `routeSpecialists` reads 0 in all three, so the counts discriminate.
+    `src/lib/sweep.ts` IS DELIBERATELY NOT DECLARED even though it holds the two consumer fields:
+    this task changes only how they are PRODUCED, and the cap row that reads them is unchanged. An
+    implementer who concludes sweep.ts must change has left this scope and must amend the shard
+    first. `test/review-orphan-wiring.test.ts` ALREADY EXISTS and is the wiring's own suite, so no
+    test file is invented.
+    `src/run-task.ts` IS DECLARED AND THE COST IS ACCEPTED IN WRITING: `reviewOrphansFor` is defined
+    there and nowhere else, so the producer cannot change without it. W1-T471 records that declaring
+    the monolith serialises every task naming it — this shard will wait behind them, and that queue
+    cost is paid knowingly rather than dodged by leaving the producer undeclared.
+
+    THE ID RESTS ON A FOUR-SURFACE SWEEP, GIT SURFACES FIRST AND THE OPEN-PR SURFACE LAST AND
+    SERIALLY, WITH COVERAGE ASSERTED SEPARATELY FROM READABILITY. W1-T1015 read 0 on all four:
+    refs/rmd-id (107 refs enumerated, nothing above 1014; control W1-T953 = 1, negative
+    W1-T99999 = 0), shard filenames on origin/main (364 enumerated against 364 expected, max 1014;
+    control W1-T1014 = 1), ids declared anywhere under plan/ (600 distinct, max 1014; control
+    W1-T1014 = 1 file), and every open PR's FILE LIST and TITLE (8 enumerated, 8 opened, 0 failures
+    — file lists carry W1-T1012/1013 among others and titles carry W1-T1005/1006/1008/1009/1012/
+    1013/948, none of them 1015).
+
+    THE GATE WAS PROVED ON THE SAME INVOCATION AS THE MINT, AND THE TWO OUTCOMES DIFFER. A fresh
+    orphan pushed with a PLAIN, BRACED refspec at the ALREADY-TAKEN refs/rmd-id/W1-T953 returned
+    rc=1 with a real ref-level refusal, verbatim:
+      ! [rejected]        375b4441aa202d01e832b22c5998a7023ccb4618 -> refs/rmd-id/W1-T953 (fetch first)
+    and that ref read fba95299cbd655085b504bd915612c57e6a8189e both BEFORE and AFTER — UNCHANGED.
+    `could not read Username` appeared 0 times, so the refusal is the gate and not a credential
+    prompt. THE MINT ITSELF WAS REFUSED FOR A DIFFERENT REASON, AND THE DIFFERENCE IS THE EVIDENCE:
+    the push to refs/rmd-id/W1-T1015 returned rc=1 with NO rejection line (0) and no username
+    prompt (0), verbatim:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+    The taken-ref probe reached a REF-LEVEL decision while this died at the TRANSPORT, so the 403 is
+    the credential limit W1-T518 files, not evidence that 1015 is taken. Readback returned 0 lines
+    and did not carry the nonce, against a control readback of refs/rmd-id/W1-T953 that returned its
+    sha. A RE-SWEEP IMMEDIATELY BEFORE THE PUSH re-read 107 refs (unchanged) and 0 for W1-T1015 on
+    both refs and origin/main filenames, against controls of W1-T953 = 1 and W1-T1014 = 1.
