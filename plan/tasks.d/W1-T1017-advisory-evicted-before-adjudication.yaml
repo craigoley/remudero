@@ -1,4 +1,4 @@
-- id: W1-T1016
+- id: W1-T1017
   title: "THE SHIPS-UNWIRED ADVISORY IS EVICTED FROM THE LIVE LEDGER AT EVERY ROTATION AND ITS PROTECTION IS SEQUENCED AFTER THE READ IT EXISTS TO PROTECT — review.unwired_advisory is absent from DECISION_RELEVANT_LEDGER_STEPS, the live file holds 4 of 87 rows against a control of 219 review.posted, and W1-T323 clause (iii) registers the step only INSIDE the flip change, which is downstream of the adjudication that consumes the corpus: register it now"
   repo: remudero
   depends_on: []
@@ -97,13 +97,13 @@
         W1-T322's contract and are untouched.
   acceptance:
     - claim: "an advisory row survives a rotation that would previously have evicted it from the live ledger"
-      proof: "unit test: W1-T1016: an advisory row survives a rotation that would have evicted it"
+      proof: "unit test: W1-T1017: an advisory row survives a rotation that would have evicted it"
     - claim: "the per-step cap still bounds the registered step so the retained core stays finite"
-      proof: "unit test: W1-T1016: the registered advisory step is still bounded by the per step cap"
+      proof: "unit test: W1-T1017: the registered advisory step is still bounded by the per step cap"
     - claim: "the decision relevant set names the advisory step rather than dropping it silently"
       proof: "grep: unwired_advisory in src/lib/ledger.ts"
     - claim: "steps that were already decision relevant keep the retention they had before this change"
-      proof: "unit test: W1-T1016: previously decision relevant steps keep their retention unchanged"
+      proof: "unit test: W1-T1017: previously decision relevant steps keep their retention unchanged"
   risk: high
   origin: "oper#advisory-rotation-gap-2026-08-18"
   plan_refs: ["W1-T323", "W1-T322", "W1-T1013", "W1-T316", "W1-T244"]
