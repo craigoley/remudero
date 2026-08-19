@@ -3717,7 +3717,24 @@ export function decideAutoMergeArm(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   tddStrict: boolean,
   override?: CappedOverride,
+  // W1-T947 (DECISIONS.md's 2026-08-16 ruling, W1-T919: the fleet gates on IRREVERSIBILITY, not
+  // outwardness): a DIFF-DERIVED classification, never the static `risk:` field (that
+  // non-consultation is a standing ruling this preserves, not reverses). Appended LAST, exactly
+  // like `override` above, so no positional caller shifts — every existing call site that omits
+  // it keeps today's behavior byte-for-byte.
+  irreversible?: boolean,
 ): ArmDecision {
+  // Checked BEFORE `state`, `capped` and `override` — irreversibility is a hard refusal an
+  // operator override can never buy back (the CAPPED override two branches down answers "was
+  // enough proof executed", a different question from "can this diff's effect be undone").
+  if (irreversible) {
+    return {
+      arm: false,
+      reason:
+        "diff classified IRREVERSIBLE (W1-T919: the fleet gates on irreversibility, not outwardness) — " +
+        "auto-merge refuses regardless of the review verdict; an operator must arm this manually",
+    };
+  }
   if (verdict.state !== "success") {
     return { arm: false, reason: "remudero-review is not success" };
   }
@@ -3761,8 +3778,10 @@ export function resolveAutoMergeArm(
   tddStrict: boolean,
   override: CappedOverride | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  // W1-T947: threaded straight through to {@link decideAutoMergeArm} — see its own doc.
+  irreversible?: boolean,
 ): ArmDecision {
-  const decision = decideAutoMergeArm(verdict, tddStrict, override);
+  const decision = decideAutoMergeArm(verdict, tddStrict, override, irreversible);
   // W1-T205: excludes `planOnly` — decideAutoMergeArm checks the carve-out BEFORE the
   // override branch, so a planOnly arm never actually consulted `override` even when one
   // happens to be present; logging "override used" here would misattribute the decision.

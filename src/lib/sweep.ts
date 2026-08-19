@@ -2632,7 +2632,11 @@ export type ArmOutcomeName =
   | "armed"
   | "direct-merged"
   | "direct-merge-failed"
-  | "arm-error-ignored";
+  | "arm-error-ignored"
+  // W1-T947: `armAutoMergeAtOpen` refused because the diff is classified IRREVERSIBLE
+  // (W1-T919) — mirrored here for the same reason every other member is, so `armOutcomeArmed`
+  // (below) keeps type-checking against run-task.ts's `ArmOutcome` without importing it.
+  | "irreversible-refused";
 
 /**
  * TRUE only for outcomes that genuinely armed or merged.
@@ -2645,6 +2649,8 @@ export type ArmOutcomeName =
  * Every other outcome armed NOTHING and must be retried on a later pass:
  *   no-task-id / head-unavailable / ledger-refused  — returned before any arm was attempted.
  *   direct-merge-failed / arm-error-ignored         — the attempt was made and did not stick.
+ *   irreversible-refused                            — a deliberate refusal (W1-T947), not a
+ *                                                      failure; never armed here or later.
  */
 export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
   // An `undefined` return is a fake/effect that predates this signature — treat it as armed,
