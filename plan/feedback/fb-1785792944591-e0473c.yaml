@@ -27,5 +27,18 @@ raw: "A HOLD MAY BE CHEAPER AS A DISARM THAN AS AN ARM GATE — the #1182 recon
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2227
+summary:
+  headline: "Disarm-based hold or #1182 arm-gate: choose now"
+  what_happened: "Disarm-based hold is cheaper than #1182 policy gate but only
+    works if the auto-merge sweep doesn't re-arm disarmed PRs within 93
+    seconds—this assumption must be verified."
+  decision: "Approve disarm-based hold pending sweep verification, or authorize
+    #1182 arm-gate immediately."
+  options:
+    - label: Approve disarm-based hold
+      consequence: Saves cost and fixes invisibility problem; deployment blocked until
+        sweep re-arm behavior is verified
+    - label: "Authorize #1182 arm-gate"
+      consequence: Higher cost (8 arm sites, resume path, console work), but no
+        dependencies or verification needed
