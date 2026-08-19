@@ -1,0 +1,167 @@
+- id: W1-T1020
+  title: "the reviewer already knows a PASS was only PARTIALLY executed and writes it down three ways, and every consumer downstream reads none of them — the arm decision records the reason 'verdict is a full PASS' over a verdict the same review labelled PARTIAL, and the fleet's own autonomy report buckets those rows as full passes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: |
+    RE-DERIVED AT origin/main 0b33362 IN A SCRATCH WORKTREE. Every claim below was read from
+    source on that tree, and the population was measured against GitHub over REST on the same day.
+
+    (1) THE REVIEWER CAN ALREADY DISTINGUISH THE TWO CASES, AT THREE LEVELS OF DETAIL.
+    Per criterion, `ProofSkipReason` (src/lib/review.ts) separates SIX causes — including
+    `prose-no-match` (a proof written in the house dialect that resolved to nothing) from
+    `forward-reference` (a task not yet built) and `no-dialect` (prose that was never meant to run).
+    Rolled up, `judgeReview` computes `partiallyExecuted` — SOME but not ALL executable criteria
+    observed — alongside `executedProofCount` and `executableProofCount`. Rendered, `passSummary`
+    appends the fraction to the posted commit-status description. So the DISTINCTION IS NOT THE
+    MISSING PIECE. What is missing is that anything reads it.
+
+    (2) NOTHING READS ANY OF THE THREE FIELDS. Word-bounded counts at 0b33362:
+    `partiallyExecuted` src/lib/review.ts=9 and 0 everywhere else in src/;
+    `executedProofCount` 3 and 0; `executableProofCount` 4 and 0. In test/ all three appear only in
+    test/unexecutable-proof-visibility.test.ts (6/3/3). Control: `capped` reads 25 files under src/
+    and 52 under test/, so the counts discriminate.
+
+    (3) THE ARM DECISION IS TYPED SO IT CANNOT SEE THEM, AND SAYS SO IN WORDS.
+    `decideAutoMergeArm` (src/lib/review.ts) takes `Pick<ReviewVerdict, "state" | "capped" |
+    "planOnly">`. Its second branch is `if (!verdict.capped) return { arm: true, reason: "verdict is
+    a full PASS" }`. A PARTIAL verdict is `capped: false` by construction — `capped` means ZERO
+    executed — so a review that observed 1 of 13 proofs arms with a recorded reason asserting a full
+    PASS. `resolveAutoMergeArm` carries the identical Pick. CLAUDE.md already names this defect
+    class from #981: a ledger line must carry the reason from the decision that produced its outcome.
+
+    (4) THE LEDGER CARRIES THE BOOLEAN AND NO READER. `reviewLedgerLegibilityFields`
+    (src/lib/review.ts) emits `partially_executed` on the `review.posted` row. Its only other
+    occurrences under src/ are its own declaration and doc; under test/ it appears solely as a
+    fixture field in test/review.test.ts and test/sweep-arm-parity.test.ts. Control on the same
+    query shape: `plan_only` reads 11 lines and `capped_reason` 17.
+
+    (5) AND THE LEDGER-FED PATH DROPS IT ON THE WAY BACK IN. `priorReviewVerdictFromLedger`
+    (src/lib/review.ts) reconstructs `{ state, capped, planOnly }` from a row that already carries
+    `partially_executed`, so the sweep and triage arm paths reach the decision in (3) with the field
+    defaulted rather than read.
+
+    (6) THE FLEET'S OWN AUTONOMY REPORT COUNTS PARTIALS AS FULL PASSES. `verdictClassOf`
+    (src/lib/autonomy.ts) reads the same `review.posted` row: `capped === true` becomes
+    `degraded-arm`, `floor_degraded === true` becomes `keyword-floor`, and EVERYTHING ELSE returns
+    `full-pass` — including a row whose `partially_executed` is true beside it. `CLASS_ORDER` has no
+    fourth class and `CURRENT_ARMING_POSTURE` prose repeats the same word.
+
+    (7) THE POPULATION IS NOT TWO. Measured over REST against every PR merged AFTER the PARTIAL
+    annotation shipped (#1213, 2026-08-03T16:01:16Z — earlier merges are excluded because the tag
+    did not exist yet and an absent tag is not a passing one): 834 merged PRs enumerated and 834
+    captured, no duplicate numbers. 32 carry a PARTIAL fraction. Splitting on whether the PR touched
+    src/ or test/: 24 are filings and 8 are implementations — #2186 at 2/4, #2178 at 1/2, #2177 at
+    1/3, #1927 at 4/13, #1326 at 1/2, #1609 at 2/3, #1631 at 5/6, #1825 at 14/15. Five of the eight
+    merged having observed half their proofs or fewer. Same sweep for scale: 586 full PASS, 27
+    plan-only PASS, 4 CAPPED, 1 FAIL, and 184 merged with no remudero-review status at all — that
+    last bucket is a DIFFERENT concern and this task does not touch it.
+  design: |
+    THE SHAPE: make the decisions that already run read the fields that are already written. No new
+    ledger field, no new gate, no new refusal, and no change to whether anything arms.
+
+    (i) NAME THE FRACTION AND KEEP ARMING. `decideAutoMergeArm` must read the partial-execution
+    fields its caller's verdict already carries and return a reason that names the partial shape
+    instead of asserting a full PASS. The `arm` value for that branch stays TRUE.
+
+    (ii) NEVER REFUSE ON A FRACTION. No threshold, no minimum ratio, no new capped-like refusal. A
+    bound that fires on a fraction would be this repo's recurring defect — a bound sized against a
+    population nobody separated first — and the operator ruling on this record is legibility.
+
+    (iii) CARRY THE FLAG BACK IN. `priorReviewVerdictFromLedger` must read `partially_executed` off
+    the row it already parses, so the sweep and triage paths reach (i) with the recorded value
+    rather than a default. Where only the boolean is available the reason must still say partial;
+    the fraction is named only where the counts are actually in hand.
+
+    (iv) A PARTIAL ROW MUST NOT BUCKET AS FULL PASS. `verdictClassOf` (src/lib/autonomy.ts) gains a
+    distinct class for a row whose `partially_executed` is true, ordered in `CLASS_ORDER`, and
+    `CURRENT_ARMING_POSTURE` is corrected to describe what the function then does. That prose is
+    printed verbatim beside the measured rate, so leaving it saying full-PASS would reintroduce the
+    same silence one layer up.
+
+    (v) A FULLY EXECUTED PASS MUST BE BYTE IDENTICAL. The negative control runs in the same suite: a
+    verdict where every executable criterion executed keeps today's reason string and today's
+    bucket, unchanged character for character. Without it a test showing the partial path now speaks
+    would pass just as well if the change had rewritten the ordinary path too.
+
+    (vi) OUT OF SCOPE, NAMED SO IT IS NOT DRIFTED INTO: the arming TIMING family — W1-T125's
+    `armAutoMergeAtOpen`, which arms at PR-open before any review exists, and W1-T975, which is
+    filed-not-built and covers a run abandoning a PR still armed. Both ask WHEN the arm happens;
+    this record asks WHAT THE DECISION KNOWS AND RECORDS. Neither makes the other unnecessary and
+    this task changes neither. Also out of scope: making a shard's proof titles mandatory-matching,
+    the 184 statusless merges, and any change to `capped` itself.
+
+    (vii) MUTATION CHECK, FILE-SHA BRACKETED. Read the sha256 of the edited file, revert the reason
+    change, read it again and require it to DIFFER, run the suite and require the partial-reason
+    test to FAIL, restore, and require the sha to return to the original.
+  acceptance:
+    - claim: "a partially executed PASS arms with a reason naming the partial shape rather than a full PASS"
+      proof: "unit test: W1-T1020: a partial verdict arms with a reason that names the partial shape"
+    - claim: "the same partial verdict still arms — legibility never becomes a refusal"
+      proof: "unit test: W1-T1020: a partial verdict still arms"
+    - claim: "a fully executed PASS keeps its existing reason unchanged in the same run"
+      proof: "unit test: W1-T1020: a fully executed pass keeps its reason unchanged"
+    - claim: "the ledger reconstruction carries the recorded partial flag back to the decision"
+      proof: "unit test: W1-T1020: the ledger reconstruction carries the partial flag"
+    - claim: "an autonomy row recorded as partially executed no longer classifies as a full pass"
+      proof: "unit test: W1-T1020: a partially executed row does not classify as a full pass"
+    - claim: "reverting the reason change fails the partial-reason test with the file sha read either side"
+      proof: "unit test: W1-T1020: reverting the reason change fails the partial reason test"
+  risk: high
+  origin: "recon#partial-pass-reads-as-full-2026-08-19"
+  plan_refs: ["W1-T185", "W1-T305", "W1-T125", "W1-T975"]
+  files: [src/lib/review.ts, src/lib/autonomy.ts, test/unexecutable-proof-visibility.test.ts, test/autonomy-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only `risk === "high"` and fires at two or more concerns; this
+    record names four (the reviewer, the autonomy report, and their two dedicated suites), so no
+    smaller band can pass while `files:` still covers both readers. The blast radius is genuinely
+    narrower: two reason strings and one classifier branch, with the ordinary path pinned unchanged
+    by criterion 3.
+
+    verify: auto IS DELIBERATE AND IS NOT AN ARMING-POLICY CHANGE. Nothing here alters WHETHER a PR
+    arms — design (i) fixes the `arm` value of that branch at true and design (ii) forbids any new
+    refusal. What changes is what the decision reads and what it records, which is mechanical and
+    machine-checkable end to end.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT 0b33362, NOT GUESSED.
+    `decideAutoMergeArm`: src/lib/review.ts=18, src/lib/autonomy.ts=6, src/run-task.ts=11,
+    src/lib/sweep.ts=4. `resolveAutoMergeArm`: src/lib/review.ts=4, src/run-task.ts=2,
+    src/lib/sweep.ts=1. `verdictClassOf`: src/lib/autonomy.ts=2 and nowhere else.
+    `CURRENT_ARMING_POSTURE`: src/lib/autonomy.ts=4, test/autonomy-ratchet.test.ts=3.
+    `partiallyExecuted`: src/lib/review.ts=9, test/unexecutable-proof-visibility.test.ts=6, 0 in
+    every other file under src/ and test/. Control: `routeSpecialists` reads 0 in both source
+    modules and both test suites, so the counts discriminate.
+
+    src/run-task.ts AND src/lib/sweep.ts ARE DELIBERATELY NOT DECLARED. Both call the arm decision
+    and neither needs editing: widening a `Pick` with OPTIONAL fields leaves every existing call
+    site compiling byte-for-byte, and the reason those modules ledger is the RETURN VALUE of the
+    function this record changes. Declaring src/run-task.ts would also serialise this task against
+    the 221-of-361 shards that already name the monolith (W1-T471) for no diff.
+
+    THE TEST HOMES ARE THE TWO DEDICATED SUITES, NOT test/review.test.ts. `decideAutoMergeArm`'s
+    general fixtures live there (21 mentions) but the partial-execution suite is
+    test/unexecutable-proof-visibility.test.ts, which is where W1-T305 put every assertion about
+    these three fields. Keeping the new assertions there also honours the standing rule against
+    appending coverage-load-bearing tests to a large shared file.
+
+    WHAT THIS DOES NOT FIX, STATED SO IT IS NOT MISTAKEN FOR THE WHOLE ANSWER. It does not make a
+    mismatched proof title resolve, and it does not stop a partial PR merging. A partially certified
+    merge stays a legitimate outcome; what stops is the fleet recording it as a full one. The 184
+    merges carrying no review status at all are a separate defect this record deliberately leaves
+    alone.
+
+    THE ID IS PRE-MINTED AND WAS READ BACK BEFORE ANYTHING WAS WRITTEN.
+    refs/rmd-id/W1-T1020 resolves to 9f8145bbfe3c38b3960fd304e4f4f19ce640abb6. Controls on the same
+    query: refs/rmd-id/W1-T1016 reads 1 and refs/rmd-id/W1-T999999 reads 0. The four-surface sweep
+    then confirmed nobody took the id since: shard FILENAMES 0 (the existence test, not a content
+    grep), id lines in the plan tree 0, refs/rmd-id/* 1 and that one is the pre-mint itself, and 0
+    across every open PR's file list with coverage asserted at two captured of two enumerated.
+    Controls read 1 in every case and the id-line scan saw a true maximum of 1019. The shard `- id:`
+    line is UNINDENTED, so the sweep pattern was anchored accordingly and verified against a known
+    shard before being trusted.
