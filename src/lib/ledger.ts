@@ -373,6 +373,14 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              reads the refusal as gone and re-arms a head a
  *                                              risk judge explicitly refused — "the line IS the
  *                                              bound; it must survive rotation" applies verbatim.
+ *   - "manual.completed"                    → status.ts's latestManualCompletion — the
+ *                                              hand-execution credit rung (W1-T1029), widened to
+ *                                              a completion PR in ANOTHER repository and to a
+ *                                              completion with no PR at all. Losing this line
+ *                                              re-parks every task transitively depending on the
+ *                                              one it credited, permanently — a credit-based
+ *                                              `depends_on` a hand-completed task can otherwise
+ *                                              never satisfy.
  *
  * Deliberately EXCLUDES pure telemetry/polling noise (`ci.polling`, `pr.polling`,
  * `ops.alerts_polled`, `issues.polled`, `inbox.polled`, ...) — exactly the high-frequency,
@@ -568,6 +576,14 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "triage.id_reservation_failed",
   "plan.id_reservation_failed",
   "approve.id_reservation_failed",
+  // W1-T1029: `latestManualCompletion` (status.ts) reads this back to widen rung (b)'s
+  // hand-execution credit to the two shapes a tasks.yaml `pr:` field cannot express — a
+  // completion PR in another repository, and a completion with no PR at all. The line IS the
+  // credit: a rotation archiving it away re-parks W12-T1/W1-T12e (and every task transitively
+  // depending on them) behind a `depends_on` that can never again be satisfied, the exact
+  // "sweep.absent_repush" shape this Set exists to prevent, applied to a dependency edge
+  // instead of a re-push cap.
+  "manual.completed",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: the mutation check in
   // test/ledger-rotation.test.ts anchors on those three lines followed by `]);` and asserts the
   // needle occurs EXACTLY once. A block appended after them silently breaks that anchor — this
