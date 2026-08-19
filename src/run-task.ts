@@ -18599,9 +18599,12 @@ async function triageCommandLocked(
     // ledger event naming the id/ref/outcome, never just a stringified message.
     // W1-T949 design (iv): the refusal record is `withIdReservationLogging`'s, not this lane's —
     // one policy, both arms unit-tested, rather than a hand-written `catch` per lane.
+    // Read the start id HERE, not inside the closure below: the compiler cannot know an arrow
+    // is called immediately, so `localIdBlock` widens back to `| undefined` inside it (TS18048).
+    const triageReserveFrom = localIdBlock.ids[0];
     const remoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "triage.id_reservation_failed", () =>
       reserveTaskIdBlockRemote(
-        localIdBlock.ids[0],
+        triageReserveFrom,
         TRIAGE_MAX_NEW_TASKS,
         gitRemoteRefReserver({
           run: (args) => {
@@ -18960,9 +18963,11 @@ export async function planCommand(
     // is the remote-substrate twin of `reserveTaskIdBlock`, one ref pushed per reserved id. An
     // unreachable origin THROWS (caught below, a durable ledger event, never just a stringified
     // message) rather than falling through — the paid worker is still unstarted when it does.
+    // Same closure-narrowing reason as the triage lane above.
+    const planReserveFrom = planIdBlock.ids[0];
     const planRemoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () =>
       reserveTaskIdBlockRemote(
-        planIdBlock.ids[0],
+        planReserveFrom,
         PLAN_MAX_NEW_TASKS,
         gitRemoteRefReserver({
           // Same `spawnSync`-over-`worktreePath` shape triage's own remote reserve uses — a
@@ -19691,6 +19696,8 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
             idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
               info: { purpose: `rmd approve ${payload.proposalId} (run ${runId})` },
             });
+            // Same closure-narrowing reason as the triage and plan lanes.
+            const approveReserveFrom = idBlock.ids[0];
             // W1-T949: AND RESERVE THE SAME BLOCK REMOTELY — this closure is the ONLY thing
             // `materializeDraftTaskIds` (lib/inbox.ts) sees; `reserveBlock` there is an INJECTED
             // callback (`DraftTaskIdMintDeps.reserveBlock`), so the remote half threads through
@@ -19704,7 +19711,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
               "approve.id_reservation_failed",
               () =>
                 reserveTaskIdBlockRemote(
-                  idBlock.ids[0],
+                  approveReserveFrom,
                   count,
                   gitRemoteRefReserver({
                     run: (args) => {
