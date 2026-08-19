@@ -100,3 +100,22 @@ test("runbook coverage: the required-procedure list covers the four named in W1-
     assert.ok(ids.has(expected), `REQUIRED_PROCEDURES is missing "${expected}"`);
   }
 });
+
+test("W1-T1010: runbook coverage requires the container recycle procedure", () => {
+  const ids = new Set(REQUIRED_PROCEDURES.map((p) => p.id));
+  assert.ok(ids.has("container-recycle"), "REQUIRED_PROCEDURES is missing the container recycle procedure");
+
+  // A gate is only real if a stub heading can actually fail it — the same discipline the fixture
+  // tests above apply to every other entry, re-run here for the one this task adds.
+  const entry = REQUIRED_PROCEDURES.find((p) => p.id === "container-recycle");
+  assert.ok(entry, "the container-recycle entry must be locatable");
+  const stubGuide = `## ${entry!.exampleHeading}\n\nTODO.\n`;
+  const stubResult = checkRunbookCoverage(stubGuide).find((r) => r.id === "container-recycle");
+  assert.equal(stubResult?.covered, false, "a stub heading must not satisfy the gate");
+  assert.equal(stubResult?.reason, "section-too-short");
+
+  const missingGuide = "";
+  const missingResult = checkRunbookCoverage(missingGuide).find((r) => r.id === "container-recycle");
+  assert.equal(missingResult?.covered, false);
+  assert.equal(missingResult?.reason, "heading-not-found");
+});

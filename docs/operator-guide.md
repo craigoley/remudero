@@ -338,6 +338,60 @@ If you are restarting a hand-run `rmd serve` anyway, the port check is still the
 lsof -ti :4317        # empty output = the port is free, safe to `rmd serve` again
 ```
 
+### Recycling the containerised daemon onto a fresh image
+
+The section above restarts the **mini's** launchd-supervised daemon in-process. A **containerised**
+daemon (Azure host, `docker run --name remudero-daemon ...` per `deploy/host-update.sh
+--print-daemon-run`) needs a different procedure, because replacing a container is not restarting a
+process: the old one is destroyed and a new one is created from a freshly pulled image, and the
+seven steps that make that safe used to live only in chat. Skipping any one of them took the fleet
+down twice in a single day, so `./deploy/recycle-container.sh` is the host-invoked script that runs
+them in the load-bearing order, and **its refusals are the deliverable, not the happy path**:
+
+- **No `GH_TOKEN` capturable → refuses before touching anything.** The token lives only in the
+  running container's environment (never written to disk) and is unrecoverable once that container
+  is gone; this is the very first check, ahead of even the pull.
+- **Workers still in flight past a bounded wait → refuses, and removes the pause it set.** The
+  script pauses the fleet *before* it starts waiting (so the wait can actually converge), and if the
+  wait times out with workers still running it takes the pause back off on the way out — a refusal
+  that left the fleet paused forever would be a second outage stacked on the first. This is the
+  incident from 2026-08-18: a recycle run without pausing first found three workers mid-run, and
+  killing them would have lost the work and stranded their `state/inflight/*.lock` files.
+- **A failed `docker pull` → refuses. Never starts the cached image.** The other 2026-08-18
+  incident: a pull rejected for `authentication required` was followed by a `docker run` anyway,
+  which silently relaunched whatever was already cached under the tag — the operator believed he
+  had shipped a new build and had not.
+- **The started container's image id disagrees with the digest just pulled → reports a FAILED
+  RECYCLE.** A container that started is not proof it started on the image this run obtained;
+  `docker inspect --format '{{.Image}}'` against the id captured right after the pull is the one
+  check that actually proves it, the same discipline `deploy/verify-image.sh` applies to its own
+  probes.
+
+**Every lock under `state/` that would block a boot is printed in full and never deleted or
+judged.** `state/drain.lock` and `state/inflight/*.lock` are shown with their holder pid, host and
+start time exactly as recorded, because a host-side script cannot safely decide whether a holder is
+stale: `isHolderStale`'s container-aware rung (`src/lib/fs-race-safe.ts`, W1-T978) only ever answers
+that question from *inside* a container, and the marker it keys on (`/.dockerenv`) is absent on the
+host by construction. If a lock names a container that is already gone, the daemon reclaims it on
+its own next boot — this script reads and reports, and leaves the decision there.
+
+```sh
+GH_TOKEN=<token> ./deploy/recycle-container.sh                 # recycle onto :latest
+GH_TOKEN=<token> ./deploy/recycle-container.sh --tag <sha>      # a specific build instead
+RMD_RECYCLE_WAIT_S=300 ./deploy/recycle-container.sh            # widen the bounded wait for workers
+```
+
+Two adjacent scripts are deliberately **not** re-implemented here, only reused: `deploy/host-update.sh`
+owns reclaiming disk (`docker system`/`image`/`builder prune`) and is unrelated to *this* procedure —
+run it separately when the host is tight on space — and `deploy/verify-image.sh` owns the full
+toolchain probe. A successful recycle prints the command to run that probe next; the recycle itself
+only proves the running container is on the image it just pulled, not that the image actually works.
+
+Like its siblings, this is a plain bash-and-docker script, on purpose: it must keep working on a host
+with no node, no `rmd` and no checkout, which rules out an `rmd` verb outright — every verb runs
+`checkCliFreshness` first, which would fast-forward the very checkout the container being recycled
+is bind-mounting.
+
 ### Rotating the service tokens
 
 Covered in full just above (["The console: what it binds, and rotating its

@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# recycle-container — replace the running remudero-daemon container with a freshly pulled image.
+#
+# WHY THIS EXISTS. Until now the recycle was seven steps that lived only in chat, and skipping any
+# ONE of them took the fleet down TWICE in one day:
+#   - A recycle that did not clear `state/drain.lock` left it holding a dead container's pid/host.
+#     Every boot of the replacement printed "a drain/daemon is already running", exited 1 (not the
+#     freshness code, 75), and spent docker's `--restart=on-failure:5` budget to `count=5 exited`.
+#     A human had to read the lock, confirm the container was gone, and delete it by hand.
+#   - A SECOND recycle, run without pausing first, found three workers mid-run. Killing them would
+#     have lost the work and stranded their `state/inflight/*.lock` files.
+#   - A `docker pull` failed with "authentication required" and the recycle SILENTLY relaunched the
+#     cached image under the same tag — the operator believed he had the new build and did not.
+#
+# So THE REFUSALS BELOW ARE THE DELIVERABLE, not the happy path. Four of them, each closing one of
+# the failures above:
+#   1. NO GH_TOKEN CAPTURED -> REFUSE BEFORE TOUCHING ANYTHING. It exists only in the running
+#      container's environment (`-e GH_TOKEN=...`, never written to disk — see deploy/entrypoint.sh)
+#      and is unrecoverable afterwards without an operator, so this is the FIRST check in the file,
+#      ahead of even the pull.
+#   2. WORKERS STILL RUNNING PAST A BOUNDED WAIT -> REFUSE, AND REMOVE THE PAUSE ON THE WAY OUT. A
+#      refusal that leaves the fleet paused forever is a second outage on top of the first.
+#   3. `docker pull` NON-ZERO -> REFUSE. NEVER FALL THROUGH TO A START. This is the exact 2026-08-18
+#      incident: a failed pull must never be followed by `docker run` on whatever is already cached.
+#   4. THE STARTED CONTAINER'S IMAGE ID DOES NOT MATCH THE DIGEST JUST PULLED -> report it as a
+#      FAILED RECYCLE, not a successful one. A container that started is not proof it started on the
+#      image this run just obtained.
+#
+# THE ORDER IS LOAD-BEARING, and each constraint has a different reason (see the numbered sections
+# below): the token must be captured before `docker rm` because it cannot be recovered after; the
+# pause must go on before the wait, or the wait watches a fleet still admitting work; and it must
+# come OFF before the start, because the new container reads the SAME bind mount and would
+# otherwise come up paused — the marker is a file in shared state, not process state.
+#
+# NEVER RUN THIS FROM INSIDE THE IMAGE. `deploy/Dockerfile` COPYs the whole repo into `/app`, so
+# this file lands inside the container like every other tracked path — that copy is incidental and
+# must never be the invocation path. A recycle executed inside the container it removes cannot
+# outlive `docker rm`; this file is not baked to a `PATH` location (unlike `deploy/entrypoint.sh`,
+# the one script that IS), and section 1 below refuses outright if it ever finds itself running
+# inside one.
+#
+# THE LOCK IS PRINTED, NEVER DECIDED (section 2). Every lock under `state/` that would block a boot
+# is displayed in full — holder pid, host, startedAt — and this script does not delete it and does
+# not judge it. That is not a temporary gap waiting on more code: `isHolderStale`'s container branch
+# (src/lib/fs-race-safe.ts, W1-T978) answers "was this an earlier container of THIS cell" only from
+# INSIDE a container (`defaultInContainer` reads `/.dockerenv`, which is absent on the host by
+# construction) — so a host-side script can never safely decide a lock's staleness, on this sha or
+# any future one. The daemon reclaims a foreign container-shaped holder on its own next boot; this
+# script only ever reads and reports.
+#
+# PLAIN BASH AND DOCKER, deliberately — the same discipline as deploy/verify-image.sh and
+# deploy/host-update.sh, this script's siblings. It runs on a host that may have no node, no rmd and
+# no checkout, and it must keep working when the thing it is inspecting is broken. An `rmd` verb
+# cannot fill this role: every verb runs `checkCliFreshness` (src/lib/self-sync.ts), which
+# fast-forwards THIS checkout before doing its own work — the very checkout the daemon bind-mounts
+# and the recycle is about to replace.
+#
+# WHAT THIS SCRIPT DELIBERATELY DOES NOT DO. It does not reclaim disk (`deploy/host-update.sh` owns
+# that, unchanged, run separately when disk is tight) and it does not run the full toolchain probe
+# (`deploy/verify-image.sh` owns that; run it after a successful recycle for the deeper check). This
+# file's only job is replacing the one named container safely, with the four refusals above.
+#
+# USAGE
+#   ./deploy/recycle-container.sh                  # recycle onto :latest
+#   ./deploy/recycle-container.sh --tag <sha>       # a specific tag instead of :latest
+#   REGISTRY=... IMAGE=... ./deploy/recycle-container.sh     # retarget without editing this file
+#   RMD_STATE_DIR=/path ./deploy/recycle-container.sh        # if the bind mount is not ~/rmd-state
+#   RMD_RECYCLE_WAIT_S=300 ./deploy/recycle-container.sh      # widen the bounded wait for workers
+
+set -euo pipefail
+
+REGISTRY="${REGISTRY:-synthwatcholey0620}"
+IMAGE="${IMAGE:-remudero}"
+TAG="${TAG:-latest}"
+CONTAINER_NAME="${RMD_DAEMON_CONTAINER:-remudero-daemon}"
+
+# The HOST side of the state bind mount — same derivation and same default as deploy/host-update.sh,
+# so the two scripts agree on where the fleet's locks and control flags actually live.
+STATE_DIR="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}"
+STATE_MOUNT_DEST="/home/node/Remudero"
+CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
+CRED_MOUNT_DEST="/home/node/.claude"
+DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
+
+DRAIN_LOCK="${STATE_DIR}/state/drain.lock"
+INFLIGHT_DIR="${STATE_DIR}/state/inflight"
+PAUSE_FILE="${STATE_DIR}/state/PAUSE"
+
+# How long to wait for in-flight workers before refusing, and how often to re-check while waiting.
+# Bounded deliberately: an unbounded wait is a hang with no visible cause, and the whole point of a
+# BOUNDED wait is that it can time out and refuse rather than block a recycle forever.
+WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-120}"
+POLL_INTERVAL_S="${RMD_RECYCLE_POLL_S:-5}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tag)       TAG="${2:?--tag needs a value}"; shift 2 ;;
+    --registry)  REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
+    --image)     IMAGE="${2:?--image needs a value}"; shift 2 ;;
+    --container) CONTAINER_NAME="${2:?--container needs a value}"; shift 2 ;;
+    -h|--help)   sed -n '1,70p' "$0"; exit 0 ;;
+    *) echo "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"
+echo "recycle-container: container ${CONTAINER_NAME}, target image ${REF}"
+
+# ── 1. NEVER RUN FROM INSIDE THE IMAGE ───────────────────────────────────────────────────────────
+# A recycle executed inside the container it is about to remove cannot outlive `docker rm` — this is
+# the same host-vs-image boundary deploy/verify-image.sh and deploy/host-update.sh both stand on.
+# The marker path is overridable (RMD_RECYCLE_DOCKERENV_PATH) for exactly one reason: this script's
+# own test suite may itself run inside a container (a sandboxed CI runner, for instance), where the
+# real /.dockerenv would trip this guard for a reason that has nothing to do with the script under
+# test. Unset, this is byte-for-byte the real check.
+DOCKERENV_PATH="${RMD_RECYCLE_DOCKERENV_PATH:-/.dockerenv}"
+if [ -f "${DOCKERENV_PATH}" ]; then
+  echo "recycle-container: REFUSING — this is running INSIDE a container." >&2
+  echo "  This script recycles the container it runs from a HOST shell; running it from inside the" >&2
+  echo "  image it is about to remove cannot outlive the 'docker rm' it would issue on itself." >&2
+  exit 1
+fi
+
+# ── 2. EVERY BLOCKING LOCK IS PRINTED IN FULL — NEVER DELETED, NEVER JUDGED ─────────────────────
+# `state/drain.lock` and `state/inflight/*.lock` are read-only from here, always, regardless of what
+# happens later in this run. A host-side process cannot decide whether a lock naming a now-gone
+# container is stale (see the header note on isHolderStale/W1-T978), so the only honest thing this
+# script can do is show the operator exactly what is recorded and let a human, or the daemon's own
+# next boot, decide.
+print_blocking_locks() {
+  local any=0
+  if [ -f "${DRAIN_LOCK}" ]; then
+    any=1
+    echo "recycle-container: state/drain.lock is PRESENT — printed in full, never deleted by this script:"
+    sed 's/^/    /' "${DRAIN_LOCK}" 2>/dev/null || echo "    (unreadable)"
+    echo "    A host-side script cannot tell whether the holder above names a container that is gone;"
+    echo "    the daemon reclaims a foreign container-shaped holder on its OWN next boot (W1-T978)."
+    echo "    This script does not act on that — read it, or let the next boot decide."
+  fi
+  if [ -d "${INFLIGHT_DIR}" ]; then
+    for f in "${INFLIGHT_DIR}"/*.lock; do
+      [ -e "${f}" ] || continue
+      any=1
+      echo "recycle-container: $(basename "${f}") is PRESENT under state/inflight/ — printed, never deleted:"
+      sed 's/^/    /' "${f}" 2>/dev/null || echo "    (unreadable)"
+    done
+  fi
+  if [ "${any}" -eq 0 ]; then
+    echo "recycle-container: no blocking locks under ${STATE_DIR}/state"
+  fi
+}
+print_blocking_locks
+
+# ── 3. CAPTURE GH_TOKEN — BEFORE TOUCHING ANYTHING, NOT MERELY BEFORE docker rm ─────────────────
+# `deploy/entrypoint.sh` reads GH_TOKEN from the ENVIRONMENT at call time and writes it nowhere on
+# disk, by design — so once the container that carries it is gone, an operator is the only way to
+# get it back. This is the FIRST check that can refuse, ahead of even the pull, because a pull is
+# reversible (re-run it) and a removed container's only copy of this credential is not.
+CONTAINER_EXISTS=0
+if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+  CONTAINER_EXISTS=1
+  CAPTURED_TOKEN="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null \
+    | sed -n 's/^GH_TOKEN=//p' | head -1)"
+else
+  # No container by this name yet (first-ever run on a fresh host) — the only place the token can
+  # come from is this shell's own environment.
+  CAPTURED_TOKEN="${GH_TOKEN:-}"
+fi
+
+if [ -z "${CAPTURED_TOKEN}" ]; then
+  echo "recycle-container: REFUSING — no GH_TOKEN could be captured." >&2
+  if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
+    echo "  ${CONTAINER_NAME} carries no GH_TOKEN in its own environment, and this shell has none" >&2
+    echo "  either. NOTHING has been touched — removing the container now would discard the only" >&2
+    echo "  copy of a credential that is never written to disk (deploy/entrypoint.sh)." >&2
+  else
+    echo "  ${CONTAINER_NAME} does not exist yet and this shell has no GH_TOKEN exported." >&2
+  fi
+  echo "  Export GH_TOKEN in this shell and re-run." >&2
+  exit 1
+fi
+echo "recycle-container: GH_TOKEN captured $([ "${CONTAINER_EXISTS}" -eq 1 ] && echo "from ${CONTAINER_NAME}'s own environment" || echo "from this shell")"
+
+# ── 4. AUTHENTICATE, THEN PULL — A FAILURE HERE REFUSES AND NEVER STARTS ANYTHING ────────────────
+# THE 2026-08-18 INCIDENT THIS SECTION EXISTS TO CLOSE: a pull failed with "authentication required"
+# and the recycle went on to `docker run` anyway, silently relaunching whatever was already cached
+# under this tag. The operator believed he had the new build and did not. So a pull failure is fatal
+# here, full stop — nothing below this section may ever run after it.
+if command -v az >/dev/null 2>&1; then
+  echo "recycle-container: az acr login -n ${REGISTRY}"
+  if ! az acr login -n "${REGISTRY}" >/dev/null; then
+    echo "recycle-container: REFUSING — FAILED to authenticate to ${REGISTRY}." >&2
+    echo "  ${CONTAINER_NAME} is untouched. Run 'az login' if this is a fresh shell, then re-run." >&2
+    exit 1
+  fi
+else
+  echo "recycle-container: the Azure CLI is NOT installed on this host." >&2
+  echo "  Authenticate docker by hand and re-run: docker login ${REGISTRY}.azurecr.io" >&2
+  echo "  REFUSING — an unauthenticated pull would leave the OLD image in place and this script" >&2
+  echo "  would go on to interrogate that one instead." >&2
+  exit 1
+fi
+
+echo "recycle-container: docker pull ${REF}"
+# ${PIPESTATUS[0]}, NOT the pipeline's own status — the same trap deploy/host-update.sh guards
+# against: `docker pull | tee | sed` would report tee/sed's status, which is always 0, and a failed
+# pull would read as a success. `set +e` around the pipeline is required because `set -o pipefail`
+# would otherwise abort the script here, before PULL_RC is ever assigned.
+set +e
+docker pull "${REF}" 2>&1 | tee /tmp/recycle-container-pull.log | sed 's/^/  /'
+PULL_RC="${PIPESTATUS[0]}"
+set -e
+if [ "${PULL_RC}" -ne 0 ] || grep -qiE 'authentication required|unauthorized|denied' /tmp/recycle-container-pull.log 2>/dev/null; then
+  echo "recycle-container: REFUSING — the pull FAILED (exit ${PULL_RC})." >&2
+  echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image." >&2
+  echo "  NOT starting anything — a fresh image was requested and not obtained, and the last known" >&2
+  echo "  failure of this exact kind silently relaunched the STALE cached image instead." >&2
+  exit 1
+fi
+PULLED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${REF}" 2>/dev/null || true)"
+if [ -z "${PULLED_IMAGE_ID}" ]; then
+  echo "recycle-container: REFUSING — pulled ${REF} but could not read an image id back." >&2
+  echo "  ${CONTAINER_NAME} is untouched." >&2
+  exit 1
+fi
+echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
+
+# ── 5. PAUSE, THEN WAIT (BOUNDED) FOR IN-FLIGHT WORKERS ─────────────────────────────────────────
+# THE PAUSE MUST GO ON BEFORE THE WAIT, or the wait watches a fleet still admitting new work and can
+# never converge on zero. THE OTHER 2026-08-18 INCIDENT THIS CLOSES: a recycle run without pausing
+# first found three workers mid-run; killing them would have lost the work and stranded their
+# `state/inflight/*.lock` files. If the wait times out, THE PAUSE COMES OFF ON THE WAY OUT — a
+# refusal that leaves the fleet paused forever is a second outage stacked on the first.
+mkdir -p "$(dirname "${PAUSE_FILE}")"
+cat > "${PAUSE_FILE}" <<PAUSEJSON
+{"reason":"container recycle (deploy/recycle-container.sh)","requestedAt":"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)","pid":$$,"host":"$(hostname)"}
+PAUSEJSON
+echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
+
+waited=0
+while :; do
+  n=0
+  if [ -d "${INFLIGHT_DIR}" ]; then
+    n="$(find "${INFLIGHT_DIR}" -maxdepth 1 -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  if [ "${n}" -eq 0 ]; then
+    echo "recycle-container: no in-flight workers — safe to proceed"
+    break
+  fi
+  if [ "${waited}" -ge "${WAIT_SECONDS}" ]; then
+    echo "recycle-container: REFUSING — ${n} worker(s) still in flight after ${WAIT_SECONDS}s." >&2
+    if [ -d "${INFLIGHT_DIR}" ]; then
+      for f in "${INFLIGHT_DIR}"/*.lock; do
+        [ -e "${f}" ] || continue
+        echo "  $(basename "${f}"):" >&2
+        sed 's/^/    /' "${f}" 2>/dev/null >&2 || true
+      done
+    fi
+    echo "  ${CONTAINER_NAME} is untouched — killing it now would lose this work and strand these" >&2
+    echo "  locks. Widen the wait with RMD_RECYCLE_WAIT_S, or re-run once these finish." >&2
+    rm -f "${PAUSE_FILE}"
+    echo "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+    exit 1
+  fi
+  echo "recycle-container: ${n} worker(s) still in flight, waited ${waited}s/${WAIT_SECONDS}s — polling"
+  sleep "${POLL_INTERVAL_S}"
+  waited=$((waited + POLL_INTERVAL_S))
+done
+
+# ── 6. STOP + REMOVE THE OLD CONTAINER, CLEAR THE PAUSE, START THE NEW ONE ──────────────────────
+# `docker stop` (not `-f`/`kill`) sends SIGTERM first, giving the daemon's own signal handler a
+# chance to release the drain lock cleanly before this script ever removes the container — the
+# graceful half of the fix for the 2026-08-18 drain-lock incident; section 2 above is the honest
+# backstop for whatever that handler cannot reach.
+#
+# THE PAUSE MUST COME OFF BEFORE THE START, never after: the new container reads the SAME bind
+# mount, so a pause left in place would make it come up paused with no dispatch — this marker is a
+# file in shared state, not process state, and the new container has no memory of who set it.
+if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
+  echo "recycle-container: docker stop ${CONTAINER_NAME}"
+  docker stop "${CONTAINER_NAME}" >/dev/null
+  echo "recycle-container: docker rm ${CONTAINER_NAME}"
+  docker rm "${CONTAINER_NAME}" >/dev/null
+else
+  echo "recycle-container: no existing ${CONTAINER_NAME} to stop or remove"
+fi
+
+rm -f "${PAUSE_FILE}"
+echo "recycle-container: pause cleared — the new container must not come up paused"
+
+echo "recycle-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
+docker run -d --name "${CONTAINER_NAME}" \
+  --restart=on-failure:5 \
+  --cap-drop ALL \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  --security-opt systempaths=unconfined \
+  --user 1000:1000 \
+  -e GH_TOKEN="${CAPTURED_TOKEN}" \
+  -e RMD_RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-}" \
+  -v "${STATE_DIR}:${STATE_MOUNT_DEST}" \
+  -v "${CRED_DIR}:${CRED_MOUNT_DEST}" \
+  "${REF}" \
+  ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target >/dev/null
+
+# ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────
+# `docker inspect --format '{{.Image}}'` against the id captured in section 4 is the only proof this
+# recycle actually took: a container that STARTED is not evidence it started on the image this run
+# just obtained. This is deploy/verify-image.sh's own rule applied to the running container rather
+# than a probe container: never report a verdict on an image you have not confirmed you just got.
+STARTED_IMAGE_ID="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+if [ -z "${STARTED_IMAGE_ID}" ] || [ "${STARTED_IMAGE_ID}" != "${PULLED_IMAGE_ID}" ]; then
+  echo "recycle-container: FAILED RECYCLE — ${CONTAINER_NAME} is running image ${STARTED_IMAGE_ID:-<none>}," >&2
+  echo "  which does NOT match the digest this run pulled (${PULLED_IMAGE_ID})." >&2
+  echo "  A container came up, but not on the image this run obtained — investigate before trusting it." >&2
+  exit 1
+fi
+
+echo "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_ID}"
+echo "  Next: ./deploy/verify-image.sh --expect ${PULLED_IMAGE_ID}   # the full toolchain probe"

@@ -63,6 +63,15 @@ export const REQUIRED_PROCEDURES: readonly RequiredProcedure[] = [
     headingPattern: /^#{1,6}\s*the billing boundary/im,
     exampleHeading: "The billing boundary: where ANTHROPIC_* stops",
   },
+  {
+    // W1-T1010: the container recycle procedure existed only in chat, and omitting one of its
+    // seven steps took the fleet down twice in one day. Appended here — never by editing
+    // checkRunbookCoverage — so a stub or missing section fails the same as any other procedure.
+    id: "container-recycle",
+    label: "recycling the containerised daemon onto a fresh image",
+    headingPattern: /^#{1,6}\s*recycling the containeri[sz]ed daemon/im,
+    exampleHeading: "Recycling the containerised daemon onto a fresh image",
+  },
 ];
 
 export interface RunbookCoverageResult {
