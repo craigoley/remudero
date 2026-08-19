@@ -136,6 +136,9 @@ interface HarnessCtx {
   configRoot: string;
   /** The directory the lane's reservations land in — the thing under test. */
   reservationsDir: string;
+  /** The throwaway bare origin every push in this run lands on — W1-T949: exposed so a caller
+   *  can read back `refs/rmd-id/*` after the run, not just the local reservation directory. */
+  bareOrigin: string;
 }
 
 /** Run `body` with HOME/PATH/config pointed at throwaway fixtures; returns the parsed ledger. */
@@ -168,7 +171,7 @@ async function withHarness(body: (ctx: HarnessCtx) => Promise<void>): Promise<Ar
     writeGhShim(shimDir);
     process.env.PATH = `${shimDir}:${savedPath}`;
 
-    await body({ configRoot, reservationsDir: taskIdReservationsDir(configRoot) });
+    await body({ configRoot, reservationsDir: taskIdReservationsDir(configRoot), bareOrigin: bare });
 
     const p = join(configRoot, "state", "ledger.ndjson");
     return existsSync(p)
@@ -221,6 +224,47 @@ test("plan lane reserves its task ids BEFORE the paid worker spawns", async () =
   for (const n of seenAtSpawn) {
     assert.ok(promptSeen.includes(`W1-T${n}`), `the prompt names reserved id W1-T${n}`);
   }
+});
+
+// ── W1-T949: THE REMOTE HALF — every reserved id gets its OWN ref on the shared origin, not
+// just the first. Before this the plan lane reserved a full LOCAL block (the test above) but
+// called `reserveTaskIdRemote` nowhere at all, so a plan run filing five tasks pushed ZERO refs
+// any other writer could see (rationale (3)). This drives the REAL lane end to end (a real `git
+// push` against the fixture's own bare origin, exactly `test/live-write-guard-command-sites.ts`'s
+// shape) and reads the refs back off that origin — the substrate every writer actually shares,
+// not the worker-sandbox-local reservation directory the test above already covers.
+test("plan lane pushes ONE remote ref PER reserved id, not just the first", async () => {
+  let seenAtSpawn: number[] = [];
+
+  const ledger = await withHarness(async ({ reservationsDir, bareOrigin }) => {
+    await planCommand(BRIEF, {
+      spawn: async (args: { cwd: string }) => {
+        seenAtSpawn = idsOnDisk(reservationsDir);
+        fileTaskAsShard(args.cwd, `W1-T${seenAtSpawn[0]}`, "filed by the fixture worker");
+        return fakeWorker(`PROPOSED: file W1-T${seenAtSpawn[0]} for the plan-lane remote-mint fixture`);
+      },
+    }).catch(() => undefined);
+
+    const refs = execFileSync("git", ["-C", bareOrigin, "for-each-ref", "--format=%(refname)", "refs/rmd-id/"], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .filter(Boolean);
+    assert.equal(
+      refs.length,
+      PLAN_MAX_NEW_TASKS,
+      `expected one refs/rmd-id/* ref per reserved id (${PLAN_MAX_NEW_TASKS}), the shared remote saw ${JSON.stringify(refs)}`,
+    );
+    for (const n of seenAtSpawn) {
+      assert.ok(refs.includes(`refs/rmd-id/W1-T${n}`), `W1-T${n}'s own ref must have reached the shared origin`);
+    }
+  });
+
+  assert.equal(ledger.filter((l) => l.step === "plan.id_minted").length, 1);
+  assert.ok(
+    Array.isArray((ledger.find((l) => l.step === "plan.id_minted") as { remote_refs?: unknown })?.remote_refs),
+    "plan.id_minted must ledger the pushed refs, not just the local reservation",
+  );
 });
 
 test("plan lane releases EVERY reserved id, including the ones the worker declined to use", async () => {
