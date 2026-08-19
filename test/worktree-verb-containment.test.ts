@@ -121,19 +121,40 @@ test("a MAIN checkout that has diverged STILL refuses — the guard protects the
   assert.equal(logCalls[0].extra?.reason, "diverged");
 });
 
-test("a DIRTY main checkout still refuses, with reason `dirty`", () => {
+test("a DIRTY main checkout whose dirt is OUTSIDE the incoming diff now SYNCS — W1-T446's ruled relaxation", () => {
+  // THIS EXPECTATION CHANGED WITH W1-T446, AND THE FIXTURE IS EXACTLY THE RULED CASE. `fixture()`
+  // commits `seed.txt`; `publish()` commits `published.txt`. The dirt below is on `seed.txt`, so
+  // the incoming fast-forward (`published.txt` only) would never write the dirty path — the
+  // non-overlapping case the operator ruled must no longer refuse. Asserting `refused` here was
+  // asserting the pre-ruling behaviour.
+  //
+  // AND `reexec` IS STUBBED, ALONGSIDE `log`. Supplying only `log` left `say`, `warn` AND `reexec`
+  // on their real defaults, so once this case started reaching the sync path the REAL
+  // `defaultReexec` fired — and it replays `process.argv.slice(1)`, which under `node --test` is
+  // the test runner itself. MEASURED (#2237): six runners killed across four attempts of `ci` and
+  // `coverage-ratchet` alike, 507 `### rmd self-sync:` emissions with zero tests completing. The
+  // process-level loop guard (#2248) now bounds that chain, but a test must never fire a real
+  // re-exec at all.
+  //
+  // The OVERLAPPING direction — dirt the fast-forward WOULD write, which must still refuse — is
+  // covered by test/self-sync-dirty-scope.test.ts and is deliberately not duplicated here.
   const f = fixture();
   publish(f.originDir, "published");
   writeFileSync(join(f.localDir, "seed.txt"), "uncommitted operator edit\n", "utf8");
   const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let reexecCalls = 0;
   const result = checkCliFreshness(f.localDir, {}, {
     log: (step, extra) => logCalls.push({ step, extra }),
+    say: () => {},
+    warn: () => {},
+    reexec: () => {
+      reexecCalls += 1;
+    },
   });
-  assert.equal(result.status, "refused");
-  if (result.status === "refused") assert.equal(result.reason, "dirty");
-  assert.equal(logCalls.length, 1);
-  assert.equal(logCalls[0].extra?.reason, "dirty");
-  assert.equal(logCalls[0].extra?.count, 1, "one dirty file (seed.txt) in this fixture");
+  assert.equal(result.status, "synced", "dirt outside the incoming diff must not refuse");
+  assert.equal(reexecCalls, 1, "the sync path re-execs exactly once — and only through the stub");
+  // W1-T486: only a REFUSAL is ledgered. A permitted sync must write no `self_sync.refused` row.
+  assert.equal(logCalls.length, 0, "no refusal ledgered on a permitted sync");
 });
 
 test("a main checkout on a NON-main branch still refuses off-main — W1-T445 is not weakened", () => {
