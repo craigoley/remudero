@@ -23,12 +23,27 @@
 // `checkAcceptanceCommand`, the production command body, over a real temp file.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { acceptanceBlockDiagnostics, parseAcceptanceBlock } from "../src/lib/review.js";
-import { checkAcceptanceCommand } from "../src/run-task.js";
+import {
+  acceptanceAuthorTimeCheck,
+  acceptanceBlockDiagnostics,
+  narrowNameFilteredArgs,
+  parseAcceptanceBlock,
+  parseWhitelistedProof,
+  PR_AUTHORING_PATHS,
+  type AcceptanceAuthorTimeResult,
+} from "../src/lib/review.js";
+import { checkAcceptanceCommand, dispatchAlertFixRun, type AlertFixDispatchDeps } from "../src/run-task.js";
+import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
+import type { Config } from "../src/lib/config.js";
+import type { Mount } from "../src/lib/mounts.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 const WRAPPED = `## Acceptance
 
@@ -153,4 +168,219 @@ test("check-acceptance reports a missing header through the CLI, not only throug
   } finally {
     f.cleanup();
   }
+});
+
+// ── W1-T952: THE AUTHOR-TIME CHECK — routing acceptanceBlockDiagnostics onto the ONE PR-open path
+// (rmd alert-fix) whose body has no plan-side fallback, before CI/review pays for a round trip to
+// discover the same defect a generic "no acceptance criteria to judge (fail closed)" refusal would.
+// See design item (i)'s recorded coverage in `PR_AUTHORING_PATHS` (lib/review.ts) for which paths
+// this reaches and which it structurally cannot.
+
+test("W1-T952: every PR-authoring path is enumerated with its coverage stated", () => {
+  assert.ok(PR_AUTHORING_PATHS.length >= 5, "design item (i)'s enumerated paths must all be present");
+  for (const row of PR_AUTHORING_PATHS) {
+    assert.equal(typeof row.path, "string");
+    assert.ok(row.path.length > 0, "every row names its path");
+    assert.equal(typeof row.reachable, "boolean", `${row.path}: reachable must be STATED, never omitted`);
+    assert.equal(typeof row.wiredByThisChange, "boolean", `${row.path}: wiredByThisChange must be STATED, never omitted`);
+    assert.ok(row.reason.length > 20, `${row.path}: coverage must be EXPLAINED, not merely asserted`);
+  }
+  // The load-bearing negative half of design item (i): an in-repo check cannot reach a hand-opened
+  // PR — stated explicitly here, never silently omitted.
+  const unreachable = PR_AUTHORING_PATHS.filter((r) => !r.reachable);
+  assert.ok(unreachable.length >= 2, "the hand-gh-cli and MCP-client paths must both be named as unreachable");
+  assert.ok(unreachable.every((r) => !r.wiredByThisChange), "an unreachable path can never be claimed wired");
+  // Exactly one path is ACTUALLY wired by this change — the rest are recorded, not silently
+  // claimed closed (the "silently covers only the in-repo path" failure design item (i) forbids).
+  const wired = PR_AUTHORING_PATHS.filter((r) => r.wiredByThisChange);
+  assert.equal(wired.length, 1, "exactly one path is wired by this change");
+  assert.match(wired[0].path, /alert-fix/i);
+});
+
+test("W1-T952: the diagnostic names the specific defect not a generic failure", () => {
+  const noHeader = acceptanceAuthorTimeCheck("just prose, no header, no trailer anywhere in this body");
+  assert.equal(noHeader.ok, false);
+  assert.equal(noHeader.defect, "no-header");
+
+  const unparseable = acceptanceAuthorTimeCheck(WRAPPED);
+  assert.equal(unparseable.ok, false);
+  assert.equal(unparseable.defect, "unparseable");
+
+  const emptyProofs = acceptanceAuthorTimeCheck("Acceptance:\n- a claim with no proof written anywhere\n");
+  assert.equal(emptyProofs.ok, false);
+  assert.equal(emptyProofs.defect, "empty-proofs");
+
+  const noTrailer = acceptanceAuthorTimeCheck(UNWRAPPED, { expectedTaskId: "W1-T952" });
+  assert.equal(noTrailer.ok, false);
+  assert.equal(noTrailer.defect, "no-trailer", "a healthy body-level block is still a defect when the CALLER requires a specific task trailer");
+
+  // Four DISTINCT names, not one generic "defective" boolean wearing four costumes.
+  const defects = new Set([noHeader.defect, unparseable.defect, emptyProofs.defect, noTrailer.defect]);
+  assert.equal(defects.size, 4, "each shape must produce ITS OWN name");
+
+  // And the healthy control never gets a name at all.
+  const healthy = acceptanceAuthorTimeCheck(UNWRAPPED);
+  assert.equal(healthy.ok, true);
+  assert.equal(healthy.defect, undefined);
+});
+
+// ── The wired call site: rmd alert-fix (dispatchAlertFixRun, src/run-task.ts) ───────────────────
+// alertTaskId (alertFixPrompt) never resolves in plan/tasks.yaml — the body is the ONLY thing
+// review can ever judge this lane's PR from, so this is the one path where the check's absence
+// reproduces rationale (1)'s exact failure: every CI check green, review refuses closed.
+
+function w1t952WorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-w1t952",
+    costUsd: 0.01,
+    numTurns: 1,
+    text,
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  } as unknown as WorkerResult;
+}
+
+const W1T952_ALERT: AlertLaneAlert = {
+  source: "code-scanning",
+  id: "952",
+  severity: "medium",
+  state: "open",
+  createdAt: "2026-08-17T00:00:00Z",
+  summary: "W1-T952 fixture alert",
+  url: "https://github.com/craigoley/remudero/security/code-scanning/952",
+  path: "src/lib/some-file.ts",
+};
+
+const W1T952_MOUNT: Mount = { model: "fake-model", effort: "low", maxTurns: 5, contextBudget: 1000 };
+
+function w1t952Deps(checkAcceptance: (prUrl: string) => AcceptanceAuthorTimeResult): AlertFixDispatchDeps {
+  return {
+    worktreeAdd: () => {},
+    worktreeRemove: () => {},
+    renderWorkerSettings: () => "/tmp/fake-settings.json",
+    loadMounts: () => ({}) as never,
+    resolveMount: () => W1T952_MOUNT,
+    spawn: async () => w1t952WorkerResult("REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/9521\n"),
+    ensureTaskTrailer: () => {},
+    checkAcceptance,
+  };
+}
+
+test("W1-T952: a body with no acceptance header is refused at author time", async () => {
+  const root = mkdtempSync(join(tmpdir(), "w1t952-refused-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const deps = w1t952Deps(() => acceptanceAuthorTimeCheck("just prose, no header, no trailer anywhere in this body"));
+    await dispatchAlertFixRun("craigoley", "remudero", { root } as Config, W1T952_ALERT, ledgerPath, "ALERT-FIX-W1T952-A", deps);
+    const lines = readFileSync(ledgerPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const defectLine = lines.find((l) => l.step === "alert-fix.acceptance_defect");
+    assert.ok(defectLine, "a defective body must be refused (named in the ledger) at author time, before CI/review runs");
+    assert.equal(defectLine.defect, "no-header");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The positive control, in the SAME suite invocation as the refusal above (design item iv) — an
+// implementation that refuses EVERY body would satisfy the test above perfectly.
+test("W1-T952: a well-formed body is accepted in the same run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "w1t952-accepted-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const deps = w1t952Deps(() => acceptanceAuthorTimeCheck("Acceptance:\n- the claim | unit test: test/foo.test.ts\n"));
+    await dispatchAlertFixRun("craigoley", "remudero", { root } as Config, W1T952_ALERT, ledgerPath, "ALERT-FIX-W1T952-B", deps);
+    const lines = readFileSync(ledgerPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    assert.ok(lines.some((l) => l.step === "alert-fix.pr_opened"), "sanity: the PR was opened");
+    assert.ok(!lines.some((l) => l.step === "alert-fix.acceptance_defect"), "a well-formed body must NOT be refused");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T952 DESIGN (v): THE FILE-SHA-BRACKETED MUTATION CHECK ───────────────────────────────────
+//
+// "The check is: read the sha256 of the edited file, remove the diagnostics call, read the sha256
+// again and require it to DIFFER, run the suite and require the rejection test to FAIL, restore,
+// and require the sha to return to the original." (design note (v), verbatim.) Mirrors W1-T951's
+// own mutation check (test/dispatch-lifetime-breaker.test.ts) byte-for-byte in shape, over the
+// call this task actually wired (`deps.checkAcceptance(report.prUrl)` in `dispatchAlertFixRun`,
+// src/run-task.ts) rather than status.ts's durable-credit lookup.
+//
+// Spawned from THIS file, targeting THIS file's own refusal test by name — a real child `node
+// --test` process, narrowed via the SAME house dialect `remudero-review`'s own proof executor
+// uses for a bare `unit test: <name>` proof (parseWhitelistedProof/narrowNameFilteredArgs).
+
+test("W1-T952: removing the diagnostics call fails the refusal test", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const runTaskTsPath = join(repoRoot, "src", "run-task.ts");
+  const targetTestFile = "test/acceptance-block-diagnostics.test.ts";
+  const positiveTestName = "W1-T952: a body with no acceptance header is refused at author time";
+
+  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  const original = readFileSync(runTaskTsPath, "utf8");
+  const originalSha = sha256(original);
+
+  const needle = "        const check = deps.checkAcceptance(report.prUrl);\n";
+  const occurrences = original.split(needle).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    "sanity: the diagnostics call must appear EXACTLY once in run-task.ts, or this mutation is not targeting the real rung",
+  );
+  const mutated = original.replace(
+    needle,
+    '        const check: AcceptanceAuthorTimeResult = { ok: true, message: "W1-T952 MUTATION: diagnostics call removed" };\n',
+  );
+
+  const whitelisted = parseWhitelistedProof(`unit test: ${positiveTestName}`);
+  assert.ok(whitelisted, "sanity: the proof text must parse as a name-filtered `unit test:` dialect proof");
+  assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
+  const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
+
+  let childResult: ReturnType<typeof spawnSync> | undefined;
+  try {
+    writeFileSync(runTaskTsPath, mutated);
+    const mutatedSha = sha256(readFileSync(runTaskTsPath, "utf8"));
+    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change run-task.ts's bytes");
+
+    // NODE_TEST_CONTEXT (set by node's OWN test runner on the process running THIS test) is
+    // inherited by a plain spawnSync env by default, and node's test runner treats its presence
+    // as "this is a recursive run() call" and skips every file — stripped so the child is a
+    // genuinely independent `node --test` invocation (the W1-T951 lesson, applied here too).
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+  } finally {
+    // Restored regardless of what the child run did — a throw, a timeout, or a pass must never
+    // leave the real checked-out source mutated.
+    writeFileSync(runTaskTsPath, original);
+    const restoredSha = sha256(readFileSync(runTaskTsPath, "utf8"));
+    assert.equal(restoredSha, originalSha, "run-task.ts must be restored byte-for-byte after the mutation check");
+  }
+
+  assert.ok(childResult, "sanity: the child process must actually have been spawned");
+  assert.notEqual(
+    childResult!.status,
+    0,
+    `removing the diagnostics call must fail the refusal test -- child exited ${childResult!.status}\n` +
+      `stdout:\n${childResult!.stdout}\nstderr:\n${childResult!.stderr}`,
+  );
 });
