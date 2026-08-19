@@ -1,0 +1,197 @@
+- id: W1-T1038
+  title: "DISPATCH PRICES EVERY DRAW IN DOLLARS AND NONE IN BYTES — zero memory fields across 109,986 deduped ledger rows against 1,109 carrying `cost_usd`, so when the host stalled at 18:43 with three workers live nothing had ever recorded what one costs; the guard that would fix it must FAIL OPEN, which is the opposite of the arm it would join"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    MEASURED 2026-08-19 AT origin/main 3b4dcf2e, on the Azure host that stalled. No `/rate_limit`
+    call was made, no policy value was changed, and nothing was restarted by this recon.
+
+    (1) THE GAP, RE-DERIVED. Across the full ledger union — per-form control first: 0 `.gz`, 9 plain
+    rotations, 1 live, the `.gz` zero confirmed by `find -name '*.gz'` returning 0 under `state/`
+    while the identical shape returns 9 for `ledger.*.ndjson` — deduped on the full line to 109,986
+    rows, the count of fields whose name carries mem/rss/heap/swap/avail is ZERO. Positive controls
+    on the same corpus: 1,109 rows carry `cost_usd` and 468 carry `num_turns`. The fleet has priced
+    every dispatch in dollars and turns since the ledger began and has never once recorded a byte.
+
+    (2) WHAT THAT COST. At 18:40:02 the box had 4.69 GiB available, 36% used, load 3.82. By
+    18:43:54.955 — the ledger's last pre-restart row, W1-T1011's `worker.state` — it was
+    unreachable. NOTHING WAS KILLED: zero `oom-kill`, `Out of memory`, `Killed process` and
+    `oom_reaper` lines across `journalctl -k -b -1`, `/var/log/syslog` and `/var/log/kern.log`,
+    each with its own positive control (18,833 kernel lines in the boot; 3,792 and 3,720 matching
+    "kernel" in the two files), and the previous boot is fully available in a 306.7 MB persistent
+    journal — a measured absence, not a lost log. With no swap the kernel could not page out
+    anonymous memory, so it evicted executable pages and re-faulted them; reclaim livelock never
+    arms the OOM killer. Three `Under memory pressure, flushing caches` events followed, ALL AFTER
+    death. The container has NO memory limit — `memory.max` reads `max`.
+
+    (3) THE SHAPE TO MATCH, NOT INVENT. `checkCostGovernor` (`src/lib/sweep.ts`) is a pure
+    predicate — `dayCostUsd >= policy.dailyCostCeilingUsd` returning `{deferred, observed, ceiling}`
+    — with `logCostGovernorDeferral` beside it writing one ledger line. `checkQueueGovernor` is the
+    same shape against `wipLimit`. Both are composed by `checkDispatchGovernors`
+    (`src/lib/dispatch-governor.ts`), which `runDaemon` and `runDrainLanes` both call, and whose own
+    doc requires it be called AGAIN PER LANE rather than hoisted above the loop. That composition
+    point is where a memory check belongs. Invocation counts, word-bounded, across `src/`:
+    `checkCostGovernor` 45, `checkQueueGovernor` 35, `logCostGovernorDeferral` 8.
+
+    (4) AND THE ARM IT WOULD JOIN FAILS CLOSED — THIS IS THE WHOLE DESIGN PROBLEM. The doc on
+    `checkDispatchGovernors` is headed "FAIL-CLOSED ON AN UNREADABLE OBSERVATION" and states the
+    rule in terms: "The safe answer to 'the reading could not be taken' is the SAME as a
+    confirmed-over-ceiling reading — admit no further dispatch this batch". Its
+    `DispatchGovernorVerdict` carries a shared `{kind: "unreadable"}` arm, and
+    `governorDeferPayload` renders it as "governor observation unreadable — failing closed,
+    admitting no further lane this batch". A memory check added naively INHERITS that arm and
+    therefore inherits the wrong direction. THE SHARED UNREADABLE ARM FAILS CLOSED AND THIS CHECK
+    MUST NOT USE IT.
+
+    (5) WHY THIS ONE IS OPPOSITE. Three-lane dispatch is 100% of draws since 2026-08-14 — 51 sets,
+    admitted mean 3.00, one failure in six days. A guard that refuses on a probe failure idles a
+    fleet that is three-lane on every draw, converting a 2% event into a 100% outage. The two
+    fail-closed patterns an implementer will find nearby are both correct FOR THEIR OWN REASONS and
+    both wrong here: `defaultOpenFileCount` (`src/lib/clone-reaper.ts`) ends
+    `return 1; // lsof missing or unrunnable — fail closed, treat as held`, and `isHolderStale`
+    (`src/lib/fs-race-safe.ts`, 27 invocations in `src/`) treats an unreadable holder
+    conservatively. COPYING EITHER HERE BUILDS THE WRONG THING.
+
+    (6) THE PROBE IS SETTLED — VERIFY IT, DO NOT RE-DERIVE IT. Tested against the current published
+    image as its own default uid 1000 (`node`): `free`, `ps`, `lsof`, `pgrep`, `top` and `vmstat`
+    ALL PRESENT, and `/proc/meminfo` readable at `MemAvailable: 6923732 kB`. An earlier
+    `spawnSync ps` → ENOENT observation is from an older build and DOES NOT REPRODUCE; it should not
+    be repeated as a live constraint. The trap is which SOURCE is read, not whether a binary exists:
+    because the container is unlimited, `/proc/meminfo` inside it reports real HOST figures — which
+    is what this guard wants — while a cgroup read returns `memory.max = max`, i.e. unbounded, which
+    would authorise every dispatch silently.
+    READ MemAvailable FROM meminfo AND NEVER THE CGROUP LIMIT.
+
+    (7) THE THRESHOLD IS NOT KNOWN AND MUST NOT BE GUESSED. The only retained observation is
+    container-wide `memory.peak`, 3.99 GiB across two three-lane waves, NEITHER of which ran a
+    concurrent `tsc --noEmit` or full suite — which is precisely the coincidence that froze the box
+    (W1-T1011 died inside a single six-minute tool call).
+    A PER-WORKER FIGURE IS NOT RECOVERABLE RETROSPECTIVELY: `find /sys/fs/cgroup -maxdepth 1 -type d` returns only
+    the root, so every worker shares one flat cgroup and `memory.peak` is a single unattributable
+    high-water mark. A LIVE sample taken during this recon does give a partial answer — three
+    concurrent `claude --output-format` workers at 311, 301 and 286 MiB RSS, with the orchestrating
+    `node` at 767 MiB and the container at 3.19 GiB current against 3.99 GiB peak — but the RSS that
+    matters is the SPAWNED toolchain, not the agent, and a point-in-time sample misses it unless it
+    lands mid-run. MEASURING IT IS THEREFORE PART OF THIS TASK, which is why the threshold ships
+    disabled and the row ships unconditionally.
+
+    (8) SWAP IS UNPROVEN AND THE INSTRUMENTATION IS WHAT WOULD SETTLE IT. 4 GiB was added and
+    persisted; usage since is 0 MiB of 4,095. No swapping worker has been observed, so whether swap
+    lets a worker FINISH or merely fail slower is undecided. A per-dispatch row carrying observed
+    MemAvailable is the evidence that would decide it.
+  acceptance:
+    - claim: "a dispatch is deferred when observed available memory is under the configured floor"
+      proof: "unit test: W1-T1038: a dispatch is deferred below the memory floor"
+    - claim: "an unreadable memory observation PERMITS the dispatch rather than refusing it"
+      proof: "unit test: W1-T1038: an unreadable memory probe permits dispatch"
+    - claim: "the floor ships disabled so no behaviour changes until an operator sets it"
+      proof: "unit test: W1-T1038: the memory floor is inert at its shipped default"
+    - claim: "the observation is ledgered on every dispatch including the ones it admits"
+      proof: "unit test: W1-T1038: the memory observation is recorded when it admits"
+    - claim: "a live worker over the floor keeps running and only the next dispatch is held"
+      proof: "unit test: W1-T1038: a running worker is never killed by the memory floor"
+    - claim: "the reading comes from meminfo rather than the unbounded cgroup limit"
+      proof: "unit test: W1-T1038: the probe reads meminfo not the cgroup limit"
+    - claim: "the check is re-consulted per lane rather than hoisted above the loop"
+      proof: "unit test: W1-T1038: the memory check is consulted once per admitted lane"
+    - claim: "an unreadable probe does not route into the shared fail-closed verdict arm"
+      proof: "unit test: W1-T1038: an unreadable probe skips the fail-closed arm"
+  risk: high
+  origin: "oper#dispatch-memory-headroom-2026-08-19"
+  plan_refs: ["W1-T1036", "W1-T1028", "W1-T342", "W1-T317", "W1-T321"]
+  files: [src/lib/sweep.ts, src/lib/dispatch-governor.ts, src/lib/policy.ts, src/run-task.ts, plan/policy.yaml, test/dispatch-memory-governor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    DESIGN, IN THE ORDER AN IMPLEMENTER MEETS IT.
+
+    (i) THE PREDICATE. A pure `checkMemoryGovernor(availableMib, policy)` in `src/lib/sweep.ts`,
+    beside its two siblings and against the same policy table — same return shape as
+    `checkCostGovernor`: the observation, the floor, and whether it defers. Pure and non-throwing,
+    exactly as that contract already promises.
+
+    (ii) THE COMPOSITION, AND ITS ONE CARVE-OUT. It joins `checkDispatchGovernors`
+    (`src/lib/dispatch-governor.ts`) so it is re-consulted per lane rather than hoisted. But it MUST
+    NOT route an unreadable observation into the existing `{kind: "unreadable"}` arm — that arm is
+    documented fail-closed and its payload says so. FAIL OPEN, NOT CLOSED: an unreadable
+    `/proc/meminfo` PERMITS the dispatch. This is the single place this task contradicts a
+    neighbouring convention, and it is deliberate — three-lane dispatch is 100% of draws, so a
+    probe failure that refused would idle the whole fleet to prevent an event measured once in six
+    days. The implementer states the direction at the seam in a comment, not only in a test.
+
+    (iii) DEFER AND NEVER KILL. A running worker that crosses the floor keeps running; only the
+    NEXT dispatch is held. Killing a live worker destroys spend the ledger never sees — today's
+    stall lost roughly fourteen minutes of W1-T1011's implement phase, and the four abandoned
+    run_ids together recorded only $2.42 because no `implement.done` was ever written.
+
+    (iv) THE ROW IS THE LARGER HALF, AND THE READER IS THE OPERATOR. Emit the observed MemAvailable
+    on EVERY dispatch, including the ones it admits — a deferral-only row would sample exactly the
+    population that never happens while the floor ships disabled. THE READER IS THE OPERATOR reading
+    the ledger union; that is a legitimate reader and it is named here because an unstated one is
+    not. No dashboard, no second consumer, no new verb is in scope.
+
+    (v) ROTATION. Membership in `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`, 58 entries) is
+    required ONLY IF A DECISION READS IT BACK. `test/ledger-rotation.test.ts` derives its expectation
+    by scanning consumer sources for `.step === "..."` reads, so the rule is mechanical, not a
+    judgement call: an operator-read observation row needs no membership and must not take one,
+    while any predicate that later reads this step MUST add it in the same PR. Measured precedent
+    both ways at 3b4dcf2e: `daemon.cost_governor` IS in the set, `dispatch.lane_governed` and
+    `dispatch_deferred_budget` are NOT.
+
+    (vi) THE THRESHOLD SHIPS DISABLED. The `plan/policy.yaml` row lands with a value that defers
+    nothing, copying the pattern `armSessionPrs` shipped with. The task's own output is the evidence
+    needed to set it later; choosing a live number now would be the round guess this shard exists to
+    avoid. THE FIRST TEST WRITTEN MUST BE THE INERT-DEFAULT PATH.
+
+    WHAT MUST NOT BE BUILT. `dispatchLanes` STAYS AT 3 — measured 100% of draws since 2026-08-14,
+    admitted mean 3.00, and dropping to 2 would cut total admissions from 211 to 160 across the
+    observed sets. Nothing here may propose reducing it or depend on it being reduced. NO CONTAINER
+    MEMORY LIMIT, NO VM RESIZE, NO REMOVING SWAP — setting `memory.max` converts a livelock into an
+    OOM kill, which is arguably better and is a deploy-side ruling, not this task. NO KILL PATH. NO
+    SECOND PROBE SOURCE. The stale-lock half is W1-T1036 and is NOT absorbed here.
+
+    STALE FIGURES THAT MUST NOT BE REPEATED. The "21% of draws fill three lanes" figure predates
+    2026-08-14 and is false of every draw since; the "2.04 admitted mean" is a COST ratio lifted
+    from `plan/policy.yaml`, not a lane statistic. Both are in circulation and neither should be
+    carried forward.
+
+    SIBLING, NAMED AND NOT ABSORBED. W1-T1036 (#2235) is the stale `.git/config.lock` this same
+    stall left behind, which blocked recovery across two daemon boots; it is a separate concern in
+    a separate file and is cited, not re-derived. W1-T1028 is a FOURTH casualty of that lock
+    failure, flagged `{"orphaned": true}` in `status.json` and not re-dispatched fifty minutes
+    later. WHETHER THE ORPHAN FLAG MAKES IT INELIGIBLE IS A SEPARATE QUESTION AND IS NOT ANSWERED
+    HERE.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT, and it is ordered by what the change actually
+    touches rather than by module size. `src/lib/sweep.ts` holds the two sibling predicates and the
+    policy table; `src/lib/dispatch-governor.ts` holds the composition point and the fail direction;
+    `src/lib/policy.ts` must parse a new bounded field or the YAML row cannot validate;
+    `plan/policy.yaml` carries the row. `src/run-task.ts` IS DECLARED because
+    `costGovernorGateFor` and `queueGovernorGateFor` — the real wiring that turns a pure predicate
+    into a live reading — both live there, and a memory gate with no factory beside them would be
+    the dead mechanism this shard's own criterion (iv) forbids. Per DECISIONS.md's 2026-08-18
+    W1-T471 ruling that file is not split and tasks are not re-scoped to avoid it; the ruling states
+    that the ceremonial acceptance sentence is no longer required and a new shard should simply
+    declare it, so it is declared here plainly and the serialisation cost is accepted.
+
+    `test/dispatch-memory-governor.test.ts` DOES NOT EXIST at 3b4dcf2e — a forward-referenced PATH,
+    never a guessed symbol — and is a new file because the house rule keeps a coverage-load-bearing
+    test out of a shared suite.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS: `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus acceptance text, and this set
+    crosses four `src/` modules, a plan file and `test/`. Blast radius argues both ways and both
+    belong on the record: the shipped default changes nothing observable, but the seam it edits is
+    consulted on every lane of every draw, and a floor set too high would idle a fleet that fills
+    three lanes on every one.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING, NOT MINTED HERE.
+    `refs/rmd-id/W1-T1038` resolves to 5145dd73af6f2199fd39d706427be254dab8c6ed. Positive control:
+    `refs/rmd-id/W1-T1036` reads 1. Negative control: `refs/rmd-id/W1-T1039` reads 0. The brief
+    named W1-T1037, whose ref also resolves, but the operator ruled mid-session that W1-T1037 is in
+    use on another lane; it is untouched here, and its zero shard-file and zero run-branch readings
+    are NOT treated as evidence it is free — a reservation is claimed before either exists.
