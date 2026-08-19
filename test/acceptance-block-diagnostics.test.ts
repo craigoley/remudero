@@ -23,9 +23,9 @@
 // `checkAcceptanceCommand`, the production command body, over a real temp file.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -412,13 +412,37 @@ test("W1-T952: a well-formed body is accepted in the same run", async () => {
 // "The check is: read the sha256 of the edited file, remove the diagnostics call, read the sha256
 // again and require it to DIFFER, run the suite and require the rejection test to FAIL, restore,
 // and require the sha to return to the original." (design note (v), verbatim.) Mirrors W1-T951's
-// own mutation check (test/dispatch-lifetime-breaker.test.ts) byte-for-byte in shape, over the
-// call this task actually wired (`deps.checkAcceptance(report.prUrl)` in `dispatchAlertFixRun`,
-// src/run-task.ts) rather than status.ts's durable-credit lookup.
+// own mutation check (test/dispatch-lifetime-breaker.test.ts) in what it proves, over the call
+// this task actually wired (`deps.checkAcceptance(report.prUrl)` in `dispatchAlertFixRun`,
+// src/run-task.ts) rather than status.ts's durable-credit lookup — but NOT in how it applies the
+// mutation, for the reason below.
 //
 // Spawned from THIS file, targeting THIS file's own refusal test by name — a real child `node
 // --test` process, narrowed via the SAME house dialect `remudero-review`'s own proof executor
 // uses for a bare `unit test: <name>` proof (parseWhitelistedProof/narrowNameFilteredArgs).
+//
+// WHY THE MUTANT IS WRITTEN INTO A SHADOW CHECKOUT, NEVER THE REAL src/run-task.ts. W1-T951's own
+// check (and this test's first draft) `writeFileSync`s the mutant straight over the real,
+// checked-out source and restores it in a `finally`. Node's test runner runs test FILES
+// concurrently, each importing modules from the SAME on-disk tree; for the whole width of that
+// window — here, up to the child's 90s timeout — any OTHER concurrently-running file that imports
+// `src/run-task.js` reads the MUTATED bytes instead of the real ones. `test/triage.test.ts` does
+// exactly that (`import { TRIAGE_WORKER_TOOLS, triageCommand } from "../src/run-task.js"`), and
+// MEASURED in `coverage-ratchet` (not `ci`, which never overlaps the same way) it failed with the
+// identical symptom W1-T963 already diagnosed and fixed for `src/lib/triage.ts` itself
+// (test/triage-proof-dialect.test.ts, commit 596e7a3): four assertions in a file this diff never
+// touches, `/grilling/`/`/proposed/`/`/rejected/` and the seeded-ambiguous case, tripped by a race
+// with zero relation to their own diff. W1-T963's fix (`writeMutantModule`) does not apply
+// directly here — it writes a copy that is `import()`-ed and called in-process, but this check
+// must spawn a full, independent `node --test` against the REAL target test FILE (which resolves
+// `../src/run-task.js` and a dozen other siblings by real relative path), not a single function
+// export. So instead: `git ls-files` gives the exact tracked tree, copied into a throwaway
+// `test/mutants-XXXX/` shadow checkout (same coverage-excluded, non-`.test.ts`-named home
+// `writeMutantModule` uses, and for the same two reasons — `ci.yml`'s `test/**` coverage exclude
+// and its `test/**/*.test.ts` run glob both skip it); `node_modules` is symlinked, never copied
+// (large, and never mutated); and the ONE file this check edits is written straight into the
+// shadow copy. The real `src/run-task.ts` is asserted below to have NEVER been written at all —
+// stronger than "restored", since there is no window in which it ever changed.
 
 test("W1-T952: removing the diagnostics call fails the refusal test", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -442,17 +466,27 @@ test("W1-T952: removing the diagnostics call fails the refusal test", () => {
     needle,
     '        const check: AcceptanceAuthorTimeResult = { ok: true, message: "W1-T952 MUTATION: diagnostics call removed" };\n',
   );
+  assert.notEqual(sha256(mutated), originalSha, "the mutation must actually change the bytes it is applied to");
 
   const whitelisted = parseWhitelistedProof(`unit test: ${positiveTestName}`);
   assert.ok(whitelisted, "sanity: the proof text must parse as a name-filtered `unit test:` dialect proof");
   assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
   const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
 
+  const shadowRoot = mkdtempSync(join(repoRoot, "test", "mutants-"));
   let childResult: ReturnType<typeof spawnSync> | undefined;
   try {
-    writeFileSync(runTaskTsPath, mutated);
-    const mutatedSha = sha256(readFileSync(runTaskTsPath, "utf8"));
-    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change run-task.ts's bytes");
+    const tracked = execFileSync("git", ["-C", repoRoot, "ls-files"], { encoding: "utf8" })
+      .split("\n")
+      .filter((rel) => rel.length > 0);
+    for (const rel of tracked) {
+      const dst = join(shadowRoot, rel);
+      mkdirSync(dirname(dst), { recursive: true });
+      cpSync(join(repoRoot, rel), dst);
+    }
+    symlinkSync(join(repoRoot, "node_modules"), join(shadowRoot, "node_modules"), "dir");
+    // The ONE file this check mutates -- written into the shadow copy, never the real checkout.
+    writeFileSync(join(shadowRoot, "src", "run-task.ts"), mutated);
 
     // NODE_TEST_CONTEXT (set by node's OWN test runner on the process running THIS test) is
     // inherited by a plain spawnSync env by default, and node's test runner treats its presence
@@ -460,14 +494,18 @@ test("W1-T952: removing the diagnostics call fails the refusal test", () => {
     // genuinely independent `node --test` invocation (the W1-T951 lesson, applied here too).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
-    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+    childResult = spawnSync(process.execPath, args, { cwd: shadowRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
   } finally {
-    // Restored regardless of what the child run did — a throw, a timeout, or a pass must never
-    // leave the real checked-out source mutated.
-    writeFileSync(runTaskTsPath, original);
-    const restoredSha = sha256(readFileSync(runTaskTsPath, "utf8"));
-    assert.equal(restoredSha, originalSha, "run-task.ts must be restored byte-for-byte after the mutation check");
+    rmSync(shadowRoot, { recursive: true, force: true });
   }
+
+  // The real, checked-out source was never written at all -- the race W1-T963 diagnosed has no
+  // window to occur in here, because there is nothing to restore.
+  assert.equal(
+    sha256(readFileSync(runTaskTsPath, "utf8")),
+    originalSha,
+    "run-task.ts must never be modified by this check",
+  );
 
   assert.ok(childResult, "sanity: the child process must actually have been spawned");
   assert.notEqual(
