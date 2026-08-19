@@ -4,6 +4,17 @@ import { resolve } from "node:path";
 // imports nothing from here, and lib/daemon.ts's "never touches the filesystem" purity is
 // untouched by a module that shells out to git.
 import type { DaemonFreshness } from "./daemon.js";
+// W1-T446: A RUNTIME IMPORT, DELIBERATELY, NOT TYPE-ONLY -- `treeFfSafe` is the predicate
+// itself, not a shape. `deployer.ts` already exports it pure or side-effect-free (inputs in,
+// result out) and there is NO import cycle back to this module. REUSING IT RATHER THAN
+// RE-DERIVING A SECOND INTERSECTING PREDICATE is the point: two hand-maintained intersections
+// of dirty-vs-incoming would be a second spelling of the same idea, the one option the task's
+// design doc rejects outright. The honest cost, paid deliberately: `deployer.ts` also pulls in
+// `node:fs`, `node:path`, `fleet-control.js` and `ledger.js`, and this module loads at CLI entry
+// for EVERY verb, so this does widen the startup graph of the whole CLI -- the alternative
+// (moving `treeFfSafe` to a smaller shared home) would touch `deployer.ts`, which is outside
+// this task's declared file scope.
+import { treeFfSafe } from "./deployer.js";
 
 /**
  * CLI self-freshness at entry (W1-T79) — the "stale-binary" class.
@@ -276,22 +287,57 @@ export function checkCliFreshness(
     return { status: "worktree", gitDir: linkedWorktree };
   }
 
-  const porcelain = git(["status", "--porcelain"]).trim();
-  const dirty = porcelain.length > 0;
-  if (dirty) {
-    const message =
-      `rmd is behind origin/main (${shortSha(headSha)}..${shortSha(originSha)}) and the working tree ` +
-      `has uncommitted changes -- refusing to auto-sync (never mutating uncommitted local state). ` +
-      `Commit or stash your changes, then run \`${REMEDY_COMMAND}\` yourself.`;
-    warn(message);
-    // W1-T486: a COUNT, never the porcelain paths themselves -- see the `log` field's doc.
-    log("self_sync.refused", {
-      reason: "dirty",
-      old_sha: headSha,
-      new_sha: originSha,
-      count: porcelain.split("\n").length,
-    });
-    return { status: "refused", reason: "dirty", message };
+  // RAW, NOT TRIMMED, for parsing: porcelain's two-char status column can start with a leading
+  // SPACE (` M path` — modified-in-worktree-only), and `.trim()`ing the whole blob before
+  // splitting eats that leading space, shifting every `slice(3)` path parse by one character.
+  // Only the emptiness check below is safe to run against a trimmed copy.
+  const porcelainRaw = git(["status", "--porcelain"]);
+  if (porcelainRaw.trim().length > 0) {
+    // W1-T446: THE CONDITION THIS REFUSES ON IS NOT THE HAZARD IT NAMES. An unscoped
+    // porcelain check refuses on ANY dirty path, even one the incoming fast-forward would never
+    // touch (a stray untracked directory is not a hazard to a merge that never writes it). Scope
+    // it to the same predicate `treeFfSafe` already uses for the deploy supervisor: intersect the
+    // dirty paths against the paths the fast-forward would actually write. The diff is read
+    // LOCALLY -- `fetch` already ran above, so `git diff --name-only HEAD..origin/main` costs no
+    // second network round trip.
+    //
+    // PORCELAIN PARSING MATCHES `deployer.ts`'s `dirtyFiles()` byte-for-byte (`XY path`, slice
+    // past the two-char status + one space, off the RAW per-line string) -- not a second
+    // spelling of that parse either.
+    const dirtyFiles = porcelainRaw
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean);
+    const incomingFiles = git(["diff", "--name-only", "HEAD..origin/main"])
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    // `sameAsIncoming` is deliberately OMITTED: the lossless byte-identical discard is a strictly
+    // larger, tree-MUTATING change (design (iv)) not needed to fix the observed incident, so every
+    // path that overlaps the incoming diff here is treated as a real conflict, never silently
+    // discarded.
+    const { ok, conflicting } = treeFfSafe({ dirtyFiles, incomingFiles });
+    if (!ok) {
+      const message =
+        `rmd is behind origin/main (${shortSha(headSha)}..${shortSha(originSha)}) and the working ` +
+        `tree has uncommitted changes the incoming fast-forward would also write -- refusing to ` +
+        `auto-sync (never mutating uncommitted local state). Conflicting path(s): ` +
+        `${conflicting.join(", ")}. Commit or stash your changes, then run \`${REMEDY_COMMAND}\` yourself.`;
+      warn(message);
+      // W1-T486: a COUNT, never the porcelain/conflicting paths themselves -- see the `log`
+      // field's doc. The paths ARE named in `message` (stderr, operator-facing, acceptance
+      // requires it) -- only the ledger row stays path-free.
+      log("self_sync.refused", {
+        reason: "dirty",
+        old_sha: headSha,
+        new_sha: originSha,
+        count: conflicting.length,
+      });
+      return { status: "refused", reason: "dirty", message };
+    }
+    // Dirty, but NOTHING dirty overlaps the incoming diff -- e.g. an untracked scratch file, or a
+    // modified tracked file the fast-forward never touches. Not the hazard the guard exists to
+    // catch; fall through to the remaining checks exactly as a clean tree would.
   }
 
   // Clean and not equal: is a fast-forward even possible? `merge-base --is-ancestor HEAD
@@ -495,10 +541,13 @@ export function checkServiceFreshness(
     // `DaemonStopReason`'s doc says must never reach an exit. That divergence is DECLARED, not
     // accidental, so this aligns with the entrypoint and NOT with the deployer.
     //
-    // `checkCliFreshness` above KEEPS the unscoped form deliberately. Its dirty check REFUSES rather
-    // than assesses, relaxing it is W1-T446's scope, and that task is `verify: human` precisely
-    // because loosening a blocking guard is the operator's call. This edit is scoped to the assessing
-    // sibling for that reason.
+    // `checkCliFreshness` above now intersects its dirty check against the INCOMING diff (W1-T446)
+    // rather than against `-uno`/tracked-only, and for a DIFFERENT reason than the alignment
+    // argued above: it must still refuse a tracked OR untracked path the fast-forward would
+    // actually overwrite, which `-uno` alone would silently miss. This assessing sibling stays on
+    // `-uno`, unscoped by the incoming diff, on purpose: it aligns with `entrypoint.sh`'s own
+    // tracked-only, unintersected check for the reason above, and that alignment is orthogonal to
+    // W1-T446's fix to the OTHER function's refusal.
     const dirty = git(["status", "--porcelain", "-uno"]).trim().length > 0;
   const behind = headSha !== originSha ? { oldSha: headSha, newSha: originSha } : null;
   return { status: "assessed", dirty, behind };
