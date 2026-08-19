@@ -1705,6 +1705,98 @@ test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verd
   }
 });
 
+// W1-T948: a task declaring `principles: {tdd: strict}` must actually REACH the specialist
+// panel's testing trigger through runTask's OWN production call site (taskMetadataFromPrinciples
+// -> routeSpecialists), not merely through specialist-panel.test.ts's direct unit calls — this
+// is the exact wiring gap the task fixed (routeSpecialists previously had no production caller
+// at all). Otherwise-identical to the W1-T268 merged BEHAVIORAL test above (same fixture, same
+// fake-gh sequencing) so this only isolates the ONE new variable: a `tdd: strict` principle.
+test("BEHAVIORAL (W1-T948): a real runTask run whose task declares `principles: {tdd: strict}` reaches the specialist panel call site and ledgers a `testing` trigger via the SAME production path the merged run above drives, never a hand-built input", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-specialist-panel-root-"));
+  const planPath = join(root, "tasks.yaml");
+  const planWithTddStrict = FOLLOWUP_FIXTURE_PLAN.replace(
+    "  status: queued",
+    "  status: queued\n  principles: {tdd: strict}",
+  );
+  writeFileSync(planPath, planWithTddStrict);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000098;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const fakeBinDir = statefulFakeGh({
+    branch,
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }]],
+    pollSeq: [{ state: "MERGED" }],
+  });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    if (spawnCalls.length === 2) {
+      return result({
+        sessionId: "s-implement",
+        accountLabel: "acct-tddstrict",
+        text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/601\n",
+      });
+    }
+    // The risk judge's own spawn — a confident low-risk verdict PROCEEDS, mirroring the
+    // W1-T268 merged test's own fixture exactly.
+    return result({
+      sessionId: "s-risk-judge",
+      text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: a small, well-tested fixture change\n",
+    });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        runReview: async () => fakeReview("success", []),
+      }),
+    );
+
+    assert.equal(res.verdict, "merged");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const panelLog = ledger.find((l) => l.step === "specialist.panel");
+    assert.ok(
+      panelLog,
+      "runTask must reach the W1-T948 specialist-panel call site for a `tdd: strict` task " +
+        "— the wiring gap this task fixed",
+    );
+    assert.deepEqual(
+      panelLog.triggers,
+      ["testing"],
+      "the testing trigger — the ONE trigger `principles: {tdd: strict}` fires — sourced from " +
+        "the production taskMetadataFromPrinciples(task.principles) call, never a literal",
+    );
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("BEHAVIORAL (W1-T382): a real runTask run whose merge poll never moves reaches blocked_ci via pollToGate's OWN stall branch, naming the still-pending check", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "runtask-pollgate-stall-root-"));
   const planPath = join(root, "tasks.yaml");
