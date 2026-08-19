@@ -1,0 +1,162 @@
+- id: W1-T1016
+  title: "a changeset-contradiction review failure ledgers an EMPTY reasons array, so the one field the fix-rung routing predicate reads is empty for the one failure shape the fleet already owns a mechanical repair for — the reader, the disposition row and the repair all exist and never meet"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    RE-DERIVED AT origin/main 3efd809 IN A SCRATCH WORKTREE. Every claim below was read from
+    source on that tree, not carried from the brief.
+
+    (1) THE REPAIR EXISTS AND IS CORRECT. `deriveChangesetClaimUpdate` (src/run-task.ts, W1-T307)
+    rewrites a stale `exactly N files` claim to match the real diff and fail-safes to `undefined`
+    on anything it cannot reconstruct with confidence. `runFixRung` (same module) calls it BEFORE
+    re-review, so a routed repair fixes the sentence and the review then judges the corrected body.
+
+    (2) THE DISPOSITION ROW EXISTS AND IS CORRECT. `DISPOSITION_RULES` (src/lib/sweep.ts) carries
+    THREE `blocked-fixable` rows; the third reads
+    `pr.reviewState === "failure" && (pr.unmetCriteria.length > 0 || (pr.actionableGateFailures?.length ?? 0) > 0)`
+    and is ordered BEFORE the `blocked-ambiguous` review-failure catch-all. So the disjunct that
+    would route this shape is already shipped — this task must NOT add one.
+
+    (3) THE BREAK IS ONE FIELD, ONE LAYER DOWN. `actionableGateFailuresFromReasons` (src/lib/sweep.ts)
+    is `reasons.length === 1 ? [{ reason: reasons[0] }] : []`, and the changeset-contradiction path
+    ledgers `reasons: []`. W1-T304's own doc in src/lib/review.ts records exactly this: the reason
+    "existed only inside the posted commit-status description (a 140-char field that truncates it)".
+    So `reasons: []` yields `actionableGateFailures: []`, the disjunct is false, and the PR falls to
+    `blocked-ambiguous` — a human.
+
+    (4) THE REASON IS ALREADY COMPUTED AND ALREADY ON THE ROW UNDER ANOTHER NAME.
+    `reviewLedgerLegibilityFields` (src/lib/review.ts) already emits BOTH
+    `failure_class: reviewFailureClass({...})` — which returns `changeset_contradiction` for this
+    path — AND `failure_reason: verdict.summary`. Nothing has to be derived or invented; the single
+    reason exists at the write site already.
+
+    (5) AND NOTHING ROUTES ON `failure_class`, BY DESIGN. Its only two mentions in src/lib/sweep.ts
+    are doc comments stating it is never keyed on (design note v), and
+    `actionableGateFailuresFromLedger` (src/run-task.ts) says the same. That is a deliberate choice
+    this task does not reopen.
+
+    (6) POPULATING `reasons` DOES NOT COLLIDE WITH THE OTHER READER — CHECKED, NOT ASSUMED. Exactly
+    two readers of `line.reasons` exist in src/. `unmetFromLedger` (src/run-task.ts) builds its
+    result with `claims.map(...)` where `claims` comes from `unmet_criteria` and `reasons[i]` is only
+    a positional lookup, so with `unmet_criteria` empty it returns `[]` whatever `reasons` holds. The
+    contradiction path has no unmet criteria by construction. The second reader is
+    `actionableGateFailuresFromLedger`, which is the one this task intends to reach.
+  design: |
+    THE SHAPE: write the reason that is already known into the field that is already read. No new
+    field, no new rung, no new signal, and nothing consuming anything that did not consume it before.
+
+    (i) THE ONE CHANGE. On the changeset-contradiction failure path, the `review.posted` row must
+    carry its single reason in `reasons` rather than an empty array. The reason is already computed
+    at the write site (rationale 4); this is a plumbing change, not a derivation.
+
+    (ii) EXACTLY ONE REASON, NEVER MORE. `actionableGateFailuresFromReasons` qualifies only at
+    `length === 1` and that bound is deliberate — it is what keeps a multi-cause failure out of the
+    automatic rung. A contradiction failure that somehow carried two reasons must stay unrouted, so
+    the write must not concatenate or flatten several contradictions into one entry.
+
+    (iii) EXPLICITLY OUT OF SCOPE, AND ALL THREE ARE CORRECT AS THEY STAND:
+    `deriveChangesetClaimUpdate`, `runFixRung`, and the `blocked-fixable` disposition row. Touching
+    any of them widens a one-field routing fix into a behaviour change. Also out of scope: making
+    anything read `failure_class`, which rationale 5 records as a deliberate design choice.
+
+    (iv) THE UNMET-CRITERIA PATH MUST BE PROVEN UNCHANGED, IN THE SAME RUN. This edits a field an
+    ordinary failing review also writes. A test that only shows the contradiction path now carries a
+    reason would pass just as well if the change had corrupted the ordinary path, so the negative
+    control must run beside it and observe the unmet-criteria row's own reasons untouched.
+
+    (v) AND THE ROUTING MUST BE ASSERTED AT THE DISPOSITION, NOT AT THE FIELD. Showing
+    `actionableGateFailures` is non-empty proves the plumbing; it does not prove the PR stops
+    reaching a human. The criterion that matters drives the real rules and observes `blocked-fixable`
+    where `blocked-ambiguous` was returned before.
+
+    (vi) MUTATION CHECK, FILE-SHA BRACKETED. Read the sha256 of the edited file, remove the reason
+    write, read it again and require it to DIFFER, run the suite and require the routing test to
+    FAIL, restore, and require the sha to return to the original. A no-op mutation is otherwise
+    indistinguishable from a surviving mutant.
+  acceptance:
+    - claim: "a changeset-contradiction failure ledgers exactly one reason instead of an empty array"
+      proof: "unit test: W1-T1016: a changeset contradiction failure ledgers exactly one reason"
+    - claim: "an ordinary unmet-criteria failure's reasons are unchanged, asserted in the same run"
+      proof: "unit test: W1-T1016: an unmet criteria failure keeps its own reasons unchanged"
+    - claim: "the ledger reader returns one actionable gate failure for that row"
+      proof: "unit test: W1-T1016: the ledger reader returns one actionable failure for that row"
+    - claim: "such a PR is dispositioned blocked-fixable rather than reaching a human"
+      proof: "unit test: W1-T1016: a contradiction failure is dispositioned blocked fixable"
+    - claim: "removing the reason write fails the routing test, with the file sha read either side"
+      proof: "unit test: W1-T1016: removing the reason write fails the routing test"
+  risk: high
+  origin: "recon#contradiction-reason-unreachable-2026-08-19"
+  plan_refs: ["W1-T304", "W1-T307", "W1-T923", "W1-T952"]
+  files: [src/lib/review.ts, src/run-task.ts, test/review-failure-reason-ledgered.test.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only `risk === "high"` and fires at two or more concerns; this
+    record names four (review, run-task, the W1-T304 ledger suite, the sweep suite), so no smaller
+    band can pass while `files:` still covers the write site and its reader. The blast radius is
+    genuinely narrower: one field on one failure path, with the ordinary path pinned unchanged by
+    criterion 2.
+
+    verify: auto IS DELIBERATE. The change is mechanical — move a value that already exists at the
+    write site into a field that already exists on the row — and every criterion is machine-checkable
+    including the routing one. Nothing here is a judgement, so this does not need the human band that
+    an arming-policy change would.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT 3efd809, NOT GUESSED.
+    `reviewLedgerLegibilityFields`: src/lib/review.ts=2, src/run-task.ts=4.
+    `reviewFailureClass`: src/lib/review.ts=3, and nowhere else in src/.
+    `actionableGateFailuresFromLedger`: src/run-task.ts=3, src/lib/sweep.ts=1 (doc).
+    `actionableGateFailuresFromReasons`: src/run-task.ts=3, src/lib/sweep.ts=1, test/sweep.test.ts=4.
+    Control: `routeSpecialists` reads 0 in both source modules, so the counts discriminate.
+    The three `log("review.posted", …)` emit sites all live in src/run-task.ts, which is why the
+    write site is there.
+
+    src/run-task.ts IS DECLARED AND THE COST IS ACCEPTED IN WRITING. W1-T471 records that declaring
+    the monolith serialises every task naming it, and 221 of 361 shards already do. It is declared
+    anyway because the `review.posted` emit sites and `actionableGateFailuresFromLedger` — the write
+    and the read this task connects — are both in that file. Omitting it would leave a `files:` list
+    that cannot express the change.
+
+    src/lib/sweep.ts IS DELIBERATELY NOT DECLARED. Its two symbols here are
+    `actionableGateFailuresFromReasons` (correct as written — the `length === 1` bound is the
+    intended gate) and the disposition row (correct and explicitly out of scope per design iii).
+    Declaring it would invite an edit this task must not make.
+
+    THE ID RESTS ON THE SWEEP; THE RESERVATION WAS REFUSED FOR THE FOURTH TIME THIS SESSION.
+    W1-T1016 read 0 against shard FILENAMES (the existence test, not a content grep), 0 against id
+    lines in the plan tree, 0 against refs/rmd-id/*, and 0 across the single open PR's file list
+    (coverage asserted: 1 captured of 1 enumerated). Controls read 1 in every case — W1-T1015 by
+    filename and by id line, W1-T1007 on the open-PR surface, and the ref namespace returned 108
+    refs. Max real id on main is 1015; refs also hold W1-T100000/W1-T1000000/W1-T1000001, which are
+    probe artifacts rather than filed ids.
+    The gated push to refs/rmd-id/W1-T1016 used an orphan commit over the empty tree (4b825dc6)
+    carrying a host-pid-nanosecond nonce and a braced refspec, with the exit code captured in a
+    variable. It returned rc=1, and the GATE PROOF DISTINGUISHES THIS FROM A CAS REFUSAL:
+    `! [rejected]` count 0, `could not read Username` count 0, ref count 0 before and 0 after —
+    i.e. an HTTP 403 push-permission refusal, not a non-fast-forward rejection and not a credential
+    prompt. Verbatim:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+
+    THE POPULATION FIGURE IS NOT IN THIS RECORD BECAUSE IT COULD NOT BE MEASURED. Answering "how
+    many review.posted failures carry failure_class changeset_contradiction with reasons empty"
+    needs the AZURE daemon's ledger. The only ledger reachable from this host is a container-local
+    stub: per-form coverage control found 1 file matching `ledger.ndjson`, 0 matching
+    `ledger.*.ndjson`, 0 matching `ledger.*.ndjson.gz`; deduped on the full line it holds
+    `cli.invoked` 285, `deploy.skip` 81, `automerge.disarmed` 2, and `review.posted` 0 — against a
+    positive control of 285 `cli.invoked` rows, so the corpus reads and the zero is real absence.
+    Three instances were observed by hand today (#2159, #2161, and W1-T911's own history), which
+    establishes the shape recurs but not its rate.
+
+    WHAT THIS DOES NOT FIX, STATED SO IT IS NOT MISTAKEN FOR THE WHOLE ANSWER. A pre-open check
+    catches a claim that is BORN WRONG; this catches one that WENT STALE. #2161's claim was true
+    when written and became false when a conflict resolution dropped a file, which no author-time
+    check can refuse. W1-T952 owns the pre-open half and is filed-not-built; it is the COMPLEMENT of
+    this record, never its substitute, and neither makes the other unnecessary.
