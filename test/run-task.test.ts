@@ -7028,9 +7028,14 @@ const ALERT_FIX_MOUNT: Mount = { model: "fake-model", effort: "low", maxTurns: 5
 
 function fakeAlertFixDispatchDeps(overrides: Partial<AlertFixDispatchDeps> = {}): {
   deps: AlertFixDispatchDeps;
-  calls: { worktreeAdd: unknown[][]; worktreeRemove: unknown[][]; ensureTaskTrailer: unknown[][] };
+  calls: { worktreeAdd: unknown[][]; worktreeRemove: unknown[][]; ensureTaskTrailer: unknown[][]; checkAcceptance: unknown[][] };
 } {
-  const calls = { worktreeAdd: [] as unknown[][], worktreeRemove: [] as unknown[][], ensureTaskTrailer: [] as unknown[][] };
+  const calls = {
+    worktreeAdd: [] as unknown[][],
+    worktreeRemove: [] as unknown[][],
+    ensureTaskTrailer: [] as unknown[][],
+    checkAcceptance: [] as unknown[][],
+  };
   const deps: AlertFixDispatchDeps = {
     worktreeAdd: (...args) => {
       calls.worktreeAdd.push(args);
@@ -7044,6 +7049,12 @@ function fakeAlertFixDispatchDeps(overrides: Partial<AlertFixDispatchDeps> = {})
     spawn: async () => fakeAlertFixWorkerResult("REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/999\n"),
     ensureTaskTrailer: (...args) => {
       calls.ensureTaskTrailer.push(args);
+    },
+    // Default: a healthy body (W1-T952) — most fixture PRs in this suite are not exercising the
+    // acceptance-check branch, so the default must never manufacture a false positive there.
+    checkAcceptance: (...args) => {
+      calls.checkAcceptance.push(args);
+      return { ok: true, message: "fixture default: healthy" };
     },
     ...overrides,
   };
