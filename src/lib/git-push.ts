@@ -32,10 +32,17 @@ export type PushExec = (file: string, args: string[], opts: { stdio: "inherit" |
 
 /** Options per call site — every divergence between the nine sites is a parameter here,
  *  never a second implementation. `stdio` is "ignore" only at the two best-effort fix-rung
- *  sites; `setUpstream` is true only at spike.ts's push-fallback, which used `push -u`. */
+ *  sites; `setUpstream` is true only at spike.ts's push-fallback, which used `push -u`.
+ *  `force` (W1-T1012) is true only at the two call sites that just amended the worktree's
+ *  own last commit (appending the `Remudero-Task:` trailer, `appendTaskTrailerToCommit`,
+ *  run-task.ts) AFTER that commit was already on origin — the amend rewrites the tip sha,
+ *  so a plain push is a non-fast-forward rejection. Safe here specifically: this branch is
+ *  `run-<id>-<epochMs>`, owned exclusively by this one run, so nobody else's work is ever
+ *  discarded by the force. */
 export interface PushRunBranchOpts {
   stdio?: "inherit" | "ignore";
   setUpstream?: boolean;
+  force?: boolean;
   exec?: PushExec;
 }
 
@@ -46,6 +53,7 @@ export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts =
   assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
   const args = ["-C", worktreePath, "push"];
   if (opts.setUpstream) args.push("-u");
+  if (opts.force) args.push("--force");
   args.push("origin", "HEAD");
   (opts.exec ?? defaultPushExec)("git", args, { stdio: opts.stdio ?? "inherit" });
 }
