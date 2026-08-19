@@ -21784,6 +21784,7 @@ export async function main(
   if (cmd === "dep-review" && arg) {
     process.exit(await depReviewCommand(arg, rest.slice(1)));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "receipt" && arg) {
     process.exit(await receiptCommand(arg, rest.slice(1)));
   }

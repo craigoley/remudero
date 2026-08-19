@@ -196,6 +196,30 @@ test("receiptCommand resolves the task id from the PR body's Remudero-Task trail
   assert.deepEqual(output.predicate.review.reviewer_outcome, { value: "reviewer_completed" });
 });
 
+test("receiptCommand rejects an unknown flag before any network call — fail loud, no gh spawn", async () => {
+  const { receiptCommand } = await import("../src/run-task.js");
+  const realError = console.error;
+  const errors: string[] = [];
+  console.error = (...a: unknown[]) => void errors.push(a.map(String).join(" "));
+  let ghCalled = false;
+  let code: number;
+  try {
+    code = await receiptCommand("9003", ["--bogus"], {
+      gh: () => {
+        ghCalled = true;
+        throw new Error("must not be called — bad-arg refusal happens before any gh call");
+      },
+      config: { root: "/tmp/rmd-receipt-command-test" } as never,
+      readLedgerLines: () => [],
+    });
+  } finally {
+    console.error = realError;
+  }
+  assert.equal(code, 2);
+  assert.equal(ghCalled, false);
+  assert.ok(errors.some((e) => e.includes("unexpected argument '--bogus'")));
+});
+
 test("receiptCommand refuses (never guesses) when the PR body carries no Remudero-Task trailer", async () => {
   const { receiptCommand } = await import("../src/run-task.js");
   const realError = console.error;
