@@ -1,0 +1,150 @@
+- id: W1-T1039
+  title: "AN ID BURNED BY A PROSE MENTION BECAME THE PERMANENT CEILING, SO EVERY MINT NOW RETURNS AN ID SIX ORDERS OF MAGNITUDE ABOVE THE PLAN — the max is taken across four surfaces with no upper sanity check, three of them now legitimately carry the outliers, and one of those three is git history and cannot be edited: bound the MAX, and reserve the range above the bound so a negative control is safe to write"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THE VERB IS NOT BROKEN; ITS ANSWER IS. `rmd next-task-id` now runs from a dedicated operator
+    checkout with `gh` present and ALL FOUR SURFACES READING CLEANLY — no degradation, nothing
+    unreadable. It returns an id far above the plan's range with `max` at the same magnitude. The
+    arithmetic is correct and the answer is unusable, which is why no error surfaces anywhere.
+
+    (1) WHAT THE MAX IS ACTUALLY TAKEN OVER, RE-DERIVED AT origin/main 2290281b. `mintNextTaskId`
+    (`src/lib/task-id.ts`) reads exactly three: `declaredTaskIds` over `plan/tasks.yaml`,
+    `shardTaskIds` over every `plan/tasks.d/*.yaml`, and — only when a caller supplies
+    `openPrTexts` — `mentionedTaskIds` over open plan-PR text. `mintNextTaskIdWithHistory`
+    (`src/run-task.ts`) layers a fourth, `taskIdsEverFiled`, over the `plan/` git history.
+    `maxSeen` is `Math.max` across them with NO upper bound of any kind.
+
+    (2) ONLY ONE OF THE FOUR READS PROSE, AND THAT IS WHERE THE BURN BEGINS. `TASK_ID_DECL_RE` and
+    the history scan's `ADDED_TASK_ID_RE` both require an `id:` FIELD; `TASK_ID_MENTION_RE` matches
+    the id anywhere. MEASURED with the real functions: the mention scan harvests an out-of-range
+    sentinel out of a sentence and reports it at the outlier magnitude, while `declaredTaskIds` over
+    THE SAME SENTENCE harvests zero — control, the declared scan harvests one from a real `id:`
+    line. So `plan/` prose is safe and OPEN-PR prose is not, and nothing in the authoring experience
+    shows an author that asymmetry.
+
+    (3) THE BURN IS STILL LIVE, AND THE CONVENTION THAT CAUSES IT IS THIS REPO'S OWN. A shard merged
+    to main today cites a reservation ref in prose as a negative control — "reads 0" — and that is
+    the correct, house-style way to control a zero. It is harmless there because `plan/` is read
+    structurally. Written into an OPEN PR BODY the identical sentence raises the ceiling. The next
+    negative control written in the wrong place burns another id.
+
+    (4) AND THE CEILING NO LONGER DEPENDS ON THE MENTION SCAN AT ALL, WHICH IS THE DECISIVE FACT FOR
+    WHERE THE BOUND GOES. Two shards at outlier ids are REAL FILES under `plan/tasks.d/` on main —
+    two, against a control of 386 sane-range shard files — so the STRUCTURED scan alone now produces
+    the runaway max. The highest sane declared id is 1038. Worse, those ids were genuinely ADDED as
+    `id:` lines when the shards were filed, so `taskIdsEverFiled` returns them from the git history
+    FOREVER, and that surface is immutable by construction: its own doc says the derivation "must
+    never hand back one some past commit already owned". THREE of the four surfaces now legitimately
+    carry them. Bounding the mention scan alone would fix the next burn and not today's ceiling.
+
+    (5) SO THE BOUND BELONGS AT THE MAX, AND THE POPULATION-DERIVED FORM IS REFUTED BY THE LIVE DATA
+    RATHER THAN BY TASTE. The obvious self-maintaining rule — ignore anything more than N above the
+    SECOND-highest — fails here and the measurement says why: over 624 distinct declared ids the gap
+    between the highest and the second-highest is ONE, while the gap between the second-highest and
+    the third is 998,964 — the outlier population has more than one member, so the second-highest is itself an outlier,
+    and the rule inspects exactly the position that has been poisoned. A rule that needs the
+    outliers to be solitary cannot clean up after the case that produced two of them. An explicit
+    constant is arbitrary in the sense that a number had to be chosen, and correct in the sense that
+    it does not depend on the shape of the corruption it exists to survive.
+
+    (6) THE RESERVATION SURFACE DOES NOT FEED THE MAX, AND MUST STILL BE BOUNDED FOR A DIFFERENT
+    REASON. `mintNextTaskId` never reads `refs/rmd-id/*`, so bounding it would not change a single
+    mint. But `reserveTaskIdRemote` walks UPWARD from whatever `startId` it is handed, so a poisoned
+    mint writes poisoned refs: five out-of-range refs exist against a control of 130 sane ones, and
+    none of them will ever be filed. Fixing the max fixes the refs prospectively; the existing five
+    are inert and are NOT to be deleted, for the same reason the shards are not to be renumbered.
+
+    (7) DO NOT RENUMBER THE TWO SHARDS, AND AN IMPLEMENTER WILL REACH FOR THAT FIRST. They are
+    MERGED AND CREDITED, so a renumber is a post-merge amendment and `postMergeAmendmentViolations`
+    (`src/lib/task-linter.ts`) refuses it. THE FIX IS A BOUND THAT IGNORES THEM, NEVER A CLEANUP
+    THAT MOVES THEM.
+
+    (8) AND THE BOUND MUST AFFECT ALLOCATION ONLY. An ignored-but-present shard still loads through
+    `loadPlan`, still lints under `rmd lint-plan`, still counts toward the task total, and stays
+    dispatchable and creditable exactly as today. The ONLY thing the bound changes is which ids
+    `maxSeen` considers. Criterion 2 pins that, because a bound that quietly removed a task from
+    visibility or eligibility would be a much larger and unasked-for change.
+
+    (9) THE COMPLEMENTARY HALF, AND IT IS WHAT MAKES THE CONVENTION SAFE RATHER THAN MERELY SURVIVED.
+    Declaring everything above the bound NEVER-ALLOCATABLE turns the range into a sanctioned sentinel
+    space: a negative control drawn from it can be written anywhere, including an open PR body,
+    because no mint can ever return one. That is strictly better than teaching the mention scan to
+    read structured fields only — which would also work for this defect, but would blind the scan to
+    a genuinely filed-but-unmerged id, which is the reason it reads prose at all.
+  acceptance:
+    - claim: "an id far above the sane population is ignored when the max is computed"
+      proof: "unit test: W1-T1039: an id far above the sane population is ignored when computing the max"
+    - claim: "an out-of-range shard still loads and still lints — the bound touches allocation only"
+      proof: "unit test: W1-T1039: an out of range shard still loads and still lints"
+    - claim: "a sentinel written in an open PR body no longer raises the ceiling"
+      proof: "unit test: W1-T1039: a sentinel written in an open pr body no longer raises the ceiling"
+    - claim: "the bound does not trust the second-highest id when that is itself an outlier"
+      proof: "unit test: W1-T1039: the second highest is not trusted when it is itself an outlier"
+    - claim: "the population-derived rule is refused because the outliers are not solitary"
+      proof: "grep: the outlier population has more than one member in plan/tasks.d/W1-T1039-a-burned-id-becomes-the-ceiling.yaml"
+  risk: high
+  origin: "oper#allocator-ceiling-burned-by-prose-2026-08-19"
+  plan_refs: ["W1-T1011", "W1-T278", "W1-T509"]
+  files: [src/lib/task-id.ts, test/task-id-allocation-bound.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    NO OUT-OF-RANGE ID IS WRITTEN ANYWHERE IN THIS SHARD, DELIBERATELY. Every reference to one is
+    descriptive — "the outlier magnitude", "an out-of-range shard", "the highest sane declared id is
+    1038" — because writing the literal is the exact mechanism being filed and would burn a fourth
+    the moment this shard's PR body is open and scanned. The same rule governs the PR body.
+
+    THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL
+    LINE inside rationale (5), is not on line 2, and reads 0 files across the tree at the merge base
+    against a control (`never hand back one`) that reads 1 — so it discriminates head from base.
+
+    src/run-task.ts IS NOT DECLARED, AND THAT IS THE MEASURED CHOICE. It carries 245 of 626 records
+    and DECISIONS.md's 2026-08-18 W1-T471 ruling accepts one effective lane as the standing cost of
+    naming it, so avoiding it is worth doing where the marker is reachable elsewhere. `maxSeen` is
+    computed in `mintNextTaskId` (`src/lib/task-id.ts`, declared by ONE shard), and
+    `mintNextTaskIdWithHistory`'s own `Math.max(base.maxSeen, historyMax ?? 0)` inherits an already-
+    bounded `base.maxSeen`; the history term needs the same bound applied to `historyMax`, which is a
+    one-expression change. IF an implementer finds that term cannot be bounded without editing
+    run-task.ts, the widening must be ratified before it is made and the W1-T471 cost accepted in
+    writing then.
+
+    NO WRAPPER AND NO SHELL SCRIPT. The verb already does the four-surface sweep and the atomic
+    reservation properly; anything wrapping it would reimplement both worse. The change is one
+    predicate inside the function that computes the maximum.
+
+    W1-T1011 IS CITED AND NOT ABSORBED. It files the triage lane taking a PERMANENT reservation
+    BEFORE the work is known to hold — a spend-ordering defect. This is a burned id becoming the
+    CEILING — an allocation-arithmetic defect. They share the allocator and nothing else; fixing
+    either leaves the other exactly as it was.
+
+    risk: high IS RAISED ON A MEASURED REFUSAL AND THE REFUSAL IS QUOTED. Authored at `risk: medium`
+    — one predicate and its test in two files, no workflow, no policy data, no source module beyond
+    the allocator itself — and `rmd lint-plan` refused it in these words: *"[sizing] spans 2 distinct
+    subsystems/concerns (task-id, task-id-allocation-bound) at risk:medium — Rule 19: raise to
+    risk:high or decompose into one task per concern."* The band is Rule 19's SPAN, not blast radius:
+    a predicate and the test that pins it are not two tasks, and shipping either alone is how an
+    unenforced rule gets written.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form; each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted verbatim from test/next-task-id-history.test.ts that matched one.
+    Each is plain prose under 100 characters with no comma, no `; ` and no regex metacharacter,
+    because a bare title is compiled through `escapeRegExp` and matched literally. The fifth is
+    doc-shaped and takes a `grep:` with an explicit path.
+
+    ID PROVENANCE — PRE-MINTED AND READ BACK AGAINST ITS EXPECTED SHA BEFORE FILING.
+    `refs/rmd-id/W1-T1039` resolves to `ad3b9a98…`, matching the operator's stated value (control
+    `refs/rmd-id/W1-T1037` resolves; the negative control, a deliberately-unallocated ref far above
+    the range, reads 0 — its literal id is NOT written here, for the reason this whole shard exists). Surfaces swept over
+    GIT AND SOURCE ONLY, with no GitHub API call beyond the ref sweep: the reservation; shard
+    FILENAMES via `git ls-tree -r` (this id 0, control W1-T1038 = 1 — THE FILENAME IS THE EXISTENCE
+    TEST); ids mentioned under plan/ (ADVISORY, 1 file — and that mention is itself the evidence in
+    rationale (3), a merged shard citing this very ref as a negative control while it was still
+    free); and, in place of the open-PR API surface, `git ls-remote --heads origin` swept for a
+    branch naming it, which reads 0 against a control of 1 for a recently-filed id. THE REFS ARE
+    RE-SWEPT IMMEDIATELY BEFORE PUSHING.

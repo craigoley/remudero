@@ -1,0 +1,190 @@
+- id: W1-T1041
+  title: "THE FULL ~7,900-TEST SUITE RUNS TWICE PER PR — `ci` and `coverage-ratchet` each run the identical glob under a DIFFERENT harness, so one PR spends 1,178s of billed runner time on the same tests and gives every external failure two chances to land; establish whether one run can serve both, and rule on which harness survives if it cannot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-19 on Craigs-Mac-mini under /bin/zsh 5.9, against origin/main 00a1f584 in a
+    scratch worktree. Population: the 600 most recent retained runs of `.github/workflows/ci.yml`
+    (2026-08-15T01:24Z .. 2026-08-19T21:12Z), all 7,804 of their job rows, and the step detail of
+    every non-success `ci`/`coverage-ratchet` job in that window. Zero `/rate_limit` calls.
+    POSITIVE CONTROL ON THE JOB CENSUS: each of `ci`, `coverage-ratchet`, `lint-plan`, `claims`,
+    `commitlint`, `depcruise` and seven more reads exactly 600 rows, so no run is half-read.
+
+    (1) THE DUPLICATION IS REAL, AND CONFIRMED FROM THE TWO COMMANDS RATHER THAN ASSUMED.
+    `ci`'s Test step runs `npm run test:ci`, which package.json expands to
+      node --test --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
+    `coverage-ratchet`'s Test-with-coverage step runs
+      node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**"
+           --test-reporter=spec --test-reporter-destination=stdout
+           --test-reporter=lcov --test-reporter-destination=coverage/lcov.info
+           --test --import tsx "test/**/*.test.ts"
+    THE GLOB IS BYTE-IDENTICAL. Both route through `scripts/test-with-retry.mjs` (W1-T255), so a
+    red run re-runs the WHOLE command once — four full suite executions per failing PR, not two.
+    NO OTHER JOB RUNS THE SUITE: `containment-probe` names one file, and `mutation-ratchet`'s
+    `commandRunner` was scoped to two files by W1-T133. The duplication is exactly 2x, not 3x.
+
+    (2) THE COMMANDS DIFFER IN THREE WAYS, AND ONLY TWO ARE INSTRUMENTATION.
+    Coverage flags and reporters are the expected two. THE THIRD IS NOT INSTRUMENTATION AT ALL:
+    tmp-hygiene is loaded by ci and NOT by coverage-ratchet. `test/setup/tmp-hygiene.ts` (W1-T131)
+    WRAPS `fs.mkdtempSync` via `syncBuiltinESMExports()`, rewrites every fixture's temp prefix
+    through `reapableTmpPrefix`, and sweeps the dirs on exit. So the two jobs do not merely measure
+    the same run differently — they run the fixtures under different filesystem behaviour.
+
+    (3) AND THEY DEMONSTRABLY DISAGREE, IN BOTH DIRECTIONS. 12 of 600 runs disagreed at the test
+    step: 10 where `coverage-ratchet` failed while `ci` passed, and 2 the other way. EVERY ONE
+    produced a complete summary on BOTH attempts, so none is a truncated run.
+    SEVEN OF THE TEN ARE THE SAME FOUR TRIAGE TESTS ON SEVEN UNRELATED BRANCHES inside one 90
+    minute window on 2026-08-19 — `dependabot/npm_and_yarn/stryker-mutator/core-10.0.0`,
+    `ci/widen-licence-allow-list`, `docs/operator-rulings-t472-t446-w12t1`, `run-W1-T1020-…`,
+    `run-W1-T975-…`, `run-W1-T1027-…`, `run-W1-T952-…`, `run-W1-T963-…`. Seven branches sharing one
+    failure set is not seven defects; it is one harness disagreeing with the other on the same
+    code. The failures are ordinary assertion errors (`The input did not match the regular
+    expression /rejected/`), not coverage-channel crashes, so they cannot be waved off as noise.
+    THIS IS THE POINT OF THE TASK: merging the two runs means DELETING ONE OF TWO VERDICTS THAT
+    HAVE BEEN MEASURED TO DIFFER. Which one survives is an operator ruling, not a worker's call.
+
+    (4) THE COST, PRICED FROM STEP TIMINGS RATHER THAN JOB TOTALS. On run 32277465976 (both green)
+    the three coverage-gate steps took 0s each — base diff, `diff-coverage.mjs`, `coverage-ratchet
+    .mjs`. `coverage-ratchet` spent 772s of 798s inside the suite and 26s on everything else; `ci`
+    spent 662s of 700s inside the suite and 38s on everything else. Over the 600-run window:
+    `ci` p50 479s / p95 803s (n=501 green), `coverage-ratchet` p50 699s / p95 1205s (n=475 green).
+    So a PR spends 1,178s of billed job time at p50, of which roughly 441s is a second execution
+    of tests already run. CI RAN 115 TIMES PER DAY on the three complete days in the window
+    (08-16 139, 08-17 92, 08-18 114) against 56-72 SQUASH MERGES PER DAY — the multiplier is
+    PUSHES, not merges, and the brief's 15-30/day understates it by four to seven times.
+
+    (5) THE EXPOSURE, CLASSIFIED EXTERNAL VERSUS REAL BY THE SUMMARY RULE — AND THE RULE NEEDED
+    CORRECTING FIRST. THE SPEC REPORTER WRITES A DIFFERENT SUMMARY LINE than the default one, so a
+    classifier keyed only on the TAP form scores every `coverage-ratchet` failure as "no test
+    result" and misclassifies 10 real failures as infrastructure. Corrected to accept both forms:
+      - 52 runs had exactly one of the two fail while the other passed.
+      - 30 of those are `coverage-ratchet`'s Diff-coverage step: REAL, and the job's unique signal.
+      - 12 are the test-step disagreements of (3): REAL on both sides, full summaries.
+      - 10 are the Playwright install step: EXTERNAL, no summary in EITHER form.
+    ALL 18 install failures across the whole window (10 `ci`, 8 `coverage-ratchet`) are the apt
+    lock, every one before #2226 merged at 16:37:12Z. ZERO CDN 403s appear anywhere in the window
+    (control: `Could not get lock` matches in all 18, and `cdn.playwright` appears in 12 of the 22
+    logs read) — that cause is NOT REPRODUCED here and this shard does not carry it as measured.
+  design: |
+    THE DELIVERABLE IS A MEASURED ANSWER AND A RULING. The arithmetic is recorded here; the choice
+    is not made here, because (3) shows the two harnesses produce different verdicts on the same
+    code and picking one discards a signal.
+
+    (i) THE ARTIFACT PATH, CONCRETELY, AND WHAT IT COSTS.
+    `actions/upload-artifact` is ALREADY used at a pinned sha in five workflows
+    (043fb46d1a93c77aae656e7c1c64a875d1fc6a0a), and `actions/cache` already appears in ci.yml, so
+    the mechanism needs no new dependency. AND THE CONSUMER JOB IS GENUINELY CHEAP: both
+    `scripts/diff-coverage.mjs` and `scripts/coverage-ratchet.mjs` import ONLY `node:` builtins, so
+    the downstream job needs no `npm ci` and no Playwright at all. Checkout at fetch-depth 0 (4s
+    measured), setup-node, a download, and three steps that measured 0s: call it 25-40s against
+    today's 798s.
+    THE UPSTREAM SIDE IS WHERE THE COST SITS. `ci` would have to run the INSTRUMENTED command to
+    emit an lcov, which is the slower of the two (p50 699s vs 479s), so the saving is not one whole
+    job. At p50: 1,178s today versus roughly 746s merged — about 432s per run, 828 billed
+    job-minutes per day at 115 runs, near 14 job-hours daily. THE LCOV'S SIZE IS NOT MEASURED HERE
+    and must be: 121 src files / 84,767 lines bound it at a few MB, and an artifact round-trip that
+    approaches the re-run cost would leave only the exposure halving.
+    AND WALL-CLOCK GETS WORSE, NOT BETTER. The two jobs run FULLY IN PARALLEL today — `needs:`
+    appears in this repo only inside three COMMENTS and governs ZERO jobs (control: `runs-on:`
+    appears 13 times in ci.yml alone). Wall-clock today is max(700s, 798s). Serialised behind
+    `needs: ci` it becomes the sum, so the board waits LONGER per PR while the bill falls.
+    THE SKIP HAZARD MUST BE SETTLED BEFORE ANY `needs:` LANDS. A `needs:`-dependent job whose
+    dependency fails is SKIPPED, and ci.yml's own header names a skipped required check as a
+    permanent merge deadlock. Today `coverage-ratchet` is listed in ci-gate.yml's expected-check
+    env BECAUSE it is unconditional, and ci-gate treats skipped/neutral/success alike — so a
+    skipped coverage gate would read as PASS rather than deadlock. That is the OPPOSITE failure and
+    it is worse: the per-diff coverage gate could go silently absent. Branch protection requires
+    only `remudero-review` and `ci-gate`, so the aggregator is the surface that must be re-derived.
+
+    (ii) WHAT WOULD STILL FAIL AFTERWARDS — THIS IS A HALVING, NOT A CURE, AND ONE MEASURED EVENT
+    PROVES IT. On run 32294506354 A RUNNER PREEMPTION TOOK BOTH JOBS IN THE SAME RUN: `ci` died at
+    770s and `coverage-ratchet` at 980s, each with `The runner has received a shutdown signal` and
+    `The operation was canceled`, neither naming a failed step. One job instead of two would have
+    changed nothing there. The same holds for 3 of the 15 apt-poisoned runs, where BOTH jobs hit
+    the lock. Honest arithmetic: 18 external job failures over 1,200 job-instances is 1.5% per job;
+    at one job per run the poisoned-run count falls from the observed 15 to about 9. THAT IS A 40%
+    REDUCTION, NOT 50%, and it is the whole benefit on the exposure side.
+
+    (iii) WHAT THIS TASK MUST NOT DO.
+      - IT MUST NOT REMOVE `coverage-ratchet`'s SIGNAL. The Diff-coverage step alone accounts for
+        30 of the 52 single-job failures — the target is running the tests twice, not measuring
+        coverage.
+      - IT MUST NOT PROPOSE A MERGE QUEUE OR `required_status_checks_strict`. Both were costed in
+        W1-T1014 and neither touches duplication.
+      - IT MUST NOT PROPOSE A RETRY, A LONGER CAP, OR A CACHE. A preemption killed the process and
+        a CDN refusal is upstream; `test-with-retry.mjs` already retries and did not help.
+      - IT MUST NOT RE-FILE THE FIX-RUNG MISROUTING. W1-T1009's rationale already records the
+        sweep dispatching a paid ci-log worker at an infrastructure stall; cited, not absorbed.
+
+    (iv) RULE 25 RE-DERIVED AGAINST THE LIVE PREDICATE, FOUR CONTROLS, ONE OF THEM FIRING.
+    `INSTRUMENT_SURFACE` (`src/lib/review.ts`) leads with `^\.github/workflows/`, so both files in
+    `files:` are instrument surface and THE IMPLEMENTING PR RIDES ALONE. Driving
+    `detectInstrumentEntanglement` directly: `[ci.yml]` alone reads CLEAN; `[ci.yml,
+    src/lib/review.ts]` reads ENTANGLED — the falsifier, proving the check is live rather than
+    vacuous; `[ci.yml, test/workflow-playwright-install.test.ts]` reads CLEAN because `test/` is
+    excluded from `isProductPath`; and `[src/lib/review.ts]` alone reads CLEAN. So the two test
+    files may ride with the workflows and no `src/` path may.
+
+    (v) TWO TESTS KEY ON THE JOBS' SHAPE AND BOTH NEED RE-DERIVING IF IT CHANGES.
+    `test/workflow-job-timeouts.test.ts` asserts `playwrightJobs.length > 0` AND
+    `assert.deepEqual([...playwrightJobs].sort(), ["ci","coverage-ratchet"].sort())`, so dropping
+    the browser from the consumer job breaks the set assertion, not just the count.
+    `test/workflow-playwright-install.test.ts` asserts the two install `run:` lines are
+    byte-identical (W1-T1027, #2226) — a shape that becomes meaningless the moment only one job
+    installs a browser. RE-DERIVE BOTH; do not delete either.
+  acceptance:
+    - claim: "the shard establishes the duplication from both commands and names the difference that is not instrumentation"
+      proof: "grep: tmp-hygiene is loaded by ci and NOT by coverage-ratchet in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
+    - claim: "the shard records that the two harnesses reach different verdicts on the same tests rather than assuming the split is cosmetic"
+      proof: "grep: 12 of 600 runs disagreed at the test step in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
+    - claim: "the artifact path is priced from step-level timings so the consumer job's real cost is visible"
+      proof: "grep: the three coverage-gate steps took 0s each in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
+    - claim: "the external-versus-real classifier is stated with the correction the spec reporter forced"
+      proof: "grep: THE SPEC REPORTER WRITES A DIFFERENT SUMMARY LINE in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
+    - claim: "the shard says plainly that halving the runs does not survive a preemption and names the run that proves it"
+      proof: "grep: A RUNNER PREEMPTION TOOK BOTH JOBS IN THE SAME RUN in plan/tasks.d/W1-T1041-the-full-suite-runs-twice-per-pr.yaml"
+  risk: high
+  origin: "oper#full-suite-runs-twice-2026-08-19"
+  plan_refs: ["W1-T1009", "W1-T1014", "W1-T1027", "W1-T1034", "W1-T255", "W1-T131", "W1-T133", "W1-T212"]
+  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/workflow-job-timeouts.test.ts, test/workflow-playwright-install.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    RISK IS `high` UP FRONT, AND THE BAND IS RULE 19's SPAN RATHER THAN BLAST RADIUS. `files:`
+    crosses two workflow files and two test files; the change itself is a job restructure that
+    ships no product code at all.
+
+    `files:` DECLARES THE IMPLEMENTATION SURFACE AND DELIBERATELY OMITS THIS SHARD'S OWN PATH.
+    The acceptance proofs still grep this file, which is correct for a measurement whose deliverable
+    is the arithmetic — but the WORK, if the operator rules for it, lands in the four declared
+    paths. `verify: human` is the parking mechanism: `isDispatchEligible` (`src/lib/drain.ts`)
+    returns false at `t.verify !== "auto"` before the linter is consulted, so no lane can pick the
+    surviving harness on the operator's behalf. Same shape as W1-T1014 and W1-T484.
+
+    FIVE `proof-scope` WARNINGS ARE EXPECTED AND ARE NOT SILENT. `rmd lint-plan` emits one per
+    criterion because each proof greps THIS shard while `files:` names only the implementation
+    surface. Measured before and after this file: 179 open-failing both times, so the count is
+    UNCHANGED and every new line is a `warn`, which never reaches lint-plan's exit code
+    (`lintPlanCommand` increments `failing` only inside `if (blocking.length)`). The warning's own
+    remedy does not apply here: a proof that READS a path is not a branch that WRITES it, and the
+    implementing PR touches the four declared paths, never this shard.
+
+    EVERY FIGURE IS DATED 2026-08-19 AND WILL DRIFT — RE-RUN THE QUERY, DO NOT QUOTE THE NUMBER.
+    Runs and jobs: `gh api "repos/<o>/<r>/actions/workflows/ci.yml/runs?per_page=100&page=N"` then
+    `gh api "repos/<o>/<r>/actions/runs/<id>/jobs?per_page=60"` for step conclusions and timings.
+    Logs: `gh api "repos/<o>/<r>/actions/jobs/<job_id>/logs"`. Classify a failure by requiring a
+    summary in EITHER reporter form before calling it a test result, then read the failing step.
+    Merge rate: `git log origin/main --first-parent --since=<d> --pretty='%ad %s'` filtered to
+    PR-numbered subjects. Protection: `gh api repos/<o>/<r>/branches/main/protection`.
+
+    ID PROVENANCE — FOUR SURFACES, THE FILENAME IS THE EXISTENCE TEST, RE-SWEPT BEFORE PUSHING.
+    W1-T1041 was PRE-MINTED by the operator and read back before any work started:
+    `refs/rmd-id/W1-T1041` -> b27affbea2fe3bd47e25ef8fb44d8fb2dc45e63e. At origin/main 00a1f584 the
+    other three surfaces all read 0 — `grep -c 'id: W1-T1041' plan/tasks.yaml`, a filename match
+    under `plan/tasks.d/`, and every open PR's title and branch. POSITIVE CONTROLS, same tools:
+    the W1-T1036 filename reads 1, `refs/rmd-id/W1-T9999` reads 0 against 137 real reservations,
+    and the open-PR sweep matches a `W1-T10` prefix once, so none of the three zeros is a dead query.

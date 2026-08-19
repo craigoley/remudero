@@ -2232,15 +2232,50 @@ export function isCappedReviewOrphanEscalation(pr: OpenPrView, policy: SweepPoli
  * with no recoverable ledgered verdict arms exactly as it did before this
  * function existed. Refusal requires positively observing `capped: true,
  * plan_only: false` for THIS head.
+ *
+ * W1-T1028 — RECOVERS EVIDENCE FOR A HAND-FILED PR TOO, NOT JUST A PLAN TASK'S. Before this,
+ * evidence recovery was keyed on `pr.taskId` RAW: a PR with no `Remudero-Task:` trailer (a
+ * hand-filed PR, `pr.taskId === undefined`) made {@link postedArmFactsFromLedger} bail on its
+ * own `!taskId` guard EVERY time, so this function always took the fail-open branch above —
+ * arming was never actually REFUSED for a capped or irreversible hand-filed PR by this gate,
+ * only by the run flow's OWN independent re-check downstream (`armAutoMerge`, run-task.ts),
+ * which is the disagreement this task's rationale traces end to end: this gate says arm on
+ * evidence it never looked for, the handoff refuses on evidence it never needed to look for
+ * either, and the two only ever agreed by accident. The recovery key below is `pr.taskId ??
+ * PR-<n>` — the SAME synthetic id the review lane already ledgers `review.posted` under for a
+ * task-less PR ({@link "../run-task.js".escalationTaskIdFor}, `taskId ?? PR-<n>`, inlined here
+ * rather than imported to keep this module free of a run-task.ts dependency) — so a hand-filed
+ * PR that WAS reviewed is judged on the SAME head-bound verdict the run flow would find, and
+ * one that was NEVER reviewed still takes the fail-open branch above, unchanged. This is what
+ * makes the decision this function returns the head-bound one the handoff should carry, rather
+ * than a blind pass for the entire population an absent task id used to hide from it.
  */
-export function decideSweepArm(pr: OpenPrView, ledgerLines: ReadonlyArray<Record<string, unknown>>): ArmDecision {
-  const facts = postedArmFactsFromLedger(ledgerLines, pr.taskId, pr.headSha);
+export function decideSweepArm(
+  pr: OpenPrView,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  // W1-T1028 — appended LAST, the SAME idiom {@link decideAutoMergeArm}'s own `irreversible`
+  // parameter already uses, so no positional caller shifts and today's behaviour is byte-for-
+  // byte unchanged when omitted. `OpenPrView` gains no new field for this: the run flow's own
+  // classification (`irreversibleSignalForWorktree`, run-task.ts) is worktree-bound and the
+  // sweep's reconciliation pass has no worktree for an arbitrary open PR to classify from —
+  // inventing an always-`undefined`-in-production field would only add an unproducible entry
+  // to `OpenPrView` (see producer-completeness.test.ts) for no present caller to fill. A future
+  // caller that DOES have a head-bound classification (a ledgered one, or a fresh worktree scan)
+  // can supply it here without this function's signature changing again.
+  irreversible?: boolean,
+): ArmDecision {
+  const armId = pr.taskId ?? `PR-${pr.prNumber}`;
+  const facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha);
   if (!facts) {
     return { arm: true, reason: "no ledgered verdict recoverable for this head — arming as before (no evidence to refuse on)" };
   }
-  const override =
-    facts.capped && pr.taskId ? cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) : undefined;
-  return decideAutoMergeArm({ state: "success", capped: facts.capped, planOnly: facts.planOnly }, false, override);
+  const override = facts.capped ? cappedOverrideFromLedger(ledgerLines, armId, pr.headSha) : undefined;
+  return decideAutoMergeArm(
+    { state: "success", capped: facts.capped, planOnly: facts.planOnly },
+    false,
+    override,
+    irreversible,
+  );
 }
 
 /** One armed-and-stalled PR: both facts that make it stalled, carried together. */

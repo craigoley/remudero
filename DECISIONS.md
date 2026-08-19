@@ -1738,3 +1738,84 @@ does NOT — it declares `depends_on: [W1-T187, W1-T165]`, and W1-T165 is now me
 merged; it unparks when W1-T165 ships. This does nothing for `W12-T1` (whose `prByRef` resolves against
 this repo only) or `W1-T12e` (whose drill has not happened and will produce no PR, and which refuses at
 `verify-not-auto` rather than `unmet-deps`). W1-T1029 (#2207) files that class.
+
+## 2026-08-19 — RULING: the risk judge's value is UNTESTED, not disproven — W1-T478 and W1-T1031 build before it is ruled on (OPERATOR-RULED)
+
+*Operator-ruled record, recorded at the operator's instruction.* The ruling is the operator's; the
+measurements below were taken to serve it, not to make it. This entry records a MEASUREMENT and a
+sequencing decision. It does not rule on whether the risk judge stays.
+
+**THE MEASUREMENT.** Re-derived 2026-08-19 at `origin/main` `3b4dcf2e` over the full ledger union
+(per-form control first: 0 `.gz`, 9 plain rotations, 1 live, deduped on the full line to 110,378 rows):
+
+    risk_judge.decision      78      proceed 66 (84.6%)  escalate 12 (15.4%)
+    risk_judge.escalated     12      merged anyway 12    prevented 0
+
+**TWELVE ESCALATIONS, TWELVE MERGES, NOTHING PREVENTED.** The previously carried figure — 10
+escalations, 9 merged, 0 prevented — is superseded: the two then-outstanding PRs have since merged,
+taking the merge rate from 90% to 100%. **THE RATE IS RISING, NOT STEADY:** 1 on 08-09, 1 on 08-13,
+3 on 08-14, 2 on 08-17, and **5 on 2026-08-19 alone**.
+
+**EVERY ONE TRACES TO ONE OF TWO ALREADY-FILED CAUSES. NONE IS A GENUINE HIGH-RISK FINDING.**
+
+**(a) FIVE — an unparseable response recorded as a maximum-confidence finding (W1-T478).** W1-T456
+(#1766), W1-T464 (#1777), W1-T935 (#2027), W1-T940 (#2033), W1-T188 (#2234), each carrying the
+identical single reason *"judge output carried no parseable RISK_VERDICT — failing closed (never
+silent-proceed)"* at `verdict: high, confidence: 1`. Every escalating decision at confidence exactly
+1.00 is one of these five. **THEY NAME NO FINDING**, so there is nothing to read a diff against.
+W1-T478 carries `attempts: 0` and was never implemented, yet `state/status.json` reads it `merged` —
+credited by **#1784, a plan-only filing commit** resolved through the head-branch rung. It is
+outstanding work that does not look outstanding.
+
+**(b) SEVEN — reasoning from the description rather than the diff (W1-T1031, `attempts: 0`).**
+W1-T398 (#1505), W1-T451 (#1722), W1-T496 (#1844), W1-T963 (#2204), W1-T975 (#2212), W1-T1020
+(#2214), W1-T983 (#2230), at confidence 0.70–0.92. Their reasons open *"The CANDIDATE CHANGE
+describes…"*, *"Description states…"*, *"The change description explicitly identifies…"* — quoting the
+prose, never the diff. W1-T1031's own filed title states the mechanism: *"THE RISK JUDGE IS GIVEN A
+DESCRIPTION AND A FILE LIST AND NOTHING ELSE, SO A CHANGE THAT NAMES THE DEFECT IT REMOVES READS AS A
+CHANGE THAT INTRODUCES [it]."*
+
+**THE INVERSION IS LITERAL, AND THE DIFFS WERE READ RATHER THAN INFERRED FROM THE ESCALATION TEXT.**
+#1505 was escalated for *"an unauthenticated header-trust vulnerability … enabling complete
+authentication bypass"* and its diff ADDS a required `serve.trustedProxy` declaration that REFUSES
+startup when `identityCapability` is set without it — it closes the hazard it was flagged for. #1722
+was escalated for *"unspent nonces are never deleted … unbounded Map growth"* and ADDS
+`CONFIRM_NONCE_TTL_MS` with a sweep-on-issue `pending.delete(staleNonce)`. #2214 was escalated for an
+arm reason asserting a full PASS over a partial verdict and ADDS the `partial-pass` class that stops
+exactly that. Same shape for #1844, #2204 and #2230: each subject is a `fix`/`feat` for the very
+condition quoted back as the risk.
+
+**COST, OBSERVED.** `$96.95` of run spend on the twelve blocked runs (median `$6.29`, mean `$8.08`),
+all twelve ending `verdict: blocked, reason: "risk judge escalated"`; **12 escalation issues** opened
+(#1506, #1723, #1768, #1778, #1845, #2028, #2034, #2206, #2215, #2216, #2231, #2238); and **8 of 12
+followed by a `daemon.start` within ten minutes — 7 of the last 7** (control: 151 `daemon.start` rows).
+Human time to read a diff, merge and close an issue is real and is NOT quantified here. The
+drain-halt mechanism is likewise not verifiable from the ledger — no step carries a literal `stopped`
+key; what is observable is the `verdict: blocked` on all twelve.
+
+**WHY THIS IS NOT A VERDICT ON THE JUDGE. THE VALUE IS UNTESTED, NOT DISPROVEN — AND THE DISTINCTION
+IS THE WHOLE POINT OF THIS ENTRY.** A zero-prevention record would condemn the judge only if it had
+ever been in a position to prevent something. **IT HAS NEVER BEEN GIVEN A DIFF.** Five escalations
+carried no finding at all, and seven read a prose description of a defect being removed. No escalation
+in the corpus rests on the change itself, so the twelve merges measure the INPUT, not the judgement.
+
+**AND THE SET CONTAINS ONE CHANGE THAT PLAUSIBLY WARRANTED A STOP, WHICH THE JUDGE DID NOT FIND.**
+#2212 merged carrying `wip` in its subject and its own body reading *"remaining: full test suite
+running in background to check for collateral breakage; PR body/push still to do"*. It WAS escalated —
+for *"creating a permanent bypass around the one predicate a refusal can ever live in"*, which is the
+defect that PR CLOSES (it moves the `armAutoMergeAtOpen` call behind ci-green, review-pass, the capped
+gate and the risk judge). The self-declared incompleteness appears nowhere in the judge's reasons. It
+was stopped by accident, for the wrong cause, and merged anyway. A second, weaker case (#2234, a
+squashed `chore(wip)` with a body-verification remainder) was escalated by the unparseable arm — again
+no finding.
+
+**THE RULING. W1-T478 AND W1-T1031 BUILD BEFORE THE JUDGE'S VALUE IS RULED ON.** Both are filed, both
+are unbuilt, and between them they account for all twelve escalations. Ruling on a mechanism whose
+input is known-broken would rule on the input, not the mechanism. Nothing here disables the judge,
+retunes its threshold, or changes its escalation path; no such change is authorised by this entry.
+W1-T478's phantom `merged` status is noted as a scheduling hazard — it will not surface as
+outstanding work on its own — and is not corrected here.
+
+**WHAT THIS ENTRY DOES NOT DO.** It does not close W1-T478 or W1-T1031, whose shards remain
+`status: queued`. It does not rule that the judge earns its keep, nor that it does not. It records
+that the question is currently unanswerable and names the two builds that would make it answerable.
