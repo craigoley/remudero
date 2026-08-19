@@ -66,18 +66,49 @@ export function readTaskIdReservation(path: string): TaskIdReservationInfo | nul
 }
 
 /**
+ * How a reservation failure is machine-classified, for a caller that must ledger it rather than
+ * fold it into a stringified message (design (iv), W1-T949 rationale (6)):
+ *   - "unreachable" — a remote read/write failed (network, auth, proxy — {@link classifyPushFailure}'s
+ *     default). Recoverable; a retry against a live remote may succeed.
+ *   - "exhausted"   — every id in the scanned window was already held (local or remote). Not a
+ *     transient fault — the caller's `startId`/`maxScan` window is genuinely full.
+ *   - "local"       — a non-contention failure of the LOCAL O_EXCL store itself (unwritable
+ *     directory, full disk, a permissions fault) — never names a remote id/ref.
+ */
+export type ReservationFailureOutcome = "unreachable" | "exhausted" | "local";
+
+/**
  * Raised when a reservation cannot be taken for a reason that is NOT contention — an unwritable
- * state directory, a full disk, a permissions fault.
+ * state directory, a full disk, a permissions fault, an unreachable remote, or an exhausted scan
+ * window.
  *
  * LOUD ON PURPOSE (the paid-worker trap). `triageCommandLocked` reserves BEFORE it spawns, and a
  * triage spawn costs real money (median $0.96, measured over 23 runs). A minter that cannot
  * reserve must REFUSE rather than spend — a silent fallback to the unreserved id would spend the
  * money AND then collide, which is strictly worse than not running.
+ *
+ * CARRIES STRUCTURE, NOT JUST PROSE (W1-T949 design (iv)). Every throw site in this module that
+ * can name the id/ref/outcome it failed on now does, on the error itself — so a caller no longer
+ * has to re-parse this class's own message to log something a week-later reader can query. Fields
+ * are `undefined` wherever a throw site genuinely has none to give (e.g. an unwritable directory
+ * names no single id), never a placeholder string.
  */
 export class TaskIdReservationError extends Error {
-  constructor(message: string) {
+  /** The single id this failure concerns — the id a remote push was rejected for, or the first
+   *  id a range-exhausted scan started from. `undefined` for a local directory failure, which
+   *  concerns the store itself, not any one id. */
+  readonly taskId?: string;
+  /** The remote ref {@link taskId} would have occupied, mirroring it exactly — `undefined`
+   *  wherever `taskId` is (an id-exhausted range names no single ref either). */
+  readonly ref?: string;
+  /** The machine-classified reason — see {@link ReservationFailureOutcome}. */
+  readonly outcome?: ReservationFailureOutcome;
+  constructor(message: string, info?: { taskId?: string; ref?: string; outcome?: ReservationFailureOutcome }) {
     super(message);
     this.name = "TaskIdReservationError";
+    this.taskId = info?.taskId;
+    this.ref = info?.ref;
+    this.outcome = info?.outcome;
   }
 }
 
@@ -144,7 +175,9 @@ export function reserveTaskIdFrom(startId: number, dir: string, opts: ReserveTas
   try {
     mkdirSync(dir, { recursive: true });
   } catch (e) {
-    throw new TaskIdReservationError(`cannot create the task-id reservation directory ${dir}: ${String(e)}`);
+    throw new TaskIdReservationError(`cannot create the task-id reservation directory ${dir}: ${String(e)}`, {
+      outcome: "local",
+    });
   }
 
   for (let id = startId; id < startId + maxScan; ) {
@@ -178,7 +211,10 @@ export function reserveTaskIdFrom(startId: number, dir: string, opts: ReserveTas
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
         // NOT contention — an unwritable dir, a full disk. Loud, so a paid caller never spends.
-        throw new TaskIdReservationError(`cannot reserve task id W1-T${id} at ${path}: ${String(e)}`);
+        throw new TaskIdReservationError(`cannot reserve task id W1-T${id} at ${path}: ${String(e)}`, {
+          taskId: `W1-T${id}`,
+          outcome: "local",
+        });
       }
       const held = readTaskIdReservation(path);
       if (held && isAlive(held.pid)) {
@@ -194,6 +230,7 @@ export function reserveTaskIdFrom(startId: number, dir: string, opts: ReserveTas
   }
   throw new TaskIdReservationError(
     `no free task id in W1-T${startId}..W1-T${startId + maxScan - 1} — ${dir} holds ${maxScan} live reservations`,
+    { outcome: "exhausted" },
   );
 }
 
@@ -462,11 +499,74 @@ export function reserveTaskIdRemote(
       throw new TaskIdReservationError(
         `cannot reach origin to reserve ${idFor(n)} — refusing to mint rather than minting optimistically, ` +
           "which is the behaviour that has already refused loadPlan on origin/main twice",
+        { taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), outcome: "unreachable" },
       );
     }
   }
   throw new TaskIdReservationError(
     `no free task id in ${idFor(startId)}..${idFor(startId + maxScan - 1)} — ` +
       `${maxScan} consecutive ids are reserved on origin (attempted ${attempts})`,
+    { taskId: idFor(startId), outcome: "exhausted" },
   );
+}
+
+/** A block of ids reserved on the remote, one ref each — the remote-substrate twin of
+ *  {@link TaskIdReservationBlock}. There is no `releaseAll` here: nothing releases a remote
+ *  reservation, deliberately (see {@link reserveTaskIdRemote}'s own doc) — a used-or-not ref
+ *  costs a few dozen bytes forever, and reintroducing release would reintroduce the
+ *  distributed-state problem this module already refused. */
+export interface RemoteReservationBlock {
+  /** The reserved ids, ascending — mirrors {@link TaskIdReservationBlock.ids}. */
+  readonly ids: number[];
+  /** `idFor` applied to each of {@link ids}, in the same order. */
+  readonly taskIds: string[];
+  /** {@link taskIdReservationRef} applied to each of {@link taskIds}, in the same order. */
+  readonly refs: string[];
+  /** The handles, in the same order as {@link ids}. */
+  readonly handles: RemoteReservationHandle[];
+}
+
+/**
+ * Reserve `count` ids at or above `startId`, EACH on the remote — the remote-substrate twin of
+ * {@link reserveTaskIdBlock}, and the fix W1-T949 exists for: `reserveTaskIdRemote` alone has
+ * exactly one call site and reserves exactly one ref, while a filing that mints N ids (triage's
+ * own "number them upward" instruction, or the plan/approve lanes' local block) needs N refs
+ * pushed to the ONE store every writer shares — not one, and not a fixed count regardless of N
+ * (design (v): the paired falsifier a fixed-block implementation would still pass).
+ *
+ * SAME CONTIGUOUS-FROM-THE-WINNER CHAINING {@link reserveTaskIdBlock} uses locally: each
+ * reservation asks ABOVE the id the previous one actually won (`next = h.id + 1`), so contention
+ * on any one candidate advances the whole rest of the block past it rather than re-colliding.
+ *
+ * PARTIAL ACQUIRE THROWS, IT DOES NOT RETURN A SHORT BLOCK (design (i)). A caller must never be
+ * handed a block claiming to hold `count` ids while actually holding fewer — so a failure partway
+ * through (an unreachable remote, an exhausted scan) throws the SAME {@link TaskIdReservationError}
+ * {@link reserveTaskIdRemote} throws, carrying the id/ref/outcome it failed on, rather than
+ * returning a partial result the caller could mistake for the whole. Whatever refs were already
+ * pushed before the failure STAY pushed — there is nothing to roll back to (see this module's own
+ * "NOTHING RELEASES A RESERVATION" doctrine): a hole in the id space is not a defect here, exactly
+ * as it is not one for {@link reserveTaskIdBlock}'s unused-but-reserved local ids (design (iii)).
+ */
+export function reserveTaskIdBlockRemote(
+  startId: number,
+  count: number,
+  reserver: RemoteRefReserver,
+  opts: ReserveRemoteOpts = {},
+): RemoteReservationBlock {
+  if (!Number.isInteger(count) || count < 1) {
+    throw new TypeError(`reserveTaskIdBlockRemote: count must be a positive integer, got ${String(count)}`);
+  }
+  const handles: RemoteReservationHandle[] = [];
+  let next = startId;
+  for (let i = 0; i < count; i++) {
+    const h = reserveTaskIdRemote(next, reserver, opts);
+    handles.push(h);
+    next = h.id + 1; // ask ABOVE the one just taken, so a block never reserves the same id twice
+  }
+  return {
+    ids: handles.map((h) => h.id),
+    taskIds: handles.map((h) => h.taskId),
+    refs: handles.map((h) => h.ref),
+    handles,
+  };
 }

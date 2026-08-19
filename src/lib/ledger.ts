@@ -554,6 +554,20 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // reproduce that exact bug one module later: the next red-band CI run reads "not yet filed"
   // and re-files the same debt profile, the unbounded-refile loop this dedupe exists to prevent.
   "coverage.improvement.filed",
+  // W1-T949: the reservation-REFUSAL record for each id-filing lane (triage/plan/approve).
+  // Before this, `reserveTaskIdRemote`'s `TaskIdReservationError` landed only as a stringified
+  // message inside the lane's generic `*.error` line — no id, no ref, no outcome discriminator,
+  // and nothing separating "could not reach origin" from any other lane failure (rationale (6)).
+  // These three carry `id`/`ref`/`outcome` (task-id-reservation.ts's `TaskIdReservationError`
+  // fields) as their OWN structured fields, so an operator auditing "why did this filing open no
+  // PR" a week later can query them directly instead of grepping a rotated-away free-text field.
+  // UNLIKE most of this Set, the deciding reader is a HUMAN (the same "review.unwired_advisory"
+  // shape above), not code — so these will never appear in the derived-from-consumers test's
+  // scanned `.step === "..."` corpus below, and that is expected, not a gap: see that test's own
+  // doc for why a step no automated consumer reads still needs a human-adjudicated registration.
+  "triage.id_reservation_failed",
+  "plan.id_reservation_failed",
+  "approve.id_reservation_failed",
 ]);
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,
