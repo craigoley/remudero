@@ -138,6 +138,27 @@ export interface NextRunnableOpts {
    */
   onFiltered?: (task: Task, reason: DispatchFilterReason) => void;
   /**
+   * W1-T951 DELIVERABLE B: true when this ALREADY-MERGED task's durable credit
+   * (status.ts's `isSinglePathCredited`, over its `CreditStore`) rests on
+   * EXACTLY ONE of the two credit paths — a `Remudero-Task:` trailer XOR a
+   * `run-<taskId>-*` head branch, never both. Consulted ONLY on the
+   * `"already-merged"` decline (a task {@link MergedSet} already refused to offer for
+   * dispatch), so it can never itself change eligibility — this is observation, the
+   * same discipline every other optional probe on this interface follows. Optional:
+   * omitted, nothing is observed and dispatch behaves exactly as before this existed.
+   */
+  isSinglePathCredit?: (taskId: string) => boolean;
+  /**
+   * Called ALONGSIDE (never instead of) `onFiltered(task, "already-merged")` when
+   * `isSinglePathCredit` says so — the DISCOVERABLE SIGNAL design (iii) requires:
+   * a task credited by exactly one path is indistinguishable from one credited by
+   * both until the single path disappears (rationale (2)/(4) — GitHub deletes the
+   * head ref on merge), so a caller watching the dispatch loop (a daemon log line,
+   * an idle-reason tally) gets a chance to notice the fragile population BEFORE it
+   * silently re-exposes a shipped task as dispatchable `verify: auto` work.
+   */
+  onSinglePathCredit?: (task: Task) => void;
+  /**
    * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
    * re-read of ONE candidate in-flight PR's live GitHub state, consulted
    * ONLY when `isOpenPr` reports a task in-flight — CONFIRMS, with a read
@@ -360,6 +381,11 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   // changes. Mirrors the `onIndeterminate`/`onCircuitBreak`/`onLifetimeCapExceeded` idiom already
   // used by the filters further down, which have always been legible.
   if (isMerged(t.id)) {
+    // W1-T951 DELIVERABLE B: fires BEFORE `onFiltered`, same as every other paired
+    // observation callback on this chain — never gates, only observes, so a caller
+    // that omits `isSinglePathCredit` sees byte-identical behaviour to before this
+    // existed.
+    if (opts.isSinglePathCredit?.(t.id)) opts.onSinglePathCredit?.(t);
     opts.onFiltered?.(t, "already-merged");
     return false;
   }

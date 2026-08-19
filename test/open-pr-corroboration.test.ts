@@ -25,7 +25,25 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveStatus, projectPlan, buildBatchedGithub, ghGateway, type GitHub, type PrRef, type BatchedPr, type DeriveDeps } from "../src/lib/status.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  deriveStatus,
+  projectPlan,
+  buildBatchedGithub,
+  ghGateway,
+  loadCreditStore,
+  branchOnlyCreditedIds,
+  singlePathCreditedIds,
+  isSinglePathCredited,
+  recordCredit,
+  type GitHub,
+  type PrRef,
+  type BatchedPr,
+  type DeriveDeps,
+  type CreditStore,
+} from "../src/lib/status.js";
 import { nextRunnable, type OpenPrCheck } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 
@@ -301,4 +319,174 @@ test("ghGateway issues the REAL REST pulls?state=open argv and parses the rows",
   const argv = argvs.at(-1) ?? [];
   assert.equal(argv[0], "api", "gh api is REST; gh pr list --json is GraphQL");
   assert.ok(typeof argv[1] === "string" && argv[1].includes("state=open"), `state=open, got ${argv.join(" ")}`);
+});
+
+// ── W1-T951: DURABLE MERGE CREDIT (deliverables A + B) ──────────────────────────────────────
+//
+// plan/tasks.d/W1-T951-merge-credit-fragility.yaml rationale (2)/(3)/(4): merge credit is
+// reconstructed from GitHub PR records on EVERY projection and persisted NOWHERE. 18 ids are
+// credited by head branch alone — a ref GitHub deletes from the repository on merge — so a
+// narrowed/degraded scan (an API pagination limit, a retention change, a scan that reads refs/
+// instead of PR records) silently re-exposes an already-shipped task as dispatchable `verify:
+// auto` work, with no gate anywhere observing the change.
+//
+// These tests drive the REAL `derivePrPrecedence` durable rung through `deriveStatus`/
+// `projectPlan` and the REAL pure store functions (`recordCredit`/`branchOnlyCreditedIds`/
+// `singlePathCreditedIds`/`isSinglePathCredited`/`loadCreditStore`) — never a reimplementation.
+// See test/dispatch-lifetime-breaker.test.ts for: the file-sha-bracketed mutation check (design
+// (v)) that removes this durable lookup and proves the positive test below actually fails
+// without it; and the drain.ts-side `onSinglePathCredit` consumption tests.
+
+function w951LedgerDir(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-w951-credit-"));
+}
+
+function w951Task(id: string): Task {
+  return {
+    id,
+    title: "t",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    verify: "auto",
+    risk: "low",
+    status: "queued",
+    attempts: 0,
+  } as unknown as Task;
+}
+
+/**
+ * A `GitHub` fixture for the durable-credit tests. With `forbidReads: true`, EVERY method
+ * throws instead of answering — the mechanism acceptance test 2 uses to PROVE the durable rung
+ * resolves without a single PR-record read, not merely observe that it happens to be cheap.
+ */
+function w951Github(opts: {
+  trailerHit?: PrRef | null;
+  branchHits?: PrRef[] | null;
+  headByUrl?: Record<string, string>;
+  bodyByUrl?: Record<string, string>;
+  forbidReads?: boolean;
+}): GitHub {
+  const guard = (name: string) => {
+    if (opts.forbidReads) {
+      throw new Error(`W1-T951: unexpected PR-record read via GitHub.${name} -- durable credit must resolve without one`);
+    }
+  };
+  return {
+    prByRef: (_ref) => {
+      guard("prByRef");
+      return null;
+    },
+    findMergedByTrailer: (_taskId) => {
+      guard("findMergedByTrailer");
+      return opts.trailerHit ?? null;
+    },
+    findMergedByHeadBranch: (_taskId) => {
+      guard("findMergedByHeadBranch");
+      return opts.branchHits === undefined ? [] : opts.branchHits;
+    },
+    headRefName: (prUrl) => {
+      guard("headRefName");
+      return opts.headByUrl?.[prUrl];
+    },
+    prBody: (prUrl) => {
+      guard("prBody");
+      return opts.bodyByUrl?.[prUrl];
+    },
+  };
+}
+
+test("W1-T951: the branch-only credited ids are enumerated by the change", () => {
+  // The pure function's own contract first: a hand-built store distinguishing branch-only,
+  // trailer-only, and both-paths credit.
+  let store: CreditStore = {};
+  store = recordCredit(store, "W9-T001", { source: "head-branch", prUrl: "u/1", prNumber: 1, prState: "MERGED" });
+  store = recordCredit(store, "W9-T002", { source: "trailer", prUrl: "u/2", prNumber: 2, prState: "MERGED" });
+  store = recordCredit(store, "W9-T003", { source: "head-branch", prUrl: "u/3", prNumber: 3, prState: "MERGED" });
+  store = recordCredit(store, "W9-T003", { source: "trailer", prUrl: "u/3", prNumber: 3, prState: "MERGED" });
+  assert.deepEqual(branchOnlyCreditedIds(store), ["W9-T001"], "only the branch-ONLY id -- never the trailer-only or both-paths ids");
+
+  // AS AN OUTPUT OF THE REAL SYSTEM (design (ii)), not just the pure function: drive a genuine
+  // branch-only credit through `deriveStatus` against a REAL tmp ledger directory, with NO
+  // store dependency injected at all -- the real default (disk) read/write path -- then read
+  // the store back off disk and enumerate it.
+  const dir = w951LedgerDir();
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const branchOnlyTask = w951Task("W9-T004");
+  const prUrl = "https://github.com/craigoley/remudero/pull/9101";
+  const github = w951Github({
+    trailerHit: null,
+    branchHits: [{ number: 9101, url: prUrl, state: "MERGED", headRefName: `run-${branchOnlyTask.id}-1785000000000` }],
+  });
+  const proj = deriveStatus(branchOnlyTask, { ledgerPath, github, readLedger: () => [] });
+  assert.equal(proj.merged, true, "sanity: the live branch rung actually credited this task");
+  assert.equal(proj.source, "head-branch");
+
+  const onDisk = loadCreditStore(join(dir, "merge-credit.json"));
+  assert.deepEqual(
+    branchOnlyCreditedIds(onDisk),
+    [branchOnlyTask.id],
+    "the write-through persisted the branch-only credit to the REAL default on-disk store, and it enumerates back out",
+  );
+});
+
+test("W1-T951: a branch-only id is credited from the durable record", () => {
+  const dir = w951LedgerDir();
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const taskId = "W9-T010";
+  let store: CreditStore = {};
+  store = recordCredit(store, taskId, { source: "head-branch", prUrl: "u/10", prNumber: 10, prState: "MERGED" });
+
+  // Every PR-record method on this gateway THROWS -- reaching the assertions below without a
+  // throw IS the proof that the durable record answered alone.
+  const forbidding = w951Github({ forbidReads: true });
+  const proj = deriveStatus(w951Task(taskId), { ledgerPath, github: forbidding, readLedger: () => [], readCreditStore: () => store });
+
+  assert.equal(proj.merged, true, "the durable record alone resolves the task as merged");
+  assert.equal(proj.status, "merged");
+  assert.equal(proj.source, "head-branch");
+  assert.equal(proj.prNumber, 10);
+  assert.equal(proj.prUrl, "u/10");
+});
+
+test("W1-T951: an id with neither trailer nor branch is not credited", () => {
+  // THE NEGATIVE CONTROL (design (iv)), in the SAME suite invocation as the positive test
+  // directly above: an EMPTY durable store and a live GitHub gateway that genuinely has
+  // nothing for this id. An implementation that credits EVERYTHING (which would sail through
+  // the positive test alone) is falsified here.
+  const dir = w951LedgerDir();
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const taskId = "W9-T011";
+  const github = w951Github({ trailerHit: null, branchHits: [] });
+  const proj = deriveStatus(w951Task(taskId), { ledgerPath, github, readLedger: () => [], readCreditStore: () => ({}) });
+
+  assert.equal(proj.merged, false, "no durable record and no live credit -- never merged");
+  assert.equal(proj.source, "none");
+  assert.equal(proj.singlePathCredit, undefined, "an uncredited task never carries the single-path signal either");
+});
+
+test("W1-T951: single-path credit emits a discoverable signal", () => {
+  const dir = w951LedgerDir();
+  const ledgerPath = join(dir, "ledger.ndjson");
+
+  // Single-path: credited by head-branch alone.
+  const singleId = "W9-T020";
+  let store: CreditStore = {};
+  store = recordCredit(store, singleId, { source: "head-branch", prUrl: "u/20", prNumber: 20, prState: "MERGED" });
+  // Double-path, in the SAME store, so the signal is proven to DISCRIMINATE rather than fire
+  // unconditionally whenever a store entry exists at all.
+  const doubleId = "W9-T021";
+  store = recordCredit(store, doubleId, { source: "head-branch", prUrl: "u/21", prNumber: 21, prState: "MERGED" });
+  store = recordCredit(store, doubleId, { source: "trailer", prUrl: "u/21", prNumber: 21, prState: "MERGED" });
+
+  assert.equal(isSinglePathCredited(store, singleId), true);
+  assert.equal(isSinglePathCredited(store, doubleId), false);
+  assert.deepEqual(singlePathCreditedIds(store), [singleId], "the store-level enumeration a later query can find (design iii)");
+
+  const forbidding = () => w951Github({ forbidReads: true });
+  const singleProj = deriveStatus(w951Task(singleId), { ledgerPath, github: forbidding(), readLedger: () => [], readCreditStore: () => store });
+  const doubleProj = deriveStatus(w951Task(doubleId), { ledgerPath, github: forbidding(), readLedger: () => [], readCreditStore: () => store });
+
+  assert.equal(singleProj.singlePathCredit, true, "the projection itself carries the signal -- a person reading the console sees it directly");
+  assert.equal(doubleProj.singlePathCredit, undefined, "a task credited by BOTH paths must never be flagged single-path");
 });
