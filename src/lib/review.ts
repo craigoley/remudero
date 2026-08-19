@@ -1304,11 +1304,19 @@ export function buildProofEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.P
  *  an identical sha. Exported (W1-T387) so `checkProofCommand` (src/run-task.ts) can wrap it to
  *  CAPTURE the raw stdout/exit status {@link execWhitelistedProof} observes — for its own
  *  diagnostics (argv, exit code, hit count) only, never for the verdict, which stays exactly what
- *  execWhitelistedProof decides. */
+ *  execWhitelistedProof decides.
+ *
+ *  `NODE_V8_COVERAGE: undefined` closes a side channel `buildProofEnv`'s allowlist alone can't:
+ *  when THIS process itself has V8 coverage collection active (e.g. `coverage-ratchet`'s CI run),
+ *  Node's own `child_process` module force-injects `NODE_V8_COVERAGE` into every spawned child —
+ *  even one given an explicit `env` object that simply omits the key — because that omission reads
+ *  as "unspecified", not "excluded". Naming the key here with an `undefined` value is the one form
+ *  Node treats as an explicit exclusion, so a coverage-instrumented orchestrator (CI) and a
+ *  non-instrumented one (the reviewer daemon) still hand a proof byte-identical envs. */
 export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) =>
   execFileSync(command, args as string[], {
     cwd,
-    env: buildProofEnv(),
+    env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
     stdio: ["ignore", "pipe", "ignore"],
     timeout: timeoutMs,
     encoding: "utf8",
