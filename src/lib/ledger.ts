@@ -483,6 +483,21 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // review stalled for hours reads as freshly detected and never surfaces as stalled. Same
   // "the line IS the bound" discipline as its two siblings immediately above.
   "review.pending_posted",
+  // W1-T1017: W1-T322's SHIPS-UNWIRED advisory floor line — measured live 4 / rotations 83
+  // against a `review.posted` control of live 219 / rotations 390, i.e. rotation was dropping
+  // 95%+ of these rows. UNLIKE every other entry in this Set, the deciding reader is not code:
+  // it is the operator adjudicating W1-T323's advisory-versus-blocking flip against this exact
+  // corpus, which is why `run-task.ts`'s own emitter comment (the "NOT added ... deliberately"
+  // note beside `log("review.unwired_advisory", ...)`) is now stale and due a follow-up edit,
+  // not why the row itself should keep expiring. W1-T323 clause (iii) already named this
+  // registration but sequenced it INSIDE the flip change, downstream of the adjudication it
+  // exists to protect; this entry registers it now instead, ahead of that change, so it is a
+  // no-op (not a conflict) if W1-T323 lands first and registers the step itself. Preserves rows
+  // from the next rotation onward only — it does not and cannot restore the 2026-08-04 through
+  // 08-10 rows already archived out of this host. Bounded the same as every other entry here by
+  // `MAX_RETAINED_LINES_PER_STEP` (200 newest per step, PASS 4 below), comfortably above the 87
+  // rows measured live at filing time.
+  "review.unwired_advisory",
   "automerge.capped_override_granted",
   "daemon.boot",
   // W1-…/impl-DF: the idle rung's reason tally. A HUMAN reads this to tell "starved of work"
