@@ -1,0 +1,150 @@
+- id: W1-T1027
+  title: "THE OPERATOR HAS RULED THAT A GREEN REVIEWED HAND-FILED PR SHOULD NOT NEED HIS MERGE — and the arming rule and its flag BOTH already exist and are both on, so the surviving gap is one disagreement: the sweep's own gate fails OPEN on absent ledger evidence and the handoff it calls fails CLOSED on the same absence, which is exactly the population a hand-filed PR falls in"
+  repo: remudero
+  depends_on: [W1-T1020]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    W1-T1020 MUST BUILD FIRST, AND IT IS NOT BUILT YET — CHECKED BY SYMBOL, NOT BY `status:`.
+    `decideAutoMergeArm` (`src/lib/review.ts`) still takes
+    `Pick<ReviewVerdict, "state" | "capped" | "planOnly">` and its body never mentions
+    `partiallyExecuted`; that field exists in review.ts but only feeds the "PARTIAL: X/Y" summary
+    annotation. So the `!verdict.capped` branch still returns `arm: true, reason: "verdict is a full
+    PASS"` for a review that executed 1 of 6 proofs, because CAPPED means ZERO executed. THIS TASK
+    WIDENS WHICH PRs REACH THAT DECISION; W1-T1020 MAKES THE DECISION CORRECT. Widening first would
+    route more PRs into a decision known to be wrong. W1-T1020's shard is filed (#2198, plan-only)
+    and unbuilt.
+
+    (1) THE BRIEFED PREMISE DOES NOT SURVIVE, AND THE CORRECTION IS THE FINDING. The claim was that
+    every arming path is run-scoped and no rule matches a hand-filed PR. `DISPOSITION_RULES`
+    (`src/lib/sweep.ts`) already carries a `mergeable` row whose predicate is exactly
+    `pr.checksState === "green" && pr.reviewState === "success"` — no run scope, no task, no plan.
+    `sweep.ts` imports `loadPlan`/`Plan` ZERO times against a control of 9 import lines, so the
+    sweep really can arm anything it enumerates, and it does act: the `mergeable` branch calls
+    `decideSweepArm` and then `deps.arm(pr)`.
+
+    (2) THE FLAG ALSO ALREADY EXISTS AND IS ALREADY ON. `sweep.armSessionPrs` sits in
+    `plan/policy.yaml` at `value: true` with `origin: "net-new"`, is read by `booleanField` in
+    `src/lib/policy.ts`, and is consumed by `sweepArmTaskId` (`src/run-task.ts`), which substitutes
+    the review lane's `PR-<n>` surrogate id when a PR has none — landed by W1-T516 as #1890 on
+    2026-08-15. So the operator's "a setting, default off for another operator" is not a new surface
+    to invent; it is a row that exists, and this task must RECORD the ruling against it rather than
+    add a second flag.
+
+    (3) SO WHAT ACTUALLY REFUSES, TRACED END TO END. `decideSweepArm` recovers facts through
+    `postedArmFactsFromLedger(lines, pr.taskId, pr.headSha)`, which returns `undefined` the moment
+    either key is missing, and its documented contract is FAIL-OPEN: *"a head with no recoverable
+    ledgered verdict arms exactly as it did before this function existed."* The sweep therefore says
+    ARM. The very next call, `armAutoMerge` → `priorReviewVerdictFromLedger(lines, taskId)` →
+    `decideArmFromLedgerVerdict`, opens with the opposite rule: *"no ledgered review.posted verdict
+    found for this task — arming withheld (W1-T230, fail closed)."* the sweep decides to arm and the handoff refuses for evidence it never needed.
+    Two gates, one question, opposite defaults — and the hand-filed population is precisely where the
+    evidence is absent, because its verdict is keyed to a surrogate id minted at review time rather
+    than to a task the plan knows.
+
+    (4) THE POPULATION, MEASURED ON THE MINI'S LEDGER AND LABELLED AS SUCH. This host's state dir
+    (666 gz, 6 plain, 1 live; per-form `sweep.disposed` counts 2,547,918 / 10,141 / 1,157, every form
+    non-zero; deduped on the FULL LINE). `no-task-id` resolves to 432 distinct rows — 216
+    `sweep.disposed` rows carrying `disposition: "mergeable"` paired with 216 `sweep.dispose.not_open`
+    — over SEVEN distinct PRs between 2026-07-31 and 2026-08-12, one PR refused 88 times. THOSE ARE
+    HISTORICAL: they predate W1-T516 and are what it fixed. What is NOT historical in shape is
+    `ledger-refused`: 11 distinct rows, and SEVEN OF THE ELEVEN carry a `PR-<n>` surrogate task id
+    (PR-977, PR-981, PR-982, PR-984, PR-985, PR-989 …). That is the disagreement in (3), on the
+    record. CONTROL on the same corpus: `deferred to full sweep` reads 7,508 distinct rows, so the
+    query and the corpus are sound. THE MINI'S FLEET LANES STOP AT 2026-08-12 AND AZURE'S IS THE
+    FLEET'S — every count here is this host's and #2198's own refusal is not in it.
+
+    (5) WHERE THE FIX BELONGS: A WIDENED HANDOFF, NOT A NEW DISPOSITION ROW. The `mergeable` row
+    already matches and is already ordered ABOVE the `blocked-ambiguous` catch-all, so no row is
+    added and no ordering changes — `DISPOSITION_RULES` is first-match-wins and a new row would be
+    redundant at best. The change is that the sweep's arm must CARRY the head-bound decision
+    `decideSweepArm` already made, instead of handing over a task id and inviting a second,
+    task-keyed recovery that cannot succeed for this population. Both functions live under `src/lib/`,
+    which is why `src/run-task.ts` is not declared.
+
+    (6) THE RULING WIDENS THE POPULATION, NOT THE PERMISSIVENESS, AND THIS IS THE CLAUSE AN
+    IMPLEMENTER MAY NOT SOFTEN. Everything `decideAutoMergeArm` refuses today must still refuse on the
+    widened path: an `irreversible` diff (checked FIRST, and no override buys it back), a verdict whose
+    `state !== "success"`, a CAPPED verdict with no ledgered `automerge.capped_override_granted`, and
+    `decideArmFromLedgerVerdict`'s head-mismatch refusal — a verdict posted for an older head must
+    never arm the new one. A draft PR and a PR whose required checks are not green never reach the
+    `mergeable` row at all. Nothing in this task relaxes any of them.
+
+    (7) NOT ARMING AT PR-OPEN, DELIBERATELY. `armAutoMergeAtOpen` (W1-T125) fires inside `runTask` with
+    no verdict gate and no CI gate, and W1-T975 (`status: queued`) files the arm-timing question.
+    BOTH ARE CITED AND NEITHER IS ABSORBED: this task arms only where a review verdict already exists,
+    which is the opposite end of the timing question from W1-T125's early arm.
+  acceptance:
+    - claim: "a green reviewed PR with no run branch reaches the arm instead of being refused for its id"
+      proof: "unit test: W1-T1027: a green reviewed pr with no run branch reaches the arm"
+    - claim: "the sweep's arm carries the head-bound decision it already made"
+      proof: "unit test: W1-T1027: the sweep arm carries its own head bound decision"
+    - claim: "a capped verdict with no ledgered override still refuses on the widened path"
+      proof: "unit test: W1-T1027: a capped verdict still refuses on the widened path"
+    - claim: "an irreversible diff still refuses on the widened path"
+      proof: "unit test: W1-T1027: an irreversible diff still refuses on the widened path"
+    - claim: "the two gates disagree on absent evidence rather than no rule matching"
+      proof: "grep: the sweep decides to arm and the handoff refuses for evidence it never needed in plan/tasks.d/W1-T1027-handfiled-pr-never-reaches-the-arm.yaml"
+  risk: high
+  origin: "oper#hand-filed-pr-should-not-need-my-merge-2026-08-19"
+  plan_refs: ["W1-T1020", "W1-T516", "W1-T975", "W1-T125", "W1-T230"]
+  files: [src/lib/sweep.ts, src/lib/review.ts, test/handfiled-arm-handoff.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL
+    LINE inside rationale (3), is not on line 2 of the file, and reads 0 files across the whole tree at
+    the merge base against a control (`fail closed`) that reads 34 — so it discriminates head from base
+    and cannot be downgraded to `executed_stale`.
+
+    depends_on: [W1-T1020] IS THE FIRST CLAUSE AND IT IS LOAD-BEARING. `isDispatchEligible`
+    (`src/lib/drain.ts`) will not dispatch this task until W1-T1020 is credited, which is the
+    ordering the rationale argues rather than a courtesy. AND IF BOTH DECLARE `src/lib/sweep.ts` THEY
+    SERIALISE UNDER `partitionByFileOverlap` — THAT IS CORRECT HERE, NOT UNFORTUNATE: they change the
+    same arming decision from two sides and running them concurrently would let each land against a
+    tree the other had already moved.
+
+    src/run-task.ts IS NOT DECLARED, AND THAT IS A MEASURED CHOICE. It carries 235 of 375 records,
+    and DECISIONS.md's 2026-08-18 ruling accepts one effective lane as the standing cost of declaring
+    it — so avoiding it when the marker is reachable elsewhere is worth doing rather than a
+    preference. Both halves of the disagreement are in `src/lib/`: `decideSweepArm` in sweep.ts (70
+    shards) and `decideArmFromLedgerVerdict` in review.ts (98 shards). If an implementer finds the
+    handoff cannot be carried without touching `armAutoMerge`'s own signature in run-task.ts, that
+    widening must be ratified before it is made, not disclosed afterwards.
+
+    NO NEW FLAG, AND NO SECOND CONFIG SURFACE. `sweep.armSessionPrs` already exists at `value: true`
+    with schema-bounded siblings in the same `sweep:` block (`staleDays` 1-90, `strikeCap` 1-10,
+    `wipLimit` 1-50) and is already read through `booleanField`. The operator's ruling — arm
+    everything green and reviewed here, with a switch another operator can flip — is RECORDED against
+    that row. A boolean with no `min`/`max` is the established shape for this table; `armSessionPrs`
+    and `supersessionDisposal` are both written that way.
+
+    THE CONSOLE HALF IS A SIBLING AND IS NOT ABSORBED. A `policy.yaml` row is operator-togglable
+    today with an editor. The console button needs a chain this task does not own: the console is
+    currently STOPPED, its write routes need W1-T996's Access-JWT grant, and `/v1/inbox/approve` is
+    `tier: "high"` while the provider grants `middle`. NAMED, NOT SCOPED IN.
+
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. The criteria name an arming
+    handoff, a head-bound decision, a capped refusal and an irreversibility refusal across two lib
+    modules; `sizingViolation` (`src/lib/task-linter.ts`) derives subsystems from `files:` plus the
+    acceptance text and would refuse medium on that span.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form; each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted verbatim from test/sweep.test.ts that matched one. Each is plain
+    prose under 100 characters with no comma, no `; ` and no regex metacharacter, because a bare title
+    is compiled through `escapeRegExp` and matched literally. The fifth is doc-shaped and takes a
+    `grep:` with an explicit path.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK AGAINST ITS EXPECTED SHA BEFORE FILING.
+    `refs/rmd-id/W1-T1027` resolves to `96bd26dcd81881cb…`, matching the operator's stated
+    `96bd26dc…` (negative control `refs/rmd-id/W1-T444444` reads 0; positive control
+    `refs/rmd-id/W1-T1021` resolves). Four surfaces swept anyway, GIT AND LEDGER FIRST AND REST LAST
+    AND SERIAL, `/rate_limit` never called: the reservation; shard FILENAMES via `git ls-tree -r` (374
+    files, W1-T1027 = 0, control W1-T1021 = 1 — THE FILENAME IS THE EXISTENCE TEST, and the shard's
+    `- id:` line is unindented); ids mentioned under plan/ (ADVISORY only, 0 here against a control of
+    6 files for W1-T516); and the open-PR titles, heads and file lists. THE OPEN-PR SET WAS READ, NOT
+    UNREAD: three open pull requests were enumerated (#2196, #2199, #2201) and their ids are W1-T949,
+    W1-T952 and W1-T1026, none of them this one.
