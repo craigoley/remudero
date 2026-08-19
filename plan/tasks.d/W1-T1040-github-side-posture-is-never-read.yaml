@@ -1,0 +1,231 @@
+- id: W1-T1040
+  title: "NOTHING EVER READS WHETHER THE REPO'S GITHUB-SIDE PROTECTIONS ARE ON, SO AN AVAILABLE-AND-OFF CAPABILITY IS INVISIBLE UNTIL SOMETHING NEEDS IT — `dependabot_security_updates` reads `disabled` while eight sibling repos in the same org read `enabled`, and the status vocabulary carries no way to tell OFF from IMPOSSIBLE"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    MEASURED 2026-08-19 AT origin/main 00a1f584, on the Azure host. No `/rate_limit` call was made,
+    no repository setting was changed, no write endpoint was called, and no paid feature was enabled.
+
+    (1) THE GAP. `.github/workflows/` carries codeql, semgrep, osv-scanner, scorecard,
+    dependency-review and mutation-nightly, and they run. NOTHING reads the capabilities that live in
+    GitHub rather than in a workflow file. The posture below was read by hand today and by nothing
+    else, ever.
+
+    (2) WHAT IS OFF, READ FROM `GET /repos/{owner}/{repo}`. The `security_and_analysis` block
+    carries 8 keys: `secret_scanning` and `secret_scanning_push_protection` read `enabled`;
+    `dependabot_security_updates`, `secret_scanning_ai_detection`,
+    `secret_scanning_non_provider_patterns`, `secret_scanning_validity_checks`,
+    `secret_scanning_delegated_alert_dismissal` and `secret_scanning_delegated_bypass` read
+    `disabled`. `GET /repos/{o}/{r}/automated-security-fixes` independently returns
+    `{"enabled": false, "paused": false}` — the same fact through a second endpoint. And
+    `GET .../branches/main/protection/enforce_admins` reads `enabled: false`. Dependabot VERSION
+    updates demonstrably work; it is the SECURITY-update path that is off, so a CVE in a dependency
+    would not auto-open a PR.
+
+    (3) READ AND WRITE DIFFER, AND THE TOKEN SETTLES THE SCOPE. Six reads were confirmed on the
+    fleet's own PAT today: `repos/{o}/{r}` 200, `automated-security-fixes` 200,
+    `vulnerability-alerts` 204, `branches/main/protection` 200, `.../enforce_admins` 200,
+    `languages` 200. The operator separately measured 403 `Resource not accessible by personal
+    access token` on `PUT .../automated-security-fixes` and
+    `POST .../branches/main/protection/enforce_admins`. **THE WRITES WERE DELIBERATELY NOT
+    RE-ATTEMPTED HERE**, because a PUT that succeeded would have changed a setting this brief
+    forbids changing — the read/write split is established from the read side plus the operator's
+    measurement, never by probing a mutation. A CHECK BUILT ON A WRITE-CAPABLE ASSUMPTION WOULD FAIL
+    SILENTLY, so this task is DETECTION ONLY and must never call a write endpoint.
+
+    (4) THE API DOES NOT DISTINGUISH OFF FROM UNAVAILABLE — MEASURED, NOT ASSUMED. Across every
+    repo the org exposes to this token (15 repos, 122 status observations) the vocabulary is
+    EXACTLY TWO VALUES: `enabled` 57, `disabled` 65. There is no `unavailable`, no `not_set`, no
+    third string. So the check CANNOT self-classify from the status field and MUST CARRY AN
+    ALLOWLIST of expected-off capabilities.
+
+    (5) AND THE ALLOWLIST IS DERIVABLE FROM THE SAME SWEEP, WHICH IS WHY IT IS NOT A GUESS. Sibling
+    repos in this org prove availability: `dependabot_security_updates` reads `enabled` on 8 of them,
+    `secret_scanning_ai_detection` on 4, `secret_scanning_non_provider_patterns` on 6,
+    `secret_scanning_validity_checks` on 6. Those four are AVAILABLE AND OFF HERE. By contrast
+    `secret_scanning_delegated_alert_dismissal` and `secret_scanning_delegated_bypass` read
+    `disabled` on ALL 14 repos carrying them — no repo this account owns has ever had them on — which
+    is the signature of a tier-limited capability rather than a toggle. THE ALLOWLIST FOR THIS REPO
+    TO READ CLEAN TODAY IS THOSE TWO DELEGATED KEYS AND NOTHING ELSE.
+
+    (6) THE TIER CANNOT BE READ ON THIS TOKEN. `GET /orgs/craigoley` returns `plan: null`, and
+    `GET /repos/{o}/{r}` returns `plan: null` too. So the check cannot resolve which of the three
+    states an unknown capability belongs to by asking; the allowlist is the ONLY mechanism available,
+    and it must be data with a stated reason per entry rather than a bare path list.
+
+    (7) CODE QUALITY HAS NO API SURFACE AT ALL. `repos/{o}/{r}/code-quality` and
+    `repos/{o}/{r}/quality` both return 404, against positive controls of 200 on
+    `code-scanning/default-setup`, `code-scanning/alerts`, `rulesets` and `dependabot/alerts` on the
+    same token in the same call sequence. It is visible only in the settings UI. THEREFORE IT CANNOT
+    BE PROBED AND MUST BE AN ANNOTATED ALLOWLIST ENTRY CARRYING ITS COST, never a live read.
+
+    (8) ITS INCREMENT IS SMALLER THAN IT LOOKS, AND THE MEASUREMENT SAYS SO. `codeql.yml` already
+    runs `queries: security-and-quality` — its own comment reads "security-extended queries +
+    maintainability" — so the QUALITY QUERY HALF IS ALREADY RUNNING. `coverage-ratchet` already
+    computes an aggregate floor and diff-coverage from `--experimental-test-coverage`, though in
+    lcov: `cobertura` appears ZERO times in the repo against a control of 48 files containing
+    `lcov`, so the coverage half would need a NEW REPORT FORMAT over an EXISTING MEASUREMENT. What
+    is genuinely new is the AI-POWERED ANALYSIS ON RECENTLY CHANGED FILES. Language support is not
+    in doubt: `GET .../languages` reads TypeScript 96.8% and JavaScript 1.7% — 98.5% of the repo —
+    and `code-scanning/default-setup` lists `javascript-typescript` and `typescript` among its
+    languages while reading `state: "not-configured"`.
+
+    (9) WHY THE INCREMENT IS RELEVANT HERE SPECIFICALLY, RECORDED WITHOUT RECOMMENDING IT. GitHub's
+    stated use case is a team adopting AI coding assistants that needs assurance generated code
+    meets the same bar, with AI analysis catching what rule-based queries were not written for. This
+    fleet opens 15-30 PRs a day and no human reads them line by line. THAT IS CONTEXT FOR A
+    PURCHASE DECISION AND NOT A RECOMMENDATION TO MAKE IT.
+
+    (10) THE WRONG ESCALATION TIER IS INVISIBLE, WHICH IS WHY THIS MUST NOT USE IT. `escalate()`
+    (`src/lib/escalate.ts`) gates its only `notify()` call on `cls === "MANUAL" || cls ===
+    "HARD_STOP"`, and `src/lib/notify.ts` says so in its own header: iMessage is "reserved for
+    MANUAL + HARD_STOP escalations (MASTER-PLAN §4); BLOCKED and ..." are silent. Every daemon
+    escalation measured today was BLOCKED. Nine crash-loop issues went unread for five days on
+    exactly that tier.
+  acceptance:
+    - claim: "the posture read never calls a write endpoint even when a capability reads disabled"
+      proof: "unit test: W1-T1040: the posture read never calls a write endpoint"
+    - claim: "an expected-off capability on the allowlist produces no finding"
+      proof: "unit test: W1-T1040: an allowlisted capability produces no finding"
+    - claim: "an available-and-off capability produces a finding naming the capability"
+      proof: "unit test: W1-T1040: an available-and-off capability is named"
+    - claim: "a paid capability carries its cost in the finding rather than reading as a free toggle"
+      proof: "unit test: W1-T1040: a paid capability carries its cost"
+    - claim: "an unchanged posture emits nothing on the second consecutive read"
+      proof: "unit test: W1-T1040: an unchanged posture emits nothing the second time"
+    - claim: "a posture that changed since the recorded baseline emits exactly once"
+      proof: "unit test: W1-T1040: a changed posture emits once and not again"
+    - claim: "a finding never halts a dispatch and never fails a check"
+      proof: "unit test: W1-T1040: a posture finding never blocks a dispatch"
+    - claim: "an unreadable posture read degrades to no finding rather than a false all-clear"
+      proof: "unit test: W1-T1040: an unreadable posture read reports nothing rather than clean"
+    - claim: "the read runs at most once a day rather than once per dispatch"
+      proof: "unit test: W1-T1040: the posture read is rate-limited to once a day"
+    - claim: "the new module is reached from the daemon's own wiring rather than shipping unreferenced"
+      proof: "grep: readGithubPosture( in src/run-task.ts"
+  risk: high
+  origin: "oper#github-side-posture-unread-2026-08-19"
+  plan_refs: ["W1-T1038", "W1-T352", "W1-T402", "W1-T27"]
+  files: [src/lib/github-posture.ts, src/lib/daemon.ts, src/run-task.ts, test/github-posture.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    DESIGN, IN THE ORDER AN IMPLEMENTER MEETS IT.
+
+    (i) DETECTION ONLY. The module reads `GET /repos/{owner}/{repo}` and
+    `GET .../branches/{branch}/protection/enforce_admins` and NOTHING ELSE. IT MUST NEVER CALL A
+    WRITE ENDPOINT — not to set a capability, not to probe whether it could. The token 403s on the
+    writes, so an attempt cannot succeed, but the prohibition is about intent rather than outcome:
+    a future token with more scope must not silently turn this into a remediator.
+
+    (ii) THREE STATES, AND THE MIDDLE ONE IS THE POINT. (a) OFF-AND-FREE: flag it. (b) OFF-AND-PAID:
+    flag it ONCE, carrying the cost in the finding — GitHub Code Quality requires Team or Enterprise
+    Cloud, bills per active committer, and adds AI credits for autofixes plus Actions minutes for its
+    own CodeQL scans. FLAGGING A PURCHASE DECISION THE SAME WAY AS A FREE TOGGLE IS THE NOISE THAT
+    KILLS A CHECK. (c) UNAVAILABLE-ON-THIS-TIER: never flag. A check that reports an impossible
+    setting daily teaches the operator to ignore it, which is the failure the 63-item escalation
+    backlog already had.
+
+    (iii) THE ALLOWLIST IS DATA WITH REASONS, NOT A PATH LIST. Because the API's vocabulary is only
+    `enabled`/`disabled` (measured, rationale (4)), state (c) cannot be derived at runtime. Follow
+    `INSTRUMENT_SURFACE_EXCLUSIONS` (`src/lib/review.ts`), which pairs every excused entry with the
+    reason it earns a pass and refuses an entry whose reason is empty. TODAY'S ALLOWLIST IS
+    `secret_scanning_delegated_alert_dismissal` and `secret_scanning_delegated_bypass` — 0 of 14
+    org repos have either on — plus Code Quality as an annotated paid entry that no API can report.
+    Everything else currently off is state (a) and SHOULD flag.
+
+    (iv) THE BASELINE LIVES BESIDE `last-seen.json`, NOT IN THE LEDGER. The ledger is append-only and
+    rotates, so a prior-posture comparison cannot rest on it — that is the same defect
+    `DECISION_RELEVANT_LEDGER_STEPS` exists to patch, and patching it here would be the wrong fix.
+    `state/` already holds durable single-fact stores the daemon rewrites in place
+    (`last-seen.json`, `last-auto-triage.json`, `last-retro.json`, `merge-credit.json`,
+    `status.json`), and `src/lib/last-seen.ts` is the pattern to COPY rather than to edit — it is
+    deliberately NOT in `files:`. `state/` is gitignored (`.gitignore`), which is correct and
+    load-bearing; the baseline is runtime state, not a record, and the FINDING is what must be
+    durable, not the snapshot.
+
+    (v) CHANGE-ONLY, NEVER DAILY. A setting off today is off tomorrow. Emit when the posture
+    DIFFERS from the recorded baseline and on the first read after the baseline is absent; emit
+    nothing otherwise. THE FIRST TEST WRITTEN MUST BE THE UNCHANGED-POSTURE PATH.
+
+    (vi) THE READER IS THE OPERATOR, SAID OUT LOUD. The finding is a ledger row and a line in the
+    daemon summary, read by THE OPERATOR reading the ledger. That is a legitimate reader and it is
+    named here because an unstated one is not. It is deliberately NOT an `escalate()` call: that
+    path gates iMessage on `MANUAL || HARD_STOP` (rationale (10)) and a posture finding is neither —
+    routing it there would make it invisible on the BLOCKED tier where nine crash-loop issues sat
+    unread for five days. NO NEW NOTIFY CHANNEL, NO NEW VERB, NO CONSOLE SURFACE IS IN SCOPE.
+
+    (vii) IT MUST NOT BLOCK. A posture finding never halts a dispatch, never fails a check, never
+    changes a verdict. And an unreadable read reports NOTHING rather than a clean bill — a silent
+    all-clear on a failed probe is the vacuous pass this repo has been bitten by repeatedly.
+
+    (viii) CADENCE. At most once a day, reusing the interval shape the daemon already has
+    (`minIntervalMinutes` and the `checkRetroTrigger`/`checkAutoTriage` rungs in `src/lib/daemon.ts`)
+    rather than inventing scheduling. A per-dispatch call is waste against a budget exhausted six
+    times today. FIVE SCHEDULED WORKFLOWS ALREADY EXIST (`clock-sweep.yml`,
+    `fleet-heartbeat-watch.yml`, `mutation-nightly.yml`, `recovery-drill.yml`, `scorecard.yml`) and a
+    sixth is NOT proposed — see (ix) for why the home is `src/`.
+
+    (ix) WHY THE HOME IS `src/` AND NOT A WORKFLOW — RULE 25, RE-DERIVED WITH FOUR CONTROLS.
+    `INSTRUMENT_SURFACE` (`src/lib/review.ts`) carries `^\.github/workflows/` as its FIRST entry, and
+    `detectInstrumentEntanglement` was run against four file lists at 00a1f584:
+    workflow + `src/` product => entangled TRUE; workflow alone => FALSE; `src/` + `test/` alone =>
+    FALSE; workflow + `test/` only => FALSE. 4 of 4 behaved as specified. So a workflow-homed
+    implementation would have to RIDE ALONE, and this task needs a module plus its daemon wiring in
+    the same PR. Choosing the `src/` home is therefore a consequence of the measurement, not a
+    preference.
+
+    WHAT MUST NOT BE BUILT. NO SETTING IS CHANGED AND NO LICENCE IS BOUGHT — both are operator
+    decisions and the token cannot make either. NO REMEDIATION PATH, not even behind a flag. NO
+    RULESET IS CREATED: Code Quality's rulesets can block PRs on quality and coverage thresholds,
+    which would be A NEW MERGE GATE on a fleet where `ci-gate` is already the required check and
+    `enforce_admins` reads false and `GET .../rulesets` currently returns an empty list. THAT NEEDS
+    THE SAME CARE AS THE `required_status_checks_strict` QUESTION AND IS NOT THIS TASK.
+
+    SIBLING, NAMED AND NOT ABSORBED. `src/lib/project-init.ts` generates new-repo scaffolding — it
+    emits `.github/workflows/` files, a `.github/dependabot.yml` adapted from this repo's own, and a
+    security doc. IT CONFIGURES AT CREATION; THIS TASK DETECTS DRIFT AFTERWARDS. They are different
+    things and neither subsumes the other: scaffolding cannot turn on a GitHub-side capability
+    (that needs the write endpoints this token 403s on), and a drift check cannot bootstrap a repo
+    that does not exist yet. It matters for the BYO-hosting direction recorded in `DECISIONS.md`,
+    where customers get their own repos and inherit whatever posture the scaffolding leaves them.
+    `src/lib/project-init.ts` is deliberately NOT declared in `files:`.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT. `src/lib/github-posture.ts` is the new module (the
+    read, the three-state classifier and the allowlist). `src/lib/daemon.ts` carries the cadence
+    rung and the `DaemonDeps` wiring — it scores 10 on a word-bounded count of the cadence symbols
+    (`checkAutoTriage`, `checkRetroTrigger`, `minIntervalMinutes`, `readJsonFile`) against
+    `src/run-task.ts` at 11 and every other file at 2 or fewer. `src/run-task.ts` IS DECLARED
+    because the real gateway factories that turn an injected predicate into a live REST read live
+    there beside `costGovernorGateFor` and `queueGovernorGateFor`; per DECISIONS.md's 2026-08-18
+    W1-T471 ruling that file is not split and tasks are not re-scoped to avoid it, and the ruling
+    states the ceremonial acceptance sentence is no longer required, so it is declared plainly and
+    the serialisation cost is accepted.
+
+    `test/github-posture.test.ts` DOES NOT EXIST at 00a1f584 — a forward-referenced PATH, never a
+    guessed symbol — and is a new file because the house rule keeps a coverage-load-bearing test out
+    of a shared suite.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS: `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus acceptance text, and this set
+    crosses three `src/` modules and `test/`. Blast radius argues DOWN — the finding blocks nothing
+    and changes no verdict — and UP, because a check that flags an impossible setting daily trains
+    the operator to ignore the channel, which is why (ii) and (iii) are stated as constraints rather
+    than left to judgement.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING, NOT MINTED HERE.
+    `refs/rmd-id/W1-T1040` resolves to 2dad93bed8cb94f7bd85b5ff9130ac2f96c821e8, matching the
+    `2dad93be` prefix the brief named. Positive control: `refs/rmd-id/W1-T1038` reads 1. Negative
+    control: `refs/rmd-id/W1-T999999` reads 0.
+
+    THE CALL-SITE CRITERION NAMES A SYMBOL THAT DOES NOT EXIST YET, AND THAT IS DELIBERATE. The
+    `call-site` linter refuses a task that creates a module without an acceptance criterion proving
+    something calls it — "Eleven modules have merged green and unreached; this is the check that
+    would have caught six of them." Satisfying it requires forward-referencing a SYMBOL rather than
+    a path, which is normally a guess; here the linter mandates it, so the implementer is BOUND to
+    the name: the exported reader MUST be `readGithubPosture` and `src/run-task.ts` MUST call it.
+    Renaming it means amending this criterion in the same PR.
