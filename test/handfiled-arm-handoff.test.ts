@@ -103,7 +103,7 @@ function fakeDeps(lines: Array<Record<string, unknown>>, overrides: Partial<Swee
 
 // ── 1. a green reviewed PR with no run branch reaches the arm ───────────────
 
-test("W1-T1028: a green reviewed pr with no run branch reaches the arm instead of being refused for its id", async () => {
+test("W1-T1028: a green reviewed pr with no run branch reaches the arm", async () => {
   const deps = fakeDeps([postedLine()]);
   const summary = await runSweep([handFiledPr()], deps);
   assert.deepEqual(
@@ -118,7 +118,7 @@ test("W1-T1028: a green reviewed pr with no run branch reaches the arm instead o
 
 // ── 2. the sweep's arm carries the head-bound decision it already made ──────
 
-test("W1-T1028: the sweep arm carries the head-bound decision it already made", () => {
+test("W1-T1028: the sweep arm carries its own head bound decision", () => {
   const decision = decideSweepArm(handFiledPr(), [postedLine()]);
   // Byte-identical to the run flow's own core predicate over the SAME recovered facts — proving
   // this is the real, head-bound verdict (not the generic "no evidence" fallback a taskId-blind
