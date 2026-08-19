@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: ["W1-T970"]
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 70.00
   rationale: |

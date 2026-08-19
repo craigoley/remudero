@@ -377,6 +377,13 @@ function ghRefusalBackoffMs(
  * propagates straight out of THIS call, un-caught and un-rewrapped, before `call` runs (or runs
  * again). That is the stand-down: nothing here classifies it, counts it as a `rate_limit` result,
  * or feeds it back to `recordResult` a second time.
+ *
+ * W1-T1008: a CLEAN `call()` is also checked for a budget reading attached via
+ * {@link withBudgetReading} (`fetchOpenPrsRest`'s own doc: "the ONE value that already crosses
+ * that exact boundary unmodified") and, when present, threaded into THIS `recordResult` call — the
+ * one that already runs on every success — rather than a second one. A `call` that attaches
+ * nothing (every caller before this task, and every OTHER guarded call in this codebase) yields
+ * `undefined` here, identical to omitting the argument entirely.
  */
 export function paceGhEntry<T>(
   pacer: GhCallPacer | undefined,
@@ -394,7 +401,7 @@ export function paceGhEntry<T>(
   for (;;) {
     try {
       const result = call();
-      pacer.recordResult(false);
+      pacer.recordResult(false, budgetReadingOf(result));
       return result;
     } catch (err) {
       const limited = isRateLimited(err);
@@ -420,8 +427,71 @@ export function singlePrRestArgs(owner: string, repo: string, prNumber: number):
  * v8 coverage channel stamps `DA:<line>,0` across a new module's leading and trailing
  * source-line records, so a type-only declaration parked at either end reads to diff-coverage as
  * uncovered "code".
+ *
+ * W1-T1008: `onRateLimit` is the SAME optional second parameter `ghJson` (lib/worker.ts) already
+ * declares — restated STRUCTURALLY rather than imported, because this module deliberately never
+ * imports from worker.ts (see this file's declared-scope note in the owning task's `note`). Every
+ * real caller passes `ghJson` itself, which already satisfies this shape; every existing fixture
+ * in this suite that ignores the second parameter keeps compiling and keeps working unchanged —
+ * this is strictly ADDITIVE. Only the fields the floor actually needs are named; `ghJson`'s own
+ * `used`/`reset` are simply extra properties a structurally-typed caller does not have to declare.
  */
-export type GhApiFetcher = (args: string[]) => unknown;
+export type GhApiFetcher = (
+  args: string[],
+  onRateLimit?: (reading: { remaining?: number; limit?: number; resource?: string }) => void,
+) => unknown;
+
+/**
+ * W1-T1008 — the missing HALF of the chain rationale (1) names: `ghJson`'s reading is optional in
+ * every field (most `gh` calls carry no rate-limit header at all), while {@link GhBudgetReading}
+ * — what actually arms the floor — requires all three. A reading missing any one of them (no `api`
+ * call was made, or this particular response omitted the header) yields NO budget, never a
+ * partial/zeroed one that could read as "empty" and stand every following call down on a fluke.
+ */
+function budgetFromRateLimitLikeReading(reading: {
+  remaining?: number;
+  limit?: number;
+  resource?: string;
+}): GhBudgetReading | undefined {
+  const { remaining, limit, resource } = reading;
+  if (remaining === undefined || limit === undefined || resource === undefined) return undefined;
+  if (!Number.isFinite(remaining) || !Number.isFinite(limit)) return undefined;
+  return { remaining, limit, resource };
+}
+
+/**
+ * W1-T1008 — THE CHANNEL `fetchOpenPrsRest` uses to hand its own list call's budget reading back
+ * to {@link paceGhEntry}, which is what actually calls `recordResult`.
+ *
+ * WHY A SYMBOL-KEYED PROPERTY ON THE RETURN VALUE, RATHER THAN A NEW PARAMETER ANYWHERE. The real
+ * (unedited, out of this task's declared scope) production call composes these two functions
+ * EXACTLY as `paceGhEntry(pacer, isRateLimited, () => fetchOpenPrsRest(owner, repo, fetch))` —
+ * run-task.ts's `buildOpenPrViews`. `paceGhEntry` is generic over `call`'s return type precisely
+ * because `lib/status.ts`'s own call sites guard entirely different fetches (issue lists, PR
+ * lists) through the SAME function, so it cannot be given a fifth "how do I get the budget out of
+ * your result" parameter without either (a) widening every other caller's contract for a reading
+ * only this one call ever produces, or (b) requiring `run-task.ts`'s existing call site to change
+ * to supply one — and that call site is a zero-argument closure that this task's declared files do
+ * not include, so nothing here can make it pass anything new. The array `fetchOpenPrsRest` returns
+ * is the ONE value that already crosses that exact boundary unmodified. A symbol key is invisible
+ * to `JSON.stringify`, `Object.keys`, `for…in` and object/array spread, so every existing consumer
+ * of that array (including `run-task.ts`'s own `as RawOpenPr[]`) is byte-for-byte unaffected.
+ */
+const GH_BUDGET_READING = Symbol("open-prs-rest.ghBudgetReading");
+
+/** Attach `budget` (when present) to `value` via {@link GH_BUDGET_READING}, then return `value`. */
+function withBudgetReading<T>(value: T, budget: GhBudgetReading | undefined): T {
+  if (budget !== undefined && value !== null && (typeof value === "object" || typeof value === "function")) {
+    (value as unknown as Record<symbol, GhBudgetReading>)[GH_BUDGET_READING] = budget;
+  }
+  return value;
+}
+
+/** Read back whatever {@link withBudgetReading} attached, or `undefined` if nothing did. */
+function budgetReadingOf(value: unknown): GhBudgetReading | undefined {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return undefined;
+  return (value as Record<symbol, GhBudgetReading | undefined>)[GH_BUDGET_READING];
+}
 
 /**
  * Check-runs for a head SHA. REST defaults to `filter=latest` (one run per check NAME), which is
@@ -701,10 +771,20 @@ function rollupFor(owner: string, repo: string, sha: string, fetch: GhApiFetcher
  * `statusCheckRollup`, rather than aborting the enumeration. No retry — the observed failure
  * class is rate-limit exhaustion, and retrying against an exhausted budget only deepens it; the
  * next sweep pass re-derives.
+ *
+ * W1-T1008: the LIST call — and ONLY the list call, never the per-PR rollup fetches below it —
+ * asks `fetch` for its rate-limit reading (design (i): "READ THE HEADER AT THE CALL, NOT THE
+ * PROBE", W1-T529's own unshipped clause) and, once one is present, hands it back on the returned
+ * array via {@link withBudgetReading} for {@link paceGhEntry} to read and arm the floor from. A
+ * `fetch` that ignores the second parameter (every fixture in this suite written before this task)
+ * simply never calls it, so `budget` stays `undefined` and the array carries none — unaffected.
  */
 export function fetchOpenPrsRest(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
-  const rows = fetch(openPrsRestArgs(owner, repo)) as RestPullRow[];
-  return rows.map((row) => {
+  let budget: GhBudgetReading | undefined;
+  const rows = fetch(openPrsRestArgs(owner, repo), (reading) => {
+    budget = budgetFromRateLimitLikeReading(reading);
+  }) as RestPullRow[];
+  const result = rows.map((row) => {
     const pr = mapRestPr(row);
     try {
       return { ...pr, statusCheckRollup: rollupFor(owner, repo, pr.headRefOid, fetch) };
@@ -712,6 +792,7 @@ export function fetchOpenPrsRest(owner: string, repo: string, fetch: GhApiFetche
       return { ...pr, rollupUnreadable: true as const };
     }
   });
+  return withBudgetReading(result, budget);
 }
 
 /** The `rmd fix` single-PR read — same mapping, plus the `state` token `routeFix` gates on. */

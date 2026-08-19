@@ -635,6 +635,12 @@ export function renderShellHtml(
   .ask-type-badge.ask-type-verify {
     background: rgba(163, 172, 194, 0.16); color: var(--status-queued); border-color: var(--status-queued);
   }
+  /* W1-T1006: the blocked-PR badge -- SAME pill shape, the "blocked" tone (distinct from both
+     the amber escalation/action tone and the queued verify tone) so a sweep-disposed PR reads
+     as its own kind. */
+  .ask-type-badge.ask-type-blocked-pr {
+    background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border-color: var(--status-blocked);
+  }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -1720,6 +1726,14 @@ export function renderShellHtml(
   // W1-T159 GLANCE LAYER state -- see renderGlanceStrip/updateTabTitle/updateGlanceAnomaly and
   // renderDaemonHealth, below, for where each is read/written.
   let latestSpend = null; // GET /v1/status's { mergedToday, spendTodayUsd, spendWeekUsd } (board.ts's computeGlanceSpend)
+  // W1-T1006: NEEDS ME's sixth row source, riding the SAME GET /v1/status response every other
+  // board.ts-sourced field above does (board.ts's BoardSnapshot.blockedPrs/
+  // blockedPrsUnverifiedReason) -- never a second fetch, so this can never drift from tasks'
+  // own generated_at. Read directly inside renderNeedsMe (module state, the SAME pattern
+  // latestFeedbackEntries/latestInboxReady/latestInboxDrafting already use) rather than a new
+  // renderNeedsMe parameter, so its existing call sites are untouched.
+  let latestBlockedPrs = [];
+  let latestBlockedPrsUnverifiedReason;
   let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
   let latestDaemonHealth = null; // GET /v1/daemon-health's body
   let latestAccountUsage = null; // GET /v1/account-usage's body (account-usage.ts's AccountUsageSnapshot)
@@ -2245,6 +2259,8 @@ export function renderShellHtml(
     // reload would flash "…" for merged-today/spend-today/spend-this-week even while every OTHER
     // stale-but-real number (task counts) restores immediately from this SAME cached snapshot.
     latestSpend = snapshot.spend ?? null;
+    latestBlockedPrs = snapshot.blockedPrs ?? [];
+    latestBlockedPrsUnverifiedReason = snapshot.blockedPrsUnverifiedReason;
     latestFeedbackEntries = snapshot.feedbackEntries ?? [];
     latestInboxReady = snapshot.inboxReady ?? [];
     latestInboxDrafting = snapshot.inboxDrafting ?? [];
@@ -2516,6 +2532,39 @@ export function renderShellHtml(
       \`<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">awaiting human verification -- filed verify: human, never auto-dispatched</span>\`
     );
   }
+  // W1-T1006: THE SIXTH NEEDS-ME KIND -- a PR the sweep reconciler already disposed into a
+  // non-progressing class (blocked-fixable/blocked-ambiguous/conflicted/stale), with no
+  // escalation issue required for it to be visible here at all (design (1)/(6): that gate is
+  // the whole defect this task closes). disposition and reason render VERBATIM off the
+  // ledger's own sweep.disposed line (design (ii), the W1-T186 named-reason doctrine --
+  // status-board.ts's BlockedPrBlocker doc) -- no new taxonomy, no rewording, no collapsing
+  // distinct families down to the disposition word alone. No action affordance renders here,
+  // same discipline as needsMeVerifyRowHtml just above: nothing in src/ offers a console verb
+  // for this row yet (design note (vii), an operator ruling, not this task's to make). No card
+  // link either (design (v)): computeTaskCard 404s for any id the plan does not hold, and this
+  // row's own taskId (when the ledger line even carried one) is not known to be one of the ones
+  // that do -- so the pushed row below deliberately carries no taskId field at all (see
+  // reconcileRows' own row.taskId !== undefined gate), which is what keeps this row un-
+  // clickable rather than a 404 one click away.
+  function needsMeBlockedPrRowHtml(r) {
+    const prLabel = r.prUrl
+      ? \`<a href="\${escapeHtml(r.prUrl)}" target="_blank" rel="noreferrer">PR #\${r.prNumber}</a>\`
+      : \`PR #\${r.prNumber}\`;
+    return (
+      \`\${statusBadge("needs-human")}<span class="ask-type-badge ask-type-blocked-pr">Blocked</span>\` +
+      \`<span class="task-id">\${prLabel}</span><span class="detail">\${escapeHtml(r.disposition)} -- \${escapeHtml(r.reason)}</span>\`
+    );
+  }
+  // W1-T1006 design (iii): the SAME withholding distinction status-board.ts's own
+  // blockedPrsUnverifiedReason already draws (live GitHub state could not be checked THIS
+  // cycle -- withheld rather than replay possibly-stale history as current) rendered as its OWN
+  // row, so an outage reads as "unverified", never as a healthy-looking empty group.
+  function needsMeBlockedPrUnverifiedHtml(reason) {
+    return (
+      \`\${statusBadge("needs-human")}<span class="ask-type-badge ask-type-blocked-pr">Blocked</span>\` +
+      \`<span class="detail">blocked-PR ledger entries unverified -- \${escapeHtml(reason)}</span>\`
+    );
+  }
   function renderNeedsMe(tasks, feedbackEntries, inboxReady, inboxDrafting) {
     const rows = [];
     const shown = new Set();
@@ -2546,6 +2595,13 @@ export function renderShellHtml(
     }
     for (const p of inboxReady ?? []) rows.push({ key: \`inbox:\${p.proposalId}\`, html: needsMeInboxHtml(p) });
     for (const p of inboxDrafting ?? []) rows.push({ key: \`inbox-drafting:\${p.proposalId}\`, html: needsMeDraftingHtml(p), ts: p.spawnedAt });
+    // W1-T1006: the sixth group, its OWN pass exactly like verifyHumanPending's above -- never
+    // folded into the needsHuman loop, and reached via module state (latestBlockedPrs) rather
+    // than a new parameter here, so every existing caller of renderNeedsMe is untouched.
+    for (const r of latestBlockedPrs ?? []) rows.push({ key: \`blocked-pr:\${r.prNumber}\`, html: needsMeBlockedPrRowHtml(r) });
+    if (latestBlockedPrsUnverifiedReason) {
+      rows.push({ key: "blocked-pr-unverified", html: needsMeBlockedPrUnverifiedHtml(latestBlockedPrsUnverifiedReason) });
+    }
     reconcileRows(document.getElementById("needs-me-list"), rows, "nothing needs you right now");
     tickElapsed(); // paint the DRAFTING row's freshly-(re)rendered elapsed span immediately, same as renderNow does
     updateNeedsMeArrivalEmphasis(rows);
@@ -4160,6 +4216,10 @@ export function renderShellHtml(
     // W1-T159: "spend" rides on this SAME /v1/status response (board.ts's computeGlanceSpend) --
     // no extra round trip for merged-today/spend-today/spend-this-week.
     latestSpend = statusSnap.spend ?? null;
+    // W1-T1006: the blocked-PR queue rides this SAME /v1/status response too (board.ts's
+    // BoardSnapshot.blockedPrs/blockedPrsUnverifiedReason) -- no second fetch, one snapshot.
+    latestBlockedPrs = statusSnap.blockedPrs ?? [];
+    latestBlockedPrsUnverifiedReason = statusSnap.blockedPrsUnverifiedReason;
     paintFromTasksById();
     // W1-T163: ONE-TIME, off this load's first snapshot only -- see renderRecapSection's doc for
     // why re-rendering off every later poll's own (by-then-mostly-consumed) recap would be wrong.
@@ -4225,6 +4285,8 @@ export function renderShellHtml(
         generated_at: statusSnap.generated_at,
         tasks,
         spend: latestSpend,
+        blockedPrs: latestBlockedPrs,
+        blockedPrsUnverifiedReason: latestBlockedPrsUnverifiedReason,
         recentEntries: latestRecentEntries,
         upNextCards: latestUpNextCards,
         feedbackEntries: latestFeedbackEntries,

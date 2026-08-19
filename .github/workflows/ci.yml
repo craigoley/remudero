@@ -23,6 +23,14 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
+    # W1-T1009: HEAVY band. 35m/2100s sits in the empty gap this repo's own data leaves between
+    # the longest observed non-hung run (1637s, a legitimately FAILING `ci`) and the first
+    # observed hang (2647s) -- and it MUST stay strictly below ci-gate.yml's own
+    # WAIT_CAP_SECONDS (2400s): below the tail it kills honest work, at/above 2400 it changes
+    # nothing because ci-gate times out first and the misattribution defect returns intact. If
+    # WAIT_CAP_SECONDS is ever retuned (W1-T312), re-derive this value too -- do not raise it
+    # past 2400 without moving that cap first.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,6 +88,10 @@ jobs:
     # right messages.
     name: commitlint
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- 13x this job class's observed max (46s over 440
+    # sampled job-runs). No instance of this job hanging was observed; it is bounded because it
+    # runs the same networked actions/setup-node + npm ci steps as the jobs that did hang.
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read # W1-T351: `gh pr view` below needs this to read the live PR title
@@ -118,6 +130,10 @@ jobs:
     # its own job status is what "on every PR" is proven by.
     name: leak-grep
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation (13x this job class's observed max of 46s; no observed hang, bounded because it
+    # shares the same networked setup as the jobs that did hang).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: leak-grep (plaintext secret tripwire)
@@ -143,6 +159,12 @@ jobs:
     # instrumented-but-never-hit, even when the aggregate ratchet above stays green.
     name: coverage-ratchet
     runs-on: ubuntu-latest
+    # W1-T1009: HEAVY band -- see the `ci` job's comment above for the full derivation. This job
+    # carries the same `npx playwright install` step and hung on it independently of `ci`
+    # (PR #2150, five minutes after PR #2148's `ci` hang on the same step), so it gets the same
+    # 35m/2100s bound, jointly constrained to stay strictly below ci-gate.yml's
+    # WAIT_CAP_SECONDS (2400s).
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -274,6 +296,11 @@ jobs:
     # genuinely improves), never down to make a red PR pass.
     name: mutation-ratchet
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation. This job used to install Playwright too (W1-T133 removed that step because
+    # neither file `commandRunner` now scopes to needs a browser), so it is not immune to the same
+    # class of stall even though this task's measured hangs were on `ci`/`coverage-ratchet`.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -328,6 +355,9 @@ jobs:
     # pass genuinely needs more room), never down to make a red PR pass.
     name: learnings-budget-ratchet
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -381,6 +411,9 @@ jobs:
     # no-shared-block fixture is ACCEPTED, both driving the real jscpd CLI as a subprocess).
     name: jscpd-gate
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -408,6 +441,9 @@ jobs:
     # plan/.
     name: claims
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -439,6 +475,9 @@ jobs:
     # (parseWhitelistedProof, reused verbatim from src/lib/review.ts) never lands.
     name: lint-plan
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -469,6 +508,9 @@ jobs:
     # under src/lib fails this job, which ci-gate's REQUIRED list waits on.
     name: depcruise
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -503,6 +545,9 @@ jobs:
     # successfully so it never blocks an unrelated PR.
     name: containment-probe
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -541,6 +586,9 @@ jobs:
     # absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid.
     name: api-client-drift
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -567,6 +615,9 @@ jobs:
     # silently absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid.
     name: no-hand-rolled-fetch
     runs-on: ubuntu-latest
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
