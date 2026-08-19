@@ -198,3 +198,36 @@ test("grep: the squash keeps the commit and discards the body in plan/tasks.d/W1
   );
   assert.match(yaml, /the squash keeps the commit and discards the body/);
 });
+
+// ── the best-effort contract: a git failure returns false rather than throwing ──────────
+
+test("W1-T1012: a repo with NO commit to amend returns false rather than throwing", () => {
+  // THE CATCH ARM IN ITS OWN RIGHT. The function's stated contract is best-effort — it
+  // "returns `false` on any git failure (no commit to read/amend) rather than throwing, the
+  // same best-effort contract `lastCommitSubject` already keeps at this exact call site — a
+  // trailer nuance must never crash an otherwise-successful run." That arm is only reachable
+  // when `git log -1` (or the `--amend` behind it) actually fails, which every other fixture
+  // here is built to avoid, so without this case the arm is dead code at the gate and the
+  // contract is asserted only in prose. A freshly-initialised repo with no commit at all is
+  // the deterministic shape: `git log -1` exits non-zero with "does not have any commits yet".
+  const dir = mkdtempSync(join(tmpdir(), "rmd-trailer-empty-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", dir], { encoding: "utf8" });
+
+  // PRECONDITION, so a false below is the catch arm and not a vacuous pass: the fixture really
+  // does make `git log -1` fail, and it is NOT short-circuited by the no-op guard above — that
+  // guard only returns early when `origin/main` RESOLVES, and this repo has no such ref.
+  assert.throws(
+    () => execFileSync("git", ["-C", dir, "log", "-1", "--format=%B"], { stdio: "pipe" }),
+    "fixture precondition: git log must fail in a repo with no commits",
+  );
+  assert.throws(
+    () => execFileSync("git", ["-C", dir, "rev-parse", "--verify", "--quiet", "origin/main"], { stdio: "pipe" }),
+    "fixture precondition: origin/main must be absent, so the no-op guard falls through",
+  );
+
+  assert.equal(
+    appendTaskTrailerToCommit(dir, "W1-T1012"),
+    false,
+    "an unamendable repo must return false, never throw",
+  );
+});
