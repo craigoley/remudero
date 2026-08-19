@@ -652,7 +652,7 @@ test("W1-T188 criterion 3: pre-#414 merged tasks whose acceptance criteria asser
   );
 });
 
-test("W1-T188 criterion 4: W1-T154's plan entry (title, rationale, design, acceptance) is UNCHANGED by this task's PR -- standing rule 21 forbids amending a merged task's criteria", () => {
+test("W1-T188 criterion 4: the W1-T154 plan entry is unchanged by this task's PR -- title, rationale, design and acceptance all pinned; standing rule 21 forbids amending a merged task's criteria", () => {
   const planYaml = readFileSync(join(repoRootFromThisFile(), "plan", "tasks.yaml"), "utf8");
   const content = extractW1T154Content(planYaml);
   assert.ok(
