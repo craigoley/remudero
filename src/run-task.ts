@@ -463,6 +463,8 @@ import {
   scopeAdvisorySection,
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
+  acceptanceAuthorTimeCheck,
+  type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   postReviewPending,
@@ -20264,6 +20266,32 @@ export interface AlertFixDispatchDeps {
   resolveMount: typeof resolveMount;
   spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
   ensureTaskTrailer: (prUrl: string, taskId: string) => void;
+  /** W1-T952 design (ii): the author-time acceptance check, applied to the just-opened PR before
+   *  CI/review would pay for a round trip to discover the same defect. Injectable so a test can
+   *  drive both the refusal and the positive-control branch without a real `gh` call — see the
+   *  real binding ({@link checkAlertFixAcceptance}) and `PR_AUTHORING_PATHS`'s "alert-fix" row
+   *  (lib/review.ts) for why THIS lane, specifically, cannot fall back to a plan-side lookup. */
+  checkAcceptance: (prUrl: string) => AcceptanceAuthorTimeResult;
+}
+
+/**
+ * The REAL `checkAcceptance` binding: fetch the PR body {@link dispatchAlertFixRun} just stamped a
+ * trailer onto, and run {@link "./lib/review.js".acceptanceAuthorTimeCheck} over it — the same
+ * diagnostic `rmd check-acceptance` prints, reached here without an author ever having to know that
+ * verb exists. `alertTaskId` never resolves in `plan/tasks.yaml` (it is a synthetic
+ * `ALERT-<source>-<id>`-shaped id, not a filed task), so no `expectedTaskId` is passed — the general,
+ * body-only check applies (a resolvable `Remudero-Task:` trailer OR a judgeable body-level block).
+ */
+export function checkAlertFixAcceptance(
+  prUrl: string,
+  /** Injectable `gh` reader, appended LAST so no positional caller shifts (the W1-T268 shape).
+   *  Omitted ⇒ the real {@link ghJson}. Exists because every dispatch test injects
+   *  `deps.checkAcceptance` and would otherwise leave THIS binding — the only thing that actually
+   *  reads the PR body in production — unexecuted. */
+  read: (args: string[]) => unknown = ghJson,
+): AcceptanceAuthorTimeResult {
+  const view = read(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
+  return acceptanceAuthorTimeCheck(view.body ?? "");
 }
 
 const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
@@ -20274,6 +20302,7 @@ const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
   resolveMount,
   spawn: spawnWorker,
   ensureTaskTrailer,
+  checkAcceptance: checkAlertFixAcceptance,
 };
 
 /**
@@ -20340,6 +20369,21 @@ export async function dispatchAlertFixRun(
     if (report?.prUrl) {
       deps.ensureTaskTrailer(report.prUrl, taskId);
       log("alert-fix.pr_opened", { pr_url: report.prUrl, origin: `alert#${originId}` });
+      // W1-T952 design (ii): the diagnostics call, at the one point this lane already reads the
+      // PR back — before CI/review would pay a full cycle to discover the same thing (rationale
+      // (2)). Best-effort: an unreadable PR (a `gh` hiccup) must never fail this lane over a
+      // diagnostic read, so only the check itself is guarded, not `ensureTaskTrailer`/`pr_opened`
+      // above. The mutation check (test/acceptance-block-diagnostics.test.ts) targets THIS exact
+      // `deps.checkAcceptance` call — removing it must fail "a body with no acceptance header is
+      // refused at author time" without touching anything else in this lane.
+      try {
+        const check = deps.checkAcceptance(report.prUrl);
+        if (!check.ok) {
+          log("alert-fix.acceptance_defect", { pr_url: report.prUrl, defect: check.defect, message: check.message });
+        }
+      } catch (e) {
+        log("alert-fix.acceptance_check_error", { pr_url: report.prUrl, error: String((e as Error)?.message ?? e) });
+      }
     } else {
       log("alert-fix.no_pr", { subtype: worker.subtype });
     }

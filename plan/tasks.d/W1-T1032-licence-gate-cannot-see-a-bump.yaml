@@ -1,0 +1,134 @@
+- id: W1-T1032
+  title: "THE LICENCE GATE CANNOT TELL A NEW LICENCE FROM A BUMPED PACKAGE — `diffAdded` keys on `name@version`, so a version bump re-adds the entry and a licence the project already lives with reads as newly introduced: key the comparison on the PACKAGE and its BASE licence, which the gate already has in hand, and keep flagging the one case that is a genuine risk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THE DEFECT IS ONE PREDICATE THROWING AWAY DATA IT ALREADY HAS. `collectLockPackages`
+    (`test/helpers/check-dependency-licences.mjs`) returns a `Map<"name@version", license>` for BOTH
+    the base and the head lockfile — so the base licence for every package is already computed and in
+    memory. `diffAdded` then reduces that to `if (baseMap.has(key)) continue`, consulting only the
+    KEY and never the VALUE. A version bump changes the key, so the entry is reported as an addition
+    and its base licence is discarded. NO NEW I/O, NO NEW PARSING, NO SECOND LOCKFILE READ — the fix
+    is which of two things already in hand the predicate compares.
+
+    (1) MEASURED ON THE TWO PRs THAT MOTIVATED THIS, AGAINST THEIR REAL `base..head`. Base
+    95751a57; heads read from `refs/pull/<n>/head`. Re-keying the added set by PACKAGE and comparing
+    against the licence that package already carries at base:
+      - #2208: 46 added -> 46 same-package-same-licence bumps, 0 licence changes, 0 new packages.
+      - #2209: 59 added -> 48 same-package-same-licence bumps, 1 LICENCE CHANGED, 10 new packages
+        (all MIT, allowed today).
+    SO #2208 WOULD HAVE PASSED WITH NO POLICY WIDENING AT ALL, and #2209 would have narrowed from
+    two forbidden entries to one.
+
+    (2) EVERY FLAG WAS ALREADY IN THE TREE, PACKAGE BY PACKAGE, ON MAIN'S OWN LOCKFILE.
+    `@axe-core/playwright@4.12.1` and `axe-core@4.12.1` at MPL-2.0 against 4.13.0 at MPL-2.0;
+    `caniuse-lite@1.0.30001806` at CC-BY-4.0 against 1.0.30001809 at CC-BY-4.0; and the nine
+    `@anthropic-ai/claude-agent-sdk*` packages at 0.3.226 carrying the same unresolved
+    `SEE LICENSE IN LICENSE.md` (and `README.md` on the root package) they carry at 0.3.233. Not one
+    of them introduced a licence the project did not already carry.
+
+    (3) AND THE OPERATOR'S SECOND QUESTION HAS A LIVE ANSWER SITTING INSIDE #2209, WHICH IS WHY THE
+    NAIVE FORM MUST BE REJECTED. A LICENCE-SET comparison — "a licence present on main at ANY version
+    is not newly introduced" — is the obvious reading and it is WRONG. `lru-cache` is on main at
+    5.1.1 under ISC; #2209 bumps it to 11.5.2 under BlueOak-1.0.0. BlueOak-1.0.0 is ALSO already on
+    main, carried by `minimatch@10.2.5` — so under a set comparison the change would be silently
+    accepted — a licence-set comparison would silently accept the one genuine risk in these two PRs.
+    A PACKAGE-KEYED comparison flags it, because the question it asks is "did THIS package's licence
+    change", not "have we seen this licence somewhere".
+
+    (4) THE RULE, STATED SO AN IMPLEMENTER CANNOT WIDEN IT BY ACCIDENT. An added `name@version` is
+    NOT an introduction when the SAME package name exists at base carrying the SAME licence string.
+    Everything else is evaluated against the allow-list exactly as today: a package name absent from
+    base entirely, and a package whose licence differs from the one it carried at base. The
+    permissiveness of `classifyLicense` and the never-exemptable status of a `forbidden` verdict are
+    untouched — this changes WHICH entries are evaluated, never HOW one is judged.
+
+    (5) THE EDGE THE COMPARISON MUST NOT FUMBLE. A package can exist at base under SEVERAL versions
+    with DIFFERENT licences (`minimatch` is on main at both 3.1.5/ISC and 10.2.5/BlueOak-1.0.0). The
+    predicate must therefore compare against the SET of licences that package carries at base, and an
+    added version matching ANY of them is a bump — while a licence matching NONE of them is a change
+    and still flags. Collapsing that to "the first licence seen" would flag ordinary bumps of any
+    multi-version package.
+
+    (6) WHAT THIS REPLACES, AND WHAT IT DOES NOT. #2217 widened `ALLOW_LICENSES` by MPL-2.0,
+    CC-BY-4.0 and BlueOak-1.0.0 to clear the immediate hold on #2208/#2209. Under this rule #2208
+    needs none of them and #2209 needs only the BlueOak-1.0.0 entry — and needs it for a REAL licence
+    change that arguably deserved a human look rather than an allow-list row. Whether to narrow
+    `ALLOW_LICENSES` back afterwards is a RULING and is deliberately out of scope here; this task
+    changes the predicate and nothing in `.github/workflows/`.
+
+    (7) AND THE THREE MEASURED-BUT-UNRULED LICENCES STAY OUT. Python-2.0, Unlicense and 0BSD were
+    found in the 2026-08-17 `node_modules` scan, were deliberately NOT added to the allow-list by
+    #2217, and are not added here either. This task gives no path by which they could arrive: a
+    package already carrying one of them at base can be bumped without a flag, which is exactly the
+    noise being removed, but a NEW package adopting one still flags as it does today.
+  acceptance:
+    - claim: "a version bump whose licence is unchanged from base is not treated as an introduction"
+      proof: "unit test: W1-T1032: a version bump with an unchanged licence is not an introduction"
+    - claim: "a package whose licence changed between versions is still flagged"
+      proof: "unit test: W1-T1032: a package whose licence changed between versions still flags"
+    - claim: "a package name absent from base is evaluated against the allow-list exactly as today"
+      proof: "unit test: W1-T1032: a genuinely new package is evaluated exactly as today"
+    - claim: "a licence carried by some other package at base does not clear a changed one"
+      proof: "unit test: W1-T1032: a licence present elsewhere at base does not clear a changed one"
+    - claim: "the naive licence-set reading is rejected because it would accept a real change"
+      proof: "grep: a licence-set comparison would silently accept the one genuine risk in these two PRs in plan/tasks.d/W1-T1032-licence-gate-cannot-see-a-bump.yaml"
+  risk: high
+  origin: "oper#licence-gate-bump-blindness-2026-08-19"
+  plan_refs: ["W1-T1004"]
+  files: [test/helpers/check-dependency-licences.mjs, test/dependency-licence-policy.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL
+    LINE inside rationale (3), is not on line 2 of the file, and reads 0 files across the whole tree
+    at the merge base against a control (`never exemptable`) that reads 1 — so it discriminates head
+    from base and cannot be downgraded to `executed_stale`.
+
+    THIS RIDES ALONE AND TOUCHES NO INSTRUMENT PATH. `.github/workflows/dependency-review.yml` is on
+    `INSTRUMENT_SURFACE` (`^\.github/workflows/`) and is deliberately absent from `files:`: the
+    predicate lives in `test/helpers/check-dependency-licences.mjs` and its contract in
+    `test/dependency-licence-policy.test.ts`, neither of which is on the surface, so
+    `detectInstrumentEntanglement` has nothing to entangle. The workflow's env block already passes
+    `ALLOW_LICENSES` and `LICENSE_EXEMPTIONS` and needs no edit for this change; if an implementer
+    finds it does, that widening must be ratified before it is made and shipped as its own PR.
+
+    THE MEASUREMENTS IN RATIONALE (1) ARE REPRODUCIBLE WITHOUT GITHUB. `readLockAtRef` takes a git
+    ref, so the whole comparison runs from local objects: fetch `refs/pull/<n>/head`, use 95751a57 as
+    the base, and re-key `diffAdded`'s output by package name. That is how they were taken — the REST
+    API was rate-limited at the time and was not used.
+
+    risk: high IS RAISED ON A MEASURED REFUSAL AND THE REFUSAL IS QUOTED. Authored at `risk: medium`
+    — the change is one predicate and its own test, with no source module, no workflow and no policy
+    data touched — and `rmd lint-plan` refused it in these words: *"[sizing] spans 2 distinct
+    subsystems/concerns (check-dependency-licences, dependency-licence-policy) at risk:medium —
+    Rule 19: raise to risk:high or decompose into one task per concern."* The band is Rule 19's SPAN,
+    not blast radius: a predicate and the test that pins its contract are not decomposable into two
+    tasks, since shipping either alone is how an unenforced rule gets written.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form; each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted verbatim from test/dependency-licence-policy.test.ts that matched
+    one. Each is plain prose under 100 characters with no comma, no `; ` and no regex metacharacter,
+    because a bare title is compiled through `escapeRegExp` and matched literally. The fifth is
+    doc-shaped and takes a `grep:` with an explicit path.
+
+    ID PROVENANCE — MINTED THIS SESSION OVER GIT PROTOCOL, PLAIN REFSPEC, EVERY VARIABLE BRACED. An
+    orphan anchor over the empty tree (0 parents, 0 tree entries) naming host, pid and a nanosecond
+    nonce. Free id: rc=0, `* [new reference] c2b3ccd5… -> refs/rmd-id/W1-T1032`, readback equal to the
+    anchor. NEGATIVE CONTROL, the identical plain refspec carrying a different sha at the taken
+    refs/rmd-id/W1-T1031: rc=1, `! [rejected] … (fetch first)`, that ref still 9b3b65d5. `could not
+    read Username` 0 and `403` 0 on BOTH pushes. THE REFS WERE RE-SWEPT IMMEDIATELY BEFORE MINTING.
+    SURFACES — AND ONE OF THEM COULD NOT BE READ, WHICH IS SAID RATHER THAN GLOSSED. Refs (max 1031;
+    W1-T1032 = 0), shard FILENAMES via `git ls-tree -r` (W1-T1032 = 0, control W1-T1027 = 1 — THE
+    FILENAME IS THE EXISTENCE TEST, and the `- id:` line is unindented), and ids under plan/
+    (advisory only, 0 against a control of 6 for W1-T516) were all read over git protocol. THE
+    OPEN-PR SURFACE WAS NOT READ: GitHub's REST API returned HTTP 403 rate-limit for this user
+    mid-session, so `gh` was stopped. In its place `git ls-remote --heads origin` was swept for a
+    branch naming this id and read 0. That is a WEAKER substitute — it sees branch names, never PR
+    titles or file lists — and the refs re-sweep immediately before pushing is what carries the
+    guarantee instead.

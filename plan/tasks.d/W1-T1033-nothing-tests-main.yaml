@@ -1,0 +1,150 @@
+- id: W1-T1033
+  title: "NOTHING RUNS THE SUITE AGAINST `main` — `ci.yml` and `ci-gate.yml` are both `on: pull_request` and nothing else, so a broken merge is invisible until an unrelated PR fails for a reason its author cannot explain; three PRs merged red past a required check today and ten went red behind them, one of whose entire diff is three workflow-YAML version bumps"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    MEASURED 2026-08-19 AT origin/main f539e64e, and re-derived there after an earlier reading at
+    d4478ea9. No `/rate_limit` call was made; every GitHub read used a REST path.
+
+    (1) THE SUITE HAS NEVER RUN AGAINST `main`, AND THE CAUSE IS STRUCTURAL RATHER THAN DRIFT.
+    `main` at f539e64e carries SIX check-runs — `Analyze (actions)`, `Analyze
+    (javascript-typescript)`, `plan-load`, `Scan`, `scan / osv-scan`, `Scorecard analysis` — all
+    green. `ci`, `coverage-ratchet` and `ci-gate` each read ZERO. POSITIVE CONTROL on that zero: the
+    same query against an open PR head (#2218) returns `ci` = 1, so the reader sees its corpus.
+    There is no push trigger to have broken: `.github/workflows/ci.yml` and
+    `.github/workflows/ci-gate.yml` both declare `on: pull_request` and nothing else. CONTROL that
+    this is a real configuration fact and not a failed grep: `codeql.yml`, `main-plan-guard.yml` and
+    `scorecard.yml` DO carry a `push:` trigger.
+
+    (2) THE CONSEQUENCE WAS OBSERVED, NOT PREDICTED. Three PRs merged carrying red required checks
+    at their merged heads — #2204 at 12:57:39Z (`ci-gate=failure`, `coverage-ratchet=failure`),
+    #2212 at 13:37:04Z (the same pair), #2211 at 13:38:54Z (`ci-gate=failure`). Ten open PRs went
+    red behind them for one inherited cause, including one whose entire diff is three workflow-YAML
+    version bumps. THE ORIGINAL BREAK IS ALREADY FIXED IN #2221 (a test mutating shared source in
+    place). THIS TASK IS NOT THAT FIX — IT IS WHY NOBODY SAW IT FOR NINETY MINUTES.
+
+    (3) THE REDUNDANCY OBJECTION DOES NOT HOLD HERE, AND TODAY IS THE PROOF. Post-merge runs are
+    commonly called redundant because the PR gate already covered it. `enforce_admins` reads
+    `false`, `ci-gate` IS among the required contexts (`["remudero-review","ci-gate"]`), and
+    protection DID refuse — the three merges above went through by admin bypass. NO PR-SCOPED GATE
+    CAN SEE WHAT LANDS AFTER IT IS BYPASSED: by construction it has already finished running. A
+    post-merge run is the only observer of a bypassed merge.
+  design: |
+    (i) `ci` ALONE, AND THE OTHER TWO ARE EXCLUDED FOR MEASURED REASONS RATHER THAN TASTE.
+      `ci-gate` MUST NOT BE ADDED TO A PUSH TRIGGER. Its job env is
+      `SHA: ${{ github.event.pull_request.head.sha }}`, which is EMPTY on a push; its wait loop
+      calls `gh api repos/${REPO}/commits/${SHA}/check-runs`, that call fails, `runs_json` exhausts
+      its retries and `unreadable_die` exits 1 with "could NOT READ the check-runs API". Its
+      `concurrency.group` is likewise `ci-gate-${{ github.event.pull_request.number }}`, which
+      collapses to one shared group for every push with `cancel-in-progress: true`. Adding it would
+      make EVERY MERGE LOOK BROKEN, which is worse than the problem this task fixes.
+      `coverage-ratchet` IS TWO HALVES AND ONLY ONE SURVIVES. The ratchet half
+      (`coverage-ratchet.mjs --lcov … --baseline scripts/coverage-baseline.json`) is
+      base-independent and would work. The diff-coverage half runs
+      `git diff "${BASE_SHA}"...HEAD` with `BASE_SHA: ${{ github.event.pull_request.base.sha }}`,
+      empty on a push. Even wired to the previous commit it answers a DIFFERENT QUESTION — "lines
+      this merge added that no test covers" is not "lines this PR added" — and would re-flag every
+      line of a squash-merged PR. The comparison does not mean anything on a push.
+      `ci` IS PUSH-SAFE: its job body contains ZERO references to `github.event`, `pull_request` or
+      `BASE_SHA` (CONTROL: the `coverage-ratchet` job contains 1). Its steps are `npm ci`, the
+      Playwright install, `tsc --noEmit` and `npm run test:ci`.
+      THE SUITE IS WHAT FAILED, NOT THE GATE — so the minimum set that would have caught today's
+      break is `ci` alone, and that is what this task adds.
+
+    (ii) THE PRICE, MEASURED OVER THE 40 MOST RECENT COMPLETED CI RUNS, SUCCESS-ONLY.
+      `ci`               n=31  p50 511s  p95 783s  max 1197s  mean 577s
+      `coverage-ratchet` n=23  p50 740s  p95 1285s max 1638s  mean 845s
+      At the observed merge rate of 15-30 per day, `ci` alone costs 144 CI-min/day (2.4 h) at 15 and
+      289 CI-min/day (4.8 h) at 30. Adding `coverage-ratchet` would add 211-422 CI-min/day for a
+      comparison design (i) shows is meaningless on a push.
+
+    (iii) A RED PUSH RUN MUST REACH A NAMED READER, AND THE READER ALREADY EXISTS.
+      `classifyRedCause` (`src/lib/sweep.ts`) returns `"base-caused"` when `baseCausedCheckName`
+      fires; `redCauseStandsDown` then returns true, which stops the fix rung spending a strike, and
+      the reason rides on the EXISTING `sweep.disposed` line rather than a new step — that
+      function's own design note (vi) says so, precisely so it is not another mechanism nobody
+      reads. THE GAP IS THE INPUT, NOT THE CONSUMER: `baseCausedCheckName(pr, allPrs)` infers base
+      causation PURELY from the cross-PR pattern — the same check failing on EVERY open PR, with a
+      vacuity guard below two PRs and `undefined` the moment one survivor exists. It reads nothing
+      from `main`. Today it would have fired only after most of the ten had reddened, and a single
+      PR whose head predated the check would have silenced it entirely. A red push run on `main` is
+      a FIRST-PARTY signal needing no inference, and it can attribute the FIRST affected PR.
+      CRITERION 3 REQUIRES THE READER TO BE NAMED IN THE CHANGE. Wiring it into
+      `classifyRedCause`'s inputs is the expected shape; any other named consumer is acceptable, and
+      an UNNAMED one is not.
+
+    (iv) EXPLICITLY NOT PROPOSED.
+      - AUTO-REVERT. Current practice offers it, but `DECISIONS.md` ratifies gating on
+        irreversibility and an automatic revert of merged work is the operator's call. Named and
+        stopped.
+      - A MERGE QUEUE. It closes the adjacent gap — two PRs each green, broken together — but it is
+        a separate change and W1-T1014 already examined it with its costs.
+      - ANY CHANGE TO `enforce_admins` OR ANY OTHER REPOSITORY SETTING. See the note: that is the
+        prevention this task does not provide.
+      - THE ORIGINAL TEST DEFECT, which #2221 already fixes.
+  acceptance:
+    - claim: "the suite runs against main on a push, so a broken merge is observable without an unrelated PR failing first"
+      proof: "unit test: W1-T1033: the ci workflow runs the suite on a push to main"
+    - claim: "ci-gate is not triggered by a push, because an empty PR sha would fail every merge"
+      proof: "unit test: W1-T1033: ci-gate is never triggered by a push"
+    - claim: "a red push run reaches a named reader rather than being recorded and unread"
+      proof: "unit test: W1-T1033: a red main run reaches its named reader"
+    - claim: "the pull-request path is unchanged, so no PR gains or loses a check"
+      proof: "unit test: W1-T1033: the pull request trigger is byte-for-byte unchanged"
+  risk: high
+  origin: "oper#nothing-tests-main-2026-08-19"
+  plan_refs: ["W1-T1014", "W1-T312", "W1-T1027"]
+  files: [.github/workflows/ci.yml, test/push-ci-on-main.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIS RIDES ALONE — NO `src/` PATH MAY ENTER THE IMPLEMENTING DIFF, AND THAT IS A GATE. Rule 25
+    was RE-DERIVED IN-PROCESS AGAINST `detectInstrumentEntanglement` WITH FOUR CONTROLS:
+      `.github/workflows/ci.yml` + `test/push-ci-on-main.test.ts`  -> entangled=false  <- this shape
+      `.github/workflows/ci.yml` + `src/lib/sweep.ts`              -> entangled=TRUE
+      `src/lib/sweep.ts` + `test/sweep.test.ts`                    -> entangled=false
+      `.github/workflows/ci.yml` + two `test/` files               -> entangled=false
+    So `test/` may ride (`isProductPath` is "under src/ and not a test file" — the design's own
+    carve-out) and `src/` may not. IF CRITERION 3'S READER REQUIRES A `src/` EDIT, IT MUST SHIP AS
+    ITS OWN PR rather than being folded in here; the criterion is satisfiable by naming the reader
+    and proving the signal reaches it, which a fixture can do without changing `src/`.
+
+    TWO SIBLINGS, CITED AND NOT ABSORBED.
+      (i) THE REVIEW VERDICT IS ORTHOGONAL TO THE BOARD. #2204 carried `remudero-review: PASS — 5
+      criteria substantiated` while two required checks were red at the same head, and #2212 carried
+      `PASS — 3 criteria substantiated` likewise. The reviewer grades the shard's criteria and never
+      asks whether the suite is green, which is what made a red PR look mergeable. Its own concern.
+      (ii) NOTHING ATTRIBUTES AN INHERITED RED. Ten PRs went red for one cause and not one said so.
+      Design (iii) supplies the input that would make attribution possible; the attribution surface
+      itself is not built here.
+
+    AND ONE ITEM IS THE OPERATOR'S, NOT THIS TASK'S. `enforce_admins` reads `false` on `main` while
+    `ci-gate` IS among the required contexts and protection DID refuse — admin bypass is how three
+    red PRs landed. A push run DETECTS a broken trunk; it does not PREVENT one. THAT IS THE
+    PREVENTION THIS TASK DOES NOT PROVIDE, and no repository setting is changed by it.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT: the deliverable is the trigger in
+    `.github/workflows/ci.yml` plus a falsifier. `test/push-ci-on-main.test.ts` does not exist at
+    f539e64e — a forward-referenced PATH, never a guessed symbol — and is a new file because the
+    house rule keeps a coverage-load-bearing test out of a shared suite.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS: `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus acceptance text and this set
+    crosses the workflow surface and `test/`. Blast radius argues DOWN — one trigger gains a branch,
+    the pull-request path is unchanged by criterion 4, and the worst failure is a noisy post-merge
+    run rather than a wrong verdict on a PR.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING. `refs/rmd-id/W1-T1033`
+    resolves to dc1c230352710481d53b2c9d0925782038032149, anchored
+    "reserve W1-T1033 Remudero-1747-1787149018698433573" at 2026-08-19T14:16:58Z — reserved by
+    another host, confirmed present rather than minted here. Positive control:
+    `refs/rmd-id/W1-T1030` reads 1. Negative control: `refs/rmd-id/W1-T999999` reads 0.
+    FOUR SURFACES SWEPT, GIT FIRST AND REST LAST: the reservation (1); shard FILENAMES under
+    `plan/tasks.d/` on origin/main (0 — THE FILENAME MATCH IS THE EXISTENCE TEST, and the control
+    `W1-T1027` reads 1 on that same query); DECLARED ids under `plan/` (0); and every open PR's
+    title AND file list (0). Mention-trap control: `W1-T999999` reads 0 filenames and 0 refs. The
+    filename and open-PR surfaces were RE-SWEPT immediately before pushing.

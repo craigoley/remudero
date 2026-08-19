@@ -47,41 +47,37 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Install Playwright's Chromium (W1-T153 shell a11y/responsive tests need a real headless browser — Lighthouse-equivalent axe-core scan, 390px/1440px no-hscroll, fleet-control read-back/STOP-confirm interaction)
-        # W1-T492 round 1 (ci-log): this step's `apt-get update` (run internally by `--with-deps`)
-        # has hung INDEFINITELY on this exact runner fleet -- observed live across four
-        # consecutive attempts on this PR, always stalled right after fetching
-        # noble-security's InRelease with no further progress, and the SAME step already hung
-        # twice before on independent PRs (#2148, #2150 per the `coverage-ratchet` comment
-        # below). `timeout-minutes: 35` above only bounds the whole JOB after the fact --
-        # nothing inside this single step ever gave up and retried on a fresh connection. A
-        # bounded per-attempt timeout + retry (mirrors the whole-command retry `npm run
-        # test:ci` already does for the `Test` step below, W1-T255) turns an indefinite mirror
-        # stall into at most 3 * 6m = 18m, leaving room for Typecheck/Test inside the 35m cap.
+        # NO `--with-deps`, AND THAT IS THE WHOLE FIX: it is what invoked apt, and apt is what
+        # failed. MEASURED ON A GREEN RUN: `--with-deps` reported `0 upgraded, 9 newly installed`
+        # and every one of the nine was a FONT package (fonts-freefont-ttf, fonts-ipafont-gothic,
+        # fonts-tlwg-loma-otf, fonts-unifont, fonts-wqy-zenhei, xfonts-cyrillic, xfonts-encodings,
+        # xfonts-scalable, xfonts-utils). 26 packages read "already the newest version" -- every
+        # Chromium shared library (libnss3, libgbm1, libatk*, libcairo2, libdrm2, libpango-1.0-0,
+        # libx11-6, libcups2t64, libasound2t64) is ALREADY in the runner image, as are
+        # fonts-liberation and fonts-noto-color-emoji. So `--with-deps` installed no browser
+        # dependency here; it bought nine fonts and a dependency on apt.
         #
-        # W1-T1027: the retry above cannot win a lock it does not hold -- the Actions-API
-        # measurement behind this task (18 of 69 failed/cancelled jobs in 48h, one hard failure
-        # naming the cause verbatim: "Could not get lock /var/lib/apt/lists/lock. It is held by
-        # process 2418 (apt-get)") shows the retry was blindly re-invoking the identical
-        # `--with-deps` command (which re-runs `apt-get update` itself) against a lock held by
-        # the runner IMAGE's OWN background apt-get (cloud-init/unattended-upgrades on a fresh
-        # VM), not by another CI job. That holder always finishes on its own, so each attempt now
-        # waits (bounded, 300s) for the dpkg/apt locks to clear before invoking playwright
-        # install, instead of colliding with them immediately and burning the attempt.
-        run: |
-          wait_for_apt_lock() {
-            echo "::notice::waiting up to 300s for the apt/dpkg lock the runner image's own background apt-get holds on a fresh VM"
-            sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
-            sudo flock -w 300 /var/lib/apt/lists/lock true 2>/dev/null || true
-          }
-          for attempt in 1 2 3; do
-            wait_for_apt_lock
-            if timeout 360 npx playwright install --with-deps chromium; then
-              exit 0
-            fi
-            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt mirror stall) -- retrying"
-          done
-          echo "::error::playwright install failed after 3 attempts"
-          exit 1
+        # AND THE SUITES DO NOT NEED THOSE FONTS. The console's own stack is
+        # `system-ui, -apple-system, "Segoe UI", sans-serif` plus a mono variable -- no named
+        # family among the nine -- and a scan for CJK/Cyrillic/Thai reads ZERO across all 24
+        # browser-touching test files, src/lib/serve.ts and plan/tasks.yaml (positive control: 441
+        # lines of serve.ts do carry non-ASCII, so the scan is live). test/serve.shell-ux.test.ts
+        # is the falsifier: its axe scan and its 390px/1440px no-horizontal-overflow assertion are
+        # the two a missing font could plausibly move, and they run on every CI pass.
+        #
+        # W1-T1027 filed the cause; #2211 was the attempt this supersedes, and it did not work.
+        # NO RETRY, NO WAIT, NO DPkg::Lock::Timeout HERE -- DELIBERATELY, MEASURED TWICE. #2211's
+        # `wait_for_apt_lock` used `flock`, which cannot observe apt's `fcntl(F_SETLK)` lock and
+        # returned in under a second while the lock was demonstrably held. Worse, `timeout 360`
+        # orphaned a ROOT-owned apt-get (playwright runs it under sudo) that the runner user
+        # cannot signal, so attempts 2 and 3 collided with the orphan attempt 1 created and burned
+        # 4.5 seconds: PID 2725 on PR #2207 at 13:53Z, PID 2702 on PR #2199 at 14:39Z, the same
+        # PID across both retries in each case. A retry cannot outlive a lock holder it created
+        # and cannot kill. Removing apt removes all of it.
+        #
+        # W1-T1034 (#2223) proposed baking the browser into a container image to reach the same
+        # end. This makes that unnecessary: there is no apt call left to move off the critical path.
+        run: npx playwright install chromium
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement --
         # tsconfig.json has `strict: true`, and a strict-mode violation anywhere in src/**/test/**
@@ -209,29 +205,12 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
-        # W1-T492 round 1 (ci-log): same bounded retry as the `ci` job's identical step above --
-        # see that step's comment for the live-observed hang this guards against.
-        #
-        # W1-T1027: same apt-lock-wait fix as the `ci` job's identical step above, applied here
-        # too -- rationale (5) in this task's shard is explicit that fixing one copy and not the
-        # other leaves the second free to take the board down on its own (it did: PR #2150, five
-        # minutes after PR #2148's `ci` hang on this exact step). This `run:` block must stay
-        # byte-identical to the `ci` job's, which test/workflow-playwright-install.test.ts asserts.
-        run: |
-          wait_for_apt_lock() {
-            echo "::notice::waiting up to 300s for the apt/dpkg lock the runner image's own background apt-get holds on a fresh VM"
-            sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
-            sudo flock -w 300 /var/lib/apt/lists/lock true 2>/dev/null || true
-          }
-          for attempt in 1 2 3; do
-            wait_for_apt_lock
-            if timeout 360 npx playwright install --with-deps chromium; then
-              exit 0
-            fi
-            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt mirror stall) -- retrying"
-          done
-          echo "::error::playwright install failed after 3 attempts"
-          exit 1
+        # Same step as the `ci` job's above, and the same reason: see that step's comment for the
+        # measurement behind dropping `--with-deps`. Fixing one copy and not the other leaves the
+        # second free to take the board down on its own -- it did, PR #2150 five minutes after PR
+        # #2148. This `run:` line must stay byte-identical to the `ci` job's, which
+        # test/workflow-playwright-install.test.ts asserts.
+        run: npx playwright install chromium
       - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
         # W1-T220 defect 1: this step used to run with ONLY --test-reporter=lcov, whose destination
         # is a file, so a failing run's CI log carried zero test output -- just
