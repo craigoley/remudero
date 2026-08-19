@@ -1,0 +1,171 @@
+- id: W1-T1027
+  title: "`npx playwright install --with-deps chromium` shells out to `apt-get`, and apt on a GitHub-hosted runner is contended — 18 of 69 failed CI jobs in 48 hours died on that one step, 17 of them hung until the job cap; the bounded retry shipped for it re-runs the same command against a lock it cannot win"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "MEASURED FROM THE ACTIONS API ON 2026-08-19, over the last 200 runs of the `CI`
+    workflow (id 312964904) — window 2026-08-17T12:17:22Z to 2026-08-19T12:05:45Z: 151 success, 30
+    failure, 15 cancelled, 4 still in flight. Every figure below is a count over that enumeration,
+    not an impression.
+
+    (1) THE STEP IS THE LARGEST INFRASTRUCTURE CULPRIT ON THE BOARD. Those runs carry 69
+    failed-or-cancelled JOBS. Attributing each to its first failed-or-cancelled STEP:
+      Install Playwright's Chromium  18   <- 14 in `ci`, 4 in `coverage-ratchet`
+      Test with coverage             17
+      Test                           15
+      Diff coverage                  10
+      commitlint                      3
+      rmd lint-plan                   2
+      Plan claims                     2
+    The three larger buckets are the suites and the coverage gate REFUSING REAL WORK — they are the
+    gates doing their job. The install step is not a gate at all; it is setup, and it took down 18
+    jobs across 16 distinct runs and 11 distinct branches in two days. Earliest incident in the
+    window 2026-08-17T22:52:35Z, latest 2026-08-19T11:50:22Z.
+
+    (2) THE FAILURE IS APT, AND THE PROOF IS THE ONE JOB THAT DIED LOUDLY. 17 of the 18 were
+    CANCELLED — they hung until the job cap and their logs end mid-step with no message, which is
+    why this looked like flake for so long. Exactly ONE failed hard, job 96018816644 on PR #2192 at
+    2026-08-19T09:24:37Z, and it named the cause verbatim:
+      E: Could not get lock /var/lib/apt/lists/lock. It is held by process 2418 (apt-get)
+      E: Unable to lock directory /var/lib/apt/lists/
+      Failed to install browsers
+      Error: Installation process exited with code: 100
+      ::error::playwright install failed after 3 attempts
+    A second, distinct sub-mode is on the record from the mitigation's own comment: a stall right
+    after fetching noble-security's InRelease. Both are apt, reached through `--with-deps`. STATED
+    AS EVIDENCE RATHER THAN ASSERTED: the lock message is from that single hard failure; the other
+    17 are hangs at the same step and are CONSISTENT with it, not individually proven. A builder
+    must not report the 17 as lock-confirmed.
+
+    (3) THE RETRY CANNOT WIN A LOCK it does not hold. The current mitigation is
+    `for attempt 1 2 3; do timeout 360 npx playwright install --with-deps chromium; done`, so a
+    contended apt is retried with the identical command up to three times, 6 minutes apart, while
+    the holder is the runner image's own background apt. It converts an unbounded hang into a
+    bounded one — which is worth having and must not be reverted — but it cannot succeed against
+    contention, and 17 cancellations after it shipped are the measurement of that.
+
+    (4) APT IS ONLY THERE FOR FONTS, which is the fact that decides the remedy and was checked
+    rather than assumed. On a GREEN run (job 96057352173, 2026-08-19T11:50) `--with-deps` apt-
+    installed: fonts-wqy-zenhei, fonts-freefont-ttf, fonts-tlwg-loma-otf, xfonts-encodings,
+    fonts-ipafont-gothic, fonts-unifont, xfonts-utils, xfonts-cyrillic, xfonts-scalable, with
+    man-db and fontconfig triggers. NOT ONE Chromium shared library — `ubuntu-latest` already
+    carries those. The browsers themselves come from cdn.playwright.dev over plain HTTPS with no
+    apt involved, and the whole step takes about 25 seconds when apt cooperates. So the entire
+    contended dependency exists to render CJK and decorative glyphs.
+
+    (5) ONE STEP DUPLICATED ACROSS TWO JOBS, verbatim: `ci` and `coverage-ratchet` each carry their
+    own copy, each pays the apt cost, and each can hang independently — W1-T1009's own title
+    records two jobs hanging on it five minutes apart, both needing a human with Actions-API write
+    access to end. `test/workflow-job-timeouts.test.ts` already asserts that exactly those two jobs
+    carry a `playwright install` step, matched by content rather than a hardcoded job list, so a
+    remedy that moves or renames the step must keep that assertion honest.
+
+    (6) W1-T1009 BOUNDS AND DOES NOT PREVENT, and must not be trailered for this. Its concern is
+    that every job was unbounded so a hung step was structurally misattributed; it shipped
+    `timeout-minutes` across ci.yml plus the test above (#2160, 423cc924). That is the reason these
+    hangs now end at 35 minutes instead of 360. It changes nothing about whether the step hangs.
+
+    (7) AND THE MITIGATION HAS NO SHARD OF ITS OWN — this defect is genuinely unfiled. The retry
+    loop's comment cites `W1-T492 round 1`, but W1-T492's shard is about
+    `proofNameResolutionViolations` being called with no injected resolver; the Playwright change
+    rode inside that task's PR (#2189, 8e5d9287, which also raised `timeout-minutes` to 35).
+    CONTROLLED: across `plan/`, `with-deps`/`apt-get`/`apt mirror` appear in ONE file, W1-T1009's
+    shard, against a positive control of 119 shards naming `coverage` — so the corpus is readable
+    and no existing task claims this.
+
+    (8) THE OPERATIONAL COST IS PAID BY A HUMAN. In one operator session five PRs (#2185, #2186,
+    #2190, #2191, #2192) reached green only after their failed jobs were re-run by hand, and
+    `ci-gate` then had to be re-run separately on each because it had already concluded and its
+    self-clearing grace window had expired. Nothing about that is visible as a red test."
+  design: "A GREEN RERUN IS NOT A FIX, and that is the trap this task is most likely to fall into.
+    The failure is contention: re-running until it passes always eventually passes, so a builder who
+    demonstrates one green run has demonstrated nothing. THE ACCEPTANCE MUST DISCRIMINATE — the
+    changed step must be shown to survive a CONTENDED apt, not merely an uncontended one.
+
+    (i) ESTABLISH FROM THE BROWSER TESTS WHICH FONTS ARE ACTUALLY REQUIRED before removing or
+    keeping `--with-deps`. Rationale (4) establishes that apt installs fonts and nothing else; it
+    does NOT establish that the suites can do without them. The a11y/responsive assertions
+    (W1-T153) render real pages, and a missing glyph can change a layout measurement. Settle it by
+    running the browser suites against an install WITHOUT the font packages, on the same tree.
+
+    (ii) OPTIONS, RECORDED AND DELIBERATELY NOT RANKED: drop `--with-deps` and install only the
+    fonts (i) proves necessary, as a separate step that may fail without taking the job down; wait
+    for the apt lock before invoking, since the holder is the runner's own background apt and it
+    finishes; cache `~/.cache/ms-playwright` so the download is skipped, noting this does NOT avoid
+    apt on its own; or run the install once in a setup job the other two consume. Whichever is
+    chosen, the retry bound from (3) stays — it is the only thing making the failure finite.
+
+    (iii) THIS IS AN INSTRUMENT-ONLY CHANGESET. `.github/workflows/ci.yml` matches
+    `INSTRUMENT_SURFACE` (`^\\.github/workflows/`, `src/lib/review.ts`), so Rule 25's
+    `detectInstrumentEntanglement` FAILS any diff that also carries a `src/` product path — the
+    verdict is forced to failure and is not suppressible. A workflow plus its `test/` assertions is
+    the sanctioned shape and reads entangled=false; the two precedents both shipped exactly that
+    way (#2160 and #2189, each ci.yml plus one test file, nothing else). Nobody may bundle this
+    with a product change, and a builder who needs one must file it separately.
+
+    (iv) FIX BOTH COPIES OR NEITHER. The step is duplicated verbatim across `ci` and
+    `coverage-ratchet` (rationale (5)); a change to one leaves the other able to take the board
+    down on its own, which is the same partial-fix drift the reviewer's own rubric names."
+  acceptance:
+    - claim: the shard establishes that retrying the same command cannot resolve apt contention
+      proof: "grep: THE RETRY CANNOT WIN A LOCK in plan/tasks.d/W1-T1027-playwright-apt-contention.yaml"
+    - claim: the shard establishes from a green run that the apt dependency installs only fonts
+      proof: "grep: APT IS ONLY THERE FOR FONTS in plan/tasks.d/W1-T1027-playwright-apt-contention.yaml"
+    - claim: the shard separates the already-shipped bounding change from the unfixed hang
+      proof: "grep: W1-T1009 BOUNDS AND DOES NOT PREVENT in plan/tasks.d/W1-T1027-playwright-apt-contention.yaml"
+    - claim: the shard forbids bundling the workflow change with any product path under Rule 25
+      proof: "grep: THIS IS AN INSTRUMENT-ONLY CHANGESET in plan/tasks.d/W1-T1027-playwright-apt-contention.yaml"
+    - claim: the shard requires both duplicated copies of the step to be fixed together
+      proof: "grep: ONE STEP DUPLICATED ACROSS TWO JOBS in plan/tasks.d/W1-T1027-playwright-apt-contention.yaml"
+    - claim: the shard refuses a single green run as evidence, since the failure is contention
+      proof: "grep: A GREEN RERUN IS NOT A FIX in plan/tasks.d/W1-T1027-playwright-apt-contention.yaml"
+    - claim: the existing workflow-shape assertions still hold after the step is changed
+      proof: "unit test: test/workflow-job-timeouts.test.ts"
+  risk: high
+  origin: recon#playwright-apt-contention-2026-08-19
+  plan_refs: ["W1-T1009", "W1-T153", "W1-T255"]
+  files: [.github/workflows/ci.yml, test/workflow-job-timeouts.test.ts, test/workflow-playwright-install.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) exempts only
+    `risk === 'high'` and returns clean only below two subsystems, and `files:` spans `.github/`
+    and `test/`. The band is Rule 19's SPAN, not blast radius — the runtime effect is one setup
+    step in one workflow file.
+
+    `files:` IS DERIVED, NOT GUESSED. `.github/workflows/ci.yml` holds both copies of the step.
+    `test/workflow-job-timeouts.test.ts` is declared because it already asserts, by CONTENT, that
+    exactly `ci` and `coverage-ratchet` carry a `playwright install` step — a remedy that changes
+    the run line moves that assertion, so the file is genuinely touched rather than merely nearby.
+    `test/workflow-playwright-install.test.ts` does NOT exist and is declared as a NEW path:
+    forward-referencing a path is safe where a symbol would be a guess, and CLAUDE.md requires a
+    coverage-load-bearing test in its own file. Sixteen test files read `.github/workflows/ci.yml`;
+    the other fourteen assert unrelated properties (title linting, dependency review, NUL bytes)
+    and are deliberately excluded. `src/run-task.ts` is NOT declared — this change does not touch
+    it, and every task naming the monolith serialises against every other that does (W1-T471). The
+    shard's own path is not declared either, which would convert the endemic proof-scope warnings
+    into one hard `rule15-filing` violation.
+
+    THE REMOTE RESERVATION WAS REFUSED, and the two refusal signatures were distinguished rather
+    than conflated. W1-T1026 was swept clean minutes earlier and then genuinely taken: the push
+    came back `! [rejected]` and a readback returned `cc34133f`, whose anchor commit reads
+    `reserve W1-T1026 nonce=Craigs-Mac-mini-18450-...` — the mini's own allocator, live and
+    minting. Every attempt from W1-T1027 upward then returned the TRANSPORT limit instead, verbatim
+    and with no `! [rejected]` line anywhere:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+    That trailing `Everything up-to-date` is why the exit code was captured in a variable rather
+    than read through a pipe. WHAT THE 403 IS, stated only as far as it was observed: a REST
+    branch-delete from the same container returned an explicit refusal — `Write access to this
+    GitHub API path is not permitted through this proxy` — so at least the REST write path is
+    proxy-blocked here. The git-over-HTTPS ref push returned a bare `HTTP 403 curl 22` with no
+    message, which is CONSISTENT with the same block but is not the same observation and is not
+    reported as one. Either way it is the class W1-T518 files, and the filing proceeds without a
+    reservation rather than being held by it. W1-T1027 is free on all three
+    readable surfaces at filing time — reservations, filed ids across `plan/tasks.yaml` plus every
+    `plan/tasks.d/` shard, and open-PR titles/bodies/branches — each checked with a positive
+    control (W1-T1026 reserved, W1-T1019 filed, W1-T1021 named by an open PR)."
