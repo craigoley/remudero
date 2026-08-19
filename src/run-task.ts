@@ -564,6 +564,7 @@ import {
   ABSENT_REPUSH_CAP,
   DEFAULT_FIX_CLASSES,
   detectPostReviewStall,
+  isCappedReviewOrphanEscalation,
 } from "./lib/sweep.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
@@ -16656,9 +16657,25 @@ export function buildSweepEffects(
         pr_number: pr.prNumber,
         question: question.question.slice(0, 120),
       });
+      // W1-T983 — THE ONE CLASS CHANGE THIS TASK MAKES: a capped review-orphaned PR (green
+      // checks, no review posted, `priorReviewOrphans` at `policy.reviewOrphanCap`) is terminal
+      // for that PR — nothing else will ever move it — so it escalates MANUAL instead of the
+      // silent BLOCKED default every other blocked-ambiguous disposition still gets. Read off
+      // the SAME `pr`/`policy` this closure already has in scope, via the pure predicate in
+      // sweep.ts (never re-derived here) so the two conditions cannot drift apart.
+      //
+      // TARGET CLASS AND PROJECTED PING RATE (design clause ii, computed the same way rationale
+      // (3)/(4) were): MANUAL averaged 8 issues over the SAME 29 distinct days BLOCKED did
+      // (~0.28/day); this disposition fires ~1.7/day (5 issues over 3 days). Reclassifying only
+      // THIS disposition to MANUAL projects to ~2/day for that class — "a few pings a day," well
+      // under the ~15.6/day BLOCKED average a blanket tier change would reinstate. MANUAL also
+      // fits the disposition semantically (this module's own header: "only a human hand can do
+      // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
+      // override the cap or merge it by hand; nothing downstream can move it further on its own.
+      const cls: EscalationClass = isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
       escalate(
         {
-          class: "BLOCKED",
+          class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
           // this issue retirable cannot silently regress behind this closure's real gateway.
           taskId: escalationTaskIdFor(pr),
