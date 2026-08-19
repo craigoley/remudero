@@ -21,6 +21,8 @@ import {
   taskIdReservationPath,
   taskIdReservationsDir,
   TaskIdReservationError,
+  idReservationFailureFields,
+  withIdReservationLogging,
 } from "../src/lib/task-id-reservation.js";
 import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, rotateLedger } from "../src/lib/ledger.js";
 import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
@@ -565,4 +567,108 @@ test("W1-T949: a failed reservation leaves a durable ledger event", () => {
   assert.equal(failure!.id, "W1-T700");
   assert.equal(failure!.ref, taskIdReservationRef("W1-T700"));
   assert.equal(failure!.outcome, "unreachable");
+});
+
+// ── W1-T949 design (iv): THE REFUSAL RECORD IS ONE POLICY, NOT THREE COPIES ──────────────────
+// Three filing lanes reserve remote ids — triage, plan and approve — and each needs the identical
+// durable record when the reservation refuses: the id, the ref, the machine-classified outcome,
+// and the message, never the message alone (an operator has to tell an unreachable origin from an
+// exhausted range from a local store fault, and free text is not queryable). Written as a `catch`
+// per lane it was three places to drift AND unreachable from a unit test, since each lived inside
+// a `run-task.ts` lane body. Both arms are exercised directly here; `test/plan-lane-mint.test.ts`
+// carries the end-to-end half, driving a real lane into a real remote refusal.
+
+/** Records every ledger row a run emits, so a test asserts the CALL and its fields. */
+function logRecorder(): { rows: Array<{ step: string; extra?: Record<string, unknown> }>; log: (step: string, extra?: Record<string, unknown>) => void } {
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  return { rows, log: (step, extra) => void rows.push({ step, extra }) };
+}
+
+test("withIdReservationLogging returns the body's value and ledgers NOTHING when it does not throw", () => {
+  const rec = logRecorder();
+  assert.equal(withIdReservationLogging(rec.log, "triage.id_reservation_failed", () => 42), 42);
+  assert.deepEqual(rec.rows, [], "a successful reservation must never write a refusal row");
+});
+
+test("withIdReservationLogging ledgers the id, ref and outcome and rethrows the SAME error", () => {
+  const rec = logRecorder();
+  const err = new TaskIdReservationError("cannot reach origin", {
+    taskId: "W1-T7",
+    ref: taskIdReservationRef("W1-T7"),
+    outcome: "unreachable",
+  });
+
+  let thrown: unknown;
+  try {
+    withIdReservationLogging(rec.log, "triage.id_reservation_failed", () => {
+      throw err;
+    });
+  } catch (e) {
+    thrown = e;
+  }
+
+  assert.equal(thrown, err, "the SAME error object propagates — never swallowed, never re-wrapped");
+  assert.equal(rec.rows.length, 1, "exactly one row per refusal");
+  assert.equal(rec.rows[0].step, "triage.id_reservation_failed", "under the step the LANE names, not a shared one");
+  assert.deepEqual(rec.rows[0].extra, {
+    id: "W1-T7",
+    ref: "refs/rmd-id/W1-T7",
+    outcome: "unreachable",
+    error: "cannot reach origin",
+  });
+});
+
+test("withIdReservationLogging records an absent ref as null rather than omitting the key", () => {
+  // The exhausted arm names a starting id but NO single ref — it is the range that ran out. The
+  // key must still be present: to a later `zgrep` over the ledger, a missing key and a key that
+  // is genuinely empty read identically, and only one of them is a fact about the failure.
+  const rec = logRecorder();
+  const exhausted = new TaskIdReservationError("no free task id in W1-T5..W1-T54", { taskId: "W1-T5", outcome: "exhausted" });
+  assert.throws(() => withIdReservationLogging(rec.log, "plan.id_reservation_failed", () => {
+    throw exhausted;
+  }), TaskIdReservationError);
+  assert.deepEqual(Object.keys(rec.rows[0].extra!).sort(), ["error", "id", "outcome", "ref"]);
+  assert.equal(rec.rows[0].extra!.ref, null);
+  assert.deepEqual(idReservationFailureFields(exhausted), {
+    id: "W1-T5",
+    ref: null,
+    outcome: "exhausted",
+    error: "no free task id in W1-T5..W1-T54",
+  });
+});
+
+test("withIdReservationLogging leads with the caller's own field and never lets it shadow the error's", () => {
+  const rec = logRecorder();
+  const err = new TaskIdReservationError("cannot reach origin", { taskId: "W1-T7", outcome: "unreachable" });
+
+  assert.throws(() => withIdReservationLogging(rec.log, "approve.id_reservation_failed", () => {
+    throw err;
+  }, { proposal_id: "P45" }), TaskIdReservationError);
+  assert.deepEqual(Object.keys(rec.rows[0].extra!), ["proposal_id", "id", "ref", "outcome", "error"], "the lane's field leads the row");
+
+  rec.rows.length = 0;
+  assert.throws(() => withIdReservationLogging(rec.log, "approve.id_reservation_failed", () => {
+    throw err;
+  }, { id: "SHADOW" }), TaskIdReservationError);
+  assert.equal(rec.rows[0].extra!.id, "W1-T7", "a colliding caller key must never displace the error's own id");
+});
+
+test("withIdReservationLogging passes any OTHER error through unlogged", () => {
+  // The negative control for every assertion above. Without it they would all hold just as well
+  // for a wrapper that ledgered a refusal for any failure at all — which would file a reservation
+  // incident for, say, a filesystem error in the worktree, and send triage at the wrong organ.
+  const rec = logRecorder();
+  const other = new TypeError("something else entirely");
+
+  let thrown: unknown;
+  try {
+    withIdReservationLogging(rec.log, "triage.id_reservation_failed", () => {
+      throw other;
+    });
+  } catch (e) {
+    thrown = e;
+  }
+
+  assert.equal(thrown, other, "it propagates unchanged");
+  assert.deepEqual(rec.rows, [], "and is NOT ledgered as a reservation refusal");
 });

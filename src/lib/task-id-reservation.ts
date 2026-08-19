@@ -463,6 +463,45 @@ export interface RemoteReservationHandle {
   readonly attempts: number;
 }
 
+/** The machine-readable fields a {@link TaskIdReservationError} contributes to a ledger row —
+ *  `id`/`ref`/`outcome` alongside the message, never the message alone. An operator triaging a
+ *  refusal has to tell an unreachable origin from an exhausted range from a local store fault,
+ *  and a stringified message is not queryable. `null` rather than `undefined` for the absent
+ *  ones so the field is PRESENT in the row: a missing key and a key that is genuinely empty read
+ *  identically to a later `zgrep`, and the exhausted arm legitimately names no single ref. */
+export function idReservationFailureFields(e: TaskIdReservationError): Record<string, unknown> {
+  return { id: e.taskId ?? null, ref: e.ref ?? null, outcome: e.outcome ?? null, error: e.message };
+}
+
+/**
+ * Run `body`; on a {@link TaskIdReservationError} emit ONE durable ledger row under `step` before
+ * rethrowing the error UNCHANGED. Any other error passes through untouched and unlogged.
+ *
+ * WHY A WRAPPER AND NOT A `catch` AT EACH CALL SITE (W1-T949 design (iv)): all three filing lanes
+ * — triage, plan and approve — need the identical refusal record, and each had written its own
+ * `catch` around its own `reserveTaskIdBlockRemote` call. Three copies of one policy is three
+ * places for it to drift, and none of them was reachable from a unit test: they live inside
+ * `run-task.ts`'s lane bodies, so the only way to execute them is to drive a whole lane into a
+ * remote failure. Here the policy is one function with both arms exercised directly, and the
+ * lanes carry only the step name and any lane-specific field.
+ *
+ * `extra` is spread FIRST so a lane-specific key (approve's `proposal_id`) leads the row and can
+ * never shadow the four fields {@link idReservationFailureFields} contributes.
+ */
+export function withIdReservationLogging<T>(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  step: string,
+  body: () => T,
+  extra: Record<string, unknown> = {},
+): T {
+  try {
+    return body();
+  } catch (e) {
+    if (e instanceof TaskIdReservationError) log(step, { ...extra, ...idReservationFailureFields(e) });
+    throw e;
+  }
+}
+
 /**
  * Reserve the first id at or above `startId` that no other writer holds ON THE REMOTE.
  *

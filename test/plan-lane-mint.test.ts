@@ -198,6 +198,36 @@ function idsOnDisk(dir: string): number[] {
 
 const BRIEF = ["--mode=create", "a", "fixture", "brief", "for", "the", "plan", "lane", "mint"];
 
+/**
+ * Install a `pre-receive` hook on the bare origin that refuses ONLY `refs/rmd-id/*`, leaving
+ * every ordinary branch push working — so a run reaches the reservation and fails THERE rather
+ * than dying earlier for an unrelated reason.
+ *
+ * MEASURED against the real reserver rather than assumed: a hook-refused push prints
+ * `! [remote rejected]`, which `classifyPushFailure` reads as `taken` (its pattern includes
+ * `rejected`), so `reserveTaskIdRemote` advances to the next id, exhausts its `maxScan` range
+ * and throws a `TaskIdReservationError` carrying `outcome: "exhausted"` and NO `ref` — the
+ * exhausted arm names a starting id but no single ref, since it is the RANGE that ran out. A
+ * plain branch push against the same hooked origin still exits 0, and the identical scan against
+ * an unhooked origin reserves successfully.
+ */
+function refuseIdReservations(bareOrigin: string): void {
+  const hooks = join(bareOrigin, "hooks");
+  mkdirSync(hooks, { recursive: true });
+  writeFileSync(
+    join(hooks, "pre-receive"),
+    [
+      "#!/bin/sh",
+      "while read -r _old _new ref; do",
+      '  case "$ref" in refs/rmd-id/*) echo "fixture: refusing id reservations" >&2; exit 1;; esac',
+      "done",
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
 test("plan lane reserves its task ids BEFORE the paid worker spawns", async () => {
   let seenAtSpawn: number[] = [];
   let promptSeen = "";
@@ -442,4 +472,62 @@ test("the reservation path works with an EMPTY config file — CI's normal state
     process.env.HOME = savedHome;
     for (const d of [home, dir]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// ── W1-T949 design (iv): A REFUSAL MUST LEAVE A DURABLE, QUERYABLE RECORD ────────────────────
+// The reservation is the one thing standing between two writers and a duplicate id, and it can
+// fail for reasons an operator has to tell apart — an unreachable origin, an exhausted range,
+// a local store fault. Folded into the generic free-text error field it would be unqueryable and
+// unprotected from rotation; the lane logs its own step carrying the machine-readable id, ref
+// and outcome instead. This drives the REAL lane into that failure through the real reserver.
+
+test("plan lane ledgers plan.id_reservation_failed when the shared remote refuses every reservation", async () => {
+  let spawned = 0;
+
+  const ledger = await withHarness(async ({ bareOrigin }) => {
+    refuseIdReservations(bareOrigin);
+    await planCommand(BRIEF, {
+      spawn: async () => {
+        spawned += 1;
+        return fakeWorker("PROPOSED: the worker should never have been reached");
+      },
+    }).catch(() => undefined);
+  });
+
+  const failed = ledger.filter((l) => l.step === "plan.id_reservation_failed");
+  assert.equal(
+    failed.length,
+    1,
+    `exactly one durable refusal row is expected; the run ledgered ${JSON.stringify(ledger.map((l) => l.step))}`,
+  );
+  assert.equal(failed[0]?.outcome, "exhausted", "the MACHINE-READABLE outcome, not a stringified message");
+  assert.match(String(failed[0]?.id), /^W1-T\d+$/, "the row names the id the scan started from");
+  assert.equal(failed[0]?.ref, null, "the exhausted arm names no single ref — it is the RANGE that ran out, not one id");
+  assert.match(String(failed[0]?.error), /no free task id/, "and it carries the reserver's own message alongside the fields");
+
+  // THE POINT OF FAILING HERE: a minter that cannot reserve must not spend. The refusal is
+  // raised before the paid worker is started, so nothing is billed for a run that cannot file.
+  assert.equal(spawned, 0, "the paid worker must never start once the reservation has refused");
+  assert.equal(ledger.filter((l) => l.step === "plan.id_minted").length, 0, "and nothing may be ledgered as minted");
+});
+
+test("plan lane CONTROL: the same run mints normally when the remote accepts the reservation", async () => {
+  // The paired half of the test above. Without it, that assertion would pass just as well
+  // against a lane that always refused — the hook has to be what makes the difference.
+  let spawned = 0;
+
+  const ledger = await withHarness(async ({ reservationsDir }) => {
+    await planCommand(BRIEF, {
+      spawn: async (args: { cwd: string }) => {
+        spawned += 1;
+        const ids = idsOnDisk(reservationsDir);
+        fileTaskAsShard(args.cwd, `W1-T${ids[0]}`, "filed by the control fixture worker");
+        return fakeWorker(`PROPOSED: file W1-T${ids[0]} for the plan-lane reservation control`);
+      },
+    }).catch(() => undefined);
+  });
+
+  assert.equal(ledger.filter((l) => l.step === "plan.id_reservation_failed").length, 0, "no refusal without the hook");
+  assert.equal(ledger.filter((l) => l.step === "plan.id_minted").length, 1, "the mint row the refusing run never reaches");
+  assert.equal(spawned, 1, "and the paid worker DOES start once the ids are safely held");
 });

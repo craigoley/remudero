@@ -252,7 +252,7 @@ import {
   reserveTaskIdBlock,
   reserveTaskIdBlockRemote,
   gitRemoteRefReserver,
-  TaskIdReservationError,
+  withIdReservationLogging,
   type RemoteReservationBlock,
   type TaskIdReservationBlock,
   taskIdReservationsDir,
@@ -18597,9 +18597,10 @@ async function triageCommandLocked(
     // as it does locally; an unreachable origin THROWS rather than falling through, and the paid
     // worker is still unstarted when it does — caught below so the refusal leaves a durable
     // ledger event naming the id/ref/outcome, never just a stringified message.
-    let remoteIdBlock: RemoteReservationBlock;
-    try {
-      remoteIdBlock = reserveTaskIdBlockRemote(
+    // W1-T949 design (iv): the refusal record is `withIdReservationLogging`'s, not this lane's —
+    // one policy, both arms unit-tested, rather than a hand-written `catch` per lane.
+    const remoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "triage.id_reservation_failed", () =>
+      reserveTaskIdBlockRemote(
         localIdBlock.ids[0],
         TRIAGE_MAX_NEW_TASKS,
         gitRemoteRefReserver({
@@ -18615,21 +18616,8 @@ async function triageCommandLocked(
             return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
           },
         }),
-      );
-    } catch (e) {
-      if (e instanceof TaskIdReservationError) {
-        // W1-T949 design (iv): a durable, QUERYABLE record of the refusal — never folded into
-        // the generic `triage.error` free-text field below, which `DECISION_RELEVANT_LEDGER_STEPS`
-        // does not protect from rotation.
-        log("triage.id_reservation_failed", {
-          id: e.taskId ?? null,
-          ref: e.ref ?? null,
-          outcome: e.outcome ?? null,
-          error: e.message,
-        });
-      }
-      throw e;
-    }
+      ),
+    );
     // The ids the WORKER is told to use — the REMOTE reservation's, which equal the local ones
     // whenever no other writer held any of them (the overwhelmingly common case). The remote is
     // the authority because it is the only store every writer can see.
@@ -18972,9 +18960,8 @@ export async function planCommand(
     // is the remote-substrate twin of `reserveTaskIdBlock`, one ref pushed per reserved id. An
     // unreachable origin THROWS (caught below, a durable ledger event, never just a stringified
     // message) rather than falling through — the paid worker is still unstarted when it does.
-    let planRemoteIdBlock: RemoteReservationBlock;
-    try {
-      planRemoteIdBlock = reserveTaskIdBlockRemote(
+    const planRemoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () =>
+      reserveTaskIdBlockRemote(
         planIdBlock.ids[0],
         PLAN_MAX_NEW_TASKS,
         gitRemoteRefReserver({
@@ -18986,18 +18973,8 @@ export async function planCommand(
             return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
           },
         }),
-      );
-    } catch (e) {
-      if (e instanceof TaskIdReservationError) {
-        log("plan.id_reservation_failed", {
-          id: e.taskId ?? null,
-          ref: e.ref ?? null,
-          outcome: e.outcome ?? null,
-          error: e.message,
-        });
-      }
-      throw e;
-    }
+      ),
+    );
     const reservedIds = planRemoteIdBlock.taskIds;
     log("plan.id_minted", {
       reserved: reservedIds,
@@ -19722,30 +19699,23 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
             // reservation failure into a free-text `reason` string) so a genuine
             // `TaskIdReservationError` still leaves a durable, structured ledger event before
             // `materializeDraftTaskIds` reduces it to prose.
-            try {
-              const remote = reserveTaskIdBlockRemote(
-                idBlock.ids[0],
-                count,
-                gitRemoteRefReserver({
-                  run: (args) => {
-                    const r = spawnSync("git", ["-C", worktreePath as string, ...args], { encoding: "utf8" });
-                    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-                  },
-                }),
-              );
-              return { ids: remote.ids };
-            } catch (e) {
-              if (e instanceof TaskIdReservationError) {
-                log("approve.id_reservation_failed", {
-                  proposal_id: payload.proposalId,
-                  id: e.taskId ?? null,
-                  ref: e.ref ?? null,
-                  outcome: e.outcome ?? null,
-                  error: e.message,
-                });
-              }
-              throw e;
-            }
+            const remote = withIdReservationLogging(
+              log,
+              "approve.id_reservation_failed",
+              () =>
+                reserveTaskIdBlockRemote(
+                  idBlock.ids[0],
+                  count,
+                  gitRemoteRefReserver({
+                    run: (args) => {
+                      const r = spawnSync("git", ["-C", worktreePath as string, ...args], { encoding: "utf8" });
+                      return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+                    },
+                  }),
+                ),
+              { proposal_id: payload.proposalId },
+            );
+            return { ids: remote.ids };
           },
         },
       );
