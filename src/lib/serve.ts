@@ -46,7 +46,9 @@ import {
   createService,
   makeConfirmNonceRoute,
   type ConfirmNonceStore,
+  type Method,
   type Route,
+  type Scope,
   type ServiceOptions,
   type ServiceTokens,
   type SseRoute,
@@ -4672,6 +4674,40 @@ export function buildPeekRoute(deps: { root: string; isLive: (runId: string) => 
   };
 }
 
+/**
+ * W1-T493 design (i): the completeness ratchet for SCOPE, `writeRoutesMissingTier`-shaped
+ * (service.ts, W1-T404) but over `scope` rather than `tier`. `scope` is REQUIRED on both `Route`
+ * and `SseRoute` (service.ts), so a TypeScript-checked route literal can never appear here — an
+ * unclassified route fails to COMPILE, the strongest ratchet there is (see
+ * test/route-scope-matrix.test.ts's own compile-time proof of that). This is the runtime
+ * backstop for the one thing the compiler cannot see: an entry assembled through a widened or
+ * cast array (an `as Route`, a spread from an untyped source) that slips an invalid `scope` past
+ * it. Empty ⇒ every entry in `entries` declares one of the two real `Scope` values — proving the
+ * FIELD is present, never that enforcement matches it; test/route-scope-matrix.test.ts is the
+ * suite that separately drives the REAL assembled table (this function's real caller,
+ * {@link buildServeRoutes}, plus the one mounted SSE stream) through `createService` itself.
+ */
+export function routesMissingScopeClassification(
+  entries: readonly { method?: Method; path: string; scope: Scope }[],
+): string[] {
+  return entries
+    .filter((r) => r.scope !== "read" && r.scope !== "write")
+    .map((r) => (r.method ? `${r.method} ${r.path}` : `GET ${r.path} (sse)`));
+}
+
+/**
+ * design (iii-a)'s shape, copied: run {@link routesMissingScopeClassification} and FAIL THE
+ * CALLER (throw) rather than merely reporting. Extracted here, callable directly, so its throw
+ * branch is unit-testable without needing the real assembled table (which never triggers it,
+ * `scope` being required on the type) to somehow go missing a classification.
+ */
+export function assertRoutesScopeComplete(entries: readonly { method?: Method; path: string; scope: Scope }[]): void {
+  const missing = routesMissingScopeClassification(entries);
+  if (missing.length > 0) {
+    throw new Error(`route(s) with no declared Scope: ${missing.join(", ")}`);
+  }
+}
+
 /** Every REST route `rmd serve` registers — board, panel actions (two-root split, see module header), panel graph, and the shell. Reused verbatim from each module's own exported builder. */
 export function buildServeRoutes(deps: ServeDeps): Route[] {
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
@@ -4814,6 +4850,11 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   // (this one), not merely a test — a write-scoped route added here with no declared tier fails
   // the build rather than defaulting quietly. See `assertWriteTiersComplete`'s own doc.
   assertWriteTiersComplete(routes);
+  // W1-T493 design (i): the same shape, over `scope`. Never fires today (`scope` is required on
+  // the `Route` type, so an unclassified literal cannot compile) — kept here anyway, beside its
+  // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
+  // `assertRoutesScopeComplete`'s own doc.
+  assertRoutesScopeComplete(routes);
 
   return routes;
 }
