@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
@@ -370,23 +371,24 @@ test("W1-T1020: the ledger reconstruction carries the partial flag", () => {
 // read the sha256 again and require it to DIFFER, run the suite and require the partial-reason
 // test to FAIL, restore, and require the sha to return to the original.
 //
-// This mutates the REAL, checked-out `src/lib/review.ts` on disk (restored in a `finally`,
-// verified byte-identical by its own sha256 afterward), then spawns a REAL child `node --test`
-// process — the same model test/task-id-reservation.test.ts's own W1-T949 mutation test follows,
-// narrowed via `--test-name-pattern` to ONLY the "arms with a reason that names the partial
-// shape" test above, in this SAME file. That narrowing is what makes same-file safe: the pattern
-// matches that one test's name and no other's, so THIS test (a different name) is never invoked
-// by the child and no recursive re-entry occurs.
+// This mutates a PRIVATE TMPDIR COPY of `src/lib/review.ts` (never the real, shared checkout —
+// see the ISOLATED WORKING COPY note below for why), then spawns a REAL child `node --test`
+// process against that copy — the same model test/task-id-reservation.test.ts's own W1-T949
+// mutation test follows for its own target file, narrowed via `--test-name-pattern` to ONLY the
+// "arms with a reason that names the partial shape" test above, in this SAME source file. That
+// narrowing is what makes same-file safe: the pattern matches that one test's name and no
+// other's, so THIS test (a different name) is never invoked by the child and no recursive
+// re-entry occurs.
 
 test("W1-T1020: reverting the reason change fails the partial reason test", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const srcPath = join(repoRoot, "src", "lib", "review.ts");
+  const realSrcPath = join(repoRoot, "src", "lib", "review.ts");
   const targetTestFile = "test/unexecutable-proof-visibility.test.ts";
   const positiveTestName = "W1-T1020: a partial verdict arms with a reason that names the partial shape";
 
   const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
-  const original = readFileSync(srcPath, "utf8");
+  const original = readFileSync(realSrcPath, "utf8");
   const originalSha = sha256(original);
 
   // THE REASON CHANGE: decideAutoMergeArm's `if (verdict.partiallyExecuted) { ... }` branch,
@@ -426,10 +428,43 @@ test("W1-T1020: reverting the reason change fails the partial reason test", () =
   assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
   const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
 
+  // ── ISOLATED WORKING COPY (never the real, shared checkout) ────────────────────────────────
+  //
+  // `review.ts` is imported by ~69 OTHER test files — by far the most widely imported source
+  // module in this suite (contrast task-id-reservation.ts, the model this check otherwise
+  // follows: 3 importers). `node --test` runs each matched FILE in its OWN subprocess
+  // (test/setup/tmp-hygiene.ts's own header comment confirms this empirically, "no cross-file
+  // collision risk under parallel execution" — true WITHIN one process's fixtures, but those
+  // subprocesses themselves start throughout the WHOLE suite run, not all at t=0). Writing the
+  // mutation directly onto the real, shared `src/lib/review.ts` therefore races ANY of those ~69
+  // files' subprocesses that happen to start importing review.ts while it sits mutated on disk.
+  //
+  // MEASURED, not theorized: under `--experimental-test-coverage --enable-source-maps` (the
+  // exact flags the `coverage-ratchet` CI job's "Test with coverage" step runs), this file
+  // running alongside as few as one OTHER mutation check on a different file
+  // (test/ledger-rotation.test.ts's own, independent mutation check on ledger.ts) corrupted
+  // coverage-report generation for the WHOLE run — "Could not report code coverage. TypeError:
+  // Cannot read properties of undefined (reading 'startOffset')" — leaving coverage/lcov.info
+  // EMPTY (0 bytes). Reproduced twice in a row with that combination present, absent every time
+  // (repeatedly) with either mutation target's file excluded from the run.
+  //
+  // A tmpdir COPY of src/ + test/ sidesteps the race entirely: the mutation lands on a path no
+  // other subprocess (in this run or any other) ever resolves, so the shared checkout's
+  // review.ts is never written to at all — the `untouchedSha` assertion in the `finally` below
+  // makes that a checked property, not an assumption.
+  const isolatedRoot = mkdtempSync(join(tmpdir(), "rmd-w1t1020-review-mutation-"));
+  const skipVendoredOrVcs = (source: string) => /(^|[/\\])(node_modules|\.git)([/\\]|$)/.test(source);
+  cpSync(join(repoRoot, "src"), join(isolatedRoot, "src"), { recursive: true, filter: (s) => !skipVendoredOrVcs(s) });
+  cpSync(join(repoRoot, "test"), join(isolatedRoot, "test"), { recursive: true, filter: (s) => !skipVendoredOrVcs(s) });
+  cpSync(join(repoRoot, "package.json"), join(isolatedRoot, "package.json"));
+  cpSync(join(repoRoot, "tsconfig.json"), join(isolatedRoot, "tsconfig.json"));
+  symlinkSync(join(repoRoot, "node_modules"), join(isolatedRoot, "node_modules"));
+  const isolatedSrcPath = join(isolatedRoot, "src", "lib", "review.ts");
+
   let childResult: ReturnType<typeof spawnSync> | undefined;
   try {
-    writeFileSync(srcPath, mutated);
-    const mutatedSha = sha256(readFileSync(srcPath, "utf8"));
+    writeFileSync(isolatedSrcPath, mutated);
+    const mutatedSha = sha256(readFileSync(isolatedSrcPath, "utf8"));
     assert.notEqual(mutatedSha, originalSha, "the mutation must actually change review.ts's bytes");
 
     // NODE_TEST_CONTEXT (set by node's OWN test runner on the process running THIS test) is
@@ -440,13 +475,15 @@ test("W1-T1020: reverting the reason change fails the partial reason test", () =
     // reason (test/task-id-reservation.test.ts's W1-T949 mutation test notes the same trap).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
-    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+    childResult = spawnSync(process.execPath, args, { cwd: isolatedRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
   } finally {
-    // RESTORED REGARDLESS of what the child run did — a throw, a timeout, or a pass must never
-    // leave the real checked-out source mutated.
-    writeFileSync(srcPath, original);
-    const restoredSha = sha256(readFileSync(srcPath, "utf8"));
-    assert.equal(restoredSha, originalSha, "review.ts must be restored byte-for-byte after the mutation check");
+    // The isolated copy is disposable regardless of what the child run did — a throw, a
+    // timeout, or a pass all clean up the same way.
+    rmSync(isolatedRoot, { recursive: true, force: true });
+    // And the REAL, shared checkout was never written to in the first place — checked, not
+    // assumed, so a future edit that reintroduces a real-file write trips this immediately.
+    const untouchedSha = sha256(readFileSync(realSrcPath, "utf8"));
+    assert.equal(untouchedSha, originalSha, "the real, shared review.ts must never be touched by this check");
   }
 
   assert.ok(childResult, "sanity: the child process must actually have been spawned");
