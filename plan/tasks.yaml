@@ -6650,6 +6650,10 @@
   risk: high
   origin: architect
   plan_refs: ["§4B"]
+  files: [src/lib/daemon.ts, src/lib/launchd.ts]  # W1-T504 declared-scope: the same daemon +
+    # launchd-unit code W1-T12a/b/c already declare — this task is the LIVE commissioning of
+    # that code (launchctl-load, overnight drain, kill-and-recover), touching no new path of
+    # its own.
   status: done
   pr: 69                    # merged PR #69 (hand-executed commissioning record) -> deriveStatus resolves this task as merged
   attempts: 1
