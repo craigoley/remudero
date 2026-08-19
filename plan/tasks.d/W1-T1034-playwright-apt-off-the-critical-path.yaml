@@ -81,7 +81,60 @@
     orphaned root process, a wait that observes nothing, and a slow mirror — and only the third is
     the actual trigger. A remedy that closes the first two leaves CI failing on the third.
 
-    (i) THE CONTAINER OPTION, PRICED FROM THE REGISTRY. `mcr.microsoft.com/playwright:v1.62.1-noble`
+    (0) DROP `--with-deps`. THE MEASUREMENT SETTLES IT, AND THIS CLAUSE REVERSES THIS SHARD'S FIRST
+    RECOMMENDATION. As filed, this task led with the container image and priced it in detail;
+    clause (viii) admitted it had not answered W1-T1027 design (i), the fonts precondition upstream
+    of every lighter option. That precondition has since been ANSWERED BY RUNNING THE SUITES, and
+    the answer removes the need for the container entirely.
+
+    THE EXPERIMENT, on a Linux host stripped to the runner's PRE---with-deps baseline: the nine
+    Chromium shared libraries the runner already carries were installed and all nine of the font
+    packages `--with-deps` adds were confirmed ABSENT, as was `fonts-noto-color-emoji`, which the
+    runner's base image does have — so the environment is strictly LEANER than the runner, and a
+    pass on it is a stronger result than a pass there. Then `npx playwright install chromium`, with
+    no `--with-deps`, no `sudo` and no apt of any kind, and the browser suites run against it:
+      243 tests across 21 files, 243 pass, 0 fail, 0 skipped, 0 cancelled
+    including the two the question was actually about — the axe accessibility scan (zero critical or
+    serious violations, the Lighthouse-equivalent bar) and the 390px/1440px no-horizontal-overflow
+    assertion, both of which executed and passed with real per-test timings.
+
+    THE NEGATIVE CONTROL, because a green run over absent fonts proves nothing unless the fonts were
+    genuinely absent. Canvas advance widths at 100px sans-serif, measured in the same browser that
+    ran the suites: `AAA` reads 200.10 (real glyphs), while `日本語` and `あいう` both read 225 —
+    IDENTICAL to a private-use codepoint with no glyph anywhere. CJK renders as tofu on that host and
+    the suites passed anyway. `Мир` reads 194.78, so Cyrillic resolves to real glyphs from the base
+    image's `fonts-liberation`; `xfonts-cyrillic` is an X11 bitmap set Chromium never consumes, so
+    Cyrillic was never at risk in the first place.
+
+    AND IT CANNOT FAIL STRUCTURALLY, which is the corroboration that makes one run enough: the
+    console has no CJK to render. Zero CJK codepoints across `src/`, `plan/` and `test/`, against
+    positive controls of 122, 520 and 610 files respectively that DO carry non-ASCII, so the scan is
+    live rather than silently matching nothing. Zero Cyrillic in the same three trees. And zero
+    visual-snapshot tests anywhere in 552 test files — no `toMatchSnapshot`, no `toHaveScreenshot`,
+    no pixel comparison — so no assertion in this repo is sensitive to which glyph a fallback picks.
+
+    SO THE FLAG CLOSES ALL THREE FINDINGS AT NO INFRASTRUCTURE COST. The orphan goes because there is
+    no root phase at all to orphan. The dead wait goes with the step that carried it. The mirror
+    stall goes because the archive host leaves the critical path completely; what remains is the
+    `cdn.playwright.dev` download the step ALREADY performs today, after apt. No container, no digest
+    pin, no Node re-base, no `runs-on` change — one line, applied identically to both copies.
+
+    (0a) WHAT `--with-deps` STILL BOUGHT, recorded because dropping it is not free. It was insurance
+    against a future `ubuntu-latest` image dropping a Chromium shared library: today it drops none —
+    the failing job's own log shows every one reading `is already the newest version` — but if one
+    ever went missing, apt would have silently repaired it, and without the flag the same event
+    surfaces as a cryptic browser-launch error inside an unrelated suite. THE CHEAP MITIGATION IS A
+    LAUNCH SMOKE-CHECK WITH A LEGIBLE MESSAGE: a test that calls `chromium.launch()` in the same CI
+    job that installed it, so a missing library fails BY NAME instead of as an unexplained shell-ux
+    error. #2226 ALREADY DOES THIS — its falsifier carries `chromium launches from an install that
+    never ran apt`, plus a second test rendering the console's real font stack and asserting a
+    measurable width, so a zero-glyph fallback collapsing to the container cannot quietly make the
+    390px overflow assertion vacuous. That is the shape this clause requires; it is not a new ask.
+
+    (i) THE CONTAINER OPTION, PRICED FROM THE REGISTRY — NOW THE FALLBACK, NOT THE LEAD. Kept in full
+    because the pricing is real work and stays correct if clause (0) is ever refuted, and because it
+    is the answer if a future base image genuinely stops carrying the Chromium libraries. Nothing
+    below argues for adopting it today. `mcr.microsoft.com/playwright:v1.62.1-noble`
     was read anonymously over the v2 API rather than assumed. Index digest
     sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e; amd64 manifest
     sha256:c091b21d9fae78c76e85cd4356431e9b018402f172a214fc7d7a5e9a7e29d8ac, 7 layers,
@@ -95,16 +148,18 @@
     runner uses today. The fonts and libs are baked; the browsers are baked; the install step
     disappears entirely rather than being made more patient.
 
-    (ii) TWO OF THREE, NOT THREE OF THREE — and the shard says so rather than overselling the
-    option it prefers. The orphan (1)/(2) goes: there is no apt invocation, so nothing to orphan.
+    (ii) TWO OF THREE, NOT THREE OF THREE — the container's honest score, and the reason clause (0)
+    beats it. The orphan (1)/(2) goes: there is no apt invocation, so nothing to orphan.
     The dead wait (3) goes with the step that carries it. The MIRROR STALL (4) is RELOCATED, not
     removed: a ~0.95 GB compressed image pull enters the critical path where a 21.1 MB apt download
     left it. Two things make that trade plausibly good and neither is proven here — the pull holds
     no lock, so a failure is clean and a re-run is a real retry rather than a collision; and it is
-    one dependency instead of an archive host plus a CDN. MEASURE IT. A builder must report the
-    observed pull time across several runs beside the ~25s the install step costs when apt
-    cooperates, and must not treat one green run as the answer (W1-T1027's own A GREEN RERUN IS NOT
-    A FIX applies unchanged).
+    one dependency instead of an archive host plus a CDN. DROPPING THE FLAG SCORES THREE OF THREE
+    AND ADDS NO NEW DEPENDENCY AT ALL, which is the whole argument: the container trades one network
+    dependency for another and pays the costs in (iii) to do it, while clause (0) removes the
+    dependency outright. If the container is ever adopted anyway, the pull time must still be
+    reported across several runs and one green run must still not be treated as the answer
+    (W1-T1027's own A GREEN RERUN IS NOT A FIX applies unchanged).
 
     (iii) WHAT THE CONTAINER COSTS, each item derived from this tree:
       - `runs-on`/`container:` change on TWO jobs (`ci`, `coverage-ratchet`); the other twelve jobs
@@ -138,15 +193,21 @@
     closes (1) and (2): attempts 2 and 3 stop colliding with attempt 1's leftovers and the effective
     N goes from 1 to 3. It does nothing about (4). Attempt 1 still burns 360s against a mirror that
     delivered ~8 seconds of useful transfer in 360, and three such attempts against that mirror are
-    not obviously enough. Choose it if the container's pull cost measures badly under (ii); ship it
-    knowing CI can still go red on the same trigger.
+    not obviously enough. IT IS NOW THIRD CHOICE, behind clause (0) and behind the container: it is
+    the only one of the three that leaves the actual trigger in place. Reach for it only if clause
+    (0) is refuted AND the container's pull cost measures badly under (ii), and ship it knowing CI
+    can still go red on the same trigger.
 
     (v) A LONGER WAIT IS REFUSED, and so are two of its cousins. A larger `-w`, a fourth attempt,
     and `-o DPkg::Lock::Timeout` are all aimed at how an invocation WAITS. The failing invocation
     never gets control back to wait — it is killed mid-download and never reaches a lock at all.
     None of the three can change this run's outcome, and a builder proposing one has not read (2).
-    The 3-attempt bound itself STAYS wherever an install step survives: W1-T1027 (3) is right that
-    it is the only thing making a still-contended apt finite.
+    THE 3-ATTEMPT BOUND IS THE ONE CLAUSE (0) SUPERSEDES, and this shard's first draft had it wrong.
+    W1-T1027 (3) is right that the bound is the only thing making a STILL-CONTENDED apt finite — but
+    under clause (0) there is no apt call to contend, so the retry and the wait both exist to survive
+    something that no longer happens and must go WITH the flag rather than outliving it. Keep the
+    bound only on a remedy that still invokes apt; a bare `npx playwright install chromium` needs
+    neither, and re-adding either would rebuild exactly the orphan class finding (2) measured.
 
     (vi) THIS IS AN INSTRUMENT-ONLY CHANGESET AND IT RIDES ALONE. `.github/workflows/ci.yml`
     matches INSTRUMENT_SURFACE's first entry, so Rule 25's `detectInstrumentEntanglement` forces the
@@ -163,14 +224,22 @@
         apt on the critical path — and it must be re-expressed as that, per job, matched by content.
       - test/workflow-job-timeouts.test.ts — `jobsCarryingPlaywrightInstall` selects jobs by
         searching their `run:` for `playwright install`, and the WAIT_CAP_SECONDS test asserts
-        `playwrightJobs.length > 0`. That assertion FAILS the moment the step goes. W1-T1009's
-        heavy-band bound is still correct for both jobs; only its selector is wrong. Re-anchor the
-        selector, keep the bound, and do not weaken the strictly-below-WAIT_CAP_SECONDS check.
+        `playwrightJobs.length > 0`. THIS BREAKS UNDER THE CONTAINER ONLY, AND THE FIRST DRAFT SAID
+        IT BREAKS EITHER WAY — WRONG. A bare `npx playwright install chromium` still contains the
+        substring `playwright install`, so under clause (0) the selector still matches both jobs,
+        `playwrightJobs.length > 0` still holds, and the file needs NO edit (#2226 ran it against
+        that tree: 4 tests, 4 pass). It is still declared in `files:` because the container fallback
+        would break it. Under the container, W1-T1009's heavy-band bound stays correct for both jobs
+        and only the selector is wrong: re-anchor the selector, keep the bound, and do not weaken the
+        strictly-below-WAIT_CAP_SECONDS check.
 
-    (viii) THE FONTS QUESTION IS STILL OPEN AND STILL UPSTREAM OF ANY LIGHTER OPTION. W1-T1027
+    (viii) THE FONTS QUESTION IS ANSWERED — 243 TESTS, 0 FAILURES, GLYPHS PROVEN ABSENT. W1-T1027
     design (i) requires establishing from the browser suites which fonts are actually needed before
-    dropping `--with-deps`. The container makes the question moot by shipping them; every other
-    option still owes the answer. This task does not answer it and must not pretend to."
+    dropping `--with-deps`. Clause (0) establishes it by running them on a host where the nine font
+    packages are absent and CJK is proven to render as `.notdef`, so the precondition is discharged
+    rather than deferred, and it is discharged in the direction that makes the container unnecessary.
+    THE FIRST DRAFT OF THIS CLAUSE SAID THE OPPOSITE — that the question was still open and that only
+    the container made it moot. It is superseded here rather than quietly rewritten."
   acceptance:
     - claim: no playwright-carrying job can leave a root process holding the dpkg lock once its own bound expires
       proof: "unit test: test/workflow-playwright-install.test.ts"
@@ -186,7 +255,47 @@
   files: [.github/workflows/ci.yml, test/workflow-playwright-install.test.ts, test/workflow-job-timeouts.test.ts]
   status: queued
   attempts: 0
-  note: "THIS IS NOT W1-T1027 RE-FILED, and the boundary is worth stating because the two are one
+  note: "AMENDED 2026-08-19, AFTER FILING AND BEFORE MERGE — THE RECOMMENDATION IS REVERSED. As
+    filed, this shard led with the container image and left the fonts precondition unanswered. Design
+    clause (0) now leads with dropping `--with-deps`, clause (i) is explicitly demoted to the
+    fallback, clause (iv) is demoted to third, clause (v) records that the retry bound goes WITH the
+    flag rather than outliving it, clause (vii) corrects a factual error (the timeouts suite does NOT
+    break under the flag, only under the container), and clause (viii) is answered rather than
+    deferred. Each reversed clause says so in place instead of being rewritten silently.
+
+    NO ACCEPTANCE CRITERION WAS TOUCHED. All four survive the reversal byte-identical, because they
+    were deliberately written option-agnostic — a fact worth recording, since it is the only reason
+    a reversal this large costs nothing at the criteria layer. AND THEY ARE SATISFIED BY #2226 AS IT
+    STANDS: its rewritten falsifier carries the launch smoke-check and the font-stack measurement
+    (criterion 1), the timeouts suite still passes untouched (criterion 2), and its ci.yml comment
+    contains both `W1-T1034` and `critical path` (criteria 3 and 4) — though HONESTLY, those last two
+    are satisfied by a comment naming this task while making it moot, which is a hollow pass rather
+    than a real one. A reader should not take criteria 3 and 4 as evidence the remedy was shipped
+    under this id.
+
+    RULE 21 WAS CHECKED BEFORE PUSHING, BY RUNNING IT, NOT BY READING IT.
+    `postMergeAmendmentViolations` (`src/lib/task-linter.ts`) returns `[]` here because #2223 is
+    OPEN — `ctx.merged` is false, so the rule short-circuits before `criteriaAdded` is consulted, and
+    the task did not exist at the base ref either. POSITIVE CONTROL, so the clean result is not a
+    dead check: the same task with `merged: true` and one criterion altered returns
+    `['post-merge-amendment']`; with `merged: true` and criteria unchanged, `[]`; with
+    `followUpFiled: true`, `[]` (the escape hatch); with `statusResolvable: false`, `[]` (fails
+    OPEN). The rule is live and did not refuse, and no criterion changed regardless — so the
+    instruction to comment rather than edit was not reached.
+
+    AND #2226 MAY MAKE THIS SHARD REDUNDANT, which is said here rather than left for a reviewer to
+    notice. #2226 (`ci(playwright): drop --with-deps so the install never invokes apt`) is OPEN and
+    implements clause (0) in full, filed under W1-T1027 round 2 rather than under this id, and its
+    own body says this task's container proposal is thereby unnecessary. It reached the same
+    conclusion INDEPENDENTLY and from a different direction — a corpus scan for CJK/Cyrillic/Thai
+    rather than a suite run — and its own verification records that its font test ran on macOS,
+    `whose own fonts are present, so it proves the code and CI proves the Linux font case`. CLAUSE
+    (0) IS EXACTLY THAT MISSING LINUX EVIDENCE, taken on a host with the nine packages absent and the
+    glyphs proven `.notdef`. If #2226 merges, the honest disposition of W1-T1034 is a record of the
+    measurement and the pricing, not a task awaiting a builder — the Architect should close it or
+    fold it into W1-T1027 rather than dispatch it. That is an operator call and is not taken here.
+
+    THIS IS NOT W1-T1027 RE-FILED, and the boundary is worth stating because the two are one
     keystroke apart. W1-T1027 is the FILED CAUSE — it measured the step's cost across the Actions
     API (18 of 69 failed/cancelled jobs in 48h) and left its remedy options DELIBERATELY UNRANKED.
     It is `status: queued` still. This task consumes evidence that did not exist when that shard was
