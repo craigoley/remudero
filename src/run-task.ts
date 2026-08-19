@@ -477,6 +477,7 @@ import {
   type CriterionVerdict,
   type ReviewVerdict,
 } from "./lib/review.js";
+import { buildReceipt } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision } from "./lib/auto-triage.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
@@ -6216,7 +6217,11 @@ async function runTask(
       : reconObservedToContext(recon, taskId, recordPath);
     const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
-    log("prompt.linted", { provenance: "clean" });
+    // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
+    // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
+    // ground-truth field to read instead of a fabricated one. Rides the SAME `prompt.linted` line
+    // (a one-line addition, per the task's own design), never a second ledger step.
+    log("prompt.linted", { provenance: "clean", prompt_template_hash: createHash("sha256").update(prompt).digest("hex") });
     say("prompt provenance-linted: clean");
 
     // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
@@ -8647,6 +8652,59 @@ export function checkAcceptanceCommand(rest: string[]): number {
     );
   }
   return 1;
+}
+
+/** Seams for {@link receiptCommand} — defaulted to the real gateways; a test injects fakes so
+ *  the command's own PR/task-id resolution + print path is exercisable with zero network. */
+export interface ReceiptCommandDeps {
+  gh?: (args: string[]) => unknown;
+  config?: Config;
+  readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
+}
+
+/**
+ * `rmd receipt <pr>` (W1-T71, ratifies P17) — the deterministic in-toto-style run receipt,
+ * printed for a merged (or open) PR. Resolves the task id from the PR body's trailer via
+ * {@link reviewTaskIdFromBody} (the SAME #119-hardened extractor `rmd review` already uses —
+ * never a second dialect), reads this checkout's ledger, and hands both to the pure
+ * {@link buildReceipt} (src/lib/receipt.ts). READ-ONLY: writes no ledger line, no state file,
+ * posts nothing — the "posted on every merged PR" integration (design item 3) is a separate,
+ * operator-observed call site (Rule 18), not this command's job.
+ *
+ * A PR whose body carries no resolvable task id (a hand-opened PR, or one predating the
+ * trailer contract) REFUSES rather than guessing — never fabricates a receipt for the wrong task.
+ */
+export async function receiptCommand(prArg: string, rest: string[] = [], deps: ReceiptCommandDeps = {}): Promise<number> {
+  const badArg = unknownArgError("receipt", rest, ["--repo"]);
+  if (badArg) {
+    console.error(badArg);
+    return 2;
+  }
+  const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
+  const gh = deps.gh ?? ghJson;
+  const args = reviewViewArgs(owner, repo, prArg);
+  const raw = gh(args);
+  const view = (reviewPrNumber(prArg) !== undefined ? mapRestPr(raw as RestPullRow) : raw) as {
+    headRefOid: string;
+    headRefName: string;
+    body: string;
+    url: string;
+    number: number;
+  };
+  const body = view.body ?? "";
+  const taskId = reviewTaskIdFromBody(body);
+  if (!taskId) {
+    console.error(
+      `rmd receipt: no Remudero-Task trailer resolvable from ${view.url ?? prArg}'s body — nothing to build a receipt for`,
+    );
+    return 1;
+  }
+  const config = deps.config ?? loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const lines = (deps.readLedgerLines ?? readLedgerLines)(ledgerPath);
+  const receipt = buildReceipt(lines, { taskId, prUrl: view.url ?? prArg });
+  console.log(JSON.stringify(receipt, null, 2));
+  return 0;
 }
 
 /**
@@ -21088,6 +21146,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd emissions [--days N]   # which CLI verbs have written NO ledger line in the window (default 30d) — the runtime half of dead-capability detection, paired with a static call-site count so 'reachable but never typed' is distinguishable from 'unreachable'. Unions the ledger AND its rotations (reading the live file alone undercounts ~4x). READ-ONLY: writes nothing, spawns nothing",
   },
   {
+    name: "receipt",
+    usage:
+      "rmd receipt <pr> [--repo <name>]   # W1-T71 (ratifies P17): print a deterministic in-toto-style run receipt assembled purely from ledger ground truth (src/lib/receipt.ts's buildReceipt) for <pr>'s task — resolves the task id from the PR body's Remudero-Task trailer (same extractor `rmd review` uses), refusing rather than guessing when none resolves. Every field with no ledger source for this run prints null with a named reason, never a fabricated value. Sigstore signing + the published schema doc are DEFERRED v2 rungs, not this command's job. READ-ONLY: writes no ledger line, posts nothing.",
+  },
+  {
     name: "check-proof",
     usage:
       "rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). --base <ref> (W1-T912, OPTIONAL — omitting it leaves every line and exit code above byte-identical) re-runs the SAME proof against <ref> and prints a `base:`/`discrimination:` line: a proof that ALSO matches at <ref> discriminates nothing and reports `executed_stale`, the reviewer's OWN name for the exact downgrade it applies at review time (W1-T273/W1-T362) — so a local `verdict: pass` that would count for nothing in review is visible before a PR ever opens. Only `grep:` proofs get a base blob materialized (same scope the reviewer itself has); a `unit test:` proof reports NOT COMPARABLE. EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades), 5 executed_stale (--base only — passed on both trees, never read as fail). READ-ONLY: writes no cache, no ledger line, no state file",
@@ -21720,6 +21783,10 @@ export async function main(
   }
   if (cmd === "dep-review" && arg) {
     process.exit(await depReviewCommand(arg, rest.slice(1)));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await receiptCommand(arg, rest.slice(1))) cannot carry a DA hit without forking the process; receiptCommand's own logic — the unknown-arg refusal, the trailer resolution/refusal, and the buildReceipt print path — is unit-tested in test/receipt.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
+  if (cmd === "receipt" && arg) {
+    process.exit(await receiptCommand(arg, rest.slice(1)));
   }
   if (cmd === "lint-plan") {
     process.exit(await lintPlanCommand(rest));
