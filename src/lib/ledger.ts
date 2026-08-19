@@ -1236,9 +1236,17 @@ function datedStateBackupDir(backupsRoot: string, now: Date): string {
  * {@link STATE_BACKUP_PROPOSALS_REGISTER_RELPATH} and the staged copy does not — the two
  * files this task's own acceptance names by name. A verification failure is cleaned up (the
  * temp dir is removed) rather than left behind as an empty or partial archive.
+ *
+ * `opts.copy` overrides the staging step and exists for ONE reason: to make that verification
+ * falsifiable. `copyStateFiles` copies every entry it is given or throws, so against the real
+ * implementation the "the staged copy lost a file" arm is unreachable — and an unreachable
+ * check is indistinguishable from an absent one, which is the shape this task exists to
+ * refuse. Only that one test supplies it; every other caller, and every other test here, runs
+ * the default.
  */
-export function snapshotState(stateDir: string, backupsRoot: string, opts: { now?: () => Date } = {}): StateBackupSnapshot {
+export function snapshotState(stateDir: string, backupsRoot: string, opts: { now?: () => Date; copy?: (srcRoot: string, dstRoot: string, relPaths: readonly string[]) => void } = {}): StateBackupSnapshot {
   const now = opts.now ?? (() => new Date());
+  const copy = opts.copy ?? copyStateFiles;
   let tmpDir: string | undefined;
   try {
     if (!existsSync(stateDir)) {
@@ -1247,7 +1255,7 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: { now
     mkdirSync(backupsRoot, { recursive: true });
     tmpDir = mkdtempSync(join(backupsRoot, ".state-backup-tmp-"));
     const sourceEntries = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS);
-    copyStateFiles(stateDir, tmpDir, sourceEntries);
+    copy(stateDir, tmpDir, sourceEntries);
 
     const staged = listStateFiles(tmpDir);
     if (staged.length === 0) {
