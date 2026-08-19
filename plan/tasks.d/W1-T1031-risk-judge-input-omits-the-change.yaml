@@ -1,0 +1,158 @@
+- id: W1-T1031
+  title: "THE RISK JUDGE IS GIVEN A DESCRIPTION AND A FILE LIST AND NOTHING ELSE, SO A CHANGE THAT NAMES THE DEFECT IT REMOVES READS AS A CHANGE THAT INTRODUCES ONE — 10 escalations over 75 decisions, 9 merged anyway and none prevented anything, three of them today on implementations whose descriptions describe their own subject: give the prompt a bounded, REST-sourced view of the change it is judging"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    Measured on the AZURE ledger — the fleet's; the mini's dispatches stop 2026-08-13 — read per
+    form with a full-line dedupe. Per-form control: `run.start` 964 plain / 182 live / 0 `.gz` files.
+    Deduped corpus 102,598 rows. Every count is a query; the symbol names are the check.
+
+    (1) THIS IS ROUND 2 OF W1-T454, NOT A NEW DISCOVERY, AND THAT MATTERS FOR HOW IT IS READ.
+    W1-T454's own title is *"the risk judge blocks merges on a task TITLE and prints its guesses as
+    observations — it is never shown the diff"*. It split the work explicitly:
+      OPTION B — MAKE THE VERDICT HONEST ABOUT ITS EVIDENCE. **SHIPPED**, as #1740 on 2026-08-13
+        (`fix(lib): make the risk judge's escalation reasons say what they rest on`).
+        `evidenceQualifiedReason` (`src/lib/risk-judge.ts`) now prefixes every reason with
+        *"on the change's description/files alone, no diff was read"*, and the prompt itself carries
+        *"YOU ARE NOT SHOWN A DIFF (W1-T454). The description and files list below are everything you
+        get — no patch, no hunks, no code."*
+      OPTION A — GIVE IT EVIDENCE. **NOT SHIPPED.** W1-T454 named the bounded forms to weigh
+        (`git diff --numstat`, the ACTUAL changed-file list rather than the shard's declared one, the
+        PR body's summary) and said *"Measure the prompt size of each form against a real PR rather
+        than estimating."*
+    Its own design says *"A AND B ARE SEPARABLE AND B DOES NOT DEPEND ON A … Shipping B alone is a
+    complete, defensible outcome."* B was the complete outcome; **THIS TASK IS A, WITH THE EVIDENCE
+    B'S HONESTY MADE VISIBLE.** W1-T454 is CITED, NOT RE-FILED — and note it carries **no `status:`
+    field at any indent**, which is a separate shard-shape defect this task does not fix.
+
+    (2) THE JUDGE IS COMPLYING PERFECTLY. THE INPUT IS THE DEFECT. `buildRiskJudgePrompt`
+    (`src/lib/risk-judge.ts`) renders exactly four things: `input.change.description`,
+    `input.change.files` joined, `input.gatesState`, and `input.planContext` — and deliberately NOT
+    the static `risk:` field, which `RiskJudgeInput` has no slot for. The prompt then instructs the
+    model not to phrase reasons as though it read code. It does not. Every escalation reason carries
+    B's prefix verbatim. **NOTHING DOWNSTREAM ACTS ON THAT DECLARED LIMIT.**
+
+    (3) THE RATE, RE-TAKEN AND LARGER THAN THE LAST READING. 75 `risk_judge.decision` rows: 65 low,
+    **10 high, and all 10 escalated** — a 13% escalation rate. Of the 10, **9 merged anyway** by a
+    later human or run; the tenth escalated minutes before this measurement and is still in flight.
+    **NONE PREVENTED ANYTHING.** A prior reading found 7/7/0; the corpus now holds ten.
+
+    (4) TODAY ALONE HAS THREE, AND THEY SHARE ONE SHAPE.
+      #2206 — W1-T963, PR 2204, 12:51:17Z — flagged for a description stating three PRs merged with
+        empty diffs. W1-T963's SUBJECT IS THE EMPTY-DIFF GATE; it ships the gate that refuses them.
+      #2215 — W1-T975, PR 2212, 13:31:47Z — flagged for a description identifying a permanent bypass.
+        W1-T975 REMOVES that bypass by deferring the arm until the run commits to a verdict.
+      #2216 — W1-T1020, PR 2214, 13:35:21Z — flagged because *"The change description explicitly
+        identifies that the arm decision records the reason…"*. Same shape again.
+    **A CHANGE IS PENALISED FOR DESCRIBING ITS OWN SUBJECT.** The more precisely a shard names the
+    defect it removes, the more likely the judge is to read that description as the hazard.
+
+    (5) AND THE OBVIOUS SCOPE-BASED SHORTCUT WOULD NOT HAVE HELPED, MEASURED. The hypothesis worth
+    testing was that false positives cluster on plan shards, which `isPlanOnlyFilingPr` (5 refs in
+    `src/lib/status.ts`, 7 in `src/run-task.ts`) could skip. **REFUTED FOR TODAY'S THREE: every one
+    touches code** — PR 2204 `src`+`test`, PR 2212 `src`+`test`, PR 2214 `src`+`test`, read from each
+    PR's own file list. **THE SEVEN OLDER ESCALATIONS CANNOT BE CLASSIFIED AT ALL**: their
+    `risk_judge.escalated` rows carry no `pr_number` (the field appears only from 2026-08-19), so
+    their shape is UNKNOWN, not plan-only. Skipping plan-only filings is therefore not this defect's
+    remedy and is not proposed.
+
+    (6) THE DIFF IS REACHABLE BUT THE OBVIOUS SOURCE IS ON THE WRONG TRANSPORT. `fetchPrDiffFiles`
+    exists and resolves through a REAL DEFAULT — `const fetchDiffFiles = deps.fetchPrDiffFiles ??
+    fetchPrDiffFilesViaGh` (`src/run-task.ts`), so it works unsupplied. But
+    `fetchPrDiffFilesViaGh` calls `gh pr view --json files`, which is **GRAPHQL — the bucket that
+    exhausted three times today**. A judge that reaches for the diff over GraphQL would fail exactly
+    when the fleet is already degraded. The REST path for the same data is
+    `repos/{owner}/{repo}/pulls/{n}/files`, which this recon used for §5 without touching GraphQL.
+  design: |
+    (i) GIVE THE PROMPT A BOUNDED VIEW OF THE CHANGE, SOURCED OVER REST. The prompt already exists
+    and already has a reader — `decideAutoMergeArm` consumes the verdict — so this adds NO new
+    signal and NO new consumer. It widens one existing input. The bounded forms W1-T454 named are
+    the candidates: the ACTUAL changed-file list (not the shard's declared one), per-file added and
+    deleted counts, and optionally a capped excerpt. **AN IMPLEMENTER PICKS ONE AND SAYS WHY**;
+    reaching for the whole patch without measuring is what W1-T454 forbade.
+
+    (ii) THE TRANSPORT IS A CONSTRAINT, NOT A DETAIL. Whatever is passed must be sourced over REST.
+    `fetchPrDiffFilesViaGh`'s `gh pr view --json files` is GraphQL and is unavailable precisely when
+    the fleet is under pressure. If an implementer reuses `fetchPrDiffFiles`, the injectable seam
+    must be supplied with a REST reader rather than left on its default.
+
+    (iii) MEASURE THE COST; DO NOT ASSERT IT. The judge runs on the cheapest configured mount by
+    construction (`resolveRiskJudgeMount`), so prompt size lands on the weakest model.
+    **LATENCY IS NOT MEASURABLE FROM THE LEDGER TODAY**: zero `risk_judge.decision` rows carry any
+    duration field, so any per-call figure quoted from that step is unsupported. An implementer
+    measures prompt size and wall-clock against a real PR of each shape — a small shard, a large
+    implementation — before choosing the form, and records both. **A JUDGE THAT TIMES OUT ON LARGE
+    CHANGES IS WORSE THAN ONE THAT MISREADS SMALL ONES**, so the bound is the deliverable, not the
+    diff.
+
+    (iv) THE FALSIFIER MUST SEPARATE BOTH CASES IN ONE RUN, AND ONE HALF ALONE IS NOT EVIDENCE.
+    A change whose bounded view is benign while its description names a hazard must NOT escalate;
+    a change whose bounded view is genuinely dangerous must STILL escalate. **A TEST PROVING ONLY
+    THE FIRST PASSES EQUALLY WELL ON A JUDGE THAT HAS STOPPED JUDGING**, which is a strictly worse
+    outcome than today's false positives.
+
+    (v) THE JUDGE'S AUTHORITY DOES NOT MOVE. Both of today's verdicts were CORRECT GIVEN WHAT THEY
+    SAW — the failure is the input, never the verdict. What must not change: `decideAutoMergeArm`
+    still refuses to arm on a high-risk verdict, judge-unavailable still fails closed to escalate,
+    `disarmAutoMerge` still runs before the escalation, and `task.risk` stays excluded by
+    construction. **A FIX THAT MADE THE JUDGE QUIETER BY LETTING CHANGES THROUGH UNASSESSED IS
+    REFUSED HERE IN ADVANCE.**
+
+    (vi) SCOPE IS THE INPUT, NOT THE COVERAGE. Whether the review, sweep, triage and operator lanes
+    should reach the judge at all is DEFERRED BY OPERATOR RULING until W1-T1027 builds. **AND THESE
+    ESCALATIONS ARE THE ARGUMENT FOR FIXING THE INPUT FIRST: widening coverage over a prompt that
+    omits its own subject would multiply exactly this.** Named and stopped.
+
+    (vii) OUT OF SCOPE, NAMED. Skipping plan-only filings (§5 refutes it as this defect's remedy).
+    W1-T454's missing `status:` field. The judge's mount choice. The escalation's own delivery path.
+    And this task does not touch `evidenceQualifiedReason` — B's honesty prefix stays exactly as it
+    is, because a bounded view is still not the whole patch and the reason must keep saying so.
+  acceptance:
+    - claim: "the prompt carries a bounded view of the actual change rather than the declared file list alone"
+      proof: "unit test: W1-T1031: the prompt carries a bounded view of the actual change"
+    - claim: "a benign change whose description names a hazard is not escalated"
+      proof: "unit test: W1-T1031: a benign change whose description names a hazard is not escalated"
+    - claim: "a genuinely dangerous change still escalates so the judge has not stopped judging"
+      proof: "unit test: W1-T1031: a genuinely dangerous change still escalates"
+    - claim: "the change view is sourced over rest so it survives a graphql outage"
+      proof: "unit test: W1-T1031: the change view is sourced over rest not graphql"
+    - claim: "an unavailable change view still fails closed to escalate rather than passing unassessed"
+      proof: "unit test: W1-T1031: an unavailable change view still fails closed to escalate"
+    - claim: "the call site supplies the change view so the prompt cannot ship unreached"
+      proof: "grep: changeView( in src/run-task.ts"
+  risk: high
+  origin: "oper#risk-judge-input-2026-08-19"
+  plan_refs: ["W1-T454", "W1-T1027", "W1-T125", "W1-T186"]
+  files: [src/lib/risk-judge.ts, src/run-task.ts, test/risk-judge-change-view.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — the declared paths reach
+    two concerns (risk-judge, run-task) and `sizingViolation` refuses that at medium. Decomposition
+    is declined with a reason: a prompt widened without a caller supplying the new input is the
+    ships-unwired shape this fleet has measured repeatedly, so the render and its supply are one
+    change.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT. `buildRiskJudgePrompt` reads 3 in
+    `src/lib/risk-judge.ts` and nowhere else — that is where the four inputs are rendered.
+    `runRiskJudge` reads 6 there, 2 in `src/run-task.ts` and 2 in `src/lib/sweep.ts`; the two
+    `sweep.ts` references are COMMENTS about the emitted fields, not calls, so **`src/lib/sweep.ts`
+    IS NOT DECLARED**. `src/run-task.ts` holds the judge's only real call site and is declared:
+    DECISIONS.md's 2026-08-18 W1-T471 ruling accepts one effective lane through that file, and
+    **THAT SERIALIZATION COST IS ACCEPTED IN WRITING** rather than dodged by declaring a narrower
+    path that cannot supply the input.
+
+    THIS SHARD'S OWN PROSE IS THE SHAPE THAT TRIPS THE JUDGE, AND THAT IS DELIBERATE. It describes a
+    judge misreading descriptions, which is precisely the pattern §4 shows being penalised. A
+    plan-only filing is not itself judged — the judge runs inside a task's own run, after that
+    task's PR exists — but the IMPLEMENTATION of this task will be, on a description that names this
+    hazard. **IF IT ESCALATES ON ITS OWN DESCRIPTION, THAT IS THE ELEVENTH INSTANCE AND SHOULD BE
+    RECORDED AS ONE**, not worked around by softening the text.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive with a per-form read of `state/ledger.*.ndjson` and
+    `state/ledger.ndjson` on the Azure host, full-line deduped, and `git grep -woF <symbol> -- src/`.
+    They move; the symbol names are the check.
