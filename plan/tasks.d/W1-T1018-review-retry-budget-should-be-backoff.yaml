@@ -1,0 +1,130 @@
+- id: W1-T1018
+  title: "the review-orphan cap counts DISTINCT PUSHED HEADS rather than failed re-reviews, so merging a repaired base — the remedy the fleet itself prescribes — spends the same budget as a failing review, and a PR whose checks are green and whose diff is sound is walled off from re-review permanently"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: |
+    OPERATOR RULING, 2026-08-19: "I don't really like the idea of a review budget. We just need back
+    off." This record carries that ruling. Everything below was re-derived at origin/main da37269.
+
+    (1) THE COUNTER DOES NOT COUNT WHAT ITS NAME SAYS. `priorReviewOrphans` (src/lib/sweep.ts) is
+    documented as "how many DISTINCT prior heads carry a posted review" and its producer in
+    src/run-task.ts derives exactly that — a count of distinct prior head shas with a `review.posted`
+    line. It never asks whether the push was a RETRY. Any push landing after a verdict exists
+    increments it, and at `reviewOrphanCap: 2` the cap row in `DISPOSITION_RULES` — ordered STRICTLY
+    BEFORE the post-review row — escalates instead of re-reviewing, permanently.
+
+    (2) SO THE BUDGET IS SPENT BY HOUSEKEEPING, MEASURED ON A LIVE PR. PR #2159's four heads, with
+    the PR's OWN three-dot diff beside each:
+      941a0437  merge main into the run branch          own diff: 2 files +187/-8
+      14a51e73  test(status): prove reset…              own diff: 2 files +212/-8   <- cap reached
+      694d78cb  Merge branch 'main' …                   own diff: 2 files +212/-8
+      f6def0f1  Merge remote-tracking 'origin/main' …   own diff: 2 files +212/-8
+    The last two are BASE REPAIRS and the PR's own diff is byte-identical across them. Merging a
+    repaired base is what this system explicitly instructs on a base-recovered notice, and it is
+    charged to a review-retry budget. Had the first two heads been clean, those two base merges alone
+    would have exhausted the cap.
+
+    (3) AND THE CONDITION IT FIRES ON WAS HEALING, NOT WEDGED. Both of #2159's actual review failures
+    were the SAME repairable shape — `body contradicts its own diff: claimed "No code"` — which
+    `deriveChangesetClaimUpdate` (src/run-task.ts) exists to fix mechanically. At the moment the cap
+    stranded it, #2159 read 23 of 23 checks green, zero failing, and 143 of 143 on its own suite.
+
+    (4) THIS IS THE FOURTH INSTANCE OF A NAMED RECURRING DEFECT. CLAUDE.md's investigation section
+    already records "a bound that fires on a HEALTHY condition is this repo's recurring defect" with
+    three prior instances (ci-gate's wait cap, a deploy ceiling, a check-wait bound where 21 of 21
+    booked PRs later merged). The cap's own producer doc concedes the direction: it states the
+    false-positive cost is "a premature needs-human issue, NOT a paid re-review".
+
+    (5) RAISING THE CAP IS NOT THE FIX AND IS RULED OUT. A larger number moves the wall; it does not
+    change what the counter measures. The operator has ruled this out explicitly on a prior brief.
+  design: |
+    THE SHAPE: keep the escalation, drop the cessation, and stop charging housekeeping to the budget.
+    Two independent changes, both required, neither sufficient alone.
+
+    (i) BACK OFF ON ELAPSED TIME, NEVER ON ATTEMPT COUNT. A delay keyed to the number of attempts is
+    a budget with pauses — it still exhausts monotonically and still ends in permanent silence. Keyed
+    to time since the last attempt, the lane recovers on its own, which matters because these
+    conditions demonstrably heal: #2159's blocking cause was a broken base that was later repaired.
+
+    (ii) ESCALATE FOR VISIBILITY, AND KEEP RE-REVIEWING. The cap's one genuine virtue is that it asks
+    a human for help; its defect is that it stops trying at the same instant. These separate. The
+    escalation must still fire at a threshold so a person learns the PR is struggling, and the review
+    lane must still re-run afterwards on the backoff schedule. "Escalate AND keep going", never
+    "escalate INSTEAD of going".
+
+    (iii) RESET ON A REAL SIGNAL CHANGE, or the backoff decays into the cap it replaces. At minimum:
+    the PR's own diff changing, checks flipping to green, or the body being edited. A schedule with
+    no reset is a slow wall.
+
+    (iv) AND DO NOT COUNT AN ORPHAN WHEN THE PUSH CHANGED NOTHING REVIEWABLE. Rationale (2) is
+    mechanically checkable: compare the PR's own three-dot diff across the two heads, and if it is
+    identical the push was housekeeping, not a retry. This alone would have spared #2159 both base
+    merges. It does not help the genuine repeated-failure case, which is what (i) and (ii) are for,
+    so it is additional to them rather than a substitute.
+
+    (v) A POSITIVE TEST ALONE PROVES NOTHING HERE. An implementation that never counts an orphan
+    satisfies "housekeeping does not spend the budget" perfectly, and one that never escalates
+    satisfies "the lane keeps retrying". Both directions must be asserted in the SAME suite
+    invocation: a diff-changing push still counts, and the escalation still fires.
+
+    (vi) MUTATION CHECK, FILE-SHA BRACKETED. Read the sha256 of the edited file, remove the backoff
+    reset, read it again and require it to DIFFER, run the suite and require the re-review test to
+    FAIL, restore, and require the sha to return to the original.
+
+    (vii) OUT OF SCOPE. Raising `reviewOrphanCap` — ruled out in rationale (5). The escalation TIER
+    question, which W1-T983 owns. And the upstream cause of the failures that spent #2159's budget,
+    which W1-T1016 owns: this record is about what happens after a review fails, never about why it
+    failed.
+  acceptance:
+    - claim: "a push that leaves the PR's own diff unchanged does not spend the retry budget"
+      proof: "unit test: W1-T1018: a push that changes nothing reviewable does not count an orphan"
+    - claim: "a push that does change the PR's own diff still counts, asserted in the same run"
+      proof: "unit test: W1-T1018: a diff-changing push still counts an orphan"
+    - claim: "a PR past the threshold is re-reviewed after the interval rather than silenced"
+      proof: "unit test: W1-T1018: a PR past the threshold is re-reviewed after the interval"
+    - claim: "the escalation still fires at the threshold, so a human still learns it is struggling"
+      proof: "unit test: W1-T1018: the escalation still fires at the threshold"
+    - claim: "removing the backoff reset fails the re-review test, with the file sha read either side"
+      proof: "unit test: W1-T1018: removing the backoff reset fails the re-review test"
+  risk: high
+  origin: "oper#review-budget-should-be-backoff-2026-08-19"
+  plan_refs: ["W1-T225", "W1-T983", "W1-T1016"]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/review-orphan-wiring.test.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only `risk === "high"` and fires at two or more concerns; this
+    record names three (sweep, run-task, the review-orphan wiring suite). The blast radius is real
+    but bounded in a specific direction worth stating: getting this wrong toward "retry forever,
+    never escalate" is the dangerous side, because it is silent, which is why design item (ii) makes
+    the escalation a criterion in its own right rather than a side effect.
+
+    verify: auto IS DELIBERATE, AND THE JUDGEMENT IS ALREADY MADE. The shape question — budget versus
+    backoff — was decided by the operator and is recorded in rationale (0) and design (i)-(ii). What
+    remains is a schedule, a reset set, and a diff-comparison, all machine-checkable, which is why
+    this does not need the human band a policy question would.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT da37269, NOT GUESSED.
+    `priorReviewOrphans`: src/lib/sweep.ts=7, src/run-task.ts=3, test/sweep.test.ts=6.
+    `reviewOrphanedByPush`: src/lib/sweep.ts=10, src/run-task.ts=1, test/sweep.test.ts=5.
+    `reviewOrphanCap`: src/lib/sweep.ts=8, src/run-task.ts=1, test/sweep.test.ts=3.
+    Control: `routeSpecialists` reads 0 in both source modules, so the counts discriminate.
+    test/review-orphan-wiring.test.ts is the dedicated suite for both fields and is declared with
+    test/sweep.test.ts, which carries the disposition-row cases.
+
+    src/run-task.ts IS DECLARED AND THE COST IS ACCEPTED IN WRITING. W1-T471 records that declaring
+    the monolith serialises every task naming it. It is declared anyway because the PRODUCER that
+    counts distinct prior heads lives there, and design item (iv) changes precisely what that
+    producer counts — a `files:` list omitting it could not express the change.
+
+    THE ID RESTS ON A FOUR-SURFACE SWEEP. W1-T1018 read 0 against shard filenames (the existence
+    test, not a content grep), 0 against id lines in the plan tree, 0 against refs/rmd-id/*, and 0
+    across every open PR's file list with coverage asserted at 3 captured of 3 enumerated. Controls
+    read 1 in every case — W1-T1017 by filename and by id line, W1-T1016 on the open-PR surface, and
+    the ref namespace returned 109 refs. Max on main is 1017; refs also hold W1-T100000/W1-T1000000/
+    W1-T1000001, which are probe artifacts rather than filed ids.
