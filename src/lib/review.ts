@@ -3526,6 +3526,18 @@ export interface PriorReviewVerdict {
    *  fail-open DEFAULT rather than a recorded fact. Surfaced in the arm decision's own reason
    *  string — no new ledger step, so a polling lane cannot amplify it into per-tick noise. */
   cappedFieldAbsent?: true;
+  /**
+   * W1-T1020: recorded `partially_executed`, read back the same way `capped`/`planOnly` already
+   * are — so {@link decideAutoMergeArm} judges the SAME partial-execution fact the review
+   * actually posted, instead of the always-false default it silently took before this field was
+   * threaded through. Written unconditionally by {@link reviewLedgerLegibilityFields} (never
+   * absent on a line that carries `partially_executed` at all), so ABSENT MEANS NOT PARTIAL —
+   * the same fail-open default `capped` uses for lines older than the field. OPTIONAL (not a
+   * bare `boolean` like `capped`/`planOnly`) purely so every existing `PriorReviewVerdict`
+   * fixture across the suite that predates this field keeps compiling byte-for-byte; every
+   * caller must still treat a missing value as `false`, never as "unknown, so skip the check".
+   */
+  partiallyExecuted?: boolean;
 }
 
 /** Result of applying the W1-T178 verdict-stability rule to a freshly computed verdict. */
@@ -3563,6 +3575,12 @@ export function priorReviewVerdictFromLedger(
       capped: cappedRecorded ?? false,
       planOnly: typeof line.plan_only === "boolean" ? line.plan_only : false,
       ...(cappedRecorded === undefined ? { cappedFieldAbsent: true as const } : {}),
+      // W1-T1020: same "absent means false" rule as `capped`/`plan_only`, but — like
+      // `cappedFieldAbsent` above — spread in ONLY when the line actually carries the key, so a
+      // line older than W1-T305 (or any fixture built before this field existed) reconstructs a
+      // byte-identical object rather than gaining a new `partiallyExecuted: false` key nobody
+      // asked for.
+      ...(typeof line.partially_executed === "boolean" ? { partiallyExecuted: line.partially_executed } : {}),
     };
   }
   return prior;
@@ -3738,9 +3756,23 @@ export interface ArmDecision {
  *   is what makes "refuses without an override; permits with one" a single
  *   unit fixture (acceptance criterion 2), independent of ledger/CLI
  *   plumbing.
+ * - W1-T1020: an UNCAPPED verdict that only observed SOME of its executable
+ *   criteria (`partiallyExecuted`) still arms — legibility never becomes a
+ *   new refusal — but its reason NAMES the partial shape instead of
+ *   asserting a full PASS. The fraction is named only when the caller's
+ *   verdict actually carries the counts (`executedProofCount`/
+ *   `executableProofCount`); a caller that only has the recorded BOOLEAN
+ *   (the ledger-reconstruction path, {@link priorReviewVerdictFromLedger})
+ *   still gets a reason that says "partial", just without the numerator. A
+ *   verdict with no `partiallyExecuted` field at all (an older caller that
+ *   never threaded it through) is indistinguishable from "not partial" and
+ *   keeps today's unqualified "verdict is a full PASS" — absent means
+ *   unknown, and unknown must never regress to a WORSE (refusing) outcome,
+ *   matching every other absent-field default in this file.
  */
 export function decideAutoMergeArm(
-  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly"> &
+    Partial<Pick<ReviewVerdict, "partiallyExecuted" | "executedProofCount" | "executableProofCount">>,
   tddStrict: boolean,
   override?: CappedOverride,
   // W1-T947 (DECISIONS.md's 2026-08-16 ruling, W1-T919: the fleet gates on IRREVERSIBILITY, not
@@ -3765,6 +3797,17 @@ export function decideAutoMergeArm(
     return { arm: false, reason: "remudero-review is not success" };
   }
   if (!verdict.capped) {
+    if (verdict.partiallyExecuted) {
+      const hasCounts = typeof verdict.executedProofCount === "number" && typeof verdict.executableProofCount === "number";
+      return {
+        arm: true,
+        reason: hasCounts
+          ? `verdict is a PARTIAL PASS (${verdict.executedProofCount}/${verdict.executableProofCount} executable ` +
+            "criteria executed) — arms unchanged; legibility never becomes a refusal (W1-T1020)"
+          : "verdict is a PARTIAL PASS (some, not all, executable criteria executed) — arms unchanged; " +
+            "legibility never becomes a refusal (W1-T1020)",
+      };
+    }
     return { arm: true, reason: "verdict is a full PASS" };
   }
   if (verdict.planOnly) {
@@ -3800,7 +3843,8 @@ export function decideAutoMergeArm(
  * is the real caller.
  */
 export function resolveAutoMergeArm(
-  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly"> &
+    Partial<Pick<ReviewVerdict, "partiallyExecuted" | "executedProofCount" | "executableProofCount">>,
   tddStrict: boolean,
   override: CappedOverride | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -4047,7 +4091,7 @@ export function decideArmFromLedgerVerdict(
   // a defect this repo has already paid for twice; delegating deletes the copy rather than
   // teaching it the same lesson again.
   const decision = decideAutoMergeArm(
-    { state: prior.state, capped: prior.capped, planOnly: prior.planOnly },
+    { state: prior.state, capped: prior.capped, planOnly: prior.planOnly, partiallyExecuted: prior.partiallyExecuted },
     false,
     override,
   );
