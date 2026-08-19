@@ -625,7 +625,7 @@ import {
   type AttemptOutcome,
   type FailureSignal,
 } from "./lib/classify.js";
-import { shouldRecordDecision } from "./lib/risk-score.js";
+import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "./lib/risk-score.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
 import {
   clearKick,
@@ -1443,7 +1443,11 @@ export type ArmOutcome =
   | "armed"
   | "direct-merged"
   | "direct-merge-failed"
-  | "arm-error-ignored";
+  | "arm-error-ignored"
+  // W1-T947: {@link armAutoMergeAtOpen} refused because the diff is classified IRREVERSIBLE
+  // (W1-T919) — the ONE outcome this file's arm sites can return that never went through
+  // `attemptArm` at all (every other non-arming outcome is a real gh/ledger failure or absence).
+  | "irreversible-refused";
 
 export function armAutoMerge(
   prUrl: string,
@@ -1516,6 +1520,79 @@ function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect"
 }
 
 /**
+ * W1-T947: bare unified-diff walk — JUST ENOUGH to build risk-score.ts's own {@link
+ * DiffFileChange} shape (a path plus its added/removed line text) for {@link
+ * reversibilityFactor}. Deliberately a SECOND, narrower walk rather than exporting
+ * lib/review.ts's private `walkDiff` for this one caller — that function's plan-only /
+ * instrument-entanglement machinery is not needed here, and this file already keeps its own
+ * copy of the same "diff paths only" shape a few lines above (the W1-T142 scope guard's
+ * `diffFiles`), for the identical reason: each consumer reads git/the diff on its own terms.
+ */
+function diffFileChangesFromPatch(diff: string): DiffFileChange[] {
+  const byFile = new Map<string, string[]>();
+  let file = "";
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      const m = raw.match(/\sb\/(\S+)\s*$/);
+      file = m ? m[1] : "";
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      // A deleted file's `+++` line is `/dev/null` — keep the path the `diff --git` header
+      // already set rather than clobbering it (mirrors lib/review.ts's own walkDiff, W1-T389).
+      const plus = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      if (plus !== "/dev/null") file = plus;
+      continue;
+    }
+    if (raw.startsWith("--- ") || raw.startsWith("@@") || !file) continue;
+    if (raw.startsWith("+") || raw.startsWith("-")) {
+      const lines = byFile.get(file) ?? [];
+      lines.push(raw.slice(1));
+      byFile.set(file, lines);
+    } else if (!byFile.has(file)) {
+      byFile.set(file, []);
+    }
+  }
+  return [...byFile.entries()].map(([path, lines]) => ({ path, content: lines.join("\n") }));
+}
+
+/**
+ * W1-T947: whether the diff `diffText` unifies to is classified IRREVERSIBLE, per
+ * risk-score.ts's OWN diff-derived `reversibilityFactor` (§4B) — this task ROUTES that
+ * existing signal to the arm path rather than inventing a second classifier (its only
+ * consumer before this task was the specialist panel). "critical" is the ONLY band this
+ * treats as irreversible: "high" (a migration-shaped path whose content could not be read,
+ * or a migration with no destructive marker) still arms — the W1-T919 ruling gates on
+ * IRREVERSIBILITY, not mere migration-adjacency. `metadata` is deliberately `{}`: the static
+ * `risk:` field is NEVER routed through here (a standing ruling this task preserves, not
+ * reverses — see this file's `rationale:`), and no task-declared `irreversible`/`novel` flag
+ * exists yet for a diff-only caller to read.
+ */
+export function diffIsClassifiedIrreversible(diffText: string): boolean {
+  return reversibilityFactor({ files: diffFileChangesFromPatch(diffText) }, {}).band === "critical";
+}
+
+/**
+ * W1-T947: the git-plumbing wrapper `diffIsClassifiedIrreversible` above needs to reach a
+ * real diff from a real worktree — split out so the classifier itself stays a pure,
+ * string-in/boolean-out unit fixture. An unreadable diff says nothing about the work
+ * (mirrors the W1-T434 scope-guard reasoning a few hundred lines up in this same file) and is
+ * never itself grounds for refusing to arm — it degrades to `false`, the pre-existing
+ * behavior every caller had before this task.
+ */
+function irreversibleSignalForWorktree(worktreePath: string): boolean {
+  try {
+    const patch = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD"], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return diffIsClassifiedIrreversible(patch);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * W1-T125: arm auto-merge the INSTANT a run's own PR opens — deliberately
  * UNGATED by any ledger verdict, because none can possibly exist yet (review
  * hasn't run at PR-open time). This is safe ONLY because GitHub's own
@@ -1533,11 +1610,29 @@ function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect"
  * refusal branch closes that gap by calling {@link disarmAutoMerge} BEFORE
  * escalating, withdrawing this early arm so the capped verdict's `success`
  * status can no longer trigger a stray auto-merge.
+ *
+ * W1-T947: the OTHER gap this doc used to leave open — arming "the INSTANT this run's PR
+ * exists" fired before ANY classification of the diff could exist either, so a diff classified
+ * IRREVERSIBLE (DECISIONS.md's 2026-08-16 ruling, W1-T919: the fleet gates on irreversibility,
+ * not outwardness) armed exactly like an ordinary one. `irreversible` is the caller's own
+ * diff-derived verdict (never re-derived here — this function stays a pure dispatch on the
+ * flag it is handed); when true, this refuses BEFORE `attemptArm` runs, so GitHub's auto-merge
+ * is never registered for a change that cannot cleanly be taken back. Defaulted `false` so
+ * every call site that predates this task (and the sweep/ledger re-arm paths this task does not
+ * touch — see `decideArmFromLedgerVerdict`'s own doc) keeps today's ungated-at-open behavior.
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say"> = realArmDeps(),
+  irreversible = false,
 ): ArmOutcome {
+  if (irreversible) {
+    deps.say(
+      `automerge.irreversible_refused (W1-T919/W1-T947): diff classified irreversible — refusing to ` +
+        `arm at open; an operator must review and merge this manually: ${prUrl}`,
+    );
+    return "irreversible-refused";
+  }
   return attemptArm(prUrl, deps);
 }
 
@@ -1780,6 +1875,8 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
       return "GitHub refused --auto as already-clean and the direct-merge fallback then failed";
     case "arm-error-ignored":
       return "`gh pr merge --auto` failed for a reason that is not the clean-status case — treated as transient and left for the next sweep pass";
+    case "irreversible-refused":
+      return "the diff was classified IRREVERSIBLE (W1-T919/W1-T947) — auto-merge refuses regardless of verdict; an operator must arm this manually";
     case "skipped":
       return "the semantic gate refused before any arm was attempted";
   }
@@ -6706,8 +6803,11 @@ async function runTask(
     // this leaves (a CAPPED verdict that still posts remudero-review=success)
     // is closed below by disarmAutoMerge, right where the capped-refusal
     // decision is made.
-    const armAtOpenOutcome = armAutoMergeAtOpen(prUrl);
-    log("automerge.armed", { at: "open", outcome: armAtOpenOutcome });
+    //
+    // W1-T947 (W1-T919 ruling): computed ONCE, reused below at the post-review decision gate too.
+    const irreversible = irreversibleSignalForWorktree(worktreePath);
+    const armAtOpenOutcome = armAutoMergeAtOpen(prUrl, undefined, irreversible);
+    log("automerge.armed", { at: "open", outcome: armAtOpenOutcome, irreversible });
 
     // The implement worker's own optional '## Follow-ups' section (§2 OUTPUT CONTRACT,
     // outputContractLines in lib/compaction.ts).
@@ -6893,6 +6993,16 @@ async function runTask(
     // yet consult `capped`/an override — a PR this refuses stays OPEN and
     // UNARMED, but a later sweep poll could still arm it via that separate
     // path. Left for a follow-up task rather than widened here unreviewed.
+    //
+    // A SECOND, SAME-SHAPED RESIDUAL GAP (W1-T947, explicitly out of THIS task's stated file
+    // scope — `plan/tasks.d/W1-T947-*.yaml` `files:` names only review.ts, run-task.ts and this
+    // test file): `decideArmFromLedgerVerdict`/`armAutoMerge` (lib/review.ts, lib/run-task.ts) —
+    // the SWEEP's and `rmd review`'s independent re-arm path, reached via
+    // `withdrawArmIfVerdictRefuses`/`armIfVerdictPermits` — call the SAME `decideAutoMergeArm`
+    // this task raised, but neither passes it an `irreversible` signal (no live worktree diff
+    // is available at ledger-recovery time the way it is here). A PR this run's two gates
+    // correctly refuse could still be armed later by a sweep pass or a manual `rmd review`.
+    // Named here, not silently absorbed, per this task's own design clause (v).
     const tddStrict = isTddStrict(task.principles);
     // W1-T948: the specialist panel's testing trigger (specialist-panel.ts)
     // reads the SAME `principles` this line just did, through the panel's one
@@ -6913,7 +7023,11 @@ async function runTask(
     const cappedOverride = review.capped
       ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId, review.headSha)
       : undefined;
-    const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra));
+    // W1-T947: `irreversible` reuses the SAME diff-derived verdict computed above at PR-open
+    // (never re-derived — a re-derive here could disagree with the at-open gate on the
+    // identical diff if either read failed differently) so this decision-time gate honours the
+    // W1-T919 ruling exactly like the at-open one just did.
+    const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra), irreversible);
     if (!armDecision.arm) {
       // W1-T125: withdraw the early arm-at-open BEFORE escalating — GitHub already
       // (or is about to) see ci=success + remudero-review=success (capped verdicts
@@ -6921,45 +7035,67 @@ async function runTask(
       // ALREADY-armed PR; without this it could auto-merge despite the capped
       // refusal below.
       disarmAutoMerge(prUrl);
-      log("automerge.disarmed", { reason: "capped verdict refused auto-merge" });
+      // W1-T947: CAPPED and IRREVERSIBLE are different facts about the PR — the reason below,
+      // and the escalation it feeds, must name the one that actually fired (design clause iii).
+      const reason = irreversible
+        ? "diff classified irreversible (W1-T919) — auto-merge refused unattended"
+        : "capped verdict refused auto-merge";
+      log("automerge.disarmed", { reason });
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const issueUrl = escalate(
-        {
-          class: "BLOCKED",
-          taskId,
-          runId,
-          summary: `CAPPED verdict — auto-merge refused unattended — ${prUrl}`,
-          detail:
-            `remudero-review posted CAPPED (0 of ${review.criteria.length} proofs executed). ` +
-            `${armDecision.reason}\n\nAuto-merge was NOT armed.`,
-          options: [
-            {
-              label: "add-proof",
+        irreversible
+          ? {
+              class: "BLOCKED",
+              taskId,
+              runId,
+              summary: `diff classified IRREVERSIBLE — auto-merge refused unattended (W1-T919) — ${prUrl}`,
+              detail: `${armDecision.reason}\n\nAuto-merge was NOT armed.`,
+              options: [
+                {
+                  label: "merge-manually",
+                  detail:
+                    "read the diff and, once satisfied it is correct and intended, merge it by hand — " +
+                    "or close/amend it if the irreversible effect should not ship as-is.",
+                },
+              ],
+              recommendation: "merge-manually",
+            }
+          : {
+              class: "BLOCKED",
+              taskId,
+              runId,
+              summary: `CAPPED verdict — auto-merge refused unattended — ${prUrl}`,
               detail:
-                "push executable proof (a whitelisted `grep:`/`unit test:` dialect proof) so the review " +
-                "executes and certifies the diff for real, then re-drain.",
+                `remudero-review posted CAPPED (0 of ${review.criteria.length} proofs executed). ` +
+                `${armDecision.reason}\n\nAuto-merge was NOT armed.`,
+              options: [
+                {
+                  label: "add-proof",
+                  detail:
+                    "push executable proof (a whitelisted `grep:`/`unit test:` dialect proof) so the review " +
+                    "executes and certifies the diff for real, then re-drain.",
+                },
+                {
+                  label: "override",
+                  detail:
+                    `rmd review ${prNum} --override-capped-by <name> --override-capped-reason <text>, then ` +
+                    `re-drain to arm.`,
+                },
+              ],
+              recommendation: "add-proof",
             },
-            {
-              label: "override",
-              detail:
-                `rmd review ${prNum} --override-capped-by <name> --override-capped-reason <text>, then ` +
-                `re-drain to arm.`,
-            },
-          ],
-          recommendation: "add-proof",
-        },
         { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
       );
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
-        reason: "capped verdict refused auto-merge",
+        reason,
         issue_url: issueUrl,
         cost_usd: costUsd,
         billing_mode: billingMode(impl.childEnvKeys),
         account_label: impl.accountLabel,
       });
-      say(`verdict: blocked — CAPPED verdict, escalated: ${issueUrl}`);
+      say(`verdict: blocked — ${irreversible ? "diff classified irreversible" : "CAPPED verdict"}, escalated: ${issueUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
     }
 

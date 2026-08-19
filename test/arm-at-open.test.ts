@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   armAutoMerge,
   armAutoMergeAtOpen,
+  diffIsClassifiedIrreversible,
   disarmAutoMerge,
   realArmDeps,
   runTask,
@@ -158,6 +159,99 @@ test("realArmDeps: disableAuto (W1-T125) reaches gh pr merge <url> --disable-aut
     process.env.PATH = oldPath;
     rmSync(bin, { recursive: true, force: true });
   }
+});
+
+// ── (A2) W1-T947 — THE ARM-PATH IRREVERSIBILITY GATE ────────────────────────────────────
+//
+// DECISIONS.md's 2026-08-16 ruling (W1-T919): the fleet gates on IRREVERSIBILITY, not
+// outwardness. Neither arm site consulted any such signal before this task — `armAutoMergeAtOpen`
+// arms unconditionally the instant a PR exists, and `decideAutoMergeArm` branched only on
+// `state`/`capped`/`planOnly`. Both now accept an `irreversible` flag; both refuse when it is
+// true, and BOTH must still arm an ordinary diff (the positive control design clause (iv) calls
+// "the point" — a gate that refused everything would pass the first test and fail this one).
+
+test("unit test: an irreversible diff refuses to arm and names irreversibility as the reason", () => {
+  // A FULL PASS verdict — deliberately not capped, not a state failure — isolates the NEW gate:
+  // if this refuses, it can only be the irreversibility check, never one of the pre-existing ones.
+  const verdict = { state: "success" as const, capped: false, planOnly: false };
+  const decision = decideAutoMergeArm(verdict, false, undefined, true);
+
+  assert.equal(decision.arm, false, "FALSIFIER: an irreversible diff must never arm, whatever the verdict says");
+  assert.match(
+    decision.reason.toLowerCase(),
+    /irreversib/,
+    "the refusal must NAME irreversibility as the reason — a human reading the PR must see WHY",
+  );
+});
+
+test("unit test: an ordinary diff still arms so the gate is not a blanket refusal", () => {
+  // THE POSITIVE CONTROL (design clause (iv)): without this, disabling auto-merge outright would
+  // satisfy the refusal test above. `irreversible` is explicitly false here, and also omitted
+  // entirely below, to prove BOTH the explicit-false and the default-omitted shapes still arm.
+  const verdict = { state: "success" as const, capped: false, planOnly: false };
+  assert.equal(decideAutoMergeArm(verdict, false, undefined, false).arm, true, "explicit false still arms");
+  assert.equal(decideAutoMergeArm(verdict, false).arm, true, "omitted (undefined) still arms — every pre-W1-T947 call site is unaffected");
+});
+
+test("unit test: the at open arm refuses an irreversible diff before any verdict exists", () => {
+  // Mirrors the "no ledgerLines/headSha dep at all" shape of the happy-path test above — proving
+  // this refusal, too, needs no prior verdict: `irreversible` is a diff-derived fact, computed
+  // before review ever runs, which is exactly why `armAutoMergeAtOpen` (armed unconditionally,
+  // "before any decision is reached") is one of the two sites this task closes.
+  const armed: string[] = [];
+  const merged: string[] = [];
+  const said: string[] = [];
+  const outcome = armAutoMergeAtOpen(
+    "url/irreversible-1",
+    {
+      armAuto: (u) => { armed.push(u); },
+      mergeDirect: (u) => { merged.push(u); },
+      say: (m) => { said.push(m); },
+    },
+    true,
+  );
+
+  assert.equal(outcome, "irreversible-refused");
+  assert.deepEqual(armed, [], "FALSIFIER: gh pr merge --auto must never be reached for an irreversible diff");
+  assert.deepEqual(merged, [], "nor the clean-status direct-merge fallback, which completes the merge outright");
+  assert.ok(
+    said.some((m) => m.toLowerCase().includes("irreversib")),
+    "the refusal is legible on the console, not silent",
+  );
+
+  // AND THE UNCHANGED HAPPY PATH, right beside its refusal — the same positive-control shape as
+  // the test above, at the SAME call site this task modified.
+  let armedUrl: string | undefined;
+  const stillArms = armAutoMergeAtOpen("url/irreversible-2", {
+    armAuto: (u) => { armedUrl = u; },
+    mergeDirect: () => {},
+    say: () => {},
+  });
+  assert.equal(stillArms, "armed");
+  assert.equal(armedUrl, "url/irreversible-2");
+});
+
+test("diffIsClassifiedIrreversible: a destructive migration diff is IRREVERSIBLE; an ordinary diff is not", () => {
+  // The mechanism connecting a real diff to the boolean the three tests above thread through —
+  // reuses risk-score.ts's OWN diff-derived `reversibilityFactor` (§4B) rather than a second
+  // classifier (its only pre-W1-T947 consumer was the specialist panel).
+  const destructiveMigration =
+    "diff --git a/migrations/003_drop_users.sql b/migrations/003_drop_users.sql\n" +
+    "--- a/migrations/003_drop_users.sql\n" +
+    "+++ b/migrations/003_drop_users.sql\n" +
+    "@@ -0,0 +1,2 @@\n" +
+    "+DROP TABLE users;\n" +
+    "+-- irrecoverable\n";
+  assert.equal(diffIsClassifiedIrreversible(destructiveMigration), true);
+
+  const ordinary =
+    "diff --git a/src/lib/greeting.ts b/src/lib/greeting.ts\n" +
+    "--- a/src/lib/greeting.ts\n" +
+    "+++ b/src/lib/greeting.ts\n" +
+    "@@ -1,1 +1,1 @@\n" +
+    "-export const GREETING = \"hi\";\n" +
+    "+export const GREETING = \"hello\";\n";
+  assert.equal(diffIsClassifiedIrreversible(ordinary), false);
 });
 
 // ── (B) INTEGRATION — the REAL runTask(), mirroring test/run-task.test.ts's ──
@@ -796,12 +890,17 @@ test(
     const nextEscalateIdx = runTaskSrc.indexOf("escalate(", disarmIdx);
     assert.ok(nextEscalateIdx >= 0, "an escalate( call must follow the disarm");
     assert.ok(
-      nextEscalateIdx - disarmIdx < 300,
+      // W1-T947 widened this from 300: the capped-refusal branch now also names WHICH refusal
+      // fired (capped vs irreversible, design clause iii) between the disarm and the escalate.
+      nextEscalateIdx - disarmIdx < 700,
       "the escalate( call immediately following disarmAutoMerge must be the SAME capped-refusal branch's own call, not some unrelated one elsewhere in the file",
     );
     assert.match(
       runTaskSrc.slice(disarmIdx, nextEscalateIdx),
-      /log\("automerge\.disarmed", \{ reason: "capped verdict refused auto-merge" \}\)/,
+      // W1-T947: the literal capped-only reason is now ONE branch of a computed `reason` that
+      // also names an irreversible refusal — asserting the variable is logged, not the old
+      // hardcoded string, which no longer appears verbatim (see the two tests above this one).
+      /const reason = irreversible[\s\S]*log\("automerge\.disarmed", \{ reason \}\)/,
       "the disarm is ledgered with an attributable reason, matching this file's never-silent idiom",
     );
     // And the disarm site is textually INSIDE the `if (!armDecision.arm)` capped-
@@ -824,8 +923,12 @@ test(
     // armAutoMergeAtOpen, by contrast, is reachable right after `pr.opened`.
     const openedIdx = runTaskSrc.indexOf('log("pr.opened", { pr_url: prUrl });');
     assert.ok(openedIdx >= 0 && openedIdx < pollIdx);
-    const afterOpened = runTaskSrc.slice(openedIdx, openedIdx + 800);
-    assert.match(afterOpened, /armAutoMergeAtOpen\(prUrl\)/, "armAutoMergeAtOpen must fire close after pr.opened, not deep into the flow");
+    // W1-T947 widened this from 800: an irreversibility check (a synchronous git diff, not a
+    // wait) now runs between `pr.opened` and the arm call — still no CI/review wait in between,
+    // which is what this window actually needs to distinguish (the review call itself sits
+    // ~4300 chars after `pr.opened`, so 1300 stays nowhere near "deep into the flow").
+    const afterOpened = runTaskSrc.slice(openedIdx, openedIdx + 1300);
+    assert.match(afterOpened, /armAutoMergeAtOpen\(prUrl,/, "armAutoMergeAtOpen must fire close after pr.opened, not deep into the flow");
   },
 );
 
