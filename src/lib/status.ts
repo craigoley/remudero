@@ -420,6 +420,18 @@ export interface StatusProjection {
    * applicable.
    */
   verifyHumanPending?: true;
+  /**
+   * W1-T951 DELIVERABLE B: true when this MERGED task's durable credit rests on EXACTLY ONE of
+   * the two paths (`"trailer"` XOR `"head-branch"`) recorded in {@link CreditStore} — the
+   * defect rationale (2) measured: 18 ids credited by head-branch alone, and the branch ref is
+   * one GitHub deletes from the repository on merge. Set by {@link derivePrPrecedence} from
+   * {@link isSinglePathCredited} against whichever durable store the resolving rung wrote to
+   * (or already found), so it is available the SAME call that resolves `merged: true`, never a
+   * second query. Sparse, like `needsHuman`/`indeterminate`/`orphaned` — present ONLY when
+   * `merged` is true AND the credit is single-path; a task credited by both paths, or not
+   * credited at all, omits it (not `false`).
+   */
+  singlePathCredit?: true;
 }
 
 /**
@@ -748,6 +760,31 @@ export interface DeriveDeps {
    * {@link buildGitLogSupersessionSearch}'s note on why this is not wired into a hot path.
    */
   supersessionSearch?: SupersessionSearch;
+  /**
+   * W1-T951: where the durable {@link CreditStore} lives — defaults to
+   * {@link defaultCreditStorePath}(`ledgerPath`) when omitted. Injectable so a test (or a caller
+   * sharing one store across many per-task ledger directories) can point elsewhere without
+   * touching a real file.
+   */
+  creditStorePath?: string;
+  /**
+   * Reader for the durable credit store; defaults to {@link loadCreditStore} against
+   * `creditStorePath`. Injectable so a test can hand a canned {@link CreditStore} directly —
+   * the route acceptance test "a branch-only id is credited from the durable record" uses to
+   * prove the resolution never touches `deps.github` at all, not even indirectly through a real
+   * file read.
+   */
+  readCreditStore?: () => CreditStore;
+  /**
+   * Writer for the durable credit store; defaults to {@link saveCreditStore} against
+   * `creditStorePath`. Called by {@link derivePrPrecedence} whenever a live rung (trailer or
+   * head-branch) discovers a credit the store does not already have, so a LATER derivation for
+   * the same task never needs to read GitHub again (design (ii): durable, not dependent on
+   * GitHub retaining the head ref). {@link projectPlan} overrides this to batch every task's
+   * writes into ONE save at the end of the plan sweep, the same shape it already uses for the
+   * ledger read and the two batched head-branch indexes just below.
+   */
+  writeCreditStore?: (store: CreditStore) => void;
 }
 
 /**
@@ -781,6 +818,161 @@ const realLedgerFs: LedgerFsDeps = {
   existsSync: (path) => fs.existsSync(path),
   readFileSync: (path, encoding) => fs.readFileSync(path, encoding),
 };
+
+// ── W1-T951: DURABLE MERGE CREDIT ───────────────────────────────────────────────────────────
+//
+// DESIGN DECISION (i), RECORDED IN WRITING per the shard's own requirement: the durable record
+// belongs at THIS layer — `src/lib/status.ts`, inside `derivePrPrecedence` — not a new one
+// bolted on above `deriveStatus`/`projectPlan`, and not inside `drain.ts`. Every construction
+// site that reads `projection.merged` (status-board.ts:1325, panel-graph.ts:1018,
+// run-task.ts:10621/:12292) goes THROUGH `deriveStatus`/`projectPlan`; neither rung (c)'s
+// trailer search nor rung (c2)'s `corroborateByBranch` persists anything today (rationale (3)),
+// and both already live in this one module. Adding a store here means every existing caller of
+// `deriveStatus`/`projectPlan` gets the fix for free — the SAME "optional dep, real default"
+// shape `readLedger`/`mergedHeadBranches`/every other {@link DeriveDeps} field already uses — with
+// zero wiring changes at any of those four construction sites, so `run-task.ts` stays undeclared
+// exactly as the shard's note requires (W1-T471: declaring the monolith serialises every task
+// naming it).
+//
+// WHY NOT A NEW LAYER (e.g. a `credit.ts`, or a ledger step): a new module would need its own
+// copy of the "read once per `projectPlan` call, write once at the end" batching
+// `readLedgerLines`/`mergedHeadBranches` already solved for the identical N-tasks-per-projection
+// shape a few lines below — reinventing it, not reusing it. A ledger step (`credit.recorded`)
+// was considered and rejected: the ledger is PER-TASK (`deps.ledgerPath` is scoped to one task's
+// state directory in the real caller — see `derivePrPrecedence`'s existing ledger reads), while
+// credit needs to be looked up FOR a task from a store that does not require that task to have
+// ever produced ledger output of its own (a durable record must survive precisely the case the
+// ledger cannot: nothing local to the task's own history, only the fact that some PR merged it).
+
+/** One path's persisted merge credit for a task — see {@link CreditStore}. */
+export interface CreditStoreEntry {
+  source: "trailer" | "head-branch";
+  prUrl: string;
+  prNumber: number;
+  prState: string;
+}
+
+/**
+ * DELIVERABLE A — the durable, GitHub-independent record of merge credit. Keyed by task id,
+ * then by the path that credited it, so a caller can tell in O(1) whether a task's credit rests
+ * on ONE path or BOTH: {@link branchOnlyCreditedIds} / {@link singlePathCreditedIds} /
+ * {@link isSinglePathCredited} (deliverable B) are pure functions over exactly this shape.
+ * Persisted as JSON at {@link defaultCreditStorePath} (sibling of the ledger directory) unless a
+ * caller injects {@link DeriveDeps.readCreditStore}/{@link DeriveDeps.writeCreditStore}.
+ */
+export type CreditStore = Record<string, Partial<Record<CreditStoreEntry["source"], CreditStoreEntry>>>;
+
+/** The minimal fs surface the durable credit store needs — same "inject or default to a
+ *  property-accessed `fs` call" shape {@link LedgerFsDeps}/`realLedgerFs` already establish just
+ *  above, so an external `mock.method` spy on the real `fs` module observes every real call. */
+export interface CreditStoreFsDeps {
+  existsSync: (path: string) => boolean;
+  readFileSync: (path: string, encoding: "utf8") => string;
+  mkdirSync: (path: string) => void;
+  writeFileSync: (path: string, data: string) => void;
+  renameSync: (from: string, to: string) => void;
+}
+
+const realCreditStoreFs: CreditStoreFsDeps = {
+  existsSync: (path) => fs.existsSync(path),
+  readFileSync: (path, encoding) => fs.readFileSync(path, encoding),
+  mkdirSync: (path) => fs.mkdirSync(path, { recursive: true }),
+  writeFileSync: (path, data) => fs.writeFileSync(path, data),
+  renameSync: (from, to) => fs.renameSync(from, to),
+};
+
+/** Default store location: a sibling of the ledger this call is already scoped to, so no new
+ *  required `DeriveDeps` field is needed for the common case — only a test, or a caller wanting
+ *  a shared store across many ledger directories, injects {@link DeriveDeps.creditStorePath}. */
+export function defaultCreditStorePath(ledgerPath: string): string {
+  return `${dirname(ledgerPath)}/merge-credit.json`;
+}
+
+/**
+ * Reads the durable store — `{}` on a missing OR corrupt file, never a throw: the store is an
+ * ACCELERATOR/ARCHIVE, not the sole route to a credit (every live rung below still runs when the
+ * store has nothing), so a read failure here must degrade to "nothing durable yet" exactly like
+ * `readLedgerLines`' own malformed-line handling, never propagate into a caller that has no
+ * reason to expect this optional layer to throw.
+ */
+export function loadCreditStore(path: string, fsDeps: CreditStoreFsDeps = realCreditStoreFs): CreditStore {
+  if (!fsDeps.existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(fsDeps.readFileSync(path, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as CreditStore) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Writes the durable store ATOMICALLY (temp file + rename, the SAME pattern `projectPlan`'s own
+ * `state/status.json` cache write already uses just below, for the identical reason: a reader
+ * mid-`writeFileSync` must never observe a torn/truncated store). BEST-EFFORT: a write failure
+ * (an unwritable/nonexistent directory — every existing test's `ledgerPath` points at one) is
+ * swallowed, never thrown — the projection that discovered this credit is already correct and
+ * returned regardless of whether the store write that would speed up the NEXT call succeeds; the
+ * next successful write (this task's or another's) catches the store up. Mirrors the
+ * absent/failed-⇒-skip discipline every other optional {@link DeriveDeps} dependency follows.
+ */
+export function saveCreditStore(path: string, store: CreditStore, fsDeps: CreditStoreFsDeps = realCreditStoreFs): void {
+  try {
+    fsDeps.mkdirSync(dirname(path));
+    const tmpPath = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    fsDeps.writeFileSync(tmpPath, JSON.stringify(store, null, 2) + "\n");
+    fsDeps.renameSync(tmpPath, path);
+  } catch {
+    // best-effort — see doc comment above.
+  }
+}
+
+/**
+ * Merges one newly-discovered credit into the store, immutably. Idempotent: a source already
+ * recorded for this task is left untouched (no churn on every re-derivation of an
+ * already-durable task — which in practice never happens anyway, since the durable rung in
+ * {@link derivePrPrecedence} returns before this would ever run again for that task/source pair,
+ * but the guard keeps the function correct standing alone too).
+ */
+export function recordCredit(store: CreditStore, taskId: string, entry: CreditStoreEntry): CreditStore {
+  const existing = store[taskId] ?? {};
+  if (existing[entry.source]) return store;
+  return { ...store, [taskId]: { ...existing, [entry.source]: entry } };
+}
+
+/**
+ * DELIVERABLE A's enumeration, AS AN OUTPUT of the change (design (ii)): every id whose durable
+ * record has a `"head-branch"` entry and NO `"trailer"` entry — exactly the population rationale
+ * (2) measured as fragile (18 ids, credited by a ref GitHub deletes from the repository on
+ * merge). Sorted for a deterministic report/test diff.
+ */
+export function branchOnlyCreditedIds(store: CreditStore): string[] {
+  return Object.keys(store)
+    .filter((id) => {
+      const paths = store[id];
+      return !!paths["head-branch"] && !paths.trailer;
+    })
+    .sort();
+}
+
+/**
+ * DELIVERABLE B: every id credited by EXACTLY ONE of the two paths, either direction — the
+ * discoverable signal design (iii) requires. The defect is not that single-path credit exists;
+ * it is that it is indistinguishable from double-path credit until the single path disappears.
+ * This makes the distinction queryable in advance, over the whole store, not just the one task a
+ * live derivation happens to be looking at.
+ */
+export function singlePathCreditedIds(store: CreditStore): string[] {
+  return Object.keys(store)
+    .filter((id) => Object.keys(store[id]).length === 1)
+    .sort();
+}
+
+/** Per-task twin of {@link singlePathCreditedIds}, for {@link derivePrPrecedence} to attach
+ *  {@link StatusProjection.singlePathCredit} without scanning the whole store. */
+export function isSinglePathCredited(store: CreditStore, taskId: string): boolean {
+  const paths = store[taskId];
+  return !!paths && Object.keys(paths).length === 1;
+}
 
 /**
  * {@link readLedgerLines}' return type: a plain `Array<Record<string, unknown>>` for every
@@ -2102,6 +2294,63 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     };
   }
 
+  // W1-T951 DURABLE CREDIT RUNG — directly UNDER `correction` (never above it: a correction must
+  // still be able to override a stale/wrong durable entry) and directly ABOVE every rung that
+  // reads a live PR record, INCLUDING rung (a)'s own `deps.github.prByRef(openedUrl)` a few lines
+  // down. That ordering is the whole point of DELIVERABLE A (design (ii)): once a task's credit
+  // is durable, resolving it again costs NO PR-record read at all — not the trailer body search,
+  // not the branch corroboration, not even rung (a)/(b)'s ledger-triggered `prByRef` — which is
+  // exactly what makes the credit independent of GitHub retaining the head ref (rationale (4)):
+  // the ref can be gone, the branch search can be narrowed or paginate short, and this task still
+  // resolves merged from a LOCAL record no remote mutation can touch.
+  const readCreditStore = deps.readCreditStore ?? (() => loadCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath)));
+  const writeCreditStore =
+    deps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath), store));
+  const creditStore = readCreditStore();
+  const durableCredit = creditStore[task.id];
+  if (durableCredit) {
+    // Trailer, when both happen to be durable, is the STURDIER of the two evidentially (a body-
+    // search hit anchored by `creditsByAnchoredTrailer`, not a ref GitHub deletes on merge) — but
+    // either alone is sufficient; this is a tie-break for which URL/number to report, not a gate.
+    const entry = durableCredit.trailer ?? durableCredit["head-branch"];
+    if (entry) {
+      const base: StatusProjection = {
+        taskId: task.id,
+        source: entry.source,
+        status: "merged",
+        merged: true,
+        prUrl: entry.prUrl,
+        prNumber: entry.prNumber,
+        prState: entry.prState,
+        // DELIVERABLE B: the discoverable signal (design (iii)) — a task credited by exactly one
+        // of the two durable paths says so right here, in the SAME projection every existing
+        // caller of `merged`/`source` already reads, no second query required.
+        ...(isSinglePathCredited(creditStore, task.id) ? { singlePathCredit: true as const } : {}),
+      };
+      // W1-T119/W1-T179 PARITY: the durable record proves the MERGE itself beyond doubt, but a
+      // caller reading `indeterminate` is asking a DIFFERENT question — "did THIS cycle's
+      // GitHub read actually succeed" (an operator dashboard, or a gate that treats
+      // indeterminate specially for reasons beyond this one task's credit) — so a genuinely
+      // dark cycle is still surfaced here, exactly as the darkness-fallback arm at the bottom
+      // of this function surfaces it for a task resolved via `previousProjection`. This checks
+      // `readFailed()`/`readTruncated()`/`readFailureReason()` ONLY — cheap flags the gateway
+      // already computed from whatever fetch it already attempted (`projectPlan`'s own batched
+      // fetch, for the real caller) — never a NEW PR-record read, so acceptance test 2's "without
+      // a PR-record read" claim holds on this branch exactly as on the one below it.
+      if (deps.github.readFailed?.() || deps.github.readTruncated?.()) {
+        const previous = deps.previousProjection?.(task.id);
+        const now = deps.now ?? Date.now;
+        return {
+          ...base,
+          indeterminate: true,
+          unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
+          githubUnobservableSince: previous?.githubUnobservableSince ?? new Date(now()).toISOString(),
+        };
+      }
+      return base;
+    }
+  }
+
   // (a) ledger `pr.opened` for this task -> query that PR. A MERGED resolution
   // returns immediately, as always. A NON-merged resolution (OPEN/CLOSED) is
   // stashed as `ownResult` rather than returned immediately — SIBLING CREDIT
@@ -2192,9 +2441,14 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
         // dispatched task's worktree) would otherwise credit the task it just filed unconditionally.
         !isPlanOnlyFilingPr(ledgerLines, pr.url),
     );
-    return hit
-      ? { taskId: task.id, source: "head-branch", ...fromPrState(hit.state), prNumber: hit.number, prUrl: hit.url, prState: hit.state }
-      : undefined;
+    if (!hit) return undefined;
+    // W1-T951 DELIVERABLE A: a merged branch hit is a NEW live credit this task's durable store
+    // does not have yet (the durable rung above already returned early if it did) — persist it
+    // now, so the NEXT derivation for this task resolves from the store, never GitHub, even after
+    // GitHub deletes `hit.headRefName` on its own housekeeping. Best-effort (see
+    // {@link saveCreditStore}): a write failure never blocks the projection this call returns.
+    writeCreditStore(recordCredit(creditStore, task.id, { source: "head-branch", prUrl: hit.url, prNumber: hit.number, prState: hit.state }));
+    return { taskId: task.id, source: "head-branch", ...fromPrState(hit.state), prNumber: hit.number, prUrl: hit.url, prState: hit.state };
   };
 
   /**
@@ -2258,6 +2512,15 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
         : false;
     const planOnlyRefusal = planOnlyFilingRefusal || planOnlyDiffRefusal;
     if (!planOnlyRefusal && wouldCredit) {
+      // W1-T951 DELIVERABLE A: persist ONLY the MERGED case — `wouldCredit` is also true for a
+      // non-merged own-branch PR (TRAP 2's `ownsBranch` fallback a few lines above, in
+      // `creditsByAnchoredTrailer`), and the durable store is a record of MERGE credit, never of
+      // an in-flight/closed PR that could still change state on a later derivation.
+      if (trailerPr.state.toUpperCase() === "MERGED") {
+        writeCreditStore(
+          recordCredit(creditStore, task.id, { source: "trailer", prUrl: trailerPr.url, prNumber: trailerPr.number, prState: trailerPr.state }),
+        );
+      }
       return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
     }
     // Rejected: a branch claiming ANOTHER task, a non-merged PR off a foreign branch,
@@ -3007,6 +3270,23 @@ export function projectPlan(
   const readLedgerOnce = effectiveDeps.readLedger ?? readLedgerLines;
   const ledgerLinesOnce = readLedgerOnce(effectiveDeps.ledgerPath);
   effectiveDeps = { ...effectiveDeps, readLedger: () => ledgerLinesOnce };
+  // W1-T951 DELIVERABLE A, READ+WRITE THE DURABLE CREDIT STORE ONCE PER PLAN — same
+  // batch-once-amortize-over-N-tasks shape as the ledger read directly above: without this, an
+  // N-task plan would open+JSON.parse the store file once per task (deriveStatus's own default),
+  // and — worse — a task-by-task write would fsync N times per projection instead of once. Every
+  // write `derivePrPrecedence` discovers during the loop below is accumulated in `creditStoreLive`
+  // and flushed in ONE save after the loop, only if it actually changed.
+  const creditStorePathOnce = effectiveDeps.creditStorePath ?? defaultCreditStorePath(effectiveDeps.ledgerPath);
+  const creditStoreAtStart = effectiveDeps.readCreditStore ? effectiveDeps.readCreditStore() : loadCreditStore(creditStorePathOnce);
+  const flushCreditStore = effectiveDeps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(creditStorePathOnce, store));
+  let creditStoreLive = creditStoreAtStart;
+  effectiveDeps = {
+    ...effectiveDeps,
+    readCreditStore: () => creditStoreLive,
+    writeCreditStore: (store: CreditStore) => {
+      creditStoreLive = store;
+    },
+  };
   // BATCHED rung (c2) CORROBORATION (W1-T257): #737 corroborates an empty trailer search with a
   // per-task `gh pr list --search head:run-<taskId>-`, which fires for EVERY uncredited task on
   // EVERY projection (the 07-23 GraphQL-exhaustion multiplier). Fetch every merged PR's head ref
@@ -3061,6 +3341,10 @@ export function projectPlan(
   }
   const byId = new Map<string, StatusProjection>();
   for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, effectiveDeps));
+  // W1-T951: ONE flush for the whole plan sweep — see the batching note above. Skipped entirely
+  // when nothing new was discovered this cycle (the common case once a plan's credits are mostly
+  // durable), so a steady-state poll loop costs zero writes, not one no-op write per cycle.
+  if (creditStoreLive !== creditStoreAtStart) flushCreditStore(creditStoreLive);
   // W1-T485 — attached HERE rather than inside `deriveStatus` so that function, which every
   // precedence rung and every existing test drives, is left byte-identical: this is an additive
   // observation about tasks the rungs have ALREADY resolved, not a new rung. Skips anything the

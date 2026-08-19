@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import {
   nextRunnable,
@@ -22,6 +25,7 @@ import {
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import type { Config } from "../src/lib/config.js";
 import { drainCommand, daemonCommand, escalateLifetimeCapExceeded } from "../src/run-task.js";
+import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
 
 // W1-T271 — THE LOOP THAT SUCCEEDS: dispatchesWithoutNewOwnedPr (the existing streak
 // breaker) resets to 0 on every pr.opened line, so a task that re-dispatches forever
@@ -367,5 +371,146 @@ test("W1-T316: DECISION_RELEVANT_LEDGER_STEPS carries dispatch.lifetime_capped.e
   assert.ok(
     DECISION_RELEVANT_LEDGER_STEPS.has("dispatch.lifetime_capped.escalated"),
     "escalateLifetimeCapExceeded's own dedup marker must survive ledger rotation, exactly like dispatch.circuit_broken.escalated",
+  );
+});
+
+// ── W1-T951 DELIVERABLE B, THE CONSUMPTION SIDE: `isDispatchEligible`'s `already-merged`
+// decline (this file's own reason for being named in the shard -- see its `files:` note on why
+// `runnableCandidates`/`nextRunnable` are the highest exercisers of the selection path) now
+// carries an OPTIONAL, purely-observational single-path-credit signal alongside it. See
+// test/open-pr-corroboration.test.ts for the status.ts-side durable store the signal reads from.
+// ──────────────────────────────────────────────────────────────────────────────────────────
+
+test("W1-T951: a single-path-credited merged task fires onSinglePathCredit ALONGSIDE the already-merged decline, never in place of it", () => {
+  const plan = fixturePlan(); // tasks "A" and "D", both otherwise runnable
+  const isMerged: MergedSet = (id) => id === "A";
+  const filtered: Array<{ id: string; reason: string }> = [];
+  const singlePath: string[] = [];
+
+  const picked = nextRunnable(plan, isMerged, {
+    isSinglePathCredit: (id) => id === "A",
+    onSinglePathCredit: (t) => singlePath.push(t.id),
+    onFiltered: (t, reason) => filtered.push({ id: t.id, reason }),
+  });
+
+  assert.equal(picked?.id, "D", "A is still declined and D is still offered -- pure observation, eligibility is unchanged");
+  assert.deepEqual(filtered, [{ id: "A", reason: "already-merged" }], "the existing decline is untouched");
+  assert.deepEqual(singlePath, ["A"], "and the single-path signal fired for the task the durable store flagged");
+});
+
+test("W1-T951: a task credited by BOTH paths never fires onSinglePathCredit", () => {
+  const plan = fixturePlan();
+  const isMerged: MergedSet = (id) => id === "A";
+  const singlePath: string[] = [];
+
+  nextRunnable(plan, isMerged, {
+    isSinglePathCredit: () => false, // the durable store says A is credited by trailer AND head-branch
+    onSinglePathCredit: (t) => singlePath.push(t.id),
+  });
+
+  assert.deepEqual(singlePath, [], "double-path credit must never trip the signal");
+});
+
+test("W1-T951: omitting isSinglePathCredit behaves byte-identically to before this existed", () => {
+  const plan = fixturePlan();
+  const isMerged: MergedSet = (id) => id === "A";
+  const filtered: Array<{ id: string; reason: string }> = [];
+
+  const picked = nextRunnable(plan, isMerged, { onFiltered: (t, reason) => filtered.push({ id: t.id, reason }) });
+
+  assert.equal(picked?.id, "D");
+  assert.deepEqual(filtered, [{ id: "A", reason: "already-merged" }]);
+});
+
+test("W1-T951: runnableCandidates carries the SAME onSinglePathCredit observation as nextRunnable", () => {
+  const plan = fixturePlan();
+  const isMerged: MergedSet = (id) => id === "A";
+  const singlePath: string[] = [];
+
+  const candidates = runnableCandidates(plan, isMerged, 5, {
+    isSinglePathCredit: (id) => id === "A",
+    onSinglePathCredit: (t) => singlePath.push(t.id),
+  });
+
+  assert.deepEqual(candidates.map((t) => t.id), ["D"], "A stays excluded from the concurrent candidate set too");
+  assert.deepEqual(singlePath, ["A"]);
+});
+
+// ── W1-T951 DESIGN (v): THE FILE-SHA-BRACKETED MUTATION CHECK ───────────────────────────────
+//
+// "A positive test alone proves nothing here, and this is the trap. An implementation that
+// credits EVERYTHING satisfies 'credit is found for a branch-only id' perfectly... The check
+// is: read the sha256 of the edited file, remove the durable-credit lookup, read the sha256
+// again and require it to DIFFER, run the suite and require the positive test to FAIL, restore,
+// and require the sha to return to the original." (design note (v), verbatim.)
+//
+// This test mutates the REAL, checked-out `src/lib/status.ts` on disk (restored in a `finally`,
+// verified byte-identical by its own sha256 afterward), then spawns a REAL child `node --test`
+// process -- the SAME house-dialect proof-execution shape `remudero-review`'s own
+// `parseWhitelistedProof`/`narrowNameFilteredArgs` build for a bare `unit test: <name>` acceptance
+// proof (see test/proof-exec-tmp-hygiene.test.ts) -- narrowed to ONLY
+// test/open-pr-corroboration.test.ts's "a branch-only id is credited from the durable record"
+// test. That test's `w951Github({ forbidReads: true })` fixture throws on every PR-record read,
+// so once the durable lookup is gone the derivation falls through to a live rung and the test
+// throws -- a real, mechanically-produced failure, not an assumption.
+//
+// Deliberately spawned from THIS file, targeting a DIFFERENT one: spawning
+// open-pr-corroboration.test.ts from inside itself would re-enter this very mutation test
+// recursively (the target file would spawn itself spawning itself...).
+
+test("W1-T951: removing the durable credit lookup fails the positive test", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const statusTsPath = join(repoRoot, "src", "lib", "status.ts");
+  const targetTestFile = "test/open-pr-corroboration.test.ts";
+  const positiveTestName = "W1-T951: a branch-only id is credited from the durable record";
+
+  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  const original = readFileSync(statusTsPath, "utf8");
+  const originalSha = sha256(original);
+
+  const needle = "  const durableCredit = creditStore[task.id];\n";
+  const occurrences = original.split(needle).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    "sanity: the durable-credit lookup must appear EXACTLY once in status.ts, or this mutation is not targeting the real rung",
+  );
+  const mutated = original.replace(needle, "  const durableCredit = undefined; // W1-T951 MUTATION: durable-credit lookup removed\n");
+
+  const whitelisted = parseWhitelistedProof(`unit test: ${positiveTestName}`);
+  assert.ok(whitelisted, "sanity: the proof text must parse as a name-filtered `unit test:` dialect proof");
+  assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
+  const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
+
+  let childResult: ReturnType<typeof spawnSync> | undefined;
+  try {
+    writeFileSync(statusTsPath, mutated);
+    const mutatedSha = sha256(readFileSync(statusTsPath, "utf8"));
+    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change status.ts's bytes");
+
+    // `NODE_TEST_CONTEXT` (set by node's OWN test runner on the process running THIS test) is
+    // inherited by a plain `spawnSync` env by default -- and node's test runner treats its
+    // presence as "this is a recursive `run()` call" and SKIPS running any files at all,
+    // exiting 0 having executed nothing. Strip it so the child is a genuinely independent
+    // `node --test` invocation, not a no-op that would make this check pass for the wrong
+    // reason (a silently-skipped child looks identical to a clean exit).
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+  } finally {
+    // RESTORED REGARDLESS of what the child run did -- a throw, a timeout, or a pass must never
+    // leave the real checked-out source mutated.
+    writeFileSync(statusTsPath, original);
+    const restoredSha = sha256(readFileSync(statusTsPath, "utf8"));
+    assert.equal(restoredSha, originalSha, "status.ts must be restored byte-for-byte after the mutation check");
+  }
+
+  assert.ok(childResult, "sanity: the child process must actually have been spawned");
+  assert.notEqual(
+    childResult!.status,
+    0,
+    `removing the durable-credit lookup must fail the positive test -- child exited ${childResult!.status}\n` +
+      `stdout:\n${childResult!.stdout}\nstderr:\n${childResult!.stderr}`,
   );
 });
