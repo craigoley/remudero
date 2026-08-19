@@ -461,12 +461,27 @@ test("freshness guard: its git flags MATCH deploy/entrypoint.sh's, read from bot
   );
 });
 
-test("freshness guard: checkCliFreshness is NOT relaxed — its blocking dirty check still counts untracked", () => {
-  // SCOPE GUARD. The two functions carry byte-identical predicate lines, so a blind replace_all
-  // would also relax the BLOCKING refusal. That is W1-T446's scope and it is `verify: human`,
-  // because loosening a guard that refuses in the safe direction is the operator's call.
-  const { localDir } = gitFixture();
+// W1-T446: `checkCliFreshness`'s dirty check is now SCOPED to the incoming diff (see
+// test/self-sync-dirty-scope.test.ts for the dedicated acceptance suite) — it no longer shares
+// `checkServiceFreshness`'s unscoped predicate byte-for-byte. This is the negative control for
+// that scoping: a dirty path that is NOT in the incoming diff must not be conflated with one that
+// is, and `checkServiceFreshness` right above must be entirely unaffected (it stays on its own
+// `-uno`, unintersected predicate — see the comment on its `dirty` line).
+test("freshness guard: checkCliFreshness and checkServiceFreshness diverge on an untracked path the incoming diff does not touch", () => {
+  const { originDir, localDir } = gitFixture();
+  publishNewCommit(originDir, "PUBLISHED"); // touches plan/tasks.yaml only
   writeFileSync(join(localDir, "an-untracked-scratch-file.txt"), "four", "utf8");
-  const refused = checkCliFreshness(localDir, {});
-  assert.notEqual(refused.status, "synced", "the CLI guard must keep refusing on untracked dirt until the operator rules");
+
+  const { deps } = spies(localDir);
+  const cli = checkCliFreshness(localDir, {}, deps);
+  assert.equal(cli.status, "synced", "the untracked scratch file is outside the incoming diff — no longer a refusal");
+
+  // checkServiceFreshness is a SEPARATE fixture (the CLI check above already ff-merged this one).
+  const svc = gitFixture();
+  writeFileSync(join(svc.localDir, "an-untracked-scratch-file.txt"), "four", "utf8");
+  const assessed = checkServiceFreshness(svc.localDir, {});
+  assert.equal(assessed.status, "assessed");
+  if (assessed.status === "assessed") {
+    assert.equal(assessed.dirty, false, "checkServiceFreshness's own -uno predicate is unchanged by this task");
+  }
 });
