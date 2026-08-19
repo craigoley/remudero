@@ -50,6 +50,37 @@ function headMessage(dir: string): string {
   return execFileSync("git", ["-C", dir, "log", "-1", "--format=%B"], { encoding: "utf8" });
 }
 
+// ── the no-op guard: nothing of this run's own must never be amended ────────────────────
+
+test("W1-T1012: a branch with no commits of its own is never amended", () => {
+  // THE REGRESSION THIS PINS. `--amend` rewrites the tip sha, so amending a commit the branch
+  // merely INHERITED from origin/main leaves it 1 commit ahead of a base it is identical to.
+  // Both call sites gate on exactly that count -- `retroCommand`'s W1-T64 no-op guard and
+  // `runTask`'s implement no-op guard -- so the amend fabricated the very commit the guard
+  // exists to find absent. MEASURED before the fix: test/retro-marker-atomic.test.ts's "the
+  // Architect commits NOTHING" case failed with `a no-op retro (nothing committed) must NEVER
+  // advance the marker`.
+  const dir = makeRepoWithCommit("chore: a commit that came from the base, not from this run");
+  execFileSync("git", ["-C", dir, "update-ref", "refs/remotes/origin/main", "HEAD"], { encoding: "utf8" });
+  const before = headSha(dir);
+  const changed = appendTaskTrailerToCommit(dir, "W1-T1012");
+  assert.equal(changed, false, "a branch level with origin/main has nothing of its own to trailer");
+  assert.equal(headSha(dir), before, "the tip must not move -- moving it is what fabricates the commit");
+  assert.doesNotMatch(headMessage(dir), /Remudero-Task:/, "no trailer may be written onto an inherited commit");
+});
+
+test("W1-T1012: an UNREADABLE base fails OPEN and still trailers", () => {
+  // `commitsAhead` returns 0 both for "no commits ahead" and for "the base ref could not be
+  // read", so reusing it would let an ABSENT origin/main silently suppress the trailer. The
+  // guard verifies the base first and falls through when there is none -- the fixtures in this
+  // very file are `git init` repos with no origin/main, which is why this direction is pinned.
+  const dir = makeRepoWithCommit("feat(x): real work on a repo with no origin/main at all");
+  const before = headSha(dir);
+  assert.equal(appendTaskTrailerToCommit(dir, "W1-T1012"), true, "no readable base must not suppress the trailer");
+  assert.notEqual(headSha(dir), before);
+  assert.match(headMessage(dir), /^Remudero-Task:\s*W1-T1012\s*$/m);
+});
+
 // ── acceptance 1: an implementation run's final commit carries the trailer before the PR opens ──
 
 test("W1-T1012: an implementation run commits the task trailer before the pr opens", () => {

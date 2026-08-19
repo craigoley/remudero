@@ -1403,6 +1403,33 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
  * `run-<id>-<epochMs>` branch is owned exclusively by this one run.
  */
 export function appendTaskTrailerToCommit(worktreePath: string, taskId: string): boolean {
+  // NOTHING OF THIS RUN'S OWN => NOTHING TO TRAILER, AND AMENDING WOULD MANUFACTURE WORK.
+  // `--amend` REWRITES the tip sha, so amending a commit the branch merely INHERITED from
+  // origin/main leaves the branch 1 commit ahead of a base it is byte-identical to. Both
+  // call sites gate a later decision on exactly that count: `retroCommand`'s W1-T64 no-op
+  // guard (`commitsAhead(worktreePath, "origin/main") === 0` => log `retro.no_op`, leave the
+  // marker alone) and `runTask`'s own implement no-op guard. MEASURED on this branch before
+  // this check existed: `test/retro-marker-atomic.test.ts`'s "the Architect commits NOTHING"
+  // case failed with `a no-op retro (nothing committed) must NEVER advance the marker` — the
+  // amend fabricated the very commit the guard exists to find absent. Checked HERE, not at
+  // each call site, so a third caller cannot reintroduce it.
+  //
+  // AND THE TWO ZEROES ARE SEPARATED DELIBERATELY. `commitsAhead` returns 0 both for "no
+  // commits ahead" and for "the base ref could not be read at all" (its own `catch` returns
+  // 0), and reusing it here would make an ABSENT `origin/main` silently suppress the trailer
+  // — which is exactly the shape a unit fixture built by `git init` has. So the base is
+  // verified first and a MISSING base FAILS OPEN (proceed and trailer), matching this
+  // function's own best-effort contract; only a base that is present AND zero commits behind
+  // suppresses the amend.
+  try {
+    execFileSync("git", ["-C", worktreePath, "rev-parse", "--verify", "--quiet", "origin/main"], { stdio: "pipe" });
+    const ahead = execFileSync("git", ["-C", worktreePath, "rev-list", "--count", "origin/main..HEAD"], {
+      encoding: "utf8",
+    });
+    if ((parseInt(ahead.trim(), 10) || 0) === 0) return false;
+  } catch {
+    /* no readable origin/main => no base to be identical to; fall through and trailer */
+  }
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const trailerRe = new RegExp(`^Remudero-Task:\\s*${escaped}\\s*$`, "m");
   try {
