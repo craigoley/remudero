@@ -1,0 +1,150 @@
+- id: W1-T1036
+  title: "A ZERO-BYTE `.git/config.lock` LEFT BY A KILLED PROCESS FAILS EVERY SUBSEQUENT DISPATCH AND NOTHING DETECTS IT — `worktreeAdd` writes `branch.<name>.remote/.merge` into `.git/config`, so the lock is a hard failure; three workers died in one pass and the daemon exited 1, while the existing widowed-lock pass enumerates a different tree entirely"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    MEASURED 2026-08-19 AT origin/main 2e7956a3. No `/rate_limit` call was made, and no lock was
+    cleared by this recon.
+
+    (1) THE INCIDENT. The VM OOM-stalled at 18:43 and a `.git/config.lock` survived the kill —
+    ZERO BYTES, mode `-r--r--r--`, owner `node`, holder long dead. Three workers in the next pass
+    then failed with `error: could not lock config file .git/config: File exists` and
+    `unable to write upstream branch configuration`; W1-T446's `git worktree add` failed outright
+    and the daemon exited 1.
+
+    (2) WHY IT IS A HARD FAILURE RATHER THAN A WARNING. `worktreeAdd` (`src/lib/worker.ts`) runs
+    `git worktree add -b <branch> <path> <base>`, which writes `branch.<name>.remote` and
+    `branch.<name>.merge` into `.git/config`. A held config lock therefore fails the call that
+    CREATES the worktree, before any recon or implement work begins.
+
+    (3) THE EXISTING REAPER CANNOT SEE IT, AND THE REASON IS STRUCTURAL. `reapStaleWorktrees`
+    (`src/lib/worker.ts`) does have a widowed-lock pass, but it enumerates the WORKTREES directory
+    and its staleness test is `existsSync(dirPath)` — "is the directory this lock is named after
+    gone?". `.git/config.lock` lives in a different tree and is paired with no directory at all.
+    CONFIRMED BY MEASUREMENT: zero handling of any `.git/*.lock` anywhere in `src/`, against a
+    positive control of 97 files containing the word "lock".
+
+    (4) BOOT-TIME CLEARING IS NOT SAFE, AND THE REPO ALREADY MEASURED WHY. Two restart paths
+    behave differently. `deploy/recycle-container.sh` DOES wait — it pauses first, waits a bounded
+    `RMD_RECYCLE_WAIT_S` for zero in-flight workers, and REFUSES on timeout; its own header records
+    the incident that taught it: "A SECOND recycle, run without pausing first, found three workers
+    mid-run. Killing them would have lost the work and stranded their `state/inflight/*.lock`
+    files." But the IN-CONTAINER FRESHNESS RESTART DOES NOT WAIT AT ALL: `deploy/entrypoint.sh`
+    restarts on `DAEMON_EXIT_STALE=75` up to `FRESHNESS_RESTART_MAX` (default 100) with a 5s pause
+    and no worker-quiescence check. So a worker CAN be mid-`git worktree add` when the next daemon
+    boots, and clearing at boot would delete a lock a live process holds.
+
+    (5) THE PROBE'S AVAILABILITY IS NOT A GIVEN, AND THAT IS THE SUBTLE HALF. `deploy/Dockerfile`
+    installs `procps` and `lsof` with IN-LAYER verification (`pgrep --version`, `lsof -v` both
+    gated inside the RUN). Immediately below it records the opposite observation: "PROCESS
+    INSPECTION (procps, lsof) — MEASURED ABSENT FROM THE PUBLISHED IMAGE as uid 1000 with the
+    entrypoint bypassed: `ps`, `lsof`, `pgrep`, `pkill`, `top` and `free` all MISS, and a direct
+    `spawnSync ps` reports ENOENT." Availability therefore depends on which Dockerfile revision the
+    RUNNING container was built from, and the running image has been measured 124 commits behind
+    main before. The same note names the trap: "the sweeps that shell these binaries do not fail —
+    they report SUCCESS on an empty result, which is this repo's recurring 'zero is overloaded'
+    shape."
+
+    (6) W1-T978 IS THE SIBLING AND ITS PREDICATE CANNOT BE REUSED — FOR TWO INDEPENDENT REASONS.
+    Its container-aware branch keys on `defaultInContainer()` = `existsSync("/.dockerenv")`, which
+    is ABSENT host-side (re-derived on the mini; positive control `/etc/hosts` present), so the
+    shortcut never fires there. And a git lock CARRIES NO HOLDER AT ALL: zero bytes means the
+    process died before writing, so `isHolderStale`'s rung 2 (`isPidAlive(held.pid)`) and rung 3
+    (`defaultGetProcessStartTime`) have no pid to interrogate. The shape is the same; the predicate
+    is not transferable.
+  design: |
+    (i) THE PREDICATE ASKS THE OS, AND FAILS CLOSED. Three conditions, ALL of which must hold
+    before a lock is reclaimed:
+      1. AGE — the lock's mtime is older than a grace far beyond any legitimate config write. A
+         `git config` write is milliseconds, so even a small grace is orders of magnitude of
+         headroom, and it covers the only real race: a process between `open()` and `write()`,
+         which is exactly the observed zero-byte state.
+      2. NO LIVE GIT PROCESS — `pgrep git`, not `lsof`. Both are declared in the image, so this is
+         a choice of BIAS rather than availability: the coarser probe answers "held" more often,
+         which is the correct direction (see (ii)), and it avoids `lsof`'s path-scoping entirely.
+      3. THE PROBE RAN — an ENOENT or any unrunnable probe is NOT evidence of staleness and must
+         KEEP the lock. Rationale (5) is why this rung is load-bearing rather than defensive.
+
+    (ii) THE ASYMMETRY IS THE ARGUMENT, AND IT DECIDES EVERY TIE. Clearing a LIVE lock lets two
+    writers race and one `rename` clobbers the other's config. A false negative costs the outage in
+    rationale (1) — recoverable in minutes. A false positive costs the config. This repo already
+    states the rule twice: `defaultOpenFileCount` (`src/lib/clone-reaper.ts`) — "if `lsof` cannot be
+    run at all we return 1 ('something holds it') rather than 0, so a probe failure keeps the
+    directory instead of authorising a delete" — and `isHolderStale` defers on unknowns for the same
+    reason. THE PREDICATE MAY NOT BE LOOSENED TOWARD RECLAMATION BY AN IMPLEMENTER.
+
+    (iii) THE RECLAIMER MUST `unlink`, NEVER OVERWRITE. Mode `-r--r--r--` makes truncate-and-rewrite
+    fail while removal succeeds under the DIRECTORY permission. A reclaimer written as
+    "open for write and truncate" fails on the exact artifact this task exists to clear.
+
+    (iv) PRINT BEFORE CLEAR. Any reclaim is ledgered BEFORE it happens, naming the path and the
+    rung that authorised it. Nothing about a zero-byte file tells a later reader what was removed
+    or why, so an unledgered reclaim is indistinguishable from the corruption it is meant to
+    prevent.
+
+    (v) WHERE IT PLUGS IN, AND WHY THE SHARED FUNCTION IS THE HOME. The prune rung runs immediately
+    before `worktreeAdd`, which is the right moment — a check there turns three failed workers and
+    a daemon exit into one ledgered reclaim. That prune-then-add pairing appears FIVE times in
+    `src/run-task.ts` (the dispatch, retro, triage, propose and one further lane), plus a sixth
+    injected `deps.worktreeAdd`. All five call `pruneStaleRuns`, which lives in `src/lib/worker.ts`
+    — so the fix belongs there and `src/run-task.ts` NEED NOT BE DECLARED, and the W1-T471 ruling
+    need not be invoked.
+
+    (vi) THE FIXTURE IS SYNTHESISED, AND SAYING SO IS PART OF THE DELIVERABLE. The live artifact is
+    gone: a read-only survey of both git dirs reads 0 `.lock` files (positive control: the same
+    `find` sees `config`). The shape is trivial to create —
+    `: > "<repo>/.git/config.lock" && chmod 444 "<repo>/.git/config.lock"` — zero bytes, mode 444,
+    no holder. AN IMPLEMENTER MUST NOT WASTE A RUN HUNTING AN ARTIFACT THAT NO LONGER EXISTS.
+
+    (vii) ONE CONCERN. This task does NOT clear `index.lock` or any other git lock. They have a
+    different lifetime, different holder semantics and a different blast radius, and folding them
+    in would widen a reclaimer past the evidence that justifies it.
+  acceptance:
+    - claim: "a zero-byte config.lock with no live git process is reclaimed before the worktree add that would fail on it"
+      proof: "unit test: W1-T1036: a stale config lock is reclaimed before the worktree add"
+    - claim: "the same lock is KEPT while a git process is live, in the same run"
+      proof: "unit test: W1-T1036: a live git process keeps the config lock"
+    - claim: "an unrunnable probe keeps the lock rather than authorising a delete"
+      proof: "unit test: W1-T1036: an unrunnable probe keeps the config lock"
+    - claim: "the reclaim is ledgered before the file is removed, naming the path"
+      proof: "unit test: W1-T1036: the reclaim is ledgered before the unlink"
+    - claim: "a read-only lock is removed by unlink rather than failing on a truncate"
+      proof: "unit test: W1-T1036: a mode 444 lock is unlinked rather than overwritten"
+  risk: high
+  origin: "oper#stale-git-config-lock-2026-08-19"
+  plan_refs: ["W1-T978", "W1-T406", "W1-T446", "W1-T381"]
+  files: [src/lib/worker.ts, test/stale-git-config-lock.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT. `pruneStaleRuns` and `reapStaleWorktrees` both
+    live in `src/lib/worker.ts`, and design (v) establishes that all five prune-then-add call sites
+    reach the fix through that one function — so `src/run-task.ts` is deliberately NOT declared and
+    the 2026-08-18 W1-T471 ruling on that file does not need to be invoked. `worktreeAdd` is in the
+    same module, so nothing else is owed.
+
+    `test/stale-git-config-lock.test.ts` DOES NOT EXIST at 2e7956a3 — a forward-referenced PATH,
+    never a guessed symbol — and is a new file because the house rule keeps a coverage-load-bearing
+    test out of a shared suite.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS: `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus acceptance text, and this set
+    crosses `src/` and `test/`. Blast radius argues DOWN in one direction and UP in the other, and
+    both belong on the record: the reclaimer touches one file class in one directory, but a
+    predicate loosened toward reclamation corrupts `.git/config`, which is why design (ii) forbids
+    it in terms rather than leaving it to judgement.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING, NOT MINTED HERE.
+    `refs/rmd-id/W1-T1036` resolves to 2f129df40e0889c68d7d3ee2f48fa26b23002e74, anchored
+    "reserve W1-T1036 Remudero-2986-1787168303766889032" at 2026-08-19T19:38:23Z by another host.
+    Positive control: `refs/rmd-id/W1-T1035` reads 1. Negative control: `refs/rmd-id/W1-T999999`
+    reads 0.
+    FOUR SURFACES SWEPT, GIT FIRST AND REST LAST: the reservation (1); shard FILENAMES under
+    `plan/tasks.d/` on origin/main (0 — THE FILENAME MATCH IS THE EXISTENCE TEST, and the control
+    `W1-T1035` reads 1 on that same query); DECLARED ids under `plan/` (0); and every open PR's
+    title AND file list (0). Mention-trap control: `W1-T999999` reads 0 filenames. The filename and
+    open-PR surfaces were RE-SWEPT immediately before pushing.

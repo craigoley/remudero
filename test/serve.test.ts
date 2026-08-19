@@ -8,10 +8,13 @@
 // runtime helper (test/setup/open-shell.ts's reachSection) for exactly that reason -- there is no
 // `page` here to reach a section on.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import {
   buildServeRoutes,
@@ -37,6 +40,12 @@ import { buildBatchedGithub, type GitHub, type PrRef } from "../src/lib/status.j
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+// W1-T188 (W1-T154 re-verification): the SAME committed, production-scale corpus W1-T187's own
+// suite (test/w1-t187-*.test.ts) uses -- >= 200 tasks / >= 18,000 ledger lines, a fixed clock, all
+// checked into git rather than generated per-run. Reused here rather than duplicated so this
+// suite's re-verification measures the identical fixture, not a second one that could quietly
+// drift out of "production scale" over time.
+import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "./fixtures/w1-t187/load.js";
 
 // ── W1-T139: rmd serve -- the front door ─────────────────────────────────────────────────
 //
@@ -437,6 +446,227 @@ test("GET /v1/status over a full 183-task plan: first-paint-to-data under budget
     assert.ok(ms < 2000, `first-paint-to-data ${ms.toFixed(0)}ms exceeded the 2000ms budget`);
     assert.equal(fetchCalls, 1, `expected O(1) GitHub fetch for the snapshot, got ${fetchCalls} for ${N} tasks`);
   });
+});
+
+// ── W1-T188: W1-T154 RE-VERIFICATION (rule 21 follow-up) ──────────────────────────────────────
+//
+// W1-T154's <2s first-paint-to-data budget merged (PR #388) certified by KEYWORD coverage --
+// remudero-review passed it before W1-T128 (#414) shipped the proof executor, so "first-paint-
+// to-data is < 2s ... at 183-task scale" was never actually MEASURED at merge time. It was then
+// CONTRADICTED in production: GET / at 49.0s cold / 42.6s warm, GET /v1/status at
+// 58.7s/54.0s/34.5s, measured 2026-07-20 against a serve process on current main. The root cause
+// (projectPlan re-reading + re-parsing the WHOLE ledger once PER TASK) was W1-T187's fix (#445,
+// merged on main: status.ts's projectPlan now hoists a single ledger read -- see the "READ THE
+// LEDGER ONCE (W1-T187)" comment in src/lib/status.ts). Standing rule 21 forbids amending T154's
+// own merged criteria, so this re-verifies empirically rather than editing plan/tasks.yaml.
+//
+// The tests below reuse the SAME committed production-scale corpus (test/fixtures/w1-t187/, >=
+// 200 tasks / >= 18,000 ledger lines, fixed clock) that W1-T187's own suite established --
+// deliberately not a second, possibly-smaller fixture -- and drive a REAL buildServeServer
+// instance with a REAL fetch client, exactly the shape T154's own criterion asked for
+// ("measured from the REAL browser client at ... scale").
+
+const PRE_PROOF_EXECUTOR_PR = 414; // W1-T128 (#414): the PR that shipped the working proof executor.
+
+/**
+ * The mechanism behind W1-T188 criterion 3 -- mechanically identify merged tasks whose acceptance
+ * criteria assert a MEASURED property (latency/throughput/scale/resource ceiling), merged BEFORE
+ * PR #414 shipped proof execution, and therefore certified by keyword coverage alone. Ground
+ * truth for "merged, and at what PR number" is the git history itself (`(W1-T<id>) (#<pr>)` in a
+ * squash-merge subject) -- durable and append-only, unlike MASTER-PLAN.md's SHIPPED log, which is
+ * explicitly folded/summarized over time (its own header: "PRIOR CYCLES (folded ...)").
+ *
+ * A criterion counts as "measured" when its acceptance text (claim + proof) contains a numeric
+ * time unit (ms/seconds), a latency/throughput/req-per-second term, or a numeric comparator
+ * (`< 2s`, `>= 500ms`) -- the class of claim keyword matching cannot falsify even in principle
+ * (plan/tasks.yaml's own W1-T188 rationale). This is a heuristic identification, not a precise
+ * gate: false positives are acceptable (a human still triages the list), false negatives are the
+ * real risk, so the pattern is kept broad on purpose.
+ */
+function findPreProofExecutorMeasuredCriteria(repoRoot: string): Array<{ id: string; pr: number }> {
+  const log = execFileSync("git", ["log", "--oneline"], { cwd: repoRoot, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  const prByShortId = new Map<string, number>();
+  const shipRe = /\(W\d+-T(\w+)\) \(#(\d+)\)/g;
+  for (const m of log.matchAll(shipRe)) {
+    const shortId = m[1];
+    const pr = Number(m[2]);
+    const prev = prByShortId.get(shortId);
+    if (prev === undefined || pr < prev) prByShortId.set(shortId, pr);
+  }
+
+  const planYaml = readFileSync(join(repoRoot, "plan", "tasks.yaml"), "utf8");
+  const entries = planYaml.split(/\n(?=- id: )/);
+  const measuredRe =
+    /(\d+(\.\d+)?\s?(ms|milliseconds|seconds?|sec)\b)|(\blatency\b)|(\bthroughput\b)|(\breq\/s\b)|(\brequests? per second\b)|([<>]=?\s?\d)/i;
+  const hits: Array<{ id: string; pr: number }> = [];
+  for (const entry of entries) {
+    const idMatch = entry.match(/^- id: (\S+)/);
+    if (!idMatch) continue;
+    const fullId = idMatch[1];
+    const shortMatch = fullId.match(/-T(\w+)$/);
+    if (!shortMatch) continue;
+    const pr = prByShortId.get(shortMatch[1]);
+    if (pr === undefined || pr >= PRE_PROOF_EXECUTOR_PR) continue;
+    const acceptanceMatch = entry.match(/\n {2}acceptance:\n([\s\S]*?)\n {2}[a-zA-Z_]+:/);
+    const acceptanceText = acceptanceMatch ? acceptanceMatch[1] : entry;
+    if (measuredRe.test(acceptanceText)) hits.push({ id: fullId, pr });
+  }
+  return hits;
+}
+
+/**
+ * The content W1-T188 criterion 4 protects on W1-T154's plan entry: title/rationale/design/
+ * acceptance -- never `status`/`attempts`/`note`, which legitimately change across the task's
+ * lifecycle (e.g. a plan-sync step flipping `status: queued` -> `merged`) without that being an
+ * amendment to the CRITERIA rule 21 exists to protect.
+ */
+function extractW1T154Content(planYaml: string): { title: string; rationale: string; design: string; acceptance: string } | null {
+  const entries = planYaml.split(/\n(?=- id: )/);
+  const entry = entries.find((e) => e.startsWith("- id: W1-T154\n"));
+  if (!entry) return null;
+  const titleMatch = entry.match(/^- id: W1-T154\n {2}title: "([^"]*)"/);
+  const rationaleMatch = entry.match(/\n {2}rationale: "([\s\S]*?)"\n {2}design:/);
+  const designMatch = entry.match(/\n {2}design: \|\n([\s\S]*?)\n {2}acceptance:/);
+  const acceptanceMatch = entry.match(/\n {2}acceptance:\n([\s\S]*?)\n {2}risk:/);
+  if (!titleMatch || !rationaleMatch || !designMatch || !acceptanceMatch) return null;
+  return { title: titleMatch[1], rationale: rationaleMatch[1], design: designMatch[1], acceptance: acceptanceMatch[1] };
+}
+
+// Pinned 2026-08-19 (W1-T188) over W1-T154's title+rationale+design+acceptance, as they read on
+// origin/main at this task's dispatch -- a sha256 rather than the ~3KB literal so this file does
+// not carry a second copy of T154's text to drift out of sync with formatting nits.
+const W1_T154_CONTENT_SHA256 = "b5d3eb1f7e3d1a1b6758b3937d1394520b2b1d00b77a2df17af8bc272560b7a8";
+
+function repoRootFromThisFile(): string {
+  return fileURLToPath(new URL("..", import.meta.url));
+}
+
+test("W1-T188 criterion 1: first-paint-to-data is RE-MEASURED empirically at production-corpus scale against a real server, and the result is recorded with numbers", async () => {
+  const plan = loadCorpusPlan();
+  const github = loadCorpusGithub();
+  const root = tmpRoot();
+  const planPath = writePlan(root, "[]\n"); // panel-graph reloads plan/tasks.yaml fresh; unexercised here
+  const ledgerPath = corpusLedgerPath();
+
+  const deps: ServeDeps = {
+    board: { plan, ledgerPath, github, now: () => Date.parse(FIXED_NOW_ISO) },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: fakeRatifyGateway() },
+    ledgerPath,
+    issues: fakeIssueCloser(),
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+  };
+
+  await withServeServer(deps, async (base) => {
+    const shellStart = performance.now();
+    const shellRes = await get(base, "/", READ_TOKEN);
+    await shellRes.text();
+    const shellMs = performance.now() - shellStart;
+    assert.equal(shellRes.status, 200);
+
+    const statusStart = performance.now();
+    const statusRes = await get(base, "/v1/status", READ_TOKEN);
+    const body = (await statusRes.json()) as { tasks: unknown[] };
+    const statusMs = performance.now() - statusStart;
+    assert.equal(statusRes.status, 200);
+    assert.equal(body.tasks.length, plan.tasks.length);
+
+    // RECORDED WITH NUMBERS (W1-T188 criterion 1), whichever way it falls -- the assertion
+    // messages below carry both the measured figure and the 2026-07-20 pre-fix falsifier so a
+    // future reader sees the before/after without needing this PR's body.
+    assert.ok(
+      shellMs < 2000,
+      `GET / took ${shellMs.toFixed(1)}ms over ${plan.tasks.length} tasks -- must be < 2000ms ` +
+        `(pre-W1-T187-fix falsifier, 2026-07-20: 49.0s cold / 42.6s warm)`,
+    );
+    assert.ok(
+      statusMs < 2000,
+      `GET /v1/status took ${statusMs.toFixed(1)}ms over ${plan.tasks.length} tasks -- must be < 2000ms ` +
+        `(pre-W1-T187-fix falsifier, 2026-07-20: 58.7s/54.0s/34.5s)`,
+    );
+  });
+});
+
+test("W1-T188 criterion 2: the first-paint-to-data budget is a REPLAYABLE golden fixture -- the committed production-scale corpus reproduces the budget check identically across independent loads and independent server instances, not a one-off manual curl", async () => {
+  // REPLAYABLE requires DETERMINISM first: the fixture must be the same data every time it is
+  // loaded, not regenerated randomly per run.
+  assert.deepEqual(loadCorpusPlan(), loadCorpusPlan(), "the golden corpus plan must be byte-identical across independent loads");
+  assert.deepEqual(
+    loadCorpusLedgerLines(),
+    loadCorpusLedgerLines(),
+    "the golden corpus ledger must be byte-identical across independent loads",
+  );
+
+  // NOTE ON SHAPE (design note: "verify W1-T165's actual shape ... before assuming it can host a
+  // timing golden"): W1-T165's replay.ts mechanism (GoldenTask/GoldenExpectation, SEEDED_GOLDENS)
+  // compares a task-DISPATCH outcome -- verdict/filesTouched/prTrailerTaskId/fixDispatches -- it
+  // has no field for a latency measurement, and bending it to carry one would misuse a shape built
+  // for a different kind of golden. The corpus fixture below is the honest alternative the design
+  // note allows: a COMMITTED, deterministic, production-scale fixture (test/fixtures/w1-t187/)
+  // that re-runs this exact budget check on every `npm test`/CI invocation of a harness-touching
+  // change, rather than living only in a PR body to be rediscovered by the next operator report.
+
+  // "Replay" the SAME golden corpus through two INDEPENDENT server instances -- exactly what every
+  // future run of this suite does.
+  for (let replay = 1; replay <= 2; replay++) {
+    const plan = loadCorpusPlan();
+    const github = loadCorpusGithub();
+    const root = tmpRoot();
+    const planPath = writePlan(root, "[]\n");
+    const ledgerPath = corpusLedgerPath();
+    const deps: ServeDeps = {
+      board: { plan, ledgerPath, github, now: () => Date.parse(FIXED_NOW_ISO) },
+      panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: fakeRatifyGateway() },
+      ledgerPath,
+      issues: fakeIssueCloser(),
+      fleetControlRoot: root,
+      questionsRoot: root,
+      tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    };
+    await withServeServer(deps, async (base) => {
+      const t0 = performance.now();
+      const res = await get(base, "/v1/status", READ_TOKEN);
+      await res.text();
+      const ms = performance.now() - t0;
+      assert.equal(res.status, 200);
+      assert.ok(ms < 2000, `replay ${replay}/2 of the golden corpus: GET /v1/status took ${ms.toFixed(1)}ms -- must be < 2000ms`);
+    });
+  }
+});
+
+test("W1-T188 criterion 3: pre-#414 merged tasks whose acceptance criteria assert MEASURED properties are enumerated mechanically -- the at-risk keyword-certified set", () => {
+  const hits = findPreProofExecutorMeasuredCriteria(repoRootFromThisFile());
+  const ids = hits.map((h) => h.id);
+  assert.ok(
+    hits.length > 0,
+    "the mechanical sweep found zero pre-#414 measured-property criteria -- this is the set W1-T188 exists to make visible, and W1-T154 alone should surface",
+  );
+  // Positive controls: W1-T154 (PR #388, this task's own subject) and W1-T156 (PR #398, named in
+  // plan/tasks.yaml's own note as "the second member" of this exact class) must both surface, or
+  // the mechanism is not actually finding the case it exists to catch.
+  assert.ok(ids.includes("W1-T154"), `mechanical sweep must find W1-T154 (PR #388); found: ${ids.join(", ") || "(none)"}`);
+  assert.ok(
+    ids.includes("W1-T156"),
+    `mechanical sweep must find W1-T156 (PR #398), the plan's own noted "second member" of the W1-T188 class; found: ${ids.join(", ") || "(none)"}`,
+  );
+});
+
+test("W1-T188 criterion 4: the W1-T154 plan entry is unchanged by this task's PR -- title, rationale, design and acceptance all pinned; standing rule 21 forbids amending a merged task's criteria", () => {
+  const planYaml = readFileSync(join(repoRootFromThisFile(), "plan", "tasks.yaml"), "utf8");
+  const content = extractW1T154Content(planYaml);
+  assert.ok(
+    content,
+    "W1-T154 must still exist in plan/tasks.yaml with its title/rationale/design/acceptance fields -- rule 21 protects the record, not just the criteria wording",
+  );
+  const hash = createHash("sha256").update(JSON.stringify(content)).digest("hex");
+  assert.equal(
+    hash,
+    W1_T154_CONTENT_SHA256,
+    "W1-T154's title/rationale/design/acceptance changed since this hash was pinned (W1-T188, 2026-08-19). " +
+      "W1-T154 is MERGED: standing rule 21 requires amendments to be filed as a follow-up task (like this one), " +
+      "never an edit to the already-merged entry itself.",
+  );
 });
 
 // ── the batched gateway's pre-warm is GATED ON A CONNECTED CONSOLE ─────────────────────────
