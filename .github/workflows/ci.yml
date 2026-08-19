@@ -78,7 +78,20 @@ jobs:
         # second later. Pre-seeding `DPkg::Lock::Timeout` closes that gap at the source: apt/dpkg
         # themselves then wait (bounded, 300s) for a contended lock instead of failing fast, so
         # playwright's internal call is covered too, not just our pre-check.
+        #
+        # PR-2218 round 2 (ci-log): the race survived round 1 in a DIFFERENT shape -- the live
+        # failure now hit `E: Could not get lock /var/lib/apt/lists/lock. It is held by process
+        # 2097 (apt-get)` seconds after `wait_for_apt_lock` returned, with `DPkg::Lock::Timeout`
+        # already pre-seeded. The holder is the runner image's own `apt-daily`/`apt-daily-upgrade`
+        # systemd units, which the WAIT-based fixes (flock, DPkg::Lock::Timeout) can only ever
+        # wait OUT, never stop from restarting mid-window. Explicitly stopping the timers (so
+        # they cannot re-arm) and force-killing any already-running instance of the services
+        # removes the holder outright instead of racing it, closing the gap for good rather than
+        # narrowing it again.
         run: |
+          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+          sudo systemctl kill --kill-who=all apt-daily.service >/dev/null 2>&1 || true
+          sudo systemctl kill --kill-who=all apt-daily-upgrade.service >/dev/null 2>&1 || true
           sudo mkdir -p /etc/apt/apt.conf.d
           echo 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/99synthwatch-locktimeout >/dev/null
           wait_for_apt_lock() {
@@ -234,7 +247,14 @@ jobs:
         # PR-2218 round 1 (ci-log): same `DPkg::Lock::Timeout` pre-seed as the `ci` job's
         # identical step above, applied here too -- see that step's comment for the live-observed
         # check-then-act race this closes.
+        #
+        # PR-2218 round 2 (ci-log): same `apt-daily`/`apt-daily-upgrade` stop-and-kill fix as the
+        # `ci` job's identical step above, applied here too -- see that step's comment for the
+        # live-observed `/var/lib/apt/lists/lock` failure this closes.
         run: |
+          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+          sudo systemctl kill --kill-who=all apt-daily.service >/dev/null 2>&1 || true
+          sudo systemctl kill --kill-who=all apt-daily-upgrade.service >/dev/null 2>&1 || true
           sudo mkdir -p /etc/apt/apt.conf.d
           echo 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/99synthwatch-locktimeout >/dev/null
           wait_for_apt_lock() {
