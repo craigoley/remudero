@@ -1,0 +1,161 @@
+- id: W1-T1021
+  title: "THE RUNNING IMAGE CAN FALL ARBITRARILY FAR BEHIND MAIN AND NOTHING NOTICES — `acr-build.yml` is `workflow_dispatch:` only, the entrypoint that boots every container is COPY'd into the image while everything it runs comes from a live mount, and the build sha is already stamped at `/etc/rmd-build-sha` yet no code reads it: compare that stamp against the baked paths' own history at the freshness gate and surface the answer where a human already looks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: |
+    THE SPLIT IS THE WHOLE PREDICATE AND IT WAS RE-DERIVED FROM THE TWO FILES, NOT ASSUMED.
+    `deploy/entrypoint.sh` resolves `TREE="$CONFIG_ROOT/remudero"`, fetches and checks it out at every
+    boot, then `cd "$TREE"` and runs `./bin/rmd`, which execs `$TREE/node_modules/.bin/tsx`. So `src/`,
+    `test/`, `plan/`, `bin/` and `scripts/` are LIVE from the mount and take effect on the next
+    freshness restart with no rebuild. `node_modules` is LIVE TOO — the entrypoint bootstraps
+    `$TREE/node_modules` and leaves freshness to `ensureInstallFresh`; the image's own `/app`
+    node_modules is never reached, so the common belief that it is baked is wrong.
+
+    (1) WHAT IS ACTUALLY BAKED, FROM THE DOCKERFILE'S OWN LINES. `COPY --chown=node:node
+    deploy/entrypoint.sh /usr/local/bin/rmd-entrypoint` followed by `ENTRYPOINT [… "/usr/local/bin/
+    rmd-entrypoint"]` — the EXECUTED entrypoint is the image's copy, never the mount's. The Dockerfile
+    itself bakes every apt binary, `ARG GH_VERSION`, `ARG CLAUDE_CODE_VERSION` and the node base. A
+    `COPY . .` snapshot lands at `/app`, but the entrypoint `cd`s away from it, so it is inert rather
+    than authoritative. THE BAKED SET FOR THIS DETECTOR IS THEREFORE EXACTLY TWO PATHS:
+    `deploy/entrypoint.sh` and `deploy/Dockerfile`. A change under `src/` MUST NOT trigger it.
+
+    (2) THE COMPARISON INPUT ALREADY EXISTS, IS ALREADY POPULATED, AND IS ALREADY READABLE FROM INSIDE.
+    `ARG RMD_BUILD_SHA=unknown` / `LABEL org.opencontainers.image.revision="${RMD_BUILD_SHA}"` /
+    `RUN printf '%s\n' "${RMD_BUILD_SHA}" > /etc/rmd-build-sha && chmod 0444 /etc/rmd-build-sha`, and
+    `.github/workflows/acr-build.yml` passes `--build-arg "RMD_BUILD_SHA=${GITHUB_SHA}"`, so the stamp
+    carries a real commit sha rather than the default. `deploy/verify-image.sh` reads it with a plain
+    `cat` from INSIDE the container. SO NO DOCKERFILE CHANGE IS NEEDED AND NO LABEL NEEDS ADDING —
+    the stamp already exists and nothing compares it to main. That is the entire gap.
+
+    (3) THE DAEMON CANNOT SEE ITS OWN IMAGE THROUGH DOCKER, AND DOES NOT NEED TO. `deploy/
+    host-update.sh` runs each container with exactly two `-v` mounts (state and credentials; the serve
+    container gets one), and `docker.sock` reads ZERO across `deploy/` against a control of 3 real
+    `-v` lines — no socket, no Docker API. `scripts/fleet-heartbeat.sh` gets the value only by
+    `docker exec … cat /etc/rmd-build-sha` FROM THE HOST. The detector avoids all of that: the file is
+    an ordinary 0444 file in the daemon's own filesystem, so it is a `readFileSync`, not a runtime
+    query.
+
+    (4) NOTHING READS IT. `image_build_sha` reads 0 in `src/` — against controls of 78 `head_sha` and
+    58 `daemon.boot` occurrences in the same tree, so the zero is real absence and not a broken query.
+    The beat PUBLISHES the sha; publishing is not comparing, and no code anywhere joins it to the
+    baked paths' history.
+
+    (5) THE FALSE-POSITIVE COST, MEASURED OVER THE WHOLE RETAINED HISTORY. 21 commits have touched
+    either baked path across 1,671 commits on main — 1.3%, or about one commit in eighty. Split:
+    `deploy/Dockerfile` 14, `deploy/entrypoint.sh` 9, last touched 2026-08-15 and 2026-08-18. CONTROL:
+    `src/` was touched by 752 commits (45%), which is what a naive detector keyed on source would fire
+    on. THIS IS THE ARGUMENT FOR THE DETECTOR BEING CHEAP, NOT FOR IT BEING URGENT.
+
+    (6) THE READER IS NAMED AND IT ALREADY EXISTS. `deriveNeedsMe` (`src/lib/status-board.ts`) builds
+    the needs-me section from LEDGER LINES, keyed today on a single step constant imported from
+    `src/lib/cost-anomaly.ts` — a module that owns its step, emits it, and is read by exactly this
+    clause. That is the shape to copy. `buildStatusBoard` has TWO callers — `src/lib/board.ts` for the
+    console and `statusCommand` (`src/run-task.ts`) — so the finding surfaces in `rmd status` even
+    though `remudero-serve` is stopped. `renderDaemonSummary` is deliberately NOT the reader: it has
+    ONE call site, in `daemonCommand`'s return path, so a daemon that never exits never prints it.
+
+    (7) THE EMIT POINT ALREADY LEDGERS ITS SIBLINGS. `serviceFreshnessGate` (`src/run-task.ts`) is the
+    daemon's boot-time freshness path and already writes `daemon.tree_dirty` and `daemon.stale_code`
+    off `checkServiceFreshness`. The image comparison belongs beside them: same gate, same boot, same
+    ledger. That is why `src/run-task.ts` is unavoidable here.
+
+    (8) THE THREE DEGRADED CASES, EACH A CRITERION RATHER THAN A COMMENT. Off-container the stamp file
+    is ABSENT and the answer is not-applicable, never drift. A stamp that is not a hex sha —
+    `ARG RMD_BUILD_SHA=unknown` makes a hand-built image real, and `scripts/fleet-heartbeat.sh` already
+    guards it with `*[!0-9a-fA-F]*` — is UNMEASURABLE, never drift. And a stamp naming a commit the
+    local history cannot resolve is unmeasurable for the same reason. A detector that reports drift on
+    any of these would fire on every developer machine.
+  acceptance:
+    - claim: "a merge that touches only source paths does not report image drift"
+      proof: "unit test: W1-T1021: a source-only merge does not report image drift"
+    - claim: "a baked entrypoint change landing after the image was built reports drift"
+      proof: "unit test: W1-T1021: a baked entrypoint change after the build reports drift"
+    - claim: "an absent build-sha file reports not-applicable rather than drift"
+      proof: "unit test: W1-T1021: an absent build sha file reports not applicable"
+    - claim: "a build stamp that is not a hex sha reports unmeasurable rather than drift"
+      proof: "unit test: W1-T1021: a non sha build stamp reports unmeasurable"
+    - claim: "the daemon freshness gate reaches the new check rather than leaving it unreached"
+      proof: "unit test: W1-T1021: the freshness gate reaches the image drift check"
+    - claim: "the baked stamp is already present and unread rather than something this task adds"
+      proof: "grep: the stamp already exists and nothing compares it to main in plan/tasks.d/W1-T1021-image-drift-is-undetected.yaml"
+  risk: high
+  origin: "oper#image-drift-undetected-2026-08-19"
+  plan_refs: ["W1-T496", "W1-T490"]
+  files: [src/lib/image-drift.ts, src/lib/status-board.ts, src/run-task.ts, test/image-drift.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE GREP PROOF MATCHES RATIONALE PROSE, NOT ITS OWN DECLARATION. The phrase sits on ONE PHYSICAL
+    LINE inside rationale (2), is not on line 2 of the file, and reads 0 files across the whole tree at
+    the merge base against a control phrase from CLAUDE.md that reads 1 — so it discriminates head from
+    base and cannot be downgraded to `executed_stale`.
+
+    NO DOCKERFILE CHANGE, AND THAT IS A MEASURED CONCLUSION RATHER THAN A SCOPE PREFERENCE. The brief
+    asked whether a baked revision label should be added here or in a sibling; the answer is NEITHER,
+    because `LABEL org.opencontainers.image.revision` and `/etc/rmd-build-sha` are both already in
+    `deploy/Dockerfile` and `acr-build.yml` already supplies the value. `deploy/` is therefore absent
+    from `files:` entirely, which is also why this shard does not span the Dockerfile and `src/`.
+
+    RULE 25 RE-DERIVED BY RUNNING THE PREDICATE, NOT BY READING IT. `INSTRUMENT_SURFACE`
+    (`src/lib/review.ts`) holds 6 entries; compiling them exactly as `INSTRUMENT_SURFACE_RE` does and
+    testing six paths gives: `.github/workflows/ci.yml` ON and `scripts/coverage-ratchet.mjs` ON (the
+    two positive controls), and `deploy/Dockerfile`, `deploy/entrypoint.sh`, `src/lib/status-board.ts`
+    and `src/run-task.ts` all OFF. **`deploy/` IS NOT ON THE INSTRUMENT SURFACE** — and note the
+    briefing's suggested positive control `src/run-task.ts` reads OFF, so it cannot serve as one; the
+    workflow path and the ratchet script are the controls that actually fire.
+
+    NO NEW SIGNAL WITHOUT A CONSUMER. The new step is read by `deriveNeedsMe` in the SAME change, on
+    the exact precedent `COST_ANOMALY_STEP` sets: a small module owning its step constant, imported by
+    `src/lib/status-board.ts` and consumed in one clause. It is a RENDER-relevant row, not a decision
+    input, so it belongs with `RENDER_RELEVANT_LEDGER_STEPS` rather than
+    `DECISION_RELEVANT_LEDGER_STEPS` — the builder must state which set it registered and why, since a
+    row nothing decides on does not earn a place in the never-rotated core.
+
+    src/run-task.ts MUST BE DECLARED AND ITS SERIALISATION COST IS ACCEPTED. It is declared by 232 of
+    372 records, so this task serialises against most of the pool under `overlappingPaths`. It is
+    unavoidable: `serviceFreshnessGate` is the daemon's freshness gate and the site that already writes
+    `daemon.tree_dirty` / `daemon.stale_code`, so an emit anywhere else would be a second freshness
+    path. src/lib/self-sync.ts is deliberately NOT declared (16 shards, cheap) — `checkServiceFreshness`
+    is a mount-side predicate and nothing in it changes; the image question is a different corpus.
+
+    NO REBUILD IS PROPOSED AND NONE MAY BE. `acr-build.yml` stays `workflow_dispatch:` only. A rebuild
+    and recycle drops running workers and clears locks, which is more irreversible than a merge, and
+    `DECISIONS.md` ratifies gating on irreversibility. DETECTION IS THIS SHARD; DISPATCH IS THE
+    OPERATOR'S. An implementer who wires an automatic build has exceeded this task.
+
+    risk: high IS RAISED ON A MEASURED REFUSAL AND THE REFUSAL IS QUOTED, NOT GUESSED. Authored at
+    `risk: medium` and run through `rmd lint-plan`, which refused it in these words: *"[sizing] spans 3
+    distinct subsystems/concerns (image-drift, run-task, status-board) at risk:medium — Rule 19: raise
+    to risk:high or decompose into one task per concern."* The band is Rule 19's SPAN, not blast
+    radius: the three subsystems are one new module, one reader clause and one emit site for a single
+    finding, and decomposing an emitter from the reader that makes it non-inert is not a real
+    decomposition — it is how the eleven unreached modules were built.
+
+    THE `[call-site]` ADVISORY IS ANSWERED BY TEST, NOT BY GREP, AND THE REASON IS MEASURED. The linter
+    asks for `grep: <symbol>( in <the file that calls it>`. Measured with `rmd check-proof`: that form
+    reads `hits: 0, verdict: fail, exit: 1` at this head, because the symbol does not exist yet — and
+    an `executed_fail` overrides keyword coverage and FAILS the PR, so writing it here would fail this
+    filing over work that has not started. Control on the same command: `grep: serviceFreshnessGate( in
+    src/run-task.ts` reads `hits: 2, verdict: pass`. Criterion 5 therefore proves the call site as a
+    name-filtered `unit test:`, which forward-references safely as `no-match`. An implementer SHOULD
+    add the grep form once the symbol exists.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING. Four criteria are mechanical and take the name-filtered
+    `unit test:` form; each title was measured against test/ with `grep -rlF` and matched ZERO files,
+    against a control title lifted verbatim from test/fleet-heartbeat-image-sha.test.ts that matched
+    one. Each is plain prose under 100 characters with no comma, no `; ` and no regex metacharacter,
+    because a bare title is compiled through `escapeRegExp` and matched literally. The fifth is
+    doc-shaped and takes a `grep:` with an explicit path.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING. `refs/rmd-id/W1-T1021` resolves
+    to `11661761…` (negative control `refs/rmd-id/W1-T444444` reads 0). Four surfaces swept anyway,
+    GIT FIRST AND REST LAST AND SERIAL, `/rate_limit` never called: the reservation; shard FILENAMES
+    via `git ls-tree -r` (371 files, W1-T1021 = 0, control W1-T1017 = 1 — THE FILENAME IS THE EXISTENCE
+    TEST, and the shard's `- id:` line is unindented); ids mentioned under plan/ (ADVISORY only, 0 for
+    this id against a control of 5 files for W1-T496, proving the surface can match); and the open-PR
+    titles, heads and file lists. THE OPEN-PR SET WAS READ, NOT UNREAD: three open pull requests were
+    enumerated (#2190, #2191, #2196) and all three file lists fetched, none carrying a plan/tasks path.
