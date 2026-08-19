@@ -67,7 +67,20 @@ jobs:
         # VM), not by another CI job. That holder always finishes on its own, so each attempt now
         # waits (bounded, 300s) for the dpkg/apt locks to clear before invoking playwright
         # install, instead of colliding with them immediately and burning the attempt.
+        #
+        # PR-2218 round 1 (ci-log): the wait-then-release `flock ... true` above is a
+        # CHECK-then-act race -- it drops the lock the instant it acquires it, so the runner
+        # image's background apt-get can reacquire the lock in the gap before playwright's own
+        # internal `apt-get`/`dpkg` call runs. That is exactly what the live failure showed:
+        # `wait_for_apt_lock` returned clean (the notice printed, `Installing dependencies...`
+        # started immediately after) and playwright's OWN `apt-get`/`dpkg` still hit `E: Could
+        # not get lock /var/lib/dpkg/lock-frontend. It is held by process 2701 (apt-get)` a
+        # second later. Pre-seeding `DPkg::Lock::Timeout` closes that gap at the source: apt/dpkg
+        # themselves then wait (bounded, 300s) for a contended lock instead of failing fast, so
+        # playwright's internal call is covered too, not just our pre-check.
         run: |
+          sudo mkdir -p /etc/apt/apt.conf.d
+          echo 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/99synthwatch-locktimeout >/dev/null
           wait_for_apt_lock() {
             echo "::notice::waiting up to 300s for the apt/dpkg lock the runner image's own background apt-get holds on a fresh VM"
             sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
@@ -217,7 +230,13 @@ jobs:
         # other leaves the second free to take the board down on its own (it did: PR #2150, five
         # minutes after PR #2148's `ci` hang on this exact step). This `run:` block must stay
         # byte-identical to the `ci` job's, which test/workflow-playwright-install.test.ts asserts.
+        #
+        # PR-2218 round 1 (ci-log): same `DPkg::Lock::Timeout` pre-seed as the `ci` job's
+        # identical step above, applied here too -- see that step's comment for the live-observed
+        # check-then-act race this closes.
         run: |
+          sudo mkdir -p /etc/apt/apt.conf.d
+          echo 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/99synthwatch-locktimeout >/dev/null
           wait_for_apt_lock() {
             echo "::notice::waiting up to 300s for the apt/dpkg lock the runner image's own background apt-get holds on a fresh VM"
             sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
