@@ -1852,6 +1852,31 @@ test("W1-T1005: a rate-limited call widens the gap for the other gateway too", (
   }
 });
 
+test("W1-T1005: resetDefaultGhCallPacerForTest(undefined) really clears the shared default, not just this test's fake", () => {
+  // Every test above resets to `undefined` in its own `finally`, but none of them proves that
+  // reset actually TAKES: if `resetDefaultGhCallPacerForTest(undefined)` were a no-op, a stale
+  // fake from an earlier test would silently keep answering later ones and this whole suite
+  // would still pass green while `buildBatchedGithub` quietly leaked test state into every
+  // caller after it — the same class of "no throw, no signal" failure this task exists to close,
+  // just moved into the test double instead of production. Prove it directly: seed a fake, clear
+  // it, and confirm the NEXT unpaced construction never reaches the cleared fake at all.
+  const staleFakeCalls: string[] = [];
+  const staleFake: GhCallPacer = {
+    wait: () => staleFakeCalls.push("wait"),
+    recordResult: (rateLimited) => staleFakeCalls.push(`result:${rateLimited}`),
+  };
+  resetDefaultGhCallPacerForTest(staleFake);
+  resetDefaultGhCallPacerForTest(undefined);
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [] });
+  gh.findMergedByTrailer("W1-T1");
+  assert.deepEqual(
+    staleFakeCalls,
+    [],
+    "the cleared fake never sees another call — reset(undefined) really drops the module's " +
+      "reference to it rather than leaving it installed",
+  );
+});
+
 test("W1-T181: a batched-gateway fetch FAILURE projects indeterminate/throttled through deriveStatus — never the bare merged=false/source=none shape a genuine absence produces (the signal W1-T179's github_unobservable marking is designed to consume)", () => {
   // FALSIFIER, measured live on 2026-07-20: with the pre-fix catch, the batched gateway read
   // merged 0/212 with 207 indeterminate and the board reported every task queued, while the
