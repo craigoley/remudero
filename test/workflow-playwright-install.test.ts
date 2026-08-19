@@ -43,6 +43,23 @@ function playwrightInstallStep(job: CiJob): string | undefined {
   return (job.steps ?? []).find((step) => step.run?.includes("playwright install"))?.run;
 }
 
+/**
+ * The step's EXECUTABLE lines only — every `#` comment and blank line removed.
+ *
+ * W1-T1027 round 2: the assertions below used to run against the whole `run:` block, so a
+ * mechanism named in a COMMENT satisfied them. That is how round 1's `flock` no-op passed its
+ * own gate, and this round's first attempt then satisfied the same assertions with prose about
+ * `fuser` while the command line no longer waited on anything at all. A gate that a comment can
+ * satisfy is not a gate.
+ */
+function playwrightInstallCommands(job: CiJob): string {
+  const run = playwrightInstallStep(job) ?? "";
+  return run
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line) && line.trim() !== "")
+    .join("\n");
+}
+
 const EXPECTED_JOBS = ["ci", "coverage-ratchet"];
 
 test("W1-T1027: both playwright-carrying jobs exist and each has an install step", async () => {
@@ -53,29 +70,26 @@ test("W1-T1027: both playwright-carrying jobs exist and each has an install step
   }
 });
 
-test("W1-T1027: the install step waits for the apt/dpkg lock before each attempt, rather than blindly re-invoking", async () => {
+test("W1-T1027: the install step either avoids apt entirely, or waits with a mechanism that can SEE the holder", async () => {
   const jobs = await loadCiJobs();
   for (const jobId of EXPECTED_JOBS) {
-    const run = playwrightInstallStep(jobs[jobId]!)!;
-    // W1-T1027 round 2: this used to assert the literal string `flock`, which is why the
-    // no-op survived — `flock -w` cannot observe the fcntl(2) record lock dpkg actually holds
-    // (measured: rc=0 after 0s against an fcntl-held lock, vs a full block against a
-    // flock-held one), so the step matched the assertion while waiting for nothing. The
-    // assertion now names MECHANISMS THAT CAN SEE THE HOLDER, and deliberately excludes
-    // `flock`: `fuser` reports any process holding the file open whatever the lock flavour,
-    // and `DPkg::Lock::Timeout` is apt's own wait applied inside the apt-get `--with-deps`
-    // invokes. A future edit that reverts to `flock` alone fails here rather than passing.
-    const waitMechanism = /\bfuser\b/.test(run) || /DPkg::Lock::Timeout/.test(run);
+    const cmd = playwrightInstallCommands(jobs[jobId]!);
+
+    // THE MEASUREMENT THIS ENCODES. `--with-deps` is the only reason this step touches apt, and
+    // apt on this runner fleet is contended by the image's own background apt-get: on PR #2225
+    // the step waited its full 3 x 300s and the holder was STILL there at 1010 seconds, refuting
+    // round 1's "that holder always finishes on its own". A green run showed `--with-deps`
+    // installs ONLY font packages, never a Chromium shared library. So the sanctioned shapes are
+    // (a) do not invoke apt at all, or (b) invoke it behind a wait that can OBSERVE the holder —
+    // `fuser` (any open handle, whatever the lock flavour) or apt's own DPkg::Lock::Timeout.
+    // `flock` is deliberately NOT accepted: it cannot see dpkg's fcntl(2) record lock at all.
+    const invokesApt = /--with-deps/.test(cmd);
+    const waitsObservably = /\bfuser\b/.test(cmd) || /DPkg::Lock::Timeout/.test(cmd);
     assert.ok(
-      waitMechanism,
-      `job '${jobId}'s install step must wait on the apt/dpkg lock with a mechanism that can ` +
-        "OBSERVE the holder (fuser, or apt's own DPkg::Lock::Timeout) before invoking playwright " +
-        "install -- `flock` cannot see dpkg's fcntl lock and returns instantly, which is the " +
-        "no-op this round replaces",
-    );
-    assert.ok(
-      run.includes("/var/lib/dpkg/lock-frontend") || run.includes("/var/lib/apt/lists/lock"),
-      `job '${jobId}'s install step must name the actual apt/dpkg lock path it waits on`,
+      !invokesApt || waitsObservably,
+      `job '${jobId}'s install step invokes apt via --with-deps without an observing wait. Either ` +
+        "drop --with-deps (the browser download needs no apt) or wait with fuser / " +
+        "DPkg::Lock::Timeout -- flock cannot see dpkg's fcntl lock and returns instantly.",
     );
   }
 });

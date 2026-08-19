@@ -68,38 +68,35 @@ jobs:
         # waits (bounded, 300s) for the dpkg/apt locks to clear before invoking playwright
         # install, instead of colliding with them immediately and burning the attempt.
         run: |
-          # W1-T1027 ROUND 2: `flock -w` CANNOT OBSERVE THE LOCK DPKG HOLDS, so the wait this
-          # replaces was a no-op. dpkg/apt take an fcntl(2) POSIX record lock on lock-frontend;
-          # flock(2) is an INDEPENDENT mechanism on Linux, so `flock -w 300 <lockfile> true`
-          # takes its own advisory lock and returns immediately -- and `2>/dev/null || true`
-          # swallowed the evidence. MEASURED: `flock -w 3` against an fcntl-held lock returns
-          # rc=0 after 0s; against a flock-held lock it blocks the full 3s. PR #2199 then failed
-          # AFTER that fix shipped, naming the very lock it waits on ("Could not get lock
-          # /var/lib/dpkg/lock-frontend. It is held by process 2702 (apt-get)").
+          # W1-T1027 ROUND 2 — THE PREMISE BOTH EARLIER ROUNDS RESTED ON IS REFUTED, MEASURED.
+          # Round 1 waited with `flock -w 300`, which cannot observe the lock at all: dpkg takes an
+          # fcntl(2) POSIX record lock on lock-frontend and flock(2) is an independent mechanism on
+          # Linux (measured: `flock -w 3` returns rc=0 after 0s against an fcntl-held lock, and
+          # blocks the full 3s against a flock-held one). Replacing it with a `fuser` poll made the
+          # wait real — and the real wait then MEASURED the thing that matters: on PR #2225 the step
+          # ran 1010 SECONDS, i.e. all three attempts waited their full 300s and the holder was
+          # STILL there. Round 1's comment asserted "that holder always finishes on its own". Over
+          # a 15-minute window on that runner, it did not. So no amount of waiting fixes this.
           #
-          # TWO MECHANISMS, both of which can actually see the holder. `fuser` reports any
-          # process holding the file OPEN, whatever lock flavour it uses, so the poll is
-          # observable rather than advisory. `DPkg::Lock::Timeout` is apt's OWN wait, applied
-          # inside the apt-get that `--with-deps` invokes, which closes the check-then-act window
-          # the poll alone would leave for the holder to reappear in.
-          export APT_CONFIG="${RUNNER_TEMP}/rmd-apt.conf"
-          printf 'DPkg::Lock::Timeout "300";\n' > "${APT_CONFIG}"
-          wait_for_apt_lock() {
-            for _ in $(seq 1 60); do
-              if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
-                return 0
-              fi
-              echo "::notice::apt/dpkg lock still held by the runner image's own background apt-get -- waiting"
-              sleep 5
-            done
-            echo "::warning::apt/dpkg lock still held after 300s -- invoking anyway, DPkg::Lock::Timeout will wait inside apt"
-          }
+          # THE APT DEPENDENCY IS ONLY FONTS, and that is what makes dropping it the experiment
+          # rather than a gamble. On a green run `--with-deps` apt-installed exactly
+          # fonts-wqy-zenhei, fonts-freefont-ttf, fonts-tlwg-loma-otf, xfonts-encodings,
+          # fonts-ipafont-gothic, fonts-unifont, xfonts-utils, xfonts-cyrillic and xfonts-scalable
+          # — CJK and decorative glyph packages — and NOT ONE Chromium shared library, because
+          # ubuntu-latest already carries those. The browser itself comes from cdn.playwright.dev
+          # over plain HTTPS with no apt involved.
+          #
+          # W1-T1027's shard names this as the determination a builder must make and how to make
+          # it: "run the browser suites against an install WITHOUT the font packages, on the same
+          # tree". This IS that run, with CI as the instrument. If W1-T153's a11y/responsive suites
+          # need those glyphs they fail here loudly and deterministically, which is a far better
+          # signal than a 15-minute hang; if they pass, apt leaves this workflow's critical path
+          # for good. The retry and the 360s per-attempt bound stay either way (W1-T1009).
           for attempt in 1 2 3; do
-            wait_for_apt_lock
-            if timeout 360 npx playwright install --with-deps chromium; then
+            if timeout 360 npx playwright install chromium; then
               exit 0
             fi
-            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt lock or mirror stall) -- retrying"
+            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s -- retrying"
           done
           echo "::error::playwright install failed after 3 attempts"
           exit 1
@@ -239,38 +236,35 @@ jobs:
         # minutes after PR #2148's `ci` hang on this exact step). This `run:` block must stay
         # byte-identical to the `ci` job's, which test/workflow-playwright-install.test.ts asserts.
         run: |
-          # W1-T1027 ROUND 2: `flock -w` CANNOT OBSERVE THE LOCK DPKG HOLDS, so the wait this
-          # replaces was a no-op. dpkg/apt take an fcntl(2) POSIX record lock on lock-frontend;
-          # flock(2) is an INDEPENDENT mechanism on Linux, so `flock -w 300 <lockfile> true`
-          # takes its own advisory lock and returns immediately -- and `2>/dev/null || true`
-          # swallowed the evidence. MEASURED: `flock -w 3` against an fcntl-held lock returns
-          # rc=0 after 0s; against a flock-held lock it blocks the full 3s. PR #2199 then failed
-          # AFTER that fix shipped, naming the very lock it waits on ("Could not get lock
-          # /var/lib/dpkg/lock-frontend. It is held by process 2702 (apt-get)").
+          # W1-T1027 ROUND 2 — THE PREMISE BOTH EARLIER ROUNDS RESTED ON IS REFUTED, MEASURED.
+          # Round 1 waited with `flock -w 300`, which cannot observe the lock at all: dpkg takes an
+          # fcntl(2) POSIX record lock on lock-frontend and flock(2) is an independent mechanism on
+          # Linux (measured: `flock -w 3` returns rc=0 after 0s against an fcntl-held lock, and
+          # blocks the full 3s against a flock-held one). Replacing it with a `fuser` poll made the
+          # wait real — and the real wait then MEASURED the thing that matters: on PR #2225 the step
+          # ran 1010 SECONDS, i.e. all three attempts waited their full 300s and the holder was
+          # STILL there. Round 1's comment asserted "that holder always finishes on its own". Over
+          # a 15-minute window on that runner, it did not. So no amount of waiting fixes this.
           #
-          # TWO MECHANISMS, both of which can actually see the holder. `fuser` reports any
-          # process holding the file OPEN, whatever lock flavour it uses, so the poll is
-          # observable rather than advisory. `DPkg::Lock::Timeout` is apt's OWN wait, applied
-          # inside the apt-get that `--with-deps` invokes, which closes the check-then-act window
-          # the poll alone would leave for the holder to reappear in.
-          export APT_CONFIG="${RUNNER_TEMP}/rmd-apt.conf"
-          printf 'DPkg::Lock::Timeout "300";\n' > "${APT_CONFIG}"
-          wait_for_apt_lock() {
-            for _ in $(seq 1 60); do
-              if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
-                return 0
-              fi
-              echo "::notice::apt/dpkg lock still held by the runner image's own background apt-get -- waiting"
-              sleep 5
-            done
-            echo "::warning::apt/dpkg lock still held after 300s -- invoking anyway, DPkg::Lock::Timeout will wait inside apt"
-          }
+          # THE APT DEPENDENCY IS ONLY FONTS, and that is what makes dropping it the experiment
+          # rather than a gamble. On a green run `--with-deps` apt-installed exactly
+          # fonts-wqy-zenhei, fonts-freefont-ttf, fonts-tlwg-loma-otf, xfonts-encodings,
+          # fonts-ipafont-gothic, fonts-unifont, xfonts-utils, xfonts-cyrillic and xfonts-scalable
+          # — CJK and decorative glyph packages — and NOT ONE Chromium shared library, because
+          # ubuntu-latest already carries those. The browser itself comes from cdn.playwright.dev
+          # over plain HTTPS with no apt involved.
+          #
+          # W1-T1027's shard names this as the determination a builder must make and how to make
+          # it: "run the browser suites against an install WITHOUT the font packages, on the same
+          # tree". This IS that run, with CI as the instrument. If W1-T153's a11y/responsive suites
+          # need those glyphs they fail here loudly and deterministically, which is a far better
+          # signal than a 15-minute hang; if they pass, apt leaves this workflow's critical path
+          # for good. The retry and the 360s per-attempt bound stay either way (W1-T1009).
           for attempt in 1 2 3; do
-            wait_for_apt_lock
-            if timeout 360 npx playwright install --with-deps chromium; then
+            if timeout 360 npx playwright install chromium; then
               exit 0
             fi
-            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt lock or mirror stall) -- retrying"
+            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s -- retrying"
           done
           echo "::error::playwright install failed after 3 attempts"
           exit 1
