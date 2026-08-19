@@ -68,17 +68,38 @@ jobs:
         # waits (bounded, 300s) for the dpkg/apt locks to clear before invoking playwright
         # install, instead of colliding with them immediately and burning the attempt.
         run: |
+          # W1-T1027 ROUND 2: `flock -w` CANNOT OBSERVE THE LOCK DPKG HOLDS, so the wait this
+          # replaces was a no-op. dpkg/apt take an fcntl(2) POSIX record lock on lock-frontend;
+          # flock(2) is an INDEPENDENT mechanism on Linux, so `flock -w 300 <lockfile> true`
+          # takes its own advisory lock and returns immediately -- and `2>/dev/null || true`
+          # swallowed the evidence. MEASURED: `flock -w 3` against an fcntl-held lock returns
+          # rc=0 after 0s; against a flock-held lock it blocks the full 3s. PR #2199 then failed
+          # AFTER that fix shipped, naming the very lock it waits on ("Could not get lock
+          # /var/lib/dpkg/lock-frontend. It is held by process 2702 (apt-get)").
+          #
+          # TWO MECHANISMS, both of which can actually see the holder. `fuser` reports any
+          # process holding the file OPEN, whatever lock flavour it uses, so the poll is
+          # observable rather than advisory. `DPkg::Lock::Timeout` is apt's OWN wait, applied
+          # inside the apt-get that `--with-deps` invokes, which closes the check-then-act window
+          # the poll alone would leave for the holder to reappear in.
+          export APT_CONFIG="${RUNNER_TEMP}/rmd-apt.conf"
+          printf 'DPkg::Lock::Timeout "300";\n' > "${APT_CONFIG}"
           wait_for_apt_lock() {
-            echo "::notice::waiting up to 300s for the apt/dpkg lock the runner image's own background apt-get holds on a fresh VM"
-            sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
-            sudo flock -w 300 /var/lib/apt/lists/lock true 2>/dev/null || true
+            for _ in $(seq 1 60); do
+              if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+                return 0
+              fi
+              echo "::notice::apt/dpkg lock still held by the runner image's own background apt-get -- waiting"
+              sleep 5
+            done
+            echo "::warning::apt/dpkg lock still held after 300s -- invoking anyway, DPkg::Lock::Timeout will wait inside apt"
           }
           for attempt in 1 2 3; do
             wait_for_apt_lock
             if timeout 360 npx playwright install --with-deps chromium; then
               exit 0
             fi
-            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt mirror stall) -- retrying"
+            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt lock or mirror stall) -- retrying"
           done
           echo "::error::playwright install failed after 3 attempts"
           exit 1
@@ -218,17 +239,38 @@ jobs:
         # minutes after PR #2148's `ci` hang on this exact step). This `run:` block must stay
         # byte-identical to the `ci` job's, which test/workflow-playwright-install.test.ts asserts.
         run: |
+          # W1-T1027 ROUND 2: `flock -w` CANNOT OBSERVE THE LOCK DPKG HOLDS, so the wait this
+          # replaces was a no-op. dpkg/apt take an fcntl(2) POSIX record lock on lock-frontend;
+          # flock(2) is an INDEPENDENT mechanism on Linux, so `flock -w 300 <lockfile> true`
+          # takes its own advisory lock and returns immediately -- and `2>/dev/null || true`
+          # swallowed the evidence. MEASURED: `flock -w 3` against an fcntl-held lock returns
+          # rc=0 after 0s; against a flock-held lock it blocks the full 3s. PR #2199 then failed
+          # AFTER that fix shipped, naming the very lock it waits on ("Could not get lock
+          # /var/lib/dpkg/lock-frontend. It is held by process 2702 (apt-get)").
+          #
+          # TWO MECHANISMS, both of which can actually see the holder. `fuser` reports any
+          # process holding the file OPEN, whatever lock flavour it uses, so the poll is
+          # observable rather than advisory. `DPkg::Lock::Timeout` is apt's OWN wait, applied
+          # inside the apt-get that `--with-deps` invokes, which closes the check-then-act window
+          # the poll alone would leave for the holder to reappear in.
+          export APT_CONFIG="${RUNNER_TEMP}/rmd-apt.conf"
+          printf 'DPkg::Lock::Timeout "300";\n' > "${APT_CONFIG}"
           wait_for_apt_lock() {
-            echo "::notice::waiting up to 300s for the apt/dpkg lock the runner image's own background apt-get holds on a fresh VM"
-            sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
-            sudo flock -w 300 /var/lib/apt/lists/lock true 2>/dev/null || true
+            for _ in $(seq 1 60); do
+              if ! sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+                return 0
+              fi
+              echo "::notice::apt/dpkg lock still held by the runner image's own background apt-get -- waiting"
+              sleep 5
+            done
+            echo "::warning::apt/dpkg lock still held after 300s -- invoking anyway, DPkg::Lock::Timeout will wait inside apt"
           }
           for attempt in 1 2 3; do
             wait_for_apt_lock
             if timeout 360 npx playwright install --with-deps chromium; then
               exit 0
             fi
-            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt mirror stall) -- retrying"
+            echo "::warning::playwright install attempt ${attempt}/3 failed or hung past 360s (apt lock or mirror stall) -- retrying"
           done
           echo "::error::playwright install failed after 3 attempts"
           exit 1

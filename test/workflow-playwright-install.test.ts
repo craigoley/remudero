@@ -57,11 +57,21 @@ test("W1-T1027: the install step waits for the apt/dpkg lock before each attempt
   const jobs = await loadCiJobs();
   for (const jobId of EXPECTED_JOBS) {
     const run = playwrightInstallStep(jobs[jobId]!)!;
+    // W1-T1027 round 2: this used to assert the literal string `flock`, which is why the
+    // no-op survived — `flock -w` cannot observe the fcntl(2) record lock dpkg actually holds
+    // (measured: rc=0 after 0s against an fcntl-held lock, vs a full block against a
+    // flock-held one), so the step matched the assertion while waiting for nothing. The
+    // assertion now names MECHANISMS THAT CAN SEE THE HOLDER, and deliberately excludes
+    // `flock`: `fuser` reports any process holding the file open whatever the lock flavour,
+    // and `DPkg::Lock::Timeout` is apt's own wait applied inside the apt-get `--with-deps`
+    // invokes. A future edit that reverts to `flock` alone fails here rather than passing.
+    const waitMechanism = /\bfuser\b/.test(run) || /DPkg::Lock::Timeout/.test(run);
     assert.ok(
-      /flock/.test(run),
-      `job '${jobId}'s install step must wait on the apt/dpkg lock (flock or equivalent) before ` +
-        "invoking playwright install -- retrying the identical command against a lock it cannot " +
-        "win is the defect this task fixes",
+      waitMechanism,
+      `job '${jobId}'s install step must wait on the apt/dpkg lock with a mechanism that can ` +
+        "OBSERVE the holder (fuser, or apt's own DPkg::Lock::Timeout) before invoking playwright " +
+        "install -- `flock` cannot see dpkg's fcntl lock and returns instantly, which is the " +
+        "no-op this round replaces",
     );
     assert.ok(
       run.includes("/var/lib/dpkg/lock-frontend") || run.includes("/var/lib/apt/lists/lock"),
