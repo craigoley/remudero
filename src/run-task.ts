@@ -20127,8 +20127,15 @@ export interface AlertFixDispatchDeps {
  * `ALERT-<source>-<id>`-shaped id, not a filed task), so no `expectedTaskId` is passed — the general,
  * body-only check applies (a resolvable `Remudero-Task:` trailer OR a judgeable body-level block).
  */
-function checkAlertFixAcceptance(prUrl: string): AcceptanceAuthorTimeResult {
-  const view = ghJson(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
+export function checkAlertFixAcceptance(
+  prUrl: string,
+  /** Injectable `gh` reader, appended LAST so no positional caller shifts (the W1-T268 shape).
+   *  Omitted ⇒ the real {@link ghJson}. Exists because every dispatch test injects
+   *  `deps.checkAcceptance` and would otherwise leave THIS binding — the only thing that actually
+   *  reads the PR body in production — unexecuted. */
+  read: (args: string[]) => unknown = ghJson,
+): AcceptanceAuthorTimeResult {
+  const view = read(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
   return acceptanceAuthorTimeCheck(view.body ?? "");
 }
 

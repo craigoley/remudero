@@ -39,7 +39,12 @@ import {
   PR_AUTHORING_PATHS,
   type AcceptanceAuthorTimeResult,
 } from "../src/lib/review.js";
-import { checkAcceptanceCommand, dispatchAlertFixRun, type AlertFixDispatchDeps } from "../src/run-task.js";
+import {
+  checkAcceptanceCommand,
+  checkAlertFixAcceptance,
+  dispatchAlertFixRun,
+  type AlertFixDispatchDeps,
+} from "../src/run-task.js";
 import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -224,6 +229,63 @@ test("W1-T952: the diagnostic names the specific defect not a generic failure", 
   assert.equal(healthy.defect, undefined);
 });
 
+test("W1-T952: a resolvable trailer is the OTHER healthy shape — both trailer arms report ok with no defect", () => {
+  // ARM 1 — the caller REQUIRES a specific task id and the body carries exactly it. The
+  // no-trailer failure arm is already covered above; this is its passing twin, and without it the
+  // only executed path through the `expectedTaskId` branch is the one that returns a defect.
+  const matched = acceptanceAuthorTimeCheck("body prose\n\nRemudero-Task: W1-T952\n", { expectedTaskId: "W1-T952" });
+  assert.equal(matched.ok, true, "a trailer equal to the expected id is healthy");
+  assert.equal(matched.defect, undefined, "a healthy result never carries a defect name");
+  assert.match(matched.message, /credits this task on merge/);
+
+  // ARM 2 — no caller expectation, but the body carries a trailer, so criteria resolve from the
+  // plan rather than from a body-level block. Distinct from the `UNWRAPPED` control above, which
+  // is healthy because its BLOCK parses, not because a trailer exists.
+  const resolvable = acceptanceAuthorTimeCheck("no acceptance header at all\n\nRemudero-Task: W1-T400\n");
+  assert.equal(resolvable.ok, true, "a trailer alone is healthy — criteria resolve from plan/tasks.yaml");
+  assert.equal(resolvable.defect, undefined);
+  assert.match(resolvable.message, /criteria resolve from plan\/tasks\.yaml/);
+  assert.match(resolvable.message, /W1-T400/, "the message names the trailer it actually found");
+
+  // FALSIFIER — the same body with a DIFFERENT expected id is still a defect, so arm 1 is
+  // asserting equality rather than mere presence.
+  const mismatched = acceptanceAuthorTimeCheck("body prose\n\nRemudero-Task: W1-T952\n", { expectedTaskId: "W1-T999" });
+  assert.equal(mismatched.ok, false);
+  assert.equal(mismatched.defect, "no-trailer");
+  assert.match(mismatched.message, /found "Remudero-Task: W1-T952" instead/);
+});
+
+test("W1-T952: the REAL checkAcceptance binding reads the PR body over gh and delegates the verdict", () => {
+  // Every dispatch test below injects `deps.checkAcceptance`, so the production binding — the one
+  // thing that actually reads a PR body — would otherwise never execute. Inject only the `gh`
+  // reader (appended LAST) and assert the argv AND the delegation.
+  const calls: string[][] = [];
+  const healthy = checkAlertFixAcceptance("https://github.com/craigoley/remudero/pull/4242", (args) => {
+    calls.push(args);
+    return { body: "no header here\n\nRemudero-Task: W1-T952\n" };
+  });
+  assert.deepEqual(
+    calls,
+    [["pr", "view", "https://github.com/craigoley/remudero/pull/4242", "--json", "body"]],
+    "reads exactly the PR body, once, for the url it was handed",
+  );
+  assert.equal(healthy.ok, true, "the verdict is acceptanceAuthorTimeCheck's, not a second hand-rolled one");
+
+  // A body the check refuses must come back refused THROUGH the binding — proving delegation
+  // rather than an unconditional ok.
+  const defective = checkAlertFixAcceptance("https://github.com/craigoley/remudero/pull/4243", () => ({
+    body: "just prose, no header, no trailer anywhere in this body",
+  }));
+  assert.equal(defective.ok, false);
+  assert.equal(defective.defect, "no-header");
+
+  // A read that yields no `body` field at all is treated as an EMPTY body, never as ok — the
+  // `?? ""` arm, which is what a deleted or unreadable PR looks like on this path.
+  const absent = checkAlertFixAcceptance("https://github.com/craigoley/remudero/pull/4244", () => ({}));
+  assert.equal(absent.ok, false, "an absent body is a defect, never silently healthy");
+  assert.equal(absent.defect, "no-header");
+});
+
 // ── The wired call site: rmd alert-fix (dispatchAlertFixRun, src/run-task.ts) ───────────────────
 // alertTaskId (alertFixPrompt) never resolves in plan/tasks.yaml — the body is the ONLY thing
 // review can ever judge this lane's PR from, so this is the one path where the check's absence
@@ -297,6 +359,37 @@ test("W1-T952: a body with no acceptance header is refused at author time", asyn
 
 // The positive control, in the SAME suite invocation as the refusal above (design item iv) — an
 // implementation that refuses EVERY body would satisfy the test above perfectly.
+test("W1-T952: a checkAcceptance that THROWS is ledgered as an error, never swallowed and never fatal", async () => {
+  // The catch arm around the diagnostics call. Without this the only executed paths are ok and
+  // not-ok, and a reader would have to take on faith that a `gh` failure here degrades rather
+  // than killing the lane after the worker has already been paid for.
+  const root = mkdtempSync(join(tmpdir(), "w1t952-throws-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const deps = w1t952Deps(() => {
+      throw new Error("gh: could not resolve to a PullRequest");
+    });
+    await dispatchAlertFixRun("craigoley", "remudero", { root } as Config, W1T952_ALERT, ledgerPath, "ALERT-FIX-W1T952-T", deps);
+    const lines = readFileSync(ledgerPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const errLine = lines.find((l) => l.step === "alert-fix.acceptance_check_error");
+    assert.ok(errLine, "a throwing check must leave a NAMED ledger row, not silence");
+    assert.match(errLine.error, /could not resolve to a PullRequest/, "the row carries the real cause, not a generic message");
+    assert.equal(errLine.pr_url, "https://github.com/craigoley/remudero/pull/9521");
+    // FALSIFIER-ish control: the throw must not have been reclassified as an ordinary defect, and
+    // must not have aborted the lane before its own cleanup.
+    assert.equal(
+      lines.find((l) => l.step === "alert-fix.acceptance_defect"),
+      undefined,
+      "a THROW is not a defect verdict — the two rows are distinct outcomes",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T952: a well-formed body is accepted in the same run", async () => {
   const root = mkdtempSync(join(tmpdir(), "w1t952-accepted-"));
   const ledgerPath = join(root, "ledger.ndjson");
