@@ -115,17 +115,24 @@ test("W1-T1027: no third job silently grows a playwright install step", async ()
 // still runs. These two do, IN THE SAME CI JOB THAT INSTALLED IT — if `npx playwright install
 // chromium` (no --with-deps) failed to produce a working browser, `chromium.launch()` throws here
 // and this file fails rather than the failure surfacing as an unexplained shell-ux error.
+// The launch PROMISE is assigned SYNCHRONOUSLY and teardown awaits it, never the resolved handle --
+// the convention test/serve-browser-teardown.test.ts enforces across every browser-launching suite.
+// Closing the handle leaks a browser when teardown fires before `before` resolved (e.g. a zero-match
+// --test-name-pattern run), which is exactly what this file would otherwise do.
+let browserPromise: Promise<Browser> | undefined;
 let browser: Browser | undefined;
 let launchError: unknown;
 before(async () => {
+  browserPromise = chromium.launch({ args: ["--no-sandbox"] });
   try {
-    browser = await chromium.launch({ args: ["--no-sandbox"] });
+    browser = await browserPromise;
   } catch (e) {
     launchError = e;
   }
 });
 after(async () => {
-  await browser?.close();
+  const launched = await browserPromise;
+  await launched?.close();
 });
 
 test("W1-T1027: chromium launches from an install that never ran apt", async () => {
