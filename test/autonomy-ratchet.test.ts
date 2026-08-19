@@ -219,7 +219,8 @@ test("an EMPTY merge corpus reports n=0 and a null rate, never a false 0% or 100
   const report = zeroTouchMergeRate([], mining({}));
   assert.equal(report.totalMerges, 0);
   assert.equal(report.zeroTouchRate, null);
-  assert.equal(report.classes.length, 4);
+  // W1-T1020: 5, not 4 — full-pass / partial-pass / keyword-floor / degraded-arm / unclassified.
+  assert.equal(report.classes.length, 5);
   for (const c of report.classes) {
     assert.equal(c.total, 0);
     assert.equal(c.zeroTouchRate, null);
@@ -329,6 +330,42 @@ test("split BY VERDICT CLASS: each class's zero-touch rate is computed independe
   assert.equal(keywordFloor.zeroTouchRate, 0);
   assert.equal(degradedArm.total, 0);
   assert.equal(degradedArm.zeroTouchRate, null);
+});
+
+// ── W1-T1020 ─────────────────────────────────────────────────────────────────────────────────
+//
+// Before this task, `verdictClassOf` read `capped`/`floor_degraded` off the `review.posted` row
+// and returned `"full-pass"` for EVERYTHING else — including a row whose own `partially_executed`
+// was `true` (some, not all, executable criteria observed). That is the same silence the arm
+// decision carried: the reviewer already wrote the fact down, and the fleet's own autonomy report
+// read none of it. This test proves the row now lands in its own `"partial-pass"` bucket instead.
+
+test("W1-T1020: a partially executed row does not classify as a full pass", () => {
+  const merges = [
+    { taskId: "W1-T1", sha: SHA_A, ts: "2026-01-01T00:00:00+00:00" }, // full-pass, zero-touch
+    { taskId: "W1-T2", sha: SHA_B, ts: "2026-01-02T00:00:00+00:00" }, // partially executed
+  ];
+  const m = mining({
+    "W1-T1": [
+      { step: "automerge.armed", task_id: "W1-T1" },
+      { step: "review.posted", task_id: "W1-T1", capped: false, floor_degraded: false, partially_executed: false },
+    ],
+    "W1-T2": [
+      { step: "automerge.armed", task_id: "W1-T2" },
+      { step: "review.posted", task_id: "W1-T2", capped: false, floor_degraded: false, partially_executed: true },
+    ],
+  });
+  const report = zeroTouchMergeRate(merges, m);
+
+  const partialRow = report.rows.find((r) => r.taskId === "W1-T2")!;
+  assert.equal(partialRow.verdictClass, "partial-pass");
+  assert.notEqual(partialRow.verdictClass, "full-pass");
+
+  const fullPass = report.classes.find((c) => c.verdictClass === "full-pass")!;
+  const partialPass = report.classes.find((c) => c.verdictClass === "partial-pass")!;
+  assert.equal(fullPass.total, 1, "the partially-executed row must not inflate the full-pass bucket");
+  assert.equal(partialPass.total, 1);
+  assert.equal(partialPass.zeroTouchRate, 1);
 });
 
 test("a merge with no review.posted line lands in the 'unclassified' bucket, never guessed into a real class", () => {

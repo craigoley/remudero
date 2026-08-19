@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   applyVerdictStability,
   auditMergedTaskClaims,
+  decideArmFromLedgerVerdict,
+  decideAutoMergeArm,
   judgeCriterion,
   judgeReview,
+  narrowNameFilteredArgs,
+  parseWhitelistedProof,
+  priorReviewVerdictFromLedger,
   reviewLedgerLegibilityFields,
   type PriorReviewVerdict,
   type ProofExecutor,
@@ -268,4 +278,182 @@ test("ACCEPTANCE 3: the PARTIAL tag survives verdict-stability suppression — a
   assert.equal(result.suppressed, true);
   assert.equal(result.verdict.state, "success");
   assert.match(result.verdict.summary, /PARTIAL: 1\/2/);
+});
+
+// ── W1-T1020 ─────────────────────────────────────────────────────────────────────────────────
+//
+// W1-T305 (above) made the reviewer WRITE DOWN that a PASS was only partially executed, at three
+// levels of detail: per criterion (`ProofSkipReason`), rolled up (`partiallyExecuted` +
+// `executedProofCount`/`executableProofCount`), and posted (`passSummary`'s "PARTIAL: X/Y" tag).
+// Nothing downstream READ any of it: `decideAutoMergeArm`'s uncapped branch unconditionally
+// returned `reason: "verdict is a full PASS"` — true of a review that observed every criterion,
+// false of one that observed 1 of 13 — and `priorReviewVerdictFromLedger` reconstructed the
+// ledger-fed path's verdict WITHOUT the recorded `partially_executed` boolean, so the sweep and
+// triage arm paths never even had the fact in hand. These four tests prove that gap is closed
+// WITHOUT turning legibility into a new refusal — the `arm` value is unchanged in every case.
+
+const PARTIAL_VERDICT_FOR_ARM: Pick<ReviewVerdict, "state" | "capped" | "planOnly"> &
+  Pick<ReviewVerdict, "partiallyExecuted" | "executedProofCount" | "executableProofCount"> = {
+  state: "success",
+  capped: false,
+  planOnly: false,
+  partiallyExecuted: true,
+  executedProofCount: 1,
+  executableProofCount: 2,
+};
+
+test("W1-T1020: a partial verdict arms with a reason that names the partial shape", () => {
+  const decision = decideAutoMergeArm(PARTIAL_VERDICT_FOR_ARM, false);
+  assert.match(decision.reason, /PARTIAL/, "the reason must name the partial shape");
+  assert.match(decision.reason, /1\/2/, "the fraction is named when the caller's verdict carries the counts");
+  assert.notEqual(
+    decision.reason,
+    "verdict is a full PASS",
+    "a verdict the same review labelled PARTIAL must never record the FULL-PASS reason",
+  );
+});
+
+test("W1-T1020: a partial verdict still arms", () => {
+  const decision = decideAutoMergeArm(PARTIAL_VERDICT_FOR_ARM, false);
+  assert.equal(decision.arm, true, "legibility must never become a new refusal (design (ii))");
+});
+
+test("W1-T1020: a fully executed pass keeps its reason unchanged", () => {
+  // Every executable criterion executed — `partiallyExecuted` is false, exactly the shape
+  // `judgeReview` computes for a healthy review. The negative control from design (v): without
+  // it, a change that also rewrote the ordinary path's reason string would pass just as well.
+  const fullyExecuted: Pick<ReviewVerdict, "state" | "capped" | "planOnly"> &
+    Pick<ReviewVerdict, "partiallyExecuted" | "executedProofCount" | "executableProofCount"> = {
+    state: "success",
+    capped: false,
+    planOnly: false,
+    partiallyExecuted: false,
+    executedProofCount: 2,
+    executableProofCount: 2,
+  };
+  const decision = decideAutoMergeArm(fullyExecuted, false);
+  assert.equal(decision.arm, true);
+  assert.equal(decision.reason, "verdict is a full PASS", "byte identical to today's reason — the ordinary path is pinned");
+});
+
+test("W1-T1020: the ledger reconstruction carries the partial flag", () => {
+  const lines = [
+    {
+      step: "review.posted",
+      task_id: "W1-T1020-fixture",
+      head_sha: "deadbeef",
+      state: "success",
+      capped: false,
+      plan_only: false,
+      partially_executed: true,
+    },
+  ];
+  const prior = priorReviewVerdictFromLedger(lines, "W1-T1020-fixture");
+  assert.ok(prior);
+  assert.equal(prior!.partiallyExecuted, true, "the recorded partially_executed boolean must reach the reconstructed verdict");
+
+  // End to end: the sweep/triage arm path (decideArmFromLedgerVerdict) reaches the SAME decision
+  // as the fresh-verdict path above, from ONLY the boolean the ledger carries (no counts) — the
+  // fraction is named only where it is actually in hand (design (iii)).
+  const decision = decideArmFromLedgerVerdict(prior, "deadbeef");
+  assert.equal(decision.arm, true);
+  assert.match(decision.reason, /PARTIAL/);
+  assert.notEqual(decision.reason, "verdict is a full PASS");
+});
+
+// ── W1-T1020 DESIGN (vii): THE FILE-SHA-BRACKETED MUTATION CHECK ────────────────────────────
+//
+// A positive test alone proves nothing here: an implementation that named the partial shape only
+// in a code COMMENT, or that computed the right string but never returned it on this branch,
+// would still make the three tests above pass by accident if they were weakly written. The check
+// (verbatim, design note (vii)): read the sha256 of the edited file, revert the reason change,
+// read the sha256 again and require it to DIFFER, run the suite and require the partial-reason
+// test to FAIL, restore, and require the sha to return to the original.
+//
+// This mutates the REAL, checked-out `src/lib/review.ts` on disk (restored in a `finally`,
+// verified byte-identical by its own sha256 afterward), then spawns a REAL child `node --test`
+// process — the same model test/task-id-reservation.test.ts's own W1-T949 mutation test follows,
+// narrowed via `--test-name-pattern` to ONLY the "arms with a reason that names the partial
+// shape" test above, in this SAME file. That narrowing is what makes same-file safe: the pattern
+// matches that one test's name and no other's, so THIS test (a different name) is never invoked
+// by the child and no recursive re-entry occurs.
+
+test("W1-T1020: reverting the reason change fails the partial reason test", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const srcPath = join(repoRoot, "src", "lib", "review.ts");
+  const targetTestFile = "test/unexecutable-proof-visibility.test.ts";
+  const positiveTestName = "W1-T1020: a partial verdict arms with a reason that names the partial shape";
+
+  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  const original = readFileSync(srcPath, "utf8");
+  const originalSha = sha256(original);
+
+  // THE REASON CHANGE: decideAutoMergeArm's `if (verdict.partiallyExecuted) { ... }` branch,
+  // which is what makes the uncapped arm reason name the partial shape instead of unconditionally
+  // asserting a full PASS. Reverted here to reproduce EXACTLY the defect this task closes.
+  const needle =
+    '  if (!verdict.capped) {\n' +
+    '    if (verdict.partiallyExecuted) {\n' +
+    '      const hasCounts = typeof verdict.executedProofCount === "number" && typeof verdict.executableProofCount === "number";\n' +
+    '      return {\n' +
+    '        arm: true,\n' +
+    '        reason: hasCounts\n' +
+    '          ? `verdict is a PARTIAL PASS (${verdict.executedProofCount}/${verdict.executableProofCount} executable ` +\n' +
+    '            "criteria executed) — arms unchanged; legibility never becomes a refusal (W1-T1020)"\n' +
+    '          : "verdict is a PARTIAL PASS (some, not all, executable criteria executed) — arms unchanged; " +\n' +
+    '            "legibility never becomes a refusal (W1-T1020)",\n' +
+    '      };\n' +
+    '    }\n' +
+    '    return { arm: true, reason: "verdict is a full PASS" };\n' +
+    '  }';
+  const occurrences = original.split(needle).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    "sanity: the uncapped-branch reason logic must appear EXACTLY once, or this mutation is not targeting the real rung",
+  );
+  const mutated = original.replace(
+    needle,
+    '  if (!verdict.capped) {\n' +
+      '    // W1-T1020 MUTATION: the partial-shape branch removed, reverting to the pre-fix defect.\n' +
+      '    return { arm: true, reason: "verdict is a full PASS" };\n' +
+      '  }',
+  );
+
+  const whitelisted = parseWhitelistedProof(`unit test: ${positiveTestName}`);
+  assert.ok(whitelisted, "sanity: the proof text must parse as a name-filtered `unit test:` dialect proof");
+  assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
+  const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
+
+  let childResult: ReturnType<typeof spawnSync> | undefined;
+  try {
+    writeFileSync(srcPath, mutated);
+    const mutatedSha = sha256(readFileSync(srcPath, "utf8"));
+    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change review.ts's bytes");
+
+    // NODE_TEST_CONTEXT (set by node's OWN test runner on the process running THIS test) is
+    // inherited by a plain spawnSync env by default — node's test runner treats its presence as
+    // "this is a recursive run() call" and SKIPS running any files at all, exiting 0 having
+    // executed nothing. Strip it so the child is a genuinely independent `node --test`
+    // invocation, not a silently-skipped no-op that would make this check pass for the wrong
+    // reason (test/task-id-reservation.test.ts's W1-T949 mutation test notes the same trap).
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+  } finally {
+    // RESTORED REGARDLESS of what the child run did — a throw, a timeout, or a pass must never
+    // leave the real checked-out source mutated.
+    writeFileSync(srcPath, original);
+    const restoredSha = sha256(readFileSync(srcPath, "utf8"));
+    assert.equal(restoredSha, originalSha, "review.ts must be restored byte-for-byte after the mutation check");
+  }
+
+  assert.ok(childResult, "sanity: the child process must actually have been spawned");
+  assert.notEqual(
+    childResult!.status,
+    0,
+    `reverting the partial-shape reason must fail its own test — child exited ${childResult!.status}\n` +
+      `stdout:\n${childResult!.stdout}\nstderr:\n${childResult!.stderr}`,
+  );
 });

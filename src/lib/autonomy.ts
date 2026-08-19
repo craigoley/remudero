@@ -65,6 +65,20 @@ import { parseGitEventDump, type GitCommitEvent, type VerdictClass } from "./ver
 
 export type { VerdictClass };
 
+/**
+ * W1-T1020: this module's OWN extension of `verdict-calibration.ts`'s three-way
+ * {@link VerdictClass} vocabulary with a fourth bucket — `"partial-pass"`, a row whose
+ * `review.posted` line carries `partially_executed: true` (SOME but not ALL executable
+ * criteria observed). Local to autonomy.ts, never added to `verdict-calibration.ts` itself:
+ * that module's own correctness-join corpus and this module's quantity report are deliberately
+ * separate measurements (see this module's header doc), and widening the shared three-way type
+ * would ripple into verdict-calibration.ts's report shape for no reason this task asked for.
+ * Before this, a partially-executed row fell through `verdictClassOf`'s `capped`/`floor_degraded`
+ * checks into the catch-all `"full-pass"` return — indistinguishable from a review that actually
+ * observed every executable criterion.
+ */
+export type AutonomyVerdictClass = VerdictClass | "partial-pass";
+
 // ── The merge corpus (the "merge record") ───────────────────────────────────────────────────
 
 /** One trailer-bearing merge, mined from the git log dump. */
@@ -149,17 +163,17 @@ export interface MergeTouchRow {
   taskId: string;
   sha: string;
   ts: string;
-  verdictClass: VerdictClass | null;
+  verdictClass: AutonomyVerdictClass | null;
   zeroTouch: boolean;
   touches: string[];
 }
 
 /** Per verdict-class outcome — `verdictClass` is `"unclassified"` for rows whose
  *  `review.posted` line could not be recovered, kept as its OWN bucket rather than folded into
- *  any of the three real classes (a guess would misreport which class the ratchet is safe to
+ *  any of the four real classes (a guess would misreport which class the ratchet is safe to
  *  move). */
 export interface ZeroTouchClassOutcome {
-  verdictClass: VerdictClass | "unclassified";
+  verdictClass: AutonomyVerdictClass | "unclassified";
   total: number;
   zeroTouchCount: number;
   /** `null` when `total === 0` — an empty class prints a count, never a false 0% or 100%. */
@@ -191,18 +205,29 @@ export interface ZeroTouchMergeRateReport {
  *  (lib/review.ts) does TODAY. Moving this policy is a reviewed diff to that function, never a
  *  side effect of reading this report. */
 export const CURRENT_ARMING_POSTURE =
-  "decideAutoMergeArm arms unconditionally on a full-PASS verdict; a CAPPED (zero-proof) verdict " +
-  "arms only for a structurally plan-only PR or an explicit, ledgered operator override " +
+  "decideAutoMergeArm arms unconditionally on a full-PASS verdict; also arms — naming the partial " +
+  "shape in its reason, never asserting a full PASS — on a PARTIAL-PASS verdict (some but not all " +
+  "executable criteria observed, partially_executed) rather than refusing; a CAPPED (zero-proof) " +
+  "verdict arms only for a structurally plan-only PR or an explicit, ledgered operator override " +
   "(automerge.capped_override_granted) — otherwise it refuses. This report measures against " +
   "that posture; it changes nothing about it.";
 
-const CLASS_ORDER: readonly (VerdictClass | "unclassified")[] = ["full-pass", "keyword-floor", "degraded-arm", "unclassified"];
+const CLASS_ORDER: readonly (AutonomyVerdictClass | "unclassified")[] = [
+  "full-pass",
+  "partial-pass",
+  "keyword-floor",
+  "degraded-arm",
+  "unclassified",
+];
 
-function verdictClassOf(lines: readonly Record<string, unknown>[]): VerdictClass | null {
+function verdictClassOf(lines: readonly Record<string, unknown>[]): AutonomyVerdictClass | null {
   const posted = [...lines].reverse().find((l) => l.step === "review.posted");
   if (!posted) return null;
   if (posted.capped === true) return "degraded-arm";
   if (posted.floor_degraded === true) return "keyword-floor";
+  // W1-T1020: SOME but not ALL executable criteria observed — checked before the catch-all so a
+  // partially-executed row is never indistinguishable from a fully-observed full-pass.
+  if (posted.partially_executed === true) return "partial-pass";
   return "full-pass";
 }
 
@@ -304,7 +329,7 @@ export function zeroTouchMergeRate(
   const zeroTouchCount = rows.filter((r) => r.zeroTouch).length;
   const totalMerges = rows.length;
 
-  const buckets = new Map<VerdictClass | "unclassified", { total: number; zeroTouch: number }>(
+  const buckets = new Map<AutonomyVerdictClass | "unclassified", { total: number; zeroTouch: number }>(
     CLASS_ORDER.map((c) => [c, { total: 0, zeroTouch: 0 }]),
   );
   for (const row of rows) {
