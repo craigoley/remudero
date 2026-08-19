@@ -1621,3 +1621,64 @@ written — the collisions it reports are real.
 
 **Rollback:** delete this entry. It changes no behaviour, so nothing else moves; the ritual sentence
 would then be neither required nor forbidden, exactly as before.
+## 2026-08-19 — RULING: W1-T472 and W1-T446 take the efficient option WITH telemetry; the site splits, the console does not (OPERATOR-RULED)
+
+*Operator-ruled record, recorded at the operator's instruction.* The three rulings are the operator's;
+the measurements were taken to serve them, not to make them. `W1-T472` and `W1-T446` are re-banded to
+`verify: auto` on the same authorisation.
+
+**1 — W1-T472: TAKE WHICHEVER OPTION REMOVES THE MOST COST WHILE PRESERVING THE SIGNAL**, on two
+conditions. (i) IT MUST BE REVERSIBLE, and reversibility is a COMPLETION CONDITION: an option that
+cannot be undone without re-deriving evidence that no longer exists is outside this ruling. (ii)
+TELEMETRY SHIPS IN THE SAME CHANGE, recording what the removed path would have done.
+**THE MEASUREMENT REFUTES THE FREE-DROP PREMISE AND IS RECORDED SO NOBODY RE-DERIVES IT.** The
+`--ci-parity` preflight HAS gone red: `preflight.failed` reads 27 rows, 27 distinct after deduping on
+the full line, across 24 distinct tasks — against a same-invocation positive control of 39
+`preflight.binary_pin` rows, and all three ledger forms read explicitly. The reds name real checks
+(`commitlint`, `ci:test`, `coverage-ratchet:test-with-coverage`). So "drop it" and "gate it" do NOT
+cost the same and neither is free. HONEST LIMIT: every row falls on 2026-08-12, which is essentially
+the whole window in which this host dispatched after the preflight shipped; the rate is unmeasured,
+the existence is not.
+**AND CONDITION (i) BITES ON ONE OPTION, WHICH IS RECORDED AS A FINDING RATHER THAN A CHOICE:**
+dropping the worker preflight also stops `preflightSummaryPath` being written, so the evidence a later
+reversal would need is destroyed by the removal itself. A builder must establish reversibility for
+whichever option they take, and say so.
+
+**2 — W1-T446: RELAX THE GUARD, MEASURE, REVERSE ON EVIDENCE.** `checkCliFreshness` refuses only on
+paths the incoming fast-forward would actually write. Each time the relaxed guard PERMITS something
+the strict one would have refused, it emits a row carrying the path and the reason, so the relaxation
+is reversible on evidence rather than on feel. The shard's own note says why this needed a ruling:
+*"design (i) is a policy question about relaxing a safety guard and no linter can settle it."*
+
+**THE CLAUSE THAT BINDS BOTH, AND MAY NOT BE SOFTENED.** THE TELEMETRY IS NOT OPTIONAL AND SHIPS IN
+THE SAME CHANGE — a relaxation with no record of what it allowed cannot be reversed. NAME THE READER
+IN THE CHANGE, or the row is the next built-and-unread mechanism; twelve have merged green with no
+consumer and a thirteenth was found on 2026-08-18. THE OPERATOR READING THE LEDGER IS A LEGITIMATE
+ANSWER — an unstated reader is not. And if either step must survive rotation to be read, it needs
+`DECISION_RELEVANT_LEDGER_STEPS` membership (`src/lib/ledger.ts`) IN THE SAME CHANGE; that omission
+has already cost this repo twice.
+**THE TELEMETRY IS AN OPERATOR-AUTHORISED ADDITION TO EACH TASK'S SCOPE.** Rule 15 forbids a worker
+adding it unbidden, so it is sanctioned here and a builder should treat it as in scope.
+
+**3 — W12-T1: THE SITE IS A SEPARATE REPOSITORY. THE CONSOLE IS NOT.** The console stays in
+`remudero` because it is not a website — it is `rmd serve`, a verb of the harness. Splitting it would
+make the daemon depend on another repository's build, and a worker changing `src/lib/service.ts`
+could not see the routes that consume it; one repository also gives agents one canonical instruction
+set, which this repo has in `CLAUDE.md`. The marketing site is genuinely separate: it shares no code
+with the harness and ships on its own cadence. **THE ANSWER IS THE SAME WHETHER OR NOT `remudero`
+GOES PRIVATE**, because a public site cannot live in a private repo — so `W12-T1` does not wait on the
+open-core decision. `W12-T1` is therefore REAL WORK IN A REPOSITORY THAT DOES NOT EXIST YET, not a
+paperwork gap, and `W1-T49` waits on it legitimately. If W1-T49 is wanted sooner, the edge is the
+thing to question, not the site.
+
+**AND THE FIELD EDIT THAT SHIPS WITH THIS.** `W1-T12d` gains `pr: 69` in `plan/tasks.yaml` — the
+sanctioned channel `deriveStatus` already reads for "(b) explicit `pr:` field (hand-executed,
+pre-ledger)", with `StatusSource` carrying `"pr-field"` and three records already using it. PR #69
+records the commissioning and carries `Remudero-Task: W1-T12D-RECORD`, a synthetic id its author chose
+so the record would not credit; that instinct was right and the trailer stays as written.
+**MEASURED, NOT ASSUMED, AND IT UNPARKS ONE TASK RATHER THAN TWO.** Driven through
+`isDispatchEligible`'s own refusal reasons: `W1-T165` moves from `unmet-deps` to OFFERED. `W1-T188`
+does NOT — it declares `depends_on: [W1-T187, W1-T165]`, and W1-T165 is now merely dispatchable, not
+merged; it unparks when W1-T165 ships. This does nothing for `W12-T1` (whose `prByRef` resolves against
+this repo only) or `W1-T12e` (whose drill has not happened and will produce no PR, and which refuses at
+`verify-not-auto` rather than `unmet-deps`). W1-T1029 (#2207) files that class.

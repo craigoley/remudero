@@ -6651,6 +6651,7 @@
   origin: architect
   plan_refs: ["§4B"]
   status: done
+  pr: 69                    # merged PR #69 (hand-executed commissioning record) -> deriveStatus resolves this task as merged
   attempts: 1
   note: "COMMISSIONED 2026-07-15 (verify:human, operator-attested). Evidence recorded in satisfied_by
     above (ledger runs DAEMON-1784130435165/-976494/-127724; sandbox PRs #6/#7/#8 merged; no duplicate
