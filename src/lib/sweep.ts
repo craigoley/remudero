@@ -2171,8 +2171,37 @@ export function deriveDisposition(
 }
 
 /**
- * ARMING PARITY WITH THE RUN FLOW — the fix for the gap run-task.ts named in its
- * own capped-refusal comment ("`sweep.ts`'s independent 'checks green + review
+ * W1-T983 — IS THIS OPEN PR'S DISPOSITION THE CAPPED-GREEN-REVIEW-ORPHAN SHAPE: the ONE
+ * blocked-ambiguous disposition this task reclassifies to a reaching escalation tier, out of
+ * every other blocked-ambiguous shape (merge conflicts, fix-rung strikes exhausted, stale
+ * pending, the terminal catch-all, ...) which all keep the class they have today. PURE and
+ * callable with no spawn and no GitHub — every input is a field {@link OpenPrView} already
+ * carries plus {@link SweepPolicy.reviewOrphanCap}, mirrored EXACTLY off the SAME four
+ * conditions the review-orphan-cap row of {@link DISPOSITION_RULES} above already reads
+ * (`checksState`, `reviewState`, `reviewOrphanedByPush`, `priorReviewOrphans` against the cap,
+ * `requiredContextsUnreadable`), never re-derived independently — so this predicate and that
+ * row's `when` clause cannot drift apart.
+ *
+ * `run-task.ts`'s sweep-escalate closure (`buildSweepEffects`) is the sole reader: `true` here
+ * is the only thing that moves ONE escalation off today's silent BLOCKED default. See that call
+ * site's own doc for the measured ping-rate this narrow reclassification stays inside — the
+ * cap fires ~1.7/day (rationale (3): five issues over three days), never the ~15.6/day BLOCKED
+ * average a blanket tier change (reclassifying every blocked-ambiguous escalation) would
+ * reinstate (rationale (4)).
+ */
+export function isCappedReviewOrphanEscalation(pr: OpenPrView, policy: SweepPolicy): boolean {
+  return (
+    pr.checksState === "green" &&
+    pr.reviewState === "none" &&
+    pr.reviewOrphanedByPush === true &&
+    (pr.priorReviewOrphans ?? 0) >= policy.reviewOrphanCap &&
+    pr.requiredContextsUnreadable !== true
+  );
+}
+
+/**
+ * ARMING PARITY WITH THE RUN FLOW — the fix for the gap run-task.ts named in its own
+ * capped-refusal comment ("`sweep.ts`'s independent 'checks green + review
  * success -> mergeable' reconciliation does not yet consult `capped`/an
  * override — a PR this refuses stays OPEN and UNARMED, but a later sweep poll
  * could still arm it via that separate path").
