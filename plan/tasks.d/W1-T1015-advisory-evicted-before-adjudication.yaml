@@ -1,0 +1,144 @@
+- id: W1-T1015
+  title: "THE SHIPS-UNWIRED ADVISORY IS EVICTED FROM THE LIVE LEDGER AT EVERY ROTATION AND ITS PROTECTION IS SEQUENCED AFTER THE READ IT EXISTS TO PROTECT — review.unwired_advisory is absent from DECISION_RELEVANT_LEDGER_STEPS, the live file holds 4 of 87 rows against a control of 219 review.posted, and W1-T323 clause (iii) registers the step only INSIDE the flip change, which is downstream of the adjudication that consumes the corpus: register it now"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    Measured at origin/main 02d5b89 on the Azure host, over the ledger union read per form with a
+    full-line dedupe. Every count is a query, not a number to carry.
+
+    (1) THE STEP IS EVICTED, AND THE ASYMMETRY IS THE WHOLE FINDING. `rotateLedger`
+    (`src/lib/ledger.ts`) retains only the lines in `DECISION_RELEVANT_LEDGER_STEPS` plus the
+    health/deploy/render sets; everything else is archived out of the live file at every rotation.
+    `review.unwired_advisory` is NOT in that set — 0 occurrences against a control of 1 for
+    `sweep.disposed`. Measured live-versus-rotations right now:
+      review.unwired_advisory     live 4    rotations 83     NOT decision-relevant
+      review.posted               live 219  rotations 390    decision-relevant
+      run.start                   live 162  rotations 154    decision-relevant
+      daemon.idle_reasons         live 63   rotations 63     decision-relevant
+    A decision-relevant step keeps its rows in the live file; this one keeps 4.6% of them.
+
+    (2) THE PROTECTION EXISTS AND FIRES TOO LATE. W1-T323's design clause (iii) already says it:
+    *"If the flip decision reads the ledger, register the step it reads in
+    DECISION_RELEVANT_LEDGER_STEPS in the SAME change (the W1-T316(iv)/#977 rotation rule)."* That
+    is correct and it is SEQUENCED WRONG for this case. The read W1-T323 protects is the operator's
+    ADJUDICATION of the measurement window — and registration lands inside the flip change, which
+    happens AFTER that adjudication. The guard arrives after the thing it guards has been consumed.
+    W1-T323 is also `verify: human`, so `isDispatchEligible` (`src/lib/drain.ts`) returns false at
+    `t.verify !== "auto"` before the linter is consulted and it can never be picked up by the drain
+    — the registration has no automatic path at all.
+
+    (3) THE EROSION IS REAL AND ALREADY MEASURED, NOT PROJECTED. The advisory shipped 2026-08-04
+    (#1292, `feat(review): add the SHIPS-UNWIRED advisory floor (W1-T322)`). The Azure corpus holds
+    advisory rows only from 2026-08-11 — so 08-04 through 08-10 is GONE from this host, the host the
+    building fleet writes to. A sibling corpus on the mini holds 08-04 to 08-12 and stops. Neither
+    host holds the whole window, and the union of both is smaller than what was written.
+
+    (4) AND IT IS STILL WRITING, SO THE WINDOW IS STILL GROWING. 87 rows over 57 distinct PRs
+    between 2026-08-11 and 2026-08-18, with rows on every one of those days including 7 on the last.
+    By reason code: `scope_violation` 52, `inverse_scope` 31, `unwired_export` 4. This is not a
+    closed set waiting to be read; it is an open set being trimmed from the old end while it grows
+    at the new one.
+
+    (5) WHAT THIS DOES NOT CLAIM. Nothing in the repo deletes archive files — `unlink` reads 0 in
+    `src/lib/ledger.ts` against a control of 14 in `src/`, and `deploy/host-update.sh` states in its
+    own header that the state bind mount is never touched. So the missing pre-08-13 rotations went
+    out of band (an operator act, a disk reclaim, a host change) and THIS TASK DOES NOT FIX THAT and
+    does not propose an archive-retention policy. What it fixes is the half that is in the code: a
+    step whose rows are dropped from the live file every rotation and therefore depend entirely on
+    archives nothing in this repo is responsible for keeping.
+
+    (6) THE EXCLUSION'S OWN STATED REASON HAS EXPIRED. `src/run-task.ts`'s emitter comment says:
+    *"NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts), deliberately: nothing DECIDES
+    anything off this step yet — see design (v), which defers registration to W1-T323's own change."*
+    The deferral condition was "nothing decides off it yet". Something does now: the W1-T323
+    adjudication is in progress against this exact corpus. CLAUDE.md's own caution — that
+    registering an unread step keeps it forever for no reader — is what made the exclusion right in
+    August; it is what makes registration right now, on the same rule.
+  design: |
+    (i) ADD `review.unwired_advisory` TO `DECISION_RELEVANT_LEDGER_STEPS` AND NOTHING ELSE. One
+    entry in the existing constant in `src/lib/ledger.ts`. No new step, no new field, no new
+    mechanism, no reader added — the consumer is the operator reading the window, which exists
+    today. This is the whole change.
+
+    (ii) IT PRESERVES; IT DOES NOT RESTORE, AND THE RECORD MUST SAY SO. Registration protects rows
+    from the next rotation onward. The 2026-08-04 to 08-10 rows are already gone from this host and
+    no change here recovers them. An implementer must not write a body claiming recovery.
+
+    (iii) THE COST IS BOUNDED BY A MECHANISM ALREADY IN PLACE. Registered steps are still capped by
+    `MAX_RETAINED_LINES_PER_STEP` (200 newest per step) in rotation PASS 4 — so this cannot grow
+    without bound, and at 87 rows the step sits well under that ceiling today. The falsifier must
+    prove BOTH directions in one run: a registered advisory row survives a rotation that would
+    previously have evicted it, AND the per-step cap still bites at 200 so registration has not
+    created an unbounded core.
+
+    (iv) THE DISCIPLINE TEST IS THE SECOND HALF, NOT A NICE-TO-HAVE. `test/ledger-rotation.test.ts`
+    is where `DECISION_RELEVANT_LEDGER_STEPS` membership is asserted (11 word-bounded references,
+    the highest of any test file). The registration and its assertion are one change; shipping the
+    constant without the test is exactly the shape the rotation rule exists to stop.
+
+    (v) DELIBERATELY OUT OF SCOPE, EACH NAMED.
+      - **W1-T323's FLIP, ITS THRESHOLD, AND THE ADJUDICATION ITSELF.** This task takes no position
+        on advisory-versus-blocking and adjudicates no PR. It only stops the evidence disappearing
+        while the operator rules. W1-T323 clause (iii) is CITED, NOT RE-FILED — if it lands first
+        and registers the step, this task is already satisfied and should be closed unbuilt.
+      - **THE SAME CLASS ON TWO OTHER STEPS, MEASURED AND NOT SCOPED IN**: `report.followups` reads
+        live 17 / rotations 267, and `followup.harvested` reads live 0 / rotations 233. Identical
+        eviction, different consumer. **W1-T1013 (#2164) files the reader half of that** — teaching
+        the retro to read the union instead of the live file. That is the correct fix THERE because
+        the consumer is code; registration is the correct fix HERE because the consumer is a human
+        reading the window by hand and no union-reading code path exists to point at him.
+      - **ARCHIVE RETENTION.** Nothing in this repo keeps or prunes rotation files (§5). Whether it
+        should is a real question and a separate filing; this task does not raise it.
+      - **THE STEP'S CONTENT.** The scan, the markers, the reason codes and the emitter are
+        W1-T322's contract and are untouched.
+  acceptance:
+    - claim: "an advisory row survives a rotation that would previously have evicted it from the live ledger"
+      proof: "unit test: W1-T1015: an advisory row survives a rotation that would have evicted it"
+    - claim: "the per-step cap still bounds the registered step so the retained core stays finite"
+      proof: "unit test: W1-T1015: the registered advisory step is still bounded by the per step cap"
+    - claim: "the decision relevant set names the advisory step rather than dropping it silently"
+      proof: "grep: unwired_advisory in src/lib/ledger.ts"
+    - claim: "steps that were already decision relevant keep the retention they had before this change"
+      proof: "unit test: W1-T1015: previously decision relevant steps keep their retention unchanged"
+  risk: high
+  origin: "oper#advisory-rotation-gap-2026-08-18"
+  plan_refs: ["W1-T323", "W1-T322", "W1-T1013", "W1-T316", "W1-T244"]
+  files: [src/lib/ledger.ts, test/ledger-rotation.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` WAS SET BY THE LINTER, NOT ASSERTED. A first draft at `medium` was refused,
+    exit 1, verbatim: *"[sizing] spans 2 distinct subsystems/concerns (ledger, ledger-rotation)
+    at risk:medium — Rule 19: raise to risk:high or decompose into one task per concern"*. Raised
+    on that refusal. Decomposition is declined with a reason: registering the step without the
+    assertion that it is registered is precisely the shape the W1-T316(iv) rotation rule exists to
+    stop, so the constant and its test are one change.
+
+    THE `grep:` PROOF ESCAPES ITS DOT ON THE LINTER'S OWN ADVICE — `[proof-grep-safety]` warned
+    that `review.unwired_advisory` has an unescaped `.` matching ANY character in a BRE. The escape is invalid inside a
+    double-quoted YAML scalar (`YAMLParseError: Invalid escape sequence \.`), so the pattern drops
+    the dot instead: `unwired_advisory`, which is equally distinctive and needs no escaping.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT. `DECISION_RELEVANT_LEDGER_STEPS` reads 9 in
+    `src/lib/ledger.ts` (its home) and 11 in `test/ledger-rotation.test.ts` (the highest of any test
+    file); `MAX_RETAINED_LINES_PER_STEP`, which design (iii) requires the falsifier to exercise,
+    reads 5 in the same source file. **`src/run-task.ts` IS NOT DECLARED** even though it holds 13
+    `DECISION_RELEVANT_LEDGER_STEPS` references and the emitter comment this task corrects: the
+    constant's HOME is `src/lib/ledger.ts`, the change is one entry in that constant, and 221 shards
+    already declare `src/run-task.ts` (W1-T471). If an implementer finds the emitter comment must
+    also change, that is a one-line doc edit and the right move is to say so rather than widen the
+    declaration silently.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive with a per-form read of `state/ledger.*.ndjson` and
+    `state/ledger.ndjson` (0 `.gz` files on this host), full-line deduped, and word-bounded
+    `git grep`. They move; the symbol names are the check.
+
+    THE PREMISE WAS TESTED BEFORE FILING, AND ONE CANDIDATE EXPLANATION WAS REJECTED. The obvious
+    reading — that `MAX_RETAINED_LINES_PER_STEP` trimmed the old rows — is WRONG: the step holds 87
+    rows, well under the 200 cap, so that bound has never bitten it. The eviction is categorical
+    (not in the retained set), not quantitative. Recording that here so a later reader does not
+    re-derive the wrong mechanism from the same symptom.
