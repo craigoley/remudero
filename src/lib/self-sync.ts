@@ -139,8 +139,11 @@ const REMEDY_COMMAND = "git pull --ff-only";
  * the result is `"synced"` (a real ff-merge + reexec) — every other path is read-only.
  *
  * @param repoDir  The checkout to check (the running CLI's own repo root in production).
- * @param env      Process environment to read {@link SELF_SYNC_GUARD_ENV} from (injectable —
- *                 production passes `process.env`, tests pass a plain object).
+ * @param env      Process environment to read {@link SELF_SYNC_GUARD_ENV} and the CI markers
+ *                 from (injectable — production passes `process.env`, tests pass a plain
+ *                 object). The loop guard ALSO reads the real `process.env` regardless of what
+ *                 is passed here — see {@link alreadySelfSynced} for why a spawn cannot cross
+ *                 this argument.
  * @param deps     Injectable git/say/warn/reexec/log; all default to real implementations (log
  *                 defaults to a no-op — see {@link SelfSyncDeps.log}).
  */
@@ -154,12 +157,38 @@ export function isCiEnv(env: NodeJS.ProcessEnv | Record<string, string | undefin
   return truthy(env.CI) || truthy(env.GITHUB_ACTIONS);
 }
 
+/**
+ * Is THIS process already a self-sync re-exec child?
+ *
+ * THE GUARD MUST BE READ FROM WHERE {@link defaultReexec} WRITES IT. `defaultReexec` spawns the
+ * child with {@link SELF_SYNC_GUARD_ENV} in the CHILD PROCESS'S ENVIRONMENT — it has no way to
+ * reach into whatever object that child's caller will later hand to {@link checkCliFreshness}.
+ * Reading only the injected `env` argument therefore misses the guard entirely whenever the
+ * caller passes anything other than `process.env`, and re-entrancy is a property of the PROCESS,
+ * not of one call's argument.
+ *
+ * MEASURED (#2237, six killed runners across four attempts of `ci` AND `coverage-ratchet`): a
+ * caller passing a literal `{}` never saw the guard, so each re-exec child re-ran the same code
+ * path, called `reexec()` again, and blocked in `spawnSync` forever — an unbounded chain of full
+ * `node --test` processes. The log signature was 507 `### rmd self-sync:` emissions with ZERO
+ * tests completing, against a green-run control of 0. `isCiEnv({})` is false for the same reason,
+ * so CI's own short-circuit could not stop it either.
+ *
+ * The injected argument still WINS when it carries the guard, so a test can force the guarded
+ * branch with a plain object exactly as before; this only ADDS the process-level channel that a
+ * spawn can actually cross. Note the deliberate consequence: exporting `RMD_SELF_SYNC_DONE=1`
+ * into a shell and running the suite there guards every call — which is what that variable means.
+ */
+function alreadySelfSynced(env: NodeJS.ProcessEnv | Record<string, string | undefined>): boolean {
+  return env[SELF_SYNC_GUARD_ENV] === "1" || process.env[SELF_SYNC_GUARD_ENV] === "1";
+}
+
 export function checkCliFreshness(
   repoDir: string,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
   deps: SelfSyncDeps = {},
 ): SelfSyncResult {
-  if (env[SELF_SYNC_GUARD_ENV] === "1") {
+  if (alreadySelfSynced(env)) {
     // The loop guard: skip EVERYTHING, not even a fetch — this is what a real re-exec's
     // child sees, and it must never be able to talk itself into a second sync attempt.
     return { status: "guarded" };
@@ -380,6 +409,13 @@ function currentBranch(git: GitRunner): string | undefined {
 // diff-cov: process-boundary — re-execs process.execArgv and exits with the child's code; a real
 // re-exec cannot carry a coverage hit without forking the suite (W1-T221, see docs/review-gate.md).
 function defaultReexec(env: NodeJS.ProcessEnv | Record<string, string | undefined>): void {
+  // SECOND, INDEPENDENT STOP, AT THE SPAWN ITSELF. `alreadySelfSynced` above keeps a re-exec
+  // child from DECIDING to sync; this keeps it from SPAWNING even if some future caller reaches
+  // here by another route. The two are deliberately not the same check in the same place: the
+  // decision guard can be bypassed by any caller that computes its own status, whereas nothing
+  // can recurse without passing through this function. Cheap, and it bounds the blast radius of
+  // the whole class rather than the one call site that exposed it.
+  if (process.env[SELF_SYNC_GUARD_ENV] === "1") return;
   const result = spawnSync(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
     stdio: "inherit",
     env: { ...(env as NodeJS.ProcessEnv), [SELF_SYNC_GUARD_ENV]: "1" },
@@ -421,7 +457,7 @@ export function checkServiceFreshness(
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
   deps: SelfSyncDeps = {},
 ): ServiceFreshness {
-  if (env[SELF_SYNC_GUARD_ENV] === "1") return { status: "guarded" };
+  if (alreadySelfSynced(env)) return { status: "guarded" };
   if (isCiEnv(env)) return { status: "guarded" };
 
   const git =
