@@ -1,0 +1,192 @@
+- id: W1-T1035
+  title: "a task whose fresh live read says MERGED is ADMITTED as a dispatch candidate — `isDispatchEligible`'s in-flight guard fires `onStoodDown` and falls through to `return true`, so 24 of 32 stand-downs ended in `dispatch.refused_already_merged` and 8 deferrals were queued behind a task the same pass had just called finished"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "READ FROM THE FLEET'S OWN LEDGER AND FROM `src/lib/drain.ts`, NOT INFERRED. Corpus:
+    9 plain rotations plus the live file, 0 `.gz` (none exist on this host), deduped on the FULL LINE
+    to 108,796 rows; `run.start` non-zero in both live forms as the per-form coverage control.
+
+    (1) THE SELECTION IS NOT THE DEFECT, AND THIS SHARD RETRACTS THE CLAIM THAT IT IS. The brief this
+    task was filed from states that `runnableCandidates` returns at most `budget` tasks in plan order,
+    so a pool of 18 is examined three deep. RE-DERIVED AGAINST `src/lib/drain.ts`: it does not
+    truncate. It walks `dispatchOrder(plan.tasks)` in full, applies `isDispatchEligible` to EVERY
+    task, and hands the complete eligible list to `packDisjointFirst`, W1-T476's greedy
+    disjointness-first pack. RUN AGAINST THE LIVE POOL of 18 eligible tasks, of which 12 declare
+    `src/run-task.ts` and 6 do not:
+      lanes 2 -> [W1-T983, W1-T1020]                     partition admits 2, defers 0
+      lanes 3 -> [W1-T983, W1-T1020, W1-T1029]           partition admits 3, defers 0
+      lanes 4 -> [W1-T983, W1-T1020, W1-T1029, W1-T1030] partition admits 4, defers 0
+    Every lane fills, nothing is deferred. `packDisjointFirst` landed 2026-08-14 in #1782, five days
+    before the pass this task was filed from, and its own doc records the exact measurement the brief
+    re-describes: `at lanes 2/3/4 the plain-truncation order admitted 1/1/1 where a disjoint set of
+    that size existed`. THE PRIOR SATURATION MODEL IS ALSO RETRACTED — it enumerated random 3-subsets
+    of the pool and reported 1.94 of 3 admitted with 35% of slots lost; the real selector does not
+    draw randomly, and the correct figure against this pool is 3 of 3 with 0 lost.
+
+    (2) THE ADMISSION IS THE DEFECT, AND IT IS FOUR LINES. In `isDispatchEligible`
+    (`src/lib/drain.ts`), the in-flight guard reads:
+      const liveState = opts.readLiveState?.(t.id, openPrNumber);
+      if (liveState !== undefined && liveState !== 'OPEN') {
+        opts.onStoodDown?.(t, openPrNumber, liveState);
+      } else { opts.onSkip?.(t, openPrNumber); return false; }
+    On a fresh read of MERGED the guard fires an OBSERVATION callback and then FALLS THROUGH to the
+    function's `return true`. The task is admitted as a dispatch candidate on the strength of a read
+    that just said its PR is merged.
+
+    (3) THREE QUARTERS OF THOSE ADMISSIONS WERE WRONG, AND THE LEDGER SAYS SO IN ITS OWN WORDS.
+    34 `dispatch.stood_down` rows across the corpus — 32 naming state MERGED, 2 CLOSED, 34 distinct
+    tasks. 24 OF THE 32 MERGED STAND-DOWNS LATER PRODUCED `dispatch.refused_already_merged` FOR THE
+    SAME TASK: the daemon admitted it, spawned a worker, and the worker refused because the task was
+    already merged. 28 `dispatch.refused_already_merged` rows in total, across 27 distinct tasks.
+
+    (4) AND EIGHT DEFERRALS WERE QUEUED BEHIND A GHOST. `partitionByFileOverlap` is handed the
+    admitted set and names one member as the `blocked_by` for the rest. 8 of the 62
+    `dispatch.serialized` rows in the corpus are blocked by a task that was stood down as MERGED IN
+    THE SAME MINUTE — five separate incidents, verbatim:
+      2026-08-14T00:32:01Z  W1-T457  blocked_by W1-T456  [src/lib/sweep.ts, src/run-task.ts, test/sweep.test.ts]
+      2026-08-14T00:32:01Z  W1-T458  blocked_by W1-T456  [src/lib/review.ts]
+      2026-08-14T12:16:21Z  W1-T474  blocked_by W1-T470  [src/run-task.ts]
+      2026-08-14T12:16:21Z  W1-T477  blocked_by W1-T470  [src/run-task.ts]
+      2026-08-16T15:16:23Z  W1-T912  blocked_by W1-T907  [src/run-task.ts]
+      2026-08-17T02:36:41Z  W1-T932  blocked_by W1-T931  [src/lib/sweep.ts]
+      2026-08-19T15:15:46Z  W1-T983  blocked_by W1-T975  [src/run-task.ts]
+      2026-08-19T15:15:46Z  W1-T1011 blocked_by W1-T975  [src/run-task.ts]
+    THE 15:15 PASS IS THE COMPOUND CASE. W1-T975 was stood down as MERGED (#2212) at 15:15:45, and
+    0.9s later W1-T983 and W1-T1011 were serialized behind it. The pass admitted one task, and that
+    task was finished. At 15:32 the daemon dispatched W1-T975 anyway and got
+    `dispatch.refused_already_merged`. Net dispatches from a pass with a full disjoint set available:
+    zero.
+
+    (5) IT RECURRED WHILE THIS WAS BEING MEASURED, which is why the shard carries a live instance
+    rather than only a historical one:
+      18:00:27.698Z  dispatch.stood_down  W1-T1020  reason: cached in-flight read was stale
+      18:00:51.430Z  run.start
+      18:01:17.886Z  dispatch.refused_already_merged
+    Twenty-six seconds of a lane, spent on a task the previous row had already called merged.
+
+    (6) THE W1-T177 CASE IS CORRECT AND MUST SURVIVE — this is not a revert. `test/drain.test.ts`
+    asserts deliberately, under a `NONE_MERGED` merged-set, that `A is actually runnable — its cached
+    in-flight PR already merged`, with `onStoodDown` naming the state rather than a misleading
+    `open-pr` skip. A PR can merge without crediting the task that opened it, and that task genuinely
+    still needs a run. THE TWO SUB-CASES ARE NOT THE SAME and nothing today separates them.
+
+    (7) THE DAEMON IS TICKING AND IS REACHING THE DRAIN, so this is not an idle-loop or a
+    drain-not-reached concern and must not be filed as one. Since the 15:33 stop the ledger holds 426
+    `sweep.summary` rows, 152 `daemon.alive` rows and 6 `daemon.iteration` rows, and
+    `daemon.idle_reasons` has not fired since 2026-08-18T17:30. The tick runs; the pass it runs is
+    what wastes itself."
+  design: "SCOPE IS THE ADMISSION. NOT THE PARTITION, NOT THE SELECTION, NOT THE RULING.
+
+    (i) `partitionByFileOverlap` IS CORRECT AND MUST NOT BE RELAXED. DECISIONS.md's 2026-08-18 ruling
+    accepts one effective dispatch lane for `src/run-task.ts`, refuses splitting the file on 640
+    cross-section references, and refuses re-scoping tasks to avoid declaring it. The operator has not
+    reopened it. A builder who reaches for the overlap check has mis-scoped this task. Raising
+    `dispatchLanes` is equally refused here: rationale (1) shows the lanes already fill.
+
+    (ii) AND THE SELECTION QUESTION IS ALREADY ANSWERED — DO NOT RE-OPEN IT. The brief asks whether
+    `budget` can be over-drawn safely, what a wider draw costs per candidate, and whether plan order
+    should survive. W1-T476 answered all three in #1782 and the answers are in the tree:
+    `runnableCandidates` already evaluates every task rather than the first `budget`; the per-candidate
+    `isMerged` and in-flight reads are already paid across the whole plan on every pass; and PLAN ORDER
+    DOES SURVIVE — `dispatchOrder` is a deterministic comparator over `priority` and `id` (its own
+    DETERMINISM note), and `packDisjointFirst` walks `remaining` in that order, preferring the
+    EARLIEST remaining disjoint candidate and falling back to the next in order. FIFO is the tie-break,
+    not a casualty. Checked, not assumed.
+
+    (iii) THE DISCRIMINATION THIS TASK OWES. A MERGED stand-down is direct evidence that the credit
+    projection consulted at the TOP of the chain is staler than the live read consulted near the
+    BOTTOM. The chain has fresher information at the in-flight guard than it had at `isMerged(t.id)`
+    and does nothing with it. What must be separated, and what the falsifier must prove separately:
+      - THE STALE-CREDIT CASE — the live read says MERGED and that merge credits this task. The
+        earlier `isMerged` was simply behind. Admitting is wrong; 24 of 32 landed here.
+      - THE W1-T177 CASE — the live read says MERGED and the merge does NOT credit this task. The
+        task is genuinely runnable and must stay admitted, exactly as `test/drain.test.ts` asserts.
+    HOW THE TWO ARE TOLD APART IS THE IMPLEMENTER'S CALL and is deliberately not prescribed here; what
+    is fixed is that they must be told apart rather than collapsed.
+
+    (iv) AND AN ADMITTED-THEN-DISCREDITED CANDIDATE MUST NOT BE A `blocked_by`. Rationale (4) is the
+    half that costs other tasks their pass: the overlap partition runs against a candidate set the
+    eligibility chain has already observed to be terminal. Whatever the discrimination in (iii)
+    decides, no task may be serialized behind a candidate whose own stand-down fired in the same pass.
+
+    (v) SAY WHETHER FIXING THE ORDER ALONE WOULD HAVE FILLED THE 15:15 PASS, because the brief asks
+    and the answer is not obvious. W1-T983 and W1-T1011 both declare `src/run-task.ts`, so they
+    overlap EACH OTHER, not only the ghost. Removing W1-T975 from that pass admits ONE of them, not
+    both — plus any disjoint third from the wider pool. The honest claim is that the pass would have
+    dispatched real work instead of none, NOT that it would have run three. A builder must not
+    overstate this.
+
+    (vi) THE FALSIFIER MUST BITE IN BOTH DIRECTIONS. A test proving only that a stale-credit
+    stand-down is refused passes equally well on a chain that has simply reverted W1-T177 and refuses
+    every stand-down. `test/drain.test.ts`'s three existing W1-T177 assertions must still pass
+    untouched, and the new suite must prove the genuinely-uncredited task is STILL admitted. Prove the
+    `blocked_by` half too: a candidate stood down in a pass must not appear as another task's blocker
+    in that same pass.
+
+    (vii) OUT OF SCOPE, NAMED SO IT IS NOT ABSORBED. The refill sources are a different shard: the
+    feedback reservoir holds 149 entries with 56 still `new` and its newest `new` dated 2026-08-09,
+    and 678 distinct follow-up candidates sit unmined across 327 `report.followups` rows. W1-T1013
+    files that cause — `retroCommand` reads the live ledger alone — and is UNBUILT. Cite it; do not
+    re-derive it and do not fix it here. CONTEXT, NOT SCOPE: shard `origin:` fields read operator 182,
+    recon 99, feedback 46, architect 44, retro 0 — neither automated source has ever contributed a
+    task."
+  acceptance:
+    - claim: a stand-down whose fresh read says MERGED no longer admits the task when that merge credits it
+      proof: "unit test: test/drain-stale-credit-admission.test.ts"
+    - claim: the W1-T177 case survives untouched — a genuinely uncredited task whose PR merged stays runnable
+      proof: "unit test: test/drain.test.ts"
+    - claim: no task is serialized behind a candidate whose own stand-down fired in the same pass
+      proof: "unit test: test/drain-stale-credit-admission.test.ts"
+    - claim: the change is recorded under this task beside the guard it alters
+      proof: "grep: W1-T1035 in src/lib/drain.ts"
+    - claim: the eligibility chain names the credit projection as the thing that was stale
+      proof: "grep: credit projection in src/lib/drain.ts"
+  risk: high
+  origin: recon#stale-credit-admission-2026-08-19
+  plan_refs: ["W1-T177", "W1-T476", "W1-T471", "W1-T1013"]
+  files: [src/lib/drain.ts, test/drain.test.ts, test/drain-stale-credit-admission.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) exempts only
+    `risk === 'high'` and `files:` spans `src/` and `test/`. Rule 19's band is SPAN, not blast radius —
+    the runtime effect is one guard in one function.
+
+    `files:` IS DERIVED BY WORD-BOUNDED INVOCATION COUNT, NOT BY GUESS. `isDispatchEligible` reads 9
+    in `src/lib/drain.ts`, 5 in `src/lib/daemon.ts` and 1 in `src/run-task.ts`; `onStoodDown` reads 4
+    in drain.ts and 1 in daemon.ts. `src/lib/drain.ts` holds the definition and the guard, and is
+    declared. `src/run-task.ts` IS NOT DECLARED — its single reference was opened and read, and it is
+    a COMMENT (`isDispatchEligible consults it right after`), not a call site. That matters twice: a
+    task naming the monolith serialises against every other that does (W1-T471), and this shard would
+    otherwise have joined the 12-of-18 population it is about. `src/lib/daemon.ts` is NOT declared
+    either — it only WIRES `onStoodDown` as an observation callback, and the guard's decision is
+    entirely inside drain.ts. `test/drain.test.ts` IS declared because its three W1-T177 assertions
+    constrain the fix rather than merely sitting nearby: design (vi) requires them to keep passing,
+    and a change that cannot satisfy them is the wrong change. The new suite gets its own file per
+    CLAUDE.md's rule that a coverage-load-bearing test never rides in an existing file. The shard's own
+    path is not declared, which would convert the endemic proof-scope warnings into a hard
+    `rule15-filing` violation.
+
+    THE ACCEPTANCE POINTS AT THE IMPLEMENTATION, NOT AT THIS FILE. Self-referential `grep:` proofs are
+    satisfied by prose that already exists and name a path outside `files:`, earning one
+    [proof-scope] warning apiece. Both greps here are FORWARD REFERENCES reading 0 against
+    `src/lib/drain.ts` today (`W1-T1035` 0, `credit projection` 0 — measured, and `dispatchOrder`
+    reads 10 in the same file as the positive control that the query can see it).
+
+    TWO CLAIMS THIS SHARD RETRACTS RATHER THAN INHERITS. The brief it was filed from asserts that
+    `runnableCandidates` truncates to `budget` in plan order and that the fleet loses 35% of its lane
+    slots to file overlap. Rationale (1) refutes both against the live tree and the live pool. Filing
+    the task the brief describes would have re-implemented W1-T476. What survives from that brief is
+    the 15:15 pass, and the defect it exposes is the one filed here.
+
+    ID PROVENANCE. `W1-T1035` was PRE-MINTED BY THE OPERATOR and read back before anything else:
+    `refs/rmd-id/W1-T1035` -> `e067c5ad8543707303f2bfbfb11327f302c47240`, an orphan over the empty
+    tree with zero parents, message `reserve W1-T1035 Remudero-1747-1787164166414148754`. NOTHING WAS
+    MINTED BY THIS SESSION. The other three surfaces read 0 at filing time, each with a positive
+    control that passed: shard FILENAMES under `plan/tasks.d/` 0 (control `W1-T1027` = 1 — the
+    filename is the existence test, never a grep for the string), unindented `^- id:` declarations
+    across `plan/` 0 (control `W1-T1027` = 1), and live remote heads 0 (control: 72 open `run-*`
+    heads). All three were re-swept on a fresh fetch immediately before the push."
