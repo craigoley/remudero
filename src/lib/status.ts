@@ -65,6 +65,15 @@ import { isInPlanScope } from "./plan-architect.js";
  *       credit is never masked by an in-flight ledger row (the W1-T1 149x root
  *       cause: `pr.opened` pointed at an open, later-dispatched PR while `pr: 2`
  *       had long since merged);
+ *   (b2) a `manual.completed` ledger line (W1-T1029) — the SAME hand-execution
+ *       rung as (b), widened to the two shapes a bare `pr:` NUMBER cannot
+ *       express: a completion PR in ANOTHER repository (`pr:` resolves only
+ *       against THIS gateway's own configured repo), and a completion with NO
+ *       PR at all, because none will ever exist (a manual task whose own work
+ *       is a live drill/action, not a diff). DECLARED credit, like (c)'s
+ *       correction override above — never re-verified against GitHub, since a
+ *       cross-repo PR is unreachable from this gateway and a no-PR completion
+ *       has nothing to verify. See {@link latestManualCompletion};
  *   (c) a merged PR whose body carries the trailer `Remudero-Task: <id>` —
  *       ownership-asserted (its head branch must be this task's own `run-<id>-*`),
  *       anchor-verified (the trailer must be an exact line, not a fuzzy search
@@ -81,13 +90,26 @@ import { isInPlanScope } from "./plan-architect.js";
  */
 
 /**
- * The three precedence sources, plus `none` when GitHub has no evidence, plus
+ * The precedence sources, plus `none` when GitHub has no evidence, plus
  * `throttled` when GitHub could not be read at all (rate-limited, network error,
  * or any other failed `gh` call) — W1-T119: an exhausted/errored read must never
  * be conflated with a genuinely absent result, the false `source: "none"` that
  * mis-filed W1-T116 as not-merged when GitHub simply hadn't been consulted.
+ * `"manual-completion"` (W1-T1029) is the ledger-recorded twin of `"pr-field"`
+ * (see {@link latestManualCompletion}) — DECLARED, not GitHub-verified, exactly
+ * like `"correction"`, because the whole reason it exists is a completion this
+ * gateway's own `prByRef` cannot reach (a different repo) or that never had a
+ * PR to look up at all.
  */
-export type StatusSource = "ledger" | "pr-field" | "trailer" | "head-branch" | "correction" | "none" | "throttled";
+export type StatusSource =
+  | "ledger"
+  | "pr-field"
+  | "manual-completion"
+  | "trailer"
+  | "head-branch"
+  | "correction"
+  | "none"
+  | "throttled";
 
 /**
  * The CLASSIFIED reason a `gh` read actually failed (W1-T119 design (i)) —
@@ -1456,6 +1478,63 @@ function lastPrOpened(
   return url;
 }
 
+/** One `manual.completed` ledger line, resolved — see {@link latestManualCompletion}. */
+export interface ManualCompletion {
+  actor: string;
+  ts: string;
+  /** OPTIONAL: a FULL PR url (self-describing its own owner/repo), never a bare number —
+   *  the shape that lets this credit name a PR in ANY repository, not just the one the
+   *  calling {@link GitHub} gateway happens to be scoped to. */
+  prUrl?: string;
+}
+
+/**
+ * The most recent `manual.completed` ledger line for a task id (last one wins, same
+ * "last assertion wins" convention as {@link lastPrOpened}/{@link latestActualPrUrl}) — an
+ * explicit, ACTOR-AND-TIME-STAMPED assertion (W1-T1029 rationale (6)) that a hand-executed
+ * task was completed, widening rung (b)'s `task.pr` to the two shapes it structurally cannot
+ * express: a completion PR in ANOTHER repository (`task.pr` is a bare number, resolved by
+ * {@link GitHub.prByRef} against ONLY the calling gateway's own configured repo — a
+ * `remudero-site` PR is unreachable that way), and a completion with NO PR at all, because
+ * none will ever exist (a manual task whose deliverable is a live action, e.g. a
+ * commissioning drill, not a diff).
+ *
+ * A line qualifies ONLY with both `actor` and `ts` present as non-empty strings — a line
+ * missing either is not a genuine assertion and is silently skipped, the same "malformed
+ * line, ignore it" discipline every other ledger reader in this file already applies (see
+ * {@link lastPrOpened}'s own `typeof` guard). `ts` is the ledger's own write-time stamp
+ * ({@link appendLedger} always sets it), never a second, independently-suppliable field, so
+ * the assertion's time can never drift from when it was actually recorded.
+ *
+ * REVERSIBLE THE SAME WAY EVERY RUNG BELOW THE CORRECTION RUNG ALREADY IS (rationale (8)): a
+ * later `correction.provenance` row is checked FIRST, above every branch in
+ * {@link derivePrPrecedence} including this one, and supersedes it outright — retracting a
+ * wrong assertion never means deleting this line, only outranking it.
+ */
+export function latestManualCompletion(
+  lines: Array<Record<string, unknown>>,
+  taskId: string,
+): ManualCompletion | undefined {
+  let found: ManualCompletion | undefined;
+  for (const line of lines) {
+    if (
+      line.step === "manual.completed" &&
+      line.task_id === taskId &&
+      typeof line.actor === "string" &&
+      line.actor.length > 0 &&
+      typeof line.ts === "string" &&
+      line.ts.length > 0
+    ) {
+      found = {
+        actor: line.actor,
+        ts: line.ts,
+        ...(typeof line.pr_url === "string" && line.pr_url.length > 0 ? { prUrl: line.pr_url } : {}),
+      }; // keep scanning: last one wins
+    }
+  }
+  return found;
+}
+
 /**
  * PER-TASK DISPATCH CIRCUIT BREAKER (MASTER-PLAN P29(ii)) — policy-as-data
  * (rule 2), never a hardcoded literal buried in a caller: how many times the
@@ -2349,6 +2428,33 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
       }
       return base;
     }
+  }
+
+  // (b2) LEDGER-RECORDED MANUAL COMPLETION (W1-T1029) — the SAME hand-execution rung as (b)
+  // below, widened to the two shapes an explicit tasks.yaml `pr:` field cannot express: a
+  // completion PR in ANOTHER repository (`task.pr` is a bare number, resolved by
+  // {@link GitHub.prByRef} against ONLY the calling gateway's own configured repo — W12-T1's
+  // PR lives in `remudero-site` and is unreachable that way), and a completion with NO PR at
+  // all, because none will ever exist (W1-T12e, a live drill that leaves no diff to name).
+  // DECLARED credit, like the correction rung above — never re-verified against GitHub, for
+  // the same reason `correction` isn't (W1-T130's SUPREME OFFLINE note): there is no live read
+  // this rung COULD perform even if it wanted to (a cross-repo number, or no PR at all).
+  // Checked BEFORE (a)/(b) — a human's recorded assertion is stronger evidence than an
+  // in-flight ledger row or a same-repo `pr:` field could ever contradict, and it is
+  // REVERSIBLE without deleting it (see {@link latestManualCompletion}'s doc): a later
+  // `correction.provenance` row is checked above THIS rung too, so retracting a wrong
+  // assertion is already covered by code that already ran.
+  const manualCompletion = latestManualCompletion(ledgerLines, task.id);
+  if (manualCompletion) {
+    return {
+      taskId: task.id,
+      source: "manual-completion",
+      status: "merged",
+      merged: true,
+      ...(manualCompletion.prUrl
+        ? { prUrl: manualCompletion.prUrl, prNumber: prNumberFromRef(manualCompletion.prUrl) }
+        : {}),
+    };
   }
 
   // (a) ledger `pr.opened` for this task -> query that PR. A MERGED resolution
