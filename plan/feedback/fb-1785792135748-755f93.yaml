@@ -19,5 +19,6 @@ raw: "ACCEPTANCE BLOCK: THE REVIEWER'S PATH MAY PARSE NARROWER THAN
   error and there is nothing here."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
