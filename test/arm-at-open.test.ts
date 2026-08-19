@@ -26,18 +26,36 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 // ── W1-T125: move auto-merge arming from "after review" to "at PR creation".
+// W1-T975 MOVED IT AGAIN — deferred from "at PR creation" to "the point this run
+// commits to a verdict" (right before `pollToGate`: ci green, review passed, the
+// capped-verdict gate did not refuse, the risk judge did not escalate). An
+// already-armed PR short-circuits the SWEEP's own arming decision
+// (`alreadyDone = pr.autoMergeArmed === true`, lib/sweep.ts) — the one place a
+// durable risk-judge refusal (W1-T970) can ever be consulted — so a standing arm
+// left by an abandoned run routed a would-be merge AROUND that predicate,
+// permanently. The two primitives below (`armAutoMergeAtOpen`, `disarmAutoMerge`)
+// are UNCHANGED by W1-T975 — only their call site inside `runTask` moved; the
+// function names are kept exactly as W1-T125 left them (see
+// `armAutoMergeAtOpen`'s own doc for the W1-T975 addendum).
 //
 // This file proves three distinct things, independently:
-//   (A) the two new primitives (`armAutoMergeAtOpen`, `disarmAutoMerge`) behave
+//   (A) the two primitives (`armAutoMergeAtOpen`, `disarmAutoMerge`) behave
 //       correctly in isolation (deps-injected, no real gh/network) — mirrors
 //       test/run-task.test.ts's existing `armAutoMerge` unit-test style.
-//   (B) a REAL `runTask()` run arms the instant its PR opens, structurally
-//       before any CI poll — the acceptance-criteria proof.
+//   (B) a REAL `runTask()` run arms ONLY once it has committed to a verdict —
+//       and a run that exits earlier (ci-not-green before review, a capped
+//       refusal) leaves NO standing arm at all. This is the W1-T975
+//       acceptance-criteria proof, and it is also the falsifier for the OLD
+//       "arms instantly at PR-open" behaviour this file used to assert.
 //   (C) the capped-verdict safety mitigation (`disarmAutoMerge` called before
-//       escalating a CAPPED verdict) is wired into runTask's own capped-refusal
-//       branch. See the comment on that test for why this is proven at
-//       SOURCE level rather than by driving a real runTask() through the
-//       review gate — deliberately, not by omission.
+//       escalating a CAPPED verdict) is still wired into runTask's own
+//       capped-refusal branch — now a defensive NO-OP against this run's own
+//       arm (which never happened by this point, see (B)) rather than a real
+//       withdrawal, kept as a backstop against the documented residual
+//       sweep-race gap named in run-task.ts's own comments. See the comment
+//       on that test for why this is proven at SOURCE level rather than by
+//       driving a real runTask() through the review gate — deliberately, not
+//       by omission.
 
 // ── (A) UNIT TESTS — deps-injected, mirrors test/run-task.test.ts's armDeps() ──
 
@@ -397,13 +415,14 @@ function readLedger(root: string): Array<Record<string, unknown>> {
 }
 
 test(
-  "ACCEPTANCE (W1-T125 criteria 1+4): a real runTask run arms auto-merge the INSTANT its PR opens — " +
-    "the fake-gh call log proves `pr merge --auto` fires BEFORE the first CI poll (\"at creation\", not " +
-    "\"eventually\"), and the ledger's pr.opened line is IMMEDIATELY followed by automerge.armed with ZERO " +
-    "polling iterations in between (the structural \"delta ~0\" regression fixture — deterministic, not " +
-    "wall-clock)",
+  "W1-T975: the ci-not-green exit before review arms nothing",
   async (t) => {
-    const root = mkdtempSync(join(tmpdir(), "arm-open-root-"));
+    // Same fixture the OLD W1-T125 "arms the instant its PR opens" acceptance test used — CI
+    // answers RED on the very first poll, so the run returns blocked_ci BEFORE the review ever
+    // runs. Under W1-T125 that PR still got armed at open; under W1-T975 it must not, because
+    // this is exactly the shape the rationale names: a local orchestrator decision to stop, with
+    // no GitHub-visible signal, that used to leave a standing arm nothing ever re-examined.
+    const root = mkdtempSync(join(tmpdir(), "arm-nogreen-root-"));
     const planPath = join(root, "tasks.yaml");
     writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
     const config: Config = { claudeBin: "/bin/true", root };
@@ -446,34 +465,31 @@ test(
         }),
       );
 
-      // ── CRITERION 3 falsifier, same run: CI never went green (red on the very
-      // first poll) — the PR must NOT merge. Early arming registering intent is
-      // provably NOT the same as GitHub actually merging: the required-status
-      // contract still gates the merge, exactly as it did before this task.
-      assert.equal(res.verdict, "blocked_ci", "a red PR is unchanged and does NOT merge — the falsifier for criterion 3");
+      // CI never went green (red on the very first poll) — the run returns blocked_ci before
+      // ever reaching review, exactly the shape this task's arm call now sits AFTER.
+      assert.equal(res.verdict, "blocked_ci", "a red PR returns before review — the ci-not-green early exit");
       assert.equal(res.merged, false);
       assert.equal(spawnCalls.length, 2, "exactly recon then implement — no resume, no review spawn reached");
 
-      // ── CRITERION 1+4: the ledger's own structural order.
+      // ── THE FALSIFIER: no automerge.armed line anywhere in the ledger. Under the OLD
+      // W1-T125 behaviour this line was the VERY NEXT one after pr.opened; under W1-T975 it must
+      // never appear at all for a run that never reached its verdict.
       const ledger = readLedger(root);
       const openedIdx = ledger.findIndex((l) => l.step === "pr.opened");
-      assert.ok(openedIdx >= 0, "pr.opened must be ledgered");
-      assert.equal(ledger[openedIdx + 1]?.step, "automerge.armed", "automerge.armed is the VERY NEXT ledger line after pr.opened");
-      assert.equal(ledger[openedIdx + 1]?.at, "open");
-      assert.equal(ledger[openedIdx + 1]?.outcome, "armed");
-      assert.ok(
-        !ledger.slice(0, openedIdx + 2).some((l) => l.step === "ci.polling" || l.step === "pr.polling"),
-        "zero polling iterations occur between PR creation and the arm — the delta is structurally ~0, not merely fast",
+      assert.ok(openedIdx >= 0, "pr.opened must still be ledgered");
+      assert.equal(
+        ledger.find((l) => l.step === "automerge.armed"),
+        undefined,
+        "FALSIFIER: a run that exits before its verdict must leave NO automerge.armed line at all",
       );
 
-      // ── CRITERION 1: the fake-gh call log proves the arm reached `gh` itself
-      // BEFORE the first `statusCheckRollup` poll — "at creation", not "eventually".
+      // ── The fake-gh call log proves the arm never even reached `gh`: no `pr merge --auto`
+      // call of any kind, though the CI poll itself did happen.
       const calls = readFileSync(callLogPath, "utf8").split("\n").filter(Boolean);
       const armIdx = calls.findIndex((l) => l.startsWith("arm "));
       const pollIdx = calls.findIndex((l) => l === "poll");
-      assert.ok(armIdx >= 0, "the fake-gh call log recorded the `pr merge --auto` call");
-      assert.ok(pollIdx >= 0, "the fake-gh call log recorded the statusCheckRollup poll");
-      assert.ok(armIdx < pollIdx, "the arm call precedes the first CI poll in gh's own call order");
+      assert.equal(armIdx, -1, "the fake-gh call log recorded NO `pr merge --auto` call — the arm never reached gh");
+      assert.ok(pollIdx >= 0, "the fake-gh call log still recorded the statusCheckRollup poll that found ci red");
     } finally {
       dateNowSpy.mock.restore();
       process.env.PATH = savedPath;
@@ -608,11 +624,15 @@ function armOpenCappedFakeGh(branch: string, callLogPath: string, headSha: strin
 }
 
 test(
-  "EXECUTION (W1-T125 mechanism iv): a real runTask() run whose review call (injected) returns a " +
-    "CAPPED, state:success, planOnly:false verdict actually EXECUTES disarmAutoMerge(prUrl) and logs " +
-    "automerge.disarmed — the fake-gh call log proves `pr merge --disable-auto` really reaches `gh`, " +
-    "withdrawing the arm-at-open BEFORE the run escalates and returns a blocked verdict",
+  "W1-T975: a run that exits before its verdict leaves no auto-merge arm",
   async (t) => {
+    // A CAPPED verdict is exactly a run that does NOT reach a verdict it stands behind — the
+    // capped-refusal branch is the OTHER named early exit (rationale (3)/(4)), so this is the
+    // general claim's own second, independent proof (criterion 3 above covers ci-not-green).
+    // Also still exercises the EXECUTION-level mitigation MECHANISM (iv) coverage this test
+    // used to own under W1-T125: `disarmAutoMerge(prUrl)` really reaches `gh` from this branch —
+    // now as a defensive no-op (see this file's header comment), since the run's OWN arm never
+    // happened by this point under W1-T975's deferred call site.
     const root = mkdtempSync(join(tmpdir(), "arm-open-capped-root-"));
     const planPath = join(root, "tasks.yaml");
     // W1-T948: the tdd:strict variant, so this SAME run also exercises run-task.ts's
@@ -684,11 +704,17 @@ test(
       assert.equal(seenRunReviewArgs?.prUrl, "https://github.com/acme/remudero/pull/501", "the injected review seam observed the run's own PR");
 
       const ledger = readLedger(root);
-      const armedIdx = ledger.findIndex((l) => l.step === "automerge.armed");
-      assert.ok(armedIdx >= 0, "the run must have armed at open first, same as the sibling ACCEPTANCE test");
+      // ── THE FALSIFIER: no automerge.armed line at all — under W1-T125 this branch's PR was
+      // already armed at open; under W1-T975 the arm call sits strictly AFTER this decision, so
+      // a capped refusal (a run that never reaches a verdict it stands behind) leaves nothing to
+      // withdraw and nothing standing.
+      assert.equal(
+        ledger.find((l) => l.step === "automerge.armed"),
+        undefined,
+        "FALSIFIER: a capped verdict must leave NO automerge.armed line — the arm call sits after this decision now",
+      );
       const disarmedIdx = ledger.findIndex((l) => l.step === "automerge.disarmed");
-      assert.ok(disarmedIdx >= 0, "automerge.disarmed must be ledgered — the line disarmAutoMerge's own log() call writes");
-      assert.ok(disarmedIdx > armedIdx, "the disarm must be ledgered AFTER the earlier arm-at-open, never before");
+      assert.ok(disarmedIdx >= 0, "automerge.disarmed must still be ledgered — the defensive no-op call still runs and still logs");
       assert.equal(ledger[disarmedIdx]?.reason, "capped verdict refused auto-merge");
       const verdictIdx = ledger.findIndex((l) => l.step === "verdict");
       assert.ok(verdictIdx > disarmedIdx, "the terminal verdict line must follow the disarm, matching the source order (disarm BEFORE escalate BEFORE the verdict log)");
@@ -711,15 +737,16 @@ test(
 
       // ── The execution-level proof itself: `gh pr merge <url> --disable-auto`
       // really reached the fake `gh` binary — disarmAutoMerge's default deps
-      // (realArmDeps()) shell out for real, exercised end-to-end here.
+      // (realArmDeps()) shell out for real, exercised end-to-end here. But
+      // `pr merge --auto` never did: the deferred arm call sits after this
+      // decision, so this run never reached `gh` to arm anything at all.
       const calls = readFileSync(callLogPath, "utf8").split("\n").filter(Boolean);
       assert.ok(
         calls.includes("disarm https://github.com/acme/remudero/pull/501"),
         `expected a 'disarm <prUrl>' call in the gh call log; got: ${JSON.stringify(calls)}`,
       );
       const armIdx = calls.indexOf("arm https://github.com/acme/remudero/pull/501");
-      const disarmIdx = calls.indexOf("disarm https://github.com/acme/remudero/pull/501");
-      assert.ok(armIdx >= 0 && disarmIdx > armIdx, "the disarm call must follow the earlier arm-at-open call in gh's own call order");
+      assert.equal(armIdx, -1, "FALSIFIER: no `pr merge --auto` call ever reached gh for this run");
     } finally {
       dateNowSpy.mock.restore();
       process.env.PATH = savedPath;
@@ -741,10 +768,11 @@ test(
 // runTask() end-to-end test reaches this call site").
 
 test(
-  "EXECUTION (W1-T248): a real runTask() run whose (injected) review is a full, non-capped PASS reaches " +
-    "the risk-judge block; a HIGH-risk verdict from the (injected) judge spawn withdraws the arm-at-open, " +
-    "ledgers risk_judge.decision + risk_judge.escalated VERBATIM, and returns a blocked verdict naming the " +
-    "judge's own escalation issue — all BEFORE pollToGate is ever reached",
+  "EXECUTION (W1-T248, retargeted by W1-T975): a real runTask() run whose (injected) review is a full, " +
+    "non-capped PASS reaches the risk-judge block; a HIGH-risk verdict from the (injected) judge spawn " +
+    "means the run NEVER reaches the deferred arm call at all — ledgers risk_judge.decision + " +
+    "risk_judge.escalated VERBATIM, still logs the defensive automerge.disarmed no-op, and returns a " +
+    "blocked verdict naming the judge's own escalation issue — all BEFORE pollToGate is ever reached",
   async (t) => {
     const root = mkdtempSync(join(tmpdir(), "arm-open-riskjudge-root-"));
     const planPath = join(root, "tasks.yaml");
@@ -826,8 +854,15 @@ test(
       assert.equal(spawnCalls.length, 3, "recon, implement, THEN the risk judge's own spawn — pollToGate never spawns anything");
 
       const ledger = readLedger(root);
-      const armedIdx = ledger.findIndex((l) => l.step === "automerge.armed");
-      assert.ok(armedIdx >= 0, "the run armed at open, same as every other run in this file");
+      // ── THE FALSIFIER: no automerge.armed line at all. Under W1-T125 this PR was already
+      // armed at open; under W1-T975 the deferred arm call sits AFTER the risk-judge check, so a
+      // HIGH-risk escalation — a run that never reaches a verdict it stands behind — returns
+      // before ever reaching it.
+      assert.equal(
+        ledger.find((l) => l.step === "automerge.armed"),
+        undefined,
+        "FALSIFIER: a risk-judge escalation must leave NO automerge.armed line — the arm call sits after this decision now",
+      );
 
       // ── W1-T948 NEGATIVE CONTROL, on the same real runTask path as the (C) positive:
       // this run's task declares NO principles, so the testing trigger does not fire and
@@ -847,10 +882,9 @@ test(
       assert.equal(ledger[decisionIdx]?.action, "escalate");
 
       const disarmedIdx = ledger.findIndex((l) => l.step === "automerge.disarmed");
-      assert.ok(disarmedIdx >= 0, "the risk judge's escalate dep must withdraw the arm-at-open");
+      assert.ok(disarmedIdx >= 0, "the risk judge's escalate dep still calls disarmAutoMerge — now a defensive no-op, but still ledgered");
       assert.equal(ledger[disarmedIdx]?.reason, "risk judge escalated — auto-merge refused");
-      assert.ok(disarmedIdx > armedIdx, "the disarm follows the earlier arm-at-open, never before it");
-      assert.ok(disarmedIdx > decisionIdx, "the decision is ledgered BEFORE the escalate dep withdraws the arm, matching runRiskJudge's own source order");
+      assert.ok(disarmedIdx > decisionIdx, "the decision is ledgered BEFORE the escalate dep's disarm call, matching runRiskJudge's own source order");
 
       const escalatedIdx = ledger.findIndex((l) => l.step === "risk_judge.escalated");
       assert.ok(escalatedIdx >= 0, "risk_judge.escalated must be ledgered");
@@ -911,26 +945,208 @@ test(
 );
 
 test(
-  "WIRING (W1-T125 design point ii): the OLD post-review arm call site no longer calls armAutoMerge — " +
-    "arming already happened at PR-open; this site only polls to the gate now",
+  "WIRING (W1-T975): the deferred arm call sits immediately before pollToGate — no longer close " +
+    "after pr.opened, and armAutoMergeAtOpen is called from exactly one site",
   () => {
+    // The old post-review site's own OLD armAutoMerge(prUrl, taskId) call was already removed by
+    // W1-T125 — that regression is still guarded by the '`old post-review armAutoMerge(...)` call
+    // must be removed' assertion this test used to make; keep it, it costs nothing.
     const pollIdx = runTaskSrc.indexOf("const outcome = await pollToGate(prUrl,");
     assert.ok(pollIdx >= 0, "pollToGate must still be called");
-    // The 400 chars immediately BEFORE the poll call must contain no armAutoMerge(
-    // call — the primary arm now happens at PR-open, not here.
-    const before = runTaskSrc.slice(Math.max(0, pollIdx - 400), pollIdx);
-    assert.ok(!/armAutoMerge\(prUrl, taskId\)/.test(before), "the old post-review armAutoMerge(prUrl, taskId) call must be removed from this site");
-    // armAutoMergeAtOpen, by contrast, is reachable right after `pr.opened`.
+    assert.ok(
+      !/armAutoMerge\(prUrl, taskId\)/.test(runTaskSrc.slice(Math.max(0, pollIdx - 900), pollIdx)),
+      "the old, pre-W1-T125 armAutoMerge(prUrl, taskId) call must not have crept back in here",
+    );
+
+    // W1-T975: armAutoMergeAtOpen must now be reachable in the window IMMEDIATELY BEFORE
+    // pollToGate — the deferred call site this task moves it to.
+    const before = runTaskSrc.slice(Math.max(0, pollIdx - 900), pollIdx);
+    assert.match(
+      before,
+      /armAutoMergeAtOpen\(prUrl,/,
+      "armAutoMergeAtOpen must fire immediately before pollToGate — the W1-T975 deferred arm call site",
+    );
+
+    // And it must NOT be reachable close after `pr.opened` any more — the OLD W1-T125 site this
+    // task removes. `pr.opened` sits far upstream now (>20,000 chars before pollToGate on the
+    // current source), so a generous 1300-char window still proves the call moved away, not
+    // merely that the file grew.
     const openedIdx = runTaskSrc.indexOf('log("pr.opened", { pr_url: prUrl });');
     assert.ok(openedIdx >= 0 && openedIdx < pollIdx);
-    // W1-T947 widened this from 800: an irreversibility check (a synchronous git diff, not a
-    // wait) now runs between `pr.opened` and the arm call — still no CI/review wait in between,
-    // which is what this window actually needs to distinguish (the review call itself sits
-    // ~4300 chars after `pr.opened`, so 1300 stays nowhere near "deep into the flow").
     const afterOpened = runTaskSrc.slice(openedIdx, openedIdx + 1300);
-    assert.match(afterOpened, /armAutoMergeAtOpen\(prUrl,/, "armAutoMergeAtOpen must fire close after pr.opened, not deep into the flow");
+    assert.doesNotMatch(
+      afterOpened,
+      /armAutoMergeAtOpen\(prUrl,/,
+      "FALSIFIER: armAutoMergeAtOpen must NOT fire close after pr.opened any more — W1-T975 moved it",
+    );
+
+    // Exactly one call site in the whole file — the one just proven above, right before
+    // pollToGate — never two (e.g. a forgotten duplicate left at the old PR-open site).
+    const callSites = runTaskSrc.split("armAutoMergeAtOpen(prUrl,").length - 1;
+    assert.equal(callSites, 1, "armAutoMergeAtOpen must be called from exactly one site in runTask");
   },
 );
+
+// ── (E) THE POSITIVE CONTROL — criterion 2's own falsifier ──────────────────────────
+//
+// Criterion 2 exists so deleting the arm entirely cannot pass criterion 1/3 by accident (this
+// file's note block names this explicitly: "criterion 2 IS THE FALSIFIER"). A run that DOES
+// reach a verdict it stands behind — ci green, a full non-capped PASS, a LOW-risk judge
+// verdict — must still arm, all the way to a real GitHub merge, so the W1-T125 dead-time saving
+// survives for the happy path. `pollToGate` reads `gh pr view --json state,statusCheckRollup`
+// (a DIFFERENT combined field from `waitForCiGreen`'s bare `statusCheckRollup`), so this needs
+// its own fake `gh` answering that field too — none of the fixtures above ever reach it, because
+// every other test in this file returns before pollToGate by design.
+
+/** A fake `gh` for the W1-T975 happy-path proof (criterion 2): answers `pr view` exactly like
+ *  `armOpenCappedFakeGh` (headRefName/body/headRefOid/statusCheckRollup — CI GREEN on the very
+ *  first poll) PLUS `pr view --json state,statusCheckRollup` — `pollToGate`'s OWN combined
+ *  read — returning MERGED on its very first poll, so the run reaches a real "merged" verdict
+ *  with zero sleeps. `pr merge --auto`/`--disable-auto` are logged exactly like the sibling
+ *  fixtures above, which is what lets this test prove the deferred arm actually reached `gh`. */
+function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: string): string {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "arm-open-merged-bin-"));
+  const fakeGhPath = join(fakeBinDir, "gh");
+  writeFileSync(
+    fakeGhPath,
+    [
+      "#!/bin/bash",
+      "set -e",
+      `CALLLOG="${callLogPath}"`,
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
+      "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
+      `  if [[ "$5" == 'headRefOid' ]]; then echo '{"headRefOid":"${headSha}"}'; exit 0; fi`,
+      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then",
+      "    echo 'ci-poll' >> \"$CALLLOG\"",
+      "    echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}]}'",
+      "    exit 0",
+      "  fi",
+      "  if [[ \"$5\" == 'state,statusCheckRollup' ]]; then",
+      "    echo 'gate-poll' >> \"$CALLLOG\"",
+      "    echo '{\"state\":\"MERGED\",\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}]}'",
+      "    exit 0",
+      "  fi",
+      "fi",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'merge' ]]; then",
+      "  if [[ \"$4\" == '--auto' ]]; then echo \"arm $3\" >> \"$CALLLOG\"; exit 0; fi",
+      "  if [[ \"$4\" == '--disable-auto' ]]; then echo \"disarm $3\" >> \"$CALLLOG\"; exit 0; fi",
+      "  exit 0",
+      "fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeGhPath, 0o755);
+  return fakeBinDir;
+}
+
+test("W1-T975: a run that reaches its verdict still arms auto-merge", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "arm-verdict-merged-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+
+  armOpenGitFixture(root);
+
+  const FIXED_TS = 1785100000010;
+  const branch = `run-T-ARM-OPEN-${FIXED_TS}`;
+  const headSha = "feedface9999";
+  const callLogPath = join(root, "gh-calls.log");
+  writeFileSync(callLogPath, "");
+  const fakeBinDir = armOpenMergedFakeGh(branch, callLogPath, headSha);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing notable\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+    }
+    if (spawnCalls.length === 2) {
+      return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/702\n" });
+    }
+    // The risk judge's own spawn (the THIRD injected `spawn` call, same wiring as group (D)
+    // above) — a confident LOW-risk verdict PROCEEDS, so the run reaches the deferred arm call
+    // and then pollToGate for real.
+    return result({
+      sessionId: "s-risk-judge",
+      text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: a small, well-trodden change\n",
+    });
+  };
+
+  // A full, non-capped PASS — the SAME shape group (D) uses to reach the risk-judge block,
+  // except this judge PROCEEDS instead of escalating, so the run runs all the way through the
+  // deferred arm call and pollToGate to a real merge.
+  const fullPassVerdict = {
+    state: "success" as const,
+    criteria: [],
+    testTheater: false,
+    summary: "full PASS — every criterion executed",
+    floorDegraded: false,
+    capped: false,
+    keywordOnly: false,
+    planOnly: false,
+    headSha,
+    reviewerOutcome: "success",
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-ARM-OPEN", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: ARM_OPEN_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: armOpenHoldingContainmentExec,
+        isolationExec: armOpenCleanIsolationExec,
+        runReview: async () => fullPassVerdict,
+      }),
+    );
+
+    assert.equal(res.verdict, "merged", "a full-pass, low-risk verdict reaches a real merge — the W1-T125 dead-time saving survives");
+    assert.equal(res.merged, true);
+    assert.equal(
+      spawnCalls.length,
+      3,
+      "recon, implement, and the risk judge — no fix rung, no reviewer LLM spawn (review was injected)",
+    );
+
+    const ledger = readLedger(root);
+    const armedIdx = ledger.findIndex((l) => l.step === "automerge.armed");
+    assert.ok(armedIdx >= 0, "the run must arm once it commits to a verdict — this IS criterion 2, the positive control");
+    assert.equal(ledger[armedIdx]?.at, "verdict", "the arm row's `at` field now names the deferred point — never `open` any more");
+    assert.equal(ledger[armedIdx]?.outcome, "armed");
+
+    const decisionIdx = ledger.findIndex((l) => l.step === "risk_judge.decision");
+    assert.ok(decisionIdx >= 0, "the risk judge still runs on the happy path — it just PROCEEDS instead of escalating");
+    assert.equal(ledger[decisionIdx]?.action, "proceed");
+    assert.ok(decisionIdx < armedIdx, "the arm follows the risk judge's own PROCEED decision — it must never precede it");
+
+    const mergedIdx = ledger.findIndex((l) => l.step === "pr.merged");
+    assert.ok(mergedIdx > armedIdx, "the arm precedes the merge it registered intent for");
+
+    assert.equal(
+      ledger.filter((l) => l.step === "automerge.disarmed").length,
+      0,
+      "nothing was refused on this path, so nothing withdrew the arm",
+    );
+
+    const calls = readFileSync(callLogPath, "utf8").split("\n").filter(Boolean);
+    assert.ok(
+      calls.includes("arm https://github.com/acme/remudero/pull/702"),
+      `expected an 'arm <prUrl>' call in the gh call log; got: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 // Re-exported so `armAutoMerge`'s own (unmodified) 6-call-site contract is
 // still importable from this file without an unused-import lint complaint —
