@@ -43,6 +43,7 @@ import {
   type BatchedPr,
   type DeriveDeps,
   type CreditStore,
+  type CreditStoreFsDeps,
 } from "../src/lib/status.js";
 import { nextRunnable, type OpenPrCheck } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -489,4 +490,63 @@ test("W1-T951: single-path credit emits a discoverable signal", () => {
 
   assert.equal(singleProj.singlePathCredit, true, "the projection itself carries the signal -- a person reading the console sees it directly");
   assert.equal(doubleProj.singlePathCredit, undefined, "a task credited by BOTH paths must never be flagged single-path");
+});
+
+// ── W1-T951: the durable store is an ACCELERATOR, never the sole route to a credit ──────────
+//
+// `loadCreditStore`'s own doc states the contract in terms: `{}` on a missing OR corrupt file,
+// never a throw, "exactly like `readLedgerLines`' own malformed-line handling". A throw here
+// would take down every rung BELOW it — the live trailer and head-branch reads that do not
+// need this layer at all — turning an optional cache into a hard dependency. The three
+// degradation arms are distinct and are asserted apart, because a reader that simply always
+// returned `{}` would satisfy any one of them alone.
+
+/** A `CreditStoreFsDeps` whose read returns exactly `body`, so the parse arms are reachable
+ *  without a real file. The write half is inert: nothing here calls `saveCreditStore`. */
+function creditStoreReading(body: string): CreditStoreFsDeps {
+  return {
+    existsSync: () => true,
+    readFileSync: () => body,
+    mkdirSync: () => {},
+    writeFileSync: () => {},
+    renameSync: () => {},
+  };
+}
+
+test("W1-T951: a corrupt credit store degrades to an empty store instead of throwing", () => {
+  const path = "/nonexistent/merge-credit.json";
+
+  // ARM 1 — UNPARSEABLE. A truncated write is the shape a process killed mid-`writeFileSync`
+  // leaves behind, which is precisely why saveCreditStore writes through a temp file.
+  assert.deepEqual(loadCreditStore(path, creditStoreReading('{"W9-T900": {"trai')), {});
+
+  // CONTROL, same function and same deps shape: valid JSON parses back out. Without it the
+  // assertion above holds for a reader that returned {} unconditionally, and would prove
+  // nothing about the catch.
+  const parsed = loadCreditStore(
+    path,
+    creditStoreReading('{"W9-T900":{"trailer":{"source":"trailer","prUrl":"u/900","prNumber":900,"prState":"MERGED"}}}'),
+  );
+  assert.deepEqual(Object.keys(parsed), ["W9-T900"], "valid JSON must parse — otherwise the corrupt case proves nothing");
+  assert.equal(parsed["W9-T900"]?.trailer?.prNumber, 900, "and it parses to the real entry, not merely a non-empty object");
+
+  // ARM 2 — PARSEABLE BUT NOT A STORE. Distinct from arm 1: this never throws, so it exercises
+  // the shape check rather than the catch, and a fix to one arm cannot silently cover the other.
+  assert.deepEqual(loadCreditStore(path, creditStoreReading("[1,2,3]")), {}, "a JSON array is not a store");
+  assert.deepEqual(loadCreditStore(path, creditStoreReading("null")), {}, "JSON null is not a store");
+  assert.deepEqual(loadCreditStore(path, creditStoreReading('"a string"')), {}, "a JSON string is not a store");
+
+  // ARM 3 — ABSENT. Short-circuits before any read at all, asserted by the READ NEVER HAPPENING
+  // rather than by the return value, which is `{}` in all three arms and so cannot tell them apart.
+  let reads = 0;
+  const absent: CreditStoreFsDeps = {
+    ...creditStoreReading("{}"),
+    existsSync: () => false,
+    readFileSync: () => {
+      reads += 1;
+      return "{}";
+    },
+  };
+  assert.deepEqual(loadCreditStore(path, absent), {});
+  assert.equal(reads, 0, "an absent store must not be read at all");
 });
