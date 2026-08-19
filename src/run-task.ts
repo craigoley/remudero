@@ -612,7 +612,13 @@ import {
   sweepStaleInflightLocks,
   type InflightSweepResult,
 } from "./lib/inflight-lock.js";
-import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
+import {
+  classifyFailure,
+  runDiagnoseThenRetry,
+  MAX_TRANSIENT_RETRIES,
+  type AttemptOutcome,
+  type FailureSignal,
+} from "./lib/classify.js";
 import { shouldRecordDecision } from "./lib/risk-score.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
 import {
@@ -4913,6 +4919,49 @@ export function isTransientResult(r: WorkerResult): boolean {
 }
 
 /**
+ * W1-T7B: thrown from {@link implementAttemptOutcome} (never returned as an `AttemptOutcome`)
+ * on an `error_max_budget_usd` envelope. Dollars are the HARD backstop
+ * (`workerErrorVerdict`'s `budgetBreach`, "not retried ... the backstop") — a budget breach
+ * must exit `runDiagnoseThenRetry`'s loop immediately, never spend a strike (or a diagnose
+ * dispatch) retrying a call that is already over budget.
+ */
+export class ImplementBudgetBreach extends Error {
+  constructor() {
+    super("worker breached maxBudgetUsd — not retried (dollars are the backstop)");
+  }
+}
+
+/**
+ * W1-T7B: classify one implement-stage `WorkerResult` into the shape
+ * `classify.js`'s `runDiagnoseThenRetry` driver needs from its `attempt` callback —
+ * the seam that gives `runDiagnoseThenRetry` its first live call site (Standing rule
+ * 14; W1-T7 shipped the function with none). Reproduces the two invariants the
+ * pre-W1-T7B implement loop already enforced, byte-for-byte, rather than re-deriving
+ * them:
+ *   - a positive `apiError` signal (an Anthropic-side server_error mid-response) is
+ *     ALWAYS a transient candidate, even when the envelope's own `subtype` says
+ *     "success" (`isTransientResult`'s existing `isError || apiError` gate; the exact
+ *     fixture `{apiError:true, subtype:"success"}` this mirrors lives in
+ *     test/run-task.test.ts);
+ *   - the CONTRADICTORY `{isError:true, subtype:"success"}` envelope with no apiError
+ *     (W1-T12a-1784117152056 — the SDK iterator threw AFTER a success envelope) is a
+ *     clean SUCCESS, never a strike — `workerErrorVerdict`'s own `!r.isError ||
+ *     subtype==="success"` guard;
+ *   - `error_max_budget_usd` throws {@link ImplementBudgetBreach} instead of returning
+ *     failure, so it never enters the strike/diagnose machinery at all.
+ * Anything else `isError`-flagged is a real strike, carrying `workerSignal`'s evidence
+ * shape so `classifyFailure` (inside the driver) can still reclassify a strike-looking
+ * envelope as transient (network/5xx/CI-infra text) exactly as it always has.
+ */
+export function implementAttemptOutcome(r: WorkerResult): AttemptOutcome {
+  if (r.apiError) return { success: false, evidence: workerSignal(r) };
+  if (r.isError && r.subtype === "error_max_budget_usd") throw new ImplementBudgetBreach();
+  if (r.isError && r.subtype === "success") return { success: true };
+  if (r.isError) return { success: false, evidence: workerSignal(r) };
+  return { success: true };
+}
+
+/**
  * FOLLOW-UP HARVEST (W1-T105, §2 non-blocking, mirrors the QUESTION contract's
  * parse-then-log discipline). Shared by every call site that can carry a worker's
  * OPTIONAL '## Follow-ups' section — implement, recon, and the fix rung — so the
@@ -5239,6 +5288,33 @@ export function renderReconPrompt(planIndexBlock: string, operatorNotesBlock = "
 }
 
 /**
+ * Render the DIAGNOSE worker's prompt (W1-T7B — the two-strikes dispatch, §4). EVIDENCE-ONLY,
+ * mirroring `renderReconPrompt`'s own read-only contract: two prior implement attempts at the
+ * SAME task both failed (a strike each), and this worker's job is to explain WHY — never to
+ * patch, commit, or push. It runs in the SAME worktree the failing attempts left behind (the
+ * real call site passes the same `cwd: worktreePath` recon already uses), so `git diff`/`git
+ * status`/the failing test or build output are all still on disk to inspect.
+ *
+ * Its report becomes the NEXT (diagnose-informed) attempt's `findings` — `classify.js`'s
+ * `runDiagnoseThenRetry` threads whatever text this worker returns straight into the next
+ * `attempt(findings)` call, so the third patch is never blind (acceptance #2).
+ */
+export function renderDiagnosePrompt(task: Pick<Task, "id" | "title">, failureEvidence: string): string {
+  return [
+    "You are a DIAGNOSE worker. Do NOT modify, commit, or push ANYTHING — this is a read-only " +
+      "investigation. Two prior attempts at the task below both failed. Inspect the current " +
+      "worktree (git status, git diff, git log, re-run whatever failed) and explain the ROOT " +
+      "CAUSE — never propose or write a patch; that is the NEXT worker's job, informed by your " +
+      "report.",
+    `TASK: ${task.id} — ${task.title}`,
+    `## PRIOR FAILURE EVIDENCE\n${failureEvidence || "(no evidence captured)"}`,
+    "Output exactly one report:\nDIAGNOSE REPORT\nROOT CAUSE: <your best-evidenced explanation>\n" +
+      "EVIDENCE: <the specific commands/output that support it>\n" +
+      "SUGGESTED APPROACH: <a concrete next step for the retry — description only, no code>",
+  ].join("\n\n");
+}
+
+/**
  * Render the implement prompt: cited CONTEXT + TASK + explicit output contract.
  *
  * CACHE-AWARE ASSEMBLY (MASTER-PLAN §8A / W1-T35): the Anthropic prompt cache
@@ -5340,6 +5416,14 @@ export function resolveRunMounts(
   reviewerMount: Mount;
   fixMount: Mount;
   /**
+   * W1-T7B: the DIAGNOSE stage's own mount (`routes.diagnose`, task_type "diagnose" × risk) —
+   * model STEPS UP (§9), same discipline as `reviewerMount`/`fixMount` above. Resolved via the
+   * plain (never class-routed) `resolveMount`, exactly like those two: `test/mounts-wiring.test.ts`
+   * already proves `resolveMount(m, "diagnose", risk)` resolves for every risk off the committed
+   * table, so — like `reviewerMount`/`fixMount` — this is never optional/try-caught.
+   */
+  diagnoseMount: Mount;
+  /**
    * impl-BP — the RECON stage's own mount (`routes.recon`, task_type "recon" × risk × class).
    *
    * OPTIONAL, AND THAT IS THE SAFETY PROPERTY. Recon runs on EVERY dispatch, so a throw here
@@ -5396,6 +5480,7 @@ export function resolveRunMounts(
     mount: mountResolution.mount,
     reviewerMount: resolveMount(mountsTable, "reviewer", task.risk),
     fixMount: resolveMount(mountsTable, "fix", task.risk),
+    diagnoseMount: resolveMount(mountsTable, "diagnose", task.risk),
     reconMount,
     taskClass,
     mountClass: mountResolution.resolvedClass,
@@ -5711,7 +5796,11 @@ async function runTask(
   // checkout — resolution + the loud class-fallback ledgering live in
   // resolveRunMounts (exported, above) so every branch, including the fallback a
   // COMPLETE committed table can never reach, is unit-covered with fixture tables.
-  const { mount, reviewerMount, fixMount, reconMount, taskClass, mountClass } = resolveRunMounts(repoRoot, task, log);
+  const { mount, reviewerMount, fixMount, diagnoseMount, reconMount, taskClass, mountClass } = resolveRunMounts(
+    repoRoot,
+    task,
+    log,
+  );
   log("run.start", {
     repo: task.repo,
     type: task.type,
@@ -6140,14 +6229,18 @@ async function runTask(
     const anchor = renderAnchorBlock(task, runId);
     log("anchor.built", { anchor });
 
-    // ── Implement. A TRANSIENT (an Anthropic-side server_error mid-response, or a
-    // network/5xx/CI-infra blip) is Anthropic's fault, NOT the task's — W1-T7's classifier
-    // (now WIRED here; it never was — run W1-T12a-1784117152056 reached verdict-assembly
-    // unclassified) RETRIES it, bounded, consuming NO strike and NEVER stamping failed/no_pr.
+    // ── Implement + DIAGNOSE-THEN-RETRY (W1-T7B — Standing rule 14: the CALL SITE is the
+    // deliverable). `classify.js`'s `runDiagnoseThenRetry` (built by W1-T7, PR #48, with ZERO
+    // call site since — the two-strikes DIAGNOSE dispatch was UNREACHABLE) now DRIVES every
+    // implement attempt. A TRANSIENT failure (an Anthropic-side server_error mid-response, or a
+    // network/5xx/CI-infra blip) retries bounded (MAX_TRANSIENT_RETRIES), consuming NO strike —
+    // byte-identical to the pre-W1-T7B behavior. A REAL strike no longer fails the run on the
+    // FIRST one: it accumulates, and at DIAGNOSE_AT_STRIKES (two) an evidence-only DIAGNOSE
+    // worker (mount steps UP, §9) runs BEFORE any third patch attempt — that third attempt's
+    // prompt carries the diagnose findings verbatim, never a third blind patch (acceptance #1).
     say("implement worker");
-    let impl: WorkerResult;
-    let transientAttempts = 0;
-    for (;;) {
+    let impl!: WorkerResult;
+    const attemptImplement = async (findings?: string): Promise<AttemptOutcome> => {
       impl = account(
         // `spawn` (opts.spawn ?? the real spawnWorker, exactly like the recon dispatch
         // above) — not the raw spawnWorker import. Zero behavior change on the real path
@@ -6168,7 +6261,13 @@ async function runTask(
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config,
-          prompt,
+          // W1-T7B: a diagnose-informed attempt gets the SAME task prompt, plus the prior
+          // DIAGNOSE worker's report appended verbatim — never paraphrased, never silently
+          // re-issued as an identical blind prompt (acceptance #1's "never blind" falsifier).
+          prompt: findings
+            ? `${prompt}\n\n## DIAGNOSE FINDINGS (a prior evidence-only worker's report — read before ` +
+              `trying again; do NOT repeat the same failing approach blind)\n${findings}`
+            : prompt,
         }),
       );
       log("implement.done", {
@@ -6177,18 +6276,55 @@ async function runTask(
         num_turns: impl.numTurns,
         subtype: impl.subtype,
         api_error: impl.apiError,
-        transient_attempt: transientAttempts,
+        diagnose_informed: !!findings,
         permission_denials: impl.permissionDenials.length,
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(impl),
       });
-      if (!isTransientResult(impl)) break; // clean success OR a real strike ⇒ handled below
-      if (transientAttempts < MAX_TRANSIENT_RETRIES) {
-        transientAttempts++;
-        log("implement.transient_retry", { attempt: transientAttempts, subtype: impl.subtype, api_error: impl.apiError });
-        say(`transient (${impl.apiError ? "api server_error" : impl.subtype}) — retry ${transientAttempts}/${MAX_TRANSIENT_RETRIES}, NO strike`);
-        continue;
-      }
+      // implementAttemptOutcome reproduces isTransientResult's/workerErrorVerdict's existing
+      // invariants byte-for-byte (see its own doc) and THROWS ImplementBudgetBreach on
+      // error_max_budget_usd rather than returning failure — dollars are the hard backstop and
+      // must never be retried, so that case is handled OUTSIDE the driver, below.
+      return implementAttemptOutcome(impl);
+    };
+    const dispatchDiagnose = async (): Promise<{ text: string }> => {
+      say("diagnose worker (two strikes — evidence-only, before any third patch)");
+      const d = account(
+        await spawn({
+          cwd: worktreePath,
+          permissionMode: "bypassPermissions",
+          model: diagnoseMount.model,
+          effort: diagnoseMount.effort,
+          maxTurns: diagnoseMount.maxTurns,
+          maxBudgetUsd: budgetUsd,
+          settingsFile,
+          config,
+          prompt: renderDiagnosePrompt(task, [impl.text, impl.blocks.join("\n"), impl.stderr].join("\n")),
+        }),
+      );
+      log("diagnose.worker_done", {
+        session_id: d.sessionId,
+        cost_usd: d.costUsd,
+        num_turns: d.numTurns,
+        subtype: d.subtype,
+        // W1-T6: every worker call ledgers the standard telemetry shape.
+        ...workerLedgerFields(d),
+      });
+      return { text: [d.text, d.blocks.join("\n")].join("\n") };
+    };
+
+    let driverResult: Awaited<ReturnType<typeof runDiagnoseThenRetry>>;
+    try {
+      driverResult = await runDiagnoseThenRetry({ attempt: attemptImplement, diagnose: dispatchDiagnose, log });
+    } catch (e) {
+      if (!(e instanceof ImplementBudgetBreach)) throw e;
+      // Exits the diagnose-then-retry loop immediately — `impl` (the breaching attempt) is
+      // already captured above; the ordinary post-loop code below (failOnWorkerError) renders
+      // it blocked_budget exactly as it always has, off that SAME `impl`.
+      driverResult = { outcome: "gave_up", strikes: 0, transientRetries: 0, diagnosed: false, attempts: 1, reason: e.message };
+    }
+
+    if (driverResult.outcome === "gave_up" && /transient retries exhausted/i.test(driverResult.reason ?? "")) {
       // A transient that PERSISTED across the bounded retries: Anthropic-side, not a task
       // failure and not a no-op. Honest, distinct verdict (NOT failed, NOT no_pr) the daemon
       // can reason about; it blocks the drain like any non-merged terminal state.
