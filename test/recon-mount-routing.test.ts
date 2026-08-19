@@ -49,6 +49,9 @@ const ROWS_WITHOUT_RECON = `  implement:
   fix:
     high:
       src: ${CELL}
+  diagnose:
+    high:
+      src: ${CELL}
 `;
 
 // ── 1: the committed table routes recon, and the values come from the ROW ───────────

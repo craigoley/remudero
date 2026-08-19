@@ -1190,6 +1190,215 @@ test("BEHAVIORAL (W1-T268): a real runTask run that transients across every retr
   }
 });
 
+// ── W1-T7B: runDiagnoseThenRetry's LIVE call site (Standing rule 14 — the call site is the
+// deliverable). W1-T7 (PR #48) shipped classify.ts's classifier + state machine with ZERO call
+// site in the run path, so the two-strikes DIAGNOSE dispatch was UNREACHABLE. These two
+// BEHAVIORAL tests drive a REAL runTask() run (no real Claude/gh spawn — the injected `spawn`
+// stands in for both, exactly like the transient test above) through two genuine strikes and
+// prove the driver is actually wired: a diagnose run lands in the ledger, and the third attempt
+// is diagnose-INFORMED, never blind. ──────────────────────────────────────────────────────────
+
+test("BEHAVIORAL (W1-T7B): two real implement strikes dispatch a DIAGNOSE worker (evidence-only, model steps up) BEFORE any third patch attempt — never a third blind patch", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-diagnose-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000020;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    if (spawnCalls.length === 2 || spawnCalls.length === 3) {
+      // Two REAL (deterministic, non-transient) implement failures — a strike each. Neither
+      // is retried forever blind: the 2nd (DIAGNOSE_AT_STRIKES) must dispatch a DIAGNOSE
+      // worker before any 3rd attempt.
+      return result({
+        sessionId: `s-implement-strike-${spawnCalls.length - 1}`,
+        isError: true,
+        subtype: "error_max_turns",
+        text: "AssertionError: expected 1 to equal 2 — a real, deterministic failure",
+      });
+    }
+    if (spawnCalls.length === 4) {
+      // The evidence-only DIAGNOSE worker — never touches the diff, only reports.
+      return result({
+        sessionId: "s-diagnose",
+        text: "DIAGNOSE REPORT\nROOT CAUSE: the assertion expects a 1-indexed count; code emits 0-indexed.\n",
+      });
+    }
+    // The 3rd (diagnose-informed) implement attempt — a clean success with nothing committed,
+    // so the run's own terminal verdict is the ordinary no_pr path, unrelated to this task.
+    return result({ sessionId: "s-implement-informed", text: "REPORT\nno PR opened yet\n" });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      }),
+    );
+
+    assert.equal(spawnCalls.length, 5, "recon + strike 1 + strike 2 + diagnose + the diagnose-informed 3rd attempt");
+    assert.equal(res.verdict, "no_pr", "the diagnose-informed 3rd attempt succeeded — nothing left to merge");
+
+    // "never a third blind patch": the 3rd attempt's prompt must carry the diagnose worker's
+    // own findings verbatim; the first two (blind) attempts carry none.
+    assert.doesNotMatch(String(spawnCalls[1]?.prompt ?? ""), /DIAGNOSE FINDINGS/, "1st attempt is blind");
+    assert.doesNotMatch(String(spawnCalls[2]?.prompt ?? ""), /DIAGNOSE FINDINGS/, "2nd attempt (blind retry after strike 1) is still blind");
+    const thirdAttemptPrompt = String(spawnCalls[4]?.prompt ?? "");
+    assert.match(thirdAttemptPrompt, /DIAGNOSE FINDINGS/, "3rd attempt must be diagnose-informed");
+    assert.match(thirdAttemptPrompt, /ROOT CAUSE: the assertion expects a 1-indexed count/, "carrying the report VERBATIM");
+
+    // "a seeded double-failure produces a diagnose run in the ledger" (acceptance #1's proof) —
+    // classify.js's runDiagnoseThenRetry ledgers diagnose.spawn/diagnose.done itself; this run's
+    // own diagnose worker dispatch is ledgered too (diagnose.worker_done, run-task.ts).
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    assert.ok(ledger.some((l) => l.step === "diagnose.spawn"), "ledger must show diagnose.spawn");
+    assert.ok(ledger.some((l) => l.step === "diagnose.done"), "ledger must show diagnose.done");
+    assert.ok(ledger.some((l) => l.step === "diagnose.worker_done"), "the diagnose worker's own spawn is ledgered");
+    assert.equal(
+      ledger.filter((l) => l.step === "implement.done").length,
+      3,
+      "two blind strikes + the diagnose-informed 3rd attempt — bounded, no forever-loop",
+    );
+  } finally {
+    dateNowSpy.mock.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL (W1-T7B): a run that never strikes twice (a clean first attempt) never dispatches DIAGNOSE at all — exactly one implement spawn", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-diagnose-clean-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000021;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    return result({ sessionId: "s-implement", text: "REPORT\nno PR opened yet\n" });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      }),
+    );
+
+    assert.equal(res.verdict, "no_pr");
+    assert.equal(spawnCalls.length, 2, "recon + exactly ONE clean implement attempt — no strike, no diagnose");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    assert.equal(ledger.filter((l) => l.step === "diagnose.spawn").length, 0, "a clean run never dispatches diagnose");
+    assert.equal(ledger.filter((l) => l.step === "diagnose.worker_done").length, 0);
+  } finally {
+    dateNowSpy.mock.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL (W1-T7B): error_max_budget_usd is NEVER retried — dollars are the hard backstop, even inside the new diagnose-then-retry driver", async (t) => {
+  // The pre-W1-T7B implement loop never spent a strike (or a diagnose dispatch) on a budget
+  // breach; wiring runDiagnoseThenRetry as the live driver must not change that — a breach
+  // exits the loop immediately via ImplementBudgetBreach, never reaching planRetry's strike
+  // counter at all.
+  const root = mkdtempSync(join(tmpdir(), "runtask-diagnose-budget-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000022;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    return result({
+      sessionId: "s-implement-budget",
+      isError: true,
+      subtype: "error_max_budget_usd",
+      numTurns: 12,
+      costUsd: 3.14,
+      accountLabel: "acct-budget",
+      childEnvKeys: [],
+    });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked_budget");
+    assert.equal(spawnCalls.length, 2, "recon + exactly ONE implement attempt — a budget breach is NEVER retried");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    assert.equal(ledger.filter((l) => l.step === "diagnose.spawn").length, 0, "a budget breach never dispatches diagnose");
+    const verdict = ledger.find((l) => l.step === "verdict" && l.verdict === "blocked_budget");
+    assert.ok(verdict, "the blocked_budget verdict is ledgered");
+    assert.match(verdict.reason, /not retried/i);
+  } finally {
+    dateNowSpy.mock.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("BEHAVIORAL (W1-T268): a real runTask run whose implement worker commits IN-SCOPE but gh pr create's own output never parses to a url reaches the 'no PR opened' failed verdict carrying billing_mode + account_label", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "runtask-noprurl-root-"));
   const planPath = join(root, "tasks.yaml");
