@@ -163,3 +163,59 @@ test("buildReceipt scopes strictly to the given task id — a shared ledger neve
   const forOther = buildReceipt([...fullLedger(), other], { taskId: "W1-T999", prUrl: PR_URL });
   assert.equal(forOther.predicate.run.run_id.value, null);
 });
+
+// ── `rmd receipt <pr>` — the CLI wiring around buildReceipt (design item 3), driven with
+// injected deps so the resolution + refusal paths are exercised with zero network. ────────
+test("receiptCommand resolves the task id from the PR body's Remudero-Task trailer and prints buildReceipt's predicate", async () => {
+  const { receiptCommand } = await import("../src/run-task.js");
+  const printed: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void printed.push(a.map(String).join(" "));
+  let code: number;
+  try {
+    code = await receiptCommand("9001", ["--repo", "remudero"], {
+      // "9001" is REST-addressable (reviewPrNumber matches a bare number), so reviewViewArgs
+      // takes the REST arm and this fake must return a raw REST pull row — mapRestPr's shape,
+      // not `gh pr view --json`'s — exactly as reviewCommand's own fetchView fake would.
+      gh: () => ({
+        number: 9001,
+        html_url: PR_URL,
+        head: { sha: "deadbeef", ref: `run-${TASK_ID}-1755000000000` },
+        body: `Some prose mentioning Remudero-Task: W1-T20c mid-body.\n\nRemudero-Task: ${TASK_ID}\n`,
+      }),
+      config: { root: "/tmp/rmd-receipt-command-test" } as never,
+      readLedgerLines: () => fullLedger(),
+    });
+  } finally {
+    console.log = realLog;
+  }
+  assert.equal(code, 0);
+  const output = JSON.parse(printed.join("\n"));
+  assert.equal(output.subject.task_id, TASK_ID);
+  assert.equal(output.subject.pr_url, PR_URL);
+  assert.deepEqual(output.predicate.review.reviewer_outcome, { value: "reviewer_completed" });
+});
+
+test("receiptCommand refuses (never guesses) when the PR body carries no Remudero-Task trailer", async () => {
+  const { receiptCommand } = await import("../src/run-task.js");
+  const realError = console.error;
+  const errors: string[] = [];
+  console.error = (...a: unknown[]) => void errors.push(a.map(String).join(" "));
+  let code: number;
+  try {
+    code = await receiptCommand("9002", ["--repo", "remudero"], {
+      gh: () => ({
+        number: 9002,
+        html_url: "https://github.com/craigoley/remudero/pull/9002",
+        head: { sha: "cafebabe", ref: "some-branch" },
+        body: "no trailer here",
+      }),
+      config: { root: "/tmp/rmd-receipt-command-test" } as never,
+      readLedgerLines: () => [],
+    });
+  } finally {
+    console.error = realError;
+  }
+  assert.equal(code, 1);
+  assert.ok(errors.some((e) => e.includes("no Remudero-Task trailer")));
+});
