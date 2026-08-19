@@ -148,7 +148,7 @@ test("dependency-licence-policy: license-review does NOT depend on actions/depen
   assert.match(scriptStep.run, /--head "\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\}\}"/, "must diff against the PR's real head sha");
 });
 
-test("dependency-licence-policy: the allow-list is seeded EXACTLY from the feedback's named permissive family (MIT / Apache-2.0 / BSD-2-Clause / BSD-3-Clause / ISC) — not silently widened to cover this repo's own measured outliers", async () => {
+test("dependency-licence-policy: the allow-list is the seeded five PLUS exactly the three the operator ruled in on 2026-08-19 — every other measured outlier stays out, and the helper's own default is untouched", async () => {
   const job = await loadLicenseReviewJob();
   const scriptStep = job.steps.find((s: any) => typeof s.env?.ALLOW_LICENSES === "string");
   assert.ok(scriptStep, "license-review's script step must set ALLOW_LICENSES");
@@ -156,20 +156,50 @@ test("dependency-licence-policy: the allow-list is seeded EXACTLY from the feedb
     .split(",")
     .map((s: string) => s.trim())
     .filter(Boolean);
+  // THE RULING, PINNED: the seeded five, plus MPL-2.0 / CC-BY-4.0 / BlueOak-1.0.0. Each of the
+  // three was ALREADY in this tree at the time of the ruling (main's package-lock.json at
+  // ff20505: MPL-2.0 on @axe-core/playwright and axe-core, CC-BY-4.0 on caniuse-lite,
+  // BlueOak-1.0.0 on minimatch) and was being re-flagged on every version bump, because the gate
+  // is diff-scoped and a bump re-adds the entry. Widening beyond this list is still a RULING, not
+  // an edit: this assertion is what makes a silent one fail.
   assert.deepEqual(
     [...allowList].sort(),
-    ["Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT"],
-    `ALLOW_LICENSES drifted from the exact seeded five: ${JSON.stringify(allowList)}`,
+    ["Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "BlueOak-1.0.0", "CC-BY-4.0", "ISC", "MIT", "MPL-2.0"],
+    `ALLOW_LICENSES drifted from the seeded five plus the three ruled in: ${JSON.stringify(allowList)}`,
   );
+  // The SCRIPT's own default is deliberately NOT widened with the workflow: the conservative seed
+  // is what any caller that supplies no allow-list still gets.
   assert.deepEqual([...DEFAULT_ALLOW_LICENSES].sort(), ["Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT"]);
-  // Real outliers measured in this repo's OWN node_modules on 2026-08-17 (2 MPL-2.0, 1
-  // Python-2.0, 1 CC-BY-4.0, 1 Unlicense, 1 BlueOak-1.0.0, 1 0BSD — see the PR body / workflow
-  // comment for the full distribution) must NOT have been quietly folded into the allow-list to
-  // make the gate "pass" on today's tree — the gate is diff-scoped (claim 4) precisely so it
-  // never needs to.
-  for (const outlier of ["MPL-2.0", "Python-2.0", "CC-BY-4.0", "Unlicense", "BlueOak-1.0.0", "0BSD"]) {
-    assert.ok(!allowList.includes(outlier), `${outlier} must stay OUT of ALLOW_LICENSES — it was measured, not silently allow-listed`);
+  // The outliers measured on 2026-08-17 that were NOT ruled on must still stay out — the gate is
+  // diff-scoped (claim 4) precisely so it never needs them to pass on today's tree.
+  for (const outlier of ["Python-2.0", "Unlicense", "0BSD"]) {
+    assert.ok(!allowList.includes(outlier), `${outlier} must stay OUT of ALLOW_LICENSES — it was measured, not ruled on`);
   }
+});
+
+test("dependency-licence-policy: every LICENSE_EXEMPTIONS entry names a package AND carries a non-empty reason — an exemption without a stated why is exactly the silent papering-over design (iii) forbids", async () => {
+  const job = await loadLicenseReviewJob();
+  const scriptStep = job.steps.find((s: any) => typeof s.env?.LICENSE_EXEMPTIONS === "string");
+  assert.ok(scriptStep, "license-review's script step must set LICENSE_EXEMPTIONS");
+  const exemptions = JSON.parse(String(scriptStep.env.LICENSE_EXEMPTIONS)) as Array<{ name?: string; reason?: string }>;
+  assert.ok(Array.isArray(exemptions), "LICENSE_EXEMPTIONS must parse as a JSON array");
+  for (const e of exemptions) {
+    assert.ok(typeof e.name === "string" && e.name.trim().length > 0, `exemption with no name: ${JSON.stringify(e)}`);
+    assert.ok(typeof e.reason === "string" && e.reason.trim().length > 0, `exemption '${e.name}' carries no reason`);
+  }
+  // The nine first-party Anthropic SDK packages are the whole population today: they ship their
+  // licence as TEXT rather than an SPDX id, so they classify "unresolved" (exemptable), never
+  // "forbidden" (which this script refuses to exempt at all).
+  const names = exemptions.map((e) => e.name);
+  assert.ok(
+    names.includes("@anthropic-ai/claude-agent-sdk"),
+    `the root SDK package must be exempted by name: ${JSON.stringify(names)}`,
+  );
+  assert.equal(
+    names.filter((n) => String(n).startsWith("@anthropic-ai/claude-agent-sdk")).length,
+    exemptions.length,
+    "every exemption today is an @anthropic-ai/claude-agent-sdk package — a new family needs its own review, not a quiet append",
+  );
 });
 
 // ── The script's own classification (claims 1-3) — the REAL function, not a model of it ───────
