@@ -244,6 +244,8 @@ import { assertProposedPlanLoads,
   parseTriageArgs,
   parseTriageVerdict,
   triageCommitMessage,
+  triageDeclaredScope,
+  triageEmptyScopeDisposition,
   triagePrompt,
 } from "./lib/triage.js";
 import { mintNextTaskId, type MintDegradation, type MintSources } from "./lib/task-id.js";
@@ -18817,6 +18819,46 @@ async function triageCommandLocked(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
+
+    // W1-T963 (empty-diff-triage-merge incident: #2075/#2077/#2078 merged and passed review
+    // despite changing nothing). `diff` above is `gh pr diff` — frozen against THIS branch's own
+    // fork point, so it stays non-empty even once a SIBLING triage PR for the SAME feedback entry
+    // has already landed the identical change on `origin/main`. Re-diff the declared scope (the
+    // feedback entry this decision writes) against a FRESH fetch of the LIVE default branch tip
+    // instead — `no_task`/`grill` only: a `propose` decision's entire contribution is never just
+    // this one file (it also adds a new plan/tasks.d/ shard), so this narrower scope would refuse
+    // a genuinely-new proposal whose feedback-file edit happens to look identical to a sibling's.
+    if (decision.action !== "propose") {
+      const scopeFiles = triageDeclaredScope(feedbackId);
+      let liveDiffFiles: string[] | undefined;
+      try {
+        execFileSync("git", ["-C", worktreePath, "fetch", "origin", "main"], { stdio: "inherit" });
+        liveDiffFiles = execFileSync(
+          "git",
+          ["-C", worktreePath, "diff", "--name-only", "origin/main", "HEAD", "--", ...scopeFiles],
+          { encoding: "utf8" },
+        )
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean);
+      } catch (e) {
+        // Fail OPEN, never a false positive (mirrors buildBaseProofDir's own "unresolvable base ⇒
+        // no staleness signal"): an unreadable/unfetchable live tip is never treated as "already done".
+        log("triage.live_scope_check_error", { error: String((e as Error)?.message ?? e) });
+      }
+      const disposition = liveDiffFiles !== undefined ? triageEmptyScopeDisposition(liveDiffFiles, scopeFiles) : undefined;
+      if (disposition?.action === "close") {
+        log("triage.already_done", { scope: scopeFiles });
+        say(
+          `triage PR's declared scope (${scopeFiles.join(", ")}) is EMPTY against the LIVE origin/main — ` +
+            `a sibling triage PR already landed this change; closing rather than merging: ${prUrl}`,
+        );
+        execFileSync("gh", ["pr", "close", prUrl, "--comment", disposition.comment!], { stdio: "inherit" });
+        worktreeRemove(repoDir, worktreePath);
+        return 0; // terminal, deliberate — the work is already done, not a failure (design (v))
+      }
+    }
+
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
     // W1-T230: reviewCommand resolved this PR's task id off its own

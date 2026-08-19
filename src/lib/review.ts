@@ -2872,6 +2872,32 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
   return out;
 }
 
+/**
+ * Whether `diffFiles` is EMPTY against its own DECLARED SCOPE — the specific paths a PR claims to
+ * touch, never the whole tree (W1-T963, the empty-diff-triage-merge incident: #2075/#2077/#2078
+ * merged and passed review despite changing nothing, because nothing downstream ever asked this
+ * question). `scopeFiles` absent/empty means nothing was declared, so there is nothing to check —
+ * this NEVER manufactures a refusal for an ordinary PR with no declared scope, only for a caller
+ * that explicitly names one (a triage PR's own feedback entry, e.g.).
+ *
+ * `bodyContradictsDiff` above answers a DIFFERENT question — "does the body's PROSE contradict
+ * `diffFiles`" — and is vacuously satisfied when `diffFiles` is empty (nothing to contradict). This
+ * is the complement: a purely structural check with no report/prose involved at all, so an empty
+ * diff can be refused even when the body never claims anything about the changeset.
+ *
+ * SCOPED, NOT WHOLE-TREE (design (iv)): `nonPlanFilesInDiff`/`diffCitesFeedback` (lib/triage.js)
+ * are the closest existing precedent — both already inspect a triage diff structurally, never via
+ * prose. This generalizes their shape to "touches none of its own declared paths" rather than
+ * "touches something outside plan/", which is the complementary structural gap those two leave
+ * open: a diff can be simultaneously plan-only, feedback-citing (in the STALE PR-body sense) AND
+ * empty against the one path that actually matters, which is exactly what happened live.
+ */
+export function diffEmptyAgainstScope(diffFiles: readonly string[], scopeFiles: readonly string[]): boolean {
+  if (scopeFiles.length === 0) return false;
+  const touched = new Set(diffFiles);
+  return !scopeFiles.some((f) => touched.has(f));
+}
+
 // ── SHIPS-UNWIRED advisory floor (W1-T322) ─────────────────────────────────
 
 const WIRED_AT_RE = /\bWIRED-AT:\s*([^\s:]+)::(\w+)/g;
