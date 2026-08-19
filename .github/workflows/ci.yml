@@ -57,8 +57,24 @@ jobs:
         # bounded per-attempt timeout + retry (mirrors the whole-command retry `npm run
         # test:ci` already does for the `Test` step below, W1-T255) turns an indefinite mirror
         # stall into at most 3 * 6m = 18m, leaving room for Typecheck/Test inside the 35m cap.
+        #
+        # W1-T1027: the retry above cannot win a lock it does not hold -- the Actions-API
+        # measurement behind this task (18 of 69 failed/cancelled jobs in 48h, one hard failure
+        # naming the cause verbatim: "Could not get lock /var/lib/apt/lists/lock. It is held by
+        # process 2418 (apt-get)") shows the retry was blindly re-invoking the identical
+        # `--with-deps` command (which re-runs `apt-get update` itself) against a lock held by
+        # the runner IMAGE's OWN background apt-get (cloud-init/unattended-upgrades on a fresh
+        # VM), not by another CI job. That holder always finishes on its own, so each attempt now
+        # waits (bounded, 300s) for the dpkg/apt locks to clear before invoking playwright
+        # install, instead of colliding with them immediately and burning the attempt.
         run: |
+          wait_for_apt_lock() {
+            echo "::notice::waiting up to 300s for the apt/dpkg lock the runner image's own background apt-get holds on a fresh VM"
+            sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
+            sudo flock -w 300 /var/lib/apt/lists/lock true 2>/dev/null || true
+          }
           for attempt in 1 2 3; do
+            wait_for_apt_lock
             if timeout 360 npx playwright install --with-deps chromium; then
               exit 0
             fi
@@ -195,8 +211,20 @@ jobs:
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
         # W1-T492 round 1 (ci-log): same bounded retry as the `ci` job's identical step above --
         # see that step's comment for the live-observed hang this guards against.
+        #
+        # W1-T1027: same apt-lock-wait fix as the `ci` job's identical step above, applied here
+        # too -- rationale (5) in this task's shard is explicit that fixing one copy and not the
+        # other leaves the second free to take the board down on its own (it did: PR #2150, five
+        # minutes after PR #2148's `ci` hang on this exact step). This `run:` block must stay
+        # byte-identical to the `ci` job's, which test/workflow-playwright-install.test.ts asserts.
         run: |
+          wait_for_apt_lock() {
+            echo "::notice::waiting up to 300s for the apt/dpkg lock the runner image's own background apt-get holds on a fresh VM"
+            sudo flock -w 300 /var/lib/dpkg/lock-frontend true 2>/dev/null || true
+            sudo flock -w 300 /var/lib/apt/lists/lock true 2>/dev/null || true
+          }
           for attempt in 1 2 3; do
+            wait_for_apt_lock
             if timeout 360 npx playwright install --with-deps chromium; then
               exit 0
             fi
