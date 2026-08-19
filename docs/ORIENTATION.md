@@ -1,47 +1,46 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-17T11:49:23.081Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-19T02:55:58.075Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-27 run(s) since the last retro marker. Verdicts: {"blocked":2,"blocked_ci":13,"incomplete":2,"merged":9,"pr_attribution_failed":1}.
+30 run(s) since the last retro marker. Verdicts: {"blocked":2,"blocked_ci":8,"incomplete":7,"merged":10,"pr_attribution_failed":3}.
 
 ### Shipped since marker
-- W1-T533 → https://github.com/craigoley/remudero/pull/1968 (gate-side merge; run ended blocked_ci)
-- W1-T905 → https://github.com/craigoley/remudero/pull/1948 (gate-side merge; run ended blocked_ci)
-- W1-T907 → https://github.com/craigoley/remudero/pull/1952 (gate-side merge; run ended blocked_ci)
-- W1-T908 → https://github.com/craigoley/remudero/pull/1969 (gate-side merge; run ended blocked_ci)
-- W1-T911 → https://github.com/craigoley/remudero/pull/1983
-- W1-T912 → https://github.com/craigoley/remudero/pull/1981 (gate-side merge; run ended pr_attribution_failed)
-- W1-T913 → https://github.com/craigoley/remudero/pull/1995 (gate-side merge; run ended blocked_ci)
-- W1-T914 → https://github.com/craigoley/remudero/pull/2010
-- W1-T915 → https://github.com/craigoley/remudero/pull/1985
-- W1-T918 → https://github.com/craigoley/remudero/pull/1982 (gate-side merge; run ended blocked_ci)
-- W1-T920 → https://github.com/craigoley/remudero/pull/1998
-- W1-T923 → https://github.com/craigoley/remudero/pull/2000
-- W1-T924 → https://github.com/craigoley/remudero/pull/2002 (gate-side merge; run ended blocked_ci)
-- W1-T925 → https://github.com/craigoley/remudero/pull/2011
-- W1-T929 → https://github.com/craigoley/remudero/pull/2006
-- W1-T930 → https://github.com/craigoley/remudero/pull/2008
-- W1-T931 → https://github.com/craigoley/remudero/pull/2013 (gate-side merge; run ended blocked_ci)
-- W1-T932 → https://github.com/craigoley/remudero/pull/2020 (gate-side merge; run ended incomplete)
-- W1-T936 → https://github.com/craigoley/remudero/pull/2026
+- W1-T1004 → https://github.com/craigoley/remudero/pull/2152
+- W1-T1007 → https://github.com/craigoley/remudero/pull/2157
+- W1-T493 → https://github.com/craigoley/remudero/pull/2183
+- W1-T7B → https://github.com/craigoley/remudero/pull/2178
+- W1-T939 → https://github.com/craigoley/remudero/pull/2052 (gate-side merge; run ended pr_attribution_failed)
+- W1-T941 → https://github.com/craigoley/remudero/pull/2060 (gate-side merge; run ended incomplete)
+- W1-T943 → https://github.com/craigoley/remudero/pull/2051 (gate-side merge; run ended pr_attribution_failed)
+- W1-T944 → https://github.com/craigoley/remudero/pull/2049 (gate-side merge; run ended incomplete)
+- W1-T945 → https://github.com/craigoley/remudero/pull/2055 (gate-side merge; run ended blocked_ci)
+- W1-T970 → https://github.com/craigoley/remudero/pull/2106 (gate-side merge; run ended incomplete)
+- W1-T972 → https://github.com/craigoley/remudero/pull/2113 (gate-side merge; run ended blocked_ci)
+- W1-T976 → https://github.com/craigoley/remudero/pull/2115
+- W1-T977 → https://github.com/craigoley/remudero/pull/2116 (gate-side merge; run ended blocked_ci)
+- W1-T978 → https://github.com/craigoley/remudero/pull/2117
+- W1-T984 → https://github.com/craigoley/remudero/pull/2127
+- W1-T986 → https://github.com/craigoley/remudero/pull/2132
+- W1-T991 → https://github.com/craigoley/remudero/pull/2146
+- W1-T999 → https://github.com/craigoley/remudero/pull/2155
 
 ## Next runnable task
 
-**W1-T939** — nothing obligates a postmortem to leave a drill entry behind — `operator_impact: true` already forces a troubleshooting entry from the diff alone, and the identical rung for 'add it to the drill' does not exist, so the drill library only ever grows when somebody remembers
+**W1-T74** — Proposal-id integrity — retro minting derives next-unused + a deterministic uniqueness gate in ci (the #125/#118 P21 collision)
 
-- risk: high · depends_on: W1-T938
+- risk: high · depends_on: W1-T62
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
 - 1. PROVENANCE OR IT DOESN'T GO IN A PROMPT.
 - 2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.
 - 3. One concern per PR. Branch from latest origin/main. Isolated worktrees.
-- 3B. The merge gate is a GitHub-enforced CONTRACT (required status checks), never a runner-side decision that can be raced. `ci-gate` (the aggregated check rollup) AND `remudero-review` (acceptance verdict by a fresh-context reviewer) are the two required contexts, and both must be green; GitHub does the merging. `ci` (typecheck+tests) and `coverage-ratchet` are NOT required contexts themselves — they gate TRANSITIVELY, because `ci-gate` aggregates a REQUIRED list that includes them and fails when any member fails. The runner ARMS auto-merge and observes — its exit verdict is advisory telemetry, incapable of diverging from reality. Corollary: auto-merge is safe to leave armed, because the contract, not the runner, decides.
+- 3B. The merge gate is a GitHub-enforced CONTRACT (required status checks), never a runner-side decision that can be raced. `ci` (typecheck+tests) AND `remudero-review` (acceptance verdict by a fresh-context reviewer) must both be green; GitHub does the merging. The runner ARMS auto-merge and observes — its exit verdict is advisory telemetry, incapable of diverging from reality. Corollary: auto-merge is safe to leave armed, because the contract, not the runner, decides.
 - 4. Acceptance criteria are proofs, not vibes. Green checks ≠ evidence (the full-shop-flow lesson).
 - 5. Never a third blind patch: two strikes → diagnose → one evidence-armed retry → escalate.
 - 6. Zero ask rules in worker settings. Hooks <1s. Workers carry scoped PATs only. No MCP in workers.
