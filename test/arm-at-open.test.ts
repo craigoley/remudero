@@ -180,6 +180,17 @@ const ARM_OPEN_FIXTURE_PLAN = [
   "",
 ].join("\n");
 
+/** W1-T948: the SAME probe task plus the one declaration the specialist panel's testing
+ *  trigger reads — `principles: {tdd: strict}`, the very property review.ts's `isTddStrict`
+ *  already reads for the arm gate. Behaviourally INERT for arming: `decideAutoMergeArm` takes
+ *  `tddStrict` and never reads it (the name appears in its signature and nowhere in its
+ *  body), so the (C) run below decides exactly what it decided before this declaration
+ *  existed — only the specialist panel's own log line is added. */
+const ARM_OPEN_FIXTURE_PLAN_TDD_STRICT = ARM_OPEN_FIXTURE_PLAN.replace(
+  "  status: queued",
+  "  principles: {tdd: strict}\n  status: queued",
+);
+
 const ARM_OPEN_OFFLINE_GITHUB: GitHub = {
   prByRef: () => null,
   findMergedByTrailer: () => null,
@@ -510,7 +521,9 @@ test(
   async (t) => {
     const root = mkdtempSync(join(tmpdir(), "arm-open-capped-root-"));
     const planPath = join(root, "tasks.yaml");
-    writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
+    // W1-T948: the tdd:strict variant, so this SAME run also exercises run-task.ts's
+    // specialist-panel call site. Inert for everything this test already asserts.
+    writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN_TDD_STRICT);
     const config: Config = { claudeBin: "/bin/true", root };
 
     armOpenGitFixture(root);
@@ -585,6 +598,22 @@ test(
       assert.equal(ledger[disarmedIdx]?.reason, "capped verdict refused auto-merge");
       const verdictIdx = ledger.findIndex((l) => l.step === "verdict");
       assert.ok(verdictIdx > disarmedIdx, "the terminal verdict line must follow the disarm, matching the source order (disarm BEFORE escalate BEFORE the verdict log)");
+
+      // ── W1-T948: the SAME real run reaches run-task.ts's specialist-panel call site.
+      // This task declares `principles: {tdd: strict}`, so `taskMetadataFromPrinciples`
+      // builds metadata the testing trigger fires on and the panel's ledger line is
+      // WRITTEN, naming that trigger. The paired negative half — an otherwise identical
+      // run whose task declares no principles writing NO such line — is asserted in the
+      // (D) risk-judge test below, off the same real runTask path.
+      const panelLines = ledger.filter((l) => l.step === "specialist.panel");
+      assert.equal(panelLines.length, 1, "a tdd:strict task must ledger specialist.panel exactly once");
+      assert.deepEqual(
+        panelLines[0]?.triggers,
+        ["testing"],
+        "only the testing trigger fires: the panel is called with an EMPTY-files diff, so security and containment see no path and design has no task flag",
+      );
+      const panelIdx = ledger.findIndex((l) => l.step === "specialist.panel");
+      assert.ok(panelIdx < disarmedIdx, "the panel line precedes the arm decision it sits above in source order");
 
       // ── The execution-level proof itself: `gh pr merge <url> --disable-auto`
       // really reached the fake `gh` binary — disarmAutoMerge's default deps
@@ -705,6 +734,16 @@ test(
       const ledger = readLedger(root);
       const armedIdx = ledger.findIndex((l) => l.step === "automerge.armed");
       assert.ok(armedIdx >= 0, "the run armed at open, same as every other run in this file");
+
+      // ── W1-T948 NEGATIVE CONTROL, on the same real runTask path as the (C) positive:
+      // this run's task declares NO principles, so the testing trigger does not fire and
+      // no specialist.panel line is written. Without this half, the (C) assertion would
+      // also pass against a panel that logged unconditionally.
+      assert.equal(
+        ledger.filter((l) => l.step === "specialist.panel").length,
+        0,
+        "a task with no `principles: {tdd: strict}` declaration must ledger NO specialist.panel line",
+      );
 
       const decisionIdx = ledger.findIndex((l) => l.step === "risk_judge.decision");
       assert.ok(decisionIdx >= 0, "risk_judge.decision must be ledgered");
