@@ -28,7 +28,8 @@
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -155,13 +156,30 @@ test("acquireDrainLock: with no onReclaim override, a reclaim still prints (via 
   );
 });
 
-// ── acceptance 3: the shutdown signal reaches the SUPERVISED daemon ────────────────────────
+// ── acceptance 3: the shutdown signal reaches the daemon, AND THE COMMON PATH RELEASES ─────
 //
-// REAL bash, REAL git — the same approach test/entrypoint-boot.test.ts already takes, so this
-// runs deploy/entrypoint.sh exactly as production does, not a description of it. The daemon
-// stand-in traps TERM itself and reports back through a marker file, so this proves DELIVERY —
-// that the signal reaches the supervised child at all — not any particular node-side behaviour
-// (run-task.ts's own SIGTERM handler is exercised elsewhere).
+// REAL bash, REAL git, REAL `acquireDrainLock`/`release()` — the same approach
+// test/entrypoint-boot.test.ts already takes for the script, extended here to the LOCK ITSELF
+// rather than a generic marker file, because the claim under test is not merely "a signal
+// arrived" but "so the common path RELEASES rather than strands". The daemon stand-in is a real
+// `.ts` file run through `node --import tsx` — the SAME mechanism this whole suite already runs
+// under (`package.json`'s own `test` script), loaded by an ABSOLUTE path to `tsx`'s loader so it
+// resolves regardless of the child's cwd (the throwaway clone `deploy/entrypoint.sh` `cd`s into
+// has no `node_modules` of its own — `--import`'s bare-specifier resolution needs one on the path
+// it starts from, which an absolute path to the loader file sidesteps entirely). Its SIGTERM
+// handler mirrors `run-task.ts`'s ACTUAL shape byte-for-byte (src/run-task.ts's drain command):
+// acquire the lock, and on SIGTERM call `drainLock.release()` THEN re-raise via
+// `process.kill(process.pid, sig)` with the once-listener already cleared, so node dies from the
+// signal for real exactly as production does — never a stand-in that merely reports "I got a
+// signal" and exits cleanly on its own terms.
+
+/** Absolute path to `tsx`'s loader module, resolved from THIS file's own location (which always
+ *  has a `node_modules` chain reaching it) rather than as a bare `tsx` specifier from the
+ *  spawned child's cwd — the throwaway clone `deploy/entrypoint.sh` runs `"$@"` from has none. */
+function tsxLoaderPath(): string {
+  const require = createRequire(import.meta.url);
+  return join(dirname(require.resolve("tsx/package.json")), "dist", "loader.mjs");
+}
 
 function makeOrigin(): string {
   const origin = tmp("rmd-signal-origin-");
@@ -181,86 +199,115 @@ function writeNpmStub(dir: string): void {
   chmodSync(join(dir, "npm"), 0o755);
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs: number, onTimeout: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(onTimeout);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 test("drain lock: the shutdown signal reaches the supervised daemon", async () => {
   const home = tmp("rmd-signal-home-");
   const origin = makeOrigin();
   const stubs = tmp("rmd-signal-stub-");
-  const rec = tmp("rmd-signal-rec-");
   writeNpmStub(stubs);
 
-  // A daemon stand-in that traps TERM itself, reports receipt through a marker file, and exits 0
-  // — the shape a real `run-task.ts` SIGTERM handler takes after `drainLock.release()`. Backgrounds
-  // its own `sleep` and `wait`s on it so ITS OWN trap fires immediately, the same reason the
-  // entrypoint's own fix backgrounds "$@" rather than running it in the foreground.
-  const fakeDaemon = join(stubs, "rmd-fake-daemon");
-  writeFileSync(
-    fakeDaemon,
-    [
-      "#!/usr/bin/env bash",
-      `touch "${rec}/started"`,
-      `trap 'touch "${rec}/got-sigterm"; exit 0' TERM`,
-      "sleep 100 &",
-      "wait $!",
-    ].join("\n") + "\n",
-    { mode: 0o755 },
-  );
-  chmodSync(fakeDaemon, 0o755);
+  const lockDir = tmp("rmd-signal-lockdir-");
+  const lockPath = join(lockDir, "drain.lock");
+  const startedFile = join(lockDir, "started");
+  const drainLockModule = join(REPO_ROOT, "src", "lib", "drain-lock.js"); // .js — tsx maps it to the .ts source, exactly like every in-repo import
+  const standinScript = join(tmp("rmd-signal-standin-"), "fake-daemon.ts");
 
-  const child = spawn("bash", [ENTRYPOINT, fakeDaemon, "daemon"], {
-    cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      PATH: `${stubs}:${process.env.PATH ?? ""}`,
-      HOME: home,
-      RMD_REPO_URL: origin,
-      RMD_REF: "main",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0",
-      // Long enough that a naive re-pass (no forwarding at all) would still be asleep in the
-      // crash throttle when this test's own timeout fires — so a regression FAILS instead of
-      // merely running slow.
-      RMD_RESTART_THROTTLE_S: "60",
+  // THE REAL PRIMITIVE, THE REAL SHAPE. Not a bash trap that just reports receipt — this is
+  // `acquireDrainLock`/`release()` from src/lib/drain-lock.ts, driven by a SIGTERM handler that
+  // mirrors run-task.ts's drain command exactly: release, then re-raise with the default
+  // disposition now unguarded, so the process actually dies from the signal like production does.
+  writeFileSync(
+    standinScript,
+    [
+      `import { acquireDrainLock } from ${JSON.stringify(drainLockModule)};`,
+      `import { writeFileSync } from "node:fs";`,
+      `const lockPath = process.argv[2] as string;`,
+      `const startedFile = process.argv[3] as string;`,
+      `const handle = acquireDrainLock(lockPath);`,
+      `writeFileSync(startedFile, "started\\n");`,
+      `const onSignal = (sig: NodeJS.Signals) => {`,
+      `  handle.release();`,
+      `  process.kill(process.pid, sig); // re-raise with the default handler now cleared — matches run-task.ts`,
+      `};`,
+      `process.once("SIGTERM", onSignal);`,
+      `setInterval(() => {}, 1000); // keep the event loop alive until signalled`,
+    ].join("\n") + "\n",
+  );
+
+  // `detached: true` makes bash the LEADER of its own new process group (pid === gid) without
+  // changing what SIGTERM targets below: `child.kill("SIGTERM")` still signals ONLY that one pid,
+  // exactly what tini sends its direct child — a pre-fix regression genuinely leaves the
+  // grandchild un-signalled, so this does not make the test pass "by construction". What it buys
+  // is a NEGATIVE pid in the `finally` cleanup, so a regression (bash dies untrapped, the daemon
+  // orphaned and still running) cannot leak a live process out of this test and hang the runner
+  // waiting on an inherited stdio pipe that orphan never closes.
+  const child = spawn(
+    "bash",
+    [ENTRYPOINT, "node", "--import", tsxLoaderPath(), standinScript, lockPath, startedFile, "daemon"],
+    {
+      cwd: REPO_ROOT,
+      detached: true,
+      env: {
+        ...process.env,
+        PATH: `${stubs}:${process.env.PATH ?? ""}`,
+        HOME: home,
+        RMD_REPO_URL: origin,
+        RMD_REF: "main",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_TERMINAL_PROMPT: "0",
+        // Short but real: a regression that never forwards the signal leaves the lock stranded
+        // until this sleep completes, so this bounds the test rather than hanging it — the
+        // acceptance is on the LOCK'S release timing (asserted below), not this sleep.
+        RMD_RESTART_THROTTLE_S: "3",
+      },
     },
-  });
+  );
 
   let stderr = "";
   child.stderr?.on("data", (d) => {
     stderr += String(d);
   });
 
-  const exited = new Promise<{ code: number | null }>((resolve) => {
-    child.on("exit", (code) => resolve({ code }));
-  });
+  try {
+    // Poll for the stand-in to actually hold the lock before signalling — sending TERM before
+    // acquisition would prove nothing about release.
+    await waitFor(() => existsSync(startedFile), 20_000, `the daemon stand-in never started: ${stderr}`);
+    assert.equal(existsSync(lockPath), true, `the real drain lock must be held before the signal is sent: ${stderr}`);
 
-  // Poll for the daemon stand-in to actually be running before signalling it — sending TERM
-  // before it installed its own trap would prove nothing about forwarding.
-  const deadline = Date.now() + 20_000;
-  while (!existsSync(join(rec, "started"))) {
-    if (Date.now() > deadline) {
-      throw new Error(`the daemon stand-in never started: ${stderr}`);
+    const sentAt = Date.now();
+    child.kill("SIGTERM"); // exactly what tini sends the supervised bash on a docker stop/restart
+
+    // THE ACCEPTANCE ITSELF: the common path RELEASES, not merely "received a signal". A
+    // regression to "no trap, bash dies, node orphaned" leaves this file on disk forever (the
+    // measured incident — three hand-clears in one day) rather than clearing it promptly.
+    await waitFor(
+      () => !existsSync(lockPath),
+      15_000,
+      `the drain lock was never released after SIGTERM (strands, exactly the measured incident): ${stderr}`,
+    );
+    const releasedElapsedMs = Date.now() - sentAt;
+    // FAR under the 3s throttle sleep a stranded-and-never-released lock would fall through to —
+    // the release happens on receipt of the FORWARDED signal, not on any timer.
+    assert.ok(releasedElapsedMs < 2_000, `the lock must release promptly on the forwarded signal, took ${releasedElapsedMs}ms`);
+  } finally {
+    // The stand-in re-raises and dies for real (like production), so the outer entrypoint still
+    // has its own throttle sleep to run through before exiting; nothing further to assert once
+    // the lock's release is proven, so clean up the WHOLE process group (negative pid) rather
+    // than only `child.pid` — a regression leaves a live, un-signalled grandchild that a plain
+    // `child.kill` would otherwise leak past this test.
+    if (child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // ESRCH: the whole group is already gone — nothing to clean up.
+      }
     }
-    await new Promise((r) => setTimeout(r, 50));
   }
-
-  const sentAt = Date.now();
-  child.kill("SIGTERM"); // exactly what tini sends the supervised bash on a docker stop/restart
-
-  const result = await Promise.race([
-    exited,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`entrypoint.sh never exited after SIGTERM: ${stderr}`)), 20_000),
-    ),
-  ]);
-  const elapsedMs = Date.now() - sentAt;
-
-  assert.equal(
-    existsSync(join(rec, "got-sigterm")),
-    true,
-    `the daemon stand-in must have received the forwarded TERM: ${stderr}`,
-  );
-  assert.equal(result.code, 0, `a clean shutdown must propagate as exit 0, not a crash code: ${stderr}`);
-  // FAR under the 60s throttle: a regression to "no trap, bash dies, node orphaned" would either
-  // hang (nothing left to wait on cleanly) or fall through to the crash-throttle sleep — either
-  // way nowhere near this bound.
-  assert.ok(elapsedMs < 10_000, `must exit promptly on a forwarded, handled signal, took ${elapsedMs}ms`);
 });
