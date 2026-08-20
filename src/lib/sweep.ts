@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
-import { loadDefaultPolicy } from "./policy.js";
+import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import { loadDefaultCostAnomalyPolicy, recordCostAnomalies, type CostAnomalyPolicy } from "./cost-anomaly.js";
 import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger, REVIEW_CONTEXT } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
@@ -351,15 +353,48 @@ export interface SweepPolicy {
    * W1-T325: this is now literally true — `plan/policy.yaml`'s `sweep.dispatchLanes`
    * row is the source of the default below (read via {@link loadDefaultPolicy}), not
    * a source literal. The relocation retunes nothing; the value stays 2.
-   * W1-T473: ALSO the review lane ceiling — `runSweep` consults this SAME field a
-   * second time (`Math.max(1, policy.dispatchLanes)`, floored exactly like
-   * `daemon.ts`'s `laneCount`) to bound how many `post-review` PRs it runs
-   * CONCURRENTLY in one pass, honouring "the same lane number" dispatch uses
-   * rather than inventing a second, independently-tuned ceiling. This field's own
-   * MEANING is unchanged — still the dispatch-lane count `daemon.ts`'s `laneCount`
-   * and `test/policy-consumers.test.ts` read — `runSweep` is simply one more reader.
+   * W1-T473: USED TO ALSO be the review lane ceiling — `runSweep` consulted this SAME
+   * field a second time (`Math.max(1, policy.dispatchLanes)`) to bound how many
+   * `post-review` PRs it runs CONCURRENTLY in one pass, "honouring the same lane
+   * number" dispatch uses rather than inventing a second, independently-tuned
+   * ceiling. W1-T1049 (rationale (3)/(4)): that coupling silently pinned drainage's
+   * OWN concurrency budget to a dispatch-only ruling — the operator's "stays at 3"
+   * ruling on THIS field was never about review — and let the two ceilings ADD on
+   * the host with nothing anywhere naming their sum. `runSweep` now reads {@link
+   * SweepPolicy.reviewLanes} instead, a SIBLING field, never a second use of this
+   * one. This field's own MEANING is unchanged and no longer shared — still only the
+   * dispatch-lane count `daemon.ts`'s `laneCount` and `test/policy-consumers.test.ts`
+   * read.
    */
   dispatchLanes: number;
+  /**
+   * W1-T1049 — THE REVIEW LANE'S OWN CONCURRENCY BUDGET (rationale (3)/(4)): bounds
+   * how many `post-review` PRs `runSweep` runs CONCURRENTLY in one pass. Floored at 1
+   * in `runSweep` exactly like `daemon.ts`'s `laneCount` floors `dispatchLanes` — a
+   * misconfigured 0 must never silently mean "review nothing" (design (ii); the code
+   * floor survives regardless of this field's own `min`). A CEILING, NEVER A TARGET
+   * (design (iii)): only ever bounds the reviews THIS PASS already found eligible —
+   * a pass with zero eligible reviews starts zero lanes no matter this number.
+   *
+   * Until this field existed, `runSweep` read {@link SweepPolicy.dispatchLanes}
+   * above A SECOND TIME for this (W1-T473) — a coupling W1-T473's own design (ii)
+   * named the cost of in advance ("silently couples two unrelated ceilings
+   * forever") and which then bound: raising or lowering drainage's own budget meant
+   * reopening a dispatch-only ruling, and the two ceilings ADDED on the host with
+   * nothing naming their sum (measured: 3 dispatch lanes + 3 review lanes = 6
+   * concurrent Claude workers on a host measured to fit about 4).
+   *
+   * DEFAULTS to `dispatchLanes`' own present value (3, read via {@link
+   * loadReviewLanesPolicy} directly off `plan/policy.yaml`'s `sweep.reviewLanes`
+   * row) — the split changes NO effective behavior by itself, only who controls the
+   * number, and the flip is reversible AS DATA, never a src edit plus CI plus
+   * deploy. Sourced OUTSIDE `src/lib/policy.ts`'s `PolicyValues`/
+   * `loadDefaultPolicy` schema deliberately: this task's own declared `files:` is
+   * `src/lib/sweep.ts` + `plan/policy.yaml` + one test file, and extending that
+   * schema is a second concern this shard does not reopen (design (i): "ONE
+   * CONCERN") — see {@link loadReviewLanesPolicy}'s own doc.
+   */
+  reviewLanes: number;
   /**
    * W1-T148 COST GOVERNOR (the $206/60-run W1-T1 spin-loop incident) — a DAILY
    * spend ceiling, in notional USD, on DISPATCH ONLY: at or over this many
@@ -539,6 +574,10 @@ export interface SweepPolicy {
  * source still carried a literal. W1-T330 collects `dailyCostCeilingUsd` the same way — a
  * RELOCATION, not a retune (the value is unchanged at whatever plan/policy.yaml's row carries).
  * `pendingCeilingMinutes` is NOT a collected constant for this task and stays exactly as it was.
+ * W1-T1049 collects `reviewLanes` similarly (a plan-data row a reviewed PR retunes with zero
+ * code change) but DELIBERATELY NOT via {@link loadDefaultPolicy}/`POLICY_SWEEP` above — see
+ * {@link loadReviewLanesPolicy}'s own doc for why this one field reads `plan/policy.yaml`
+ * directly instead of through `src/lib/policy.ts`'s schema.
  *
  * W1-T331 — `dailyCostCeilingUsd` ON THIS OBJECT IS FROZEN AT IMPORT, DELIBERATELY UNCHANGED BY
  * THAT TASK: `loadDefaultPolicy()` below runs once, at module load, and this const is never
@@ -554,12 +593,64 @@ export interface SweepPolicy {
  * fallback — never the live daemon's operative ceiling.
  */
 const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
+
+/**
+ * W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
+ * `src/lib/policy.ts`'s `loadDefaultPolicy`/`PolicyValues` schema `POLICY_SWEEP` above goes
+ * through. That module is deliberately NOT one of this task's declared `files:`
+ * (`src/lib/sweep.ts` + `plan/policy.yaml` + `test/review-lane-budget.test.ts` only) —
+ * registering a new field in its `PolicyValues` interface and `EXPECTED_ORIGIN_KIND` registry
+ * is a second concern this shard does not reopen (design (i): "ONE CONCERN").
+ *
+ * Validated the SAME way `policy.ts`'s own (unexported) `numberField` validates every other
+ * bounded numeric row — finite `value`/`min`/`max`, `min <= value <= max` — so a malformed row
+ * fails LOUD at load, exactly like every other policy row in this repo, never a silent
+ * fallback that could mask a bad edit (rule 2: an absent/malformed policy value is a refused
+ * load, not unbounded or silently-default behavior). `installPolicyPath`/`PolicyError` are
+ * both pre-existing exports of `policy.ts` — referencing them is not an edit to that file.
+ */
+export function validateReviewLanesRow(row: unknown): number {
+  if (typeof row !== "object" || row === null) {
+    throw new PolicyError(`policy.yaml: 'sweep.reviewLanes' must be a mapping with 'value'/'origin'/'min'/'max'.`);
+  }
+  const { value, min, max } = row as Record<string, unknown>;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new PolicyError(`policy.yaml: 'sweep.reviewLanes.value' must be a finite number, got ${JSON.stringify(value)}.`);
+  }
+  if (typeof min !== "number" || typeof max !== "number" || !Number.isFinite(min) || !Number.isFinite(max)) {
+    throw new PolicyError(
+      `policy.yaml: 'sweep.reviewLanes' must carry numeric 'min' and 'max' bounds — finite ones ` +
+        `(got min=${JSON.stringify(min)}, max=${JSON.stringify(max)}).`,
+    );
+  }
+  if (min > max) {
+    throw new PolicyError(`policy.yaml: 'sweep.reviewLanes' has min (${min}) > max (${max}) — an unsatisfiable bound.`);
+  }
+  if (value < min || value > max) {
+    throw new PolicyError(
+      `policy.yaml: 'sweep.reviewLanes.value' (${value}) is out of its declared bound [${min}, ${max}].`,
+    );
+  }
+  return value;
+}
+
+/** Reads the row {@link validateReviewLanesRow} validates. Split from it so every refusal arm
+ *  above is reachable from a test without a temp policy file on disk — the file read stays here,
+ *  the decisions stay there. */
+function loadReviewLanesPolicy(): number {
+  const path = installPolicyPath();
+  const raw = parseYaml(readFileSync(path, "utf8")) as { sweep?: { reviewLanes?: unknown } } | null;
+  return validateReviewLanesRow(raw?.sweep?.reviewLanes);
+}
+const REVIEW_LANES_DEFAULT = loadReviewLanesPolicy();
+
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   staleDays: POLICY_SWEEP.staleDays,
   strikeCap: POLICY_SWEEP.strikeCap,
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: POLICY_SWEEP.wipLimit,
   dispatchLanes: POLICY_SWEEP.dispatchLanes,
+  reviewLanes: REVIEW_LANES_DEFAULT,
   dailyCostCeilingUsd: POLICY_SWEEP.dailyCostCeilingUsd,
   pendingCeilingMinutes: 60,
   // 10 minutes: an order of magnitude above the observed push->first-check-registers latency
@@ -2877,8 +2968,9 @@ export interface SweepDeps {
    *
    * W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls to this same
    * function — `runSweep` no longer awaits one `postReview` before starting
-   * the next. Concurrency is bounded (`policy.dispatchLanes`, the SAME lane
-   * number dispatch uses) and every concurrent call is guaranteed a DISTINCT
+   * the next. Concurrency is bounded (`policy.reviewLanes` — its own row as
+   * of W1-T1049, no longer `policy.dispatchLanes`) and every concurrent call
+   * is guaranteed a DISTINCT
    * `${taskId}@${headSha}` key — `runSweep` claims each key synchronously
    * before scheduling its call, so this function is never asked to run twice
    * for the same task+head at once. A caller wiring a real effect here (e.g.
@@ -2928,7 +3020,8 @@ export interface SweepDeps {
    * here until the NEXT full sweep picks them up. W1-T473: "mutex-serialized"
    * described the WHOLE pass being single-threaded — post-review calls
    * WITHIN one pass now run concurrently with each other too (bounded by
-   * `policy.dispatchLanes`, real per-`taskId@headSha` mutual exclusion —
+   * `policy.reviewLanes` as of W1-T1049 — its own row, no longer
+   * `policy.dispatchLanes` — real per-`taskId@headSha` mutual exclusion —
    * see `runSweep`'s own doc), so it is no longer accurate to call this ONE
    * lane serialized; it is the one lane safe to run alongside `runOne`.
    */
@@ -3451,8 +3544,9 @@ const inFlightReviewKeys = new Set<string>();
  * W1-T473 — REVIEW CONCURRENCY: every disposition EXCEPT `post-review` still
  * runs exactly as before, one PR at a time, in `openPrs` order. `post-review`
  * PRs are instead collected and run in a SECOND, bounded-concurrency phase
- * after the walk — up to `Math.max(1, policy.dispatchLanes)` `postReview`
- * calls in flight at once (the same lane number dispatch uses), each against
+ * after the walk — up to `Math.max(1, policy.reviewLanes)` `postReview`
+ * calls in flight at once (the review lane's OWN budget as of W1-T1049 —
+ * no longer `policy.dispatchLanes`), each against
  * a DISTINCT `${taskId}@${headSha}` key claimed synchronously during the walk
  * (real mutual exclusion the single-threaded walk used to supply for free —
  * see `PriorActions.postReviewed`'s doc). A review beyond budget stands down
@@ -4062,21 +4156,23 @@ export async function runSweep(
     finalizeDisposition(prIndex, pr, disposition, reason, question, acted, alreadyDone, actionError, standDownReason, depReviewOutcome);
   }
 
-  // ── W1-T473 — REVIEW CONCURRENCY BUDGET ────────────────────────────────────
-  // Reviews get their OWN lane ceiling, honouring the SAME number dispatch
-  // uses (`policy.dispatchLanes`, `daemon.ts`'s `laneCount`) — a SECOND
-  // consultation of that one field, never a sibling policy key: dispatch's
-  // own meaning is untouched (still the field `daemon.ts`/
-  // `test/policy-consumers.test.ts` read), and a review ceiling is not a
-  // concept that needs its own live-reload gap yet. Floored at 1 exactly like
-  // `daemon.ts`'s `laneCount` — a misconfigured `dispatchLanes: 0` must never
-  // silently mean "review nothing".
+  // ── W1-T1049 — REVIEW CONCURRENCY BUDGET, NOW ITS OWN ───────────────────────
+  // Reviews get their OWN lane ceiling (`policy.reviewLanes`) — no longer a
+  // SECOND consultation of `policy.dispatchLanes` (W1-T473's original wiring).
+  // That coupling silently pinned drainage's own concurrency budget to a
+  // dispatch-only ruling and let the two ceilings ADD on the host with
+  // nothing naming their sum (rationale (3)/(4)): `dispatchLanes` above keeps
+  // its EXACT present meaning — still the field `daemon.ts`'s `laneCount` and
+  // `test/policy-consumers.test.ts` read — this is a SIBLING row, never a
+  // retune of it. Floored at 1 exactly like `daemon.ts`'s `laneCount` floors
+  // `dispatchLanes` — a misconfigured `reviewLanes: 0` must never silently
+  // mean "review nothing".
   //
   // A CEILING, NOT A TARGET: `reviewLanes` only ever bounds `pendingReviews`
   // — the reviews THIS PASS already found eligible, above. It never goes
   // looking for work: a pass with zero eligible reviews runs `Promise.all([])`
   // and starts zero lanes (acceptance 3).
-  const reviewLanes = Math.max(1, policy.dispatchLanes);
+  const reviewLanes = Math.max(1, policy.reviewLanes);
   const runNow = pendingReviews.slice(0, reviewLanes);
   const deferredToNextPass = pendingReviews.slice(reviewLanes);
 

@@ -344,6 +344,48 @@ sweep:
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4
+  # W1-T1049: THE REVIEW LANE'S OWN CONCURRENCY BUDGET. Until this row existed, `runSweep`
+  # (src/lib/sweep.ts) read `dispatchLanes` above A SECOND TIME as its review-lane ceiling
+  # (`Math.max(1, policy.dispatchLanes)`, W1-T473's own wiring) — W1-T473's design (ii) named
+  # this cost in advance: "Reading the dispatch field twice is smaller now and SILENTLY
+  # COUPLES TWO UNRELATED CEILINGS FOREVER." That coupling has now bound: the operator's ruling
+  # that dispatchLanes "stays at 3 on that evidence" (above) was a ruling about DISPATCH, but it
+  # silently also pinned the drainage ceiling at 3, and any future retune of either moved both.
+  # AND THE TWO CEILINGS ADD ON THE HOST, WHICH NOTHING ANYWHERE NAMED: `dispatchLanes` is
+  # consulted independently by `daemon.ts`'s `laneCount` (build workers) and by `runSweep`
+  # (review workers) — their SUM is the host's real exposure. MEASURED (2026-08-20, the Azure
+  # host, `Remudero`, 7.75 GiB total + 4 GiB swapfile — re-confirmed at implementation time via
+  # `free -h`, still 7.8 GiB / 4.0 GiB swap, and a running host has no spare capacity to spawn
+  # several concurrent `claude` workers to resample peak RSS without itself risking the memory
+  # pressure this row exists to bound, so the operator's own cited figure is retained rather
+  # than a fresh multi-worker sample): ~1.33 GiB peak per Claude worker (against a reported
+  # `memory.peak` of 3.99 GiB for three build workers), ~5.85 GiB available for workers after
+  # ~1.9 GiB resident for the non-daemon system — ABOUT FOUR CONCURRENT WORKERS OF ANY KIND fit.
+  # Today's configured worst case is `dispatchLanes` 3 builders + this row's 3 reviewers = SIX,
+  # ~7.98 GiB, already over the whole host before the system's own 1.9 GiB is counted.
+  # DEFAULT is `dispatchLanes`' own present value (3) — this row changes NO effective behavior
+  # by itself, only who controls the number: the flip is reversible as a plan-data edit, never a
+  # src change plus CI plus deploy.
+  # BOUNDS ARE TIGHT ON PURPOSE, TIGHTER EVEN THAN `dispatchLanes`' OWN max: 4 (itself already
+  # deliberately below this table's usual ~5x-of-value convention — see that row's own history
+  # above). max: 3 permits tuning THIS row DOWN from today's default, never UP: any in-bounds
+  # edit that raised it would widen the sum this row exists to make reviewable, and this task
+  # does not reopen `dispatchLanes`' own ceiling (out of scope, design (vi)) to make room for
+  # one. min: 1 mirrors `dispatchLanes`' own floor; the CODE-LEVEL `Math.max(1, ...)` floor in
+  # `runSweep` survives regardless of this row's own min (design (ii) — a policy bound and a
+  # code floor are different guarantees).
+  # SOURCED OUTSIDE `src/lib/policy.ts`'s `PolicyValues`/`loadDefaultPolicy` schema, deliberately
+  # (see `src/lib/sweep.ts`'s `loadReviewLanesPolicy`, this row's one reader): this task's own
+  # declared `files:` is `src/lib/sweep.ts` + this file + `test/review-lane-budget.test.ts`
+  # only, and registering a new field in that schema is a second concern this shard does not
+  # reopen (design (i): "ONE CONCERN"). `origin: "net-new"` reflects that literally — no prior
+  # standalone `reviewLanes` source constant ever existed; its VALUE was borrowed from
+  # `dispatchLanes` (the defect this task fixes), never a dedicated site of its own.
+  reviewLanes:
+    value: 3
+    origin: "net-new"
+    min: 1
+    max: 3
   # W1-T330: the daily spend ceiling (W1-T148 COST GOVERNOR) — at or over this many ledgered
   # dollars spent today, NEW dispatch is deferred (drainage is never gated). This is a
   # RELOCATION, not a retune: the value stays exactly what src/lib/sweep.ts's
