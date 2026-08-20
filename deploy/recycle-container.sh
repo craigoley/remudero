@@ -92,6 +92,23 @@ PAUSE_FILE="${STATE_DIR}/state/PAUSE"
 WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-120}"
 POLL_INTERVAL_S="${RMD_RECYCLE_POLL_S:-5}"
 
+# THE AGE ABOVE WHICH A LANE-LESS WORKER IS TREATED AS HUNG RATHER THAN BUSY (W1-T1046).
+#
+# DERIVED FROM THE OBSERVED DISTRIBUTION, NOT PICKED. Over 115 `implement.done` rows carrying
+# `worker_duration_ms`, a legitimate implement runs 19.3 min median, 36.0 p90, 46.7 p95 and 98.5 max.
+# 7200s is 22% clear of the LARGEST run ever observed and roughly 3.3x p90, so ZERO of those 115
+# would have tripped it — checked directly, not inferred from the percentiles. The hang this closes
+# ran 149 minutes, comfortably past it. A number that would have killed a legitimate worker is a
+# worse bug than the deadlock it fixes, so the margin is deliberately lopsided: raise this rather
+# than lower it, and re-derive from `implement.done` before you do.
+HUNG_WORKER_AGE_S="${RMD_RECYCLE_HUNG_AGE_S:-7200}"
+
+# Where the "what this recycle actually did" record goes. The ledger is append-only NDJSON that the
+# daemon already owns and every other post-hoc reconstruction reads, and it survives the container
+# this script is about to remove because it lives on the bind mount. One line, appended, never
+# rewritten — this script does not read it back and does not depend on it existing.
+LEDGER_FILE="${STATE_DIR}/state/ledger.ndjson"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --tag)       TAG="${2:?--tag needs a value}"; shift 2 ;;
@@ -237,18 +254,85 @@ cat > "${PAUSE_FILE}" <<PAUSEJSON
 PAUSEJSON
 echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 
+# THE LOCK COUNT ALONE IS BLIND TO A WHOLE LANE, IN BOTH DIRECTIONS (W1-T1046).
+#
+# `state/inflight/*.lock` is taken by the DISPATCH lane only. The FIX RUNG runs inside the daemon's
+# own sweep, consumes no lane and takes no lock: its worker is spawned with a settings file at
+# `tmp/sweep-fix-settings-<task>-<epoch>.json` into a worktree named `sweep-<task>-<epoch>` (both
+# `src/run-task.ts`), and the ledger shows the same split — every `worker.state` row carries a
+# dispatch-lane run_id and none carries a sweep-shaped one, so a fix-rung worker is invisible to the
+# ledger too. A lock-only wait therefore reads ZERO while such a worker is mid-run and proceeds to
+# `docker rm` it, losing spend that was never recorded (a killed worker writes no `implement.done`).
+# The same blindness cannot EXPLAIN a hang either, which is how a hand-rolled variant of this script
+# that counted PROCESSES instead deadlocked for 1,420s against a worker that would never exit.
+#
+# SO BOTH SIGNALS ARE READ, AND THEY DECIDE DIFFERENT THINGS. Locks decide "a lane is occupied,
+# never proceed"; processes decide "something is running that holds no lane, is it busy or hung".
+# THE ASYMMETRY SETS THE DEFAULT: killing a live worker loses unrecorded spend, so anything this
+# cannot positively classify as hung is waited for and then REFUSED, exactly as before.
+worker_lines() {
+  # `procps` is installed in the image (deploy/Dockerfile), so this is real ps, not the busybox
+  # applet. A failure here yields NO lines, which reads as "no lane-less worker" — deliberately the
+  # conservative direction for the *kill* decision, and harmless for the *wait* decision because the
+  # lock count below is independent of it.
+  docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
+    | grep -F -- 'claude --output-format' || true
+}
+
 waited=0
 while :; do
   n=0
   if [ -d "${INFLIGHT_DIR}" ]; then
     n="$(find "${INFLIGHT_DIR}" -maxdepth 1 -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
   fi
-  if [ "${n}" -eq 0 ]; then
+
+  # Lane-less workers, split by age. `busy` blocks the recycle exactly like a lock does; `hung` does
+  # not, because it never will.
+  lane_less_busy=0
+  lane_less_hung=""
+  while read -r wpid wage wargs; do
+    [ -n "${wpid:-}" ] || continue
+    case "${wargs}" in
+      *sweep-fix-settings-*) : ;;
+      *) lane_less_busy=$((lane_less_busy + 1)); continue ;;
+    esac
+    if [ "${wage}" -ge "${HUNG_WORKER_AGE_S}" ] 2>/dev/null; then
+      lane_less_hung="${lane_less_hung}${wpid} ${wage}"$'\n'
+    else
+      lane_less_busy=$((lane_less_busy + 1))
+    fi
+  done <<WORKERS
+$(worker_lines)
+WORKERS
+
+  if [ "${n}" -eq 0 ] && [ "${lane_less_busy}" -eq 0 ]; then
+    # PRINT BEFORE CLEARING, ALWAYS — the standing rule, and the only reason the forensics that
+    # produced this predicate were possible at all. A hung worker is reported in full BEFORE the
+    # container carrying it is removed, because afterwards its `/proc` is gone for good.
+    if [ -n "${lane_less_hung}" ]; then
+      echo "recycle-container: proceeding PAST lane-less worker(s) judged hung (>= ${HUNG_WORKER_AGE_S}s, no inflight lock):" >&2
+      printf '%s' "${lane_less_hung}" | while read -r hpid hage; do
+        [ -n "${hpid:-}" ] || continue
+        echo "  pid ${hpid}  age ${hage}s  predicate: fix-rung shape (sweep-fix-settings) AND age >= ${HUNG_WORKER_AGE_S}s AND zero inflight locks" >&2
+        docker exec "${CONTAINER_NAME}" sh -c "tr '\\0' ' ' < /proc/${hpid}/cmdline 2>/dev/null; echo; readlink /proc/${hpid}/cwd 2>/dev/null" 2>/dev/null \
+          | sed 's/^/    /' >&2 || true
+        # ONE LINE PER WORKER, appended. Nothing is cleaned here: the processes die with the
+        # container, and every mount-side leftover already has a daemon-side owner that fires on the
+        # next boot — `reapStaleWorktrees` (src/lib/worker.ts) for the `sweep-*` worktree,
+        # `sweepTmp` for `tmp/`, the worker-home sweep for `worker-home-*`. Duplicating them here
+        # would put a second, host-side deleter on paths a live container may still be using.
+        # `.git/config.lock` is W1-T1036's subject and is deliberately not touched.
+        if [ -d "$(dirname "${LEDGER_FILE}")" ]; then
+          printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.hung_worker_passed","lane":"deploy","pid":%s,"age_s":%s,"age_bound_s":%s,"predicate":"fix-rung shape and over age bound and zero inflight locks","cleaned":"none — worktree/tmp/worker-home have daemon-side owners","host":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${hpid}" "${hage}" "${HUNG_WORKER_AGE_S}" "$(hostname)" >> "${LEDGER_FILE}" || true
+        fi
+      done
+    fi
     echo "recycle-container: no in-flight workers — safe to proceed"
     break
   fi
   if [ "${waited}" -ge "${WAIT_SECONDS}" ]; then
-    echo "recycle-container: REFUSING — ${n} worker(s) still in flight after ${WAIT_SECONDS}s." >&2
+    echo "recycle-container: REFUSING — ${n} lane-holding and ${lane_less_busy} lane-less worker(s) still in flight after ${WAIT_SECONDS}s." >&2
     if [ -d "${INFLIGHT_DIR}" ]; then
       for f in "${INFLIGHT_DIR}"/*.lock; do
         [ -e "${f}" ] || continue
@@ -256,13 +340,20 @@ while :; do
         sed 's/^/    /' "${f}" 2>/dev/null >&2 || true
       done
     fi
+    # A LANE-LESS WORKER UNDER THE AGE BOUND IS REPORTED AND STILL REFUSED. It holds no lock, so
+    # nothing above names it, and before this change it was not merely unreported — it was invisible,
+    # and the recycle removed the container out from under it.
+    if [ "${lane_less_busy}" -gt 0 ]; then
+      echo "  lane-less worker(s) under the ${HUNG_WORKER_AGE_S}s age bound — busy, not hung:" >&2
+      worker_lines | sed 's/^/    /' >&2 || true
+    fi
     echo "  ${CONTAINER_NAME} is untouched — killing it now would lose this work and strand these" >&2
     echo "  locks. Widen the wait with RMD_RECYCLE_WAIT_S, or re-run once these finish." >&2
     rm -f "${PAUSE_FILE}"
     echo "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
     exit 1
   fi
-  echo "recycle-container: ${n} worker(s) still in flight, waited ${waited}s/${WAIT_SECONDS}s — polling"
+  echo "recycle-container: ${n} lane-holding + ${lane_less_busy} lane-less worker(s) still in flight, waited ${waited}s/${WAIT_SECONDS}s — polling"
   sleep "${POLL_INTERVAL_S}"
   waited=$((waited + POLL_INTERVAL_S))
 done
