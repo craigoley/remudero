@@ -1,0 +1,145 @@
+- id: W1-T1068
+  title: "THE INSTALLATION-TOKEN REFRESHER CAN DIE SILENTLY AND PERMANENTLY AND THE FLEET GOES DOWN AN HOUR LATER WITH NO ROW EXPLAINING IT — the exchange fetch carries no timeout and the refresh promise carries no catch, so a hung socket or a throwing ledger write kills the loop; and because a successful mint REPLACES the static PAT in process.env, a dead loop is not degraded, it is dead"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  rationale: |
+    OBSERVED BY RECON ON THE AZURE HOST `Remudero` (Linux 6.17.0-1022-azure), bash 5.2.21, from a
+    scratch worktree at origin/main 38738672, and RE-DERIVED HERE TO CONFIRM rather than re-run.
+    No token was minted, no secret printed, no daemon state touched.
+
+    (0) THIS IS A GAP IN A GOOD DESIGN, NOT A BAD ONE, AND THE REST MUST NOT BE TOUCHED. Every
+    other failure path in `refreshInstallationToken` (`src/lib/github-app.ts`) is correct: an
+    unreadable key, a signing failure, a request failure, a non-2xx, an unparsable body and a
+    missing token field ALL log `github_app.token_refresh_failed` with a named reason, and a 404 is
+    distinguishable from a network fault because the non-2xx arm names the status. The design's
+    "fails open, never silently" claim holds EXCEPT on the two paths below. The task is to close
+    those two, not to revisit the others.
+
+    (1) THE EXCHANGE FETCH CARRIES NO TIMEOUT AND NO `AbortSignal`. Re-derived: a combined
+    `AbortSignal|AbortController|timeout` query over `src/lib/github-app.ts` reads ZERO, against a
+    live control of FOUR word-bounded `fetch` occurrences in the same file — so the query can see
+    the module and the absence is real. Node's `fetch` has no default timeout, so a connection that
+    opens and then hangs never settles: the `await` never returns, no row is written, and nothing
+    reschedules. PERMANENTLY, not until the next tick, because the next tick is armed only after
+    this one resolves (see (3)).
+
+    (2) AND THE REFRESH PROMISE CARRIES NO `catch`, WHILE THE LOGGER IT DEPENDS ON THROWS.
+    `startInstallationTokenRefresh` runs `void refresh({ log }).then(…)`; `.then(` occurs ONCE in
+    the module and `.catch(` ZERO times. At the daemon call site `log` resolves to
+    `appendLedger(ledgerPath, …)`, and `appendLedger` (`src/lib/ledger.ts`) is `mkdirSync` +
+    `openSync` + a `try`/`finally` whose `finally` only does `closeSync` — THERE IS NO `catch`, so
+    it propagates ENOSPC, EACCES and EROFS to its caller. A ledger-write failure inside
+    `refreshInstallationToken`'s own `log(...)` therefore rejects the promise, writes no row, and
+    never reschedules. ENOSPC IS NOT HYPOTHETICAL HERE: this host reached 100% disk twice on
+    2026-08-20.
+
+    (3) AND THE CONSEQUENCE IS NOT DEGRADED, IT IS DEAD. A successful mint assigns
+    `env.GH_TOKEN = body.token`, replacing the static PAT in the daemon's own process — which is
+    W1-T1024's deliberate seam and is NOT to be undone. So once the first mint succeeds, the PAT is
+    gone from that process, and a loop that later dies means every `gh` spawn, every `git` push and
+    every freshly-spawned worker starts 401-ing within the hour, with no row saying why. THE FIX IS
+    THAT THE LOOP SURVIVES, NEVER THAT IT RETREATS TO THE PAT.
+
+    (4) THE INTERVAL IS SHORTER THAN THE BRIEF ASSUMED, WHICH MATTERS FOR THE RETRY CADENCE.
+    Re-derived at head: `INSTALLATION_TOKEN_LIFETIME_MS` is 60 minutes and `REFRESH_MARGIN_MS` is
+    FIVE minutes, not fifteen — so the healthy interval is ~55 minutes and, more importantly, the
+    ALREADY-CORRECT failure path reschedules at `REFRESH_MARGIN_MS`, i.e. retries every five
+    minutes. Any timeout chosen in (i) must sit far inside that five-minute retry, not inside a
+    fifteen-minute one.
+  design: |
+    (i) A TIMEOUT ON THE EXCHANGE, SIZED AGAINST WHAT IS ACTUALLY MEASURABLE — AND WHAT IS NOT.
+    THE LEDGER CARRIES NO DURATION FOR THIS CALL, AND SAYING SO IS PART OF THE DELIVERABLE: a
+    `github_app.token_refreshed` row carries `ts`, `run_id`, `task_id`, `lane`, `host`,
+    `installation_id` and `expires_at` and NO duration-shaped field; the `board_gateway.fetch_bytes`
+    row cited as the reference carries `bytes`, `restCalls`, `mode` and `truncated` and likewise NO
+    duration field, so its 10.9s figure is a wall-clock observation and not a value this shard can
+    re-read. The timeout is therefore REASONED FROM A BOUND, not fitted to a measurement:
+    10.9 seconds bought 26.7 MB over 14 REST calls, and a token exchange is ONE small POST with a
+    tiny JSON body, so 10.9s is already a generous ceiling for something an order of magnitude
+    larger. TWENTY SECONDS is proposed — roughly twice that ceiling, so a healthy-but-slow network
+    never trips it, and two orders inside the five-minute retry cadence from rationale (4), so a
+    timeout costs one retry rather than a missed refresh.
+    A TIMEOUT MUST LOG `github_app.token_refresh_failed` WITH ITS OWN NAMED REASON AND RESCHEDULE —
+    NEVER THROW. It is the same shape as the existing request-failure arm and must join it, not
+    replace it: the whole value of this task is that the loop survives the failure.
+
+    (ii) A `catch` ALONE IS NOT SUFFICIENT, AND THE RESCHEDULE MUST MOVE. Read where `setTimer` is
+    called relative to the settle: it is INSIDE the `.then` callback, after the delay is computed
+    from `result`. So a rejection skips the callback entirely and NO timer is ever armed — a bare
+    `.catch(() => {})` would swallow the rejection and leave the loop just as dead, because
+    swallowing is not rescheduling. THE RESCHEDULE MUST RUN ON BOTH OUTCOMES: move it to a path
+    that executes whether the mint resolved or rejected (a `finally`-equivalent, or an
+    `async`/`try`/`catch`/`finally` restructure), with the delay defaulting to `REFRESH_MARGIN_MS`
+    on any non-success — which is exactly what the existing failure branch already computes.
+    AND THE RESCHEDULE MUST NOT DEPEND ON A SUCCESSFUL WRITE. If `appendLedger` is what threw, a
+    handler that tries to log the failure throws AGAIN and the second throw is just as unhandled as
+    the first. Arm the next timer BEFORE attempting any explanatory write, and wrap that write in
+    its own guard, so the loop's survival never rides on the filesystem that just failed.
+
+    (iii) THE TESTS LAND IN THE EXISTING HOME, NOT A NEW FILE. `test/github-app.test.ts` already
+    owns this module's behaviour on origin/main, so the new cases join it rather than opening a
+    second github-app test file — the same "the test home is the existing one" choice this repo has
+    already made elsewhere, and the reason `files:` names one concern rather than two.
+    THEY MUST DRIVE BOTH ARMS AT THE INJECTED SEAMS THAT ALREADY EXIST. `refresh`,
+    `setTimer` and `now` are already injectable on `startInstallationTokenRefresh`, and
+    `fetchImpl`, `readKey`, `env` and `log` on `refreshInstallationToken` — so a hung exchange, a
+    rejecting refresh and a THROWING `log` are all reachable without a network, a timer or a real
+    ledger. The decisive assertion in each is that `setTimer` was still called: a test that only
+    asserts a row was written would pass against a loop that never rearms.
+
+    (iv) DO NOT PROPOSE A FALLBACK TO THE STATIC PAT. The token replacement is W1-T1024's ruled
+    design and stays. Restoring the PAT on failure would silently return the fleet to the shared
+    pool that this whole line of work exists to leave, and would do it at exactly the moment nobody
+    is watching.
+
+    (v) OUT OF SCOPE, NAMED. The other failure arms in rationale (0) are correct and unchanged. No
+    change to `REFRESH_MARGIN_MS`, to the lifetime constant, or to the env-gate's silent
+    `armed: false` — an unconfigured host writing nothing is deliberate and documented.
+  acceptance:
+    - claim: "a hung token exchange is abandoned rather than waited on forever"
+      proof: "unit test: W1-T1068: a hung exchange is abandoned rather than awaited forever"
+    - claim: "an abandoned exchange logs a named reason instead of failing silently"
+      proof: "unit test: W1-T1068: an abandoned exchange logs a named timeout reason"
+    - claim: "a rejected refresh still arms the next timer so the loop survives"
+      proof: "unit test: W1-T1068: a rejected refresh still arms the next timer"
+    - claim: "a ledger write that throws does not stop the loop rearming"
+      proof: "unit test: W1-T1068: a throwing ledger write still leaves the loop armed"
+    - claim: "the reschedule happens without depending on a successful write"
+      proof: "unit test: W1-T1068: the next timer is armed before any explanatory write"
+    - claim: "a successful mint keeps its existing interval and reason unchanged"
+      proof: "unit test: W1-T1068: a successful mint reschedules on its own expiry as before"
+  origin: "recon#token-refresher-dies-silently-2026-08-20"
+  plan_refs: ["W1-T1024", "W1-T1047"]
+  files: [src/lib/github-app.ts, test/github-app.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: medium` — the declared paths reach ONE concern (the installation-token refresh loop) plus
+    its own new test file, which is inside Rule 19's span for medium. The blast radius is one
+    timeout, one restructured reschedule, and no change to any other arm.
+
+    TWO MILDER FINDINGS ARE CARRIED HERE AS DESIGN NOTES RATHER THAN AS SEPARATE SHARDS, AND THE
+    REASON IS THE SAME FOR BOTH: neither changes a verdict, so neither earns the serialisation cost
+    of its own task against the same file.
+      - `readKey`'s catch answers the IDENTICAL `"private key unreadable"` for a MISSING file and an
+        UNREADABLE one. That is the same ENOENT/EACCES conflation that produced two real fail-opens
+        on 2026-08-20 (`spawnSync` returning `status: null` on a signalled child read as success,
+        and `readdirSync` answering `[]` to both ENOENT and EACCES). HERE IT IS STRICTLY MILDER:
+        both arms are failures, both log, and both degrade the same way, so it costs an operator
+        diagnostic precision — "wrong path" versus "wrong permissions" — and never correctness.
+      - An unparsable `expires_at` silently substitutes `now + INSTALLATION_TOKEN_LIFETIME_MS`
+        without naming the substitution, so a malformed expiry is indistinguishable in the ledger
+        from a well-formed one-hour token.
+    An implementer who is already editing this module may fix either in passing; neither is
+    required by this task's acceptance, and neither should widen `files:`.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the two gaps with
+    `git grep -cE 'AbortSignal|AbortController|timeout' -- src/lib/github-app.ts` against a `fetch`
+    control, and `git grep -cE '\.catch\(' -- src/lib/github-app.ts` against a `.then(` control;
+    confirm `appendLedger`'s shape by reading its `try`/`finally` directly. Ledger figures need the
+    per-form union read with a coverage control taken first.
