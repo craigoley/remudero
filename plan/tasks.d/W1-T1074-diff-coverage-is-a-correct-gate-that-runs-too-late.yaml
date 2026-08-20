@@ -1,0 +1,172 @@
+- id: W1-T1074
+  title: "`diff-coverage` is a CORRECT gate that runs only in CI, so to the author writing the code it is PROSE — the arm it refuses is invisible until a push has already been spent, and the fix shape is identical every time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-20 from a scratch worktree cut off origin/main, plus a REST read of the
+    check-run and timeline APIs. No spawning rmd verb was run, no daemon state file was written.
+    Every zero below carries a positive control, and where a control REFUTED the claim being
+    tested that is reported rather than dropped.
+
+    (1) THE COMPLAINT IS LATENCY, NOT STRICTNESS, AND THE GATE MUST NOT BE WEAKENED. `diff-coverage`
+    found two real fail-opens today — `spawnSync` returning `status: null` on a signalled child,
+    and `readdirSync` answering `[]` to both ENOENT and EACCES. Both are exactly the class it
+    exists to catch. Nothing in this task exempts an arm, lowers a threshold, or narrows what the
+    gate refuses.
+
+    (2) THE FRAMING IS CLAUDE.md's OWN META-RULE, TURNED AROUND. That file says a rule stated only
+    in prose can be violated silently and repeatedly, so the fix is to make something refuse it.
+    THE COROLLARY IS THAT A GATE WHICH ONLY RUNS IN CI IS PROSE TO THE AUTHOR WRITING THE CODE:
+    it does refuse, but only after a push, a CI cycle and — on a reviewed PR — a spent review
+    orphan. The author is writing against a rule nothing local will enforce.
+
+    (3) THE SHAPE IS ALWAYS THE SAME AND THE AUTHORS ALREADY KNOW THE FIX. The blocking line is a
+    catch arm or a refusal branch reachable only on a real I/O path, invisible to every test that
+    injects a seam. The remedy is identical every time — extract the decision from the I/O and test
+    one arm each with a positive control. CLAUDE.md records the same shape historically: three
+    consecutive PRs blocked on first push, each costing a full amend, a force-push and a CI round
+    trip (#768, #773, #777), and a later vacuous `OK` over an empty instrumented set (#1399).
+
+    (4) THE SIX-PR LIST DOES NOT RECONSTRUCT FROM THE GITHUB RECORD, AND THAT IS REPORTED RATHER
+    THAN CARRIED. Across #2274, #2284, #2311, #2312, #2314 and #2316, every commit of every PR
+    shows ZERO `coverage`-named check-run failures, each PR carries exactly one commit, and the
+    timeline API shows exactly one `head_ref_force_pushed` event among all six — a tree-identical
+    re-head pushed for an unrelated reason. Controls: the check-run name filter is live
+    (`coverage-ratchet` is a real check-run name on the current main head), and the timeline query
+    is live (it enumerates seven distinct event types on one of these PRs). WHAT SURVIVES: #2314 is
+    failing `coverage-ratchet` on its head RIGHT NOW, so the phenomenon is live and first-party.
+    WHAT THE QUERY CANNOT SEE: iterations that happened BEFORE a PR was opened. If those authors
+    hit the gate locally and repaired before pushing, the record would look exactly like this — and
+    that reading SUPPORTS this task rather than undermining it, because the only local route is the
+    hand-typed incantation CLAUDE.md carries. The count is not the argument; the shape is.
+
+    (5) AND #2314 IS THE ARGUMENT IN ONE PR. It adds `scripts/acceptance-author-gate.mjs` — an
+    author-time gate for the acceptance block — and it is itself blocked late by `coverage-ratchet`.
+    Reading its own header, it runs `acceptanceAuthorTimeCheck` as a STANDALONE CI JOB off the
+    `pull_request` event payload. That genuinely cuts latency, because it no longer waits on a full
+    cycle plus a posted verdict. IT IS STILL NOT AUTHOR-TIME IN THE SENSE THAT MATTERS HERE: it
+    needs a push to run at all. So the sibling exists, it covers a different gate, and it does not
+    close this gap.
+
+    (6) `preflight --fast` CANNOT CARRY A COVERAGE STEP, AND ITS OWN COMMENT SAYS SO IN TERMS.
+    `FAST_GATE_STEPS` (`src/lib/ci-parity.ts`) states its curation criterion as enforcement rather
+    than preference: a step qualifies only if it is deterministic, runs in seconds, needs no
+    network, and has demonstrably blocked a PR. Design item (iii) names the one mistake the mode
+    exists to prevent — growing the list to include anything that spawns `node --test` would make
+    the fast mode the expensive mode wearing a cheaper name — and `runPreflightFast` never shells
+    the suite. A coverage lcov requires the suite. So this belongs in a SEPARATE, additive mode on
+    the same verb, never inside `--fast`.
+
+    (7) A PARTIAL-SUITE LCOV IS NOT TRUSTWORTHY AS A PASS, AND THAT IS THE FINDING RATHER THAN AN
+    OBSTACLE TO ROUTE AROUND. `diff-coverage.mjs` reports `OK — every added source line lcov
+    INSTRUMENTS is covered`. The quantifier ranges over what the run instrumented, so a scoped run
+    whose suites never import a changed file emits no `SF:` record for it and the claim is
+    trivially true over an empty set. That exact false green was caught twice today. A scoped run
+    can therefore only ever say INVESTIGATE; only a full run can say PASS.
+
+    (8) BUT THE SOUNDNESS OF A PARTIAL RUN SPLITS BY GATE KIND, WHICH IS THE SHARPEST THING THIS
+    RECON FOUND. A COVERAGE gate's verdict is defined over the set of files the run instrumented,
+    so shrinking the run silently shrinks the denominator. An ASSERTION gate's verdict is not: a
+    docs-claims or runbook-coverage test asserts a fixed property of the repo and answers the same
+    way whatever else ran beside it. So a curated subset of TEST FILES is sound for assertion gates
+    and unsound for coverage — the same partial run is trustworthy for one and vacuous for the other.
+
+    (9) THE BASE IS COMPUTED ENTIRELY BY THE CALLER TODAY, WHICH IS WHY BOTH AUTHOR-TIME BASE
+    DEFECTS ARE INVISIBLE TO CI. `main()` in `scripts/diff-coverage.mjs` takes `--lcov` and
+    `--diff` and derives no base at all; the diff arrives as a file or on stdin. CI supplies its
+    own correctly. Locally, one lane built the diff with a two-dot `--cached origin/main` form and
+    saw main's commits as its own, and another ran the check before committing and got a pass over
+    an empty diff. Neither is reachable from CI, because CI never asks the caller.
+  design: |
+    (i) A FOURTH ADDITIVE MODE ON `preflight`, NOT A NEW VERB AND NOT INSIDE `--fast`.
+    `--ci-parity` and `--fast` already establish the precedent that a new gate set is a flag on
+    `preflight` rather than a sibling verb, and rationale (6) is why it cannot join `--fast`. The
+    mode is opt-in and slow by construction; its honest cost — a full suite over thousands of
+    tests, minutes not seconds — must be stated in the help text rather than discovered, because a
+    mode whose cost surprises the caller is one they stop running.
+
+    (ii) THE RUNNER OWNS THE BASE. It must derive the comparison itself as a three-dot
+    `origin/main...HEAD` against a freshly refreshed origin/main, and REFUSE rather than report
+    when the inputs cannot support a verdict: an empty diff, and a working tree with uncommitted
+    changes to files in the diff (the lcov and the diff must come from the same tree). Trusting a
+    caller-supplied diff is the one thing that makes both defects in rationale (9) possible.
+
+    (iii) THE RUNNER MUST ASSERT INSTRUMENTATION BEFORE IT MAY REPORT A PASS. For every source
+    file in the computed diff, the lcov must carry an `SF:` record; if any does not, the verdict is
+    UNPROVEN and names the files, never OK. This is the local half of rationale (7) and it is a
+    STRENGTHENING, not an exemption — it converts a vacuous green into an explicit refusal to
+    conclude.
+
+    (iv) `scripts/diff-coverage.mjs` IS NOT CHANGED BY THIS TASK. It is a pure lcov-times-diff
+    comparator, CI feeds it correctly, and the two defects this closes are both about what is
+    handed TO it. Whether the script itself should also refuse an uninstrumented changed file in
+    CI is a real question and a SEPARATE one; folding it in here would put a required-check change
+    in a task about author-time latency.
+
+    (v) ONE RUNNER DOES NOT SERVE ALL FOUR LATE GATES, AND THE SPLIT IS BY COST, NOT BY TASTE.
+    Of the four named — this one, `bodyContradictsDiff`'s count-claim refusal, the acceptance-block
+    parser and the hand-maintained operator-guide command table — the last three are seconds-fast
+    and network-free and belong with the `--fast` family, and one of them already has a caller in
+    flight (rationale (5)). Only coverage needs the suite. The operator-guide table is the
+    interesting case: nothing in `scripts/` or `.github/workflows/` reads it, and it is asserted by
+    TEST files instead, so it is late for a different reason and is exactly the assertion-gate kind
+    rationale (8) says a curated partial run WOULD serve.
+
+    (vi) DO NOT WEAKEN ANYTHING. No exempted arm, no lowered threshold, no narrowing of what
+    `diff-coverage` refuses, and no change to `coverage-ratchet`. The gate is correct; only its
+    reachability is at issue.
+
+    (vii) NOT IN SCOPE: `FAST_GATE_STEPS`' membership, which rationale (6) settles; the
+    `bodyContradictsDiff` and operator-guide gates, named in (v) so the class is visible but
+    deliberately left unscoped; `scripts/acceptance-author-gate.mjs`, which is another task's work
+    in flight; and any git hook, since this repo configures no `core.hooksPath` and adding one is a
+    posture change rather than a gate.
+  acceptance:
+    - claim: "the coverage mode refuses a base the caller supplied and derives its own three-dot comparison instead"
+      proof: "unit test: test/preflight-coverage-mode.test.ts"
+    - claim: "an empty diff or a tree dirty in the diffed files is refused rather than reported as a pass"
+      proof: "unit test: test/preflight-coverage-mode.test.ts"
+    - claim: "a changed source file with no instrumentation record yields UNPROVEN and names the file"
+      proof: "unit test: test/preflight-coverage-mode.test.ts"
+    - claim: "the fast mode still shells no test suite once the coverage mode exists"
+      proof: "unit test: test/preflight-coverage-mode.test.ts"
+  files: [src/run-task.ts, src/lib/ci-parity.ts, test/preflight-coverage-mode.test.ts]
+  status: queued
+  attempts: 0
+  origin: recon#diff-coverage-runs-too-late-2026-08-20
+  plan_refs: ['W1-T373', 'W1-T294', 'W1-T221', 'W1-T1060', 'W1-T471']
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/preflight-coverage-mode.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through the W1-T456 forward-reference carve-out (`forwardReferenceFiles`,
+    `src/lib/review.ts`) to `not_yet_built` rather than executing against an absent file.
+
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` crosses two
+    `src/` modules and `test/`, so `subsystemsOf` (`src/lib/task-linter.ts`) derives more than one
+    tag. The diff itself is one flag, one runner and its wiring.
+
+    `src/run-task.ts` MUST BE DECLARED, per DECISIONS.md's 2026-08-18 W1-T471 ruling: the flag is
+    refused by `unknownArgError` inside `preflightCommand` unless that file learns it, and the
+    ruling records that the file is not split and tasks are not re-scoped to avoid declaring it.
+    `src/lib/ci-parity.ts` is where `runPreflightFast` and `FAST_GATE_STEPS` already live, so the
+    new mode's engine belongs beside them rather than in a third module.
+
+    `scripts/diff-coverage.mjs` IS DELIBERATELY NOT DECLARED — design item (iv). Declaring a file
+    the diff will not touch would trip `inverseScopeUntouchedFiles` and serialise this task against
+    every other task that names it.
+
+    THE SIX-PR CLAIM THAT PROMPTED THIS RECON IS RECORDED AS REFUTED IN RATIONALE (4) RATHER THAN
+    QUIETLY DROPPED. The live instance (#2314) and the historical record in CLAUDE.md carry the
+    argument; no count is asserted, because the population that would support one could not be
+    reconstructed from the GitHub record.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1074` resolves to f9b732f273088bd843817dadc6a508ba893724f4,
+    read back before filing; live control, `refs/rmd-id/W1-T999999` returns exit 2, so a resolve is
+    meaningful and not a query that always succeeds. The anchor's MESSAGE SHAPE WAS NOT JUDGED:
+    `rmd next-task-id --reserve` and the fleet share `reserveTaskIdRemote`, so both write the same
+    `rmd-id reservation <pid>@<host>` form and the shape cannot identify a holder.
