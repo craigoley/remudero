@@ -470,3 +470,54 @@ test("W1-T1045: the abandonment step's rotation membership matches its readers",
   assert.doesNotMatch(runTaskSrc, /step:\s*"worker\.abandoned"/, 'the string never appears as a ledger step, only as a "stage" field');
   assert.ok(!DECISION_RELEVANT_LEDGER_STEPS.has("worker.abandoned"), "unregistered — nothing reads it back for a decision");
 });
+
+test("W1-T1045: a worktree that cannot be reclaimed is ledgered and the run still ends with its verdict", async () => {
+  // The abandon branch reclaims the worktree best-effort. Its catch is the arm that keeps a
+  // failed reclaim from turning a recorded abandonment into an unhandled throw — and no test
+  // reached it, because the reclaim succeeds on every healthy fixture.
+  //
+  // LOCKING is the mechanism, measured rather than assumed: `git worktree remove --force` on a
+  // LOCKED worktree exits 128 ("cannot remove a locked working tree"), while the same command
+  // after merely deleting the directory exits 0. So deleting would not have failed the reclaim.
+  const { root, planPath, config } = buildFixtureRoot();
+  try {
+    const calls: SpawnWorkerArgs[] = [];
+    const spawn: typeof spawnWorker = async (args) => {
+      calls.push(args);
+      if (calls.length === 1) return reconResult();
+      execFileSync("git", ["-C", args.cwd, "worktree", "lock", args.cwd], { stdio: "ignore" });
+      throw new WorkerAbandonedError(
+        { elapsedMs: 500_000, boundMs: 7_200_000, lastState: "working", lastStateMs: 42 },
+        new Error("simulated: SDK transport error on abort"),
+      );
+    };
+
+    const res = await runTask("TST-CLOCKBOUND", {
+      skipGitSync: true,
+      planPath,
+      config,
+      github: OFFLINE_GITHUB,
+      spawn,
+      containmentExec: clockBoundHoldingContainmentExec,
+      isolationExec: clockBoundCleanIsolationExec,
+    });
+
+    assert.equal(res.verdict, "failed", "a failed reclaim never changes the run's own verdict");
+    assert.equal(res.merged, false);
+
+    const lines = readLedger(root);
+    const removeError = lines.find((l) => l.step === "worktree.remove.error");
+    assert.ok(removeError, `expected a worktree.remove.error row, saw: ${[...new Set(lines.map((l) => l.step))].join(", ")}`);
+    assert.equal(removeError!.on, "worker.abandoned", "the row names WHICH reclaim failed, not just that one did");
+    // `worktreeRemove` shells git with `stdio: "inherit"`, so git's own "cannot remove a locked
+    // working tree" text goes to the parent's stderr and never reaches `err.message` — the row
+    // carries the failing command instead. Assert on what the row actually holds.
+    assert.match(String(removeError!.error), /Command failed: git .*worktree remove --force/);
+
+    // The positive control on the same corpus: the abandonment itself is still recorded, so the
+    // failed reclaim is an extra row rather than a path that swallowed the whole branch.
+    assert.ok(lines.some((l) => l.step === "verdict" && l.stage === "worker.abandoned"), "the abandonment verdict row still lands");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
