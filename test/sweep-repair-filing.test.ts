@@ -252,6 +252,20 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & { captures: R
     ledgerPath: ledgerPath(),
     runId: "SWEEP-1",
     now: () => NOW,
+    // THE ROW'S TIMESTAMP MUST COME FROM THE INJECTED CLOCK, NOT THE WALL CLOCK.
+    // `dueRepairFilings` buckets by ABSOLUTE epoch time (`floor(now / windowMs)`) and then keeps
+    // only rows whose own `ts` falls inside the bucket `now` lands in. `runSweep` writes those
+    // rows through `deps.appendLine ?? appendLedger`, and `appendLedger` stamps
+    // `ts: new Date().toISOString()` — REAL time — so a fixed `NOW` and a real-time `ts` agree
+    // only while the wall clock happens to sit in the same bucket as `NOW`. MEASURED: with
+    // `WINDOW_DAYS = 7` and `NOW = 2026-08-16T12:00:00Z`, that bucket is
+    // 2026-08-13T00:00:00Z..2026-08-20T00:00:00Z, so the two real-`runSweep` tests below began
+    // failing the instant the wall clock passed 2026-08-20T00:00:00Z — a time bomb that fired on
+    // a schedule and reddened every PR and `main` itself, with no diff involved.
+    // `appendLedger` spreads `...line` AFTER its own `ts`, so passing `ts` here overrides it; the
+    // seam is the intended one (sweep.ts: "`appendLine`/`appendLedger` stamp their own
+    // write-time"). Production is untouched — it injects nothing and keeps the real clock.
+    appendLine: (path, line) => appendLedger(path, { ...line, ts: new Date(NOW).toISOString() }),
     captureRepairFeedback: (filing) => {
       captures.push(filing);
     },
@@ -371,4 +385,38 @@ test("runSweep + real captureFeedback: a SECOND pass over the SAME recurring sur
   const { readdirSync } = await import("node:fs");
   const filedEntries = readdirSync(join(r, "plan", "feedback")).filter((f: string) => f.endsWith(".yaml"));
   assert.equal(filedEntries.length, 1, "one recurring surface, one window, ONE entry — the second pass filed nothing new");
+});
+
+// ── the time bomb's own falsifier ────────────────────────────────────────────────────────────
+
+test("fixture guard: a real runSweep pass stamps its ledger rows from the INJECTED clock, never the wall clock", async () => {
+  // WHY THIS EXISTS AS ITS OWN TEST. The two real-`runSweep` cases above assert on
+  // `dueRepairFilings`, which buckets by absolute epoch time — so when the rows a pass writes
+  // carried REAL timestamps they silently fell out of `NOW`'s bucket the moment the wall clock
+  // crossed a window boundary, and both tests began failing on a schedule with no diff involved.
+  // That reads as a regression in the code under test, which is the expensive part.
+  //
+  // IT MUST RUN A REAL PASS, NOT SEED ROWS. `disposedRow()` already carries its own `ts`, and
+  // `appendLedger` spreads `...line` after its own stamp — so a seeded-row version of this check
+  // passes whether the override is present or not (MEASURED: it did, which is why it was rewritten
+  // rather than trusted). Only rows `runSweep` writes itself go through the appender unstamped.
+  const deps = fakeDeps();
+  await runSweep(
+    Array.from({ length: THRESHOLD }, (_, i) => blockedFixablePrN(1300 + i)),
+    deps,
+    { ...DEFAULT_SWEEP_POLICY, ...POLICY },
+  );
+  const written = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(written.length, THRESHOLD, "sanity: the pass really did write its own rows");
+  const windowMs = WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const bucketStart = Math.floor(NOW / windowMs) * windowMs;
+  for (const w of written) {
+    assert.equal(w.ts, new Date(NOW).toISOString(), "a row a pass writes must carry the injected NOW");
+    const ts = Date.parse(String(w.ts));
+    assert.ok(
+      ts >= bucketStart && ts < bucketStart + windowMs,
+      `a row at ${String(w.ts)} must fall inside NOW's own window ` +
+        `${new Date(bucketStart).toISOString()}..${new Date(bucketStart + windowMs).toISOString()}`,
+    );
+  }
 });
