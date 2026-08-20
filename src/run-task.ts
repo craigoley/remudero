@@ -254,7 +254,11 @@ import {
   reserveTaskIdBlock,
   reserveTaskIdBlockRemote,
   gitRemoteRefReserver,
+  reserveTaskIdRemote,
+  taskIdReservationRef,
   withIdReservationLogging,
+  type RemoteRefReserver,
+  type TaskIdReservationError,
   type RemoteReservationBlock,
   type TaskIdReservationBlock,
   taskIdReservationsDir,
@@ -10226,10 +10230,104 @@ export function overlapAdvisoryLines(
   return overlapWarningLinesFor(candidateFilesFromArgs(rest), owner, repo, planPath, deps);
 }
 
-export async function nextTaskIdCommand(rest: string[], overlapDeps: OverlapWarningDeps = {}): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline"]);
+/**
+ * W1-T1055 — WHO HOLDS A CONTESTED ID. The two anchor shapes are already distinguishable on the
+ * remote but nothing surfaced the difference, so an operator could not tell a reservation HE holds
+ * from one the fleet holds. A rejection scrolled past unnoticed twice on 2026-08-20.
+ *
+ *  - the fleet's code path writes `rmd-id reservation <pid>@<container> <iso>` ({@link gitRemoteRefReserver})
+ *  - an operator hand-mint writes `reserve W1-T#### <host>-<pid>-<nanotime>` over the empty tree
+ *
+ * PURE, so both arms and the unknown fallback are reachable from a test without a git remote.
+ */
+export type ReservationHolder = "fleet" | "operator" | "unknown";
+
+export function classifyReservationAnchor(message: string): ReservationHolder {
+  const m = message.trim();
+  if (/^rmd-id reservation\b/.test(m)) return "fleet";
+  if (/^reserve\s+W1-T\d+\b/.test(m)) return "operator";
+  return "unknown";
+}
+
+/** How a contested candidate is reported. NEVER silent: the whole point is that advancing past a
+ *  taken id must be visible, because silently advancing is what let two collisions go unnoticed. */
+export function describeContestedId(taskId: string, holder: ReservationHolder): string {
+  const who =
+    holder === "fleet"
+      ? "HELD BY ANOTHER CALLER — the fleet (an `rmd-id reservation <pid>@<container>` anchor)"
+      : holder === "operator"
+        ? "HELD BY ANOTHER CALLER — an operator hand-mint (a `reserve W1-T#### <host>-<pid>-<nanotime>` anchor)"
+        : "HELD BY ANOTHER CALLER — holder shape unreadable from here";
+  return `(${taskId}: ${who})`;
+}
+
+/**
+ * The refusal text for a {@link TaskIdReservationError}, by outcome. FAIL-CLOSED STAYS FAIL-CLOSED:
+ * under `--reserve` an unreachable origin must refuse loudly rather than mint optimistically,
+ * because the caller has spent nothing yet and loud-and-local is recoverable.
+ */
+export function describeReservationRefusal(outcome: string | undefined, message: string): string {
+  const head =
+    outcome === "unreachable"
+      ? "### rmd next-task-id --reserve: REFUSED — origin is unreachable, so no id was claimed"
+      : outcome === "exhausted"
+        ? "### rmd next-task-id --reserve: REFUSED — every candidate in the scanned range is already reserved"
+        : "### rmd next-task-id --reserve: REFUSED";
+  return `${head}\n  ${message}`;
+}
+
+/**
+ * `--reserve` and `--offline` are contradictory — one claims an id on the remote, the other
+ * declines to read the remote at all — so they are REFUSED by argument validation rather than
+ * silently resolved, the same posture `unknownArgError` already takes on an unknown flag.
+ */
+export function validateReserveArgs(rest: readonly string[]): string | undefined {
+  return rest.includes("--reserve") && rest.includes("--offline")
+    ? "### rmd next-task-id: --reserve and --offline are contradictory — --reserve must push to origin, --offline declines to read it"
+    : undefined;
+}
+
+/**
+ * Adapt a `spawnSync`-shaped runner to {@link RemoteReserveDeps}'s stricter contract.
+ *
+ * EXTRACTED RATHER THAN INLINED so it is reachable from a test. As an inline closure it ran ONLY
+ * on the real, un-injected path — every test supplies its own reserver — so `diff-coverage` blocked
+ * the diff on exactly these two lines. The defaults are not cosmetic: `spawnSync` reports
+ * `status: null` when the child was killed by a signal, and {@link classifyPushFailure} would read
+ * a null as success. Mapping it to 1 makes a signalled `git push` a FAILURE, which then classifies
+ * as `unreachable` — the fail-closed direction.
+ */
+export function gitRunAdapter(
+  run: (args: string[]) => { status: number | null; stdout?: string; stderr?: string },
+): (args: string[]) => { status: number; stdout: string; stderr: string } {
+  return (args: string[]) => {
+    const r = run(args);
+    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  };
+}
+
+/** Injectable seams for `--reserve` (W1-T1055) — the reserver itself, the git runner behind the
+ *  holder read, and the holder classifier. Real callers pass none of them; a test drives every arm
+ *  (created / taken-then-created / unreachable) without a git remote. */
+export interface NextTaskIdReserveDeps {
+  reserver?: RemoteRefReserver;
+  runGit?: (args: string[]) => { status: number | null; stdout: string; stderr: string };
+  holderOf?: (taskId: string, run: (args: string[]) => { status: number | null; stdout: string; stderr: string }) => ReservationHolder;
+}
+
+export async function nextTaskIdCommand(
+  rest: string[],
+  overlapDeps: OverlapWarningDeps = {},
+  deps: NextTaskIdReserveDeps = {},
+): Promise<number> {
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline", "--reserve"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const contradiction = validateReserveArgs(rest);
+  if (contradiction) {
+    console.error(contradiction + "\n" + USAGE);
     return 2;
   }
   const planPath = flagValue(rest, "--plan") ?? join(repoRoot, "plan", "tasks.yaml");
@@ -10269,7 +10367,71 @@ export async function nextTaskIdCommand(rest: string[], overlapDeps: OverlapWarn
   // suppresses it for the same reason it suppresses the open-PR sweep above.
   for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
     (overlapDeps.say ?? console.log)(line);
+  // ── W1-T1055 — `--reserve`: MAKE THE PUSH THE CLAIM ───────────────────────────────────────────
+  // WITHOUT the flag, every line above is byte-identical to before this existed and nothing is
+  // claimed — the 2026-08-01 author's line between PRINTING and SPENDING is honoured, not
+  // reversed. Roughly fifty ids are already reserved-but-unfiled and nothing releases a
+  // reservation, so an operator asking "what is next" a hundred times must not leave a hundred
+  // holes; and because `reserveTaskIdRemote` FAILS CLOSED on an unreachable origin, a default
+  // would turn a read that degrades into a hard refusal. Hence a flag.
+  //
+  // THE LOOP IS NOT REBUILT HERE. `reserveTaskIdRemote` already advances on contention, is already
+  // bounded by `maxScan`, and its handle already names the id it actually holds — so this prints
+  // THAT id and never the one it first tried. Re-implementing the scan in this command is the
+  // failure mode the shard asks review to refuse.
+  if (rest.includes("--reserve")) {
+    const contested: string[] = [];
+    const run = deps.runGit ?? ((args: string[]) => spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" }));
+    const base = deps.reserver ?? gitRemoteRefReserver({ run: gitRunAdapter(run) });
+    // Decorate rather than modify: `src/lib/task-id-reservation.ts` is deliberately NOT declared by
+    // this task and nothing in it changes. The decorator only OBSERVES each attempt, so a `taken`
+    // outcome is reported instead of silently skipped.
+    const reserver: RemoteRefReserver = {
+      mintAnchor: () => base.mintAnchor(),
+      attempt: (taskId: string, anchor: string) => {
+        const outcome = base.attempt(taskId, anchor);
+        if (outcome === "taken") contested.push(describeContestedId(taskId, (deps.holderOf ?? readReservationHolder)(taskId, run)));
+        return outcome;
+      },
+    };
+    try {
+      // ONE DURABLE ROW, THROUGH THE EXISTING WRAPPER (shard design iv) — never a fourth
+      // hand-rolled catch beside the three lane bodies this wrapper was built to replace. The
+      // ledger sink degrades to a no-op when no config is readable, exactly like the advisory
+      // notice above: a READ that cannot log must still answer.
+      const logRow = (step: string, extra?: Record<string, unknown>): void => {
+        try {
+          appendLedger(ledgerPathFor(loadConfig()), { run_id: `MINT-${process.pid}`, task_id: mint.id, step, lane: "mint", ...extra });
+        } catch {
+          /* no readable config ⇒ no row, never a crash in a read-only verb */
+        }
+      };
+      const held = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(mint.n, reserver));
+      for (const line of contested) console.log(line);
+      console.log(`RESERVED ${held.taskId} on origin (${held.ref}) after ${held.attempts} attempt(s)`);
+      if (held.taskId !== mint.id) console.log(`(note: the advisory mint printed ${mint.id}; ${held.taskId} is the id actually HELD)`);
+    } catch (e) {
+      for (const line of contested) console.log(line);
+      const err = e as TaskIdReservationError;
+      console.error(describeReservationRefusal(err.outcome, err.message));
+      return 2;
+    }
+  }
   return mint.degraded.length ? 1 : 0;
+}
+
+/** Read the anchor message behind an existing reservation ref so a contested id can name WHO holds
+ *  it. Best-effort by design: an unreadable ref yields `"unknown"`, which {@link describeContestedId}
+ *  renders honestly rather than guessing a shape. */
+export function readReservationHolder(
+  taskId: string,
+  run: (args: string[]) => { status: number | null; stdout: string; stderr: string },
+): ReservationHolder {
+  const fetched = run(["fetch", "origin", `${taskIdReservationRef(taskId)}`]);
+  if ((fetched.status ?? 1) !== 0) return "unknown";
+  const msg = run(["log", "-1", "--format=%s", "FETCH_HEAD"]);
+  if ((msg.status ?? 1) !== 0) return "unknown";
+  return classifyReservationAnchor(msg.stdout ?? "");
 }
 
 /** W1-T180: the post-merge-amendment status resolution's only I/O — loadConfig (reads $HOME),
@@ -21886,7 +22048,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "next-task-id",
     usage:
-      "rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing",
+      "rmd next-task-id [--plan <path>] [--offline] [--reserve]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation.",
   },
   {
     name: "emissions",
