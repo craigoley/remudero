@@ -1,0 +1,143 @@
+- id: W1-T1052
+  title: "A FAILED AUTO-MERGE ATTEMPT IS RECORDED UNDER A STEP NAME THAT SAYS IT WAS SKIPPED — `logArmAttribution` collapses every non-arming outcome into `automerge.arm_skipped` while success gets a second dedicated step of its own, so a census of arm failures reads ZERO against a success control that reads fine; rename the step rather than adding one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    MEASURED 2026-08-20 on Craigs-Mac-mini under /bin/zsh 5.9, in a scratch worktree at
+    origin/main f38f71d8. Per-form coverage control taken FIRST — 666 gz, 6 plain, 1 live, all
+    readable — and every census deduped on the FULL LINE. No `/rate_limit` call; the daemon and
+    its state files untouched.
+
+    (1) THE MECHANISM, TRACED FROM SOURCE. `logArmAttribution` (`src/run-task.ts`) routes every
+    outcome through `armOutcomeArmed`: `armed` and `direct-merged` become `automerge.armed`, and
+    EVERYTHING ELSE becomes `automerge.arm_skipped` — including an outcome meaning the direct
+    merge was ATTEMPTED AND FAILED. A step name asserting something that did not happen.
+
+    (2) AND THE ASYMMETRY IS THE DEFECT, NOT THE NAME ALONE. The same function gives SUCCESS a
+    second, dedicated step — `automerge.clean_status_direct_merge` — fired only when the outcome
+    is `direct-merged`. FAILURE GETS NONE. So a search for a failure step returns zero against a
+    success control that reads fine, which is exactly the shape of a query that answers wrong
+    rather than erroring.
+
+    (3) THE HARM IS NOT HYPOTHETICAL AND IS RECORDED HERE AS THE MOTIVATION. A census of arm
+    outcomes reported `direct-merged 1, direct-merge-failed 0` and THE ZERO WAS BELIEVED BY TWO
+    READERS before a source trace corrected it. The failure side was never countable; the zero
+    read the absence of a record, not the absence of an event.
+
+    (4) THE REAL FAILURE COUNT, READ FROM THE `outcome` FIELD AND NEVER THE STEP NAME — AND THE
+    CORPUS LIMIT IS THE HEADLINE. Over the deduped union this host holds 194 distinct
+    `automerge.arm_skipped` rows: `arm-error-ignored` 99, `skipped` 90, `ledger-refused` 5, and
+    ZERO carrying an outcome meaning an attempted merge failed. THAT ZERO IS NOT AN ANSWER.
+    Those rows span 2026-07-31T02:49Z to 2026-08-13T13:31Z; `logArmAttribution` landed 2026-08-12,
+    so only 22 of the 194 post-date the code in question — ABOUT THIRTY-FOUR HOURS OF OVERLAP —
+    and 193 of the 194 carry no `lane` field at all, exactly one reading `lane: review`. THE
+    NUMBER HAS NEVER BEEN KNOWN AND THIS HOST CANNOT SUPPLY IT; it must be taken on the fleet's
+    own ledger, and the acceptance criteria below are about the RECORD, not about that figure.
+
+    (5) THIS IS NOT THE CALL FAILING. W1-T1050 files that — a merge whose local-branch cleanup
+    needs a branch a detached HEAD does not have. THIS FILES THE RECORD LYING ABOUT IT. The two
+    are independently falsifiable and fixing either leaves the other intact: rename the step and
+    the call still fails; fix the call and every other non-arming outcome is still filed as a skip.
+    Its mechanism is cited, not re-derived, and nothing here proposes touching that call.
+  design: |
+    ONE CONCERN: the step name a non-arming outcome is filed under. Not the call, not the sweep
+    lane, not a new emitter.
+
+    (i) RENAME, DO NOT ADD — AND THE MEASUREMENT SUPPORTS IT RATHER THAN TASTE. The obvious
+    remedy is a dedicated failure step mirroring the success one, and it is the wrong one: a new
+    step is a permanent new row on a file that already carries a large majority of rows nothing
+    reads, and rotation volume is real. THE CHEAPER CANDIDATE IS A STEP NAME THAT DOES NOT CLAIM
+    `skipped` FOR SOMETHING THAT WAS ATTEMPTED. It adds not one row.
+
+    (ii) WHAT A RENAME BREAKS, ESTABLISHED BEFORE PROPOSING IT — AND IT IS ONLY TESTS. Every
+    occurrence of the literal in `src/` is a WRITE site or a comment: `logArmAttribution` itself
+    plus the two dependabot-skip emissions in `armIfVerdictPermits`. NO PRODUCTION READER CONSUMES
+    IT. The consumers are six test files, each asserting the literal. POSITIVE CONTROL, same idiom:
+    `automerge.armed` IS genuinely read — by `src/lib/autonomy.ts`, `src/lib/receipt.ts` and
+    `src/lib/verdict-calibration.ts` — so the query can find a real consumer when one exists.
+
+    (iii) `DECISION_RELEVANT_LEDGER_STEPS` MEMBERSHIP IS NOT REQUIRED, BY ITS OWN MECHANICAL RULE.
+    That list (`src/lib/ledger.ts`) holds `automerge.capped_override_granted` because
+    `cappedOverrideFromLedger` reads it back TO DECIDE. Neither `automerge.armed` nor
+    `automerge.arm_skipped` is a member, and `test/ledger-rotation.test.ts` derives membership by
+    SCANNING CONSUMERS rather than from a hardcoded list. Since no decision reads the skipped step
+    back, a rename creates no membership obligation — but the derivation test is the check that
+    proves it, and it must be re-run rather than assumed.
+
+    (iv) THE SWEEP LANE IS A SECOND CONCERN, NAMED AND DELIBERATELY NOT ABSORBED. IT NEEDS ITS OWN
+    ID. Both `logArmAttribution` call sites pass the outcome as a FIELD, so the review and operator
+    lanes leave the truth recoverable by a reader who knows not to trust the step name. THE SWEEP
+    LANE DOES NOT EVEN DO THAT: it writes `arm outcome: <outcome>` as free text into
+    `standDownReason` on a `sweep.disposed` row — a different step, about a disposal rather than an
+    arm. MEASURED: 16,598 distinct `sweep.disposed` rows, 216 carrying it, ALL 216 reading
+    `no-task-id`, and the row's own `task_id` reads the literal `SWEEP` on every one of them, so
+    the outcome is prose inside a reason on a row with no task identity. UNIFYING THE THREE LANES
+    IS A SECOND CHANGE IN A DIFFERENT MODULE and raises a design question this task must not
+    answer: whether the sweep should emit an arm-shaped row at all, or whether the disposed row is
+    the right home. Scoped out on purpose.
+
+    (v) WHAT THIS TASK MUST NOT DO. It must not add a ledger step. It must not absorb W1-T1050 or
+    propose anything about the merge call. It must not absorb the sweep lane in (iv). It must not
+    delete a test assertion to make the rename pass — each of the six must be re-derived to the
+    new name, because they are what proves the refusal is still recorded at all.
+  acceptance:
+    - claim: "an attempted merge that failed is no longer filed under a step name meaning it was skipped"
+      proof: "unit test: arm step name: an attempted merge that failed is not recorded as skipped"
+    - claim: "a genuine skip and a failed attempt are distinguishable from the step name alone"
+      proof: "unit test: arm step name: a genuine skip and a failed attempt no longer share one step"
+    - claim: "the outcome field and the step name agree rather than contradicting each other"
+      proof: "unit test: arm step name: the outcome field and the step name agree on every outcome"
+    - claim: "no reader keyed on the old literal is left behind by the rename"
+      proof: "unit test: arm step name: no reader keyed on the old literal is left behind"
+    - claim: "the change adds no new ledger step, so the rotation cost is unchanged"
+      proof: "unit test: arm step name: the change adds no new ledger step"
+  risk: high
+  origin: "oper#failed-arm-recorded-as-skip-2026-08-20"
+  plan_refs: ["W1-T1050", "W1-T449", "W1-T453", "W1-T975", "W1-T471"]
+  files: [src/run-task.ts, test/arm-on-passing-verdict.test.ts, test/arm-ordering.test.ts, test/arm-outcome-five-sites.test.ts, test/capped-verdict-never-arms.test.ts, test/policy.test.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `files:` WAS DERIVED BY WORD-BOUNDED INVOCATION COUNT, NOT GUESSED. `logArmAttribution` reads 5
+    in `src/run-task.ts` AND NOWHERE ELSE, which is why that one module carries the whole source
+    side; the other two emissions of the same literal are `armIfVerdictPermits`'s dependabot skips
+    in the same file. On the test side exactly six files assert the literal, and every one of them
+    is declared, because a rename that leaves an assertion behind fails the suite rather than the
+    review. DECISIONS.md's 2026-08-18 W1-T471 ruling governs the `src/run-task.ts` declaration: it
+    states a new shard declaring the file *"should simply declare it"*, so this one does and cites
+    the ruling instead of reciting a formula. The shard's own path is absent.
+
+    ONE HAZARD FOR THE IMPLEMENTER, FROM THIS REPO'S OWN RECORD: `test/run-task.test.ts` has
+    intermittently crashed at FILE level under coverage instrumentation, which zeroes the coverage
+    record for everything in it. THE RENAME ONLY EDITS EXISTING ASSERTIONS THERE — do not add a
+    coverage-load-bearing new test to that file; put any new case in its own file.
+
+    RISK IS `high` UP FRONT AND THE BAND IS RULE 19's SPAN, not blast radius: one source module and
+    six test files. The change ships no new behaviour and no new row.
+
+    EVERY FIGURE IS DATED 2026-08-20 AND WILL DRIFT — RE-RUN THE QUERY RATHER THAN QUOTING IT.
+    The census: `zgrep -h '"step":"automerge.arm_skipped"' <every ledger form> | sort -u`, then
+    tally the `outcome` FIELD — never the step name, which is the whole point of this task. Take a
+    per-form file count as the coverage control before trusting any total. Readers of the literal:
+    `git grep -alw` across `src/` and `test/`, with `automerge.armed` as the positive control since
+    it has real consumers. Membership: `test/ledger-rotation.test.ts` derives it by scanning
+    consumers, so run that test rather than reading the constant.
+    AND THE NUMBER THIS SHARD COULD NOT SUPPLY is how often the failure has actually occurred. This
+    host's rows overlap the current code by about thirty-four hours; the fleet's own ledger is where
+    that count lives.
+
+    ID PROVENANCE — FIVE SURFACES, RE-SWEPT IMMEDIATELY BEFORE PUSHING, AND THE FOURTH ONE IS NOT
+    DECORATION. Pre-minted by the operator and read back against the sha he supplied before any
+    work started: `refs/rmd-id/W1-T1052` -> 6dd5b10344986bf0fd87bcf4140a2c8350b798d1, matched. The
+    other four read 0: the shard FILENAME under `plan/tasks.d/` on origin/main, a declared `- id:`
+    under `plan/` on origin/main, every open PR's title, branch AND changed-file list, and
+    `git grep` across `src/`, `test/` and `deploy/` on origin/main. LIVE CONTROLS, same tools and
+    corpus: the W1-T1050 filename reads 1 and its declared id reads 1; the open-PR listing is
+    non-empty and two of its rows name a `plan/tasks.d/` shard; the source sweep reads 2 files for
+    the id an earlier merged PR orphaned. THE ID ORIGINALLY OFFERED FOR THIS SHARD WAS CLAIMED BY
+    ANOTHER LANE WHILE THE RECON RAN, and the open-PR surface is what caught it — a reservation ref
+    reads present either way and cannot distinguish reserved-and-free from reserved-and-in-use.
