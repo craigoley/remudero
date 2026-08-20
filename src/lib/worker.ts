@@ -29,6 +29,7 @@ import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-a
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
 import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "./compaction.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { pgrepFailureMeansZero } from "./deployer.js";
 import { isHolderStale, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
 import { loadDefaultPolicy } from "./policy.js";
@@ -2046,6 +2047,9 @@ export interface PruneSummary {
   branches: string[];
   /** Worktrees deliberately LEFT because a live run owns them (liveness guard). */
   skipped: string[];
+  /** W1-T1036: the `.git/config.lock` path reclaimed this pass, or `null` if none was
+   *  stale (or none existed) by the predicate in {@link isConfigLockStale}. */
+  configLock: string | null;
 }
 
 /**
@@ -2149,6 +2153,152 @@ export interface PruneOpts {
   graceMs?: number;
   /** Injectable clock for the age check (tests). Defaults to Date.now. */
   now?: () => number;
+  /** W1-T1036: injectable {@link ConfigLockReclaimOpts} for the `.git/config.lock` rung
+   *  below — tests drive age / the live-process probe / the ledger sink without a real
+   *  `pgrep` or a real clock. */
+  configLock?: ConfigLockReclaimOpts;
+}
+
+// ── Stale `.git/config.lock` reclaimer (W1-T1036) ──────────────────────────
+//
+// A `.git/config.lock` left behind by a killed process (rationale (1): an OOM-stalled VM)
+// fails every subsequent `git worktree add` outright — that call writes
+// `branch.<name>.remote`/`.merge` into `.git/config` (rationale (2)) — and the EXISTING
+// widowed-lock pass in reapStaleWorktrees cannot see it: that pass enumerates the worktrees
+// directory and asks "is the directory this lock is named after gone?", but a config lock
+// lives in a different tree entirely and is paired with no directory at all (rationale (3)).
+//
+// This reclaimer plugs into pruneStaleRuns (below), the shared function every prune-then-add
+// call site already runs immediately before worktreeAdd (design (v)) — so the fix reaches all
+// of them without src/run-task.ts needing to declare or change anything.
+
+/**
+ * Grace window (ms) below which a zero-byte `.git/config.lock` is presumed to be a process
+ * still between `open()` and `write()` — design (i).1. A `git config` write completes in
+ * single-digit milliseconds, so this is orders of magnitude of headroom over the only
+ * legitimate race, while remaining short enough that genuinely abandoned debris (the
+ * OOM-killed process in rationale (1)) clears on the very next prune pass.
+ */
+export const DEFAULT_CONFIG_LOCK_GRACE_MS = 2000;
+
+/** Path of the `.git/config.lock` for a repo checkout. */
+export function configLockPath(repoDir: string): string {
+  return join(repoDir, ".git", "config.lock");
+}
+
+/** The outcome of asking the OS "is any `git` process alive right now?" (design (i).2-3).
+ *  `ran` distinguishes a probe that genuinely answered from one that could not — an ENOENT
+ *  or any other unrunnable probe must be treated as NOT evidence of staleness (design (i).3),
+ *  never conflated with `ran: true, alive: false`. */
+export interface LiveGitProcessProbe {
+  ran: boolean;
+  alive: boolean;
+}
+
+/** The one syscall {@link defaultProbeLiveGitProcess} makes, injectable so a test can drive its
+ *  three outcomes without a real subprocess (mirrors {@link ProcessStartTimeSyscalls} in
+ *  fs-race-safe.ts, the same split for the same reason: the default wiring to a real syscall and
+ *  the branch logic over its result are two different things to falsify). */
+export interface PgrepSyscalls {
+  execFileSync: typeof execFileSync;
+}
+
+const defaultPgrepSyscalls: PgrepSyscalls = { execFileSync };
+
+/**
+ * Real probe: `pgrep git` (design (i).2 — deliberately `pgrep`, not `lsof`; both are declared
+ * in the image, and the coarser name-match answers "held" more often, which is the safe
+ * direction per design (ii)). Reuses {@link pgrepFailureMeansZero} (deployer.ts) rather than
+ * reinventing its exit-code table: `status === 1` is pgrep's own documented "no processes
+ * matched" (a real, ran-to-completion zero); anything else — ENOENT (binary absent, rationale
+ * (5)'s measured failure mode), a syntax error, a fatal error — means the read did not happen
+ * and must NOT be read as "no git process".
+ */
+export function defaultProbeLiveGitProcess(sysImpl: PgrepSyscalls = defaultPgrepSyscalls): LiveGitProcessProbe {
+  try {
+    sysImpl.execFileSync("pgrep", ["git"], { stdio: "pipe" });
+    return { ran: true, alive: true }; // exit 0 — at least one match
+  } catch (e) {
+    if (pgrepFailureMeansZero(e)) return { ran: true, alive: false }; // exit 1 — genuinely none
+    return { ran: false, alive: false }; // ENOENT / exit 2 / exit 3 — the read did not happen
+  }
+}
+
+export interface ConfigLockReclaimOpts {
+  /** Injectable clock (tests). Defaults to Date.now. */
+  now?: () => number;
+  /** Grace window (design (i).1). Default {@link DEFAULT_CONFIG_LOCK_GRACE_MS}. */
+  graceMs?: number;
+  /** Injectable live-git-process probe (design (i).2-3). Default {@link defaultProbeLiveGitProcess}. */
+  probeLiveGitProcess?: () => LiveGitProcessProbe;
+  /** Ledger sink (design (iv)) — called with the path and the authorising rung BEFORE the
+   *  file is removed, never after. Default `console.error`. */
+  ledger?: (message: string) => void;
+  /** Injectable removal call (tests) — lets a test drive the race window between the
+   *  staleness check and the removal itself (the lock vanishing or becoming unremovable in
+   *  that gap) without needing a real second writer. Default {@link unlinkSync}. */
+  unlink?: typeof unlinkSync;
+}
+
+/**
+ * THE PREDICATE, AND IT FAILS CLOSED (design (i)). All three rungs must hold before a
+ * `.git/config.lock` is considered reclaimable:
+ *   1. AGE — older than `graceMs`.
+ *   2. NO LIVE GIT PROCESS — the probe ran AND found none.
+ *   3. THE PROBE RAN — an unrunnable probe is not evidence of staleness and KEEPS the lock.
+ * THIS PREDICATE MAY NOT BE LOOSENED TOWARD RECLAMATION (design (ii)): clearing a live lock
+ * lets two writers race and corrupts `.git/config`; keeping a dead one costs only minutes.
+ */
+export function isConfigLockStale(lockPath: string, opts: ConfigLockReclaimOpts = {}): boolean {
+  const now = opts.now ?? (() => Date.now());
+  const graceMs = opts.graceMs ?? DEFAULT_CONFIG_LOCK_GRACE_MS;
+  const probe = opts.probeLiveGitProcess ?? defaultProbeLiveGitProcess;
+
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(lockPath).mtimeMs;
+  } catch {
+    return false; // absent or unreadable — nothing here to reclaim
+  }
+  if (now() - mtimeMs < graceMs) return false; // rung 1: may still be mid open()-then-write()
+
+  const result = probe();
+  if (!result.ran) return false; // rung 3: the read did not happen — keep, never authorise
+  if (result.alive) return false; // rung 2: a live git process holds it — keep
+
+  return true;
+}
+
+/**
+ * Reclaim a stale `.git/config.lock` for `repoDir` (design (i)-(iv)) — meant to run
+ * immediately before the `git worktree add` that would otherwise fail on it (rationale (2)).
+ *
+ * `unlink`s, never truncates/overwrites (design (iii)): the observed artifact is mode
+ * `-r--r--r--`, so an "open for write and truncate" reclaimer fails on the exact file this
+ * function exists to clear, while removal succeeds under the DIRECTORY's own permission.
+ *
+ * Ledgers BEFORE removing, naming the path (design (iv)): nothing about a zero-byte file
+ * tells a later reader what was removed or why, so an unledgered reclaim would be
+ * indistinguishable from the corruption it exists to prevent.
+ *
+ * Best-effort and per-item guarded, like every other reclaim in this module: an absent,
+ * unreadable, still-live, or already-vanished lock is left alone and reported `false`.
+ */
+export function reclaimStaleConfigLock(repoDir: string, opts: ConfigLockReclaimOpts = {}): boolean {
+  const lockPath = configLockPath(repoDir);
+  if (!isConfigLockStale(lockPath, opts)) return false;
+  const ledger = opts.ledger ?? ((m: string) => console.error(m));
+  ledger(
+    `pruneStaleRuns: reclaiming stale .git/config.lock at ${lockPath} (W1-T1036: past grace, ` +
+      "no live git process, probe ran) before the next worktree add",
+  );
+  const unlink = opts.unlink ?? unlinkSync;
+  try {
+    unlink(lockPath);
+  } catch {
+    return false; // vanished, or unremovable, between the check above and here
+  }
+  return true;
 }
 
 /**
@@ -2188,6 +2338,14 @@ export function pruneStaleRuns(
   const removedWorktrees: string[] = [];
   const removedBranches: string[] = [];
   const skipped: string[] = [];
+
+  // 0. W1-T1036: reclaim a stale .git/config.lock BEFORE anything below shells out to
+  //    `git` against repoDir. Every call site's very next step after pruneStaleRuns is
+  //    worktreeAdd, whose `git worktree add` writes into `.git/config` and fails outright
+  //    on a held lock (rationale (2)) — this is the earliest point common to all of them
+  //    (design (v)). Best-effort and fails closed: see reclaimStaleConfigLock's own doc.
+  const reclaimedConfigLock = reclaimStaleConfigLock(repoDir, opts.configLock);
+  const configLock = reclaimedConfigLock ? configLockPath(repoDir) : null;
 
   // 1. Force-remove any registered worktree whose path is under our worktrees
   //    root and whose branch is a run-* branch — UNLESS a live run owns it.
@@ -2272,7 +2430,7 @@ export function pruneStaleRuns(
     }
   }
 
-  return { worktrees: removedWorktrees, branches: removedBranches, skipped };
+  return { worktrees: removedWorktrees, branches: removedBranches, skipped, configLock };
 }
 
 // ── Worktree reaper (W1-T175) — closes pruneStaleRuns' coverage holes ─────
