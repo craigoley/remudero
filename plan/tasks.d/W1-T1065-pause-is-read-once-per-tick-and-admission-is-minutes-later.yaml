@@ -1,0 +1,155 @@
+- id: W1-T1065
+  title: "THE OPERATOR'S ONLY STOP CONTROL IS READ ONCE PER TICK AND ADMISSION HAPPENS MINUTES LATER IN THE SAME TICK — `deps.checkPause` is consulted at the top of `runDaemon`'s loop and never again before `daemon.iteration`, with the full sweep and three more awaited hooks in between, so a PAUSE created in that window dispatches anyway; re-check immediately before admission"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    MEASURED 2026-08-20 on Craigs-Mac-mini under /bin/zsh 5.9, in a scratch worktree proved equal
+    to origin/main 944bd33a before anything was read. Per-form ledger coverage control taken first
+    (666 gz, 6 plain, 1 live) and every census deduped on the FULL LINE. No `/rate_limit` call; no
+    state file touched; no process signalled.
+
+    (1) THE INSTANCE, WITH THE ADMISSION TIMESTAMP THAT SETTLES IT. The operator created
+    `state/PAUSE` and the daemon dispatched anyway. `state/PAUSE`'s mtime reads 14:49; BOTH
+    `daemon.iteration` rows for the two admitted tasks read 2026-08-20T14:53:35.989Z — one batch,
+    admitted ~4.5 MINUTES AFTER the flag existed. That is not an in-flight batch finishing; it is
+    a NEW admission past a visible hold.
+
+    (2) IT IS NOT AN UNWIRED DEP, AND THAT MATTERS BECAUSE THE FIX WOULD BE LARGER IF IT WERE.
+    `checkPause` IS supplied at both construction sites in `src/run-task.ts` — `daemonCommand` and
+    `drainCommand` — as `() => pauseDetail(config.root)`. `isPaused` is `existsSync` on
+    `join(root, "state", "PAUSE")`, documented as gating on "existence alone, independent of
+    whether the JSON parses (fail CLOSED)", so a bare `touch` pauses exactly as `rmd pause` does.
+    Nothing caches a directory handle: the path is re-joined and re-stat'd on every call, so a
+    bind mount that resolved at container start resolves on every tick.
+
+    (3) THE DEFECT IS THE WINDOW. `git grep -an 'deps.checkPause' -- src/lib/daemon.ts` returns
+    EXACTLY ONE LINE. Between that read and `log("daemon.iteration", ...)` sit roughly eight
+    hundred lines carrying FIVE awaited, unbounded operations: `deps.checkFreshness`, then
+    `await deps.sweep()` — the full reconciler over every open PR, wrapped in its own in-flight
+    ticker — then `await deps.sweepOrphans()`, `await deps.sweepFeedbackLanding()` and
+    `await deps.readUsage()`, before `runnableCandidates` and `partitionByFileOverlap` pick the
+    batch. PAUSE is never consulted again in that span.
+
+    (4) THE WINDOW IS MEASURED, AND THE FIGURE IS A LOWER BOUND RATHER THAN THE WINDOW ITSELF.
+    Over the deduped union, the gap from the last `sweep.pass` row to the next `daemon.iteration`
+    (n=142) reads min 19.7s, p50 39.6s, p75 69.2s, p90 3.6m, p95 32.1m, max 64.5m — and FOURTEEN
+    OF THE 142 EXCEED THE 4.5 MINUTES THIS INSTANCE WAS MISSED BY. It is a LOWER BOUND because it
+    starts at the sweep's LAST row rather than at the pause check, so it excludes the sweep's own
+    duration and the three other awaited hooks entirely. One hung sweep ran 3.6 hours the night
+    before; that is the same window.
+
+    (5) STOP HAS THE IDENTICAL SHAPE. `deps.checkStop` also returns exactly one line in
+    `src/lib/daemon.ts`, one line above the pause read. Both operator holds are single-read,
+    top-of-tick, and both miss anything created after that read.
+
+    (6) AND THE CROSS-CHECK THAT WOULD NORMALLY CONFIRM A TICK BOUNDARY IS UNAVAILABLE, WHICH IS
+    WORTH RECORDING SEPARATELY. `dispatch.settled_set` — the row logged when an admitted batch
+    settles — has not fired since 04:44:01Z. So the "did a tick close between the pause and the
+    admission" question cannot be answered from that row on the live corpus, and the
+    `daemon.iteration` timestamps had to carry the whole argument. Why that row stopped firing is
+    NOT this task's subject and is not diagnosed here.
+  design: |
+    ONE CONCERN: an operator hold that is read once per tick while admission happens much later in
+    the same tick. Not a new control, not the drainage policy, not the sweep's duration.
+
+    (i) THE FIX IS A RE-CHECK IMMEDIATELY BEFORE ADMISSION, AND IT IS DELIBERATELY NOT A NEW
+    CONTROL. The existing dep, the existing predicate and the existing `daemon.pause` row all
+    stay; what changes is that the value is read again after the awaited hooks and before the
+    first `daemon.iteration`, so a hold created during the sweep is honoured on the same tick
+    rather than the next one. STOP gets the same treatment for the same reason — leaving one of
+    the two single-read would be a half fix on a control whose whole value is that it is
+    immediate.
+
+    (ii) DRAIN-AND-HOLD IS PRESERVED, AND THAT IS THE LINE THIS TASK MUST NOT CROSS. `daemon.ts`
+    states PAUSE is "a drain-and-hold, an awaiting-resume state", and `drain.ts`'s own check
+    carries "awaited to completion before the loop returns here, so an in-flight task always
+    reaches its verdict + merge". A re-check BEFORE admission stops the NEXT batch; it must never
+    abort a batch already running, never interrupt `Promise.allSettled`, and never cancel a
+    worker. The whole change sits above the admission, never inside it.
+
+    (iii) DRAINAGE STAYS UNGATED AND THAT APPEARS DELIBERATE, SO IT IS OUT OF SCOPE.
+    `src/lib/sweep.ts` references `checkPause`, `isPaused` and `pauseDetail` NOWHERE — positive
+    control: the same query returns hits across `daemon.ts`, `drain.ts` and `run-task.ts`, so the
+    zero is a measurement rather than a dead query. `plan/policy.yaml` states drainage
+    (sweep/heal/arm/merge, at any depth) is never gated by the dispatch governor. This task does
+    not change that. A DISPATCH past a hold is the defect; a drainage rung past it is policy.
+
+    (iv) SECOND DESIGN NOTE — THE ACKNOWLEDGEMENT GAP, CARRIED HERE RATHER THAN FILED SEPARATELY.
+    Nothing records that a pause has been SEEN. `daemon.pause` is written only inside the branch
+    that acts on it, so while a batch drains there is no row distinguishing "hold seen, draining"
+    from "hold not seen at all" — and that is exactly the ambiguity that made this instance read
+    as a broken control. The operator waited, saw nothing, escalated to `docker stop`, and had to
+    clear a stranded `state/drain.lock` by hand an hour later. THE FIX IS ONE FIELD ON A ROW THIS
+    TICK ALREADY WRITES: `startInFlightTicker` emits `daemon.alive` every poll interval during a
+    dispatch and can carry whether a hold is currently set. NO NEW STEP AND NO NEW ROW — the same
+    discipline the sweep-lane arm-outcome shard applies. It rides here because it is the same
+    concern (the operator's hold being observable) and one field, not because it is small.
+
+    (v) WHAT THIS TASK MUST NOT DO. It must not abort in-flight work. It must not add a ledger
+    step. It must not gate drainage. It must not diagnose why `dispatch.settled_set` stopped
+    firing — that is recorded in the rationale as an unavailable cross-check, nothing more. It
+    must not change `isPaused`, `pauseDetail` or either construction site: they are correct.
+  acceptance:
+    - claim: "a pause created while the sweep is running is honoured before the next batch is admitted"
+      proof: "unit test: daemon pause: a pause created during the sweep window is honoured before admission"
+    - claim: "the re-check sits after the awaited hooks and before the first admission row rather than only at the top"
+      proof: "unit test: daemon pause: the re-check runs after the sweep and before the first iteration row"
+    - claim: "a batch already in flight still drains to its verdict rather than being aborted"
+      proof: "unit test: daemon pause: an in-flight batch still drains rather than aborting"
+    - claim: "stop is re-checked at the same point because it has the identical single-read shape"
+      proof: "unit test: daemon pause: stop gets the same re-check because it has the same single-read shape"
+    - claim: "the heartbeat records that a hold has been seen while a batch drains, so waiting is distinguishable from ignoring"
+      proof: "unit test: daemon pause: the heartbeat records that a pause has been seen while the batch drains"
+  risk: high
+  origin: "oper#pause-missed-during-sweep-window-2026-08-20"
+  plan_refs: ["W1-T11", "W1-T936", "W1-T343", "W1-T254"]
+  files: [src/lib/daemon.ts, test/daemon-pause-before-admission.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE ALTERNATIVE HYPOTHESIS WAS TESTED AND REJECTED ON THE OPERATOR'S OWN NUMBERS, WHICH IS WHY
+    THIS SHARD EXISTS AT ALL. A first pass concluded there was probably NO defect: `daemon.alive`
+    carrying `phase: dispatch` every ~68s is written only by `startInFlightTicker`, which runs only
+    while the daemon is blocked on awaited work, so a daemon that never returned to the top of its
+    loop would show exactly the observed silence on `daemon.pause`. That reading required admission
+    to PREDATE the pause. It did not: both `daemon.iteration` rows read 14:53:35.989Z against a
+    14:49 mtime. THE ID WAS HELD UNUSED UNTIL THAT ONE TIMESTAMP CAME BACK, and the shard is filed
+    on the branch the measurement actually chose rather than the one that was easier to argue.
+
+    `files:` IS TWO PATHS AND THAT IS THE HONEST LIST. The re-check is one read in
+    `src/lib/daemon.ts`, which holds the only occurrence of `deps.checkPause` and the only
+    occurrence of `deps.checkStop`. The test goes in a NEW file rather than `test/daemon.test.ts`:
+    that file carries 83 `runDaemon` references already, and this repo has measured file-level
+    crashes under coverage instrumentation in large shared test files, which would make a
+    coverage-load-bearing test flaky for reasons unrelated to the change. The shard's own path is
+    absent.
+
+    RISK IS `high` AND THE BAND IS RULE 19's SPAN, NOT BLAST RADIUS — MEASURED, NOT ASSUMED. The
+    change is narrow: one source module, one new test file, one concern. This shard was authored at
+    `medium` and `rmd lint-plan --base origin/main` REFUSED it — *"spans 2 distinct
+    subsystems/concerns (daemon, daemon-pause-before-admission) at risk:medium"* — then passed at
+    `high` with the file list unchanged. The two "concerns" are the two FILENAME STEMS; decomposing
+    is not the alternative, because the test exists to prove the one read the source file adds.
+    Folding the test into `test/daemon.test.ts` would collapse the span but reintroduce the
+    coverage-crash hazard named above, so the band is paid instead.
+
+    EVERY FIGURE IS DATED 2026-08-20 AND WILL DRIFT — RE-RUN THE QUERY. The window:
+    `zgrep -h '"step":"daemon.iteration"\|"step":"sweep.pass"' <every ledger form> | sort -u`,
+    then for each iteration row take the gap to the most recent preceding sweep row. Take a
+    per-form file count as the coverage control first. The single-read claim:
+    `git grep -an 'deps.checkPause' -- src/lib/daemon.ts` must return exactly one line, and
+    `deps.checkStop` likewise — if either returns two, the fix has landed.
+
+    ID PROVENANCE — FIVE SURFACES, RE-SWEPT IMMEDIATELY BEFORE PUSHING. Pre-minted by the operator
+    and read back before any work: `refs/rmd-id/W1-T1065` -> 3909dc9544b97944f29025f40e8356c6476ca8a5,
+    an orphan over the empty tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904 with the hand-mint
+    message shape, matching the known-good W1-T1053 anchor byte for byte in tree and author. The
+    other four read 0: the shard FILENAME under `plan/tasks.d/`, a declared `- id:` under `plan/`,
+    every open PR's title, branch AND changed-file list, and `git grep` across `src/`, `test/` and
+    `deploy/` on origin/main. LIVE CONTROLS, same tools: the W1-T1053 filename reads 1, the open-PR
+    listing is non-empty, and the source sweep reads 2 files for an id an earlier merged PR
+    orphaned — so none of the four zeros is a dead query.

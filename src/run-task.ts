@@ -645,6 +645,9 @@ import {
   resumeFleet,
   stopDetail,
 } from "./lib/fleet-control.js";
+import {
+  startInstallationTokenRefresh,
+} from "./lib/github-app.js";
 
 /**
  * The REAL reads behind the binary-pin rung, as one object so the wiring is a single argument and
@@ -2232,15 +2235,45 @@ export interface PrHeadGateway {
  * layer (any error resolves to `undefined`) is deliberate: {@link checkPrOwnership}
  * treats an unresolved head ref as NOT owned, so a `gh` hiccup fails CLOSED
  * (never merged) rather than silently assuming the claim is honest.
+ *
+ * W1-T1026: the GraphQL read (`--json`) is the ONE bucket measured to exhaust on
+ * this account while REST/core stays healthy (CLAUDE.md), and 16 of 29
+ * `pr_attribution_failed` instances were exactly this — an unreadable head ref,
+ * 13 of them on the run's OWN `run-<task>-<epoch>` branch, indistinguishable from
+ * a genuinely foreign one once `undefined` reached {@link checkPrOwnership}. So a
+ * GraphQL failure here no longer gives up: it retries the SAME field
+ * (`headRefName`) over REST — a separate quota — via {@link singlePrRestArgs} /
+ * {@link mapRestPr}, the identical migration {@link ghLiveState} already applies
+ * to `state`. Still fail-SOFT end to end: an unparsable URL or a REST failure
+ * (both transports down, or a genuinely unreadable PR) resolves to `undefined`
+ * exactly as before, so {@link checkPrOwnership}'s fail-closed guard for that
+ * residual case is unchanged — this widens what counts as "read successfully",
+ * never what happens when nothing can be read.
+ *
+ * `gh` IS INJECTABLE, defaulting to the real {@link ghJson} — mirroring
+ * {@link fetchPrBodyViaGh}/{@link fetchPrDiffFilesViaGh} just above and
+ * {@link ghLiveStateByNumber} below, all in this same file. Both the GraphQL
+ * probe and the REST fallback are `gh` calls of the identical `(args: string[])
+ * => unknown` shape, so ONE injected reader drives both without a second
+ * parameter — a test can make the first call throw (the exhaustion this task
+ * measures) and the second answer, or make both throw (the residual
+ * both-transports-down case), with no `gh` exec anywhere in the suite.
  */
-export function ghPrHeadGateway(): PrHeadGateway {
+export function ghPrHeadGateway(gh: (args: string[]) => unknown = ghJson): PrHeadGateway {
   return {
     headRefName(prUrl) {
       try {
-        const view = ghJson(["pr", "view", prUrl, "--json", "headRefName"]) as { headRefName?: string };
+        const view = gh(["pr", "view", prUrl, "--json", "headRefName"]) as { headRefName?: string };
         return view.headRefName;
       } catch {
-        return undefined;
+        const target = prUrlTarget(prUrl);
+        if (!target) return undefined;
+        try {
+          const row = gh(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
+          return mapRestPr(row).headRefName || undefined;
+        } catch {
+          return undefined;
+        }
       }
     },
   };
@@ -13687,6 +13720,30 @@ export async function daemonCommand(
     1,
     `### rmd daemon — ledger: ${ledgerPath} | stdout: ${outLogPath} | stderr: ${errLogPath}`,
   );
+
+  // W1-T1024 — THE FLEET AUTHENTICATES AS THE INSTALLED GITHUB APP, whose core/graphql pool is
+  // measured SEPARATE from an operator's interactive session (github-app.ts's own doc: the
+  // incident that files this task was an operator session exhausting graphql while the daemon's
+  // own traffic in that window was negligible). Started here, once, in the DAEMON'S OWN PROCESS
+  // — process.env only means anything to ITS children, and every existing GH_TOKEN consumer
+  // (env.ts's ALLOWLIST at worker spawn, review.ts's per-call spread, deploy/entrypoint.sh's
+  // credential helper) already reads it at call/spawn time, so refreshing it here reaches all
+  // three with NO call-site change.
+  //
+  // GATED ON CONFIG PRESENCE so an unconfigured host (the App not installed there yet) is BYTE-
+  // IDENTICAL to before this task: zero ledger lines, zero timers, GH_TOKEN's own optional shape
+  // preserved exactly. Where it IS configured, `refreshInstallationToken` mints once immediately
+  // and this loop reschedules itself off the minted `expires_at` (via `nextRefreshDelayMs`,
+  // strictly inside the one-hour life) — or off `REFRESH_MARGIN_MS` when a mint fails, so a
+  // transient outage keeps retrying rather than going silent (design iv: degrade, never refuse).
+  //
+  // THE WORKER GAP IS A KNOWN, ACCEPTED LIMIT (github-app.ts's file header, design iii): a
+  // worker's own GH_TOKEN copy is captured at spawn and held for its whole run, so a run
+  // outliving the token's one-hour life can still hit the failure it always could — closing that
+  // needs a change to worker.ts or git-push.ts, neither of which is in this task's declared
+  // files. This refresher fixes the DAEMON's own calls and every FRESHLY-spawned worker; it does
+  // not retrofit an already-running one.
+  startInstallationTokenRefresh({ log });
 
   // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
