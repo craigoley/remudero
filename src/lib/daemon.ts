@@ -134,6 +134,17 @@ export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" |
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 /**
+ * W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND): the DEFAULT bound on `await deps.sweep()`
+ * below — mirrors plan/policy.yaml's `sweepWallClockBoundMs` row (net-new; the measured
+ * healthy-vs-hung derivation lives in that file's comment). Same fs-free-safety-net reasoning
+ * as {@link DEFAULT_POLL_INTERVAL_MS} immediately above: this pure module cannot load
+ * `plan/policy.yaml` itself, so this literal is the default for a direct/test caller that
+ * supplies no `DaemonOpts.sweepWallClockBoundMs`; the real `rmd daemon` entry
+ * (`daemonCommand`, run-task.ts) threads `policy.values.sweepWallClockBoundMs` explicitly.
+ */
+export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
+
+/**
  * The exit code a FRESHNESS self-restart uses, distinct from a crash's 1 (W1-T490).
  *
  * 75 is `EX_TEMPFAIL` from sysexits(3) — "temporary failure, the user is invited to
@@ -660,6 +671,18 @@ export interface DaemonOpts {
    * states.
    */
   wipLimit?: number;
+  /**
+   * W1-T1044 — the WALL-CLOCK BOUND (ms) on `await deps.sweep()`, below (default {@link
+   * DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}). POLICY DATA (rule 2): the real `rmd daemon` entry
+   * threads `policy.values.sweepWallClockBoundMs` (src/lib/policy.ts) here, never a literal
+   * at the call site. A sweep still in flight once this many REAL ms (a `setTimeout`,
+   * independent of the injected `deps.sleep` cadence the in-flight ticker already owns — see
+   * the call site's own comment for why a second consumer of that clock is avoided) have
+   * elapsed is ABANDONED — the tick logs `daemon.sweep.abandoned` and returns control to the
+   * loop rather than awaiting it forever (this repo's own measured incident: a fix-rung
+   * worker's `until` shell loop with no exit condition parked the daemon up to 165 minutes).
+   */
+  sweepWallClockBoundMs?: number;
 }
 
 /**
@@ -1772,6 +1795,9 @@ export async function runDaemon(
   opts: DaemonOpts = {},
 ): Promise<DaemonSummary> {
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
+  // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
+  const sweepWallClockBoundMs = opts.sweepWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
   const log = deps.log ?? (() => {});
   // W1-T342: shared by BOTH `checkDispatchGovernors` call sites below (the tick-top one and the
   // per-dispatch one immediately before `runOne`) — same three log shapes either call site can
@@ -2198,7 +2224,42 @@ export async function runDaemon(
     if (deps.sweep) {
       const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep").stop;
       try {
-        await deps.sweep();
+        // W1-T1044: the WALL-CLOCK BOUND on `deps.sweep()` — see DaemonOpts.sweepWallClockBoundMs's
+        // own doc for the measured incident this closes (a fix-rung worker's `until` shell loop
+        // with no exit condition parked this exact await for up to 165 minutes, and neither the
+        // worker's `--max-turns` nor its `--max-budget-usd` cap can fire on a shell command that
+        // never returns — both burn neither a turn nor a dollar). A REAL `setTimeout`, never
+        // `deps.sleep`: the ticker started above already owns that injected clock for its own
+        // `daemon.alive`/`sweepLight` cadence, and racing a SECOND consumer against it would
+        // double the sleep-call count every other daemon.ts suite counts as its idle proxy (see
+        // `startInFlightTicker`'s own doc) — a test drives this bound with a small REAL `ms`
+        // value via `DaemonOpts.sweepWallClockBoundMs` instead (matches
+        // `spawnFixWorkerBounded`'s identical real-timer choice, run-task.ts).
+        //
+        // Wrapped in `Promise.resolve().then(...)` so a `deps.sweep` that throws SYNCHRONOUSLY
+        // (never awaits at all) still produces a rejected promise this can race the timer
+        // against, exactly like an eventually-rejecting one would.
+        const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!());
+        const startedAtMs = Date.now();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const bound = new Promise<"abandoned">((resolve) => {
+          timer = setTimeout(() => resolve("abandoned"), sweepWallClockBoundMs);
+        });
+        try {
+          const winner = await Promise.race([sweepPromise, bound]);
+          if (winner === "abandoned") {
+            const elapsedMs = Date.now() - startedAtMs;
+            log("daemon.sweep.abandoned", { elapsed_ms: elapsedMs, bound_ms: sweepWallClockBoundMs });
+            // Never leave the real sweep's eventual outcome unhandled — it may still resolve or
+            // throw well after this tick has moved on to dispatch (the mutex `runSweep` shares
+            // across concurrent calls, cited in the doc above, is what makes that safe).
+            sweepPromise.catch((e) => {
+              log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e), after_abandon: true });
+            });
+          }
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       } catch (e) {
         log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e) });
       } finally {
