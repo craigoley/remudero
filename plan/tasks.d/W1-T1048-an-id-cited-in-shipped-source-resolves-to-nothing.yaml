@@ -128,7 +128,7 @@
   risk: high
   origin: "oper#id-cited-in-source-never-reserved-2026-08-20"
   plan_refs: ["W1-T1039", "W1-T949", "W1-T278", "W1-T509", "W1-T1010", "W1-T471"]
-  files: [.github/workflows/ci.yml, package.json, scripts/task-id-existence-check.mjs, scripts/task-id-existence-baseline.json, test/task-id-existence-check.test.ts]
+  files: [.github/workflows/ci.yml, package.json, scripts/task-id-existence-check.mjs, scripts/task-id-existence-baseline.json, test/task-id-existence-check.test.ts, src/lib/ci-parity.ts, src/lib/review.ts]
   status: queued
   attempts: 0
   note: |
