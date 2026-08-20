@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { checkImageDrift, IMAGE_DRIFT_STEP } from "../src/lib/image-drift.js";
+import { BAKED_PATHS, checkImageDrift, IMAGE_DRIFT_STEP } from "../src/lib/image-drift.js";
 import { serviceFreshnessGate } from "../src/run-task.js";
 import type { ServiceFreshness } from "../src/lib/self-sync.js";
 
@@ -88,6 +88,14 @@ test("W1-T1021: a build sha this checkout's history cannot resolve reports unmea
   const { dir } = repoFixture();
   const finding = checkImageDrift(dir, { readStamp: () => "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" });
   assert.equal(finding.status, "unmeasurable");
+  // WHICH arm, not merely which status. Two different refusals return `unmeasurable`, so a test
+  // asserting only the status passes even when the wrong one fired — it would still pass if this
+  // sha resolved fine and the baked-path history read blew up instead.
+  assert.match(
+    finding.status === "unmeasurable" ? finding.reason : "",
+    /is not resolvable in/,
+    "must be the cat-file arm, not the baked-path history-read arm below",
+  );
 });
 
 test("checkImageDrift: a stamp file that is genuinely absent from disk (default readStamp) degrades to not-applicable, never throws", () => {
@@ -182,4 +190,66 @@ test("serviceFreshnessGate: guarded/degraded NEVER consults checkImageDrift at a
     },
   });
   assert.equal(calls, 0, "guarded status short-circuits before checkImageDrift is ever consulted");
+});
+
+// ── THE BAKED-PATH HISTORY READ'S OWN REFUSAL ARM ─────────────────────────────────────────────
+//
+// `checkImageDrift`'s `git log -1 --format=%H HEAD -- <BAKED_PATHS>` call has a `catch` that
+// returns `unmeasurable`. A HEALTHY repo cannot produce that failure — which is exactly why the
+// arm shipped with zero covering tests and `diff-coverage` blocked the PR on it. The only honest
+// way to reach it is to inject the failure at the seam the module already exposes (`deps.git`),
+// so these keep every OTHER git call real (this file's stated discipline) and fake precisely the
+// one call under test.
+
+/**
+ * A `git` runner that delegates to REAL git for every call except the baked-path `log` lookup.
+ * With `failLog: true` that one call throws; with `failLog: false` NOTHING is injected and the
+ * wrapper is a pure pass-through — the well-formed control that proves a refusal below came from
+ * the injected failure rather than from a fake that never worked. `logCalls` is the second half
+ * of that control: a wrapper the module never routed through would report zero, and both tests
+ * would otherwise pass vacuously.
+ */
+function realGitExceptBakedPathLog(failLog: boolean): {
+  run: (repoDir: string, args: string[]) => string;
+  logCalls: () => number;
+} {
+  let logCalls = 0;
+  return {
+    run: (repoDir: string, args: string[]): string => {
+      if (args[0] === "log") {
+        logCalls += 1;
+        if (failLog) throw new Error("fatal: simulated failure reading the baked paths' history");
+      }
+      return execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" });
+    },
+    logCalls: () => logCalls,
+  };
+}
+
+test("checkImageDrift: a baked-path history read that FAILS reports unmeasurable naming both baked paths, never drift", () => {
+  const { dir, commit } = repoFixture();
+  const buildSha = commit("deploy/entrypoint.sh", "#!/bin/sh\necho boot2\n", "baked entrypoint change");
+  const g = realGitExceptBakedPathLog(true);
+
+  const finding = checkImageDrift(dir, { readStamp: () => buildSha, git: g.run });
+
+  assert.equal(finding.status, "unmeasurable", "a git failure is never evidence of drift");
+  assert.ok(g.logCalls() > 0, "control: the module really did route through the failing seam");
+  const reason = finding.status === "unmeasurable" ? finding.reason : "";
+  for (const baked of BAKED_PATHS) {
+    assert.ok(reason.includes(baked), `the refusal must name ${baked} so an operator knows what could not be read`);
+  }
+  assert.ok(reason.includes(dir), "and the repo it could not read them in");
+  assert.doesNotMatch(reason, /is not resolvable in/, "this is the history-read arm, NOT the cat-file arm above");
+});
+
+test("checkImageDrift: the SAME wrapper with no failure injected reports fresh — the control that the arm above fired on the injection, not on a broken fake", () => {
+  const { dir, commit } = repoFixture();
+  const buildSha = commit("deploy/entrypoint.sh", "#!/bin/sh\necho boot2\n", "baked entrypoint change");
+  const g = realGitExceptBakedPathLog(false);
+
+  const finding = checkImageDrift(dir, { readStamp: () => buildSha, git: g.run });
+
+  assert.equal(finding.status, "fresh", "an un-injected pass-through must reach the ordinary verdict");
+  assert.ok(g.logCalls() > 0, "control: the wrapper intercepted the same call it fails in the test above");
 });
