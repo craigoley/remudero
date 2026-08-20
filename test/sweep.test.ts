@@ -3218,6 +3218,10 @@ test("arm outcome: a no-task-id refusal yields acted:false AND names itself in s
     "arm outcome: no-task-id",
     "the refusal must be visible in the LEDGER, not only on stdout via say()",
   );
+  // W1-T1061: the SAME outcome also rides its own field now, beside the sentence above —
+  // re-derived from the prose assertion rather than dropping it, since together they are
+  // what proves the outcome is recorded at all (design note (iv)).
+  assert.equal(disposed[0].arm_outcome, "no-task-id", "the outcome is ALSO a field, not only prose");
 });
 
 test("arm outcome REGRESSION LOCK: an armed outcome still yields acted:true — the fix did not make everything stand down", async () => {
@@ -3281,6 +3285,74 @@ test("arm outcome: a NEW head sha re-earns an arm attempt even after a prior suc
   await runSweep([movedHead], second, DEFAULT_SWEEP_POLICY);
 
   assert.deepEqual(calls, ["newsha0000"], "the new head re-earned the arm attempt");
+});
+
+// ── W1-T1061: the arm outcome is a FIELD on `sweep.disposed`, not only prose inside
+// `stand_down_reason` — the sweep is the one lane that arms the most PRs and, until now,
+// the one lane whose outcome could not be counted without splitting a sentence on a colon.
+// `stand_down_reason` keeps its human sentence unchanged; `arm_outcome` is the new sibling.
+
+test("sweep arm outcome: the disposed row carries the outcome as a field and not as prose", async () => {
+  const deps = fakeDeps({ arm: () => "no-task-id" });
+  await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1);
+  // The FIELD carries the bare outcome name — never the "arm outcome: " prefix that only
+  // ever belonged to the human sentence.
+  assert.equal(disposed[0].arm_outcome, "no-task-id", "the outcome is its own field on the row");
+  assert.notEqual(
+    disposed[0].arm_outcome,
+    "arm outcome: no-task-id",
+    "the field is the bare outcome, not the prose sentence repeated onto a second key",
+  );
+});
+
+test("sweep arm outcome: the field is readable without parsing a sentence", async () => {
+  const deps = fakeDeps({ arm: () => "ledger-refused" });
+  await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  // No `.split(":")`, no regex, no substring — a direct read of the field IS the outcome.
+  assert.equal(disposed[0].arm_outcome, "ledger-refused");
+  // Contrast: the sentence this used to be the ONLY carrier of still requires exactly that
+  // parse — proving the field is a genuine escape from it, not a duplicate of the need.
+  assert.equal(
+    String(disposed[0].stand_down_reason).split(": ")[1],
+    disposed[0].arm_outcome,
+    "the sentence still needs a colon-split to yield the same value the field hands over directly",
+  );
+});
+
+test("sweep arm outcome: a disposal with no arm attempt carries no outcome field", async () => {
+  const deps = fakeDeps();
+  await runSweep([blockedFixablePr()], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(deps.armed.length, 0, "this disposition never reaches deps.arm at all");
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1);
+  assert.equal(disposed[0].disposition, "blocked-fixable");
+  assert.equal("arm_outcome" in disposed[0], false, "no attempt means no field at all — not even null");
+});
+
+test("sweep arm outcome: the sentence and the field agree on what happened", async () => {
+  const deps = fakeDeps({ arm: () => "head-unavailable" });
+  await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(
+    disposed[0].stand_down_reason,
+    `arm outcome: ${disposed[0].arm_outcome}`,
+    "one write site feeds both — the sentence and the field can never drift apart",
+  );
+});
+
+test("sweep arm outcome: no new ledger step is added by the change", async () => {
+  const deps = fakeDeps({ arm: () => "no-task-id" });
+  await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
+
+  const steps = [...new Set(readLedgerLines(deps.ledgerPath).map((l) => l.step))];
+  assert.deepEqual(steps, ["sweep.disposed"], "the field rides the EXISTING row — no new step, no new row");
 });
 
 // ── W1-T520: ARMED AND BEHIND, THE TWO FACTS NOTHING JOINED ──────────────────────────────────

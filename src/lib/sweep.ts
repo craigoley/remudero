@@ -3654,6 +3654,11 @@ export async function runSweep(
    * IDENTICALLY. Unconditional counting (`actionsTaken`/`actionsFailed`)
    * matches the original inline placement exactly: a deduped/wait PR reaches
    * here with `acted:false` and no `actionError`, so neither counter moves.
+   *
+   * W1-T1061: `armOutcome` rides alongside `standDownReason` rather than only inside it —
+   * `standDownReason` stays the human sentence (`"arm outcome: no-task-id"`), but a caller
+   * counting outcomes from this lane no longer has to split that sentence on a colon to do
+   * it; see `arm_outcome` on the ledgered `disposedLine` below.
    */
   function finalizeDisposition(
     index: number,
@@ -3666,6 +3671,7 @@ export async function runSweep(
     actionError: string | undefined,
     standDownReason: string | undefined,
     depReviewOutcome: string | undefined,
+    armOutcome: ArmOutcomeName | undefined,
   ): void {
     if (standDownReason) {
       // The site the TASK names ("a sweep disposition"), naming the state —
@@ -3719,6 +3725,13 @@ export async function runSweep(
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
+        // W1-T1061: the FIELD sibling to `stand_down_reason`'s prose — present whenever
+        // `deps.arm` returned a concrete outcome for THIS pr this pass (armed or not),
+        // absent whenever no arm was even attempted (every other disposition, and a
+        // mergeable PR that stood down before reaching `deps.arm` at all). This is the
+        // same value `standDownReason`'s `arm outcome: ${armOutcome}` sentence names, so
+        // the two can never drift apart — one write site, read twice.
+        ...(armOutcome ? { arm_outcome: armOutcome } : {}),
         ...(question ? { question: question.question } : {}),
       };
       appendLine(deps.ledgerPath, disposedLine);
@@ -3861,6 +3874,13 @@ export async function runSweep(
     // and from `deps.dryRun` (preview), so the disposed line can name WHY
     // `acted` is false without conflating the three.
     let standDownReason: string | undefined;
+    // W1-T1061: the FIELD twin of `standDownReason`'s prose, set ONLY when the "mergeable"
+    // case below actually calls `deps.arm(pr)` and gets a concrete (non-void) outcome back —
+    // every other disposition, and a mergeable PR that stands down in `decideSweepArm` before
+    // ever reaching `deps.arm`, leaves this `undefined` so `finalizeDisposition` writes no
+    // `arm_outcome` field at all (acceptance: "a disposal with no arm attempt carries no
+    // outcome field").
+    let armOutcome: ArmOutcomeName | undefined;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate
     // straight out of `runSweep` as one un-attributed `sweep.error`, aborting
     // the WHOLE pass (every later PR in `openPrs` went unreconciled this
@@ -3907,12 +3927,17 @@ export async function runSweep(
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its
               // seven branches it took, and five of them armed nothing. Discarding it is what
               // let `acted:true` be recorded for a PR that was never armed.
-              const armOutcome = await deps.arm(pr);
-              if (!armOutcomeArmed(armOutcome)) {
+              const armResult = await deps.arm(pr);
+              // W1-T1061: capture the concrete outcome onto the OUTER `armOutcome` (read by
+              // `finalizeDisposition` below) whenever one came back — a `void` return is the
+              // legacy "treat as armed" shape `armOutcomeArmed` already special-cases, and it
+              // names no real branch, so no field is written for it either.
+              if (armResult !== undefined) armOutcome = armResult;
+              if (!armOutcomeArmed(armResult)) {
                 acted = false;
                 // The refusal used to go only to `say` -> stdout -> daemon.out.log, leaving no
                 // trace in the ledger where anyone looks. Name it on the disposed line.
-                standDownReason = `arm outcome: ${String(armOutcome)}`;
+                standDownReason = `arm outcome: ${String(armResult)}`;
               }
               break;
             }
@@ -4145,6 +4170,7 @@ export async function runSweep(
           undefined,
           `duplicate review key (${reviewKey}) already claimed this pass — see PriorActions.postReviewed's doc`,
           undefined,
+          undefined,
         );
       } else {
         claimedReviewKeys.add(reviewKey);
@@ -4153,7 +4179,19 @@ export async function runSweep(
       continue;
     }
 
-    finalizeDisposition(prIndex, pr, disposition, reason, question, acted, alreadyDone, actionError, standDownReason, depReviewOutcome);
+    finalizeDisposition(
+      prIndex,
+      pr,
+      disposition,
+      reason,
+      question,
+      acted,
+      alreadyDone,
+      actionError,
+      standDownReason,
+      depReviewOutcome,
+      armOutcome,
+    );
   }
 
   // ── W1-T1049 — REVIEW CONCURRENCY BUDGET, NOW ITS OWN ───────────────────────
@@ -4201,6 +4239,7 @@ export async function runSweep(
       false,
       undefined,
       `review budget exhausted this pass (${reviewLanes} lane(s) in use) — re-derived next pass`,
+      undefined,
       undefined,
     );
   }
@@ -4308,7 +4347,19 @@ export async function runSweep(
         // never protect any.
         claimedReviewKeys.delete(job.reviewKey);
       }
-      finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, acted, false, actionError, standDownReason, undefined);
+      finalizeDisposition(
+        job.index,
+        job.pr,
+        "post-review",
+        job.reason,
+        job.question,
+        acted,
+        false,
+        actionError,
+        standDownReason,
+        undefined,
+        undefined,
+      );
     }),
   );
 
