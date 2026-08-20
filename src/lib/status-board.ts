@@ -1128,7 +1128,9 @@ interface DispatchCadence {
  *  construction on too little evidence: zero or one dispatch ever, or every dispatch landing at
  *  the identical instant, both leave `boundMs`/`boundDerivation` undefined rather than fabricate
  *  a number (design (iv), "unknown is not stalled"). */
-function deriveDispatchCadence(lines: Array<Record<string, unknown>>): DispatchCadence {
+/** W1-T1047: EXPORTED so `rmd doctor` can reuse this host's own observed cadence as the stall
+ *  bound instead of reimplementing it against a guessed round figure. Behaviour unchanged. */
+export function deriveDispatchCadence(lines: Array<Record<string, unknown>>): DispatchCadence {
   const dispatches = dispatchRunStarts(lines);
   if (dispatches.length === 0) return {};
   const newest = dispatches[dispatches.length - 1]!;
@@ -1327,7 +1329,11 @@ const BLOCKERS_NEXT_ACTIONS: readonly NextActionRule<BlockersSection>[] = [
  *  escalation, not only after. */
 const PERPETUAL_ATTEMPT_THRESHOLD = DEFAULT_MAX_TASK_DISPATCHES - 1;
 
-function deriveQueueHead(
+/** W1-T1047: EXPORTED so `rmd doctor` can call it with a LOCALLY-derived merged set instead of
+ *  the GitHub projections. The `!projections || ghUnknownReason` bail below is exactly why a
+ *  network outage blanks the stall check in `rmd status`; doctor supplies local projections so the
+ *  same code answers without a network read. Behaviour unchanged for existing callers. */
+export function deriveQueueHead(
   plan: Plan | undefined,
   lines: Array<Record<string, unknown>>,
   projections: Map<string, StatusProjection> | undefined,

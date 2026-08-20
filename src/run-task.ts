@@ -1,3 +1,13 @@
+import {
+  DOCTOR_USAGE_EXIT,
+  buildDoctorReport,
+  readGitLocks,
+  readMemInfo,
+  readPauseAgeMs,
+  refuseUnsupportedArgs,
+  readDiskFreeBytes,
+  type MemInfo,
+} from "./lib/doctor.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
@@ -141,7 +151,7 @@ import {
   provisionInstallRoot,
   resolveInstallRoot,
 } from "./lib/install-root.js";
-import { buildStatusBoard, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
+import { buildStatusBoard, deriveDispatchCadence, deriveQueueHead, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import {
@@ -15213,6 +15223,106 @@ export interface StatusDeps {
  * config read) and hands everything else to the pure builder. Read-only: never writes a
  * marker, never spawns anything, always exits 0 (bad args aside).
  */
+/** Every `*.lock` run id under the inflight dir — the FILES, independent of whether their pids
+ *  live. Missing dir is zero locks, never an error: a fleet that has never dispatched is healthy. */
+function defaultReadLockFiles(dir: string): string[] {
+  try {
+    return readdirSync(dir).filter((n) => n.endsWith(".lock")).map((n) => n.slice(0, -".lock".length));
+  } catch {
+    return [];
+  }
+}
+
+/** Injectable seams for {@link doctorCommand} — every reader it drives, so the whole command is
+ *  exercisable without a real /proc, a real ledger, or a live daemon. */
+export interface DoctorDeps {
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+  loadConfig?: () => Config;
+  nowMs?: number;
+  readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
+  loadPlan?: () => Plan | undefined;
+  liveInflightRuns?: (dir: string) => LiveInflightRun[];
+  readMemInfo?: () => MemInfo;
+  readDiskFreeBytes?: (path: string) => number | undefined;
+  readPauseAgeMs?: (root: string, nowMs: number) => number | undefined;
+  readGitLocks?: (root: string, nowMs: number) => Array<{ path: string; ageMs: number }>;
+  readLockFiles?: (dir: string) => string[];
+}
+
+/**
+ * W1-T1047 — `rmd doctor`: the one LOCAL, READ-ONLY command that answers "is the fleet healthy"
+ * with an exit code that means something. Every judgement lives in `src/lib/doctor.ts` as a pure
+ * function; this is the I/O shell that measures the inputs and prints the report.
+ *
+ * NO NETWORK, BY CONSTRUCTION. The stall check reuses `deriveQueueHead`/`deriveDispatchCadence`
+ * (exported by this task, never reimplemented) but supplies LOCALLY-derived projections instead of
+ * the GitHub ones, so the check that would have caught the stall survives the API outage during
+ * which it is most needed. Nothing here calls `gh`.
+ *
+ * A DOWN DAEMON IS NOT AN ERROR. Every reader degrades to a stated unknown; the command still
+ * prints a full report and still exits by worst verdict.
+ */
+export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Promise<number> {
+  const out = deps.out ?? ((l: string) => console.log(l));
+  const err = deps.err ?? ((l: string) => console.error(l));
+  const refusal = refuseUnsupportedArgs(rest);
+  if (refusal) {
+    err(refusal);
+    return DOCTOR_USAGE_EXIT;
+  }
+  const config = (deps.loadConfig ?? loadConfig)();
+  const nowMs = deps.nowMs ?? Date.now();
+  const root = config.root;
+  const ledgerLines = (deps.readLedgerLines ?? ((pth: string) => readLedgerLines(pth) as Array<Record<string, unknown>>))(ledgerPathFor(config));
+
+  // LOCAL merged set: a task is merged if the ledger says so. This is the substitution that keeps
+  // the stall check alive without a network read — `deriveQueueHead` needs projections, and these
+  // come from rows this host already wrote.
+  const projections = new Map<string, StatusProjection>();
+  for (const line of ledgerLines) {
+    const id = typeof line.task_id === "string" ? line.task_id : undefined;
+    if (!id) continue;
+    if (line.step === "verdict" && line.merged === true) {
+      projections.set(id, { taskId: id, status: "merged", merged: true } as StatusProjection);
+    }
+  }
+
+  const plan = deps.loadPlan ? deps.loadPlan() : undefined;
+  const cadence = deriveDispatchCadence(ledgerLines as Array<Record<string, unknown>>);
+  const head = deriveQueueHead(plan, ledgerLines as Array<Record<string, unknown>>, projections, undefined, 5, nowMs);
+  const newestDispatchMs = cadence.newestTs ? Date.parse(cadence.newestTs) : NaN;
+
+  const inflightDir = join(root, "state", "inflight");
+  // `liveInflightRuns` returns ONLY runs whose pid is alive, so divergence is the difference
+  // between the lock FILES on disk and that live set — a lock with no live pid is a run that died
+  // without releasing. Both halves are injectable so the arm is testable without real pids.
+  const live = (deps.liveInflightRuns ?? liveInflightRuns)(inflightDir);
+  const lockFiles = (deps.readLockFiles ?? defaultReadLockFiles)(inflightDir);
+  const liveIds = new Set(live.map((r) => r.runId));
+  const dead = lockFiles.filter((f) => !liveIds.has(f));
+
+  const report = buildDoctorReport({
+    nowMs,
+    ledgerLines: ledgerLines as Array<Record<string, unknown>>,
+    candidateCount: head.rows.length,
+    ...(Number.isFinite(newestDispatchMs) ? { dispatchSinceMs: Math.max(0, nowMs - newestDispatchMs) } : {}),
+    ...(cadence.boundMs === undefined ? {} : { dispatchBoundMs: cadence.boundMs }),
+    ...(cadence.boundDerivation === undefined ? {} : { dispatchBoundDerivation: cadence.boundDerivation }),
+    mem: (deps.readMemInfo ?? readMemInfo)(),
+    ...(((v) => (v === undefined ? {} : { diskFreeBytes: v }))((deps.readDiskFreeBytes ?? readDiskFreeBytes)(root))),
+    ...(((v) => (v === undefined ? {} : { pauseAgeMs: v }))((deps.readPauseAgeMs ?? readPauseAgeMs)(root, nowMs))),
+    totalLocks: lockFiles.length,
+    deadLocks: dead,
+    gitLocks: (deps.readGitLocks ?? readGitLocks)(repoRoot, nowMs),
+    workerCount: 0,
+  });
+
+  if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));
+  else out(report.text);
+  return report.exitCode;
+}
+
 export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l));
   const err = deps.err ?? ((l: string) => console.error(l));
@@ -22010,6 +22120,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd sync [--dry-run]   # W1-T907: the sanctioned dedupe-then-pull recipe as one explicit verb, for exactly the case checkCliFreshness refuses (behind origin/main AND dirty) that W1-T446's intersect-only fix cannot unstick — three-way classifies every `git status --porcelain` path against the origin/main blob (git hash-object vs git rev-parse <ref>:<path>, the same predicate deployer.ts's sameAsIncoming/discardLocal already established): IDENTICAL (local bytes == origin/main's blob at that path, or a DECISIONS.md whose every appended `## ...` record already landed via plan/decisions.d, W1-T191) is discarded/restored as provably lossless; everything else (no origin/main counterpart, differing bytes, or an unlanded DECISIONS.md record) is COPIED ASIDE under state/sync-<timestamp>/ with a named report BEFORE any discard runs and is NEVER deleted, cleared from the working tree only if the fast-forward actually needs that path; a local commit that is not an ancestor of origin/main (BLOCKING) refuses the WHOLE verb, mutating nothing. Then `git merge --ff-only origin/main` — never merge, never rebase, never reset --hard. --dry-run prints the identical classification and mutates nothing. Off-main/detached checkouts refuse exactly as W1-T445 established for the CLI entry guard. Does not touch checkCliFreshness's own predicate (W1-T446 owns that).",
   },
   {
+    name: "doctor",
+    usage:
+      "rmd doctor [--json]   # W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (never the cgroup limit — this container is unlimited, so memory.max reads `max` and would report unbounded headroom on a host that already froze). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.",
+  },
+  {
     name: "status",
     usage:
       "rmd status [--json]   # W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
@@ -22644,6 +22759,10 @@ export async function main(
     process.exit(syncCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await doctorCommand(rest)) cannot carry a DA hit without forking the process; doctorCommand's own logic (arg refusal, the reader wiring, the exit-code translation) and every judgement it composes (buildDoctorReport and the pure judge* arms) are unit-tested in test/doctor.test.ts (same irreducible-glue shape as the sibling status/console-url dispatch cases).
+  if (cmd === "doctor") {
+    process.exit(await doctorCommand(rest));
+  }
   if (cmd === "status") {
     process.exit(await statusCommand(rest));
   }
