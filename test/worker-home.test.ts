@@ -4,16 +4,19 @@ import fs, {
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { test } from "node:test";
+
+import { playwrightCacheRoot } from "../src/lib/review.js";
 import {
   CLAUDE_CONFIG_BACKUP_PREFIX,
   CLAUDE_CONFIG_REL,
@@ -23,6 +26,7 @@ import {
   ensureWorkerKeychain,
   keychainProvisionLockPath,
   materializeWorkerHome,
+  playwrightCacheRelPath,
   sweepClaudeConfigBackups,
   workerHomePlan,
   workerKeychainPaths,
@@ -64,9 +68,26 @@ test("workerHomePlan: the macOS login keychain is symlinked back — the OAuth t
   assert.ok(kc, "the login keychain (Claude Code-credentials OAuth token) must be granted back, or a redirected HOME hides it and the worker exits 'Not logged in' at $0 before any turn");
   assert.equal(kc!.to, "/Users/operator/Library/Keychains/login.keychain-db", "must point at the REAL login keychain");
   assert.match(kc!.reason, /keychain|OAuth/i, "the grant states why the keychain is needed");
-  // Minimality: ONLY the single DB file is granted, never the whole ~/Library.
+  // MINIMALITY, STATED AS THE PROPERTY RATHER THAN AS A COUNT (W1-T1063). The invariant this
+  // guards is "never grant a broad swathe of ~/Library" — it was encoded as `length === 1` while
+  // the keychain was the only Library grant, and the browser-cache grant made that encoding wrong
+  // without making the invariant wrong. So assert the invariant itself: every Library grant is a
+  // NAMED LEAF, and neither `Library` nor `Library/Caches` is ever granted wholesale.
   const libGrants = plan.symlinks.filter((s) => s.from.includes("/Library/"));
-  assert.equal(libGrants.length, 1, "exactly ONE path under ~/Library is granted (the login keychain DB), not the whole Library");
+  const expectedLibLeaves = ["Library/Keychains/login.keychain-db", "Library/Caches/ms-playwright"];
+  for (const g of libGrants) {
+    assert.ok(
+      expectedLibLeaves.some((leaf) => g.from.endsWith(`/${leaf}`)),
+      `unexpected ~/Library grant ${g.from} — a new one must be added here deliberately, never by accident`,
+    );
+  }
+  for (const broad of ["/Library", "/Library/Caches", "/Library/Keychains"]) {
+    assert.equal(
+      plan.symlinks.some((s) => s.from.endsWith(broad)),
+      false,
+      `the whole ${broad} must never be granted — only named leaves beneath it`,
+    );
+  }
 });
 
 // ── materializeWorkerHome: given an INJECTED HOME, isolation holds on disk ──
@@ -491,5 +512,104 @@ test("W1-T981: one backup that refuses to be removed is kept and never blocks th
     assert.deepEqual(readdirSync(backupsDir).sort(), summary.kept.sort());
   } finally {
     rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T1063: the browser cache grant ────────────────────────────────────────────────────────
+
+test("worker home: the granted cache path matches the resolver", () => {
+  // DERIVED, NOT A SECOND COPY. The whole point of the design is that the grant and the launch
+  // path cannot disagree about where the cache lives, so this asserts the table entry equals what
+  // `playwrightCacheRoot` computes for the SAME platform, rather than equalling a literal.
+  for (const platform of ["linux", "darwin"] as const) {
+    const home = "/__rmd_home__";
+    const expected = relative(home, playwrightCacheRoot({}, platform, home)).split(sep).join("/");
+    assert.equal(playwrightCacheRelPath(platform), expected, `${platform}: grant must equal the resolver`);
+  }
+  // BOTH PLATFORMS ARE COVERED AND THEY GENUINELY DIFFER — a single shared answer would mean the
+  // platform branch was not being exercised at all.
+  assert.notEqual(playwrightCacheRelPath("linux"), playwrightCacheRelPath("darwin"));
+  assert.equal(playwrightCacheRelPath("linux"), ".cache/ms-playwright");
+  assert.equal(playwrightCacheRelPath("darwin"), "Library/Caches/ms-playwright");
+});
+
+test("worker home: the browser cache is granted into a redirected home", () => {
+  // ASSERTS THE RESOLVED PATH, NOT MERELY THAT A LINK EXISTS. A test that only checked for a
+  // symlink would pass on a link pointing anywhere; what a worker needs is that reading through
+  // the redirected HOME lands on the populated cache. So this writes a real marker on the REAL
+  // home's side and reads it back through the WORKER home's path.
+  const root = mkdtempSync(join(tmpdir(), "rmd-t1063-grant-"));
+  const realHome = join(root, "real");
+  const workerHome = join(root, "worker-home-RUN1");
+  const rel = playwrightCacheRelPath();
+  const realCache = join(realHome, rel);
+  mkdirSync(realCache, { recursive: true });
+  writeFileSync(join(realCache, "INSTALLATION_COMPLETE"), "x");
+
+  materializeWorkerHome({ workerHome, realHome });
+
+  const through = join(workerHome, rel, "INSTALLATION_COMPLETE");
+  assert.equal(existsSync(through), true, "a worker must be able to READ THROUGH the grant to the populated cache");
+  assert.equal(readFileSync(through, "utf8"), "x", "and read the real bytes, not an empty shim");
+
+  // NEGATIVE CONTROL: a path that is NOT granted must not resolve through the worker home. Without
+  // this the assertion above would pass on a wholesale HOME copy, which is exactly what the grant
+  // table exists to avoid.
+  const ungranted = join(realHome, ".not-granted-cache");
+  mkdirSync(ungranted, { recursive: true });
+  writeFileSync(join(ungranted, "marker"), "y");
+  assert.equal(
+    existsSync(join(workerHome, ".not-granted-cache", "marker")),
+    false,
+    "an UNGRANTED path must not resolve through the worker home",
+  );
+});
+
+test("worker home: an absent cache skips the grant and still materializes", () => {
+  // DEGRADE, NEVER BREAK. A host that never populated a cache must still get a working home — the
+  // grant is optional and its absence is recorded, not thrown.
+  const root = mkdtempSync(join(tmpdir(), "rmd-t1063-absent-"));
+  const realHome = join(root, "real");
+  const workerHome = join(root, "worker-home-RUN2");
+  mkdirSync(realHome, { recursive: true });
+  const rel = playwrightCacheRelPath();
+  assert.equal(existsSync(join(realHome, rel)), false, "fixture precondition: the real home has NO cache");
+
+  const plan = materializeWorkerHome({ workerHome, realHome });
+
+  assert.equal(existsSync(workerHome), true, "the home still materializes");
+  assert.equal(existsSync(join(workerHome, rel)), false, "no dangling link is left where the target is absent");
+  const outcome = (plan.outcomes ?? []).find((o) => o.relFrom === rel);
+  assert.ok(outcome, "the grant's outcome is RECORDED rather than silently dropped");
+  assert.equal(outcome?.state, "absent", "an absent target is `absent`, distinguishable from `failed`");
+});
+
+test("worker home: the cache grant adds no writable path", () => {
+  // CONTAINMENT IS UNCHANGED. The grant is a symlink INSIDE the worker home pointing at the real
+  // home — not a bind and not a new writable location. Asserting the link's own type is what
+  // distinguishes this from a copy, which WOULD be new writable bytes under the worker home.
+  const root = mkdtempSync(join(tmpdir(), "rmd-t1063-nowrite-"));
+  const realHome = join(root, "real");
+  const workerHome = join(root, "worker-home-RUN3");
+  const rel = playwrightCacheRelPath();
+  mkdirSync(join(realHome, rel), { recursive: true });
+
+  materializeWorkerHome({ workerHome, realHome });
+
+  const linkPath = join(workerHome, rel);
+  assert.equal(lstatSync(linkPath).isSymbolicLink(), true, "the grant is a SYMLINK, never a copied tree");
+  assert.equal(realpathSync(linkPath), realpathSync(join(realHome, rel)), "and it resolves to the real home's cache");
+});
+
+test("worker home: the existing grants are unchanged", () => {
+  // ADDING ONE ENTRY MUST NOT DISTURB THE FOUR BESIDE IT. Named explicitly rather than by count,
+  // so this states which grants must survive rather than merely how many.
+  const rels = WORKER_HOME_SYMLINKS.map((s) => s.relPath);
+  for (const expected of [".claude", ".config/gh", ".gitconfig", "Library/Keychains/login.keychain-db"]) {
+    assert.ok(rels.includes(expected), `the pre-existing grant ${expected} must still be present`);
+  }
+  assert.ok(rels.includes(playwrightCacheRelPath()), "and the new grant is present beside them");
+  for (const s of WORKER_HOME_SYMLINKS) {
+    assert.ok(s.reason.trim().length > 0, `every grant carries a written reason — ${s.relPath} does not`);
   }
 });
