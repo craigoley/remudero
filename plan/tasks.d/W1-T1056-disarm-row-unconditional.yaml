@@ -1,0 +1,139 @@
+- id: W1-T1056
+  title: "`disarmAutoMerge` returns void and swallows a failed withdrawal BY DESIGN, and all three call sites then write `automerge.disarmed` unconditionally — so a withdrawal that GitHub refused is recorded on the ledger as a withdrawal that happened"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "RE-DERIVED FROM SOURCE at origin/main 3794a555, on the cloud container `vm` under
+    /usr/bin/bash, in a scratch worktree. EVERY SOURCE FACT BELOW IS A TREE FACT. THE TWO LEDGER
+    FIGURES THIS TASK NEEDS COULD NOT BE TAKEN HERE and are marked so — see the note.
+
+    (0) THE SWALLOW IS DELIBERATE, and establishing that changes what the fix is. `disarmAutoMerge`
+    (`src/run-task.ts`) wraps `deps.disableAuto(prUrl)` in a try/catch whose catch calls `deps.say`
+    and returns void. That is not an oversight: `withdrawArmIfVerdictRefuses`'s own doc states the
+    reason in terms — `SAFE WHEN NOT ARMED. disarmAutoMerge never throws, so this needs no extra
+    API call to learn whether the PR was armed — which would cost one request per PR per sweep
+    pass.` GitHub refuses `--disable-auto` when auto-merge is not enabled, which is a NO-OP rather
+    than an error, and the catch exists to absorb exactly that.
+
+    (1) SO THE DEFECT IS THE UNCONDITIONAL ROW, not the swallow. Each call site logs
+    `automerge.disarmed` on the next line regardless of what happened inside. A withdrawal GitHub
+    refused for a REAL reason is therefore recorded, in the same words and the same step, as a
+    withdrawal that succeeded. A missing row would leave the reader with a question; this leaves
+    them with a wrong answer.
+
+    (2) AND THE ERROR TEXT ALREADY DISCRIMINATES, so the fix costs no extra request. The benign
+    refusal is identifiable from the message the catch already holds: the daemon narrated
+    `automerge.disarm_failed (W1-T125): Command failed: gh pr merge <url> --disable-auto` /
+    `GraphQL: Can't disable auto-merge for this pull request. (disablePullRequestAutoMerge)` on
+    PR #2234 on 2026-08-19. A classifier over the caught error separates not-armed from
+    really-failed without the per-PR API call clause (0) declined to pay.
+
+    (3) THE THREE CALL SITES ARE NOT EQUALLY AFFECTED, and the shard must not treat them alike.
+    SITE A IS THE ONE THAT MATTERS: `withdrawArmIfVerdictRefuses` calls the disarm and then logs
+    `automerge.disarmed` carrying `reason` and `head_sha`. It exists BECAUSE the PR was armed at
+    open and the verdict now refuses, so there is genuinely an arm to withdraw — and its row is
+    the one an incident reader consults. If the call fails there, the arm is still standing on
+    GitHub and the ledger says it was withdrawn.
+    SITES B AND C are `runTask`'s capped/irreversible-refusal branch and its risk-judge-escalation
+    branch. Both are documented IN SOURCE as defensive no-ops — `there is usually nothing here to
+    withdraw`, kept only against a sweep race — so on the ordinary path they disarm a PR that was
+    never armed, absorb the benign refusal, and write the row anyway. Their rows are false on the
+    NORMAL path rather than only on failure; they are lower-consequence per row (nothing was
+    armed, so nothing survives that should not) and higher in volume.
+
+    (4) THE QUESTION IT CORRUPTS IS ASKED DURING INCIDENTS, not in review: `did the arm fire, and
+    why did a refused PR merge anyway?` A reader answering it from the ledger is told the arm was
+    withdrawn. W1-T970 and W1-T975 both work this path and both depend on that row meaning what it
+    says."
+  design: "THE FIX IS A RETURN VALUE AND THREE CONDITIONAL ROWS, and clause (0) constrains it.
+    (i) `disarmAutoMerge` returns an outcome rather than void, classified from the error it ALREADY
+    catches — not-armed (the benign refusal clause (0) exists to absorb), disarmed, or failed. It
+    must keep never throwing, and must not add an API call: the moment it costs one request per PR
+    per sweep pass, the property `withdrawArmIfVerdictRefuses`'s doc relies on is gone.
+    (ii) Each call site branches on that outcome. `automerge.disarmed` is written only when a
+    withdrawal actually occurred; the other outcomes get a row that says what did happen. Do NOT
+    invent a step per outcome — see (iv).
+    (iii) THE ACCEPTANCE MUST RUN BOTH DIRECTIONS ON THE SAME INVOCATION. A test proving the row is
+    absent after a failed disarm is satisfied by code that never writes the row at all. Pair every
+    refusal with a success in the same run: a disarm that succeeds still writes `automerge.disarmed`,
+    a disarm GitHub refuses benignly does not, and a disarm that fails for a real reason does not.
+    (iv) THE OUTCOME FIELD ALREADY CARRIES THE TRUTH. A large share of ledger rows are written by
+    steps nothing reads and the file rotates at multiple megabytes a day, so a new step per outcome
+    makes the corpus worse to buy a distinction the existing field already draws. The defect is that
+    the step CONTRADICTS the field, not that the field is missing.
+    (v) THE ARMED MASQUERADE IS A SEPARATE ID and must not be absorbed here. `src/run-task.ts` logs
+    step `automerge.armed` unconditionally at the verdict-time arm with the truth in an `outcome`
+    field, while the impl-BI wrapper one site over correctly branches
+    (`armOutcomeArmed(outcome) ? automerge.armed : automerge.arm_skipped`). `armOutcomeArmed`
+    (`src/lib/sweep.ts`) returns true only for `armed` and `direct-merged`, so six of the eight
+    `ArmOutcome` values ride under a step named `armed`. THAT FIX IS THE EXISTING WRAPPER APPLIED TO
+    ONE MORE SITE; THIS ONE NEEDS NEW ERROR HANDLING AND A SIGNATURE CHANGE. Same family, different
+    work, independently falsifiable — two concerns, and this shard is the disarm half.
+    (vi) W1-T1052 IS A DIFFERENT FAILURE and is cited, not re-derived: it files a correct record
+    under a misleading name. This files a record that asserts something that did not happen.
+    (vii) AND THE VOCABULARY SPLIT NEEDS ITS OWN ID TOO. `automerge.disarm_failed`,
+    `direct_merge_failed`, `ledger_refused`, `head_sha_unavailable` and `irreversible_refused` are
+    narration tokens that exist as no declared step — measured against a quoted-step-literal probe,
+    with `automerge.clean_status_direct_merge` as the control that is both narrated AND declared and
+    is correctly absent from the difference. One ledger reason even directs the reader to `the
+    automerge.ledger_refused console line`: the ledger citing stdout. Named here so it is not
+    silently absorbed; it is not this task's scope."
+  acceptance:
+    - claim: the shard establishes that the swallowed failure is deliberate rather than an oversight
+      proof: "grep: THE SWALLOW IS DELIBERATE in plan/tasks.d/W1-T1056-disarm-row-unconditional.yaml"
+    - claim: the shard locates the defect in the unconditional row rather than in the swallow
+      proof: "grep: THE DEFECT IS THE UNCONDITIONAL ROW in plan/tasks.d/W1-T1056-disarm-row-unconditional.yaml"
+    - claim: the shard establishes the fix needs no extra API call because the error text separates the cases
+      proof: "grep: THE ERROR TEXT ALREADY DISCRIMINATES in plan/tasks.d/W1-T1056-disarm-row-unconditional.yaml"
+    - claim: the shard separates the call site whose row is load-bearing from the two defensive ones
+      proof: "grep: SITE A IS THE ONE THAT MATTERS in plan/tasks.d/W1-T1056-disarm-row-unconditional.yaml"
+    - claim: the shard fences off the armed-step masquerade as its own id rather than absorbing it
+      proof: "grep: THE ARMED MASQUERADE IS A SEPARATE ID in plan/tasks.d/W1-T1056-disarm-row-unconditional.yaml"
+    - claim: the shard cites the neighbouring task without re-deriving its mechanism
+      proof: "grep: W1-T1052 IS A DIFFERENT FAILURE in plan/tasks.d/W1-T1056-disarm-row-unconditional.yaml"
+    - claim: the existing disarm suite still passes once the row becomes conditional
+      proof: "unit test: test/disarm-on-capped-verdict.test.ts"
+  risk: high
+  origin: recon#disarm-row-unconditional-2026-08-20
+  plan_refs: ["W1-T125", "W1-T970", "W1-T975", "W1-T1052"]
+  files: [src/run-task.ts, test/arm-at-open.test.ts, test/disarm-on-capped-verdict.test.ts, test/disarm-outcome-recorded.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) exempts only
+    `risk === 'high'` and returns clean only below two subsystems; `files:` spans `src/` and
+    `test/`. The band is Rule 19's SPAN, not blast radius — the runtime effect is one return value
+    and three log calls.
+
+    `files:` IS DERIVED BY INVOCATION COUNT WITH WORD BOUNDARIES, at origin/main 3794a555.
+    `src/run-task.ts` holds `disarmAutoMerge` and every one of its call sites (`\\bdisarmAutoMerge`
+    = 11; `automerge\\.disarmed` = 4) and is the only source file involved.
+    `test/arm-at-open.test.ts` (21 and 8) is the heaviest existing coverage of the disarm row and
+    asserts its presence and its ordering against `automerge.armed`, so a conditional row moves
+    those assertions. `test/disarm-on-capped-verdict.test.ts` (`\\bwithdrawArmIfVerdictRefuses` = 8)
+    is the dedicated suite for SITE A. `test/disarm-outcome-recorded.test.ts` does NOT exist and is
+    declared as a NEW path — forward-referencing a path is safe where a symbol would be a guess, and
+    CLAUDE.md requires a coverage-load-bearing test in its own file.
+    DELIBERATELY EXCLUDED, with reasons: `test/risk-judge-wiring.test.ts` (2 and 1) asserts the
+    risk-judge escalation rather than the disarm record, and `test/capped-verdict-never-arms.test.ts`
+    (1) asserts the arm refusal. Neither file's assertions move when the row becomes conditional.
+    THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING: declaring `src/run-task.ts` serialises
+    this task against every other task declaring it, per DECISIONS.md's 2026-08-18 ruling that the
+    monolith stays one file and the fleet accepts one effective dispatch lane. It is declared anyway
+    because the function and all three call sites live there and cannot be fixed without it. The
+    shard's own path is not declared, which would convert the endemic proof-scope warnings into one
+    hard `rule15-filing` violation.
+
+    TWO REQUIRED MEASUREMENTS COULD NOT BE TAKEN ON THIS HOST, and are stated as NOT RUN rather than
+    estimated. This container carries NO `state/` directory and NO ledger file of any form, so the
+    per-form coverage control the ledger union requires cannot even open its first form. Both must be
+    taken on the daemon host before this task is built:
+      (a) whether an `automerge.disarmed` row was written for PR #2234 at the time the daemon
+          narrated `automerge.disarm_failed` — the measurement that turns clause (1) from a source
+          reading into an observed false record;
+      (b) how many `automerge.armed` rows carry an `outcome` field whose value is not `armed` or
+          `direct-merged` — clause (v)'s size, read from the FIELD and never from the step name, and
+          remembering the outcome values are hyphenated.
+    The SOURCE side of both is established above and does not depend on either figure."
