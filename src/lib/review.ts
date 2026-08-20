@@ -122,6 +122,26 @@ export type PostableReviewState = ReviewState | "pending";
  *                     stays `executed_fail` (W1-T72's test-theater guard, unchanged): a forward
  *                     reference is a POSITIVE claim from the diff itself, never inferred from
  *                     absence alone.
+ *   stale_self_path — (W1-T1071) a `grep:` proof went `"stale"` (see `executed_stale` above)
+ *                     and its target is BOTH a plan-shard path ({@link SHARD_PATH_RE}) AND a path
+ *                     this diff's own task declares SOMETHING ELSE beside — the shape a proof
+ *                     takes when it was authored to discriminate the FILING PR (grepping the
+ *                     shard's own rationale text into its own plan/tasks.d/*.yaml) and is now
+ *                     being read on the PR that BUILDS the task: the shard already merged, so the
+ *                     same pattern matches the merge-base too, and `executed_stale`'s ordinary
+ *                     degrade-to-keyword-floor would let a report that never engages the real
+ *                     behaviour slip through on prose alone. UNLIKE every other stale/degrade
+ *                     outcome above, this one is NOT a degrade: `met` is forced `false`
+ *                     regardless of keyword coverage — a REFUSAL, named, telling the author the
+ *                     proof was filing-time and must be rewritten to name the behaviour the diff
+ *                     now builds. Reachable ONLY when {@link ProofExecContext.forwardReferenceFiles}
+ *                     names a path other than the proof's own target — BY CONSTRUCTION, not by an
+ *                     id allowlist, so a shard whose `files:` is nothing but its own plan path
+ *                     (no code ever follows it) is exempt without being named: it has no OTHER
+ *                     declared path, so this branch is never reached for it, and its self-path
+ *                     grep keeps discriminating exactly as it always has. A grep proof whose
+ *                     target is not a plan-shard path — an ordinary code grep gone stale for
+ *                     unrelated reasons — is UNTOUCHED and keeps degrading to `executed_stale`.
  */
 /**
  * WHY a criterion produced no executed outcome. Diagnostic only — it never affects `met`, `state`,
@@ -176,7 +196,8 @@ export type ProofExecOutcome =
   | "exec_error"
   | "executed_stale"
   | "base_unreadable"
-  | "not_yet_built";
+  | "not_yet_built"
+  | "stale_self_path";
 
 /** One criterion's verdict against its stated proof. */
 export interface CriterionVerdict {
@@ -1996,6 +2017,42 @@ function grepProofTargetPath(whitelisted: WhitelistedProof): string | undefined 
 }
 
 /**
+ * (W1-T1071) Is an ALREADY-STALE `grep:` proof a FILING-TIME SELF-PATH proof read on the diff
+ * that BUILDS the task, rather than an ordinary code grep that happened to stop discriminating?
+ * The house convention this recognises (measured live across the plan, `plan/tasks.d/*.yaml`):
+ * a criterion whose proof greps a distinctive line of the shard's OWN rationale/design prose
+ * back out of its OWN `plan/tasks.d/<id>-<slug>.yaml` — e.g. `grep: the outlier population has
+ * more than one member in plan/tasks.d/W1-T1039-a-burned-id-becomes-the-ceiling.yaml`. That
+ * proof is honest on the FILING PR (the shard's text is absent from the merge-base and present
+ * on the head — it discriminates the ONE thing it can: "was this shard filed"). Once the shard
+ * merges, the same pattern sits in the merge-base of every PR that comes after, including the
+ * PR that builds the task the shard describes — `classifyBaseProofOutcome` correctly reports
+ * `"stale"` there, and this predicate names WHY: the proof was never about the code at all.
+ *
+ * TWO conditions, both required, matching design (iv)/(v):
+ *   1. The target is shaped like a plan-shard path ({@link SHARD_PATH_RE}) — an ordinary code
+ *      grep (`grep: foo in src/lib/bar.ts`) that independently drifted stale is a DIFFERENT,
+ *      pre-existing situation this task does not touch; it keeps degrading to `executed_stale`.
+ *   2. `declaredFiles` — {@link ProofExecContext.forwardReferenceFiles}, this diff's OWN task's
+ *      declared paths — names something OTHER than the target. This is the BY-CONSTRUCTION
+ *      exemption design (v) requires for the shards whose entire deliverable IS their plan text:
+ *      such a shard's `files:` holds nothing but that same plan path, so it never has a path
+ *      "the proof does not name" and this predicate returns false for it, structurally, with no
+ *      id ever hardcoded. A shard with a real code/test deliverable besides its plan path always
+ *      has one, so the refusal below is reachable for exactly the 29-shard population this task
+ *      is filed against and never for the 3 that are plan-text-only by design.
+ */
+function staleProofIsSelfPath(whitelisted: WhitelistedProof, declaredFiles: ReadonlySet<string> | undefined): boolean {
+  const target = grepProofTargetPath(whitelisted);
+  if (target === undefined || !SHARD_PATH_RE.test(target)) return false;
+  if (!declaredFiles) return false;
+  for (const p of declaredFiles) {
+    if (p !== target) return true;
+  }
+  return false;
+}
+
+/**
  * (W1-T460) Did `git show <rev>:<path>` fail because the path is NOT IN THAT REV, or because the
  * read itself broke? MEASURED against the installed git (and locked by
  * test/base-blob-read-failure.test.ts Group 0, so a git upgrade that moves these shapes turns red
@@ -2195,6 +2252,24 @@ export function judgeCriterion(
                 `(${whitelisted.kind}: ${whitelisted.label}) but its base blob could not be read, so the ` +
                 `merge-base staleness check never ran for THIS proof (the base tree itself exists and ` +
                 `other proofs were checked against it); positive override withdrawn, keyword floor applied`;
+            } else if (baseOutcome === "stale" && staleProofIsSelfPath(whitelisted, execCtx.forwardReferenceFiles)) {
+              // (W1-T1071) The stale match is not an ordinary non-discriminating grep — its
+              // target is a plan-shard path (see `staleProofIsSelfPath`'s doc), and this diff's
+              // own task declares a REAL path besides it, so this task has an implementing diff.
+              // A self-path grep only ever discriminated by proving the shard's OWN filing text
+              // was present — the exact thing that is now permanently true at the merge-base too.
+              // `executed_stale`'s ordinary degrade would let a report that never engages the
+              // real, now-built behaviour slip through on keyword coverage of the OLD plan prose.
+              // Refuse instead, by name: `met` is forced false regardless of the keyword floor,
+              // never merely withdrawn.
+              proofExec = "stale_self_path";
+              met = false;
+              reason =
+                `proof unmet: REFUSED — proof (${whitelisted.kind}: ${whitelisted.label}) is a filing-time ` +
+                `self-path proof (it greps this diff's own plan shard, which now also matches at the PR's ` +
+                `merge-base) — it discriminated the PR that FILED the task and cannot discriminate the PR ` +
+                `that BUILDS it; rewrite this proof to name the behaviour this diff builds, not the plan ` +
+                `text that filed it`;
             } else if (baseOutcome === "stale") {
               // The SAME check also matches/passes on the PR's MERGE-BASE — it
               // would have exited 0 before this task's work ever landed, so
