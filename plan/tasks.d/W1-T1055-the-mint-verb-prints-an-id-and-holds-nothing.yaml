@@ -1,0 +1,203 @@
+- id: W1-T1055
+  title: "`rmd next-task-id` PRINTS AN ID AND HOLDS NOTHING, SO EVERY CALLER IS RACING EVERY OTHER CALLER — the atomic reserver it needs already exists, already loops on rejection and already returns the id it actually holds, and no CLI path calls it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-20 ON THE AZURE HOST `Remudero` (Linux 6.17.0-1022-azure), shell bash 5.2.21,
+    from a scratch worktree cut off origin/main. No `/rate_limit` call was made, no process was
+    signalled, no daemon state file was written. Five surfaces, each with a live control: `git grep`
+    across `src/ test/ deploy/`; `git log -S` provenance; `git show <sha>:<path>` historical state;
+    `git ls-remote refs/rmd-id/*` plus a REST read of each anchor commit; and the deduped ledger
+    union over the live ledger and all ten plain rotations.
+
+    (1) THE ORIGINAL REASONING WAS SOUND WHEN IT WAS WRITTEN, AND THIS IS A CONDITION THAT CHANGED
+    RATHER THAN A MISTAKE. `nextTaskIdCommand` (`src/run-task.ts`) carries the comment "a
+    reservation held by a process that exits microseconds later reserves nothing anyway", and
+    `git log -S` puts it in commit 567f3b67, 2026-08-01 — the SAME commit that introduced the
+    atomic reserver, titled "reserve a minted task id atomically so a third caller cannot reuse
+    it" (#1075). The author was not unaware of the race; they routed the SPENDING lane through the
+    lock and left the PRINTING verb advisory on purpose.
+
+    AND ON 2026-08-01 THAT WAS RIGHT, BECAUSE THE FLEET WAS NOT CONCURRENT. At 567f3b67
+    `src/lib/daemon.ts` contains ZERO word-bounded occurrences of `laneCount` and ZERO of
+    `dispatchLanes`; live control at that same sha, `pollIntervalMs` reads 24, so the file was
+    genuinely read. `runDaemon` was not wired to lane machinery until W1-T343 (#1363) on
+    2026-08-05 — FOUR DAYS LATER — and shipped dark at one lane. Today `src/lib/daemon.ts` reads
+    `laneCount` 28 times. So when the comment was written there was effectively one dispatching
+    caller, and a single operator asking "what is next" repeatedly really would have burned ids
+    for nothing.
+
+    WHAT CHANGED IS THE NUMBER OF MINTERS, AND THE RESERVATION NAMESPACE RECORDS IT. Reading the
+    anchor commit behind a sample of the reservation refs, the code path's own message format
+    (`rmd-id reservation <pid>@<host> <iso>`) names THREE DISTINCT CONTAINER HOSTS —
+    `5efb86ede91b`, `eae16667008a`, `b79658d95089` — while hand-mints in the same sample name
+    `Craigs-Mac-mini` and `Remudero`. The premise "a process that exits microseconds later" is
+    still true of ONE operator and false of five concurrent minters, because the reservation is a
+    REMOTE REF, not a lock the process holds: it outlives the process by construction. The
+    comment's conclusion did not stop following from its premise; the premise stopped being true.
+
+    (2) THE RACE IS LIVE RIGHT NOW, AND IT IS FIRST-PARTY. At the moment of filing, TWO OPEN PRs
+    file the SAME id under different slugs: #2278 (`plan/file-sweep-arm-outcome`, created
+    2026-08-20T11:36:46Z) carries `plan/tasks.d/W1-T1053-the-sweeps-arm-outcome-is-prose.yaml`, and
+    #2279 (`run-TRIAGE-fb-1785794082507-130558-1787225501683`, created 11:36:47Z — ONE SECOND
+    LATER) carries `plan/tasks.d/W1-T1053-no-caller-resolves-the-queues-proofs.yaml`. Meanwhile
+    `refs/rmd-id/W1-T1053` resolves to db695eba2ad6704da2f4d44d302db16bee8d0a33, whose anchor
+    message is a HAND-MINT (`reserve W1-T1053 Remudero-2986-1787225462632113268`) committed
+    11:31:02Z — five minutes before either PR opened. `loadPlan` (`src/lib/plan.ts`) throws
+    `duplicate task id` on exactly this shape, so if both merge every plan-reading verb on
+    origin/main refuses. That is the W1-T488 and W1-T533/W1-T534 incident arriving a third time.
+
+    (3) THE THREE COLLISIONS THE BRIEF NAMES ARE THE SAME MECHANISM, AND THE DETECTION SIDE IS
+    ALREADY FILED. W1-T1048 (#2258, MERGED) files the detection of an id cited in shipped source
+    that resolves to nothing — the #2251 case. CITED, NOT RE-DERIVED. W1-T1039 (#2255, MERGED)
+    bounded the allocatable range so a burned id cannot become the ceiling. CITED, NOT RE-DERIVED.
+    THOSE TWO FIXED WHAT THE VERB READS. THIS FIXES WHAT THE VERB DOES.
+
+    (4) THE LOCK ALREADY EXISTS, IS ALREADY ATOMIC, AND ALREADY DOES THE LOOP-ON-REJECTION THE
+    OPERATOR'S HAND-MINT BLOCK DOES BY HAND. `reserveTaskIdRemote`
+    (`src/lib/task-id-reservation.ts`) pushes an orphan `commit-tree` over the empty tree to
+    `refs/rmd-id/<id>`; git's non-fast-forward refusal IS the lock, because a parentless payload is
+    unique per writer. `classifyPushFailure` separates CONTENTION from an unreachable remote and
+    defaults the unknown case to `unreachable`, the fail-closed direction. On `taken` the loop
+    ADVANCES to the next candidate, bounded by `maxScan` (default 50), and the handle it returns
+    carries `id`, `taskId`, `ref`, `anchor` and `attempts` — SO THE FUNCTION ALREADY REPORTS THE ID
+    IT ACTUALLY HOLDS RATHER THAN THE ONE IT FIRST TRIED. `reserveTaskIdBlockRemote` chains from
+    the winner (`next = h.id + 1`). NOTHING IN THE LOOP NEEDS BUILDING; the gap is that no CLI path
+    calls any of it.
+
+    (5) A RESERVATION PUSH SURVIVES AN EXHAUSTED API, AND THAT IS DECIDABLE FROM SOURCE AND FROM
+    THE LEDGER. All three existing reserver call sites in `src/run-task.ts` build
+    `gitRemoteRefReserver` over `spawnSync("git", ...)` — GIT PROTOCOL, NEVER `gh`. The ledger
+    agrees: over the deduped union, 1144 rows carry a rate-limit failure (per-form coverage control
+    first — `run.start` reads non-zero in the live form and in every one of the ten plain
+    rotations; the gzipped form is empty on this host), and 290 of those 1144 have
+    git-protocol-dependent work within five minutes on either side — `run.start` at
+    2026-08-14T05:39:49Z sits 69 seconds before a rate-limit row at 05:40:58Z, and a `worktreeAdd`
+    off origin/main is a git fetch. A NAKED ZERO WOULD NOT HAVE BEEN ENOUGH HERE: the densest
+    rate-limit hour (2026-08-18T16Z) contains zero `run.start` rows, but that zero is confounded —
+    the dispatcher needs the API to FIND runnable work — so it is reported as unusable rather than
+    as evidence git failed.
+
+    (6) BUT SURVIVING AN EXHAUSTED API IS NOT THE SAME AS SURVIVING AN UNREACHABLE ORIGIN, AND
+    THAT IS WHY THE SHAPE MATTERS. `reserveTaskIdRemote` throws `TaskIdReservationError` with
+    `outcome: "unreachable"` and REFUSES TO MINT rather than minting optimistically. Making
+    reservation the DEFAULT would therefore convert a verb that today degrades to silence — its
+    open-PR sweep already does, and `--offline` already suppresses it deliberately — into one that
+    HARD-REFUSES when origin is unreachable. That is a posture change to an advisory read, not an
+    improvement to it.
+
+    (7) AND THE NAMESPACE ALREADY SHOWS WHAT A DEFAULT WOULD COST. Re-derived at filing time:
+    `git ls-remote origin 'refs/rmd-id/*'` returns 151 distinct reserved ids; the plan
+    (`plan/tasks.yaml` plus `plan/tasks.d/`) carries 633 filed ids; the intersection is 97 — the
+    positive control that the comparison can see both sides — and the difference,
+    RESERVED BUT UNFILED, IS 54. Caveat stated rather than hidden: that is measured against
+    origin/main's plan, and four PRs were open at the time; none of them files any of the 54, and
+    W1-T1055 itself is one of them because this shard was not yet pushed when the sweep ran.
+    Nothing releases a reservation — `reserveTaskIdRemote`'s own doctrine, deliberately — so every
+    id a default-reserving query burned would join that set permanently. An operator asking "what
+    is next" a hundred times must not leave a hundred holes.
+  design: "(i) THE SHAPE IS A `--reserve` FLAG, NOT A CHANGED DEFAULT AND NOT A NEW VERB, AND THE
+    ARGUMENT IS RATIONALE (6) AND (7) TOGETHER. A flag leaves the advisory read byte-identical for
+    every caller that only wants to know, keeps the degrade-to-silence posture the verb already has
+    on its open-PR surface, and adds the claim only for the caller that is about to FILE — which is
+    the same line the 2026-08-01 author drew, honoured rather than reversed. A CHANGED DEFAULT
+    makes every existing caller claim an id it may not use against a namespace already carrying 54
+    reserved-but-unfiled refs, and turns an unreachable origin from silence into a refusal. A NEW
+    VERB would have to recompute the floor `mintNextTaskIdWithHistory` already computes, and a
+    second implementation of the floor is precisely the drift this repo keeps paying for.
+    (ii) THE LOOP IS THE POINT AND IT MUST NOT BE REBUILT. `reserveTaskIdRemote` already advances
+    on contention, is already bounded by `maxScan`, and its handle already names the id it holds.
+    THE VERB MUST PRINT THAT HELD ID AND NEVER THE ONE IT FIRST TRIED — a `--reserve` run whose
+    first candidate is taken must report the id it won, and the falsifier for this is a reserver
+    stub that refuses the first candidate and accepts the second. Re-implementing the scan inside
+    the command, rather than calling the existing function, is the failure mode to refuse at
+    review.
+    (iii) FAIL-CLOSED STAYS FAIL-CLOSED UNDER THE FLAG, AND MUST NOT LEAK INTO THE UNFLAGGED PATH.
+    With `--reserve`, an unreachable origin must exit non-zero and print the refusal — the caller
+    has spent nothing yet, so loud and local is correct. WITHOUT the flag the command's output and
+    exit code must be unchanged from today, including the existing advisory notice built on
+    `firstUnreservedAtOrAbove` and the `--offline` suppression. `--reserve` and `--offline`
+    together are contradictory and should be refused by argument validation rather than silently
+    resolved, the same way `unknownArgError` already refuses an unknown flag.
+    (iv) ONE DURABLE ROW, THROUGH THE EXISTING WRAPPER. A refusal must go through
+    `withIdReservationLogging`, which already emits `idReservationFailureFields`
+    (`id`/`ref`/`outcome`/`error`) and rethrows unchanged — never a fourth hand-rolled catch beside
+    the three lane bodies that wrapper was built to replace.
+    (v) THE ADVISORY READ KEEPS ITS KEEP EVEN AFTER THE PUSH BECOMES THE CLAIM. Once `--reserve`
+    pushes, the reservation sweep stops being what makes an id safe — but the OTHER scope-time
+    surfaces answer DIFFERENT questions and stay load-bearing: the max-id scan over
+    `plan/tasks.yaml` and `plan/tasks.d/` still supplies the scan's STARTING POINT; the open-PR
+    sweep still catches a shard filed on a branch that origin/main's plan cannot see (rationale
+    (2) is exactly that case); the `run-<id>-*` head sweep still answers who is BUILDING now; and
+    the merged-trailer plus head-branch union still answers whether the WORK already shipped. What
+    demotes to advisory is only the pre-read of `refs/rmd-id/*` as a safety check — it remains
+    worth doing as a courtesy that avoids burning ids, and it remains the only surface that can
+    name WHO holds a contested id.
+    (vi) DO NOT PROPOSE REMOVING THE RE-SWEEP-BEFORE-PUSHING RULE, AND DO NOT WEAKEN IT. A reserved
+    ref reads PRESENT whether the id is merely held or is being filed by someone right now, so the
+    ref cannot answer the question the re-sweep answers.
+    (vii) A SKILL IS NOT THE FIX AND MUST NOT BE PROPOSED AS ONE: a minting skill written against a
+    verb that does not reserve would enshrine the race in a second place. A thin skill naming the
+    FIXED verb is worth revisiting afterwards, as a SIBLING and not as scope here.
+    (viii) NOT IN SCOPE: `src/lib/task-id-reservation.ts` itself (the loop, the classifier and the
+    block form all already do what is needed); the triage, plan and approve lanes, which already
+    reserve; release-on-merge, which this module has already refused by name; and any change to
+    what the verb READS, which W1-T1039 (#2255) settled."
+  acceptance:
+    - claim: "the mint verb reserves the id on the remote when asked to"
+      proof: "unit test: test/next-task-id-reserve.test.ts"
+    - claim: "a contested first candidate reports the id actually held, not the id first tried"
+      proof: "unit test: test/next-task-id-reserve.test.ts"
+    - claim: "an unreachable origin refuses loudly instead of minting optimistically"
+      proof: "unit test: test/next-task-id-reserve.test.ts"
+    - claim: "the unflagged verb reserves nothing and its output is unchanged"
+      proof: "unit test: test/next-task-id-reserve.test.ts"
+  files: [src/run-task.ts, test/next-task-id-reserve.test.ts]
+  status: queued
+  attempts: 0
+  origin: recon#mint-holds-nothing-2026-08-20
+  plan_refs: ['W1-T1039', 'W1-T1048', 'W1-T949', 'W1-T471']
+  note: |
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus the acceptance text, and this
+    set crosses a `src/` module and `test/` while the acceptance wording names the id-reservation
+    and CLI surfaces. The blast radius of the diff itself is one flag, one call to a function that
+    already exists, and one refusal path.
+
+    `files:` IS CHOSEN BY WORD-BOUNDED INVOCATION COUNT OVER THE SEAMS THIS CHANGE TOUCHES, AND ITS
+    OWN PATH IS ABSENT. Counting `nextTaskIdCommand`, `reserveTaskIdRemote`, `gitRemoteRefReserver`,
+    `firstUnreservedAtOrAbove`, `mintNextTaskIdWithHistory`, `describeMintWithHistory`,
+    `withIdReservationLogging` and `TaskIdReservationError` across `src/`: `src/run-task.ts` totals
+    27, `src/lib/task-id-reservation.ts` 22, `src/lib/ledger.ts` 3, `src/lib/inbox.ts` 1. The count
+    is not the whole argument — `nextTaskIdCommand` and `describeMintWithHistory` occur in
+    `src/run-task.ts` AND NOWHERE ELSE IN `src/`, so the verb body is only reachable there.
+
+    `src/lib/task-id-reservation.ts` IS DELIBERATELY NOT DECLARED even though it scores 22. Every
+    piece the wiring needs is already exported from it and none of it changes: the scan loop, the
+    `taken`/`unreachable` classifier, the bounded `maxScan`, the handle that names the held id, and
+    the logging wrapper. Declaring a file the diff will not touch would trip
+    `inverseScopeUntouchedFiles` and serialise this task against every other task that names it.
+
+    `src/run-task.ts` MUST BE DECLARED, per DECISIONS.md's 2026-08-18 W1-T471 ruling: that file is
+    not split and tasks are not re-scoped to avoid declaring it. The ruling's own measurement is
+    why — 640 cross-section references, with 128 of 368 symbols reached from outside the section
+    that defines them — and it records that declared `src/` paths are touched 15 of 17 times, so
+    the declaration here is not defensive padding.
+
+    THE THREE COLLISION SURFACES ARE NOT ALL THE SAME QUESTION, WHICH IS WHY THIS SHARD FIXES ONLY
+    ONE. A reservation ref answers "is this NUMBER claimed". An open-PR or head-branch sweep
+    answers "is this WORK already being done". A merged-trailer sweep answers "has this WORK
+    shipped". Making the push the claim closes the first and leaves the other two exactly as
+    load-bearing as they are today.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING, NOT MINTED HERE.
+    `git ls-remote origin 'refs/rmd-id/W1-T1055'` resolves to
+    7c69c390b1e7012cb6b70f0da80f60f0cb01d4b7, exit 0, matching the sha the mint printed; live
+    control, the same form against `refs/rmd-id/W1-T1049` returns a ref, so an empty result would
+    be absence and not a broken query. The remote was re-swept on a fresh fetch immediately before
+    pushing.
