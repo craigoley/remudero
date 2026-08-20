@@ -1,0 +1,175 @@
+- id: W1-T1045
+  title: "A DISPATCH WORKER IS BOUNDED BY TURNS AND DOLLARS AND BY NOTHING ON THE CLOCK, AND NEITHER CAP CAN FIRE ON A STALL — W1-T943's detector already finds a quiet run and by design never ends it, so a wedged worker holds a lane, an inflight lock and a slot until a human intervenes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    MEASURED 2026-08-20 AT origin/main 2529ff12, on the Azure host. Per-form coverage control first:
+    0 `.gz`, 9 plain rotations, 1 live, the `.gz` zero confirmed because `find -name '*.gz'` under
+    `state/` returns 0 while the identical shape returns 9 for `ledger.*.ndjson`; deduped on the full
+    line. No `/rate_limit` call was made and no process was signalled.
+
+    (1) THERE IS NO CLOCK. `src/lib/worker.ts` contains ZERO `AbortController`, ZERO `abortSignal`
+    and ZERO `setTimeout`, against positive controls of 4 `query(` and 2 `for await` IN THAT SAME
+    FILE, and against `src/lib/serve.ts` which does use `AbortController` — so the symbol is
+    available and used elsewhere in `src/`, and its absence here is a choice rather than a platform
+    limit. `spawnWorker` runs the SDK query in-process and iterates the stream to completion.
+
+    (2) AND NEITHER CAP CAN FIRE ON A STALL, BY CONSTRUCTION. `--max-turns 400` and `maxBudgetUsd`
+    are both consumption counters: a worker waiting on a command that never returns BURNS NO TURNS
+    AND NO DOLLARS, so neither ceiling is approached, let alone reached. The observed instance sat
+    at roughly 1.5% CPU for 12,951s. A dispatch worker that stops progressing without ending its
+    stream holds its slot the same way — and unlike the fix rung it also holds a LANE and a
+    `state/inflight/<task>.lock`.
+
+    (3) THE QUIET FLOOR IS DISPLAY-ONLY, AND THAT IS NOT A BOUND. `DEFAULT_WORKER_QUIET_FLOOR_MS` is
+    30s and `WorkerStateTracker` (`src/lib/worker.ts`) emits a `quiet` state consumed by
+    `src/lib/board.ts`, `src/lib/serve.ts` and `src/lib/status.ts` — a render, a console element and
+    a projection field. Across every `src/` file mentioning `quiet`, exactly one line also mentions
+    abort/kill/signal/terminate, and it is the doc saying the detector never does.
+    A CONSUMER THAT ONLY RENDERS IS NOT A BOUND.
+
+    (4) W1-T943'S DETECTOR IS ALREADY WIRED AND ALREADY CORRECT — THIS IS THE FINDING THAT MAKES THE
+    TASK SMALL. `runWorkerStallDetectorRung` (`src/run-task.ts`) is a PER-POLL rung inside the
+    daemon's sweep with its own try/catch, reading `policy.values.workerStall` (`plan/policy.yaml`,
+    `value: 3600000`, bounds 1200000-7200000, parsed by `numberField` in `src/lib/policy.ts`). It
+    judges every LIVE in-flight run's newest `worker.state` row against that threshold and escalates
+    a quiet one. NOTHING ABOUT IT IS BROKEN AND NOTHING ABOUT IT NEEDS REPLACING.
+
+    (5) IT HAS NEVER FIRED BECAUSE NO DISPATCH WORKER HAS EVER STALLED. Over 2,919 `worker.state`
+    rows across 55 runs, the inter-row gap is 4s median, 49s p90 and **879s max — 14.6 minutes**,
+    against a 60-minute threshold. ZERO gaps exceed `workerStall`; zero exceed 7200s. So the
+    silence is the population's, not the detector's: `worker.stalled` has never been written
+    (positive controls: 8 `ci.stalled`, 2 `pr.stalled`) because the event has not happened in this
+    lane. THE THRESHOLD IS NOT UNREACHABLE AND THE RUNG IS NOT UNWIRED — the two other hypotheses
+    are eliminated by that measurement.
+
+    (6) SO THE GAP IS THE ACTION, NOT THE DETECTION. The rung's own doc says it "never kills/signals
+    it", and its escalation detail says so to the operator in terms: *"never auto-killed either way
+    (design note iv) — the operator, or a future paramedic verb, decides."* That deferral was the
+    right call for W1-T943 and it is explicitly a placeholder for something later. THIS TASK IS
+    THAT SOMETHING, scoped to the one action the detector deliberately withheld.
+
+    (7) AND THE TIER IT ESCALATES ON IS MEASURED SILENT. It calls `tryEscalate` with
+    `class: "BLOCKED"`, while `escalate()` (`src/lib/escalate.ts`) gates its only `notify()` call on
+    `cls === "MANUAL" || cls === "HARD_STOP"` and `src/lib/notify.ts` states the same in its header.
+    So even on the day it does fire, the detection reaches a queue rather than a person — the same
+    tier on which nine crash-loop issues went unread for five days. That is context for why an
+    unattended action is needed and is NOT a licence to retier the escalation here.
+
+    (8) HONESTLY STATED: NO DISPATCH WORKER HAS EVER EXCEEDED THE PROPOSED BOUND. The longest
+    observed dispatch-run span (first to last `worker.state`) is 92.4 minutes and only one exceeds
+    60 minutes at all; ZERO exceed 7200s. The stall class has been observed ONLY in the fix-rung
+    lane, which W1-T1044 covers. THIS IS PREVENTION FOR A CLASS THIS LANE HAS NOT YET SUFFERED, and
+    it must not be argued as anything stronger. It is still worth building because the two lanes
+    differ only in which code path spawns the worker, and this one additionally holds a lane and a
+    lock that the fix rung does not.
+  acceptance:
+    - claim: "a worker whose stream exceeds the bound is abandoned rather than iterated forever"
+      proof: "unit test: W1-T1045: a worker past the clock bound is abandoned"
+    - claim: "a worker inside the bound is untouched and completes normally"
+      proof: "unit test: W1-T1045: a worker inside the bound completes untouched"
+    - claim: "abandonment records elapsed time and the last observed state before releasing anything"
+      proof: "unit test: W1-T1045: abandonment records elapsed and last state first"
+    - claim: "the inflight lock and the lane are released so the task can be dispatched again"
+      proof: "unit test: W1-T1045: abandonment releases the lock and the lane"
+    - claim: "the abandoned run ends with a terminal verdict rather than vanishing"
+      proof: "unit test: W1-T1045: an abandoned run ends with a terminal verdict"
+    - claim: "a busy worker producing state transitions is never abandoned however long it runs"
+      proof: "unit test: W1-T1045: a progressing worker is never abandoned on elapsed alone"
+    - claim: "the bound is read from policy rather than hardcoded at the call site"
+      proof: "unit test: W1-T1045: the worker clock bound is read from policy"
+    - claim: "the record survives rotation only if a decision reads it back"
+      proof: "unit test: W1-T1045: the abandonment step's rotation membership matches its readers"
+  risk: high
+  origin: "oper#dispatch-worker-unbounded-2026-08-20"
+  plan_refs: ["W1-T1044", "W1-T943", "W1-T942", "W1-T1036"]
+  files: [src/lib/worker.ts, src/run-task.ts, plan/policy.yaml, test/worker-clock-bound.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE BOUND, AND WHY IT IS THE SAME NUMBER AS #2251's.
+
+    7200s, checked DIRECTLY against all 116 `implement.done` rows carrying `worker_duration_ms`
+    rather than inferred from percentiles: 19.3 min median, 36.0 p90, 46.7 p95, 55.2 p99, 98.5 max.
+    At 7200s, ZERO of the 116 would have tripped it, with a 22% margin over the largest run ever
+    observed. At 5400s, ONE would have — which is why the next tighter candidate is rejected rather
+    than preferred. The bound is on ELAPSED TIME SINCE THE LAST OBSERVED STATE TRANSITION, never on
+    total run age, so a long healthy run that keeps emitting `worker.state` is never touched: that
+    is what criterion 6 asserts, and it is the difference between this and a wall-clock kill.
+
+    #2251 CHOSE 7200s FOR THE RECYCLE'S KILL PREDICATE ON THIS SAME POPULATION, AND THE RISKS ARE
+    GENUINELY DIFFERENT, SO THE MATCH IS ARGUED RATHER THAN INHERITED. The recycle decides whether
+    to kill a process it did not start, WITH an operator present who invoked it. This is a run
+    deciding to abandon its OWN worker, UNATTENDED. The naive reading says unattended should be more
+    conservative — but it cuts the other way: ABANDONING IS THE SOFTER ACT. The run ends with a
+    terminal verdict, the lock is released, the task becomes dispatchable again and the evidence is
+    written down; the recycle's kill is terminal for that process with no re-dispatch behind it. One
+    number across both is easier to reason about and neither trips any observed run, SO THEY MATCH
+    DELIBERATELY. IF EITHER IS EVER RETUNED, RETUNE BOTH OR RECORD WHY THEY DIVERGED.
+
+    WHAT IS RECORDED, AND WHO READS IT. At the moment of abandonment, BEFORE anything is released:
+    elapsed since the last observed `worker.state` transition, that last state and its timestamp,
+    the run id and task id, the resolved bound, and the lock and worktree about to be released.
+    Turns are recorded ONLY IF the stream carried them — the SDK's `num_turns` arrives in the
+    completion envelope, which by definition a stalled stream has not produced, so this must be an
+    optional field and must never be fabricated. A killed worker writes no `implement.done`, which
+    is exactly why its spend appears nowhere today; the same blind spot covers the `no_pr` bucket.
+    THE READER IS THE OPERATOR reading the ledger, and that is stated because an unstated one is
+    not. Whether an abandonment burns a strike or counts as an attempt is a POLICY QUESTION THIS
+    SHARD RAISES AND DOES NOT ANSWER.
+
+    ROTATION MEMBERSHIP IS DECIDED BY THE RULE, NOT BY PREFERENCE. `DECISION_RELEVANT_LEDGER_STEPS`
+    (`src/lib/ledger.ts`, 59 entries) is required ONLY IF A DECISION READS THE STEP BACK via
+    `.step === "..."`, and `test/ledger-rotation.test.ts` derives its expectation by scanning
+    consumer sources for exactly that. An operator-read row needs no membership and must not take
+    one; if the implementer adds any predicate that reads this step, it MUST join the set in the
+    same PR. Criterion 8 asserts whichever of those two the implementation actually chooses.
+
+    THE ABANDONED PROCESS IS NOT NECESSARILY REAPED, AND THAT IS NAMED RATHER THAN SOLVED. An
+    `AbortController` ends the ITERATION; the SDK's child `claude` process is a separate pid and may
+    keep running. `killProcessGroup` (`src/lib/worker-containment.ts`) is the pid-based mechanism
+    that exists for this and is the natural tool. THE ADJACENT GAP, NAMED AND EXPLICITLY NOT SCOPED
+    IN: `deploy/recycle-container.sh` carries three TERM-shaped references and ZERO `SIGKILL`/`-9`
+    escalation, so a process that ignores TERM is not escalated there — that is #2251's territory
+    and a separate concern, and this shard must not widen into it.
+
+    WHAT MUST NOT BE BUILT. NO CHANGE TO `--max-turns`, `maxBudgetUsd` OR `dispatchLanes` — the
+    first two cannot fire on a stall by construction and the third stays at 3 by operator ruling.
+    NO REPLACEMENT FOR W1-T943's DETECTOR, whose rung, threshold and escalation are correct and
+    stay as they are. NO RETIERING of its `BLOCKED` escalation. NO NEW STALL SENSOR: `worker.state`
+    already exists and is what the bound reads. NO BOUND ON `await deps.sweep()` OR ON THE FIX-RUNG
+    SPAWN — that is W1-T1044 (#2249), the sibling half of this same class, cited and deliberately
+    not re-derived here. NO KILL PATH FOR A PROGRESSING WORKER.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT, ordered by a word-bounded invocation count of the
+    seams the bound touches (`spawnWorker`, `queryFn`, `WorkerStateTracker`, `workerStall`):
+    `src/run-task.ts` 56 and `src/lib/worker.ts` 23, with every other file at 6 or fewer.
+    `src/lib/worker.ts` is where the stream is iterated and where the abort must live;
+    `src/run-task.ts` owns the lock, the worktree, the verdict and the rung that already detects the
+    stall, so the ACT-ON-DETECTION half cannot live anywhere else. Per DECISIONS.md's 2026-08-18
+    W1-T471 ruling that file is not split and tasks are not re-scoped to avoid it, and the ruling
+    states the ceremonial acceptance sentence is no longer required, so it is declared plainly and
+    the serialisation cost is accepted. `plan/policy.yaml` carries the threshold as data beside the
+    existing `workerStall` row it must not disturb.
+
+    `test/worker-clock-bound.test.ts` DOES NOT EXIST at 2529ff12 — a forward-referenced PATH, never
+    a guessed symbol — and is a new file because the house rule keeps a coverage-load-bearing test
+    out of a shared suite.
+
+    THE FALSIFIER MUST PROVE BOTH DIRECTIONS OR IT PASSES ON A BOUND THAT ABANDONS EVERYTHING.
+    Criterion 6 is that other direction and is not optional: a worker still emitting `worker.state`
+    transitions must survive past the bound in the SAME run that abandons a silent one.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS: `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus acceptance text, and this set
+    crosses two `src/` modules, a plan file and `test/`. Blast radius argues UP: this is the only
+    code path that may end a paying worker unattended, which is why the bound is required to key on
+    silence rather than age and why the inside-the-bound case is asserted alongside the outside one.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING, NOT MINTED HERE.
+    `refs/rmd-id/W1-T1045` resolves to abda5d26928921e8009b0727fc9a2719fcec4d1e. Positive control:
+    `refs/rmd-id/W1-T1044` reads 1. Negative control: `refs/rmd-id/W1-T999999` reads 0.
