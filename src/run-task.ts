@@ -2235,15 +2235,45 @@ export interface PrHeadGateway {
  * layer (any error resolves to `undefined`) is deliberate: {@link checkPrOwnership}
  * treats an unresolved head ref as NOT owned, so a `gh` hiccup fails CLOSED
  * (never merged) rather than silently assuming the claim is honest.
+ *
+ * W1-T1026: the GraphQL read (`--json`) is the ONE bucket measured to exhaust on
+ * this account while REST/core stays healthy (CLAUDE.md), and 16 of 29
+ * `pr_attribution_failed` instances were exactly this — an unreadable head ref,
+ * 13 of them on the run's OWN `run-<task>-<epoch>` branch, indistinguishable from
+ * a genuinely foreign one once `undefined` reached {@link checkPrOwnership}. So a
+ * GraphQL failure here no longer gives up: it retries the SAME field
+ * (`headRefName`) over REST — a separate quota — via {@link singlePrRestArgs} /
+ * {@link mapRestPr}, the identical migration {@link ghLiveState} already applies
+ * to `state`. Still fail-SOFT end to end: an unparsable URL or a REST failure
+ * (both transports down, or a genuinely unreadable PR) resolves to `undefined`
+ * exactly as before, so {@link checkPrOwnership}'s fail-closed guard for that
+ * residual case is unchanged — this widens what counts as "read successfully",
+ * never what happens when nothing can be read.
+ *
+ * `gh` IS INJECTABLE, defaulting to the real {@link ghJson} — mirroring
+ * {@link fetchPrBodyViaGh}/{@link fetchPrDiffFilesViaGh} just above and
+ * {@link ghLiveStateByNumber} below, all in this same file. Both the GraphQL
+ * probe and the REST fallback are `gh` calls of the identical `(args: string[])
+ * => unknown` shape, so ONE injected reader drives both without a second
+ * parameter — a test can make the first call throw (the exhaustion this task
+ * measures) and the second answer, or make both throw (the residual
+ * both-transports-down case), with no `gh` exec anywhere in the suite.
  */
-export function ghPrHeadGateway(): PrHeadGateway {
+export function ghPrHeadGateway(gh: (args: string[]) => unknown = ghJson): PrHeadGateway {
   return {
     headRefName(prUrl) {
       try {
-        const view = ghJson(["pr", "view", prUrl, "--json", "headRefName"]) as { headRefName?: string };
+        const view = gh(["pr", "view", prUrl, "--json", "headRefName"]) as { headRefName?: string };
         return view.headRefName;
       } catch {
-        return undefined;
+        const target = prUrlTarget(prUrl);
+        if (!target) return undefined;
+        try {
+          const row = gh(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
+          return mapRestPr(row).headRefName || undefined;
+        } catch {
+          return undefined;
+        }
       }
     },
   };
