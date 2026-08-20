@@ -29,5 +29,21 @@ raw: "AN UNRESOLVABLE PROOF CERTIFIES NOTHING AND NOTHING NOTICES — residual
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2279
+summary:
+  headline: Diagnose proof validation issues in queued tasks
+  what_happened: Task W1-T229 had proofs that resolved to zero tests—making it
+    undetectable whether it passed or failed. This is the third similar case,
+    indicating a potential pattern rather than isolated authoring error.
+  decision: Execute rmd check-proof diagnostic on all queued tasks; report the
+    affected count, list, and whether all three cases share a root cause.
+  options:
+    - label: Run full diagnostic now
+      consequence: Complete data on issue prevalence and root cause; enables
+        preventive measures without blocking current queue.
+    - label: Run diagnostic on recent changes only
+      consequence: Faster results; captures likely source; may miss older
+        infrastructure issues underlying the pattern.
+    - label: Skip diagnostic; document W1-T229 only
+      consequence: Minimal overhead; if isolated, saves resources; if systemic,
+        pattern remains hidden until next incident.
