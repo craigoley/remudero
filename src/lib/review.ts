@@ -5388,6 +5388,9 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^stryker\\.conf\\.json$",
   // W1-T1048: the task-id existence gate's rule logic, behind a required, unconditional ci.yml job.
   "^scripts/task-id-existence-check\\.mjs$",
+  // W1-T1051: the assertion-discrimination gate's rule logic, behind a required, unconditional
+  // ci.yml job — same shape as the task-id existence entry directly above.
+  "^scripts/assertion-discrimination-check\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
