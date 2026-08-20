@@ -1253,13 +1253,32 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
 // THE PREDICATE IS `undeclaredScopeLast`'s OWN (`t.files === undefined || t.files.length === 0`),
 // restated here rather than imported — drain.ts keeps no new dependency on this module, and the
 // two can be pinned against each other by test rather than by coupling.
+//
+// W1-T1030 — DISPATCHER-UNREACHABLE EXEMPTION. The rule above is sound but its rationale is
+// entirely about `overlappingPaths` at DISPATCH: `isDispatchEligible` (drain.ts) refuses at
+// `t.verify !== "auto"` BEFORE any path is read, so a task that is not `verify: auto` never
+// reaches `overlappingPaths` and cannot serialise the lane by an undeclared scope. Gating on
+// `verify: human` rather than `type: manual` because `verify` is the exact field
+// `isDispatchEligible` checks — `type: manual` is today a strict subset of it (see W1-T1030's
+// rationale) but is a proxy that a future `type: manual, verify: auto` record would break. The
+// 71 `implement/auto` records with no `files:` are untouched: this exemption checks `verify`,
+// not `type`, so they still hit the `block` below exactly as before. The exemption is also
+// SELF-LAPSING: it re-reads `task.verify` on every call, so the moment a task's record is
+// re-banded to `verify: auto` (the sanctioned `deriveStatus` channel), the very next lint run
+// — the changed-tasks CI pass that re-lints any touched record — sees `verify !== "human"` and
+// the block re-applies with no separate bookkeeping.
 
 /** A task whose `files:` is absent, or present and empty — W1-T504's exact shape. The predicate
  *  is `undeclaredScopeLast`'s own (drain.ts, W1-T476), restated rather than imported so this
  *  module gains no new dependency. See the module comment above for why this is `block`, not
- *  `warn`, and why no dispatcher-side change accompanies it. */
+ *  `warn`, and why no dispatcher-side change accompanies it.
+ *
+ *  EXEMPT when `verify: human` (W1-T1030): such a task never reaches `isDispatchEligible`'s
+ *  path-reading step, so the overlap hazard this check exists to prevent cannot occur for it.
+ *  The exemption lapses the instant `verify` reads `auto` again — see the module comment. */
 export function declaredScopeViolation(task: Task): LintViolation | undefined {
   if (!(task.files === undefined || task.files.length === 0)) return undefined;
+  if (task.verify === "human") return undefined;
   return {
     check: "declared-scope",
     severity: "block",
