@@ -1,0 +1,145 @@
+- id: W1-T1066
+  title: "THE NO-POLLING RULE LANDED AS PROSE AND NOTHING REFUSES A POLLER — eighty gh calls at a 45-second cadence against an 8-13 minute CI cycle locked the operator out of his own repository for ninety minutes while /rate_limit read 204 of 5000 used, because the ceiling hit was the SECONDARY limit which counts cadence not volume: add rule 6 to the PreToolUse deny floor and reach the population that actually polled"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    CLAUDE.md's own meta-rule: a rule that keeps getting violated needs a GATE, not sharper prose.
+    The no-polling rule landed as prose at 62626 of 62644 bytes with eighteen to spare, and nothing
+    refuses a poller. This files the gate. Re-derived at origin/main 944bd33a in a scratch worktree
+    proven equal to origin/main. No `gh` was run and no `/rate_limit` call was made.
+
+    (1) THE MECHANISM ALREADY EXISTS AND IS ALREADY NUMBERED. `hooks/deny-floor.sh` is a PreToolUse
+    tripwire — exit 2 blocks the tool call and feeds stderr back to the model — carrying five
+    numbered rules today (force-push to default, `gh auth` mutation, the planted probe path, `gh api`
+    commit-status POST, the operator's local protected paths), 78 lines, with `test/deny-floor.test.ts`
+    and `test/deny-floor-probe.test.ts` already in the tree. This is rule 6 in an existing file with an
+    existing test, not new machinery.
+
+    (2) BUT IT REACHES WORKERS ONLY TODAY, AND THE OFFENDERS WERE NOT WORKERS. The hook is wired in
+    `settings/worker.json`, whose own `$comment` says in terms: *"Passed to workers ONLY — never
+    merged into ~/.claude/settings.json."* And `src/lib/worker.ts`'s spawn doc pins the other side:
+    `settingSources: []` → SDK isolation mode, so a worker loads no setting sources at all and takes
+    hooks only from the settings file passed to it explicitly. THE ASYMMETRY IS THEREFORE THE REVERSE
+    OF THE ONE FEARED: a repo-level `.claude/settings.json` reaches INTERACTIVE lanes and cannot reach
+    workers, while `settings/worker.json` reaches workers and cannot reach interactive lanes. The lanes
+    that polled were interactive `claude` sessions in a worktree of this repo, so they are reachable —
+    but only through a surface the repo does not ship yet.
+
+    (3) THE COST IS ONE IGNORED PATH, NAMED UP FRONT. `.gitignore` line 44 is `.claude/`, so a
+    repo-level `.claude/settings.json` cannot be committed without un-ignoring that one file. That is
+    the real price of this task and it is not incidental: it adds a committed settings surface to a
+    repo that deliberately has none. `CONTAINMENT_PATH_PATTERNS` (`src/lib/specialist-panel.ts`)
+    matches `hooks/`, `.claude/settings*.json` and `settings/*.json`, so this diff necessarily trips
+    the required `containment-probe` job — which is correct, that job exists for exactly this, and it
+    is named here so nobody reads a red probe as a surprise.
+
+    (4) THE PREDICATE DISCRIMINATES, MEASURED BOTH WAYS. A bare `gh` call is fine; a `gh` call inside
+    a loop with a `sleep` is the defect. Against the two OBSERVED shapes —
+    `for i in $(seq 1 25); do … gh pr view … sleep 20; done` and
+    `until [ "$(gh run view …)" = "completed" ]; do sleep 20; done` — a loop-keyword AND `sleep` AND
+    `gh` conjunction fires on both. Against eight benign commands it fires on none, including a bare
+    `gh pr view`, a bare `sleep`, a `for` loop with no `gh`, and `until [ -f coverage/lcov.info ]; do
+    sleep 30; done` — waiting on a LOCAL FILE is not rate-limit pressure and must stay allowed.
+
+    (5) AND IT REFUSES NONE OF THIS REPO'S OWN POLLING, FOR A STRUCTURAL REASON RATHER THAN A LUCKY
+    ONE. This repo does poll: `.github/workflows/ci-gate.yml` runs `while :; do … sleep
+    "${WAIT_POLL_INTERVAL_SECONDS}"; done` as its required wait, and `deploy/entrypoint.sh` runs its
+    own supervisor loop. Ten files under `deploy/ scripts/ .github/workflows/ bin/` carry a real
+    `…; do` loop construct (control: the same regex matches a synthetic offender). NONE can trip a
+    PreToolUse hook, because that hook inspects one tool call's `tool_input.command` and every one of
+    those loops lives inside a committed file invoked by name — the hook sees `bash scripts/foo.sh`,
+    never the loop body, and CI's runners have no Claude Code hook at all. FALSE POSITIVES AGAINST
+    THIS REPO'S OWN LOOPS: ZERO, and by construction rather than by tuning.
+
+    (6) THE HONEST LIMIT, STATED RATHER THAN DISCOVERED LATER. A PreToolUse hook sees ONE command
+    string, so it catches a poller written as a single inline loop — the shape that actually caused
+    the outage — and CANNOT see a poller spread across N separate tool calls that each make one `gh`
+    call. This gate raises the cost of the observed shape; it does not make polling impossible. An
+    implementer must not claim otherwise in the PR body.
+
+    (7) NO CHEAPER CONTROL EXISTS FOR THIS POPULATION. `buildBatchedGithub` has defaulted a pacer
+    since W1-T1005 and `paceGhEntry` spaces calls, but every one of those paths is TypeScript reached
+    through `execFileSync`/`ghJson` inside the daemon. An interactive lane's bare `gh` in a Bash tool
+    call goes to the API through none of it. Pacing a bare `gh` would mean shadowing the binary on
+    PATH — a far larger and more surprising change than one refusal rule. REFUSAL IS THE ONLY LEVER
+    THAT REACHES THIS POPULATION.
+
+    (8) THE BLAST RADIUS DID SHRINK, AND IT DOES NOT KILL THE TASK. #2294 merged and the daemon is
+    genuinely on its own installation token — one `github_app.token_refreshed` row at
+    2026-08-20T15:41:41.554Z with `expires_at` 2026-08-20T16:41:41Z, and zero
+    `github_app.token_refresh_failed` (control: 173 `daemon.start` rows over the same union of 11
+    plain/live forms, 0 `.gz`). So a polling lane now starves the operator rather than the fleet. That
+    is a smaller radius, not a harmless one: the measured cost was the OPERATOR locked out of his own
+    repository for ninety minutes, and that cost is unchanged by the fleet's new pool.
+  design: |
+    (i) RULE 6 IN `hooks/deny-floor.sh`, THE SAME SHAPE AS RULES 1-4. Deny when a single command
+    carries a loop keyword (`for`/`while`/`until`) AND `sleep` AND a `gh` invocation. Emit a reason
+    naming the cadence problem, not merely "blocked", so the model gets back something it can act on:
+    say that the wait belongs to the operator and that it should report what it knows and stop.
+
+    (ii) SHIP `.claude/settings.json` AND UN-IGNORE EXACTLY THAT FILE. It carries the same PreToolUse
+    matcher shape `settings/worker.json` already uses, pointing at the same `hooks/deny-floor.sh`, so
+    interactive lanes and workers run ONE floor rather than two that can drift. `.gitignore` gains a
+    negation for that single path only — `.claude/` stays ignored otherwise, so no operator-local
+    state becomes committable by accident.
+
+    (iii) THE NEGATIVE CONTROL IS PART OF THE DELIVERABLE, NOT AN EXTRA. `test/deny-floor.test.ts`
+    must assert BOTH directions: the two observed shapes are refused, and a bare `gh pr view`, a bare
+    `sleep`, a `for` loop with no `gh`, and a local-file `until` wait are all allowed. A refusal rule
+    with no allow-side test is how a gate that cries wolf ships.
+
+    (iv) DO NOT ADD A CLAUDE.md RULE. The prose form landed at 62626 of 62644 bytes with eighteen to
+    spare; another rule would need another fold and would still refuse nothing. If the existing bullet
+    needs anything, it is the one-line pointer that it now names its enforcing gate — which the
+    charter already asks for and which costs almost nothing.
+
+    (v) OUT OF SCOPE, NAMED. The multi-tool-call poller of rationale (6) is not addressed and is not
+    addressable at this seam. `paceGhEntry`'s own unreachable stand-down is W1-T1008's subject and is
+    not touched. No change to the daemon's App-token path from #2294.
+  acceptance:
+    - claim: "a gh call inside a loop with a sleep is refused at the tool boundary"
+      proof: "unit test: W1-T1066: a gh call inside a loop with a sleep is refused"
+    - claim: "a bare gh call is still allowed so the gate does not cry wolf"
+      proof: "unit test: W1-T1066: a bare gh call is still allowed"
+    - claim: "a wait loop that touches no gh call is still allowed"
+      proof: "unit test: W1-T1066: a loop with a sleep and no gh call is still allowed"
+    - claim: "the refusal names the cadence reason rather than a bare blocked"
+      proof: "unit test: W1-T1066: the refusal names cadence rather than a bare blocked"
+    - claim: "interactive lanes load the same floor the workers already run"
+      proof: "grep: deny-floor\\.sh in .claude/settings.json"
+  risk: high
+  origin: "oper#no-polling-gate-2026-08-20"
+  plan_refs: ["W1-T1005", "W1-T1008", "W1-T203"]
+  files: [hooks/deny-floor.sh, .claude/settings.json, .gitignore, test/deny-floor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    RENUMBERED FROM THE ID THIS SHARD FIRST CARRIED, WHICH THE OPERATOR ASSIGNED TWICE IN
+    ERROR. Two open PRs filed the same integer; `loadPlan` throws `duplicate task id` on that
+    shape, so both merging would refuse every plan-reading verb on origin/main. The other PR
+    claimed it first and is untouched. W1-T1055 (#2281, merged) is the filed defect behind it:
+    the printing verb reserves nothing, so two callers can hold the same integer with neither
+    at fault.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` counts two
+    concerns here — deny-floor and settings — and refuses that at medium. DECOMPOSITION IS DECLINED
+    WITH A REASON: a refusal rule nothing loads is the ships-unwired shape this repo already has a
+    floor for (`test/ships-unwired-floor.test.ts`), and the settings file is the only thing that makes
+    the rule reach the population that polled. Splitting them ships a gate that refuses nothing, then
+    a config that points at a rule which may not exist yet. The rule and its reachability are one
+    change.
+
+    THE ONE OUTCOME THAT WOULD KILL THIS TASK WAS CHECKED AND DID NOT HAPPEN. If neither interactive
+    lanes nor workers could be reached by a hook, the shard would be undeliverable and should be
+    dropped rather than built. Workers are reached today (`settings/worker.json`); interactive lanes
+    are reachable at the cost of one un-ignored path (rationale 2 and 3). Both populations are
+    therefore addressable, and the task stands.
+
+    THE MEASUREMENTS ARE QUERIES, NOT QUOTED NUMBERS. Re-derive the loop inventory with
+    `git grep -nE '(while|until|for)[^#]*;[[:space:]]*do\b' -- deploy/ scripts/ .github/workflows/ bin/`,
+    the ledger figures with the per-form union read (control first), and the byte budget with
+    `npm run --silent claude-md-budget-ratchet`.
