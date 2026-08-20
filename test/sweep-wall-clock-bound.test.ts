@@ -21,7 +21,7 @@ import { runDaemon, DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS, type DaemonDeps } from ".
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import type { MergedSet } from "../src/lib/drain.js";
-import { runFixRung, type FixRungOutcome } from "../src/run-task.js";
+import { reclaimAbandonedWorker, runFixRung, type FixRungOutcome } from "../src/run-task.js";
 import { loadPolicy, installPolicyPath } from "../src/lib/policy.js";
 import type { Config } from "../src/lib/config.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
@@ -412,4 +412,156 @@ test("W1-T1044: an unsensed worker is bounded by elapsed time", async () => {
     0,
     "the wider-bound run's own ledger is ALSO free of worker.state rows",
   );
+});
+
+// ── the reclaim primitive itself, and the abandon path's two error arms ────────────────────────
+//
+// The tests above prove the RUNG reclaims; these prove what the reclaim actually does, and what
+// happens when the two things that can go wrong afterwards do. All three are error/branch arms
+// that a passing run never takes, which is why none of them was observed.
+
+test("W1-T1044: reclaimAbandonedWorker kills only the candidate whose marker names THIS run", () => {
+  const killed: number[] = [];
+  const markers: Record<number, { runId: string } | undefined> = {
+    11: { runId: "OTHER-RUN" },
+    22: { runId: "THIS-RUN" },
+    33: undefined, // a process carrying no marker at all
+  };
+  reclaimAbandonedWorker(
+    { runId: "THIS-RUN", taskId: "W1-T1044FIX", elapsedMs: 20 },
+    {
+      listCandidates: () => [{ pid: 11 }, { pid: 22 }, { pid: 33 }] as never,
+      readMarkers: ((pid: number) => markers[pid]) as never,
+      kill: (pid: number) => void killed.push(pid),
+    },
+  );
+  assert.deepEqual(killed, [22], "only the run's own worker is signalled — a foreign or marker-less process is left alone");
+});
+
+test("W1-T1044: reclaimAbandonedWorker swallows a failing process enumeration rather than throwing back into the rung", () => {
+  assert.doesNotThrow(() =>
+    reclaimAbandonedWorker(
+      { runId: "THIS-RUN", taskId: "W1-T1044FIX", elapsedMs: 20 },
+      {
+        listCandidates: () => {
+          throw new Error("ps: cannot read the process table");
+        },
+      },
+    ),
+  );
+  // The same swallow when the KILL itself fails — a signal race is the likelier of the two, and
+  // the rung has already ledgered the abandonment by this point.
+  assert.doesNotThrow(() =>
+    reclaimAbandonedWorker(
+      { runId: "THIS-RUN", taskId: "W1-T1044FIX", elapsedMs: 20 },
+      {
+        listCandidates: () => [{ pid: 22 }] as never,
+        readMarkers: (() => ({ runId: "THIS-RUN" })) as never,
+        kill: () => {
+          throw new Error("ESRCH");
+        },
+      },
+    ),
+  );
+});
+
+test("W1-T1044: a reclaim that THROWS is ledgered, never propagated out of the rung", async () => {
+  const steps: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const outcome: FixRungOutcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    deps: {
+      spawn: () => new Promise<WorkerResult>(() => {}),
+      waitForCiGreen: async () => "green",
+      runReview: async () => fixReview(),
+      push: () => {},
+      issues: NEVER_ISSUES,
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra = {}) => steps.push({ step, extra: extra ?? {} }),
+      say: () => {},
+      account: (r) => r,
+      spawnWallClockBoundMs: 20,
+      reclaimWorker: () => {
+        throw new Error("reclaim exploded");
+      },
+    },
+  });
+  assert.equal(outcome.outcome, "spawn_abandoned", "a failed reclaim never changes the rung's outcome");
+  const failed = steps.find((s) => s.step === "fix.spawn_reclaim_failed");
+  assert.ok(failed, "a reclaim failure is recorded — otherwise the worker is left running with nothing saying so");
+  assert.match(String(failed!.extra.error), /reclaim exploded/);
+  assert.equal(failed!.extra.task_id, "W1-T1044FIX");
+});
+
+test("W1-T1044: a spawn that REJECTS after the rung abandoned it is ledgered, never an unhandled rejection", async () => {
+  const steps: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let rejectSpawn: ((e: Error) => void) | undefined;
+  const outcome: FixRungOutcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    deps: {
+      spawn: () =>
+        new Promise<WorkerResult>((_resolve, reject) => {
+          rejectSpawn = reject;
+        }),
+      waitForCiGreen: async () => "green",
+      runReview: async () => fixReview(),
+      push: () => {},
+      issues: NEVER_ISSUES,
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra = {}) => steps.push({ step, extra: extra ?? {} }),
+      say: () => {},
+      account: (r) => r,
+      spawnWallClockBoundMs: 20,
+      reclaimWorker: () => {},
+    },
+  });
+  assert.equal(outcome.outcome, "spawn_abandoned");
+  // The rung has moved on; the real spawn settles LATER. Without the attached handler this is an
+  // unhandled rejection that takes the process down.
+  rejectSpawn?.(new Error("worker died long after the bound"));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const settled = steps.find((s) => s.step === "fix.spawn_settled_after_abandon");
+  assert.ok(settled, "a post-abandon rejection is recorded rather than crashing the daemon");
+  assert.match(String(settled!.extra.error), /worker died long after the bound/);
+  assert.equal(settled!.extra.run_id, "W1-T1044FIX-1730000000000");
+});
+
+test("W1-T1044: a sweep that REJECTS after the tick abandoned it is ledgered, never an unhandled rejection", async () => {
+  // The sibling of `fix.spawn_settled_after_abandon` above, on the daemon's own sweep bound: the
+  // tick has already moved on, so without the attached handler this rejection is unhandled and
+  // takes the daemon down. A passing run never reaches it, which is why it was unobserved.
+  const root = mkdtempSync(join(tmpdir(), "sweep-wall-clock-bound-"));
+  const plan = emptyPlan();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let rejectSweep: ((e: Error) => void) | undefined;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async () => {
+        throw new Error("nothing runnable in this fixture — runOne must never be called");
+      },
+      sleep: REAL_SLEEP,
+      sweep: () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSweep = reject;
+        }),
+      checkStop: () => stopDetail(root),
+      log: (step, extra = {}) => {
+        lines.push({ step, extra });
+        if (step === "daemon.sweep.abandoned") {
+          // Settle the abandoned sweep LATE, exactly as a real one would: the tick has already
+          // recorded the abandonment and moved on by the time this rejects.
+          rejectSweep?.(new Error("sweep died long after the bound"));
+          requestStop(root, "test observed the abandonment");
+        }
+      },
+    },
+    { pollIntervalMs: 30, sweepWallClockBoundMs: 20 },
+  );
+  assert.equal(s.stopReason, "stopped", "the daemon survived the late rejection rather than crashing on it");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const failed = lines.find((l) => l.step === "daemon.sweep.failed");
+  assert.ok(failed, `expected a daemon.sweep.failed line, saw steps: ${lines.map((l) => l.step).join(", ")}`);
+  assert.equal(failed!.extra.after_abandon, true, "the row says the failure arrived AFTER the abandonment, not instead of it");
+  assert.match(String(failed!.extra.error), /sweep died long after the bound/);
 });

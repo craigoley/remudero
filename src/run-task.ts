@@ -4012,11 +4012,27 @@ export function detectReviewFalseBlock(check: {
  * process staying alive for a LATER orphan sweep to find once its run truly ends — it never
  * throws back into the rung that already ledgered the abandonment (`fix.spawn_abandoned`).
  */
-function reclaimAbandonedWorker(info: { runId: string; taskId: string; elapsedMs: number }): void {
+export function reclaimAbandonedWorker(
+  info: { runId: string; taskId: string; elapsedMs: number },
+  // APPENDED LAST, the house convention, so no positional caller shifts: both call sites
+  // (`runTaskBody`'s `reclaimWorker` wiring and `reclaimWorkerImpl`'s default) pass `info` alone
+  // and keep today's behaviour byte-for-byte. Injected only so this function's own arms are
+  // reachable from a test — the primitives it wraps enumerate and signal REAL processes, so
+  // driving the defaults could neither exercise the match nor the failure without touching the
+  // host's process table.
+  deps: {
+    listCandidates?: typeof defaultListCandidates;
+    readMarkers?: typeof defaultReadMarkers;
+    kill?: typeof killProcessGroup;
+  } = {},
+): void {
+  const listCandidates = deps.listCandidates ?? defaultListCandidates;
+  const readMarkers = deps.readMarkers ?? defaultReadMarkers;
+  const kill = deps.kill ?? killProcessGroup;
   try {
-    for (const candidate of defaultListCandidates()) {
-      const markers = defaultReadMarkers(candidate.pid);
-      if (markers?.runId === info.runId) killProcessGroup(candidate.pid);
+    for (const candidate of listCandidates()) {
+      const markers = readMarkers(candidate.pid);
+      if (markers?.runId === info.runId) kill(candidate.pid);
     }
   } catch {
     /* best-effort — see doc above */
