@@ -23,6 +23,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { playwrightCacheRoot } from "./review.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
+import { parseInflightLockInfo } from "./inflight-lock.js";
 
 /**
  * GENERAL SHELL-ISOLATION MECHANISM (W1-T18 / OSS blocker).
@@ -531,7 +532,7 @@ export function materializeWorkerHome(opts: {
 // NOT IN SCOPE, and unchanged by this section: WHAT is symlinked — the allowlist
 // above, verbatim — only how many homes exist and who owns each.
 
-const workerHomeFsOps = { existsSync, rmSync, readdirSync, statSync };
+const workerHomeFsOps = { existsSync, rmSync, readdirSync, statSync, readFileSync };
 type WorkerHomeFsOps = typeof workerHomeFsOps;
 
 /**
@@ -601,15 +602,46 @@ export function reapWorkerHome(
 
 /** Default age ceiling for {@link sweepStaleWorkerHomes}: 24h — matches the
  * other boot sweeps (lib/tmp.ts's `sweepStaleTempDirs`, lib/worker-scratch.ts's
- * `sweepStaleWorkerScratch`). */
+ * `sweepStaleWorkerScratch`). W1-T1064: this is now the BACKSTOP for a candidate whose
+ * run id resolves to nothing, not the primary signal — see {@link sweepStaleWorkerHomes}'s
+ * doc for the predicate that runs before it. */
 export const DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface WorkerHomeSweepOpts {
-  /** Reap a worker-home dir older than this. Default 24h. */
+  /** Reap a worker-home dir older than this, when its run id resolves to nothing (no
+   *  live lock, no terminal ledger verdict). Default 24h. */
   maxAgeMs?: number;
   /** Injectable clock (tests). Defaults to Date.now. */
   now?: () => number;
   fsImpl?: Partial<WorkerHomeFsOps>;
+  /**
+   * W1-T1064: where `state/inflight/*.lock` files live — checked for a lock naming a
+   * candidate's run id BEFORE anything is removed (a live lock keeps the home
+   * regardless of age; design bullet 2, plan/tasks.d/W1-T1064). Defaults to
+   * `<dirname(root)>/state/inflight`, mirroring config.ts's own documented relationship
+   * between `workerHomeDir` (`<config.root>/worker-home`, unless a `workerHomeRoot`
+   * override is configured) and `config.root` — every EXISTING caller of
+   * {@link sweepStaleWorkerHomes} passes only `root`, so this default is what makes the
+   * sharpened predicate apply with no call-site change. A caller running a custom
+   * `workerHomeRoot` should pass this explicitly.
+   */
+  inflightDir?: string;
+  /**
+   * W1-T1064: the ledger checked for a terminal `verdict` line naming a candidate's run
+   * id — the ONLY thing that authorises removing a home before the age ceiling (design
+   * bullet 3). Defaults to `<dirname(root)>/state/ledger.ndjson`, the same
+   * `workerHomeDir`-relative assumption {@link inflightDir} makes.
+   */
+  ledgerPath?: string;
+  /**
+   * W1-T1064: "PRINT BEFORE CLEARING, ALWAYS" (the task design's own words) — called once
+   * per removal naming the home, its run id and the evidence that judged it dead, and
+   * once more at the end of EVERY pass (including the zero-removed case), so a pass that
+   * ran and found nothing stale is no longer indistinguishable from one that never ran.
+   * Optional and unwired by any existing caller — every current call site is therefore
+   * unaffected by this addition.
+   */
+  log?: (step: string, fields: Record<string, unknown>) => void;
 }
 
 export interface WorkerHomeSweepSummary {
@@ -618,24 +650,112 @@ export interface WorkerHomeSweepSummary {
 }
 
 /**
+ * W1-T1064: `true` iff `inflightDir` holds a `*.lock` file whose `run_id` names `runId`
+ * — a POSITIVE liveness signal that is file-based and survives a restart (design bullet
+ * 2), unlike a live-pid check (bullet 1), which the moment right after a restart makes
+ * unreliable on its own (pids are reassigned right when workers are being respawned).
+ * `sweepStaleInflightLocks` (inflight-lock.ts) reaps stale locks on its own schedule, so
+ * this function's ABSENT result must never be read as "the run ended" — only a PRESENT
+ * result means anything, which is why {@link sweepStaleWorkerHomes} only ever uses this
+ * to KEEP, never to authorise a removal.
+ */
+function findLiveInflightLockForRun(inflightDir: string, runId: string, f: WorkerHomeFsOps): boolean {
+  let entries: string[];
+  try {
+    entries = f.readdirSync(inflightDir);
+  } catch {
+    return false; // absent/unreadable inflight dir — proves nothing either way
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".lock")) continue;
+    let raw: string;
+    try {
+      raw = f.readFileSync(join(inflightDir, entry), "utf8");
+    } catch {
+      continue; // vanished/unreadable between readdir and read — someone else's concern
+    }
+    const info = parseInflightLockInfo(raw);
+    if (info && info.run_id === runId) return true;
+  }
+  return false;
+}
+
+/**
+ * W1-T1064: `true` iff `ledgerPath` holds a `step: "verdict"` line whose `run_id` names
+ * `runId` — the POSITIVE statement of death (design bullet 3) that authorises
+ * {@link sweepStaleWorkerHomes} to remove a home before the age ceiling. Every
+ * `run-task.ts` run's `log` closure stamps this exact `{run_id, step: "verdict"}` shape
+ * on every terminal outcome (`log("verdict", ...)`), so this reads the SAME fact the
+ * daemon itself already records, never a second notion of "done".
+ */
+function hasTerminalLedgerVerdict(ledgerPath: string, runId: string, f: WorkerHomeFsOps): boolean {
+  let raw: string;
+  try {
+    raw = f.readFileSync(ledgerPath, "utf8");
+  } catch {
+    return false; // absent/unreadable ledger — nothing to find
+  }
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // torn/unparseable line — dropped, same discipline readLedgerLines applies
+    }
+    const rec = parsed as { step?: unknown; run_id?: unknown };
+    if (rec.step === "verdict" && rec.run_id === runId) return true;
+  }
+  return false;
+}
+
+/**
  * Boot-time backstop (mirrors worker-scratch.ts's `sweepStaleWorkerScratch`
  * and tmp.ts's `sweepStaleTempDirs`): reap `<root>-<id>` worker-home dirs a
  * crashed/killed process could not reach its own {@link reapWorkerHome} call
  * for — the daemon boot sweep this task's design calls for, so a home
  * orphaned by an ended run does not accumulate across boots. Scans `root`'s
- * PARENT directory for siblings matching `<basename(root)>-`, reaping only
- * ones older than `maxAgeMs`: `materializeWorkerHome` touches a home's mtime
- * on every use, so a home belonging to a still-running spawn is always
- * recent and never collateral. Best-effort throughout; never throws.
+ * PARENT directory for siblings matching `<basename(root)>-`.
+ *
+ * W1-T1064 — THE PREDICATE, SHARPENED. Age alone let a day's worth of ~24h-old homes
+ * (mostly a per-run Playwright browser cache) accumulate until the disk hit 100% and
+ * tore a ledger write mid-record. Age is now the BACKSTOP, not the primary signal, for a
+ * candidate whose run id (the `<id>` in `<root>-<id>`) resolves to nothing:
+ *
+ *   1. A LIVE `state/inflight/` lock naming this run id (see
+ *      {@link findLiveInflightLockForRun}) keeps the home REGARDLESS OF AGE — file-based,
+ *      so unlike a pid check it survives a restart. Its ABSENCE proves nothing (the lock
+ *      sweep reaps stale locks on its own) and never authorises a removal by itself.
+ *   2. Only once no live lock was found: a TERMINAL `verdict` ledger line naming this run
+ *      id (see {@link hasTerminalLedgerVerdict}) is a POSITIVE statement that the run
+ *      finished, and removes the home NOW, before the age ceiling.
+ *   3. Anything else — no lock, no verdict; an orphan from a `kill -9` or a crash before
+ *      any verdict was written — falls back to `maxAgeMs`, exactly the pre-existing
+ *      mtime-only behavior.
+ *
+ * `inflightDir`/`ledgerPath` default off `dirname(root)` (see {@link WorkerHomeSweepOpts}),
+ * so every EXISTING caller — `run-task.ts`'s boot rung and `logDiskReclaimRung` both call
+ * `sweepStaleWorkerHomes(root)` with no other args — gets the sharpened predicate for
+ * free, with no call-site change required.
+ *
+ * Every removal is named via the optional `log` (home, run id, evidence), and the pass
+ * reports once more at the end EVEN WHEN NOTHING WAS REMOVED (design: "say so when
+ * nothing was eligible"), so silence never again reads the same as "never ran".
+ *
+ * Best-effort throughout; never throws.
  */
 export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = {}): WorkerHomeSweepSummary {
   const f = { ...workerHomeFsOps, ...opts.fsImpl };
   const now = opts.now ?? (() => Date.now());
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS;
+  const log = opts.log;
   const removed: string[] = [];
   const kept: string[] = [];
   const parent = dirname(root);
   const prefix = `${basename(root)}-`;
+  const inflightDir = opts.inflightDir ?? join(parent, "state", "inflight");
+  const ledgerPath = opts.ledgerPath ?? join(parent, "state", "ledger.ndjson");
 
   let entries: string[];
   try {
@@ -660,17 +780,47 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
       kept.push(name);
       continue;
     }
+
+    const runId = name.slice(prefix.length);
+    if (findLiveInflightLockForRun(inflightDir, runId, f)) {
+      kept.push(name); // live run: kept however old — no age check at all (claim 2)
+      continue;
+    }
+    if (hasTerminalLedgerVerdict(ledgerPath, runId, f)) {
+      try {
+        f.rmSync(full, { recursive: true, force: true });
+        removed.push(name);
+        log?.("worker_home_reap.removed", {
+          name,
+          run_id: runId,
+          reason: "terminal-verdict",
+          detail: `terminal ledger verdict for run ${runId}, no live inflight lock — removed before the age ceiling`,
+        });
+      } catch {
+        kept.push(name); // a permissions hiccup on one entry never blocks the rest
+      }
+      continue; // dead run: age is irrelevant once a positive statement of death exists
+    }
+
+    // Run id resolves to nothing (no lock, no verdict) — mtime age is the backstop.
     if (now() - mtimeMs <= maxAgeMs) {
-      kept.push(name); // recent mtime ⇒ a live spawn may still own it
+      kept.push(name); // recent mtime ⇒ possibly a live spawn this predicate could not resolve
       continue;
     }
     try {
       f.rmSync(full, { recursive: true, force: true });
       removed.push(name);
+      log?.("worker_home_reap.removed", {
+        name,
+        run_id: runId,
+        reason: "age-ceiling",
+        detail: `no live lock or ledger verdict for run ${runId}; aged past the ${maxAgeMs}ms ceiling`,
+      });
     } catch {
       kept.push(name); // a permissions hiccup on one entry never blocks the rest
     }
   }
+  log?.("worker_home_reap.summary", { removed: removed.length, kept: kept.length });
   return { removed, kept };
 }
 
