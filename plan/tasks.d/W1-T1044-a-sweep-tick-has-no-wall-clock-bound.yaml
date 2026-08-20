@@ -1,0 +1,177 @@
+- id: W1-T1044
+  title: "A SWEEP TICK HAS NO WALL-CLOCK BOUND, SO A FIX-RUNG WORKER THAT NEVER RETURNS PARKS THE DAEMON INDEFINITELY — the turn cap and the budget cap cannot fire on a shell command that never returns, and the run has been measured 21 times in seven days for 20.9 hours total, the longest 165 minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    MEASURED 2026-08-19/20 AT origin/main 39c690ef, on the Azure host. Process state was captured
+    from `/proc` BEFORE the operator recycled the daemon and cannot be re-taken; the source and
+    ledger halves below are re-derived at that sha. No `/rate_limit` call was made and no process
+    was signalled.
+
+    (1) WHAT HAPPENED. A `claude` worker ran 8,970s as a DIRECT CHILD of the daemon, spawned two
+    seconds after boot, in `ep_poll`. Its `--settings` path and cwd named the lane and the task that
+    no ledger row named: `sweep-fix-settings-W1-T446-*.json` and
+    `worktrees/sweep-W1-T446-*`. Its child was a shell loop with no exit condition it could reach —
+    `until [ "$(gh run view <id> --json status --jq .status 2>/dev/null)" = "completed" ]; do sleep
+    20; done` — no iteration cap, no timeout, and `2>/dev/null` makes a failing `gh` return an empty
+    string that can never equal `completed`. A BROKEN gh AND AN UNFINISHED RUN ARE
+    INDISTINGUISHABLE TO IT. The daemon sat in `ep_poll` with that worker as a direct child and
+    essentially no CPU movement; `await deps.sweep()` had not returned since 21:10:45 and
+    `daemon.sweep.failed` never fired, because nothing threw.
+
+    (2) THE CLASS, WHICH IS NOT THE LOOP. The worker carries `--max-turns 400` and
+    `--max-budget-usd 45` and NO TIME BOUND. A shell command that never returns burns NEITHER a
+    turn NOR a dollar, so both caps are structurally unable to fire. Fixing the `until` loop fixes
+    one instance; THE NEXT WORKER WILL WRITE A DIFFERENT UNBOUNDED COMMAND. The loop is the trigger
+    and the missing wall-clock bound is the defect.
+
+    (3) IT IS RECURRENT, NOT A ONE-OFF — AND THIS IS THE MEASUREMENT THAT MATTERS. `daemon.alive`
+    carries a `phase` field (`startInFlightTicker`, `src/lib/daemon.ts`) present on all 5,635 rows
+    since 2026-08-12T23:46:59 (control: 0 rows without it). Sweeping for runs of consecutive
+    `phase: sweep` rows with no `dispatch` between them finds 28 runs, 21 of them longer than 20
+    minutes, 9 longer than an hour, the longest 165.5 minutes. THE CONFOUND WAS RULED OUT: a fast
+    dispatch emits no ticker row, so each of the ten longest runs was checked for ANY post-sweep
+    step — `daemon.iteration`, `daemon.headroom`, `daemon.quota`, `daemon.idle`, `dispatch.*`,
+    `daemon.orphan_sweep`, `daemon.feedback_landing_sweep` — and ALL TEN CONTAIN NONE, against
+    corpus controls of 2,108 `daemon.quota`, 1,045 `daemon.headroom` and 931 `daemon.idle` rows. The
+    loop genuinely never reached dispatch. Total: 20.9 hours over a 168.2-hour instrumented window,
+    12.4% of it.
+
+    (4) BUT IT DOES NOT EXPLAIN ALL THE IDLE TIME, AND THE SHARD SAYS SO. Restricted to the same
+    instrumented window, 19 of 80 above-median inter-dispatch gaps overlap a hang (24%), covering
+    11% of long-gap seconds. So the fleet was hung repeatedly AND was also genuinely waiting for
+    work most of the time. THE 91%-BUILT PICTURE STANDS AND THE IDLE DIAGNOSIS IS PARTLY WRONG
+    RATHER THAN OVERTURNED.
+
+    (5) THE STALL DETECTOR IS ALREADY BUILT AND HAS NEVER FIRED. W1-T943 shipped one in #2051 — a
+    policy-data quiet threshold, `worker.stalled` ledgered once, escalating through the existing §4
+    machinery, 213 lines into `src/run-task.ts` plus a 440-line suite — and W1-T942 shipped the
+    `worker.state` sensor in #2037. Neither saw this worker. ALL 2,854 `worker.state` rows in the
+    corpus carry a `W1-T…` DISPATCH-LANE run_id and ZERO carry a sweep- or fix-shaped one; no row of
+    ANY step does. `worker.stalled` has never been written, against positive controls of 8
+    `ci.stalled` and 2 `pr.stalled`. A detector keyed on worker silence cannot observe a worker that
+    was never sensed, so the built detector had no subject.
+
+    (6) THE QUOTA METER GOES BLIND EXACTLY WHEN IT MATTERS. `daemon.quota` records the GraphQL
+    bucket (`bucket: "graphql"`, `remaining`, `resets_at`) but is logged AFTER the sweep, so ZERO
+    quota rows fall inside ANY of the eight longest hangs. An unledgered worker polling GraphQL
+    every 20 seconds is invisible to it by construction. On whether exhaustion TRIGGERS the hang the
+    evidence is suggestive and thin, and is recorded that way: 3 of 21 hangs began with the last
+    reading at `remaining: 0` against a base rate of 2.1% across 1,054 readings — roughly sevenfold
+    enrichment — but the other 18 began with ample budget. NOT ESTABLISHED AS THE CAUSE.
+
+    (7) AND ONE CIRCULATING FIGURE IS WRONG. `daemon.idle_reasons` is logged after
+    `await deps.sweep()`, so a tick that never returns can never reach it. Its newest row,
+    2026-08-18T17:30, has been read all day as "the daemon has not been idle". IT IS A CONSEQUENCE
+    OF THIS STALL, NOT EVIDENCE ABOUT THE QUEUE, and the pool was not empty when it was quoted —
+    `runnableCandidates` returned 19 eligible tasks (controls: limit=0 -> 0, limit=3 -> 3).
+  acceptance:
+    - claim: "a sweep that exceeds the configured wall-clock bound returns control to the loop"
+      proof: "unit test: W1-T1044: an over-running sweep returns control to the loop"
+    - claim: "the tick that follows an abandoned sweep reaches the dispatch phase"
+      proof: "unit test: W1-T1044: the tick after an abandoned sweep reaches dispatch"
+    - claim: "a worker the bound abandons is reclaimed rather than left running"
+      proof: "unit test: W1-T1044: an abandoned worker is reclaimed not orphaned"
+    - claim: "abandoning records the task and the elapsed time rather than failing silently"
+      proof: "unit test: W1-T1044: abandoning a sweep records the task and elapsed time"
+    - claim: "a sweep inside the bound is untouched and completes normally"
+      proof: "unit test: W1-T1044: a sweep inside the bound completes untouched"
+    - claim: "the bound ships as policy data rather than a literal at the call site"
+      proof: "unit test: W1-T1044: the sweep bound is read from policy"
+    - claim: "a worker with no recorded state is still bounded by elapsed time"
+      proof: "unit test: W1-T1044: an unsensed worker is bounded by elapsed time"
+  risk: high
+  origin: "oper#sweep-tick-unbounded-2026-08-19"
+  plan_refs: ["W1-T943", "W1-T942", "W1-T1009", "W1-T484", "W1-T513"]
+  files: [src/lib/daemon.ts, src/run-task.ts, plan/policy.yaml, test/sweep-wall-clock-bound.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    WHERE THE BOUND GOES, AND WHAT EACH PLACEMENT MISSES. Three candidates, and the measurement says
+    TWO ARE REQUIRED because neither covers the other.
+
+    (a) ON `await deps.sweep()` (`src/lib/daemon.ts`). This is the one that frees the DAEMON — it is
+    the await that did not return, and bounding it is what lets the next tick reach dispatch. WHAT
+    IT MISSES: it abandons the sweep without touching what the sweep spawned. THE HUNG WORKER KEEPS
+    RUNNING AFTER THE DAEMON GIVES UP ON IT, still holding its worktree, its lock and its API
+    session, still polling. A bound here alone converts one parked daemon into an orphan that
+    nothing reaps.
+
+    (b) ON THE WORKER SPAWN inside `runFixRung` (`src/run-task.ts`). This is the one that RECLAIMS
+    THE RESOURCES. WHAT IT MISSES: it bounds only this spawner. The sweep can hang on anything else
+    it awaits — a network read, a different spawn — and the daemon parks exactly as before.
+
+    (c) ON `runFixRung` AS A WHOLE. Strictly between the two and covers neither fully: it does not
+    bound the rest of the sweep, and by itself it does not say what becomes of a worker still alive
+    when the rung returns.
+
+    SO THE TASK TAKES (a) AND (b) TOGETHER: the daemon-side bound restores dispatch, and the
+    worker-side bound stops the abandoned worker becoming an unreaped orphan. (c) IS NOT BUILT.
+
+    WHAT HAPPENS TO AN ABANDONED WORKER, AND WHY THE CI PRECEDENT DOES NOT TRANSFER CLEANLY.
+    W1-T1009 capped CI jobs and that worked, but a CI job holds nothing: a `claude` worker holds a
+    worktree, a lock and a live API session, and killing one mid-run LOSES UNRECORDED IMPLEMENT
+    SPEND — a `verdict` row is only written when the run ends, so an abandoned worker's thinking
+    appears nowhere. The bound must therefore RECORD BEFORE IT RECLAIMS: the task id, the elapsed
+    time and the run's own identifiers go to the ledger first, so the abandonment is legible even
+    though the spend is not recoverable. Deliberately NOT in scope: recovering that spend, resuming
+    an abandoned run, or any partial-cost estimate.
+
+    THE THRESHOLD IS POLICY DATA, NOT A LITERAL. `plan/policy.yaml` already carries W1-T943's own
+    quiet threshold with its derivation written beside it, and `src/lib/policy.ts` already parses
+    bounded numeric fields (`minIntervalMinutes`, `maxPerDay`). This bound follows that shape. IT
+    MUST SHIP AT A VALUE ABOVE THE OBSERVED HEALTHY MAXIMUM, not at a round number: healthy sweep
+    ticks measured 61.8s median and 111.8s p90, and the shortest confirmed hang ran 20 minutes, so
+    the whole healthy population and the whole hung population are separated by more than an order
+    of magnitude. THE FIRST TEST WRITTEN MUST BE THE INSIDE-THE-BOUND PATH, so a sweep that is
+    merely slow is never abandoned.
+
+    WHAT MUST NOT BE BUILT. NOT A FIX FOR THE `until` LOOP — it is the trigger, not the defect, and
+    bounding one shell idiom leaves the class open. NO NEW LEDGER STEP FOR LIVENESS: the `phase`
+    field already distinguishes a sweeping tick from a dispatching one and the fix there is a
+    READER, not a signal (see the sibling below). NO KILL PATH FOR A HEALTHY WORKER. NO CHANGE TO
+    `--max-turns` OR `--max-budget-usd`. NO CHANGE TO `drain.lock`, which is the daemon's
+    single-instance guard taken at boot and released on signal — holding it for the daemon's
+    lifetime is correct and it is NOT involved.
+
+    SIBLINGS, NAMED AND NOT ABSORBED. **THE `phase` READER IS THE DETECTION HALF AND IS A SEPARATE
+    CONCERN.** `daemon.alive` carries `phase` and NOTHING READS IT — the string "daemon.alive"
+    appears three times across `src/`, one of them the write site in `startInFlightTicker`. Since
+    21:09 there were 140 `daemon.alive` rows, ALL `phase: sweep`, ZERO `dispatch`, against a control
+    of 110 sweep / 135 dispatch before the hang. The signal that would have caught this in sixty
+    seconds already exists and has no consumer; building that reader is detection-after-the-fact and
+    this task is prevention. W1-T513 added the ticker precisely so a slow full sweep would not
+    starve the light pass, AND IT SUCCEEDS AT THAT — the defect is that the liveness signal the
+    fleet trusts is emitted by the mechanism that masks the stall. W1-T484 is the INVERSE concern
+    (`status: queued`) — a busy daemon reported dead — and is not this one. W1-T943 and W1-T942 are
+    BUILT and are not re-filed; rationale (5) records why they did not see this worker, and whether
+    the fix-rung lane should emit `worker.state` at all is a THIRD concern that is named here and
+    not answered.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT, chosen by a word-bounded invocation count of the
+    seams the bound touches (`runFixRung`, `startInFlightTicker`, `deps.sweep`, `pollIntervalMs`):
+    `src/lib/daemon.ts` 45, `src/run-task.ts` 32, `src/lib/sweep.ts` 12. `src/lib/sweep.ts` is
+    DELIBERATELY NOT DECLARED — `runSweep` is the thing being bounded, not the thing that bounds,
+    and neither placement (a) nor (b) edits it. `src/run-task.ts` IS DECLARED because `runFixRung`
+    is defined there; per DECISIONS.md's 2026-08-18 W1-T471 ruling that file is not split and tasks
+    are not re-scoped to avoid it, and the ruling states the ceremonial acceptance sentence is no
+    longer required, so it is declared plainly and the serialisation cost is accepted.
+
+    `test/sweep-wall-clock-bound.test.ts` DOES NOT EXIST at 39c690ef — a forward-referenced PATH,
+    never a guessed symbol — and is a new file because the house rule keeps a coverage-load-bearing
+    test out of a shared suite.
+
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS: `subsystemsOf`
+    (`src/lib/task-linter.ts`) derives its tags from `files:` plus acceptance text, and this set
+    crosses two `src/` modules, a plan file and `test/`. Blast radius argues UP in one direction:
+    the seam is the daemon's main loop, and a bound set too low would abandon healthy sweeps, which
+    is why the threshold is required to sit above the observed healthy maximum rather than at a
+    round number.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING, NOT MINTED HERE.
+    `refs/rmd-id/W1-T1044` resolves to ea33bc8c33420ef5ae6b28ac8ed677bf514d5053. Positive control:
+    `refs/rmd-id/W1-T1040` reads 1. Negative control: `refs/rmd-id/W1-T999999` reads 0.
