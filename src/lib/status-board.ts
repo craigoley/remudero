@@ -60,6 +60,7 @@ import {
   type CrashLoopWindow,
 } from "./daemon.js";
 import { COST_ANOMALY_STEP } from "./cost-anomaly.js";
+import { IMAGE_DRIFT_STEP } from "./image-drift.js";
 import {
   aggregateCacheHitTotals,
   aggregateLearningsInjection,
@@ -504,14 +505,31 @@ export interface CostAnomalyRow {
 }
 
 /**
+ * W1-T1021 IMAGE DRIFT — the newest un-dismissed `daemon.image_drift` ledger row
+ * (`src/lib/image-drift.ts`'s `checkImageDrift`, ledgered by `serviceFreshnessGate` in
+ * `src/run-task.ts` beside `daemon.tree_dirty`/`daemon.stale_code`): a baked path
+ * (`deploy/entrypoint.sh` or `deploy/Dockerfile`) changed on `main` AFTER the running
+ * container's own image was built, so the image cannot pick it up on a mount-side freshness
+ * restart the way `src/`/`test/`/`node_modules` do. Names the two shas a human needs to judge
+ * it — the image's own build sha and the baked commit it is missing.
+ */
+export interface ImageDriftRow {
+  buildSha: string;
+  bakedSha: string;
+  /** The `daemon.image_drift` ledger line's own `ts`, when present. */
+  ts?: string;
+}
+
+/**
  * NEEDS ME — the board's own escalation surface (distinct from `rmd serve`'s HTML "Needs me"
  * panel, which is task-escalation-driven; design note (viii) scopes this task to EXACTLY the
  * console surfaces `rmd status` text and `--json` project, "the whole surface here"). Today
- * carries only the cost-anomaly rows this task ships; a future sentinel is a new field here, not
- * a new section.
+ * carries the cost-anomaly rows W1-T931 shipped plus W1-T1021's image-drift finding; a future
+ * sentinel is a new field here, not a new section.
  */
 export interface NeedsMeSection {
   costAnomaly: CostAnomalyRow[];
+  imageDrift?: ImageDriftRow;
 }
 
 export interface StatusBoardModel {
@@ -1551,7 +1569,22 @@ function deriveNeedsMe(lines: ReadonlyArray<Record<string, unknown>>): NeedsMeSe
     });
   }
   const costAnomaly = [...byRunId.values()].sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
-  return { costAnomaly };
+
+  // W1-T1021: the NEWEST `daemon.image_drift` line, same "latest wins" read `isNewer` already
+  // gives `deriveHeadroomDegraded` above — a drift finding is a point-in-time comparison against
+  // the checkout's own current history, so an older row never outranks a fresher one.
+  let imageDrift: ImageDriftRow | undefined;
+  for (const l of lines) {
+    if (l.step !== IMAGE_DRIFT_STEP) continue;
+    const buildSha = typeof l.build_sha === "string" ? l.build_sha : undefined;
+    const bakedSha = typeof l.baked_sha === "string" ? l.baked_sha : undefined;
+    if (!buildSha || !bakedSha) continue;
+    const ts = typeof l.ts === "string" ? l.ts : undefined;
+    if (imageDrift && !isNewer(ts, imageDrift.ts)) continue;
+    imageDrift = { buildSha, bakedSha, ts };
+  }
+
+  return { costAnomaly, imageDrift };
 }
 
 /**
@@ -1988,11 +2021,13 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
 }
 
 /** W1-T931 — one line per un-dismissed `cost.anomaly` row, naming the run, its class, its cost,
- *  and the median it exceeded (this task's own acceptance criterion, verbatim). `nothing needs
- *  you` on an empty set, matching this module's "no rule matches, no line" doctrine elsewhere. */
+ *  and the median it exceeded (this task's own acceptance criterion, verbatim). W1-T1021 adds a
+ *  second, independent row for an image-drift finding, naming both shas a human needs to judge
+ *  it. `nothing needs you` only when NEITHER has anything to report, matching this module's
+ *  "no rule matches, no line" doctrine elsewhere. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   const out = ["── NEEDS ME ─────────────────────────────────────────────"];
-  if (n.costAnomaly.length === 0) {
+  if (n.costAnomaly.length === 0 && !n.imageDrift) {
     out.push("nothing needs you");
     return out;
   }
@@ -2000,6 +2035,13 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
     out.push(
       `cost.anomaly : ${r.taskId} (${r.runId}) [${r.taskClass}] $${r.costUsd.toFixed(2)} vs class median ` +
         `$${r.medianCostUsd.toFixed(2)} (>${r.multiplier}x, n=${r.sampleSize})`,
+    );
+  }
+  if (n.imageDrift) {
+    out.push(
+      `image drift : running image built at ${n.imageDrift.buildSha} is missing a baked change at ` +
+        `${n.imageDrift.bakedSha} (deploy/entrypoint.sh or deploy/Dockerfile) — dispatch a rebuild ` +
+        `(.github/workflows/acr-build.yml, workflow_dispatch)`,
     );
   }
   return out;

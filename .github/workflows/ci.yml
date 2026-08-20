@@ -755,3 +755,39 @@ jobs:
         run: npm ci
       - name: No-hand-rolled-fetch grep gate (apps/**, packages/** except packages/api-client)
         run: npm run --silent no-hand-rolled-fetch:check
+
+  task-id-existence:
+    # TASK-ID EXISTENCE gate (W1-T1048). #2251 cited an id as its OWN task id in shipped code
+    # (two comments in deploy/recycle-container.sh, five references in
+    # test/recycle-container.test.ts) that resolved to neither a reservation ref nor a plan
+    # record -- the hand lane's only id source, `rmd next-task-id`, prints an id and reserves
+    # NOTHING by design, so a later mint handed the same number out as free. Nothing noticed
+    # until an open PR had to be renumbered. scripts/task-id-existence-check.mjs walks `src` and
+    # `deploy` (never `test` -- excluded by construction, not exemption, since that tree's ids
+    # are synthetic fixture data and not claims) and fails on any `W1-T<n>` that resolves to
+    # NEITHER a `refs/rmd-id/*` reservation ref NOR a declared `- id:` plan record, against a
+    # small written-reason baseline (scripts/task-id-existence-baseline.json) for the handful of
+    # pre-allocator/pre-schema ids that were filed or retired before either surface existed. See
+    # test/task-id-existence-check.test.ts for the falsifier proof this is ACTIVE (a planted
+    # unreserved/undeclared id is REJECTED, a reservation-only id still resolves, a baseline entry
+    # with no written reason is rejected, and the scan never reaches test/), driving the real CLI
+    # as a subprocess (this script is a plain .mjs file outside tsconfig's `include`).
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:`) -- same fail-closed shape as
+    # `claims`/`no-hand-rolled-fetch`/`jscpd-gate` above: a path-filtered REQUIRED check that can
+    # go silently absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid.
+    name: task-id-existence
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Task-id existence check (every id cited under src/deploy must resolve)
+        run: npm run --silent task-id-existence:check

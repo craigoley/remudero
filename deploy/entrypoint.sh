@@ -210,8 +210,64 @@ resolve_target() {
   return 1
 }
 
+# ── W1-T1054: A DAEMON-WRITTEN UNTRACKED FILE CAN COLLIDE WITH ITSELF, BY CONSTRUCTION ────────
+# `feedbackDir` (src/lib/feedback.ts) writes `plan/feedback/**` INTO THIS SAME WORKING TREE, and
+# `landFeedback` (src/lib/feedback-landing.ts) lands that identical content upstream as a gated PR
+# but never deletes the local copy once it has landed — every `rmSync` in that module targets a
+# scratch dir, none touches the entry. So the next boot's checkout lands on a commit that ADDS the
+# very path the daemon already wrote locally, byte-for-byte, and the tracked-only dirty guard above
+# (deliberately, see its own comment) does not see it — this is the collision `checkout_target`'s
+# CHECKOUT FAILED message already names as "a common cause". It is guaranteed by the daemon's own
+# routine work, not a race, and it is safe to clear in exactly the one case it can PROVE redundant.
+#
+# THE PREDICATE, CITED RATHER THAN RE-DERIVED. `treeFfSafe` (src/lib/deployer.ts) intersects dirty
+# paths against the INCOMING diff and only conflicts on the overlap; `rmd sync` (W1-T907) already
+# classifies a local path as provably lossless when its bytes equal the origin blob at that path.
+# This is that same predicate, in bash, at boot: an untracked path is removable ONLY IF the incoming
+# target ADDS that same path AND the local bytes are IDENTICAL to the incoming blob there. Anything
+# else — untracked and not in the incoming diff, or in it with different content — is left alone, so
+# the checkout below fails exactly as it always has and the operator sees the same diagnosis.
+#
+# BYTES, NOT TEXT. Comparing content requires reading it into a shell string, which mangles binary
+# data and trailing newlines. `git hash-object` on the local path against the incoming blob's own sha
+# compares bytes exactly, through git's own hashing, with no string handling in this script at all.
+#
+# UNREADABLE MEANS REFUSE, NOT "TREAT AS SAFE". `git rev-parse "$target:$path"` resolves the blob sha
+# from the TREE object alone — it does not need the blob's content to be present locally, so it can
+# succeed even when the object itself is missing or corrupt (a partial fetch, a damaged store). Only
+# `git cat-file -e` actually opens the object, so that is the read this function trusts before
+# calling anything redundant. When it fails, the path is NOT provably safe and stays in place —
+# fail-closed, matching the tracked-only guard's own posture.
+#
+# EVERY CLEARED PATH IS NAMED, ALWAYS. Removing an untracked file is how uncommitted real work
+# disappears if the predicate is ever wrong, so nothing here removes a path without first logging
+# which one and why — the log must show what was discarded even on a boot that then succeeds.
+#
+# NOT IN SCOPE (see plan/tasks.d/W1-T1054-*.yaml): relocating the daemon's feedback write, which has
+# a reader and would silently drop unlanded filings; teaching `landFeedback` to clean up after
+# itself, a real and separate candidate; detecting the outage this caused (W1-T1047, already filed);
+# and the restart budget above, which is correct as it stands.
+clear_redundant_untracked() {
+  local target="$1" path blob local_sha
+  while IFS= read -r -d '' path; do
+    blob="$(git -C "$TREE" rev-parse --verify --quiet "${target}:${path}" 2>/dev/null)" || continue
+    if ! git -C "$TREE" cat-file -e "$blob" 2>/dev/null; then
+      log "  leaving untracked '$path' in place: cannot read the incoming blob at that path, so it is not provably redundant"
+      continue
+    fi
+    local_sha="$(git -C "$TREE" hash-object -- "$path" 2>/dev/null)" || continue
+    if [ "$local_sha" = "$blob" ]; then
+      log "  clearing untracked '$path': the incoming commit adds this exact path with identical bytes"
+      rm -f -- "$TREE/$path"
+    else
+      log "  leaving untracked '$path' in place: the incoming commit adds this path but with DIFFERENT bytes"
+    fi
+  done < <(git -C "$TREE" ls-files --others --exclude-standard -z)
+}
+
 checkout_target() {
   TARGET="$(resolve_target)" || die "ref not found: $REF (tried origin/$REF, then $REF as an exact object)"
+  clear_redundant_untracked "$TARGET"
   if ! out="$(git -C "$TREE" checkout --detach "$TARGET" 2>&1)"; then
     log "CHECKOUT FAILED — refusing to run on whatever HEAD happens to be:"
     printf '%s\n' "$out" | sed 's/^/  /' >&2

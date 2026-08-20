@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -278,6 +278,104 @@ test("a TRACKED modification still refuses, so the -uno relaxation did not disab
   const second = boot(home, origin);
   assert.match(second.stderr, /REFUSING to sync/, "uncommitted TRACKED work must still stop the sync");
   assert.equal(headOf(home), before, "and nothing may be discarded");
+});
+
+// ── W1-T1054: A PROVABLY-REDUNDANT UNTRACKED FILE CLEARS ITSELF, BEFORE THE CHECKOUT ───────────
+// The daemon writes `plan/feedback/**` into this SAME working tree and later lands the identical
+// content upstream (rationale (1)-(2) of the shard). That produces exactly the collision above —
+// untracked locally, added by the incoming commit — except with IDENTICAL bytes, which the guard
+// above can now prove safe to clear rather than dying on.
+
+test("entrypoint: an identical untracked file at an incoming path is cleared and the boot proceeds", () => {
+  const home = freshHome();
+  const origin = makeOrigin();
+  assert.equal(boot(home, origin).status, 0);
+
+  // Untracked locally with the EXACT bytes the incoming commit is about to add at the same path —
+  // the shape a daemon that writes into its own boot checkout and then lands that content upstream
+  // produces on every recurring sweep.
+  writeFileSync(join(treeOf(home), "collide.txt"), "same\n");
+  const c2 = advanceOrigin(origin, "collide.txt", "same\n");
+
+  const second = boot(home, origin);
+  assert.equal(second.status, 0, `second boot failed: ${second.stderr}`);
+  assert.equal(headOf(home), c2, "the checkout must proceed onto the incoming commit");
+  assert.equal(readFileSync(join(treeOf(home), "collide.txt"), "utf8"), "same\n", "and land the now-tracked copy");
+});
+
+test("entrypoint: a differing untracked file at an incoming path still refuses", () => {
+  const home = freshHome();
+  const origin = makeOrigin();
+  assert.equal(boot(home, origin).status, 0);
+  const before = headOf(home);
+
+  writeFileSync(join(treeOf(home), "collide.txt"), "local\n");
+  advanceOrigin(origin, "collide.txt", "incoming\n");
+
+  const second = boot(home, origin);
+  assert.notEqual(second.status, 0, "different bytes are not provably redundant, so the boot must still refuse");
+  assert.match(second.stderr, /CHECKOUT FAILED/, "and say so by name, exactly as before this change");
+  assert.equal(headOf(home), before, "HEAD must be left where it was");
+  assert.equal(readFileSync(join(treeOf(home), "collide.txt"), "utf8"), "local\n", "and the local file must be untouched, not discarded");
+});
+
+test("entrypoint: an untracked file outside the incoming diff is never removed", () => {
+  const home = freshHome();
+  const origin = makeOrigin();
+  assert.equal(boot(home, origin).status, 0);
+
+  writeFileSync(join(treeOf(home), "untouched.txt"), "nobody claims this path\n");
+  const c2 = advanceOrigin(origin, "second.txt", "two\n");
+
+  const second = boot(home, origin);
+  assert.equal(second.status, 0, `second boot failed: ${second.stderr}`);
+  assert.equal(headOf(home), c2);
+  assert.ok(existsSync(join(treeOf(home), "untouched.txt")), "an untracked file the incoming commit never touches must survive");
+  assert.doesNotMatch(second.stderr, /clearing untracked 'untouched\.txt'/, "and must never be named as cleared");
+});
+
+test("entrypoint: every cleared path is named in the log before removal", () => {
+  const home = freshHome();
+  const origin = makeOrigin();
+  assert.equal(boot(home, origin).status, 0);
+
+  writeFileSync(join(treeOf(home), "collide.txt"), "same\n");
+  advanceOrigin(origin, "collide.txt", "same\n");
+
+  const second = boot(home, origin);
+  assert.equal(second.status, 0, `second boot failed: ${second.stderr}`);
+  assert.match(
+    second.stderr,
+    /clearing untracked 'collide\.txt': the incoming commit adds this exact path with identical bytes/,
+    "the discard must be named, not silent, even on a boot that then succeeds",
+  );
+});
+
+test("entrypoint: an unreadable incoming blob refuses instead of clearing", () => {
+  const home = freshHome();
+  const origin = makeOrigin();
+  assert.equal(boot(home, origin).status, 0);
+  const before = headOf(home);
+
+  writeFileSync(join(treeOf(home), "collide.txt"), "same\n");
+  advanceOrigin(origin, "collide.txt", "same\n");
+
+  // Fetch the incoming commit into the tree's OWN object store first, then corrupt the blob from
+  // under a resolvable tree. `git rev-parse "$target:$path"` only needs the TREE object to answer,
+  // not the blob's content, so this reproduces "the path resolves but the object cannot be read"
+  // without needing a genuinely broken remote.
+  git(treeOf(home), ["fetch", "-q", "origin"]);
+  const blob = git(treeOf(home), ["rev-parse", "origin/main:collide.txt"]);
+  const objectPath = join(treeOf(home), ".git", "objects", blob.slice(0, 2), blob.slice(2));
+  assert.ok(existsSync(objectPath), "the fetch must have written the blob as a loose object");
+  unlinkSync(objectPath);
+
+  const second = boot(home, origin);
+  assert.notEqual(second.status, 0, "an unreadable blob is not provably redundant, so the boot must refuse");
+  assert.match(second.stderr, /cannot read the incoming blob/, "and say why, rather than silently leaving it or clearing it");
+  assert.match(second.stderr, /CHECKOUT FAILED/, "the checkout must still refuse, exactly as an ordinary collision does");
+  assert.equal(headOf(home), before, "HEAD must be left where it was");
+  assert.equal(readFileSync(join(treeOf(home), "collide.txt"), "utf8"), "same\n", "and the local file must be untouched");
 });
 
 // ── DEFECT 4: THE IDENTITY IS WRITTEN ABOVE THE SKIP ────────────────────────────────────────

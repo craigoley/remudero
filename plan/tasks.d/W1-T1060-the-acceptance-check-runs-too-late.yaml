@@ -1,0 +1,139 @@
+- id: W1-T1060
+  title: "THE AUTHOR-TIME ACCEPTANCE CHECK EXISTS AND CANNOT REACH THE PATHS THAT KEEP FAILING — a hand-opened PR body is judged only after a full CI cycle, and a posted verdict binds to its sha, so a truncated block costs a fresh head rather than a correction: run the SAME predicate as a standalone CI job off the event payload, with no API call"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  files: [.github/workflows/ci.yml, scripts/acceptance-author-gate.mjs, test/acceptance-author-gate.test.ts]
+  rationale: |
+    THE PREDICATE IS BUILT; ITS REACH IS THE DEFECT. W1-T952 (#2199) shipped
+    `acceptanceAuthorTimeCheck` (`src/lib/review.ts`), enumerated every PR-authoring path in
+    `PR_AUTHORING_PATHS`, and proved the coverage with a test. CITED, NOT RE-DERIVED. All four
+    reachable paths are wired or safe by construction. The two rows reading `reachable: false` are a
+    human or agent running `gh pr create` or the REST endpoint directly, and an MCP client opening a
+    PR against the GitHub API — and those are exactly the paths that keep producing unjudgeable
+    bodies, because no in-repo call site exists to hook. This task does not add a fifth wiring; it
+    moves the SAME predicate to the one place both unreachable paths must pass through: CI.
+
+    (1) PATH 4 RE-READ IN FULL AND CONFIRMED, BECAUSE IF IT WERE WRONG THIS SHARD WOULD CHANGE
+    SHAPE. `runTask`'s implement dispatch is covered because `ensureTaskTrailer` guarantees a
+    `Remudero-Task:` trailer, and `acceptanceAuthorTimeCheck` returns OK on a trailer at face value
+    with the message "criteria resolve from plan/tasks.yaml" — the body's own block genuinely is
+    irrelevant there, because the reviewer resolves criteria from the task record instead. The
+    reasoning holds as written and path 4 is NOT a gap.
+
+    (2) THE BODY IS READABLE WITH NO API CALL, WHICH IS WHAT MAKES THIS SAFE TO GATE ON.
+    `.github/workflows/ci.yml` already runs `on: pull_request`, and a `pull_request` event carries
+    the body in its payload — reachable as `github.event.pull_request.body`, and as a file at
+    `GITHUB_EVENT_PATH`. No REST and no GraphQL, so the gate keeps working in exactly the window a
+    busy fleet exhausts the API. The author login rides in the same payload, which matters for (5).
+
+    (3) A STANDALONE JOB, NOT A STEP, AND THE NUMBERS DECIDE IT. Measured from a real `ci` job's own
+    step timings on this repo: checkout about four seconds, `setup-node` about five, `npm ci` about
+    ten — so a runnable predicate is roughly twenty seconds from job start, while the `Test` step
+    that follows ran for the better part of eight minutes. A STEP inside `ci` would report at about
+    the same twenty seconds but only inside a job that then continues, and it would leave
+    `coverage-ratchet` running the whole suite in parallel regardless. A STANDALONE job reports on
+    its own check name, needs no Playwright install, and is done while both long jobs are still
+    running. It follows the shape this repo already uses for its other fast gates.
+
+    (4) THE `edited` TRAP IS FIRST-CLASS HERE AND WOULD OTHERWISE REPRODUCE THE VERY PROBLEM.
+    `ci.yml` declares no `types:` under `pull_request`, so it takes the defaults — opened,
+    synchronize, reopened — which EXCLUDE `edited`. A gate on those defaults would refuse a body,
+    the author would fix the body, and NOTHING WOULD RE-RUN. That is the same shape as a posted
+    review verdict binding to its sha. This job must declare `types: [opened, synchronize, reopened,
+    edited]` or it converts a two-minute correction into a fresh head, which is the cost this task
+    exists to remove.
+
+    (5) WHAT IT MUST NOT FLAG — AND MEASUREMENT FOUND ONE THE BRIEF DID NOT ANTICIPATE. A body
+    carrying a `Remudero-Task:` trailer is judgeable from the task record and returns OK already, so
+    every fleet build is exempt by construction. The `#277/#280` manual plan/doc shape that
+    `parseAcceptanceBlock`'s own doc names as legitimate — `- claim:` followed by an INDENTED
+    `proof:` continuation — parses to N criteria and is likewise OK. Both are handled by the
+    existing predicate. THE THIRD EXEMPTION IS DEPENDABOT: running the real predicate over the
+    recently merged population, the only rows that would fail are two dependency bumps authored by
+    `dependabot[bot]` and one hand-opened plan renumber. A gate that refuses every dependency bump
+    is a gate the fleet learns to ignore within a day, and the dep-review lane already owns those
+    PRs — `armAutoMerge` skips them with the stated reason that the dep-review lane owns arming.
+    The author login is in the same event payload, so the exemption costs nothing.
+
+    (6) THE POPULATION SAYS SHIP CLEAN, AND ALSO SAYS THE SILENT HALF IS LARGE. Every currently open
+    PR passes the predicate — the gate would refuse none of them today, so it ships with no backlog
+    to grandfather. The merged population since 2026-08-17 tells the other half of the story: a
+    substantial group merged with a DEFECTIVE block and passed only because their trailer let the
+    reviewer resolve criteria from the task record instead. They are green and their bodies are
+    still wrong, which is why the trailer exemption must stay an exemption from FAILING and never a
+    reason to stop reporting.
+
+    (7) THE COST THIS REMOVES IS NOT A MINUTE. `parseAcceptanceBlock` ends the block at the first
+    indented line that is not a fresh `proof:`, with NO error — a claim wrapped onto a second line
+    silently truncates everything below it. Three PRs paid for that today; one read a single parsed
+    criterion against five bullets written. Because a posted verdict binds to its head sha and the
+    post-review rung fires only at `reviewState === "none"`, repairing the body clears nothing on
+    its own: the remedy is a NEW HEAD plus a full CI cycle.
+  design: |
+    REUSE `acceptanceAuthorTimeCheck`, NEVER A SECOND PREDICATE. It already encodes both call
+    shapes and the defect priority — no-header, no-trailer, unparseable, empty-proofs. The job's own
+    logic is: read the body and the author login from the event payload, exempt a bot author, then
+    call the existing function with no `expectedTaskId` and fail on a non-OK result, reporting the
+    `defect` and the message verbatim.
+
+    REPORT THE DIAGNOSIS, NOT JUST A REFUSAL. `acceptanceBlockDiagnostics` already returns bullets
+    written, criteria parsed, empty proofs and the bullet at which the block truncated. A refusal
+    that prints "N bullets written, M parsed, ends before bullet K" tells the author exactly which
+    line wrapped; a bare failure sends them back to the parser source.
+
+    FAIL LOUD ON AN UNREADABLE PAYLOAD. If the body cannot be read at all, refuse rather than pass —
+    a gate that treats an unreadable input as clean is the vacuous-pass family this repo has paid
+    for repeatedly.
+
+    NOT IN SCOPE: wiring another `PR_AUTHORING_PATHS` entry (all four reachable paths are covered
+    and W1-T952 proved it); changing `parseAcceptanceBlock`'s truncation rule, which is a separate
+    and much larger decision; and the review lane's own verdict timing.
+  acceptance:
+    - claim: "a body whose acceptance block truncates at a wrapped claim is refused before the suite runs"
+      proof: "unit test: acceptance gate: a block truncated at a wrapped claim is refused"
+    - claim: "a body carrying a task trailer is never refused, because its criteria resolve from the task record"
+      proof: "unit test: acceptance gate: a trailered body is never refused"
+    - claim: "the manual plan or doc shape with an indented proof continuation parses and is not refused"
+      proof: "unit test: acceptance gate: an indented proof continuation is not refused"
+    - claim: "a bot-authored dependency bump is exempt so the gate does not fire on every bump"
+      proof: "unit test: acceptance gate: a bot authored pull request is exempt"
+    - claim: "an unreadable body refuses rather than passing, so an empty input is never read as clean"
+      proof: "unit test: acceptance gate: an unreadable body refuses instead of passing"
+    - claim: "the refusal names the bullet at which the block ended so the author can find the wrapped line"
+      proof: "unit test: acceptance gate: the refusal names the truncating bullet"
+  origin: "oper#acceptance-check-runs-too-late-2026-08-20"
+  plan_refs: ["W1-T952"]
+  status: queued
+  attempts: 0
+  note: |
+    RULE 25 RE-DERIVED BY RUNNING THE REAL `INSTRUMENT_SURFACE` EXPORT, NOT BY READING IT, WITH FOUR
+    CONTROLS. `.github/workflows/ci.yml` MATCHES, so this task is instrument-entangled and THE
+    IMPLEMENTING PR RIDES ALONE. `scripts/acceptance-author-gate.mjs` does NOT match — the script
+    pattern is `-ratchet.mjs`, not an arbitrary script; `test/acceptance-author-gate.test.ts` does
+    not match; `src/lib/review.ts` does not match. Positive control: `scripts/coverage-ratchet.mjs`
+    DOES match, so the predicate was live when the three negatives were taken.
+
+    `src/lib/review.ts` IS DELIBERATELY NOT DECLARED. The predicate is REUSED, not modified — this
+    task adds a caller, and declaring the file it calls would widen scope for no edit. If an
+    implementer finds `acceptanceAuthorTimeCheck` must change to serve the job, that widening must
+    be ratified before it is made rather than taken silently.
+
+    PROOF DIALECT UNIFORM AND DELIBERATE. Every criterion forward-references through `unit test:`. A
+    forward-referencing `grep:` at an EXISTING path is a HARD refusal on a filing PR: the path is
+    greppable, the symbol is not yet there, the proof executes, returns zero, and `executed_fail`
+    overrides keyword coverage. Two filing PRs were refused that way inside half an hour on
+    2026-08-20 before the pattern was named.
+
+    ID PROVENANCE — PRE-MINTED, READ BACK, AND THE ANCHOR'S AUTHORSHIP CHECKED RATHER THAN ASSUMED.
+    The reservation resolves to the sha the operator's mint printed. Its anchor commit carries the
+    operator's own session identity, matching the identity and process field on the operator's other
+    recent mints; the fleet's block allocator writes a DIFFERENT subject shape entirely, and two
+    neighbouring reservations carry that machine form — which is the distinction this check exists
+    to make. Six surfaces swept with a live control on each: the reservation; shard FILENAMES via
+    `git ls-tree -r`; a `plan/` grep; open PR text; a grep across `src/ test/ deploy/`; and live
+    `run-` branches. THE SURFACES ARE RE-SWEPT IMMEDIATELY BEFORE PUSHING.

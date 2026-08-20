@@ -1,0 +1,143 @@
+- id: W1-T1054
+  title: "THE DAEMON WRITES A FEEDBACK ENTRY INTO ITS OWN BOOT CHECKOUT, LANDS THE SAME PATH UPSTREAM, AND THEN CANNOT CHECK OUT PAST IT — the collision is guaranteed by construction rather than raced, the entrypoint already names the cause in its own error text and refuses correctly, and the escalation that would report it is unreachable because it runs after the checkout that failed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  files: [deploy/entrypoint.sh, test/entrypoint-boot.test.ts]
+  rationale: |
+    ONE UNTRACKED FILE TOOK THE FLEET DOWN FOR HOURS, AND EVERY LAYER BEHAVED AS DESIGNED. The
+    entrypoint refused to run on an unknown HEAD, which is correct. Docker stopped rather than
+    crash-looping once its bounded restart budget was spent, which is correct — a larger budget
+    would loop longer on a permanent condition, not recover, and nothing here asks to raise it. The
+    defect is that the condition is created by the daemon's own routine work, is reported to a log
+    nobody reads, and has no path to a human.
+
+    (1) THE COLLISION IS GUARANTEED, NOT A RACE, AND THE SOURCE SAYS SO. `feedbackDir` (`src/lib/
+    feedback.ts`) resolves to `plan/feedback` UNDER THE PASSED ROOT — the WORKING TREE, not a state
+    directory — and the sweep's `captureRepairFeedbackImpl` (`src/run-task.ts`) passes the daemon's
+    own `repoRoot`. So a recurring repair surface writes an untracked entry into the boot checkout.
+    `landFeedback` (`src/lib/feedback-landing.ts`) then diffs that same local `plan/feedback/**`
+    tree against `origin/main` and lands what differs as a gated PR. The identical content is
+    therefore written locally and committed upstream BY THE SAME MECHANISM, every time. The next
+    boot's `git checkout --detach` onto a commit that ADDS that path finds the untracked file in the
+    way and refuses. Nothing about the timing needs to be unlucky.
+
+    (2) THE LOCAL WRITE HAS A READER, SO "DO NOT WRITE IT" IS REFUTED AND MUST NOT BE THE FIX.
+    `landFeedback`'s own doc describes the local tree as its INPUT — it rebuilds the landing branch
+    as "origin/main plus whatever plan/feedback/** content is still unlanded locally". The local
+    file IS the queue. Removing the write would silently drop every filing that has not yet landed.
+    What is missing is the other end: `landFeedback` NEVER removes the local copy once it has
+    landed — every `rmSync` in that module targets a scratch temp dir, none touches the entry. So
+    the file survives as a byte-identical duplicate of a now-tracked path, which is precisely the
+    shape that blocks the checkout.
+
+    (3) THE ENTRYPOINT ALREADY DIAGNOSES THIS AND STILL CANNOT ACT. `checkout_target` (`deploy/
+    entrypoint.sh`) logs "A common cause is an UNTRACKED file at a path an incoming commit also
+    adds: the tracked-only dirty guard sees a clean tree, and git will not overwrite it" and then
+    dies. The tracked-only guard is deliberate and load-bearing — the script's own comment records
+    that counting untracked files as dirt broke the second boot once already, because the first boot
+    creates untracked files itself. So the guard is right and the gap is that nothing acts on the
+    one case it can prove safe.
+
+    (4) THE PREDICATE ALREADY EXISTS IN THIS REPO, ONE LAYER UP, AND MUST BE CITED RATHER THAN
+    RE-DERIVED. `treeFfSafe` (`src/lib/deployer.ts`) intersects dirty paths against the INCOMING
+    diff, and `rmd sync` (W1-T907) already classifies a local path as provably lossless when its
+    bytes equal the origin blob at that path. `checkCliFreshness` adopted the same intersect under
+    W1-T446. This task needs that predicate in bash, at boot, before the checkout — not a second
+    spelling of it.
+
+    (5) THE SIBLING IS W1-T1036 (#2268, MERGED) AND IT IS THE SAME SHAPE ONE LAYER DOWN — a stale
+    `.git/config.lock` left behind by a dead process blocks every later git operation, and is safe
+    to clear only under a provable predicate. CITED, NOT RE-DERIVED. This is the same class at the
+    working-tree layer instead of the lock layer.
+
+    (6) DETECTION IS ALREADY FILED AND IS NOT DUPLICATED HERE. `daemon.alive` stops when the process
+    dies, so its ABSENCE is the signal, and nothing reads it. W1-T1047 (#2256, MERGED) files the
+    `doctor` verb whose ledger-freshness check answers this in one command. CITED. This shard does
+    not restate it and must not.
+
+    (7) THE QUESTION THIS SHARD ANSWERS INSTEAD, AND THE ANSWER IS UNCOMFORTABLE: THE DAEMON CANNOT
+    ESCALATE WHEN IT CANNOT BOOT, BY CONSTRUCTION. `escalate` is an `rmd` verb; `deploy/entrypoint.sh`
+    reaches its `exec "$@"` only AFTER `checkout_target` succeeds. A checkout failure dies before the
+    process that would report it ever starts. So an in-container escalation is unreachable for
+    exactly the failure that most needs reporting, and the answer is EXTERNAL — something outside
+    the container must notice the silence. A tier is still worth stating because it governs whether
+    any future signal is seen at all: a DEAD FLEET WARRANTS HARD_STOP. `rmd escalate`'s own contract
+    is that MANUAL and HARD_STOP fire a real-time ping while BLOCKED collapses to a digest, and
+    crash-loop issues have sat unread for days on the BLOCKED tier — an escalation at the wrong tier
+    is invisible and would have changed nothing here.
+
+    (8) AND `deploy/entrypoint.sh` IS A BAKED PATH. The container runs the entrypoint COPIED INTO
+    THE IMAGE, not the one on the bind-mounted checkout, so merging this fix ships nothing until an
+    image rebuild is triggered and deployed. That is not a reason to file it differently; it is a
+    fact the implementer and the operator both need, because the fix will read as inert on a
+    green, merged commit until the rebuild happens.
+  design: |
+    THE SAFE PREDICATE, STATED SO A FALSIFIER CAN EXIST. Before the checkout, for each UNTRACKED
+    path in the tree: it is removable ONLY IF the incoming target ADDS that same path AND the local
+    bytes are IDENTICAL to the incoming blob at that path. All three conditions, together. Anything
+    else — untracked and not in the incoming diff, or in it with DIFFERENT content — must report and
+    refuse exactly as today.
+
+    PRINT BEFORE CLEARING, ALWAYS. The entrypoint must never silently `rm` an untracked file; that
+    is how real work disappears. Name every path it removes and why it judged it redundant, so the
+    log shows what was discarded even when the boot then succeeds.
+
+    REFUSE ON AN UNREADABLE COMPARISON. If the incoming blob cannot be read, the path is NOT
+    provably redundant and the boot must refuse — the fail-closed direction, matching the guard's
+    existing posture.
+
+    NOT IN SCOPE: removing or relocating the daemon's feedback write (it has a reader — see
+    rationale (2)); teaching `landFeedback` to clean up after itself, which is a real and separate
+    candidate; detection of the outage (W1-T1047); and the restart budget, which is correct.
+  acceptance:
+    - claim: "an untracked file whose path the incoming commit adds with identical bytes is removed and the boot proceeds"
+      proof: "unit test: entrypoint: an identical untracked file at an incoming path is cleared and the boot proceeds"
+    - claim: "an untracked file at an incoming path whose bytes differ is reported and the boot still refuses"
+      proof: "unit test: entrypoint: a differing untracked file at an incoming path still refuses"
+    - claim: "an untracked file the incoming commit never touches is left alone and never removed"
+      proof: "unit test: entrypoint: an untracked file outside the incoming diff is never removed"
+    - claim: "every removed path is printed before it is cleared so a discard is never silent"
+      proof: "unit test: entrypoint: every cleared path is named in the log before removal"
+    - claim: "an unreadable incoming blob refuses rather than assuming the local copy is redundant"
+      proof: "unit test: entrypoint: an unreadable incoming blob refuses instead of clearing"
+  origin: "oper#untracked-file-blocks-every-boot-2026-08-20"
+  plan_refs: ["W1-T1036", "W1-T1047", "W1-T907", "W1-T446"]
+  status: queued
+  attempts: 0
+  note: |
+    RULE 25 RE-DERIVED BY RUNNING THE REAL `INSTRUMENT_SURFACE` EXPORT, NOT BY READING IT, WITH FOUR
+    CONTROLS. `deploy/entrypoint.sh` DOES NOT MATCH — deploy/ is not instrument surface — and
+    neither does `test/entrypoint-boot.test.ts` nor `src/lib/deployer.ts`. Positive controls:
+    `.github/workflows/ci.yml` and `scripts/coverage-ratchet.mjs` both DO match, so the predicate
+    was live when the three negatives were taken. THIS TASK THEREFORE DOES NOT NEED TO RIDE ALONE.
+
+    A DANGLING CITATION ALREADY NAMES THIS ID, AND IT IS NOT A COLLISION THE ALLOCATOR COULD SEE.
+    `plan/tasks.d/W1-T341-deploy-idle-gate-deferral-bound.yaml` cites this id in prose and in
+    `plan_refs` as "`decideDeployTrigger`'s staleness rule", added by #1303 on 2026-08-04 when the
+    plan's ids were nowhere near this range. Verified across all history: this id was NEVER declared
+    as an `id:` field and no shard for it ever existed, so `mintNextTaskId` — which reads `id:`
+    fields structurally and not prose — never saw it and the reservation is sound. The consequence
+    is editorial rather than structural: once this shard lands, W1-T341's reference points at an
+    unrelated task instead of at nothing, which is worse for a reader than a dangling id. W1-T341's
+    record is NOT edited here — Rule 15 keeps a worker out of another task's record — and the
+    correction is left to the operator.
+
+    PROOF DIALECT UNIFORM AND DELIBERATE. Every criterion forward-references through `unit test:`. A
+    forward-referencing `grep:` at an EXISTING path is a HARD refusal on a filing PR: the path is
+    greppable, the symbol is not yet there, the proof executes, returns zero, and `executed_fail`
+    overrides keyword coverage. Two filing PRs were refused that way inside half an hour on
+    2026-08-20 before the pattern was named.
+
+    ID PROVENANCE — PRE-MINTED AND READ BACK BEFORE FILING, THEN RE-SWEPT IMMEDIATELY BEFORE
+    PUSHING. The reservation resolves to the sha the operator's own mint printed. Five surfaces, each
+    with a live control: the reservation (present; control, a sibling id, present); shard FILENAMES
+    via `git ls-tree -r` (zero; control, a merged id, one); ids mentioned under `plan/` (ONE — the
+    dangling W1-T341 citation above, which is why this note exists; control, a merged id, one); open
+    PR text (zero; control one); and `git grep` across `src/ test/ deploy/` (zero; control W1-T1046,
+    two — the id claimed in shipped source while four surfaces read it free, which is why that fifth
+    surface exists). Live `run-` branches for this id read zero against a control reading one.

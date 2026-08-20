@@ -52,8 +52,10 @@
     that goes quiet before the bound must deploy at that point rather than waiting it out. Both
     directions, or the bound is unproven in one of them. State whether the test drives the real
     deploy path or an injected `probeIdle`, and name any line left unproven.
-    NOT IN SCOPE: lane wiring (W1-T343); the deploy's own health-check/rollback path; `decideDeployTrigger`'s
-    staleness rule (W1-T1054), which decides WHETHER to deploy, not how long to wait for quiet.
+    NOT IN SCOPE: lane wiring (W1-T343); the deploy's own health-check/rollback path;
+    `decideDeployTrigger`'s staleness rule — `runningStale` in `src/lib/deployer.ts`, shipped by
+    #1054 and carrying no task record of its own — which decides WHETHER to deploy, not how long to
+    wait for quiet.
     VERIFY `daemonIsIdle`'s callers and the deploy path's skip behaviour FROM SOURCE before editing.
   acceptance:
     - claim: "a fleet that never reaches the idle condition still deploys once the stated deferral ceiling elapses, rather than skipping indefinitely"
@@ -64,7 +66,7 @@
       proof: "unit test: test/deployer.test.ts"
   risk: high
   origin: oper#build-daemon-parallelism-2026-08-04
-  plan_refs: ["W1-T326", "W1-T1054"]
+  plan_refs: ["W1-T326"]
   files: [src/lib/deployer.ts, src/lib/ledger.ts, test/deployer.test.ts, test/ledger-render-retention.test.ts]
   status: queued
   attempts: 0
