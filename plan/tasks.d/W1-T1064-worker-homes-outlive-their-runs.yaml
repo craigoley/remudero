@@ -1,0 +1,140 @@
+- id: W1-T1064
+  title: "WORKER HOMES ARE REAPED ON AGE ALONE AT A TWENTY-FOUR-HOUR CEILING, SO A DAY'S WORTH ACCUMULATES BEFORE ANYTHING IS ELIGIBLE — and the bulk of each one is a browser cache the host only needs once, downloaded per run because HOME is per run and the cache path is HOME-relative: the disk filled twice in a day and killed the daemon mid-ledger-write"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  files: [src/lib/worker-home.ts, test/daemon-worker-home-sweep.test.ts]
+  rationale: |
+    THE REAPER EXISTS, IT FIRES, AND IT IS BEHAVING EXACTLY AS DESIGNED. That is the finding — this
+    is not a broken sweep, it is a correct sweep whose ceiling is longer than the disk lasts.
+
+    (1) WHAT IT KEYS ON: AGE, AND NOTHING ELSE. `sweepStaleWorkerHomes` (`src/lib/worker-home.ts`)
+    walks the parent directory for entries matching the home prefix and keeps every one whose
+    `mtimeMs` is within `DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS` — twenty-four hours. It consults no
+    process table, no `state/inflight/` lock and no ledger verdict. Its own comment states the
+    assumption it rests on: a still-running spawn's home is always recent because materialize
+    touches it on every use, so mtime stands in for liveness.
+
+    (2) WHY THE NINETEEN-HOUR-OLD HOMES SURVIVED, AND IT IS NOT A DEFECT IN THE PREDICATE. They were
+    younger than the ceiling. Nothing failed; they were simply not yet eligible. At three lanes and
+    a home in the hundreds of megabytes, a full day of ineligibility is more accumulation than the
+    host has headroom for, which is why the disk reached one hundred percent and tore a ledger
+    record on a short write. RAISING THE CEILING IS NOT THE FIX AND LOWERING IT ALONE IS RISKY: mtime
+    is a proxy, and a long-running worker that has not touched its home would be reaped out from
+    under itself by a short enough ceiling. The predicate has to get better, not just faster.
+
+    (3) IT DOES FIRE, AND THAT IS PROVEN FROM THE LEDGER RATHER THAN ASSERTED. Over the full union —
+    per-form coverage control first, all three forms non-empty, deduped on the full line — the step
+    `daemon.worker_home_sweep` is present, across several distinct dates, with removal counts from
+    one to ten. Positive control in the same corpus: `daemon.start` is present in the thousands. So
+    the boot rung is reachable and has done real work.
+
+    (4) BUT ITS SILENCE PROVES NOTHING, AND THIS IS THE PART THAT MATTERS FOR ANY FUTURE READER.
+    BOTH emitters are conditional on having removed something: the boot rung logs
+    `daemon.worker_home_sweep` only `if (homes.removed.length)`, and `logDiskReclaimRung`'s
+    `run.disk_reclaim` fires only if one of its three sweeps removed anything. A pass that ran and
+    found nothing stale leaves NO trace at all. So the absence of a row cannot distinguish `never
+    ran` from `ran, nothing was eligible` — and in particular the absence of `run.disk_reclaim` in
+    the corpus does NOT mean that rung is unreachable. It is reached: `logDiskReclaimRung(config,
+    log)` is called at the start of every run in `src/run-task.ts`, on the same rung as
+    `logWorktreeReapBootSurvey`. A sweep that cannot say `I ran and there was nothing to do` is
+    indistinguishable from one that never ran, which is the same class as the steps this repo has
+    already found declared-and-unreachable.
+
+    (5) WHAT IS ACTUALLY BIG, DERIVED FROM SOURCE AND CORROBORATED BY A REAL CACHE. Playwright
+    resolves its browser directory from `PLAYWRIGHT_BROWSERS_PATH`, and `deploy/Dockerfile` records
+    that the variable is deliberately NOT set, so the platform default applies:
+    `$HOME/.cache/ms-playwright`. `buildWorkerEnv` (`src/lib/env.ts`) OVERRIDES `HOME` with the
+    per-run worker home. Those two facts together mean the browser cache is per run by
+    construction — every worker downloads its own copy into its own home, and the image's own cache
+    is measured empty in that same Dockerfile comment. For scale, a fully populated ms-playwright
+    cache on the operator's own machine measures in the gigabytes. THE MEASUREMENT THIS SHARD DOES
+    NOT HAVE is a `du` breakdown inside one of the large homes on the container host itself; it was
+    taken from source and from a local cache instead, and the implementer should confirm the split
+    on the host before choosing between the two fixes below.
+
+    (6) SO THERE ARE TWO INDEPENDENT FIXES AND THEY ARE NOT INTERCHANGEABLE. Pointing
+    `PLAYWRIGHT_BROWSERS_PATH` at ONE shared read-only cache removes the cost at source and would
+    make reaping almost irrelevant to disk pressure. Sharpening the reap predicate bounds the
+    residue whatever the contents. THIS TASK IS THE SECOND ONE. The first touches the image and the
+    worker environment and is a different blast radius; it is named here so the reader knows it
+    exists and is deliberately NOT scoped in.
+
+    (7) AND THE HOME IS LINKABLE TO A RUN, WHICH IS WHAT MAKES A BETTER PREDICATE POSSIBLE AT ALL.
+    The directory is `worker-home-<runId>` — the module's own doc calls that form durable and
+    legible in `ps` and logs. A run id maps to an inflight lock and to a ledger verdict, so a home
+    can be asked about rather than guessed at.
+  design: |
+    THE PREDICATE, AND WHICH PARTS SURVIVE A RESTART — THIS IS THE WHOLE DESIGN.
+      - A LIVE PROCESS holding the home is proof of life, and it does NOT survive a container
+        restart: pids are reassigned, so immediately after a restart every home looks unowned. That
+        is the most dangerous possible moment to reap, because workers are being respawned right
+        then. A pid check may only ever ADD safety, never authorise a removal on its own.
+      - AN `state/inflight/` LOCK for the run id is file-based and DOES survive a restart. It is the
+        better liveness signal, with one caveat the implementer must handle: `sweepStaleInflightLocks`
+        reaps stale locks itself, so an absent lock can mean the lock was cleaned rather than that the
+        run ended, and absence alone must not authorise removal.
+      - A TERMINAL LEDGER VERDICT for the run id survives a restart and is the strongest single
+        signal: it is a positive statement that the run finished, not an inference from something
+        missing. This is what a home should have to show before it is removed.
+      - MTIME AGE stays as the backstop for a home whose run id resolves to nothing at all — an
+        orphan from a kill -9 or a crash before any verdict was written. It must not be the primary.
+    SO: REMOVE ON A POSITIVE STATEMENT OF DEATH, KEEP ON ANYTHING UNKNOWN. A home whose run id has a
+    terminal verdict and no live lock is removable now, long before the age ceiling. A home whose id
+    resolves to nothing falls back to age. A home that is unknown for any other reason is KEPT.
+
+    PRINT BEFORE CLEARING, ALWAYS. Name every home removed, its run id and the evidence that judged
+    it dead, so a discard is never silent — the operator's standing rule, and the reason this is a
+    sharpening rather than a shortening of the ceiling.
+
+    SAY SO WHEN NOTHING WAS ELIGIBLE. The rung must emit a row on EVERY pass, including the zero
+    case, so its silence stops being ambiguous. Rationale (4) is the whole argument: today a pass
+    that found nothing is indistinguishable from a pass that never happened.
+
+    NO NEW ACTOR. The daemon already owns this rung and a second process mutating state a live
+    daemon depends on is the measured hazard on this host — the change is to the predicate the
+    existing rung already calls, and to what it reports.
+
+    NOT IN SCOPE: the shared browser-cache fix of rationale (6); the inflight-lock sweep's own
+    staleness rule; and the ledger short-write that the full disk caused, which is a durability
+    question of its own.
+  acceptance:
+    - claim: "a home whose run has a terminal verdict and no live lock is removed before the age ceiling"
+      proof: "unit test: worker home reap: a finished run's home is removed before the age ceiling"
+    - claim: "a home whose run is still live is kept however old it is, so age alone can never reap a working run"
+      proof: "unit test: worker home reap: a live run's home is kept regardless of age"
+    - claim: "a home whose run id resolves to nothing falls back to the age ceiling rather than being removed outright"
+      proof: "unit test: worker home reap: an unresolvable run id falls back to age"
+    - claim: "every removal names the home and the evidence that judged it dead, so a discard is never silent"
+      proof: "unit test: worker home reap: every removal names its evidence"
+    - claim: "a pass that removed nothing still reports, so silence no longer reads the same as never having run"
+      proof: "unit test: worker home reap: a pass that removes nothing still reports"
+  origin: "oper#worker-homes-filled-the-disk-2026-08-20"
+  plan_refs: ["W1-T170", "W1-T411", "W1-T18"]
+  status: queued
+  attempts: 0
+  note: |
+    RULE 25 RE-DERIVED BY RUNNING THE REAL `INSTRUMENT_SURFACE` EXPORT WITH FOUR CONTROLS.
+    `src/lib/worker-home.ts` does NOT match, `test/daemon-worker-home-sweep.test.ts` does not, and
+    `plan/policy.yaml` does not. Positive controls: `.github/workflows/ci.yml` and
+    `scripts/coverage-ratchet.mjs` both DO match. So this task is NOT instrument-entangled and does
+    not need to ride alone.
+
+    THE TEST HOME IS THE EXISTING ONE. `test/daemon-worker-home-sweep.test.ts` already owns the
+    sweep's behaviour, so the new cases land there rather than in a sixth worker-home test file.
+
+    WHAT THIS RECON COULD NOT MEASURE, STATED RATHER THAN GLOSSED. The container host's own disk was
+    not reachable from where this was taken, so the per-directory breakdown inside a large home is
+    derived from source plus a local cache rather than measured in place. Every ledger figure IS
+    first-hand: the union was read with a per-form coverage control across all three rotation forms
+    and deduped on the full line, with a positive control step present in the thousands beside the
+    sweep step being counted.
+
+    PROOF DIALECT UNIFORM. Every criterion forward-references through `unit test:`. A
+    forward-referencing `grep:` at an EXISTING path is a hard refusal on a filing PR — the path is
+    greppable, the symbol is not yet there, the proof executes, returns zero, and `executed_fail`
+    overrides keyword coverage.
