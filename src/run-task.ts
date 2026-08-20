@@ -645,6 +645,14 @@ import {
   resumeFleet,
   stopDetail,
 } from "./lib/fleet-control.js";
+import {
+  GH_APP_ID_ENV,
+  GH_APP_INSTALLATION_ID_ENV,
+  GH_APP_PRIVATE_KEY_PATH_ENV,
+  nextRefreshDelayMs,
+  REFRESH_MARGIN_MS,
+  refreshInstallationToken,
+} from "./lib/github-app.js";
 
 /**
  * The REAL reads behind the binary-pin rung, as one object so the wiring is a single argument and
@@ -13687,6 +13695,42 @@ export async function daemonCommand(
     1,
     `### rmd daemon — ledger: ${ledgerPath} | stdout: ${outLogPath} | stderr: ${errLogPath}`,
   );
+
+  // W1-T1024 — THE FLEET AUTHENTICATES AS THE INSTALLED GITHUB APP, whose core/graphql pool is
+  // measured SEPARATE from an operator's interactive session (github-app.ts's own doc: the
+  // incident that files this task was an operator session exhausting graphql while the daemon's
+  // own traffic in that window was negligible). Started here, once, in the DAEMON'S OWN PROCESS
+  // — process.env only means anything to ITS children, and every existing GH_TOKEN consumer
+  // (env.ts's ALLOWLIST at worker spawn, review.ts's per-call spread, deploy/entrypoint.sh's
+  // credential helper) already reads it at call/spawn time, so refreshing it here reaches all
+  // three with NO call-site change.
+  //
+  // GATED ON CONFIG PRESENCE so an unconfigured host (the App not installed there yet) is BYTE-
+  // IDENTICAL to before this task: zero ledger lines, zero timers, GH_TOKEN's own optional shape
+  // preserved exactly. Where it IS configured, `refreshInstallationToken` mints once immediately
+  // and this loop reschedules itself off the minted `expires_at` (via `nextRefreshDelayMs`,
+  // strictly inside the one-hour life) — or off `REFRESH_MARGIN_MS` when a mint fails, so a
+  // transient outage keeps retrying rather than going silent (design iv: degrade, never refuse).
+  //
+  // THE WORKER GAP IS A KNOWN, ACCEPTED LIMIT (github-app.ts's file header, design iii): a
+  // worker's own GH_TOKEN copy is captured at spawn and held for its whole run, so a run
+  // outliving the token's one-hour life can still hit the failure it always could — closing that
+  // needs a change to worker.ts or git-push.ts, neither of which is in this task's declared
+  // files. This refresher fixes the DAEMON's own calls and every FRESHLY-spawned worker; it does
+  // not retrofit an already-running one.
+  if (process.env[GH_APP_ID_ENV] && process.env[GH_APP_INSTALLATION_ID_ENV] && process.env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
+    const tickInstallationTokenRefresh = () => {
+      void refreshInstallationToken({ log }).then((result) => {
+        const delay =
+          result.ok && result.expiresAtMs !== undefined
+            ? nextRefreshDelayMs(result.expiresAtMs, Date.now())
+            : REFRESH_MARGIN_MS;
+        const timer = setTimeout(tickInstallationTokenRefresh, delay);
+        timer.unref?.();
+      });
+    };
+    tickInstallationTokenRefresh();
+  }
 
   // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
