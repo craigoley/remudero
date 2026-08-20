@@ -539,6 +539,7 @@ import {
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
   checkCostGovernor,
+  checkMemoryGovernor,
   checkQueueGovernor,
   checksStateFromRollup,
   dedupeRollupByLatestAttempt,
@@ -547,6 +548,7 @@ import {
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
+  logMemoryObservation,
   logQueueGovernorDeferral,
   operatorVerdictEvidence,
   renderClarificationQuestion,
@@ -571,6 +573,7 @@ import {
   type FixClass,
   type FixDispatchEvidence,
   type LiveStateResult,
+  type MemoryGovernorResult,
   type MergeConflictEvidence,
   type OpenPrView,
   type PostFixReverificationSummary,
@@ -13109,6 +13112,71 @@ function queueGovernorGateFor(
     if (!result.deferred) return undefined;
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
+  };
+}
+
+/**
+ * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults. Reads
+ * `/proc/meminfo` and NEVER a cgroup limit (design note (6), `checkMemoryGovernor`'s own doc):
+ * this fleet's containers carry no memory limit (`memory.max` reads `max`), so a cgroup read
+ * would report "unbounded" and authorise every dispatch silently, while `/proc/meminfo` reports
+ * the real host figure this guard actually wants.
+ *
+ * `path` defaults to the real file and is injectable so a test can point this at a fixture
+ * without touching the live `/proc/meminfo` (test/dispatch-memory-governor.test.ts, "the probe
+ * reads meminfo not the cgroup limit"). Throws when the file is unreadable OR carries no
+ * `MemAvailable` line (e.g. a cgroup-shaped file, which has no such line at all) — a genuinely
+ * malformed/absent reading must not silently parse as a number. `memoryGovernorGateFor` below
+ * deliberately does NOT catch this throw itself; `dispatch-governor.ts`'s
+ * `checkDispatchGovernors` is the ONE place that decides what an unreadable memory observation
+ * means (fail OPEN, unlike the shared cost/queue `unreadable` arm — see that function's own
+ * comment), so this probe stays a plain, honestly-throwing read.
+ */
+export function readAvailableMemoryMib(path = "/proc/meminfo"): number {
+  const text = readFileSync(path, "utf8");
+  const match = /^MemAvailable:\s*(\d+)\s*kB\s*$/m.exec(text);
+  if (!match) {
+    throw new Error(`${path}: no 'MemAvailable' line found — not a /proc/meminfo-shaped reading`);
+  }
+  return Math.floor(Number(match[1]) / 1024);
+}
+
+/**
+ * W1-T1038 — THE MEMORY FLOOR'S caller, mirroring {@link costGovernorGateFor}/{@link
+ * queueGovernorGateFor} immediately above in SHAPE — but deliberately NOT in fail direction; see
+ * `checkMemoryGovernor`'s own doc (sweep.ts) and `checkDispatchGovernors`'s own comment
+ * (dispatch-governor.ts) for why. `checkMemoryGovernor` is a pure predicate that was built,
+ * tested, and never invoked from any dispatch path; this supplies the live reading it consults,
+ * via {@link readAvailableMemoryMib} immediately above.
+ *
+ * THE OBSERVATION IS LEDGERED ON EVERY SUCCESSFUL READ (design (iv)) — unconditionally, never
+ * gated on `result.deferred` — unlike {@link costGovernorGateFor}/{@link queueGovernorGateFor},
+ * which ledger only a DEFERRAL. See {@link logMemoryObservation}'s own doc (sweep.ts) for why a
+ * deferral-only row would sample exactly the population that never happens while the floor
+ * ships disabled.
+ *
+ * A READ FAILURE IS DELIBERATELY LEFT UNCAUGHT HERE, exactly like `costGovernorGateFor`'s own
+ * ledger read: this closure does not need its own try/catch to fail open, it only needs to NOT
+ * catch, so `checkDispatchGovernors` — the ONE place cost/queue and memory diverge — is the only
+ * place the direction is decided.
+ *
+ * NOT wired into `DaemonDeps`/`DrainDeps` by this task (`daemon.ts`/`drain.ts` are not among its
+ * declared `files:`) — this factory exists, is exported, and is directly tested so it is not the
+ * "dead mechanism" criterion (iv) forbids; threading it into the real dispatch loops is a
+ * follow-up, mirroring how `costGovernorGateFor`/`queueGovernorGateFor` themselves were built and
+ * tested (W1-T148/W1-T121) before W1-T317/W1-T321 wired them in.
+ */
+export function memoryGovernorGateFor(
+  ledgerPath: string,
+  runId: string,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  readAvailableMib: () => number = readAvailableMemoryMib,
+): () => MemoryGovernorResult | undefined {
+  return () => {
+    const result = checkMemoryGovernor(readAvailableMib(), policy);
+    // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
+    logMemoryObservation(result, appendLedger, ledgerPath, runId);
+    return result.deferred ? result : undefined;
   };
 }
 

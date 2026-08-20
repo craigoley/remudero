@@ -1809,6 +1809,19 @@ export async function runDaemon(
         wip_limit: verdict.result.wipLimit,
         poll_interval_ms: pollIntervalMs,
       });
+    } else if (verdict.kind === "memory") {
+      // W1-T1038: a new discriminant on the shared `DispatchGovernorVerdict` union — added here
+      // ONLY to keep this exhaustive-by-construction branch type-checking (`verdict.source`/
+      // `verdict.error` below are NOT members of the "memory" arm). No production caller
+      // currently supplies `DaemonDeps.checkMemoryGovernor` (that wiring is out of THIS task's
+      // declared `files:`), so this branch is unreached today — it exists so a future wiring
+      // task finds the log shape already correct rather than a type error.
+      log("daemon.memory_governor", {
+        tick,
+        observed_available_mib: verdict.result.observedAvailableMib,
+        memory_floor_mib: verdict.result.floorMib,
+        poll_interval_ms: pollIntervalMs,
+      });
     } else {
       log("daemon.governor_check_failed", {
         tick,
