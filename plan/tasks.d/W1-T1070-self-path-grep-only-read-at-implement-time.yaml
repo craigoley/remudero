@@ -1,0 +1,168 @@
+- id: W1-T1070
+  title: "A `grep:` PROOF AT A SHARD'S OWN PATH IS ONLY EVER READ AT IMPLEMENT TIME, WHERE THE SHARD IS UNTOUCHED AND THE PROOF IS PROVABLY `executed_stale` — 32 of 414 shards carry 103 such criteria, `proof-scope` ALREADY WARNS ON 97 OF THEM, and its own first-listed remedy (`add the path to files:`) SILENCES the warn without changing the proof; two shards have taken it and both are now `type: implement` tasks scoped to nothing but their own YAML"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-20 against origin/main `6c7fa027`, from a scratch worktree whose HEAD was
+    proved equal to that sha before any reading. Every population figure below was produced by
+    driving the repo's OWN predicates (`proofScopeViolations`, `proofKeywords`/`tokenize`/
+    `MIN_COVERAGE`), never a hand-rolled re-implementation, and every zero carries a control.
+
+    (1) THE TWO FIELDS ALREADY EXIST, WHICH IS WHY THIS IS AN AUTHORING DEFECT AND NOT A DESIGN
+    GAP. A filing PR deliberately carries NO `Remudero-Task:` trailer (#1527 — crediting it would
+    mark the task done before it is built), so review judges it from its OWN `## Acceptance` body
+    block. An implementing PR carries the trailer, and `review.ts` then resolves criteria from the
+    shard: *"trailer present — criteria resolve from plan/tasks.yaml"*. So the body block is read
+    ONLY at filing time and the shard's `acceptance:` block is read ONLY at implement time. A
+    `grep:` at the shard's own path is a genuine, discriminating check on the FILING diff, where
+    the shard is an added file — and it is in the wrong field. Put in the shard, it can never be
+    read on the diff it would discriminate against.
+
+    (2) AND AT IMPLEMENT TIME IT IS PROVABLY NON-DISCRIMINATING, NOT MERELY LIKELY TO BE. The
+    implementing diff does not touch the shard — Rule 15's `criterionFieldTampered` refuses a
+    worker that edits criteria at all — so the grep matches the head and the merge-base
+    identically, `classifyBaseProofOutcome` returns `stale`, and `judgeCriterion` sets
+    `executed_stale`: *"positive override withdrawn, keyword floor applied"*. The whole criterion
+    then rests on keyword coverage against the PR body. OBSERVED on #2319, whose shard (W1-T1056)
+    carries six self-path greps of seven criteria: a correct build failed review on one criterion
+    at 0.50 with nothing wrong in its diff. #2319 IS THE INSTANCE, NOT THE SUBJECT — the same
+    shard-authoring shape is on 31 others.
+
+    (3) THE POPULATION IS A MINORITY, WHICH SETTLES THE "IS THIS THE HOUSE CONVENTION" QUESTION
+    THE OTHER WAY. Over all 414 shards under `plan/tasks.d/` (every one of which carries an
+    acceptance block) and their 1,651 criteria: 32 shards (7.7%) carry at least one self-path
+    grep, covering 103 criteria (6.2%). Status: 29 queued, 2 blocked, 1 unset — NONE merged, so
+    every consequence below is still ahead of the fleet rather than behind it. 29 of the 32
+    declare a real code path in `files:`, so an implementing diff will exist and will not touch
+    the shard: 96 criteria will go stale on contact. On FIVE of those — W1-T1041, W1-T464,
+    W1-T468, W1-T484, W1-T486 — EVERY criterion is a self-path grep (24 criteria), so an
+    implementing PR would arrive with no executable proof at all and a verdict resting entirely
+    on the keyword floor.
+
+    (4) THE REPO ALREADY DETECTS THIS. IT HAS BEEN WARNING FOR SEVENTEEN DAYS AND NOBODY SEES IT.
+    `proofScopeViolations` (`src/lib/task-linter.ts`, W1-T310, #1231, landed 2026-08-03) compares
+    each proof's named path against the task's own declared `files:`. A shard's own YAML is not in
+    `files:`, so the check fires. DRIVEN OVER THE REAL PREDICATE, NOT INFERRED: 97 of the 103
+    self-path criteria already produce a `proof-scope` violation today. It is WARN, and a warn
+    never reaches `lint-plan`'s exit code — `lintPlanCommand` increments `failing` only inside
+    `if (blocking.length)`. So the detector is right, it is in the right place, and its output is
+    invisible.
+
+    (5) AND ITS REMEDY TEXT NAMES THE WRONG FIX FIRST — MEASURED, WITH TWO SHARDS THAT TOOK IT.
+    The message ends *"add `<path>` to files: or rewrite the proof to name a path already in
+    scope"*. For a self-path grep the first branch is actively harmful: adding
+    `plan/tasks.d/<id>.yaml` to `files:` silences the warn and changes nothing about the proof,
+    which stays exactly as stale at implement time. The 6 criteria that are SILENT today are
+    precisely the two shards that did this — W1-T1014 (5 criteria, `verify: human`, queued) and
+    W1-T314 (1 criterion, `verify: auto`, blocked). Both are `type: implement` with
+    `files:` listing ONLY their own YAML, so `scopeGuardOutOfScopeFiles` would now refuse any
+    branch of theirs that touched real code. Following the advice converted a visible warning into
+    a silent, still-broken proof AND made the task undeliverable.
+
+    (6) THE MERGED-CLAIMS AUDIT SCORES THESE AS CLEAN PASSES, IN THE OPPOSITE DIRECTION.
+    `auditMergedTaskClaims` calls `judgeCriterion` with an `execCtx` that carries no `baseCwd`, and
+    the module's own doc says the consequence in terms: `executed_stale` is *"structurally
+    unreachable through THIS caller"*. So a self-path grep run there matches, returns
+    `executed_pass`, and is counted in `executableClaimsChecked` as a substantiated claim — when
+    all it observed is that the shard still contains its own words. None of the 32 is merged today,
+    so this is prospective: 103 criteria enter the audit as self-passing the moment their tasks do.
+
+    (7) THE LIVE BLAST RADIUS IS ZERO AND THAT IS A MEASUREMENT, NOT AN ABSENCE. Driving the real
+    `proofKeywords`/`tokenize`/`MIN_COVERAGE = 0.6` over all 8 open PRs and the 48 criteria they
+    resolve (every one via a trailer, i.e. from a shard): 0 below the floor and 0 within one token
+    of it; the lowest is 0.88. POSITIVE CONTROL, both directions: the same W1-T1056 criteria score
+    1.00/1.00/0.91/1.00/0.90/1.00/1.00 against #2319's repaired body and 6 of 7 BELOW the floor
+    against an unrelated PR's body. The scorer separates the cases, so the zero is real. The
+    exposure is entirely deferred into the 96 criteria of (3).
+
+    (8) THE PRECEDENT FOR THE FIX ALREADY EXISTS, IN THE MIRROR IMAGE. `not_yet_built` (W1-T456)
+    recognises a plan-FILING PR whose `unit test:` proof names a file the implementation will
+    create, via `shardDeclaredFilesInDiff` reading the shard's `files:` straight off the added
+    lines of the diff. That is the same filing-time/implement-time asymmetry, handled — and it
+    degrades to the keyword floor under its OWN name rather than crediting anything. This task is
+    the other half.
+  design: |
+    (i) A SELF-PATH GREP BECOMES ITS OWN NAMED VIOLATION, NOT THE GENERIC OUT-OF-SCOPE ONE. The
+    two cases have different causes and different remedies, and the whole defect of (5) is that
+    one message serves both. The new violation says what is actually true: this proof is only ever
+    read through a `Remudero-Task:` trailer, on a diff that does not touch the shard, so it is
+    stale by construction — move it to the FILING PR's `## Acceptance` body block, where it
+    discriminates, and give the shard a proof about the code the task will change.
+
+    (ii) DECLARING THE SHARD'S OWN PATH IN `files:` MUST NOT SILENCE IT. This is the load-bearing
+    difference from `proof-scope` and the reason a severity flip on the existing check is NOT the
+    fix: `proofScopeViolations` returns early at `declared.has(path)`, which is correct for its own
+    question and wrong for this one. Both shards in (5) are already sitting in that hole, so this
+    is not a hypothetical branch.
+
+    (iii) SEVERITY: WARN IN THE ENGINE, BLOCK ONLY IN CHANGED-TASKS MODE. A blocking engine default
+    would refuse dispatch for the 29 queued shards of (3) the moment it merged — the exact
+    "legacy backlog must not brick overnight" cost W1-T310's own module comment documents for
+    itself, and `assertLintClean` would return `blocked_illformed` for every one. `lintPlanCommand`
+    already has the lever: it populates extra `opts` ONLY when `scope` is set (the `--base` /
+    changed-tasks pass), which is exactly how W1-T497 wired `resolveNameFilteredCandidates`. Set
+    the severity to `block` there and a NEW or EDITED shard is refused in CI while the 32 existing
+    ones are grandfathered until someone touches them.
+
+    (iv) DO NOT TOUCH `MIN_COVERAGE`, THE KEYWORD FLOOR, OR `executed_stale`. All three are behaving
+    correctly — a proof that discriminates nothing SHOULD lose its positive override, and 0.6 is a
+    deliberate W1-T219 hardening from 0.34. The defect is upstream of every one of them: a proof
+    written for one review being read by another.
+
+    (v) REPAIRING THE 32 IS NOT THIS TASK. This task stops new ones and makes the existing ones
+    loud; moving 103 criteria across 32 shards is a mechanical sweep with its own blast radius and
+    belongs in its own filing, sequenced BEFORE any operator flips (iii)'s severity wider.
+
+    (vi) OUT OF SCOPE, NAMED. No change to `proofScopeViolations`' existing message or severity —
+    44 of the 76 tasks it warns on today are ordinary out-of-scope proofs and are none of this
+    task's business. No change to `auditMergedTaskClaims`; (6) is a real second harm but its fix is
+    a `baseCwd` question, not an authoring one.
+  acceptance:
+    - claim: "a grep proof naming the shard's own file draws a violation distinct from the out-of-scope one"
+      proof: "unit test: W1-T1070: a self-path grep proof draws its own named violation"
+    - claim: "declaring the shard's own path in files does not silence that violation"
+      proof: "unit test: W1-T1070: declaring the shard's own path does not silence it"
+    - claim: "the violation text sends the author to the filing PR body rather than to files"
+      proof: "unit test: W1-T1070: the self-path violation points at the filing PR body"
+    - claim: "an ordinary out-of-scope grep keeps the existing proof-scope wording untouched"
+      proof: "unit test: W1-T1070: an ordinary out-of-scope grep keeps its message"
+    - claim: "a name-filtered unit test proof stays silent because it names no path at all"
+      proof: "unit test: W1-T1070: a name-filtered unit test proof stays silent"
+    - claim: "every self-path criterion on a shard is reported and not only the first"
+      proof: "unit test: W1-T1070: every self-path criterion on a shard is reported"
+    - claim: "the check warns by default so no queued task is refused at dispatch"
+      proof: "unit test: W1-T1070: the check warns by default at pre-dispatch"
+    - claim: "the changed-tasks pass raises it to blocking so a newly filed shard is refused"
+      proof: "unit test: W1-T1070: the changed-tasks pass raises the check to blocking"
+  origin: "recon#self-path-grep-cannot-discriminate-2026-08-20"
+  plan_refs: ["W1-T310", "W1-T456", "W1-T497", "W1-T1056"]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads two
+    stems here — `task-linter` and `run-task` — and refuses that at medium. DECOMPOSITION IS
+    DECLINED WITH A REASON: design (iii) is the whole point of the task, and the severity lever it
+    needs lives in `lintPlanCommand`'s `if (scope)` block in `run-task.ts` while the predicate lives
+    in the linter. Splitting them ships a predicate nothing consults — which is the defect in (4),
+    reproduced. The diff is one predicate, one message, and one severity line.
+
+    `test/task-linter.test.ts` IS THE EXISTING HOME and is declared rather than a new filename, so
+    `subsystemsOf` reads `task-linter` and not a third stem.
+
+    THIS SHARD DELIBERATELY CARRIES NO PROOF THAT GREPS ITS OWN PATH — that is the defect being
+    filed, and a shard that committed it while describing it would be unreadable as evidence. Its
+    eight proofs are name-filtered `unit test:` forward references, which `proofScopePath` returns
+    `undefined` for, so `proof-scope` is correctly silent on all eight.
+
+    EVERY FIGURE IS A QUERY, NOT A NUMBER TO CARRY. Re-derive the population by parsing each shard's
+    `acceptance:` and comparing each `grep:` proof's path (the token after the LAST " in ") against
+    the shard's own path; re-derive the already-warned count by calling `proofScopeViolations(task)`
+    directly and matching its `criterion N` prefix; re-derive the open-PR scores by importing the
+    real `proofKeywords`/`tokenize` and `MIN_COVERAGE` rather than restating 0.6. All three moved
+    between W1-T310's filing (102 of 338 tasks) and this one (76 of 414), and they will move again.
