@@ -20,7 +20,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps, type SweepPolicy } from "../src/lib/sweep.js";
+import { PolicyError } from "../src/lib/policy.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, validateReviewLanesRow, type OpenPrView, type SweepDeps, type SweepPolicy } from "../src/lib/sweep.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-review-lane-budget-")), "ledger.ndjson");
@@ -122,4 +123,62 @@ test("W1-T1049 acceptance 4 — dispatchLanes' own value is untouched by this ro
 
 test("W1-T1049 — DEFAULT_SWEEP_POLICY.reviewLanes defaults to dispatchLanes' own shipped value: the split changes NO effective behavior by itself, only who controls the number", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, DEFAULT_SWEEP_POLICY.dispatchLanes);
+});
+
+// ── every refusal arm of the policy row's validator, one test each ─────────────────────────
+//
+// `loadReviewLanesPolicy` runs at module load against the SHIPPED plan/policy.yaml, so its happy
+// path is covered by importing this module at all — and every refusal arm is unreachable that
+// way, because the shipped row is well-formed. Splitting the decisions out of the file read
+// (`validateReviewLanesRow`) makes each arm reachable directly, with no temp policy file and no
+// override seam on `installPolicyPath`. Each arm gets its own test: a single "a malformed row
+// throws" case would pass while four of the five arms stayed dead.
+
+test("W1-T1049 — a 'sweep.reviewLanes' that is not a mapping is refused, naming the shape it needed", () => {
+  for (const row of [undefined, null, 3, "3"]) {
+    assert.throws(() => validateReviewLanesRow(row), (e: unknown) => e instanceof PolicyError && /must be a mapping/.test((e as Error).message));
+  }
+});
+
+test("W1-T1049 — a non-finite 'sweep.reviewLanes.value' is refused, naming the value it got", () => {
+  for (const value of ["3", null, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => validateReviewLanesRow({ value, min: 1, max: 8 }),
+      (e: unknown) => e instanceof PolicyError && /'sweep\.reviewLanes\.value' must be a finite number/.test((e as Error).message),
+    );
+  }
+});
+
+test("W1-T1049 — 'sweep.reviewLanes' without finite numeric min and max bounds is refused", () => {
+  for (const [min, max] of [[undefined, 8], [1, undefined], ["1", 8], [1, "8"], [Number.NaN, 8], [1, Number.POSITIVE_INFINITY]]) {
+    assert.throws(
+      () => validateReviewLanesRow({ value: 3, min, max }),
+      (e: unknown) => e instanceof PolicyError && /must carry numeric 'min' and 'max' bounds/.test((e as Error).message),
+    );
+  }
+});
+
+test("W1-T1049 — a 'sweep.reviewLanes' bound with min greater than max is refused as unsatisfiable", () => {
+  assert.throws(
+    () => validateReviewLanesRow({ value: 3, min: 8, max: 1 }),
+    (e: unknown) => e instanceof PolicyError && /min \(8\) > max \(1\) — an unsatisfiable bound/.test((e as Error).message),
+  );
+});
+
+test("W1-T1049 — a 'sweep.reviewLanes.value' outside its own declared bound is refused, on either side", () => {
+  for (const value of [0, 9]) {
+    assert.throws(
+      () => validateReviewLanesRow({ value, min: 1, max: 8 }),
+      (e: unknown) => e instanceof PolicyError && /is out of its declared bound \[1, 8\]/.test((e as Error).message),
+    );
+  }
+});
+
+// The positive control for the five refusals above: the same validator accepts a well-formed row
+// and returns its value, so those throws are arm-specific rather than the function refusing
+// everything handed to it.
+test("W1-T1049 — a well-formed 'sweep.reviewLanes' row returns its value, including at either bound", () => {
+  assert.equal(validateReviewLanesRow({ value: 3, min: 1, max: 8 }), 3);
+  assert.equal(validateReviewLanesRow({ value: 1, min: 1, max: 8 }), 1);
+  assert.equal(validateReviewLanesRow({ value: 8, min: 1, max: 8 }), 8);
 });

@@ -609,10 +609,7 @@ const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
  * load, not unbounded or silently-default behavior). `installPolicyPath`/`PolicyError` are
  * both pre-existing exports of `policy.ts` — referencing them is not an edit to that file.
  */
-function loadReviewLanesPolicy(): number {
-  const path = installPolicyPath();
-  const raw = parseYaml(readFileSync(path, "utf8")) as { sweep?: { reviewLanes?: unknown } } | null;
-  const row = raw?.sweep?.reviewLanes;
+export function validateReviewLanesRow(row: unknown): number {
   if (typeof row !== "object" || row === null) {
     throw new PolicyError(`policy.yaml: 'sweep.reviewLanes' must be a mapping with 'value'/'origin'/'min'/'max'.`);
   }
@@ -635,6 +632,15 @@ function loadReviewLanesPolicy(): number {
     );
   }
   return value;
+}
+
+/** Reads the row {@link validateReviewLanesRow} validates. Split from it so every refusal arm
+ *  above is reachable from a test without a temp policy file on disk — the file read stays here,
+ *  the decisions stay there. */
+function loadReviewLanesPolicy(): number {
+  const path = installPolicyPath();
+  const raw = parseYaml(readFileSync(path, "utf8")) as { sweep?: { reviewLanes?: unknown } } | null;
+  return validateReviewLanesRow(raw?.sweep?.reviewLanes);
 }
 const REVIEW_LANES_DEFAULT = loadReviewLanesPolicy();
 
