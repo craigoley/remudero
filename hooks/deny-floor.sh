@@ -75,4 +75,21 @@ if [ -f "$deny_local" ]; then
   done < "$deny_local"
 fi
 
+# 6) an inline polling loop against `gh` (W1-T1066 — THE NINETY-MINUTE LOCKOUT). A
+#    single command that carries a loop keyword (for/while/until) AND `sleep` AND a
+#    `gh` invocation is the exact shape that exhausted the SECONDARY rate limit (which
+#    counts cadence, not volume) and locked the operator out of his own repo for ~90
+#    minutes: `for i in $(seq 1 25); do gh pr view …; sleep 20; done` and
+#    `until [ "$(gh run view …)" = completed ]; do sleep 20; done` both match. A bare
+#    `gh` call, a bare `sleep`, and a loop that never touches `gh` (e.g. waiting on a
+#    local file) are all left alone — this refuses the ACT of polling `gh` in one
+#    inline command, not `gh` itself and not waiting in general.
+if printf '%s' "$cmd" | grep -Eq '\b(for|while|until)\b'; then
+  if printf '%s' "$cmd" | grep -Eq '\bsleep\b'; then
+    if printf '%s' "$cmd" | grep -Eq '\bgh\b'; then
+      deny "inline polling loop against gh (W1-T1066) — a wait is the operator's to schedule; report what you know and stop"
+    fi
+  fi
+fi
+
 exit 0
