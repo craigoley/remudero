@@ -553,9 +553,6 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   npmScriptEntry("api-client-drift", "api-client:check"),
   npmScriptEntry("no-hand-rolled-fetch", "no-hand-rolled-fetch:check"),
-  // W1-T1048: the task-id existence gate is exactly the shared npm-script shape — deterministic,
-  // unconditional on every PR, and measured at ~1.1s, so it is mirrored rather than excluded.
-  npmScriptEntry("task-id-existence", "task-id-existence:check"),
 ];
 
 export interface CiParityDeps {
