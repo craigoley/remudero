@@ -4946,8 +4946,11 @@ export function checkMemoryGovernor(
  *
  * NOT registered in `ledger.ts`'s `DECISION_RELEVANT_LEDGER_STEPS` (design note (v)): nothing
  * reads this step back yet — THE READER IS THE OPERATOR, scanning the ledger union by hand.
- * Membership is required only if a future predicate reads `.step === "dispatch_memory_observed"`
- * back, and that predicate's own PR is the one that adds it.
+ * Membership is required only once a future predicate reads this step back to decide something,
+ * and that predicate's own PR is the one that adds it. Written WITHOUT the literal comparison
+ * expression on purpose: test/ledger-rotation.test.ts derives the decision-relevant set by
+ * scanning this file's TEXT for that pattern, comments included, so spelling it out here
+ * manufactures a consumer that does not exist and fails that test on prose alone.
  */
 export function logMemoryObservation(
   result: MemoryGovernorResult,
