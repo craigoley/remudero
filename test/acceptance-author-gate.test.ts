@@ -35,12 +35,13 @@ const mod = (await import(GATE_URL)) as {
   EXEMPT_BOT_LOGINS: ReadonlySet<string>;
   readEventPayload: (eventPath: string) => { readable: boolean; body?: string; authorLogin?: string; reason?: string };
   evaluateGate: (input: { body: string; authorLogin?: string }) => { ok: boolean; defect?: string; message: string };
+  main: (argv: string[]) => void;
   resolveEventPath: (
     flagValue: string | undefined,
     env?: Record<string, string | undefined>,
   ) => { ok: boolean; eventPath?: string; message?: string };
 };
-const { EXEMPT_BOT_LOGINS, evaluateGate, readEventPayload, resolveEventPath } = mod;
+const { EXEMPT_BOT_LOGINS, evaluateGate, main, readEventPayload, resolveEventPath } = mod;
 
 /** Byte-identical in shape to test/acceptance-block-diagnostics.test.ts's own WRAPPED fixture —
  *  a claim long enough that an author wrapped it onto a second line. `parseAcceptanceBlock`
@@ -267,4 +268,62 @@ test("W1-T1060: with no --event-path and no GITHUB_EVENT_PATH the gate REFUSES r
   // and the flag WINS over the environment, which is the documented precedence
   const both = resolveEventPath("/tmp/flag.json", { GITHUB_EVENT_PATH: "/tmp/env.json" });
   assert.equal(both.eventPath, "/tmp/flag.json");
+});
+
+// ── main()'s own refusal arm, in-process ──────────────────────────────────────────────────────
+//
+// The CLI-level tests above spawn the script, and a subprocess's coverage is not this run's, so
+// main's early return on an unresolvable event path was never observed here. `main` is exported
+// for exactly this: the direct-execution guard at the bottom of the script still gates the real
+// invocation, so exporting it adds no behaviour. process.exitCode is saved and restored around
+// each call — leaving it set would fail this suite's own process.
+
+async function withExitCode(fn: () => void): Promise<{ exitCode: typeof process.exitCode; err: string[]; out: string[] }> {
+  const priorExit = process.exitCode;
+  const err: string[] = [];
+  const out: string[] = [];
+  const realErr = console.error;
+  const realOut = console.log;
+  console.error = (...a: unknown[]) => void err.push(a.join(" "));
+  console.log = (...a: unknown[]) => void out.push(a.join(" "));
+  try {
+    fn();
+    return { exitCode: process.exitCode, err, out };
+  } finally {
+    console.error = realErr;
+    console.log = realOut;
+    process.exitCode = priorExit;
+  }
+}
+
+test("W1-T1060: main REFUSES with exit 1 and the named reason when no event path can be resolved", async () => {
+  const priorEnv = process.env.GITHUB_EVENT_PATH;
+  delete process.env.GITHUB_EVENT_PATH;
+  try {
+    const r = await withExitCode(() => main([]));
+    assert.equal(r.exitCode, 1, "an unresolvable event path is a refusal, not a pass");
+    assert.equal(r.err.length, 1, "the refusal is reported once, on stderr");
+    assert.match(r.err[0], /REFUSED — no event payload path/);
+    assert.deepEqual(r.out, [], "a refusal prints no OK line");
+  } finally {
+    if (priorEnv === undefined) delete process.env.GITHUB_EVENT_PATH;
+    else process.env.GITHUB_EVENT_PATH = priorEnv;
+  }
+});
+
+// The positive control: the SAME entry point, handed a resolvable path, gets past the refusal
+// above — so the exit 1 is that branch and not main refusing everything.
+test("W1-T1060: main gets past the event-path refusal when a path IS resolvable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-acceptance-author-gate-main-"));
+  const eventPath = join(dir, "event.json");
+  writeFileSync(eventPath, JSON.stringify({ pull_request: { body: "## Acceptance\n- a | grep: x in y\n", user: { login: "someone" } } }));
+  try {
+    const r = await withExitCode(() => main(["--event-path", eventPath]));
+    assert.ok(
+      !r.err.some((l) => /no event payload path/.test(l)),
+      "the event-path refusal is not reached when the path resolves",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -126,7 +126,7 @@ export function resolveEventPath(flagValue, env = process.env) {
       };
 }
 
-function main(argv) {
+export function main(argv) {
   const { values } = parseArgs({ args: argv, options: { "event-path": { type: "string" } } });
   const resolved = resolveEventPath(values["event-path"]);
   if (!resolved.ok) {
