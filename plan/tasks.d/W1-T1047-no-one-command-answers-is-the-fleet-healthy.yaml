@@ -1,0 +1,185 @@
+- id: W1-T1047
+  title: "NO ONE COMMAND ANSWERS 'IS THE FLEET HEALTHY' — `rmd status` claims the mandate but ALWAYS EXITS 0, its one stall check is short-circuited by a GitHub read, and the disk/ledger-freshness signals live behind `rmd serve`, which was the thing that was down; add a local-only `rmd doctor` that reads what already exists and returns a meaningful exit code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-20 on Craigs-Mac-mini under /bin/zsh 5.9, in a scratch worktree at
+    origin/main 2529ff12. No `/rate_limit` call, no process signalled, no daemon state touched.
+
+    (1) A VERB ALREADY CLAIMS THIS MANDATE, AND ITS OWN USAGE STRING SAYS SO. `COMMANDS`
+    (`src/run-task.ts`) registers 60 subcommands; there is no `doctor`, `health`, `diagnose`,
+    `check` or `selfcheck` among them (positive control: `status` reads 1). `rmd status`'s usage
+    text opens *"W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from
+    ONE read model"* and closes *"always exits 0 (bad args aside)"*. Both halves are true, and the
+    second is the defect: `statusCommand` returns 2 ONLY from `unknownArgError`, and 0 on every
+    real outcome. IT IS A RENDERER, NOT A CHECKER — no thresholds in the exit code, so it cannot
+    run from cron, a workflow, or a phone.
+
+    (2) THE ONE CHECK THAT WOULD HAVE CAUGHT TONIGHT IS ALREADY BUILT AND WAS STRUCTURALLY
+    UNAVAILABLE. `deriveQueueHead` (`src/lib/status-board.ts`) already computes `QueueHeadStall`:
+    `candidateCount` from `runnableCandidates`, `sinceMs` from the newest `run.start`, and a
+    `boundMs` with a `boundDerivation` string derived from THIS HOST'S OWN observed cadence
+    (`deriveDispatchCadence`) rather than a guessed round figure. It renders
+    `STALL: N candidate(s), nothing dispatched in <age>`. It does NOT consult
+    `daemon.idle_reasons`. BUT ITS FIRST LINE IS
+    `if (!plan || !projections || ghUnknownReason) return { rows: [], unknownReason: ... }` — so a
+    GitHub outage BLANKS THE QUEUE HEAD AND THE STALL WITH IT. GraphQL was exhausted six times on
+    2026-08-19 and hangs correlate with exhaustion, so the check disappears exactly when it is
+    needed. THE INGREDIENTS ARE LOCAL: only `isMerged` comes from the network.
+
+    (3) THE FRESHNESS AND DISK SIGNALS EXIST AND ARE BEHIND THE WEB SERVICE THAT WAS DOWN.
+    `src/lib/daemon-health.ts` is a CONSOLE ROUTE (`buildDaemonHealthRoute`, wired only from
+    `src/lib/serve.ts`). It already exports `deriveLastPoll` — the max `ts` across every
+    `daemon.`-prefixed ledger line, chosen on the PREFIX precisely because no single step fires
+    unconditionally — and `readDiskFreeBytes` (`statfsSync(path).bavail * bsize`, injectable).
+    Both are local, both are pure, and neither is reachable from a cold ssh session while
+    `remudero-serve` is `Exited (137)`.
+
+    (4) THE PHASE FIELD IS EMITTED AND READ BY NOTHING. `"daemon.alive"` appears in `src/` exactly
+    ONCE — its write site in `src/lib/daemon.ts`, carrying `phase` and `poll_interval_ms`. Zero
+    readers (positive control: `"daemon.summary"` appears in three files and IS read by
+    `status-board.ts` and `status.ts`). A dispatch-starvation check is a READER, not a new signal.
+
+    (5) TWO REUSABLE PREDICATES ARE ALREADY WRITTEN, ONE OF THEM IN THE WRONG LANGUAGE.
+    `liveInflightRuns` (`src/run-task.ts`) already pairs `readInflightLock` with `isPidAlive` and
+    is the lock-versus-process predicate; it is invoked 18 times in that file and 5 elsewhere. The
+    lane-less predicate is `deploy/recycle-container.sh` (#2251, merged 2026-08-20T00:46:15Z):
+    `HUNG_WORKER_AGE_S` defaults to 7200 with its derivation stated in the file, and the matcher
+    is `ps -eo pid,etimes,args` filtered on `claude --output-format` with a `sweep-fix-settings-`
+    shape test. IT IS SHELL, NOT TYPESCRIPT — reuse means reusing the THRESHOLD AND ITS
+    DERIVATION, and that cost is named here rather than discovered later.
+  design: |
+    ONE CONCERN: a read-only `rmd doctor` that answers liveness from LOCAL STATE ONLY, prints one
+    summary line, and exits with a code that means something. Not a dashboard, not a new ledger
+    step, not a console route — the value is one command that works from a cold ssh session on a
+    sick box.
+
+    (i) THE THREE CONSTRAINTS, EACH FROM A MEASURED FAILURE, AND EACH ONE A REFUSAL.
+      - CLI-SIDE. `remudero-serve` has been `Exited (137)` for 27 hours by operator decision. A
+        check behind `buildDaemonHealthRoute` is useless when the service is what broke.
+      - NO NETWORK. Every check listed below reads the ledger, `state/`, `plan/`, `/proc` or `ps`.
+        NONE calls `gh`. That is the whole reason (2) is a defect rather than a preference.
+      - NO HEALTHY DAEMON REQUIRED. Nothing here awaits a tick, takes a lock, or writes.
+
+    (ii) THE CHECK LIST, WITH DATA AVAILABILITY PER CHECK. SEVEN READ WHAT EXISTS.
+      1. ELIGIBLE POOL VERSUS DISPATCH AGE — `FAIL`. EXISTS: `deriveQueueHead`/
+         `deriveDispatchCadence` (status-board.ts). Both are MODULE-PRIVATE (3 and 2 word-bounded
+         invocations, all inside that one file), so the work is to EXPORT them and call them with
+         a LOCAL merged-set instead of the GitHub projections, never to reimplement the bound.
+      2. DISPATCH LIVENESS — `WARN`. EXISTS as an unread field: consecutive `daemon.alive` rows
+         all `phase: sweep` with no `dispatch`. A reader only.
+      3. LEDGER FRESHNESS — `FAIL` past the bound. EXISTS: `deriveLastPoll` (daemon-health.ts),
+         already exported and already consumed by four modules. THE SINGLE BEST LIVENESS SIGNAL:
+         `docker logs` narrates actions and goes silent between them; the ledger does not.
+      4. LOCK VERSUS PROCESS DIVERGENCE — `WARN`. EXISTS: `liveInflightRuns` + `isPidAlive`.
+         BLOCKED BY LAYERING AND THAT IS A REAL COST: `.dependency-cruiser.cjs`'s
+         `lib-no-spike-or-cli` rule is `severity: error` and forbids `src/lib` importing
+         `src/run-task.ts`, and `depcruise` is a required check. Its body uses only
+         `readInflightLock` (`src/lib/inflight-lock.ts`) and a pid probe, so re-homing it into
+         `src/lib` is mechanical — but it is an edit to `src/run-task.ts`, not an import.
+      5. LANE-LESS WORKERS — `WARN`. EXISTS in shell (#2251). Reuse the 7200s threshold and its
+         stated derivation; do not re-derive it and do not lower it.
+      6. STALE GIT LOCKS — `WARN`, REPORT ONLY. W1-T1036 (#2235) owns the reclamation. This prints
+         the lock and its age and stops there.
+      7. DISK HEADROOM — `WARN`/`FAIL`. EXISTS: `readDiskFreeBytes`, already exported.
+      8. MEMORY AND SWAP — `FAIL`. NO EMITTER NEEDED, but a new READ: `MemAvailable` and
+         `SwapTotal` from `/proc/meminfo`, one line each. READ `/proc/meminfo`, NEVER THE CGROUP
+         LIMIT — the container is unlimited, so `memory.max` reads `max` and would report
+         unbounded headroom on a host that froze at 4% available with zero swap. That reclaim
+         livelock never armed the OOM killer, so nothing was logged and no other signal existed.
+         `meminfo`, `MemAvailable` and `SwapTotal` each read ZERO across `src/` today (positive
+         control: `homedir` reads 9), so this is the one genuinely new reader in the list.
+      NAMED AND DROPPED: IMAGE DRIFT. W1-T1021 files it; it is not re-derived or absorbed here.
+
+    (iii) THE OUTPUT CONTRACT, BECAUSE A HEALTH COMMAND THAT CRIES WOLF IS WORSE THAN NONE.
+      - EVERY CHECK PRINTS ITS MEASURED VALUE BESIDE ITS THRESHOLD, never a bare verdict — the
+        same discipline `boundDerivation` already applies to the stall bound.
+      - ONE SUMMARY LINE FIRST, short enough for a cron subject or a phone screen, because the
+        operator's most common question all day was simply whether it was running.
+      - EXIT CODE: 0 when the worst verdict is OK, 1 on any WARN, 2 on any FAIL. Distinct from
+        `statusCommand`'s bad-argument 2, which is why doctor's arg errors must not collide.
+      - READ-ONLY. `--fix` IS OUT OF SCOPE. Every repair path already has an owner: #2251 for the
+        recycle, W1-T1036 for the git lock, W1-T978 for `drain.lock`. A SECOND ACTOR MUTATING
+        STATE A LIVE DAEMON DEPENDS ON IS THE HAZARD, and this repo has already measured it.
+      - A DOWN DAEMON IS NOT AN ERROR CONDITION, IT IS THE DIAGNOSIS. No process, no recent
+        ledger row, no lock: that is a complete, printable answer and the exit code says FAIL
+        without the command itself failing.
+
+    (iv) WHAT THIS TASK MUST NOT DO. It must not propose a dashboard, a new ledger step or a
+    console route. It must not widen or weaken `rmd status`. It must not re-file the sweep bound —
+    W1-T1044 (#2249) IS THE PREVENTION, bounding the sweep so the hang does not happen; THIS IS
+    DETECTION, AND THEY ARE DIFFERENT. It must not reimplement `deriveDispatchCadence`'s bound,
+    #2251's age threshold, or `deriveLastPoll`.
+  acceptance:
+    - claim: "a non-empty eligible pool sitting past this host's own dispatch bound is reported as a FAIL with no network read"
+      proof: "unit test: doctor: a non-empty eligible pool past the dispatch bound is a FAIL"
+    - claim: "consecutive daemon.alive rows carrying only the sweep phase are read as dispatch starvation"
+      proof: "unit test: doctor: consecutive alive rows in sweep phase report dispatch starvation"
+    - claim: "ledger freshness is measured from the newest daemon-prefixed row and needs no running daemon"
+      proof: "unit test: doctor: ledger freshness is measured from the newest row and needs no daemon"
+    - claim: "every check prints the value it measured beside the threshold it was judged against"
+      proof: "unit test: doctor: every check prints its measured value beside its threshold"
+    - claim: "the one-line summary and the process exit code both carry the worst verdict observed"
+      proof: "unit test: doctor: the summary line and the exit code agree on the worst verdict"
+    - claim: "the new module has a real call site — the verb registration dispatches into it from the CLI entrypoint"
+      proof: "grep: doctorCommand( in src/run-task.ts"
+  risk: high
+  origin: "oper#no-one-command-answers-fleet-health-2026-08-20"
+  plan_refs: ["W1-T1044", "W1-T1036", "W1-T1021", "W1-T978", "W1-T279", "W1-T280", "W1-T450", "W1-T159", "W1-T471"]
+  files: [src/run-task.ts, src/lib/status-board.ts, src/lib/doctor.ts, test/doctor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    WHY THIS SHARD IS W1-T1047 AND NOT W1-T1046 — RENUMBERED ON OPERATOR RULING, SAME BRANCH,
+    SAME PR. It was first filed under W1-T1046, which the four canonical surfaces all read as free
+    and which the operator had reserved. IT WAS NOT FREE ON A FIFTH. `deploy/recycle-container.sh`
+    (two comments) and `test/recycle-container.test.ts` (five, three of them TEST NAMES) already
+    cite W1-T1046 AS THEIR OWN TASK ID, shipped by #2251, whose PR body names it three times.
+    THE ID IS LOAD-BEARING IN MERGED CODE FOR THE LANE-LESS RECYCLE PREDICATE, so leaving this
+    shard on it would make a grep for W1-T1046 return two unrelated tasks forever and would put
+    this task's proof titles in the same namespace as #2251's test names. #2251's references are
+    NOT touched: they are merged, they belong to the recycle task, and rewriting them would be a
+    post-merge amendment on shipped work.
+
+    THE SPARE RESERVATION IS LEFT ALONE, AND THAT IS THE DISTINCTION. A merely-reserved id with no
+    citation anywhere is a spare and gets reused; an id already load-bearing in shipped code does
+    not. `refs/rmd-id/W1-T1046` therefore stays as it is.
+
+    `src/run-task.ts` IS DECLARED BECAUSE THE VERB REGISTRATION LIVES IN `COMMANDS` THERE, and
+    because check 4 needs `liveInflightRuns` re-homed out of it to satisfy `lib-no-spike-or-cli`.
+    DECISIONS.md's 2026-08-18 ruling on W1-T471 governs: `src/run-task.ts` is not split, tasks are
+    not re-scoped to avoid declaring it, and one effective dispatch lane is an accepted operating
+    condition. THAT RULING ALSO RETIRED THE RITUAL SENTENCE — it states in terms that the phrase
+    is not required and a new shard declaring the file *"should simply declare it"* — so this
+    shard declares it and cites the ruling instead of reciting the formula.
+
+    `files:` WAS DERIVED BY WORD-BOUNDED INVOCATION COUNT, NOT BY GUESS. `deriveQueueHead` (3) and
+    `deriveDispatchCadence` (2) are invoked only inside `src/lib/status-board.ts` and are not
+    exported, so that file must be edited. `deriveLastPoll` (4 external consumers) and
+    `readDiskFreeBytes` are already exported from `src/lib/daemon-health.ts`, so that file is
+    IMPORT-ONLY and is deliberately NOT declared. `runnableCandidates` (`src/lib/drain.ts`, 7
+    consumers) and `isPidAlive` (`src/lib/worker-containment.ts`) are import-only for the same
+    reason. The shard's own path is absent, and the list is four paths.
+
+    RISK IS `high` UP FRONT AND THE BAND IS RULE 19's SPAN, not blast radius: two existing source
+    files plus a new module and its test. The command writes nothing and spawns nothing.
+
+    ID PROVENANCE — FIVE SURFACES NOW, BECAUSE FOUR IS WHAT MISSED THE SQUAT. Pre-minted by the
+    operator and read back before any edit: `refs/rmd-id/W1-T1047` ->
+    9685a5e9564e282233fb6db79ac6a5e8b99210d4. The other four all read 0 for W1-T1047: the shard
+    FILENAME under `plan/tasks.d/` on origin/main, a declared `- id:` under `plan/` on origin/main,
+    every open PR's title, branch AND changed-file list, and — THE NEW ONE — `git grep` across
+    `src/`, `test/` and `deploy/` on origin/main. EVERY ZERO CARRIES A LIVE CONTROL, same tool and
+    same corpus: `refs/rmd-id/W1-T99999` reads nothing while the reservation above reads 1; the
+    W1-T1044 filename reads 1; the W1-T1044 declared id reads 1; the open-PR listing is non-empty
+    and two of its rows do name a `plan/tasks.d/` shard; and the fifth surface reads W1-T1046 in
+    two files, which is exactly the squat it exists to catch.
+
+    NO PROOF PATH NEEDED REWRITING, AND THAT IS WORTH STATING RATHER THAN ASSUMING. Five criteria
+    are name-filtered `unit test:` forward references and the sixth is
+    `grep: doctorCommand( in src/run-task.ts` — none names this shard's own path, so the renumber
+    could not strand a proof against a file that no longer exists.
