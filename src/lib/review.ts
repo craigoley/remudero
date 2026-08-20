@@ -5386,6 +5386,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^scripts/[^/]*-baseline\\.json$",
   "^scripts/mutation-relevant-paths\\.json$",
   "^stryker\\.conf\\.json$",
+  // W1-T1048: the task-id existence gate's rule logic, behind a required, unconditional ci.yml job.
+  "^scripts/task-id-existence-check\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
@@ -5427,6 +5429,9 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
   "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
   "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
+  "deploy/recycle-container.sh":
+    "container-recycle ops runbook script with no CI-gate role — derived only because the task-id-existence " +
+    "job's comment cites it as the defect's worked example, which is prose, not a reference",
   "scripts/fleet-heartbeat.sh": "monitoring script for fleet-heartbeat-watch.yml, not a quality gate",
   "scripts/needs-human-issue.mjs": "issue-filing ops tool, not a quality gate",
   "scripts/recovery-drill.mjs": "ops drill script for recovery-drill.yml, not a quality/measurement gate",
