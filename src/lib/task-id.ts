@@ -51,6 +51,54 @@ export function mentionedTaskIds(text: string): number[] {
   return [...text.matchAll(TASK_ID_MENTION_RE)].map((m) => Number(m[1]));
 }
 
+/**
+ * THE UPPER SANITY BOUND ON AN ALLOCATABLE ID (W1-T1039), AND THE SENTINEL RANGE ABOVE IT.
+ *
+ * THE DEFECT THIS EXISTS FOR. `maxSeen` below is a `Math.max` across every source with no upper
+ * check of any kind, and the invariant in this module's header — "minting MAY skip a number; it
+ * must NEVER return a number some source already owns" — is one-directional by design: a single
+ * absurdly high id anywhere raises the ceiling permanently and every later mint inherits it. That
+ * is not hypothetical. An id was burned by being written as a NEGATIVE CONTROL in prose that the
+ * open-PR scan reads, the mint returned it, shards were then filed AT it, and the verb began
+ * answering with ids far above the plan's own range while all four surfaces read cleanly. No error
+ * surfaces anywhere, because the arithmetic is correct — only the answer is unusable.
+ *
+ * WHY AN EXPLICIT CONSTANT AND NOT A POPULATION-DERIVED RULE. The self-maintaining form — ignore
+ * anything more than N above the SECOND-highest — is refuted by the live data rather than by taste:
+ * the outliers are CONSECUTIVE, so highest-minus-second-highest is a gap of 1 and the rule blesses
+ * exactly the position that has been poisoned. A rule that needs the outliers to be solitary cannot
+ * clean up after a case that produced two of them. A constant is arbitrary only in that a number had
+ * to be chosen; it is correct in that it does not depend on the shape of the corruption it survives.
+ *
+ * WHAT THE HEADROOM IS. The plan's highest real id is in the low thousands after a year of filing,
+ * so this is roughly two orders of magnitude of headroom — decades at the observed rate — while
+ * sitting far below the magnitude the burned ids occupy.
+ *
+ * THE COMPLEMENTARY HALF, WHICH IS WHAT MAKES THE CONVENTION SAFE RATHER THAN MERELY SURVIVED.
+ * Everything above this bound is NEVER ALLOCATABLE, so the range above it is a sanctioned sentinel
+ * space: a negative control drawn from it can be written anywhere, INCLUDING AN OPEN PR BODY,
+ * because no mint can ever return one. That is strictly better than teaching the mention scan to
+ * read structured fields only — which would also fix this defect, but would blind that scan to a
+ * genuinely filed-but-unmerged id, which is the entire reason it reads prose.
+ *
+ * ALLOCATION ONLY. An id above the bound is ignored HERE and nowhere else. A shard declaring one
+ * still loads through `loadPlan`, still lints under `lintPlan`, still counts toward the task total,
+ * and stays dispatchable and creditable exactly as before — the two that exist are merged and
+ * credited, and `postMergeAmendmentViolations` refuses a renumber, so the fix is a bound that
+ * ignores them and never a cleanup that moves them.
+ */
+export const MAX_ALLOCATABLE_TASK_ID = 100_000;
+
+/**
+ * May this id number ever be MINTED? False for anything above {@link MAX_ALLOCATABLE_TASK_ID},
+ * and for a non-positive or non-integer number — a parse that produced one of those is not an id
+ * this allocator may hand out. Read by the per-source fold below; deliberately NOT consulted by
+ * `loadPlan`, the linter, or anything that decides visibility or eligibility.
+ */
+export function isAllocatableTaskId(n: number): boolean {
+  return Number.isInteger(n) && n > 0 && n <= MAX_ALLOCATABLE_TASK_ID;
+}
+
 /** Why a mint source contributed nothing — carried on the result, never swallowed. */
 export interface MintDegradation {
   /** Which source could not be read (`shards` | `open-prs`). */
@@ -80,11 +128,26 @@ export interface MintedTaskId {
   sources: MintSources;
   /** Non-empty when a source could not be read — the mint is then a FLOOR, not a ceiling. */
   degraded: MintDegradation[];
+  /** How many ids the sources carried above {@link MAX_ALLOCATABLE_TASK_ID} and this mint
+   *  therefore ignored — a COUNT, never the ids. Zero on a healthy plan. */
+  ignoredAboveBound: number;
 }
 
-/** Highest of a number list, or `null` when empty — the per-source fold. */
+/** Highest ALLOCATABLE id in a list, or `null` when none is — the per-source fold. Ids above
+ *  {@link MAX_ALLOCATABLE_TASK_ID} are dropped here rather than at the `Math.max` below, so the
+ *  per-source figures `describeMint` prints are the ones that actually fed the mint. That also
+ *  keeps the CLI from ECHOING a burned id back at an author, which is how one gets copied into a
+ *  PR body and burns the next one. */
 function highest(ns: number[]): number | null {
-  return ns.length ? Math.max(...ns) : null;
+  const allocatable = ns.filter(isAllocatableTaskId);
+  return allocatable.length ? Math.max(...allocatable) : null;
+}
+
+/** How many ids a source offered that are above the bound — a COUNT, never the ids themselves,
+ *  mirroring the ledger discipline that keeps a burned literal out of anything downstream can
+ *  echo. Non-zero means the plan really does carry ids this allocator will never hand out. */
+function countAboveBound(...lists: number[][]): number {
+  return lists.flat().filter((n) => Number.isInteger(n) && n > MAX_ALLOCATABLE_TASK_ID).length;
 }
 
 /**
@@ -149,8 +212,11 @@ export function mintNextTaskId(opts: {
     shards: highest(shards.ids),
     openPrs: openPrsEnumerated ? highest(openPrIds) : null,
   };
+  // Every term here has already been through `highest`, so each is allocatable or null — the
+  // bound is applied at the FOLD, not re-applied at the max.
   const maxSeen = Math.max(0, ...[sources.monolith, sources.shards, sources.openPrs].filter((n): n is number => n != null));
-  return { id: `W1-T${maxSeen + 1}`, n: maxSeen + 1, maxSeen, sources, degraded };
+  const ignoredAboveBound = countAboveBound(monolithIds, shards.ids, openPrIds);
+  return { id: `W1-T${maxSeen + 1}`, n: maxSeen + 1, maxSeen, sources, degraded, ignoredAboveBound };
 }
 
 /** One-line provenance for a mint — what it derived from, and any source it could not read. */
@@ -159,5 +225,10 @@ export function describeMint(mint: MintedTaskId): string {
   const warn = mint.degraded.length
     ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
     : "";
-  return `${mint.id} (max ${mint.maxSeen} across ${src})${warn}`;
+  // A COUNT, never the ignored ids — printing one would put a burned literal back in front of an
+  // author, and the open-PR scan reads exactly that kind of prose.
+  const ignored = mint.ignoredAboveBound
+    ? ` — ${mint.ignoredAboveBound} id(s) above the allocatable bound ignored`
+    : "";
+  return `${mint.id} (max ${mint.maxSeen} across ${src})${ignored}${warn}`;
 }
