@@ -1,0 +1,479 @@
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+
+import { readDiskFreeBytes, deriveLastPoll } from "./daemon-health.js";
+import { pauseFilePath } from "./fleet-control.js";
+
+/**
+ * W1-T1047 — `rmd doctor`: ONE local, read-only command that answers "is the fleet healthy" and
+ * returns an exit code that means something.
+ *
+ * THREE CONSTRAINTS, EACH FROM A MEASURED FAILURE, EACH A REFUSAL RATHER THAN A PREFERENCE:
+ *  - CLI-SIDE, NOT CONSOLE. `remudero-serve` was `Exited (137)` for over a day by operator
+ *    decision. A check living behind `buildDaemonHealthRoute` is useless when the web service is
+ *    the thing that broke.
+ *  - NO NETWORK. The shared API budget was exhausted ten times in two days and the operator was
+ *    locked out of his own repository for ninety minutes. A check that calls GitHub fails on
+ *    exactly the condition it exists to report. Every reader below touches the ledger, `state/`,
+ *    `plan/`, `/proc` or `ps` — nothing calls `gh`.
+ *  - NO HEALTHY DAEMON REQUIRED. Nothing here awaits a tick, takes a lock, or writes a byte. A
+ *    DOWN DAEMON IS NOT AN ERROR CONDITION, IT IS THE DIAGNOSIS: no process, no recent ledger row
+ *    and no lock is a complete, printable answer, and the exit code says FAIL without the command
+ *    itself failing.
+ *
+ * READ-ONLY, AND `--fix` IS REFUSED RATHER THAN UNIMPLEMENTED. Every repair path already has an
+ * owner — #2251 for the container recycle, W1-T1036 for the git lock, W1-T978 for `drain.lock` —
+ * and a SECOND ACTOR MUTATING STATE A LIVE DAEMON DEPENDS ON is the hazard this repo has already
+ * measured. {@link doctorCommand} rejects the flag by name and says who owns the repair.
+ *
+ * WHY THE DECIDERS ARE PURE AND SEPARATE FROM THE READERS. Every `judge*` function below takes
+ * already-measured numbers and returns a verdict; every reader does I/O and no judging. That split
+ * is not tidiness — a refusal arm reachable only through a real `/proc` read or a real `ps` call is
+ * a line no test can cover, and `diff-coverage` blocks a diff whose added lines have no covering
+ * test. Each arm is therefore reachable by calling one pure function with one set of numbers, and
+ * each has a paired positive control in `test/doctor.test.ts`.
+ */
+
+export type Verdict = "OK" | "WARN" | "FAIL";
+
+/**
+ * One check's result. `measured` and `threshold` are BOTH required and both human-readable,
+ * because the output contract is that no check ever prints a bare verdict — the same discipline
+ * `boundDerivation` already applies to the queue-head stall bound. A verdict with no number beside
+ * it is what makes a health command cry wolf.
+ */
+export interface Check {
+  name: string;
+  verdict: Verdict;
+  measured: string;
+  threshold: string;
+  detail?: string;
+}
+
+const ORDER: Record<Verdict, number> = { OK: 0, WARN: 1, FAIL: 2 };
+
+/** The worst verdict across every check — the summary line and the exit code both derive from
+ *  THIS, so they cannot disagree. An empty list is OK: nothing measured, nothing wrong. */
+export function worstVerdict(checks: readonly Check[]): Verdict {
+  let worst: Verdict = "OK";
+  for (const c of checks) if (ORDER[c.verdict] > ORDER[worst]) worst = c.verdict;
+  return worst;
+}
+
+/**
+ * 0 / 1 / 2 by worst verdict. DELIBERATELY DISTINCT FROM `statusCommand`'s bad-argument 2: a
+ * doctor arg error exits 64 (`EX_USAGE`), so a cron reading exit 2 always means "a check FAILED"
+ * and never "you typed the flag wrong".
+ */
+export const DOCTOR_USAGE_EXIT = 64;
+
+export function exitCodeFor(worst: Verdict): number {
+  return worst === "FAIL" ? 2 : worst === "WARN" ? 1 : 0;
+}
+
+// ── pure deciders ─────────────────────────────────────────────────────────────────────────────
+
+/** Bytes → a short human figure. Kept here so `measured` and `threshold` are formatted the same
+ *  way and a reader can compare them at a glance. */
+export function humanBytes(n: number): string {
+  const u = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)}${u[i]}`;
+}
+
+export function humanMs(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m}m`;
+  return `${(m / 60).toFixed(1)}h`;
+}
+
+/**
+ * LEDGER FRESHNESS — the single best liveness signal, and the reason is structural: `docker logs`
+ * narrates ACTIONS and goes silent between them, so a quiet log is ambiguous; the ledger's
+ * `daemon.`-prefixed rows do not stop while the daemon lives. FAIL past the bound rather than
+ * WARN, because a stale ledger is the daemon being gone.
+ */
+export function judgeLedgerFreshness(ageMs: number | undefined, boundMs: number): Check {
+  const threshold = `<= ${humanMs(boundMs)}`;
+  if (ageMs === undefined) {
+    return {
+      name: "ledger-freshness",
+      verdict: "FAIL",
+      measured: "no daemon row found",
+      threshold,
+      detail: "no `daemon.`-prefixed ledger row at all — the daemon has not run, or the ledger path is wrong",
+    };
+  }
+  return {
+    name: "ledger-freshness",
+    verdict: ageMs > boundMs ? "FAIL" : "OK",
+    measured: humanMs(ageMs),
+    threshold,
+  };
+}
+
+/**
+ * DISK HEADROOM. The thresholds are the measured incident, not round numbers: this host reached
+ * 55MiB free with a live daemon on it, and at that point ordinary commands failed to write their
+ * own stdout. FAIL is set an order of magnitude above where that happened so the warning arrives
+ * with time to act, and WARN above that again.
+ */
+export const DISK_FAIL_BYTES = 512 * 1024 * 1024;
+export const DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
+
+export function judgeDiskHeadroom(freeBytes: number | undefined): Check {
+  const threshold = `WARN < ${humanBytes(DISK_WARN_BYTES)}, FAIL < ${humanBytes(DISK_FAIL_BYTES)}`;
+  if (freeBytes === undefined) {
+    return { name: "disk-headroom", verdict: "WARN", measured: "unreadable", threshold };
+  }
+  const verdict: Verdict = freeBytes < DISK_FAIL_BYTES ? "FAIL" : freeBytes < DISK_WARN_BYTES ? "WARN" : "OK";
+  return { name: "disk-headroom", verdict, measured: humanBytes(freeBytes), threshold };
+}
+
+/**
+ * MEMORY AND SWAP — the one genuinely new reader in the list, and it reads `/proc/meminfo`,
+ * NEVER THE CGROUP LIMIT. This container is unlimited, so `memory.max` reads the literal string
+ * `max` and would report unbounded headroom on a host that had already frozen. The measured freeze
+ * was ~4% available with ZERO swap, and because a reclaim livelock never arms the OOM killer,
+ * nothing was logged and no other signal existed — which is why swap being absent is part of the
+ * judgement rather than a footnote.
+ */
+export const MEM_FAIL_FRACTION = 0.1;
+export const MEM_WARN_FRACTION = 0.2;
+
+export function judgeMemory(availableBytes: number | undefined, totalBytes: number | undefined, swapTotalBytes: number | undefined): Check {
+  const threshold = `WARN < ${Math.round(MEM_WARN_FRACTION * 100)}% available, FAIL < ${Math.round(MEM_FAIL_FRACTION * 100)}%`;
+  if (availableBytes === undefined || totalBytes === undefined || totalBytes <= 0) {
+    return { name: "memory", verdict: "WARN", measured: "unreadable", threshold, detail: "/proc/meminfo did not yield MemAvailable and MemTotal" };
+  }
+  const frac = availableBytes / totalBytes;
+  const pct = `${(frac * 100).toFixed(1)}%`;
+  const swapNote = swapTotalBytes === 0 ? " with NO swap — a reclaim livelock here never arms the OOM killer and logs nothing" : "";
+  const verdict: Verdict = frac < MEM_FAIL_FRACTION ? "FAIL" : frac < MEM_WARN_FRACTION ? "WARN" : "OK";
+  return {
+    name: "memory",
+    verdict,
+    measured: `${humanBytes(availableBytes)} of ${humanBytes(totalBytes)} (${pct})`,
+    threshold,
+    ...(verdict === "OK" ? {} : { detail: `available headroom is ${pct}${swapNote}` }),
+  };
+}
+
+/**
+ * ELIGIBLE POOL VERSUS DISPATCH AGE. The bound is NOT a guessed round figure — it comes from this
+ * host's own observed dispatch cadence, and the caller passes both it and the derivation string so
+ * the printed threshold explains itself. A non-empty eligible pool sitting past that bound is the
+ * shape that renders identically to a healthy queue in `rmd status`, which is the defect.
+ */
+export function judgeDispatchStall(candidateCount: number, sinceMs: number | undefined, boundMs: number | undefined, boundDerivation?: string): Check {
+  const threshold = boundMs === undefined ? "no observed cadence yet" : `<= ${humanMs(boundMs)}${boundDerivation ? ` (${boundDerivation})` : ""}`;
+  if (candidateCount === 0) {
+    return { name: "dispatch-stall", verdict: "OK", measured: "0 eligible candidate(s)", threshold };
+  }
+  if (sinceMs === undefined || boundMs === undefined) {
+    return { name: "dispatch-stall", verdict: "WARN", measured: `${candidateCount} eligible, dispatch age unknown`, threshold };
+  }
+  return {
+    name: "dispatch-stall",
+    verdict: sinceMs > boundMs ? "FAIL" : "OK",
+    measured: `${candidateCount} eligible, nothing dispatched in ${humanMs(sinceMs)}`,
+    threshold,
+  };
+}
+
+/**
+ * DISPATCH LIVENESS — a READER for a field that is emitted and read by nothing. `daemon.alive`
+ * carries `phase`, and consecutive rows all reading `sweep` with no `dispatch` among them is a
+ * daemon that is awake and sweeping but never dispatching. WARN, not FAIL: a genuinely empty queue
+ * produces the same shape, so this is a prompt to look, not a verdict on its own.
+ */
+export const STARVATION_MIN_ROWS = 3;
+
+export function judgeDispatchStarvation(phases: readonly string[]): Check {
+  const threshold = `some dispatch phase within the last ${STARVATION_MIN_ROWS} alive row(s)`;
+  if (phases.length < STARVATION_MIN_ROWS) {
+    return { name: "dispatch-liveness", verdict: "OK", measured: `${phases.length} alive row(s) — too few to judge`, threshold };
+  }
+  const recent = phases.slice(-STARVATION_MIN_ROWS);
+  const starved = recent.every((p) => p === "sweep");
+  return {
+    name: "dispatch-liveness",
+    verdict: starved ? "WARN" : "OK",
+    measured: `last ${recent.length} phase(s): ${recent.join(", ")}`,
+    threshold,
+    ...(starved ? { detail: "awake and sweeping but never dispatching — an empty queue looks the same, so confirm against dispatch-stall" } : {}),
+  };
+}
+
+/**
+ * LOCK VERSUS PROCESS DIVERGENCE. An inflight lock whose pid is gone is a run that died without
+ * releasing. WARN and report only — W1-T978 owns `drain.lock` reclamation and #2251 owns the
+ * recycle; doctor names the divergence and stops.
+ */
+export function judgeLockDivergence(totalLocks: number, deadLocks: readonly string[], unreadableReason?: string): Check {
+  // AN UNREADABLE DIR IS NOT AN EMPTY ONE, and conflating them is a FAIL-OPEN in a health check:
+  // a permissions fault that HIDES every lock would otherwise read as "0 locks, all healthy". An
+  // absent dir genuinely is zero locks (a fleet that has never dispatched), so only that case is
+  // silently fine; anything else reports that lock state is UNKNOWN.
+  if (unreadableReason !== undefined) {
+    return {
+      name: "lock-vs-process",
+      verdict: "WARN",
+      measured: `lock state UNKNOWN — ${unreadableReason}`,
+      threshold: "every inflight lock has a live pid",
+      detail: "an unreadable inflight dir hides locks rather than proving there are none — do not read this as healthy",
+    };
+  }
+  return {
+    name: "lock-vs-process",
+    verdict: deadLocks.length > 0 ? "WARN" : "OK",
+    measured: `${totalLocks} lock(s), ${deadLocks.length} with no live pid`,
+    threshold: "every inflight lock has a live pid",
+    ...(deadLocks.length > 0 ? { detail: `stale: ${deadLocks.join(", ")} — W1-T978 owns reclamation, doctor only reports` } : {}),
+  };
+}
+
+/**
+ * Classify a filesystem read failure into "genuinely absent" versus "could not be read".
+ *
+ * EXTRACTED AND PURE so both arms are reachable from a test without arranging a real EACCES. This
+ * is the same class of defect a sibling task found today: `spawnSync` returns `status: null` on a
+ * signalled child and the classifier read it as success. The shape here is a `catch` that cannot
+ * tell ENOENT from EPERM and answers "nothing there" to both.
+ */
+export function classifyReadFailure(e: unknown): { absent: boolean; reason: string } {
+  const code = typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "";
+  if (code === "ENOENT") return { absent: true, reason: "ENOENT" };
+  return { absent: false, reason: code || String((e as Error)?.message ?? e) };
+}
+
+/**
+ * LANE-LESS WORKERS. The threshold is #2251's `HUNG_WORKER_AGE_S`, REUSED rather than re-derived
+ * and deliberately NOT lowered — that PR states its own derivation and this task must not
+ * second-guess it. Reuse here means reusing the number and its reasoning; the matcher itself lives
+ * in shell, which is a cost named up front rather than discovered.
+ */
+export const HUNG_WORKER_AGE_S = 7200;
+
+export function judgeLaneLessWorkers(oldestEtimeS: number | undefined, count: number): Check {
+  const threshold = `<= ${humanMs(HUNG_WORKER_AGE_S * 1000)} (#2251 HUNG_WORKER_AGE_S, reused not re-derived)`;
+  if (count === 0 || oldestEtimeS === undefined) {
+    return { name: "lane-less-workers", verdict: "OK", measured: "0 worker process(es)", threshold };
+  }
+  return {
+    name: "lane-less-workers",
+    verdict: oldestEtimeS > HUNG_WORKER_AGE_S ? "WARN" : "OK",
+    measured: `${count} worker(s), oldest ${humanMs(oldestEtimeS * 1000)}`,
+    threshold,
+  };
+}
+
+/**
+ * STALE GIT LOCKS — REPORT ONLY. W1-T1036 (#2235) owns the reclamation entirely; this prints the
+ * lock and its age and stops there, which is the whole of its mandate.
+ */
+export function judgeStaleGitLocks(locks: ReadonlyArray<{ path: string; ageMs: number }>): Check {
+  return {
+    name: "git-locks",
+    verdict: locks.length > 0 ? "WARN" : "OK",
+    measured: locks.length === 0 ? "none" : locks.map((l) => `${l.path} (${humanMs(l.ageMs)})`).join(", "),
+    threshold: "no index.lock present",
+    ...(locks.length > 0 ? { detail: "W1-T1036 owns reclamation — doctor reports and stops" } : {}),
+  };
+}
+
+/**
+ * PAUSE HELD WHILE DISPATCH CONTINUES. Earned on 2026-08-20: the operator held a pause for
+ * fourteen minutes with no acknowledgement and reasonably concluded the control was dead. The
+ * underlying tick defect is filed as W1-T1065 (#2298) and is CITED, NOT FIXED here — doctor
+ * reports "PAUSED, N minutes, last dispatch M minutes ago" and nothing more, because a health
+ * command that repairs the control it is diagnosing is the second-actor hazard again.
+ */
+export function judgePauseHonoured(pauseAgeMs: number | undefined, lastDispatchAgeMs: number | undefined): Check {
+  const threshold = "no dispatch newer than the pause";
+  if (pauseAgeMs === undefined) {
+    return { name: "pause-honoured", verdict: "OK", measured: "not paused", threshold };
+  }
+  const measured = `PAUSED ${humanMs(pauseAgeMs)}, last dispatch ${lastDispatchAgeMs === undefined ? "never" : `${humanMs(lastDispatchAgeMs)} ago`}`;
+  // A dispatch NEWER than the pause means the pause was not honoured: its age exceeds the
+  // dispatch's, so the dispatch happened after the flag went down.
+  const ignored = lastDispatchAgeMs !== undefined && lastDispatchAgeMs < pauseAgeMs;
+  return {
+    name: "pause-honoured",
+    verdict: ignored ? "FAIL" : "OK",
+    measured,
+    threshold,
+    ...(ignored ? { detail: "dispatch continued after the pause was requested — W1-T1065 (#2298) files the tick defect; doctor only reports" } : {}),
+  };
+}
+
+// ── readers (I/O only, no judging) ────────────────────────────────────────────────────────────
+
+export interface MemInfo {
+  availableBytes?: number;
+  totalBytes?: number;
+  swapTotalBytes?: number;
+}
+
+/**
+ * Parse `/proc/meminfo`. Values there are in kB regardless of the unit column, which is why the
+ * multiplier is fixed rather than parsed. Returns an empty object on any failure — an unreadable
+ * meminfo is a WARN from {@link judgeMemory}, never a crash.
+ */
+export function parseMemInfo(text: string): MemInfo {
+  const read = (key: string): number | undefined => {
+    const m = new RegExp(`^${key}:\\s+(\\d+)\\s*kB`, "m").exec(text);
+    return m ? Number(m[1]) * 1024 : undefined;
+  };
+  return { availableBytes: read("MemAvailable"), totalBytes: read("MemTotal"), swapTotalBytes: read("SwapTotal") };
+}
+
+export function readMemInfo(readText: (p: string) => string = (p) => readFileSync(p, "utf8")): MemInfo {
+  try {
+    return parseMemInfo(readText("/proc/meminfo"));
+  } catch {
+    return {};
+  }
+}
+
+/** Newest `daemon.`-prefixed row age, via the already-exported {@link deriveLastPoll}. */
+export function readLedgerAgeMs(lines: ReadonlyArray<Record<string, unknown>>, nowMs: number): { ageMs?: number; boundMs: number } {
+  const poll = deriveLastPoll(lines);
+  const parsed = poll.lastPollTs ? Date.parse(poll.lastPollTs) : NaN;
+  // Two missed polls is the bound: one missed poll is ordinary jitter, two is a pattern.
+  const boundMs = poll.pollIntervalMs * 2;
+  return { ...(Number.isFinite(parsed) ? { ageMs: Math.max(0, nowMs - parsed) } : {}), boundMs };
+}
+
+/** `daemon.alive` phases, oldest→newest. A reader for a field nothing read before. */
+export function readAlivePhases(lines: ReadonlyArray<Record<string, unknown>>): string[] {
+  const out: string[] = [];
+  for (const l of lines) {
+    if (l.step === "daemon.alive" && typeof l.phase === "string") out.push(l.phase);
+  }
+  return out;
+}
+
+/** Age of `state/PAUSE`, or undefined when the flag is absent. Never writes, never clears. */
+export function readPauseAgeMs(root: string, nowMs: number, stat: (p: string) => { mtimeMs: number } = statSync): number | undefined {
+  try {
+    return Math.max(0, nowMs - stat(pauseFilePath(root)).mtimeMs);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `index.lock` files under the repo's git dir, with ages. Report-only input. */
+export function readGitLocks(repoRoot: string, nowMs: number, deps: { readdir?: (p: string) => string[]; stat?: (p: string) => { mtimeMs: number } } = {}): Array<{ path: string; ageMs: number }> {
+  const readdir = deps.readdir ?? ((p: string) => readdirSync(p));
+  const stat = deps.stat ?? statSync;
+  const out: Array<{ path: string; ageMs: number }> = [];
+  try {
+    for (const name of readdir(join(repoRoot, ".git"))) {
+      if (name !== "index.lock") continue;
+      const p = join(repoRoot, ".git", name);
+      out.push({ path: p, ageMs: Math.max(0, nowMs - stat(p).mtimeMs) });
+    }
+  } catch {
+    // An unreadable git dir is not a lock — report nothing rather than inventing a WARN.
+  }
+  return out;
+}
+
+export { readDiskFreeBytes };
+
+// ── composition, rendering, and the verb ──────────────────────────────────────────────────────
+
+export interface DoctorReport {
+  checks: Check[];
+  worst: Verdict;
+  exitCode: number;
+  text: string;
+}
+
+/**
+ * ONE SUMMARY LINE FIRST, short enough for a cron subject or a phone screen — the operator's most
+ * common question all day was simply whether it was running, and a wall of sections does not
+ * answer that on a phone. Every check line then prints its measured value BESIDE its threshold.
+ */
+export function renderDoctor(checks: readonly Check[]): string {
+  const worst = worstVerdict(checks);
+  const fails = checks.filter((c) => c.verdict === "FAIL");
+  const warns = checks.filter((c) => c.verdict === "WARN");
+  const headline =
+    worst === "OK"
+      ? `rmd doctor: OK — ${checks.length} check(s) passed`
+      : `rmd doctor: ${worst} — ${fails.length} fail, ${warns.length} warn: ${[...fails, ...warns].map((c) => c.name).join(", ")}`;
+  const lines = [headline, ""];
+  for (const c of checks) {
+    lines.push(`  [${c.verdict.padEnd(4)}] ${c.name.padEnd(20)} measured: ${c.measured}   threshold: ${c.threshold}`);
+    if (c.detail) lines.push(`           ${c.detail}`);
+  }
+  return lines.join("\n");
+}
+
+export interface DoctorInputs {
+  nowMs: number;
+  ledgerLines: ReadonlyArray<Record<string, unknown>>;
+  candidateCount: number;
+  dispatchSinceMs?: number;
+  dispatchBoundMs?: number;
+  dispatchBoundDerivation?: string;
+  mem: MemInfo;
+  diskFreeBytes?: number;
+  pauseAgeMs?: number;
+  totalLocks: number;
+  deadLocks: readonly string[];
+  locksUnreadableReason?: string;
+  gitLocks: ReadonlyArray<{ path: string; ageMs: number }>;
+  workerCount: number;
+  oldestWorkerEtimeS?: number;
+}
+
+/**
+ * Assemble every check from already-measured inputs. PURE — no I/O — so the whole check list,
+ * every verdict combination and the exit-code mapping are testable without a filesystem, a
+ * `/proc`, a `ps`, or a daemon.
+ */
+export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
+  const ledger = readLedgerAgeMs(inputs.ledgerLines, inputs.nowMs);
+  const lastDispatchAgeMs = inputs.dispatchSinceMs;
+  const checks: Check[] = [
+    judgeLedgerFreshness(ledger.ageMs, ledger.boundMs),
+    judgeDispatchStall(inputs.candidateCount, inputs.dispatchSinceMs, inputs.dispatchBoundMs, inputs.dispatchBoundDerivation),
+    judgeDispatchStarvation(readAlivePhases(inputs.ledgerLines)),
+    judgePauseHonoured(inputs.pauseAgeMs, lastDispatchAgeMs),
+    judgeLockDivergence(inputs.totalLocks, inputs.deadLocks, inputs.locksUnreadableReason),
+    judgeLaneLessWorkers(inputs.oldestWorkerEtimeS, inputs.workerCount),
+    judgeStaleGitLocks(inputs.gitLocks),
+    judgeDiskHeadroom(inputs.diskFreeBytes),
+    judgeMemory(inputs.mem.availableBytes, inputs.mem.totalBytes, inputs.mem.swapTotalBytes),
+  ];
+  const worst = worstVerdict(checks);
+  return { checks, worst, exitCode: exitCodeFor(worst), text: renderDoctor(checks) };
+}
+
+/**
+ * `--fix` IS REFUSED BY NAME, not silently unrecognised, and the refusal says WHO owns each repair
+ * so the operator is pointed somewhere rather than stopped. Returns the message, or undefined when
+ * the args are acceptable.
+ */
+export function refuseUnsupportedArgs(rest: readonly string[]): string | undefined {
+  if (rest.includes("--fix")) {
+    return [
+      "rmd doctor: --fix is refused. doctor is READ-ONLY by design.",
+      "  Every repair path already has an owner: #2251 (container recycle), W1-T1036 (git index.lock), W1-T978 (drain.lock).",
+      "  A second actor mutating state a live daemon depends on is the measured hazard this refusal exists for.",
+    ].join("\n");
+  }
+  const known = new Set(["--json"]);
+  const bad = rest.find((a) => a.startsWith("-") && !known.has(a));
+  return bad ? `rmd doctor: unknown argument ${bad}\n  usage: rmd doctor [--json]` : undefined;
+}
