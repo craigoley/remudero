@@ -476,6 +476,7 @@ import {
   reviewEvidenceStrength,
   cappedReason,
   reviewLedgerLegibilityFields,
+  reviewLedgerReasons,
   parseWhitelistedProof,
   resolveNameFilteredCandidates,
   narrowNameFilteredArgs,
@@ -3042,8 +3043,11 @@ async function runReview(args: {
   // criterion must never reach.
   const visibleUnmet = visibleCriteria(unmet);
   const unmetClaims = visibleUnmet.map((c) => c.claim);
-  const reasons = visibleUnmet.map((c) => c.reason);
-  if (verdict.testTheater) reasons.push("test theater: added tests assert nothing");
+  // W1-T1016: `reviewLedgerReasons` is the SAME pure rule this line used to compute inline
+  // (per-visible-unmet-criterion reason + testTheater), now ALSO covering the changeset-
+  // contradiction path so `reasons` is never `[]` for the one failure shape the fleet already
+  // owns a `blocked-fixable` disposition row for — see that function's own doc (lib/review.ts).
+  const reasons = reviewLedgerReasons(verdict);
   // OBSERVABILITY (W1-T65 design): per-criterion proof_exec outcome, so an
   // OBSERVED verdict (executed_pass/executed_fail) is legible on the ledger vs a
   // KEYWORD one (not_executable), and an environment hiccup (exec_error) is never

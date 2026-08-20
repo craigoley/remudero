@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { classifyUpdateBranchFailure, updateBranchViaGh } from "../src/run-task.js";
 import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeMutantModule } from "./helpers/mutant-module.js";
 import {
   DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
@@ -45,7 +47,7 @@ import {
   type SweepPolicy,
   type SupersessionVerdict,
 } from "../src/lib/sweep.js";
-import type { CriterionVerdict } from "../src/lib/review.js";
+import { reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { escalate, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
@@ -675,6 +677,116 @@ test("W1-T923: the class field alone never decides actionability", () => {
   });
   const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(r.disposition, "blocked-fixable", "a judgement-classed row with a named single-form remedy still qualifies");
+});
+
+// ── W1-T1016 ─────────────────────────────────────────────────────────────────
+//
+// The reader (`actionableGateFailuresFromReasons` above), the disposition row (W1-T923's third
+// `blocked-fixable` disjunct), and the repair (`deriveChangesetClaimUpdate`/`runFixRung`) all
+// already existed and never met: a changeset-contradiction review failure ledgered `reasons: []`
+// (the measured #1193 shape — every criterion substantiated, yet the review still failed on
+// `bodyContradictsDiff`), so `actionableGateFailuresFromReasons`'s `length === 1` gate could never
+// fire for it and the PR fell to `blocked-ambiguous` (a human) instead of the fix rung this exact
+// shape already has a mechanical repair for. `reviewLedgerReasons` (lib/review.ts) is the fix — the
+// SAME rule run-task.ts's `log("review.posted", …)` call now uses to populate `reasons` — closing
+// the one-field gap between the write site and the reader below.
+
+/** The measured #1193 shape: every criterion met, but `bodyContradictsDiff` still fails the verdict. */
+function contradictionVerdict(): Pick<ReviewVerdict, "testTheater" | "summary" | "changesetContradictions"> & {
+  criteria: CriterionVerdict[];
+} {
+  return {
+    criteria: [criterion({ met: true, reason: "" })],
+    testTheater: false,
+    changesetContradictions: [{ claim: "exactly one file: MASTER-PLAN.md", files: ["src/lib/widget.ts"] }],
+    summary:
+      'remudero-review: FAIL — body contradicts its own diff: claimed "exactly one file: MASTER-PLAN.md", ' +
+      "actual changed files: src/lib/widget.ts",
+  };
+}
+
+test("W1-T1016: the ledger reader returns one actionable failure for that row", () => {
+  // The write side (reviewLedgerReasons) and the read side (actionableGateFailuresFromReasons)
+  // meeting on the SAME row — the exact seam the bug lived in.
+  const reasons = reviewLedgerReasons(contradictionVerdict());
+  assert.deepEqual(reasons, [contradictionVerdict().summary], "exactly one reason, never an empty array");
+  assert.deepEqual(
+    actionableGateFailuresFromReasons(reasons),
+    [{ reason: contradictionVerdict().summary }],
+    "the ledger reader now returns one actionable gate failure for this row",
+  );
+});
+
+test("W1-T1016: a contradiction failure is dispositioned blocked fixable", () => {
+  // Asserted at the DISPOSITION, not the field (design note v) — this is what actually stops the
+  // PR from reaching a human.
+  const reasons = reviewLedgerReasons(contradictionVerdict());
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    actionableGateFailures: actionableGateFailuresFromReasons(reasons),
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable", "a changeset-contradiction failure now reaches the fix rung, not a human");
+});
+
+test("W1-T1016: removing the reason write fails the routing test", () => {
+  const reviewUrl = new URL("../src/lib/review.ts", import.meta.url);
+  const src = readFileSync(reviewUrl, "utf8");
+  const target = "  if (reasons.length === 0 && (verdict.changesetContradictions?.length ?? 0) > 0) {\n    reasons.push(verdict.summary);\n  }\n";
+  const occurrences = src.split(target).length - 1;
+  assert.equal(occurrences, 1, "the substitution target must be UNIQUE or the mutant proves nothing");
+
+  // File-sha bracketed (design clause vi): read the sha256 BEFORE the mutation.
+  const originalSha = createHash("sha256").update(src).digest("hex");
+
+  const mutated = "  if (reasons.length === 0 && (verdict.changesetContradictions?.length ?? 0) > 0) {\n    // reason write removed by the W1-T1016 mutation check\n  }\n";
+  const mutatedSrc = src.replace(target, mutated);
+  const mutatedSha = createHash("sha256").update(mutatedSrc).digest("hex");
+  assert.notEqual(mutatedSha, originalSha, "the mutation must actually change the file content");
+
+  const mutantPath = writeMutantModule("review.ts", mutatedSrc);
+  return (async () => {
+    const mutant = (await import(mutantPath)) as typeof import("../src/lib/review.js");
+
+    const mutantReasons = mutant.reviewLedgerReasons(contradictionVerdict());
+    assert.deepEqual(mutantReasons, [], "the mutant reverts to the pre-fix reasons: [] shape");
+    assert.deepEqual(
+      actionableGateFailuresFromReasons(mutantReasons),
+      [],
+      "with reasons: [] the reader can never produce an actionable gate failure",
+    );
+    const mutantPr = pr({
+      reviewState: "failure",
+      checksState: "green",
+      unmetCriteria: [],
+      priorStrikes: 0,
+      actionableGateFailures: actionableGateFailuresFromReasons(mutantReasons),
+    });
+    const mutantDisposition = deriveDisposition(mutantPr, DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(
+      mutantDisposition.disposition,
+      "blocked-ambiguous",
+      "the routing test FAILS under the mutant — the PR falls back to reaching a human",
+    );
+
+    // The real, on-disk file was never touched by the mutant copy.
+    const shaAfter = createHash("sha256").update(readFileSync(reviewUrl, "utf8")).digest("hex");
+    assert.equal(shaAfter, originalSha, "the real file must read unchanged either side of the mutation check");
+
+    // And the real, unmutated function still routes the contradiction shape to blocked-fixable.
+    const realReasons = reviewLedgerReasons(contradictionVerdict());
+    const realPr = pr({
+      reviewState: "failure",
+      checksState: "green",
+      unmetCriteria: [],
+      priorStrikes: 0,
+      actionableGateFailures: actionableGateFailuresFromReasons(realReasons),
+    });
+    assert.equal(deriveDisposition(realPr, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
+  })();
 });
 
 test("deriveDisposition: in-flight (pending review, pending checks, not stale) -> blocked-ambiguous (the #161 fix — never armed pre-green)", () => {
