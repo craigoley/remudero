@@ -15,11 +15,15 @@ import { test } from "node:test";
 
 import { buildWorkerEnv } from "../src/lib/env.js";
 import {
+  GH_APP_ID_ENV,
+  GH_APP_INSTALLATION_ID_ENV,
+  GH_APP_PRIVATE_KEY_PATH_ENV,
   INSTALLATION_TOKEN_LIFETIME_MS,
-  nextRefreshDelayMs,
   REFRESH_MARGIN_MS,
+  nextRefreshDelayMs,
   refreshInstallationToken,
   signAppJwt,
+  startInstallationTokenRefresh,
 } from "../src/lib/github-app.js";
 
 function keyPair() {
@@ -243,4 +247,61 @@ test("W1-T1024: absent App configuration leaves GH_TOKEN untouched and logs noth
   assert.equal(result.reason, "app not configured");
   assert.equal(env.GH_TOKEN, "OLD-STATIC-TOKEN");
   assert.equal(logs.length, 0);
+});
+
+// ── the daemon's refresh loop, extracted so it can be reached at all ────────────────────────
+
+test("startInstallationTokenRefresh: an unconfigured host arms nothing and stays byte-identical to before", () => {
+  // THE GATE IS THE WHOLE SAFETY PROPERTY. A host where the App is not installed must see zero
+  // timers and zero ledger lines — `armed: false` states that to the caller rather than leaving it
+  // to be inferred from nothing happening.
+  const logged: string[] = [];
+  let refreshes = 0;
+  let timers = 0;
+  const res = startInstallationTokenRefresh({
+    log: (step) => logged.push(step),
+    env: {},
+    refresh: async () => { refreshes += 1; return { ok: true, expiresAtMs: 0 }; },
+    setTimer: () => { timers += 1; return {}; },
+  });
+  assert.equal(res.armed, false);
+  assert.equal(refreshes, 0, "no mint on an unconfigured host");
+  assert.equal(timers, 0, "no timer on an unconfigured host");
+  assert.deepEqual(logged, [], "no ledger line on an unconfigured host");
+});
+
+test("startInstallationTokenRefresh: a configured host mints once and reschedules off the minted expiry", async () => {
+  const NOW = 1_700_000_000_000;
+  const EXPIRES = NOW + 60 * 60 * 1000;
+  let refreshes = 0;
+  const delays: number[] = [];
+  let unrefs = 0;
+  const res = startInstallationTokenRefresh({
+    log: () => {},
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: async () => { refreshes += 1; return { ok: true, expiresAtMs: EXPIRES }; },
+    setTimer: (_fn, ms) => { delays.push(ms); return { unref: () => { unrefs += 1; } }; },
+    now: () => NOW,
+  });
+  assert.equal(res.armed, true);
+  await new Promise((r) => setImmediate(r)); // let the mint's .then settle
+  assert.equal(refreshes, 1, "mints once immediately");
+  assert.deepEqual(delays, [nextRefreshDelayMs(EXPIRES, NOW)], "reschedules off the minted expiry, not a fixed interval");
+  assert.equal(unrefs, 1, "an armed refresher must never hold the process open");
+});
+
+test("startInstallationTokenRefresh: a FAILED mint still reschedules on the margin rather than going silent", async () => {
+  // DEGRADE, NEVER REFUSE. A transient outage must keep retrying; a loop that stopped on the first
+  // failure would leave the daemon on a token it can no longer renew, which is the failure this
+  // whole mechanism exists to prevent.
+  const delays: number[] = [];
+  const res = startInstallationTokenRefresh({
+    log: () => {},
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: async () => ({ ok: false, reason: "boom" }) as never,
+    setTimer: (_fn, ms) => { delays.push(ms); return {}; },
+  });
+  assert.equal(res.armed, true);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(delays, [REFRESH_MARGIN_MS], "a failed mint retries on the margin");
 });

@@ -218,3 +218,49 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
 export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()): number {
   return Math.max(0, expiresAtMs - REFRESH_MARGIN_MS - now);
 }
+
+/**
+ * Start the daemon's own installation-token refresh loop, and report whether it armed.
+ *
+ * EXTRACTED FROM `daemonCommand` SO THE LOOP IS TESTABLE AT ALL. Inline at the call site the whole
+ * body sat behind a three-variable env gate that no test sets, so every line of it was added
+ * source with zero covering tests — `diff-coverage` blocked the PR naming exactly those lines. The
+ * gate itself is the only part a daemon-boot test can reach, so the body has to move somewhere a
+ * test can call directly; the call site keeps one line and the behaviour is unchanged.
+ *
+ * GATED ON CONFIG PRESENCE, as before: an unconfigured host (the App not installed there yet) is
+ * byte-identical to before this task — zero ledger lines, zero timers, `GH_TOKEN`'s own optional
+ * shape preserved — and `armed: false` says so to the caller rather than silently doing nothing.
+ *
+ * Every seam is injectable and defaults to the real thing, so a test drives the reschedule
+ * arithmetic without a network call or a live timer: `refresh` mints, `setTimer` schedules, `now`
+ * stamps. `setTimer` returns the timer so the caller can `unref` it — an armed refresher must
+ * never hold the process open.
+ */
+export function startInstallationTokenRefresh(opts: {
+  log: RefreshOptions["log"];
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  refresh?: (o: RefreshOptions) => Promise<RefreshResult>;
+  setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
+  now?: () => number;
+}): { armed: boolean } {
+  const env = opts.env ?? process.env;
+  if (!env[GH_APP_ID_ENV] || !env[GH_APP_INSTALLATION_ID_ENV] || !env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
+    return { armed: false };
+  }
+  const refresh = opts.refresh ?? refreshInstallationToken;
+  const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const now = opts.now ?? Date.now;
+  const tick = (): void => {
+    void refresh({ log: opts.log }).then((result) => {
+      // A FAILED MINT STILL RESCHEDULES (design iv: degrade, never refuse) — a transient outage
+      // keeps retrying on the margin rather than going silent.
+      const delay =
+        result.ok && result.expiresAtMs !== undefined ? nextRefreshDelayMs(result.expiresAtMs, now()) : REFRESH_MARGIN_MS;
+      const timer = setTimer(tick, delay);
+      timer.unref?.();
+    });
+  };
+  tick();
+  return { armed: true };
+}

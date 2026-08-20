@@ -646,12 +646,7 @@ import {
   stopDetail,
 } from "./lib/fleet-control.js";
 import {
-  GH_APP_ID_ENV,
-  GH_APP_INSTALLATION_ID_ENV,
-  GH_APP_PRIVATE_KEY_PATH_ENV,
-  nextRefreshDelayMs,
-  REFRESH_MARGIN_MS,
-  refreshInstallationToken,
+  startInstallationTokenRefresh,
 } from "./lib/github-app.js";
 
 /**
@@ -13718,19 +13713,7 @@ export async function daemonCommand(
   // needs a change to worker.ts or git-push.ts, neither of which is in this task's declared
   // files. This refresher fixes the DAEMON's own calls and every FRESHLY-spawned worker; it does
   // not retrofit an already-running one.
-  if (process.env[GH_APP_ID_ENV] && process.env[GH_APP_INSTALLATION_ID_ENV] && process.env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
-    const tickInstallationTokenRefresh = () => {
-      void refreshInstallationToken({ log }).then((result) => {
-        const delay =
-          result.ok && result.expiresAtMs !== undefined
-            ? nextRefreshDelayMs(result.expiresAtMs, Date.now())
-            : REFRESH_MARGIN_MS;
-        const timer = setTimeout(tickInstallationTokenRefresh, delay);
-        timer.unref?.();
-      });
-    };
-    tickInstallationTokenRefresh();
-  }
+  startInstallationTokenRefresh({ log });
 
   // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
