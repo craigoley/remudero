@@ -41,7 +41,19 @@ plan/operator-notes.ndjson
 ee-open.json
 # Claude Code's own per-project state directory. Untracked since 2026-08-03 and never committable;
 # on its own it made `git status --porcelain` non-empty, which is all self-sync's dirty check reads.
-.claude/
+# `.claude/*` (not `.claude/`) ON PURPOSE — a directory-match pattern makes a later `!` negation
+# a no-op (git never re-descends into an excluded directory), so this must exclude by content to
+# leave the one exception below re-includable.
+.claude/*
+# W1-T1066: the ONE exception. settings/worker.json's PreToolUse deny floor reaches spawned
+# workers only (settingSources: [] isolates them from every other settings source); an
+# interactive `claude` lane — the lane that actually polled `gh` in a loop and locked the
+# operator out of his own repo for ~90 minutes — loads a repo-level .claude/settings.json
+# natively, and that is the only surface that reaches it. Un-ignoring exactly this one path
+# makes the same deny floor reach interactive lanes too; everything else under .claude/ stays
+# ignored, so no operator-local state (transcripts, session caches) becomes committable by
+# accident.
+!.claude/settings.json
 *.log
 
 # W1-T421: mutated module copies written by test/helpers/mutant-module.ts. They live under test/
