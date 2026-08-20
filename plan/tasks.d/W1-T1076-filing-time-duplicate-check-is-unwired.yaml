@@ -1,0 +1,161 @@
+- id: W1-T1076
+  title: "TWO LANES FILED THE SAME FINDING TWO MINUTES APART, TWICE IN TWENTY MINUTES, AND NO CHECK COULD HAVE SEEN IT — `duplicateTitleViolations` (W1-T420) IS BUILT, TESTED AND UNREACHABLE because `opts.openTaskTitles` is assigned NOWHERE in `src/`; and wiring it alone fixes nothing, because the house-style TITLE scores 0.00 and 0.05 on the two measured pairs while the filename SLUG at k=2 scores 0.20 and 1.00 — supply the corpus from OPEN plan PRs, in changed-tasks scope only, and score the slug"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-20 against origin/main `607220e6`, from a scratch worktree whose HEAD was
+    proved equal to that sha before any reading. Every predicate below was DRIVEN — `bestNearDuplicate`,
+    `duplicateTitleViolations`, `DEFAULT_SHINGLE_K` — never re-implemented, and every zero carries a
+    control on the same invocation.
+
+    (1) THE COST IS DATED AND IT IS DUPLICATE FILINGS, NOT DUPLICATE PROSE. Two pairs of shards
+    were filed on the same subject, by independent lanes, within twenty minutes:
+      #2324 `W1-T1071` 20:34:13Z and #2325 `W1-T1070` 20:36:47Z — 2m34s apart — both filing that a
+      self-path `grep:` proof cannot discriminate on an implementing diff.
+      #2327 `W1-T1075` 20:52:47Z and #2328 `W1-T1074` 20:54:43Z — 1m56s apart — both filing that
+      `diff-coverage` is a correct gate that runs too late. THEIR SHARD FILENAMES ARE BYTE-IDENTICAL
+      apart from the id.
+    NEITHER PAIR CROSS-CITES: a grep for the sibling's id or PR number over all four bodies returns
+    zero. LIVE CONTROL on the same query shape: those same four bodies cite 6, 12, 2 and 1 OTHER task
+    ids respectively, so the zero is a real absence and not a broken read. These are independent
+    derivations, minutes apart, and no lane could have seen the other.
+
+    (2) AND THE PROSE RE-DERIVATION THE BRIEF HYPOTHESISED IS REAL BUT MODEST — SAID PLAINLY RATHER
+    THAN INFLATED. Over the whole corpus of merged plus open PR bodies, counting a body as
+    "explaining from scratch" when a single sentence carries both the mechanism and a causal
+    connective and cites no prior PR or task: the proof-execution classifier 19, the CI-gate
+    ordering 23, the `executed_stale` fallback 10. HAND-CLASSIFYING the smallest set — all 12
+    `executed_stale` explanations — most are the PR that CHANGED that code documenting its own
+    change, which is correct, or an author applying CLAUDE.md's `grep -arn`, never `grep -F` rule
+    almost verbatim, which is the existing pipeline WORKING. So a compiled page set is not what
+    today's evidence buys. The sharp, dated cost is (1).
+
+    (3) THE ORGAN THAT WOULD CATCH IT EXISTS AND HAS NO CALLER. `duplicateTitleViolations`
+    (`src/lib/task-linter.ts`, W1-T420) takes `opts.openTaskTitles`, scores every open task title
+    against the candidate with `bestNearDuplicate`, and warns above `DEFAULT_DUPLICATE_CUTOFF`. It
+    is wired into `lintTask`'s aggregator and it is silent by construction absent a corpus — its own
+    doc says so: "Absent `opts.openTaskTitles` ⇒ silent (the caller hasn't supplied a corpus)."
+    CALL-SITE CENSUS: `openTaskTitles:` as an assigned key returns ZERO across all of `src/`. LIVE
+    CONTROLS on the identical query shape, both non-zero: `opts.moduleExists =` and
+    `opts.resolveNameFilteredCandidates =` are each assigned once in `src/run-task.ts`, and a second
+    `moduleExists:` arrives there in object-literal form — so the injected-predicate
+    wiring pattern is real and used, and this zero is an absence rather than a query defect. The
+    `openTaskTitles` identifier that DOES appear in `run-task.ts` belongs to the retro follow-up
+    harvest and is passed as `openTitles`, a different option to a different function.
+
+    (4) WIRING IT ALONE WOULD HAVE CAUGHT NEITHER PAIR, AND THAT IS THE HALF THAT MATTERS.
+    Driven over the real predicate at the shipped `DEFAULT_SHINGLE_K = 3` and cutoff 0.2, scoring
+    the TITLE: pair A reads 0.000 and pair B reads 0.054. Both far below cutoff. The reason is
+    structural rather than accidental — the house title style is long, shouty and deliberately
+    distinctive prose, so two descriptions of one mechanism share almost no 3-token shingle. The
+    FILENAME SLUG is the opposite: short, topical, and written to name the subject. Scoring the slug:
+    pair A 0.111 and pair B 1.000 at k=3; pair A 0.200 and pair B 1.000 at k=2 — BOTH CAUGHT at k=2,
+    with the module's own fixture control still reading 0.818 at that k.
+
+    (5) CONCATENATING TITLE AND SLUG IS WORSE THAN THE SLUG ALONE, WHICH IS COUNTER-INTUITIVE AND
+    MEASURED. At k=2 the joined text scores 0.049 and 0.102 against the slug's 0.200 and 1.000: the
+    long title floods the shingle set and dilutes the signal the slug carries. An implementer must
+    not "improve" this by adding more text.
+
+    (6) THE FALSE-POSITIVE LOAD IS MEASURED, NOT ASSUMED, AND k=2 IS THE HONEST CHOICE. Slug pairs
+    at or above cutoff across the whole plan on main: 124 at k=1, 25 at k=2, 4 at k=3. k=1 warns on
+    roughly a third of the plan and is unusable; k=3 misses pair A. k=2 sits between, and its top
+    hits read as genuinely adjacent work rather than noise. The LIVE corpus is open plan PRs, not the
+    whole plan, so the warns any one filing actually draws are far fewer than 25.
+
+    (7) THE PLAN'S OWN NEAR-DUPLICATE IS NOT EVIDENCE FOR THIS TASK AND IS RECORDED AS SUCH.
+    Scanning all 414 shards on main by title at cutoff 0.2 returns EXACTLY ONE pair — `W1-T1062` and
+    `W1-T403`, byte-identical titles, both queued. That pair is DELIBERATE: #2293 re-filed the
+    original under a fresh id because its own plan-only filing commit had credited it as built, and
+    that body CITES `W1-T1004` rather than re-deriving it. It is an example of the knowledge pipeline
+    working. It is not a duplicate this task would prevent, and it must not be counted as one.
+  design: |
+    (i) THE CORPUS IS OPEN PLAN PRs, SUPPLIED AT THE CALL SITE. The candidate is the shard being
+    filed; the corpus is the shard title AND filename slug of every plan shard added by a currently
+    OPEN pull request. That is precisely the surface neither lane in (1) could see. It is supplied
+    the way `moduleExists` and `resolveNameFilteredCandidates` already are — the verb holding a real
+    checkout and a GitHub reader passes a predicate in, and the linter itself stays pure and reads
+    no disk and no network.
+
+    (ii) ONLY IN CHANGED-TASKS SCOPE. `lintPlanCommand` populates its extra `opts` only when `scope`
+    is set, and W1-T497's comment beside that block says why in terms: the whole-plan pass is a job
+    "ci.yml calls cheap pure JS with no network". A GitHub read in the whole-plan pass would break
+    that property for every task on every run. Scoped to the one or two tasks a PR actually touches,
+    it costs one list call.
+
+    (iii) SCORE THE SLUG, AT k=2, VIA `opts.k`. `bestNearDuplicate` already takes `{ k }`, so this
+    needs no change to `knowledge-dedup.ts` — the caller chooses. Rationale (4) and (6) are the whole
+    argument and both numbers must be re-derived by the implementer, not trusted from this shard.
+
+    (iv) WARN, UNCONDITIONALLY, AND NEVER BLOCK. W1-T420 made this advisory on purpose: sibling tasks
+    in one arc legitimately score high, and a false block at filing costs a whole re-file cycle. That
+    posture is preserved exactly. The check writes nothing, mutates nothing, and gates nothing — the
+    author reads the warn and decides. There is no second actor and no state a live daemon depends on.
+
+    (v) NO CORPUS ⇒ NO OPINION. If the GitHub read fails or returns nothing, the corpus is empty and
+    the check is silent, which is already `duplicateTitleViolations`' documented contract. A failed
+    read must never manufacture a warn and must never fail the lint.
+
+    (vi) NO NEW STORE, AND THAT IS A CONSTRAINT NOT A PREFERENCE. Nothing here adds a file, an index,
+    a database, an embedding or a search service. The corpus is derived from GitHub at call time and
+    discarded. A second store is a second thing to go stale, and the whole point of this task is a
+    surface that cannot drift from the thing it describes.
+
+    (vii) OUT OF SCOPE, NAMED. W1-T1059 is a DIFFERENT concern and must not be folded in: it gives
+    `runPromotionPass` a caller so a project learning can travel to the cross-repo `user-overall`
+    layer. That is distribution between repos, at retro time; this is duplicate detection within one
+    repo, at filing time. It shares only a family resemblance — an organ built, tested, ratified and
+    left without a caller — and this task is a second instance of that family, not the same instance.
+    Also out of scope: any change to `DEFAULT_DUPLICATE_CUTOFF` or `DEFAULT_SHINGLE_K` themselves,
+    both of which are measured defaults for the learnings corpus and are not this task's to move; k
+    is chosen per call.
+  acceptance:
+    - claim: "the filing lint draws a warn when an open plan PR already carries a near-duplicate shard"
+      proof: "unit test: W1-T1076: an open plan PR carrying a near-duplicate draws a warn"
+    - claim: "the corpus is built from the shard slug rather than only the task title"
+      proof: "unit test: W1-T1076: the duplicate corpus is built from the shard slug"
+    - claim: "the two measured pairs from 2026-08-20 are both caught as fixtures"
+      proof: "unit test: W1-T1076: both measured duplicate pairs are caught"
+    - claim: "concatenating the title onto the slug is not what the check scores"
+      proof: "unit test: W1-T1076: the check scores the slug and not the joined text"
+    - claim: "an empty or failed corpus read leaves the check silent and the lint passing"
+      proof: "unit test: W1-T1076: an absent corpus leaves the check silent"
+    - claim: "the violation is a warn so a filing is never refused by it"
+      proof: "unit test: W1-T1076: the duplicate violation never blocks a filing"
+    - claim: "the whole-plan lint pass supplies no corpus so it stays free of network reads"
+      proof: "unit test: W1-T1076: the whole-plan pass supplies no duplicate corpus"
+    - claim: "two unrelated shards score below cutoff and draw nothing"
+      proof: "unit test: W1-T1076: two unrelated shards draw no duplicate warn"
+  origin: "recon#filing-time-duplicate-check-unwired-2026-08-20"
+  plan_refs: ["W1-T420", "W1-T497", "W1-T1004", "W1-T1059"]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/knowledge-dedup.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads three
+    stems here — `task-linter`, `run-task` and `knowledge-dedup` — and refuses that at medium.
+    DECOMPOSITION IS DECLINED WITH A REASON: the predicate change and its corpus wiring are the same
+    defect. W1-T420 already shipped the predicate alone, and the result is the unreachable organ in
+    rationale (3); shipping the corpus shape without the k choice would reproduce rationale (4),
+    where the check is wired and still catches nothing. The diff is a corpus builder, one `opts.k`,
+    and one call-site assignment.
+
+    `test/knowledge-dedup.test.ts` IS THE EXISTING HOME — W1-T420's own ACCEPTANCE 3 tests for
+    `duplicateTitleViolations` live there — so it is declared rather than a new filename.
+
+    THIS SHARD CARRIES NO PROOF THAT GREPS ITS OWN PATH. Its eight proofs are name-filtered
+    `unit test:` forward references, for which `proofScopePath` returns `undefined`, so `proof-scope`
+    is silent on all eight.
+
+    EVERY FIGURE IS A QUERY. Re-derive the call-site census by grepping `openTaskTitles:` as an
+    assigned key across `src/` with `moduleExists` and `resolveNameFilteredCandidates` as live
+    controls. Re-derive every score by importing `bestNearDuplicate` and passing `{ k }` — note that
+    its third parameter is an OPTIONS OBJECT and NOT a cutoff, so a number passed there is silently
+    ignored and every pair comes back as a match; filter on `.score` yourself. Re-derive the
+    false-positive load by scanning slugs at each k against the plan on main. The k=3 figures will
+    move as shards land; the shape of the trade-off is what this task rests on.
