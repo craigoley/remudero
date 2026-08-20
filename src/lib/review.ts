@@ -5391,6 +5391,12 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T1051: the assertion-discrimination gate's rule logic, behind a required, unconditional
   // ci.yml job — same shape as the task-id existence entry directly above.
   "^scripts/assertion-discrimination-check\\.mjs$",
+  // W1-T1060: the author-time acceptance gate's rule logic (reads the pull_request event payload,
+  // exempts one bot login, then defers to the unmodified acceptanceAuthorTimeCheck below) — behind
+  // its own unconditional pull_request job (.github/workflows/acceptance-author-gate.yml, already
+  // covered by the "^\\.github/workflows/" entry above; this line is the script that job's `run:`
+  // step calls). Same shape as the two entries directly above.
+  "^scripts/acceptance-author-gate\\.mjs$",
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
