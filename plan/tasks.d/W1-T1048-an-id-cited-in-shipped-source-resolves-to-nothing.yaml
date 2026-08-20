@@ -1,0 +1,181 @@
+- id: W1-T1048
+  title: "A TASK ID CAN BE WRITTEN INTO MERGED SOURCE WITHOUT EVER BEING RESERVED OR FILED, AND NOTHING NOTICES — the hand lane's only id source is a verb that deliberately reserves nothing, so a later mint hands the same id out as free; add an existence check over the shipped trees and say plainly that it needs a small baseline"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    MEASURED 2026-08-20 on Craigs-Mac-mini under /bin/zsh 5.9, in a scratch worktree at
+    origin/main 39367b4c. No `/rate_limit` call; the daemon and its state files untouched.
+
+    STAKES FIRST, AND THEY ARE SMALL. The observed cost was ONE RENUMBER OF AN OPEN PR AND ABOUT
+    TWENTY MINUTES. Nothing hung, nothing merged wrong, no work was lost. THIS IS WORTH CATCHING
+    BECAUSE IT IS CHEAP TO CATCH, NOT BECAUSE IT IS DANGEROUS, and the shard should be read at
+    that weight.
+
+    (1) THE INSTANCE. #2251 cited an id as ITS OWN task id in shipped code — two comments in
+    `deploy/recycle-container.sh` and five references in `test/recycle-container.test.ts`, three
+    of them TEST NAMES — and named it three times in its PR body. All four canonical surfaces
+    read clean for that id: no plan record declared it, no merged PR carried its
+    `Remudero-Task:` trailer, no `run-*` head ref existed, no shard filename matched. CONTROLS,
+    same idioms: the shard-filename and declared-id queries read 1 for W1-T1044, and the trailer
+    query returns #2252 for the id W1-T1032 carries. So a later mint offered it as free and an
+    open PR had to be renumbered.
+
+    (2) WHERE THE ID CAME FROM — THE SANCTIONED PATH RESERVES NOTHING, BY DESIGN, AND THAT IS THE
+    FINDING. #2251's head ref is `fix/recycle-lane-less-worker-predicate`, NOT a
+    `run-<taskId>-<epoch>` branch, so it was a hand/session lane rather than a fleet dispatch and
+    had no dispatch-supplied id. The only id source such a lane has is `rmd next-task-id`, and
+    `nextTaskIdCommand` (`src/run-task.ts`) calls `mintNextTaskIdWithHistory`, PRINTS the id, and
+    reserves nothing — its own comment says so: *"a process that exits microseconds later reserves
+    nothing anyway"*. It reads `firstUnreservedAtOrAbove` only to WARN. Word-bounded call sites
+    confirm the split: `reserveTaskIdRemote` is invoked at exactly one place, inside
+    `reserveTaskIdBlock`'s remote twin in `src/lib/task-id-reservation.ts`, and
+    `reserveTaskIdBlock` itself is called only from the triage, plan and approve lanes in
+    `src/run-task.ts`. NO CLI PATH RESERVES. So the observed orphan is the DESIGNED OUTPUT of the
+    advisory verb, not a worker inventing a number.
+    WHAT COULD NOT BE VERIFIED, STATED AS SUCH: whether that particular run invoked the verb.
+    #2251 was authored off this host; the single `next-task-id` row in this host's ledger inside
+    the authoring window carries `host: Craigs-Mac-mini` and a timestamp about four hours before
+    #2251's own commit. POSITIVE CONTROL: 253 `cli.invoked` rows of fourteen distinct verbs sit in
+    that same window, so the corpus is dense and the absence is about the HOST, not the query.
+
+    (3) W1-T949 IS A DIFFERENT MECHANISM AND DOES NOT COVER THIS. Its subject is that a filing
+    minting N ids reserves only the first, and its fix — the block-reserving remote twin — is
+    MERGED. That is about lanes which DO reserve, reserving too few. This is about a lane which
+    reserves NONE. Neither absorbs the other.
+
+    (4) THE ORPHANED REFERENCES STAY AS THEY ARE, AND THAT IS ACCEPTABLE. #2251 is merged;
+    rewriting its comments and test names would be a post-merge amendment on shipped work that
+    `postMergeAmendmentViolations` would refuse. The id remains orphaned in those two files and
+    nothing depends on it resolving.
+  design: |
+    ONE CONCERN: an after-the-fact EXISTENCE check over the shipped trees. Not an ownership check,
+    not an allocator change.
+
+    (i) THE PREDICATE IS EXISTENCE, NEVER OWNERSHIP, AND THE OBVIOUS VERSION WOULD BE REVERTED.
+    Ids legitimately appear in source: `deploy/recycle-container.sh` cites W1-T1010 correctly,
+    because a task that ships code names itself in comments and test titles. A lint forbidding ids
+    in source would break the house convention within a day. The shippable predicate is: EVERY
+    `W1-T<n>` appearing in the scanned trees MUST RESOLVE TO A RESERVATION REF OR A PLAN RECORD.
+    The orphaned id resolved to neither.
+
+    (ii) THE POPULATION, MEASURED BEFORE PROPOSING — AND IT DECIDES THE SCOPE.
+    Cited-id populations at 39367b4c against a known set of 680 (144 reservation refs unioned with
+    628 declared plan ids):
+      - `src/` + `test/` + `deploy/`: 621 distinct ids cited, THIRTY-ONE FAIL — and roughly
+        twenty-five of those are SYNTHETIC TEST FIXTURES cited only under `test/`, ids invented as
+        fixture data, which are not claims and never will be. A baseline over them would be a
+        permanent, growing exemption list.
+      - `src/` + `deploy/`: 535 distinct ids cited, SIX fail.
+      - `deploy/` alone: 11 distinct ids cited, ZERO fail.
+    RECOMMENDED SCOPE IS `src/` PLUS `deploy/`, WITH A SIX-ENTRY BASELINE. The six are named
+    NOWHERE in this shard on purpose — see the note — and are regenerated by the query in the note
+    rather than quoted. Every one of them is a REAL COMPLETED TASK whose plan record was compacted
+    away after merging, all in the low-to-mid ranges that predate the reservation allocator
+    (W1-T509). `plan/tasks.d/W1-T278-task-id-from-plan-history.yaml` already records that
+    phenomenon in terms — completed ids being *"absent from every source the minter consults"* —
+    so this shard cites it rather than re-deriving it.
+    SO THE HONEST ANSWER TO "DOES IT SHIP CLEAN" IS: NOT AT ZERO, BUT NEARLY. Six baseline entries,
+    each carrying a written reason, and the `test/` tree excluded by construction rather than
+    by exemption.
+
+    (iii) AND IT WOULD NOT HAVE CAUGHT TONIGHT'S INSTANCE AS THINGS NOW STAND. The orphaned id was
+    reserved after the fact when the operator minted it, so it resolves today and is absent from
+    the failing set. THE CHECK CATCHES THE NEXT ONE, NOT THIS ONE. Saying otherwise would
+    overstate it.
+
+    (iv) WHERE IT RUNS: A SCRIPT AND ITS OWN CI JOB, NOT `lint-plan`. `lintPlanCommand` iterates
+    TASKS and reports `task(s) checked`; it never walks the source tree, and bolting a tree scan
+    onto it would make a plan verb depend on the working tree's shape. The house precedent is
+    exact and there are two of them: `scripts/claims-check.mjs` runs as the `claims` job via
+    `npm run --silent claims`, and `scripts/no-hand-rolled-fetch-check.mjs` runs as the
+    `no-hand-rolled-fetch` job via `npm run --silent no-hand-rolled-fetch:check`. Both are
+    unconditional jobs registering a check run every PR. This follows that shape exactly, which is
+    why NO `rmd` VERB AND NO `src/` PATH IS NEEDED.
+    ONE COST TO NAME: resolving against reservations means reading `refs/rmd-id/*`, which is a
+    remote read. In CI that is the same origin the checkout already authenticated to, but the
+    check must degrade to a STATED UNKNOWN on an unreachable remote rather than failing closed on
+    a network blip.
+
+    (v) RULE 25 RE-DERIVED AGAINST THE LIVE PREDICATE, FOUR CONTROLS, ONE FIRING. Driving
+    `detectInstrumentEntanglement` (`src/lib/review.ts`) directly: the mandated diff — the
+    workflow, the script, a `-baseline.json`, the test and `package.json` — reads CLEAN, with the
+    workflow and the baseline both recognised as instrument surface and no product path beside
+    them; that same diff PLUS one `src/` path reads ENTANGLED, which is the falsifier proving the
+    check is live rather than vacuous; the workflow alone reads CLEAN; and the script with its
+    test and no workflow reads CLEAN. SO THE IMPLEMENTING PR MAY CARRY THE WORKFLOW, THE SCRIPT,
+    THE BASELINE, THE TEST AND `package.json` TOGETHER, AND MAY NOT CARRY ANY `src/` PATH.
+
+    (vi) WHAT THIS TASK MUST NOT DO. It must not make the allocator read this surface — see the
+    acceptance criterion for the negative. It must not propose renumbering the merged references.
+    It must not widen into ownership. It must not absorb W1-T949 or W1-T278.
+  acceptance:
+    - claim: "an id cited in the shipped trees that resolves to neither a reservation nor a plan record fails the check"
+      proof: "unit test: task-id-existence: an id in shipped source with no reservation and no plan record FAILS"
+    - claim: "a baseline entry without a written reason is rejected so the exemption list cannot grow silently"
+      proof: "unit test: task-id-existence: a baseline entry with no recorded reason is rejected"
+    - claim: "the scan covers the shipped trees and excludes the fixture tree by construction rather than by exemption"
+      proof: "unit test: task-id-existence: the scan reads src and deploy and never the test tree"
+    - claim: "the check only detects — it allocates nothing and cannot burn an id the way a mention scan would"
+      proof: "unit test: task-id-existence: the scan is read-only and mints no id"
+    - claim: "an id holding a reservation but no plan record still resolves, because reservation alone is a valid claim"
+      proof: "unit test: task-id-existence: a fresh reservation with no plan record still resolves"
+    - claim: "the check has a real call site — an unconditional CI job invokes it on every pull request"
+      proof: "grep: task-id-existence:check in .github/workflows/ci.yml"
+  risk: high
+  origin: "oper#id-cited-in-source-never-reserved-2026-08-20"
+  plan_refs: ["W1-T1039", "W1-T949", "W1-T278", "W1-T509", "W1-T1010", "W1-T471"]
+  files: [.github/workflows/ci.yml, package.json, scripts/task-id-existence-check.mjs, scripts/task-id-existence-baseline.json, test/task-id-existence-check.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE ORPHANED ID IS NEVER WRITTEN LITERALLY IN THIS SHARD, AND NEITHER ARE THE SIX BASELINE
+    IDS. Writing an id that resolves to nothing is the exact mechanism being filed, so quoting one
+    here would be a self-inflicted instance of it. Every id this shard does name was verified
+    RESERVED OR DECLARED before it was written, against the same two sets the predicate uses
+    (control: the six baseline ids read reserved=0 declared=0, which is why they are described
+    rather than listed).
+
+    THE SIX ARE A QUERY, NOT A LIST, WHICH IS ALSO THE RIGHT DISCIPLINE FOR A FIGURE THAT DRIFTS:
+      git grep -ahoE 'W1-T[0-9]+' origin/main -- src deploy | sort -u > cited
+      git ls-remote origin 'refs/rmd-id/W1-T*' | awk '{print $2}' | sed 's|refs/rmd-id/||' | sort -u > a
+      git grep -ahoE '^\s*- id: W1-T[0-9]+' origin/main -- plan/tasks.yaml plan/tasks.d | grep -oE 'W1-T[0-9]+' | sort -u > b
+      sort -u a b > known && comm -23 cited known
+    Re-run it rather than trusting the count above; every figure here is dated 2026-08-20.
+
+    DOES THE ALLOCATOR NEED TO READ THIS SURFACE? NO, AND THE MEASUREMENT SAYS SO PLAINLY. Tonight
+    the fifth surface was added by a human, which is why the collision was caught before the shard
+    landed rather than after. But `mintNextTaskId` walking the source tree on every mint would be
+    both slow and WRONG: 621 distinct ids are cited across the three trees, the overwhelming
+    majority as SIBLING REFERENCES rather than claims, and treating a citation as a claim burns
+    ids exactly the way the prose-mention scan did. W1-T1039 is the sibling that bounds precisely
+    that failure, and its PR is OPEN rather than merged as this is written — so the bound is in
+    flight, not shipped, and recreating the same defect in a new surface would be worse than
+    leaving the surface unread. THE ANSWER IS: DETECT AFTER THE FACT, DO NOT ALLOCATE FROM IT.
+
+    NO `src/run-task.ts`, AND THAT IS DELIBERATE RATHER THAN AN OVERSIGHT. The two precedent
+    checks are a plain node script plus an npm script plus an unconditional CI job, with no `rmd`
+    verb and no entry in `COMMANDS`. Following that shape keeps this out of the file DECISIONS.md's
+    2026-08-18 W1-T471 ruling accepts one dispatch lane for — the ruling would have licensed
+    declaring it, and it simply is not needed here.
+
+    `files:` WAS DERIVED FROM THE PRECEDENT'S OWN FILE SET, NOT GUESSED: a script under `scripts/`,
+    its `package.json` entry, its unconditional job in `.github/workflows/ci.yml`, its test, and
+    the baseline the population measurement proves is required. The shard's own path is absent.
+    RISK IS `high` UP FRONT AND THE BAND IS RULE 19's SPAN, not blast radius — the change ships no
+    product code and the check writes nothing.
+
+    ID PROVENANCE — FIVE SURFACES, RE-SWEPT IMMEDIATELY BEFORE PUSHING. Pre-minted by the operator
+    and read back against the sha he supplied before any work started: `refs/rmd-id/W1-T1048` ->
+    29746de909f1311ae5e7ca6933716aae7b25e9b7, matched exactly. The other four read 0 for this id:
+    the shard FILENAME under `plan/tasks.d/` on origin/main, a declared `- id:` under `plan/` on
+    origin/main, every open PR's title, branch AND changed-file list, and `git grep` across `src/`,
+    `test/` and `deploy/` on origin/main. LIVE CONTROLS, same tools and same corpus:
+    a reservation ref for a deliberately out-of-range five-digit sentinel reads nothing, proving
+    the ref query can return empty; the W1-T1044 filename reads 1; the W1-T1044 declared id
+    reads 1; the open-PR listing is non-empty and two of its rows name a `plan/tasks.d/` shard; and
+    the fifth surface reads the orphaned id in two files, which is exactly the squat it exists to
+    catch.
