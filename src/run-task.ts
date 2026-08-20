@@ -1738,12 +1738,52 @@ export function armAutoMergeAtOpen(
  * require changing `postReviewStatusGuarded` (out of this task's scope), so
  * this is the minimal, best-effort, in-scope mitigation.
  */
-export function disarmAutoMerge(prUrl: string, deps: Pick<ArmDeps, "disableAuto" | "say"> = realArmDeps()): void {
+export type DisarmOutcome = "disarmed" | "not-armed" | "failed";
+
+/**
+ * W1-T1056 — PURE classifier for a failed `gh pr merge --disable-auto` (exported for test),
+ * the same shape as {@link armFailureAction} directly below its own call site.
+ *
+ * GitHub refuses `--disable-auto` on a PR that was never armed, and {@link disarmAutoMerge}'s
+ * catch exists to absorb exactly that (see {@link withdrawArmIfVerdictRefuses}'s "SAFE WHEN NOT
+ * ARMED" clause — learning the arm state up front would cost one request per PR per sweep pass).
+ * That benign refusal is identifiable from the message the catch ALREADY holds, so separating it
+ * from a real failure costs no extra request: MEASURED on PR #2234 (2026-08-19), the daemon
+ * narrated `GraphQL: Can't disable auto-merge for this pull request. (disablePullRequestAutoMerge)`.
+ *
+ * FAILS TOWARDS `"failed"`, DELIBERATELY. An error this does not recognise is NOT evidence the PR
+ * was unarmed — answering `"not-armed"` for both "definitely not armed" and "no idea" is the
+ * same fail-open shape that lets an absent reading masquerade as a negative one, and here it
+ * would resurrect the very false record this task exists to remove.
+ */
+export function classifyDisarmFailure(stderrText: string): "not-armed" | "failed" {
+  return /can't disable auto-merge|disablePullRequestAutoMerge/i.test(stderrText) ? "not-armed" : "failed";
+}
+
+/**
+ * W1-T1056 — did a withdrawal ACTUALLY happen? The one predicate every call site branches on,
+ * mirroring {@link import("./lib/sweep.js").armOutcomeArmed} rather than inventing a second rule.
+ */
+export function disarmOutcomeWithdrawn(outcome: DisarmOutcome | void): boolean {
+  // An `undefined` return is a fake/effect that predates this signature — treat it as a real
+  // withdrawal, which is exactly what every call site assumed before this task, so no existing
+  // lane regresses. The SAME allowance `armOutcomeArmed` (lib/sweep.ts) already makes.
+  if (outcome === undefined) return true;
+  return outcome === "disarmed";
+}
+
+export function disarmAutoMerge(
+  prUrl: string,
+  deps: Pick<ArmDeps, "disableAuto" | "say"> = realArmDeps(),
+): DisarmOutcome {
   try {
     deps.disableAuto(prUrl);
     deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
+    return "disarmed";
   } catch (e) {
-    deps.say(`automerge.disarm_failed (W1-T125): ${String((e as Error)?.message ?? e)} — ${prUrl}`);
+    const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
+    deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
+    return classifyDisarmFailure(msg);
   }
 }
 
@@ -1779,7 +1819,7 @@ export function withdrawArmIfVerdictRefuses(
     ledgerPath: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
   },
-  deps: { disarm?: (prUrl: string) => void; ledgerLines?: () => Array<Record<string, unknown>> } = {},
+  deps: { disarm?: (prUrl: string) => DisarmOutcome | void; ledgerLines?: () => Array<Record<string, unknown>> } = {},
 ): boolean {
   const override = verdict.capped
     ? cappedOverrideFromLedger(
@@ -1790,9 +1830,15 @@ export function withdrawArmIfVerdictRefuses(
     : undefined;
   const decision = decideAutoMergeArm(verdict, false, override);
   if (decision.arm) return false;
-  (deps.disarm ?? disarmAutoMerge)(ctx.prUrl);
-  ctx.log("automerge.disarmed", {
+  // W1-T1056: the row follows the OUTCOME, never the attempt. This is the load-bearing site —
+  // it runs BECAUSE the PR was armed at open and the verdict now refuses, so there is genuinely
+  // an arm to withdraw, and this row is the one an incident reader consults when asking "did the
+  // arm fire, and why did a refused PR merge anyway?". A failed withdrawal recorded as
+  // `automerge.disarmed` leaves the arm standing on GitHub and the ledger asserting it is gone.
+  const outcome = (deps.disarm ?? disarmAutoMerge)(ctx.prUrl);
+  ctx.log(disarmOutcomeWithdrawn(outcome) ? "automerge.disarmed" : "automerge.disarm_skipped", {
     reason: `verdict refuses auto-merge: ${decision.reason}`,
+    outcome,
     head_sha: ctx.headSha,
   });
   return true;
@@ -2796,7 +2842,7 @@ async function runReview(args: {
    * {@link disarmAutoMerge}. Exists so a unit test can assert the withdrawal is
    * ISSUED rather than mocking `gh`.
    */
-  disarm?: (prUrl: string) => void;
+  disarm?: (prUrl: string) => DisarmOutcome | void;
   /** Head ref of the PR under review — used ONLY to exclude `dependabot/` heads from the
    *  post-verdict arm, which the dep-review lane owns. Absent ⇒ not a dependabot PR. */
   headRefName?: string;
