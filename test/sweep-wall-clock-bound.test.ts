@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon, DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS, type DaemonDeps } from "../src/lib/daemon.js";
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { appendLedger } from "../src/lib/ledger.js";
 import type { MergedSet } from "../src/lib/drain.js";
 import { runFixRung, type FixRungOutcome } from "../src/run-task.js";
 import { loadPolicy, installPolicyPath } from "../src/lib/policy.js";
@@ -318,22 +319,40 @@ test("W1-T1044: abandoning a sweep records the task and elapsed time", async () 
   assert.equal(outcome.spawnAbandonedElapsedMs, abandonedLine!.extra!.elapsed_ms, "the outcome and the ledger line report the SAME elapsed time");
 });
 
+/** Parse an NDJSON ledger file's lines into plain records — the same shape `readLedgerLines`
+ *  (status.ts) reads, kept local so this file's own claim ("no recorded state") is checked
+ *  against the REAL bytes on disk, not a second in-memory recorder that could drift from what
+ *  `appendLedger` actually writes. */
+function readLedgerRecords(path: string): Array<Record<string, unknown>> {
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
 test("W1-T1044: an unsensed worker is bounded by elapsed time", async () => {
-  // NO worker-state / liveness signal of any kind is supplied here — `runFixRung`'s own deps
-  // carry no such field at all (this task's own rationale (5): the fix-rung lane's worker
-  // spawn emits no `worker.state` row, so a detector keyed on worker silence has no subject to
-  // watch). The bound must still fire, driven ONLY by elapsed wall-clock time.
+  // "NO RECORDED STATE" IS A LEDGER FACT, NOT MERELY AN OMITTED CALLBACK — this task's own
+  // rationale (5): ALL `worker.state` rows in the production corpus carry a dispatch-lane
+  // run_id and ZERO carry a sweep-/fix-shaped one, so a detector keyed on worker silence has no
+  // subject to watch for THIS lane. Proven here against a REAL ledger file (`deps.log` wired to
+  // the real `appendLedger`, never a swallowing no-op): after the run, the ledger is read back
+  // off disk and asserted to carry ZERO `worker.state` rows for this run — the worker was
+  // genuinely never sensed — while STILL carrying the abandonment. The bound is not merely
+  // "untested against a liveness signal"; it demonstrably does not need one to fire.
+  const ledgerPath = tmpLedgerPath();
+  const runId = "W1-T1044FIX-1730000000001";
   const start = Date.now();
   const outcome: FixRungOutcome = await runFixRung({
     ...fixRungBaseOpts(),
+    runId,
     deps: {
       spawn: () => new Promise<WorkerResult>(() => {}), // never resolves, never emits any signal
       waitForCiGreen: async () => "green",
       runReview: async () => fixReview(),
       push: () => {},
       issues: NEVER_ISSUES,
-      ledgerPath: tmpLedgerPath(),
-      log: () => {},
+      ledgerPath,
+      log: (step, extra = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "W1-T1044FIX", step, ...extra }),
       say: () => {},
       account: (r) => r,
       spawnWallClockBoundMs: 30,
@@ -342,22 +361,41 @@ test("W1-T1044: an unsensed worker is bounded by elapsed time", async () => {
   });
   const realElapsedMs = Date.now() - start;
   assert.equal(outcome.outcome, "spawn_abandoned");
-  assert.ok(outcome.spawnAbandonedElapsedMs !== undefined && outcome.spawnAbandonedElapsedMs >= 30, "bounded by the configured elapsed time");
+  // A real `setTimeout`, not a fake clock (see spawnFixWorkerBounded's own doc) — allow a few ms
+  // either side of the requested bound rather than pinning exact timer precision, the same
+  // tolerance the sibling "abandoning a sweep records the task and elapsed time" test uses.
+  assert.ok(outcome.spawnAbandonedElapsedMs !== undefined && outcome.spawnAbandonedElapsedMs >= 25, "bounded by the configured elapsed time");
   assert.ok(realElapsedMs < 5000, `abandonment must fire near the 30ms bound, not the module's own multi-minute default (saw ${realElapsedMs}ms)`);
 
+  const records = readLedgerRecords(ledgerPath);
+  assert.ok(records.length > 0, "the ledger genuinely received writes — this is not an unused path");
+  const workerStateRows = records.filter((r) => r.step === "worker.state");
+  assert.equal(
+    workerStateRows.length,
+    0,
+    `this run's OWN real ledger must carry zero worker.state rows (saw ${workerStateRows.length}) — ` +
+      "the worker was never sensed, exactly as rationale (5) measured for this lane",
+  );
+  const abandonedRow = records.find((r) => r.step === "fix.spawn_abandoned");
+  assert.ok(abandonedRow, "the SAME real ledger still carries the abandonment — bounded despite no recorded state");
+  assert.equal(abandonedRow!.run_id, runId);
+
   // A WIDER bound takes genuinely longer to fire — confirms the trigger is elapsed time itself,
-  // never a fixed constant that happened to read 30 above.
+  // never a fixed constant that happened to read 30 above, and still with no worker.state row.
+  const ledgerPath2 = tmpLedgerPath();
+  const runId2 = "W1-T1044FIX-1730000000002";
   const start2 = Date.now();
   const outcome2: FixRungOutcome = await runFixRung({
     ...fixRungBaseOpts(),
+    runId: runId2,
     deps: {
       spawn: () => new Promise<WorkerResult>(() => {}),
       waitForCiGreen: async () => "green",
       runReview: async () => fixReview(),
       push: () => {},
       issues: NEVER_ISSUES,
-      ledgerPath: tmpLedgerPath(),
-      log: () => {},
+      ledgerPath: ledgerPath2,
+      log: (step, extra = {}) => appendLedger(ledgerPath2, { run_id: runId2, task_id: "W1-T1044FIX", step, ...extra }),
       say: () => {},
       account: (r) => r,
       spawnWallClockBoundMs: 120,
@@ -368,5 +406,10 @@ test("W1-T1044: an unsensed worker is bounded by elapsed time", async () => {
   assert.ok(
     realElapsedMs2 > realElapsedMs - 10,
     `a wider bound must take at least as long to fire (saw ${realElapsedMs}ms then ${realElapsedMs2}ms)`,
+  );
+  assert.equal(
+    readLedgerRecords(ledgerPath2).filter((r) => r.step === "worker.state").length,
+    0,
+    "the wider-bound run's own ledger is ALSO free of worker.state rows",
   );
 });
