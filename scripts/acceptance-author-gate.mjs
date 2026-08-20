@@ -107,14 +107,34 @@ export function evaluateGate({ body, authorLogin }) {
   return acceptanceAuthorTimeCheck(body);
 }
 
+/**
+ * Resolve the event-payload path from the flag, falling back to the environment.
+ *
+ * EXTRACTED AND PURE so its refusal arm is reachable from a test. Inline in `main` it ran only when
+ * the script was invoked as a process, so `diff-coverage` blocked the PR naming exactly those
+ * lines — the same extraction-and-injection remedy used elsewhere in this repo rather than an
+ * exemption comment, which the script's own guidance says "blocks the PR harder, not softer".
+ */
+export function resolveEventPath(flagValue, env = process.env) {
+  const eventPath = flagValue ?? env.GITHUB_EVENT_PATH;
+  return eventPath
+    ? { ok: true, eventPath }
+    : {
+        ok: false,
+        message:
+          "acceptance-author-gate: REFUSED — no event payload path (pass --event-path or set GITHUB_EVENT_PATH)",
+      };
+}
+
 function main(argv) {
   const { values } = parseArgs({ args: argv, options: { "event-path": { type: "string" } } });
-  const eventPath = values["event-path"] ?? process.env.GITHUB_EVENT_PATH;
-  if (!eventPath) {
-    console.error("acceptance-author-gate: REFUSED — no event payload path (pass --event-path or set GITHUB_EVENT_PATH)");
+  const resolved = resolveEventPath(values["event-path"]);
+  if (!resolved.ok) {
+    console.error(resolved.message);
     process.exitCode = 1;
     return;
   }
+  const eventPath = resolved.eventPath;
 
   const payload = readEventPayload(eventPath);
   if (!payload.readable) {

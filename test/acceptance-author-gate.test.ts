@@ -35,8 +35,12 @@ const mod = (await import(GATE_URL)) as {
   EXEMPT_BOT_LOGINS: ReadonlySet<string>;
   readEventPayload: (eventPath: string) => { readable: boolean; body?: string; authorLogin?: string; reason?: string };
   evaluateGate: (input: { body: string; authorLogin?: string }) => { ok: boolean; defect?: string; message: string };
+  resolveEventPath: (
+    flagValue: string | undefined,
+    env?: Record<string, string | undefined>,
+  ) => { ok: boolean; eventPath?: string; message?: string };
 };
-const { EXEMPT_BOT_LOGINS, evaluateGate, readEventPayload } = mod;
+const { EXEMPT_BOT_LOGINS, evaluateGate, readEventPayload, resolveEventPath } = mod;
 
 /** Byte-identical in shape to test/acceptance-block-diagnostics.test.ts's own WRAPPED fixture —
  *  a claim long enough that an author wrapped it onto a second line. `parseAcceptanceBlock`
@@ -236,4 +240,31 @@ test("acceptance gate: the workflow wires opened/synchronize/reopened/edited so 
   const text = readFileSync(workflowPath, "utf8");
   assert.match(text, /pull_request:\s*\n\s*types:\s*\[opened,\s*synchronize,\s*reopened,\s*edited\]/);
   assert.match(text, /acceptance-author-gate\.mjs/);
+});
+
+// ── the refusal arm diff-coverage named ───────────────────────────────────────────────────────
+
+test("W1-T1060: with no --event-path and no GITHUB_EVENT_PATH the gate REFUSES rather than guessing", () => {
+  // Inline in `main` this arm ran only when the script was invoked as a process, so nothing covered
+  // it. Extracted, both directions are reachable without spawning anything.
+  const refused = resolveEventPath(undefined, {});
+  assert.equal(refused.ok, false);
+  assert.match(refused.message!, /REFUSED/);
+  assert.match(refused.message!, /--event-path/, "the refusal names the flag that would fix it");
+  assert.match(refused.message!, /GITHUB_EVENT_PATH/, "and the environment variable too");
+
+  // POSITIVE CONTROL 1 — the flag alone resolves, so the refusal is the absence and not a
+  // resolver that never succeeds.
+  const viaFlag = resolveEventPath("/tmp/event.json", {});
+  assert.equal(viaFlag.ok, true);
+  assert.equal(viaFlag.eventPath, "/tmp/event.json");
+
+  // POSITIVE CONTROL 2 — the environment alone resolves too.
+  const viaEnv = resolveEventPath(undefined, { GITHUB_EVENT_PATH: "/tmp/from-env.json" });
+  assert.equal(viaEnv.ok, true);
+  assert.equal(viaEnv.eventPath, "/tmp/from-env.json");
+
+  // and the flag WINS over the environment, which is the documented precedence
+  const both = resolveEventPath("/tmp/flag.json", { GITHUB_EVENT_PATH: "/tmp/env.json" });
+  assert.equal(both.eventPath, "/tmp/flag.json");
 });
