@@ -1741,6 +1741,16 @@ export function armAutoMergeAtOpen(
 export type DisarmOutcome = "disarmed" | "not-armed" | "failed";
 
 /**
+ * W1-T1056's NEIGHBOUR, CITED AND NOT RE-DERIVED. W1-T1052 IS A DIFFERENT FAILURE in the same
+ * family: it files a CORRECT record under a misleading step name (`automerge.arm_skipped` covering
+ * an attempt that was made and failed), and its remedy is a rename with no new error handling.
+ * This one files a record that asserts something that DID NOT HAPPEN — a withdrawal GitHub
+ * refused, written as `automerge.disarmed` — and its remedy needs a classifier and a signature
+ * change. Independently falsifiable, so they are two ids rather than one; the mechanism of that
+ * one lives in its own shard and is not restated here.
+ */
+
+/**
  * W1-T1056 — PURE classifier for a failed `gh pr merge --disable-auto` (exported for test),
  * the same shape as {@link armFailureAction} directly below its own call site.
  *
