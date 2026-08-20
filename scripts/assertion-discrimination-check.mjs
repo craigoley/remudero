@@ -178,10 +178,6 @@ export function stripComments(text, syntax) {
 
 // ── Static path resolution (repo-checkout paths only, never a per-test tmpdir) ──────────────
 
-function stripQuotes(literal) {
-  return literal.slice(1, -1);
-}
-
 /**
  * Resolve a small vocabulary of statically-analysable path expressions to an absolute path, or
  * return null when the expression is not one of them (e.g. a per-test tmpdir variable such as
