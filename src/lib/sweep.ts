@@ -414,6 +414,18 @@ export interface SweepPolicy {
    */
   dailyCostCeilingUsd: number;
   /**
+   * W1-T1038 (the 2026-08-19 host stall) — a DAILY-GOVERNOR TWIN of {@link dailyCostCeilingUsd}
+   * immediately above, ONE FIELD APART BY DESIGN: same "policy-as-data, dispatch-only,
+   * never gates drainage" shape, but the OPPOSITE fail direction on an unreadable observation —
+   * see {@link checkMemoryGovernor}, this row's consumer, and `dispatch-governor.ts`'s
+   * `checkDispatchGovernors`, which enforces that opposite direction at the composition point.
+   * Below this many MiB of `/proc/meminfo`'s `MemAvailable`, NEW dispatch is deferred; at or
+   * above it, dispatch proceeds. SHIPS AT 0 (`plan/policy.yaml`'s row) — inert, since
+   * `MemAvailable` can never read below zero, until an operator raises it against a measured
+   * figure this task's own rationale says does not exist yet.
+   */
+  memoryFloorMib: number;
+  /**
    * W1-T114 (the 30-issue predicate-storm fix) — the STALENESS CEILING for the
    * WAIT disposition: required checks pending/queued with the newest check's
    * start younger than this many minutes -> wait, no action; at or beyond it
@@ -652,6 +664,9 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   dispatchLanes: POLICY_SWEEP.dispatchLanes,
   reviewLanes: REVIEW_LANES_DEFAULT,
   dailyCostCeilingUsd: POLICY_SWEEP.dailyCostCeilingUsd,
+  // W1-T1038: collected off plan/policy.yaml's own row (POLICY_SWEEP, above), the same relocation
+  // dailyCostCeilingUsd/wipLimit/dispatchLanes already made — never a source literal.
+  memoryFloorMib: POLICY_SWEEP.memoryFloorMib,
   pendingCeilingMinutes: 60,
   // 10 minutes: an order of magnitude above the observed push->first-check-registers latency
   // (seconds), and far below the 7h45m #921 sat in its silent loop.
@@ -4849,6 +4864,104 @@ export function logCostGovernorDeferral(
     step: "dispatch_deferred_budget",
     observed_day_cost_usd: result.observedDayCostUsd,
     daily_cost_ceiling_usd: result.ceilingUsd,
+  });
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W1-T1038 — the MEMORY GOVERNOR (the 2026-08-19 host stall). Dispatch has priced every draw in
+// dollars ({@link checkCostGovernor} above) and in turns (`num_turns`) since the ledger began,
+// and never once in bytes: across the full deduped ledger, zero fields carry
+// mem/rss/heap/swap/avail while 1,109 rows carry `cost_usd`. At 18:43:54.955Z the host went
+// unreachable with three workers live, 4.69 GiB available minutes earlier. NOTHING WAS
+// KILLED — zero `oom-kill`/`Out of memory`/`Killed process`/`oom_reaper` lines across
+// journalctl/syslog/kern.log, a measured absence, not a lost log: with no swap the kernel could
+// not page out anonymous memory, so it evicted and re-faulted executable pages under reclaim
+// livelock, which never arms the OOM killer.
+//
+// THE ONE DELIBERATE ASYMMETRY WITH ITS TWO SIBLINGS ABOVE. {@link checkCostGovernor} and
+// {@link checkQueueGovernor} are consulted through `dispatch-governor.ts`'s
+// `checkDispatchGovernors`, whose own doc is headed "FAIL-CLOSED ON AN UNREADABLE OBSERVATION":
+// an unreadable cost/queue reading is treated as if it were confirmed over ceiling. THIS
+// GOVERNOR'S UNREADABLE CASE MUST NOT JOIN THAT ARM. Three-lane dispatch has been 100% of draws
+// since 2026-08-14 (51 sets, admitted mean 3.00, one failure in six days); a guard that refused
+// dispatch on every `/proc/meminfo` hiccup would convert a once-in-six-days event into a 100%
+// outage. FAIL OPEN: an unreadable observation PERMITS the dispatch. That direction is enforced
+// one layer up, at the composition point (`checkDispatchGovernors`'s own comment) — THIS
+// predicate never sees a probe failure at all; its input is already a resolved number, and the
+// failure (an unreadable `/proc/meminfo`) happens in the real wiring one layer further up still
+// (`run-task.ts`'s `memoryGovernorGateFor`).
+// ────────────────────────────────────────────────────────────────────────────
+
+/** {@link checkMemoryGovernor}'s verdict for one dispatch-path consultation. */
+export interface MemoryGovernorResult {
+  /** true ⇒ the dispatch path MUST defer — do not open a new run this pass. */
+  deferred: boolean;
+  /** The observed `MemAvailable` (MiB, read from `/proc/meminfo` — NEVER a cgroup limit; design
+   *  note (6): this fleet's containers carry no memory limit, so a cgroup read reports
+   *  "unbounded" and would authorise every dispatch silently) the decision was made against. */
+  observedAvailableMib: number;
+  /** The policy floor consulted (`policy.memoryFloorMib`, carried for the ledger line). */
+  floorMib: number;
+}
+
+/**
+ * The memory governor's pure predicate (design (i)): STRICTLY BELOW `policy.memoryFloorMib` MiB
+ * available, NEW dispatch is deferred; at or above it, dispatch proceeds normally. Same shape as
+ * {@link checkCostGovernor}/{@link checkQueueGovernor} immediately above — the observation, the
+ * floor, and whether it defers — and the SAME dispatch-only asymmetry those two document: never
+ * call this from `runSweep` or any of its deps (arm/dispatchFix/close/escalate); it is consulted
+ * ONLY on the NEW-dispatch path.
+ *
+ * SHIPS INERT (design (vi)): `policy.memoryFloorMib` defaults to 0 (`plan/policy.yaml`'s own
+ * row), and `observedAvailableMib` can never be negative, so `deferred` is `false` on every call
+ * until an operator raises the floor against a measured figure — the threshold this task's own
+ * rationale (7) says is NOT YET KNOWN and must not be guessed. Measuring it is this task's own
+ * row ({@link logMemoryObservation}, below), never this default.
+ *
+ * DEFER, NEVER KILL (design (iii)): this predicate only ever gates the NEXT dispatch. It takes
+ * a plain number and returns a plain object — there is no parameter through which it could
+ * reach, signal, or otherwise touch a running process, so a live worker that crosses the floor
+ * mid-run keeps running exactly as {@link checkCostGovernor}/{@link checkQueueGovernor} already
+ * never touch an in-flight run either.
+ */
+export function checkMemoryGovernor(
+  availableMib: number,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): MemoryGovernorResult {
+  return {
+    deferred: availableMib < policy.memoryFloorMib,
+    observedAvailableMib: availableMib,
+    floorMib: policy.memoryFloorMib,
+  };
+}
+
+/**
+ * THE OBSERVATION IS LEDGERED ON EVERY CONSULTATION (design (iv)) — unlike {@link
+ * logCostGovernorDeferral}/{@link logQueueGovernorDeferral} immediately above, which fire ONLY
+ * when their governor's `deferred` is `true`, this caller ledgers unconditionally, admitted
+ * readings included. A deferral-only row would sample exactly the population that never happens
+ * while the floor ships disabled (design note (vi)) — the evidence this task exists to gather
+ * (what a live dispatch actually observes, design notes (7)/(8)) is the ADMITTED reading, not
+ * the currently-unreachable deferred one.
+ *
+ * NOT registered in `ledger.ts`'s `DECISION_RELEVANT_LEDGER_STEPS` (design note (v)): nothing
+ * reads this step back yet — THE READER IS THE OPERATOR, scanning the ledger union by hand.
+ * Membership is required only if a future predicate reads `.step === "dispatch_memory_observed"`
+ * back, and that predicate's own PR is the one that adds it.
+ */
+export function logMemoryObservation(
+  result: MemoryGovernorResult,
+  appendLine: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void,
+  ledgerPath: string,
+  runId: string,
+): void {
+  appendLine(ledgerPath, {
+    run_id: runId,
+    task_id: "GOVERNOR",
+    step: "dispatch_memory_observed",
+    observed_available_mib: result.observedAvailableMib,
+    memory_floor_mib: result.floorMib,
+    deferred: result.deferred,
   });
 }
 

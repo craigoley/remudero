@@ -20,7 +20,7 @@
  * THE GOVERNOR RESULT TYPES stay in sweep.ts and are imported here type-only — this module owns the
  * DECISION, never the shapes.
  */
-import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 
 
 
@@ -56,6 +56,19 @@ import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
  * be taken" is the SAME as a confirmed-over-ceiling reading — admit no further dispatch this
  * batch (`kind: "unreadable"`) — never a silent fall-through to "admitted" because the check
  * errored.
+ *
+ * `deps.checkMemoryGovernor` (W1-T1038) DOES NOT FOLLOW THAT RULE, DELIBERATELY. Cost and queue
+ * failing closed is correct for THEIR OWN reasons (an unbounded spend, an unbounded queue, are
+ * both genuinely worse than one held-back dispatch) — but three-lane dispatch has been 100% of
+ * draws since 2026-08-14 (51 sets, admitted mean 3.00, one failure in six days), so a memory
+ * probe failure that refused would convert a once-in-six-days event into a 100% outage every
+ * time `/proc/meminfo` hiccups. So: a throw from `checkMemoryGovernor` is caught and DISCARDED
+ * here — it never becomes `{kind: "unreadable"}` (that arm's own `source` type is `"cost" |
+ * "queue"`; `"memory"` is not a member, so routing it there would not even type-check) — and
+ * falls straight through to the NEXT check, exactly as if the memory dep had returned `undefined`
+ * (admitted). UNREADABLE PERMITS. THE READING COMES FROM `/proc/meminfo`, NEVER A CGROUP LIMIT —
+ * see `checkMemoryGovernor`'s own doc (sweep.ts) for why a cgroup read would authorise every
+ * dispatch silently on this fleet's unlimited containers.
  */
 export function checkDispatchGovernors(
   deps: DispatchGovernorDeps,
@@ -76,6 +89,21 @@ export function checkDispatchGovernors(
     return { kind: "unreadable", source: "queue", error: e instanceof Error ? e.message : String(e) };
   }
   if (queueGoverned) return { kind: "queue", result: queueGoverned };
+
+  // W1-T1038 — RE-CONSULTED EVERY CALL, exactly like cost/queue above: this function holds no
+  // cache of its own, so a caller that invokes it once per lane (design (ii)) gets a fresh memory
+  // reading per lane, never one reading admitting a whole batch.
+  let memoryGoverned: MemoryGovernorResult | undefined;
+  try {
+    memoryGoverned = deps.checkMemoryGovernor?.();
+  } catch {
+    // FAIL OPEN (design (ii), this function's own doc above) — swallow the error and proceed as
+    // if nothing was observed. Deliberately NOT `{kind: "unreadable", ...}`: that arm is the
+    // fail-CLOSED one cost/queue share, and joining it here is the one thing this task exists to
+    // avoid. `memoryGoverned` stays `undefined`, so control falls through to the final
+    // `return undefined` below exactly as an admitting reading would.
+  }
+  if (memoryGoverned) return { kind: "memory", result: memoryGoverned };
 
   return undefined;
 }
@@ -98,12 +126,16 @@ export function checkDispatchGovernors(
 export interface DispatchGovernorDeps {
   checkCostGovernor?: (dailyCostCeilingUsd?: number) => CostGovernorResult | undefined;
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
+  /** W1-T1038 — see this module's own FAIL-OPEN note (above `checkDispatchGovernors`) for why a
+   *  throw from this one dep is handled differently from the two above it. */
+  checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
 }
 
 /** W1-T342: discriminates which governor (if either) is deferring THIS dispatch, and why. */
 export type DispatchGovernorVerdict =
   | { kind: "cost"; result: CostGovernorResult }
   | { kind: "queue"; result: QueueGovernorResult }
+  | { kind: "memory"; result: MemoryGovernorResult }
   | { kind: "unreadable"; source: "cost" | "queue"; error: string };
 
 /**
@@ -126,6 +158,9 @@ export function governorDeferPayload(verdict: DispatchGovernorVerdict): Record<s
   }
   if (verdict.kind === "queue") {
     return { observed_open_count: verdict.result.observedOpenCount, wip_limit: verdict.result.wipLimit };
+  }
+  if (verdict.kind === "memory") {
+    return { observed_available_mib: verdict.result.observedAvailableMib, memory_floor_mib: verdict.result.floorMib };
   }
   return {
     source: verdict.source,

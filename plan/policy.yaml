@@ -516,6 +516,41 @@ sweep:
     value: false
     origin: "net-new"
 
+  # W1-T1038 (the 2026-08-19 host stall). Dispatch has priced every draw in dollars
+  # (dailyCostCeilingUsd above) and never once in bytes: across the full deduped ledger, zero
+  # fields carry mem/rss/heap/swap/avail against 1,109 rows carrying cost_usd. At 18:43:54.955Z
+  # the host went unreachable with three workers live; no oom-kill fired (a measured absence —
+  # journalctl/syslog/kern.log all checked, all clean) because with no swap the kernel evicted
+  # and re-faulted executable pages under reclaim livelock rather than arming the OOM killer.
+  #
+  # THE VALUE (0) SHIPS THIS ROW INERT, DELIBERATELY, copying the shape armSessionPrs and
+  # supersessionDisposal above already ship with: `MemAvailable` (src/lib/sweep.ts's
+  # checkMemoryGovernor reads it from /proc/meminfo, never a cgroup limit) can never read below
+  # zero, so `observed < 0` never holds and this floor defers nothing until an operator raises
+  # it. THE THRESHOLD IS NOT KNOWN AND MUST NOT BE GUESSED: the only retained observation is a
+  # container-wide memory.peak of 3.99 GiB across two three-lane waves, neither of which ran a
+  # concurrent `tsc --noEmit` or full suite — precisely the coincidence that froze the box — and
+  # every worker shares one flat cgroup, so a per-worker figure is not recoverable
+  # retrospectively. Measuring it is this task's own row (the observation this floor's own gate
+  # ledgers on EVERY dispatch, admitted included, once wired) — not this default.
+  #
+  # min: 0 — a negative floor is not a floor. max: 8192 (8 GiB) sits comfortably above every
+  # `MemAvailable` figure measured on this fleet's hosts (4.69-6.92 GiB across the cited
+  # readings), so an operator can set a real floor anywhere in the plausible range without the
+  # bound itself becoming a second incident, while staying finite rather than effectively
+  # unbounded.
+  #
+  # FAIL OPEN ON AN UNREADABLE READING (design (ii), dispatch-governor.ts's own comment): this
+  # is the ONE field in this table whose governor deliberately does NOT join
+  # dailyCostCeilingUsd's/wipLimit's shared fail-closed unreadable arm — three-lane dispatch has
+  # been 100% of draws since 2026-08-14 (51 sets, admitted mean 3.00, one failure in six days),
+  # so a probe failure that refused would convert a once-in-six-days event into a 100% outage.
+  memoryFloorMib:
+    value: 0
+    origin: "net-new"
+    min: 0
+    max: 8192
+
 drain:
   max:
     value: 10
