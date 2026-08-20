@@ -230,6 +230,19 @@ const DECLARED: readonly Declared[] = [
       "the same fixture's own teardown, restoring write+read on the 0o200 file above so rmSync can remove it — not " +
       `a denial itself, but paired with the site above and audited by the same depth-matched walk. ${CHMOD_REMEDY}`,
   },
+  {
+    kind: "chmod",
+    file: "stale-git-config-lock.test.ts",
+    key: "0o444",
+    count: 1,
+    reason:
+      "W1-T1036: acceptance criterion 5 requires proving a read-only lock is removed by unlinkSync rather than " +
+      "failing on an open-for-write — the test first pins that writeFileSync on the fixture throws EACCES, then " +
+      "asserts reclaimStaleConfigLock still succeeds via unlink. Root bypasses the write denial, so the covered " +
+      "branch (falling back from truncate to unlink) is merely unexercised there, never falsified. CHMOD_REMEDY " +
+      "does not apply: EISDIR/ENOTDIR deny writeFileSync too, but they also deny the unlinkSync this test needs " +
+      "to observe succeeding, so neither substitutes for a real read-only FILE.",
+  },
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
   {
     kind: "platform-tool",
