@@ -1,0 +1,147 @@
+- id: W1-T1062
+  title: "rmd can only ever target repos under its OWN GitHub owner — `resolveOwnerRepo()` parses the owner from this checkout's origin and 28 call sites across 27 commands each re-derive it independently, so the single hard limit on running N containers against N codebases is 27 per-verb decisions rather than one edit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "RECON 2026-08-07 (state/recon-remudero-root-and-owner.md), RE-DERIVED AT e422486.
+    THAT RECON WAS COMMISSIONED AS AN IMPLEMENTATION AND STOPPED, because the brief's premise —
+    'small and localised' — was refuted by measurement. This shard files what it established, with
+    the design fixed rather than left open, so the next reader does not re-derive any of it.
+    THE BLOCKER. `resolveOwnerRepo()` (src/run-task.ts) parses owner+repo from THIS checkout's
+    `remote.origin.url`, and every clone runs `gh repo clone <selfOwner>/<repo>`. A target under a
+    different GitHub owner cannot be named, cloned, or have its PRs resolved. That is the one hard
+    limit on the operator's stated direction of N containers against N codebases.
+    THE SCALE, RE-DERIVED BY EXECUTION AT THIS SHA: 28 call sites of
+    `resolveOwnerRepo()`/`resolveOwner()` across 27 DISTINCT functions in src/run-task.ts. This is
+    the fact that makes it not-small — it is not one edit repeated, it is 27 per-verb decisions
+    about whether that verb is asking about the INSTANCE'S OWN repo or about the TARGET.
+    SELF-SCOPED and correct today, out of scope, and they must STAY self-scoped: `serveCommand`,
+    `daemonPlistCommand`, `nextTaskIdCommand`, `retroCommand`, `triageCommandLocked`, `planCommand`,
+    `inboxCommand`, `approveCommand`.
+    TARGET-SCOPED, and the only ones this task may touch: `daemonCommand`, `runTask`,
+    `sweepCommand`, `buildSweepEffects`, `fixCommand`, `reviewCommand`, `wipeTestCommand`.
+    UNCLASSIFIED AND DELIBERATELY LEFT SO — twelve of the twenty-seven fall in neither list:
+    `alertFixCommand`, `dispatchAlertFixRun`, `correctCommand`, `depReviewCommand`, `drainCommand`,
+    `escalateCommand`, `opsCommand`, `projectCommand`, `reframeCommand`, `traceCommand`,
+    `retroShippedGithubGateway`, `resolveOwner`. Classifying them is NOT part of this task; they
+    keep today's behaviour untouched. Recorded so nobody reads the two lists above as exhaustive.
+    THE DESIGN IS ALREADY SETTLED BY THIS REPO AND MUST NOT BE RE-INVENTED. `resolveReviewTarget`
+    (src/run-task.ts) already parses `--repo <owner>/<name>` and its own doc states that a bare
+    name keeps the default owner. It is already pure and already unit-tested without a `gh` call.
+    The default-preservation this change requires is therefore preserved BY CONSTRUCTION by reusing
+    that splitting rather than writing a second one. Do not add a parallel parser.
+    WHAT IS ALREADY THREADED, so the work is smaller than the caller count suggests.
+    `resolveDaemonTarget` is pure, exported, and already returns `{owner, repo, planPath, isSelf,
+    dryRun}` — and its `owner` is genuinely consumed, not decorative: it drives the ledger `gateway`
+    field, the `gh repo clone` argument, `githubFactory(target.owner, target.repo)`, and the dry-run
+    banner. Exactly one line hardcodes it, assigning the self owner.
+    Inside `runTask`, the owner comes from a SINGLE assignment which feeds ELEVEN uses: the
+    `ghGateway`, the run banner, the `gh repo clone`, the PR-create command, the `reviewBase`, the
+    CI-failure fetch, and three `ghIssueGateway` constructions. One correct source fixes all eleven
+    together.
+    THE PARTIAL-FIX HAZARD IS THIS SHARD'S CENTRAL WARNING AND IT IS MEASURED, NOT PREDICTED. The
+    dispatch seam carries NO owner: `runOne` is typed as taking a task id and returning a RunResult,
+    and nothing else. So `resolveDaemonTarget`'s carefully-resolved owner CANNOT REACH `runTask`
+    today. Fixing `resolveDaemonTarget` alone would clone the other owner's repo at the daemon level
+    and then dispatch a run that clones from the SELF owner and opens its PR against the SELF owner.
+    THAT IS WORSE THAN TODAY'S HONEST REFUSAL, and a slice that does it must be refused at review.
+    RECORDED SO NOBODY 'FIXES' IT LATER — the same recon's other half, which needs no change. Every
+    `.remudero/` reader resolves against the RMD CHECKOUT and they do not mix: `mountsPath` (nine
+    call sites), `managedReposPath` and `skillsDir` all take a root parameter, and every caller
+    passes `repoRoot`, which is assigned ONCE at module scope. A target repo's own `.remudero/` is
+    therefore NEVER read. For N containers on N codebases that is the DESIRABLE behaviour — each
+    instance carries its own skills and mounts rather than executing whatever the target ships — so
+    it is a design fact, not a defect, and this task must not change it."
+  design: "(i) SETTLE THE SCHEMA QUESTION FIRST, AS ITS OWN STEP, BEFORE ANY CODE. `Task.repo` is a
+    bare string, validated as one in src/lib/plan.ts, and it is used to build ON-DISK PATHS under
+    the config root's repos directory. Admitting a slash changes the directory layout. The options,
+    posed as a question rather than inferred:
+      (a) `Task.repo` becomes `owner/name`, with the on-disk path either nesting or flattening —
+          decide which, because both are defensible and they are not interchangeable;
+      (b) `Task.repo` stays bare and gains a SIBLING owner field, leaving paths untouched;
+      (c) `Task.repo` stays bare and the owner rides ONLY on the daemon's `--repo` flag, never on
+          the task record, so a plan is owner-agnostic and the instance decides.
+    THIS IS EXACTLY THE SHAPE W1-T391 DIED ON — a discriminator inferred rather than decided, with
+    an implementer building the whole thing before the flaw surfaced. `verify: human` is set for
+    that reason: the operator answers (i), and only then does this become dispatchable work.
+    (ii) SCOPE IS THE DISPATCH PATH ONLY, and a complete slice is four coordinated changes:
+    `resolveDaemonTarget`'s hardcoded owner; the `runOne` seam signature, which is a DOCUMENTED seam
+    and whose change must be stated rather than slipped in; the run-task options type; and
+    `runTask`'s single owner derivation. Fewer than four is the partial fix above.
+    (iii) `isSelf` MUST COMPARE BOTH OWNER AND REPO. Today it compares repo alone. Retro and
+    auto-triage hooks are gated on it, and so is the plan-sync branch — so a target repo that merely
+    SHARES THIS REPO'S NAME under a different owner would be treated as self-hosting and would start
+    filing into this instance's own plan. That is the sharpest single failure mode in the change.
+    (iv) THE FALSIFIER, VERBATIM: a bare repo flag still resolves to the self owner; an
+    owner-qualified flag does not; and the self repo NAME under a foreign owner is NOT self.
+    (v) THE SELF-SCOPED VERBS ARE NOT TOUCHED, and a test must assert that boundary rather than
+    leave it to inspection — a later reader will otherwise assume the lift was meant to be global."
+  acceptance:
+    - claim: "a bare repo flag keeps resolving to this checkout's own owner, so every existing config and plan behaves exactly as it does today"
+      proof: "unit test: test/owner-target-resolution.test.ts"
+    - claim: "an owner-qualified target resolves to that owner rather than to this checkout's, through the splitting the review path already uses"
+      proof: "unit test: test/owner-qualified-dispatch.test.ts"
+    - claim: "the self-host predicate compares owner as well as repo, so this repo's name under a foreign owner is not treated as self and cannot reach the retro or auto-triage hooks"
+      proof: "unit test: test/owner-self-host-gating.test.ts"
+    - claim: "the resolved owner reaches the dispatch path, so a run clones and opens its pull request against the same owner the target named"
+      proof: "unit test: test/owner-dispatch-threading.test.ts"
+    - claim: "the verbs that are about this instance's own repo still derive their owner from this checkout, so the lift did not silently become global"
+      proof: "unit test: test/owner-self-scoped-verbs-unchanged.test.ts"
+    - claim: "a slice that resolves the owner at the daemon without threading it to the run is refused, so a partial fix cannot ship as an improvement"
+      proof: "unit test: test/owner-dispatch-threading.test.ts"
+  risk: high
+  origin: recon#remudero-root-and-owner-2026-08-07
+  plan_refs: ["§9", "§4"]
+  files: [src/run-task.ts, src/lib/drain.ts, src/lib/plan.ts, test/owner-target-resolution.test.ts, test/owner-qualified-dispatch.test.ts, test/owner-self-host-gating.test.ts, test/owner-dispatch-threading.test.ts, test/owner-self-scoped-verbs-unchanged.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:human, and the reason is design (i), not the work. The schema question is an
+    OPERATOR DECISION with three defensible answers, and `isDispatchEligible` refuses a task whose
+    verify is not auto BEFORE the linter is consulted — so this cannot be handed to a worker who
+    would rediscover the W1-T391 wall. Flip it to auto once (i) is answered; nothing else about the
+    shard needs rewriting when that happens, because every acceptance claim above holds under all
+    three options.
+    risk:high is Rule 19's SPAN, not blast radius. The file set crosses src/ and test/ and touches a
+    documented dispatch seam; the band is raised deliberately here rather than shipped as a sizing
+    violation, which is the W1-T400/#1401 lesson.
+    src/lib/plan.ts is declared because options (a) and (b) both touch the task schema. Under option
+    (c) it is untouched — declaring it costs nothing, whereas omitting it would have the scope guard
+    refuse the branch AFTER the work was done.
+    All five proofs are forward references to PATHS, never to symbols: a path forward-reference is
+    safe, a symbol one is a guess. None is a `grep:` naming an existing symbol, because such a
+    pattern would match the merge base as well as the head and be downgraded to a stale proof that
+    discriminates nothing.
+    THIS RE-FILES A TASK THAT WAS CREDITED WITHOUT BEING BUILT, AND THE SUPERSESSION IS THE REASON
+    THIS RECORD EXISTS TWICE. The original shard was credited as implemented by its own plan-only
+    FILING commit — that commit touched nothing but the shard file itself, carried the task trailer,
+    and merged, so the merged-credit path counted the filing as the work. W1-T1004 files that
+    mechanism and is cited here rather than re-derived. Re-derived before this re-file: all five of
+    the acceptance proofs above name test files that DO NOT EXIST (control: a real test file in the
+    same directory reads present), and `resolveOwnerRepo` still parses `git config --get
+    remote.origin.url` exactly as the rationale describes — zero of five criteria are met. Because
+    credit derives from git history there is no clean way to un-credit, and `isDispatchEligible`
+    refuses an already-merged id before anything else is consulted, so the original can never be
+    dispatched again. Re-filing under a fresh id is the only route. THE ORIGINAL RECORD IS NOT
+    EDITED: it is merged, `postMergeAmendmentViolations` would refuse an amendment, and the
+    duplicate-concern risk is handled by this paragraph rather than by touching it.
+    THE BAND IS NOW verify:auto BY OPERATOR RULING, WHICH SUPERSEDES THE FIRST PARAGRAPH OF THIS
+    NOTE. That paragraph justified verify:human by design (i)'s schema question; the operator has
+    ruled and the question is no longer a gate on dispatch. The partial-fix hazard that band was
+    implicitly guarding is now carried as a BLOCKING ACCEPTANCE CRITERION instead, which is the
+    stronger form: the refusal condition is mechanically checkable — does the resolved owner reach
+    `runTask`, or not — rather than depending on a human reading the diff, and this plan currently
+    holds a large population of verify:human tasks with nothing surfacing them.
+    W1-T988 IS NOT A PREREQUISITE, AND IT WAS READ RATHER THAN ASSUMED. It files the finding that
+    the dispatcher never reads a task's repo, but its own rationale opens by calling itself A SAFETY
+    GUARD ON A SINGLE-TARGET DAEMON, NOT MULTI-REPO SUPPORT, AND NOT THE ROUTING STAGE 2 NEEDS — it
+    makes the CURRENT daemon refuse work that is not its own, and names a second daemon with its own
+    `config.root` as the architecture that recon actually found. N containers on N codebases is one
+    daemon per codebase, each with its own config root and plan, so owner-scoping alone is sufficient
+    for that shape and W1-T988 is orthogonal rather than blocking. It is named here so the
+    relationship is on the record, and deliberately NOT added to depends_on, which would make this
+    task undispatchable until an unrelated guard builds.
+        The ledger is UNMEASURED throughout — the host is down and no figure in this shard is read from
+    it. Every count here is from source at e422486."
