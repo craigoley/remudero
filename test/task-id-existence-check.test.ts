@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
@@ -262,4 +262,81 @@ test("task-id-existence: an unconditional ci job runs the check on every pull re
   // honest and the gate is wired against the actual src/deploy trees, not a stub).
   const result = spawnSync(process.execPath, [SCRIPT, "--remote", "origin"], { cwd: REPO_ROOT, encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+// ── the refusal and empty-tree arms, driven through the exported functions ─────────────────────
+//
+// Every test above drives the CLI as a subprocess, which is the right shape for the gate's
+// end-to-end behaviour and reaches none of the error arms below: a subprocess's coverage is not
+// the parent run's, and the happy path never takes them anyway. These call the same module's
+// exported functions directly. One test per arm rather than one "malformed input throws" case,
+// which would pass while the rest stayed dead.
+const mod = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
+
+function scratch(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-task-id-existence-arms-"));
+}
+
+test("W1-T1048: scanCitedIds treats an absent directory as nothing to scan, not an error", () => {
+  const root = scratch();
+  assert.equal(mod.scanCitedIds(["does-not-exist"], root).size, 0);
+});
+
+test("W1-T1048: scanCitedIds treats a path that is a file rather than a directory the same way", () => {
+  const root = scratch();
+  writeFileSync(join(root, "not-a-dir"), "W1-T1 cited here\n");
+  assert.equal(mod.scanCitedIds(["not-a-dir"], root).size, 0);
+  // The positive control for both: the SAME call over a real directory does find an id, so the
+  // zeros above are the absent/ENOTDIR arms and not a scanner that never matches anything.
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "a.ts"), "// cites W1-T4242\n");
+  assert.deepEqual([...mod.scanCitedIds(["src"], root).keys()], ["W1-T4242"]);
+});
+
+test("W1-T1048: scanDeclaredPlanIds tolerates an absent tasks file and an absent shard directory", () => {
+  const root = scratch();
+  const ids = mod.scanDeclaredPlanIds(root, { planTasksFile: "no-such.yaml", planTasksDir: "no-such.d" });
+  assert.equal(ids.size, 0);
+  // Positive control on the same call shape: a real file and a real shard dir both resolve.
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "- id: W1-T4243\n");
+  writeFileSync(join(root, "plan", "tasks.d", "s.yaml"), "- id: W1-T4244\n");
+  assert.deepEqual([...mod.scanDeclaredPlanIds(root)].sort(), ["W1-T4243", "W1-T4244"]);
+});
+
+test("W1-T1048: loadBaseline refuses an unreadable file, naming the path", () => {
+  assert.throws(
+    () => mod.loadBaseline(join(scratch(), "absent.json")),
+    (e: Error) => /cannot read baseline file .*absent\.json/.test(e.message),
+  );
+});
+
+test("W1-T1048: loadBaseline refuses a file that is not valid JSON", () => {
+  const p = join(scratch(), "b.json");
+  writeFileSync(p, "{not json");
+  assert.throws(() => mod.loadBaseline(p), (e: Error) => /is not valid JSON/.test(e.message));
+});
+
+test("W1-T1048: loadBaseline refuses a JSON document that is not an array of entries", () => {
+  const p = join(scratch(), "b.json");
+  writeFileSync(p, JSON.stringify({ "W1-T1": "a map, not an array" }));
+  assert.throws(() => mod.loadBaseline(p), (e: Error) => /must be a JSON array/.test(e.message));
+});
+
+test("W1-T1048: loadBaseline refuses an entry whose id is missing or not a W1-T id", () => {
+  const p = join(scratch(), "b.json");
+  for (const entry of [{ reason: "no id at all" }, { id: "T7", reason: "bare form" }, { id: 7, reason: "not a string" }]) {
+    writeFileSync(p, JSON.stringify([entry]));
+    assert.throws(() => mod.loadBaseline(p), (e: Error) => /has no valid "id"/.test(e.message));
+  }
+});
+
+test("W1-T1048: loadBaseline refuses the same id listed twice", () => {
+  const p = join(scratch(), "b.json");
+  writeFileSync(p, JSON.stringify([{ id: "W1-T1", reason: "first" }, { id: "W1-T1", reason: "second" }]));
+  assert.throws(() => mod.loadBaseline(p), (e: Error) => /lists W1-T1 more than once/.test(e.message));
+  // Positive control: the same shape with distinct ids loads, so the refusals above are the
+  // duplicate arm rather than loadBaseline rejecting every well-formed file.
+  writeFileSync(p, JSON.stringify([{ id: "W1-T1", reason: "first" }, { id: "W1-T2", reason: "second" }]));
+  assert.deepEqual([...mod.loadBaseline(p).keys()], ["W1-T1", "W1-T2"]);
 });
