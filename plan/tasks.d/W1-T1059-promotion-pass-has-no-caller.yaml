@@ -1,0 +1,182 @@
+- id: W1-T1059
+  title: "THE LEARNINGS PROMOTION PASS IS BUILT, TESTED, RATIFIED AND HAS NO CALLER — runPromotionPass has zero production call sites, so promotion.scrub/verdict/promoted cannot fire; and the layer it would promote INTO is read-only, with exactly one production reference and no writer anywhere: give the pass a caller in the retro that PROPOSES through the Architect's existing gated PR, and name the missing writer rather than inventing one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    FILED FROM RECON at origin/main 3794a555 on host `vm`. Every claim below was re-derived at THAT
+    head, not at an older tree, and each zero carries a live positive control on the same invocation.
+
+    (1) THE PIPELINE IS WHOLE AND IT IS UNREACHABLE. `src/lib/learnings.ts` carries the entire
+    thing: `promoteEntry` (per-entry), `runPromotionPass` (the batch), `scrubEntry` (the gate that
+    runs BEFORE the judge is ever invoked), an ADVISORY judge behind `PromotionJudgeDeps.judge`
+    with `planPromotionFromVerdict` as the deterministic actor, `DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD`,
+    and `redactProvenance` so provenance survives promotion in redacted form. `planPromotionFromVerdict`
+    is `applicability === "broadly-applicable" && confidence >= threshold` — so `broadly-applicable`
+    at a confidence below the threshold does NOT promote; uncertainty never promotes.
+    CALL-SITE CENSUS, word-bounded, at 3794a555: `runPromotionPass` has ZERO references in `src/`
+    outside its own module and ZERO in `deploy/`; every in-module hit is a `{@link}` doc reference
+    except its own declaration. `promoteEntry` is the same, its one real call being from
+    `runPromotionPass` itself. The import list `src/run-task.ts` takes from `learnings.js` carries
+    neither. LIVE CONTROL on the identical query shape: `captureFeedback` returns eleven `src/`
+    files, and `loadLearningsCorpus`/`projectLearningsHome` both read 1 in that same import list —
+    so the zeros are real absences, not a broken query.
+    CONSEQUENCE: `promotion.scrub`, `promotion.verdict` and `promotion.promoted` each appear in
+    exactly one tracked file — the module that would emit them — and cannot fire. LIVE CONTROL:
+    `sweep.disposed` appears in 63.
+
+    (2) IT HAS NEVER BEEN WIRED, NOT EVEN ATTEMPTED. `git log -S'runPromotionPass'` returns ONE
+    commit across all history — b05d34e7, the original build (W1-T146/#371). LIVE CONTROL: the same
+    query for `captureFeedback` returns 33. No open PR, no open branch and no filed shard proposes a
+    caller (five surfaces swept, each controlled).
+
+    (3) THE `user-overall` LAYER IS THE CROSS-REPO MECHANISM — ESTABLISHED FROM THE RESOLVER, NOT
+    FROM THE LAYER NAME. `userOverallLearningsHome(config)` returns `learningsHomes(config).userOverall`,
+    which is `config.learningsHomes?.userOverall ?? join(config.root, "learnings-user")`. It takes
+    ONLY a `Config` — no repo and no cwd parameter — and `test/learnings-layers.test.ts` asserts
+    exactly that, that two different repo configs resolve to the SAME home. Contrast
+    `projectLearningsHome(repoRoot)`, which is `join(repoRoot, "learnings")` and is repo-scoped by
+    construction. So the layer is CONFIG-ROOT-RELATIVE, sits outside any repo, and promotion CAN
+    cross repos. W1-T432 made that sharing deliberate: `src/lib/config.ts`'s D-11 note says a
+    per-cell derivation "silently SPLITS the org brain", and the field exists so "N cells read one
+    brain instead of fragmenting it N ways".
+
+    (4) BUT THE DESTINATION IS READ-ONLY, AND THAT IS THE HALF THE BRIEF DID NOT NAME.
+    `userOverallLearningsHome` has EXACTLY ONE production reference: `src/run-task.ts` passes
+    `userOverallDir:` into the corpus matcher on every dispatch. That is a READ. Nothing anywhere
+    writes that directory — `src/lib/learnings.ts` contains no `writeFileSync`, `mkdirSync` or
+    `appendFileSync` at all (LIVE CONTROL: `src/lib/feedback.ts` matches that query 8 times), and
+    `runPromotionPass` returns `promotedEntries` in memory and persists nothing. The GLOBAL layer,
+    by contrast, DOES have a writer — `rmd learnings import` does `mkdirSync(globalLearningsHome(config))`
+    then `writeFileSync(globalArtifactPath(config))` behind a verified hash pin. So the gap is TWO
+    parts, not one: no caller, and no writer for the layer a caller would promote into.
+
+    (5) WHY IT HAS NEVER FIRED IS PARTLY STRUCTURAL AND THE PIPELINE IS NOT ABANDONED. The fleet
+    self-hosts, so project and fleet have always been the same repo; every lesson promoted out of
+    `<repo>/learnings` into `<config.root>/learnings-user` would have been re-read on the very next
+    dispatch from either home, because the matcher already reads both. Promotion had a DESTINATION
+    the whole time — it had no DISCRIMINATING VALUE while one repo existed. That value appears the
+    moment a second repo does, which is precisely the operator's case. This is a pipeline built
+    correctly ahead of a condition that has not yet occurred.
+
+    (6) THERE IS SOMETHING TO PROMOTE — THE CALLER WOULD NOT RUN OVER NOTHING. Measured by running
+    the REAL `scrubEntry` and `entryLayer`/`nextLayer` over the REAL corpus in-process at 3794a555:
+    `learnings/` holds 38 entries across 5 shards. No entry carries a `layer` field, and
+    `entryLayer` defaults to `"project"`, so `nextLayer` gives `"user-overall"` for every one — none
+    is already at the top layer. `runPromotionPass` skips anything whose `lifecycle !== "active"`,
+    which removes 2 superseded entries, leaving 36 that ENTER the pass. Of those 36, ZERO are
+    blocked at scrub and 36 reach the judge. LIVE CONTROLS on the same invocation: a synthetic
+    entry bearing a GitHub token is blocked with reason `github-token`, and a clean entry is not
+    blocked — the gate is live and discriminating. The confidence half of the threshold is a
+    property of a JUDGE VERDICT, not of an entry, so how many of the 36 clear 0.7 cannot be
+    measured without spawning the judge, and this recon did not spawn one.
+
+    (7) A BRIEF PREMISE, CORRECTED SO IT IS NOT RE-IMPORTED. The `origin:` census does read `retro`
+    at ZERO for the bare form and zero across `plan/tasks.d/` — but `plan/tasks.yaml` carries SIX
+    `origin: retro#<runId>` tasks (`retro#1784058021334`, `retro#1784133446353` ×2,
+    `retro#1784155126258`, `retro#session-2026-07-16`). LIVE CONTROL: bare `origin: architect`
+    reads 271. So the retro lane HAS filed tasks; its most recent was 2026-07-16, 35 days before
+    this filing. The lane is quiet, not inert, which strengthens rather than weakens it as the host.
+  design: |
+    THE SHAPE: give the pass a caller that PROPOSES and never persists, and name the missing writer
+    instead of inventing one. Layer (iii) is out of scope; see (v).
+
+    (i) THE CALLER IS THE RETRO, AT ITS EXISTING ARCHITECT STAGE. Chosen against a daemon rung and
+    against end-of-run because the retro ALREADY has every property this needs, and the other two
+    have none of them. `src/lib/retro.ts` already mines and renders candidates the Architect then
+    files (`mineProceduralCandidates`/`renderProceduralCandidates`); its own doc states the mining
+    is "Pure: no I/O, no plan/tasks.yaml write — the corrective tasks are PROPOSALS the retro's
+    Architect stage files, same discipline as the `learnings/` corpus shards never being hand-edited
+    outside a reviewed PR". `ProceduralPhraseDeps` says in terms that it "mirrors learnings.ts's
+    `PromotionJudgeDeps.judge` shape: evidence is deterministic, the model only phrases/judges over
+    it" — the SAME injected-judge architecture this pass uses. And `ProceduralLearningDraft` is
+    already "shaped to become a `LearningEntry` (learnings.ts) once the Architect ratifies it into a
+    `learnings/*.yaml` shard — same fields, NO parallel store". A daemon rung would have to
+    reinvent the gated-PR path; end-of-run would run per task over a corpus that changes per retro.
+
+    (ii) THE OPERATOR GATE IS A CONSTRAINT AN IMPLEMENTER MAY NOT SOFTEN. MASTER-PLAN's P32 doctrine
+    reads: "the machine never ratifies on its own judgment — it acts within a policy the operator
+    ratified once." The retro's own comment records the rule that follows from it: "Standing rule 15:
+    only the Architect authors learnings". THEREFORE the new stage MUST be pure — it loads the
+    corpus, runs `runPromotionPass` with an injected judge, and RENDERS the proposed promotions for
+    the Architect to ratify. It MUST NOT write a promoted entry, MUST NOT write `learnings/`, and
+    MUST NOT write the shared home. A promoted entry reaches disk only through a reviewed PR. An
+    implementer who makes the pass write directly has broken the doctrine, not saved a step.
+
+    (iii) DO NOT INVENT THE WRITER — NAME IT AS THE FOLLOW-UP IT IS. Rationale (4) establishes there
+    is no writer for `<config.root>/learnings-user`, and the path is config-root-relative rather
+    than repo-relative, so the repo's PR gate does not reach it: there is no PR to review a write
+    to a directory that is not in a repo. That is a real, separate problem and it is NOT solved
+    here. The precedent for solving it is already in the tree — the GLOBAL layer's write is an
+    OPERATOR-INVOKED CLI verb (`rmd learnings import`) behind a verified hash pin, not an unattended
+    daemon write. State that shape as the recommended direction, file nothing for it, and let the
+    proposal the Architect ratifies land in the fleet repo's own `learnings/` where a PR does gate
+    it. `src/lib/config.ts`'s D-11 note is explicit that sharing "does not add or change any
+    locking — writes remain whatever single-writer path already exists today", which is another
+    reason a writer must not be improvised inside this task.
+
+    (iv) WHAT MUST BE ASSERTED, USING THE REAL CORPUS. That the new stage is pure (no write of any
+    kind under a temp root). That an entry the injected judge marks `broadly-applicable` ABOVE the
+    threshold is rendered as a proposal. That the SAME entry BELOW the threshold is not — the
+    uncertainty-never-promotes arm. That a scrub-blocked entry never reaches the judge, proven by a
+    judge stub that records whether it was called. And that a `lifecycle: superseded` entry is
+    skipped, which is `runPromotionPass`'s own documented behaviour and is live in this corpus today.
+
+    (v) LAYER (iii) IS OUT OF SCOPE AND STAYS BANKED — STATED SO IT IS NOT RE-OPENED HERE.
+    MASTER-PLAN's P32 entry is explicit: "layers (i) and (ii) are usable today; layer (iii) has a
+    schema and a gate but NO WIRE", and "the GLOBAL TRANSPORT stays banked to §6 packaging in Tier
+    3's stateless shape". DECISIONS.md describes that layer as "global knowledge exchange. A
+    stateless, opt-in POST of scrubbed insights UP + a pull of a versioned, HASH-PINNED artifact
+    DOWN. No persistent connection." That is a CROSS-USER exchange — a different feature from the
+    operator's cross-repo case, which layers (i)->(ii) already serve. This task does not wire it,
+    does not unbank it, and does not depend on it.
+
+    (vi) DO NOT DELETE OR RESHAPE THE PIPELINE. It is ratified under P32, shipped as W1-T145/#360
+    and W1-T146/#371, and covered by `test/learnings-promotion.test.ts`. `src/lib/learnings.ts` is
+    deliberately NOT declared in `files:` — `runPromotionPass` is already exported and already pure,
+    so a caller needs no edit there, and declaring an unchanged file fails `inverseScopeUntouchedFiles`
+    (`src/lib/review.ts`). The threshold, the scrub gate and `redactProvenance` stay byte-identical.
+  acceptance:
+    - claim: "the promotion pass has a production caller and the three promotion ledger steps can fire"
+      proof: "unit test: test/learnings-promotion-caller.test.ts"
+    - claim: "the new stage is pure and writes no learnings file anywhere when it runs"
+      proof: "unit test: test/learnings-promotion-caller.test.ts"
+    - claim: "an entry judged broadly-applicable above the threshold is rendered as a proposal for the Architect"
+      proof: "unit test: test/learnings-promotion-caller.test.ts"
+    - claim: "the same entry below the confidence threshold is not proposed — uncertainty never promotes"
+      proof: "unit test: test/learnings-promotion-caller.test.ts"
+    - claim: "a scrub-blocked entry never reaches the judge and a superseded entry never enters the pass"
+      proof: "unit test: test/learnings-promotion-caller.test.ts"
+  risk: high
+  origin: recon
+  plan_refs: ["P32", "W1-T145", "W1-T146", "W1-T432", "§Self-improvement"]
+  files: [src/lib/retro.ts, src/run-task.ts, test/learnings-promotion-caller.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high SET UP FRONT. Rule 19 sizing counts `src/lib/retro.ts` and `src/run-task.ts` as a
+    two-module span, and the band is that SPAN rather than blast radius — the stage is pure and
+    proposes, so a mistake produces a bad suggestion in a reviewed PR, not a bad write.
+
+    `files:` DERIVED BY INVOCATION COUNT, NOT GUESSED. `src/lib/retro.ts` is where the mine/render
+    stages this one joins already live, and it already carries the injected-judge shape
+    (`ProceduralPhraseDeps`). `src/run-task.ts` holds `retroCommand` — `src/lib/orientation.ts` and
+    `src/lib/plan-pr-emitter.ts` both name it as living there, and it is the only site that
+    assembles the Architect stage. DECISIONS.md's 2026-08-18 W1-T471 ruling governs that
+    declaration and says a new shard "should simply declare it"; the ritual acceptance sentence is
+    explicitly no longer required, so none is written here. `src/lib/learnings.ts` is NOT declared
+    for the reason in design (vi). The new suite is its own file rather than an append to
+    `test/retro.test.ts`, per the house rule that a coverage-load-bearing test gets its own file.
+
+    THE PROOFS ARE ALL `unit test:` AT A PATH THE IMPLEMENTER CREATES. That is deliberate: a
+    forward-referencing `grep:` at an already-existing path would be a refusal, and every claim here
+    is about behaviour that does not exist yet. The pure-path form lint-passes today and executes
+    whatever the implementation adds.
+
+    THIS TASK DOES NOT CLAIM THE CORPUS IS LARGE. Thirty-six entries enter the pass and all thirty-six
+    reach the judge, but how many the judge actually promotes is unmeasured and unmeasurable without
+    spawning it. If the answer turns out to be zero, the caller is still correct and the finding is
+    still useful: it converts an untestable assumption into a rendered, reviewable proposal list.
