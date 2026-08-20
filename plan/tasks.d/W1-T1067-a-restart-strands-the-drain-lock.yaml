@@ -1,0 +1,153 @@
+- id: W1-T1067
+  title: "`docker restart` STRANDS `state/drain.lock` AND THE DAEMON THEN CRASH-LOOPS BEHIND ITS OWN DEBRIS — the SIGTERM handler that releases the lock is never delivered, because the restart throttle takes the entrypoint off its `exec` path and leaves an un-trapped bash between tini and node; and the container-aware reclamation cannot help, because a same-container restart keeps the hostname the lock recorded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-20 on Craigs-Mac-mini under /bin/zsh 5.9 against origin/main 00cf401d in a
+    scratch worktree proved equal to it before anything was read, plus READ-ONLY probes of the
+    live Azure container over ssh. Nothing was restarted, no state file was touched, no process
+    was signalled.
+
+    (1) THE INSTANCE. Three hand-clears in one day. Each stranded lock read
+    `{"pid": 52, "host": "83d9093a0c6c", "startedAt": ...}`, after which the daemon refused to
+    boot, exited 1 and crash-looped at a 120-second throttle until the file was removed. One
+    occurrence cost five hours of downtime; another blocked a token refresh.
+
+    (2) WHY THE CONTAINER-AWARE RECLAMATION CANNOT REACH IT — HYPOTHESIS CONFIRMED, NOT ASSUMED.
+    `isHolderStale` (`src/lib/fs-race-safe.ts`) opens on the HOST rung, and W1-T978's container
+    branch fires only on a MISMATCH: `held.host !== myHost`, then in-container, then
+    container-id-shaped. A `docker restart` REUSES the container, so the hostname is unchanged —
+    MEASURED on the live container: `hostname` reads `83d9093a0c6c` and
+    `docker inspect --format {{.Id}}` truncates to the same `83d9093a0c6c`, which is exactly the
+    `host` the stranded lock recorded. Rung 1 therefore falls through and W1-T978's reclamation
+    never runs. A `docker run` on a NEW container behaves differently by construction: a new id
+    means a mismatch, so the container branch DOES fire there. The gap is specific to restart.
+
+    (3) THE SIGTERM HANDLER EXISTS AND IS CORRECT — IT IS NEVER DELIVERED, AND THAT IS THE REAL
+    DEFECT. `run-task.ts`'s daemon path registers `process.once("SIGTERM", onSignal)` where
+    `onSignal` calls `drainLock.release()` before re-raising. So the design already releases on
+    shutdown. What breaks is the delivery chain, and the live process tree shows it:
+      pid 1     /usr/bin/tini -- /usr/local/bin/rmd-entrypoint ./bin/rmd daemon ...
+      pid 7     bash /usr/local/bin/rmd-entrypoint ./bin/rmd daemon ...
+      pid 12178 sleep 120                                   (child of pid 7)
+    THERE IS NO NODE PROCESS IN THAT TREE — the entrypoint bash is sitting in the restart-throttle
+    sleep. `deploy/entrypoint.sh` `exec "$@"` ONLY when `RESTART_THROTTLE_S` is zero; the live
+    container carries `RMD_RESTART_THROTTLE_S=120`, which takes the non-exec branch and leaves
+    bash alive as tini's child, supervising node rather than being replaced by it. `trap` appears
+    ZERO times in that script (positive control: `exec` appears twice), so bash forwards nothing.
+    tini SIGTERMs bash; node never sees it; node is SIGKILLed at the grace deadline; `onSignal`
+    never runs; the lock survives.
+
+    (4) AND THE THROTTLE THAT CAUSES IT EXISTS TO SURVIVE THE CRASH-LOOP THE STRANDED LOCK
+    PRODUCES. That is the whole shape: the mitigation for looping is what breaks the release that
+    would prevent the loop.
+
+    (5) WHAT IS NOT ESTABLISHED, STATED PLAINLY. Rungs 2 and 3 of `isHolderStale` should still
+    have reclaimed: pid 52 in a fresh namespace is either dead (rung 2 reclaims) or alive with a
+    start time later than the lock's `startedAt` by far more than `STALE_START_TOLERANCE_MS`,
+    which is 2000 ms (rung 3 reclaims). Neither fired. `ps` is present at `/usr/bin/ps` in the
+    container, so `defaultGetProcessStartTime`'s one syscall is available. THE REMAINING
+    QUESTION IS WHICH RUNG RETURNED FALSE AND WHY, and the daemon's own refusal line carries it:
+    it prints the holder's pid, host and startedAt. Capture that line on the next occurrence
+    rather than reasoning about it here.
+  design: |
+    ONE CONCERN: a lock that outlives the process that took it, because the signal that would
+    release it never arrives. Not the lock's existence, not the throttle's existence.
+
+    (i) RELEASE ON SHUTDOWN IS THE BETTER FIX AND THE EVIDENCE SAYS SO. Reclaiming on boot is a
+    guess about a dead holder; releasing on shutdown is the holder itself saying it is done. The
+    handler is already written and already correct — what is missing is DELIVERY. Restoring it
+    costs a `trap` in the entrypoint that forwards the signal to the supervised child and waits
+    for it, or a supervisor that `exec`s on the final attempt. Both are small; neither invents a
+    new mechanism.
+
+    (ii) BUT BOTH ARE WANTED, BECAUSE SIGKILL EXISTS. A shutdown release cannot cover a SIGKILL,
+    an OOM kill or a host power loss, and the fleet has met all three. So the boot-side
+    reclamation must ALSO learn the restart case — shutdown release is the common path, boot
+    reclamation is the floor under it.
+
+    (iii) THE SAFE PREDICATE, SIZED AGAINST WHAT THE LOCK IS FOR. This is a single-instance mutex
+    and two daemons draining one repo is the hazard it prevents, so an over-eager reclamation is
+    worse than the stranding. Three candidates were considered and only one is both available and
+    sound:
+      - PID IDENTITY VIA `/proc/<pid>/`. REJECTED. Pids are reassigned across a restart and the
+        container id is not, so a coincidental match is exactly the case that must not reclaim.
+      - A BOOT NONCE written beside the lock. SOUND but needs a new emitter and a new file whose
+        own lifetime has to be reasoned about — more machinery than the question deserves.
+      - THE CONTAINER'S OWN BOOT TIME, COMPARED AGAINST THE LOCK'S `startedAt`. AVAILABLE AND
+        SOUND, and it is the one to use: a lock whose `startedAt` PREDATES the current PID 1 was
+        written by a process of an earlier boot and is dead BY CONSTRUCTION, whatever pid it
+        names. MEASURED on the live container: `/proc/1/stat` field 22 reads, `/proc/uptime`
+        reads, and `ps -o etimes= -p 1` returns the container's age in seconds — the SAME `ps`
+        route `defaultGetProcessStartTime` already uses, so no new syscall and no new dependency.
+      IT IS CONSERVATIVE IN THE RIGHT DIRECTION: it can only ever reclaim a lock older than this
+      boot, and a genuinely concurrent second daemon in the same container necessarily started
+      AFTER PID 1, so it is never swept.
+
+    (iv) THE SIBLING WHOSE SHAPE THIS FOLLOWS. W1-T1036 (#2268) is merged and was confirmed
+    firing in production today on `.git/config.lock` — same problem, same container, same
+    print-before-clear discipline. Follow it rather than inventing a second idiom. W1-T978 is the
+    existing reclamation this extends, not replaces. #2251's lane-less-worker predicate is the
+    third member of the family and is cited for its age-bound shape, not copied.
+
+    (v) WHAT THIS TASK MUST NOT DO. It must not remove the restart throttle — it exists for a
+    reason and removing it trades one outage shape for another. It must not widen reclamation to
+    a bare age bound. It must not touch the inflight locks, which have their own rung and their
+    own owner. It must not clear a lock without printing it first.
+  acceptance:
+    - claim: "a lock written before the current container boot is reclaimed, whatever pid it names"
+      proof: "unit test: drain lock: a lock older than this boot is reclaimed whatever pid it names"
+    - claim: "a lock written after the current boot is left alone, because a concurrent daemon is the hazard"
+      proof: "unit test: drain lock: a lock newer than this boot is left alone"
+    - claim: "the shutdown signal reaches the daemon so the common path releases rather than strands"
+      proof: "unit test: drain lock: the shutdown signal reaches the supervised daemon"
+    - claim: "a reclaimed lock is printed in full before it is removed, never judged silently"
+      proof: "unit test: drain lock: a reclaimed lock is printed before it is removed"
+    - claim: "a same-container restart is distinguished from a foreign host rather than folded into it"
+      proof: "unit test: drain lock: a same-container restart is not treated as a foreign host"
+  risk: high
+  origin: "oper#docker-restart-strands-drain-lock-2026-08-20"
+  plan_refs: ["W1-T978", "W1-T1036", "W1-T396", "W1-T368"]
+  files: [src/lib/fs-race-safe.ts, deploy/entrypoint.sh, test/drain-lock-restart-reclaim.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE LIVE PROBES WERE READ-ONLY AND ARE LISTED SO THEY CAN BE RE-RUN. Over ssh, inside the
+    running container: `ps -eo pid,ppid,etimes,args` for the process tree, `hostname` and
+    `docker inspect --format '{{.Id}}'` for the host/lock comparison, `cat /proc/uptime` and
+    `ps -o etimes= -p 1` for the boot-time signal, `command -v ps` for the syscall's availability,
+    and `docker inspect --format '{{range .Config.Env}}...'` for the throttle. Nothing was
+    started, stopped, signalled or written.
+
+    `files:` IS THREE PATHS AND EACH EARNS ITS PLACE. `src/lib/fs-race-safe.ts` holds
+    `isHolderStale` and is where the boot-side rung lands; `deploy/entrypoint.sh` is where the
+    signal chain is broken and where a `trap` or a final-attempt `exec` restores it; the test is
+    new rather than appended, because the existing lock suites are large and this repo has
+    measured file-level coverage crashes in large shared test files. The shard's own path is
+    absent. NOTE THAT `deploy/entrypoint.sh` IS A BAKED PATH: it ships only on an image rebuild,
+    not on merge, so the shutdown half of this fix is inert until the operator triggers one — the
+    boot-side half ships immediately via the mount.
+
+    RISK IS `high` UP FRONT AND THE BAND IS RULE 19's SPAN: a source module, a baked deploy
+    script and a new test. If the sizing check disagrees at authoring time, record the refusal
+    rather than pre-inflating.
+
+    EVERY FIGURE IS DATED 2026-08-20 AND WILL DRIFT — RE-RUN THE PROBE. The one measurement this
+    shard could NOT take is which rung of `isHolderStale` returned false on the real occurrence;
+    the daemon's refusal line prints the holder's pid, host and startedAt, so capture it next time
+    rather than inferring it.
+
+    ID PROVENANCE — SEVEN SURFACES, RE-SWEPT BEFORE PUSHING, EVERY CONTROL AN ID OR STRING THAT IS
+    ACTUALLY PRESENT. Pre-minted by the operator and read back first: `refs/rmd-id/W1-T1067` ->
+    f1973e30a7f0d386d51c6d9b31fad668d3ba08e7, an orphan over the empty tree
+    4b825dc642cb6eb9a060e54bf8d69288fbee4904 carrying `reserve W1-T1067 <host>-<pid>-<nanotime>` —
+    the operator's hand-mint shape, not the fleet's `rmd-id reservation <n>@<container>`. The
+    other six read 0. CONTROLS: a five-digit sentinel ref reads nothing; the W1-T1053 filename and
+    declared id both read 1 and its plan mentions read 4; W1-T1046 reads 2 files under
+    `src/ test/ deploy/`; and the open-PR title and file-list queries were re-run after an
+    EMPTY-FILE SCARE — a transient API error had produced two vacuous zeros, caught only because
+    the control could not fire either.
