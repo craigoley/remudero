@@ -58,6 +58,12 @@ export interface PolicyValues {
    *  prior source literal ever measured this. See plan/policy.yaml's own row for why the
    *  default sits comfortably above the ~16-minute `--ci-parity` suite (W1-T463/W1-T465). */
   workerStall: number;
+  /** W1-T1045: THE CLOCK BOUND — how long a dispatch worker's SDK stream may go silent (no
+   *  observed `worker.state` activity) before `src/lib/worker.ts`'s clock-bound watchdog aborts
+   *  it and `src/run-task.ts` ends the run with a terminal verdict. NET-NEW: no prior source
+   *  literal ever measured this. See plan/policy.yaml's own row for why the default equals
+   *  #2251's recycle kill predicate over the same measured population. */
+  workerAbandon: number;
   sweep: {
     staleDays: number;
     strikeCap: number;
@@ -200,6 +206,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   pollIntervalMs: "lifted",
   fixStrikeCap: "lifted",
   workerStall: "net-new",
+  workerAbandon: "net-new",
   "sweep.staleDays": "lifted",
   "sweep.strikeCap": "lifted",
   "sweep.wipLimit": "lifted",
@@ -388,6 +395,7 @@ export function validatePolicy(raw: unknown): Policy {
   const pollIntervalMs = numberField("pollIntervalMs", raw.pollIntervalMs, origin);
   const fixStrikeCap = numberField("fixStrikeCap", raw.fixStrikeCap, origin);
   const workerStall = numberField("workerStall", raw.workerStall, origin);
+  const workerAbandon = numberField("workerAbandon", raw.workerAbandon, origin);
 
   const sweepRaw = raw.sweep;
   if (!isPlainObject(sweepRaw)) throw new PolicyError("policy.yaml: 'sweep' must be a mapping.");
@@ -453,6 +461,7 @@ export function validatePolicy(raw: unknown): Policy {
       pollIntervalMs,
       fixStrikeCap,
       workerStall,
+      workerAbandon,
       sweep: {
         staleDays,
         strikeCap: sweepStrikeCap,

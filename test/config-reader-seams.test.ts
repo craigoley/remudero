@@ -201,8 +201,12 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // routes, rather than the seam appearing twice. FIFTEEN since `buildSweepEffects`'s
   // `armSessionPrs` (run-task.ts, W1-T516) landed — a FOURTEENTH consumer, also SEAMED
   // (`armSessionPrsOverride ?? loadDefaultPolicy()`), gating whether the sweep arms a session
-  // PR (no plan task id) under the review lane's own PR-<n> synthetic id.
-  assert.equal(readers.length, 15, `expected 15 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // PR (no plan task id) under the review lane's own PR-<n> synthetic id. SIXTEEN since
+  // `runTask`'s own `workerAbandonMs` (run-task.ts, W1-T1045) landed — a FIFTEENTH consumer,
+  // also SEAMED (`opts.workerAbandonMs ?? loadDefaultPolicy()`), resolving the clock bound
+  // threaded into every real dispatch spawn's `clockBound` — see worker.ts's
+  // `createWorkerClockBoundWatchdog`.
+  assert.equal(readers.length, 16, `expected 16 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
