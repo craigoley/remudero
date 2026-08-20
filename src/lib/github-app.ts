@@ -1,0 +1,266 @@
+/**
+ * THE FLEET AUTHENTICATES AS THE INSTALLED GITHUB APP (W1-T1024, MASTER-PLAN §9).
+ *
+ * THE INCIDENT. `daemon.quota` read `bucket: graphql, remaining: 0` while `core` read 4289 in
+ * the SAME second — the two buckets are independent, and the exhausted one belonged to the
+ * OPERATOR'S interactive session, not the fleet (the daemon's own graphql traffic in that window
+ * was negligible against the 5,000 limit). Two seconds later the HARD_STOP escalation — `gh
+ * issue create`, itself graphql — failed on the exact condition it exists to report. That shape
+ * recurred on 2026-08-16, 2026-08-17 and 2026-08-19.
+ *
+ * THE FIX IS A SEPARATE POOL, NOT A HARDER LIMIT ON THE FLEET: an installation token minted
+ * against the App reads its OWN `core`/`graphql` buckets, measured independent of whatever an
+ * operator's shell is spending. This module mints that token in-process (`crypto.sign`, no
+ * `openssl` shell-out, no new dependency — Node's `node:crypto` signs RS256 directly) and
+ * refreshes {@link refreshInstallationToken}'s ONE seam: `process.env.GH_TOKEN`.
+ *
+ * WHY THE ENV VAR IS THE WHOLE FIX. Word-bounded, `GH_TOKEN` has exactly three runtime readers:
+ *   - `src/lib/env.ts`'s `ALLOWLIST`     — copied into a worker's child env AT SPAWN
+ *   - `src/lib/review.ts`'s env spread   — `{ ...process.env, GH_TOKEN: … }` AT CALL TIME
+ *   - `deploy/entrypoint.sh`'s credential helper — stored with `$GH_TOKEN` UNEXPANDED, so git's
+ *     own shell re-reads it AT CALL TIME, never written to disk
+ * Refreshing `process.env.GH_TOKEN` in the daemon's own process reaches every `gh` spawn, every
+ * `git` push and every worker with ZERO call-site change — see {@link refreshInstallationToken}.
+ *
+ * THE WORKER GAP (design iii), STATED PLAINLY. `env.ts`'s `ALLOWLIST` copies `GH_TOKEN` into a
+ * worker's child env AT SPAWN, and that copy is held for the worker's whole run — refreshing
+ * THIS process's `process.env.GH_TOKEN` cannot reach an already-spawned child. Runs here
+ * routinely exceed the token's one-hour life, so a long worker can in principle outlive its own
+ * copy. Of the three ways to close that (a fresh re-read inside the worker, a retry-once-on-401
+ * in the push path, or accepting the gap for long runs), this task takes the THIRD: both other
+ * options require editing `src/lib/worker.ts` or `src/lib/git-push.ts`, neither of which is in
+ * this task's declared file list (a credential module with nothing supplying it to the process is
+ * the ships-unwired shape this fleet has already measured once; widening scope to chase every
+ * consumer is the OPPOSITE mistake). A long-running worker keeps whatever `GH_TOKEN` it was
+ * spawned with for its entire run, exactly as it does today — this task does not make that case
+ * worse, it just does not fix it either. Filed as a follow-up, not silently absorbed.
+ *
+ * FALLBACK IS THE DEFAULT (design iv). Missing config, an unreadable key, a signing failure or a
+ * rejected exchange all leave `process.env.GH_TOKEN` EXACTLY as they found it and — for an
+ * ATTEMPTED refresh that failed — ledger a named reason. Absent config (the App simply isn't
+ * installed on this host yet) is not itself an attempt and logs nothing, mirroring `GH_TOKEN`'s
+ * own optional shape today. Nothing here ever refuses to boot.
+ *
+ * NO SECRET EVER REACHES A LOG LINE OR LEDGER ROW — not the private key, not the minted token,
+ * not even a prefix. Every `log(...)` call below carries only the installation id, the token's
+ * `expires_at` and a fixed reason string.
+ */
+
+import { readFileSync } from "node:fs";
+import { sign as cryptoSign } from "node:crypto";
+
+/** Config, never source (design ii) — the same shape `GH_TOKEN` itself has today: a name read
+ *  from the environment, never a literal in the tree. `GH_APP_PRIVATE_KEY_PATH` is a PATH to the
+ *  mounted key, not the key material itself. */
+export const GH_APP_ID_ENV = "GH_APP_ID";
+export const GH_APP_INSTALLATION_ID_ENV = "GH_APP_INSTALLATION_ID";
+export const GH_APP_PRIVATE_KEY_PATH_ENV = "GH_APP_PRIVATE_KEY_PATH";
+
+/** GitHub's own contract: an installation access token is valid for exactly one hour. */
+export const INSTALLATION_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
+
+/** Refresh margin — STRICTLY INSIDE the token's one-hour life (design i: "on a margin well
+ *  inside the one-hour life"), never at or past the edge. Five minutes leaves fifty-five minutes
+ *  of a live token even on the slowest tick, comfortably larger than any single `gh`/`git`
+ *  invocation this fleet makes, and is also the retry cadence on a failed mint (design iv: keep
+ *  trying, never go silent). */
+export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+// GitHub's App-JWT contract: `iat` backdated for clock skew, `exp` capped at ten minutes —
+// this JWT is used ONCE (to mint an installation token) and then discarded, so nine minutes of
+// life is ample and stays under the ceiling with margin.
+const JWT_BACKDATE_SEC = 60;
+const JWT_TTL_SEC = 9 * 60;
+
+export interface RefreshOptions {
+  /** Overrides the value `GH_APP_ID_ENV` would otherwise supply — test seam only. */
+  appId?: string;
+  /** Overrides the value `GH_APP_INSTALLATION_ID_ENV` would otherwise supply — test seam only. */
+  installationId?: string;
+  /** Overrides the value `GH_APP_PRIVATE_KEY_PATH_ENV` would otherwise supply — test seam only. */
+  privateKeyPath?: string;
+  /** Defaults to `process.env` — the SAME object every consumer above already reads, so setting
+   *  `GH_TOKEN` on it reaches all three with no call-site change. A test passes a throwaway
+   *  object instead of mutating the real process environment. */
+  env?: NodeJS.ProcessEnv;
+  /** Injectable clock — defaults to `Date.now`. */
+  now?: () => number;
+  /** Injectable fetch — defaults to the global `fetch` (Node's own, no dependency). Mirrors
+   *  `src/lib/service.ts`'s identical `fetchImpl: typeof fetch = fetch` seam. */
+  fetchImpl?: typeof fetch;
+  /** Injectable private-key reader — defaults to `readFileSync(path, "utf8")`. */
+  readKey?: (path: string) => string;
+  /** Ledger/log sink — defaults to a no-op. Never receives the key or the token (see file
+   *  header); only the installation id, the token's `expires_at`, or a fixed reason string. */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+export interface RefreshResult {
+  ok: boolean;
+  /** Present on every non-ok result — see file header, never the reason a caller passes to a log
+   *  line without a value alongside it. */
+  reason?: string;
+  /** Present only when `ok` — the minted token's expiry, for the caller to schedule the NEXT
+   *  refresh off (see {@link nextRefreshDelayMs}). */
+  expiresAtMs?: number;
+}
+
+/**
+ * Signs a GitHub App JWT with `crypto.sign` — an IN-PROCESS, ONE-SHOT call (Node's own
+ * `node:crypto`, confirmed `typeof crypto.sign === "function"` under the fleet's own runtime) —
+ * never an `openssl` shell-out and never a new dependency (design i). Exported so a test can
+ * verify the signature round-trips against the matching public key without mocking the network
+ * exchange at all.
+ */
+export function signAppJwt(appId: string, privateKeyPem: string, now: () => number = Date.now): string {
+  const nowSec = Math.floor(now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const payload = { iat: nowSec - JWT_BACKDATE_SEC, exp: nowSec + JWT_TTL_SEC, iss: appId };
+  const encode = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+  const signingInput = `${encode(header)}.${encode(payload)}`;
+  const signature = cryptoSign("RSA-SHA256", Buffer.from(signingInput, "utf8"), privateKeyPem).toString(
+    "base64url",
+  );
+  return `${signingInput}.${signature}`;
+}
+
+/**
+ * Mints a fresh installation token and, on success, writes it into `opts.env.GH_TOKEN` — the one
+ * place every existing consumer already reads (file header). On ANY failure — config absent, key
+ * unreadable, signing failure, network failure, a non-2xx exchange, or an unparsable response —
+ * `opts.env.GH_TOKEN` is left completely untouched (design iv: degrade to the old pool, never
+ * refuse). An ATTEMPTED-and-failed exchange (config was present) ledgers a named reason; absent
+ * config is not an attempt and logs nothing, mirroring `GH_TOKEN`'s own optional shape today.
+ */
+export async function refreshInstallationToken(opts: RefreshOptions = {}): Promise<RefreshResult> {
+  const env = opts.env ?? process.env;
+  const now = opts.now ?? Date.now;
+  const log = opts.log ?? (() => {});
+  const fetchFn = opts.fetchImpl ?? fetch;
+  const readKey = opts.readKey ?? ((p: string) => readFileSync(p, "utf8"));
+
+  const appId = opts.appId ?? env[GH_APP_ID_ENV];
+  const installationId = opts.installationId ?? env[GH_APP_INSTALLATION_ID_ENV];
+  const keyPath = opts.privateKeyPath ?? env[GH_APP_PRIVATE_KEY_PATH_ENV];
+
+  if (!appId || !installationId || !keyPath) {
+    // Not installed on this host (yet) — not an attempt, so no ledger noise. See file header.
+    return { ok: false, reason: "app not configured" };
+  }
+
+  let privateKeyPem: string;
+  try {
+    privateKeyPem = readKey(keyPath);
+  } catch {
+    log("github_app.token_refresh_failed", { reason: "private key unreadable" });
+    return { ok: false, reason: "private key unreadable" };
+  }
+
+  let jwt: string;
+  try {
+    jwt = signAppJwt(appId, privateKeyPem, now);
+  } catch {
+    log("github_app.token_refresh_failed", { reason: "jwt signing failed" });
+    return { ok: false, reason: "jwt signing failed" };
+  }
+
+  let res: Response;
+  try {
+    res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+  } catch {
+    log("github_app.token_refresh_failed", { reason: "exchange request failed" });
+    return { ok: false, reason: "exchange request failed" };
+  }
+
+  if (!res.ok) {
+    // design (v): a 403 here reads exactly like a missing-scope rejection, not the rate limit
+    // this whole task exists to route around — naming the status keeps the two from being
+    // confused again the way this incident already confused them once.
+    log("github_app.token_refresh_failed", { reason: `exchange rejected: ${res.status}` });
+    return { ok: false, reason: `exchange rejected: ${res.status}` };
+  }
+
+  let body: { token?: string; expires_at?: string };
+  try {
+    body = (await res.json()) as { token?: string; expires_at?: string };
+  } catch {
+    log("github_app.token_refresh_failed", { reason: "exchange response unparsable" });
+    return { ok: false, reason: "exchange response unparsable" };
+  }
+
+  if (!body.token || !body.expires_at) {
+    log("github_app.token_refresh_failed", { reason: "exchange response missing token" });
+    return { ok: false, reason: "exchange response missing token" };
+  }
+
+  const parsedExpiry = Date.parse(body.expires_at);
+  const expiresAtMs = Number.isFinite(parsedExpiry) ? parsedExpiry : now() + INSTALLATION_TOKEN_LIFETIME_MS;
+
+  // THE SEAM (file header): every existing GH_TOKEN consumer reads process.env at call/spawn
+  // time, so this line — and only this line — is what reaches all three with no call-site change.
+  env.GH_TOKEN = body.token;
+  log("github_app.token_refreshed", { installation_id: installationId, expires_at: body.expires_at });
+  return { ok: true, expiresAtMs };
+}
+
+/**
+ * Delay, in ms, until the NEXT refresh should fire — strictly inside the token's remaining life
+ * (design i), never at or past its expiry. Clamped at zero so an already-stale `expiresAtMs`
+ * (e.g. a clock jump) schedules an immediate retry rather than a negative delay.
+ */
+export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()): number {
+  return Math.max(0, expiresAtMs - REFRESH_MARGIN_MS - now);
+}
+
+/**
+ * Start the daemon's own installation-token refresh loop, and report whether it armed.
+ *
+ * EXTRACTED FROM `daemonCommand` SO THE LOOP IS TESTABLE AT ALL. Inline at the call site the whole
+ * body sat behind a three-variable env gate that no test sets, so every line of it was added
+ * source with zero covering tests — `diff-coverage` blocked the PR naming exactly those lines. The
+ * gate itself is the only part a daemon-boot test can reach, so the body has to move somewhere a
+ * test can call directly; the call site keeps one line and the behaviour is unchanged.
+ *
+ * GATED ON CONFIG PRESENCE, as before: an unconfigured host (the App not installed there yet) is
+ * byte-identical to before this task — zero ledger lines, zero timers, `GH_TOKEN`'s own optional
+ * shape preserved — and `armed: false` says so to the caller rather than silently doing nothing.
+ *
+ * Every seam is injectable and defaults to the real thing, so a test drives the reschedule
+ * arithmetic without a network call or a live timer: `refresh` mints, `setTimer` schedules, `now`
+ * stamps. `setTimer` returns the timer so the caller can `unref` it — an armed refresher must
+ * never hold the process open.
+ */
+export function startInstallationTokenRefresh(opts: {
+  log: RefreshOptions["log"];
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  refresh?: (o: RefreshOptions) => Promise<RefreshResult>;
+  setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
+  now?: () => number;
+}): { armed: boolean } {
+  const env = opts.env ?? process.env;
+  if (!env[GH_APP_ID_ENV] || !env[GH_APP_INSTALLATION_ID_ENV] || !env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
+    return { armed: false };
+  }
+  const refresh = opts.refresh ?? refreshInstallationToken;
+  const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const now = opts.now ?? Date.now;
+  const tick = (): void => {
+    void refresh({ log: opts.log }).then((result) => {
+      // A FAILED MINT STILL RESCHEDULES (design iv: degrade, never refuse) — a transient outage
+      // keeps retrying on the margin rather than going silent.
+      const delay =
+        result.ok && result.expiresAtMs !== undefined ? nextRefreshDelayMs(result.expiresAtMs, now()) : REFRESH_MARGIN_MS;
+      const timer = setTimer(tick, delay);
+      timer.unref?.();
+    });
+  };
+  tick();
+  return { armed: true };
+}
