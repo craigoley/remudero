@@ -503,6 +503,12 @@ import {
 import { buildReceipt } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision } from "./lib/auto-triage.js";
+import {
+  checkGithubPosture,
+  readGithubPosture,
+  type GithubPostureFinding,
+  type GithubPostureGateway,
+} from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
@@ -11220,6 +11226,52 @@ export function buildRetroDaemonHooks(deps: {
 }
 
 /**
+ * W1-T1040: THE GITHUB-SIDE POSTURE DRIFT CHECK'S GATEWAY FACTORY — turns the injected
+ * predicate `github-posture.ts` offers (its own `checkGithubPosture`, cadence-gated and
+ * baseline-diffed but agnostic to WHERE the read/state live) into a live REST read for THIS
+ * repo, beside `costGovernorGateFor`/`queueGovernorGateFor` above (the same "gateway factory"
+ * shape those two already use, per this task's own `files:` note on why `run-task.ts` is
+ * declared rather than split, DECISIONS.md's 2026-08-18 W1-T471 ruling).
+ *
+ * `readGithubPosture` IS CALLED HERE, EXPLICITLY, rather than only living behind
+ * `checkGithubPosture`'s own default — this is the literal call site the task's `call-site`
+ * acceptance criterion (grep: `readGithubPosture(` in this file) exists to force: a module that
+ * is built and unit-tested but never reached from production wiring is indistinguishable from
+ * dead code (task's own "Eleven modules have merged green and unreached" note).
+ */
+export function githubPostureCheck(
+  now: Date = new Date(),
+  deps: { config?: Config; gateway?: GithubPostureGateway; branch?: string } = {},
+): GithubPostureFinding[] {
+  const config = deps.config ?? loadConfig();
+  const { owner, repo } = resolveOwnerRepo();
+  return checkGithubPosture({
+    owner,
+    repo,
+    configRoot: config.root,
+    now,
+    branch: deps.branch,
+    read: (o, r, opts) => readGithubPosture(o, r, { gateway: deps.gateway ?? opts.gateway, branch: opts.branch }),
+  });
+}
+
+/**
+ * Builds `DaemonDeps.checkGithubPosture` — mirrors {@link buildRetroDaemonHooks}/
+ * {@link buildAutoTriageDaemonHooks} exactly: the hook BODY (the `githubPostureCheck`
+ * delegation) is unit-testable in isolation via an injected `check`, leaving `daemonCommand`'s
+ * own `DaemonDeps` literal holding only a covered property reference.
+ */
+export function buildGithubPostureDaemonHooks(deps: {
+  check?: () => GithubPostureFinding[];
+  config?: Config;
+  now?: () => Date;
+  gateway?: GithubPostureGateway;
+} = {}): { checkGithubPosture: () => GithubPostureFinding[] } {
+  const check = deps.check ?? (() => githubPostureCheck(deps.now?.() ?? new Date(), { config: deps.config, gateway: deps.gateway }));
+  return { checkGithubPosture: () => check() };
+}
+
+/**
  * W1-T322 (design (iii)): the RETRO-TIME consumer of the SAME reachability scan the review path
  * uses — MASTER-PLAN's own NET STATE section, re-checked against the CURRENT mainline checkout
  * (`repoRoot`, never a PR diff). Returns the report section to concatenate, or `""`.
@@ -14258,6 +14310,11 @@ export async function daemonCommand(
   // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
   // exactly how #1066 merged: consumer wired, producer never.
   const autoTriageHooks = target.isSelf ? buildAutoTriageDaemonHooks({ config }) : undefined;
+  // W1-T1040: the GitHub-side posture drift check. SELF-TARGET ONLY, same reason retro/auto-triage
+  // are — the baseline (state/github-posture.json) lives under THIS process's `config.root`, never
+  // a drained target's, so wiring it for a non-self target would either read the wrong repo's
+  // posture into the wrong repo's baseline or silently do nothing useful.
+  const githubPostureHooks = target.isSelf ? buildGithubPostureDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -14451,6 +14508,12 @@ export async function daemonCommand(
         // makes the switch REACHABLE, it does not turn anything on.
         checkAutoTriage: autoTriageHooks?.checkAutoTriage,
         runAutoTriage: autoTriageHooks?.runAutoTriage,
+        // W1-T1040: THE GITHUB-SIDE POSTURE DRIFT CHECK — reads `security_and_analysis` +
+        // `enforce_admins` at most once a day (github-posture.ts's own cadence gate), diffs
+        // against the recorded state/github-posture.json baseline, and returns only what
+        // changed. Best-effort like sweep/sweepOrphans above — `lib/daemon.ts`'s loop logs each
+        // finding and never gates dispatch on it (see that call site's own comment).
+        checkGithubPosture: githubPostureHooks?.checkGithubPosture,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
