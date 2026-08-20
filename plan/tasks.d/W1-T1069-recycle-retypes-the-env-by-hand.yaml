@@ -1,0 +1,146 @@
+- id: W1-T1069
+  title: "`deploy/recycle-container.sh` CAPTURES ONE ENV VAR AND RETYPES THE REST FROM A HARDCODED LIST, SO EVERY NEW RUNTIME VARIABLE MUST BE REMEMBERED BY HAND AND FORGETTING ONE IS SILENT — a recycle today would have dropped four of six and the fleet would have fallen back to the static PAT without a row saying so; `host-update.sh --print-daemon-run` prints the same two and has the same defect in a different shape"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-20 ON THE AZURE HOST `Remudero` (Linux 6.17.0-1022-azure), bash 5.2.21, from a
+    scratch worktree at origin/main 2d8e9a8c. Read-only: `docker inspect` and `docker image inspect`
+    only, no container touched, no env VALUE printed at any point — names only.
+
+    (1) THE DRIFT IS REAL AND IT IS FOUR OF SIX. `deploy/recycle-container.sh`'s `docker run` passes
+    exactly two variables: `-e GH_TOKEN` and `-e RMD_RESTART_THROTTLE_S`. The running container
+    carries six runtime variables — those two plus `RMD_FRESHNESS_RESTART_MAX`, `GH_APP_ID`,
+    `GH_APP_INSTALLATION_ID` and `GH_APP_PRIVATE_KEY_PATH`. A recycle would therefore have dropped
+    four. THE CONSEQUENCE IS SILENT BY DESIGN: `startInstallationTokenRefresh`
+    (`src/lib/github-app.ts`) returns `{ armed: false }` and writes NO ledger row when its three
+    `GH_APP_*` variables are absent, because an unconfigured host is deliberately byte-identical to
+    before that feature existed. So the fleet would have reverted to the shared-pool PAT with
+    nothing anywhere recording that it had.
+
+    (2) AND ONLY ONE OF THE TWO IS ACTUALLY CAPTURED — THE OTHER IS RE-READ FROM THE OPERATOR'S OWN
+    SHELL. `GH_TOKEN` is captured from the container (`docker inspect ... | sed -n
+    's/^GH_TOKEN=//p'`). `RMD_RESTART_THROTTLE_S` is passed as `"${RMD_RESTART_THROTTLE_S:-}"`,
+    which reads the INVOKING shell and silently substitutes empty when unset. So the count of
+    variables genuinely preserved across a recycle is ONE, not two.
+
+    (3) THE NARROWNESS IS INCIDENTAL, NOT REASONED, AND THE DATES PROVE IT. Section 3's own
+    rationale is a CLASS argument, not a GH_TOKEN argument: *"reads GH_TOKEN from the ENVIRONMENT at
+    call time and writes it nowhere on disk, by design — so once the container that carries it is
+    gone, an operator is the only way to get it back."* That applies verbatim to every runtime-set
+    variable. It names only `GH_TOKEN` because when it was written `GH_TOKEN` was the only one:
+    section 3 landed in #2190 on 2026-08-19, and `GH_APP_ID` first appears anywhere in `src/` or
+    `deploy/` in #2294 on 2026-08-20 — THE NEXT DAY. The author did not consider and exclude the
+    others; they did not exist yet.
+
+    (4) THE IMAGE/RUNTIME SUBTRACTION IS SOUND, AND IT WAS RUN AGAINST THE LIVE PAIR RATHER THAN
+    ASSUMED. `docker image inspect --format '{{json .Config.Env}}'` returns exactly five names —
+    `PATH`, `NODE_VERSION`, `YARN_VERSION`, `HOME`, `DISABLE_AUTOUPDATER` — and the container
+    returns those five plus precisely the six runtime variables of (1). The difference is the
+    runtime set, with nothing spurious on either side. RE-PASSING THE IMAGE'S OWN FIVE WOULD BE THE
+    BUG THIS SCRIPT EXISTS TO PREVENT: pinning a stale `PATH` or `NODE_VERSION` across an image
+    upgrade is exactly the "you did not get the new build" class the pull-failure refusal already
+    guards.
+
+    (5) BUT THE SUBTRACTION HAS THREE KNOWN BLIND SPOTS, AND AN IMPLEMENTER MUST HANDLE THE FIRST.
+      - A RUNTIME VALUE THAT SHADOWS AN IMAGE NAME IS INVISIBLE TO A NAME-ONLY DIFF. `-e HOME=/other`
+        leaves `HOME` present in both sets, so a name-based subtraction drops the override and the
+        recycle silently reverts it. The rule must therefore be: preserve a variable when its NAME is
+        absent from the image env, OR its VALUE differs from the image's. Comparing values requires
+        no printing of them.
+      - `.Config.Env` IS THE CONFIGURED ENV, NOT THE PROCESS ENV. A variable exported by
+        `deploy/entrypoint.sh` inside the container never appears there and cannot be recovered this
+        way. That is a real limit of the mechanism and must be stated, not silently assumed away.
+      - THE `{{println}}` FORM EMITS A TRAILING EMPTY ELEMENT, which a naive parse turns into an
+        empty variable name. Both live reads above showed it.
+
+    (6) AND `deploy/host-update.sh --print-daemon-run` CARRIES THE SAME DEFECT IN A DIFFERENT SHAPE.
+    It prints an invocation containing `-e GH_TOKEN="$GH_TOKEN"` and
+    `-e RMD_RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-}"` and nothing else. A printed command
+    that silently omits four variables hands an operator a recipe for the same outage, and it is
+    WORSE in one respect: the operator reasonably trusts a printed command more than a remembered
+    one.
+  design: |
+    (i) ONE DECLARED LIST OF RUNTIME VARIABLE NAMES, CONSUMED BY BOTH SCRIPTS. The names — not the
+    values — are the thing that keeps drifting, so they become data in ONE place that both
+    `recycle-container.sh` and `host-update.sh` read. This is what makes "forgetting one" impossible
+    rather than merely unlikely, and it is why a shared helper alone is not enough (see (iii)).
+
+    (ii) THE SUBTRACTION BECOMES A DRIFT CHECK, NOT THE SOURCE OF TRUTH. Deriving the list purely by
+    subtraction at run time would make the recycle's behaviour depend on whatever happens to be set
+    on the box, which is unauditable and cannot be tested. Instead: the declared list is the source,
+    and the subtraction is run against it as an ASSERTION — a runtime variable present on the
+    container but ABSENT from the declared list must make the recycle REFUSE and name the variable,
+    in the same voice as the four refusals the file already treats as its deliverable. That converts
+    the silent drop into a loud stop, which is this task's actual point.
+
+    (iii) ONE FIX DOES NOT FULLY SERVE BOTH, AND THE REASON IS STRUCTURAL. `recycle-container.sh`
+    runs WITH the live container present, so it can capture each declared variable's value from it.
+    `host-update.sh --print-daemon-run` PRINTS a command and may legitimately run when no container
+    exists (a fresh host, or after a removal), so it has nothing to capture from. The DECLARED LIST
+    is therefore shared; the SOURCE is not. The printer emits `-e NAME="$NAME"` passthroughs for
+    every declared name — preserving the existing shape, which already does exactly this for
+    `GH_TOKEN` — so an operator's shell supplies the values and the printed command stops omitting
+    four of them.
+
+    (iv) DO NOT WRITE THE ENV TO DISK. The token is deliberately never persisted
+    (`deploy/entrypoint.sh`), and that ruling stands. A declared list of NAMES is not a persisted
+    value and does not touch it; nothing in this task may add a values file, a dotenv, or a
+    state-directory copy.
+
+    (v) FIX THE HALF-CAPTURE FROM RATIONALE (2) WHILE HERE. `RMD_RESTART_THROTTLE_S` should be
+    captured from the container like `GH_TOKEN`, falling back to the invoking shell only when no
+    container exists — the same two-source shape section 3 already implements. Silently substituting
+    empty from an operator's shell is the same silent-drop defect at one remove.
+
+    (vi) OUT OF SCOPE, NAMED. No change to the four existing refusals, to the pause/wait ordering, or
+    to the image-digest verification — those are the file's deliverable and are correct. No change to
+    `startInstallationTokenRefresh`'s silent `armed: false` on an unconfigured host: that is
+    deliberate, and W1-T1068 already files the refresher's own silent-death paths. This task stops
+    the variables from going missing; it does not change what happens when they legitimately are.
+  acceptance:
+    - claim: "a runtime variable on the container that no declared name covers makes the recycle refuse and name it"
+      proof: "unit test: W1-T1069: an undeclared runtime variable makes the recycle refuse and name it"
+    - claim: "the image's own variables are not re-passed so an upgrade is not pinned to stale values"
+      proof: "unit test: W1-T1069: image-supplied variables are not re-passed by the recycle"
+    - claim: "a runtime value that shadows an image name is preserved rather than dropped"
+      proof: "unit test: W1-T1069: a runtime value shadowing an image name is preserved"
+    - claim: "the printed daemon run carries every declared variable rather than only two"
+      proof: "unit test: W1-T1069: the printed daemon run carries every declared variable"
+    - claim: "both scripts read the declared names from one place so they cannot drift apart"
+      proof: "unit test: W1-T1069: both scripts read the same declared name list"
+    - claim: "the throttle variable is captured from the container rather than retyped from the shell"
+      proof: "unit test: W1-T1069: the throttle variable is captured from the container"
+  origin: "recon#recycle-retypes-the-env-2026-08-20"
+  plan_refs: ["W1-T1024", "W1-T1068"]
+  files: [deploy/recycle-container.sh, deploy/host-update.sh, test/recycle-container.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads three
+    concerns here — daemon, host-update, recycle-container — and refuses that at medium.
+    DECOMPOSITION IS DECLINED WITH A REASON, and the reason is the defect itself: the whole fix is
+    ONE declared list of names that BOTH scripts read, so splitting it into one task per script
+    ships two lists that can drift apart — which is precisely the failure being closed. The blast
+    radius of the diff is a name list, two call sites that consume it, and one refusal.
+
+    `test/recycle-container.test.ts` IS THE EXISTING HOME and is declared rather than a new file, so
+    `subsystemsOf` reads one concern and not two — the same choice W1-T1068 made after `lint-plan`
+    refused a second test filename as a second concern.
+
+    `deploy/host-update.sh` IS DECLARED BECAUSE IT IS EDITED, not defensively: rationale (6) is a
+    change to its printed output, and design (iii) explains why that change cannot be folded into
+    the recycle script alone.
+
+    BOTH BAKED-PATH SCRIPTS ARE UNDER `deploy/`, SO THIS SHIPS ONLY ON A REBUILD. `deploy/Dockerfile`
+    COPYs the repo into the image, so an implementer must expect the image-drift rule to apply and
+    must NOT assume a merge takes effect on the next freshness restart the way a `src/` change does.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the passed set with `grep -n '\-e [A-Z_]*=' on both
+    scripts; re-derive the runtime set with `docker image inspect --format '{{json .Config.Env}}'`
+    subtracted from the container's, reading NAMES only and never printing a value; re-derive the
+    provenance with `git log -1 -S` on each of the two symbols named in rationale (3).
