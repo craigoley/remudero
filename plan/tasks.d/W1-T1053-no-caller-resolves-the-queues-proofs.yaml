@@ -1,0 +1,126 @@
+- id: W1-T1053
+  title: "NOTHING RESOLVES THE QUEUE'S PROOFS AGAINST THE FILESYSTEM, so a queued task whose proof resolves to ZERO tests is indistinguishable from one that will pass — W1-T229 sat queued 13 days that way and was caught by hand; the resolver-backed check merged and has no whole-queue caller, so give it one as a REPORT that exits 0"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "THE WITNESS IS IN THE PLAN, VERBATIM. W1-T229 (plan/tasks.yaml, withdrawal record) carried
+    both criteria on the proof `unit test: case added to test/review.test.ts`, and its own withdrawal note
+    records what `rmd check-proof` says about it: `parse: OK - kind=test (name-filtered)`,
+    `candidates: absent`, `verdict: no-match - the executor fast-fails here and never spawns node`. The
+    task was UNFALSIFIABLE as written — a dispatched run could have implemented it perfectly and still
+    posted CAPPED at `proof_exec: 0/2`, whoever ran it. It was withdrawn by hand inspection, not by any
+    instrument.
+    THE DETECTOR EXISTS, IS CORRECT, AND HAS NO WHOLE-QUEUE CALLER. `proofNameResolutionViolations`
+    (src/lib/task-linter.ts, W1-T488/#1821) calls the reviewer's OWN `resolveNameFilteredCandidates`
+    (src/lib/review.ts) — never a reimplementation — and warns exactly on a name-filtered `unit test:`
+    proof that resolves to ZERO tests. Its first statement returns `[]` when `opts.resolveNameFilteredCandidates`
+    is absent, and NO production call site supplies it. W1-T497's three independent measurements at 0a1179a
+    stand as the recon this feedback asked for and are NOT re-derived here: `rmd lint-plan` emits 598
+    warnings and zero of them are `proof-name-resolution`; driving `lintTask` over the real plan with the
+    reviewer's resolver bound moves that label from 0 to 19, invoking the resolver 320 times for 68 resolved
+    and 252 absent.
+    SO THE FALSIFIER THIS ENTRY SET IS ALREADY ANSWERED, AGAINST THE PLAN'S OWN NUMBERS. The entry said: if
+    fewer than a handful of queued tasks carry unresolvable proofs, W1-T229 was an isolated authoring error
+    and a report is not worth building. NINETEEN is not a handful, and all 320 name-filtered proofs are on
+    OPEN tasks (W1-T492's own count). The class is live and it is queue-shaped.
+    WHAT THE EXISTING INSTRUMENTS DO AND DO NOT COVER, so this is not re-filed as new later.
+    (1) W1-T369 SHIPPED a proof-debt ratchet over exactly this population (open + unmerged + verify:auto)
+    with `PROOF_DEBT_CEILING = 0` — but it counts BLOCKING `proof-dialect`/`proof-resolvability`
+    violations, which are SHAPE checks, and its own live-plan test says in as many words that it does not
+    assert filesystem existence for the population because a forward-referencing PATH proof is legitimate.
+    W1-T229's proof PARSES and is shape-clean. The ratchet reads zero on it.
+    (2) W1-T497 (queued) wires the resolver at `lintPlanCommand`'s `--base` changed-tasks pass and rules
+    whole-plan coverage OUT of scope with a measured reason: 66.4 s over 320 proofs against a job ci.yml
+    calls cheap pure JS. That ruling is CORRECT and is not reopened — it protects a required check. But
+    changed-tasks scope can only ever see a task a PR is already touching, so the 19 sitting in the queue
+    are invisible to it forever. THIS TASK IS THAT EXCLUDED HALF, off the PR path, and it does not
+    duplicate the wiring or wait on it.
+    (3) W1-T358 (queued) wires `planHealthSweep` into the retro gather, which does re-grade every OPEN task
+    — but the sweep is documented PURE, no I/O, and resolution requires shelling out. It cannot host this.
+    (4) W1-T305 makes unexecutability loud at REVIEW time, after the budget is spent. This is the same
+    fact one dispatch earlier, while it is still free."
+  design: |
+    A REPORT, NOT A GATE — AND THAT IS THE LOAD-BEARING HALF, NOT A HEDGE.
+    (i) EXIT 0 ALWAYS. No dispatch path, no CI job and no arm decision may consult this verdict, and the
+    implementing PR must say so in its body. The repo already has the idiom and the reason: `src/lib/emissions.ts`
+    ("IT IS A REPORT, NOT A GATE, and that is a decision rather than an omission") and `src/lib/host-parity.ts`
+    ("it is a report, not a gate, and it exits 0 either way"). Gating today would stop the queue outright
+    against a standing population of pre-existing violations, and a gate that produces false positives gets
+    deleted within a week. If the count is later driven to a floor, a ratchet over THIS report is a separate,
+    ratified filing — the shape W1-T369 already established — and must not be smuggled in here.
+    (ii) SCOPE: OPEN AND UNMERGED ONLY. The population is the one that can still be dispatched — status not
+    blocked/merged/done, and no merge evidence. Do not re-derive that line by hand: `classifyFailingMergeEvidence`
+    + `defaultMergeEvidenceLog` (src/run-task.ts) are the offline, no-network readers `lint-plan`'s own
+    whole-plan split uses, and test/plan-proof-debt.test.ts's `deriveProofDebtPopulation` is the worked
+    example. FAIL OPEN on a shallow checkout, the same posture `lintPlanCommand` and that test already take.
+    (iii) A FORWARD REFERENCE STAYS LEGITIMATE, AND THIS IS THE ONE WAY THE REPORT CAN BE WRONG ENOUGH TO
+    BE DELETED. For an unimplemented task the named test does not exist yet (CLAUDE.md). A whole-file path
+    proof `unit test: test/foo.test.ts` naming a file not yet on disk MUST NOT be reported, ever. What IS
+    reported is the class that can never resolve for anyone: a name-filtered title matching zero tests
+    (W1-T229's shape), a `grep:` proof whose `in <path>` names a path that does not exist, and a proof that
+    does not parse as a dialect at all.
+    (iv) SPLIT THE COUNT BY CAUSE, and print the offending ids. Refused-parse, name-filtered-zero-match,
+    grep-path-absent — W1-T305's split, applied one dispatch earlier. A single undifferentiated number
+    lands in the 598-warning stream nobody demonstrably reads; a per-cause list with ids is actionable and
+    batchable per class, which is the bulk-fix rule CLAUDE.md and W1-T358 (ii) both already state.
+    (v) THE REVIEWER'S OWN PARSER AND RESOLVER, CALLED DIRECTLY — `parseWhitelistedProof` and
+    `resolveNameFilteredCandidates` (src/lib/review.ts), never a second hand-rolled resolution. The whole
+    defect class is a report disagreeing with what actually executes.
+    (vi) IT MUST HAVE A CALLER IN THE SAME CHANGESET. This mechanism's own history is three checks that
+    merged green and never executed (W1-T488 dormant, W1-T322, W1-T1019). Ship the pure classifier in its
+    own module and REGISTER THE VERB in the same PR; `src/run-task.ts` is declared for that reason and for
+    no other. The measured 66.4 s is acceptable for an on-demand local verb and is the reason it goes
+    nowhere near the PR path — state the cost the run actually observes in the PR body.
+    NOT IN SCOPE, DELIBERATELY: W1-T497's changed-tasks wiring (independent, and this does not wait on it);
+    promoting `proof-name-resolution` above `warn`; rewriting any task's proofs (W1-T369/W1-T370 own that);
+    the 598-warning stream; and any ratchet, ceiling or exit code derived from this report.
+  acceptance:
+    - claim: "the audit resolves every open, unmerged task's proofs through the reviewer's own parser and resolver and reports a count plus the offending task ids, split by cause"
+      proof: "unit test: test/proof-queue-audit.test.ts"
+    - claim: "a whole-file path proof naming a test file that does not exist yet is NOT reported, so a legitimate forward reference stays legitimate"
+      proof: "unit test: test/proof-queue-audit.test.ts"
+    - claim: "a name-filtered proof matching zero tests and a grep proof whose path is absent are both reported, in the shape W1-T229 carried"
+      proof: "unit test: test/proof-queue-audit.test.ts"
+    - claim: "the audit exits 0 over a plan full of offenders — it is a report, never a gate"
+      proof: "unit test: test/proof-queue-audit.test.ts"
+    - claim: "the report has a real caller rather than shipping dormant like the check it consumes"
+      proof: "grep: proofQueueAudit( in src/run-task.ts"
+  risk: high
+  origin: feedback#fb-1785794082507-130558
+  plan_refs: ["W1-T488", "W1-T497", "W1-T369", "W1-T358", "W1-T305", "§5C"]
+  files: [src/lib/proof-queue-audit.ts, src/run-task.ts, test/proof-queue-audit.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT — Rule 19 SPAN across src/ and test/, which `sizingViolation`
+    (src/lib/task-linter.ts) blocks below that band. The blast radius argues LOWER: a new read-only verb
+    that exits 0 on every input and that no dispatch, CI or arm path reads. The span is the reason, and it
+    is stated rather than dodged by splitting — a shard that omitted the call site would reproduce the exact
+    dormancy this task exists to end (design (vi)).
+    verify:auto — the classifier is pure over a loaded plan plus an injected resolver, so both directions
+    are assertable against fixtures; the live-plan pass fails open on a shallow checkout exactly as
+    test/plan-proof-debt.test.ts already does.
+    src/run-task.ts IS DECLARED AND WILL BE TOUCHED — the verb registration has nowhere else to live. THE
+    COST IS ACCEPTED, NOT HIDDEN: at ~19,900 lines it serialises this task against every other task naming
+    it (`partitionByFileOverlap`, W1-T471), W1-T492 and W1-T497 among them. That is the honest price of
+    landing with a caller.
+    THE NEW MODULE IS ITS OWN FILE rather than an append to task-linter.ts: that module is documented PURE
+    (no fs, no exec) and this audit shells out through the resolver, so hosting it there would break the
+    contract three other checks depend on.
+    PROOFS: four pure-path `unit test:` forms against the suite this task creates — the path form parses now
+    and executes the whole file once it exists, and a title invented here would resolve to zero, which is
+    the very defect being filed. The single `grep:` proof names the wiring, the one claim a unit test over
+    the classifier cannot make on its own. Both declared paths are inside `files:`, so `proof-scope` is
+    silent.
+    NO depends_on. W1-T497 wires the same resolver at the changed-tasks pass; neither blocks the other, and
+    if W1-T497 lands first this task's classifier can reuse nothing from it — the call sites are disjoint by
+    design (design (ii) of that shard).
+    THE THREE-ENTRY CONVERGENCE, RULED AND RECORDED so a fourth session does not re-file it as one
+    instrument. W1-T309's defect is a proof that EXECUTED AND PASSED while certifying a seam the shipped
+    command never reaches — the opposite failure, and no resolver can see it. fb-1785792135748-755f93 was
+    TRIAGED AND REJECTED (both criteria paths call the same parser on the same input). Only this entry's
+    class — a proof that resolves to NOTHING looking identical to one that resolves to something passing —
+    is covered here. One instrument does not cover all three, and claiming it would be the same
+    unfalsifiable move this task exists to catch."
