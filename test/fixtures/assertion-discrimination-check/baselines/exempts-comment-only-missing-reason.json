@@ -1,0 +1,10 @@
+{
+  "_comment": "Fixture: exempts the cases-comment-only finding WITHOUT a reason field -- must be REJECTED at load time so the exemption list cannot grow silently.",
+  "exemptions": [
+    {
+      "testFile": "cases-comment-only/site.fixture.ts",
+      "target": "targets/comment-only.yml",
+      "literal": "TOTALLY-UNIQUE-LITERAL-A"
+    }
+  ]
+}

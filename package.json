@@ -35,6 +35,7 @@
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
     "jscpd": "jscpd src --config .jscpd.json",
     "claims": "node scripts/claims-check.mjs",
+    "assertion-discrimination": "node scripts/assertion-discrimination-check.mjs",
     "learnings-index": "node scripts/generate-learnings-index.mjs",
     "learnings-index:check": "node scripts/generate-learnings-index.mjs --check",
     "plan-index": "node scripts/generate-plan-index.mjs",

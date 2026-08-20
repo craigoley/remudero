@@ -536,6 +536,47 @@ jobs:
       - name: Plan claims (every plan/claims.yaml assertion must exit 0)
         run: npm run --silent claims
 
+  assertion-discrimination:
+    # ASSERTION-DISCRIMINATION gate (W1-T1051). A test can assert that a literal string appears
+    # in the RAW text of a repo file while the literal is satisfiable only by a COMMENT next to
+    # the mechanism the test claims to pin -- the mechanism can go dead and the assertion still
+    # passes, because the string is still written down somewhere. That is exactly how a CI wait
+    # that should have blocked ~5 minutes on an apt lock instead returned in ~1 second and
+    # shipped green: the test pinned the literal `flock`, which was present only because the
+    # step's own comment named the tool it called. Mutation testing cannot see this class --
+    # it mutates SOURCE, this defect lives in a TEST asserting against a non-source file, and
+    # `test/**` is never a mutation target (see stryker.conf.json / mutation-nightly-scope.json).
+    #
+    # scripts/assertion-discrimination-check.mjs strips comments from the target a variable-bound
+    # readFileSync/readFile call statically resolves to (a real repo path, never a per-test
+    # tmpdir) and re-evaluates the same literal against the stripped copy: present in raw text
+    # but absent once stripped means the assertion is satisfiable by a comment alone. Findings
+    # are checked against scripts/assertion-discrimination-baseline.json, whose every entry must
+    # carry a written reason -- an entry without one is rejected at load time. Falsifier fixture
+    # suite lives in test/assertion-discrimination-check.test.ts, driving the real CLI as a
+    # subprocess.
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:` beyond the PR-only gate
+    # below) -- same reasoning as `claims`/`lint-plan`/`depcruise`/`jscpd-gate` above: a
+    # path-filtered REQUIRED check that can go silently absent is the synthwatch #102 deadlock
+    # class ci-gate.yml exists to avoid, and a dead-guard test can be introduced by a change
+    # anywhere in the tree, not just under test/.
+    name: assertion-discrimination
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Assertion discrimination (comment-stripped re-evaluation of raw-text assertions)
+        run: npm run --silent assertion-discrimination
+
   lint-plan:
     # §5C Layer A (W1-T20c) — the CI half of the deterministic task linter. Runs
     # UNCONDITIONALLY on every PR (no path filter) so it always registers a check
