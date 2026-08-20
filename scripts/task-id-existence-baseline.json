@@ -1,0 +1,34 @@
+[
+  {
+    "id": "W1-T199",
+    "reason": "Pre-allocator (before W1-T509) task, filed and completed; its plan record was compacted away after merging. src/lib/task-id-reservation.ts's phantom-id-trap comment names it alongside W1-T224/W1-T247/W1-T263 as one of the four ids this repo already lost that way -- see plan/tasks.d/W1-T278-task-id-from-plan-history.yaml for the documented phenomenon (\"absent from every source the minter consults\")."
+  },
+  {
+    "id": "W1-T224",
+    "reason": "Pre-allocator (before W1-T509) task, filed and completed; its plan record was compacted away after merging. src/lib/task-id-reservation.ts's phantom-id-trap comment names it alongside W1-T199/W1-T247/W1-T263 as one of the four ids this repo already lost that way -- see plan/tasks.d/W1-T278-task-id-from-plan-history.yaml for the documented phenomenon."
+  },
+  {
+    "id": "W1-T247",
+    "reason": "Pre-allocator (before W1-T509) task, filed and completed; its plan record was compacted away after merging. src/lib/task-id-reservation.ts's phantom-id-trap comment names it alongside W1-T199/W1-T224/W1-T263 as one of the four ids this repo already lost that way -- see plan/tasks.d/W1-T278-task-id-from-plan-history.yaml for the documented phenomenon."
+  },
+  {
+    "id": "W1-T263",
+    "reason": "Pre-allocator (before W1-T509) task, filed and completed; its plan record was compacted away after merging. src/lib/task-id-reservation.ts's phantom-id-trap comment names it alongside W1-T199/W1-T224/W1-T247 as one of the four ids this repo already lost that way -- see plan/tasks.d/W1-T278-task-id-from-plan-history.yaml for the documented phenomenon."
+  },
+  {
+    "id": "W1-T385",
+    "reason": "Pre-allocator (before W1-T509) task, cited in src/lib/review.ts and src/run-task.ts as a completed piece of work (\"Until W1-T385 NOTHING IN THE TREE SET THIS FIELD\"); its plan record was compacted away after merging, the same phenomenon plan/tasks.d/W1-T278-task-id-from-plan-history.yaml documents for its low-numbered siblings."
+  },
+  {
+    "id": "W1-T919",
+    "reason": "Completed task ruled on by DECISIONS.md's 2026-08-16 entry (\"the fleet gates on irreversibility, not outwardness\", commit c5821966) and cited in src/lib/review.ts / src/lib/sweep.ts; its plan record was compacted away after merging, the same phenomenon plan/tasks.d/W1-T278-task-id-from-plan-history.yaml documents."
+  },
+  {
+    "id": "W1-T9",
+    "reason": "Pre-schema bootstrap task, never itself declared with an `- id:` record. plan/tasks.yaml's own comment above W1-T9a says it plainly: \"W1-T9 was decomposed into W1-T9a/b/c (over-scoped ... died error_max_turns at 81 turns)\" -- src/run-task.ts:5890 and src/lib/task-linter.ts:21 both cite it as one of the three malformed pre-schema tasks (W1-T6, W1-T9, W1-T12) that motivated the linter existing at all. It was retired in place, not filed, so it never held a plan record or a reservation ref and never will."
+  },
+  {
+    "id": "W1-T12",
+    "reason": "Pre-schema bootstrap task (\"Daemonize\"), retired without ever getting its own `- id:` plan record. src/lib/daemon.ts:4 says it plainly: \"W1-T12 (Daemonize) was split along the machine/human boundary (DIAGNOSIS.md, Rule 16)\" into W1-T12a/b/c; src/run-task.ts:5890 and src/lib/task-linter.ts:21 cite it alongside W1-T6/W1-T9 as one of the three malformed pre-schema tasks that motivated the task linter. It was retired in place, not filed, so it never held a plan record or a reservation ref and never will."
+  }
+]
