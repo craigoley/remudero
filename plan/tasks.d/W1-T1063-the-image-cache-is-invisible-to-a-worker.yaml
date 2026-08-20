@@ -49,19 +49,21 @@
     must not silently turn a worker's install into a write against the shared cache — the design
     below states what happens when the pinned build is absent.
 
-    (5) THE SAVING IS REAL AND IT IS NOT THE MAJORITY, WHICH THE PREMISE OVERSTATED. Measured inside
-    a real worker home: the browser cache is the LARGEST SINGLE ITEM in it, larger than any other
-    directory — but the toolchain caches beside it (`.rustup`, `.npm`, `.cargo`) together exceed it.
-    So granting the cache removes the biggest single component of a home and does NOT remove most of
-    a home. Anyone reading this as the whole disk fix will be disappointed; it is the largest single
-    piece of it, and the toolchain caches are a separate question this task does not open.
+    (5) THE SAVING IS THE BULK OF A WORKER HOME, AND THE FIGURE IS CONTAINER-MEASURED. MEASURED ON
+    THE CONTAINER HOST against a COMPLETED worker home: the home totals roughly eight hundred
+    megabytes, of which the browser cache is roughly six hundred and fifty — a little over FOUR
+    FIFTHS of the whole home. The only other entry of any size is the npm cache at roughly a
+    hundred and fifty megabytes; everything else is under a megabyte, and the `gh` directory sharing
+    `.cache` with the browsers is measured in tens of kilobytes. So granting the cache removes the
+    great majority of what a worker home costs, not merely its largest single component.
 
-    (6) THE MEASUREMENT THIS SHARD DOES NOT HAVE, STATED PLAINLY. The split above was taken on the
-    operator's own machine, where the platform path is the macOS one, against a singleton worker
-    home rather than the container's per-run homes. The container host was not reachable from where
-    this recon was taken. The IMPLEMENTER MUST CONFIRM the split on the container before treating
-    the saving as sized, because the Linux path differs and a container home may carry a different
-    mix of toolchain caches.
+    (6) AN EARLIER READING OF THIS SPLIT WAS TAKEN ON THE WRONG HOST AND IS SUPERSEDED — RECORDED SO
+    THE CORRECTION IS NOT RE-LITIGATED. That reading came from the operator's own machine, on the
+    macOS platform path, against a SINGLETON worker home rather than a container per-run home, and
+    it showed large `.rustup` and `.cargo` trees alongside the cache. THE CONTAINER HAS NEITHER.
+    Those toolchains belong to the operator's workstation and never existed in a worker home, so
+    the conclusion drawn from them — that toolchain caches together exceed the browser cache — was
+    an artefact of the wrong corpus and does not hold. The figures in (5) replace it entirely.
 
     (7) DISPOSAL IS NOT THIS TASK. W1-T1064 owns the reaper's predicate and explicitly scopes the
     cache out; this is the source of the volume, not its removal. Neither task subsumes the other:
@@ -84,6 +86,17 @@
     grant is skipped in that case so the worker falls back to its own directory, or whether the
     install is allowed to populate the shared one. Both are defensible; leaving it unstated is how a
     shared cache becomes a shared corruption.
+
+    THE npm CACHE IS THE SIBLING AND IT IS NOT THIS SHAPE — NAMED, NOT SCOPED IN. `.npm` is the only
+    other entry of consequence in a container worker home, and it has the SAME HOME-relative,
+    per-run property the browser cache has: a redirected HOME gives every run its own. But the
+    evidence that licenses a grant here does NOT transfer. A browser cache is READ at runtime — the
+    measurement in rationale (4) is that nothing under a populated tree is modified across repeated
+    launches — whereas an npm cache is WRITTEN during an install, which is what it is for. So a
+    symlink into the real home would make concurrent runs write into one shared tree, which is a
+    different question with a different failure mode and needs its own reasoning about locking and
+    corruption. It is named here so the next reader sees the pattern rather than rediscovering it,
+    and it is deliberately left out of this task.
 
     NOT IN SCOPE: setting `PLAYWRIGHT_BROWSERS_PATH`, for the reason in rationale (1) — the allowlist
     strips it and the Dockerfile already rejected that arrangement on measured grounds; the reaper's
