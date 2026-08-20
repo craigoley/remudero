@@ -1,0 +1,122 @@
+- id: W1-T1063
+  title: "THE IMAGE INSTALLS A BROWSER CACHE WHERE THE DEFAULT POINTS, AND THE WORKER HOME REDIRECT MAKES IT INVISIBLE AGAIN — the Dockerfile solved this exact class once by installing at the default path rather than setting a variable the allowlist strips, but HOME is redirected per run, so the populated cache is one level out of reach and the grant mechanism that already fixes four other paths is not applied to this one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  files: [src/lib/worker-home.ts, test/worker-home.test.ts]
+  rationale: |
+    THE VARIABLE IS UNSET FOR A REASON THAT STILL HOLDS, SO THIS SHARD DOES NOT PROPOSE SETTING IT.
+    That was the first question and it nearly killed the task. `deploy/Dockerfile` states the reason
+    in terms: reaching a relocated cache "required an environment variable that the fleet
+    deliberately destroys" — the `ALLOWLIST` in `src/lib/env.ts` is PATH, HOME, TMPDIR, LANG, USER
+    and the Claude token, "and NOTHING ELSE survives into a spawned worker",
+    `PLAYWRIGHT_BROWSERS_PATH` not among them. Its conclusion: "SO THE FIX IS TO INSTALL WHERE THE
+    DEFAULT ALREADY POINTS, and to set no variable at all... Nothing then has to be propagated,
+    which is the only arrangement the allowlist cannot break." THAT REASONING IS CORRECT AND IS NOT
+    DISTURBED HERE. The same comment declines a base-image swap precisely because that image sets
+    the variable and "would reproduce this exact defect at a different path".
+
+    (1) THE GAP IS ONE LEVEL UP, AND IT IS THE SAME DEFECT SHAPE THE DOCKERFILE ALREADY NAMED. The
+    image installs into `/home/node/.cache/ms-playwright` because that is what the default computes
+    for the container's own HOME. But `buildWorkerEnv` OVERRIDES HOME with the per-run worker home
+    (`opts.home` → HOME, the W1-T18 isolation mechanism), and `playwrightCacheRoot`
+    (`src/lib/review.ts`) resolves its no-override branch off HOME. So inside a worker the cache
+    path is `<workerHome>/.cache/ms-playwright`, not the populated one. The Dockerfile fixed
+    "installed but unreachable" for the container's HOME; the worker's HOME reintroduces it.
+
+    (2) THE MECHANISM TO CLOSE IT ALREADY EXISTS AND IS USED FOUR TIMES. `WORKER_HOME_SYMLINKS`
+    (`src/lib/worker-home.ts`) grants exactly-named paths from the redirected home to the real one,
+    each with a written reason: `.claude`, `.config/gh`, `.gitconfig`, and the macOS login keychain —
+    that last one carrying the same shape of reason as this task, that the keychain "is HOME-relative
+    ... so a redirected HOME hides it". The browser cache is the fifth path with that property and
+    the only one of its kind not granted. This is one entry in a list, not a new mechanism.
+
+    (3) IT DOES NOT WIDEN THE SANDBOX, AND THAT IS WHY THIS SHAPE WAS CHOSEN OVER A MOUNT. A grant
+    here is a SYMLINK INSIDE THE WORKER HOME pointing at the real home — not a bind, not a new
+    writable path, not a containment change. Every existing grant is the same construction.
+
+    (4) AND PLAYWRIGHT DOES NOT WRITE TO THE CACHE AT RUNTIME, MEASURED RATHER THAN ASSUMED. On a
+    host with a fully populated cache, every browser directory's mtime is its INSTALL date and
+    nothing under the tree has been modified since, across a window in which Chromium was launched
+    repeatedly by this repo's own Playwright suites. Control: the tree holds thousands of files, so
+    the zero-modified reading is a measurement and not an empty scan. A read-only grant is therefore
+    sufficient for the launch path. The install path is a separate matter: `ensureBrowsers`
+    (`src/lib/review.ts`) exists to fetch missing builds and is memoised per process, so a grant
+    must not silently turn a worker's install into a write against the shared cache — the design
+    below states what happens when the pinned build is absent.
+
+    (5) THE SAVING IS REAL AND IT IS NOT THE MAJORITY, WHICH THE PREMISE OVERSTATED. Measured inside
+    a real worker home: the browser cache is the LARGEST SINGLE ITEM in it, larger than any other
+    directory — but the toolchain caches beside it (`.rustup`, `.npm`, `.cargo`) together exceed it.
+    So granting the cache removes the biggest single component of a home and does NOT remove most of
+    a home. Anyone reading this as the whole disk fix will be disappointed; it is the largest single
+    piece of it, and the toolchain caches are a separate question this task does not open.
+
+    (6) THE MEASUREMENT THIS SHARD DOES NOT HAVE, STATED PLAINLY. The split above was taken on the
+    operator's own machine, where the platform path is the macOS one, against a singleton worker
+    home rather than the container's per-run homes. The container host was not reachable from where
+    this recon was taken. The IMPLEMENTER MUST CONFIRM the split on the container before treating
+    the saving as sized, because the Linux path differs and a container home may carry a different
+    mix of toolchain caches.
+
+    (7) DISPOSAL IS NOT THIS TASK. W1-T1064 owns the reaper's predicate and explicitly scopes the
+    cache out; this is the source of the volume, not its removal. Neither task subsumes the other:
+    a grant reduces what accumulates, a predicate bounds how long it survives, and the disk filled
+    because both were missing.
+  design: |
+    ONE ENTRY IN `WORKER_HOME_SYMLINKS`, WITH ITS REASON WRITTEN, exactly as the four beside it. The
+    relative path is the platform's own cache location as `playwrightCacheRoot` computes it, so the
+    grant and the resolver cannot disagree — deriving it from that function rather than hardcoding a
+    second copy of the platform branch is the point.
+
+    THE ABSENT-CACHE CASE MUST DEGRADE, NEVER BREAK. `materializeWorkerHome` already records what
+    ACTUALLY happened to each grant rather than assuming success, and a real home on a machine with
+    no populated cache must still materialize: a missing target is a skipped grant with a stated
+    reason, not a throw and not a broken home. That is the existing contract for every other grant
+    and this one inherits it.
+
+    AND SAY WHAT HAPPENS WHEN THE PINNED BUILD IS MISSING. If the shared cache lacks the pinned
+    revision, a worker must not silently write into the shared tree — decide and state whether the
+    grant is skipped in that case so the worker falls back to its own directory, or whether the
+    install is allowed to populate the shared one. Both are defensible; leaving it unstated is how a
+    shared cache becomes a shared corruption.
+
+    NOT IN SCOPE: setting `PLAYWRIGHT_BROWSERS_PATH`, for the reason in rationale (1) — the allowlist
+    strips it and the Dockerfile already rejected that arrangement on measured grounds; the reaper's
+    age ceiling and predicate, which W1-T1064 owns; and the toolchain caches of rationale (5).
+  acceptance:
+    - claim: "a worker home grants the platform browser cache, so a redirected home reaches the populated one"
+      proof: "unit test: worker home: the browser cache is granted into a redirected home"
+    - claim: "the granted path is derived from the same resolver the launch path uses rather than a second copy"
+      proof: "unit test: worker home: the granted cache path matches the resolver"
+    - claim: "an absent cache on the real home is a skipped grant with a stated reason, never a broken home"
+      proof: "unit test: worker home: an absent cache skips the grant and still materializes"
+    - claim: "the grant is a symlink inside the worker home and adds no writable mount, so containment is unchanged"
+      proof: "unit test: worker home: the cache grant adds no writable path"
+    - claim: "the existing grants keep working unchanged, so adding one did not disturb the four beside it"
+      proof: "unit test: worker home: the existing grants are unchanged"
+  origin: "oper#image-cache-invisible-to-a-worker-2026-08-20"
+  plan_refs: ["W1-T18", "W1-T1064", "W1-T505"]
+  status: queued
+  attempts: 0
+  note: |
+    RULE 25 RE-DERIVED BY RUNNING THE REAL `INSTRUMENT_SURFACE` EXPORT WITH FOUR CONTROLS.
+    `deploy/Dockerfile` DOES NOT MATCH — deploy/ is not instrument surface — and neither does
+    `src/lib/worker-home.ts`, its test, nor `src/lib/env.ts`. Positive controls:
+    `.github/workflows/ci.yml` and `scripts/coverage-ratchet.mjs` both DO match. So this task is NOT
+    instrument-entangled and does not ride alone. The Dockerfile is cited throughout and is NOT in
+    `files:` — nothing in the image needs to change, which is the whole point of rationale (1).
+
+    THE FIRST QUESTION NEARLY KILLED THIS TASK AND THE ANSWER IS RECORDED SO IT IS NOT REOPENED. The
+    variable is unset deliberately, the reason still holds, and the shard is written to work WITH
+    that decision rather than against it. If a future reader proposes setting
+    `PLAYWRIGHT_BROWSERS_PATH`, rationale (1) is the refusal.
+
+    PROOF DIALECT UNIFORM. Every criterion forward-references through `unit test:`. A
+    forward-referencing `grep:` at an EXISTING path is a hard refusal on a filing PR: the path is
+    greppable, the symbol is not yet there, the proof executes, returns zero, and `executed_fail`
+    overrides keyword coverage.
