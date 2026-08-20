@@ -36,13 +36,79 @@ interface Run {
 }
 
 /**
- * Write the `docker` and `az` stubs. `STUB_MODE` selects the branch:
- *   good          — container exists, carries GH_TOKEN, pull succeeds, started image matches pulled
- *   no-token      — container exists but carries no GH_TOKEN, and the shell has none either
- *   pull-fail     — GH_TOKEN present; the pull is rejected for authentication
- *   wrong-image   — everything succeeds up to start, but the started container's image id disagrees
- *                   with the digest this run pulled
- *   no-container  — no container by this name exists yet (first-ever run)
+ * The five names `deploy/Dockerfile` bakes into the image itself (rationale 4) — never in
+ * `RMD_DAEMON_RUNTIME_ENV_VARS`, so a recycle must never re-pass any of these via `-e`.
+ */
+const IMAGE_ENV_LINES = ["PATH=/usr/local/bin:/usr/bin:/bin", "NODE_VERSION=22.11.0", "YARN_VERSION=1.22.22", "HOME=/home/node", "DISABLE_AUTOUPDATER=1"];
+
+/** The six declared runtime names (deploy/runtime-env-vars.sh), with fixture values for the stub. */
+const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
+  GH_TOKEN: "captured-token-value",
+  RMD_RESTART_THROTTLE_S: "300",
+  RMD_FRESHNESS_RESTART_MAX: "100",
+  GH_APP_ID: "app-id-fixture",
+  GH_APP_INSTALLATION_ID: "install-id-fixture",
+  GH_APP_PRIVATE_KEY_PATH: "/path/to/key.pem",
+};
+
+/** The image env plus every declared runtime var at its fixture value, one override or drop applied. */
+function containerEnvLines(opts: { drop?: string; extra?: string; override?: [string, string] } = {}): string[] {
+  const lines = [...IMAGE_ENV_LINES];
+  for (const [name, value] of Object.entries(DECLARED_RUNTIME_FIXTURE)) {
+    if (name === opts.drop) continue;
+    if (opts.override && opts.override[0] === name) {
+      lines.push(`${name}=${opts.override[1]}`);
+    } else {
+      lines.push(`${name}=${value}`);
+    }
+  }
+  if (opts.extra) lines.push(opts.extra);
+  return lines;
+}
+
+/** Per-STUB_MODE container env, as raw `docker inspect --format Config.Env`-shaped lines. */
+const CONTAINER_ENV_BY_MODE: Record<string, string[]> = {
+  good: containerEnvLines(),
+  "pull-fail": containerEnvLines(),
+  "wrong-image": containerEnvLines(),
+  "hung-fixrung": containerEnvLines(),
+  "busy-fixrung": containerEnvLines(),
+  "hung-plus-dispatch": containerEnvLines(),
+  "image-env-unknown": containerEnvLines(),
+  "no-token": containerEnvLines({ drop: "GH_TOKEN" }),
+  "undeclared-var": containerEnvLines({ extra: "SOME_UNKNOWN_VAR=surprise" }),
+  // The container's own GH_APP_ID (an operator override) differs from what the (contrived, for
+  // this fixture only) image itself bakes in — see IMAGE_ENV_BY_MODE below. A name-only diff would
+  // read this as "unchanged from the image" and silently revert it (rationale 5, bullet 1).
+  "shadow-declared": containerEnvLines({ override: ["GH_APP_ID", "real-appid"] }),
+};
+
+/** Per-STUB_MODE image env — always the five baked names, `shadow-declared` also bakes GH_APP_ID. */
+const IMAGE_ENV_BY_MODE: Record<string, string[]> = {
+  "shadow-declared": [...IMAGE_ENV_LINES, "GH_APP_ID=image-baked-appid"],
+};
+
+function bashCaseEchoLines(byMode: Record<string, string[]>, defaultLines: string[]): string[] {
+  const out = ['  case "$STUB_MODE" in'];
+  for (const [mode, lines] of Object.entries(byMode)) {
+    out.push(`    ${mode}) ${lines.map((l) => `echo "${l}"`).join("; ")} ;;`);
+  }
+  out.push(`    *) ${defaultLines.map((l) => `echo "${l}"`).join("; ")} ;;`);
+  out.push("  esac");
+  out.push('  echo ""'); // the {{println}} form's trailing empty element (rationale 5, bullet 3)
+  return out;
+}
+
+/**
+ * Write the `docker` and `az` stubs. `STUB_MODE` selects the branch — see CONTAINER_ENV_BY_MODE and
+ * IMAGE_ENV_BY_MODE above for what each carries, plus:
+ *   good              — pull succeeds; started image matches pulled
+ *   pull-fail         — the pull is rejected for authentication
+ *   wrong-image       — the started container's image id disagrees with the digest this run pulled
+ *   no-container      — no container by this name exists yet (first-ever run)
+ *   image-env-unknown — `docker image inspect` for the Config.Env format FAILS, so the
+ *                        undeclared-variable check cannot run and must be SKIPPED, not assumed
+ *                        clean and not treated as a refusal
  */
 function writeStubs(dir: string): void {
   const docker = [
@@ -51,7 +117,18 @@ function writeStubs(dir: string): void {
     'rec "$@"',
     'case "$1" in',
     "  image)",
-    '    if [ "$2" = "inspect" ]; then echo "sha256:PULLEDID"; exit 0; fi',
+    '    if [ "$2" = "inspect" ]; then',
+    "      shift 2",
+    '      fmt=""',
+    '      if [ "$1" = "--format" ]; then fmt="$2"; shift 2; fi',
+    '      case "$fmt" in',
+    "        *Config.Env*)",
+    '          case "$STUB_MODE" in image-env-unknown) exit 1 ;; esac',
+    ...bashCaseEchoLines(IMAGE_ENV_BY_MODE, IMAGE_ENV_LINES).map((l) => `  ${l}`),
+    "          exit 0 ;;",
+    "        *) echo \"sha256:PULLEDID\"; exit 0 ;;",
+    "      esac",
+    "    fi",
     "    exit 0 ;;",
     "  inspect)",
     "    shift",
@@ -61,8 +138,11 @@ function writeStubs(dir: string): void {
     '      case "$STUB_MODE" in no-container) exit 1 ;; *) exit 0 ;; esac',
     "    fi",
     '    case "$fmt" in',
+    "      *Config.Image*)",
+    '        echo "test-registry/remudero:old"',
+    "        exit 0 ;;",
     "      *Config.Env*)",
-    '        case "$STUB_MODE" in no-token) : ;; *) echo "GH_TOKEN=captured-token-value" ;; esac',
+    ...bashCaseEchoLines(CONTAINER_ENV_BY_MODE, containerEnvLines()).map((l) => `  ${l}`),
     "        exit 0 ;;",
     "      *.Image}}*)",
     '        case "$STUB_MODE" in wrong-image) echo "sha256:WRONGID" ;; *) echo "sha256:PULLEDID" ;; esac',
@@ -402,4 +482,182 @@ test("W1-T1046: a hung fix-rung worker alone is passed, printed before clearing,
   assert.equal(row.age_s, 8970);
   assert.equal(row.age_bound_s, 7200);
   assert.match(row.cleaned, /daemon-side owners/, "what it did NOT clean must be stated, not implied");
+});
+
+// ── W1-T1069: `deploy/recycle-container.sh` NO LONGER RETYPES THE ENV BY HAND ───────────────────
+//
+// Before this change the script's `docker run` named exactly two variables (`GH_TOKEN`,
+// `RMD_RESTART_THROTTLE_S`) and retyped `RMD_RESTART_THROTTLE_S` from the OPERATOR'S OWN SHELL
+// rather than the container. A recycle against a live fleet host would have dropped four of six
+// runtime variables (`RMD_FRESHNESS_RESTART_MAX`, `GH_APP_ID`, `GH_APP_INSTALLATION_ID`,
+// `GH_APP_PRIVATE_KEY_PATH`) SILENTLY: `startInstallationTokenRefresh` (src/lib/github-app.ts)
+// treats an unconfigured host as byte-identical to one that never had the feature, so the fleet
+// would have reverted to the shared-pool PAT with nothing anywhere recording that it had.
+//
+// The fix is ONE declared list (deploy/runtime-env-vars.sh), read by both this script and
+// deploy/host-update.sh, plus a drift check that REFUSES when the container carries a runtime
+// variable the list does not name, instead of silently dropping it.
+
+const HOST_UPDATE_SCRIPT = join(REPO_ROOT, "deploy", "host-update.sh");
+const SHARED_RUNTIME_VARS_FILE = join(REPO_ROOT, "deploy", "runtime-env-vars.sh");
+
+function printDaemonRunEnvNames(scriptPath: string = HOST_UPDATE_SCRIPT): string[] {
+  const r = spawnSync("bash", [scriptPath, "--print-daemon-run"], { encoding: "utf8", cwd: REPO_ROOT });
+  assert.equal(r.status, 0, `--print-daemon-run failed: ${r.stderr}`);
+  const out = r.stdout ?? "";
+  const block = out.slice(out.indexOf("docker run -d --name remudero-daemon"), out.indexOf("./bin/rmd daemon"));
+  assert.ok(block.length > 0, "the daemon invocation must be present in --print-daemon-run output");
+  return [...block.matchAll(/-e\s+([A-Z_][A-Z0-9_]*)=/g)].map((m) => m[1]);
+}
+
+/** Extract a bash array literal's elements by name, tolerant of either single- or multi-line form. */
+function extractBashArray(src: string, varName: string): string[] {
+  const re = new RegExp(`${varName}=\\(([\\s\\S]*?)\\)`);
+  const m = src.match(re);
+  assert.ok(m, `${varName}=(...) must be present in the source`);
+  return m![1]
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+test("W1-T1069: an undeclared runtime variable makes the recycle refuse and name it", () => {
+  const run = runRecycle("undeclared-var");
+  assert.notEqual(run.status, 0, "a runtime variable this recycle does not declare must refuse");
+  assert.match(
+    run.stderr,
+    /REFUSING — remudero-daemon carries a runtime variable this recycle does not declare/,
+  );
+  assert.match(run.stderr, /SOME_UNKNOWN_VAR/, "the undeclared variable must be NAMED, not merely flagged");
+  assert.equal(run.calls.filter(isStop).length, 0, "the container must not be stopped");
+  assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed");
+  assert.equal(run.calls.filter(isRun).length, 0, "no replacement may start");
+});
+
+test("W1-T1069: MUTANT: dropping the drift-check refusal lets an undeclared variable through silently", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const anchor =
+    '  echo "  been touched." >&2\n    exit 1\n  fi\n';
+  assert.equal(src.split(anchor).length - 1, 1, "the mutation target must be unique");
+  const dir = mkdtempSync(join(tmpdir(), "recycle-mutant-drift-"));
+  const mutant = join(dir, "recycle-container.sh");
+  writeFileSync(mutant, src.replace(anchor, '  echo "  been touched." >&2\n  fi\n'), { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const run = runRecycle("undeclared-var", { scriptPath: mutant });
+  assert.ok(run.calls.filter(isRun).length > 0, "the mutant must actually reach docker run, or this proves nothing about the guard");
+  assert.equal(runRecycle("undeclared-var").calls.filter(isRun).length, 0, "and the real script must not");
+});
+
+test("W1-T1069: image-supplied variables are not re-passed by the recycle", () => {
+  const run = runRecycle("good");
+  assert.equal(run.status, 0, `expected success, got ${run.status}: ${run.stderr}`);
+  const runCall = run.calls.filter(isRun)[0];
+  assert.ok(runCall, "a docker run call must have happened");
+  const eNames: string[] = [];
+  for (let i = 0; i < runCall.argv.length; i++) {
+    if (runCall.argv[i] === "-e") eNames.push(runCall.argv[i + 1].split("=")[0]);
+  }
+  for (const imageVar of ["PATH", "NODE_VERSION", "YARN_VERSION", "HOME", "DISABLE_AUTOUPDATER"]) {
+    assert.ok(!eNames.includes(imageVar), `${imageVar} belongs to the image — it must never be re-passed via -e`);
+  }
+  assert.deepEqual(
+    [...eNames].sort(),
+    Object.keys(DECLARED_RUNTIME_FIXTURE).sort(),
+    "only the declared runtime names may be passed, and every one of them must be",
+  );
+});
+
+test("W1-T1069: a runtime value shadowing an image name is preserved", () => {
+  // The IMAGE (contrived, for this fixture) bakes GH_APP_ID=image-baked-appid; the CONTAINER
+  // overrides it to GH_APP_ID=real-appid. A name-only diff would call GH_APP_ID "unchanged from
+  // the image" and this recycle would silently revert the override — GH_APP_ID is declared, so it
+  // must instead be captured straight off the container and carried through untouched.
+  const run = runRecycle("shadow-declared");
+  assert.equal(run.status, 0, `expected success, got ${run.status}: ${run.stderr}`);
+  const runCall = run.calls.filter(isRun)[0];
+  assert.ok(runCall, "a docker run call must have happened");
+  assert.ok(runCall.argv.includes("GH_APP_ID=real-appid"), "the container's own (shadowed) value must win");
+  assert.ok(!runCall.argv.includes("GH_APP_ID=image-baked-appid"), "the image's baked value must never surface");
+});
+
+test("W1-T1069: the throttle variable is captured from the container", () => {
+  // The invoking shell claims 999; the CONTAINER's own RMD_RESTART_THROTTLE_S is the "good" fixture
+  // (300). Before this change the script read RMD_RESTART_THROTTLE_S from the SHELL unconditionally
+  // (`"${RMD_RESTART_THROTTLE_S:-}"`), so 999 would have won even with a container running.
+  const run = runRecycle("good", { extraEnv: { RMD_RESTART_THROTTLE_S: "999" } });
+  assert.equal(run.status, 0, `expected success, got ${run.status}: ${run.stderr}`);
+  const runCall = run.calls.filter(isRun)[0];
+  assert.ok(runCall, "a docker run call must have happened");
+  assert.ok(runCall.argv.includes(`RMD_RESTART_THROTTLE_S=${DECLARED_RUNTIME_FIXTURE.RMD_RESTART_THROTTLE_S}`), "the container's own value must win");
+  assert.ok(!runCall.argv.includes("RMD_RESTART_THROTTLE_S=999"), "the operator's shell value must not be retyped over a live container");
+});
+
+test("W1-T1069: when the image env cannot be read, the drift check is SKIPPED, not assumed clean and not a refusal", () => {
+  const run = runRecycle("image-env-unknown");
+  assert.equal(run.status, 0, `a skipped drift check must not block a healthy recycle: ${run.stderr}`);
+  assert.match(run.stderr, /NOTE — could not read remudero-daemon's own image env.*skipped/);
+  assert.ok(run.calls.filter(isRun).length > 0, "the recycle must still proceed");
+});
+
+test("W1-T1069: the printed daemon run carries every declared variable", () => {
+  const names = printDaemonRunEnvNames();
+  for (const declared of Object.keys(DECLARED_RUNTIME_FIXTURE)) {
+    assert.ok(names.includes(declared), `--print-daemon-run must pass ${declared} through; got ${JSON.stringify(names)}`);
+  }
+});
+
+test("W1-T1069: MUTANT: dropping a passthrough line from host-update.sh's printed block is caught", () => {
+  const src = readFileSync(HOST_UPDATE_SCRIPT, "utf8");
+  const line = '    -e GH_APP_ID="\\${GH_APP_ID:-}" \\\\\n';
+  assert.equal(src.split(line).length - 1, 1, "the mutation target must be unique");
+  const dir = mkdtempSync(join(tmpdir(), "host-update-mutant-appid-"));
+  const mutant = join(dir, "host-update.sh");
+  writeFileSync(mutant, src.replace(line, ""), { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const mutantNames = printDaemonRunEnvNames(mutant);
+  assert.ok(!mutantNames.includes("GH_APP_ID"), "the mutant must really drop GH_APP_ID");
+  assert.ok(printDaemonRunEnvNames().includes("GH_APP_ID"), "the real script must still carry it");
+});
+
+test("W1-T1069: both scripts read the same declared name list", () => {
+  const sharedSrc = readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8");
+  const recycleSrc = readFileSync(SCRIPT, "utf8");
+  const hostUpdateSrc = readFileSync(HOST_UPDATE_SCRIPT, "utf8");
+
+  const sharedNames = extractBashArray(sharedSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+  assert.deepEqual([...sharedNames].sort(), Object.keys(DECLARED_RUNTIME_FIXTURE).sort(), "this suite's own fixture must match deploy/runtime-env-vars.sh");
+
+  // Both scripts SOURCE the shared file (not merely carry a matching fallback) — this is what
+  // makes "forgetting one" impossible rather than merely unlikely (design i).
+  assert.match(recycleSrc, /source "\$\{RUNTIME_ENV_VARS_FILE\}"/, "recycle-container.sh must source the shared list");
+  assert.match(hostUpdateSrc, /source "\$\{RUNTIME_ENV_VARS_FILE\}"/, "host-update.sh must source the shared list");
+  assert.match(recycleSrc, /RUNTIME_ENV_VARS_FILE=.*runtime-env-vars\.sh/, "recycle-container.sh must point at deploy/runtime-env-vars.sh");
+  assert.match(hostUpdateSrc, /RUNTIME_ENV_VARS_FILE=.*runtime-env-vars\.sh/, "host-update.sh must point at deploy/runtime-env-vars.sh");
+
+  // Each script's inline fallback (used only when copied away from its sibling — see the MUTANT
+  // fixtures throughout this file) must not itself have drifted from the real list.
+  const recycleFallback = extractBashArray(recycleSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+  const hostUpdateFallback = extractBashArray(hostUpdateSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+  assert.deepEqual([...recycleFallback].sort(), [...sharedNames].sort(), "recycle-container.sh's fallback array must match deploy/runtime-env-vars.sh");
+  assert.deepEqual([...hostUpdateFallback].sort(), [...sharedNames].sort(), "host-update.sh's fallback array must match deploy/runtime-env-vars.sh");
+
+  // And the static `-e` passthrough block host-update.sh prints must name every declared variable —
+  // exactly, so a name added to the list without a matching passthrough line is caught here too.
+  const printedNames = printDaemonRunEnvNames();
+  assert.deepEqual([...printedNames].sort(), [...sharedNames].sort(), "the printed passthrough names must match the declared list exactly");
+});
+
+test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-env-vars.sh is caught", () => {
+  // Proves the consistency test above actually discriminates, rather than passing on any six names.
+  const recycleSrc = readFileSync(SCRIPT, "utf8");
+  const mutated = recycleSrc.replace(
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
+  );
+  assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");
+  const mutantFallback = extractBashArray(mutated, "RMD_DAEMON_RUNTIME_ENV_VARS");
+  const sharedNames = extractBashArray(readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8"), "RMD_DAEMON_RUNTIME_ENV_VARS");
+  assert.notDeepEqual([...mutantFallback].sort(), [...sharedNames].sort(), "a drifted fallback must actually differ, or this proves nothing");
 });

@@ -53,6 +53,25 @@
 
 set -euo pipefail
 
+# ── THE DECLARED RUNTIME VARIABLE NAMES — ONE LIST, READ HERE AND BY recycle-container.sh (W1-T1069)
+# `deploy/runtime-env-vars.sh` is the single source of truth for which environment variable NAMES
+# the daemon container carries at runtime; see that file's header for the full rationale, and
+# deploy/recycle-container.sh's own copy of this block for how it uses the list to capture values
+# off a live container. This script has no container to capture FROM (design iii: `--print-daemon-run`
+# may legitimately run on a fresh host), so it only reads the NAMES, to keep the `-e` passthroughs
+# below from being retyped by hand — the exact way this list drifted before W1-T1069. The inline
+# fallback fires ONLY when this script has been copied away from its sibling (a test fixture does
+# this on purpose); test/recycle-container.test.ts asserts this fallback, recycle-container.sh's
+# own fallback, deploy/runtime-env-vars.sh's real array, and the `-e` names actually printed below
+# never disagree, so neither the fallback nor the static passthrough block below can go stale
+# unnoticed.
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH)
+RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
+if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
+  # shellcheck source=./runtime-env-vars.sh
+  source "${RUNTIME_ENV_VARS_FILE}"
+fi
+
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
@@ -278,6 +297,15 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
   # a sandboxed container — seccomp and AppArmor are both off for the whole thing — it is fewer
   # capabilities and no device access. See deploy/Dockerfile's REQ 9 comment for the full doctrine.
   # THIS ONLY CHANGES THE PRINTED TEXT: the operator re-runs \`docker run\` by hand to apply it.
+  #
+  # RMD_FRESHNESS_RESTART_MAX AND THE THREE GH_APP_* VARIABLES (W1-T1069). All four are declared in
+  # deploy/runtime-env-vars.sh alongside GH_TOKEN and RMD_RESTART_THROTTLE_S above — this printed
+  # invocation carries a passthrough for EVERY declared name now, not just the two that existed when
+  # this block was first written. GH_APP_ID, GH_APP_INSTALLATION_ID and GH_APP_PRIVATE_KEY_PATH
+  # configure src/lib/github-app.ts's installation-token refresh; leaving any one of them unset is
+  # not an error — startInstallationTokenRefresh treats an unconfigured host as deliberately
+  # byte-identical to one that never had the feature (see that file) — but a printed command that
+  # silently omitted them handed an operator a recipe for the exact silent-drop outage this closes.
   docker run -d --name remudero-daemon \\
     --restart=on-failure:5 \\
     --cap-drop ALL \\
@@ -287,6 +315,10 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
     --user 1000:1000 \\
     -e GH_TOKEN="\$GH_TOKEN" \\
     -e RMD_RESTART_THROTTLE_S="\${RMD_RESTART_THROTTLE_S:-}" \\
+    -e RMD_FRESHNESS_RESTART_MAX="\${RMD_FRESHNESS_RESTART_MAX:-}" \\
+    -e GH_APP_ID="\${GH_APP_ID:-}" \\
+    -e GH_APP_INSTALLATION_ID="\${GH_APP_INSTALLATION_ID:-}" \\
+    -e GH_APP_PRIVATE_KEY_PATH="\${GH_APP_PRIVATE_KEY_PATH:-}" \\
     -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
     ${REF} \\
