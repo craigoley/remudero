@@ -1164,7 +1164,7 @@ auto-filed.**
   branches prints `RUNS NOT IN SCOPE THAT MERGED — 1: run-X-…` and stamps the `runs` column; a window
   where the sets agree prints `none (0)`, never an empty section; a merged branch that is not
   `run-*`-shaped is ignored without comment.
-- **★ P49 — MINTED THIS CYCLE (the mapping: highest prior header was P48; P49 is the next unused id,
+- **PROPOSAL MINTED THIS CYCLE — P49 (the mapping: highest prior header was P48; P49 is the next unused id,
   derived the way `rmd next-task-id` derives task ids and now CI-gated by W1-T74/#2186, which shipped
   in this very window).** Full entry below the ranking.
 - **PROCEDURAL SUCCESS — MINED, AND THE CORPUS DID NOT MOVE.** The miner surfaced `implement` ×
