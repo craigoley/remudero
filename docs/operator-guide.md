@@ -270,6 +270,44 @@ Rotate whenever a token has been exposed. Treat *exposed* broadly: a token that 
 file, a terminal transcript, a screenshot, or a chat window is compromised and must be rotated
 rather than merely un-shared.
 
+## Shipping a new CI gate: three PRs, in this order
+
+A new gate — a workflow job plus the script it runs — cannot land as one PR, and merging the
+pieces out of order reddens `main`. Four gates were built in a single day and the order was
+rediscovered each time; one out-of-order merge left `main` red for seventy-two minutes.
+
+**Phase 1 — the `INSTRUMENT_SURFACE` registration in `src/lib/review.ts`, alone.** Adding a gate
+script makes `test/instrument-surface-completeness.test.ts` derive it as a candidate that must be
+either declared in `INSTRUMENT_SURFACE` or excused in `INSTRUMENT_SURFACE_EXCLUSIONS` with a
+written reason. This phase is green on a tree where the job does not yet exist, because
+`INSTRUMENT_SURFACE` is a **regex list consulted during a diff walk, not an assertion that a path
+exists** — so it can and should land first.
+
+**Phase 2 — the workflow job, the script, the baseline and its test.** With phase 1 on `main` the
+completeness alarm is already satisfied, so this phase clears that arm on merge.
+
+**Phase 3 — the `CI_PARITY_TABLE` entry in `src/lib/ci-parity.ts`.** This one **cannot** land
+before the job exists: the parity contract asserts both directions, and its own test says so —
+*"the table cannot silently grow ahead of the workflow either."* Until phase 2 merges, an entry
+here fails.
+
+**The three cannot be combined, and that is the whole reason for the split.**
+`detectInstrumentEntanglement` refuses any diff carrying both instrument surface (a workflow, a
+`*-baseline.json`, a ratchet script) and a `src/` product path. That verdict forces the review
+state to `failure` and is **not suppressible** — so a PR carrying the job *and* its registrations
+cannot go green no matter how correct it is.
+
+Between phase 2 merging and phase 3 merging, `main` is red on the parity assertions. That window
+is real and expected; keep it short rather than trying to avoid it.
+
+**The exception, and why it does not generalise.** Commit `74ab526` ("ride the CLAUDE.md ratchet as
+a step, not a job") cuts this to two phases by adding the gate as a **step inside an existing job**
+rather than a job of its own: `CI_PARITY_TABLE` keys on **job names**, so a step needs no entry and
+phase 3 disappears. It did not transfer to `task-id-existence`, and the reason is worth knowing —
+`test/instrument-surface-completeness.test.ts` harvests `package.json`'s scripts map as well as the
+workflows, so a gate wired as an npm script is derived as a candidate wherever its invocation
+sits. Workflow placement was simply irrelevant to that half.
+
 ## Crisis runbook: the procedures you need at 3am
 
 The rest of this guide is about reading state. These four are the ones you need when you have
@@ -391,6 +429,61 @@ Like its siblings, this is a plain bash-and-docker script, on purpose: it must k
 with no node, no `rmd` and no checkout, which rules out an `rmd` verb outright — every verb runs
 `checkCliFreshness` first, which would fast-forward the very checkout the container being recycled
 is bind-mounting.
+
+### Attaching a data disk to the container host
+
+The Azure host's OS disk is 30 GB and the image store fills it. Standard practice is a separate
+data disk with the image store and the fleet's state bind-mounted onto it. The procedure below is
+in the order that works; the first attempt failed on two of these steps and cost most of an
+afternoon.
+
+- **The image store is `/var/lib/containerd`, not `/var/lib/docker`, and the driver tells you
+  which.** `docker info --format '{{.Driver}}'` reads `overlayfs` here, and `docker info` shows
+  `driver-type: io.containerd.snapshotter.v1` — under the containerd snapshotter the layers live
+  under `/var/lib/containerd`. Moving `data-root` in `/etc/daemon.json` therefore achieves almost
+  nothing on this host: it relocates a directory the snapshotter is not using.
+- **Verify with `mountpoint`, `du --one-file-system` and `df` agreeing, before you switch
+  anything.** Plain `du` descends through mounts and double-counts, so a directory that is mostly
+  other filesystems reads far larger than it is; that misreading is what sent the first attempt at
+  `data-root`. `mountpoint -q <path>` answers whether a path is its own mount at all, and `df`
+  gives the filesystem's real numbers. Treat a disagreement between the three as "stop and find
+  out", never as "pick the biggest".
+- **The VM is zonal, so the disk must be created in the same zone.** `az vm show … --query zones`
+  reads `["1"]` here; a disk created without `--zone 1` is refused at attach. **A refused attach
+  leaves a control-plane lock that rejects a delete of the new disk for several minutes** — wait
+  it out rather than retrying into the error.
+- **The device is NVMe and the data disk is one character from the OS disk.** `lsblk` shows
+  `nvme0n1` (30G, holding `/`) and `nvme0n2` (128G, the data disk). Partition and format
+  `nvme0n2`, never `nvme0n1`, and read the size column before you type either name.
+- **Every fstab line needs `nofail`, and `findmnt --verify` before you trust a reboot.** Without
+  it a disk that fails to attach leaves the host unbootable rather than merely degraded. Run
+  `findmnt --verify` under `sudo`: unrooted it still runs but reports `[W] cannot detect on-disk
+  filesystem type (Permission denied)` for every entry, which buries any real warning.
+- **Stop the daemon container before bind-mounting over its state path.** Docker resolves a bind
+  mount at container start, so mounting over a path a running container already holds leaves that
+  container on the old inode — it keeps reading and writing the directory you just replaced, and
+  nothing reports it.
+- **A shell sitting below a moved path loses `getcwd()` entirely.** Every command in that shell
+  then fails with an error that names the command rather than the cause. `cd ~` fixes it; a new
+  shell also works. Do not debug the command.
+
+The live layout, for comparison when you next do this:
+
+```sh
+docker info --format '{{.Driver}}'      # overlayfs; `docker info | grep driver-type` -> containerd
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT      # nvme0n1 = 30G OS, nvme0n2 = 128G data -> /mnt/rmd
+mountpoint -q /var/lib/containerd       # the image store, bind-mounted onto the data disk
+df -h / /mnt/rmd                        # the numbers that decide whether this was worth doing
+findmnt --verify                        # run under sudo; unrooted warnings are noise, not findings
+```
+
+and the two bind mounts, as they read in `/etc/fstab`:
+
+```
+UUID=<data-disk-uuid> /mnt/rmd ext4 defaults,nofail 0 2
+/mnt/rmd/containerd /var/lib/containerd none bind,nofail 0 0
+/mnt/rmd/state2 /home/<user>/rmd-state2 none bind,nofail 0 0
+```
 
 ### Rotating the service tokens
 
