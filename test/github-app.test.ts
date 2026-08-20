@@ -305,3 +305,48 @@ test("startInstallationTokenRefresh: a FAILED mint still reschedules on the marg
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(delays, [REFRESH_MARGIN_MS], "a failed mint retries on the margin");
 });
+
+// ── the two failure arms of the exchange response, one test each ────────────────────────────
+
+test("refreshInstallationToken: an UNPARSABLE exchange response degrades with a named reason, never a throw", async () => {
+  // ITS OWN TEST BECAUSE A CATCH ARM IS ONLY REACHABLE ONE WAY. Every other fixture here returns
+  // well-formed JSON, so this arm was added source with no covering test and diff-coverage named
+  // it. A refresher that threw here would take the daemon's boot down on a malformed response.
+  const { privateKey } = keyPair();
+  const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const result = await refreshInstallationToken({
+    appId: "app-1",
+    installationId: "inst-1",
+    privateKeyPath: "/fake/key.pem",
+    env: {},
+    readKey: () => privateKey,
+    fetchImpl: (async () => ({
+      ok: true,
+      status: 201,
+      json: async () => { throw new Error("not json"); },
+    })) as unknown as typeof fetch,
+    log: (step, extra = {}) => logs.push({ step, extra }),
+  });
+  assert.equal(result.ok, false);
+  assert.match(String((result as { reason?: string }).reason), /unparsable/);
+  assert.ok(logs.some((l) => l.step === "github_app.token_refresh_failed"), "the failure is ledgered");
+});
+
+test("refreshInstallationToken: an exchange response MISSING the token degrades rather than storing undefined", async () => {
+  // The sibling arm: valid JSON, absent fields. Storing `undefined` as GH_TOKEN would be worse
+  // than failing, because every consumer reads that variable at call time.
+  const { privateKey } = keyPair();
+  const env: NodeJS.ProcessEnv = { GH_TOKEN: "OLD-STATIC-TOKEN" };
+  const result = await refreshInstallationToken({
+    appId: "app-1",
+    installationId: "inst-1",
+    privateKeyPath: "/fake/key.pem",
+    env,
+    readKey: () => privateKey,
+    fetchImpl: (async () => fakeResponse(201, { expires_at: "2026-08-20T13:00:00Z" })) as typeof fetch,
+    log: () => {},
+  });
+  assert.equal(result.ok, false);
+  assert.match(String((result as { reason?: string }).reason), /missing token/);
+  assert.equal(env.GH_TOKEN, "OLD-STATIC-TOKEN", "the existing token is left alone on a bad response");
+});
