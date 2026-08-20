@@ -1,0 +1,53 @@
+{
+  "_comment": "Exemption list for scripts/assertion-discrimination-check.mjs (W1-T1051). Every entry MUST carry a non-empty `reason` -- an entry without one is rejected at load time so this list cannot grow silently. SEEDED from the real scan of origin/main: every one of these 8 sites is a test whose OWN title or assert message says it is pinning that a COMMENT/doc-string still documents a fact (a rationale, a field, an invariant) -- not a test that means to pin a live mechanism and is accidentally satisfied by a comment instead. Add a NEW entry here only as a deliberate, reviewed exception with the same bar, never to make a red run pass without understanding why it is red.",
+  "exemptions": [
+    {
+      "testFile": "test/blocked-illformed-does-not-halt-drain.test.ts",
+      "target": "src/run-task.ts",
+      "literal": "BEFORE the inflight lock is even taken",
+      "reason": "The test's own comment says it explicitly: 'Read from source, since no unit test drives the real refusal path' -- it deliberately pins that the doc-comment above the refusal still says the refusal precedes the lock, not that the refusal itself runs first (nothing exercises that path here)."
+    },
+    {
+      "testFile": "test/ci-gate-reaggregate.test.ts",
+      "target": ".github/workflows/ci-gate.yml",
+      "literal": "GitHub Actions",
+      "reason": "assert.match's own message says 'expected ci-gate.yml to document the GitHub Actions recursion-guard finding' -- the assertion is intentionally about the comment documenting a finding, not a live mechanism."
+    },
+    {
+      "testFile": "test/ci-gate-reaggregate.test.ts",
+      "target": ".github/workflows/ci-gate.yml",
+      "literal": "p95",
+      "reason": "assert.match's own message says 'expected ci-gate.yml to state the measured p95 inline, not just a bare number' -- intentionally pinning the comment's prose, not a mechanism."
+    },
+    {
+      "testFile": "test/ci-gate-reaggregate.test.ts",
+      "target": ".github/workflows/ci-gate.yml",
+      "literal": "measured",
+      "reason": "assert.match's own message says 'expected ci-gate.yml to document that the cap comes from a measurement, not a guess' -- intentionally pinning the comment's prose, not a mechanism."
+    },
+    {
+      "testFile": "test/drill-coverage-rubric.test.ts",
+      "target": "learnings/failures.yaml",
+      "literal": "drill_obligating",
+      "reason": "The test's own title says 'the new field is documented where an author will meet it: learnings/failures.yaml's header' -- it deliberately reads the file's header COMMENT block, not an entry."
+    },
+    {
+      "testFile": "test/drill-coverage-rubric.test.ts",
+      "target": "learnings/failures.yaml",
+      "literal": "recovery-drill.mjs",
+      "reason": "Same site as the drill_obligating entry above (same test, same header-comment read) -- the test's own title says it is checking that the header documents the field."
+    },
+    {
+      "testFile": "test/run-task.test.ts",
+      "target": "src/lib/self-sync.ts",
+      "literal": "DIRT NEVER BLOCKS A SERVICE",
+      "reason": "The test's own title says 'self-sync.ts's service carve-out is untouched -- DIRT NEVER BLOCKS A SERVICE still stands, verbatim' -- it deliberately pins the doc-comment's exact wording, not a mechanism."
+    },
+    {
+      "testFile": "test/workflow-job-timeouts.test.ts",
+      "target": ".github/workflows/ci.yml",
+      "literal": "WAIT_CAP_SECONDS",
+      "reason": "The test's own title says 'ci.yml's heavy-band comment names WAIT_CAP_SECONDS, coupling the two files' -- it deliberately pins that ci.yml's comment mentions the constant, not that ci.yml enforces it (ci.yml doesn't own that value; ci-gate.yml does)."
+    }
+  ]
+}

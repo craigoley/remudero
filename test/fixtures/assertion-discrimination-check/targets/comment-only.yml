@@ -1,0 +1,7 @@
+# Fixture target for assertion-discrimination-check's falsifier suite (W1-T1051).
+#
+# TOTALLY-UNIQUE-LITERAL-A appears ONLY on this comment line -- nowhere in the executable YAML
+# below. A test asserting this literal appears in the raw text of this file is satisfiable by
+# this comment alone, which is exactly the defect class this check exists to catch.
+job:
+  run: echo "no relation to the literal above"

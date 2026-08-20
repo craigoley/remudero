@@ -310,6 +310,12 @@ forensic detail, so the narrative does not need to live here.
   cap is sized against this repo's real required-check wall-clock, so a green-in-progress sibling is
   waited out rather than timed out (W1-T312, `WAIT_CAP_SECONDS` in `.github/workflows/ci-gate.yml`).
   Both defects are FIXED; the citations are the forensic detail. *(#873/#877, W1-T261/#885, W1-T312)*
+- **NEVER BACKGROUND A POLLER OR ARM A CHECK-IN — do not loop on `gh pr view`, `gh run view` or any
+  API call waiting for a state change. Report what you know and STOP.** A lane polled 80 times at a
+  45-second cadence against an 8-13 minute CI cycle, exhausted the shared budget and locked the
+  operator out of his own repo for ~90 minutes, while single calls 403'd and `/rate_limit` still read
+  204 of 5000 used — the ceiling hit was the SECONDARY limit, which counts CADENCE, NOT VOLUME.
+  A wait is the operator's to schedule, never yours. *(2026-08-20 — the ninety-minute lockout)*
 - **`gh pr create` is GraphQL and dies with "API rate limit already exceeded" when that budget is
   spent** (frequent on this account while REST/core stays healthy). Open PRs via REST:
   `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
@@ -331,15 +337,12 @@ forensic detail, so the narrative does not need to live here.
   SHARED closing `});`** — keeping both sides then leaves one block unclosed, and esbuild reports
   `Unexpected end of file` rather than naming the merge. Close the ours-side block explicitly.
   *(#1399 vs #1404 — resolved by emitting `});` where the `=======` marker was)*
-- **A corrected PR title is now observed by a RE-RUN, not only by a new sha — but `edited` still
-  fires nothing.** `ci.yml`'s commitlint job reads the title LIVE (`gh pr view --json title --jq
-  .title`), so re-running the job picks up a title fixed after the fact; that read replaced an event-
-  payload snapshot which no re-run could ever clear (W1-T351). What has NOT changed: `on: pull_request`
-  still carries no `types:`, so the defaults `[opened, synchronize, reopened]` exclude `edited` and a
-  retitle alone triggers no run at all. Order still matters for the cheapest path — retitle, THEN push
-  — but the recovery when you get it backwards is now a re-run rather than a throwaway sha. Close/reopen
-  fires `reopened` without touching another lane's branch. *(re-derived 2026-08-06; the pre-W1-T351
-  advice to mint a fresh sha is obsolete)*
+- **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
+  nothing.** `ci.yml`'s commitlint job reads the title LIVE (`gh pr view --json title --jq .title`),
+  so re-running it picks up a title fixed after the fact. `on: pull_request` carries no `types:`, so
+  the defaults `[opened, synchronize, reopened]` exclude `edited` and a retitle alone triggers no run.
+  Cheapest path is retitle THEN push; backwards, re-run the job. Close/reopen fires `reopened` without
+  touching another lane's branch. *(W1-T351; re-derived 2026-08-06)*
 
 ## Ledger and evidence discipline
 
@@ -371,9 +374,8 @@ forensic detail, so the narrative does not need to live here.
   `MAX_RETAINED_LINES_PER_STEP = 200` newest per step and archives the rest, so most history exists
   ONLY in older archives — deleting any destroys unique data and the newest subsumes nothing.
   Claims of the form "N occurrences", and especially "zero in the entire history", are unsupportable
-  without every form. *(recon-AE §0; re-derived 2026-08-05, and CORRECTED 2026-08-12 after the
-  `.gz`-only idiom returned a silent **0** for a pattern with 3 real hits — its own positive control
-  passing at 257k the whole time)*
+  without every form. *(recon-AE §0 — the `.gz`-only idiom returned a silent **0** for a pattern
+  with 3 real hits, its own positive control passing at 257k the whole time)*
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.**
   `automerge.armed` once logged `outcome: "ledger-refused"` beside `reason: "verdict is a full PASS"`
   — outcome from the gate that refused, reason from `decideAutoMergeArm` which had APPROVED, with
@@ -580,13 +582,10 @@ forensic detail, so the narrative does not need to live here.
   its code from that checkout, so a branch checkout risks it serving branch code on restart.
   *(#768/#773)*
 - **A deploy is only observable if the daemon records the sha it booted on.** `decideDeployTrigger`
-  now deploys when EITHER the install is behind origin/main OR the running daemon is not on the
-  install (`runningStale`), so fast-forwarding the checkout no longer consumes the trigger. Before
-  that fix, an operator `git pull` left the supervisor reporting "up-to-date" while the daemon ran
-  stale code indefinitely. An unrecorded running sha is treated as stale (fail-eager), costing one
-  self-correcting restart. To force a deploy by hand: `git pull` then
-  `launchctl kickstart -k gui/$UID/com.remudero.daemon`. *(#1054, superseding the #768/#773 rule that
-  the supervisor never restarts for you)*
+  deploys when EITHER the install is behind origin/main OR the running daemon is not on the install
+  (`runningStale`), so fast-forwarding the checkout does not consume the trigger. An unrecorded
+  running sha is treated as stale (fail-eager), costing one self-correcting restart. To force a
+  deploy by hand: `git pull` then `launchctl kickstart -k gui/$UID/com.remudero.daemon`. *(#1054)*
 - **A fix you merge mid-drain reaches the PLAN and the WORKERS immediately and the JUDGE not at all
   — so "I merged it and the next run still did the wrong thing" is a RESTART, not a failed fix.**
   Three clocks, not one: `syncPlanFromOrigin` re-reads the plan blob from origin/main at every
@@ -639,8 +638,7 @@ forensic detail, so the narrative does not need to live here.
   operation. **AND INSPECT WITH `^3`, because the obvious command UNDERSTATES the payload** —
   `git stash show --stat stash@{0}` printed NOTHING for that entry, since all 9 files were UNTRACKED
   and untracked payload hangs off the third parent: `git show --stat 'stash@{0}^3'` is what shows it.
-  **`git stash push <path>` WORKS — it is NOT "unsupported" (re-derived on git 2.54.0) — and is
-  still the wrong verb**: the new entry lands at `stash@{0}` and DEMOTES the older one, so a
+  **`git stash push <path>` WORKS and is still the wrong verb**: the new entry lands at `stash@{0}` and DEMOTES the older one, so a
   concurrent bare `pop` takes yours. `git checkout -- <path>` is scoped to the path, cannot reach
   another session's work, and cannot silently no-op. *(2026-08-13 — the eight-file pop)*
 

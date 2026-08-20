@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -17,7 +18,9 @@ import {
   writeSync,
   renameSync,
 } from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+
+import { playwrightCacheRoot } from "./review.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
 
@@ -106,6 +109,27 @@ export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
  * individually. Mirrors env.ts's ALLOWLIST discipline: name each grant and its
  * reason, never inherit the rest of HOME wholesale.
  */
+/**
+ * The browser cache's path RELATIVE TO HOME, derived from the SAME resolver the launch path uses
+ * ({@link playwrightCacheRoot}, `lib/review.ts`) rather than a second copy of its platform branch —
+ * W1-T1063's design point, so the grant and the resolver cannot disagree.
+ *
+ * PASSING AN EMPTY ENV IS DELIBERATE. The no-override branch is the only one a worker can ever
+ * take, because `ALLOWLIST` (`lib/env.ts`) passes PATH, HOME, TMPDIR, LANG, USER and the Claude
+ * token and NOTHING ELSE into a spawn, so `PLAYWRIGHT_BROWSERS_PATH` cannot survive to be read.
+ * That is the same reason `deploy/Dockerfile` gives for installing at the default path and setting
+ * no variable at all, and it is why this grant — not a variable — is the mechanism.
+ *
+ * A SENTINEL HOME IS USED, NOT A REAL ONE, so the result is a pure relative path independent of
+ * whose HOME is asked about: linux yields `.cache/ms-playwright`, darwin
+ * `Library/Caches/ms-playwright`. BOTH PLATFORMS ARE COVERED — the fleet runs in the Linux
+ * container, and the table already carries a macOS-specific entry beside this one.
+ */
+export function playwrightCacheRelPath(platform: string = process.platform): string {
+  const sentinel = "/__rmd_home__";
+  return relative(sentinel, playwrightCacheRoot({}, platform, sentinel)).split(sep).join("/");
+}
+
 export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
   {
     relPath: ".claude",
@@ -116,6 +140,27 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
       "sibling is absent. OAuth may read under HOME — unverified live, see LEARNINGS.md.",
   },
   { relPath: ".config/gh", reason: "gh CLI auth token, so a worker can open/merge PRs" },
+  {
+    relPath: playwrightCacheRelPath(),
+    reason:
+      "Playwright's browser cache is HOME-relative (playwrightCacheRoot, lib/review.ts, resolves its " +
+      "no-override branch off HOME), so a redirected HOME hides the copy the image already installed " +
+      "and every run downloads its own — MEASURED on the container at the great majority of a completed " +
+      "worker home. READ-ONLY IN PRACTICE: on a populated cache every browser directory's mtime is its " +
+      "INSTALL date and nothing under the tree is modified across repeated launches, so this grant adds " +
+      "no writable path and no bind — it is a symlink inside the worker home, exactly like the four " +
+      "beside it. AN ABSENT CACHE IS A SKIPPED GRANT, inherited from materializeWorkerHome's existing " +
+      "contract: a target that does not exist is recorded `absent` and skipped silently, so a host " +
+      "that never populated one still materializes a working home and the worker falls back to its own " +
+      "directory. THE PINNED-BUILD CASE, DECIDED AND STATED: when the cache exists but lacks the pinned " +
+      "revision, the install seam (ensureBrowsers, memoised per process) populates the SHARED tree. " +
+      "That is bounded rather than free — Playwright installs into a per-REVISION directory and writes " +
+      "its INSTALLATION_COMPLETE marker last, so a half-extracted directory reads as absent to a reader " +
+      "and two runs on DIFFERENT revisions cannot collide; MEASURED on a populated cache, the markers " +
+      "are present and there is no lock file, so the marker protects readers and not concurrent " +
+      "writers. The residual is two runs installing the SAME missing revision at once, which is the " +
+      "one case an enforcing predicate would have to cover and is left to its own task.",
+  },
   { relPath: ".gitconfig", reason: "git author identity for commits the worker makes" },
   {
     relPath: "Library/Keychains/login.keychain-db",

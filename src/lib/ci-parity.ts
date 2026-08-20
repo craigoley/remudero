@@ -527,6 +527,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       return [refresh, lint];
     },
   },
+  // W1-T1051: the assertion-discrimination gate is a deterministic npm-script gate that reads only
+  // the checked-out tree — the test sources plus the files their assertions name — so it needs no
+  // PR-specific input and mirrors exactly, the same class as the entries around it.
+  npmScriptEntry("assertion-discrimination", "assertion-discrimination"),
   npmScriptEntry("depcruise", "depcruise"),
   {
     job: "containment-probe",

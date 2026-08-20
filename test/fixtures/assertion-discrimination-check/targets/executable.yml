@@ -1,0 +1,3 @@
+# Fixture target for assertion-discrimination-check's falsifier suite (W1-T1051).
+job:
+  run: echo "TOTALLY-UNIQUE-LITERAL-B lives in real executable text, not just a comment"
