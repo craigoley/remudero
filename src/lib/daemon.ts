@@ -79,6 +79,11 @@ import type { OrphanSweepReport } from "./worker-containment.js";
 // `LandFeedbackResult` only shapes the `sweepFeedbackLanding` boot param and
 // `DaemonDeps.sweepFeedbackLanding` injection points below (W1-T530).
 import type { LandFeedbackResult } from "./feedback-landing.js";
+// Type-only (erased at build) — W1-T1040's GitHub-side posture drift finding shape, defined once
+// in github-posture.ts and reused here so DaemonDeps.checkGithubPosture never re-declares it.
+// This module stays a PURE, filesystem-free module at runtime (file header) — the real read +
+// baseline diff live in run-task.ts's wiring, exactly like checkRetroTrigger/checkAutoTriage.
+import type { GithubPostureFinding } from "./github-posture.js";
 
 /**
  * Reason the scheduler loop returned — every terminal state is one of these.
@@ -1163,6 +1168,19 @@ export interface DaemonDeps {
    */
   sweepFeedbackLanding?: () => Promise<LandFeedbackResult> | LandFeedbackResult;
   /**
+   * W1-T1040: THE GITHUB-SIDE POSTURE DRIFT CHECK — reads whether the repo's GitHub-side
+   * security capabilities (`security_and_analysis`, `enforce_admins`) are on, once a day at
+   * most (github-posture.ts's own cadence gate), and returns only the findings that changed
+   * since the recorded baseline (or the first read if none is recorded) — `[]` on every other
+   * tick, including an unreadable read (never a false all-clear). Best-effort by the SAME
+   * contract as `sweep`/`sweepOrphans`/`sweepFeedbackLanding` above: a throw costs one logged
+   * tick, never the daemon's life, and a non-empty return NEVER halts dispatch, fails a check,
+   * or changes a verdict — it is a ledger row for the operator, nothing more (see
+   * github-posture.ts's module header for why this is deliberately not an `escalate()` call).
+   * Optional: omitted ⇒ the loop behaves exactly as before this check existed.
+   */
+  checkGithubPosture?: () => Promise<GithubPostureFinding[]> | GithubPostureFinding[];
+  /**
    * W1-T160: evaluate the retro cadence trigger this tick — fires on
    * merges-since-marker >= N OR days-since-marker >= D (policy data),
    * whichever crosses first (retro.ts's `evaluateRetroTrigger`, the pure
@@ -2239,6 +2257,25 @@ export async function runDaemon(
         });
       } catch (e) {
         log("daemon.feedback_landing_sweep.failed", { error: String((e as Error)?.message ?? e) });
+      }
+    }
+
+    // GITHUB-SIDE POSTURE DRIFT CHECK (W1-T1040): runs alongside the sweeps above, on the SAME
+    // "once per iteration" cadence — the hook itself throttles the actual read to at most once a
+    // day (github-posture.ts's decideGithubPostureCheck), so most ticks return `[]` at no network
+    // cost. Best-effort by the same contract as `sweep`/`sweepOrphans`/`sweepFeedbackLanding`
+    // above: a throw costs one logged tick, never the daemon's liveness. A non-empty return is
+    // LEDGERED — never gated, never a `continue`, never consulted by any governor below — so a
+    // posture finding can never halt a dispatch or fail a check (task rationale (vii)). Optional:
+    // omitted ⇒ the loop behaves exactly as before this check existed.
+    if (deps.checkGithubPosture) {
+      try {
+        const findings = await deps.checkGithubPosture();
+        for (const finding of findings) {
+          log("github_posture.finding", { capability: finding.capability, kind: finding.kind, cost: finding.cost });
+        }
+      } catch (e) {
+        log("github_posture.check_failed", { error: String((e as Error)?.message ?? e) });
       }
     }
 
