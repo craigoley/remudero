@@ -9,6 +9,7 @@ import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   isCappedReviewOrphanEscalation,
+  reviewOrphanBackoffElapsed,
   type OpenPrView,
 } from "../src/lib/sweep.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -439,5 +440,174 @@ test("W1-T983: inverting the predicate fails the paired control", () => {
     // And the real, unmutated predicate still decides both directions correctly.
     assert.equal(isCappedReviewOrphanEscalation(capped, DEFAULT_SWEEP_POLICY), true);
     assert.equal(isCappedReviewOrphanEscalation(ordinary, DEFAULT_SWEEP_POLICY), false);
+  })();
+});
+
+// ── W1-T1018: BACKOFF, NOT A BUDGET ─────────────────────────────────────────────────────────
+//
+// Operator ruling, 2026-08-19: "I don't really like the idea of a review budget. We just need
+// back off." `priorReviewOrphans` used to count DISTINCT PUSHED HEADS — so a base-repair merge
+// (the remedy this system itself prescribes on a base-recovered notice) spent the SAME budget a
+// genuine failing retry did, and reaching `policy.reviewOrphanCap` was a PERMANENT wall (rationale
+// (1)-(4), PR #2159). Two independent changes, both required:
+//   (iv) `reviewOrphansFor` (run-task.ts) now counts DISTINCT REVIEWABLE DIFFS, not distinct
+//        heads, when a `diffDigestForHead` fetcher is supplied — two heads with a byte-identical
+//        PR-own diff are ONE orphan, never two.
+//   (i)/(ii)/(iii) `reviewOrphanBackoffElapsed` (lib/sweep.ts) replaces the cap's old PERMANENT
+//        cessation with an ELAPSED-TIME backoff — the cap row still escalates for visibility, but
+//        yields back to post-review once enough wall-clock time has passed since the lane's last
+//        real attempt, so the lane never stops trying outright.
+
+const DIGEST_D1 = "d1-unchanged-diff";
+const DIGEST_D2 = "d2-genuinely-different-diff";
+
+test("W1-T1018: a push that changes nothing reviewable does not count an orphan", () => {
+  // PRIOR_A and PRIOR_B both carry the SAME digest — a base-repair merge that left the PR's own
+  // diff byte-identical (rationale (2)'s #2159 base merges: "own diff: 2 files +212/-8" on both).
+  const ledger = [ledgerLine("review.posted", "W1-A", PRIOR_A), ledgerLine("review.posted", "W1-A", PRIOR_B)];
+  const digestForHead = (sha: string): string | undefined => (sha === PRIOR_A || sha === PRIOR_B ? DIGEST_D1 : undefined);
+
+  const facts = reviewOrphansFor(ledger, "W1-A", CURRENT, digestForHead);
+  assert.equal(facts.orphanedByPush, true, "the PR was still reviewed on a now-superseded head");
+  assert.equal(facts.priorOrphans, 1, "two identical-diff heads are ONE orphan, not two — housekeeping is free");
+});
+
+test("W1-T1018: a diff-changing push still counts an orphan", () => {
+  // The housekeeping shape from the test above, immediately contrasted — in the SAME test run —
+  // with a genuinely diff-changing push, so the two directions cannot be satisfied by an
+  // implementation that just never counts (or always counts) anything.
+  const housekeepingLedger = [ledgerLine("review.posted", "W1-A", PRIOR_A), ledgerLine("review.posted", "W1-A", PRIOR_B)];
+  const sameDigest = (): string => DIGEST_D1;
+  const housekeeping = reviewOrphansFor(housekeepingLedger, "W1-A", CURRENT, sameDigest);
+  assert.equal(housekeeping.priorOrphans, 1, "sanity: the identical-diff pair still reads as one");
+
+  // Now PRIOR_B's push genuinely changed the PR's own diff — a real retry, not housekeeping.
+  const changingLedger = [ledgerLine("review.posted", "W1-A", PRIOR_A), ledgerLine("review.posted", "W1-A", PRIOR_B)];
+  const differentDigest = (sha: string): string => (sha === PRIOR_A ? DIGEST_D1 : DIGEST_D2);
+  const changing = reviewOrphansFor(changingLedger, "W1-A", CURRENT, differentDigest);
+  assert.equal(changing.priorOrphans, 2, "a genuinely diff-changing push still counts — never silently discounted");
+});
+
+test("W1-T1018: an unreadable digest counts its head on its own, never merging with anything", () => {
+  // FALSE-POSITIVE LOCK: an unreadable compare (a throw, a rate limit) must never manufacture a
+  // false "unchanged" reading by collapsing two genuinely-distinct heads together.
+  const ledger = [ledgerLine("review.posted", "W1-A", PRIOR_A), ledgerLine("review.posted", "W1-A", PRIOR_B)];
+  const alwaysUnreadable = (): undefined => undefined;
+  const facts = reviewOrphansFor(ledger, "W1-A", CURRENT, alwaysUnreadable);
+  assert.equal(facts.priorOrphans, 2, "missing information must never silently discount a possibly-genuine retry");
+});
+
+test("W1-T1018: reviewOrphansFor without a digest fetcher counts every distinct head, exactly as before", () => {
+  // Byte-identical to the pre-W1-T1018 behaviour when no 4th argument is passed at all — the
+  // SCOPE-lag default `buildOpenPrViews` currently relies on (see that function's own comment).
+  const ledger = [ledgerLine("review.posted", "W1-A", PRIOR_A), ledgerLine("review.posted", "W1-A", PRIOR_B)];
+  const facts = reviewOrphansFor(ledger, "W1-A", CURRENT);
+  assert.equal(facts.priorOrphans, 2);
+});
+
+/** A minimal green, review-none, orphaned {@link OpenPrView} — the shared shape the backoff tests key off. */
+function backoffPr(overrides: Partial<OpenPrView>): OpenPrView {
+  return {
+    prNumber: 2159,
+    prUrl: "https://github.com/craigoley/remudero/pull/2159",
+    taskId: "W1-CAP",
+    headSha: CURRENT,
+    reviewState: "none",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    strikeHistory: [],
+    lastActivityAt: "2026-08-01T18:00:00.000Z",
+    autoMergeArmed: false,
+    isDependabot: false,
+    reviewOrphanedByPush: true,
+    priorReviewOrphans: DEFAULT_SWEEP_POLICY.reviewOrphanCap,
+    ...overrides,
+  } as OpenPrView;
+}
+
+const BACKOFF_NOW = Date.parse("2026-08-01T18:05:00.000Z");
+
+test("W1-T1018: the escalation still fires at the threshold", () => {
+  // No prior attempt on record yet (undefined) — byte-identical to the pre-W1-T1018 permanent
+  // cap: the FIRST time the threshold is reached, it escalates for visibility.
+  const firstReach = backoffPr({ reviewOrphanLastAttemptAt: undefined });
+  const d1 = deriveDisposition(firstReach, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);
+  assert.equal(d1.disposition, "blocked-ambiguous", "the cap is met — escalate for visibility");
+  assert.match(d1.reason, /orphaned by a push, again/);
+  assert.match(d1.reason, new RegExp(`${DEFAULT_SWEEP_POLICY.reviewOrphanCap} cap`));
+
+  // A RECENT attempt (5 minutes ago, well inside the 120m backoff window) — still escalates;
+  // hammering the lane again this soon would be the exact loop this task exists to prevent.
+  const recentAttempt = backoffPr({ reviewOrphanLastAttemptAt: "2026-08-01T18:00:00.000Z" });
+  const d2 = deriveDisposition(recentAttempt, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);
+  assert.equal(d2.disposition, "blocked-ambiguous", "still within the backoff window — escalate, not retry");
+});
+
+test("W1-T1018: a PR past the threshold is re-reviewed after the interval", () => {
+  // The SAME capped PR as above, but its last real attempt was 8 hours ago — well past the
+  // 120-minute default backoff. Design (ii): "escalate AND keep going" — the lane resumes.
+  const pastBackoff = backoffPr({ reviewOrphanLastAttemptAt: "2026-08-01T10:00:00.000Z" });
+  assert.equal(
+    reviewOrphanBackoffElapsed(pastBackoff, DEFAULT_SWEEP_POLICY, BACKOFF_NOW),
+    true,
+    "sanity: this fixture really is past the backoff window",
+  );
+  const derived = deriveDisposition(pastBackoff, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);
+  assert.equal(
+    derived.disposition,
+    "post-review",
+    "past the interval, the sweep re-reviews rather than silencing the PR forever",
+  );
+  assert.match(derived.reason, /orphaned by a push/, "the SAME post-review dispatch every orphaned PR gets");
+});
+
+test("W1-T1018: removing the backoff reset fails the re-review test", () => {
+  const sweepUrl = new URL("../src/lib/sweep.ts", import.meta.url);
+  const src = readFileSync(sweepUrl, "utf8");
+  const target =
+    "export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {\n" +
+    "  if (!pr.reviewOrphanLastAttemptAt) return false;\n" +
+    "  const last = Date.parse(pr.reviewOrphanLastAttemptAt);\n" +
+    "  if (Number.isNaN(last)) return false;\n" +
+    "  return now - last >= policy.reviewOrphanBackoffMinutes * 60_000;\n" +
+    "}";
+  const occurrences = src.split(target).length - 1;
+  assert.equal(occurrences, 1, "the substitution target must be UNIQUE or the mutant proves nothing");
+
+  // File-sha bracketed (design clause vi): read the sha256 BEFORE the mutation.
+  const originalSha = createHash("sha256").update(src).digest("hex");
+
+  // THE MUTATION: remove the backoff reset entirely — the function never reports elapsed, which
+  // is exactly the pre-W1-T1018 permanent cap this task's own risk note names as the dangerous
+  // direction to regress toward, so a falsifier that catches it is load-bearing, not decorative.
+  const removed =
+    "export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {\n" +
+    "  return false;\n" +
+    "}";
+  const mutatedSrc = src.replace(target, removed);
+  const mutatedSha = createHash("sha256").update(mutatedSrc).digest("hex");
+  assert.notEqual(mutatedSha, originalSha, "the mutation must actually change the file content");
+
+  const mutantPath = writeMutantModule("sweep.ts", mutatedSrc);
+  return (async () => {
+    const mutant = (await import(mutantPath)) as typeof import("../src/lib/sweep.js");
+
+    const pastBackoff = backoffPr({ reviewOrphanLastAttemptAt: "2026-08-01T10:00:00.000Z" });
+    const derived = mutant.deriveDisposition(pastBackoff, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);
+    assert.equal(
+      derived.disposition,
+      "blocked-ambiguous",
+      "the mutant must fail the re-review test — with no reset it walls the PR off exactly like the old cap",
+    );
+    assert.notEqual(derived.disposition, "post-review", "the mutant must NOT reproduce the fixed behaviour");
+
+    // The real, on-disk file was never touched by the mutant copy.
+    const shaAfter = createHash("sha256").update(readFileSync(sweepUrl, "utf8")).digest("hex");
+    assert.equal(shaAfter, originalSha, "the real file must read unchanged either side of the mutation check");
+
+    // And the real, unmutated behaviour still resumes retrying past the interval.
+    const realDerived = deriveDisposition(pastBackoff, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);
+    assert.equal(realDerived.disposition, "post-review");
   })();
 });

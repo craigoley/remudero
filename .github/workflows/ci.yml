@@ -89,8 +89,14 @@ jobs:
         # PID across both retries in each case. A retry cannot outlive a lock holder it created
         # and cannot kill. Removing apt removes all of it.
         #
-        # W1-T1034 (#2223) proposed baking the browser into a container image to reach the same
-        # end. This makes that unnecessary: there is no apt call left to move off the critical path.
+        # W1-T1034 (#2223) is the task that MEASURED this failure mode from a raw job log: the
+        # orphaned root apt-get, the flock wait that cannot see apt's fcntl lock, and the mirror
+        # stall underneath both. Its filing draft led with baking the browser into a container
+        # image; that recommendation was REVERSED before dispatch (shard amended 2026-08-19) to
+        # lead instead with dropping `--with-deps` -- exactly what this step does. There is no apt
+        # call left to move off the critical path, so the container stays priced as a fallback for
+        # a future base image that stops carrying Chromium's shared libs, not adopted today, and
+        # the retry/wait machinery #2211 tried is gone rather than made more patient.
         run: npx playwright install chromium
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement --

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { judgeReview, reviewFailureClass, reviewLedgerLegibilityFields } from "../src/lib/review.js";
+import { judgeReview, reviewFailureClass, reviewLedgerLegibilityFields, reviewLedgerReasons } from "../src/lib/review.js";
 
 // ── W1-T304 ──────────────────────────────────────────────────────────────────
 //
@@ -57,6 +57,66 @@ diff --git a/docs/ORIENTATION.md b/docs/ORIENTATION.md
   assert.ok(fields.failure_reason && fields.failure_reason.length > 0, "reasons: [] is no longer the whole story");
   assert.equal(fields.failure_reason, v.summary, "the ledger's reason is the SAME text the verdict actually rendered");
   assert.match(fields.failure_reason!, /body contradicts its own diff/i);
+});
+
+// ── W1-T1016: the `reasons` array itself, not just failure_class/failure_reason ──────────────
+//
+// `reviewLedgerLegibilityFields` above proves the reason is COMPUTED (`failure_class`/
+// `failure_reason`); it never touches `reasons`, which run-task.ts's `log("review.posted", …)`
+// call populates separately and which `actionableGateFailuresFromReasons` (lib/sweep.ts) —
+// the fix rung's own routing gate — actually reads. Before this task `reasons` stayed `[]` for
+// this exact #1193 shape, so the gate's `length === 1` bound could never fire and the PR fell to
+// `blocked-ambiguous` (a human) instead of the `blocked-fixable` row that already exists for it.
+
+/** The #1193 fixture from the test above, factored out so both the positive and negative-control
+ *  tests below build the SAME contradiction verdict rather than a hand-copied variant. */
+function contradictionVerdict() {
+  const threeFileDiff = `
+diff --git a/MASTER-PLAN.md b/MASTER-PLAN.md
++++ b/MASTER-PLAN.md
+@@
++updated plan text
+diff --git a/plan/tasks.yaml b/plan/tasks.yaml
++++ b/plan/tasks.yaml
+@@
++- id: W1-T999
+diff --git a/docs/ORIENTATION.md b/docs/ORIENTATION.md
++++ b/docs/ORIENTATION.md
+@@
+-old orientation text
++new orientation text
+`.trim();
+  const body = `${RESPONSIVE_REPORT}\n\nexactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md.`;
+  return judgeReview(ONE_CRITERION, { diff: threeFileDiff, report: body });
+}
+
+test("W1-T1016: a changeset contradiction failure ledgers exactly one reason instead of an empty array", () => {
+  const v = contradictionVerdict();
+  assert.ok(v.criteria.every((c) => c.met), "every criterion substantiated — reasons would stay [] without the fix");
+  assert.equal(v.state, "failure");
+
+  const reasons = reviewLedgerReasons(v);
+  assert.equal(reasons.length, 1, "exactly one reason, never an empty array and never more than one (design note ii)");
+  assert.equal(reasons[0], v.summary, "the single reason is the SAME text already computed as failure_reason — never re-derived");
+});
+
+test("W1-T1016: an unmet criteria failure keeps its own reasons unchanged", () => {
+  // The negative control, run beside the positive case above (design note iv): editing the field
+  // an ORDINARY failing review also writes must not corrupt that ordinary path. Fully
+  // non-responsive report so the named criterion reads unmet, with NO changeset contradiction in
+  // play at all.
+  const criteria: AcceptanceCriterion[] = [{ claim: "the widget renders correctly", proof: "widget renders correctly on load" }];
+  const v = judgeReview(criteria, { diff: "", report: "REPORT\nAn unrelated refactor of the plan loader.\nPR_URL: https://github.com/o/r/pull/1" });
+  assert.equal(v.state, "failure", v.summary);
+  assert.equal(v.changesetContradictions?.length ?? 0, 0, "this fixture carries no changeset contradiction at all");
+
+  const reasons = reviewLedgerReasons(v);
+  assert.deepEqual(
+    reasons,
+    v.criteria.filter((c) => !c.met).map((c) => c.reason),
+    "byte-identical to the pre-W1-T1016 per-criterion rule — untouched by the contradiction fallback",
+  );
+  assert.notEqual(reasons[0], v.summary, "an ordinary unmet criterion's own reason, never the verdict summary");
 });
 
 test("ACCEPTANCE 2: Standing rule 15 tampering (no unmet named criterion) carries failure_class=criteria_tampered", () => {

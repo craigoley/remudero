@@ -476,6 +476,7 @@ import {
   reviewEvidenceStrength,
   cappedReason,
   reviewLedgerLegibilityFields,
+  reviewLedgerReasons,
   parseWhitelistedProof,
   resolveNameFilteredCandidates,
   narrowNameFilteredArgs,
@@ -3042,8 +3043,11 @@ async function runReview(args: {
   // criterion must never reach.
   const visibleUnmet = visibleCriteria(unmet);
   const unmetClaims = visibleUnmet.map((c) => c.claim);
-  const reasons = visibleUnmet.map((c) => c.reason);
-  if (verdict.testTheater) reasons.push("test theater: added tests assert nothing");
+  // W1-T1016: `reviewLedgerReasons` is the SAME pure rule this line used to compute inline
+  // (per-visible-unmet-criterion reason + testTheater), now ALSO covering the changeset-
+  // contradiction path so `reasons` is never `[]` for the one failure shape the fleet already
+  // owns a `blocked-fixable` disposition row for — see that function's own doc (lib/review.ts).
+  const reasons = reviewLedgerReasons(verdict);
   // OBSERVABILITY (W1-T65 design): per-criterion proof_exec outcome, so an
   // OBSERVED verdict (executed_pass/executed_fail) is legible on the ledger vs a
   // KEYWORD one (not_executable), and an environment hiccup (exec_error) is never
@@ -15563,12 +15567,27 @@ function isReviewPostedStep(step: unknown): boolean {
   return step === "review.posted" || step === "review.post_refused";
 }
 
-/** What {@link reviewOrphansFor} derived — the two halves of the W1-T225 pair, from one scan. */
+/** What {@link reviewOrphansFor} derived — the two halves of the W1-T225 pair, from one scan,
+ *  plus W1-T1018's elapsed-time-backoff clock. */
 interface ReviewOrphanFacts {
   /** True iff this PR was reviewed on a head that is no longer the current one. */
   orphanedByPush: boolean;
-  /** How many DISTINCT prior heads carry a posted review — the loop falsifier's count. */
+  /**
+   * How many DISTINCT REVIEWABLE prior heads carry a posted review — the escalation threshold's
+   * count. W1-T1018 design (iv): when `diffDigestForHead` is supplied, two prior heads whose
+   * digest matches count as ONE, never two — a base-repair merge that leaves the PR's own diff
+   * unchanged is housekeeping, not a retry, and must not spend the same budget one does.
+   */
   priorOrphans: number;
+  /**
+   * W1-T1018 — the LATEST ledger timestamp (ISO string) among every qualifying prior-head line
+   * this scan found, whether or not that head's diff counted toward `priorOrphans` above. Feeds
+   * {@link "./lib/sweep.js".reviewOrphanBackoffElapsed} via `OpenPrView.reviewOrphanLastAttemptAt`.
+   * `undefined` when no qualifying line carried a parseable `ts` (including the empty-prior-heads
+   * case, where this key is omitted entirely rather than set to `undefined` — see the early return
+   * below).
+   */
+  lastAttemptAt?: string;
 }
 
 /**
@@ -15608,22 +15627,82 @@ interface ReviewOrphanFacts {
  * REASON STRING is logged, never whether the review lane runs. The one action-bearing consumer is
  * the cap row, which escalates once `priorOrphans >= policy.reviewOrphanCap` (2). So the real
  * false-positive cost is a premature needs-human issue, NOT a paid re-review.
+ *
+ * W1-T1018 design (iv), ADDED ON TOP OF THE ABOVE, NEVER REPLACING IT (operator ruling
+ * 2026-08-19): `diffDigestForHead` is OPTIONAL. Supplied, it counts DISTINCT DIGESTS among the
+ * qualifying prior heads rather than distinct SHAS — two heads whose PR-own diff (against `main`)
+ * digests identically (rationale (2)'s #2159 base-repair merges: "own diff: 2 files +212/-8" on
+ * both) are ONE orphan, not two, because the second push changed nothing reviewable. A digest read
+ * as `undefined` (an unreadable/best-effort-failed compare, or simply no fetcher wired) is NEVER
+ * merged with anything else; it counts on its own — the SAME fail-toward-escalating default
+ * {@link "./lib/sweep.js".reviewOrphanBackoffElapsed}'s own doc names: missing information must
+ * never silently discount a possibly-genuine retry.
+ *
+ * SCOPE (honest, mirrors how `pendingAnswer`/`reviewOrphanedByPush` themselves shipped their
+ * mechanism ahead of their producer — see those fields' own SCOPE notes, lib/sweep.ts): this
+ * parameter and the counting change are the full MECHANISM, wired end-to-end and unit-tested
+ * here — but `buildOpenPrViews` below does not pass a digest fetcher yet (that needs a bounded,
+ * best-effort GitHub compare call per prior head, the SAME shape `hydrateMergeConflictEvidence`,
+ * lib/open-prs-rest.ts, already uses for merge-conflict evidence, scoped to the small set of
+ * already-orphaned PRs). Until that wiring lands, every prior head still counts individually,
+ * IDENTICAL to this function's pre-W1-T1018 behaviour — housekeeping pushes still spend the
+ * budget for now, but design (i)/(ii)'s elapsed-time backoff (which IS fully wired below) already
+ * means that budget is no longer a permanent wall either way.
+ *
+ * `lastAttemptAt` is the max `ts` across EVERY qualifying line, REGARDLESS of whether its head's
+ * digest counted — a housekeeping push still runs the review lane and still proves the PR is
+ * alive, so it still resets the backoff clock (design iii: "reset on a real signal change"). This
+ * half IS fully wired below (`buildOpenPrViews` reads it off the SAME scan unconditionally, no
+ * extra fetch required).
  */
 export function reviewOrphansFor(
   ledger: Array<Record<string, unknown>>,
   taskId: string | undefined,
   headSha: string,
+  diffDigestForHead?: (sha: string) => string | undefined,
 ): ReviewOrphanFacts {
   if (!taskId || !headSha) return { orphanedByPush: false, priorOrphans: 0 };
-  const priorHeads = new Set<string>();
+  const priorHeads = new Map<string, number>(); // sha -> latest parseable ts (ms since epoch)
   for (const l of ledger) {
     if (!isReviewPostedStep(l.step)) continue;
     if (l.task_id !== taskId) continue;
     const sha = typeof l.head_sha === "string" ? l.head_sha : "";
     if (!sha || sha === headSha) continue; // absent sha, or the CURRENT head — neither is an orphan
-    priorHeads.add(sha);
+    const parsed = typeof l.ts === "string" ? Date.parse(l.ts) : NaN;
+    const prior = priorHeads.get(sha);
+    if (prior === undefined) {
+      priorHeads.set(sha, parsed); // first sighting always registers the sha, even with an unparseable/absent ts
+    } else if (!Number.isNaN(parsed) && (Number.isNaN(prior) || parsed > prior)) {
+      priorHeads.set(sha, parsed); // a later, parseable ts wins over an earlier missing/older one
+    }
   }
-  return { orphanedByPush: priorHeads.size > 0, priorOrphans: priorHeads.size };
+  if (priorHeads.size === 0) return { orphanedByPush: false, priorOrphans: 0 };
+
+  let priorOrphans: number;
+  if (diffDigestForHead) {
+    const seenDigests = new Set<string>();
+    priorOrphans = 0;
+    for (const sha of priorHeads.keys()) {
+      const digest = diffDigestForHead(sha);
+      // An unreadable digest never merges with anything (fail toward counting, see doc above) —
+      // keyed on the sha itself so it can never accidentally collide with a real digest string.
+      const key = digest ?? `unreadable:${sha}`;
+      if (!seenDigests.has(key)) {
+        seenDigests.add(key);
+        priorOrphans++;
+      }
+    }
+  } else {
+    priorOrphans = priorHeads.size;
+  }
+
+  let latestTs = -Infinity;
+  for (const ts of priorHeads.values()) if (!Number.isNaN(ts) && ts > latestTs) latestTs = ts;
+  const lastAttemptAt = Number.isFinite(latestTs) ? new Date(latestTs).toISOString() : undefined;
+
+  return lastAttemptAt === undefined
+    ? { orphanedByPush: true, priorOrphans }
+    : { orphanedByPush: true, priorOrphans, lastAttemptAt };
 }
 
 /**
@@ -16031,6 +16110,9 @@ export function buildOpenPrViews(
     const supersededBy = newest > pr.number ? newest : undefined;
     const reviewState = reviewStateFromRollup(pr.statusCheckRollup);
     const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
+    // W1-T1018: no `diffDigestForHead` passed here yet — see `reviewOrphansFor`'s own SCOPE note
+    // for why (housekeeping-push detection is a bounded follow-up fetch, not yet wired). The
+    // elapsed-time backoff below (`reviewOrphanLastAttemptAt`) IS fully wired off this SAME scan.
     const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
     // W1-T456 (DEFECT B): a plan-only filing PR deliberately carries no `Remudero-Task:`
     // trailer (#1527's correctness rule) — `taskId` above is `undefined` for it BY DESIGN, so
@@ -16113,6 +16195,9 @@ export function buildOpenPrViews(
       // OpenPrView field, so an assignment made anywhere else would still read as unwired.
       reviewOrphanedByPush: reviewOrphans.orphanedByPush,
       priorReviewOrphans: reviewOrphans.priorOrphans,
+      // W1-T1018: the elapsed-time-backoff clock, off the SAME scan the two fields above already
+      // read — no extra request. See `reviewOrphanBackoffElapsed` (lib/sweep.ts) for the consumer.
+      reviewOrphanLastAttemptAt: reviewOrphans.lastAttemptAt,
       // W1-T176 (design boundary (ii)): `ghRequiredStatusCheckContexts` fails
       // SOFT to undefined/empty on an unreadable protection rule — that same
       // signal must gate the zero-runs discriminator OFF (never assume
@@ -16834,11 +16919,15 @@ export function buildSweepEffects(
         question: question.question.slice(0, 120),
       });
       // W1-T983 — THE ONE CLASS CHANGE THIS TASK MAKES: a capped review-orphaned PR (green
-      // checks, no review posted, `priorReviewOrphans` at `policy.reviewOrphanCap`) is terminal
-      // for that PR — nothing else will ever move it — so it escalates MANUAL instead of the
+      // checks, no review posted, `priorReviewOrphans` at `policy.reviewOrphanCap`) reaches THIS
+      // escalation path with nothing ELSE going to move it in the meantime — the sweep will not
+      // re-dispatch the review lane again until W1-T1018's elapsed-time backoff
+      // (`reviewOrphanBackoffElapsed`, lib/sweep.ts) lapses — so it escalates MANUAL instead of the
       // silent BLOCKED default every other blocked-ambiguous disposition still gets. Read off
       // the SAME `pr`/`policy` this closure already has in scope, via the pure predicate in
-      // sweep.ts (never re-derived here) so the two conditions cannot drift apart.
+      // sweep.ts (never re-derived here) so the two conditions cannot drift apart. W1-T1018 (2026-
+      // 08-19 operator ruling) removed the OLD permanent wall this comment used to describe here —
+      // the disposition genuinely resumes retrying on its own once the backoff interval elapses.
       //
       // TARGET CLASS AND PROJECTED PING RATE (design clause ii, computed the same way rationale
       // (3)/(4) were): MANUAL averaged 8 issues over the SAME 29 distinct days BLOCKED did
