@@ -491,15 +491,65 @@ case "$FRESHNESS_RESTART_PAUSE_S" in
     ;;
 esac
 
+# ── SIGNAL FORWARDING (W1-T1067) — RESTORE WHAT `exec` GIVES FOR FREE ───────────────────────
+# `exec "$@"` above REPLACES this shell with the child, so the child inherits this pid directly
+# and every signal tini sends it arrives unmediated. Down here, once the throttle is non-zero,
+# this shell stays alive as tini's actual child and runs the daemon as a SEPARATE process below —
+# so with no trap, this shell's own default disposition to SIGTERM is to die immediately, which
+# leaves the daemon running, now ORPHANED, with nothing forwarded to it, until docker's grace
+# period expires and SIGKILLs it — too late for `run-task.ts`'s own SIGTERM handler ever to run
+# and release `state/drain.lock`. MEASURED on the live container (2026-08-20): the process tree
+# under a 120s throttle carried no node process at all, only this shell asleep in the crash
+# throttle's `sleep`, because the PREVIOUS restart's node had been SIGKILLed with the lock still
+# held. Forwarding the signal to the child and waiting for ITS real exit — never dying here first
+# — is what restores exactly the delivery `exec` gives for free.
+#
+# THE REAL EXIT CODE IS CAPTURED INSIDE THE TRAP ITSELF, not by resuming the interrupted `wait`
+# below. Per bash's own documented `wait` semantics: when THIS shell is blocked in the `wait`
+# builtin and a signal for which a trap is set arrives, `wait` returns IMMEDIATELY with a
+# pseudo-status greater than 128, and the trap runs right after — so the value that first `wait`
+# produces describes bash's own interruption, never the child's actual outcome, and resuming that
+# interrupted statement is not a reliable place to read the child's real code from. The trap's OWN
+# `wait "$child_pid"` below is a FRESH call, issued once the forward has already been sent and no
+# further signal is pending, so it blocks for the child's genuine completion and records it in
+# `child_rc` — which the main loop then prefers over whatever the interrupted `wait` returned.
+child_pid=""
+child_rc=""
+forward_signal() {
+  sig="$1"
+  if [ -n "$child_pid" ]; then
+    log "received $sig — forwarding to pid $child_pid so it can release its locks before exiting"
+    kill "-$sig" "$child_pid" 2>/dev/null || true
+    child_rc=0
+    wait "$child_pid" 2>/dev/null || child_rc=$?
+  fi
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+
 # CAPTURE THE CODE IN THE SAME COMMAND THAT RUNS IT. `if "$@"; then ...; fi; rc=$?` reads $? from
 # the COMPOUND, which is 0 when the condition merely tested false — so a crashing daemon exited 0,
 # docker's `on-failure` saw a success, and the container stayed down through exactly the crash it
 # is meant to restart. Caught by the non-zero-direction test below, which asserted the propagated
 # code rather than only the sleep; the sleep and both log lines were already correct.
+#
+# BACKGROUNDED, NOT FOREGROUND, so the trap above can react while it runs (a foreground `"$@"`
+# leaves this shell unable to run a trap until the command completes — precisely the delivery gap
+# this block exists to close). `child_rc` starts EMPTY every pass and is only ever set by the trap
+# above, so an ordinary, unsignaled exit leaves it empty and `rc` keeps exactly the value the plain
+# `wait` below already produced — byte-for-byte the prior behaviour on every path this block does
+# not touch.
 freshness_restarts=0
 while :; do
   rc=0
-  "$@" || rc=$?
+  child_rc=""
+  "$@" &
+  child_pid=$!
+  wait "$child_pid" || rc=$?
+  if [ -n "$child_rc" ]; then
+    rc=$child_rc
+  fi
+  child_pid=""
 
   if [ "$rc" -eq 0 ]; then
     log "exited 0 — not throttled (a STOP is a clean stop; --restart=on-failure leaves the container down)"
