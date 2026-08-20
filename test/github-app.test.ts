@@ -11,10 +11,11 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, verify as cryptoVerify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 
 import { buildWorkerEnv } from "../src/lib/env.js";
 import {
+  EXCHANGE_TIMEOUT_MS,
   GH_APP_ID_ENV,
   GH_APP_INSTALLATION_ID_ENV,
   GH_APP_PRIVATE_KEY_PATH_ENV,
@@ -349,4 +350,220 @@ test("refreshInstallationToken: an exchange response MISSING the token degrades 
   assert.equal(result.ok, false);
   assert.match(String((result as { reason?: string }).reason), /missing token/);
   assert.equal(env.GH_TOKEN, "OLD-STATIC-TOKEN", "the existing token is left alone on a bad response");
+});
+
+// ── W1-T1068: THE INSTALLATION-TOKEN REFRESHER CAN DIE SILENTLY AND PERMANENTLY ─────────────────
+//
+// Two gaps, closed at the two injected seams the design names (`fetchImpl`/`log` on
+// `refreshInstallationToken`, `refresh`/`setTimer` on `startInstallationTokenRefresh`):
+//   (i)  the exchange fetch now carries a timeout, so a hung socket is abandoned, not awaited
+//        forever — driven with `mock.timers` so the test advances a FAKE clock by exactly
+//        EXCHANGE_TIMEOUT_MS rather than sleeping for it.
+//   (ii) the refresh promise's rejection (e.g. a throwing ledger `log`) still arms the next timer,
+//        and does so BEFORE any best-effort explanatory write, never depending on that write
+//        succeeding.
+
+test("W1-T1068: a hung exchange is abandoned rather than awaited forever", async () => {
+  const { privateKey } = keyPair();
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let aborted = false;
+    // The hung socket itself: a promise that NEVER settles on its own — the only way it ever
+    // settles is if something aborts it, which is exactly the property under test.
+    const hungFetch = (async (_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(new Error("hung socket abandoned on signal"));
+        });
+      })) as unknown as typeof fetch;
+
+    const promise = refreshInstallationToken({
+      appId: "app-1",
+      installationId: "inst-1",
+      privateKeyPath: "/fake/key.pem",
+      env: {},
+      readKey: () => privateKey,
+      fetchImpl: hungFetch,
+      log: () => {},
+    });
+
+    // Advances a FAKE clock by exactly the production timeout — no real wall-clock wait, which is
+    // the decisive proof this is a real abandon-on-timeout, not a coincidence of a short test.
+    mock.timers.tick(EXCHANGE_TIMEOUT_MS);
+    const result = await promise;
+
+    assert.equal(aborted, true, "the hung request must be aborted rather than left dangling forever");
+    assert.equal(result.ok, false, "an abandoned exchange must resolve to a failure, never hang the caller");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("W1-T1068: an abandoned exchange logs a named timeout reason", async () => {
+  const { privateKey } = keyPair();
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const hungFetch = (async (_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("hung socket abandoned on signal")));
+      })) as unknown as typeof fetch;
+
+    const result = await (async () => {
+      const p = refreshInstallationToken({
+        appId: "app-1",
+        installationId: "inst-1",
+        privateKeyPath: "/fake/key.pem",
+        env: {},
+        readKey: () => privateKey,
+        fetchImpl: hungFetch,
+        log: (step, extra = {}) => logs.push({ step, extra }),
+      });
+      mock.timers.tick(EXCHANGE_TIMEOUT_MS);
+      return p;
+    })();
+
+    assert.equal(result.ok, false);
+    assert.match(String((result as { reason?: string }).reason), /timed out|timeout/i);
+
+    // JOINS the existing failure arms (rationale (0)): same step name, its OWN named reason.
+    const failureLine = logs.find((l) => l.step === "github_app.token_refresh_failed");
+    assert.ok(failureLine, "an abandoned exchange must ledger a named reason, exactly like every other failure arm");
+    assert.match(String(failureLine!.extra.reason), /timed out|timeout/i);
+    // Distinguishable from the pre-existing network-throw arm, so an operator reading the ledger
+    // can tell "the socket never opened" from "the socket opened and then hung" (design i).
+    assert.notEqual(failureLine!.extra.reason, "exchange request failed");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("W1-T1068: a rejected refresh still arms the next timer", async () => {
+  const delays: number[] = [];
+  const res = startInstallationTokenRefresh({
+    log: () => {},
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    // `refresh` REJECTS outright — not `{ ok: false }` — the shape a throwing `log(...)` inside
+    // `refreshInstallationToken` produces (rationale (2)).
+    refresh: async () => {
+      throw new Error("ledger write failed: ENOSPC");
+    },
+    setTimer: (_fn, ms) => {
+      delays.push(ms);
+      return {};
+    },
+  });
+  assert.equal(res.armed, true);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(
+    delays,
+    [REFRESH_MARGIN_MS],
+    "a rejected refresh must retry on the margin, exactly like a resolved { ok: false } failure — a dead loop is the outage this task exists to close",
+  );
+});
+
+test("W1-T1068: a throwing ledger write still leaves the loop armed", async () => {
+  const { privateKey } = keyPair();
+  const delays: number[] = [];
+  const throwingLog = (): void => {
+    throw new Error("ENOSPC: no space left on device");
+  };
+
+  // The REAL `refreshInstallationToken` — not a stub — so this exercises the exact path
+  // rationale (2) names: a rejected (non-2xx) exchange calls `log(...)`, and it is THAT throw
+  // that must not take the loop down with it.
+  const res = startInstallationTokenRefresh({
+    log: throwingLog,
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: (o) =>
+      refreshInstallationToken({
+        ...o,
+        appId: "app-1",
+        installationId: "inst-1",
+        privateKeyPath: "/fake/key.pem",
+        env: {},
+        readKey: () => privateKey,
+        fetchImpl: (async () => fakeResponse(403, { message: "forbidden" })) as typeof fetch,
+      }),
+    setTimer: (_fn, ms) => {
+      delays.push(ms);
+      return {};
+    },
+  });
+
+  assert.equal(res.armed, true);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(
+    delays,
+    [REFRESH_MARGIN_MS],
+    "a throwing ledger write (ENOSPC/EACCES/EROFS) must not stop the loop rearming",
+  );
+});
+
+test("W1-T1068: the next timer is armed before any explanatory write", async () => {
+  // THE DECISIVE ORDERING (design ii): a rejection must arm the next timer BEFORE it attempts any
+  // best-effort write explaining why — never after, because a second throw from that write must
+  // not be able to take an unarmed loop down with it. Every explanatory write here also throws, so
+  // a wrong ordering (write-then-arm) would leave `order` with NO `setTimer` entry at all.
+  const order: string[] = [];
+  const res = startInstallationTokenRefresh({
+    log: (step) => {
+      order.push(`log:${step}`);
+      throw new Error("the same broken ledger — this explanatory write fails too");
+    },
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: async () => {
+      throw new Error("boom");
+    },
+    setTimer: (_fn, ms) => {
+      order.push(`setTimer:${ms}`);
+      return {};
+    },
+  });
+  assert.equal(res.armed, true);
+  await new Promise((r) => setImmediate(r));
+  assert.ok(order.some((e) => e.startsWith("setTimer:")), "the timer must be armed even when every explanatory write throws");
+  assert.equal(
+    order[0],
+    `setTimer:${REFRESH_MARGIN_MS}`,
+    "the reschedule must happen before any explanatory write is even attempted",
+  );
+});
+
+test("W1-T1068: a successful mint reschedules on its own expiry as before", async () => {
+  // THE RESTRUCTURE MUST NOT TOUCH THE HEALTHY PATH (rationale (0)): unchanged interval, unchanged
+  // reason. Same assertions as the pre-existing "mints once and reschedules off the minted expiry"
+  // case, re-asserted under this task's own acceptance criterion.
+  const NOW = 1_700_000_000_000;
+  const EXPIRES = NOW + 60 * 60 * 1000;
+  let refreshes = 0;
+  const delays: number[] = [];
+  let unrefs = 0;
+  const res = startInstallationTokenRefresh({
+    log: () => {},
+    env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    refresh: async () => {
+      refreshes += 1;
+      return { ok: true, expiresAtMs: EXPIRES };
+    },
+    setTimer: (_fn, ms) => {
+      delays.push(ms);
+      return {
+        unref: () => {
+          unrefs += 1;
+        },
+      };
+    },
+    now: () => NOW,
+  });
+  assert.equal(res.armed, true);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(refreshes, 1);
+  assert.deepEqual(
+    delays,
+    [nextRefreshDelayMs(EXPIRES, NOW)],
+    "a successful mint must keep rescheduling off its own expiry, unchanged by this task's restructure",
+  );
+  assert.equal(unrefs, 1, "an armed refresher must still never hold the process open");
 });
