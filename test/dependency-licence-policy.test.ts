@@ -280,14 +280,82 @@ test("claim 4: diffAdded returns ONLY name@version pairs present at head but abs
   assert.equal(added[0].license, "GPL-3.0-only");
 });
 
-test("claim 4b: a version bump of an ALREADY-allowed package (base has v1 MIT, head has v2 MIT) is treated as newly introduced (matches the vendor compare API's own added/removed-by-version semantics), and still passes because v2 is also allow-listed", () => {
+test("claim 4b: a version bump of an ALREADY-allowed package (base has v1 MIT, head has v2 MIT) is NOT treated as newly introduced (W1-T1032 superseded the old name@version-only reading) -- diffAdded now compares against the base licence per-package, so an ordinary bump of an already-allowed package never even enters `added`", () => {
   const base = collectLockPackages({ packages: { "": {}, "node_modules/bumped": { version: "1.0.0", license: "MIT" } } });
   const head = collectLockPackages({ packages: { "": {}, "node_modules/bumped": { version: "2.0.0", license: "MIT" } } });
   const added = diffAdded(base, head);
-  assert.deepEqual(added, [{ name: "bumped", version: "2.0.0", license: "MIT" }]);
+  assert.deepEqual(added, [], "a same-licence bump must not appear in added at all");
   const { offenders, undetermined } = evaluate(added, { allowList: SEEDED_ALLOW_LIST, exemptions: [] });
   assert.equal(offenders.length, 0);
   assert.equal(undetermined.length, 0);
+});
+
+// ── W1-T1032: diffAdded keys the comparison on the PACKAGE and its BASE licence, not on the bare
+// `name@version` key -- so a version bump does not re-read a licence the project already lives
+// with as newly introduced, while a genuine licence change (even to a licence some OTHER package
+// already carries at base) still flags. See plan/tasks.d/W1-T1032-licence-gate-cannot-see-a-bump
+// .yaml for the full rationale and the #2208/#2209 measurements that motivated this.
+
+test("W1-T1032: a version bump with an unchanged licence is not an introduction", () => {
+  // MPL-2.0 is deliberately NOT on SEEDED_ALLOW_LIST -- this proves the bump is excluded from
+  // `added` entirely (never reaches allow-list evaluation), not merely reclassified as allowed.
+  const base = collectLockPackages({ packages: { "": {}, "node_modules/axe-core": { version: "4.12.1", license: "MPL-2.0" } } });
+  const head = collectLockPackages({ packages: { "": {}, "node_modules/axe-core": { version: "4.13.0", license: "MPL-2.0" } } });
+  const added = diffAdded(base, head);
+  assert.deepEqual(added, [], "a bump that keeps the same licence must not be reported as an introduction");
+});
+
+test("W1-T1032: a package whose licence changed between versions still flags", () => {
+  const base = collectLockPackages({ packages: { "": {}, "node_modules/shifty": { version: "1.0.0", license: "MIT" } } });
+  const head = collectLockPackages({ packages: { "": {}, "node_modules/shifty": { version: "2.0.0", license: "GPL-3.0-only" } } });
+  const added = diffAdded(base, head);
+  assert.deepEqual(added, [{ name: "shifty", version: "2.0.0", license: "GPL-3.0-only" }]);
+  const { offenders } = evaluate(added, { allowList: SEEDED_ALLOW_LIST, exemptions: [] });
+  assert.equal(offenders.length, 1, "a real licence change must still be evaluated against the allow-list, and fail here");
+});
+
+test("W1-T1032: a genuinely new package is evaluated exactly as today", () => {
+  const base = collectLockPackages({ packages: { "": {}, "node_modules/unrelated": { version: "1.0.0", license: "MIT" } } });
+  const head = collectLockPackages({
+    packages: {
+      "": {},
+      "node_modules/unrelated": { version: "1.0.0", license: "MIT" },
+      "node_modules/brand-new": { version: "1.0.0", license: "GPL-3.0-only" },
+    },
+  });
+  const added = diffAdded(base, head);
+  assert.deepEqual(added, [{ name: "brand-new", version: "1.0.0", license: "GPL-3.0-only" }]);
+  const { offenders } = evaluate(added, { allowList: SEEDED_ALLOW_LIST, exemptions: [] });
+  assert.equal(offenders.length, 1, "a package with no prior name at base is a real introduction and must be evaluated as today");
+});
+
+test("W1-T1032: a licence present elsewhere at base does not clear a changed one", () => {
+  // Mirrors the lru-cache/minimatch case from this task's rationale: lru-cache is on base at
+  // 5.1.1/ISC and bumps to 11.5.2/BlueOak-1.0.0; BlueOak-1.0.0 is ALSO already on base, but
+  // carried by the UNRELATED package minimatch. A licence-SET comparison across all of base would
+  // silently accept the bump because BlueOak-1.0.0 is "already known" -- the naive reading this
+  // task rejects. A PACKAGE-keyed comparison asks only whether lru-cache itself carried
+  // BlueOak-1.0.0 at base, which it did not, so it still flags.
+  const base = collectLockPackages({
+    packages: {
+      "": {},
+      "node_modules/lru-cache": { version: "5.1.1", license: "ISC" },
+      "node_modules/minimatch": { version: "10.2.5", license: "BlueOak-1.0.0" },
+    },
+  });
+  const head = collectLockPackages({
+    packages: {
+      "": {},
+      "node_modules/lru-cache": { version: "11.5.2", license: "BlueOak-1.0.0" },
+      "node_modules/minimatch": { version: "10.2.5", license: "BlueOak-1.0.0" },
+    },
+  });
+  const added = diffAdded(base, head);
+  assert.deepEqual(
+    added,
+    [{ name: "lru-cache", version: "11.5.2", license: "BlueOak-1.0.0" }],
+    "lru-cache's own licence changed (ISC -> BlueOak-1.0.0) and must still flag, even though BlueOak-1.0.0 is already on base via minimatch",
+  );
 });
 
 test("collectLockPackages: workspace-member entries (no `version`, e.g. this repo's own apps/*) and the root `\"\"` entry are excluded — they are not third-party dependencies", () => {

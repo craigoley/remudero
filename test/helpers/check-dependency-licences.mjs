@@ -95,13 +95,45 @@ export function collectLockPackages(lock) {
   return out;
 }
 
-/** `name@version` pairs present in `head` but absent from `base` -- the PR's own introductions. */
+/**
+ * `name@version` pairs present in `head` but absent from `base` -- the PR's OWN introductions --
+ * MINUS the entries that are merely a version bump of a package base already carries under the
+ * SAME licence (W1-T1032). A bare `name@version` key comparison can't see that: the key changes
+ * on every bump, so a licence the project already lives with re-reads as newly introduced every
+ * time its package moves version. The fix keys the comparison on the PACKAGE, against the SET of
+ * licences it already carries at base (a package can be pinned at several versions with different
+ * licences at once, e.g. `minimatch` on ISC at one version and BlueOak-1.0.0 at another -- matching
+ * ANY of them is a bump, matching NONE of them is a licence change).
+ *
+ * Three cases, in order:
+ *   - the exact `name@version` is already at base -> not added (unchanged, as before).
+ *   - the package name is new to base entirely -> added, evaluated exactly as today.
+ *   - the package name exists at base: its head licence is compared against the SET of licences
+ *     that name carries at base. A match is an ordinary bump, not an introduction, and is dropped
+ *     even if that licence is not on the allow-list -- base already carries it under this name, so
+ *     nothing new is being taken on. A NON-match is a real licence change on that package and still
+ *     flags, even if the mismatched licence is one some OTHER package already carries at base: a
+ *     licence-set comparison across all of base would silently accept that case, which is wrong --
+ *     see the `lru-cache` example in this task's own rationale.
+ */
 export function diffAdded(baseMap, headMap) {
+  const baseLicensesByName = new Map();
+  for (const [key, license] of baseMap) {
+    const at = key.lastIndexOf("@");
+    const name = key.slice(0, at);
+    if (!baseLicensesByName.has(name)) baseLicensesByName.set(name, new Set());
+    baseLicensesByName.get(name).add(license);
+  }
+
   const added = [];
   for (const [key, license] of headMap) {
-    if (baseMap.has(key)) continue;
+    if (baseMap.has(key)) continue; // identical name@version already at base
     const at = key.lastIndexOf("@");
-    added.push({ name: key.slice(0, at), version: key.slice(at + 1), license });
+    const name = key.slice(0, at);
+    const version = key.slice(at + 1);
+    const baseLicenses = baseLicensesByName.get(name);
+    if (baseLicenses && baseLicenses.has(license)) continue; // version bump, same licence -> not an introduction
+    added.push({ name, version, license });
   }
   added.sort((a, b) => (a.name === b.name ? a.version.localeCompare(b.version) : a.name.localeCompare(b.name)));
   return added;
