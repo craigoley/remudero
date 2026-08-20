@@ -617,6 +617,7 @@ import {
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import { checkCliFreshness, checkServiceFreshness, daemonFreshnessFromService } from "./lib/self-sync.js";
+import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
   InflightLockError,
@@ -22274,6 +22275,14 @@ export function ensureInstallFresh(repoDir: string, deps: InstallFreshnessDeps =
  * {@link ensureInstallFresh}, run here (guarded by the SAME `svc.status !== "assessed"`
  * early-return above it, so CI/loop-guarded invocations never redundantly reinstall)
  * BEFORE this function returns and the caller's daemon/serve dispatch proceeds.
+ *
+ * W1-T1021: also where the IMAGE comparison belongs — beside `daemon.tree_dirty`/
+ * `daemon.stale_code`, the same gate and the same boot, rather than a second freshness path.
+ * {@link checkImageDrift} compares `/etc/rmd-build-sha` against `deploy/entrypoint.sh` /
+ * `deploy/Dockerfile`'s own git history; a `"drift"` finding ledgers {@link IMAGE_DRIFT_STEP} so
+ * `deriveNeedsMe` (`src/lib/status-board.ts`) can surface it in `rmd status`. The three degraded
+ * outcomes (`not-applicable`, `unmeasurable`, `fresh`) ledger nothing — same "report the true
+ * fact, never a guessed one" doctrine as the dirty/stale-code pair above.
  */
 export function serviceFreshnessGate(
   cmd: string,
@@ -22283,6 +22292,7 @@ export function serviceFreshnessGate(
     checkServiceFreshness?: typeof checkServiceFreshness;
     ledgerPath?: string;
     ensureInstallFresh?: typeof ensureInstallFresh;
+    checkImageDrift?: typeof checkImageDrift;
   } = {},
 ): void {
   const svc = (deps.checkServiceFreshness ?? checkServiceFreshness)(repoDir, env);
@@ -22302,6 +22312,10 @@ export function serviceFreshnessGate(
   };
   if (svc.dirty) emit("daemon.tree_dirty", {});
   if (svc.behind) emit("daemon.stale_code", { old_sha: svc.behind.oldSha, new_sha: svc.behind.newSha });
+  const imageDrift = (deps.checkImageDrift ?? checkImageDrift)(repoDir);
+  if (imageDrift.status === "drift") {
+    emit(IMAGE_DRIFT_STEP, { build_sha: imageDrift.buildSha, baked_sha: imageDrift.bakedSha });
+  }
   // Install BEFORE proceeding: package.json/package-lock.json changed since the last
   // install this repoDir ran (see ensureInstallFresh's doc) — never after.
   try {
