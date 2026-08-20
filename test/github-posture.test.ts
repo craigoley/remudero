@@ -22,6 +22,8 @@ import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import type { RunResult } from "../src/lib/run-result.js";
+import type { Config } from "../src/lib/config.js";
+import { githubPostureCheck, buildGithubPostureDaemonHooks } from "../src/run-task.js";
 
 // A single-task, always-runnable plan — the minimum daemon.ts's loop needs to keep dispatching
 // while the posture hook runs alongside it (same shape as test/daemon.test.ts's fixturePlan).
@@ -317,4 +319,40 @@ test("W1-T1040: the baseline persists and reloads across a save/load round trip"
   assert.deepEqual(loadGithubPostureBaseline(path), baseline);
 
   mkdirSync(dir, { recursive: true }); // no-op — dir already exists; just proving idempotence
+});
+
+// ── run-task.ts's own gateway factory — the ACTUAL production wiring, not a stand-in ───────
+// The daemon-level tests above inject `checkGithubPosture` directly, proving lib/daemon.ts's
+// CONSUMPTION of the hook; they never exercise run-task.ts's `githubPostureCheck`/
+// `buildGithubPostureDaemonHooks` (the PRODUCER — the literal `readGithubPosture(` call site the
+// task's call-site acceptance criterion names). This closes that gap the same way #1066's own
+// post-mortem did: a producer that is only grep-proven to exist, never actually invoked in a
+// test, is exactly how that rung shipped inert.
+
+test("W1-T1040: run-task.ts's githubPostureCheck wires readGithubPosture end to end (fake gateway, real diff/baseline logic)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "github-posture-wiring-"));
+  const config: Config = { claudeBin: "/bin/true", root: dir };
+  const repoJson = {
+    security_and_analysis: {
+      dependabot_security_updates: { status: "disabled" },
+      secret_scanning: { status: "enabled" },
+    },
+  };
+  const gateway: GithubPostureGateway = {
+    getRepo: () => repoJson,
+    getEnforceAdmins: () => ({ enabled: false }),
+  };
+
+  const first = githubPostureCheck(new Date("2026-08-19T00:00:00.000Z"), { config, gateway });
+  assert.ok(
+    first.some((f) => f.capability === "dependabot_security_updates"),
+    "the real gateway factory's own readGithubPosture( call reaches the fake gateway and the finding comes through",
+  );
+
+  // Wired through buildGithubPostureDaemonHooks (what daemonCommand actually installs), a second
+  // call inside the same day is throttled — same cadence contract as the pure-module tests above,
+  // now proven over the REAL production closure.
+  const hooks = buildGithubPostureDaemonHooks({ config, gateway, now: () => new Date("2026-08-19T01:00:00.000Z") });
+  const second = hooks.checkGithubPosture();
+  assert.deepEqual(second, [], "an hour later, same day — the real wiring's cadence gate still holds");
 });

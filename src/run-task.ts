@@ -11241,10 +11241,10 @@ export function buildRetroDaemonHooks(deps: {
  */
 export function githubPostureCheck(
   now: Date = new Date(),
-  deps: { config?: Config; gateway?: GithubPostureGateway; branch?: string; owner?: string; repo?: string } = {},
+  deps: { config?: Config; gateway?: GithubPostureGateway; branch?: string } = {},
 ): GithubPostureFinding[] {
   const config = deps.config ?? loadConfig();
-  const { owner, repo } = deps.owner && deps.repo ? { owner: deps.owner, repo: deps.repo } : resolveOwnerRepo();
+  const { owner, repo } = resolveOwnerRepo();
   return checkGithubPosture({
     owner,
     repo,
