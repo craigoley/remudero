@@ -1,0 +1,11 @@
+{
+  "_comment": "Fixture: exempts the cases-comment-only finding, WITH a written reason -- must be accepted at load time and downgrade that finding to BASELINED (non-blocking).",
+  "exemptions": [
+    {
+      "testFile": "cases-comment-only/site.fixture.ts",
+      "target": "targets/comment-only.yml",
+      "literal": "TOTALLY-UNIQUE-LITERAL-A",
+      "reason": "Deliberate fixture exemption for the falsifier suite's baseline-acceptance case."
+    }
+  ]
+}

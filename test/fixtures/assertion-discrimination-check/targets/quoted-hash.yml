@@ -1,0 +1,9 @@
+# Fixture target for assertion-discrimination-check's falsifier suite (W1-T1051).
+#
+# The `run:` line below has a literal `#` INSIDE a double-quoted string, immediately followed by
+# TOTALLY-UNIQUE-LITERAL-C on the SAME line. A naive stripper that treats any `#` as a comment
+# start -- even one inside a quoted string -- would strip from that `#` to end-of-line and wrongly
+# erase the literal, making this check misreport an executable assertion as comment-satisfied
+# only. The correct stripper must leave this whole quoted string alone.
+job:
+  run: echo "value #TOTALLY-UNIQUE-LITERAL-C stays because the hash is inside quotes"
