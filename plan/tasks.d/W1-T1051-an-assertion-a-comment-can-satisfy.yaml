@@ -1,0 +1,143 @@
+- id: W1-T1051
+  title: "A TEST CAN ASSERT A LITERAL THAT ONLY A COMMENT SATISFIES, SO A GUARD KEEPS PASSING AFTER THE MECHANISM IT GUARDS GOES DEAD — the CI wait that returned in about a second against a nominal five minutes was pinned by exactly such an assertion, and mutation testing is structurally blind to the whole class: build the one mechanical check that strips comments and re-evaluates"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  files: [scripts/assertion-discrimination-check.mjs, scripts/assertion-discrimination-baseline.json, .github/workflows/ci.yml, package.json, test/assertion-discrimination-check.test.ts]
+  rationale: |
+    THE GENERAL RULE IS UNSHIPPABLE AND THE NARROW ONE IS BUILDABLE. "Every test must discriminate"
+    is a convention, and CLAUDE.md's own charter says a rule that keeps being violated needs a gate
+    rather than sharper prose — the file is at its byte cap with zero headroom, so a new rule would
+    have to evict an old one to say something nothing enforces. This shard is the mechanical subset
+    only: a POSITIVE assertion that a literal string appears in the RAW text of a workflow or source
+    file, where a comment in that file could satisfy it. That form is decidable — strip the target's
+    comments, re-evaluate the same literal, and flag it when the match disappears.
+
+    (1) THE EXPENSIVE INSTANCE, AND IT IS THE ONE THAT JUSTIFIES THE CHECK. A CI step waited on the
+    apt lock with `flock`, and the test pinned it by asserting the literal `flock` appeared. The wait
+    was inert — `flock(2)` and dpkg's `fcntl(2)` record lock are independent lock spaces, so the
+    call returned in about a second against a nominal five minutes, readable straight off the CI
+    timestamps — and the assertion passed anyway, because the string was present. It shipped green
+    and then blocked five pull requests across a full day before anyone read the timestamps. THE
+    STRING WAS ALSO SATISFIABLE BY A COMMENT, which is the property this check decides.
+
+    (2) THE PREMISE THAT #2225 ALREADY FIXED AN INSTANCE BY STRIPPING COMMENTS DOES NOT HOLD, AND
+    THE CORRECTION MATTERS BECAUSE IT NAMES A BETTER REMEDY. #2225 is CLOSED WITHOUT MERGE (closed
+    2026-08-19T16:37:38Z, seconds after #2226 merged); it shipped nothing.
+    `test/workflow-playwright-install.test.ts` contains no reference to comments at all. What
+    actually shipped, in #2211, is STRUCTURAL PARSING: the test parses the YAML and asserts against
+    `job.steps[].run` rather than raw text, so a comment elsewhere in the file cannot satisfy it.
+    That is the stronger remedy and the check should PREFER it — but it is not sufficient on its
+    own, because a shell comment INSIDE a `run:` block is still part of the parsed `run` string, and
+    that is precisely the shape the inert wait had.
+
+    (3) THE POPULATION SAYS BASELINE, NOT CLEAN SHIP. Measured at origin/main f38f71d8 over
+    `git ls-files test/`: of the tests that reference `.github/workflows`, a minority parse the YAML
+    structurally and the clear majority assert against raw text. Narrowing to the tighter form — a
+    variable read from a repo path with `readFileSync`, then asserted with `.includes`/`.match` — the
+    population is smaller, a couple of dozen assertions across under twenty files. So the check
+    SHIPS WITH A BASELINE, in the established `scripts/<name>-baseline.json` shape, and the baseline
+    must reject an entry that carries no written reason so the exemption list cannot grow silently.
+
+    (4) MUTATION TESTING IS ALREADY INSTALLED, ALREADY RUNS, AND IS STRUCTURALLY BLIND TO ALL THREE
+    INSTANCES — THIS IS NOT A "NOBODY READS THE REPORT" TASK. `mutation-nightly.yml` is active and
+    scheduled; its most recent run completed SUCCESSFULLY at 2026-08-20T04:05:41Z, and the four most
+    recent scheduled runs are green. But the scope cannot reach any of the three. The PR gate's
+    `stryker.conf.json` mutates a SINGLE source file. The nightly widens to the whole `src/**` tree
+    under a per-run file cap. `test/**` is NEVER a mutation target — the scope file says it is
+    "enforced twice", by the glob and again by `resolveMutateScope()`'s unconditional exclusion. And
+    NO scope names a workflow: all three scope files carry zero mentions of yml, yaml or workflows,
+    against a control in which all three do name `src/`. So a dead assertion about a YAML file is
+    outside the tool by construction, a vacuous test fixture is outside it twice over, and the third
+    instance is not mutation-shaped at all. The harness is pinned at the 9 line deliberately, the
+    major having been closed today on forbidden licences; nothing here asks to move it.
+
+    (5) THE THIRD INSTANCE IS A DIFFERENT DEFECT AND IS DELIBERATELY NOT ABSORBED. `run-task.ts`
+    writes `automerge.arm_skipped` on a path where a direct merge was ATTEMPTED AND FAILED, so a
+    census counting arm failures by that step name reads zero while failures occur. That is a
+    step-name/meaning mismatch, which no comment-stripping check can see and which mutation testing
+    does not ask about — a mutant flipping the branch would be killed by whatever test pins the
+    current behaviour. It is named here so the reader knows the class is wider than the check, and
+    it is left for its own task.
+
+    (6) AND THE HABIT IS ALREADY IMPROVING, SO THIS IS NOT A LIVE REGRESSION. Recent lanes ran
+    CHECKSUM-VERIFIED MUTATIONS — flip the predicate, confirm exactly the claiming test fails,
+    restore, confirm the file checksum returns to its original. That discipline is becoming routine
+    on NEW work. The gap this check closes is OLDER assertions written before it, which is why the
+    baseline exists and why the shard does not claim a regression in progress.
+  design: |
+    ONE SCRIPT AND ONE CI JOB, FOLLOWING scripts/claims-check.mjs's PRECEDENT — that script is a
+    plain node module, exposed as an npm script, invoked by exactly one unconditional ci.yml job,
+    and carries its own test file. Mirror that shape rather than inventing another.
+
+    THE PREDICATE, STATED SO A FALSIFIER CAN EXIST. For each assertion whose subject is a variable
+    read from a repo path: locate the target file, produce a comments-stripped copy, and re-evaluate
+    the SAME literal against it. If the literal matched the raw file and does NOT match the stripped
+    copy, the assertion is satisfiable by a comment alone and the check FAILS naming the test file,
+    the literal and the target. If it matches both, it passes. If the target cannot be resolved
+    statically, the check reports it as UNRESOLVED and does not count it as a pass — a check that
+    silently skipped what it could not read would be the same defect it exists to find.
+
+    COMMENT SYNTAX IS PER-TARGET, NOT UNIVERSAL. A `#` line comment for YAML and shell, `//` and
+    `/* */` for TypeScript and JSON-with-comments. The stripper must not treat a `#` inside a quoted
+    string as a comment, and the test suite must pin that with a fixture that would otherwise be
+    mis-stripped.
+
+    FAIL LOUD, NEVER SILENTLY EMPTY. If the scan resolves no assertions at all, that is a FAILURE
+    and not a pass — the empty-set vacuous pass is exactly the family this task exists to close, and
+    a check that can report success while comparing nothing would be self-refuting.
+
+    READ-ONLY. The check allocates nothing, edits no test, and rewrites no baseline; a proposed
+    exemption is added by a human with a reason.
+  acceptance:
+    - claim: "an assertion whose literal appears only in a comment of the target file is reported as a failure"
+      proof: "unit test: discrimination: a literal that only a comment satisfies is reported"
+    - claim: "an assertion whose literal survives comment stripping passes and is not flagged"
+      proof: "unit test: discrimination: a literal present in executable text is not flagged"
+    - claim: "a hash inside a quoted string is not treated as the start of a comment"
+      proof: "unit test: discrimination: a hash inside a quoted string is not stripped"
+    - claim: "a baseline entry carrying no written reason is rejected so the exemption list cannot grow silently"
+      proof: "unit test: discrimination: a baseline entry with no recorded reason is rejected"
+    - claim: "resolving no assertions at all is a failure rather than a silent pass over an empty set"
+      proof: "unit test: discrimination: an empty resolved set fails instead of passing"
+    - claim: "the check has a real call site — an unconditional CI job runs it on every pull request"
+      proof: "unit test: discrimination: an unconditional ci job runs the check on every pull request"
+  origin: "oper#assertion-a-comment-can-satisfy-2026-08-20"
+  plan_refs: ["W1-T133", "W1-T402", "W1-T1027"]
+  status: queued
+  attempts: 0
+  note: |
+    RULE 25 RE-DERIVED WITH FOUR CONTROLS, RUN AGAINST THE REAL `INSTRUMENT_SURFACE` EXPORT RATHER
+    THAN READ FROM IT. `.github/workflows/ci.yml` MATCHES, so this task is instrument-entangled and
+    THE IMPLEMENTING PR RIDES ALONE. `scripts/assertion-discrimination-check.mjs` does NOT match —
+    the script pattern is `-ratchet.mjs`, not `-check.mjs`; `src/lib/review.ts` does not match; and
+    `test/…` does not match. Positive control: `scripts/coverage-ratchet.mjs` DOES match, so the
+    predicate was live when the three negatives were taken. Note the baseline file DOES match
+    (`scripts/<name>-baseline.json`), which only reinforces the ride-alone requirement.
+
+    PROOF DIALECT CHOSEN BEFORE WRITING, AND DELIBERATELY UNIFORM. Every criterion forward-references
+    through `unit test:`. A forward-referencing `grep:` at an EXISTING path is a HARD refusal on a
+    filing PR — the path is greppable, the symbol is not yet there, the proof executes, returns zero,
+    and `executed_fail` overrides keyword coverage. Two filing PRs were refused that way within half
+    an hour on 2026-08-20 before the pattern was named, so criterion 6 in particular carries the
+    CI-wiring claim as a named test rather than a workflow grep. Sixteen test files already parse
+    `.github/workflows/ci.yml` and assert on it, so a test is the house form for that claim.
+
+    THE CHECK IS NARROWER THAN THE PROBLEM AND THAT IS THE POINT. It cannot see a test that pins a
+    call instead of a property in any other way, it cannot see the step-name mismatch in (5), and it
+    cannot see a fixture that carries the field it claims to prove. Those need their own tasks or
+    their own reviewers. A gate that catches only the cheap instance would not be worth its weight —
+    this one catches the instance that cost a full day.
+
+    ID PROVENANCE — PRE-MINTED AND READ BACK BEFORE FILING. The reservation resolves to the sha the
+    operator's own mint printed. Five surfaces swept over git and source with no GitHub call beyond
+    the ref and open-PR reads: the reservation (present, control a sibling id also present); shard
+    FILENAMES via `git ls-tree -r` (zero, control a filed id one); ids mentioned under `plan/`
+    (zero, control one); open PR text (zero, control one); and `git grep` across `src/ test/
+    deploy/` (zero, control W1-T1046 which reads two — the fifth surface exists because that id was
+    claimed there while four surfaces read it free). Live `run-` branches for this id read zero
+    against a control that reads one. THE SURFACES ARE RE-SWEPT IMMEDIATELY BEFORE PUSHING.
