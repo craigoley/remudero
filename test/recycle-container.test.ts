@@ -74,6 +74,22 @@ function writeStubs(dir: string): void {
     '      pull-fail) echo "unauthorized: authentication required" >&2; exit 1 ;;',
     "    esac",
     '    echo "Status: Downloaded newer image"; exit 0 ;;',
+    "  exec)",
+    "    shift",
+    '    while [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do shift; done',
+    "    shift 2>/dev/null || true",
+    '    case "$1" in',
+    "      ps)",
+    '        case "$STUB_MODE" in',
+    '          hung-fixrung)  echo "  363439    8970 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json" ;;',
+    '          busy-fixrung)  echo "  363439     600 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json" ;;',
+    '          hung-plus-dispatch)',
+    '            echo "  363439    8970 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/sweep-fix-settings-W1-T446-1787173796831.json"',
+    '            echo "  501122     600 /usr/local/bin/claude --output-format stream-json --settings /home/node/Remudero/tmp/run-settings-W1-T999-1787173796831.json" ;;',
+    "        esac",
+    "        exit 0 ;;",
+    "    esac",
+    "    exit 0 ;;",
     "  stop|rm|run) exit 0 ;;",
     "esac",
     "exit 0",
@@ -185,7 +201,10 @@ test("W1-T1010: live workers past the wait refuse and the pause is removed", () 
 
   const run = runRecycle("good", { stateDir: state });
   assert.notEqual(run.status, 0, "a worker still in flight past the bounded wait must refuse");
-  assert.match(run.stderr, /REFUSING — 1 worker\(s\) still in flight/);
+  // W1-T1046 widened this line to name BOTH populations (lane-holding and lane-less) because the
+  // wait now reads both. The BEHAVIOUR this test was written for is unchanged and still asserted
+  // below — refuse, name the holder, touch nothing, remove the pause — only the count wording moved.
+  assert.match(run.stderr, /REFUSING — 1 lane-holding and 0 lane-less worker\(s\) still in flight/);
   assert.match(run.stderr, /W1-T404\.lock/, "the holder must be named");
   assert.equal(run.calls.filter(isStop).length, 0, "the container must not be stopped");
   assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed");
@@ -316,4 +335,71 @@ test("W1-T1010: the real, un-overridden /.dockerenv check is still the literal s
   // so the override cannot silently change what ships when RMD_RECYCLE_DOCKERENV_PATH is unset.
   const src = readFileSync(SCRIPT, "utf8");
   assert.match(src, /DOCKERENV_PATH="\$\{RMD_RECYCLE_DOCKERENV_PATH:-\/\.dockerenv\}"/);
+});
+
+// ── W1-T1046: THE LANE-LESS PREDICATE, PROVED IN BOTH DIRECTIONS ────────────────────────────────
+//
+// A test that only proved "the hung one is passed" would pass identically on a script that passes
+// EVERYTHING, which is the bug this replaces rather than the fix. So the decisive case runs ONE
+// script invocation against a container holding BOTH a hung fix-rung worker AND a younger
+// lock-holding dispatch worker, and asserts the two opposite outcomes from that single run.
+
+test("W1-T1046: a hung fix-rung worker is passed and recorded, a lock-holding worker still refuses", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const inflightDir = join(state, "state", "inflight");
+  mkdirSync(inflightDir, { recursive: true });
+  // The dispatch worker's lane, held the only way a dispatch worker holds one.
+  writeFileSync(
+    join(inflightDir, "W1-T999.lock"),
+    JSON.stringify({ pid: 501122, run_id: "run-W1-T999-1787173796831", host: "b79658d95089", startedAt: "2026-08-19T23:00:00Z" }),
+  );
+
+  const run = runRecycle("hung-plus-dispatch", { stateDir: state });
+
+  // DIRECTION 1 — the lock is decisive: the recycle refuses and the container is untouched.
+  assert.notEqual(run.status, 0, "a held lane must still refuse, however old the other worker is");
+  assert.equal(run.calls.filter(isStop).length, 0, "the container must not be stopped");
+  assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed");
+  assert.equal(run.calls.filter(isRun).length, 0, "no replacement may start");
+  assert.match(run.stderr, /W1-T999\.lock/, "the lane holder must be named in the refusal");
+
+  // DIRECTION 2 — and the pause still comes off, so the refusal is not a second outage.
+  assert.ok(!existsSync(join(state, "state", "PAUSE")), "the pause this refusal set must not survive it");
+});
+
+test("W1-T1046: a lane-less worker under the age bound is busy, not hung, and blocks the recycle", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  mkdirSync(join(state, "state", "inflight"), { recursive: true });
+
+  const run = runRecycle("busy-fixrung", { stateDir: state });
+
+  // ZERO inflight locks, so the OLD lock-only wait would have read "safe to proceed" and removed
+  // the container out from under a live worker. It must refuse instead.
+  assert.notEqual(run.status, 0, "a young lane-less worker must block the recycle");
+  assert.match(run.stderr, /0 lane-holding and 1 lane-less worker\(s\) still in flight/);
+  assert.match(run.stderr, /busy, not hung/, "it must be named as busy rather than silently ignored");
+  assert.equal(run.calls.filter(isRm).length, 0, "the container must not be removed under a live worker");
+  assert.ok(!existsSync(join(state, "state", "PAUSE")), "the pause must not survive the refusal");
+});
+
+test("W1-T1046: a hung fix-rung worker alone is passed, printed before clearing, and ledgered", () => {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  mkdirSync(join(state, "state", "inflight"), { recursive: true });
+
+  const run = runRecycle("hung-fixrung", { stateDir: state });
+
+  assert.equal(run.status, 0, "a hung lane-less worker must not deadlock the recycle");
+  assert.equal(run.calls.filter(isRm).length, 1, "the recycle must actually proceed");
+  // PRINTED BEFORE CLEARING — the pid, the age and the predicate that fired, while /proc still exists.
+  assert.match(run.stderr, /proceeding PAST lane-less worker\(s\) judged hung/);
+  assert.match(run.stderr, /pid 363439\s+age 8970s/, "the pid and age must be reported");
+  assert.match(run.stderr, /predicate: fix-rung shape .* AND age >= 7200s AND zero inflight locks/);
+  // AND THE RECORD SURVIVES THE CONTAINER, on the bind mount the daemon already owns.
+  const ledger = readFileSync(join(state, "state", "ledger.ndjson"), "utf8").trim().split("\n");
+  const row = JSON.parse(ledger[ledger.length - 1]);
+  assert.equal(row.step, "recycle.hung_worker_passed");
+  assert.equal(row.pid, 363439);
+  assert.equal(row.age_s, 8970);
+  assert.equal(row.age_bound_s, 7200);
+  assert.match(row.cleaned, /daemon-side owners/, "what it did NOT clean must be stated, not implied");
 });
