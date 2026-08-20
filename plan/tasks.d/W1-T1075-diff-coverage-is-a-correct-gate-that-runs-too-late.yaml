@@ -1,0 +1,159 @@
+- id: W1-T1075
+  title: "`diff-coverage` IS A CORRECT GATE THAT RUNS TOO LATE AND IT COST SIX HEADS TODAY — but the local runner ALREADY EXISTS and already does the base refresh, the full suite and the three-dot diff; what W1-T464 removed was the obligation to run it, because it GATED NOTHING, so the fix is to make it gate rather than to re-add an ungated step"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-20 ON `Remudero` (Linux 6.17.0-1022-azure), bash 5.2.21, from a scratch
+    worktree at origin/main 607220e6. Six surfaces swept with a live control each; the ANCHOR-SHAPE
+    surface is deliberately NOT used — see the note.
+
+    (1) THE COST IS SIX HEADS IN ONE DAY, ALL ONE SHAPE. #2274, #2284, #2311, #2312, #2314 and #2316
+    each blocked on `diff-coverage`, and every one was the same defect class: a catch arm or refusal
+    branch reachable only on a real I/O path and therefore invisible to every test that injects a
+    seam. Each cost an 8-13 minute CI round trip plus a new head, and a new head spends a review
+    orphan. THE FIX SHAPE WAS IDENTICAL EVERY TIME — extract the decision from the I/O and test one
+    arm each with a positive control — so the authors knew how; they found out after pushing.
+
+    (2) THE GATE IS EARNING ITS COST AND MUST NOT BE WEAKENED. It found two REAL fail-opens the same
+    day: `spawnSync` returning `status: null` on a signalled child, which the push-path classifier
+    read as success; and `readdirSync` answering `[]` to both ENOENT and EACCES, so a permissions
+    fault that HID every inflight lock reported as a healthy zero. The complaint is LATENCY, NOT
+    STRICTNESS. Nothing in this task lowers a threshold, exempts an arm, or narrows the gate.
+
+    (3) THE LOCAL RUNNER ALREADY EXISTS AND IS ALREADY COMPLETE — THIS IS THE FINDING THAT CHANGES
+    THE TASK. `rmd preflight --ci-parity`'s `coverage-ratchet` entry (`src/lib/ci-parity.ts`) runs
+    FOUR steps in order: `coverage-ratchet:base-refresh` (a real `git fetch origin main`),
+    `coverage-ratchet:test-with-coverage` (the FULL suite under
+    `--experimental-test-coverage --test-coverage-exclude=test/**`, routed through
+    `scripts/test-with-retry.mjs` exactly as ci.yml does), `coverage-ratchet:ratchet`, and
+    `coverage-ratchet:diff-coverage`, whose own step label reads
+    `diff-coverage.mjs (origin/main...HEAD, refreshed base)`. So the runner, the refreshed base and
+    the THREE-DOT form are all already shipped. NO NEW VERB AND NO NEW MODE IS REQUIRED.
+
+    (4) AND `--fast` CANNOT CARRY IT, BY ITS OWN CHARTER, IN TERMS. `FAST_GATE_STEPS`' curation
+    comment states the criterion — deterministic, seconds, no network, has demonstrably blocked a PR
+    — and then states the prohibition directly: *"WHAT THIS MUST NOT BECOME: `npm test`. Growing this
+    list to include anything that spawns `node --test` ... is the ONE mistake this mode exists to
+    prevent — it would make the fast mode the expensive mode wearing a cheaper name, and the habit it
+    exists to create unaffordable."* `runPreflightFast` is built to honour that: it only ever invokes
+    `npm run --silent <script>` for a script named in the list. A coverage step in `--fast` is
+    therefore refused by the mode's own design, not merely inadvisable.
+
+    (5) A PARTIAL-SUITE LCOV IS NOT TRUSTWORTHY, AND THAT IS THE FINDING RATHER THAN AN OBSTACLE.
+    `diff-coverage` reads an lcov; an lcov produced by a SUBSET of the suite omits `SF:` records for
+    files that subset never loaded, and a changed file with no `SF:` record is not reported as
+    uncovered — it is silently not considered, which is a VACUOUS PASS over an empty set. The
+    converse was also measured today: a deliberately narrowed run reported FALSE blocks in a file the
+    full suite covers, because the covering tests had not run. Both directions were observed on this
+    host within hours. SO ONLY A FULL RUN IS TRUSTWORTHY, and the honest cost of author-time
+    diff-coverage is the full suite — there is no cheap tier to build.
+
+    (6) THE OBLIGATION WAS REMOVED FOR A GOOD REASON AND RE-ADDING IT NAIVELY REPEATS THE MISTAKE.
+    W1-T464 removed the worker-facing `rmd preflight --ci-parity` line from the implement output
+    contract, and `test/ci-parity-contract.test.ts` pins that removal in two tests. Its rationale is
+    not cost alone — it is that the step GATED NOTHING: the entire handling of a failed worker
+    preflight in `src/run-task.ts` was a `log()` plus a `say()`, with *"NO branch, NO early return,
+    NO gate"*, and the orchestrator read the failure from a summary file after the fact. It cost
+    about a quarter of every lane and prevented zero pushes. RE-INTRODUCING AN UNGATED RUN WOULD BUY
+    BACK THAT EXACT COST FOR THAT EXACT NOTHING.
+
+    (7) SO THE DEFECT IS NOT A MISSING RUNNER, IT IS A MISSING REFUSAL. The runner exists (3), the
+    base is already right (3), the cost is irreducible (5), and the obligation was correctly removed
+    because it did not gate (6). What is missing is the branch W1-T464 named as absent.
+  design: |
+    (i) MAKE THE EXISTING SUMMARY GATE, RATHER THAN ADDING A STEP. `preflightFailureNotice`
+    (`src/lib/ci-parity.ts`) already reads the worker's `coverage/preflight-summary.json` and already
+    names which steps failed. The change is to give the orchestrator a REFUSAL branch on the
+    coverage-ratchet steps specifically — the thing W1-T464 measured as absent — so a worker whose
+    own run reported `diff-coverage: BLOCKED` does not proceed to push. THE STEP THAT ALREADY RUNS
+    BECOMES THE STEP THAT STOPS THE PUSH; nothing new is executed.
+
+    (ii) REFUSE ON A DIRTY TREE, WHICH IS THE ONE GENUINELY MISSING GUARD. `src/lib/ci-parity.ts`
+    contains ZERO occurrences of `status --porcelain`, `dirty` or `uncommitted` (live control: four
+    `"git"` invocations in the same file, so the query sees it). `origin/main...HEAD` is computed
+    against COMMITTED state, so running the check before committing yields a pass over a diff that
+    does not contain the work — the second author-time false green observed today. The runner must
+    refuse rather than report a pass it cannot stand behind.
+
+    (iii) THE BASE COMPUTATION IS ONE CHANGE, NOT TWO. Both author-time failures came from
+    HAND-ROLLED invocations — one built the diff with `--cached origin/main` and saw eight of main's
+    own commits as its changes; the other ran the check before committing. Neither used the runner,
+    which already fetches and already uses the three-dot form. So the base fix is "route through the
+    existing runner", and the only NEW code is (ii)'s dirty-tree refusal. CI never sees either
+    failure because CI computes its own base — which is exactly why these are author-time-only bugs
+    and why the local runner must not trust its caller.
+
+    (iv) FOUR LATE GATES, TWO RUNNERS, SPLIT BY WHETHER THE CHECK NEEDS THE PR BODY. Named as one
+    class, scoped as two:
+      - `diff-coverage` — needs the diff and an lcov, no body. Belongs to `preflight --ci-parity`.
+        IN SCOPE.
+      - the `claims` gate that caught `docs/operator-guide.md`'s hand-maintained command table —
+        needs neither body nor suite, and is ALREADY the second entry in `FAST_GATE_STEPS`, so
+        `preflight --fast` would have caught it. NOT a missing gate; a gate nobody ran. OUT OF SCOPE,
+        and the remedy is habit, not code.
+      - the count-claim refusal (`bodyContradictsDiff`) and the acceptance-block parser — BOTH need
+        the PR body, which does not exist at preflight time, so neither can live in `preflight` at
+        all. Their runner is `scripts/acceptance-author-gate.mjs`, which is #2314 and NOT YET ON
+        MAIN. OUT OF SCOPE, and explicitly NOT a sibling to propose: the runner is already being
+        built.
+    ONE RUNNER DOES NOT SERVE ALL FOUR, and the dividing line is the PR body.
+
+    (v) DO NOT WEAKEN THE GATE. No threshold moves, no arm is exempted, and
+    `// diff-cov: process-boundary` is not extended — the script's own comment records that misusing
+    it "blocks the PR harder, not softer", and it is guarded to regions containing a real boundary
+    call.
+
+    (vi) OUT OF SCOPE, NAMED. No change to `FAST_GATE_STEPS` (rationale 4 forbids it). No new verb
+    and no new preflight mode (rationale 3 makes both unnecessary). No re-addition of the
+    worker-facing contract line as a bare instruction — an obligation without a refusal is what
+    W1-T464 measured and removed.
+  acceptance:
+    - claim: "a worker whose own coverage run reported a block does not proceed to push"
+      proof: "unit test: W1-T1075: a blocked coverage step refuses the push instead of only logging"
+    - claim: "a clean coverage run still proceeds exactly as before"
+      proof: "unit test: W1-T1075: a clean coverage summary still proceeds to push"
+    - claim: "the local runner refuses on an uncommitted tree instead of passing over a diff that omits the work"
+      proof: "unit test: W1-T1075: an uncommitted tree is refused rather than silently passing"
+    - claim: "a committed tree is not refused so the guard does not block ordinary use"
+      proof: "unit test: W1-T1075: a committed tree is not refused by the dirty guard"
+    - claim: "the diff the runner hands the checker is the three-dot form against a freshly fetched base"
+      proof: "unit test: W1-T1075: the runner builds the diff three-dot against a refreshed base"
+  origin: "recon#diff-coverage-runs-too-late-2026-08-20"
+  plan_refs: ["W1-T464", "W1-T294", "W1-T373", "W1-T1060"]
+  files: [src/lib/ci-parity.ts, src/run-task.ts, test/preflight-ci-parity.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. The declared paths reach
+    the ci-parity library and the CLI that consumes its summary, which `subsystemsOf` reads as more
+    than one concern. DECOMPOSITION IS DECLINED WITH A REASON: the refusal branch (design i) lives in
+    `src/run-task.ts` and the summary it reads is produced in `src/lib/ci-parity.ts`, so a split
+    ships a gate whose input nothing produces, or a producer nothing gates on — which is the
+    ships-unwired shape this repo already has a floor for. The diff itself is one branch, one guard
+    and their tests.
+
+    `test/preflight-ci-parity.test.ts` IS THE EXISTING HOME and is declared rather than a new file,
+    so the concern count is not inflated by a filename — the same correction `lint-plan` forced on
+    W1-T1068 and W1-T1069.
+
+    THE ANCHOR-SHAPE SURFACE IS DELIBERATELY NOT USED FOR THIS ID, AND THAT IS ITSELF A CONSEQUENCE
+    OF #2312. `rmd next-task-id --reserve` now writes reservations through `reserveTaskIdRemote` —
+    the SAME path the fleet uses — so an operator mint and a fleet mint now carry an IDENTICAL
+    `rmd-id reservation <pid>@<host>` anchor and the shape no longer identifies the owner. The other
+    six surfaces are unaffected and were used instead. A SIDE EFFECT WORTH RECORDING RATHER THAN
+    LEAVING TO BE REDISCOVERED: `describeContestedId`'s operator arm (`src/run-task.ts`, shipped by
+    #2312) classifies a contested holder by that same retired shape, so its `operator` branch is now
+    effectively unreachable in production and its output will always read `the fleet`. That is not
+    this task's to fix and is not scoped in; it is named so the next reader does not trust the label.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the runner's steps by reading the `coverage-ratchet`
+    entry in `src/lib/ci-parity.ts`; the `--fast` prohibition from the comment block above
+    `FAST_GATE_STEPS`; the removed obligation from the two tests in
+    `test/ci-parity-contract.test.ts`; and the absent dirty-tree guard with
+    `git grep -cnE 'status --porcelain|dirty|uncommitted' -- src/lib/ci-parity.ts` against a `"git"`
+    control in the same file.

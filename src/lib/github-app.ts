@@ -72,6 +72,20 @@ export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const JWT_BACKDATE_SEC = 60;
 const JWT_TTL_SEC = 9 * 60;
 
+// W1-T1068: NODE'S `fetch` HAS NO DEFAULT TIMEOUT, so a connection that opens and then hangs
+// (a stalled socket, a proxy that swallows the response) never settles — the `await` below would
+// never return, and because `tick()` in `startInstallationTokenRefresh` only arms its next timer
+// AFTER this promise settles (see that function's doc), a hang here is not a slow refresh, it is
+// a PERMANENTLY DEAD loop. Reasoned from a bound, not fitted to a measurement: this repo's own
+// `board_gateway.fetch_bytes` ledger shape carries no duration field to fit against (10.9s bought
+// 26.7 MB over 14 REST calls, but that figure is wall-clock observation, not a re-readable value),
+// so 20s is chosen as roughly TWICE that ceiling for a call two orders of magnitude smaller (one
+// POST, a tiny JSON body) — generous enough that a healthy-but-slow network never trips it, and
+// still two orders inside the five-minute `REFRESH_MARGIN_MS` retry cadence, so a timeout costs
+// one retry, never a missed refresh. Exported so a test can advance a mocked clock by EXACTLY
+// this amount rather than a magic number that would silently drift out of sync with it.
+export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
+
 export interface RefreshOptions {
   /** Overrides the value `GH_APP_ID_ENV` would otherwise supply — test seam only. */
   appId?: string;
@@ -164,7 +178,16 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
     return { ok: false, reason: "jwt signing failed" };
   }
 
+  // W1-T1068: the exchange is ABANDONED, never awaited forever — see EXCHANGE_TIMEOUT_MS's doc
+  // for why 20s. `signal.aborted` (not the caught error's shape) is what distinguishes a timeout
+  // from any other network failure, so this works whether the injected `fetchImpl` throws a real
+  // AbortError or a test fixture's own rejection once its signal fires.
   let res: Response;
+  const timeoutController = new AbortController();
+  const timeoutTimer = setTimeout(
+    () => timeoutController.abort(new Error("token exchange timed out")),
+    EXCHANGE_TIMEOUT_MS,
+  );
   try {
     res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
       method: "POST",
@@ -173,10 +196,14 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
       },
+      signal: timeoutController.signal,
     });
   } catch {
-    log("github_app.token_refresh_failed", { reason: "exchange request failed" });
-    return { ok: false, reason: "exchange request failed" };
+    const reason = timeoutController.signal.aborted ? "exchange timed out" : "exchange request failed";
+    log("github_app.token_refresh_failed", { reason });
+    return { ok: false, reason };
+  } finally {
+    clearTimeout(timeoutTimer);
   }
 
   if (!res.ok) {
@@ -251,15 +278,42 @@ export function startInstallationTokenRefresh(opts: {
   const refresh = opts.refresh ?? refreshInstallationToken;
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const now = opts.now ?? Date.now;
+  // W1-T1068: arming the NEXT timer must never depend on anything that can itself throw — see
+  // `rearm`'s two call sites below. `setTimer` returning is the only thing this loop's survival
+  // rides on.
+  const rearm = (delay: number): void => {
+    const timer = setTimer(tick, delay);
+    timer.unref?.();
+  };
   const tick = (): void => {
-    void refresh({ log: opts.log }).then((result) => {
-      // A FAILED MINT STILL RESCHEDULES (design iv: degrade, never refuse) — a transient outage
-      // keeps retrying on the margin rather than going silent.
-      const delay =
-        result.ok && result.expiresAtMs !== undefined ? nextRefreshDelayMs(result.expiresAtMs, now()) : REFRESH_MARGIN_MS;
-      const timer = setTimer(tick, delay);
-      timer.unref?.();
-    });
+    void refresh({ log: opts.log }).then(
+      (result) => {
+        // A FAILED MINT STILL RESCHEDULES (design iv: degrade, never refuse) — a transient outage
+        // keeps retrying on the margin rather than going silent.
+        const delay =
+          result.ok && result.expiresAtMs !== undefined
+            ? nextRefreshDelayMs(result.expiresAtMs, now())
+            : REFRESH_MARGIN_MS;
+        rearm(delay);
+      },
+      (err) => {
+        // THE PROMISE ITSELF REJECTED — not a `{ ok: false }` result, but a THROW. The only thing
+        // inside `refresh` that can do that is its own `log(...)` call (e.g. `appendLedger`
+        // hitting ENOSPC/EACCES/EROFS — design (2)), so the ledger is very likely the reason we're
+        // here. The next timer is armed FIRST, before any attempt to explain why, so the loop's
+        // survival never depends on a second write to the same filesystem that just failed
+        // (design ii). The explanatory write below is best-effort only, and guarded: if it throws
+        // too, that is swallowed, never left to take the already-armed timer down with it.
+        rearm(REFRESH_MARGIN_MS);
+        try {
+          opts.log?.("github_app.token_refresh_failed", {
+            reason: `refresh threw: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        } catch {
+          // Swallowed on purpose — see comment above.
+        }
+      },
+    );
   };
   tick();
   return { armed: true };

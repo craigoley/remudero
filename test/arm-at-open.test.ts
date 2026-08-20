@@ -1034,6 +1034,13 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
       "  if [[ \"$4\" == '--disable-auto' ]]; then echo \"disarm $3\" >> \"$CALLLOG\"; exit 0; fi",
       "  exit 0",
       "fi",
+      // W1-T1031: the risk judge now fetches the PR's ACTUAL change view over REST
+      // (`gh api repos/{o}/{r}/pulls/{n}/files`) before its own spawn runs — answered here
+      // with an empty file list, the same shape `armOpenCappedFakeGh`'s generic `api` catch
+      // above already answers for its own tests. Without this, the REST call fails, and the
+      // risk judge fails closed to ESCALATE before ever reaching the LOW-risk spawn below,
+      // which is exactly what this positive-control test exists to rule out.
+      "if [[ \"$1\" == 'api' ]]; then echo '[]'; exit 0; fi",
       "exit 1",
       "",
     ].join("\n"),

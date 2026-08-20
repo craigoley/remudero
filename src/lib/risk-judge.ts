@@ -80,6 +80,69 @@ export interface RiskJudgeVerdict {
 
 // ── What the judge is shown — the candidate CHANGE, never task.risk ──────
 
+/**
+ * One touched file's bounded change-SHAPE (W1-T1031): the path plus per-file added/deleted
+ * LINE COUNTS — never the lines themselves, never a hunk, never a patch. A count is not
+ * something a judge can misread as having "read the code" the way a code excerpt could.
+ */
+export interface RiskJudgeChangedFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * A BOUNDED, REST-sourced view of the change's ACTUAL diff shape (W1-T1031 — "round 2" of
+ * W1-T454's Option A, Option B having shipped as #1740). Distinct from {@link
+ * RiskJudgeChange.files}, which is the caller's DECLARED file list (a shard's `files:`, or
+ * whatever a caller supplies) — this task's own measurement found that list insufficient: a
+ * description that correctly NAMES the defect it removes reads to the judge exactly like a
+ * description that INTRODUCES one, because nothing about the change's real shape was ever
+ * shown (10/75 `risk_judge.decision` rows escalated, 9 merged anyway, none prevented anything;
+ * three same-day escalations on implementations whose descriptions named their own subject).
+ *
+ * CAPPED at {@link RISK_JUDGE_CHANGE_VIEW_FILE_CAP} files via {@link boundRiskJudgeChangeView}
+ * — design clause (iii): "a judge that times out on large changes is worse than one that
+ * misreads small ones", so the bound is the deliverable, not the diff. `truncated` says so
+ * honestly when the cap actually fired, the same discipline {@link evidenceQualifiedReason}
+ * already applies to the judge's own output — never a silent drop.
+ *
+ * STILL NOT A DIFF. `buildRiskJudgePrompt`'s "no patch, no hunks, no code" instruction
+ * (W1-T454) stays true with this field populated — see that function's own doc. This task
+ * does not touch {@link evidenceQualifiedReason}: a bounded view is still not the whole
+ * patch, and the reason text must keep saying so (design clause vii).
+ */
+export interface RiskJudgeChangeView {
+  files: RiskJudgeChangedFile[];
+  /** True when the real file list was longer than {@link RISK_JUDGE_CHANGE_VIEW_FILE_CAP} and
+   *  had to be cut — an honest admission, never a silent truncation. */
+  truncated: boolean;
+}
+
+/**
+ * The file-count cap {@link boundRiskJudgeChangeView} enforces. The judge's mount resolves to
+ * the CHEAPEST configured tier ({@link resolveRiskJudgeMount}) — this repo's own mounts.yaml
+ * puts that floor at 40,000 tokens of context (haiku/low). One rendered line per file
+ * (`path: +N/-M`) runs well under 100 characters even for a long path, so 60 files caps this
+ * section at roughly 6,000 characters — under 2,000 tokens, a small fraction of the floor —
+ * while comfortably covering every shard this fleet has filed (`files:` in plan/tasks.d/ is
+ * almost always 1-4 paths; W1-T1031's own declared list is 3). A PR that genuinely touches
+ * more than 60 files (a vendored dependency bump, a mass rename) is exactly the shape a
+ * line-count summary stops being useful for anyway — the honest `truncated` flag is preferable
+ * to either silently dropping files or letting one outlier PR inflate every prompt after it.
+ */
+export const RISK_JUDGE_CHANGE_VIEW_FILE_CAP = 60;
+
+/** Apply {@link RISK_JUDGE_CHANGE_VIEW_FILE_CAP} to a REST-sourced file list — the ONE place
+ *  both the real REST reader (src/run-task.ts's `changeView`) and any test-built list apply
+ *  the SAME bound, so the two can never drift apart. */
+export function boundRiskJudgeChangeView(files: RiskJudgeChangedFile[]): RiskJudgeChangeView {
+  return {
+    files: files.slice(0, RISK_JUDGE_CHANGE_VIEW_FILE_CAP),
+    truncated: files.length > RISK_JUDGE_CHANGE_VIEW_FILE_CAP,
+  };
+}
+
 /** The candidate change under assessment. Deliberately has no `risk` field —
  *  there is nowhere to put the static sizing artifact, so a caller cannot
  *  leak it in even by mistake (mirrors flight-judge.ts's `JudgeTurnEvidence`
@@ -87,8 +150,14 @@ export interface RiskJudgeVerdict {
 export interface RiskJudgeChange {
   /** Human-readable description of the change (diff summary, PR title/body, etc). */
   description: string;
-  /** Touched file paths, when known. */
+  /** Touched file paths, when known — the caller's DECLARED list (e.g. a shard's `files:`). */
   files?: string[];
+  /** OPTIONAL bounded, REST-sourced view of the change's ACTUAL diff shape (W1-T1031) — see
+   *  {@link RiskJudgeChangeView}'s own doc. Optional because a caller without a real PR yet
+   *  (or P28's future reuse site, before one exists) has none to supply; when present, {@link
+   *  buildRiskJudgePrompt} renders it as a SEPARATE, clearly-labeled section from `files`
+   *  above, distinguishing "what the caller declared" from "what the diff actually shows". */
+  changeView?: RiskJudgeChangeView;
 }
 
 /** Deliberately loose/string-keyed: dispatch today and P28 tomorrow each track their
@@ -144,6 +213,25 @@ function renderRecord(label: string, record: Record<string, unknown>): string {
  * even a parameter this function accepts, {@link RiskJudgeInput} has no such
  * field to render).
  */
+function renderChangeViewLines(changeView: RiskJudgeChangeView | undefined): string[] {
+  if (!changeView) {
+    return [`ACTUAL CHANGE (REST-sourced, W1-T1031): (no bounded change view supplied)`];
+  }
+  if (changeView.files.length === 0) {
+    return [`ACTUAL CHANGE (REST-sourced, W1-T1031): (0 files reported)`];
+  }
+  const lines = [
+    `ACTUAL CHANGE (REST-sourced, W1-T1031 — the real touched-file list, distinct from`,
+    `FILES TOUCHED above, with each file's added/deleted LINE COUNTS only — never the`,
+    `lines themselves, never a hunk, never a patch):`,
+    ...changeView.files.map((f) => `  ${f.path}: +${f.additions}/-${f.deletions}`),
+  ];
+  if (changeView.truncated) {
+    lines.push(`  … (truncated at ${RISK_JUDGE_CHANGE_VIEW_FILE_CAP} files; more files were touched)`);
+  }
+  return lines;
+}
+
 export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
   const filesLine = input.change.files?.length ? input.change.files.join(", ") : "(no files listed)";
 
@@ -161,8 +249,18 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `inference about unseen code, printed in the grammar of an observation, is`,
     `exactly the defect this judge exists to avoid, not one it may commit.`,
     ``,
+    `A BOUNDED, REST-SOURCED VIEW OF THE ACTUAL CHANGE MAY ALSO APPEAR BELOW`,
+    `(W1-T1031, labeled ACTUAL CHANGE) — the real touched-file list with each file's`,
+    `added/deleted LINE COUNTS, sourced fresh from the PR rather than the caller's`,
+    `declared FILES TOUCHED list. This is STILL NOT A DIFF: a line count is not code`,
+    `you have read, so the instruction above applies to it exactly as it applies to`,
+    `everything else here — do not phrase a reason as though a count showed you what`,
+    `the added/deleted lines actually say.`,
+    ``,
     `CANDIDATE CHANGE: ${input.change.description}`,
-    `FILES TOUCHED: ${filesLine}`,
+    `FILES TOUCHED (declared): ${filesLine}`,
+    ``,
+    ...renderChangeViewLines(input.change.changeView),
     ``,
     renderRecord("GATES STATE", input.gatesState),
     ``,

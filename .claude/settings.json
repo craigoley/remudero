@@ -1,0 +1,17 @@
+{
+  "$comment": "Remudero interactive-lane deny floor (W1-T1066). settings/worker.json's own comment says it is passed to workers ONLY — a worker loads settingSources: [] (src/lib/worker.ts), so it never reads this file, and this file never reaches a worker either. This is the OTHER half: an interactive `claude` session (the lane that actually polled `gh` in a loop and locked the operator out for ~90 minutes) loads a repo-level .claude/settings.json natively, so this is the only surface that reaches it. Same PreToolUse matcher shape as settings/worker.json, pointing at the same hooks/deny-floor.sh, so interactive lanes and workers run ONE floor rather than two that can drift.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/hooks/deny-floor.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
