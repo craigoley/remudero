@@ -1,0 +1,66 @@
+# Acceptance author-time gate (W1-T1060) — a STANDALONE workflow, deliberately NOT a job inside
+# ci.yml.
+#
+# WHY THIS OWN FILE, NOT A JOB IN ci.yml. `on.pull_request.types` is a WORKFLOW-level filter in
+# GitHub Actions — it cannot be set per job within one workflow file. ci.yml declares no `types:`
+# override, so it takes the default (opened, synchronize, reopened), which EXCLUDES `edited`; that
+# default is deliberate there (see ci.yml's own `on:` comment, W1-T1033) because ci.yml's other
+# jobs are the FULL, expensive CI cycle (a `ci`/`coverage-ratchet` run alone costs minutes) this
+# task exists to stop re-paying for. This gate's own reason to exist is the opposite of that: a
+# hand-opened PR body that fails only because a claim wrapped onto a second line should cost a
+# two-minute correction, not a fresh head plus a full CI cycle — and the only way to make an
+# `edited` action (a PR description fix with NO new commit) reachable at all is a workflow whose
+# OWN `on.pull_request.types` includes it. Folding this job into ci.yml would therefore either (a)
+# leave it unable to react to a body-only correction (reproducing the exact defect this task
+# fixes), or (b) widen ci.yml's shared trigger to `edited` for EVERY job in that file, which would
+# re-run the full, expensive suite on every PR-description edit — a regression this task's own
+# rationale (item 3) explicitly measures against. A separate file with its own `types:` is the only
+# shape that gets `edited` reachability for THIS gate without moving the cost of the other one.
+# (Precedent for a standalone `pull_request`-triggered workflow file living outside ci.yml already
+# exists in this repo: recovery-drill.yml, fleet-heartbeat-watch.yml — those scope by `paths:`
+# rather than `types:`, but the "its own file, its own trigger, its own check-run name" shape is
+# the same one used here.)
+#
+# NO API CALL. The `pull_request` event payload already carries the PR body and author login —
+# read directly from `$GITHUB_EVENT_PATH` (set automatically by the Actions runner) by
+# scripts/acceptance-author-gate.mjs, which REUSES `acceptanceAuthorTimeCheck`
+# (src/lib/review.ts, W1-T952) rather than re-deriving the predicate. See that script's own header
+# comment for the full rationale, including the one exemption it adds on top of the predicate
+# (`dependabot[bot]` authors — the dep-review lane already owns arming those PRs).
+#
+# RUNS UNCONDITIONALLY (no path filter, no job `if:`) so it always registers a check run — a
+# path-filtered required check that can go silently absent is the synthwatch #102 deadlock class
+# ci.yml's own jobs are written to avoid (LEARNINGS: the #102-class skipped-check deadlock). This
+# job is fast (checkout + setup-node + npm ci + one `node --import tsx` invocation reading a local
+# file, no Playwright, no network beyond npm ci) and reports on its own check-run name rather than
+# inside a job that then continues, so it is done well before ci.yml's long-running jobs finish —
+# the same "standalone job, not a step" shape ci.yml's own comments describe for its fast gates.
+#
+# NOT YET WIRED into ci-gate.yml's REQUIRED aggregator list or branch protection — this PR adds the
+# check and makes it observable on every PR; whether/when to make it a MERGE-BLOCKING required
+# check is deliberately left as a follow-up (ci-gate.yml and branch protection admin config are
+# outside this task's declared files, the same "declare it before widening into it" discipline
+# this task's own filing note applies to src/lib/review.ts).
+name: Acceptance author gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance-author-gate:
+    name: acceptance-author-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Acceptance author-time gate (reads the pull_request event payload directly — no API call)
+        run: node --import tsx scripts/acceptance-author-gate.mjs

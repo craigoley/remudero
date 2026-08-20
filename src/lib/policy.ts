@@ -102,6 +102,14 @@ export interface PolicyValues {
      *  changes nothing in production until a (separate, out-of-scope) detector populates
      *  `OpenPrView.supersessionVerdict`. NET-NEW: no prior source literal ever gated this. */
     supersessionDisposal: boolean;
+    /** W1-T1038: the DISPATCH-PATH memory floor, in MiB of `/proc/meminfo`'s `MemAvailable` —
+     *  below this figure, NEW dispatch is deferred; drainage is never gated (the same
+     *  dispatch-only asymmetry every other field in this table already documents). SHIPS AT 0
+     *  (see this field's own plan/policy.yaml row): `MemAvailable` can never read below zero, so
+     *  the shipped default defers nothing until an operator raises it against a measured figure —
+     *  the 2026-08-19 host stall's own rationale is explicit that no such figure exists yet.
+     *  See {@link checkMemoryGovernor}, this row's consumer (sweep.ts). */
+    memoryFloorMib: number;
   };
   drain: {
     max: number;
@@ -209,6 +217,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.repairFilingThreshold": "net-new",
   "sweep.repairFilingWindowDays": "net-new",
   "sweep.supersessionDisposal": "net-new",
+  "sweep.memoryFloorMib": "net-new",
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
@@ -415,6 +424,7 @@ export function validatePolicy(raw: unknown): Policy {
   const repairFilingThreshold = numberField("sweep.repairFilingThreshold", sweepRaw.repairFilingThreshold, origin);
   const repairFilingWindowDays = numberField("sweep.repairFilingWindowDays", sweepRaw.repairFilingWindowDays, origin);
   const supersessionDisposal = booleanField("sweep.supersessionDisposal", sweepRaw.supersessionDisposal, origin);
+  const memoryFloorMib = numberField("sweep.memoryFloorMib", sweepRaw.memoryFloorMib, origin);
 
   const drainRaw = raw.drain;
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
@@ -478,6 +488,7 @@ export function validatePolicy(raw: unknown): Policy {
         repairFilingThreshold,
         repairFilingWindowDays,
         supersessionDisposal,
+        memoryFloorMib,
       },
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },

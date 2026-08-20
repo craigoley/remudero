@@ -1,0 +1,147 @@
+- id: W1-T1071
+  title: "A self-path `grep:` proof discriminates on the FILING PR and CANNOT on the IMPLEMENTING one — one proof field is read by two reviews with opposite discrimination requirements, and 29 shards carry 96 criteria that will go stale the moment their code is built"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-20 over `plan/tasks.yaml` plus `plan/tasks.d/` at origin/main, and over the
+    open-PR population by REST. Every zero below carries a positive control; where a control could
+    not separate the cases, that is said rather than hidden.
+
+    (1) THE POPULATION IS A MINORITY, AND NEITHER EXTREME IS TRUE. 32 of 414 shards, carrying 103
+    of 1,651 acceptance criteria, use a proof that greps a path the shard itself declares. That is
+    a minority of the plan on both counts. It is not a marginal handful either, and any reading
+    that rounds it to "almost none" or to "the plan is riddled with it" is overstating in one
+    direction or the other.
+
+    (2) THE SPLIT THAT MATTERS IS WHETHER AN IMPLEMENTING DIFF WILL EVER EXIST. Of the 32, THREE
+    declare ONLY their own path — no code path at all — and for those the self-path grep is
+    CORRECT BY DESIGN: the shard's own text is the whole deliverable, the filing PR is the only PR
+    that will ever exist, and a grep of that text discriminates properly against the merge-base
+    where the text is absent. Those three need no change and must not be swept up by a fix.
+    The remaining TWENTY-NINE declare CODE paths. Each of those will be built by a later PR, and
+    on that PR the same proof field is read again under requirements it cannot meet. That is 96
+    criteria.
+
+    (3) FIVE OF THE TWENTY-NINE HAVE NO EXECUTABLE PROOF AT ALL. In five shards EVERY criterion is
+    a self-path grep — 24 criteria — so when their implementing diff arrives there is nothing in
+    the acceptance block that can execute against it. The whole verdict falls to the keyword floor,
+    which is a floor over the REPORT's prose, not over the repo.
+
+    (4) THE MECHANISM IS THE MERGE-BASE CHECK DOING EXACTLY WHAT IT WAS BUILT TO DO.
+    `classifyBaseProofOutcome` (`src/lib/review.ts`) re-runs the same whitelisted check against the
+    PR's merge-base, and W1-T273 (`grep:`) extended by W1-T362 (`unit test:`) makes DISCRIMINATION,
+    not mere execution, the bar. On the FILING PR the shard's path is absent from the merge-base
+    and present on the head, so the self-path grep discriminates and passes honestly. On the
+    IMPLEMENTING PR the shard has already merged, so the same pattern matches the merge-base too,
+    `executed_stale` fires, the positive override is withdrawn, and the criterion falls back to the
+    keyword floor with `met`/`reason` untouched. Nothing is broken; the proof simply stops carrying
+    information at precisely the review that most needs it.
+
+    (5) SO THE DEFECT IS NOT THE CONVENTION, IT IS THAT ONE FIELD SERVES TWO REVIEWS. Filing a
+    shard and building it are two different PRs with OPPOSITE discrimination requirements over the
+    same `proof:` string. At filing, matching the shard's own text is the only thing that CAN
+    discriminate. At build, it is the one thing that CANNOT. A field that is right in both places
+    cannot be a single static string, and no amount of care in authoring the string fixes that.
+
+    (6) THE LIVE BLAST RADIUS IS ZERO, AND THAT SETS THE PRIORITY. Across the 8 open PRs at the
+    time of measurement, 48 criteria were scored: NONE fell below `MIN_COVERAGE` and NONE sat
+    within one token of it. A two-direction positive control was run — the scorer was shown a
+    report that substantiates and a report that does not, and it separated them — so the zero is a
+    measurement and not a dead query. THE EXPOSURE IS DEFERRED, NOT ABSENT: 96 queued criteria will
+    reach the degraded path when their tasks are built, and there are no current victims. A shard
+    that implied an active outage would be overstating this.
+
+    (7) W1-T1041 IS ONE OF THE 32, AND IT IS MINE. It was filed in this same style during this
+    session's earlier work, before the two-review asymmetry was understood. Naming it here rather
+    than leaving it to be discovered is the point: the convention reproduced itself through a
+    careful author following the house form, which is why the remedy has to be a refusal and not a
+    sharper rule.
+  design: |
+    (i) THE RULING FROM THE RECON STANDS AND SCOPES THIS TASK: THE CONVENTION IS RIGHT, THE
+    HANDLING IS WRONG. A self-path grep is the correct thing to write at filing time. What must
+    change is what happens when that same field is read on the implementing diff, where it silently
+    stops discriminating.
+
+    (ii) DO NOT BUILD A REVIEWER-SIDE EXEMPTION. Teaching the reviewer to skip the merge-base check
+    for self-path proofs, or to treat `executed_stale` as a pass when the proof names a declared
+    path, accepts a proof that proves nothing. That is strictly worse than the present degradation,
+    which at least withdraws the override.
+
+    (iii) DO NOT LOWER `MIN_COVERAGE`. It is 0.6 (`src/lib/review.ts`) and W1-T219 raised it from
+    0.34 deliberately, to a genuine majority. A correct build whose criteria have all degraded to
+    the floor and scores 0.50 is evidence that the FALLBACK is carrying weight it was never
+    designed for — not evidence the floor is too high. Moving the floor to accommodate a degraded
+    proof would hide the same defect on every other criterion in the repo.
+
+    (iv) THE SHAPE IS A REFUSAL AT THE IMPLEMENTING REVIEW, NAMED AS AUTHORING DEBT. When a
+    criterion's proof resolves to a path this diff DECLARES and the merge-base check has already
+    classified it stale, the implementing PR must be told, by name, that the proof was a
+    filing-time proof and must be rewritten to name the behaviour now that the behaviour exists.
+    That is the same posture `proof-dialect` already takes toward prose: refuse and say what to
+    write, rather than degrade quietly. It converts an invisible fallback into a visible, cheap fix.
+
+    (v) THE THREE SELF-DECLARING SHARDS MUST BE EXEMPT BY CONSTRUCTION, NOT BY LIST. A shard whose
+    `files:` contains only its own path has no implementing diff, so the refusal must be reachable
+    only when the shard declares a path the proof does not name. A hardcoded allowlist of the three
+    would go stale the first time a fourth is filed.
+
+    (vi) THE 96 EXISTING CRITERIA ARE NOT REWRITTEN BY THIS TASK. This builds the refusal and the
+    message. Repairing the queued shards is a downstream consequence paid per task as each is
+    built, which is where the author has the behaviour in front of them and can write a proof that
+    names it. A bulk rewrite now would be 96 guesses at proofs for code that does not exist.
+
+    (vii) NOT IN SCOPE: `MIN_COVERAGE` and the keyword floor's arithmetic; `classifyBaseProofOutcome`
+    and the merge-base machinery, which are behaving correctly; the `not_yet_built` forward-reference
+    carve-out (W1-T456), which handles the ABSENT-path case and is a different question from the
+    STALE-pattern case; and any change to what a filing PR is allowed to write.
+  acceptance:
+    - claim: "a filing-time self-path proof is refused by name on the implementing diff instead of degrading to the keyword floor"
+      proof: "unit test: test/self-path-proof-discrimination.test.ts"
+    - claim: "a shard that declares only its own path keeps its self-path proof and is never refused"
+      proof: "unit test: test/self-path-proof-discrimination.test.ts"
+    - claim: "the refusal names the proof and says it must be rewritten to name the behaviour"
+      proof: "unit test: test/self-path-proof-discrimination.test.ts"
+    - claim: "a proof that already names behaviour rather than a declared path is untouched"
+      proof: "unit test: test/self-path-proof-discrimination.test.ts"
+  files: [src/lib/review.ts, test/self-path-proof-discrimination.test.ts]
+  status: queued
+  attempts: 0
+  origin: recon#self-path-grep-discrimination-2026-08-20
+  plan_refs: ['W1-T1041', 'W1-T273', 'W1-T362', 'W1-T219', 'W1-T456']
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/self-path-proof-discrimination.test.ts`, which this shard declares in `files:`, so
+    on THIS filing PR it resolves through the W1-T456 forward-reference carve-out
+    (`forwardReferenceFiles`, `src/lib/review.ts`) to `not_yet_built` rather than executing against
+    an absent file. Writing a self-path grep here would have reproduced, in the shard that reports
+    the defect, exactly the defect it reports.
+
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` crosses a
+    `src/` module and `test/`, and the acceptance wording names the review and proof-dialect
+    surfaces, so `subsystemsOf` (`src/lib/task-linter.ts`) derives more than one tag. The blast
+    radius of the diff itself is one refusal arm and its message.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT. The judgment this changes lives in
+    `judgeCriterion` (`src/lib/review.ts`) and nowhere else; the merge-base classifier it reads,
+    `classifyBaseProofOutcome`, is in the same file and does not change. The shard's own path is
+    deliberately not declared: this is a `verify: auto` task, and declaring the plan record beside
+    the code is what `rule15FilingViolation` refuses.
+
+    THE COUNTS IN THE RATIONALE ARE CARRIED FROM THE RECON THAT PRODUCED THIS SHARD, WITH THEIR
+    MEASUREMENT DATE, AND ARE NOT RE-DERIVED HERE. They describe the plan as of 2026-08-20; the
+    population moves as tasks are filed and built, so a later reader should re-run the sweep rather
+    than quote these figures forward.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING. `refs/rmd-id/W1-T1071`
+    resolves to 0b2b017a84b68034e80c37bedeef7863e06dfd99, a parentless commit over the empty tree
+    4b825dc642cb6eb9a060e54bf8d69288fbee4904. Its anchor message is the CODE PATH's format
+    (`rmd-id reservation <pid>@<host>`), which is what `reserveTaskIdRemote` writes for every
+    caller — including an operator invoking the `--reserve` flag W1-T1055 (#2312) added. The
+    anchor shape therefore identifies the code path, NOT the holder. Live control: the adjacent
+    `refs/rmd-id/W1-T1069` carries the hand-mint format (`reserve W1-T1069 <host>-<pid>-<nanotime>`),
+    so the two shapes are distinguishable and this reading is not a broken query.

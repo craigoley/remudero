@@ -164,6 +164,14 @@ export interface ReclaimStaleLockOpts<Holder> {
    *  swallow it" precedent `ledger.ts` uses for its own write failure — so the empty
    *  catches this primitive replaces stop being silent. Never throws itself. */
   onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
+  /** Called with the lock's own path and full raw bytes IMMEDIATELY BEFORE the unlink that
+   *  clears it — never after (design (v), W1-T1067: "it must not clear a lock without printing
+   *  it first"). A judgment that removes the only evidence of what it judged, without setting
+   *  that evidence down anywhere first, is unauditable exactly when it matters most — a
+   *  reclaim that turns out to have been wrong. Defaults to `console.error`, the same
+   *  visible-trace precedent {@link defaultOnLostReclaim} already sets for a LOST reclaim, now
+   *  extended to a SUCCESSFUL one. Never throws itself. */
+  onReclaim?: (detail: { lockPath: string; raw: string }) => void;
   /** TEST-ONLY seam: invoked once the read has judged the current holder stale, BEFORE the
    *  delete-time identity check runs — exactly the window the TOCTOU lived in. A test uses
    *  it to run a second reclaimer's ENTIRE flow to completion first (so it unlinks and
@@ -174,6 +182,10 @@ export interface ReclaimStaleLockOpts<Holder> {
 
 function defaultOnLostReclaim(detail: { lockPath: string; reason: string }): void {
   console.error(`[reclaimStaleLock] ${detail.lockPath}: ${detail.reason}`);
+}
+
+function defaultOnReclaim(detail: { lockPath: string; raw: string }): void {
+  console.error(`[reclaimStaleLock] ${detail.lockPath}: reclaiming stale holder before unlink: ${detail.raw}`);
 }
 
 /**
@@ -204,6 +216,12 @@ function defaultOnLostReclaim(detail: { lockPath: string; reason: string }): voi
  * bug this replaces, which was unconditional: ANY interleaving hit it, not only inode
  * reuse on an already-freed inode landing back on this path in a single-digit-syscall
  * window.
+ *
+ * PRINTS THE LOCK IN FULL BEFORE REMOVING IT (W1-T1067 design (v), the same print-before-clear
+ * discipline W1-T1036's `.git/config.lock` reclaimer already follows): {@link
+ * ReclaimStaleLockOpts.onReclaim} runs with the lock's path and exact bytes right before the
+ * unlink, so a reclaim is never judged silently — every caller gets this for free, since it is a
+ * property of the shared primitive rather than of any one call site.
  */
 export function reclaimStaleLock<Holder>(
   lockPath: string,
@@ -211,6 +229,7 @@ export function reclaimStaleLock<Holder>(
   fsImpl: ReclaimStaleLockSyscalls = defaultReclaimSyscalls,
 ): ReclaimStaleLockResult<Holder> {
   const onLostReclaim = opts.onLostReclaim ?? defaultOnLostReclaim;
+  const onReclaim = opts.onReclaim ?? defaultOnReclaim;
 
   let readFd: number;
   try {
@@ -274,6 +293,12 @@ export function reclaimStaleLock<Holder>(
     });
     return { outcome: "lost" };
   }
+
+  // PRINT BEFORE CLEARING (design (v)): the only copy of what this call judged is about to be
+  // unlinked, so it is set down here, before the syscall that would otherwise remove it
+  // unrecorded — never after, when a crash between the two would leave nothing to explain the
+  // judgment at all.
+  onReclaim({ lockPath, raw: deleteRaw });
 
   try {
     fsImpl.unlinkSync(lockPath);
@@ -458,6 +483,45 @@ export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): bo
       // human-named foreign host from being swept in just because THIS process is containerised.
       const inContainer = (opts.inContainer ?? defaultInContainer)();
       return inContainer && looksLikeContainerId(held.host);
+    }
+  }
+
+  // THE BOOT RUNG (W1-T1067) — sits here, between rung 1 and rung 2, and answers a question
+  // neither of them can: a `docker restart` REUSES the container, so `held.host` above reads
+  // UNCHANGED (rung 1 falls through rather than firing) — but the restart mints a FRESH pid
+  // namespace, so `held.pid` can coincidentally alias a live, unrelated process in the new boot,
+  // one whose own start time gives rung 3 below nothing to compare against the ORIGINAL holder
+  // (that comparison is about the number's CURRENT occupant, not about whether the boot the lock
+  // was written in still exists at all). A lock whose `startedAt` PREDATES this container's own
+  // boot was written by a process of an EARLIER boot and is dead by construction, whatever pid
+  // it names — no live process from a prior boot can be running in this one's pid namespace.
+  //
+  // PID 1 IS THIS CONTAINER'S OWN BOOT CLOCK, so its start time IS the container's boot time —
+  // read through the SAME `getProcessStartTime` probe rung 3 already uses (the same `ps -o
+  // etime=` route, MEASURED available in the live container via `ps -o etimes= -p 1`), so this
+  // costs no new syscall and no new dependency. Skipped entirely when `startedAt` is absent
+  // (pre-W1-T368 shape) or the probe is indeterminate — exactly rung 3's own "no evidence either
+  // way" discipline, never inventing staleness from a probe that couldn't answer.
+  //
+  // CONSERVATIVE IN THE RIGHT DIRECTION (design note iii): it can only ever reclaim a lock OLDER
+  // than this boot. A genuinely concurrent second daemon in THIS container necessarily started
+  // AFTER pid 1, so its lock's `startedAt` is always later than boot time and this rung never
+  // touches it — the single-instance mutex this lock exists to be is never weakened by it.
+  //
+  // ONLY REACHED WHEN RUNG 1 DID NOT ALREADY DECIDE: a genuinely foreign host already returned
+  // above, so this rung only ever runs against `held.host === myHost` or an absent `host` —
+  // never against a lock this process has no business judging at all.
+  if (held.startedAt !== undefined) {
+    const getStart = opts.getProcessStartTime ?? defaultGetProcessStartTime;
+    const bootTime = getStart(1);
+    if (bootTime !== null) {
+      const lockStart = Date.parse(held.startedAt);
+      // The tolerance guards the same whole-second `ps -o etime=` rounding rung 3 already
+      // accounts for: a lock legitimately written moments after THIS boot must not be swept
+      // merely because the boot-time estimate rounded a little late.
+      if (!Number.isNaN(lockStart) && lockStart < bootTime - STALE_START_TOLERANCE_MS) {
+        return true; // the boot rung: this lock predates the container it would have to run in
+      }
     }
   }
 

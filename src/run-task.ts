@@ -1,3 +1,14 @@
+import {
+  DOCTOR_USAGE_EXIT,
+  buildDoctorReport,
+  readGitLocks,
+  readMemInfo,
+  readPauseAgeMs,
+  refuseUnsupportedArgs,
+  classifyReadFailure,
+  readDiskFreeBytes,
+  type MemInfo,
+} from "./lib/doctor.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
@@ -142,7 +153,7 @@ import {
   provisionInstallRoot,
   resolveInstallRoot,
 } from "./lib/install-root.js";
-import { buildStatusBoard, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
+import { buildStatusBoard, deriveDispatchCadence, deriveQueueHead, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import {
@@ -504,6 +515,12 @@ import {
 import { buildReceipt } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision } from "./lib/auto-triage.js";
+import {
+  checkGithubPosture,
+  readGithubPosture,
+  type GithubPostureFinding,
+  type GithubPostureGateway,
+} from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
@@ -534,6 +551,7 @@ import {
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
   checkCostGovernor,
+  checkMemoryGovernor,
   checkQueueGovernor,
   checksStateFromRollup,
   dedupeRollupByLatestAttempt,
@@ -542,6 +560,7 @@ import {
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
+  logMemoryObservation,
   logQueueGovernorDeferral,
   operatorVerdictEvidence,
   renderClarificationQuestion,
@@ -566,6 +585,7 @@ import {
   type FixClass,
   type FixDispatchEvidence,
   type LiveStateResult,
+  type MemoryGovernorResult,
   type MergeConflictEvidence,
   type OpenPrView,
   type PostFixReverificationSummary,
@@ -1752,12 +1772,62 @@ export function armAutoMergeAtOpen(
  * require changing `postReviewStatusGuarded` (out of this task's scope), so
  * this is the minimal, best-effort, in-scope mitigation.
  */
-export function disarmAutoMerge(prUrl: string, deps: Pick<ArmDeps, "disableAuto" | "say"> = realArmDeps()): void {
+export type DisarmOutcome = "disarmed" | "not-armed" | "failed";
+
+/**
+ * W1-T1056's NEIGHBOUR, CITED AND NOT RE-DERIVED. W1-T1052 IS A DIFFERENT FAILURE in the same
+ * family: it files a CORRECT record under a misleading step name (`automerge.arm_skipped` covering
+ * an attempt that was made and failed), and its remedy is a rename with no new error handling.
+ * This one files a record that asserts something that DID NOT HAPPEN — a withdrawal GitHub
+ * refused, written as `automerge.disarmed` — and its remedy needs a classifier and a signature
+ * change. Independently falsifiable, so they are two ids rather than one; the mechanism of that
+ * one lives in its own shard and is not restated here.
+ */
+
+/**
+ * W1-T1056 — PURE classifier for a failed `gh pr merge --disable-auto` (exported for test),
+ * the same shape as {@link armFailureAction} directly below its own call site.
+ *
+ * GitHub refuses `--disable-auto` on a PR that was never armed, and {@link disarmAutoMerge}'s
+ * catch exists to absorb exactly that (see {@link withdrawArmIfVerdictRefuses}'s "SAFE WHEN NOT
+ * ARMED" clause — learning the arm state up front would cost one request per PR per sweep pass).
+ * That benign refusal is identifiable from the message the catch ALREADY holds, so separating it
+ * from a real failure costs no extra request: MEASURED on PR #2234 (2026-08-19), the daemon
+ * narrated `GraphQL: Can't disable auto-merge for this pull request. (disablePullRequestAutoMerge)`.
+ *
+ * FAILS TOWARDS `"failed"`, DELIBERATELY. An error this does not recognise is NOT evidence the PR
+ * was unarmed — answering `"not-armed"` for both "definitely not armed" and "no idea" is the
+ * same fail-open shape that lets an absent reading masquerade as a negative one, and here it
+ * would resurrect the very false record this task exists to remove.
+ */
+export function classifyDisarmFailure(stderrText: string): "not-armed" | "failed" {
+  return /can't disable auto-merge|disablePullRequestAutoMerge/i.test(stderrText) ? "not-armed" : "failed";
+}
+
+/**
+ * W1-T1056 — did a withdrawal ACTUALLY happen? The one predicate every call site branches on,
+ * mirroring {@link import("./lib/sweep.js").armOutcomeArmed} rather than inventing a second rule.
+ */
+export function disarmOutcomeWithdrawn(outcome: DisarmOutcome | void): boolean {
+  // An `undefined` return is a fake/effect that predates this signature — treat it as a real
+  // withdrawal, which is exactly what every call site assumed before this task, so no existing
+  // lane regresses. The SAME allowance `armOutcomeArmed` (lib/sweep.ts) already makes.
+  if (outcome === undefined) return true;
+  return outcome === "disarmed";
+}
+
+export function disarmAutoMerge(
+  prUrl: string,
+  deps: Pick<ArmDeps, "disableAuto" | "say"> = realArmDeps(),
+): DisarmOutcome {
   try {
     deps.disableAuto(prUrl);
     deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
+    return "disarmed";
   } catch (e) {
-    deps.say(`automerge.disarm_failed (W1-T125): ${String((e as Error)?.message ?? e)} — ${prUrl}`);
+    const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
+    deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
+    return classifyDisarmFailure(msg);
   }
 }
 
@@ -1793,7 +1863,7 @@ export function withdrawArmIfVerdictRefuses(
     ledgerPath: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
   },
-  deps: { disarm?: (prUrl: string) => void; ledgerLines?: () => Array<Record<string, unknown>> } = {},
+  deps: { disarm?: (prUrl: string) => DisarmOutcome | void; ledgerLines?: () => Array<Record<string, unknown>> } = {},
 ): boolean {
   const override = verdict.capped
     ? cappedOverrideFromLedger(
@@ -1804,9 +1874,15 @@ export function withdrawArmIfVerdictRefuses(
     : undefined;
   const decision = decideAutoMergeArm(verdict, false, override);
   if (decision.arm) return false;
-  (deps.disarm ?? disarmAutoMerge)(ctx.prUrl);
-  ctx.log("automerge.disarmed", {
+  // W1-T1056: the row follows the OUTCOME, never the attempt. This is the load-bearing site —
+  // it runs BECAUSE the PR was armed at open and the verdict now refuses, so there is genuinely
+  // an arm to withdraw, and this row is the one an incident reader consults when asking "did the
+  // arm fire, and why did a refused PR merge anyway?". A failed withdrawal recorded as
+  // `automerge.disarmed` leaves the arm standing on GitHub and the ledger asserting it is gone.
+  const outcome = (deps.disarm ?? disarmAutoMerge)(ctx.prUrl);
+  ctx.log(disarmOutcomeWithdrawn(outcome) ? "automerge.disarmed" : "automerge.disarm_skipped", {
     reason: `verdict refuses auto-merge: ${decision.reason}`,
+    outcome,
     head_sha: ctx.headSha,
   });
   return true;
@@ -2845,7 +2921,7 @@ async function runReview(args: {
    * {@link disarmAutoMerge}. Exists so a unit test can assert the withdrawal is
    * ISSUED rather than mocking `gh`.
    */
-  disarm?: (prUrl: string) => void;
+  disarm?: (prUrl: string) => DisarmOutcome | void;
   /** Head ref of the PR under review — used ONLY to exclude `dependabot/` heads from the
    *  post-verdict arm, which the dep-review lane owns. Absent ⇒ not a dependabot PR. */
   headRefName?: string;
@@ -11408,6 +11484,52 @@ export function buildRetroDaemonHooks(deps: {
 }
 
 /**
+ * W1-T1040: THE GITHUB-SIDE POSTURE DRIFT CHECK'S GATEWAY FACTORY — turns the injected
+ * predicate `github-posture.ts` offers (its own `checkGithubPosture`, cadence-gated and
+ * baseline-diffed but agnostic to WHERE the read/state live) into a live REST read for THIS
+ * repo, beside `costGovernorGateFor`/`queueGovernorGateFor` above (the same "gateway factory"
+ * shape those two already use, per this task's own `files:` note on why `run-task.ts` is
+ * declared rather than split, DECISIONS.md's 2026-08-18 W1-T471 ruling).
+ *
+ * `readGithubPosture` IS CALLED HERE, EXPLICITLY, rather than only living behind
+ * `checkGithubPosture`'s own default — this is the literal call site the task's `call-site`
+ * acceptance criterion (grep: `readGithubPosture(` in this file) exists to force: a module that
+ * is built and unit-tested but never reached from production wiring is indistinguishable from
+ * dead code (task's own "Eleven modules have merged green and unreached" note).
+ */
+export function githubPostureCheck(
+  now: Date = new Date(),
+  deps: { config?: Config; gateway?: GithubPostureGateway; branch?: string } = {},
+): GithubPostureFinding[] {
+  const config = deps.config ?? loadConfig();
+  const { owner, repo } = resolveOwnerRepo();
+  return checkGithubPosture({
+    owner,
+    repo,
+    configRoot: config.root,
+    now,
+    branch: deps.branch,
+    read: (o, r, opts) => readGithubPosture(o, r, { gateway: deps.gateway ?? opts.gateway, branch: opts.branch }),
+  });
+}
+
+/**
+ * Builds `DaemonDeps.checkGithubPosture` — mirrors {@link buildRetroDaemonHooks}/
+ * {@link buildAutoTriageDaemonHooks} exactly: the hook BODY (the `githubPostureCheck`
+ * delegation) is unit-testable in isolation via an injected `check`, leaving `daemonCommand`'s
+ * own `DaemonDeps` literal holding only a covered property reference.
+ */
+export function buildGithubPostureDaemonHooks(deps: {
+  check?: () => GithubPostureFinding[];
+  config?: Config;
+  now?: () => Date;
+  gateway?: GithubPostureGateway;
+} = {}): { checkGithubPosture: () => GithubPostureFinding[] } {
+  const check = deps.check ?? (() => githubPostureCheck(deps.now?.() ?? new Date(), { config: deps.config, gateway: deps.gateway }));
+  return { checkGithubPosture: () => check() };
+}
+
+/**
  * W1-T322 (design (iii)): the RETRO-TIME consumer of the SAME reachability scan the review path
  * uses — MASTER-PLAN's own NET STATE section, re-checked against the CURRENT mainline checkout
  * (`repoRoot`, never a PR diff). Returns the report section to concatenate, or `""`.
@@ -13249,6 +13371,71 @@ function queueGovernorGateFor(
 }
 
 /**
+ * W1-T1038 — THE REAL `MemAvailable` PROBE `checkMemoryGovernor` (sweep.ts) consults. Reads
+ * `/proc/meminfo` and NEVER a cgroup limit (design note (6), `checkMemoryGovernor`'s own doc):
+ * this fleet's containers carry no memory limit (`memory.max` reads `max`), so a cgroup read
+ * would report "unbounded" and authorise every dispatch silently, while `/proc/meminfo` reports
+ * the real host figure this guard actually wants.
+ *
+ * `path` defaults to the real file and is injectable so a test can point this at a fixture
+ * without touching the live `/proc/meminfo` (test/dispatch-memory-governor.test.ts, "the probe
+ * reads meminfo not the cgroup limit"). Throws when the file is unreadable OR carries no
+ * `MemAvailable` line (e.g. a cgroup-shaped file, which has no such line at all) — a genuinely
+ * malformed/absent reading must not silently parse as a number. `memoryGovernorGateFor` below
+ * deliberately does NOT catch this throw itself; `dispatch-governor.ts`'s
+ * `checkDispatchGovernors` is the ONE place that decides what an unreadable memory observation
+ * means (fail OPEN, unlike the shared cost/queue `unreadable` arm — see that function's own
+ * comment), so this probe stays a plain, honestly-throwing read.
+ */
+export function readAvailableMemoryMib(path = "/proc/meminfo"): number {
+  const text = readFileSync(path, "utf8");
+  const match = /^MemAvailable:\s*(\d+)\s*kB\s*$/m.exec(text);
+  if (!match) {
+    throw new Error(`${path}: no 'MemAvailable' line found — not a /proc/meminfo-shaped reading`);
+  }
+  return Math.floor(Number(match[1]) / 1024);
+}
+
+/**
+ * W1-T1038 — THE MEMORY FLOOR'S caller, mirroring {@link costGovernorGateFor}/{@link
+ * queueGovernorGateFor} immediately above in SHAPE — but deliberately NOT in fail direction; see
+ * `checkMemoryGovernor`'s own doc (sweep.ts) and `checkDispatchGovernors`'s own comment
+ * (dispatch-governor.ts) for why. `checkMemoryGovernor` is a pure predicate that was built,
+ * tested, and never invoked from any dispatch path; this supplies the live reading it consults,
+ * via {@link readAvailableMemoryMib} immediately above.
+ *
+ * THE OBSERVATION IS LEDGERED ON EVERY SUCCESSFUL READ (design (iv)) — unconditionally, never
+ * gated on `result.deferred` — unlike {@link costGovernorGateFor}/{@link queueGovernorGateFor},
+ * which ledger only a DEFERRAL. See {@link logMemoryObservation}'s own doc (sweep.ts) for why a
+ * deferral-only row would sample exactly the population that never happens while the floor
+ * ships disabled.
+ *
+ * A READ FAILURE IS DELIBERATELY LEFT UNCAUGHT HERE, exactly like `costGovernorGateFor`'s own
+ * ledger read: this closure does not need its own try/catch to fail open, it only needs to NOT
+ * catch, so `checkDispatchGovernors` — the ONE place cost/queue and memory diverge — is the only
+ * place the direction is decided.
+ *
+ * NOT wired into `DaemonDeps`/`DrainDeps` by this task (`daemon.ts`/`drain.ts` are not among its
+ * declared `files:`) — this factory exists, is exported, and is directly tested so it is not the
+ * "dead mechanism" criterion (iv) forbids; threading it into the real dispatch loops is a
+ * follow-up, mirroring how `costGovernorGateFor`/`queueGovernorGateFor` themselves were built and
+ * tested (W1-T148/W1-T121) before W1-T317/W1-T321 wired them in.
+ */
+export function memoryGovernorGateFor(
+  ledgerPath: string,
+  runId: string,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  readAvailableMib: () => number = readAvailableMemoryMib,
+): () => MemoryGovernorResult | undefined {
+  return () => {
+    const result = checkMemoryGovernor(readAvailableMib(), policy);
+    // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
+    logMemoryObservation(result, appendLedger, ledgerPath, runId);
+    return result.deferred ? result : undefined;
+  };
+}
+
+/**
  * `rmd drain [--until <id>] [--max <n>] [--dry-run]` — drain the DAG through the
  * EXISTING run-task path. Thin + deterministic: next-runnable is the plan.ts DAG
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
@@ -14451,6 +14638,11 @@ export async function daemonCommand(
   // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
   // exactly how #1066 merged: consumer wired, producer never.
   const autoTriageHooks = target.isSelf ? buildAutoTriageDaemonHooks({ config }) : undefined;
+  // W1-T1040: the GitHub-side posture drift check. SELF-TARGET ONLY, same reason retro/auto-triage
+  // are — the baseline (state/github-posture.json) lives under THIS process's `config.root`, never
+  // a drained target's, so wiring it for a non-self target would either read the wrong repo's
+  // posture into the wrong repo's baseline or silently do nothing useful.
+  const githubPostureHooks = target.isSelf ? buildGithubPostureDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -14644,6 +14836,12 @@ export async function daemonCommand(
         // makes the switch REACHABLE, it does not turn anything on.
         checkAutoTriage: autoTriageHooks?.checkAutoTriage,
         runAutoTriage: autoTriageHooks?.runAutoTriage,
+        // W1-T1040: THE GITHUB-SIDE POSTURE DRIFT CHECK — reads `security_and_analysis` +
+        // `enforce_admins` at most once a day (github-posture.ts's own cadence gate), diffs
+        // against the recorded state/github-posture.json baseline, and returns only what
+        // changed. Best-effort like sweep/sweepOrphans above — `lib/daemon.ts`'s loop logs each
+        // finding and never gates dispatch on it (see that call site's own comment).
+        checkGithubPosture: githubPostureHooks?.checkGithubPosture,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
@@ -15627,6 +15825,140 @@ export interface StatusDeps {
  * config read) and hands everything else to the pure builder. Read-only: never writes a
  * marker, never spawns anything, always exits 0 (bad args aside).
  */
+/**
+ * Every `*.lock` run id under the inflight dir — the FILES, independent of whether their pids live.
+ *
+ * AN ABSENT DIR IS ZERO LOCKS; AN UNREADABLE ONE IS NOT. A fleet that has never dispatched has no
+ * inflight dir and is genuinely healthy, but a permissions fault HIDES locks, and answering "none"
+ * to both would let a health check report all-clear on a fault that blinded it. Only ENOENT is
+ * silently empty; every other error is surfaced as `unreadable` and reaches
+ * {@link judgeLockDivergence} as a WARN naming that lock state is unknown.
+ *
+ * EXTRACTED WITH AN INJECTED `readdir` so both arms are reachable from a test rather than requiring
+ * a real EACCES on disk.
+ */
+export function readLockFilesFrom(
+  dir: string,
+  readdir: (p: string) => string[] = readdirSync,
+): { locks: string[]; unreadableReason?: string } {
+  try {
+    return { locks: readdir(dir).filter((n) => n.endsWith(".lock")).map((n) => n.slice(0, -".lock".length)) };
+  } catch (e) {
+    const { absent, reason } = classifyReadFailure(e);
+    return absent ? { locks: [] } : { locks: [], unreadableReason: `inflight dir unreadable (${reason})` };
+  }
+}
+
+/**
+ * The LOCAL merged set `deriveQueueHead` needs, built from rows this host already wrote.
+ *
+ * THIS IS THE SUBSTITUTION THAT KEEPS THE STALL CHECK ALIVE WITHOUT A NETWORK READ.
+ * `deriveQueueHead` bails to an unknown the moment its projections are absent, which is why a
+ * GitHub outage blanks the queue head — and takes the stall check with it — in `rmd status`.
+ * Feeding it ledger-derived projections answers the same question with no `gh` call.
+ *
+ * EXTRACTED so its effect is assertable directly. `merged === true` is a STRICT comparison on
+ * purpose: a truthy non-boolean must not count as merged, because a false positive here REMOVES a
+ * task from the eligible pool and would hide a stall rather than report one — the fail-closed
+ * direction for a health check.
+ */
+export function localMergedProjections(lines: ReadonlyArray<Record<string, unknown>>): Map<string, StatusProjection> {
+  const projections = new Map<string, StatusProjection>();
+  for (const line of lines) {
+    const id = typeof line.task_id === "string" ? line.task_id : undefined;
+    if (!id) continue;
+    if (line.step === "verdict" && line.merged === true) {
+      projections.set(id, { taskId: id, status: "merged", merged: true } as StatusProjection);
+    }
+  }
+  return projections;
+}
+
+/** Injectable seams for {@link doctorCommand} — every reader it drives, so the whole command is
+ *  exercisable without a real /proc, a real ledger, or a live daemon. */
+export interface DoctorDeps {
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+  loadConfig?: () => Config;
+  nowMs?: number;
+  readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
+  loadPlan?: () => Plan | undefined;
+  liveInflightRuns?: (dir: string) => LiveInflightRun[];
+  readMemInfo?: () => MemInfo;
+  readDiskFreeBytes?: (path: string) => number | undefined;
+  readPauseAgeMs?: (root: string, nowMs: number) => number | undefined;
+  readGitLocks?: (root: string, nowMs: number) => Array<{ path: string; ageMs: number }>;
+  readLockFiles?: (dir: string) => { locks: string[]; unreadableReason?: string };
+}
+
+/**
+ * W1-T1047 — `rmd doctor`: the one LOCAL, READ-ONLY command that answers "is the fleet healthy"
+ * with an exit code that means something. Every judgement lives in `src/lib/doctor.ts` as a pure
+ * function; this is the I/O shell that measures the inputs and prints the report.
+ *
+ * NO NETWORK, BY CONSTRUCTION. The stall check reuses `deriveQueueHead`/`deriveDispatchCadence`
+ * (exported by this task, never reimplemented) but supplies LOCALLY-derived projections instead of
+ * the GitHub ones, so the check that would have caught the stall survives the API outage during
+ * which it is most needed. Nothing here calls `gh`.
+ *
+ * A DOWN DAEMON IS NOT AN ERROR. Every reader degrades to a stated unknown; the command still
+ * prints a full report and still exits by worst verdict.
+ */
+export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Promise<number> {
+  const out = deps.out ?? ((l: string) => console.log(l));
+  const err = deps.err ?? ((l: string) => console.error(l));
+  const refusal = refuseUnsupportedArgs(rest);
+  if (refusal) {
+    err(refusal);
+    return DOCTOR_USAGE_EXIT;
+  }
+  const config = (deps.loadConfig ?? loadConfig)();
+  const nowMs = deps.nowMs ?? Date.now();
+  const root = config.root;
+  const ledgerLines = (deps.readLedgerLines ?? ((pth: string) => readLedgerLines(pth) as Array<Record<string, unknown>>))(ledgerPathFor(config));
+
+  // LOCAL merged set: a task is merged if the ledger says so. This is the substitution that keeps
+  // the stall check alive without a network read — `deriveQueueHead` needs projections, and these
+  // come from rows this host already wrote.
+  const projections = localMergedProjections(ledgerLines);
+
+  const plan = deps.loadPlan ? deps.loadPlan() : undefined;
+  const cadence = deriveDispatchCadence(ledgerLines as Array<Record<string, unknown>>);
+  const head = deriveQueueHead(plan, ledgerLines as Array<Record<string, unknown>>, projections, undefined, 5, nowMs);
+  const newestDispatchMs = cadence.newestTs ? Date.parse(cadence.newestTs) : NaN;
+
+  const inflightDir = join(root, "state", "inflight");
+  // `liveInflightRuns` returns ONLY runs whose pid is alive, so divergence is the difference
+  // between the lock FILES on disk and that live set — a lock with no live pid is a run that died
+  // without releasing. Both halves are injectable so the arm is testable without real pids.
+  const live = (deps.liveInflightRuns ?? liveInflightRuns)(inflightDir);
+  const lockRead = (deps.readLockFiles ?? readLockFilesFrom)(inflightDir);
+  const lockFiles = lockRead.locks;
+  const liveIds = new Set(live.map((r) => r.runId));
+  const dead = lockFiles.filter((f) => !liveIds.has(f));
+
+  const report = buildDoctorReport({
+    nowMs,
+    ledgerLines: ledgerLines as Array<Record<string, unknown>>,
+    candidateCount: head.rows.length,
+    ...(Number.isFinite(newestDispatchMs) ? { dispatchSinceMs: Math.max(0, nowMs - newestDispatchMs) } : {}),
+    ...(cadence.boundMs === undefined ? {} : { dispatchBoundMs: cadence.boundMs }),
+    ...(cadence.boundDerivation === undefined ? {} : { dispatchBoundDerivation: cadence.boundDerivation }),
+    mem: (deps.readMemInfo ?? readMemInfo)(),
+    ...(((v) => (v === undefined ? {} : { diskFreeBytes: v }))((deps.readDiskFreeBytes ?? readDiskFreeBytes)(root))),
+    ...(((v) => (v === undefined ? {} : { pauseAgeMs: v }))((deps.readPauseAgeMs ?? readPauseAgeMs)(root, nowMs))),
+    totalLocks: lockFiles.length,
+    ...(lockRead.unreadableReason === undefined ? {} : { locksUnreadableReason: lockRead.unreadableReason }),
+    deadLocks: dead,
+    gitLocks: (deps.readGitLocks ?? readGitLocks)(repoRoot, nowMs),
+    workerCount: 0,
+  });
+
+  if (rest.includes("--json")) out(JSON.stringify({ worst: report.worst, checks: report.checks }, null, 2));
+  else out(report.text);
+  return report.exitCode;
+}
+
 export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l));
   const err = deps.err ?? ((l: string) => console.error(l));
@@ -22444,6 +22776,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd sync [--dry-run]   # W1-T907: the sanctioned dedupe-then-pull recipe as one explicit verb, for exactly the case checkCliFreshness refuses (behind origin/main AND dirty) that W1-T446's intersect-only fix cannot unstick — three-way classifies every `git status --porcelain` path against the origin/main blob (git hash-object vs git rev-parse <ref>:<path>, the same predicate deployer.ts's sameAsIncoming/discardLocal already established): IDENTICAL (local bytes == origin/main's blob at that path, or a DECISIONS.md whose every appended `## ...` record already landed via plan/decisions.d, W1-T191) is discarded/restored as provably lossless; everything else (no origin/main counterpart, differing bytes, or an unlanded DECISIONS.md record) is COPIED ASIDE under state/sync-<timestamp>/ with a named report BEFORE any discard runs and is NEVER deleted, cleared from the working tree only if the fast-forward actually needs that path; a local commit that is not an ancestor of origin/main (BLOCKING) refuses the WHOLE verb, mutating nothing. Then `git merge --ff-only origin/main` — never merge, never rebase, never reset --hard. --dry-run prints the identical classification and mutates nothing. Off-main/detached checkouts refuse exactly as W1-T445 established for the CLI entry guard. Does not touch checkCliFreshness's own predicate (W1-T446 owns that).",
   },
   {
+    name: "doctor",
+    usage:
+      "rmd doctor [--json]   # W1-T1047: ONE local, read-only health check with a meaningful exit code (0 OK / 1 any WARN / 2 any FAIL; bad args exit 64, so exit 2 always means a check failed and never a typo). NO NETWORK and NO HEALTHY DAEMON REQUIRED — every check reads the ledger, state/, plan/, /proc or ps, so it answers from a cold ssh session while remudero-serve is down and the API budget is exhausted, which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest daemon.* row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence, reusing deriveQueueHead/deriveDispatchCadence with a LOCALLY-derived merged set), dispatch liveness (consecutive daemon.alive rows stuck in the sweep phase), pause honoured (PAUSE held while dispatch continued — W1-T1065/#2298 files the tick defect, doctor only reports), lock-vs-process divergence, lane-less workers (#2251's 7200s threshold, reused not re-derived), stale git index.lock (report only; W1-T1036 owns reclamation), disk headroom, and memory/swap from /proc/meminfo (never the cgroup limit — this container is unlimited, so memory.max reads `max` and would report unbounded headroom on a host that already froze). EVERY check prints its measured value beside its threshold; one summary line first, short enough for a cron subject. READ-ONLY: --fix is refused by name, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard.",
+  },
+  {
     name: "status",
     usage:
       "rmd status [--json]   # W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
@@ -23078,6 +23415,10 @@ export async function main(
     process.exit(syncCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await doctorCommand(rest)) cannot carry a DA hit without forking the process; doctorCommand's own logic (arg refusal, the reader wiring, the exit-code translation) and every judgement it composes (buildDoctorReport and the pure judge* arms) are unit-tested in test/doctor.test.ts (same irreducible-glue shape as the sibling status/console-url dispatch cases).
+  if (cmd === "doctor") {
+    process.exit(await doctorCommand(rest));
+  }
   if (cmd === "status") {
     process.exit(await statusCommand(rest));
   }

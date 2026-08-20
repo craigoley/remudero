@@ -117,6 +117,10 @@ function goodRaw(): Record<string, unknown> {
       // literal ever gated it; the detector that populates a verdict is a separate, out-of-scope
       // shard).
       supersessionDisposal: { value: false, origin: "net-new" },
+      // W1-T1038: the dispatch-path memory floor (MiB of /proc/meminfo's MemAvailable) —
+      // net-new, ships at 0 (inert: MemAvailable can never read below zero) until an operator
+      // raises it against a measured figure. See checkMemoryGovernor (sweep.ts).
+      memoryFloorMib: { value: 0, origin: "net-new", min: 0, max: 8192 },
     },
     drain: {
       max: { value: 10, origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)", min: 1, max: 100 },
@@ -508,6 +512,10 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // W1-T943: `workerStall` joins them too — no prior literal ever measured a worker-quiet
     // threshold before this task's own filing verified plan/policy.yaml carried zero rows for it.
     "workerStall",
+    // W1-T1038: `sweep.memoryFloorMib` joins them too — no prior literal ever measured or gated
+    // an available-memory floor; the ledger carried zero mem/rss/heap/swap/avail fields before
+    // this task, so there is no source constant to cite as this field's origin.
+    "sweep.memoryFloorMib",
     // W1-T1044: `sweepWallClockBoundMs` joins them too — no prior literal ever bounded a sweep
     // tick's wall-clock duration; this task's own rationale measured the healthy-vs-hung split
     // from scratch (see plan/policy.yaml's row for the derivation).
