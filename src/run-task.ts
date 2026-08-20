@@ -248,7 +248,7 @@ import { assertProposedPlanLoads,
   triageEmptyScopeDisposition,
   triagePrompt,
 } from "./lib/triage.js";
-import { mintNextTaskId, type MintDegradation, type MintSources } from "./lib/task-id.js";
+import { isAllocatableTaskId, mintNextTaskId, type MintDegradation, type MintSources } from "./lib/task-id.js";
 import {
   firstUnreservedAtOrAbove,
   reserveTaskIdBlock,
@@ -8661,7 +8661,33 @@ export function mintNextTaskIdWithHistory(opts: {
   let historyDegraded: MintDegradation[] = [];
   if (!isAbsolute(planRelPath) && !planRelPath.startsWith("..")) {
     const history = taskIdsEverFiled(opts.repoRoot, planRelPath === "" ? "." : planRelPath, opts.gitRunner);
-    historyMax = history.ids.length ? Math.max(...history.ids) : null;
+    // W1-T1039: THE SAME UPPER BOUND `mintNextTaskId` APPLIES TO ITS OWN THREE SURFACES, APPLIED
+    // HERE TO THE FOURTH. `base.maxSeen` arrives already bounded, so without this line the history
+    // term is the one surface that can still raise the ceiling — and it is the one that can NEVER
+    // be cleaned up, because it reads ids out of immutable git history: a shard filed at a burned
+    // id keeps returning that id from `git log -p` forever. MEASURED before this line existed, with
+    // the library bound already in place: the verb reported `shards 1044` (bounded, correct) beside
+    // a history term six orders of magnitude higher, and still answered out of range.
+    //
+    // SCOPE: `src/run-task.ts` was NOT in W1-T1039's declared `files:` as filed. The shard names
+    // this exact case — "IF an implementer finds that term cannot be bounded without editing
+    // run-task.ts, the widening must be ratified before it is made and the W1-T471 cost accepted in
+    // writing then" — and it cannot: `taskIdsEverFiled` and this fold both live here, and no
+    // function in `task-id.ts` ever sees the history value. RATIFIED BY THE OPERATOR BEFORE THIS
+    // EDIT WAS MADE, and the W1-T471 cost accepted with it: this file carries 245 of 626 records,
+    // so naming it costs one effective dispatch lane while the task is in flight.
+    //
+    // THE SHARD'S `files:` IS DELIBERATELY NOT AMENDED, because the linter refuses that: adding
+    // either this path or the shard's own to a `verify: auto` task's `files:` trips
+    // `rule15FilingViolation` — "editing a task record removes a claim:/proof: line, and with a
+    // path outside plan scope the reviewer's planOnly carve-out is gone, so criteriaTampered
+    // refuses the PR however good the work is" (measured: `rmd lint-plan` exit 1 on that edit).
+    // So the widening is recorded HERE and in the PR body, and the review's `scope_violation`
+    // advisory is the expected, correct outcome — its own doc lists "operator-instructed or
+    // review-ratified widenings" among the legitimate cases and states it "does not affect
+    // remudero-review's verdict".
+    const allocatableHistoryIds = history.ids.filter(isAllocatableTaskId);
+    historyMax = allocatableHistoryIds.length ? Math.max(...allocatableHistoryIds) : null;
     historyDegraded = history.degraded;
   }
 
