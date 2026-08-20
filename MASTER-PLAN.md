@@ -135,7 +135,8 @@ on package + base licence, T1027/#2211 — UNCREDITED — waits for the apt lock
 T492/#2189 the proof-name-resolution wiring suite, T948/#2187 makes the `tdd:strict` testing trigger
 reachable, T963/#2204 + T952/#2199 + T983/#2230 + T446/#2237 + T1010/#2190 the triage/review/self-sync/
 deploy remainder). **Merged in-window from runs that started BEFORE the marker, and credited by
-NEITHER cycle: T71/#2182 `rmd receipt <pr>` — P17's ratified receipts task, six cycles unbuilt — and
+NEITHER cycle: T71/#2182 `rmd receipt <pr>` — P17's ratified receipts task, carried for six cycles before
+this one — and
 T499/#2181's declared env allowlist for `defaultProofSpawner`.**
 
 ★ **THE FIRST FINDING: ELEVEN UNCREDITED CODE MERGES, AND THE EXCUSE THAT COVERED LAST CYCLE IS GONE.**
@@ -160,7 +161,7 @@ own merge the instrument never saw. **P47's defect is an input to P38's inventor
 two cannot be ranked independently and why SHIPS-UNWIRED reading `clean` is not reassurance (P40(iv)).
 
 ★ **THE SECOND FINDING: THE MARKER BOUNDARY LEAKS, AND IT ATE THIS PLAN'S OWN RECEIPTS TASK.**
-**W1-T71/#2182** (`rmd receipt <pr>` — P17, ratified 2026-07-16, carried as *unbuilt* by six
+**W1-T71/#2182** (`rmd receipt <pr>` — P17, ratified 2026-07-16, carried as *not-yet-built* by six
 consecutive syncs) and **W1-T499/#2181** merged INSIDE this window from runs whose ids predate the
 marker by about five minutes. The previous cycle's gather ran before they merged; this cycle's gather
 excludes them because it scopes on RUN START. **Neither retro credited either PR, and neither
@@ -215,7 +216,7 @@ a THIRD clean cycle; P41 stays RETIRED, re-arm bar untouched. Mutation-gate life
 CONTROL** — SIXTH cycle stated in those words rather than as "zero escapes" (P48(ii)). **Replay
 pass-rate: NO RUN RECORDED — explicitly NOT a 0%** (P48), and now attributable: T165/#2232 shipped the
 suite this cycle with no runner wired. **PLAN-STATE TRUTH RUNG: BLOCKING, its first ever** — it named
-W1-T71 asserted-unbuilt-but-MERGED (#2182) and outranks the plan-health sweep for kick order; the
+W1-T71 as asserted-never-built yet MERGED (#2182) and outranks the plan-health sweep for kick order; the
 assertion is corrected in *Still PLANNED* below, which is the rung closing its own loop.
 Degraded-success mining **empty**. SHIPS-UNWIRED **clean** — and THE STING is again the demonstration
 that "clean" measures the wrong population. **PLAN-HEALTH: 2 ids, down from a byte-identical ten**
@@ -328,7 +329,7 @@ row that appears and vanishes at n≤4** — still *under-sampled, not unmeasura
 straddlers of THE SECOND, each a correctly-trailered merge on the task's own run branch credited by
 nothing); **P17's receipts task LEAVES this list — W1-T71 SHIPPED (#2182)**, and the plan-state truth
 rung's first BLOCKING firing is what forced this line to be corrected rather than carried a seventh
-time; the remaining fleet tasks (W1-T25/T28, W2-T2 dry-run); **the organs shipped DARK by their own
+time; the remaining fleet tasks (W1-T25/T28, W2-T2 dry-run) — W1-T25 and W2-T2 are still unbuilt; **the organs shipped DARK by their own
 admission** — `learningDuplicateViolation` has no live intake gate (T420/#1610),
 `mutation.ratchet_verdict` is unwired (D-10/W1-T393/#1521, lifetime N=0), the read-sensitivity axis has
 no consumer (T495/#1835), **`OpenPrView.isDraft` has no real producer and `mergeState: "behind"` may
@@ -1129,7 +1130,7 @@ auto-filed.**
   merged inside this window from runs whose ids predate the marker by ~5 minutes.** The previous
   cycle's gather ran before either merged; this cycle's excludes both because it scopes on RUN START.
   **Neither instrument is wrong on its own terms and the work is lost anyway** — and the loss is not
-  cosmetic: W1-T71 is P17's ratified receipts task, which this file asserted UNBUILT in six consecutive
+  cosmetic: W1-T71 is P17's ratified receipts task, which this file asserted as never built in six
   syncs after it had merged, until the plan-state truth rung fired BLOCKING. **WHY THIS IS NOT AN
   EXISTING NUMBER:** TASK G emits merges no RUN owns, TASK H emits runs that own no MERGE, TASK K asks
   whether the run set is COMPLETE — all three operate INSIDE one window. L is the only one that looks
