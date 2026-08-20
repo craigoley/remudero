@@ -15,6 +15,7 @@ import test from "node:test";
 import {
   DEFAULT_CONFIG_LOCK_GRACE_MS,
   configLockPath,
+  defaultProbeLiveGitProcess,
   isConfigLockStale,
   pruneStaleRuns,
   reclaimStaleConfigLock,
@@ -192,4 +193,62 @@ test("W1-T1036: a mode 444 lock is unlinked rather than overwritten", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("W1-T1036: the lock vanishing between the staleness check and the unlink is reported false, not thrown", () => {
+  // The race design (iii)'s own doc names: something else removes the lock in the window
+  // between isConfigLockStale returning true and this function's own unlinkSync call. An
+  // injected `unlink` that throws ENOENT reproduces that window deterministically, without
+  // needing a second real writer racing this process.
+  const root = tmp("rmd-config-lock-race-");
+  const clone = join(root, "clone");
+  try {
+    seedClone(clone);
+    writeStaleConfigLock(clone);
+
+    const reclaimed = reclaimStaleConfigLock(clone, {
+      probeLiveGitProcess: () => ({ ran: true, alive: false }),
+      unlink: () => {
+        throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+      },
+    });
+    assert.equal(reclaimed, false, "an unlink that fails between the check and the call reports false, not a throw");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1036: defaultProbeLiveGitProcess reads pgrep's three real exit shapes", () => {
+  // Mirrors fs-race-safe.ts's defaultGetProcessStartTime tests (test/lock-holder-identity.test.ts):
+  // an injected execFileSync drives each branch deterministically, so this covers the parsing
+  // logic without depending on what's actually running on the CI host at test time.
+  const alive = defaultProbeLiveGitProcess({
+    execFileSync: (() => Buffer.from("")) as unknown as typeof execFileSync,
+  });
+  assert.deepEqual(alive, { ran: true, alive: true }, "exit 0 (a match) reads as a live git process");
+
+  const genuinelyNone = defaultProbeLiveGitProcess({
+    execFileSync: (() => {
+      throw Object.assign(new Error("exit 1"), { status: 1 });
+    }) as unknown as typeof execFileSync,
+  });
+  assert.deepEqual(genuinelyNone, { ran: true, alive: false }, "pgrep's documented exit 1 is a TRUE zero");
+
+  const unrunnable = defaultProbeLiveGitProcess({
+    execFileSync: (() => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }) as unknown as typeof execFileSync,
+  });
+  assert.deepEqual(unrunnable, { ran: false, alive: false }, "a missing pgrep binary is a read that never happened, never a zero");
+});
+
+test("W1-T1036: defaults reach the REAL pgrep syscall", () => {
+  // No `sysImpl` at all — the default path runs the real `pgrep git`. Whatever it happens to
+  // find on this host, the shape it returns is always well-formed: `ran` and `alive` are
+  // booleans, and `ran: false` never co-occurs with `alive: true` (design (i).3 — an unrunnable
+  // probe is never itself evidence of life).
+  const result = defaultProbeLiveGitProcess();
+  assert.equal(typeof result.ran, "boolean");
+  assert.equal(typeof result.alive, "boolean");
+  assert.ok(result.ran || !result.alive, "an unrunnable probe must never report alive: true");
 });

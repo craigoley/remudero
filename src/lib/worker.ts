@@ -2195,6 +2195,16 @@ export interface LiveGitProcessProbe {
   alive: boolean;
 }
 
+/** The one syscall {@link defaultProbeLiveGitProcess} makes, injectable so a test can drive its
+ *  three outcomes without a real subprocess (mirrors {@link ProcessStartTimeSyscalls} in
+ *  fs-race-safe.ts, the same split for the same reason: the default wiring to a real syscall and
+ *  the branch logic over its result are two different things to falsify). */
+export interface PgrepSyscalls {
+  execFileSync: typeof execFileSync;
+}
+
+const defaultPgrepSyscalls: PgrepSyscalls = { execFileSync };
+
 /**
  * Real probe: `pgrep git` (design (i).2 — deliberately `pgrep`, not `lsof`; both are declared
  * in the image, and the coarser name-match answers "held" more often, which is the safe
@@ -2204,9 +2214,9 @@ export interface LiveGitProcessProbe {
  * (5)'s measured failure mode), a syntax error, a fatal error — means the read did not happen
  * and must NOT be read as "no git process".
  */
-function defaultProbeLiveGitProcess(): LiveGitProcessProbe {
+export function defaultProbeLiveGitProcess(sysImpl: PgrepSyscalls = defaultPgrepSyscalls): LiveGitProcessProbe {
   try {
-    execFileSync("pgrep", ["git"], { stdio: "pipe" });
+    sysImpl.execFileSync("pgrep", ["git"], { stdio: "pipe" });
     return { ran: true, alive: true }; // exit 0 — at least one match
   } catch (e) {
     if (pgrepFailureMeansZero(e)) return { ran: true, alive: false }; // exit 1 — genuinely none
@@ -2224,6 +2234,10 @@ export interface ConfigLockReclaimOpts {
   /** Ledger sink (design (iv)) — called with the path and the authorising rung BEFORE the
    *  file is removed, never after. Default `console.error`. */
   ledger?: (message: string) => void;
+  /** Injectable removal call (tests) — lets a test drive the race window between the
+   *  staleness check and the removal itself (the lock vanishing or becoming unremovable in
+   *  that gap) without needing a real second writer. Default {@link unlinkSync}. */
+  unlink?: typeof unlinkSync;
 }
 
 /**
@@ -2278,8 +2292,9 @@ export function reclaimStaleConfigLock(repoDir: string, opts: ConfigLockReclaimO
     `pruneStaleRuns: reclaiming stale .git/config.lock at ${lockPath} (W1-T1036: past grace, ` +
       "no live git process, probe ran) before the next worktree add",
   );
+  const unlink = opts.unlink ?? unlinkSync;
   try {
-    unlinkSync(lockPath);
+    unlink(lockPath);
   } catch {
     return false; // vanished, or unremovable, between the check above and here
   }
