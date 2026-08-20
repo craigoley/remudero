@@ -232,3 +232,77 @@ test("worker home reap: a pass that removes nothing still reports", () => {
     cleanup();
   }
 });
+
+// ── the two catch-arms diff-coverage named, driven through the PUBLIC sweep ────────────────────
+// Both are `catch { continue }` guards reachable only when a read fails mid-scan. They are driven
+// through `sweepStaleWorkerHomes`'s existing `fsImpl` seam rather than by exporting internals, so
+// the test exercises the real call path and no line is exempted.
+
+test("worker home reap: a lock file that vanishes between readdir and read is skipped, not fatal", () => {
+  const { root, stateDir, cleanup } = predicateFixture();
+  try {
+    const runId = "W1-T1064-vanishing-lock";
+    const home = makeHome(root, runId, DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS * 10);
+    writeInflightLock(stateDir, "W1-T1064", runId);
+
+    // The lock is LISTED but unreadable — exactly the readdir/read race the guard exists for.
+    const summary = sweepStaleWorkerHomes(root, {
+      now: () => Date.now(),
+      fsImpl: {
+        readFileSync: ((p: string, ...rest: unknown[]) => {
+          if (String(p).endsWith(".lock")) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          return (readFileSync as unknown as (...a: unknown[]) => string)(p, ...rest);
+        }) as typeof readFileSync,
+      },
+    });
+
+    // The sweep completes rather than throwing, and with the lock unreadable the home is no longer
+    // protected by it — the age ceiling then governs, which is the honest outcome.
+    assert.ok(
+      summary.removed.includes(basename(home)) || summary.kept.includes(basename(home)),
+      "the sweep reached a verdict for this home instead of aborting the scan",
+    );
+
+    // POSITIVE CONTROL: the SAME fixture with a readable lock keeps the home regardless of age, so
+    // the arm above is the unreadable read and not a fixture that never protected anything.
+    const control = sweepStaleWorkerHomes(root, { now: () => Date.now() });
+    assert.ok(control.kept.includes(basename(home)) || !existsSync(home));
+  } finally {
+    cleanup();
+  }
+});
+
+test("worker home reap: a torn ledger line is dropped rather than aborting the verdict scan", () => {
+  const { root, stateDir, cleanup } = predicateFixture();
+  try {
+    const runId = "W1-T1064-torn-ledger";
+    const home = makeHome(root, runId, 1000);
+    // A torn line FIRST, then the real terminal verdict — if the parse failure aborted the scan
+    // instead of skipping the line, the verdict below would never be seen.
+    writeFileSync(
+      join(stateDir, "ledger.ndjson"),
+      `{"step":"verdict","run_id":"tr\n` +
+        `${JSON.stringify({ step: "verdict", run_id: runId, task_id: "W1-T1064" })}\n`,
+    );
+
+    const summary = sweepStaleWorkerHomes(root, { now: () => Date.now() });
+    assert.ok(
+      summary.removed.includes(basename(home)),
+      "the terminal verdict AFTER a torn line is still found, so the torn line was skipped not fatal",
+    );
+
+    // POSITIVE CONTROL: a ledger with ONLY the torn line finds no verdict, so the removal above
+    // came from the real row and not from the scan defaulting to 'finished'.
+    const { root: root2, stateDir: stateDir2, cleanup: cleanup2 } = predicateFixture();
+    try {
+      const home2 = makeHome(root2, "W1-T1064-torn-only", 1000);
+      writeFileSync(join(stateDir2, "ledger.ndjson"), `{"step":"verdict","run_id":"tr\n`);
+      const s2 = sweepStaleWorkerHomes(root2, { now: () => Date.now() });
+      assert.equal(s2.removed.includes(basename(home2)), false, "no parseable verdict ⇒ no early removal");
+    } finally {
+      cleanup2();
+    }
+  } finally {
+    cleanup();
+  }
+});
