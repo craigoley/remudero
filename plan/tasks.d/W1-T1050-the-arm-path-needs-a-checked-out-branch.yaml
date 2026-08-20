@@ -1,0 +1,186 @@
+- id: W1-T1050
+  title: "THE ARM PATH'S DIRECT-MERGE LEG NEEDS A CHECKED-OUT BRANCH THE DAEMON DELIBERATELY DOES NOT HAVE — `gh pr merge --squash --delete-branch` deletes the LOCAL branch too, so it fails `not on any branch` in the detached container checkout; establish whether the merge itself still succeeded before calling the leg dead, and drop the flag rather than adding `--repo` or changing cwd"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: |
+    MEASURED 2026-08-20 on Craigs-Mac-mini under /bin/zsh 5.9, in a scratch worktree at
+    origin/main dc579498. REST only, no `/rate_limit` call, daemon and state files untouched.
+
+    (1) THE INSTANCE. `automerge.direct_merge_failed` fired on the PR that filed W1-T1045, with
+    `gh pr merge … --squash --delete-branch` returning
+    *"could not determine current branch: failed to run git: not on any branch"*. The daemon's
+    checkout is detached BY DESIGN — the entrypoint does `checkout: <sha>` on every boot — and
+    this shard does NOT propose changing that: the self-sync guard depends on it.
+
+    (2) THE MECHANISM, FROM `gh`'s OWN HELP RATHER THAN INFERENCE. `gh pr merge --help` (gh 2.92.0)
+    documents the flag verbatim as *"Delete the LOCAL and remote branch after merge"*. That is the
+    whole explanation, and it also explains why only ONE of the two arm legs is affected:
+      - `armAuto` passes `--auto`, so GitHub performs the branch deletion server-side after the
+        checks clear. No local branch work happens and the call reaches the API fine — it is
+        REFUSED by GitHub on an already-green PR ("clean status"), which is the designed route
+        into the direct leg.
+      - `mergeDirect` merges immediately, so `gh` deletes the local branch ITSELF, and that step
+        needs a current branch. A detached HEAD has none.
+    The same help text also settles the PR-resolution question: the current branch is consulted
+    only *"without an argument"*, and every call site here passes an explicit PR URL.
+
+    (3) THE PREMISE THAT MUST BE TESTED BEFORE THE LEG IS CALLED DEAD, AND IT IS NOT RHETORICAL.
+    `attemptArm` (`src/run-task.ts`) wraps the WHOLE `execFileSync` in one try/catch and returns
+    `direct-merge-failed` on any non-zero exit. If `gh` merges via the API and only then fails
+    deleting the local branch, the merge SUCCEEDED and the harness reported failure. THE
+    DISCRIMINATOR IS ONE COMPARISON: the `automerge.direct_merge_failed` row's `ts` against the
+    PR's own `merged_at` of 2026-08-20T01:56:03Z. Within seconds means the merge landed and the
+    verdict is wrong; minutes earlier means a later path merged it. THAT COMPARISON CANNOT BE MADE
+    TODAY, AND NOT FOR WANT OF HOST ACCESS: THE FAILURE HAS NO LEDGER ROW TO TIMESTAMP (design note
+    (v)). The operator swept the live ledger and nine rotations for one, against a positive control
+    that read fine, and found none. Whether the merge landed survives only in the daemon's stdout.
+
+    (4) WHICH PATH MERGED IT — NOT POSITIVELY IDENTIFIED FROM REST, AND SAYING SO IS THE POINT.
+    The PR reports `auto_merge: null` (GitHub clears it on merge, so it is ambiguous), and its
+    REST timeline carries NO `auto_merge_enabled` event — nor does a merged sibling used as a
+    control, so that absence is weak evidence rather than none. `merged_by` is the shared token
+    identity and discriminates nothing. `head_ref_deleted` fires two seconds after the merge, and
+    proves nothing about the flag because the REPOSITORY ITSELF has
+    `delete_branch_on_merge: true`.
+
+    (5) HAS THE DIRECT LEG EVER SUCCEEDED? ONCE — AND THE FAILURE SIDE WAS NEVER COUNTABLE, WHICH
+    CORRECTS AN EARLIER READING OF THIS SHARD'S OWN CENSUS. Over the deduped ledger union (per-form
+    control: 666 gz, 6 plain, 1 live) there are 1,069 distinct `automerge.*` rows carrying an
+    `outcome` field — `armed` 602, `arm-error-ignored` 99, `skipped` 90, `ledger-refused` 11, and
+    `direct-merged` ONE, dated 2026-08-05T13:08:47Z from a `dep-review` lane running in a checkout
+    that sits on `main` rather than detached. THE SINGLE SUCCESS IS REAL. THE ZERO BESIDE IT IS NOT
+    A MEASUREMENT: a direct-merge FAILURE has no step of its own to be counted under (design note
+    (v)), so "zero failures" reads the absence of a record, not the absence of an event. The leg is
+    therefore not a limb that never worked — it works ATTACHED and fails DETACHED, exactly as (2)
+    predicts, and how often it has failed is UNKNOWN rather than zero.
+  design: |
+    ONE CONCERN: the immediate-merge call's dependence on a local branch. Not the daemon's detached
+    checkout, which stays as it is.
+
+    (i) THE FIX IS TO DROP THE FLAG, AND NEITHER ALTERNATIVE IN THE BRIEF WORKS.
+      - `-R/--repo` CANNOT fix it. It selects which repository to act on; it supplies no current
+        branch, and the failure is a current-branch lookup. Repository resolution was never the
+        problem — an explicit PR URL is already passed.
+      - A CWD CHANGE would work and is still wrong: it trades a dependency on THIS checkout's
+        branch for a dependency on some OTHER checkout being attached, current and unlocked, which
+        is a worse coupling for a fleet that runs several trees at once.
+      - DROPPING `--delete-branch` FROM THE IMMEDIATE-MERGE CALLS COSTS NOTHING HERE, because the
+        repository already carries `delete_branch_on_merge: true` and deletes the head branch on
+        every merge regardless of how it was merged. The daemon has no local branch worth deleting
+        in the first place.
+      IN-REPO PRECEDENT FOR THE SHAPE: `src/lib/feedback-landing.ts` already calls
+      `gh pr merge … --auto --squash` with no such flag, and W1-T921 deliberately stripped it from
+      the sweep's close path for a different reason, with a comment saying so at the call site.
+
+    (ii) THREE CALL SITES CARRY THE FLAG AND THEY ARE NOT EQUALLY AFFECTED — FIX THE TWO IMMEDIATE
+    ONES AND LEAVE THE DEFERRED ONE ALONE.
+      - `mergeDirect` in `realArmDeps` (`src/run-task.ts`): immediate merge. THIS IS THE FAILING
+        ONE.
+      - `ghPrMergeSquash` (`src/lib/worker.ts`): immediate merge, same hazard, and NOT observed
+        failing only because nothing has exercised it from the detached checkout in the measured
+        window. Fixing one and not the other leaves the second free to reproduce this on its own.
+      - `armAuto` in `realArmDeps` (`src/run-task.ts`): `--auto`, deferred to GitHub. UNAFFECTED,
+        and it must keep the flag so the deferred delete stays server-side.
+
+    (iii) THE OBSTACLE, NAMED RATHER THAN WAVED PAST. `test/live-write-guard-command-sites.test.ts`
+    asserts `merged.includes("--delete-branch")` with the message *"the merge path must keep
+    deleting its branch"*, citing W1-T447. W1-T447's subject is REMOTE branches accumulating on
+    origin — 105 had piled up and a session hand-purged 55 — so what it defends is the remote
+    deletion, not the local one. THIS TASK MUST ESTABLISH THAT `delete_branch_on_merge: true`
+    SATISFIES THAT CONCERN before removing the flag, and then RE-DERIVE THAT ASSERTION TO PIN THE
+    OUTCOME (the head ref is gone after a merge) RATHER THAN THE ARGV. Deleting the assertion is
+    not acceptable; W1-T447 earned it.
+
+    (iv) AND FIX THE REPORTING, NOT ONLY THE CALL. Even with the flag gone, `attemptArm`'s single
+    try/catch cannot distinguish "the API refused the merge" from "the merge landed and a cleanup
+    step failed". The verdict it writes is the input to every later diagnosis, so the catch must
+    name which half failed rather than collapsing both into `direct-merge-failed`.
+
+    (v) A SECOND CONCERN, NAMED AND DELIBERATELY NOT ABSORBED: THE ARM'S FAILURE PATH HAS NO
+    LEDGER STEP OF ITS OWN WHILE ITS SUCCESS PATH DOES. IT NEEDS ITS OWN ID AND IS NOT FILED HERE.
+    `logArmAttribution` (`src/run-task.ts`, landed 2026-08-12) routes every outcome through
+    `armOutcomeArmed`: `armed` and `direct-merged` become `automerge.armed`, and EVERYTHING ELSE —
+    including a direct merge that was attempted and FAILED — becomes `automerge.arm_skipped`, a step
+    name asserting something that did not happen. Success then gets a SECOND, dedicated step,
+    `automerge.clean_status_direct_merge`. FAILURE GETS NONE. Both call sites do pass the outcome as
+    a FIELD, so the review and operator lanes stay recoverable by a reader who knows to read the
+    field rather than the step name; the SWEEP lane is not even that — it writes
+    `arm outcome: <outcome>` as free text into `standDownReason` on a `sweep.disposed` row, a
+    different step entirely. MEASURED on the union: 16,598 distinct `sweep.disposed` rows, 216
+    carrying `arm outcome:`, ALL 216 reading `no-task-id`; and `automerge.clean_status_direct_merge`
+    reads ZERO here, on a host whose `automerge.*` rows stop two days after that step was
+    introduced — so this corpus barely overlaps the code now running and cannot speak to it.
+    THIS IS THE SAME FAMILY AS A FIELD NOBODY READS AND A STEP THAT FIRES WITH NO READER, AND IT IS
+    WORSE THAN EITHER: the record an operator would search for does not exist, so the search returns
+    a confident zero. It is why the discriminator in rationale (3) cannot be taken at all.
+    IT IS SCOPED OUT ON PURPOSE. Fixing the call and fixing the record are two independently
+    falsifiable claims, and this shard's `files:` covers the call.
+
+    (vi) WHAT THIS TASK MUST NOT DO. It must not un-detach the daemon's checkout — that is
+    deliberate and the self-sync guard depends on it. It must not add `--repo` or a cwd change.
+    It must not remove the flag from the `--auto` call. It must not delete the W1-T447 assertion.
+    It must not absorb the second concern in (v) — that one needs its own id.
+  acceptance:
+    - claim: "the immediate-merge calls no longer ask git for a current branch and succeed from a detached HEAD"
+      proof: "unit test: arm merge: an immediate merge from a detached HEAD does not ask for a current branch"
+    - claim: "the deferred arm keeps its server-side branch deletion and is left unchanged"
+      proof: "unit test: arm merge: the auto arm still defers its branch deletion to the remote"
+    - claim: "the branch really is gone after a merge, pinned as an outcome rather than as an argv flag"
+      proof: "unit test: arm merge: the head ref is absent after a merge with no local delete"
+    - claim: "a merge that landed but failed a cleanup step is reported as merged rather than as a failed merge"
+      proof: "unit test: arm merge: a cleanup failure after a landed merge is not reported as a failed merge"
+    - claim: "both immediate call sites are covered so the second cannot reproduce this alone"
+      proof: "unit test: arm merge: both immediate call sites drop the local branch delete"
+  risk: high
+  origin: "oper#arm-path-needs-a-checked-out-branch-2026-08-20"
+  plan_refs: ["W1-T1045", "W1-T447", "W1-T921", "W1-T125", "W1-T230", "W1-T947"]
+  files: [src/run-task.ts, src/lib/worker.ts, test/live-write-guard-command-sites.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE STAKES, STATED PLAINLY. One PR reported a failed merge that may well have succeeded, and
+    the arm's most-used leg is unaffected: `armed` is 602 rows against a single `direct-merged`.
+    This is a narrow leg that fails in one environment, not a broken arm — the reason to fix it is
+    that the fix is a deleted flag, and that the verdict it currently writes misleads every later
+    diagnosis.
+
+    `files:` WAS DERIVED BY WORD-BOUNDED INVOCATION COUNT, NOT GUESSED. In `src/` the affected
+    symbols read `attemptArm` 7, `realArmDeps` 6, `mergeDirect` 5, `armAuto` 5 and
+    `armFailureAction` 3 — all in `src/run-task.ts`, which is therefore the dominant site;
+    `ghPrMergeSquash` is DEFINED in `src/lib/worker.ts`, which is why that module is declared
+    alongside the arm's own file. On the test side only `test/live-write-guard-command-sites.test.ts`
+    pins the argv, so it is the only test file declared. THE FIFTH CRITERION IS A TEST RATHER THAN A
+    GREP DELIBERATELY: its first draft grepped `ghPrMergeSquash(`'s caller, which sits OUTSIDE
+    `files:` and drew a `[proof-scope]` warning — a proof must not send the scope guard chasing a
+    path the task never edits. The shard's own path is absent.
+
+    RISK IS `high` UP FRONT AND THE BAND IS RULE 19's SPAN: two source modules plus a test whose
+    assertion must be re-derived rather than deleted.
+
+    EVERY FIGURE IS DATED 2026-08-20 AND WILL DRIFT — RE-RUN THE QUERY. Arm outcomes:
+    `zgrep -h '"step":"automerge' <every ledger form> | sort -u`, then tally `outcome`, with a
+    per-form file count as the coverage control — and read the `outcome` FIELD, never the step
+    name, because a failed direct merge is filed under `automerge.arm_skipped`. Repository merge
+    settings:
+    `gh api repos/<o>/<r> --jq .delete_branch_on_merge`. Flag semantics: `gh pr merge --help`.
+    THE ONE MEASUREMENT THIS SHARD COULD NOT TAKE is whether the merge landed before the cleanup
+    failed, and it is UNTAKEABLE FROM THE LEDGER rather than merely untaken: there is no failure row
+    to timestamp. Until the second concern in design note (v) is addressed, the only surviving
+    evidence is the daemon's stdout.
+
+    ID PROVENANCE — FIVE SURFACES, RE-SWEPT IMMEDIATELY BEFORE PUSHING, AND THE FOURTH ONE EARNED
+    ITS PLACE TONIGHT. Pre-minted by the operator and read back against the sha he supplied:
+    `refs/rmd-id/W1-T1050` -> e009240d1338ca085b4428c47344be7c39836f9b, matched exactly. The other
+    four read 0: the shard FILENAME under `plan/tasks.d/` on origin/main, a declared `- id:` under
+    `plan/` on origin/main, every open PR's title, branch AND changed-file list, and `git grep`
+    across `src/`, `test/` and `deploy/` on origin/main. LIVE CONTROLS, same tools and corpus: the
+    W1-T1044 filename reads 1 and its declared id reads 1; the open-PR listing is non-empty and
+    three of its rows name a `plan/tasks.d/` shard; the source sweep reads 2 files for the id an
+    earlier merged PR orphaned. AND THE OPEN-PR SURFACE IS NOT DECORATION — the id originally
+    proposed for this shard was claimed by a PR opened while this recon was running, and that
+    surface is what caught it before a byte was written. A reservation ref cannot distinguish
+    `reserved and free` from `reserved and in use right now`.
