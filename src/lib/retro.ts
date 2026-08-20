@@ -1388,8 +1388,26 @@ export function buildGather(opts: {
    *  of its inputs (no internal wall-clock read). Ignored when `mounts` is
    *  omitted. */
   now?: number;
+  /**
+   * W1-T1013: the follow-up harvest's OWN ndjson corpus — the archive∪live ledger UNION
+   * (`resolveLedgerUnion`, lib/ledger-grep.ts), scoped by the caller to the three steps
+   * {@link mineFollowups} reads (`report.followups`, `followup.harvested`,
+   * `followup.deduped`). buildGather stays FS-free (this is still a plain string, exactly
+   * like `ledgerNdjson`) — the union read itself happens in the caller (retroCommand),
+   * because only IT has a `stateDir` to glob.
+   *
+   * A SEPARATE, EXPLICIT input rather than swapping `ledgerNdjson` itself: every other
+   * miner below (`degradedSuccess`, `mutationGateLifetime`, `mast`, …) is deliberately
+   * marker-scoped or full-`records`-scoped against the SAME single-file read it has always
+   * used, and re-corpusing all of them onto the union at once would change what THEY see
+   * too — criterion (3) pins that they must not. Omit ⇒ falls back to `records`
+   * (`ledgerNdjson` parsed) so an existing caller that has not wired the union yet keeps
+   * its prior behavior unchanged.
+   */
+  followupLedgerNdjson?: string;
 }): RetroGather {
   const records = parseLedger(opts.ledgerNdjson);
+  const followupRecords = opts.followupLedgerNdjson !== undefined ? parseLedger(opts.followupLedgerNdjson) : records;
   const runs = gatherRuns(records);
   const scoped = opts.sinceTs ? runs.filter((r) => r.startTs > opts.sinceTs!) : runs;
   const merged = mergedSince(runs, opts.sinceTs);
@@ -1447,8 +1465,11 @@ export function buildGather(opts: {
     taskDefectCounts: taskDefectCounts(scoped, mapping),
     // W1-T105: the FULL ledger, never `scoped` — a followup must survive past the
     // marker window (idempotency comes from the followup.harvested/deduped marks
-    // mineFollowups reads back, not from marker-scoping).
-    followups: mineFollowups(records, opts.openTitles ?? []),
+    // mineFollowups reads back, not from marker-scoping). W1-T1013: "full" now means
+    // `followupRecords` — the archive∪live union, not just `records` (this string's
+    // live-only parse) — because rotation truncates the live file long before the
+    // marker window would, which un-scoping from the marker alone cannot fix.
+    followups: mineFollowups(followupRecords, opts.openTitles ?? []),
     // W1-T393/D-10: the FULL `records`, never `scoped` — same "must survive past the marker
     // window" reasoning as `followups` immediately above, because a LIFETIME figure truncated to
     // one retro cycle is not a lifetime figure.

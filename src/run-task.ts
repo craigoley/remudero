@@ -8891,6 +8891,55 @@ export function ledgerCorpusFiles(stateDir: string): LedgerCorpusEntry[] {
 }
 
 /**
+ * W1-T1013: the `report.followups` / `followup.harvested` / `followup.deduped` lines —
+ * the three steps {@link "./lib/retro.js".mineFollowups} reads — matched by
+ * {@link resolveLedgerUnion}'s pattern vocabulary. Kept narrow (not "the whole ledger") on
+ * purpose: `retroCommand` hands this string ONLY to the follow-up harvest, never to
+ * `buildGather`'s marker-scoped miners, so a wide pattern here would waste memory
+ * unioning lines nothing downstream reads.
+ */
+const FOLLOWUP_LEDGER_STEP_PATTERN = '"step":"report\\.followups"|"step":"followup\\.harvested"|"step":"followup\\.deduped"';
+
+/**
+ * W1-T1013: the follow-up harvest's OWN ndjson corpus — `resolveLedgerUnion`'s archive∪live
+ * UNION, never the live ledger file alone.
+ *
+ * THE DEFECT THIS REPLACES. `retroCommand` used to hand `buildGather` nothing but
+ * `readFileSync(ledgerPath)` — the live file, post-rotation. `mineFollowups` deliberately
+ * un-scopes from the marker window ("a discovery from three retros ago is still worth
+ * surfacing"), but that un-scoping buys nothing when the corpus it reads is the live file:
+ * rotation truncates that file per-step long before the marker ever would, so BOTH the
+ * declared follow-ups (`report.followups`) and the marks that make re-mining idempotent
+ * (`followup.harvested`/`followup.deduped`) were lost together on every rotation. Measured
+ * on this host: 1,231 declared entries and 549 marks sit in the archives while the live
+ * file holds 0 of each (plan/tasks.d/W1-T1013's rationale).
+ *
+ * DEGRADES LOUDLY, NEVER SILENTLY, WHEN THE UNION ISN'T HEALTHY. `resolveLedgerUnion`
+ * itself already refuses to answer from the live file alone when zero archives matched, or
+ * when any matched archive could not be read (`!result.ok` ⇒ `matches: []`, by its own
+ * module doc) — this caller honors that refusal rather than working around it: on `!ok` it
+ * prints a NAMED diagnostic (`### [retro] followups.ledger_union — …`) and returns `""`
+ * (an empty corpus for this pass), the same "an error, never a smaller result" discipline
+ * `rmd ledger-grep` already applies, instead of quietly falling back to the live-file-only
+ * read this whole task exists to kill.
+ */
+export function followupLedgerUnionNdjson(stateDir: string): string {
+  const result = resolveLedgerUnion(stateDir, FOLLOWUP_LEDGER_STEP_PATTERN);
+  if (!result.ok) {
+    const reason =
+      result.archiveCount === 0
+        ? `zero archive files matched ${join(stateDir, "ledger.*.ndjson.gz")}/${join(stateDir, "ledger.*.ndjson")}`
+        : `${result.unread.length} matched rotation(s) could not be read: ${result.unread.join(", ")}`;
+    console.error(
+      `### [retro] followups.ledger_union — ${reason} — harvesting an EMPTY corpus this pass rather than ` +
+        "the live file alone, which is exactly the silent undercount W1-T1013 fixed.",
+    );
+    return "";
+  }
+  return result.matches.join("\n");
+}
+
+/**
  * `rmd check-acceptance <body-file>` — read a PR body from a file and report what
  * {@link "./lib/review.js".parseAcceptanceBlock} ACTUALLY resolves from it, against what the author
  * wrote. Exits non-zero when the two disagree.
@@ -11059,6 +11108,12 @@ async function retroCommand(
   const markerPath = join(config.root, "state", "last-retro.json");
   const learningsPath = join(repoRoot, "LEARNINGS.md");
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+  // W1-T1013: the follow-up harvest's OWN corpus — the archive∪live union, resolved
+  // separately from `ledgerNdjson` above so every OTHER miner buildGather runs keeps
+  // reading the single-file corpus it always has (see buildGather's `followupLedgerNdjson`
+  // doc for why this must stay a second, explicit input rather than replacing `ledgerNdjson`
+  // outright).
+  const followupLedgerNdjson = followupLedgerUnionNdjson(join(config.root, "state"));
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
   // W1-T89/P18: plan/mast-mapping.yaml is DATA (Rule 2) — loaded here, never
   // touched by buildGather itself. A missing file degrades to an empty table
@@ -11133,6 +11188,7 @@ async function retroCommand(
   const mountsTable = loadMounts(mountsPath(repoRoot));
   const gather = buildGather({
     ledgerNdjson,
+    followupLedgerNdjson,
     learningsMd,
     sinceTs: marker?.ts,
     learningsAtMarker: marker?.learnings_count,
