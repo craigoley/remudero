@@ -3,7 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { daemonCommand } from "../src/run-task.js";
+import { daemonCommand, ghLiveStateByNumber } from "../src/run-task.js";
+import { singlePrRestArgs, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { buildBatchedGithub, type BatchedPr, type GitHub } from "../src/lib/status.js";
 import { runDaemon } from "../src/lib/daemon.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
@@ -165,9 +166,16 @@ test("W1-T1019: a stale cached in flight read stands the guard down", async () =
     // read must be FRESH (W1-T177's discipline, applied to this lane). PR #1184 is the REAL,
     // permanent fact this task's own rationale cites (the #1184/#1185 duplicate-triage race
     // W1-T300 exists for): craigoley/remudero#1184 merged 2026-08-03 and a merged PR's state
-    // never reverts, so this is reused as a stable ground truth for the REAL readFeedbackLiveState
-    // wiring (`ghLiveStateByNumber`, uninjected) rather than a fabricated fixture that would only
-    // prove a fake, not the real construction — design clause (iii)'s own bar.
+    // never reverts.
+    //
+    // The live state is read through the REAL `ghLiveStateByNumber` — design clause (iii)'s bar is
+    // that this proves the shipped construction, not a fake — with only its `fetch` seam injected,
+    // the SAME seam test/review-status-gate.test.ts already pins it through. That keeps the fold
+    // from a REST payload to "MERGED" the shipped one rather than a literal, and drops the ONE
+    // thing this file cannot ask of a CI runner: an authenticated `gh`. Uninjected, the call is a
+    // real API read; `ghLiveStateByNumber` swallows its failure and returns undefined, so on a
+    // runner with no credential the guard never stood down and this test failed `0 !== 1` while
+    // passing on any developer machine — an environment fault wearing a regression's clothes.
     const staleCachedOpenPr: BatchedPr = {
       number: 1184,
       url: "https://github.com/craigoley/remudero/pull/1184",
@@ -179,6 +187,20 @@ test("W1-T1019: a stale cached in flight read stands the guard down", async () =
     );
     assert.equal(typeof deps.isFeedbackOpenPr, "function");
     assert.equal(typeof deps.readFeedbackLiveState, "function");
+
+    // #1184's REST row as GitHub really serves it for a merged PR, routed by path so an unrouted
+    // read throws rather than silently answering.
+    const restPath = singlePrRestArgs("craigoley", "remudero", 1184).join(" ");
+    const calls: string[] = [];
+    const fetch: GhApiFetcher = (args) => {
+      calls.push(args.join(" "));
+      if (args.join(" ") !== restPath) throw new Error(`unrouted fetch: ${args.join(" ")}`);
+      return { number: 1184, state: "closed", merged: true };
+    };
+    // The real composition, before it is handed to the daemon: the shipped fold answers MERGED,
+    // and it asks REST by number rather than the GraphQL `pr view` form W1-T511 moved off.
+    assert.equal(ghLiveStateByNumber("craigoley", "remudero", 1184, fetch), "MERGED");
+    assert.deepEqual(calls, ["api repos/craigoley/remudero/pulls/1184"]);
 
     const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
     let fires = 0;
@@ -199,7 +221,7 @@ test("W1-T1019: a stale cached in flight read stands the guard down", async () =
           fires++;
         },
         isFeedbackOpenPr: deps.isFeedbackOpenPr,
-        readFeedbackLiveState: deps.readFeedbackLiveState,
+        readFeedbackLiveState: (_feedback, prNumber) => ghLiveStateByNumber("craigoley", "remudero", prNumber, fetch),
         log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
       },
       { laneCount: 1 },
