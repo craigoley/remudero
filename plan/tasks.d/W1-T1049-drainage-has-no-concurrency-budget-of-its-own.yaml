@@ -1,0 +1,235 @@
+- id: W1-T1049
+  title: "THE REVIEW-LANE CEILING IS `dispatchLanes` READ A SECOND TIME, SO DRAINAGE HAS NO CONCURRENCY BUDGET OF ITS OWN AND NOTHING BOUNDS BUILDERS PLUS REVIEWERS AGAINST HOST MEMORY — the two ceilings are consulted independently, they ADD on the host, and their sum today is 6 concurrent Claude workers on a host measured to fit about 4"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-20 ON THE AZURE HOST (`Remudero`, Linux 6.17.0-1022-azure), shell bash
+    5.2.21, from a scratch worktree cut off origin/main 39367b4c. No `/rate_limit` call was made,
+    no process was signalled, and no daemon state file was written. Ledger figures are the
+    DEDUPED union of the live ledger and all nine plain rotations under
+    `<state-root>/state/`, per-form coverage-controlled before use.
+
+    (0) THE PREMISE THIS SHARD WAS COMMISSIONED ON IS HALF WRONG, AND THE HALF THAT IS WRONG
+    MATTERS. "Review is serial" is FALSE for the full sweep and TRUE-BY-DESIGN for the light
+    pass, and the fix differs for each.
+
+    MEASURED, the full sweep reviewing THREE PRs AT ONCE on a freshly booted daemon
+    (`DAEMON-1787190894979`): `sweep.post_review.attempt` for #2256/#2255/#2253 at
+    01:55:36.550 / 01:55:37.012 / 01:55:37.806Z — 1.3s apart, not 90s apart; all three
+    `review.pending_posted` at the SAME millisecond, 01:55:41.663Z; three `review.posted` inside
+    six seconds; all three `sweep.post_review.done` at the same millisecond, 01:56:05.352Z. That
+    is `runSweep`'s W1-T473 review phase running three lanes concurrently, exactly as designed.
+    REVIEW IS NOT SERIAL BY ACCIDENT AND IT IS NOT SERIAL AT ALL IN THE FULL SWEEP.
+
+    WHAT IS SERIAL IS THE LIGHT PASS, DELIBERATELY. `selectReviewAdmission` (W1-T526,
+    `src/lib/sweep.ts`) admits AT MOST ONE open PR to `post-review` per light pass — every
+    other PR's `actionable` is wrapped so its `post-review` disposition stands down. Its reason
+    is a MERGE-QUEUE reason, not a cost or memory one: branch protection's `strict: true` means
+    only one open PR can merge before every other reads `behind`, and a `behind` PR's next push
+    mints a new head sha that throws away the sha-pinned verdict just posted. W1-T526's own
+    measurement: an eight-open-PR queue cost 36 reviews to land 8 merges. THAT CAP IS CORRECT
+    AND THIS SHARD MUST NOT RAISE IT.
+
+    (1) `inFlightReviewKeys` IS A DEDUPE, NOT THE SERIALISER — ESTABLISHED FROM SOURCE, BOTH
+    DIRECTIONS. The key is `${pr.taskId ?? ""}@${pr.headSha}`, so two DIFFERENT PRs can never
+    contend for it; only the SAME pr@head can, which is the double-post race W1-T513 lifted the
+    Set to module scope to close. It cannot serialise distinct PRs and does not.
+
+    IT DOES HAVE A HOLD-DURATION HAZARD, WHICH IS A DIFFERENT DEFECT AND IS NOT THIS SHARD.
+    The claim is taken SYNCHRONOUSLY inside the `for (const pr of openPrs)` walk
+    (`claimedReviewKeys.add(reviewKey)`), and released only AFTER the whole walk finishes — in
+    the `deferredToNextPass` loop or the `runNow` lane's `finally`. So a walk that stalls holds
+    every already-walked PR's review claim for the stall's whole duration, and a concurrent
+    light pass over that same pr@head is locked out. The wall-clock bound for exactly that stall
+    is already filed as W1-T1044 (#2249); its lane-less-worker sibling is W1-T1045 (#2253).
+    CITED, NOT RE-DERIVED, AND NOT DUPLICATED HERE.
+
+    (2) THE DISPATCH GOVERNOR IS GENUINELY NOT THE CONSTRAINT — RE-DERIVED, AND THE OPERATOR'S
+    RULING IS NOT IN QUESTION. The exemption is stated in source at `SweepPolicy`'s
+    `dailyCostCeilingUsd` doc: "drainage (sweep/heal/arm/merge, at ANY depth) is never gated by
+    it", mirrored in `plan/policy.yaml` as "(drainage is never gated)". And the WIP governor has
+    never fired: `dispatch.wip_deferred` reads 0 in EVERY form of the corpus — 0 in the live
+    ledger and 0 in each of the nine plain rotations. POSITIVE CONTROL on that zero, same tool,
+    same flags, same files, pattern read from a file: `run.start` reads 198 live and 49/79/101/
+    117/143/147/154/174/182 across the nine rotations, non-zero in every form. THE LANE LIMIT IS
+    NOT WHAT HOLDS DRAINAGE. LANES STAY AT 3; NOTHING BELOW PROPOSES OTHERWISE, AND NOTHING
+    BELOW TOUCHES `checkQueueGovernor` OR `checkCostGovernor`.
+
+    (3) THE ACTUAL DEFECT. `runSweep`'s review ceiling is `const reviewLanes = Math.max(1,
+    policy.dispatchLanes)` — the dispatch field READ A SECOND TIME, with no sibling policy row.
+    W1-T473's design (ii) posed exactly this choice and named this cost in advance: "Reading the
+    dispatch field twice is smaller now and SILENTLY COUPLES TWO UNRELATED CEILINGS FOREVER."
+    Its own implementation note records the branch taken: "no sibling `reviewLanes` policy
+    field."
+
+    THAT COUPLING HAS NOW BOUND. The operator has ruled `dispatchLanes` stays at 3 on
+    dispatch-side evidence (`plan/policy.yaml`: "THE ROW STAYS AT 3 ON THAT EVIDENCE, not on
+    optimism" — rejected: 0, no lane ever failed for a concurrency reason). That ruling is about
+    DISPATCH. It now silently also pins the drainage ceiling at 3, and any future retune of
+    either moves both. Drainage cannot be tuned at all today without reopening a dispatch ruling
+    that was never about drainage.
+
+    (4) AND THE TWO CEILINGS ADD ON THE HOST, WHICH NOTHING ANYWHERE NAMES. `dispatchLanes` is
+    consulted by `daemon.ts`'s `laneCount` for build workers and by `runSweep` for review lanes,
+    independently. Their SUM is the host's real exposure and no code, policy row, test or
+    document bounds it.
+
+    MEASURED LIVE, this host, three concurrent BUILD workers as direct children of the daemon's
+    tsx process, classified by their own `--settings` path and cwd (W1-T1044's technique):
+    W1-T1013 / W1-T1035 / W1-T1033, RSS 289.6 / 281.6 / 289.1 MiB at 115-138s of age, daemon
+    process tree total 1.67 GiB. Host total 7937 MiB (7.75 GiB) with a 4 GiB swapfile. Against
+    the operator's reported `memory.peak` of 3.99 GiB for three build workers, that is ~1.33 GiB
+    per worker AT PEAK versus ~0.28 GiB at two minutes — a worker's footprint grows roughly 4.7x
+    over its life, so an early snapshot is a floor and never a ceiling.
+
+    SIZING, AND IT IS TIGHT: 7.75 GiB total, less ~1.9 GiB resident for the non-daemon system
+    (dockerd, containerd, cloudflared, the Azure agent), leaves ~5.85 GiB. At ~1.33 GiB peak per
+    Claude worker that is ABOUT FOUR CONCURRENT WORKERS OF ANY KIND. Today's configured worst
+    case is `dispatchLanes` 3 builders plus `reviewLanes` 3 reviewers = SIX, or ~7.98 GiB — over
+    the whole host before the system's own 1.9 GiB is counted. The reachable case is smaller and
+    still at the edge: the daemon ticks sweep then dispatch, so three reviewers and three
+    builders do not overlap in the full sweep, but `startInFlightTicker` runs `sweepLight`
+    DURING dispatch and that pass admits one review, giving 3 builders + 1 reviewer = ~5.3 GiB
+    plus 1.9 GiB system = ~7.2 GiB on a 7.75 GiB host. That is the arithmetic behind the freeze.
+
+    (5) A REVIEWER IS AN ORDER CHEAPER IN DOLLARS AND THE SAME ORDER IN MEMORY — WHICH IS WHY
+    THE BUDGET MUST BE SIZED ON MEMORY. Re-derived over the deduped union, 148 `review.reviewer`
+    rows: `total_cost_usd` min 0.22, p25 0.49, p50 0.59, p75 0.68, p90 0.78, max 1.21, sum
+    87.76. Against builds in the same corpus: `implement.done` p50 5.06 (n=178) and `verdict`
+    p50 6.46 (n=162). So a review is ~1/9 of a build in dollars, confirming the operator's $0.59
+    against $6.28. `worker_duration_ms` over the 121 rows carrying it: p25 68s, p50 90s, p75
+    109s, p90 149s, max 427s. BUT A REVIEWER SPAWNS THE SAME `claude` BINARY AT `--effort high`
+    IN THE SAME SHAPE OF WORKTREE, so its per-process memory floor is a builder's; only its
+    shorter life bounds its peak. CHEAP IN DOLLARS IS NOT CHEAP IN RAM, AND RAM IS THE BINDING
+    CONSTRAINT ON THIS HOST.
+
+    (6) AND MEMORY IS NOT INSTRUMENTED ANYWHERE IN THIS REPO. Across 113,081 deduped ledger
+    lines there is NOT ONE key matching `mem` or `rss` — no `memory.peak` step exists in the
+    corpus, and `scripts/fleet-heartbeat.sh` publishes no memory field. Every memory figure
+    above, the operator's included, is an out-of-band host reading that cannot be re-derived
+    from the ledger and goes stale the moment it is taken. A budget sized against host memory
+    with no memory telemetry is a bound nobody can later check, which is why design (v) below
+    requires the implementer to take the reading rather than inherit these numbers.
+
+    (7) WHAT DID AND DID NOT HAPPEN IN TONIGHT'S LONG SWEEP, BECAUSE THE BRIEF READS IT AS A
+    REVIEW OUTAGE AND THE LEDGER DOES NOT. Longest contiguous `phase: sweep` streak in the
+    corpus: 206 `daemon.alive` rows, 2026-08-19T21:10:45.020Z to 2026-08-20T00:47:33.855Z,
+    216.8 MINUTES at ~63s per row, with ZERO rows reading `phase: dispatch` and ZERO `run.start`
+    in the window. DISPATCH was starved for 3.6 hours. REVIEW WAS NOT: nine `review.posted` rows
+    landed inside that window, and all nine of their `sweep.disposed` rows read `acted: true`
+    with NO `stand_down_reason` at all — zero "review budget exhausted", zero "duplicate review
+    key", zero "deferred to full sweep". Per-PR wait from first `post-review` disposition to
+    acted was 0.0 minutes for every one of #2237/#2240/#2243/#2245/#2246/#2247/#2248/#2250. The
+    light pass ticked 323 `sweep.pass` rows through the stall and its restricted review lane
+    worked the entire time.
+
+    SEPARATELY, THE TWO GREEN-AND-UNREVIEWED PRs IN THE BRIEF WERE A PAUSED DAEMON, NOT A REVIEW
+    QUEUE. 24 consecutive `daemon.pause` rows, 01:30:46.887Z through 01:53:48.129Z, detail "PAUSE
+    file present — run `rmd resume` to clear". A new daemon booted at 01:55:09.550Z
+    (`DAEMON-1787190894979`) and reviewed all three waiting PRs within 56 seconds — the
+    three-at-once batch in (0). Combined-status confirms it: #2253 `success`, #2255 `success`,
+    #2256 `failure`, each carrying the `remudero-review` context. NOT A DEFECT, AND NOT THIS
+    SHARD; recorded so the next reader does not spend the cycle again.
+  design: "(i) ONE CONCERN: give the review lane its OWN policy row and stop reading
+    `dispatchLanes` for it. `dispatchLanes` MUST KEEP ITS PRESENT MEANING EXACTLY — the
+    capability snapshot renders it and `test/policy-consumers.test.ts` asserts its consumers, so
+    a row that changes what dispatch reads is out of scope and would reopen a ruling this shard
+    does not touch. The new row DEFAULTS to today's effective value so the flip is observable and
+    reversible as data, not as a src edit plus CI plus deploy.
+    (ii) THE FLOOR OF 1 IS LOAD-BEARING AND MUST SURVIVE. `Math.max(1, ...)` exists so a
+    misconfigured 0 can never silently mean 'review nothing'. Whatever the row's `min`, the
+    floor stays in code — a policy bound and a code floor are different guarantees and this repo
+    has been bitten by treating one as the other.
+    (iii) A CEILING, NEVER A TARGET — AND THIS IS THE FAILURE MODE MOST LIKELY TO BE BUILT BY
+    ACCIDENT. W1-T473 (iv) already named it and this repo has now measured the shape at least
+    four times (ci-gate's wait cap, the deploy ceiling, the check-wait bound, the dispatch
+    governor at 0 firings). The lane count must cap reviews THIS PASS ALREADY FOUND ELIGIBLE and
+    must never hunt for work: a pass with no eligible PR starts zero lanes, unchanged.
+    (iv) DO NOT TOUCH `selectReviewAdmission`. Its one-per-light-pass admission is a merge-queue
+    rule with its own quadratic-waste measurement behind it (W1-T526: 36 reviews for 8 merges),
+    and it is disjoint from a lane ceiling — one bounds ADMISSION, the other bounds CONCURRENCY.
+    Implementing this by moving or raising the admission rule would re-create the exact cost
+    W1-T526 removed. W1-T526's own design (iv) says it in terms: 'Do not implement it by
+    lowering reviewLanes to 1.' The converse holds here.
+    (v) THE SUM IS THE POINT, AND THE ROW'S `max` IS WHERE IT GETS ENFORCED. `dispatchLanes` and
+    the review ceiling are consulted by different call sites and their sum is the host's real
+    exposure; nothing names that sum today. ESTABLISH THE HOST'S ACTUAL PER-WORKER PEAK BY
+    MEASUREMENT AT BUILD TIME — the rationale's ~1.33 GiB is an out-of-band reading with no
+    ledger behind it (rationale (6)) and MUST be re-taken, not inherited. Then choose a `max`
+    that cannot let an in-bounds edit put `dispatchLanes + reviewLanes` past what the host fits,
+    the same way `dispatchLanes`' own `max: 4` is deliberately tighter than this table's usual
+    5x convention. A generous default range here would re-create the hazard the row exists to
+    make reviewable.
+    (vi) NOT IN SCOPE, EXPLICITLY: `dispatchLanes`' value or meaning; `checkQueueGovernor`;
+    `checkCostGovernor`; `wipLimit`; the disposition table; which PRs are eligible; the
+    admission rule; the walk's claim-hold duration and any wall-clock bound on a sweep tick
+    (W1-T1044/#2249 and W1-T1045/#2253 own that, on the clock, and this shard neither
+    re-derives nor duplicates them). This adds ONE ceiling to a rung that already works."
+  acceptance:
+    - claim: "the review lane ceiling is read from its own policy row, not from dispatchLanes"
+      proof: "unit test: test/review-lane-budget.test.ts"
+    - claim: "a pass with no eligible review starts no review lanes"
+      proof: "unit test: test/review-lane-budget.test.ts"
+    - claim: "a misconfigured zero still reviews one PR rather than none"
+      proof: "unit test: test/review-lane-budget.test.ts"
+    - claim: "dispatchLanes still governs dispatch and no longer governs the review lane"
+      proof: "unit test: test/review-lane-budget.test.ts"
+  files: [src/lib/sweep.ts, plan/policy.yaml, test/review-lane-budget.test.ts]
+  status: queued
+  attempts: 0
+  origin: recon#drainage-concurrency-2026-08-20
+  plan_refs: ['W1-T473', 'W1-T526', 'W1-T513', 'W1-T463', 'W1-T1044']
+  note: |
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` crosses a
+    `src/` module, a plan-data file and `test/`, which is what `subsystemsOf` counts; the blast
+    radius of the diff itself is one ceiling in one function plus one policy row.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT. `src/lib/sweep.ts` is the only source file
+    that reads the ceiling (`reviewLanes` and `selectReviewAdmission` are both defined there;
+    a word-bounded count of each across `src/ test/ deploy/` reads `reviewLanes` 7 and
+    `pendingReviews` 6 in `src/lib/sweep.ts` AND NOWHERE ELSE AT ALL, `selectReviewAdmission` 6
+    there plus 3 in `test/sweep-review-admission.test.ts`, and `inFlightReviewKeys` 6 there plus
+    1 prose mention in `src/lib/daemon.ts` and 3 in `test/daemon.test.ts`. All four read ZERO in
+    `deploy/`; positive control on that zero, same tool and flags over the same paths, `sweep`
+    matches 2/4/7 in `deploy/Dockerfile`, `deploy/host-update.sh` and
+    `deploy/recycle-container.sh`). `plan/policy.yaml` is required by rule 2 — a threshold is policy
+    data, never a constant near its call site. `test/review-lane-budget.test.ts` is a NEW file
+    rather than an append to `test/sweep.test.ts`, per this repo's coverage rule that a
+    coverage-load-bearing test lives in its own file.
+
+    `src/run-task.ts` IS DELIBERATELY NOT DECLARED. `buildSweepHook`/`buildSweepLightHook` wire
+    the same `buildSweepEffects` into both passes and neither needs to change for a ceiling that
+    is read inside `runSweep`; DECISIONS.md's 2026-08-18 W1-T471 ruling is therefore not reached
+    here — this task is not re-scoped to avoid that file, it simply does not touch it.
+    `src/lib/daemon.ts` is likewise not declared: `laneCount` keeps reading `dispatchLanes`
+    unchanged, which is design (i)'s whole point.
+
+    DELIBERATE OVERLAP WITH W1-T1044, NAMED RATHER THAN AVOIDED: both declare
+    `plan/policy.yaml`, so `overlappingPaths` will serialise them. That is the correct outcome —
+    both add a bound to the daemon's resource envelope and landing them one at a time is safer
+    than racing two policy-table edits. This shard does not depend on W1-T1044 and is
+    independently buildable in either order.
+
+    THIS SHARD IS SMALLER THAN THE BRIEF EXPECTS, AND THAT IS THE FINDING. Reviews do not need
+    to be MOVED into the light pass: they are already there. `buildSweepLightHook` wires the
+    SAME `buildSweepEffects` object the full sweep uses and passes `actionable: d => d ===
+    "post-review"`, so post-review is the ONE disposition the light pass is allowed to fire —
+    dispatchFix, close, escalate, depReview, arm and updateBranch all stand down there with
+    "deferred to full sweep (light pass)", and the credit-backfill and inbox-draft rungs are
+    excluded outright. The light pass therefore already has everything a review needs, and
+    `runSweepLightPass` already fans one `runSweep` call out per open PR CONCURRENTLY. Nothing
+    needs to be plumbed, moved, or newly made concurrent. What is missing is one number that is
+    currently borrowed from dispatch.
+
+    ID PROVENANCE — THE ID WAS PRE-MINTED AND READ BACK BEFORE FILING, NOT MINTED HERE.
+    `git ls-remote origin 'refs/rmd-id/W1-T1049'` resolves to
+    fb22fd99d233d4238a7a1e0811a8eca8f151f677, exit 0, matching the sha the mint printed. The
+    remote was re-swept immediately before pushing. Positive control on the zero-result queries:
+    the same `ls-remote` form against `refs/rmd-id/W1-T1044` returns a ref, so an empty result
+    is absence and not a broken query. Max id across `plan/tasks.yaml` and `plan/tasks.d/` at
+    filing time was W1-T1044 (ignoring the W1-T1000002/W1-T1000003 reserved band).
