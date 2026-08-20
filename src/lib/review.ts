@@ -4304,6 +4304,47 @@ export function reviewLedgerLegibilityFields(
 }
 
 /**
+ * W1-T1016: the `reasons` array the `review.posted` ledger line carries — a per-VISIBLE-
+ * unmet-criterion reason, plus `"test theater: added tests assert nothing"` when
+ * {@link ReviewVerdict.testTheater} fires (the SAME rule run-task.ts's
+ * `log("review.posted", …)` call used to compute inline), now pure + exported for the same
+ * reason {@link reviewLedgerLegibilityFields} above is: a unit test reads the exact fields
+ * the ledger line writes, never a hand-copied guess.
+ *
+ * THE ROUTING GAP THIS FUNCTION CLOSES: the changeset-contradiction path
+ * (`bodyContradictsDiff`) fails the verdict WITHOUT unmet-ing any NAMED criterion — every
+ * criterion can read `met: true`, the measured #1193 shape {@link reviewFailureClass}'s own
+ * doc records — so the per-criterion rule above alone still returns `[]` for it.
+ * `actionableGateFailuresFromReasons` (lib/sweep.ts) only ever qualifies a row at
+ * `reasons.length === 1`, so an empty array here means this failure shape could never route
+ * to the `blocked-fixable` disposition row that already exists for it (lib/sweep.ts's
+ * `DISPOSITION_RULES`, third `blocked-fixable` row) — it fell to `blocked-ambiguous` and
+ * reached a human instead, even though the single reason is already computed
+ * (`verdict.summary`, ALSO ledgered as `failure_reason` by {@link reviewLedgerLegibilityFields}
+ * above).
+ *
+ * The fallback below ONLY fires when nothing else already claimed the array
+ * (`reasons.length === 0`) AND a changeset contradiction is present — deliberately narrower
+ * than "any empty-reasons failure": a genuine multi-cause failure must stay unrouted, and this
+ * never concatenates or flattens several contradictions into one entry (`verdict.summary` is
+ * already the single, `failSummary`-rendered line for however many contradictions fired).
+ */
+export function reviewLedgerReasons(
+  verdict: Pick<ReviewVerdict, "testTheater" | "summary"> &
+    Partial<Pick<ReviewVerdict, "changesetContradictions">> & {
+      criteria: ReadonlyArray<Pick<CriterionVerdict, "met" | "holdout" | "reason">>;
+    },
+): string[] {
+  const unmet = verdict.criteria.filter((c) => !c.met);
+  const reasons = visibleCriteria(unmet).map((c) => c.reason);
+  if (verdict.testTheater) reasons.push("test theater: added tests assert nothing");
+  if (reasons.length === 0 && (verdict.changesetContradictions?.length ?? 0) > 0) {
+    reasons.push(verdict.summary);
+  }
+  return reasons;
+}
+
+/**
  * The arming-relevant facts of the review verdict posted for ONE EXACT head —
  * {@link decideAutoMergeArm}'s `verdict` argument, recovered from the ledger by
  * a caller that never held the verdict object itself (`lib/sweep.ts`'s
