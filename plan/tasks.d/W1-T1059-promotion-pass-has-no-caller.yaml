@@ -112,8 +112,17 @@
     to a directory that is not in a repo. That is a real, separate problem and it is NOT solved
     here. The precedent for solving it is already in the tree — the GLOBAL layer's write is an
     OPERATOR-INVOKED CLI verb (`rmd learnings import`) behind a verified hash pin, not an unattended
-    daemon write. State that shape as the recommended direction, file nothing for it, and let the
-    proposal the Architect ratifies land in the fleet repo's own `learnings/` where a PR does gate
+    daemon write. AND IT IS NOT MERELY A PRECEDENT — IT IS THE SAME CODE PATH, SIZED HERE SO THE
+    FOLLOW-UP IS NOT OVERSTATED: `learningsImportCommand` (`src/run-task.ts`) already runs
+    `verifyBundlePin`, then `mkdirSync`, then `writeFileSync`, and the ONLY thing binding it to one
+    layer is that its `mkdirSync` hardcodes `globalLearningsHome(config)`. `userOverallLearningsHome`
+    is imported into that very file and used ONCE, as the corpus matcher's `userOverallDir` — a read,
+    with zero writes to it anywhere in the file. So the follow-up is GIVE THE EXISTING IMPORT VERB A
+    LAYER ARGUMENT, not build a writer, and an implementer who scopes it as the latter has
+    overestimated it. The RSI-safety constraint is unchanged either way: a config-root path is outside
+    any repo, so that write stays operator-invoked behind the hash pin rather than gated by a PR.
+    File nothing for it here, and let the proposal the Architect ratifies land in the fleet repo's own
+    `learnings/` where a PR does gate
     it. `src/lib/config.ts`'s D-11 note is explicit that sharing "does not add or change any
     locking — writes remain whatever single-writer path already exists today", which is another
     reason a writer must not be improvised inside this task.
