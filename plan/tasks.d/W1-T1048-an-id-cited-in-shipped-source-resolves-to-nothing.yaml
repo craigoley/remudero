@@ -124,7 +124,7 @@
     - claim: "an id holding a reservation but no plan record still resolves, because reservation alone is a valid claim"
       proof: "unit test: task-id-existence: a fresh reservation with no plan record still resolves"
     - claim: "the check has a real call site — an unconditional CI job invokes it on every pull request"
-      proof: "grep: task-id-existence:check in .github/workflows/ci.yml"
+      proof: "unit test: task-id-existence: an unconditional ci job runs the check on every pull request"
   risk: high
   origin: "oper#id-cited-in-source-never-reserved-2026-08-20"
   plan_refs: ["W1-T1039", "W1-T949", "W1-T278", "W1-T509", "W1-T1010", "W1-T471"]
@@ -132,6 +132,20 @@
   status: queued
   attempts: 0
   note: |
+    PROOF DIALECT ON CRITERION 6 — CORRECTED AT FILING TIME, CLAIM UNTOUCHED. It was authored as
+    `grep: task-id-existence:check in .github/workflows/ci.yml`, and that FAILED this filing PR
+    rather than capping it: the workflow file exists and is greppable (control: 13 hits for
+    `runs-on`), the npm script name does not yet exist because this PR only FILES the task, so the
+    proof EXECUTED and returned zero — and `executed_fail` OVERRIDES keyword coverage, a hard
+    refusal. The five sibling criteria forward-reference through `unit test:`, which degrades to
+    `no-match`, so the dialects are NOT symmetric for an unbuilt task: a forward-referencing
+    `unit test:` is safe and a forward-referencing `grep:` at an EXISTING path is not. The
+    replacement is the house pattern for CI wiring — 16 test files already parse
+    `.github/workflows/ci.yml` and assert on it — and it lands in
+    `test/task-id-existence-check.test.ts`, which this task already declares. Only the `proof:`
+    field changed; the claim is byte-identical and the implementer must still wire an
+    unconditional CI job.
+
     THE ORPHANED ID IS NEVER WRITTEN LITERALLY IN THIS SHARD, AND NEITHER ARE THE SIX BASELINE
     IDS. Writing an id that resolves to nothing is the exact mechanism being filed, so quoting one
     here would be a self-inflicted instance of it. Every id this shard does name was verified
