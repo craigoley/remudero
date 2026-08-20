@@ -98,9 +98,16 @@ import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
  *                        FRESH verdict, never the prior one carried forward). BOUNDED
  *                        (design note, "same discipline as CI re-runs"): once
  *                        `priorReviewOrphans` reaches `policy.reviewOrphanCap`, the
- *                        row above escalates instead of re-dispatching — a PR that
- *                        pushes repeatedly (or whose re-review itself keeps failing
- *                        to stick) cannot loop the review lane unboundedly.
+ *                        row above escalates for visibility — a PR that pushes
+ *                        repeatedly (or whose re-review itself keeps failing to
+ *                        stick) surfaces to an operator instead of looping silently.
+ *                        W1-T1018 (operator ruling 2026-08-19): this is no longer a
+ *                        PERMANENT wall — {@link reviewOrphanBackoffElapsed} lets the
+ *                        row above yield back to THIS row once enough wall-clock time
+ *                        has passed since the lane's last attempt, so a PR that heals
+ *                        (a repaired base, a fixed contradiction) keeps getting
+ *                        re-reviewed rather than being stranded green-and-silenced
+ *                        forever (rationale (1)-(4), PR #2159).
  *   - WAIT             — (W1-T114, the 30-issue predicate-storm fix) required
  *                        checks pending/queued AND the newest check's start is
  *                        younger than a staleness ceiling (policy-as-data,
@@ -390,18 +397,41 @@ export interface SweepPolicy {
    */
   absentCeilingMinutes: number;
   /**
-   * W1-T225 (the 2026-07-21 PRs #477/#484 jam) — the LOOP FALSIFIER for the
+   * W1-T225 (the 2026-07-21 PRs #477/#484 jam) — the ESCALATION THRESHOLD for the
    * review-orphaned-by-push remedy: once a PR's `priorReviewOrphans` count
-   * (prior heads that already spent one orphan re-review) reaches this cap,
-   * the sweep stops re-dispatching the review lane and escalates instead —
-   * "same discipline W1-T224 owes for CI re-runs" (design note, verbatim). A
-   * ROW in this table (rule 2, policy-as-data), never a constant buried in
-   * the predicate. Set at the SAME default as `strikeCap` — bounded enough
-   * to catch a genuinely looping push/re-review cycle, generous enough that
-   * ordinary iteration (a handful of legitimate follow-up pushes) never trips
-   * it by accident.
+   * (prior DISTINCT REVIEWABLE DIFFS — W1-T1018 design (iv); see `priorReviewOrphans`'
+   * own doc — that already spent one orphan re-review) reaches this cap, the sweep
+   * escalates for visibility. A ROW in this table (rule 2, policy-as-data), never a
+   * constant buried in the predicate. Set at the SAME default as `strikeCap` —
+   * bounded enough to catch a genuinely looping push/re-review cycle, generous
+   * enough that ordinary iteration (a handful of legitimate follow-up pushes) never
+   * trips it by accident.
+   *
+   * W1-T1018 (operator ruling 2026-08-19 — "I don't really like the idea of a review
+   * budget. We just need back off."): reaching this cap NO LONGER stops the sweep
+   * re-dispatching the review lane permanently — that was the defect (rationale (1)-(4)):
+   * a bound firing on a HEALTHY condition (a repaired base, checks green, diff sound)
+   * walled a good PR off forever. See {@link reviewOrphanBackoffMinutes} for what
+   * replaces the cessation: escalate AND keep going, never one instead of the other.
    */
   reviewOrphanCap: number;
+  /**
+   * W1-T1018 (design (i)/(ii)) — THE ELAPSED-TIME BACKOFF that replaces the old
+   * permanent cessation `reviewOrphanCap` alone used to enforce. Once `priorReviewOrphans`
+   * reaches `reviewOrphanCap` the sweep still escalates (visibility never goes away —
+   * design's own words: "the cap's one genuine virtue is that it asks a human for
+   * help"), but the review lane resumes dispatching once this many minutes have
+   * elapsed since the lane's last real attempt ({@link OpenPrView.reviewOrphanLastAttemptAt}
+   * — see {@link reviewOrphanBackoffElapsed}, the predicate this row feeds). KEYED TO
+   * ELAPSED TIME, NEVER ATTEMPT COUNT (design note verbatim: "a delay keyed to the
+   * number of attempts is a budget with pauses — it still exhausts monotonically and
+   * still ends in permanent silence"). A ROW in this table (rule 2, policy-as-data).
+   * NET-NEW, and deliberately NOT sourced from `plan/policy.yaml` (this task's own
+   * declared file list is `src/lib/sweep.ts` + `src/run-task.ts` + the two test
+   * files only) — a hardcoded literal in {@link DEFAULT_SWEEP_POLICY}, the same
+   * choice `pendingCeilingMinutes` above already made.
+   */
+  reviewOrphanBackoffMinutes: number;
   /**
    * W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half). A
    * classified surface (a `sweep.disposed` row's own `disposition`) that at least this many
@@ -536,6 +566,10 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // (seconds), and far below the 7h45m #921 sat in its silent loop.
   absentCeilingMinutes: 10,
   reviewOrphanCap: 2,
+  // W1-T1018: 2 hours — long enough that a genuine repair (a base fix, a contradiction fix, an
+  // operator's own intervention) has real time to land before the lane retries again, short
+  // enough that a PR which does heal is not left silent for a whole day waiting on it.
+  reviewOrphanBackoffMinutes: 120,
   repairFilingThreshold: POLICY_SWEEP.repairFilingThreshold,
   repairFilingWindowDays: POLICY_SWEEP.repairFilingWindowDays,
   supersessionDisposalEnabled: POLICY_SWEEP.supersessionDisposal,
@@ -916,8 +950,28 @@ export interface OpenPrView {
    * fail-closed toward "escalate a PR that was never actually looping." The
    * real gateway would derive this from the SAME ledger scan that derives
    * `reviewOrphanedByPush`, counting the distinct prior heads it found.
+   *
+   * W1-T1018 (design iv): the real gateway (`run-task.ts`'s `reviewOrphansFor`) now counts
+   * DISTINCT REVIEWABLE DIFFS among those prior heads, not distinct pushed heads — two heads
+   * whose PR-own diff (against `main`) is byte-identical (a base-repair merge, the remedy this
+   * system itself prescribes on a base-recovered notice) count as ONE, never two, so housekeeping
+   * never spends the same budget a genuine retry does.
    */
   priorReviewOrphans?: number;
+  /**
+   * W1-T1018 (design i/ii/iii) — WHEN the review-orphan lane last actually ATTEMPTED this PR: the
+   * most recent `review.posted`/`review.post_refused` ledger timestamp among the heads
+   * `priorReviewOrphans` scanned (ISO string), across EVERY attempt whether or not that head's
+   * diff counted toward the budget — a housekeeping push still runs the lane and still advances
+   * this clock, which is what keeps the elapsed-time backoff ({@link reviewOrphanBackoffElapsed})
+   * from decaying into the permanent cap it replaces (design iii: "reset on a real signal
+   * change"). `undefined` reads as "no attempt on record" — {@link reviewOrphanBackoffElapsed}
+   * treats that as backoff NOT elapsed, the SAME fail-toward-escalating default every other field
+   * on this SCOPE-lagged surface uses (e.g. `priorReviewOrphans` reading `undefined` as `0`): a
+   * caller that hasn't wired this yet (every caller today) behaves exactly like the pre-W1-T1018
+   * permanent cap until a real timestamp exists to back off from.
+   */
+  reviewOrphanLastAttemptAt?: string;
 }
 
 /** The disposition derived for one PR, plus a stated human reason. */
@@ -1633,6 +1687,42 @@ function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number):
 }
 
 /**
+ * W1-T1018 (operator ruling 2026-08-19, "I don't really like the idea of a review budget. We just
+ * need back off.") — design (i)/(ii)/(iii)'s ELAPSED-TIME BACKOFF, replacing the permanent
+ * cessation the cap row used to enforce alone. Has ENOUGH WALL-CLOCK TIME passed since the
+ * review-orphan lane's last real attempt on this PR ({@link OpenPrView.reviewOrphanLastAttemptAt}
+ * — the most recent `review.posted`/`review.post_refused` ledger timestamp among the heads
+ * `priorReviewOrphans` scanned; see `reviewOrphansFor`, run-task.ts) that the cap row below should
+ * YIELD back to the ordinary post-review dispatch instead of escalating again?
+ *
+ * "ESCALATE AND KEEP GOING, NEVER ESCALATE INSTEAD OF GOING" (design ii): the cap still fires the
+ * FIRST time `priorReviewOrphans` reaches `policy.reviewOrphanCap` (this reads `false` with no
+ * attempt timestamp on record yet, so the cap row matches exactly as it always has). Once that
+ * escalation's own attempt is on record and `policy.reviewOrphanBackoffMinutes` has elapsed with
+ * no NEWER attempt superseding it, this flips `true` and the lane resumes — never a permanent
+ * wall, only a paced one.
+ *
+ * THE RESET (design iii, "or the backoff decays into the cap it replaces"): `reviewOrphanLastAttemptAt`
+ * is the max timestamp across EVERY review-lane attempt on this PR, whether or not that attempt's
+ * head counted toward `priorReviewOrphans` (a diff-unchanged housekeeping push still reviews and
+ * still advances the clock — see `reviewOrphansFor`'s design (iv) note). So the backoff clock
+ * restarts on ANY real activity, never accumulating toward a slow-motion version of the old
+ * unconditional cap.
+ *
+ * FAILS TOWARD ESCALATING, never toward silent retrying — this task's own risk note names that as
+ * the dangerous direction ("retry forever, never escalate... is silent"). A missing or unparseable
+ * timestamp (every caller that has not wired {@link OpenPrView.reviewOrphanLastAttemptAt} yet, e.g.
+ * `rmd fix`'s single-PR build) reads `false` — byte-identical to today's permanent-cap behaviour
+ * until a real attempt timestamp exists to back off from.
+ */
+export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
+  if (!pr.reviewOrphanLastAttemptAt) return false;
+  const last = Date.parse(pr.reviewOrphanLastAttemptAt);
+  if (Number.isNaN(last)) return false;
+  return now - last >= policy.reviewOrphanBackoffMinutes * 60_000;
+}
+
+/**
  * THE POLICY TABLE — the ordered rules mapping observed PR-state -> disposition.
  * Precedence is table order (first match wins); the terminal rule matches
  * unconditionally, so a disposition is ALWAYS produced (the no-disposition=none
@@ -1728,7 +1818,14 @@ function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number):
  *      post-review) so a PR that keeps getting pushed — or whose re-review
  *      keeps failing to stick — escalates instead of re-dispatching forever;
  *      the fresh verdict this posts NEVER re-uses the prior one (invalidation
- *      is not weakened).
+ *      is not weakened). W1-T1018 (operator ruling 2026-08-19 — "I don't
+ *      really like the idea of a review budget. We just need back off."):
+ *      reaching the cap no longer WALLS the PR off — it ALSO requires
+ *      {@link reviewOrphanBackoffElapsed} to read `false` (i.e. not enough
+ *      wall-clock time has passed since the last real attempt). Once the
+ *      backoff interval elapses this row yields and the post-review row
+ *      below dispatches again — escalate for visibility, AND keep retrying,
+ *      never one instead of the other.
  *   9. WAIT (W1-T114, the 30-issue predicate-storm fix): checks pending AND a
  *      datable, in-window newest-check-start (policy.pendingCeilingMinutes) ->
  *      wait — no action, ledgered, re-derived next sweep. Never reached when
@@ -2009,16 +2106,27 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // (W1-T224) already hold elsewhere. `reviewOrphanedByPush !== true` (a PR
     // awaiting its FIRST review) never matches this row — only a PR that has
     // demonstrably been reviewed before can exhaust this cap.
+    //
+    // W1-T1018 (operator ruling 2026-08-19 — "we just need back off", not a budget): reaching the
+    // cap is no longer a PERMANENT wall. `reviewOrphanBackoffElapsed` must ALSO read `false` for
+    // this row to match — once `policy.reviewOrphanBackoffMinutes` has elapsed since the lane's
+    // last real attempt with no resolution, this row yields and the post-review row below
+    // dispatches again (design ii: "escalate AND keep going"). This ALSO fixes rationale (2)/(4):
+    // `priorReviewOrphans` (run-task.ts's `reviewOrphansFor`) now counts DISTINCT REVIEWABLE
+    // DIFFS among prior heads, not distinct pushed heads — a base-repair merge that leaves the
+    // PR's own diff unchanged (the remedy this system itself prescribes) never spends this budget.
     disposition: "blocked-ambiguous",
-    when: (pr, policy) =>
+    when: (pr, policy, _ageDays, now) =>
       pr.checksState === "green" &&
       pr.reviewState === "none" &&
       pr.reviewOrphanedByPush === true &&
       (pr.priorReviewOrphans ?? 0) >= policy.reviewOrphanCap &&
-      pr.requiredContextsUnreadable !== true,
+      pr.requiredContextsUnreadable !== true &&
+      !reviewOrphanBackoffElapsed(pr, policy, now),
     reason: (pr, policy) =>
       `review orphaned by a push, again — the sweep has already re-reviewed this PR ${pr.priorReviewOrphans} ` +
-      `time(s) (>= ${policy.reviewOrphanCap} cap) — escalating instead of retrying indefinitely`,
+      `time(s) (>= ${policy.reviewOrphanCap} cap) — escalating; re-reviewing again after ` +
+      `${policy.reviewOrphanBackoffMinutes}m of backoff, never stopping outright`,
   },
   {
     // POST-REVIEW ROUTING (the 2026-07-22 #584 stall; NARROWED by W1-T176 —
@@ -2188,6 +2296,13 @@ export function deriveDisposition(
  * cap fires ~1.7/day (rationale (3): five issues over three days), never the ~15.6/day BLOCKED
  * average a blanket tier change (reclassifying every blocked-ambiguous escalation) would
  * reinstate (rationale (4)).
+ *
+ * W1-T1018: DELIBERATELY still four conditions, no fifth `now`/backoff check added here. The
+ * elapsed-time backoff ({@link reviewOrphanBackoffElapsed}) gates the DISPOSITION_RULES cap row
+ * itself — a PR only ever REACHES this predicate (via the escalate closure) when that row already
+ * matched at the SAME sweep pass's `deriveDisposition` call, which means backoff had already read
+ * un-elapsed a moment earlier. Threading `now` through here too would only rewiden the surface the
+ * signature-anchored mutation test below has to track, for no behavioural gain.
  */
 export function isCappedReviewOrphanEscalation(pr: OpenPrView, policy: SweepPolicy): boolean {
   return (
