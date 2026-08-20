@@ -15,6 +15,17 @@ name: CI
 
 on:
   pull_request:
+  # W1-T1033: nothing ran the suite against `main` — `ci-gate` (a separate file, untouched here)
+  # and every OTHER job below stayed `pull_request`-only for measured reasons (see this task's
+  # rationale/design). `ci` ALONE also runs on a push to `main` now, so a broken merge is
+  # observable without an unrelated PR failing first: its job body contains zero references to
+  # `github.event`/`pull_request`/`BASE_SHA`, so it is push-safe (CONTROL: `coverage-ratchet`'s
+  # body contains one, in its diff-coverage step — that is why THAT job stays PR-only below,
+  # same as every job in this file except `ci`). `ci-gate.yml` must NEVER gain this trigger: its
+  # `SHA` env reads `github.event.pull_request.head.sha`, empty on a push, and its
+  # `concurrency.group` collapses every push into one cancel-in-progress group — see that file.
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -22,6 +33,9 @@ permissions:
 jobs:
   ci:
     name: ci
+    # W1-T1033: no `if:` here — this is the one job in this file meant to run on BOTH triggers
+    # above (the newly added `push` and the pre-existing `pull_request`). Every job below this
+    # one carries `if: github.event_name == 'pull_request'` to stay off the new push trigger.
     runs-on: ubuntu-latest
     # W1-T1009: HEAVY band. 35m/2100s sits in the empty gap this repo's own data leaves between
     # the longest observed non-hung run (1637s, a legitimately FAILING `ci`) and the first
@@ -118,6 +132,7 @@ jobs:
     # right messages.
     name: commitlint
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- 13x this job class's observed max (46s over 440
     # sampled job-runs). No instance of this job hanging was observed; it is bounded because it
     # runs the same networked actions/setup-node + npm ci steps as the jobs that did hang.
@@ -160,6 +175,7 @@ jobs:
     # its own job status is what "on every PR" is proven by.
     name: leak-grep
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation (13x this job class's observed max of 46s; no observed hang, bounded because it
     # shares the same networked setup as the jobs that did hang).
@@ -189,6 +205,20 @@ jobs:
     # instrumented-but-never-hit, even when the aggregate ratchet above stays green.
     name: coverage-ratchet
     runs-on: ubuntu-latest
+    # W1-T1033: deliberately NO job-level (or step-level) `if:` here — test/diff-coverage.test.ts
+    # asserts this job body carries none at all (the pre-existing #729/skipped-check-deadlock
+    # discipline: this job must always register a check run). So this job still REGISTERS on the
+    # new push trigger, same as every PR — but its four PR-scoped steps below (everything after
+    # the Playwright install, which must stay byte-identical to the `ci` job's own copy per
+    # test/workflow-playwright-install.test.ts) open with a plain shell guard
+    # (`[ "$GITHUB_EVENT_NAME" = pull_request ] || { …; exit 0; }`, never a YAML `if:`) that
+    # no-ops and exits 0 on anything but a pull_request event. Design (i): this job's
+    # diff-coverage half reads `github.event.pull_request.base.sha`, EMPTY on a push (measured:
+    # `git diff "" ...HEAD` exits 129), and even wired to the previous commit it would answer a
+    # different question than "lines this PR added" — so a push run must skip the real work
+    # rather than run it wrong, and must not spend the ~740s p50 (up to 1638s) of the coverage
+    # collection step design (ii) prices at 211-422 CI-min/day for a comparison that means nothing
+    # on a push.
     # W1-T1009: HEAVY band -- see the `ci` job's comment above for the full derivation. This job
     # carries the same `npx playwright install` step and hung on it independently of `ci`
     # (PR #2150, five minutes after PR #2148's `ci` hang on the same step), so it gets the same
@@ -241,6 +271,7 @@ jobs:
         # per-test patchwork. On a green run the underlying node invocation still runs exactly
         # once -- zero behavior change from before this task.
         run: |
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
           mkdir -p coverage
           node scripts/test-with-retry.mjs \
             node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
@@ -259,11 +290,17 @@ jobs:
       - name: Compute this PR's base...head diff (for the per-diff coverage check below)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: git diff "${BASE_SHA}"...HEAD > pr.diff
+        run: |
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event — BASE_SHA is empty here and would fail this diff."; exit 0; }
+          git diff "${BASE_SHA}"...HEAD > pr.diff
       - name: Diff coverage (blocks a PR that adds untested source lines, even when the aggregate floor below stays green)
-        run: node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
+        run: |
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
+          node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
       - name: Coverage ratchet (blocks a PR whose branch coverage is below the absolute floor)
-        run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
+        run: |
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
+          node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
 
   mutation-ratchet:
     # §5 TIER 2, quality gate 2/4 (W1-T96) — green tests that kill no mutants are theater; the
@@ -331,6 +368,7 @@ jobs:
     # genuinely improves), never down to make a red PR pass.
     name: mutation-ratchet
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation. This job used to install Playwright too (W1-T133 removed that step because
     # neither file `commandRunner` now scopes to needs a browser), so it is not immune to the same
@@ -390,6 +428,7 @@ jobs:
     # pass genuinely needs more room), never down to make a red PR pass.
     name: learnings-budget-ratchet
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation.
     timeout-minutes: 10
@@ -446,6 +485,7 @@ jobs:
     # no-shared-block fixture is ACCEPTED, both driving the real jscpd CLI as a subprocess).
     name: jscpd-gate
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation.
     timeout-minutes: 10
@@ -476,6 +516,7 @@ jobs:
     # plan/.
     name: claims
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation.
     timeout-minutes: 10
@@ -510,6 +551,7 @@ jobs:
     # (parseWhitelistedProof, reused verbatim from src/lib/review.ts) never lands.
     name: lint-plan
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation.
     timeout-minutes: 10
@@ -543,6 +585,7 @@ jobs:
     # under src/lib fails this job, which ci-gate's REQUIRED list waits on.
     name: depcruise
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation.
     timeout-minutes: 10
@@ -580,6 +623,7 @@ jobs:
     # successfully so it never blocks an unrelated PR.
     name: containment-probe
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation.
     timeout-minutes: 10
@@ -621,6 +665,7 @@ jobs:
     # absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid.
     name: api-client-drift
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation.
     timeout-minutes: 10
@@ -650,6 +695,7 @@ jobs:
     # silently absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid.
     name: no-hand-rolled-fetch
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
     # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
     # derivation.
     timeout-minutes: 10
