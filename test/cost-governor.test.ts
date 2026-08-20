@@ -657,12 +657,17 @@ test("W1-T331: reloadDailyCostCeilingUsd failing on tick 2+ holds tick 1's ceili
   const plan = onePlan();
   const received: Array<number | undefined> = [];
   let reloadCalls = 0;
-  let ticks = 0;
+  // W1-T1065: the bound counts GOVERNOR CONSULTATIONS — the quantity both assertions below are
+  // written against — not `checkStop` CALLS. The daemon now reads checkStop TWICE per tick, at
+  // the top and again immediately before admission, so a call-counting bound both halves the
+  // ticks it names (this test saw 2 reloads where it requires 3) and can stop MID-tick, between
+  // the tick-wide consultation and the per-dispatch one, leaving an odd count the parity
+  // assertion then rejects. Bounding on the consultations themselves is immune to both.
   await runDaemon(
     plan,
     {
       refreshMerged: () => NONE_MERGED,
-      checkStop: () => (++ticks > 3 ? "tick cap" : undefined),
+      checkStop: () => (received.length >= 6 ? "tick cap" : undefined),
       reloadDailyCostCeilingUsd: () => {
         reloadCalls++;
         if (reloadCalls === 1) return 42;
