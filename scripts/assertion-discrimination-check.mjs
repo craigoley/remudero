@@ -370,7 +370,7 @@ export function findAssertionSites(source, testFilePath, repoRoot) {
   function addSite(name, pos, literal) {
     const binding = bindingAt(name, pos);
     if (!binding) return; // usage precedes any binding of this name: not attributable
-    const key = `${binding.targetPath ?? ""} ${literal}`;
+    const key = `${binding.targetPath ?? ""}\u0000${literal}`;
     if (seen.has(key)) return; // same (target, literal) claim already recorded for this file
     seen.add(key);
     sites.push({ testFilePath, targetPath: binding.targetPath, name, literal });
@@ -464,7 +464,7 @@ export function loadBaseline(path) {
 }
 
 function baselineKey(testFile, target, literal) {
-  return `${testFile} ${target} ${literal}`;
+  return `${testFile}\u0000${target}\u0000${literal}`;
 }
 
 // ── Scan orchestration ───────────────────────────────────────────────────────
