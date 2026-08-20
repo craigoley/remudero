@@ -1,39 +1,38 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-19T02:55:58.075Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-20T03:01:04.449Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-30 run(s) since the last retro marker. Verdicts: {"blocked":2,"blocked_ci":8,"incomplete":7,"merged":10,"pr_attribution_failed":3}.
+33 run(s) since the last retro marker. Verdicts: {"blocked":5,"blocked_ci":9,"incomplete":6,"merged":10,"no_pr":1,"pr_attribution_failed":2}.
 
 ### Shipped since marker
-- W1-T1004 → https://github.com/craigoley/remudero/pull/2152
-- W1-T1007 → https://github.com/craigoley/remudero/pull/2157
-- W1-T493 → https://github.com/craigoley/remudero/pull/2183
-- W1-T7B → https://github.com/craigoley/remudero/pull/2178
-- W1-T939 → https://github.com/craigoley/remudero/pull/2052 (gate-side merge; run ended pr_attribution_failed)
-- W1-T941 → https://github.com/craigoley/remudero/pull/2060 (gate-side merge; run ended incomplete)
-- W1-T943 → https://github.com/craigoley/remudero/pull/2051 (gate-side merge; run ended pr_attribution_failed)
-- W1-T944 → https://github.com/craigoley/remudero/pull/2049 (gate-side merge; run ended incomplete)
-- W1-T945 → https://github.com/craigoley/remudero/pull/2055 (gate-side merge; run ended blocked_ci)
-- W1-T970 → https://github.com/craigoley/remudero/pull/2106 (gate-side merge; run ended incomplete)
-- W1-T972 → https://github.com/craigoley/remudero/pull/2113 (gate-side merge; run ended blocked_ci)
-- W1-T976 → https://github.com/craigoley/remudero/pull/2115
-- W1-T977 → https://github.com/craigoley/remudero/pull/2116 (gate-side merge; run ended blocked_ci)
-- W1-T978 → https://github.com/craigoley/remudero/pull/2117
-- W1-T984 → https://github.com/craigoley/remudero/pull/2127
-- W1-T986 → https://github.com/craigoley/remudero/pull/2132
-- W1-T991 → https://github.com/craigoley/remudero/pull/2146
-- W1-T999 → https://github.com/craigoley/remudero/pull/2155
+- W1-T1010 → https://github.com/craigoley/remudero/pull/2190 (gate-side merge; run ended blocked_ci)
+- W1-T1011 → https://github.com/craigoley/remudero/pull/2236
+- W1-T1013 → https://github.com/craigoley/remudero/pull/2262
+- W1-T1017 → https://github.com/craigoley/remudero/pull/2193
+- W1-T1028 → https://github.com/craigoley/remudero/pull/2242
+- W1-T1029 → https://github.com/craigoley/remudero/pull/2241
+- W1-T1030 → https://github.com/craigoley/remudero/pull/2254
+- W1-T1032 → https://github.com/craigoley/remudero/pull/2252
+- W1-T1033 → https://github.com/craigoley/remudero/pull/2260
+- W1-T1035 → https://github.com/craigoley/remudero/pull/2263
+- W1-T492 → https://github.com/craigoley/remudero/pull/2189 (gate-side merge; run ended blocked_ci)
+- W1-T74 → https://github.com/craigoley/remudero/pull/2186 (gate-side merge; run ended blocked_ci)
+- W1-T947 → https://github.com/craigoley/remudero/pull/2194
+- W1-T948 → https://github.com/craigoley/remudero/pull/2187 (gate-side merge; run ended blocked_ci)
+- W1-T949 → https://github.com/craigoley/remudero/pull/2196 (gate-side merge; run ended blocked_ci)
+- W1-T951 → https://github.com/craigoley/remudero/pull/2188 (gate-side merge; run ended blocked_ci)
+- W1-T964 → https://github.com/craigoley/remudero/pull/2191 (gate-side merge; run ended blocked_ci)
 
 ## Next runnable task
 
-**W1-T74** — Proposal-id integrity — retro minting derives next-unused + a deterministic uniqueness gate in ci (the #125/#118 P21 collision)
+**W1-T1016** — a changeset-contradiction review failure ledgers an EMPTY reasons array, so the one field the fix-rung routing predicate reads is empty for the one failure shape the fleet already owns a mechanical repair for — the reader, the disposition row and the repair all exist and never meet
 
-- risk: high · depends_on: W1-T62
+- risk: high · depends_on: (none)
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 

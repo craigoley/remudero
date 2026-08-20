@@ -2943,9 +2943,12 @@ test("W1-T225 — a PR awaiting its FIRST review is never bound by the orphan ca
   assert.equal(deriveDisposition(neverReviewed, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
 });
 
-// ── W1-T473: reviews get their OWN concurrency budget, honouring the SAME ──
+// ── W1-T473: reviews get their OWN concurrency budget — originally the SAME ──
 //    lane number dispatch uses (`policy.dispatchLanes`), with real mutual
 //    exclusion supplying what single-threading used to give for free.
+//    W1-T1049 split the review budget onto its own `policy.reviewLanes` field
+//    (test/review-lane-budget.test.ts) — `dispatchLanes` no longer governs
+//    review concurrency; the fixtures below are updated to match.
 
 function greenPr(n: number): OpenPrView {
   return ungatedGreenPr({ prNumber: n, prUrl: `url/${n}`, taskId: `W1-BUDGET-${n}`, headSha: `sha${n}` });
@@ -2984,7 +2987,9 @@ test("W1-T473 — post-review PRs run CONCURRENTLY within one pass, not one at a
 
 test("W1-T473 acceptance 2 — the review budget bounds CONCURRENCY, never ELIGIBILITY: 3 post-review PRs under a 2-lane budget run only 2 THIS pass, and the 3rd is picked up (untouched, still eligible) on the very next pass", async () => {
   const lp = ledgerPath();
-  const tightPolicy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, dispatchLanes: 2 };
+  // W1-T1049: the review lane now has its OWN policy field (`reviewLanes`) — `dispatchLanes`
+  // no longer governs review concurrency, so the tight budget below is set on the right field.
+  const tightPolicy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 2 };
   const prs = [greenPr(801), greenPr(802), greenPr(803)];
 
   const attempts1: number[] = [];

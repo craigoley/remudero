@@ -1,0 +1,153 @@
+- id: W1-T1061
+  title: "THE SWEEP LANE RECORDS ITS ARM OUTCOME AS PROSE INSIDE A REASON STRING — `standDownReason = \"arm outcome: <outcome>\"` on a `sweep.disposed` row, so the one lane that arms the most PRs is the one lane whose outcome cannot be read without parsing a sentence; move it to a field on the row it already writes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: |
+    MEASURED 2026-08-20 on Craigs-Mac-mini under /bin/zsh 5.9, in a scratch worktree at
+    origin/main 63837dc7. Per-form coverage control taken first — 666 gz, 6 plain, 1 live, all
+    readable — and every census deduped on the FULL LINE. No `/rate_limit` call; the daemon and
+    its state files untouched.
+
+    (1) THE SHAPE, FROM ONE WRITE SITE. `src/lib/sweep.ts` assigns
+    `standDownReason = "arm outcome: " + String(armOutcome)` when the arm did not arm, and that
+    string is carried onto the PR's own `sweep.disposed` line as `stand_down_reason` — the same
+    field every other non-actionable disposition uses for a human sentence. THE OUTCOME IS
+    THEREFORE PROSE INSIDE A REASON, ON A ROW ABOUT A DISPOSAL, AND THE ONLY WAY TO COUNT ARM
+    OUTCOMES FROM THIS LANE IS TO PARSE ENGLISH.
+
+    (2) THE OTHER TWO LANES DO NOT DO THIS, WHICH IS WHAT MAKES IT A DEFECT RATHER THAN A STYLE.
+    Both `logArmAttribution` call sites (`src/run-task.ts`) pass the outcome as a FIELD, so a
+    review-lane or operator-lane outcome is machine-readable even when the step name is wrong —
+    that separate wrongness is W1-T1052's, cited and NOT absorbed here. The sweep lane is the one
+    that is not even that.
+
+    (3) MEASURED ON THE UNION: 16,598 distinct `sweep.disposed` rows, 216 of them carrying
+    `arm outcome:`, and ALL 216 reading `no-task-id`. The row's own `task_id` reads the literal
+    `SWEEP` on every one of them. POSITIVE CONTROL for that zero-free reading: the same corpus
+    yields 24 word-bounded `standDownReason` invocations in `src/lib/sweep.ts` and a live
+    `stand_down_reason` field on those rows, so the query can see the field it is reading.
+
+    (4) AND THE 216-FOR-216 IS NOT THIS TASK'S DEFECT — IT IS ALREADY FILED. Every one of those
+    rows reads `no-task-id` because the sweep could not resolve a task id for the PR at all, which
+    is W1-T453's subject in terms: `buildOpenPrViews` resolves a PR's task id from the BODY
+    TRAILER ALONE, so a fleet-built PR with no trailer can never arm. That shard's own rationale
+    already quotes `no task id resolvable for this PR — arming withheld` and names the
+    `no-task-id` vocabulary. It is filed and queued. THIS TASK DOES NOT TOUCH IT.
+  design: |
+    ONE CONCERN: the outcome's storage shape on a row the sweep already writes. Not the step name,
+    not the task id, not the arm decision.
+
+    (i) THE RULING, MADE BEFORE FILING SO THIS SHARD ASKS NOTHING. Two shapes were available: the
+    sweep emits the same arm row the other two lanes emit, or the disposed row stays and the
+    outcome moves from prose into a field. THE SECOND IS CORRECT AND THE FIRST IS REFUSED. Three
+    reasons, in order of weight:
+      - THE ROW IS ALREADY JOINABLE, JUST NOT BY TASK. `sweep.disposed` carries `pr_number` and
+        `pr_url`; `task_id: SWEEP` is the LANE identity, not a missing subject identity. A lane
+        that acts on open PRs it did not dispatch is correctly keyed on the PR.
+      - UNIFORM SHAPE WOULD BE NON-UNIFORM MEANING. An `automerge.*` row emitted by the sweep
+        asserts an arm attempt tied to a task the sweep does not have, which is a worse untruth
+        than the one being fixed.
+      - IT WOULD ADD A ROW, which is the cost W1-T1052 just declined to pay on the same lane's
+        behalf.
+
+    (ii) THE CHANGE, STATED MECHANICALLY. The outcome becomes its own field on the existing
+    `sweep.disposed` line, beside `stand_down_reason` rather than inside it. NO NEW STEP AND NO NEW
+    ROW: the row is written today, unconditionally, at the same place. The `stand_down_reason`
+    sentence may stay for a human reader, but it must stop being the only carrier — a reader must
+    never have to split on a colon to learn what happened.
+    NO FIELD OF THAT NAME EXISTS TODAY (a word-bounded sweep of `src/` finds none), so the addition
+    collides with nothing. POSITIVE CONTROL: `stand_down_reason` reads 24 in the same file, which
+    is the sibling the new field sits beside.
+
+    (iii) WHAT IS OUT OF SCOPE, EACH WITH ITS OWNER, AND NONE OF IT ABSORBED.
+      - THE STEP NAME a non-arming outcome is filed under: W1-T1052.
+      - THE MISSING TASK ID that makes every observed outcome `no-task-id`: W1-T453.
+      - THE ARM DECISION itself and anything about whether the sweep should arm: untouched.
+      A reader who fixes only this one still cannot join a sweep arm to a task, and that is
+      correct — the join is W1-T453's to restore.
+
+    (iv) WHAT THIS TASK MUST NOT DO. It must not emit an `automerge.*` row from the sweep — that
+    is the refused option in (i). It must not add a ledger step. It must not rename
+    `stand_down_reason` or repurpose it. It must not delete the two tests that assert the prose;
+    they must be re-derived to assert the field, because they are what proves the outcome is
+    recorded at all.
+  acceptance:
+    - claim: "the disposed row carries the arm outcome as its own field rather than inside a sentence"
+      proof: "unit test: sweep arm outcome: the disposed row carries the outcome as a field and not as prose"
+    - claim: "the outcome is readable without splitting a reason string on a colon"
+      proof: "unit test: sweep arm outcome: the field is readable without parsing a sentence"
+    - claim: "a disposal that involved no arm attempt carries no outcome field at all"
+      proof: "unit test: sweep arm outcome: a disposal with no arm attempt carries no outcome field"
+    - claim: "the human sentence and the machine field agree rather than drifting apart"
+      proof: "unit test: sweep arm outcome: the sentence and the field agree on what happened"
+    - claim: "the change adds no new ledger step and no new row"
+      proof: "unit test: sweep arm outcome: no new ledger step is added by the change"
+  risk: high
+  origin: "oper#sweep-arm-outcome-is-prose-2026-08-20"
+  plan_refs: ["W1-T1052", "W1-T453", "W1-T449", "W1-T230", "W1-T1055"]
+  files: [src/lib/sweep.ts, test/arm-outcome-five-sites.test.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE OPERATOR RULED BEFORE THIS WAS FILED, AND THAT IS WHY THE SHARD ASKS NOTHING. An earlier
+    pass scoped this lane out of a sibling shard with an open design question attached — whether
+    the sweep should emit an arm-shaped row at all. That question is answered in design note (i)
+    and the answer is recorded there rather than left for a recon to re-derive. A shard that files
+    a question spends a dispatch discovering it.
+
+    `files:` WAS DERIVED BY WORD-BOUNDED INVOCATION COUNT AND IS DELIBERATELY THREE PATHS.
+    `src/lib/sweep.ts` holds the ONLY write site of the prose and 24 of the 31 `standDownReason`
+    invocations in `src/`; exactly two test files assert the `arm outcome` string, and both are
+    declared. `src/run-task.ts` carries the other 7 invocations but NOT this write site, so it is
+    deliberately NOT declared — that keeps this out of the file DECISIONS.md's 2026-08-18 W1-T471
+    ruling accepts one dispatch lane for, and the ruling would have licensed declaring it had the
+    change needed to. The shard's own path is absent.
+
+    RISK IS `high` AND THE BAND IS RULE 19's SPAN, NOT BLAST RADIUS — RECORDED HERE BECAUSE THE
+    TWO READ DIFFERENTLY. The change itself is narrow: one source module, one field, one concern.
+    But `files:` names two test files whose stems the sizing check reads as distinct concerns
+    (`arm-outcome-five-sites` and `sweep`), and at `risk:medium` it BLOCKS with
+    *"spans 2 distinct subsystems/concerns … raise to risk:high or decompose"*. MEASURED, not
+    assumed: this shard was authored at `medium` and `rmd lint-plan --base origin/main` failed it,
+    then passed at `high` with the file list unchanged. Decomposing is not the alternative here —
+    the two tests assert the SAME string from the same write site, so splitting them would file one
+    task per assertion of one field.
+
+    EVERY FIGURE IS DATED 2026-08-20 AND WILL DRIFT — RE-RUN THE QUERY RATHER THAN QUOTING IT.
+    The census: `zgrep -h '"step":"sweep.disposed"' <every ledger form> | sort -u`, then count rows
+    whose JSON contains `arm outcome:` and tally the outcome by parsing that string — which is the
+    very awkwardness this task removes, and worth doing once so the before-figure is honest. Take a
+    per-form file count as the coverage control before trusting any total. The write site:
+    `git grep -n 'arm outcome' -- src/lib/sweep.ts` returns exactly one line today.
+
+    ID PROVENANCE — THIS SHARD WAS RENUMBERED, AND THE REASON IS THE POINT RATHER THAN AN
+    APOLOGY. It was first filed as W1-T1053, on an id the operator hand-reserved and read back
+    against the sha he supplied before any work started. Five minutes later the triage lane
+    independently minted and filed THE SAME id, and both PRs opened one second apart — so
+    `loadPlan` (`src/lib/plan.ts`), which throws `duplicate task id` on exactly that shape, would
+    have refused origin/main for every plan-reading verb had both merged. That is W1-T1055's
+    (#2281) subject arriving live: `rmd next-task-id` PRINTS an id and RESERVES nothing, so a
+    hand-reserved id and a lane-minted id can be the same integer with neither caller wrong. This
+    shard moves rather than the triage PR because the triage branch is a `run-TRIAGE-*` head with
+    a live owner and it also carries a feedback-entry state change, so closing it would strand
+    that entry as `new` and triage would re-attempt it. The W1-T1053 mentions kept in this
+    paragraph are DELIBERATE HISTORY, not stale references.
+
+    THE NEW ID WAS CONFIRMED ON SIX SURFACES BEFORE A BYTE WAS EDITED, EACH WITH A LIVE CONTROL
+    THAT FIRED. `refs/rmd-id/W1-T1061` resolves to 502af01971853fc35938c522a9ded4e66812d378,
+    matching the sha the mint printed (control: the same form against another reserved id returns
+    a ref). The other five read 0: the shard FILENAME under `plan/tasks.d/` on origin/main
+    (control: a filed shard's filename reads 1); a declared `- id:` under `plan/` on origin/main
+    (control: a filed id reads 1); every open PR's title AND changed-file list (control: the
+    contested id reads 2 on each, which is the shape a collision has); `git grep` across `src/`,
+    `test/`, `deploy/` AND `plan/` on origin/main and on this branch head (control: a
+    known-present token fires in all four trees on both sides, so `deploy/` and `plan/` were
+    genuinely searched); and — the surface the usual sweep misses — every `plan_refs` field on
+    origin/main plus the full diff CONTENT of every open PR, not merely their file names
+    (controls: real ids fire in both corpora). A `plan_refs` citing an unreserved id was found
+    this morning, which is why the sixth surface exists at all. NAME THE QUERY, NOT ITS ANSWER:
+    every one of these counts moves within the hour.

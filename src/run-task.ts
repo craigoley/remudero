@@ -14172,6 +14172,34 @@ export async function daemonCommand(
         // makes the switch REACHABLE, it does not turn anything on.
         checkAutoTriage: autoTriageHooks?.checkAutoTriage,
         runAutoTriage: autoTriageHooks?.runAutoTriage,
+        // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
+        // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
+        // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
+        // refused a fire (77 `auto_triage.fired` rows against 0 `skipped_inflight`). Wired HERE,
+        // the one construction site the sibling `isOpenPr`/`readLiveState` pair above is also
+        // bound from, per daemon.ts's own comment: "the SAME shape as the task lane's
+        // `isOpenPr`/`readLiveState` pair above, keyed on feedback id instead of task id."
+        //
+        // isFeedbackOpenPr REUSES `openHeadBranchesForBreaker` — the SAME batched, once-per-boot
+        // `listOpenHeadBranches()` cache `isOpenPr` above reads via `lastProj`, never a second
+        // GitHub call — and `taskIdFromRunBranch` (status.ts, already imported), the SAME head-
+        // branch-ownership reader `corroborateOpenByBranch` uses. A triage run's own branch is
+        // `run-TRIAGE-<feedbackId>-<epochMs>` (triageCommandLocked's `taskId = \`TRIAGE-${feedbackId}\``,
+        // `branch = \`run-${runId}\``), so matching `taskIdFromRunBranch(head) === \`TRIAGE-${feedbackId}\``
+        // against the OPEN slice of that SAME cache is the feedback-keyed twin of `isOpenPr`'s own
+        // `lastProj`-backed read — newest PR wins on a multi-hit, mirroring status.ts's own rung.
+        isFeedbackOpenPr: (feedbackId) => {
+          const wantTaskId = `TRIAGE-${feedbackId}`;
+          const hit = (openHeadBranchesForBreaker ?? [])
+            .filter((pr) => pr.state.toUpperCase() === "OPEN" && taskIdFromRunBranch(pr.headRefName) === wantTaskId)
+            .sort((a, b) => b.number - a.number)[0];
+          return hit?.number;
+        },
+        // readFeedbackLiveState REUSES `ghLiveStateByNumber` — the IDENTICAL fresh, always-live
+        // re-read `readLiveState` above calls, no new GitHub call shape and no new gateway — so a
+        // cached OPEN that has since merged/closed stands the guard down instead of parking a
+        // feedback entry forever (W1-T177's confirming-read discipline, applied to this lane).
+        readFeedbackLiveState: (_feedbackId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
