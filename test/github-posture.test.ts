@@ -356,3 +356,36 @@ test("W1-T1040: run-task.ts's githubPostureCheck wires readGithubPosture end to 
   const second = hooks.checkGithubPosture();
   assert.deepEqual(second, [], "an hour later, same day — the real wiring's cadence gate still holds");
 });
+
+// ── the gateway's degrade-to-undefined arm, one test per failure mode ──────────────────────────
+//
+// `ghPostureGateway`'s `tryGet` catch is the one place a failed or unreachable `gh api` read is
+// turned into `undefined` rather than a throw — the behaviour `readGithubPosture`'s doc relies on
+// to report "no finding" instead of a false all-clear. Every test above supplies a gateway that
+// succeeds, so that arm never runs; these drive the real factory with an exec that fails the two
+// ways a real one does.
+
+test("W1-T1040: the gateway degrades a THROWING `gh api` read to undefined rather than propagating", () => {
+  const gateway = ghPostureGateway(() => {
+    throw new Error("gh: exit 1 — not authenticated");
+  });
+  assert.equal(gateway.getRepo("craigoley", "remudero"), undefined);
+  assert.equal(gateway.getEnforceAdmins("craigoley", "remudero", "main"), undefined);
+});
+
+test("W1-T1040: the gateway degrades UNPARSEABLE `gh api` output to undefined rather than propagating", () => {
+  const gateway = ghPostureGateway(() => "not json at all");
+  assert.equal(gateway.getRepo("craigoley", "remudero"), undefined);
+  assert.equal(gateway.getEnforceAdmins("craigoley", "remudero", "main"), undefined);
+});
+
+// The positive control for both: the SAME factory, handed an exec that returns real JSON, passes
+// the parsed value through — so the undefineds above are the catch arm and not a gateway that
+// answers undefined to everything.
+test("W1-T1040: the same gateway factory returns the parsed body when the read succeeds", () => {
+  const gateway = ghPostureGateway((args) => JSON.stringify({ path: args.join(" ") }));
+  assert.deepEqual(gateway.getRepo("craigoley", "remudero"), { path: "api repos/craigoley/remudero" });
+  assert.deepEqual(gateway.getEnforceAdmins("craigoley", "remudero", "main"), {
+    path: "api repos/craigoley/remudero/branches/main/protection/enforce_admins",
+  });
+});
