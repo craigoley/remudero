@@ -11,6 +11,8 @@ import { test } from "node:test";
 
 import {
   DOCTOR_USAGE_EXIT,
+  classifyReadFailure,
+  readMemInfo,
   buildDoctorReport,
   exitCodeFor,
   judgeDiskHeadroom,
@@ -164,7 +166,7 @@ test("doctor: the verb registration dispatches into the doctor module", async ()
     nowMs: Date.parse("2026-08-20T12:00:00Z"),
     readLedgerLines: () => [aliveRow("dispatch", "2026-08-20T11:59:00Z")],
     liveInflightRuns: () => [],
-    readLockFiles: () => [],
+    readLockFiles: () => ({ locks: [] }),
     readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
     readDiskFreeBytes: () => 40 * 1024 ** 3,
     readPauseAgeMs: () => undefined,
@@ -287,4 +289,82 @@ test("doctor: renderDoctor names every failing check in its one-line summary", (
   assert.match(first, /^rmd doctor: FAIL/);
   assert.match(first, /beta/);
   assert.equal(first.includes("alpha"), false, "the summary names what is wrong, not what is fine");
+});
+
+// ── the three readers diff-coverage named, one test per arm, each with a positive control ──────
+
+test("doctor: an unreadable /proc/meminfo degrades to empty rather than throwing", () => {
+  // readFileSync THROWS on ENOENT/EACCES — it returns no sentinel — so the catch is the only thing
+  // between a missing /proc and a crashed health command.
+  const failed = readMemInfo(() => {
+    throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+  });
+  assert.deepEqual(failed, {}, "an unreadable meminfo yields nothing, and never throws out of doctor");
+  assert.equal(judgeMemory(failed.availableBytes, failed.totalBytes, failed.swapTotalBytes).verdict, "WARN");
+
+  // POSITIVE CONTROL: the SAME reader with a readable file parses real values, so the empty object
+  // above is the failure arm and not a reader that never works.
+  const ok = readMemInfo(() => "MemTotal: 16000000 kB\nMemAvailable: 8000000 kB\nSwapTotal: 0 kB");
+  assert.equal(ok.totalBytes, 16_000_000 * 1024);
+  assert.equal(ok.availableBytes, 8_000_000 * 1024);
+});
+
+test("doctor: an unreadable inflight dir reports UNKNOWN lock state, never zero locks", async () => {
+  // THE FAIL-OPEN THIS FIXES: a permissions fault HIDES locks. Answering "0 locks" to that would
+  // let the health check report all-clear on a fault that blinded it.
+  const { readLockFilesFrom } = await import("../src/run-task.js");
+  const denied = readLockFilesFrom("/whatever", () => {
+    throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+  });
+  assert.deepEqual(denied.locks, []);
+  assert.match(denied.unreadableReason!, /inflight dir unreadable \(EACCES\)/);
+  const unknown = judgeLockDivergence(0, [], denied.unreadableReason);
+  assert.equal(unknown.verdict, "WARN", "unknown lock state is NOT healthy");
+  assert.match(unknown.measured, /UNKNOWN/);
+  assert.match(unknown.detail!, /hides locks rather than proving there are none/);
+
+  // POSITIVE CONTROL 1 — an ABSENT dir genuinely is zero locks and stays silently OK.
+  const absent = readLockFilesFrom("/whatever", () => {
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  });
+  assert.deepEqual(absent, { locks: [] }, "ENOENT carries no unreadable reason");
+  assert.equal(judgeLockDivergence(0, [], undefined).verdict, "OK");
+
+  // POSITIVE CONTROL 2 — a readable dir really does list its locks, so the empties are absence.
+  const listed = readLockFilesFrom("/whatever", () => ["W1-T1.lock", "notes.txt", "W1-T2.lock"]);
+  assert.deepEqual(listed.locks, ["W1-T1", "W1-T2"], "only *.lock entries count, with the suffix stripped");
+
+  // and the classifier itself discriminates in both directions
+  assert.deepEqual(classifyReadFailure(Object.assign(new Error("x"), { code: "ENOENT" })), { absent: true, reason: "ENOENT" });
+  assert.equal(classifyReadFailure(Object.assign(new Error("x"), { code: "EPERM" })).absent, false);
+  assert.equal(classifyReadFailure(new Error("no code at all")).absent, false, "an unclassifiable error is NOT treated as absent");
+});
+
+test("doctor: a merged verdict row builds the local projection, and a truthy non-boolean does not", async () => {
+  // THE SUBSTITUTION THAT KEEPS THE STALL CHECK ALIVE WITH NO NETWORK READ. Asserted by EFFECT, not
+  // by coverage: falsification showed the earlier version of this test still passed with the
+  // assignment deleted, so it is rewritten to compare presence against absence.
+  const { localMergedProjections } = await import("../src/run-task.js");
+
+  const withRow = localMergedProjections([
+    { step: "verdict", task_id: "W1-T900", merged: true },
+    { step: "verdict", task_id: "W1-T901", merged: false },
+  ]);
+  assert.equal(withRow.get("W1-T900")?.merged, true, "a merged verdict row marks that task merged");
+  assert.equal(withRow.has("W1-T901"), false, "merged:false is not merged");
+  assert.equal(withRow.size, 1);
+
+  // POSITIVE CONTROL: the SAME rows without the merged flag produce an EMPTY map, so the entry
+  // above comes from the flag and not from every verdict row landing in the set.
+  const withoutRow = localMergedProjections([{ step: "verdict", task_id: "W1-T900" }]);
+  assert.equal(withoutRow.size, 0);
+  assert.equal(withRow.size, withoutRow.size + 1, "presence versus absence differs by exactly the merged row");
+
+  // FAIL-CLOSED: a truthy non-boolean must NOT count. A false positive removes a task from the
+  // eligible pool, which would HIDE a stall rather than report one.
+  assert.equal(localMergedProjections([{ step: "verdict", task_id: "W1-T9", merged: "yes" }]).size, 0);
+  // a row with no task_id is skipped rather than throwing
+  assert.equal(localMergedProjections([{ step: "verdict", merged: true }]).size, 0);
+  // and a non-verdict step never contributes
+  assert.equal(localMergedProjections([{ step: "run.start", task_id: "W1-T9", merged: true }]).size, 0);
 });

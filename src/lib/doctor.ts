@@ -217,7 +217,20 @@ export function judgeDispatchStarvation(phases: readonly string[]): Check {
  * releasing. WARN and report only — W1-T978 owns `drain.lock` reclamation and #2251 owns the
  * recycle; doctor names the divergence and stops.
  */
-export function judgeLockDivergence(totalLocks: number, deadLocks: readonly string[]): Check {
+export function judgeLockDivergence(totalLocks: number, deadLocks: readonly string[], unreadableReason?: string): Check {
+  // AN UNREADABLE DIR IS NOT AN EMPTY ONE, and conflating them is a FAIL-OPEN in a health check:
+  // a permissions fault that HIDES every lock would otherwise read as "0 locks, all healthy". An
+  // absent dir genuinely is zero locks (a fleet that has never dispatched), so only that case is
+  // silently fine; anything else reports that lock state is UNKNOWN.
+  if (unreadableReason !== undefined) {
+    return {
+      name: "lock-vs-process",
+      verdict: "WARN",
+      measured: `lock state UNKNOWN — ${unreadableReason}`,
+      threshold: "every inflight lock has a live pid",
+      detail: "an unreadable inflight dir hides locks rather than proving there are none — do not read this as healthy",
+    };
+  }
   return {
     name: "lock-vs-process",
     verdict: deadLocks.length > 0 ? "WARN" : "OK",
@@ -225,6 +238,20 @@ export function judgeLockDivergence(totalLocks: number, deadLocks: readonly stri
     threshold: "every inflight lock has a live pid",
     ...(deadLocks.length > 0 ? { detail: `stale: ${deadLocks.join(", ")} — W1-T978 owns reclamation, doctor only reports` } : {}),
   };
+}
+
+/**
+ * Classify a filesystem read failure into "genuinely absent" versus "could not be read".
+ *
+ * EXTRACTED AND PURE so both arms are reachable from a test without arranging a real EACCES. This
+ * is the same class of defect a sibling task found today: `spawnSync` returns `status: null` on a
+ * signalled child and the classifier read it as success. The shape here is a `catch` that cannot
+ * tell ENOENT from EPERM and answers "nothing there" to both.
+ */
+export function classifyReadFailure(e: unknown): { absent: boolean; reason: string } {
+  const code = typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "";
+  if (code === "ENOENT") return { absent: true, reason: "ENOENT" };
+  return { absent: false, reason: code || String((e as Error)?.message ?? e) };
 }
 
 /**
@@ -404,6 +431,7 @@ export interface DoctorInputs {
   pauseAgeMs?: number;
   totalLocks: number;
   deadLocks: readonly string[];
+  locksUnreadableReason?: string;
   gitLocks: ReadonlyArray<{ path: string; ageMs: number }>;
   workerCount: number;
   oldestWorkerEtimeS?: number;
@@ -422,7 +450,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeDispatchStall(inputs.candidateCount, inputs.dispatchSinceMs, inputs.dispatchBoundMs, inputs.dispatchBoundDerivation),
     judgeDispatchStarvation(readAlivePhases(inputs.ledgerLines)),
     judgePauseHonoured(inputs.pauseAgeMs, lastDispatchAgeMs),
-    judgeLockDivergence(inputs.totalLocks, inputs.deadLocks),
+    judgeLockDivergence(inputs.totalLocks, inputs.deadLocks, inputs.locksUnreadableReason),
     judgeLaneLessWorkers(inputs.oldestWorkerEtimeS, inputs.workerCount),
     judgeStaleGitLocks(inputs.gitLocks),
     judgeDiskHeadroom(inputs.diskFreeBytes),

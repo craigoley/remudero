@@ -5,6 +5,7 @@ import {
   readMemInfo,
   readPauseAgeMs,
   refuseUnsupportedArgs,
+  classifyReadFailure,
   readDiskFreeBytes,
   type MemInfo,
 } from "./lib/doctor.js";
@@ -15223,14 +15224,53 @@ export interface StatusDeps {
  * config read) and hands everything else to the pure builder. Read-only: never writes a
  * marker, never spawns anything, always exits 0 (bad args aside).
  */
-/** Every `*.lock` run id under the inflight dir — the FILES, independent of whether their pids
- *  live. Missing dir is zero locks, never an error: a fleet that has never dispatched is healthy. */
-function defaultReadLockFiles(dir: string): string[] {
+/**
+ * Every `*.lock` run id under the inflight dir — the FILES, independent of whether their pids live.
+ *
+ * AN ABSENT DIR IS ZERO LOCKS; AN UNREADABLE ONE IS NOT. A fleet that has never dispatched has no
+ * inflight dir and is genuinely healthy, but a permissions fault HIDES locks, and answering "none"
+ * to both would let a health check report all-clear on a fault that blinded it. Only ENOENT is
+ * silently empty; every other error is surfaced as `unreadable` and reaches
+ * {@link judgeLockDivergence} as a WARN naming that lock state is unknown.
+ *
+ * EXTRACTED WITH AN INJECTED `readdir` so both arms are reachable from a test rather than requiring
+ * a real EACCES on disk.
+ */
+export function readLockFilesFrom(
+  dir: string,
+  readdir: (p: string) => string[] = readdirSync,
+): { locks: string[]; unreadableReason?: string } {
   try {
-    return readdirSync(dir).filter((n) => n.endsWith(".lock")).map((n) => n.slice(0, -".lock".length));
-  } catch {
-    return [];
+    return { locks: readdir(dir).filter((n) => n.endsWith(".lock")).map((n) => n.slice(0, -".lock".length)) };
+  } catch (e) {
+    const { absent, reason } = classifyReadFailure(e);
+    return absent ? { locks: [] } : { locks: [], unreadableReason: `inflight dir unreadable (${reason})` };
   }
+}
+
+/**
+ * The LOCAL merged set `deriveQueueHead` needs, built from rows this host already wrote.
+ *
+ * THIS IS THE SUBSTITUTION THAT KEEPS THE STALL CHECK ALIVE WITHOUT A NETWORK READ.
+ * `deriveQueueHead` bails to an unknown the moment its projections are absent, which is why a
+ * GitHub outage blanks the queue head — and takes the stall check with it — in `rmd status`.
+ * Feeding it ledger-derived projections answers the same question with no `gh` call.
+ *
+ * EXTRACTED so its effect is assertable directly. `merged === true` is a STRICT comparison on
+ * purpose: a truthy non-boolean must not count as merged, because a false positive here REMOVES a
+ * task from the eligible pool and would hide a stall rather than report one — the fail-closed
+ * direction for a health check.
+ */
+export function localMergedProjections(lines: ReadonlyArray<Record<string, unknown>>): Map<string, StatusProjection> {
+  const projections = new Map<string, StatusProjection>();
+  for (const line of lines) {
+    const id = typeof line.task_id === "string" ? line.task_id : undefined;
+    if (!id) continue;
+    if (line.step === "verdict" && line.merged === true) {
+      projections.set(id, { taskId: id, status: "merged", merged: true } as StatusProjection);
+    }
+  }
+  return projections;
 }
 
 /** Injectable seams for {@link doctorCommand} — every reader it drives, so the whole command is
@@ -15247,7 +15287,7 @@ export interface DoctorDeps {
   readDiskFreeBytes?: (path: string) => number | undefined;
   readPauseAgeMs?: (root: string, nowMs: number) => number | undefined;
   readGitLocks?: (root: string, nowMs: number) => Array<{ path: string; ageMs: number }>;
-  readLockFiles?: (dir: string) => string[];
+  readLockFiles?: (dir: string) => { locks: string[]; unreadableReason?: string };
 }
 
 /**
@@ -15279,14 +15319,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
   // LOCAL merged set: a task is merged if the ledger says so. This is the substitution that keeps
   // the stall check alive without a network read — `deriveQueueHead` needs projections, and these
   // come from rows this host already wrote.
-  const projections = new Map<string, StatusProjection>();
-  for (const line of ledgerLines) {
-    const id = typeof line.task_id === "string" ? line.task_id : undefined;
-    if (!id) continue;
-    if (line.step === "verdict" && line.merged === true) {
-      projections.set(id, { taskId: id, status: "merged", merged: true } as StatusProjection);
-    }
-  }
+  const projections = localMergedProjections(ledgerLines);
 
   const plan = deps.loadPlan ? deps.loadPlan() : undefined;
   const cadence = deriveDispatchCadence(ledgerLines as Array<Record<string, unknown>>);
@@ -15298,7 +15331,8 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
   // between the lock FILES on disk and that live set — a lock with no live pid is a run that died
   // without releasing. Both halves are injectable so the arm is testable without real pids.
   const live = (deps.liveInflightRuns ?? liveInflightRuns)(inflightDir);
-  const lockFiles = (deps.readLockFiles ?? defaultReadLockFiles)(inflightDir);
+  const lockRead = (deps.readLockFiles ?? readLockFilesFrom)(inflightDir);
+  const lockFiles = lockRead.locks;
   const liveIds = new Set(live.map((r) => r.runId));
   const dead = lockFiles.filter((f) => !liveIds.has(f));
 
@@ -15313,6 +15347,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     ...(((v) => (v === undefined ? {} : { diskFreeBytes: v }))((deps.readDiskFreeBytes ?? readDiskFreeBytes)(root))),
     ...(((v) => (v === undefined ? {} : { pauseAgeMs: v }))((deps.readPauseAgeMs ?? readPauseAgeMs)(root, nowMs))),
     totalLocks: lockFiles.length,
+    ...(lockRead.unreadableReason === undefined ? {} : { locksUnreadableReason: lockRead.unreadableReason }),
     deadLocks: dead,
     gitLocks: (deps.readGitLocks ?? readGitLocks)(repoRoot, nowMs),
     workerCount: 0,
