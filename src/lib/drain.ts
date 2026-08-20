@@ -176,11 +176,51 @@ export interface NextRunnableOpts {
   readLiveState?: (taskId: string, prNumber: number) => string | undefined;
   /**
    * Called once per task whose CACHED in-flight snapshot this live re-check
-   * overturned — the task proceeds as runnable instead of being skipped.
-   * Mirrors `onSkip`'s legibility contract; the real wiring corrects the
-   * ledgered reason from "open-pr" to the freshly observed terminal state.
+   * overturned — one PR-level observation, fired for EVERY freshly-observed
+   * terminal state regardless of what the task's eligibility ultimately
+   * resolves to (W1-T1035: a MERGED read that also credits the task, via
+   * `isLiveMergeCredited` below, still fires this — see that field's own doc
+   * for why the two callbacks are BOTH needed rather than one replacing the
+   * other). Mirrors `onSkip`'s legibility contract; the real wiring corrects
+   * the ledgered reason from "open-pr" to the freshly observed terminal state.
    */
   onStoodDown?: (task: Task, prNumber: number, state: string) => void;
+  /**
+   * W1-T1035 (STOOD-DOWN-MERGED-TASK-STILL-ADMITTED). `isMerged(t.id)`, consulted at the TOP of
+   * `isDispatchEligible`, is the CREDIT PROJECTION for this whole pass — built ONCE by
+   * `refreshMerged()` before the per-candidate walk below it even starts, so by the time this
+   * in-flight guard takes its OWN fresh read (`readLiveState`, per candidate) that projection can
+   * already be behind it. A fresh MERGED here is therefore ambiguous on its own, and this is the
+   * ONE PLACE the chain has fresher information than `isMerged(t.id)` and, before this task, did
+   * nothing with it (measured: 24 of 32 `dispatch.stood_down MERGED` rows in the corpus later
+   * produced `dispatch.refused_already_merged` for the SAME task — the daemon admitted it, spawned
+   * a worker, and the worker refused because the credit projection had simply caught up).
+   *
+   * TWO SUB-CASES, TOLD APART HERE ONLY WHEN THIS IS SUPPLIED:
+   *   - THE STALE-CREDIT CASE — `true`: this exact merge (`prNumber`) DOES credit `taskId` per the
+   *     SAME credit rule `isMerged` applies, re-checked fresh rather than read from the pass-start
+   *     snapshot. Admitting now would just re-invite `dispatch.refused_already_merged`; the guard
+   *     excludes the task instead (see the call site).
+   *   - THE W1-T177 CASE — `false` (or this probe omitted entirely): the merge does NOT credit
+   *     `taskId` — a PR can merge without crediting the task that opened it, and that task
+   *     genuinely still needs a run (`test/drain.test.ts`'s three W1-T177 assertions, which must
+   *     keep passing untouched). The task stays admitted, exactly as before this field existed.
+   *
+   * Consulted ONLY when `readLiveState` has just answered `"MERGED"` for this candidate's open PR
+   * — never for `"OPEN"` (still in-flight, already handled) or `"CLOSED"` (abandoned, never
+   * credits anyone, always stays admitted). Omitted ⇒ `isDispatchEligible` behaves EXACTLY as
+   * before this discrimination existed — the unconditional W1-T177 fall-through.
+   */
+  isLiveMergeCredited?: (taskId: string, prNumber: number) => boolean;
+  /**
+   * Called once per task EXCLUDED because `isLiveMergeCredited` confirmed the fresh MERGED read
+   * credits it (the stale-credit case above) — fired ALONGSIDE `onStoodDown` (never instead of
+   * it), mirroring `onSinglePathCredit`'s "called alongside" contract: the same PR-level
+   * observation, plus the ADDITIONAL fact that it just changed this candidate's eligibility. The
+   * real wiring ledgers this under its own step so an operator can tell "stood down, still
+   * runnable" apart from "stood down, now excluded" instead of reading both off one row.
+   */
+  onStaleCreditExcluded?: (task: Task, prNumber: number, state: string) => void;
   /**
    * W1-T534: true when a `run-<taskId>-<epochMs>` branch already exists on origin — AUGMENTS
    * `isOpenPr`, never replaces it (design (ii)): `isOpenPr` reads a CACHED projection
@@ -445,6 +485,21 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     const liveState = opts.readLiveState?.(t.id, openPrNumber);
     if (liveState !== undefined && liveState !== "OPEN") {
       opts.onStoodDown?.(t, openPrNumber, liveState);
+      // W1-T1035: THE STALE-CREDIT DISCRIMINATION (design (iii)). `isMerged(t.id)` above is the
+      // credit projection consulted at the TOP of this chain, already stale relative to this
+      // fresh per-candidate read. A MERGED state alone cannot say whether this merge credits `t`
+      // (the stale-credit case, which must be excluded) or not (the W1-T177 case, which must stay
+      // admitted) — only `opts.isLiveMergeCredited` can tell them apart; see its own doc. Checked
+      // ONLY for MERGED (a CLOSED PR credits nothing and always falls through, unchanged).
+      if (liveState === "MERGED" && opts.isLiveMergeCredited?.(t.id, openPrNumber)) {
+        opts.onStaleCreditExcluded?.(t, openPrNumber, liveState);
+        // EXCLUDED, NOT ADMITTED: the live read's own merge already finishes this task, so
+        // admitting it here would only re-invite `dispatch.refused_already_merged` downstream —
+        // and, because this `return false` keeps it OUT of `eligible` entirely (never reaching
+        // `packDisjointFirst`/`partitionByFileOverlap`), it also can never be handed out as
+        // another candidate's `blocked_by` in this same pass (design (iv)).
+        return false;
+      }
     } else {
       opts.onSkip?.(t, openPrNumber);
       return false; // IN-FLIGHT (or unreadable — fail OPEN) — never a duplicate fresh build.
@@ -1194,6 +1249,14 @@ export interface DrainDeps {
    */
   readLiveState?: (taskId: string, prNumber: number) => string | undefined;
   /**
+   * W1-T1035: an OPTIONAL fresh re-check of whether a just-observed MERGED PR (`readLiveState`
+   * above) actually credits the task it was opened for — see {@link
+   * NextRunnableOpts.isLiveMergeCredited}'s doc for the full contract (the stale-credit vs.
+   * W1-T177 discrimination). Optional — omitted, dispatch behaves EXACTLY as before this
+   * discrimination existed.
+   */
+  isLiveMergeCredited?: (taskId: string, prNumber: number) => boolean;
+  /**
    * W1-T916 — THE SUPPLIER W1-T534 DECLARED AND NOBODY PASSED. Raw `git ls-remote --heads origin
    * 'run-*'` output, read ONCE PER PASS and parsed by {@link runBranchTaskIds} into the closure
    * {@link NextRunnableOpts.hasPushedRunBranch} consumes. Injected rather than executed here
@@ -1540,6 +1603,18 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // "open-pr" reason a stale read produced (the #388 fixture).
       onStoodDown: (t, prNumber, state) =>
         log("dispatch.stood_down", { task: t.id, pr_number: prNumber, state, reason: "cached in-flight read was stale" }),
+      // W1-T1035: the fresh MERGED read above ALSO credits this task — the credit
+      // projection (`isMerged`, captured once for this whole pass) was simply behind. Ledgered
+      // under its own step, alongside (never instead of) `dispatch.stood_down`, so an operator can
+      // tell "stood down, still runnable" (W1-T177) apart from "stood down, now excluded".
+      isLiveMergeCredited: deps.isLiveMergeCredited,
+      onStaleCreditExcluded: (t, prNumber, state) =>
+        log("dispatch.stale_credit_excluded", {
+          task: t.id,
+          pr_number: prNumber,
+          state,
+          reason: "credit projection was stale — the live merge already credits this task",
+        }),
       isIndeterminate: deps.isIndeterminate,
       // INDETERMINATE (W1-T119): a legible ledger line every tick it is
       // consulted, then the drain proceeds to the next runnable task rather
@@ -1854,6 +1929,18 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         : undefined,
       onStoodDown: (t, prNumber, state) =>
         log("dispatch.stood_down", { task: t.id, pr_number: prNumber, state, reason: "cached in-flight read was stale" }),
+      // W1-T1035: the fresh MERGED read above ALSO credits this task — the credit
+      // projection (`isMerged`, captured once for this whole pass) was simply behind. Ledgered
+      // under its own step, alongside (never instead of) `dispatch.stood_down`, so an operator can
+      // tell "stood down, still runnable" (W1-T177) apart from "stood down, now excluded".
+      isLiveMergeCredited: deps.isLiveMergeCredited,
+      onStaleCreditExcluded: (t, prNumber, state) =>
+        log("dispatch.stale_credit_excluded", {
+          task: t.id,
+          pr_number: prNumber,
+          state,
+          reason: "credit projection was stale — the live merge already credits this task",
+        }),
       isIndeterminate: deps.isIndeterminate,
       onIndeterminate: (t) => {
         log("dispatch.indeterminate", { task: t.id, ...deps.breakerDetail?.(t.id) });
