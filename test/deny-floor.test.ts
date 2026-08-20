@@ -67,3 +67,53 @@ test("deny-floor: pre-existing rules still hold (regression) — force-push to m
   assert.equal(status, 2);
   assert.match(stderr, /force/i);
 });
+
+// W1-T1066 — a lane polled `gh` 80 times at a 45-second cadence against an 8-13
+// minute CI cycle and locked the operator out of his own repo for ~90 minutes,
+// tripping the SECONDARY rate limit (cadence, not volume). Rule 6 refuses the
+// observed shape at the tool boundary: a single command carrying a loop keyword
+// AND `sleep` AND a `gh` invocation.
+
+test("W1-T1066: a gh call inside a loop with a sleep is refused", () => {
+  const forLoop = runDenyFloor(
+    'for i in $(seq 1 25); do gh pr view 42 --json state; sleep 20; done',
+  );
+  assert.equal(forLoop.status, 2);
+  assert.match(forLoop.stderr, /blocked/i);
+
+  const untilLoop = runDenyFloor(
+    'until [ "$(gh run view 123 --json status -q .status)" = "completed" ]; do sleep 20; done',
+  );
+  assert.equal(untilLoop.status, 2);
+  assert.match(untilLoop.stderr, /blocked/i);
+});
+
+test("W1-T1066: a bare gh call is still allowed", () => {
+  const { status } = runDenyFloor("gh pr view 42 --json state");
+  assert.equal(status, 0);
+});
+
+test("W1-T1066: a loop with a sleep and no gh call is still allowed", () => {
+  const localFileWait = runDenyFloor(
+    "until [ -f coverage/lcov.info ]; do sleep 30; done",
+  );
+  assert.equal(localFileWait.status, 0);
+
+  const noGhForLoop = runDenyFloor(
+    'for f in *.ts; do echo "$f"; done',
+  );
+  assert.equal(noGhForLoop.status, 0);
+
+  const bareSleep = runDenyFloor("sleep 30");
+  assert.equal(bareSleep.status, 0);
+});
+
+test("W1-T1066: the refusal names cadence rather than a bare blocked", () => {
+  const { status, stderr } = runDenyFloor(
+    'while :; do gh pr view 42 --json state; sleep 45; done',
+  );
+  assert.equal(status, 2);
+  assert.match(stderr, /polling/i);
+  assert.match(stderr, /gh/i);
+  assert.notEqual(stderr.trim(), "deny-floor: blocked");
+});
