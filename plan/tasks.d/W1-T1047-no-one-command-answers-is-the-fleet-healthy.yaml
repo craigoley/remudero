@@ -126,7 +126,7 @@
     - claim: "the one-line summary and the process exit code both carry the worst verdict observed"
       proof: "unit test: doctor: the summary line and the exit code agree on the worst verdict"
     - claim: "the new module has a real call site — the verb registration dispatches into it from the CLI entrypoint"
-      proof: "grep: doctorCommand( in src/run-task.ts"
+      proof: "unit test: doctor: the verb registration dispatches into the doctor module"
   risk: high
   origin: "oper#no-one-command-answers-fleet-health-2026-08-20"
   plan_refs: ["W1-T1044", "W1-T1036", "W1-T1021", "W1-T978", "W1-T279", "W1-T280", "W1-T450", "W1-T159", "W1-T471"]
@@ -134,6 +134,19 @@
   status: queued
   attempts: 0
   note: |
+    PROOF DIALECT ON CRITERION 6 — CORRECTED AT FILING TIME, CLAIM UNTOUCHED. It was authored as
+    `grep: doctorCommand( in src/run-task.ts`, and that FAILED this filing PR rather than capping
+    it: the path exists and is greppable (control: 159 hits for another pattern), the symbol does
+    not yet exist because this PR only FILES the task, so the proof EXECUTED and returned zero —
+    and `executed_fail` OVERRIDES keyword coverage, which is a hard refusal. The five sibling
+    criteria forward-reference through `unit test:`, which degrades to `no-match` instead, so the
+    dialects are not symmetric for an unbuilt task: a forward-referencing `unit test:` is safe and a
+    forward-referencing `grep:` at an EXISTING path is not. MEASURED across the plan: 66 `grep:`
+    proofs in queued shards name a `src/` path and 62 of them already MATCH today — they describe
+    code the task builds ON, not code it will CREATE. That is the working pattern this criterion
+    departed from. Only the `proof:` field changed; the claim is byte-identical and the implementer
+    must still wire a real call site, now evidenced by a named test rather than a symbol grep.
+
     WHY THIS SHARD IS W1-T1047 AND NOT W1-T1046 — RENUMBERED ON OPERATOR RULING, SAME BRANCH,
     SAME PR. It was first filed under W1-T1046, which the four canonical surfaces all read as free
     and which the operator had reserved. IT WAS NOT FREE ON A FIFTH. `deploy/recycle-container.sh`
