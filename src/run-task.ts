@@ -419,7 +419,16 @@ import {
 } from "./lib/emissions.js";
 import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
 import { deriveTaskClass } from "./lib/task-class.js";
-import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
+import {
+  boundRiskJudgeChangeView,
+  realRiskJudge,
+  resolveRiskJudgeMount,
+  runRiskJudge,
+  type RiskJudgeChangedFile,
+  type RiskJudgeChangeView,
+  type RiskJudgeInput,
+  type RiskJudgeVerdict,
+} from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
@@ -2098,6 +2107,41 @@ export async function fetchPrBodyViaGh(prUrl: string, gh: (args: string[]) => un
 export async function fetchPrDiffFilesViaGh(prUrl: string, gh: (args: string[]) => unknown = ghJson): Promise<string[]> {
   const view = gh(["pr", "view", prUrl, "--json", "files"]) as { files?: { path: string }[] };
   return (view.files ?? []).map((f) => f.path);
+}
+
+/**
+ * W1-T1031 — fetch THIS PR's ACTUAL changed-file list with per-file added/deleted line COUNTS,
+ * for the risk judge's {@link RiskJudgeChangeView}. The one call site below attaches the
+ * result to the judge's input right before the real judge runs (see that call site's own
+ * comment for why a throw here is left to propagate rather than caught).
+ *
+ * REST, NOT GRAPHQL, DELIBERATELY NOT `fetchPrDiffFilesViaGh` ABOVE. That reader's `gh pr view
+ * --json files` is GraphQL — the bucket this task's own rationale measured exhausted three
+ * times in one day. `repos/{owner}/{repo}/pulls/{n}/files` is REST (a separate quota), the
+ * exact endpoint `openPrFileScopes` (W1-T917, just below in this file) already established for
+ * the identical reason. Reusing `fetchPrDiffFilesViaGh`'s injectable seam and overriding its
+ * GraphQL default was the alternative design clause (ii) named — a fresh REST-native reader is
+ * chosen instead so nothing here can silently fall back onto the GraphQL path this task exists
+ * to route around.
+ *
+ * Capped via {@link boundRiskJudgeChangeView} — see that function's own doc for the cap and
+ * why. THROWS on an unparseable `prUrl` or a failed REST call — never a silent fallback to the
+ * declared file list, which would just reproduce this task's own defect under a different name.
+ */
+export function changeView(prUrl: string, fetch: (args: string[]) => unknown = ghJson): RiskJudgeChangeView {
+  const target = prUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(`change view: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to guess`);
+  }
+  const rows = fetch(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}/files?per_page=100`]) as Array<{
+    filename?: string;
+    additions?: number;
+    deletions?: number;
+  }>;
+  const files: RiskJudgeChangedFile[] = rows
+    .filter((r): r is { filename: string; additions?: number; deletions?: number } => typeof r.filename === "string")
+    .map((r) => ({ path: r.filename, additions: r.additions ?? 0, deletions: r.deletions ?? 0 }));
+  return boundRiskJudgeChangeView(files);
 }
 
 /**
@@ -7252,8 +7296,23 @@ async function runTask(
       headSha: review.headSha,
     };
     const riskJudgeMount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+    // W1-T1031: fetch the ACTUAL change view (bounded, REST-sourced — see `changeView`'s own
+    // doc) and attach it to the input the real judge is given, right before it runs. A throw
+    // from `changeView(prUrl)` here (an unparseable prUrl, a failed REST call) is deliberately
+    // left to PROPAGATE, never caught: `assessRisk`'s existing judge-unavailable catch already
+    // fails the whole judgment closed to ESCALATE (the cannot-observe→wait polarity, W1-T130,
+    // already applied to the judge itself), so no separate fail-closed branch is needed here —
+    // and catching it to fall back onto the declared `task.files` list alone would silently
+    // reproduce this task's own defect under the cover of "best effort".
+    const judgeWithChangeView = async (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
+      const view = changeView(prUrl);
+      return realRiskJudge({ mount: riskJudgeMount, cwd: worktreePath, settingsFile, spawn })({
+        ...input,
+        change: { ...input.change, changeView: view },
+      });
+    };
     const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
-      judge: realRiskJudge({ mount: riskJudgeMount, cwd: worktreePath, settingsFile, spawn }),
+      judge: judgeWithChangeView,
       escalate: (verdict, action) => {
         // W1-T125 shape, retargeted by W1-T975: this run itself never arms until
         // AFTER the risk judge proceeds (see the deferred arm call further down),

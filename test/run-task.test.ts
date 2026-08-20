@@ -1117,6 +1117,13 @@ function statefulFakeGh(opts: {
     '  process.stdout.write(JSON.stringify(v === "MERGED" ? { state: "closed", merged: true } : { state: v.toLowerCase(), merged: false }));',
     "  process.exit(0);",
     "}",
+    // W1-T1031: the risk judge's own `changeView` reads a PR's ACTUAL changed-file list over
+    // REST (`gh api repos/{o}/{r}/pulls/{n}/files`) right before its spawn — answered here
+    // with an empty file list, same shape as every other fixture's generic `api` catch.
+    'if (args[0] === "api" && typeof args[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+\\/files/.test(args[1])) {',
+    '  process.stdout.write("[]");',
+    "  process.exit(0);",
+    "}",
     'if (args[0] === "pr" && args[1] === "edit") { process.exit(0); }',
     'if (args[0] === "issue" && args[1] === "create") {',
     `  process.stdout.write(${JSON.stringify(opts.issueUrl ?? "https://github.com/acme/remudero/issues/1")} + "\\n");`,
