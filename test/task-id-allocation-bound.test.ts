@@ -166,3 +166,39 @@ test("W1-T1039: an out of range shard still loads and still lints", () => {
   // And the allocator still refuses to mint at it, in the same tree — the two facts coexist.
   assert.equal(mintNextTaskId({ planPath }).maxSeen, SANE);
 });
+
+// ── the fourth surface: git history, which can never be cleaned up ──────────────────────────
+
+test("W1-T1039: an id above the bound in plan history no longer raises the ceiling", async () => {
+  // THE SURFACE THAT CANNOT BE REPAIRED AT SOURCE. The other three can in principle be edited; this
+  // one reads ids out of immutable git history, so a shard once filed at a burned id keeps handing
+  // that id back from `git log -p` forever. `mintNextTaskIdWithHistory` folds it in AFTER
+  // `mintNextTaskId` has already bounded its own three, so without the same filter here the fix is
+  // invisible at the verb: MEASURED with the library bound alone in place, `rmd next-task-id`
+  // reported a correctly-bounded `shards` term beside an unbounded history term and still answered
+  // out of range.
+  const { mintNextTaskIdWithHistory } = await import("../src/run-task.js");
+  const root = planRoot();
+  const planPath = writePlan(root, [SANE]);
+
+  // A synthetic `git log -p` patch: one ADDED id inside the range, one above it. `taskIdsEverFiled`
+  // reads added `id:` lines, so this is the exact shape the real scan sees.
+  const patch = [`+- id: W1-T${SANE}`, `+- id: W1-T${FAR_ABOVE}`, ""].join("\n");
+  const gitRunner = (args: string[]): string => {
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return "abc1234\n";
+    if (args[0] === "log") return patch;
+    throw new Error(`unstubbed git ${args[0]}`); // no cache path resolves -> nothing is written
+  };
+
+  const mint = mintNextTaskIdWithHistory({ planPath, repoRoot: root, gitRunner });
+
+  assert.equal(mint.historyMax, SANE, "history contributes its sane id, never the one above the bound");
+  assert.equal(mint.maxSeen, SANE, "the folded max stays inside the range");
+  assert.equal(mint.n, SANE + 1);
+  assert.ok(mint.n <= MAX_ALLOCATABLE_TASK_ID, "the verb's own mint may never exceed the bound");
+
+  // PRECONDITION, so the assertions above are not vacuous: the fixture patch really does carry an
+  // id above the bound, and the scan really would have seen it.
+  assert.ok(patch.includes(`W1-T${FAR_ABOVE}`), "fixture carries an out-of-range added id");
+  assert.equal(isAllocatableTaskId(FAR_ABOVE), false, "and it is genuinely outside the bound");
+});
