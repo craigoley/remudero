@@ -483,10 +483,7 @@ forensic detail, so the narrative does not need to live here.
   IDENTICAL PAIR 1 AND 0** on `run /usr/bin/date now`, so this reproduces everywhere and is portable
   regex semantics, not a harness quirk — and `/usr/bin/grep -E '\busr'` on that same line returns 1,
   the same as git's. Anchor on the non-word character itself (`[[:space:]]/usr/bin/`), use `-w`, or
-  drop the `\b`. Never `\s` under `awk`. *(2026-08-12; this clause previously claimed git grep -E
-  ignores `\b` while a terminal `-E` honours it — its own cited example,
-  `git grep -lE '\busr/bin\b' -- CLAUDE.md`, returns 1 rather than the 0 it recorded, so the
-  mechanism above replaces it)*
+  drop the `\b`. Never `\s` under `awk`. *(2026-08-12)*
 - **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
   absence.** A GATE NOW HOLDS THE TRACKED POPULATION AT ZERO (W1-T438/#1664; `test/no-raw-nul.test.ts`
@@ -642,13 +639,10 @@ forensic detail, so the narrative does not need to live here.
   operation. **AND INSPECT WITH `^3`, because the obvious command UNDERSTATES the payload** —
   `git stash show --stat stash@{0}` printed NOTHING for that entry, since all 9 files were UNTRACKED
   and untracked payload hangs off the third parent: `git show --stat 'stash@{0}^3'` is what shows it.
-  **RETRACTED HERE AFTER RE-DERIVATION ON GIT 2.54.0: `git stash push <path>` is NOT "unsupported".**
-  It works — exit 0, list 1→2, the path reverted — so any reading that blamed a silent no-op was
-  wrong about the mechanism and should be re-taken. It is still the wrong verb, for the reason above
-  and demonstrated by that very probe: the new entry landed at `stash@{0}` and DEMOTED the
-  three-week-old one to `stash@{1}`, so a concurrent bare `pop` would have taken mine. `git checkout
-  -- <path>` is scoped to the path, cannot reach another session's work, and cannot silently no-op.
-  *(2026-08-13 — the eight-file pop, and the `push <path>` claim re-derived and retracted)*
+  **`git stash push <path>` WORKS — it is NOT "unsupported" (re-derived on git 2.54.0) — and is
+  still the wrong verb**: the new entry lands at `stash@{0}` and DEMOTES the older one, so a
+  concurrent bare `pop` takes yours. `git checkout -- <path>` is scoped to the path, cannot reach
+  another session's work, and cannot silently no-op. *(2026-08-13 — the eight-file pop)*
 
 - **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
   half of your diff you are in before you call a merge "shipped."** On a container host the daemon
@@ -685,3 +679,27 @@ forensic detail, so the narrative does not need to live here.
   client script (`new Function(<largest <script> block of renderShellHtml()>)`). serve.ts DOM
   behavior is covered by REAL Playwright/Chromium tests (`test/serve.*.test.ts`) — run them for any
   client change. *(#777)*
+
+## Lessons from 2026-08-19
+
+- **A deps object supplying SOME fakes leaves every other seam on its REAL default — so relaxing a
+  guard can make a previously-dead default FIRE, in a file the diff never touched.** The MIRROR of
+  the all-fakes bullet above. A test stubbing only `log` let the real `defaultReexec` fire, which
+  replays `process.argv.slice(1)` — under `node --test` that IS the runner — killing six runners at
+  `exit 143` with no failed step and no summary, which reads as preemption. Run every CALLER of a
+  changed symbol (`git grep -l`), never the files the task declares; the scoped run was green.
+  *(#2237, #2248)*
+- **Read re-entrancy from `process.env`, not an injected `env` argument — a spawn writes a child's
+  environment and cannot reach a parameter.** A caller passing `{}` saw no loop guard; `isCiEnv({})`
+  is false for the same reason. *(#2248)*
+- **A fixed date constant compared against rows stamped at REAL time is a time bomb; the signature
+  is a red beginning at a clock boundary with no diff involved.** Compare the last green run's
+  timestamp against the first red one before blaming a change. Stamp through the injected clock at
+  the write seam; moving the constant only re-arms it. *(#2250)*
+- **Verify a new falsifier by DELETING the fix and re-running — `# fail N` removed vs `# fail 0`
+  restored is the evidence it is load-bearing.** A guard seeded with rows already carrying the field
+  under test passed either way. *(#2250)*
+- **A `verify: auto` task can NEVER declare its own plan record in `files:`, so a ratified scope
+  widening is recorded in the source comment and PR body, not the shard** — `rule15-filing` refuses
+  it, and the reviewer's `scope_violation` is ADVISORY, naming "review-ratified widenings"
+  legitimate. *(#2255)*
