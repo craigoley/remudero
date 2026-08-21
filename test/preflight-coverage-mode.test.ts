@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
@@ -238,6 +241,47 @@ test("runPreflightCoverage: the coverage run is invoked with --enable-source-map
   assert.ok(coverageCall!.args.includes("--test-coverage-exclude=test/**"), "test/** must stay excluded from the ratio");
   assert.ok(coverageCall!.args.includes("test/**/*.test.ts"), "the FULL glob must be in scope — a scoped run cannot prove instrumentation honestly");
 });
+
+test(
+  "runPreflightCoverage: the lcov this run was supposed to produce being UNREADABLE is a toolchain " +
+    "FAIL, not a silent pass — the real readFileSync arm every other test in this file injects past",
+  () => {
+    // Every other test here supplies `deps.lcovText`, so the production read — `readFileSync` on
+    // the lcov the coverage step just wrote — never executes, and neither does its catch arm.
+    // That is exactly why diff-coverage reported those lines as added-and-uncovered. This test
+    // omits `lcovText` so the REAL read runs, against a repoRoot that carries no
+    // `coverage/lcov.info` at all, so it throws and the catch arm is the thing under test.
+    const emptyRoot = mkdtempSync(join(tmpdir(), "preflight-coverage-no-lcov-"));
+    try {
+      const { spawn, calls } = recordingSpawn({
+        "diff --name-only origin/main...HEAD": { status: 0, stdout: "src/lib/example.ts\n" },
+        "status --porcelain": { status: 0, stdout: "" },
+      });
+      const result = runPreflightCoverage(emptyRoot, { spawn });
+
+      assert.equal(result.ok, false, "an unreadable lcov must never let the overall run read as a pass");
+      const instrumentation = result.steps.find((s) => s.name === "coverage-mode:instrumentation");
+      assert.ok(instrumentation, "the failure is reported under the instrumentation step, not swallowed");
+      assert.equal(instrumentation.ok, false);
+      assert.match(
+        instrumentation.detail,
+        /toolchain unavailable/,
+        `an unreadable lcov is reported as a toolchain failure (got: ${instrumentation.detail})`,
+      );
+      // DISCRIMINATOR: this is NOT the UNPROVEN arm above it — that one names uninstrumented
+      // files off an lcov it successfully read. Here there is no lcov to read at all.
+      assert.doesNotMatch(
+        instrumentation.detail,
+        /UNPROVEN/,
+        "an unreadable lcov must not be mistaken for a readable one that merely lacks a record",
+      );
+      const diffCoverageCalled = calls.some((c) => c.args.some((a) => a.includes("diff-coverage.mjs")));
+      assert.equal(diffCoverageCalled, false, "diff-coverage.mjs is never asked for a verdict over an lcov that could not be read");
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 // ── acceptance 4: --fast still shells no test suite now that --coverage exists beside it ────
 
