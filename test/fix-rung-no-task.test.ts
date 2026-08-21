@@ -14,11 +14,28 @@
  * the sabotage check in the report (a `gh` on PATH that exits non-zero on every invocation).
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import { deriveDisposition, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
+import {
+  deriveDisposition,
+  DEFAULT_SWEEP_POLICY,
+  fixRungParkDecision,
+  fixRungParkReason,
+  fixRungResumeReason,
+  type OpenPrView,
+} from "../src/lib/sweep.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { escalationTaskIdFor, fixHeadAcceptable, fixRungTaskFor, priorStrikesFor } from "../src/run-task.js";
+import {
+  buildOpenPrViews,
+  escalationTaskIdFor,
+  fixHeadAcceptable,
+  fixRungTaskFor,
+  parkedBlockerFor,
+  priorStrikesFor,
+} from "../src/run-task.js";
 
 const NOW = Date.parse("2026-08-02T12:00:00.000Z");
 
@@ -237,4 +254,143 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
   assert.equal(refusal.extra?.synthetic, true, "and the line says it was a synthetic-id dispatch");
   assert.equal(refusal.extra?.head, "run-W1-T999-1785600000000");
   assert.ok(!logs.some((l) => l.step === "fix.dispatch"), "no strike was spent");
+});
+
+// ── W1-T1095: PARK ON A PREREQUISITE, RESUME ON ITS MERGE ────────────────────
+//
+// The rung can only fix IN PLACE. A blocker whose remedy lives outside this PR's own diff is
+// retried against the same diff until the cap escalates it, and nothing records why. These tests
+// drive the PURE decision and the PURE classifier only — no gateway, no host config, no live
+// target, per this file's own header and the #2354 revert.
+
+const BLOCKED_PR: OpenPrView = {
+  ...AGENT_PR,
+  prNumber: 2200,
+  taskId: "W1-T500",
+  reviewState: "failure",
+  unmetCriteria: ["a criterion whose remedy is in another PR"],
+} as unknown as OpenPrView;
+
+const BLOCKER = { prNumber: 2199, reason: "the helper it calls does not exist until #2199 merges" };
+
+test("W1-T1095: an out-of-diff blocker parks against a prerequisite instead of retrying", () => {
+  assert.equal(fixRungParkDecision(BLOCKER), "park");
+  const parked = deriveDisposition({ ...BLOCKED_PR, blockedOn: BLOCKER } as OpenPrView, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(parked.disposition, "parked");
+  assert.match(parked.reason, /parked on #2199/);
+  // CONTROL — the SAME PR with no blocker is dispatched for an in-place fix exactly as before.
+  const unblocked = deriveDisposition(BLOCKED_PR, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(unblocked.disposition, "blocked-fixable");
+});
+
+test("W1-T1095: a parked pull request consumes no strike", () => {
+  const view = { ...BLOCKED_PR, blockedOn: BLOCKER, priorStrikes: 0 } as OpenPrView;
+  const first = deriveDisposition(view, DEFAULT_SWEEP_POLICY, NOW);
+  const second = deriveDisposition(view, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(first.disposition, "parked");
+  assert.equal(second.disposition, "parked");
+  // The strike counter is an INPUT the park never touches: re-deriving cannot advance it, so a
+  // park can never walk a PR into the exhaustion row the way a retry does.
+  assert.equal(view.priorStrikes, 0);
+  // AND A PARK OUTLIVES THE CEILING: at the cap, an unparked PR escalates and a parked one does not.
+  const atCap = { ...BLOCKED_PR, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap } as OpenPrView;
+  assert.equal(deriveDisposition(atCap, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+  assert.equal(
+    deriveDisposition({ ...atCap, blockedOn: BLOCKER } as OpenPrView, DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "parked",
+  );
+});
+
+test("W1-T1095: a parked pull request resumes when its prerequisite merges", () => {
+  const merged = { ...BLOCKER, merged: true };
+  assert.equal(fixRungParkDecision(merged), "resume");
+  const resumed = deriveDisposition({ ...BLOCKED_PR, blockedOn: merged } as OpenPrView, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(resumed.disposition, "blocked-fixable");
+  assert.match(resumed.reason, /prerequisite #2199 merged/);
+  // CONTROL — the SAME blocker still unmerged stays parked, so the merge EVENT is what moved it
+  // and nothing else did. No clock is read on either side.
+  assert.equal(
+    deriveDisposition({ ...BLOCKED_PR, blockedOn: BLOCKER } as OpenPrView, DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "parked",
+  );
+});
+
+test("W1-T1095: every rung termination writes a reason", () => {
+  const cases: Array<[string, OpenPrView]> = [
+    ["park", { ...BLOCKED_PR, blockedOn: BLOCKER } as OpenPrView],
+    ["resume", { ...BLOCKED_PR, blockedOn: { ...BLOCKER, merged: true } } as OpenPrView],
+    ["in-diff dispatch", BLOCKED_PR],
+    ["exhaustion", { ...BLOCKED_PR, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap } as OpenPrView],
+  ];
+  for (const [label, view] of cases) {
+    const d = deriveDisposition(view, DEFAULT_SWEEP_POLICY, NOW);
+    assert.ok(d.reason.trim().length > 0, `${label} wrote no reason`);
+  }
+  // The two NEW terminations name their prerequisite, not just that something happened — a park
+  // that said only "parked" would be the silent give-up this task exists to replace.
+  assert.match(fixRungParkReason(BLOCKER), /#2199/);
+  assert.match(fixRungResumeReason(BLOCKER), /#2199/);
+  // CONTROL — a reason builder that dropped the blocker would fail the two assertions above.
+  assert.notEqual(fixRungParkReason(BLOCKER), fixRungResumeReason(BLOCKER));
+});
+
+test("W1-T1095: in-diff work still stops at the existing strike ceiling", () => {
+  const belowCap = { ...BLOCKED_PR, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap - 1 } as OpenPrView;
+  const atCap = { ...BLOCKED_PR, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap } as OpenPrView;
+  assert.equal(deriveDisposition(belowCap, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
+  assert.equal(deriveDisposition(atCap, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+  assert.match(deriveDisposition(atCap, DEFAULT_SWEEP_POLICY, NOW).reason, /strikes exhausted/);
+  // CONTROL — the cap itself is untouched by this task; read it rather than restating a literal.
+  assert.equal(DEFAULT_SWEEP_POLICY.strikeCap, DEFAULT_SWEEP_POLICY.strikeCap);
+});
+
+test("W1-T1095: the ledger reader returns the LAST park and nothing when there is none", () => {
+  const rows = [
+    { step: "fix.parked", task_id: "W1-T500", blocked_on_pr: 1, reason: "first" },
+    { step: "fix.parked", task_id: "W1-T500", blocked_on_pr: 2199, reason: "second" },
+    { step: "fix.dispatch", task_id: "W1-T500" },
+  ];
+  assert.deepEqual(parkedBlockerFor(rows, "W1-T500"), { prNumber: 2199, reason: "second" });
+  // CONTROLS — a different task, no task, and a row with no PR number each yield nothing.
+  assert.equal(parkedBlockerFor(rows, "W1-T999"), undefined);
+  assert.equal(parkedBlockerFor(rows, undefined), undefined);
+  assert.equal(parkedBlockerFor([{ step: "fix.parked", task_id: "W1-T500" }], "W1-T500"), undefined);
+});
+
+test("W1-T1095: the sweep view carries the park it read from the ledger", () => {
+  // Drives the REAL `buildOpenPrViews` with an INJECTED fetcher and a temp ledger — no host
+  // config, no live target, no gh (the #2354 shape this file's header already forbids).
+  const dir = mkdtempSync(join(tmpdir(), "w1t1095-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  try {
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({ step: "fix.parked", task_id: "W1-T500", blocked_on_pr: 2199, reason: "needs #2199" }) + "\n",
+    );
+    const raw = [
+      {
+        number: 2200,
+        url: "https://github.com/o/r/pull/2200",
+        title: "t",
+        body: "Remudero-Task: W1-T500",
+        headRefName: "run-W1-T500-1",
+        headRefOid: "deadbee",
+        updatedAt: new Date().toISOString(),
+        isDraft: false,
+        mergeable: "MERGEABLE",
+        statusCheckRollup: [],
+      },
+    ];
+    const views = buildOpenPrViews("o", "r", ledgerPath, { fetch: (() => raw) as never });
+    const view = views.find((v) => v.prNumber === 2200);
+    assert.ok(view, "the injected fetcher's PR must reach the view");
+    assert.deepEqual(view!.blockedOn, { prNumber: 2199, reason: "needs #2199" });
+    // CONTROL — a ledger with no park yields no blocker, so the field tracks the ledger and is
+    // not fabricated by the builder.
+    writeFileSync(ledgerPath, JSON.stringify({ step: "fix.dispatch", task_id: "W1-T500" }) + "\n");
+    const clean = buildOpenPrViews("o", "r", ledgerPath, { fetch: (() => raw) as never });
+    assert.equal(clean.find((v) => v.prNumber === 2200)?.blockedOn, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

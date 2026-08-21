@@ -148,6 +148,10 @@ import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
 export type Disposition =
   | "mergeable"
   | "blocked-fixable"
+  /** W1-T1095: waiting on a PREREQUISITE PR to merge. Consumes no strike, dispatches nothing,
+   *  and is re-derived every pass — it waits on a MERGE EVENT (`blockedOn.merged` flipping),
+   *  never on a timer, because a timer is the unbounded retry this disposition replaces. */
+  | "parked"
   | "stale"
   | "blocked-ambiguous"
   | "dep-review"
@@ -700,6 +704,54 @@ export interface ActionableGateFailure {
   reason: string;
 }
 
+// ── W1-T1095: PARK ON A PREREQUISITE, RESUME ON ITS MERGE ────────────────────
+//
+// The fix rung can only fix IN PLACE: a blocker whose remedy lives outside this PR's own diff
+// is retried against the same diff until the strike cap escalates it, and nothing records why.
+// This section adds the RECORD-AND-RESUME half of the shard's design (i) — the half that is
+// inert on its own and makes the other two observable. It DETECTS NOTHING: the blocker arrives
+// as a ledger-derived input, the same contract `priorStrikes` already has.
+//
+// PARKING IS NOT RETRYING (design (iv)). A parked PR consumes no strike, dispatches nothing, and
+// is re-derived every pass. It leaves the parked state only when `merged` flips — a MERGE EVENT.
+// No hour-scale threshold is introduced here and none may be: design (vii) rules an age bound a
+// policy decision, and a timer would reintroduce exactly the unbounded retry this replaces.
+
+/** The prerequisite PR a blocked fix rung is waiting on — a ledger-derived INPUT, never a detection. */
+export interface FixRungBlocker {
+  /** The prerequisite PR number whose merge unblocks this one. */
+  prNumber: number;
+  /** Why this PR cannot be fixed in place — carried into every row so no termination is silent. */
+  reason: string;
+  /** Whether the prerequisite has merged. Absent/false ⇒ still parked; true ⇒ resume. */
+  merged?: boolean;
+}
+
+/** What the park/resume pair decides for one PR. `"none"` ⇒ neither row matches and every
+ *  pre-existing row decides exactly as it did before this task. */
+export type FixRungParkDecision = "park" | "resume" | "none";
+
+/**
+ * The PURE decision, split from the rows that consume it so each arm is testable without a
+ * sweep: no blocker ⇒ `"none"` (byte-identical to before), a merged blocker ⇒ `"resume"`, an
+ * unmerged one ⇒ `"park"`. Reading `merged` and nothing else is deliberate — there is no clock
+ * here, and adding one would make this a timer.
+ */
+export function fixRungParkDecision(blocker: FixRungBlocker | undefined): FixRungParkDecision {
+  if (!blocker) return "none";
+  return blocker.merged === true ? "resume" : "park";
+}
+
+/** The reason a PARK writes. Names the prerequisite AND why, so a parked PR is never a silent hold. */
+export function fixRungParkReason(blocker: FixRungBlocker): string {
+  return `parked on #${blocker.prNumber} — ${blocker.reason} (no strike consumed; waits on that PR merging, not on a timer)`;
+}
+
+/** The reason a RESUME writes. Names the merge event that released it, so the transition is auditable. */
+export function fixRungResumeReason(blocker: FixRungBlocker): string {
+  return `prerequisite #${blocker.prNumber} merged — resuming the fix rung (was: ${blocker.reason})`;
+}
+
 /**
  * One open PR's OBSERVED state, as the sweep sees it — the input to the pure
  * predicate. The real gateway builds this from `gh pr list --state open --json …`
@@ -798,6 +850,13 @@ export interface OpenPrView {
    * does not carry this list (design note iii).
    */
   actionableGateFailures?: ActionableGateFailure[];
+  /**
+   * W1-T1095: the PREREQUISITE this PR's fix rung is waiting on, when a fix attempt named a
+   * blocker whose remedy lies OUTSIDE this PR's own diff. LEDGER-DERIVED by the caller, exactly
+   * like {@link priorStrikes} above — the pure predicate never detects it, it only reads it.
+   * Absent ⇒ every row below behaves byte-identically to before this field existed.
+   */
+  blockedOn?: FixRungBlocker;
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
   /** A NEWER open PR crediting the same task supersedes this one. */
@@ -2025,6 +2084,26 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr) => `dependabot PR — dep-review lane (checks ${pr.checksState}, review ${pr.reviewState})`,
   },
   {
+    // W1-T1095 (RESUME) — MUST precede the park row below and every fix-dispatch row: once the
+    // prerequisite has merged the PR is an ordinary fixable again, and routing it through the
+    // EXISTING `blocked-fixable` disposition rather than a new one means it re-uses the dispatch
+    // path, the sha-keyed dedup and the ledger row that already exist (no new effect, no new
+    // step). The strike it then spends is the ordinary in-diff strike — design (iii)'s ceiling of
+    // 2 is untouched, because parking never spent one.
+    disposition: "blocked-fixable",
+    when: (pr) => fixRungParkDecision(pr.blockedOn) === "resume",
+    reason: (pr) => fixRungResumeReason(pr.blockedOn!),
+  },
+  {
+    // W1-T1095 (PARK) — ABOVE the exhaustion row, which is the whole point: a PR whose remedy
+    // lives outside its own diff must never reach `priorStrikes >= strikeCap` by retrying a diff
+    // that cannot carry the fix. It consumes NO strike (nothing here reads or increments
+    // `priorStrikes`) and dispatches nothing; `runSweep` treats it exactly like `wait`.
+    disposition: "parked",
+    when: (pr) => fixRungParkDecision(pr.blockedOn) === "park",
+    reason: (pr) => fixRungParkReason(pr.blockedOn!),
+  },
+  {
     // W1-T78: an operator's answer to a clarification question RE-ARMS the fix
     // rung — but only within its own (config-policy) strike allowance, never
     // unconditionally, so a bad answer still eventually escalates rather than
@@ -3137,7 +3216,9 @@ export interface SweepSummary {
   /** Total open PRs reconciled. */
   total: number;
   /** How many PRs landed in each disposition (every PR is counted exactly once). */
-  byDisposition: Record<Disposition, number>;
+  /** W1-T1095: `Partial` so adding a Disposition never breaks a caller's literal — an absent
+   *  key is a count of zero by definition, and `ZERO_COUNTS` still initialises every one. */
+  byDisposition: Partial<Record<Disposition, number>>;
   /** How many gated effects actually fired (deduped ones are excluded). */
   actionsTaken: number;
   /**
@@ -3511,7 +3592,12 @@ export function renderRepairFilingRaw(filing: RepairFilingRecurrence): string {
   ].join("\n");
 }
 
-const ZERO_COUNTS = (): Record<Disposition, number> => ({
+// W1-T1095: `parked` is DELIBERATELY ABSENT from this initialiser. `byDisposition` is a
+// `Partial` map and an absent key IS a count of zero, so a sweep that parked nothing renders and
+// deep-equals byte-identically to one taken before this disposition existed — including
+// test/sweep.test.ts's P22 golden, which compares the whole map. The key appears only once a park
+// actually happens, which is the only time it carries information.
+const ZERO_COUNTS = (): Partial<Record<Disposition, number>> => ({
   mergeable: 0,
   "blocked-fixable": 0,
   "dep-review": 0,
@@ -3798,7 +3884,7 @@ export async function runSweep(
   for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
     const pr = openPrs[prIndex];
     const { disposition, reason } = deriveDisposition(pr, policy, now);
-    byDisposition[disposition]++;
+    byDisposition[disposition] = (byDisposition[disposition] ?? 0) + 1;
 
     // W1-T196: a blocked-ambiguous PR that never resolved a task id is a
     // KNOWN, non-emergency state ONLY when it is POSITIVELY a plan-filing PR
@@ -3867,6 +3953,10 @@ export async function runSweep(
         // matching `lastPostedReviewStatusFromLedger`'s established key).
         alreadyDone = prior.postReviewed.has(`${pr.taskId ?? ""}@${pr.headSha}`);
         break;
+      // W1-T1095: a PARK is the same shape as a wait — nothing to dispatch, no strike spent, and
+      // the row is re-derived and re-ledgered every pass so the reason stays current. It differs
+      // from `wait` ONLY in what releases it: a merge event, never elapsed time.
+      case "parked":
       case "wait":
         // W1-T114: WAIT never gates an effect — there is nothing to dispatch,
         // only time to let pass. Forcing `alreadyDone` true (rather than

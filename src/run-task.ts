@@ -17446,6 +17446,33 @@ export function strikeRegimeOf(line: Record<string, unknown>): StrikeRegime {
  * count, so a task genuinely failing against executed evidence still exhausts.
  * This never mutates the ledger: it changes how strikes are READ.
  */
+/**
+ * W1-T1095: the PREREQUISITE a task's fix rung is parked on, read from the ledger and nothing
+ * else — the SAME "ledger ground truth, never inferred" contract {@link priorStrikesFor} above
+ * already has, and the reason this lives here rather than inside the pure predicate.
+ *
+ * A `fix.parked` row opens a park and names the prerequisite plus WHY the remedy is out of diff;
+ * the LAST one wins, so a re-park on a different prerequisite supersedes an older one. `merged`
+ * is supplied by the caller from the gateway rather than read here, because the ledger cannot
+ * know when someone else's PR merged — that is the MERGE EVENT the park waits on, and it is the
+ * only thing that releases it. No timestamp is consulted anywhere in this function: a park has
+ * no clock by design (shard design (iv)).
+ */
+export function parkedBlockerFor(
+  lines: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+): { prNumber: number; reason: string } | undefined {
+  if (!taskId) return undefined;
+  let found: { prNumber: number; reason: string } | undefined;
+  for (const line of lines) {
+    if (line.step !== "fix.parked" || line.task_id !== taskId) continue;
+    const n = line.blocked_on_pr;
+    if (typeof n !== "number") continue;
+    found = { prNumber: n, reason: typeof line.reason === "string" ? line.reason : "" };
+  }
+  return found;
+}
+
 export function priorStrikesFor(
   lines: Array<Record<string, unknown>>,
   taskId: string | undefined,
@@ -17671,6 +17698,10 @@ export function buildOpenPrViews(
       // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
       // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
       actionableGateFailures: reviewState === "failure" ? actionableGateFailuresFromLedger(ledger, gateFailureKey) : [],
+      // W1-T1095: a park is LEDGER STATE, read beside `priorStrikes` and by the same contract.
+      // `merged` is left undefined here on purpose — only a gateway can answer whether
+      // someone else's PR merged, and that merge event is the only thing that releases a park.
+      blockedOn: parkedBlockerFor(ledger, taskId),
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
       strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
@@ -19676,6 +19707,11 @@ export async function fixCommand(
     // W1-T440: same signal as buildOpenPrViews above — routeFix's deriveDisposition call
     // reads it via the SAME sweep.ts row 7.
     criteriaRecoverable: taskId !== undefined,
+    // W1-T1095: DELIBERATELY NOT WIRED HERE. `blockedOn` is read on the SWEEP path
+    // (`buildOpenPrViews`), which is what the shard's criteria are about. `rmd fix <n>` is an
+    // OPERATOR asking for a retry by name, and honouring a park there would be a second
+    // decision — one this slice does not make. Covering it would also mean driving this async
+    // command in a test, the shape #2354 was reverted for.
     priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
     strikeHistory: deriveStrikeHistory(ledger, taskId),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
