@@ -3280,6 +3280,73 @@ function budgetFloorStandDown(e: unknown, disposition: Disposition): string | un
   return `gh budget at or below the stand-down floor (${e.resource} at ${e.remaining}/${e.limit}) — ${cost}`;
 }
 
+/**
+ * W1-T1110: the fix-rung dispatch steps that mean ONE ATTEMPT ENDED. `prior.fixed` records that a
+ * dispatch HAPPENED (`sweep.disposed` with `acted: true`), never that it SUCCEEDED — so a fix that
+ * worked and a fix that failed leave byte-identical state and the head stays gated forever. These
+ * are the rows the fix rung already writes when it stops; none is new, and none is a timer.
+ */
+const FIX_ATTEMPT_ENDED_STEPS: ReadonlySet<string> = new Set([
+  "fix.resolved",
+  "fix.exhausted",
+  "fix.ci_not_green",
+  "fix.stood_down",
+  "fix.review",
+  "fix.false_block",
+]);
+
+/**
+ * W1-T1110 — PURE. Did the fix dispatch that seeded `prior.fixed[pr@head]` already END, with the
+ * head unmoved? Split from every read so each arm is testable without a ledger file or a sweep.
+ *
+ * ORDER, NOT TIME. The seeding `sweep.disposed` row is located by index and the terminal fix row
+ * must come AFTER it. A clock-based expiry is refused by the task's own design (iii): it would make
+ * the sweep re-dispatch on elapsed time, which is the unbounded-retry shape `strikeCap` exists to
+ * prevent. Here the trigger is EVIDENCE the attempt stopped, so a still-running dispatch keeps its
+ * gate and two polls seconds apart cannot both dispatch — the idempotence the dedup exists for.
+ *
+ * THE HEAD IS UNMOVED BY CONSTRUCTION: the caller keys on the head it is currently disposing, so a
+ * fix that pushed a new sha is asking about a different key and never reaches here.
+ *
+ * `taskId` absent ⇒ FALSE, keeping today's behaviour: the fix rows carry `task_id` and no PR
+ * number, so without it there is no sound correlation and a guess would clear a live gate.
+ */
+export function fixAttemptEndedOnHead(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+  headSha: string,
+  taskId: string | undefined,
+): boolean {
+  if (taskId === undefined || taskId === "") return false;
+  let seeded = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.step !== "sweep.disposed" || line.acted !== true) continue;
+    if (line.pr_number !== prNumber || line.head_sha !== headSha) continue;
+    if (line.disposition === "blocked-fixable" || line.disposition === "conflicted") seeded = i;
+  }
+  if (seeded < 0) return false;
+  for (let i = seeded + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.task_id !== taskId) continue;
+    if (typeof line.step === "string" && FIX_ATTEMPT_ENDED_STEPS.has(line.step)) return true;
+  }
+  return false;
+}
+
+/**
+ * W1-T1110 — PURE. The sentence the dedup arm puts on its own `sweep.disposed` row, following the
+ * light-pass arm's shape one branch away (`"deferred to full sweep (light pass)"`). Before this the
+ * arm stood down with NO `stand_down_reason` at all, which is why 127 identical rows read as a
+ * healthy no-op instead of a deadlock.
+ */
+export function describeFixDedupStandDown(prNumber: number, headSha: string): string {
+  return (
+    `fix rung already dispatched for #${prNumber} on head ${headSha} and that attempt has not ` +
+    `ended — re-arms on the pass after it does, never on a clock`
+  );
+}
+
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
@@ -3846,7 +3913,14 @@ export async function runSweep(
       }
       case "blocked-fixable":
       case "conflicted": // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
-        alreadyDone = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`);
+        // W1-T1110: the set records an ATTEMPT, not a success, so a dispatch that ended without
+        // moving the head must stop suppressing the next pass. The evidence is the fix rung's own
+        // terminal rows — see `fixAttemptEndedOnHead`. The dedup is NOT deleted: while the attempt
+        // is still running there is no terminal row, the gate holds, and two polls seconds apart
+        // still cannot both dispatch against the same sha.
+        alreadyDone =
+          prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
+          !fixAttemptEndedOnHead(ledgerLines, pr.prNumber, pr.headSha, pr.taskId);
         break;
       case "stale":
         alreadyDone = prior.closed.has(pr.prNumber);
@@ -3889,6 +3963,12 @@ export async function runSweep(
     // and from `deps.dryRun` (preview), so the disposed line can name WHY
     // `acted` is false without conflating the three.
     let standDownReason: string | undefined;
+    // W1-T1110: the dedup arm must NAME ITSELF. Every other non-actionable disposition already
+    // writes a `stand_down_reason`; this one wrote none, so a gated head produced a row
+    // indistinguishable from a healthy no-op and repeated silently.
+    if (alreadyDone && (disposition === "blocked-fixable" || disposition === "conflicted")) {
+      standDownReason = describeFixDedupStandDown(pr.prNumber, pr.headSha);
+    }
     // W1-T1061: the FIELD twin of `standDownReason`'s prose, set ONLY when the "mergeable"
     // case below actually calls `deps.arm(pr)` and gets a concrete (non-void) outcome back —
     // every other disposition, and a mergeable PR that stands down in `decideSweepArm` before

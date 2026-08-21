@@ -15,6 +15,8 @@ import {
   armedButStalled,
   checksStateFromRollup,
   deriveDisposition,
+  describeFixDedupStandDown,
+  fixAttemptEndedOnHead,
   isBlockedCi,
   isPureConcurrentAddition,
   listRetirableEscalationIssues,
@@ -3718,4 +3720,124 @@ test("W1-T528: the failure classifier separates a conflict from an ordinary erro
   for (const s of ["gh: command not found", "HTTP 500", "network unreachable", ""]) {
     assert.equal(classifyUpdateBranchFailure(s), "error", `"${s}" is an ordinary error`);
   }
+});
+
+// ── W1-T1110: the fix dedup records an ATTEMPT and reads as a SUCCESS ───────────────────────
+//
+// `prior.fixed` is keyed `pr@headSha` and populated from any `sweep.disposed` row with
+// `acted: true`, so a fix that worked and a fix that failed leave byte-identical state — the head
+// stays gated with nothing able to move it. Every arm below is a PURE decision, tested without a
+// ledger file or a sweep, and each carries its own paired positive control so a passing assertion
+// cannot be vacuous.
+
+const T1110_HEAD = "aaaaaaa";
+const t1110Seed = (over: Record<string, unknown> = {}) => ({
+  step: "sweep.disposed",
+  acted: true,
+  pr_number: 11,
+  head_sha: T1110_HEAD,
+  disposition: "blocked-fixable",
+  task_id: "W1-B",
+  ...over,
+});
+const t1110End = (over: Record<string, unknown> = {}) => ({ step: "fix.ci_not_green", task_id: "W1-B", ...over });
+
+test("W1-T1110: a dispatch that ENDED without moving the head no longer suppresses the next pass", () => {
+  const ended = fixAttemptEndedOnHead([t1110Seed(), t1110End()], 11, T1110_HEAD, "W1-B");
+  assert.equal(ended, true, "a terminal fix row after the seeding dispatch clears the gate");
+  // CONTROL — the identical seed with NO terminal row still gates, so the assertion above is not
+  // simply "this function returns true".
+  assert.equal(fixAttemptEndedOnHead([t1110Seed()], 11, T1110_HEAD, "W1-B"), false);
+});
+
+test("W1-T1110: a dispatch still RUNNING keeps its gate, so two polls seconds apart cannot both dispatch", () => {
+  assert.equal(
+    fixAttemptEndedOnHead([t1110Seed()], 11, T1110_HEAD, "W1-B"),
+    false,
+    "no terminal row yet — the idempotence the dedup exists for is preserved",
+  );
+  // CONTROL — the same lines plus a terminal row do clear, proving the gate is not simply stuck.
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End()], 11, T1110_HEAD, "W1-B"), true);
+});
+
+test("W1-T1110: a terminal row BEFORE the seeding dispatch clears nothing — order, never a clock", () => {
+  assert.equal(
+    fixAttemptEndedOnHead([t1110End(), t1110Seed()], 11, T1110_HEAD, "W1-B"),
+    false,
+    "a fix that ended before this dispatch says nothing about this dispatch",
+  );
+  // CONTROL — reversing the order clears, so the predicate really is position-sensitive.
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End()], 11, T1110_HEAD, "W1-B"), true);
+});
+
+test("W1-T1110: a terminal row belonging to a DIFFERENT task never clears this head", () => {
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End({ task_id: "W1-OTHER" })], 11, T1110_HEAD, "W1-B"), false);
+  // CONTROL — the same row under this task does clear.
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End({ task_id: "W1-B" })], 11, T1110_HEAD, "W1-B"), true);
+});
+
+test("W1-T1110: a seeding row that did NOT act, or names another head, seeds no gate to clear", () => {
+  assert.equal(fixAttemptEndedOnHead([t1110Seed({ acted: false }), t1110End()], 11, T1110_HEAD, "W1-B"), false);
+  assert.equal(fixAttemptEndedOnHead([t1110Seed({ head_sha: "bbbbbbb" }), t1110End()], 11, T1110_HEAD, "W1-B"), false);
+  assert.equal(fixAttemptEndedOnHead([t1110Seed({ pr_number: 99 }), t1110End()], 11, T1110_HEAD, "W1-B"), false);
+  assert.equal(fixAttemptEndedOnHead([t1110Seed({ disposition: "mergeable" }), t1110End()], 11, T1110_HEAD, "W1-B"), false);
+  // CONTROL — the unmodified seed clears, so each negative above is the field under test and not a
+  // broken fixture.
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End()], 11, T1110_HEAD, "W1-B"), true);
+});
+
+test("W1-T1110: an absent task id keeps today's behaviour rather than guessing a correlation", () => {
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End()], 11, T1110_HEAD, undefined), false);
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End()], 11, T1110_HEAD, ""), false);
+  // THE ARM IS LOAD-BEARING, not decorative: a ledger row carrying NO `task_id` compares
+  // `undefined !== undefined` as FALSE, so without the early return an untasked row would be read
+  // as this PR's own fix ending. Falsified: removing the guard turns this line green-to-red.
+  const untasked = { step: "fix.ci_not_green" } as Record<string, unknown>;
+  assert.equal(
+    fixAttemptEndedOnHead([t1110Seed(), untasked], 11, T1110_HEAD, undefined),
+    false,
+    "an untasked row must never clear a gate on behalf of a task-less caller",
+  );
+  // CONTROL — the same lines with the real task id clear, so the refusal is the id and nothing else.
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End()], 11, T1110_HEAD, "W1-B"), true);
+});
+
+test("W1-T1110: every terminal fix step the rung already writes is accepted, and a non-terminal one is not", () => {
+  for (const step of ["fix.resolved", "fix.exhausted", "fix.ci_not_green", "fix.stood_down", "fix.review", "fix.false_block"]) {
+    assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End({ step })], 11, T1110_HEAD, "W1-B"), true, step);
+  }
+  // CONTROL — `fix.dispatch` is the START of an attempt, never its end.
+  assert.equal(fixAttemptEndedOnHead([t1110Seed(), t1110End({ step: "fix.dispatch" })], 11, T1110_HEAD, "W1-B"), false);
+});
+
+test("W1-T1110: the dedup stand-down names the PR and the head it is gated on", () => {
+  const s = describeFixDedupStandDown(11, T1110_HEAD);
+  assert.match(s, /#11/);
+  assert.match(s, new RegExp(T1110_HEAD));
+  assert.match(s, /never on a clock/, "the sentence says what it is NOT, so a reader cannot mistake it for an expiry");
+  // CONTROL — a different PR and head render differently, so the sentence is not a constant.
+  const other = describeFixDedupStandDown(12, "ccccccc");
+  assert.notEqual(other, s);
+  assert.doesNotMatch(other, /#11\b/);
+});
+
+test("W1-T1110: a gated head's disposed row now CARRIES a stand_down_reason instead of standing down silently", async () => {
+  const deps = fakeDeps({ readLedger: () => [t1110Seed({ head_sha: blockedFixablePr().headSha })] });
+  await runSweep([blockedFixablePr()], deps, DEFAULT_SWEEP_POLICY);
+  const row = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed").at(-1);
+  assert.equal(row?.acted, false, "still deduped — the dedup is not deleted");
+  assert.match(String(row?.stand_down_reason ?? ""), /already dispatched/, "the arm names itself");
+  assert.equal(deps.fixed.length, 0, "and dispatches nothing while the attempt is unfinished");
+});
+
+test("W1-T1110: once that attempt ends, the same head dispatches again and the row stops standing down", async () => {
+  const head = blockedFixablePr().headSha;
+  const deps = fakeDeps({
+    readLedger: () => [t1110Seed({ head_sha: head }), t1110End({ task_id: blockedFixablePr().taskId })],
+  });
+  await runSweep([blockedFixablePr()], deps, DEFAULT_SWEEP_POLICY);
+  const row = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed").at(-1);
+  assert.equal(row?.acted, true, "the ended attempt re-arms this head");
+  assert.equal(row?.stand_down_reason, undefined, "and no longer stands down");
+  assert.equal(deps.fixed.length, 1, "exactly one dispatch, never a storm");
 });
