@@ -1627,14 +1627,46 @@ export type ArmOutcome =
   // `attemptArm` at all (every other non-arming outcome is a real gh/ledger failure or absence).
   | "irreversible-refused";
 
+/**
+ * W1-T1079: {@link attemptArm}'s outcome PLUS the raw failure text it captured, when there was
+ * one. Before this, only the bare {@link ArmOutcome} string reached {@link armAndLogOutcome} /
+ * {@link armIfVerdictPermits} — the `msg` a failed `gh pr merge --auto` threw existed in
+ * `attemptArm`'s own catch block but never left it, so all 172 `arm-error-ignored` ledger rows
+ * (and every `automerge.arm_failed` line the review lane produced) carried no cause. `error` is
+ * populated ONLY on the `arm-error-ignored` outcome — an `armed`/`direct-merged` success still
+ * carries none, and callers that only care about the outcome may keep treating the bare
+ * {@link ArmOutcome} string as before (see the `arm` param widening on both call sites below).
+ */
+export interface ArmAttemptResult {
+  outcome: ArmOutcome;
+  error?: string;
+}
+
 export function armAutoMerge(
   prUrl: string,
   taskId: string | undefined,
   deps: ArmDeps = realArmDeps(),
 ): ArmOutcome {
+  return armAutoMergeDetailed(prUrl, taskId, deps).outcome;
+}
+
+/**
+ * W1-T1079: the SAME gate + attempt {@link armAutoMerge} runs, but returns the raw failure text
+ * {@link attemptArm} captured alongside the outcome. {@link armAndLogOutcome} and {@link
+ * armIfVerdictPermits} need BOTH so the ledger row an `arm-error-ignored` failure produces can
+ * finally carry what `gh pr merge --auto` actually said, rather than only the bare outcome
+ * string those two ever saw before. `armAutoMerge` is a thin wrapper around this — a refactor of
+ * its own body into a shared implementation, not a second copy of the gate logic, so every other
+ * caller typed against the bare {@link ArmOutcome} return (which is most of them) is unaffected.
+ */
+export function armAutoMergeDetailed(
+  prUrl: string,
+  taskId: string | undefined,
+  deps: ArmDeps = realArmDeps(),
+): ArmAttemptResult {
   if (!taskId) {
     deps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
-    return "no-task-id";
+    return { outcome: "no-task-id" };
   }
   let headSha: string;
   try {
@@ -1643,7 +1675,7 @@ export function armAutoMerge(
     deps.say(
       `automerge.head_sha_unavailable (W1-T230): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
     );
-    return "head-unavailable";
+    return { outcome: "head-unavailable" };
   }
   // ONE ledger read feeds both the verdict and its override — the same construction the two
   // `decideAutoMergeArm` call sites above already use, so the override escape hatch survives
@@ -1654,7 +1686,7 @@ export function armAutoMerge(
   const decision = decideArmFromLedgerVerdict(prior, headSha, override);
   if (!decision.arm) {
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
-    return "ledger-refused";
+    return { outcome: "ledger-refused" };
   }
   return attemptArm(prUrl, deps);
 }
@@ -1668,10 +1700,10 @@ export function armAutoMerge(
 function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say">,
-): ArmOutcome {
+): ArmAttemptResult {
   try {
     deps.armAuto(prUrl);
-    return "armed";
+    return { outcome: "armed" };
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     // GitHub REFUSES to enable auto-merge on an ALREADY-mergeable PR ("Pull
@@ -1688,7 +1720,7 @@ function attemptArm(
       try {
         deps.mergeDirect(prUrl);
         deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
-        return "direct-merged";
+        return { outcome: "direct-merged" };
       } catch (e2) {
         const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
         // W1-T1050: `deps.mergeDirect`'s own `execFileSync` wraps the WHOLE merge attempt, so a
@@ -1700,15 +1732,20 @@ function attemptArm(
           deps.say(
             `automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`,
           );
-          return "direct-merged";
+          return { outcome: "direct-merged" };
         }
         deps.say(`automerge.direct_merge_failed: ${msg2} — ${prUrl}`);
-        return "direct-merge-failed";
+        return { outcome: "direct-merge-failed" };
       }
     }
-    // Anything else stays informational (a transient gh/network error — the
-    // next sweep pass re-derives and retries; the run flow's poll reads true state).
-    return "arm-error-ignored";
+    // W1-T1079: this used to be pure prose on `say` (stdout only) — the ledger row itself
+    // carried nothing, which is the defect this task closes. `msg` is now returned alongside
+    // the outcome so every caller that logs it can put it on the row (see `armAndLogOutcome`/
+    // `armIfVerdictPermits`). Still never retried MORE eagerly and never given its own retry
+    // cap here (design note iii) — only named, whichever of `armFailureAction`'s two non-
+    // clean-status classes it fell into.
+    deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
+    return { outcome: "arm-error-ignored", error: msg };
   }
 }
 
@@ -1832,7 +1869,7 @@ export function armAutoMergeAtOpen(
     );
     return "irreversible-refused";
   }
-  return attemptArm(prUrl, deps);
+  return attemptArm(prUrl, deps).outcome;
 }
 
 /**
@@ -2084,7 +2121,10 @@ export function armIfVerdictPermits(
     headRefName?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
   },
-  deps: { arm?: (prUrl: string, taskId: string) => ArmOutcome; ledgerLines?: () => Array<Record<string, unknown>> } = {},
+  deps: {
+    arm?: (prUrl: string, taskId: string) => ArmOutcome | ArmAttemptResult;
+    ledgerLines?: () => Array<Record<string, unknown>>;
+  } = {},
 ): ArmOutcome | "skipped" {
   if (ctx.headRefName?.startsWith("dependabot/")) {
     ctx.log("automerge.arm_skipped", { reason: "dependabot PR — the dep-review lane owns arming for these", head_sha: ctx.headSha });
@@ -2110,7 +2150,11 @@ export function armIfVerdictPermits(
   }
   // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
   // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
-  const outcome = (deps.arm ?? armAutoMerge)(ctx.prUrl, ctx.taskId);
+  const result = (deps.arm ?? armAutoMergeDetailed)(ctx.prUrl, ctx.taskId);
+  const outcome = typeof result === "string" ? result : result.outcome;
+  // W1-T1079: `deps.arm` (test fixtures, and every default before this task) may still return a
+  // bare ArmOutcome with no error text — that is fine, `error` is simply absent from the row.
+  const error = typeof result === "string" ? undefined : result.error;
   // impl-BI: the STEP NAME must match the outcome. This used to log `automerge.armed`
   // unconditionally with the outcome merely carried in a field — so a `ledger-refused` here
   // still read as an arm to anyone counting steps.
@@ -2127,6 +2171,9 @@ export function armIfVerdictPermits(
     reason: armOutcomeReason(outcome, decision.reason),
     decision_reason: decision.reason,
     head_sha: ctx.headSha,
+    // W1-T1079: the ONE field this task adds to this row — what `gh pr merge --auto` actually
+    // said, present only when the attempt actually threw (never on an armed/skipped outcome).
+    ...(error !== undefined ? { error } : {}),
   });
   return outcome;
 }
@@ -2156,7 +2203,12 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
     case "direct-merge-failed":
       return "GitHub refused --auto as already-clean and the direct-merge fallback then failed";
     case "arm-error-ignored":
-      return "`gh pr merge --auto` failed for a reason that is not the clean-status case — treated as transient and left for the next sweep pass";
+      // W1-T1079: no longer claims "treated as transient" unconditionally — armFailureAction
+      // now only calls a narrow set of signatures transient and defaults to permanent for
+      // everything else, so this row's own `error` field (not this fixed string) is what says
+      // which one a given attempt actually was. Left for the next sweep pass either way (design
+      // note iii — no retry-cap change here).
+      return "`gh pr merge --auto` failed for a reason that is not the clean-status case — see this row's `error` field for what gh actually said; left for the next sweep pass";
     case "irreversible-refused":
       return "the diff was classified IRREVERSIBLE (W1-T919/W1-T947) — auto-merge refuses regardless of verdict; an operator must arm this manually";
     case "skipped":
@@ -2190,16 +2242,23 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
  * which is what makes a sweep-armed merge and a hand-armed merge finally distinguishable on
  * the ledger. `pr_number`/`pr_url` are added by {@link logArmAttribution}, not here, so this
  * stays the single place that decides which outcomes count as armed.
+ *
+ * W1-T1079: `arm` may return the bare {@link ArmOutcome} it always could (every existing
+ * fixture/lane override keeps working unchanged) OR the richer {@link ArmAttemptResult} the new
+ * default, {@link armAutoMergeDetailed}, returns — either way the `error` text, when there is
+ * one, is merged onto the SAME row this function already wrote, not a second line.
  */
 export function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
   lane: ArmLane = "operator",
 ): ArmOutcome {
-  const outcome = arm(prUrl, taskId);
-  logArmAttribution(log, outcome, prUrl, taskId, lane, { outcome });
+  const result = arm(prUrl, taskId);
+  const outcome = typeof result === "string" ? result : result.outcome;
+  const error = typeof result === "string" ? undefined : result.error;
+  logArmAttribution(log, outcome, prUrl, taskId, lane, error !== undefined ? { outcome, error } : { outcome });
   return outcome;
 }
 
@@ -2218,11 +2277,29 @@ export function armReportPhrase(outcome: ArmOutcome): string {
  * PURE classifier for a failed `gh pr merge --auto` (exported for test): the
  * "clean status" class means the PR was ALREADY fully mergeable — auto-merge
  * had nothing to wait on and the correct completion is an immediate direct
- * merge (the caller only ever arms gated-green PRs). Everything else is
- * "ignore": informational, retried by the next sweep pass.
+ * merge (the caller only ever arms gated-green PRs).
+ *
+ * W1-T1079: everything else used to be a single "ignore" bucket, folded in as though every
+ * non-clean-status failure were transient and safe to leave for the next sweep pass. It is not:
+ * a permanent refusal (a branch-protection rule, a required review, a merge conflict) looks
+ * IDENTICAL to a network blip once the error text is discarded, which is exactly what made
+ * rationale (1) unanswerable — see this file's own `arm-error-ignored` rows. This now names a
+ * THIRD case: `"transient"` only for the narrow set of signatures that plausibly ARE a blip
+ * (rate limiting, a timeout, a dropped connection) — everything else defaults to `"permanent"`,
+ * the opposite of the old default. Both still route to the SAME `arm-error-ignored` outcome
+ * (design note iii — no retry-cap or control-flow change here); what changes is that the
+ * classification travels with the row instead of the row itself lying about it. Callers get the
+ * error TEXT itself (see {@link ArmAttemptResult}) regardless of which of these two it is, so
+ * this classification is documentation of intent, not the only signal a future reader has.
  */
-export function armFailureAction(stderrText: string): "direct-merge" | "ignore" {
-  return /clean status/i.test(stderrText) ? "direct-merge" : "ignore";
+export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "permanent" {
+  if (/clean status/i.test(stderrText)) return "direct-merge";
+  if (/timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|network|secondary rate limit|rate.limit|abuse detection|too many requests|5\d\d\b|GraphQL: (?:Something went wrong|Server Error)/i.test(
+    stderrText,
+  )) {
+    return "transient";
+  }
+  return "permanent";
 }
 
 /**
@@ -18131,7 +18208,12 @@ export function buildSweepEffects(
   // through `armAndLogOutcome` (rather than calling it bare), so a successful sweep arm
   // finally reaches the ledger with the PR identity + a `"sweep"` lane, not only the
   // sweep.disposed row.
-  armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+  // W1-T1079: default is now {@link armAutoMergeDetailed}, not the bare-outcome
+  // {@link armAutoMerge} — the sweep lane arms far more PRs than any other, so it is where
+  // most of the 172 error-less `arm-error-ignored` rows this task fixes came from. Every
+  // existing test fixture returning a bare {@link ArmOutcome} (e.g. `(): ArmOutcome => "armed"`)
+  // still satisfies this widened type unchanged.
+  armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
   // W1-T516 — appended LAST so no positional caller shifts, the same convention every dep
   // above follows. OPTIONAL with no default expression (rather than a bare `= loadDefaultPolicy()
   // ...` default), so the `??` fallback below is the injection SEAM test/config-reader-seams.test.ts
@@ -18206,7 +18288,7 @@ export function buildSweepEffects(
   // separately-passed number. `sweepArmTaskId` is skipped (raw `taskId` passed through
   // unchanged) when the number cannot be parsed at all — a malformed `prUrl` is exactly the
   // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
-  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = (prUrl, taskId) => {
+  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = (prUrl, taskId) => {
     const prNumber = prNumberFromRef(prUrl);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs));
   };
