@@ -15,6 +15,6 @@ raw: "AN ENV-HYGIENE TEST SCRUBS ANTHROPIC_API_KEY BUT NOT ANTHROPIC_BASE_URL â€
   names the omission, this is documentation rather than a defect."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
 summary: null
