@@ -190,25 +190,42 @@ export function judgeDispatchStall(candidateCount: number, sinceMs: number | und
 
 /**
  * DISPATCH LIVENESS — a READER for a field that is emitted and read by nothing. `daemon.alive`
- * carries `phase`, and consecutive rows all reading `sweep` with no `dispatch` among them is a
- * daemon that is awake and sweeping but never dispatching. WARN, not FAIL: a genuinely empty queue
- * produces the same shape, so this is a prompt to look, not a verdict on its own.
+ * carries `phase`, and a window with no `dispatch` phase among it — WHATEVER the other phases
+ * are, not only a hardcoded `sweep` — is a daemon that is awake but never dispatching. WARN, not
+ * FAIL: a genuinely empty queue produces the same shape, so this is a prompt to look, not a
+ * verdict on its own. CALLERS MUST PASS ONLY THE CURRENT RUN'S PHASES (see
+ * {@link readCurrentRunAlivePhases}) — this function trusts its input and does not itself filter
+ * by `run_id` (W1-T1099).
+ *
+ * ZERO ROWS IS NOT THE SAME AS "TOO FEW TO JUDGE": a live daemon that has entered no rung this
+ * run writes no `daemon.alive` row at all (the ticker wraps a rung's body, not the tick), so an
+ * empty window means the arm has no evidence either way and must say so — OK would be a
+ * false-green one level below the run-boundary defect this task also fixes (W1-T1099 design iii).
  */
 export const STARVATION_MIN_ROWS = 3;
 
 export function judgeDispatchStarvation(phases: readonly string[]): Check {
   const threshold = `some dispatch phase within the last ${STARVATION_MIN_ROWS} alive row(s)`;
+  if (phases.length === 0) {
+    return {
+      name: "dispatch-liveness",
+      verdict: "WARN",
+      measured: "0 alive row(s) for the current run — liveness UNKNOWN",
+      threshold,
+      detail: "no daemon.alive row exists for this run yet — a daemon that never enters a rung writes none at all, so this is not evidence of health; check dispatch-stall and the daemon process directly",
+    };
+  }
   if (phases.length < STARVATION_MIN_ROWS) {
     return { name: "dispatch-liveness", verdict: "OK", measured: `${phases.length} alive row(s) — too few to judge`, threshold };
   }
   const recent = phases.slice(-STARVATION_MIN_ROWS);
-  const starved = recent.every((p) => p === "sweep");
+  const starved = !recent.includes("dispatch");
   return {
     name: "dispatch-liveness",
     verdict: starved ? "WARN" : "OK",
     measured: `last ${recent.length} phase(s): ${recent.join(", ")}`,
     threshold,
-    ...(starved ? { detail: "awake and sweeping but never dispatching — an empty queue looks the same, so confirm against dispatch-stall" } : {}),
+    ...(starved ? { detail: "awake but never dispatching — an empty queue looks the same, so confirm against dispatch-stall" } : {}),
   };
 }
 
@@ -361,6 +378,43 @@ export function readAlivePhases(lines: ReadonlyArray<Record<string, unknown>>): 
   return out;
 }
 
+/**
+ * The `run_id` of the newest `daemon.`-prefixed ledger line, by parsed `ts` — the SAME
+ * winning-row rule {@link deriveLastPoll} already applies for ledger freshness, re-applied here
+ * only to read that row's `run_id` rather than its `ts`. No new read: every `daemon.`-prefixed
+ * line already carries `run_id`, so this needs no new ledger field or emitter (W1-T1099 design ii).
+ */
+function newestDaemonRunId(lines: ReadonlyArray<Record<string, unknown>>): string | undefined {
+  let bestId: string | undefined;
+  let bestParsed = -Infinity;
+  for (const line of lines) {
+    const step = typeof line.step === "string" ? line.step : undefined;
+    if (!step || !step.startsWith("daemon.")) continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
+    bestParsed = parsed;
+    bestId = typeof line.run_id === "string" ? line.run_id : undefined;
+  }
+  return bestId;
+}
+
+/**
+ * `daemon.alive` phases belonging ONLY to the current daemon run, oldest→newest —
+ * {@link readAlivePhases}'s rows filtered to {@link newestDaemonRunId}. A replaced run's rows
+ * (a daemon that stopped cleanly and was superseded) are never read as if they belonged to the
+ * run that is live now — that was the second defect W1-T1099 fixes: judging a dead run's phases
+ * as the fleet's current liveness.
+ */
+export function readCurrentRunAlivePhases(lines: ReadonlyArray<Record<string, unknown>>): string[] {
+  const currentRunId = newestDaemonRunId(lines);
+  const out: string[] = [];
+  for (const l of lines) {
+    if (l.step === "daemon.alive" && typeof l.phase === "string" && l.run_id === currentRunId) out.push(l.phase);
+  }
+  return out;
+}
+
 /** Age of `state/PAUSE`, or undefined when the flag is absent. Never writes, never clears. */
 export function readPauseAgeMs(root: string, nowMs: number, stat: (p: string) => { mtimeMs: number } = statSync): number | undefined {
   try {
@@ -448,7 +502,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
   const checks: Check[] = [
     judgeLedgerFreshness(ledger.ageMs, ledger.boundMs),
     judgeDispatchStall(inputs.candidateCount, inputs.dispatchSinceMs, inputs.dispatchBoundMs, inputs.dispatchBoundDerivation),
-    judgeDispatchStarvation(readAlivePhases(inputs.ledgerLines)),
+    judgeDispatchStarvation(readCurrentRunAlivePhases(inputs.ledgerLines)),
     judgePauseHonoured(inputs.pauseAgeMs, lastDispatchAgeMs),
     judgeLockDivergence(inputs.totalLocks, inputs.deadLocks, inputs.locksUnreadableReason),
     judgeLaneLessWorkers(inputs.oldestWorkerEtimeS, inputs.workerCount),
