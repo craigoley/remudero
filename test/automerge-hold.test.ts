@@ -239,7 +239,10 @@ test("after a release the eligible backlog re-arms on the next pass with no sepa
   const deps = fakeDeps(lines);
 
   await runSweep([greenPr()], deps);
-  assert.deepEqual(deps.armed, [], "sanity: the hold refuses the first pass");
+  // `[] as OpenPrView[]`, not a bare `[]`: node's `deepStrictEqual<T>(actual, expected): asserts
+  // actual is T` NARROWS `deps.armed` to the expected type for the rest of this scope, so a bare
+  // literal pins it to `never[]` and the re-arm assertion below fails to compile.
+  assert.deepEqual(deps.armed, [] as OpenPrView[], "sanity: the hold refuses the first pass");
 
   // An explicit release row — nothing else changes about the PR or the caller.
   lines.push(holdReleasedLine());
