@@ -22,5 +22,24 @@ raw: "TWO IDIOM TRAPS THAT COST CI ROUNDS AND FALSE FINDINGS, both mechanical.
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2417
+summary:
+  headline: Fix ID truncation and title-check ordering issues
+  what_happened: ID-detection regex clips letter suffixes (T12a→T12), causing
+    phantom collisions. Title edits only retrigger CI if done before
+    pushing—wrong order wastes CI rounds.
+  decision: Add ID-recipe caveat to CLAUDE.md. For title-edit issue, run
+    falsifying check first; if no other CI path catches title changes, choose
+    between automation or documentation.
+  options:
+    - label: Run falsifying check on CI hooks
+      consequence: Verify if title-edit changes already trigger CI elsewhere. If
+        found, only ID caveat needed; if not, proceed to choose between options
+        below.
+    - label: Automate via ci.yml 'edited' event
+      consequence: Title edits auto-trigger CI without manual push; calculate cost as
+        (PRs/day) × (body edits per PR) × (CI minutes per run) versus current
+        waste.
+    - label: Document title-edit ordering in CLAUDE.md
+      consequence: Minimal upfront cost; procedure is 'edit title first, then
+        push'—effective only if contributors follow it consistently.
