@@ -884,6 +884,11 @@ test("W1-T348: a triage PROPOSE writes a validated decisionSummary onto the feed
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T348_GIT_ENV });
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  // W1-T1089: applyPlanProposalCommit's `git add -A -- plan/ MASTER-PLAN.md` fails LOUD (fatal
+  // pathspec error) when the file is entirely absent — true of every real triage worktree (a
+  // full clone), so this fixture needs one too now that triage's propose-path commit routes
+  // through the same shared function `rmd plan` does.
+  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
     ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
@@ -1009,6 +1014,11 @@ test("W1-T348: a THROWING decision-summary rung still writes the `proposed` tran
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T348_GIT_ENV });
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  // W1-T1089: applyPlanProposalCommit's `git add -A -- plan/ MASTER-PLAN.md` fails LOUD (fatal
+  // pathspec error) when the file is entirely absent — true of every real triage worktree (a
+  // full clone), so this fixture needs one too now that triage's propose-path commit routes
+  // through the same shared function `rmd plan` does.
+  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
     ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
@@ -1137,6 +1147,11 @@ test("W1-T348: a triage GRILL opens its needs-human issue WITH a validated decis
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T348_GIT_ENV });
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  // W1-T1089: applyPlanProposalCommit's `git add -A -- plan/ MASTER-PLAN.md` fails LOUD (fatal
+  // pathspec error) when the file is entirely absent — true of every real triage worktree (a
+  // full clone), so this fixture needs one too now that triage's propose-path commit routes
+  // through the same shared function `rmd plan` does.
+  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
     ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),

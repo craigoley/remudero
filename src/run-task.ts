@@ -20620,9 +20620,15 @@ async function triageCommandLocked(
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
     // the worker produced, mirroring regenerateOrientation's post-worker deterministic commit.
     setFeedbackStatus(worktreePath, feedbackId, decision.status);
-    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/"], { stdio: "inherit" });
     const commitMessage = triageCommitMessage({ decision, feedbackId, taskId, grillIssueUrl });
-    execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "inherit" });
+    // W1-T1089: route through the SAME shared stage-and-commit function `rmd plan` uses
+    // (applyPlanProposalCommit, lib/plan-architect.ts) rather than triage's own inline `git
+    // add -A -- plan/`, which never matched MASTER-PLAN.md (a root-level file, not under
+    // plan/) — silently discarding any amendment the Architect made even though
+    // triagePrompt/decideTriage/nonPlanFilesInDiff all license one. The shared function's
+    // `plan/ MASTER-PLAN.md` pathspec now stages the amendment, and it regenerates
+    // plan/plan-index.json first so a stray or renumbered heading never ships stale.
+    applyPlanProposalCommit(worktreePath, commitMessage, log);
     gitPushRunBranch(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
@@ -21038,7 +21044,7 @@ export async function planCommand(
     log("plan.verdict", { action: "propose", detail: decision.detail, files: decision.files });
     say(formatPlanVerdictLine(mode, decision));
     const commitMessage = planCommitMessage({ decision, mode, brief, taskId });
-    applyPlanProposalCommit(worktreePath, commitMessage);
+    applyPlanProposalCommit(worktreePath, commitMessage, log);
     gitPushRunBranch(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
