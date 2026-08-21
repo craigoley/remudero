@@ -512,6 +512,7 @@ import {
   type CriterionVerdict,
   type ReviewVerdict,
 } from "./lib/review.js";
+import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-audit.js";
 import { buildReceipt } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision } from "./lib/auto-triage.js";
@@ -10963,6 +10964,94 @@ export function defaultMergeEvidenceLog(cwd: string): { dump: string; ref: strin
     maxBuffer: 1 << 28,
   });
   return { dump, ref };
+}
+
+/** {@link proofQueueAuditCommand}'s only I/O beyond the plan/checkout it is pointed at —
+ *  injectable so a test can supply a fixture merge-evidence dump without a real git history or
+ *  network, the same DI shape `LintPlanStatusDeps.readMergeEvidenceLog` already uses. */
+export interface ProofQueueAuditDeps {
+  readMergeEvidenceLog?: typeof defaultMergeEvidenceLog;
+}
+
+/**
+ * `rmd proof-queue-audit` — W1-T1053: the whole-queue caller `proofQueueAudit`
+ * (lib/proof-queue-audit.ts) never had. Resolves every OPEN, UNMERGED task's proofs through the
+ * reviewer's own parser and resolver, against the real checkout, and prints every offender split
+ * by cause (`refused-parse` / `name-filtered-zero-match` / `grep-path-absent`) — the class W1-T229
+ * carried for 13 days before a human caught it by hand.
+ *
+ * SCOPE derivation mirrors `lintPlanCommand`'s whole-plan split and
+ * `test/plan-proof-debt.test.ts`'s `deriveProofDebtPopulation`, never re-derived by hand:
+ * `isOpenLintTask` (status not blocked/merged/done) intersected with `classifyFailingMergeEvidence`
+ * over `defaultMergeEvidenceLog`'s dump (the `.without` half — no merge evidence on origin/main).
+ * FAILS OPEN on a shallow checkout (this repo's `ci` job's default fetch-depth) — the same posture
+ * `lintPlanCommand`'s own `--base` resolution and `deriveProofDebtPopulation`'s live-plan test
+ * already take: a shallow checkout cannot tell open+unmerged debt apart from the merged-elsewhere
+ * population, so it prints nothing rather than counting on an undifferentiated set.
+ *
+ * IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts's module doc) — EXITS 0 ALWAYS on the
+ * analysis itself, no matter how many offenders it names. No dispatch path, CI job or arm decision
+ * may read this verdict; only a malformed INVOCATION (bad flag, an unreadable --plan) exits
+ * non-zero, the same fail-loud-on-bad-input split `lintPlanCommand`/`emissionsCommand` already
+ * draw between "usage error" and "report content". MEASURED COST (W1-T497, the identical
+ * resolver): ~207ms per name-filtered proof — acceptable for an operator running this by hand,
+ * which is the only place it is wired; nothing in the daemon/CI/arm path calls it.
+ */
+export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAuditDeps = {}): Promise<number> {
+  const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const planPathArg = flagValue(rest, "--plan");
+  const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(repoRoot, "plan", "tasks.yaml");
+  let plan: Plan;
+  try {
+    plan = loadPlan(planPath);
+  } catch (e) {
+    console.error(`### rmd proof-queue-audit: ${(e as Error).message}`);
+    return 2;
+  }
+
+  const openIds = plan.tasks.filter(isOpenLintTask).map((t) => t.id);
+  let unmergedIds: Set<string>;
+  let evidenceNote: string;
+  try {
+    const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(repoRoot);
+    unmergedIds = new Set(classifyFailingMergeEvidence(openIds, dump).without);
+    evidenceNote = `merge evidence: ${ref}`;
+  } catch (e) {
+    // FAIL OPEN on a shallow checkout — see the doc comment above. Still exits 0: even the
+    // refusal to audit is report content, never a gate.
+    console.log(
+      `### rmd proof-queue-audit: merge evidence unavailable (${(e as Error).message}) — nothing audited this run`,
+    );
+    return 0;
+  }
+
+  const population = plan.tasks.filter((t) => unmergedIds.has(t.id));
+  const report = proofQueueAudit(population, {
+    resolveNameFilteredCandidates: (rawName) => resolveNameFilteredCandidates(repoRoot, rawName),
+    pathExists: (rel) => existsSync(join(repoRoot, rel)),
+  });
+
+  const offendingTaskCount = new Set(report.offenders.map((o) => o.taskId)).size;
+  console.log(
+    `### rmd proof-queue-audit: ${population.length} open+unmerged task(s), ${report.criterionCount} proof(s) resolved (${evidenceNote})`,
+  );
+  console.log(`  ${report.offenders.length} unresolvable proof(s) across ${offendingTaskCount} task(s), by cause:`);
+  for (const cause of PROOF_QUEUE_AUDIT_CAUSES) {
+    const ids = report.byCause[cause];
+    console.log(`    ${cause.padEnd(24)} ${String(ids.length).padStart(3)} task(s): ${ids.join(", ") || "(none)"}`);
+  }
+  for (const o of report.offenders) {
+    console.log(`  ✗ ${o.taskId} criterion ${o.criterionIndex + 1} [${o.cause}] proof: "${o.proof.slice(0, 90)}"`);
+  }
+  console.log(
+    "\nrmd proof-queue-audit is a REPORT, not a gate — no dispatch, CI job or arm decision may consult this " +
+      "verdict (lib/proof-queue-audit.ts). Exits 0 unconditionally, regardless of the count above.",
+  );
+  return 0;
 }
 
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
@@ -22776,6 +22865,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing",
   },
   {
+    name: "proof-queue-audit",
+    usage:
+      "rmd proof-queue-audit [--plan <path>]   # W1-T1053: resolves every OPEN, UNMERGED task's proof through the reviewer's OWN parser+resolver (lib/review.ts) against the real checkout and names every one that can never resolve — refused-parse, name-filtered-zero-match (W1-T229's shape), or grep-path-absent — split by cause with the offending task ids; a forward-referencing whole-file test path for a not-yet-written test is NEVER reported (CLAUDE.md). IT IS A REPORT, NOT A GATE (lib/proof-queue-audit.ts): exits 0 unconditionally on the analysis itself, regardless of how many offenders it names; only a malformed invocation exits non-zero. FAILS OPEN (prints nothing audited, still exit 0) on a shallow checkout, same posture as lint-plan's whole-plan split.",
+  },
+  {
     name: "preflight",
     usage:
       "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS the curated, seconds-fast, network-free deterministic npm-script gates instead (cli-reference:check, claims, learnings-budget-ratchet, jscpd, depcruise, api-client:check, no-hand-rolled-fetch:check — FAST_GATE_STEPS, lib/ci-parity.ts) and NEVER shells the test suite, so it is the mode a worker can run habitually; either or both flags may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
@@ -23453,6 +23547,10 @@ export async function main(
   }
   if (cmd === "lint-plan") {
     process.exit(await lintPlanCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await proofQueueAuditCommand(rest)) cannot carry a DA hit without forking the process; proofQueueAuditCommand's own logic — arg validation, the open+unmerged population derivation, and the report render — is unit-tested in test/proof-queue-audit.test.ts (same irreducible-glue shape as the sibling lint-plan/emissions dispatch cases).
+  if (cmd === "proof-queue-audit") {
+    process.exit(await proofQueueAuditCommand(rest));
   }
   if (cmd === "preflight") {
     process.exit(await preflightCommand(rest));
