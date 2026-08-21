@@ -202,14 +202,19 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // `armSessionPrs` (run-task.ts, W1-T516) landed — a FOURTEENTH consumer, also SEAMED
   // (`armSessionPrsOverride ?? loadDefaultPolicy()`), gating whether the sweep arms a session
   // PR (no plan task id) under the review lane's own PR-<n> synthetic id. SIXTEEN since
-  // `runTask`'s `spawnWallClockBoundMs` (run-task.ts, W1-T1044) landed — a FIFTEENTH consumer,
-  // also SEAMED (`opts.spawnWallClockBoundMs ?? loadDefaultPolicy()`), the fix rung's own
-  // worker-spawn wall-clock bound at `runTask`'s single `runFixRung` call site. SEVENTEEN
-  // since `buildSweepEffects`'s `spawnWallClockBoundMs` (run-task.ts, W1-T1044) landed — a
-  // SIXTEENTH consumer, also SEAMED (`spawnWallClockBoundMsOverride ?? loadDefaultPolicy()`),
-  // the SAME bound at the sweep's own `dispatchFix` call site — the two placements the task
-  // requires (daemon-side + worker-spawn-side) share one policy row, read at two seamed sites.
-  assert.equal(readers.length, 17, `expected 17 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // `runTask`'s own `workerAbandonMs` (run-task.ts, W1-T1045) landed — a FIFTEENTH consumer,
+  // also SEAMED (`opts.workerAbandonMs ?? loadDefaultPolicy()`), resolving the clock bound
+  // threaded into every real dispatch spawn's `clockBound` — see worker.ts's
+  // `createWorkerClockBoundWatchdog`.
+  //
+  // Then W1-T1044 added TWO more, both SEAMED and both reading the SAME `sweepWallClockBoundMs`
+  // row: `runTask`'s `opts.spawnWallClockBoundMs ?? loadDefaultPolicy()` at its single
+  // `runFixRung` call site, and `buildSweepEffects`'s
+  // `spawnWallClockBoundMsOverride ?? loadDefaultPolicy()` at the sweep's own `dispatchFix` call
+  // site — the two placements that task requires (daemon-side + worker-spawn-side), one policy
+  // row read at two seamed sites. W1-T1045 and W1-T1044 landed independently, so the count is
+  // the sum of both, not either branch's own figure.
+  assert.equal(readers.length, 18, `expected 18 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

@@ -638,6 +638,7 @@ import {
   DEFAULT_WORKER_QUIET_FLOOR_MS,
   type WorkerState,
   type WorkerStreamObserver,
+  WorkerAbandonedError,
 } from "./lib/worker.js";
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
@@ -6061,6 +6062,9 @@ async function runTask(
      *  `plan/decisions.d/<taskId>-<runId>.md` and lands it via the shared decisions-landing
      *  bridge — the same mechanism W1-T243 proved for `plan/feedback/**`. */
     recordDecision?: typeof recordDecision;
+    /** W1-T1045: override the resolved clock bound (ms) — the SAME injection convention as
+     *  every other opt-in seam above. Default: `policy.values.workerAbandon`, read below. */
+    workerAbandonMs?: number;
     /**
      * W1-T1044: override for the fix rung's worker-spawn wall-clock bound (see
      * `runFixRung`'s own `deps.spawnWallClockBoundMs` doc). Optional — omitted reads
@@ -6080,6 +6084,11 @@ async function runTask(
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const owner = resolveOwner();
+  // W1-T1045: THE CLOCK BOUND — read here, once, alongside every other opts-defaulted knob
+  // above, and threaded into the `spawn` wrap-once shape below so every real dispatch spawn
+  // (recon/implement/diagnose/decision-resume) gets it BY CONSTRUCTION, the same rationale
+  // `onSpawnError`/`workerStateSensor.observer` already state for that wrapper.
+  const workerAbandonMs = opts.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
 
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -6125,6 +6134,11 @@ async function runTask(
             error: String(err.message ?? err),
           })),
       streamObserver: spawnArgs.streamObserver ?? workerStateSensor.observer,
+      // W1-T1045: every real dispatch spawn gets the clock bound BY CONSTRUCTION — the SAME
+      // wrap-once rationale as `onSpawnError`/`streamObserver` above. A caller that already set
+      // its own `clockBound` (none exist today) is respected; every future dispatch call site
+      // through this wrapper is covered without remembering to add it individually.
+      clockBound: spawnArgs.clockBound ?? { boundMs: workerAbandonMs },
     }).finally(stopPolling);
   };
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
@@ -7688,6 +7702,39 @@ async function runTask(
     say(`verdict: blocked_ci (${outcome.reason}) — PR left OPEN: ${prUrl}`);
     return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
   } catch (err) {
+    // W1-T1045: the clock-bound watchdog (worker.ts) aborted a silent dispatch spawn — NAME it
+    // and return a terminal verdict rather than falling through to the generic `run.error` +
+    // re-throw below, which would leave this run's promise REJECTED instead of resolved: exactly
+    // the "vanishes rather than ends" gap criterion 5 exists to close.
+    if (err instanceof WorkerAbandonedError) {
+      const { evidence } = err;
+      // THE EVIDENCE LANDS FIRST — before the worktree is removed below, before this function's
+      // own `finally` drops the worktree liveness lock, and before `runTask`'s outer `finally`
+      // releases the inflight lock: the task note's own ordering requirement ("BEFORE anything
+      // is released"). `num_turns` is deliberately absent, never fabricated: a stalled stream
+      // never produced the SDK's completion envelope, so there is nothing to report.
+      log("verdict", {
+        verdict: "failed",
+        reason: err.message,
+        stage: "worker.abandoned",
+        elapsed_ms: evidence.elapsedMs,
+        bound_ms: evidence.boundMs,
+        last_state: evidence.lastState ?? null,
+        last_state_ms: evidence.lastStateMs ?? null,
+        cost_usd: costUsd,
+      });
+      say(
+        `verdict: failed — worker abandoned after ${Math.round(evidence.elapsedMs / 1000)}s of silence ` +
+          `(bound ${Math.round(evidence.boundMs / 1000)}s, last observed state: ${evidence.lastState ?? "unknown"})`,
+      );
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "worker.abandoned" });
+      } catch (e) {
+        log("worktree.remove.error", { on: "worker.abandoned", error: String((e as Error)?.message ?? e) });
+      }
+      return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+    }
     log("run.error", { error: String((err as Error)?.message ?? err) });
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,

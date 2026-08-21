@@ -389,12 +389,15 @@ test("W1-T331: a tick sees ONE consistent cost ceiling even if the policy value 
   const c = ceilingOnDisk(100);
   const merged = new Set<string>();
   const receivedByGovernor: Array<number | undefined> = [];
-  let ticks = 0;
+  // W1-T1065: the bound counts GOVERNOR CONSULTATIONS — the quantity every assertion below is
+  // written against — not `checkStop` CALLS. The daemon reads checkStop TWICE per tick now, at
+  // the top and again immediately before admission, so a call-counting bound stops after roughly
+  // one dispatching tick and this test saw [100,100] where it needs four samples across two.
   await runDaemon(
     p.plan(),
     {
       refreshMerged: () => (id: string) => merged.has(id),
-      checkStop: () => (++ticks > 2 ? "tick cap" : undefined),
+      checkStop: () => (receivedByGovernor.length >= 4 ? "tick cap" : undefined),
       reloadDailyCostCeilingUsd: c.read,
       checkCostGovernor: (ceilingUsd?: number) => {
         receivedByGovernor.push(ceilingUsd);

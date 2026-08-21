@@ -69,6 +69,23 @@
 
 set -euo pipefail
 
+# ── THE DECLARED RUNTIME VARIABLE NAMES — ONE LIST, READ HERE AND BY host-update.sh (W1-T1069) ──
+# `deploy/runtime-env-vars.sh` is the single source of truth for which environment variable NAMES
+# the daemon container carries at runtime; see that file's header for the full rationale. Sourced,
+# not retyped: before it existed, this script's `docker run` and host-update.sh's
+# `--print-daemon-run` each named the runtime variables by hand and drifted apart — a recycle would
+# have silently dropped four of the six the day GH_APP_* was added. The inline fallback array below
+# fires ONLY when this script has been copied away from its sibling (a test fixture does this on
+# purpose, to drive a single script in isolation); test/recycle-container.test.ts asserts this
+# fallback, host-update.sh's own fallback, and deploy/runtime-env-vars.sh's real array never
+# disagree, so the fallback cannot silently go stale either.
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH)
+RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
+if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
+  # shellcheck source=./runtime-env-vars.sh
+  source "${RUNTIME_ENV_VARS_FILE}"
+fi
+
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
@@ -168,22 +185,103 @@ print_blocking_locks() {
 }
 print_blocking_locks
 
-# ── 3. CAPTURE GH_TOKEN — BEFORE TOUCHING ANYTHING, NOT MERELY BEFORE docker rm ─────────────────
+# ── 3. CAPTURE EVERY DECLARED RUNTIME VARIABLE — BEFORE TOUCHING ANYTHING, NOT MERELY BEFORE
+#      docker rm — AND REFUSE IF THE CONTAINER CARRIES ONE THIS RECYCLE DOES NOT DECLARE ─────────
 # `deploy/entrypoint.sh` reads GH_TOKEN from the ENVIRONMENT at call time and writes it nowhere on
 # disk, by design — so once the container that carries it is gone, an operator is the only way to
-# get it back. This is the FIRST check that can refuse, ahead of even the pull, because a pull is
-# reversible (re-run it) and a removed container's only copy of this credential is not.
+# get it back. That applies to every name in RMD_DAEMON_RUNTIME_ENV_VARS, not GH_TOKEN alone (it
+# only ever named GH_TOKEN because GH_TOKEN was the only one that existed the day it was written —
+# see deploy/runtime-env-vars.sh). This is the FIRST check that can refuse, ahead of even the pull,
+# because a pull is reversible (re-run it) and a removed container's only copy of a runtime
+# variable is not.
 CONTAINER_EXISTS=0
+declare -A CAPTURED=()
+
+is_declared_runtime_var() {
+  local needle="$1" candidate
+  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+    [ "${candidate}" = "${needle}" ] && return 0
+  done
+  return 1
+}
+
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   CONTAINER_EXISTS=1
-  CAPTURED_TOKEN="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null \
-    | sed -n 's/^GH_TOKEN=//p' | head -1)"
+
+  # The container's full runtime env, one NAME=VALUE per line. The `{{println}}` form emits a
+  # trailing empty element (a real blind spot, named rather than assumed away — deploy/runtime-env-vars.sh
+  # and W1-T1069's rationale), dropped here by the blank-line filter.
+  CONTAINER_ENV_RAW="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  readarray -t CONTAINER_ENV_LINES < <(printf '%s\n' "${CONTAINER_ENV_RAW}" | sed '/^$/d')
+
+  # The container's OWN image env — subtracted below to find what is genuinely runtime-set. Read via
+  # `.Config.Image` (the reference this container was started FROM), never `.Image` (the resolved
+  # digest section 7 below already owns, for a different comparison: proving the STARTED container
+  # matches what THIS run just pulled).
+  IMAGE_ENV_LINES=()
+  IMAGE_ENV_KNOWN=0
+  CONTAINER_IMAGE_REF="$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  if [ -n "${CONTAINER_IMAGE_REF}" ]; then
+    if IMAGE_ENV_RAW="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${CONTAINER_IMAGE_REF}" 2>/dev/null)"; then
+      IMAGE_ENV_KNOWN=1
+      readarray -t IMAGE_ENV_LINES < <(printf '%s\n' "${IMAGE_ENV_RAW}" | sed '/^$/d')
+    fi
+  fi
+
+  # ── THE DRIFT CHECK: a runtime NAME this recycle does not declare REFUSES, and names it ────────
+  # A variable is RUNTIME-SET when its NAME is absent from the image env, OR its VALUE differs from
+  # the image's own — a runtime value that SHADOWS an image name (e.g. `-e HOME=/other`) is still
+  # runtime-set even though the name matches, and a name-only diff would miss it. Comparing values
+  # never prints one. Skipped, not assumed clean, when the image env itself could not be read.
+  UNDECLARED_RUNTIME_VARS=""
+  if [ "${IMAGE_ENV_KNOWN}" -eq 1 ]; then
+    for line in "${CONTAINER_ENV_LINES[@]}"; do
+      name="${line%%=*}"
+      value="${line#*=}"
+      [ -n "${name}" ] || continue
+      image_has_name=0
+      image_value=""
+      for iline in "${IMAGE_ENV_LINES[@]}"; do
+        case "${iline}" in
+          "${name}="*) image_has_name=1; image_value="${iline#*=}" ;;
+        esac
+      done
+      if [ "${image_has_name}" -eq 0 ] || [ "${value}" != "${image_value}" ]; then
+        if ! is_declared_runtime_var "${name}"; then
+          UNDECLARED_RUNTIME_VARS="${UNDECLARED_RUNTIME_VARS}${UNDECLARED_RUNTIME_VARS:+, }${name}"
+        fi
+      fi
+    done
+  else
+    echo "recycle-container: NOTE — could not read ${CONTAINER_NAME}'s own image env; the undeclared-runtime-variable check is skipped this run." >&2
+  fi
+
+  if [ -n "${UNDECLARED_RUNTIME_VARS}" ]; then
+    echo "recycle-container: REFUSING — ${CONTAINER_NAME} carries a runtime variable this recycle does not declare: ${UNDECLARED_RUNTIME_VARS}" >&2
+    echo "  Add it to RMD_DAEMON_RUNTIME_ENV_VARS in deploy/runtime-env-vars.sh, or the recycle would" >&2
+    echo "  silently drop it on the next replacement — the exact defect W1-T1069 closes. NOTHING has" >&2
+    echo "  been touched." >&2
+    exit 1
+  fi
+
+  for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+    val=""
+    for line in "${CONTAINER_ENV_LINES[@]}"; do
+      case "${line}" in
+        "${name}="*) val="${line#*=}" ;;
+      esac
+    done
+    CAPTURED["${name}"]="${val}"
+  done
 else
-  # No container by this name yet (first-ever run on a fresh host) — the only place the token can
-  # come from is this shell's own environment.
-  CAPTURED_TOKEN="${GH_TOKEN:-}"
+  # No container by this name yet (first-ever run on a fresh host) — the only place a declared
+  # runtime variable can come from is this shell's own environment.
+  for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+    CAPTURED["${name}"]="${!name-}"
+  done
 fi
 
+CAPTURED_TOKEN="${CAPTURED[GH_TOKEN]-}"
 if [ -z "${CAPTURED_TOKEN}" ]; then
   echo "recycle-container: REFUSING — no GH_TOKEN could be captured." >&2
   if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
@@ -197,6 +295,29 @@ if [ -z "${CAPTURED_TOKEN}" ]; then
   exit 1
 fi
 echo "recycle-container: GH_TOKEN captured $([ "${CONTAINER_EXISTS}" -eq 1 ] && echo "from ${CONTAINER_NAME}'s own environment" || echo "from this shell")"
+
+# Names only, never values (same discipline as the line above) — the rest of the declared list that
+# actually had something to carry across this recycle.
+OTHER_CAPTURED_NAMES=""
+for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+  [ "${name}" = "GH_TOKEN" ] && continue
+  [ -n "${CAPTURED[${name}]-}" ] || continue
+  OTHER_CAPTURED_NAMES="${OTHER_CAPTURED_NAMES}${OTHER_CAPTURED_NAMES:+, }${name}"
+done
+if [ -n "${OTHER_CAPTURED_NAMES}" ]; then
+  echo "recycle-container: also carrying: ${OTHER_CAPTURED_NAMES} (names only — see deploy/runtime-env-vars.sh)"
+else
+  echo "recycle-container: no other declared runtime variable had a value to carry"
+fi
+
+# The full docker-run `-e` argument list, built from the declared names rather than retyped —
+# EVERY declared name is passed (even when its captured value is empty), matching the shape GH_TOKEN
+# and RMD_RESTART_THROTTLE_S already had before this change and never re-passing anything the image
+# itself already supplies (PATH, NODE_VERSION, ... are never in RMD_DAEMON_RUNTIME_ENV_VARS).
+RUN_ENV_ARGS=()
+for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+  RUN_ENV_ARGS+=(-e "${name}=${CAPTURED[${name}]-}")
+done
 
 # ── 4. AUTHENTICATE, THEN PULL — A FAILURE HERE REFUSES AND NEVER STARTS ANYTHING ────────────────
 # THE 2026-08-18 INCIDENT THIS SECTION EXISTS TO CLOSE: a pull failed with "authentication required"
@@ -387,8 +508,7 @@ docker run -d --name "${CONTAINER_NAME}" \
   --security-opt apparmor=unconfined \
   --security-opt systempaths=unconfined \
   --user 1000:1000 \
-  -e GH_TOKEN="${CAPTURED_TOKEN}" \
-  -e RMD_RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-}" \
+  "${RUN_ENV_ARGS[@]}" \
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}" \
   -v "${CRED_DIR}:${CRED_MOUNT_DEST}" \
   "${REF}" \

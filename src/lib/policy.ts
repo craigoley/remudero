@@ -58,6 +58,12 @@ export interface PolicyValues {
    *  prior source literal ever measured this. See plan/policy.yaml's own row for why the
    *  default sits comfortably above the ~16-minute `--ci-parity` suite (W1-T463/W1-T465). */
   workerStall: number;
+  /** W1-T1045: THE CLOCK BOUND — how long a dispatch worker's SDK stream may go silent (no
+   *  observed `worker.state` activity) before `src/lib/worker.ts`'s clock-bound watchdog aborts
+   *  it and `src/run-task.ts` ends the run with a terminal verdict. NET-NEW: no prior source
+   *  literal ever measured this. See plan/policy.yaml's own row for why the default equals
+   *  #2251's recycle kill predicate over the same measured population. */
+  workerAbandon: number;
   /** W1-T1044: the WALL-CLOCK BOUND (ms) shared by (a) `await deps.sweep()` (daemon.ts's poll
    *  loop) and (b) ONE fix-rung worker spawn inside `runFixRung` (run-task.ts) — see this
    *  field's plan/policy.yaml row for the measured healthy-vs-hung derivation. OPTIONAL in
@@ -206,6 +212,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   pollIntervalMs: "lifted",
   fixStrikeCap: "lifted",
   workerStall: "net-new",
+  workerAbandon: "net-new",
   sweepWallClockBoundMs: "net-new",
   "sweep.staleDays": "lifted",
   "sweep.strikeCap": "lifted",
@@ -404,6 +411,7 @@ export function validatePolicy(raw: unknown): Policy {
   const pollIntervalMs = numberField("pollIntervalMs", raw.pollIntervalMs, origin);
   const fixStrikeCap = numberField("fixStrikeCap", raw.fixStrikeCap, origin);
   const workerStall = numberField("workerStall", raw.workerStall, origin);
+  const workerAbandon = numberField("workerAbandon", raw.workerAbandon, origin);
   // W1-T1044: OPTIONAL, same absent-means-default shape as `autoTriage` below — only a
   // PRESENT row is validated, so a typo in an opted-in row still fails loud, but an existing
   // policy.yaml missing this row entirely still loads clean.
@@ -476,6 +484,7 @@ export function validatePolicy(raw: unknown): Policy {
       pollIntervalMs,
       fixStrikeCap,
       workerStall,
+      workerAbandon,
       sweepWallClockBoundMs,
       sweep: {
         staleDays,

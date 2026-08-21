@@ -109,6 +109,29 @@ workerStall:
   min: 1200000
   max: 7200000
 
+# W1-T1045: THE CLOCK BOUND — the ACT-ON-DETECTION half of workerStall above. workerStall only
+# ESCALATES a quiet run to an operator queue and, by its own design, never touches the worker
+# itself; this is the elapsed-since-last-`worker.state`-transition threshold past which
+# run-task.ts aborts that worker's own SDK stream, records the evidence, and ends the run with a
+# terminal verdict instead of holding a lane/lock/slot forever. Never on total run age — a run
+# still producing `worker.state` transitions is never touched, however long it runs.
+#
+# 7200000 (2h) is the SAME number #2251 chose for the recycle's kill predicate, checked directly
+# against all 116 `implement.done` rows carrying `worker_duration_ms` (19.3 min median, 36.0 p90,
+# 46.7 p95, 55.2 p99, 98.5 max): ZERO of those 116 would have tripped it, a 22% margin over the
+# largest run ever observed. Matched to workerStall's own bounds and to #2251's value
+# DELIBERATELY, not by coincidence — abandoning is the SOFTER act (a terminal verdict + a
+# re-dispatchable lock/lane release, never a bare kill), so the naive "unattended should be
+# tighter" reading does not apply. If either bound is ever retuned, retune both or record why
+# they diverged.
+#
+# min/max mirror workerStall's own row above — the identical generous reclaim/observe window
+# reasoning applies unchanged.
+workerAbandon:
+  value: 7200000
+  origin: "net-new"
+  min: 1200000
+  max: 7200000
 # W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND). The bound on (a) `await deps.sweep()`
 # (src/lib/daemon.ts's poll loop) and (b) ONE fix-rung worker spawn inside `runFixRung`
 # (src/run-task.ts) — the SAME field feeds both placements (see that task's own `note:` for

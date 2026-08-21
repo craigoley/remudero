@@ -98,6 +98,9 @@ function goodRaw(): Record<string, unknown> {
     // W1-T943: the worker-stall detector's quiet threshold — net-new, no prior source literal.
     // See plan/policy.yaml's own row for the ~16-minute `--ci-parity` headroom rationale.
     workerStall: { value: 3_600_000, origin: "net-new", min: 1_200_000, max: 7_200_000 },
+    // W1-T1045: the clock bound — net-new, no prior source literal. See plan/policy.yaml's own
+    // row for why the default equals #2251's recycle kill predicate over the same population.
+    workerAbandon: { value: 7_200_000, origin: "net-new", min: 1_200_000, max: 7_200_000 },
     sweep: {
       staleDays: { value: 14, origin: "lifted:src/lib/sweep.ts:254 (DEFAULT_SWEEP_POLICY.staleDays)", min: 1, max: 90 },
       strikeCap: { value: 2, origin: "lifted:src/lib/sweep.ts:255 (DEFAULT_SWEEP_POLICY.strikeCap)", min: 1, max: 10 },
@@ -226,8 +229,9 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
   // rather than only trusting the absence of a throw.
   const expectedTopLevelKeys = [
     "proofTimeoutMs", "pruneGraceMs", "worktreeReapGraceMs", "pollIntervalMs", "fixStrikeCap", "workerStall",
-    "sweepWallClockBoundMs", "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap",
-    "worktreeReapBoot",
+    "workerAbandon",
+    "sweepWallClockBoundMs",
+    "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
 
@@ -512,6 +516,10 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // W1-T943: `workerStall` joins them too — no prior literal ever measured a worker-quiet
     // threshold before this task's own filing verified plan/policy.yaml carried zero rows for it.
     "workerStall",
+    // W1-T1045: `workerAbandon` joins them too — the clock bound this field carries never
+    // existed as a source literal; the worker's SDK stream was never abortable at all before
+    // this task (worker.ts carried zero AbortController/abortSignal/setTimeout).
+    "workerAbandon",
     // W1-T1038: `sweep.memoryFloorMib` joins them too — no prior literal ever measured or gated
     // an available-memory floor; the ledger carried zero mem/rss/heap/swap/avail fields before
     // this task, so there is no source constant to cite as this field's origin.
