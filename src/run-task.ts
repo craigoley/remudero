@@ -3064,6 +3064,14 @@ async function runReview(args: {
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
   report: string;
+  /**
+   * (W1-T1100) True when `report` is the worker's own chat text, substituted after a failed
+   * PR-body fetch — see {@link "./lib/review.js".ReviewEvidence.reportIsSubstitute}'s doc for
+   * the two consumers this protects and why. Threaded straight into `judgeReview`'s evidence
+   * below. Absent ⇒ `report` is trusted as the real body, exactly as every caller that predates
+   * this task already gets.
+   */
+  reportIsSubstitute?: boolean;
   settingsFile: string;
   config: Config;
   budgetUsd?: number;
@@ -3249,6 +3257,8 @@ async function runReview(args: {
   const computed = judgeReview(criteria, {
     diff,
     report,
+    // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
+    reportIsSubstitute: args.reportIsSubstitute,
     semantic,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
@@ -7479,9 +7489,16 @@ async function runTask(
     //
     // Best-effort, same discipline as W1-T256: a failed read falls back to the worker text rather
     // than blocking the review, so a `gh` outage degrades to the old behaviour instead of a stall.
+    //
+    // W1-T1100: `reviewReportIsSubstitute` starts true (the fallback value already assigned above
+    // is the substitute) and flips to false ONLY on a successful fetch — so a throw leaves it
+    // true, matching `reviewReport` staying the worker's text. Threaded into `runReviewFn` below
+    // so `bodyContradictsDiff` and the keyword floor both know this is not the PR body.
     let reviewReport = fullText(impl);
+    let reviewReportIsSubstitute = true;
     try {
       reviewReport = await fetchPrBodyFn(prUrl);
+      reviewReportIsSubstitute = false;
     } catch (e) {
       log("review.body_fetch_error", { error: String((e as Error)?.message ?? e) });
     }
@@ -7491,6 +7508,7 @@ async function runTask(
       prUrl,
       task,
       report: reviewReport,
+      reportIsSubstitute: reviewReportIsSubstitute,
       settingsFile,
       config,
       budgetUsd,
