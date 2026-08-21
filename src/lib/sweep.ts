@@ -1570,6 +1570,25 @@ export const ABSENT_REPUSH_CAP = 1;
  * review cycle. A PR that already carries a passing review is never re-pushed here, whatever
  * its checks say — that certification is the expensive artifact in this system.
  */
+/**
+ * W1-T1103 (design i): how many minutes since this PR's head was last pushed, or `undefined`
+ * when the age cannot be read. Factored out of {@link absentChecksRepushDecision}'s own "time
+ * half" (below) so the NOT-YET-SCHEDULED disposition row in {@link DISPOSITION_RULES} reads the
+ * IDENTICAL clock rather than a second, independently-drifting computation of "how long has this
+ * head sat with zero check runs" — the two questions ("re-push yet?" and "escalate yet?") are the
+ * same question about the same evidence, and rationale (3)'s own point is that TIME is the one
+ * discriminator a bare run-count cannot carry, so both readers must derive it identically.
+ *
+ * `pr.lastActivityAt` (the PR's `updatedAt`) is the same clock the sibling function has always
+ * used: a push always advances it, and the fail direction on an unreadable value is `undefined`
+ * (never a guessed age) — the caller decides what "cannot date" means for its own disposition.
+ */
+export function absentAgeMinutes(pr: OpenPrView, now: number): number | undefined {
+  const pushedAt = Date.parse(pr.lastActivityAt);
+  if (Number.isNaN(pushedAt)) return undefined;
+  return (now - pushedAt) / 60_000;
+}
+
 export function absentChecksRepushDecision(
   pr: OpenPrView,
   policy: SweepPolicy,
@@ -1594,11 +1613,10 @@ export function absentChecksRepushDecision(
     return { repush: false, reason: "head branch name not observed — nothing to push to" };
   }
   // Time half.
-  const pushedAt = Date.parse(pr.lastActivityAt);
-  if (Number.isNaN(pushedAt)) {
+  const ageMin = absentAgeMinutes(pr, now);
+  if (ageMin === undefined) {
     return { repush: false, reason: "head age unreadable — never re-push on state we cannot date" };
   }
-  const ageMin = (now - pushedAt) / 60_000;
   if (ageMin < policy.absentCeilingMinutes) {
     return {
       repush: false,
@@ -2341,6 +2359,45 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
     reason: (pr, policy, _ageDays, now) =>
       `stale-pending — checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m (>= ${policy.pendingCeilingMinutes}m ceiling) — escalating`,
+  },
+  {
+    // NOT-YET-SCHEDULED (W1-T1103, design i) — the THIRD reading of `checksState === "none"`
+    // W1-T186's ABSENT/CONFLICTED split does not have. Rationale (1)/(3): a head seconds old
+    // with zero check runs and a head hours old with zero runs are the SAME count and OPPOSITE
+    // situations — a mergeable PR whose workflow simply has not been SCHEDULED yet is
+    // indistinguishable from a genuinely-missing required check by run count alone, and every
+    // prior row (CONFLICTED, mergeable, the W1-T176 refused-post row, the review-orphan-cap row,
+    // post-review, the two green+pending rows, the two datable-pending rows) requires
+    // `checksState` to be `"dirty"`-implying, `"green"`, or `"pending"` — none of them claim the
+    // bare structural-empty shape, so a young `"none"` head reaches this row exactly as it always
+    // fell through to the terminal catch-all below.
+    //
+    // THE DISCRIMINATOR IS THE SAME CLOCK `absentChecksRepushDecision` ALREADY OWNS (never a
+    // second, guessed constant — rationale (1)'s own falsifier: "a bound that fires on a healthy
+    // condition is this repo's recurring defect"). `policy.absentCeilingMinutes` is this repo's
+    // own measured time-to-first-check-run, already load-bearing for the re-push remedy below —
+    // reusing it here means the two questions ("re-push yet?" and "escalate yet?") answer off one
+    // policy row, not two that could drift apart.
+    //
+    // UNDATED FAILS TOWARD ESCALATE, NOT WAIT (`absentAgeMinutes` returning `undefined` makes the
+    // predicate below false) — the OPPOSITE polarity from a knowingly-young head, and the SAME
+    // direction `absentChecksRepushDecision`'s own "never re-push on state we cannot date" refusal
+    // already takes: an unreadable age is not evidence of youth, and treating it as YOUNG would
+    // let a genuinely-broken check suite wait forever behind an unparseable timestamp.
+    //
+    // ABOVE THE CEILING, NOTHING CHANGES: the row does not match, the PR falls through to the
+    // terminal catch-all exactly as before this task, and `runSweep`'s existing blocked-ambiguous
+    // dispatch (the ABSENT re-push remedy, then escalate) is untouched — design (i)'s own words,
+    // "above it the existing ABSENT path is unchanged."
+    disposition: "wait",
+    when: (pr, policy, _ageDays, now) => {
+      if (pr.checksState !== "none") return false;
+      const ageMin = absentAgeMinutes(pr, now);
+      return ageMin !== undefined && ageMin < policy.absentCeilingMinutes;
+    },
+    reason: (pr, policy, _ageDays, now) =>
+      `zero check runs on head ${pr.headSha.slice(0, 7)} but only ${(absentAgeMinutes(pr, now) ?? 0).toFixed(1)}m ` +
+      `since the last push (< ${policy.absentCeilingMinutes}m ceiling) — not yet scheduled, not genuinely absent — waiting`,
   },
   {
     // TERMINAL rule (matches unconditionally) — the LEAST permissive disposition
