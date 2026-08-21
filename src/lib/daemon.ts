@@ -1397,7 +1397,23 @@ function startInFlightTicker(
         while (active) {
           await deps.sleep(pollIntervalMs);
           if (!active) break;
-          log("daemon.alive", { phase, poll_interval_ms: pollIntervalMs });
+          // THE ACKNOWLEDGEMENT GAP (W1-T1065 design part iv). `daemon.pause` is written only
+          // inside the branch that ACTS on a hold (the top-of-tick idle, or the re-check above) —
+          // so while an admitted batch drains (phase "dispatch"), an operator hold created mid-
+          // drain was invisible: no row distinguished "hold seen, draining to completion" from
+          // "hold not seen at all". That ambiguity is exactly what made the originating instance
+          // read as a broken control — the operator waited, saw nothing, and escalated to
+          // `docker stop`. Riding this field on the SAME `daemon.alive` row `startInFlightTicker`
+          // already writes every poll interval (no new step, no new row) closes it: a re-check
+          // here can NEVER abort the batch already in flight — the drain-and-hold guarantee is
+          // untouched — but the operator can now tell "seen, waiting for this batch to settle"
+          // from "not seen yet" without escalating.
+          const holdSeen = phase === "dispatch" ? Boolean(deps.checkPause?.()) : undefined;
+          log("daemon.alive", {
+            phase,
+            poll_interval_ms: pollIntervalMs,
+            ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
+          });
           try {
             await deps.sweepLight!();
           } catch (e) {
@@ -2942,6 +2958,40 @@ export async function runDaemon(
 
     // A dispatchable task ends any starvation episode — re-arm so a LATER one escalates again.
     starvationEscalated = false;
+
+    // RE-CHECK STOP/PAUSE IMMEDIATELY BEFORE ADMISSION (W1-T1065). `checkStop`/`checkPause`
+    // above are each read EXACTLY ONCE, at the top of this tick — but `deps.checkFreshness`,
+    // `await deps.sweep()` (the full reconciler over every open PR), `await deps.sweepOrphans()`,
+    // `await deps.sweepFeedbackLanding()` and `await deps.readUsage()` all sit, awaited and
+    // unbounded, between that read and here. MEASURED on the live ledger (this task's own
+    // rationale): a `state/PAUSE` created 4.5 minutes after the top-of-tick read still dispatched
+    // — the sweep-to-next-`daemon.iteration` gap runs p50 39.6s, p95 32.1m, max 64.5m, so the
+    // top-of-tick read is stale by the time admission happens on any but the fastest ticks.
+    // Re-reading the IDENTICAL deps here, immediately before this tick's batch is admitted,
+    // closes that window without adding a new control: nothing has been admitted yet, so a hold
+    // observed here defers the WHOLE `dispatchSet` computed above (discarded, never dispatched)
+    // and returns to the top of the loop, where the ordinary stop/pause handling — including its
+    // own sleep/heartbeat — takes over exactly as it would have on a top-of-tick read. This can
+    // NEVER abort a lane already admitted or already running: `admitted` below is still empty at
+    // this point, and `Promise.allSettled` (further down) is unreached — the drain-and-hold
+    // guarantee for anything already in flight is completely untouched.
+    const restopped = deps.checkStop?.();
+    if (restopped) {
+      log("daemon.stop", { detail: restopped });
+      return summary("stopped", restopped);
+    }
+    const repaused = deps.checkPause?.();
+    if (repaused) {
+      ticks++;
+      log("daemon.pause", {
+        tick: ticks,
+        detail: repaused,
+        poll_interval_ms: pollIntervalMs,
+        recheck: true,
+      });
+      await deps.sleep(pollIntervalMs);
+      continue;
+    }
 
     // W1-T342/W1-T343 — THE PER-LANE GOVERNOR GATE, adopted verbatim from `runDrainLanes`
     // (drain.ts, see its own doc). A SEQUENTIAL loop that takes its OWN fresh

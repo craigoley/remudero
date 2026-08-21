@@ -213,7 +213,11 @@ test("W1-T463: the ticker's next tick does not begin until the CURRENT sweepLigh
   const slowPass = new Promise<void>((resolve) => {
     releaseSlowPass = resolve;
   });
-  let stopChecks = 0;
+  // W1-T1065: bound on TICKS ACTUALLY TAKEN, not on `checkStop` calls. The daemon now reads
+  // checkStop twice per tick — top-of-tick and again immediately before admission — so a
+  // call-counting bound stopped this run inside tick 1, before anything was ever dispatched and
+  // before the in-flight ticker this test exists to exercise had started.
+  let iterations = 0;
   const pending = runDaemon(plan, {
     refreshMerged: () => () => false, // stay OPEN — this fixture drives a real in-flight runOne
     runOne: async (): Promise<RunResult> => {
@@ -222,10 +226,10 @@ test("W1-T463: the ticker's next tick does not begin until the CURRENT sweepLigh
       await slowPass;
       return { taskId: "A", runId: "A-run", merged: true, costUsd: 0, verdict: "merged" };
     },
-    checkStop: () => {
-      stopChecks++;
-      return stopChecks > 1 ? "test bound reached" : undefined;
+    log: (step) => {
+      if (step === "daemon.iteration") iterations++;
     },
+    checkStop: () => (iterations >= 1 ? "test bound reached" : undefined),
     sweepLight: async () => {
       sweepLightCalls++;
       if (sweepLightCalls === 1) {
