@@ -1,0 +1,172 @@
+- id: W1-T1085
+  title: "A PLAN-ONLY PR IS TOLD `not certified` AND `This refuses to arm auto-merge` BY `cappedAnnotation`, WHICH TAKES NO `planOnly` ARGUMENT — the posted STATUS already renders the W1-T205 carve-out correctly on the same verdict, so one run emits two contradictory sentences and the arming claim is false"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: |
+    MEASURED 2026-08-21 on host `vm` under `/bin/bash`, in a scratch worktree at origin/main
+    6a006bff. Every zero below carries a live positive control taken with the same tool and the
+    same corpus. The daemon and its state files were untouched, and no poller was backgrounded.
+
+    (1) THE DISTINCTION IS COMPUTED, REACHED, AND CORRECTLY HONOURED BY THE ARM. This is the
+    opposite of what the shape suggests, so it is stated first and it narrows the task. `planOnly`
+    is computed once in `judgeReview` (`src/lib/review.ts`) as `diffFiles.length > 0 &&
+    diffFiles.every(isInPlanScope) && enforcementData.length === 0`, and from there it survives
+    every hop: `reviewLedgerLegibilityFields` writes it as `plan_only`,
+    `priorReviewVerdictFromLedger` reads it back onto `PriorReviewVerdict.planOnly`,
+    `decideArmFromLedgerVerdict` passes it through, and `decideAutoMergeArm` branches on it BEFORE
+    the override branch and returns `arm: true`. NOTHING IS DISCARDED AND NOTHING IS UNREACHED.
+
+    (2) SO THE DEFECT IS A SENTENCE, NOT A DECISION — AND IT IS IN THE ONE PLACE THE CARVE-OUT WAS
+    NEVER APPLIED. The posted status is a THREE-WAY branch in `judgeReview`: capped and plan-only
+    renders `planOnlySummary`, capped and not plan-only renders `cappedSummary`, uncapped renders
+    `passSummary`. The console annotation in `src/run-task.ts` is a TWO-WAY branch on
+    `verdict.capped` alone, and the function it calls, `cappedAnnotation`, has one parameter — the
+    criteria count. It cannot see `planOnly` because it is never given it.
+
+    (3) THE TWO SENTENCES, FROM ONE RUN, AND THE THIRD CLAIM THAT IS FLATLY FALSE.
+    `planOnlySummary`'s own doc says it "deliberately never says CAPPED or not certified: those
+    words read as something going wrong, and for a plan-only PR nothing did". `cappedAnnotation`
+    then says both, in the same run, plus `This refuses to arm auto-merge (see decideAutoMergeArm)
+    until proof executes or an operator grants an explicit, ledgered override`. FOR A PLAN-ONLY
+    VERDICT ALL THREE CLAUSES ARE WRONG: it is certified, by the deterministic gates the status
+    names; it does not refuse to arm; and the override it points the reader at is never consulted,
+    because the carve-out returns above it and `resolveAutoMergeArm` deliberately excludes
+    `planOnly` from override-ledgering for exactly that reason.
+
+    (4) RE-DERIVED ON THE FOUR PRs, AND ONE OF THEM NO LONGER SHOWS IT — WHICH IS WHY EACH WAS
+    RE-READ RATHER THAN CARRIED. At their current heads: #2344 reads `plan-only PR (1 criteria)`,
+    #2345 reads `plan-only PR (4 criteria)`, #2348 reads `plan-only PR (4 criteria)`. #2343 reads
+    `PASS — 6 criteria substantiated, no test theater`, so it is UNCAPPED today and is NOT an
+    instance. The contrast case behaves the same way for the same reason: #2352 is plan-only AND
+    reads `PASS — 1 criteria substantiated`, so it was never capped at all and took the ordinary
+    uncapped arm — it is a contrast on `capped`, NOT on `planOnly`, and reading it as evidence
+    that plan-only PRs cannot arm inverts what it shows.
+
+    (5) THE ARM FIRED ON ALL THREE, WHICH IS THE FACT THAT DEMOTES THIS FROM A POLICY QUESTION TO A
+    TEXT FIX. Review status posted then merged: #2344 at 02:15:49Z then 02:15:51Z, #2345 at
+    02:15:48Z then 02:15:54Z, #2348 at 02:20:28Z then 02:20:31Z. Two to six seconds, three times.
+    STATED HONESTLY: the merge LATENCY is OBSERVED and the arm is INFERRED from it, because the
+    `automerge.*` rows that would settle it are on the daemon host and no ledger is reachable from
+    this container. The falsifier is named so a reader can close it in one query rather than
+    trusting the inference: `rmd ledger-grep` for `automerge.armed` and
+    `automerge.clean_status_direct_merge` at those three shas.
+
+    (6) WHAT THE THREE DETERMINISTIC GATES THE STATUS NAMES ACTUALLY GUARANTEE, READ ONE BY ONE.
+    `lint-plan` judges ONE task against the plan schema and the standing rules and refuses on
+    `severity: "block"` — proof dialect, Rule 19 sizing, Rule 17 provenance, Rule 18 headless
+    fitness, Rule 21 post-merge amendment, Rule 25 instrument entanglement, declared scope. The
+    plan-PR emitter guarantees the BODY IS JUDGEABLE: `renderAcceptanceBlock` emits the parseable
+    claim-and-proof form, `bodyNeedsAcceptanceRepair` and `ensureJudgeableBody` repair a body the
+    reviewer's parser would resolve to zero criteria, and `buildPlanPrCommitMessage` produces a
+    commitlint-valid subject. The plan-index checks guarantee a DERIVED ARTIFACT IS FRESH:
+    `regeneratePlanIndexFile` and `scripts/generate-capability-snapshot.mjs` refuse a committed
+    `plan/plan-index.json` that differs from a fresh regeneration. All three are real and all
+    three are per-artifact.
+
+    (7) AND WHAT NONE OF THEM CATCHES: WHETHER THE SHARD HAS ALREADY BEEN FILED. Not one of the
+    three compares a new shard against the shards already on main. The check that would exists and
+    is inert TWICE OVER. `duplicateTitleViolations` (`src/lib/task-linter.ts`) returns `[]` at
+    `if (!corpus || corpus.length === 0)`, and `openTaskTitles` is supplied by NO caller: as a
+    property assignment it reads 0 occurrences across `src/`, against a live control of 2 for the
+    sibling `openTitles:` and 9 for the bare identifier, with a never-typed field name as the
+    negative control at 0. And even fully wired it emits `severity: "warn"`, which never reaches
+    `lint-plan`'s exit code. THE COST IS ALREADY MEASURED AND IS CITED RATHER THAN REDISCOVERED:
+    four duplicate shards in two days, W1-T1070 with W1-T1071 and W1-T1074 with W1-T1075, neither
+    pair citing the other and no gate catching one. W1-T1076 owns that wiring and also measures
+    why wiring alone is insufficient — the house-style TITLE scores 0.00 and 0.05 on those two
+    pairs while the filename SLUG at k=2 scores 0.20 and 1.00.
+  design: |
+    ONE CONCERN: the console annotation printed for a capped verdict must not contradict the
+    status posted for the same verdict. Not the arm, not the cap, not the gates.
+
+    (i) THE RULING, MADE BEFORE FILING SO THIS SHARD ASKS NOTHING. The brief offered two changes
+    and asked them ranked. THEY ARE NOT TWO. (a) making the reason honest is the whole task. (b)
+    letting plan-only PRs arm IS ALREADY THE BEHAVIOUR — `decideAutoMergeArm`'s `planOnly` branch
+    returns `arm: true` and has since W1-T205, and rationale (5) observes it firing three times in
+    five minutes. There is no policy change to make and this shard proposes none.
+
+    (ii) WHICH MOVES THE DUPLICATE RISK RATHER THAN ANSWERING IT, AND THE OPERATOR SHOULD HEAR IT
+    PLAINLY. The worry attached to (b) — that arming plan PRs would have auto-merged four
+    duplicates this week — is not a forecast about a proposed change. IT IS A DESCRIPTION OF
+    TODAY. The risk is already being taken. So W1-T1076 IS NOT A PRECONDITION FOR (b), because (b)
+    is not a change; it is the MISSING GUARD ON A BEHAVIOUR ALREADY LIVE, and its urgency is
+    higher than the framing implied, not lower. This shard does not scope it in and does not
+    re-file it.
+
+    (iii) AND THE `--override-capped-by` PATH IS NOT AN ANSWER HERE, FOR A STRUCTURAL REASON
+    RATHER THAN A FRICTION ONE. `decideAutoMergeArm` checks `planOnly` BEFORE the override branch,
+    so a plan-only verdict never reaches an override even when one is present, and
+    `resolveAutoMergeArm` excludes `planOnly` from override-ledgering precisely so the decision is
+    not misattributed. The override is the right instrument for a CAPPED CODE PR and this shard
+    leaves it exactly as it is. Its friction is real but beside the point: it is head-bound by
+    W1-T219, so every amend invalidates the grant and costs another invocation — which is why it
+    would be a poor standing answer even where it did apply.
+
+    (iv) THE CHANGE, STATED MECHANICALLY. `cappedAnnotation` gains the `planOnly` fact, and its
+    single call site in `src/run-task.ts` — already inside a block holding the whole verdict —
+    supplies it. A plan-only capped verdict emits an annotation consistent with the status the
+    same run posts, or emits none. NO DECISION CHANGES: the arm, the cap, the status text and the
+    ledger fields are all untouched, and the function stays pure and exported so the exact text
+    remains a unit-testable falsifier, which is the property its own doc says it exists to have.
+    AND THE AGREEMENT CRITERION MUST NOT BE MET BY EXPORTING `planOnlySummary`. It is
+    module-private today, and widening a function's visibility to let a test reach it changes the
+    module's surface to serve the test. The posted summary is already observable through
+    `judgeReview`'s own verdict, which is where that criterion reads it from.
+
+    (v) WHAT THIS TASK MUST NOT DO. It must not weaken the cap for a code PR, lower any threshold,
+    or arm a capped code PR — the cap is correct wherever proof was expected and did not run. It
+    must not change `decideAutoMergeArm`, `planOnlySummary`, `cappedSummary` or any ledger field.
+    It must not wire the duplicate check; that is W1-T1076's. And it must not delete the existing
+    capped-annotation assertions — they must be kept and joined by the plan-only cases, because
+    they are what proves the non-plan-only wording is unchanged.
+  acceptance:
+    - claim: "a plan-only capped verdict is never told it is uncertified"
+      proof: "unit test: W1-T1085: a plan-only capped verdict is never told it is uncertified"
+    - claim: "a plan-only capped verdict is never told that arming was refused"
+      proof: "unit test: W1-T1085: a plan-only capped verdict is never told arming was refused"
+    - claim: "a capped verdict that is not plan-only keeps the existing wording unchanged"
+      proof: "unit test: W1-T1085: a capped verdict that is not plan-only keeps its wording"
+    - claim: "the annotation and the status posted by the same run no longer contradict each other"
+      proof: "unit test: W1-T1085: the annotation agrees with the status posted by the same run"
+    - claim: "the arm decision for every verdict shape is byte-identical to today"
+      proof: "unit test: W1-T1085: the arm decision is unchanged for every verdict shape"
+  risk: high
+  origin: "oper#plan-only-pr-told-it-is-not-certified-2026-08-21"
+  plan_refs: ["W1-T205", "W1-T229", "W1-T1076", "W1-T1020", "W1-T453", "W1-T489"]
+  files: [src/lib/review.ts, src/run-task.ts, test/review.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THE SHARD ASKS NOTHING BECAUSE THE RANKING WAS DECIDED BEFORE FILING, AND THE DECISION WENT
+    AGAINST THE BRIEF'S FRAMING. The brief asked whether the arm discards a computed distinction or
+    never reaches it, and named those as different fixes. The measured answer is NEITHER: the arm
+    reaches it and honours it. A shard that filed the question would have spent a dispatch
+    discovering that, and an implementer who trusted the framing would have changed the arm.
+
+    `test/review.test.ts` IS THE DECLARED TEST HOME DELIBERATELY, NOT BY DEFAULT. It is the only
+    suite on main that imports `cappedAnnotation` and `floorDegradedAnnotation`, and a sweep for
+    those names across `test/` returns exactly that one path. `planOnlySummary` is NOT in that
+    list and NOT exported — see design (iv), which rules on what follows from that. A new test
+    FILE would add a second concern tag to the sizing check while proving nothing the existing
+    suite cannot, and the existing capped assertions this task must not delete already live
+    there.
+
+    `src/run-task.ts` IS DECLARED BECAUSE THE CALL SITE IS THERE and the annotation cannot receive
+    a fact nobody passes it. DECISIONS.md's 2026-08-18 W1-T471 ruling governs that declaration and
+    says a new shard should simply declare it. `src/lib/review.ts` holds `cappedAnnotation` itself.
+    No other path is declared, and the shard's own path is absent.
+
+    RISK IS `high` AND THE BAND IS RULE 19's SPAN, NOT BLAST RADIUS — RECORDED HERE BECAUSE THE TWO
+    READ DIFFERENTLY. The change is one parameter, one call site and one conditional. But `files:`
+    names stems the sizing check reads as distinct concerns, and Rule 19 refuses that span at
+    `risk: medium`. Decomposing is not the alternative: the parameter and the argument that fills
+    it are one edit, and splitting them would file a task for a signature nobody calls.
+
+    ONE FIGURE IN THE RATIONALE IS DELIBERATELY A QUERY RATHER THAN AN ANSWER. The three PRs'
+    status-to-merge latencies are stamped with their timestamps because they are historical facts
+    about fixed shas. Every count — the `openTaskTitles` sweep, the declaration totals, the test
+    suite match — moves within the hour and must be re-run, not quoted.
