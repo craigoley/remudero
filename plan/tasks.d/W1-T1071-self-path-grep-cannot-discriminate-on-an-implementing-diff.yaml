@@ -109,11 +109,26 @@
     - claim: "a proof that already names behaviour rather than a declared path is untouched"
       proof: "unit test: test/self-path-proof-discrimination.test.ts"
   files: [src/lib/review.ts, test/self-path-proof-discrimination.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
   origin: recon#self-path-grep-discrimination-2026-08-20
   plan_refs: ['W1-T1041', 'W1-T273', 'W1-T362', 'W1-T219', 'W1-T456']
   note: |
+    RETIREMENT RECORD, 2026-08-20 — THIS SHARD IS SUPERSEDED, and it is retired because a second lane
+    filed the same finding independently, rather than because it was wrong or because the work is done.
+    The work is NOT done. Everything below is preserved verbatim so a future reader needs no archaeology.
+    SUPERSEDED BY W1-T1070, which the operator ruled survives: it carries the measurement that
+    `proofScopeViolations` has been warning on this since 2026-08-03, and that the check's own remedy
+    text made two shards unbuildable.
+    WHY, IN ONE LINE: this shard (#2324, opened 20:34:13Z) and W1-T1070 (#2325, opened 20:36:47Z) were
+    filed two and a half minutes apart by independent lanes on the same subject, and NEITHER BODY CITES
+    THE OTHER — neither lane could see the other's work. W1-T1076 (#2329) FILES THAT MECHANISM, and its
+    findings are cited here rather than re-derived; read them there.
+    NOTHING MEASURED HERE IS LOST. This shard's rationale, design and criteria stay readable in git and
+    in its own merged PR #2324, so retiring it withdraws THE BUILD, NOT THE EVIDENCE. Both shards read
+    `status: queued`, so dispatch would otherwise have built each of them separately.
+    DO NOT RE-FILE THIS SHARD. If the self-path proof finding is still open, the successor is W1-T1070.
+    ORIGINAL NOTE, UNCHANGED, follows.
     NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
     naming `test/self-path-proof-discrimination.test.ts`, which this shard declares in `files:`, so
     on THIS filing PR it resolves through the W1-T456 forward-reference carve-out
