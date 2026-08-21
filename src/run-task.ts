@@ -403,15 +403,19 @@ import {
   type OpenPrFileScope,
   type RareOverlapWarning,
 } from "./lib/dispatch-overlap.js";
+import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
   assertLintClean,
   changedTaskIds,
   rawChangedTaskIds,
   criteriaAdded,
+  DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
   formatReadIdentity,
   isPathOutsideRoot,
   lintTask,
+  planShardSlugCorpus,
+  shardSlugFromPath,
   TaskLintError,
   type LintOpts,
 } from "./lib/task-linter.js";
@@ -10903,7 +10907,93 @@ export type LintPlanStatusDeps = {
   ghGateway?: typeof ghGateway;
   projectPlan?: typeof projectPlan;
   readMergeEvidenceLog?: typeof defaultMergeEvidenceLog;
+  /** W1-T1076: the OPEN-PR shard slug corpus reader, injected on the same axis as every dep
+   *  above so a test can drive the duplicate check without a network. */
+  openPlanShardSlugs?: typeof openPlanShardSlugs;
 };
+
+// ── W1-T1076: THE FILING-TIME DUPLICATE CORPUS ──────────────────────────────────────────────
+//
+// `duplicateTitleViolations` (W1-T420) has been built, tested and UNREACHABLE since it shipped:
+// nothing in `src/` ever assigned `opts.openTaskTitles`, so the check returned `[]` on every
+// real lint pass. The cost was paid on 2026-08-20, when two lanes filed the same finding
+// 2m34s apart and another two filed the same finding 1m56s apart with byte-identical shard
+// slugs, and no gate could have seen any of it.
+//
+// THE CORPUS IS DERIVED AT CALL TIME AND DISCARDED. No file, no index, no database, no
+// embedding — a second store is a second thing to go stale, and the whole point is a surface
+// that cannot drift from the thing it describes.
+//
+// AND IT IS READ ONLY IN CHANGED-TASKS (--base) SCOPE, for the reason W1-T497 already wrote
+// down beside `resolveNameFilteredCandidates`: the whole-plan pass is a job "ci.yml calls cheap
+// pure JS with no network", and a GitHub read there would break that property for every task on
+// every run. Scoped, it costs one list call plus one file list per open PR.
+// ────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The gateway surface {@link openPlanShardSlugs} actually needs — a structural subset of
+ *  {@link GitHub}, so the real `ghGateway` satisfies it and a test supplies two methods rather
+ *  than the whole interface. Both are OPTIONAL on `GitHub` itself, which is why both are
+ *  probed rather than assumed. */
+export interface OpenShardGateway {
+  listOpenHeadBranches?(): PrRef[] | null;
+  changedFiles?(prUrl: string): string[] | undefined;
+}
+
+/**
+ * THE I/O HALF: every plan shard added by a currently OPEN PR, as a slug corpus.
+ *
+ * NO CORPUS ⇒ NO OPINION, on every failure path, and NEVER a manufactured warn. A gateway
+ * missing either optional method, a `listOpenHeadBranches()` that returns `null` because the
+ * read FAILED (the W1-T119 split — `null` is a failure, `[]` is a genuine absence), and a PR
+ * whose `changedFiles` is `undefined` all degrade to fewer entries, never to a fabricated
+ * match. That is already `duplicateTitleViolations`' documented contract and this preserves it:
+ * a GitHub outage must never fail a filing, and must never invent one either.
+ */
+export function openPlanShardSlugs(github: OpenShardGateway): DuplicateCorpusEntry[] {
+  const listOpen = github.listOpenHeadBranches;
+  const changed = github.changedFiles;
+  if (!listOpen || !changed) return [];
+  const open = listOpen.call(github);
+  if (!open || open.length === 0) return [];
+  const paths: string[] = [];
+  for (const pr of open) {
+    const files = changed.call(github, pr.url);
+    if (files) paths.push(...files);
+  }
+  return planShardSlugCorpus(paths);
+}
+
+/** THE OTHER I/O HALF: each LOCAL shard's own filename slug, by task id — the candidate side.
+ *  `Task` carries no path, and the linter reads no disk, so the verb holding the checkout is
+ *  the one place that can answer it. An unreadable directory yields an EMPTY index rather than
+ *  throwing: a plan tree with no `tasks.d/` is an ordinary shape here, not an error. */
+export function shardSlugIndex(dir: string, readDir: (d: string) => string[] = readdirSync): Map<string, string> {
+  let names: string[];
+  try {
+    names = readDir(dir);
+  } catch {
+    return new Map();
+  }
+  return new Map(planShardSlugCorpus(names.map((n) => `plan/tasks.d/${n}`)).map((e) => [e.id, e.text]));
+}
+
+/** THE PURE DECISION between the two: which duplicate-check opts a given lint pass gets.
+ *  SCOPED ⇒ the corpus, this task's slug and W1-T1076's k. UNSCOPED (the whole-plan pass) ⇒
+ *  NOTHING, which is what keeps that pass free of any network read — this empty object is the
+ *  whole of criterion 7 and is a decision, not an omission. */
+export function duplicateCorpusOpts(
+  scoped: boolean,
+  taskId: string,
+  corpus: readonly DuplicateCorpusEntry[],
+  slugById: ReadonlyMap<string, string> | undefined,
+): Pick<LintOpts, "openTaskTitles" | "duplicateSlug" | "duplicateShingleK"> {
+  if (!scoped) return {};
+  return {
+    openTaskTitles: corpus,
+    duplicateSlug: slugById?.get(taskId),
+    duplicateShingleK: DUPLICATE_SLUG_SHINGLE_K,
+  };
+}
 
 /** Filing-family subjects are citations ABOUT a task (minting it, triaging it, renumbering it),
  *  never evidence its implementation merged. This one boundary is the failing-split classifier's
@@ -11230,6 +11320,23 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     }
   }
 
+  // W1-T1076: the duplicate corpus, resolved ONCE here and ONLY in changed-tasks scope — see the
+  // section comment ahead of `openPlanShardSlugs` for why the whole-plan pass gets nothing. Its
+  // OWN try/catch, deliberately not folded into the status read above: a corpus-read failure and
+  // a status-read failure are different facts, and sharing one catch would let either outage
+  // silently disable the other check.
+  let openShardCorpus: DuplicateCorpusEntry[] = [];
+  let shardSlugById: Map<string, string> | undefined;
+  if (scope && scope.size > 0) {
+    try {
+      const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+      openShardCorpus = (deps.openPlanShardSlugs ?? openPlanShardSlugs)((deps.ghGateway ?? ghGateway)(owner, repo));
+    } catch {
+      openShardCorpus = [];
+    }
+    shardSlugById = shardSlugIndex(join(dirname(planPath), "tasks.d"));
+  }
+
   let failing = 0;
   let warned = 0;
   let checked = 0;
@@ -11259,6 +11366,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         },
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
         newMonolithIds,
+        // W1-T1076: `scope` is populated iff `--base` was given, so this branch IS the
+        // changed-tasks pass and `duplicateCorpusOpts`' scoped arm is the right one here.
+        ...duplicateCorpusOpts(true, task.id, openShardCorpus, shardSlugById),
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
