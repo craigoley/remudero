@@ -13,7 +13,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
@@ -21,13 +22,17 @@ import { runDaemon, DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS, type DaemonDeps } from ".
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import type { MergedSet } from "../src/lib/drain.js";
-import { reclaimAbandonedWorker, runFixRung, type FixRungOutcome } from "../src/run-task.js";
+import { reclaimAbandonedWorker, runFixRung, runTask, type FixRungOutcome } from "../src/run-task.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import type { GitHub } from "../src/lib/status.js";
+import type { ProbeExecResult } from "../src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { loadPolicy, installPolicyPath } from "../src/lib/policy.js";
 import type { Config } from "../src/lib/config.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 
 const NONE_MERGED: MergedSet = () => false;
 
@@ -564,4 +569,196 @@ test("W1-T1044: a sweep that REJECTS after the tick abandoned it is ledgered, ne
   assert.ok(failed, `expected a daemon.sweep.failed line, saw steps: ${lines.map((l) => l.step).join(", ")}`);
   assert.equal(failed!.extra.after_abandon, true, "the row says the failure arrived AFTER the abandonment, not instead of it");
   assert.match(String(failed!.extra.error), /sweep died long after the bound/);
+});
+
+// ── the abandoned fix spawn's own VERDICT, through a REAL runTask() ────────────────────────────
+//
+// Everything above proves `runFixRung` returns `spawn_abandoned`. This proves what `runTaskBody`
+// then DOES with it: a terminal `blocked` verdict naming the bound, rather than the run vanishing.
+// That branch is reachable only end-to-end — the rung is called from inside `runTaskBody`, which
+// is not exported — so this is a real run against a throwaway origin, an offline gateway, an
+// injected spawn and a fake `gh` on PATH, modelled on test/arm-at-open.test.ts's own (B) fixture.
+// The one difference: that fixture answers CI RED so the run stops before review; this one answers
+// GREEN and injects a FAILING review, which is what routes the run into the fix rung at all.
+
+const ABANDON_FIXTURE_PLAN = [
+  "- id: T-FIXABANDON",
+  "  title: a fix worker whose spawn never returns",
+  "  repo: remudero",
+  "  type: implement",
+  "  verify: auto",
+  "  risk: medium",
+  "  files: [src/lib/daemon.ts]",
+  "  origin: architect",
+  "  status: queued",
+  "",
+].join("\n");
+
+
+const abandonHoldingContainmentExec = (token: string): Promise<ProbeExecResult> =>
+  Promise.resolve({
+    transcript: `touch ../${token}.txt: Operation not permitted`,
+    outsideWriteCreated: false,
+    insideWriteCreated: true,
+    costUsd: 0,
+  });
+
+const abandonCleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
+  Promise.resolve({
+    transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -",
+    aliasCount: 0,
+    functionCount: 0,
+    functionNames: "-",
+    costUsd: 0,
+  });
+
+function abandonGitFixture(root: string): void {
+  const originGit = mkdtempSync(join(tmpdir(), "fix-abandon-origin-"));
+  execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
+  const seed = mkdtempSync(join(tmpdir(), "fix-abandon-seed-"));
+  execFileSync("git", ["clone", "-q", originGit, seed]);
+  execFileSync("git", ["-C", seed, "config", "user.email", "fix-abandon-test@example.invalid"]);
+  execFileSync("git", ["-C", seed, "config", "user.name", "fix-abandon-test"]);
+  writeFileSync(join(seed, "README.md"), "seed\n");
+  execFileSync("git", ["-C", seed, "add", "-A"]);
+  execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
+  const repoDir = join(root, "repos", "remudero");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "-q", originGit, repoDir]);
+  execFileSync("git", ["-C", repoDir, "config", "user.email", "fix-abandon-test@example.invalid"]);
+  execFileSync("git", ["-C", repoDir, "config", "user.name", "fix-abandon-test"]);
+}
+
+/** A fake `gh` answering CI GREEN on the first poll (the difference from arm-at-open's, which
+ *  answers RED), plus the reads and the status POST the review gate makes on the way through. */
+function abandonFakeGh(repoDir: string): string {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "fix-abandon-bin-"));
+  const fakeGhPath = join(fakeBinDir, "gh");
+  writeFileSync(
+    fakeGhPath,
+    [
+      "#!/bin/bash",
+      "set -e",
+      // The ownership guard compares the PR's head branch against this run's own, and the branch
+      // is minted inside runTask with an epoch suffix nothing outside it can predict. Read it back
+      // off the repo's own refs rather than hardcoding a name that can only ever mismatch.
+      `REPO=${JSON.stringify(repoDir)}`,
+      'RUNBRANCH=$(git -C "$REPO" for-each-ref --format="%(refname:short)" "refs/heads/run-*" | head -1)',
+      'if [[ "$1" == "pr" && "$2" == "view" ]]; then',
+      '  if [[ "$5" == "headRefName" ]]; then echo "{\\"headRefName\\":\\"$RUNBRANCH\\"}"; exit 0; fi',
+      '  if [[ "$5" == "body" ]]; then echo \'{"body":""}\'; exit 0; fi',
+      '  if [[ "$5" == "statusCheckRollup" ]]; then',
+      '    echo \'{"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS","status":"COMPLETED"}]}\'',
+      "    exit 0",
+      "  fi",
+      "  echo '{}'; exit 0",
+      "fi",
+      'if [[ "$1" == "pr" ]]; then exit 0; fi',
+      // The fix rung reads the PR's LIVE lifecycle state before it works, and stands down on
+      // anything but OPEN — an unanswered read resolves UNKNOWN and the rung never spawns.
+      'if [[ "$1" == "api" ]]; then',
+      '  case "$2" in',
+      '    */pulls/*) echo \'{"number":1044,"state":"open","merged":false,"merged_at":null}\'; exit 0;;',
+      '  esac',
+      '  echo "{}"; exit 0',
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeGhPath, 0o755);
+  return fakeBinDir;
+}
+
+function abandonWorkerResult(over: Partial<WorkerResult>): WorkerResult {
+  return {
+    sessionId: "s",
+    costUsd: 0,
+    numTurns: 0,
+    text: "",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+    ...over,
+  };
+}
+
+test("W1-T1044: an abandoned fix spawn ends the RUN with a blocked verdict naming the bound", async () => {
+  const root = mkdtempSync(join(tmpdir(), "fix-abandon-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, ABANDON_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  abandonGitFixture(root);
+
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${abandonFakeGh(join(root, "repos", "remudero"))}:${savedPath}`;
+
+  // The run's own branch is `run-<taskId>-<epochMs>`, minted inside runTask, so the test cannot
+  // know it up front — and the ownership guard reads it back through the injected gateway, which
+  // answering `undefined` turns into `pr_attribution_failed` before the review gate is reached.
+  // Capture it from the worktree the first spawn is handed, and answer with that.
+  let runBranch: string | undefined;
+  const github: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => runBranch,
+    prBody: () => undefined,
+  };
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    runBranch ??= execFileSync("git", ["-C", args.cwd, "branch", "--show-current"], { encoding: "utf8" }).trim();
+    if (spawnCalls.length === 1) {
+      return abandonWorkerResult({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+    }
+    if (spawnCalls.length === 2) {
+      return abandonWorkerResult({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1044\n" });
+    }
+    // The FIX worker — never returns, the measured incident's own shape.
+    return new Promise<WorkerResult>(() => {});
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FIXABANDON", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github,
+        spawn,
+        containmentExec: abandonHoldingContainmentExec,
+        isolationExec: abandonCleanIsolationExec,
+        // A FAILING review is what routes this run into the fix rung at all.
+        runReview: async () => fixReview(),
+        spawnWallClockBoundMs: 20,
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked", "the run ENDS on a terminal verdict rather than vanishing with its worker");
+    assert.equal(res.merged, false);
+    assert.ok(spawnCalls.length >= 3, `expected recon, implement and a fix spawn — saw ${spawnCalls.length}`);
+
+    const lines = readLedgerRecords(join(root, "state", "ledger.ndjson"));
+    const verdict = lines.find((l) => l.step === "verdict" && l.verdict === "blocked" && /wall-clock bound/.test(String(l.reason ?? "")));
+    assert.ok(verdict, `expected a blocked verdict naming the bound, saw: ${[...new Set(lines.map((l) => l.step))].join(", ")}`);
+    assert.match(String(verdict!.reason), /fix rung abandoned — worker spawn exceeded its \d+ms wall-clock bound/);
+    // The positive control on the same ledger: the abandonment itself was recorded first, so the
+    // verdict reads as the rung's OUTCOME rather than a branch that invented one.
+    assert.ok(lines.some((l) => l.step === "fix.spawn_abandoned"), "the abandonment row still lands before the verdict");
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+  }
 });
