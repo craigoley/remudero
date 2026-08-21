@@ -491,6 +491,7 @@ import {
   bodyContradictsDiff,
   buildReviewPrompt,
   cappedAnnotation,
+  automergeHoldFromLedger,
   cappedOverrideFromLedger,
   cappedWordingApplies,
   decideAutoMergeArm,
@@ -525,6 +526,7 @@ import {
   execWhitelistedProof,
   defaultProofSpawner,
   type ProofSpawner,
+  type AutomergeHold,
   type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
@@ -1625,7 +1627,13 @@ export type ArmOutcome =
   // W1-T947: {@link armAutoMergeAtOpen} refused because the diff is classified IRREVERSIBLE
   // (W1-T919) — the ONE outcome this file's arm sites can return that never went through
   // `attemptArm` at all (every other non-arming outcome is a real gh/ledger failure or absence).
-  | "irreversible-refused";
+  | "irreversible-refused"
+  // W1-T1000002: {@link attemptArm} refused because an operator merge hold
+  // ({@link import("./lib/review.js").automergeHoldFromLedger}) stands over this PR — checked
+  // inside the ONE shared completion both `armAutoMerge` (the ledger-gated path) and
+  // `armAutoMergeAtOpen` (the ungated at-open path) reach, closing the at-open race a converging
+  // sweep-side disarm alone cannot (design (v) of W1-T1000002's task record).
+  | "hold-refused";
 
 export function armAutoMerge(
   prUrl: string,
@@ -1664,11 +1672,38 @@ export function armAutoMerge(
  * factored out (W1-T125) so both the ledger-gated {@link armAutoMerge} and the
  * ungated {@link armAutoMergeAtOpen} share the EXACT same completion logic
  * rather than duplicating it.
+ *
+ * W1-T1000002 — THE ONE PLACE BOTH ARM SITES ORIGINATE, SO THE ONE PLACE AN OPERATOR HOLD MUST
+ * BE CHECKED. `armAutoMerge` already re-reads the ledger for its own W1-T230 verdict gate before
+ * ever reaching here; `armAutoMergeAtOpen` fires ~16s after the PR exists, consulting NO verdict
+ * at all — a sweep that only disarms on its own ~93s cadence loses that race for any PR opened
+ * while a hold stands. Checking here, in the shared completion, closes it for both callers with
+ * one predicate instead of two.
+ *
+ * `ledgerLines` is OPTIONAL on this Pick, deliberately: `armAutoMergeAtOpen`'s own unit tests
+ * (test/arm-at-open.test.ts) assert it arms with ONLY `{armAuto, mergeDirect, say}` — no
+ * ledgerLines/headSha dep at all — proving it has no prior-verdict prerequisite. Omitting it
+ * fails OPEN (no hold is ever visible), exactly like every other optional evidence read in this
+ * file; the REAL default (`realArmDeps()`) always supplies it, so production wiring is gated
+ * unconditionally and only a caller that deliberately narrows the deps object (as those tests do,
+ * to prove the narrower shape still arms) sees the pre-W1-T1000002 behaviour.
  */
 function attemptArm(
   prUrl: string,
-  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say">,
+  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines">>,
 ): ArmOutcome {
+  const holdLedgerLines = deps.ledgerLines?.();
+  if (holdLedgerLines) {
+    const prNumber = prNumberFromRef(prUrl);
+    const hold = prNumber !== undefined ? automergeHoldFromLedger(holdLedgerLines, prNumber) : undefined;
+    if (hold) {
+      deps.say(
+        `automerge.hold_refused (W1-T1000002): operator hold engaged by ${hold.by} (${hold.reason}) — ` +
+          `arm withheld: ${prUrl}`,
+      );
+      return "hold-refused";
+    }
+  }
   try {
     deps.armAuto(prUrl);
     return "armed";
@@ -1819,10 +1854,15 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
  * that call site's own comment). This primitive is UNCHANGED by that move: still ungated by
  * any ledger verdict, still safe only because GitHub's required-status contract is what
  * actually gates the merge, never this call. Only WHEN `runTask` calls it moved.
+ *
+ * W1-T1000002: the `deps` type widened to (optionally) carry `ledgerLines`, which `attemptArm`
+ * now consults for a standing operator hold before ever arming — see that function's own doc.
+ * The default (`realArmDeps()`) always supplies it, so production wiring is gated
+ * unconditionally the moment this function is called with no `deps` override.
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
-  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> = realArmDeps(),
+  deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines">>) = realArmDeps(),
   irreversible = false,
 ): ArmOutcome {
   if (irreversible) {
@@ -2159,6 +2199,8 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
       return "`gh pr merge --auto` failed for a reason that is not the clean-status case — treated as transient and left for the next sweep pass";
     case "irreversible-refused":
       return "the diff was classified IRREVERSIBLE (W1-T919/W1-T947) — auto-merge refuses regardless of verdict; an operator must arm this manually";
+    case "hold-refused":
+      return "an operator merge hold (W1-T1000002) stands over this PR — auto-merge refuses regardless of verdict; only an explicit release lifts it";
     case "skipped":
       return "the semantic gate refused before any arm was attempted";
   }
@@ -15085,7 +15127,10 @@ export async function daemonCommand(
   // present regardless of which target repo this daemon happens to be draining, so the rung is
   // wired unconditionally rather than gated on `target.isSelf` (unlike the retro/auto-triage
   // hooks below, which really do read/write THIS repo's own plan/state).
-  const sweepFeedbackLandingRung = () => sweepFeedbackLanding(repoRoot, { log });
+  // W1-T1000002: `ledgerLines` lets this rung's ONE arm-origin (`ensurePrOpen`, feedback-landing.ts)
+  // honour a standing operator hold — the SAME `ledgerPath` this daemon boot already reads
+  // everywhere else in this function, never a second path construction.
+  const sweepFeedbackLandingRung = () => sweepFeedbackLanding(repoRoot, { log, ledgerLines: () => readLedgerLines(ledgerPath) });
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
@@ -18173,6 +18218,11 @@ export function buildSweepEffects(
   // overrides it with a recorder so the abandon-then-reclaim sequence is provable without a
   // real spawned process.
   reclaimWorkerImpl: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void> = reclaimAbandonedWorker,
+  // W1-T1000002 — appended LAST, the same convention every dep above follows. Default is the
+  // real `disarmAutoMerge` (a live `gh pr merge --disable-auto`), so production wiring is
+  // unchanged; a test overrides it with a recorder so the sweep's converging withdrawal (design
+  // (iv) of this task's record) is provable without a real mutating `gh` call.
+  disarmImpl: (prUrl: string) => DisarmOutcome | void = disarmAutoMerge,
 ): Pick<
   SweepDeps,
   | "arm"
@@ -18185,6 +18235,7 @@ export function buildSweepEffects(
   | "repushAbsent"
   | "updateBranch"
   | "captureRepairFeedback"
+  | "disarmAutoMerge"
 > {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
@@ -18233,6 +18284,15 @@ export function buildSweepEffects(
     // arming nothing for a session PR (no `Remudero-Task:` trailer). `pr.taskId` itself is
     // still passed straight through here, unchanged from before this task.
     arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, sweepArmImpl, "sweep"),
+
+    // W1-T1000002 — THE CONVERGING WITHDRAWAL: sweep.ts calls this ONLY when an operator hold
+    // stands over a PR GitHub already reports armed (`disarmAutoMerge(` — the grep proof that
+    // the sweep now owns a withdrawal call site of its own). `disarmImpl` never throws, so no
+    // try/catch is needed here; the ledger line naming who held it and why is written by the
+    // caller (sweep.ts's own `automerge.hold_withdrawal`), never duplicated here.
+    disarmAutoMerge: (pr) => {
+      disarmImpl(pr.prUrl);
+    },
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means

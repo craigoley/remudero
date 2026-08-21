@@ -40,6 +40,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { automergeHoldFromLedger } from "./review.js";
 
 const FEEDBACK_REL_DIR = "plan/feedback";
 
@@ -82,6 +83,18 @@ export interface LandFeedbackOpts {
    * real against a local bare "origin".
    */
   gh?: GhExec;
+  /**
+   * W1-T1000002 — the SAME hold reader the sweep's own arm path consults
+   * ({@link import("./review.js").automergeHoldFromLedger}), so this file's inline
+   * `gh pr merge --auto --squash` (the ONE arm-origin site {@link ensurePrOpen} owns — recon
+   * question (3) of that task's rationale: this call bypasses `attemptArm`/`armAutoMerge`
+   * entirely, reaching neither) honours a standing operator hold instead of arming around it.
+   * Optional: omitted (every pre-existing caller/fixture), a landing PR arms exactly as it did
+   * before this task — fail OPEN, matching every other optional evidence read in this codebase.
+   * A hold engaged AFTER this PR was already created and armed is still caught by the sweep's
+   * own converging disarm (lib/sweep.ts), which reconciles every open PR, including this one.
+   */
+  ledgerLines?: () => Array<Record<string, unknown>>;
 }
 
 export interface LandFeedbackResult {
@@ -238,6 +251,18 @@ const DECISIONS_LANDING_KIND: LandingKind = {
  * determined. `null` means "push" — never "skip" — so an unreadable ref degrades to the previous
  * unconditional-push behaviour rather than silently withholding a landing.
  */
+/**
+ * W1-T1000002 — ANCHORED ON `/pull/<n>`, mirroring run-task.ts's own `prUrlTarget` /
+ * review.ts's own `prLifecycleUrlTarget` — duplicated locally rather than imported (this file
+ * must not import run-task.ts, and review.ts's own copy is private) so each consumer reads the
+ * URL on its own terms, the SAME "each file reads on its own terms" idiom review.ts's own copy
+ * already documents. Returns `undefined` — never a guess — on anything that is not a PR URL.
+ */
+function landingPrNumberFromUrl(prUrl: string): number | undefined {
+  const m = /\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
+  return m ? Number(m[1]) : undefined;
+}
+
 function remoteBranchTree(git: GitExec, branch: string): string | null {
   try {
     return git(["rev-parse", `origin/${branch}^{tree}`]).trim();
@@ -259,7 +284,12 @@ function remoteBranchTree(git: GitExec, branch: string): string | null {
  * `gh pr merge` — a repeated `gh` MUTATION call on a pass this task's own acceptance requires do
  * nothing observable (criterion 3).
  */
-function ensurePrOpen(kind: LandingKind, gh: GhExec, unlanded: string[]): { prUrl?: string; error?: string } {
+function ensurePrOpen(
+  kind: LandingKind,
+  gh: GhExec,
+  unlanded: string[],
+  ledgerLines?: () => Array<Record<string, unknown>>,
+): { prUrl?: string; error?: string } {
   const existing = findPendingLandingPr({ gh, branch: kind.branch });
   if (existing) return { prUrl: existing };
 
@@ -275,12 +305,20 @@ function ensurePrOpen(kind: LandingKind, gh: GhExec, unlanded: string[]): { prUr
     return { error: `\`gh pr create\` failed for ${kind.branch}: ${String((e as Error)?.message ?? e)}` };
   }
   if (prUrl) {
-    try {
-      assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      gh(["pr", "merge", prUrl, "--auto", "--squash"]);
-    } catch {
-      // Best-effort — the ci + remudero-review gate decides; GitHub does the merging
-      // either way (Standing rule 3B), this call only arms auto-merge when it can.
+    // W1-T1000002 — THE SAME HOLD READER THE SWEEP'S ARM PATH CONSULTS, at the ONE site this
+    // file ever arms auto-merge (recon question (3): this call reaches neither `attemptArm` nor
+    // `armAutoMerge`, so it needed its own consult rather than inheriting one). Omitted
+    // `ledgerLines` fails OPEN — arms exactly as before this task.
+    const prNumber = landingPrNumberFromUrl(prUrl);
+    const hold = ledgerLines && prNumber !== undefined ? automergeHoldFromLedger(ledgerLines(), prNumber) : undefined;
+    if (!hold) {
+      try {
+        assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
+        gh(["pr", "merge", prUrl, "--auto", "--squash"]);
+      } catch {
+        // Best-effort — the ci + remudero-review gate decides; GitHub does the merging
+        // either way (Standing rule 3B), this call only arms auto-merge when it can.
+      }
     }
   }
   return { prUrl };
@@ -294,6 +332,7 @@ function finishLanding(
   treeSha: string,
   unlanded: string[],
   env: NodeJS.ProcessEnv,
+  ledgerLines?: () => Array<Record<string, unknown>>,
 ): LandFeedbackResult {
   // ── ALREADY-LANDED SHORT-CIRCUIT: push only when the CONTENT differs. ────────────────────────
   // The tree is deterministic — `read-tree origin/main` plus the same blobs yields the same
@@ -324,7 +363,7 @@ function finishLanding(
   // level-triggered sweep exists to close. `ensurePrOpen` is a no-op besides one `gh pr list`
   // when a PR is already open (the common case), so this costs nothing on a truly quiet pass.
   if (remoteBranchTree(git, kind.branch) === treeSha) {
-    const { prUrl, error } = ensurePrOpen(kind, gh, unlanded);
+    const { prUrl, error } = ensurePrOpen(kind, gh, unlanded, ledgerLines);
     return { landed: true, files: unlanded, prUrl, error, pushed: false };
   }
 
@@ -354,7 +393,7 @@ function finishLanding(
   assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
   git(["push", "--force", "origin", `${commitSha}:refs/heads/${kind.branch}`]);
 
-  const { prUrl, error } = ensurePrOpen(kind, gh, unlanded);
+  const { prUrl, error } = ensurePrOpen(kind, gh, unlanded, ledgerLines);
   if (error) {
     // Pushed fine, opening the PR failed (no `gh`, no auth) — still landed on the branch; a
     // future call (or a human `gh pr create`) can pick the PR up from there. `pushed: true`
@@ -403,7 +442,7 @@ function landPending(root: string, kind: LandingKind, opts: LandFeedbackOpts): L
       git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
     }
     const treeSha = git(["write-tree"], { env }).trim();
-    return finishLanding(kind, git, gh, mainSha, treeSha, unlanded, env);
+    return finishLanding(kind, git, gh, mainSha, treeSha, unlanded, env, opts.ledgerLines);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {
@@ -582,7 +621,7 @@ function landContent(
     if (unlanded.length === 0) return { landed: false, files: [] };
 
     const treeSha = git(["write-tree"], { env }).trim();
-    return finishLanding(kind, git, gh, mainSha, treeSha, unlanded, env);
+    return finishLanding(kind, git, gh, mainSha, treeSha, unlanded, env, opts.ledgerLines);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {
