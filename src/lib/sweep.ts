@@ -3416,6 +3416,62 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   return { armed, fixed, closed, escalated, depReviewed, postReviewed, riskRefused, absentRepushes };
 }
 
+/**
+ * W1-T1110 — HAS THE MOST RECENT `fix.dispatch` FOR THIS TASK ALREADY CONCLUDED WITHOUT LANDING
+ * A NEW HEAD? `prior.fixed` (above) is keyed `pr@headSha` off `sweep.disposed` ROWS and records
+ * only that a fix was DISPATCHED — an attempt, never an outcome (see that field's own doc). The
+ * key clears on a new head, and the head only changes when a fix runs and PUSHES; a dispatch
+ * whose worker demonstrably ran (spending a real strike — see `fix.dispatch`) and then ENDED —
+ * review still failing, or CI never green — without landing a push leaves the key set and the
+ * head unmoved, so every later pass reads `alreadyDone` and stands down FOREVER (rationale (4)).
+ *
+ * Reads exactly the two of design note (iii)'s three named steps that answer "concluded, and
+ * did NOT succeed": a `fix.review` row with `state !== "success"` (a real review ran and still
+ * failed), or a `fix.ci_not_green` row (CI never went green for that strike). The THIRD named
+ * step, `fix.resolved`, is read too — but deliberately never counted as "stalled": it fires only
+ * once `review.state === "success"`, i.e. a strike that genuinely landed a working push. Re-arming
+ * on a resolved strike would risk a second, redundant dispatch on a task the rung already
+ * finished; the caller's own sha-keyed `prior.fixed.has(pr@headSha)` check already retires that
+ * head the moment GitHub reflects the new push, so nothing here needs to also flip it — a
+ * dispatch that DID move the head must keep suppressing a second attempt (acceptance 3).
+ *
+ * TASK-ID KEYED, not head-sha keyed: none of these three steps carries a `head_sha` (they are
+ * strike-scoped, logged by `runFixRung` per round — see run-task.ts's `deps.log("fix.review", …)`
+ * / `deps.log("fix.ci_not_green", …)` / `deps.log("fix.resolved", …)` — never push-scoped), so
+ * there is nothing else to key them by except the SAME `task_id` `fix.dispatch` already stamps on
+ * every line it writes (W1-T78's `dispatchFix` fix — see `priorStrikesFor`'s own doc in
+ * run-task.ts). Reading them without a sha is safe because every caller of this function already
+ * guards on `prior.fixed.has(pr@headSha)` being true for the PR's CURRENT, live head — i.e. the
+ * head has provably not moved since the dispatch that set that key, so any strike this task has
+ * run since is necessarily against that SAME stuck head.
+ *
+ * Scoped to the MOST RECENT `fix.dispatch` only, by design: each `fix.dispatch` line resets the
+ * verdict, so an EARLIER strike's stalled conclusion never re-arms a LATER, still-in-flight
+ * strike on the same head — design (i)'s idempotence (two dispatches racing the same sha must
+ * still not both spend a strike) survives unchanged.
+ *
+ * `undefined`/no matching lines ⇒ `false`: a cold blocked-fixable dispatch with no resolvable
+ * task carries no `task_id` to key against, and this must never throw or false-positive on
+ * nothing to read.
+ */
+function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
+  if (!taskId) return false;
+  let stalled = false;
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    if (line.step === "fix.dispatch") {
+      stalled = false;
+    } else if (line.step === "fix.ci_not_green") {
+      stalled = true;
+    } else if (line.step === "fix.review") {
+      stalled = line.state !== "success";
+    } else if (line.step === "fix.resolved") {
+      stalled = false;
+    }
+  }
+  return stalled;
+}
+
 // ── W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half) ──
 //
 // A `sweep.disposed` row already NAMES a classified surface on its own `disposition` field
@@ -3880,6 +3936,13 @@ export async function runSweep(
 
     // Is this action already true (deduped)? Keyed per disposition.
     let alreadyDone: boolean;
+    // W1-T1110: set ONLY by the "blocked-fixable"/"conflicted" case below, when a PRIOR
+    // dispatch against this exact head is still deduping (`prior.fixed.has(...)` true AND its
+    // rung has not stalled out — see `fixRungStalledWithoutNewHead`'s own doc). Named here, not
+    // just silently stood down (rationale (5)): the light-pass arm one branch below already sets
+    // `standDownReason` for its own stand-down, and this arm previously did not, which is the
+    // defect two readers independently misread as an unwired action path.
+    let dedupStandDownReason: string | undefined;
     switch (disposition) {
       case "mergeable": {
         // PREFER OBSERVED STATE: GitHub's own `autoMergeArmed` is the authority for
@@ -3902,9 +3965,26 @@ export async function runSweep(
         break;
       }
       case "blocked-fixable":
-      case "conflicted": // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
-        alreadyDone = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`);
+      case "conflicted": {
+        // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
+        const dispatchedThisHead = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`);
+        // W1-T1110 — RE-ARM A STALLED DISPATCH: `dispatchedThisHead` records only that a fix was
+        // DISPATCHED against this head, never that it succeeded (rationale (3)). If the ledger
+        // shows that dispatch's own rung already ENDED without landing a new head (a real review
+        // still failing, or CI never green — `fixRungStalledWithoutNewHead`), treating it as
+        // still "already done" would dedup this PR against a head nothing will ever move again
+        // (rationale (4)) — so it does NOT suppress this pass; the strike cap (unchanged, design
+        // (iv)) still bounds however many more attempts follow. A dispatch that instead resolved
+        // (landed a working push) is never read as stalled, so it keeps suppressing a second
+        // attempt on this same, now-stale head (acceptance 3).
+        alreadyDone = dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
+        if (alreadyDone) {
+          dedupStandDownReason =
+            `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
+            `before spending another strike`;
+        }
         break;
+      }
       case "stale":
         alreadyDone = prior.closed.has(pr.prNumber);
         break;
@@ -3944,8 +4024,11 @@ export async function runSweep(
     // W1-T177: set ONLY when the terminal-state check below stood the
     // blocked-fixable dispatch down — distinct from `alreadyDone` (dedup)
     // and from `deps.dryRun` (preview), so the disposed line can name WHY
-    // `acted` is false without conflating the three.
-    let standDownReason: string | undefined;
+    // `acted` is false without conflating the three. W1-T1110: seeded from
+    // `dedupStandDownReason` (set above, in the "blocked-fixable"/"conflicted" arm of the
+    // `alreadyDone` switch) so a still-deduped fix dispatch NAMES ITSELF on this same field —
+    // the light-pass arm's exact shape, one branch away — rather than standing down silently.
+    let standDownReason: string | undefined = dedupStandDownReason;
     // W1-T1061: the FIELD twin of `standDownReason`'s prose, set ONLY when the "mergeable"
     // case below actually calls `deps.arm(pr)` and gets a concrete (non-void) outcome back —
     // every other disposition, and a mergeable PR that stands down in `decideSweepArm` before

@@ -1370,6 +1370,101 @@ test("acceptance 2 — a NEW push (changed head sha) legitimately re-earns a fix
   assert.equal(deps3.fixed.length, 1, "a new head sha (state changed) legitimately re-earns a strike");
 });
 
+// ── W1-T1110 — the dedup arm names itself, and only RE-ARMS a dispatch that ENDED without
+//    landing a new head; a dispatch that DID land one keeps suppressing a second attempt, and
+//    the strike ceiling/escalation at the cap is untouched throughout. ────────────────────────
+
+test("W1-T1110 acceptance 1 — a still-deduped fix dispatch names itself on the disposed line's stand_down_reason, the light-pass arm's own shape", async () => {
+  const shared = ledgerPath();
+  const deps1 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-1" });
+  await runSweep([blockedFixablePr()], deps1);
+  assert.equal(deps1.fixed.length, 1);
+
+  // Same head sha, no ledger evidence the dispatched rung ever concluded — dedup holds, but
+  // (this task's own fix) it must now NAME what it is standing down for, unlike before.
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  const summary = await runSweep([blockedFixablePr()], deps2);
+  assert.equal(deps2.fixed.length, 0, "unchanged head sha, no conclusion evidence ⇒ still deduped");
+  assert.equal(summary.actions[0].acted, false);
+
+  const disposed = readLedgerLines(shared).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 2);
+  assert.equal(disposed[1].acted, false);
+  assert.match(
+    String(disposed[1].stand_down_reason),
+    /already dispatched.*aaaa111/,
+    "the dedup row now names ITSELF — which head it already dispatched against — never silent",
+  );
+});
+
+test("W1-T1110 acceptance 2 — a fix dispatch that ENDED without moving the head (CI never green) no longer suppresses the next pass", async () => {
+  const shared = ledgerPath();
+  const deps1 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-1" });
+  await runSweep([blockedFixablePr()], deps1);
+  assert.equal(deps1.fixed.length, 1);
+
+  // The dispatched fix worker's OWN rung ran a real strike and ended without ever going green —
+  // ledgered under the SAME task_id `fix.dispatch`/`fix.ci_not_green` already stamp (W1-T78),
+  // never a new step, never a timer (design (iii) explicitly refuses both).
+  appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.dispatch", strike: 1, strike_cap: 2 });
+  appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.ci_not_green", strike: 1, ci: "red" });
+
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  await runSweep([blockedFixablePr()], deps2);
+  assert.equal(
+    deps2.fixed.length,
+    1,
+    "a dispatch that ended without a new head must not dedup this PR against a head nothing will ever move again",
+  );
+});
+
+test("W1-T1110 acceptance 2b — a fix dispatch that ENDED via a real (still-failing) review, never CI, ALSO re-arms — either evidence names a conclusion", async () => {
+  const shared = ledgerPath();
+  const deps1 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-1" });
+  await runSweep([blockedFixablePr()], deps1);
+  assert.equal(deps1.fixed.length, 1);
+
+  appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.dispatch", strike: 1, strike_cap: 2 });
+  appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.review", strike: 1, state: "failure", unmet: 1 });
+
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  await runSweep([blockedFixablePr()], deps2);
+  assert.equal(deps2.fixed.length, 1, "a still-failing review is a conclusion too — the dedup re-arms");
+});
+
+test("W1-T1110 acceptance 3 — a fix dispatch that DID resolve (landed a working push) still suppresses a second attempt on that same, now-stale head", async () => {
+  const shared = ledgerPath();
+  const deps1 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-1" });
+  await runSweep([blockedFixablePr()], deps1);
+  assert.equal(deps1.fixed.length, 1);
+
+  // The rung's strike genuinely succeeded — `fix.review` posted `state: "success"` and
+  // `fix.resolved` fired (run-task.ts: only reached once `review.state === "success"`).
+  appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.dispatch", strike: 1, strike_cap: 2 });
+  appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.review", strike: 1, state: "success", unmet: 0 });
+  appendLedger(shared, { run_id: "SWEEP-1", task_id: "W1-B", step: "fix.resolved", strikes: 1 });
+
+  // Re-queried against the SAME head sha (in real operation this head is now stale — GitHub
+  // would report the fix worker's new head instead — but the dedup for THIS exact key must
+  // never re-arm on a resolved strike, so it is asserted directly here).
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  await runSweep([blockedFixablePr()], deps2);
+  assert.equal(
+    deps2.fixed.length,
+    0,
+    "a resolved dispatch is never read as stalled — it keeps suppressing a second attempt",
+  );
+});
+
+test("W1-T1110 acceptance 4 — the strike ceiling and its escalation at the cap are unchanged by the dedup re-arm", async () => {
+  const deps = fakeDeps();
+  const summary = await runSweep([strikesExhaustedPr()], deps);
+  assert.equal(summary.actions[0].disposition, "blocked-ambiguous", "exhaustion still routes off the disposition rule, not the dedup");
+  assert.match(String(summary.actions[0].reason), /fix strikes exhausted \(2\/2\)/, "the cap itself (2) is untouched");
+  assert.equal(deps.escalated.length, 1, "exhaustion still escalates loudly");
+  assert.equal(deps.fixed.length, 0, "no fix dispatch fires once the cap is reached — the dedup re-arm never widens the cap");
+});
+
 // ── W1-T177: TERMINAL-STATE CHECK AT EVERY SPENDING SITE — a sweep disposition
 // never spends a fix-rung strike on a PR whose live GitHub state has already
 // gone terminal since the `openPrs` snapshot this sweep pass started from.
