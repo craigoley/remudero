@@ -30,5 +30,21 @@ raw: "TEST FIXTURES LEAK TEMP DIRS AT SCALE AND daemon.tmp_sweep REAPS NONE OF
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2359
+summary:
+  headline: Test temp directories leak; daemon.tmp_sweep won't clean them
+  what_happened: TMPDIR accumulated 53K rmd-* directories at ~200/min growth.
+    daemon.tmp_sweep logged zero removals every boot despite 49,979 candidates;
+    this caused ENOSPC crash at 23:32Z killing four W1-T312 dispatches.
+  decision: Determine whether test helpers lack teardown, sweep has wrong
+    ownership scope, or both. Implement fix and immediately manual-clear
+    backlog.
+  options:
+    - label: Test fixture teardown missing
+      consequence: Add cleanup to test helper setup; stops future leaks but backlog remains.
+    - label: Sweep scope doesn't include rmd-*
+      consequence: Extend sweep to recognize rmd-* prefix; clears backlog and handles
+        future growth.
+    - label: Both test fixtures and sweep need changes
+      consequence: Implement both fixes; requires manual backlog cleanup during
+        deployment transition.
