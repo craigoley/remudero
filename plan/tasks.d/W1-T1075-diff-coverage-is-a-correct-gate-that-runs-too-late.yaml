@@ -126,9 +126,25 @@
   origin: "recon#diff-coverage-runs-too-late-2026-08-20"
   plan_refs: ["W1-T464", "W1-T294", "W1-T373", "W1-T1060"]
   files: [src/lib/ci-parity.ts, src/run-task.ts, test/preflight-ci-parity.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
   note: |
+    RETIREMENT RECORD, 2026-08-20 — THIS SHARD IS SUPERSEDED, and it is retired because a second lane
+    filed the same finding independently, rather than because it was wrong or because the work is done.
+    The work is NOT done. Everything below is preserved verbatim so a future reader needs no archaeology.
+    SUPERSEDED BY W1-T1074, which the operator ruled survives: it carries the timeline measurement that
+    the six-PR premise did not reconstruct.
+    WHY, IN ONE LINE: this shard (#2327, opened 20:52:47Z) and W1-T1074 (#2328, opened 20:54:43Z) were
+    filed under two minutes apart by independent lanes on the same subject — their shard FILENAMES are
+    byte-identical apart from the id — and NEITHER BODY CITES THE OTHER, so neither lane could see the
+    other's work. W1-T1076 (#2329) FILES THAT MECHANISM, and its findings are cited here rather than
+    re-derived; read them there.
+    NOTHING MEASURED HERE IS LOST. This shard's rationale, design and criteria stay readable in git and
+    in its own merged PR #2327, so retiring it withdraws THE BUILD, NOT THE EVIDENCE. Both shards read
+    `status: queued`, so dispatch would otherwise have built each of them separately.
+    DO NOT RE-FILE THIS SHARD. If the diff-coverage latency finding is still open, the successor is
+    W1-T1074.
+    ORIGINAL NOTE, UNCHANGED, follows.
     `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. The declared paths reach
     the ci-parity library and the CLI that consumes its summary, which `subsystemsOf` reads as more
     than one concern. DECOMPOSITION IS DECLINED WITH A REASON: the refusal branch (design i) lives in

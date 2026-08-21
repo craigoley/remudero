@@ -99,33 +99,26 @@
   files: [src/lib/status.ts, src/lib/serve.ts, test/human-verify-queue-surfaces.test.ts]
   status: queued
   attempts: 0
-  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across two `src/` modules plus `test/`, so
-    `sizingViolation` (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is consulted.
-    THE BAND IS THE SPAN, NOT THE BLAST RADIUS: the change is a projection field and the section
-    that already renders that projection, and it gates nothing.
-    `files:` WAS DERIVED BY INVOCATION COUNT ON THE SYMBOL THAT CHANGES. `projectPlan(` is invoked
-    in `test/status.test.ts` (11), `src/run-task.ts` (6), `src/lib/panel-graph.ts` (6),
-    `test/status-atomic-write.test.ts` (5), `test/needs-me-taskless.test.ts` (3) and others — but
-    the DEFINITION is in `src/lib/status.ts`, and callers are unchanged by a new sparse field, so
-    only the definition site is declared. `src/lib/serve.ts` is declared because design (ii)
-    requires the render to distinguish the kind, and a projection field nothing renders is this
-    repo's documented dormant-check failure.
-    THE EXISTING SUITES ARE DELIBERATELY NOT DECLARED. `test/status.test.ts` scores highest on
-    `projectPlan` and is NOT declared: a declared-but-untouched path fails
-    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) exactly as an undeclared one fails
-    `scopeViolationFiles`, and a new file also keeps this task's coverage off a shared suite — the
-    `test/run-task.test.ts` coverage-channel lesson generalised.
-    A CLIENT-SCRIPT CHANGE OWES THE PLAYWRIGHT SUITES. `src/lib/serve.ts`'s console JS lives inside
-    a backtick template literal, so the implementer must keep backticks out of client comments and
-    run the real `test/serve.*.test.ts` browser suites, not only the node ones.
-    RULE 25 IS NOT ENGAGED: neither declared `src/` path matches any `INSTRUMENT_SURFACE` pattern
-    and `test/` is excluded from `isProductPath`, so this changeset reads `entangled: false`.
-    EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH — a pure path runs the
-    whole file and couples every criterion to unrelated failures in it. Each of the four titles was
-    checked to match zero files under `test/` today against a positive control matching one, and
-    each is under 100 characters with no comma, so `looksLikeScenarioNarrative`
-    (`src/lib/task-linter.ts`) cannot fail them.
-    PROVENANCE: the 38/37/31 counts, the exclusion-site census, the single `needsHuman` assignment,
-    the docket's five sources, the empty managed-repos list, the issue-comment read-absence and the
-    #1444 comment split are ALL measured on the mac mini at 24d27da1 on 2026-08-15. RE-DERIVE THE
-    COUNTS BEFORE BUILDING — three of them moved during the session that took them."
+  note: |
+    MEASUREMENT AMENDMENT, 2026-08-21 — THE FINDING STANDS AND THE MAGNITUDE HAS GROWN. Nothing else in
+    this shard changes: not the title, not `files:`, not the acceptance block, not `status:`. The work is
+    NOT done.
+
+    THE COUNT IN THE TITLE WENT STALE. This shard was filed naming 31 tasks waiting on a person who is
+    never told. Re-measured on origin/main on 2026-08-21, `verify: human` reads 136, against a live
+    control of 677 for `verify: auto` in the same query. The queue is more than four times the size the
+    title records. The date is given because the COUNT is what went stale, not the finding.
+
+    AND THIS IS THE PRECONDITION FOR THE OPERATOR STOPPING HAND-MERGING AT ALL, which is the use this
+    shard now has to serve. The operator has said he wants the fleet to manage its own queue so defects
+    surface on their own. Without the surface this shard files, a GREEN PR governed by a `verify: human`
+    task STRANDS SILENTLY and nothing tells him. Re-derived 2026-08-21: zero ledger step names anywhere
+    contain the word human (control: `automerge.armed` 585 rows in the same corpus);
+    `needs_human`, `awaiting_human`, `pr.waiting` and `review.needs_human` each read 0; and the status
+    board carries no awaiting-human surface either (control: 34 `BLOCKERS` mentions in that same file).
+    `escalation.issue_opened` is alive — 81 rows, newest 2026-08-21T00:23Z — but fires for escalations,
+    never for the sentence this shard exists to produce: this PR is green and waiting on your merge.
+
+    ORIGINAL NOTE, UNCHANGED, follows.
+
+    `risk: high` IS SET UP FRONT — Rule 19 SPAN across two `src/` modules plus `test/`, so `sizingViolation` (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is consulted. THE BAND IS THE SPAN, NOT THE BLAST RADIUS: the change is a projection field and the section that already renders that projection, and it gates nothing. `files:` WAS DERIVED BY INVOCATION COUNT ON THE SYMBOL THAT CHANGES. `projectPlan(` is invoked in `test/status.test.ts` (11), `src/run-task.ts` (6), `src/lib/panel-graph.ts` (6), `test/status-atomic-write.test.ts` (5), `test/needs-me-taskless.test.ts` (3) and others — but the DEFINITION is in `src/lib/status.ts`, and callers are unchanged by a new sparse field, so only the definition site is declared. `src/lib/serve.ts` is declared because design (ii) requires the render to distinguish the kind, and a projection field nothing renders is this repo's documented dormant-check failure. THE EXISTING SUITES ARE DELIBERATELY NOT DECLARED. `test/status.test.ts` scores highest on `projectPlan` and is NOT declared: a declared-but-untouched path fails `inverseScopeUntouchedFiles` (`src/lib/review.ts`) exactly as an undeclared one fails `scopeViolationFiles`, and a new file also keeps this task's coverage off a shared suite — the `test/run-task.test.ts` coverage-channel lesson generalised. A CLIENT-SCRIPT CHANGE OWES THE PLAYWRIGHT SUITES. `src/lib/serve.ts`'s console JS lives inside a backtick template literal, so the implementer must keep backticks out of client comments and run the real `test/serve.*.test.ts` browser suites, not only the node ones. RULE 25 IS NOT ENGAGED: neither declared `src/` path matches any `INSTRUMENT_SURFACE` pattern and `test/` is excluded from `isProductPath`, so this changeset reads `entangled: false`. EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH — a pure path runs the whole file and couples every criterion to unrelated failures in it. Each of the four titles was checked to match zero files under `test/` today against a positive control matching one, and each is under 100 characters with no comma, so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them. PROVENANCE: the 38/37/31 counts, the exclusion-site census, the single `needsHuman` assignment, the docket's five sources, the empty managed-repos list, the issue-comment read-absence and the #1444 comment split are ALL measured on the mac mini at 24d27da1 on 2026-08-15. RE-DERIVE THE COUNTS BEFORE BUILDING — three of them moved during the session that took them.

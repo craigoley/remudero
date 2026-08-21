@@ -1,0 +1,123 @@
+- id: W1-T1078
+  title: "`lint-plan`'s failing-split credits four tasks with an implementation that is only a filing — `LINT_FILING_SUBJECT_RE` excludes `chore(plan)`/`chore(triage)`/`chore(feedback)`/`docs(plan)` but not the OLDER bare `plan:`/`docs:`/`chore:` convention those subjects replaced, so the headline overstates by about two percent every time anyone runs the verb"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  rationale: |
+    THIS IS A SMALL SHARD AND SAYS SO UP FRONT: one regex widening plus a test. The recon is done and
+    is CITED HERE, NOT RE-DERIVED (recon 2026-08-20/21 on the Azure host `Remudero`, scratch worktree
+    at origin/main, no daemon state touched, no task record edited).
+
+    (1) THE DEFECT. `classifyFailingMergeEvidence` (`src/run-task.ts`) filters candidate commits
+    through `LINT_FILING_SUBJECT_RE`, which reads
+    `/^(chore\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\))/i`. That covers the CURRENT
+    conventional-commit filing subjects and misses the OLDER bare form this repo used before them —
+    `plan:`, `docs:` and `chore:`. Re-running the split with those three added moves exactly four
+    tasks: W1-T105, W1-T50, W1-T54b and W1-T63 rest ONLY on a filing-shaped commit, while the other
+    167 have a genuine implementation. So the printed headline overstates the "with a merged
+    implementation" count by about two percent.
+
+    (2) WHY IT IS WORTH DOING AT ALL, GIVEN THE SIZE. The number is printed EVERY time anyone runs
+    the verb, and the verb prints its own evidence rule beside it — the split's own comment says a
+    split whose rule is invisible is the same defect one level down. A record that ASSERTS AN
+    IMPLEMENTATION WHICH IS ONLY A FILING is the same class as `automerge.disarmed` asserting a
+    withdrawal that failed, which this fleet spent 2026-08-20 removing: a durable line that states an
+    outcome the evidence does not support. The cost of the fix is a regex and a test; the cost of
+    leaving it is a standing overstatement in a number the operator reads to price open work.
+
+    (3) WHAT THIS IS NOT, STATED PLAINLY BECAUSE THE SURROUNDING NUMBER LOOKS ALARMING AND IS NOT.
+    The 171 are CORRECTLY-OPEN RECORDS OF COMPLETED WORK whose proofs are written in a retired
+    dialect. Measured violation classes across the failing set are `proof-dialect` 275 and
+    `proof-resolvability` 177 — malformed or unresolvable PROOF STRINGS, not unmet acceptance
+    criteria. Ten sampled evenly across the id range were all `status: queued` with a real merged
+    implementation commit, and three had their shipped feature verified present in the tree.
+
+    (4) AND THE FEARED COST HAS NEVER OCCURRED, BECAUSE SOMETHING ELSE GUARDS IT.
+    `isDispatchEligible` (`src/lib/drain.ts`) checks `isMerged(t.id)` FIRST and declines with reason
+    `already-merged`, off the GitHub-derived merged projection rather than the plan's `status:`
+    field — so a stale `queued` on merged work cannot admit a dispatch. Measured over the deduped
+    ledger union: exactly ONE task has ever opened two distinct PRs (W1-T911), it is NOT in the set,
+    and the overlap between the set and the 43 tasks carrying more than one `run.start` is EMPTY.
+
+    (5) AND THE COHORT IS CLOSED, NOT GROWING. All 171 carry ids <= 500 and none above 1000. The
+    absolute count is flat since the split was introduced while the plan grew from 256 to 648 checked
+    tasks, so the rate fell from 35.4% to 26.9%. The earlier 8 -> 176 jump is not tasks ceasing to
+    close: `proof-dialect` reads ZERO files in the 2026-07-21 tree against a control of six today, so
+    the rules that produce these violations did not exist then.
+
+    (6) THE ADJACENT SHARD IS THE INVERSE, NOT A DUPLICATE, AND ITS PREMISE NEEDS ONE CORRECTION.
+    W1-T413 (`plan-only PR credits a task as implemented`, `status: queued`) files the DISPATCH side:
+    `deriveStatus`'s trailer credit in `src/lib/status.ts` treats a merged plan-only PR as an
+    implementation, so a task reads merged forever. Its rationale cites `lint-plan`'s failing-split
+    rule as the good example the dispatch path should copy — *"`lint-plan`'s own failing-split rule,
+    which is already correct"*. THAT PREMISE IS ALMOST RIGHT AND THIS SHARD QUALIFIES IT: the rule is
+    correct in SHAPE and incomplete in COVERAGE, because it does not know the older convention. The
+    two tasks touch different files (`src/run-task.ts` here, `src/lib/status.ts` there) and neither
+    subsumes the other.
+  design: |
+    (i) WIDEN `LINT_FILING_SUBJECT_RE` TO THE OLDER CONVENTION. Add the bare `plan:`, `docs:` and
+    `chore:` prefixes alongside the four scoped forms already there. The regex is already exported and
+    already the single source the filter reads, so this is one edit at one site.
+
+    (ii) THE EVIDENCE-RULE LINE MUST STAY TRUE TO THE REGEX. `lint-plan` prints its own basis beside
+    the number, naming the excluded subjects verbatim. That sentence has to name the newly excluded
+    forms too, or the printed rule stops describing the filter — which is the same
+    invisible-rule defect the split was built to avoid.
+
+    (iii) TEST BOTH DIRECTIONS WITH A POSITIVE CONTROL. A commit whose subject is the older bare
+    filing form must NOT credit a task; a commit whose subject is a genuine implementation MUST still
+    credit it. The second half is the control that keeps the widening from silently swallowing real
+    evidence — a filter that excludes too much would UNDERSTATE the count, which is worse than the
+    overstatement being fixed.
+
+    (iv) NO TASK RECORD IS TOUCHED. This shard does not propose a status sweep, a bulk edit, or any
+    change to a `status:` field, and it must not acquire one. The operator has ruled that out and
+    rationale (3)-(5) support him: the records are correct, dispatch already refuses them, and the
+    cohort is closed. A sweep that closed tasks on a heuristic would be one bad predicate away from
+    marking real work done.
+
+    (v) OUT OF SCOPE, NAMED. W1-T413's dispatch-side credit is cited and NOT absorbed — different
+    file, different consumer, already filed. No change to the proof-dialect or proof-resolvability
+    rules that produce the 174 failing records. No change to `isDispatchEligible` or to the merged
+    projection that guards dispatch.
+  acceptance:
+    - claim: "a commit whose subject uses the older bare filing form does not credit a task with an implementation"
+      proof: "unit test: W1-T1078: an older bare filing subject does not credit a task"
+    - claim: "a commit whose subject is a genuine implementation still credits the task"
+      proof: "unit test: W1-T1078: a genuine implementation subject still credits the task"
+    - claim: "the printed evidence rule names every subject form the filter actually excludes"
+      proof: "unit test: W1-T1078: the printed evidence rule matches the filter it describes"
+    - claim: "the four affected tasks move out of the credited side once the filter knows the older form"
+      proof: "unit test: W1-T1078: the previously miscredited tasks move to the uncredited side"
+  origin: "recon#failing-split-misses-older-filing-convention-2026-08-21"
+  plan_refs: ["W1-T413", "W1-T324"]
+  files: [src/run-task.ts, test/lint-plan-merge-evidence.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE TWO MUST NOT BE CONFUSED HERE.
+    `subsystemsOf` derives a tag per declared path, so `src/run-task.ts` plus ANY `test/*.test.ts`
+    reads as two concerns and `lint-plan` refuses that below high — the same correction it forced on
+    W1-T1068 and W1-T1069. THE ACTUAL DIFF IS ONE EXPORTED REGEX, the sentence that describes it, and
+    cases in an existing suite. DECOMPOSITION IS DECLINED: a regex change with no test is the
+    ships-unverified shape, and a test with no change tests nothing.
+
+    `src/run-task.ts` IS DECLARED because `LINT_FILING_SUBJECT_RE`, `classifyFailingMergeEvidence`
+    and the evidence-rule line all live there and nowhere else; DECISIONS.md's 2026-08-18 W1-T471
+    ruling is the standing acceptance that declaring that file is not re-scoped around.
+
+    `test/lint-plan-merge-evidence.test.ts` IS THE EXISTING HOME and is declared rather than a new
+    file: it already imports and exercises `classifyFailingMergeEvidence`, so the new cases join the
+    suite that already owns this classifier. That also keeps `subsystemsOf` at one concern — a NEW
+    test filename would have added a second tag and forced `risk: high` on a one-regex change, which
+    is the same correction `lint-plan` already forced on W1-T1068 and W1-T1069.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the four affected ids by running
+    `classifyFailingMergeEvidence` twice — once with the shipped regex and once widened — over the
+    same `git log origin/main --format=%s%x00%b%x01` dump, and diff the `withImpl` sets. Re-derive
+    the violation-class counts from `rmd lint-plan`'s own per-task lines. Re-derive the dispatch
+    guard by reading `isDispatchEligible`'s first branch rather than inferring it from behaviour.
