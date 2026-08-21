@@ -1,0 +1,105 @@
+- id: W1-T1101
+  title: "THE `escalation reconcile` SUMMARY LINE CANNOT SAY WHETHER IT READ ANYTHING — it prints the post-drop candidate count under the label `open needs-human issue(s) checked`, so a zero reads identically whether nothing was open, everything was dropped, or the issue-list read failed; the operator read `0 checked · 0 closed` against seventeen open issues and concluded the reconciler was broken, and it was not"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  rationale: |
+    THE RECON IS DONE AND IS CITED HERE, NOT RE-DERIVED (2026-08-21, Azure host `Remudero`, scratch
+    worktree at origin/main, ledger read-only over the per-form union: 14 plain/live forms, 0 `.gz`).
+
+    (1) THE LINE PRINTS THE WRONG NUMBER UNDER THE RIGHT WORDS. `src/run-task.ts:18764` renders
+    `escalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked ·
+    ${reconcileSummary.closed} closed`. But `total` is `candidates.length`, counted AFTER the open
+    issues have been turned into candidates and after drops — it is NOT the number of open issues,
+    which is what the label says it is.
+
+    (2) MEASURED, THE UNDERSTATEMENT IS VISIBLE IN THE ROW BESIDE IT. At 2026-08-21T14:15:33Z the
+    reconciler's own `sweep.escalation_reconcile.summary` row read `issues_seen: 13, total: 9,
+    closed: 3, dropped: {no_task_trailer: 2, no_referent: 2}`. So on that tick the CLI line would
+    have said "9 open needs-human issue(s) checked" while THIRTEEN were open and THREE were closed
+    by that very run.
+
+    (3) AND A ZERO IS AMBIGUOUS THREE WAYS, WHICH IS THE PART THAT COST A RECON. `total: 0` reads
+    identically whether nothing was open, everything open was dropped for carrying no `**Task:**`
+    trailer or no resolvable referent, or THE ISSUE-LIST READ FAILED — whose contract is explicitly
+    to yield `[]` and "do nothing this cycle, never a false 'zero open'". The operator read
+    `0 checked · 0 closed` with seventeen issues open and reasonably concluded the reconciler was
+    broken. IT WAS NOT: the rows in (2) show it seeing and closing issues the same afternoon.
+
+    (4) AND `--dry-run` DOES NOT EXPLAIN IT. The call at `src/run-task.ts:18734` passes `{ dryRun }`
+    through and still performs the read, exactly like every other rung in that command.
+
+    (5) THE FIX ALREADY EXISTS ONE LAYER DOWN, WHICH IS WHY THIS IS SMALL. `EscalationIntake`
+    already carries `issuesSeen`, `droppedNoTaskTrailer` and `droppedNoReferent` — added because
+    THIS EXACT MISREADING COST A FULL RECON ONCE BEFORE and was fixed FOR THE LEDGER ROW in #1084.
+    Its own doc names the signature: *"`issuesSeen: 3, total: 0` is the signature of that defect.
+    The old line could not express it."* THE CLI LINE WAS NEVER GIVEN THE SAME FIX. This is a
+    RENDERING CHANGE OVER DATA THE ROW ALREADY HOLDS, NOT A NEW READ and not a new query.
+
+    (6) THE CLASS IS FILED AND IS CITED, NOT RE-FILED: a surface that cannot express its own
+    uncertainty — W1-T1081 and W1-T1097 own it. This shard fixes one instance and adds nothing to
+    the taxonomy.
+  design: |
+    (i) PRINT WHAT THE ROW ALREADY KNOWS. The summary line must carry `issuesSeen` alongside the
+    candidate count and the closed count, so a reader can tell "13 seen, 9 candidates, 3 closed"
+    from "0 seen". The label must stop calling a post-drop candidate count "open issues checked" —
+    either name it as candidates, or print the seen count under that label. No new read, no new
+    gateway call, no change to what the reconciler does.
+
+    (ii) A FAILED READ MUST BE DISTINGUISHABLE FROM AN EMPTY ONE. The `[]`-on-failure contract is
+    correct and stays — a failed read must keep doing nothing this cycle. What must change is that
+    the line says so, rather than rendering the same zero it renders for a genuinely empty queue.
+    That is the whole of rationale (3), and it is the difference between an operator trusting the
+    rung and reasonably concluding it is broken.
+
+    (iii) THE DROP COUNTS BELONG ON THE LINE TOO, BECAUSE THEY ARE THE OTHER HALF OF THE ZERO. An
+    all-dropped tick is a real state with a real remedy — issues carrying no `**Task:**` trailer are
+    genuinely human territory and should be visible as such, not silently absent from a count.
+
+    (iv) DO NOT CHANGE THE RECONCILER'S BEHAVIOUR. No change to what it closes, to the drop rules,
+    to the `[]`-on-failure contract, or to the ledger row's fields — the row is already correct and
+    is the reason this defect is diagnosable at all.
+
+    (v) OUT OF SCOPE, NAMED. The seventeen open issues are not classified or retired by this task;
+    that is an operator ruling per issue. No change to `renderIssueBody`, to the `**Task:**` trailer
+    convention, or to any other summary line in `rmd sweep`. W1-T1081 and W1-T1097 are cited for the
+    class and neither is absorbed.
+  acceptance:
+    - claim: "the summary reports how many open issues the read returned, not only how many became candidates"
+      proof: "unit test: W1-T1101: the summary reports the issues the read returned"
+    - claim: "a failed issue-list read renders differently from a genuinely empty queue"
+      proof: "unit test: W1-T1101: a failed read renders differently from an empty queue"
+    - claim: "a tick whose issues were all dropped names the drops rather than rendering a bare zero"
+      proof: "unit test: W1-T1101: an all-dropped tick names its drops"
+    - claim: "the reconciler's own behaviour and its ledger row are unchanged"
+      proof: "unit test: W1-T1101: the reconciler's behaviour and ledger row are unchanged"
+  origin: "recon#escalation-reconcile-summary-cannot-express-uncertainty-2026-08-21"
+  plan_refs: ["W1-T1081", "W1-T1097", "W1-T186"]
+  files: [src/run-task.ts, test/escalation-reconcile-intake.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared path,
+    so `src/run-task.ts` plus any `test/*.test.ts` reads as two concerns and `lint-plan` refuses that
+    below high — the correction it has already forced on W1-T1068, W1-T1069, W1-T1078, W1-T1079,
+    W1-T1095 and W1-T1099. THE ACTUAL DIFF IS ONE TEMPLATE STRING AND THE FIELDS IT INTERPOLATES.
+    DECISIONS.md's 2026-08-18 W1-T471 ruling is the standing acceptance that declaring
+    `src/run-task.ts` is not re-scoped around.
+
+    `test/escalation-reconcile-intake.test.ts` IS THE EXISTING HOME and is declared rather than a new
+    file: it already owns `EscalationIntake`, which is the data this task renders.
+
+    WHY THIS IS WORTH A TASK AT ALL, GIVEN ITS SIZE. The number is printed every time anyone runs
+    `rmd sweep`, and it is the only surface an operator has for whether the needs-human queue is
+    being reconciled. It has already produced one wrong conclusion — that the reconciler was broken
+    — and the same misreading cost a full recon before #1084 fixed the ledger side. A line that
+    cannot express "I could not read" is the same defect as a check that cannot fail.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the summary row from the per-form ledger union with a
+    coverage control taken first; re-derive the label mismatch by reading `src/run-task.ts:18764`
+    against `EscalationIntake`'s own field docs; re-derive the `--dry-run` question at
+    `src/run-task.ts:18734` rather than inferring it from behaviour.
