@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -437,6 +437,21 @@ function daemonFixtureHome(): { home: string; root: string; planPath: string } {
   mkdirSync(join(root, "state"), { recursive: true });
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n"); // an explicit --plan skips the git self-sync entirely
+  // `home` starts with RMD_TMP_PREFIX ("rmd-"), the exact prefix daemonCommand's OWN real
+  // boot-time `sweepStaleTempDirs` (lib/tmp.ts) reaps anything under os.tmpdir() matching, by
+  // AGE (`now() - mtimeMs > maxAgeMs`, default 24h). Every mkdirSync/writeFileSync above this
+  // line updates `home`'s own mtime to the REAL OS clock (mtimes are not shiftable, same
+  // mechanism CLOCK_ARTIFACTS' prune-liveness/serve.glance entries cite) — under clock-sweep's
+  // future shift that real mtime reads as ancient, so the daemon's own real housekeeping sweep
+  // deleted this fixture's `state/ledger.ndjson` out from under the seeded ledger row BEFORE
+  // `checkCostGovernor` ever read it (measured: the seeded row and every `daemon.*` boot line
+  // vanished, replaced by only the rungs that ran after the sweep). Stamping `home`'s mtime
+  // from the (possibly shifted) injected clock — LAST, after every write under it, so a later
+  // mkdirSync/writeFileSync cannot silently reset it back to the real OS time — keeps this
+  // fixture's own age reading consistent with `Date.now()` regardless of shift, the same
+  // "stamp from the injected clock" remedy #2250 established for ledger `ts` fields.
+  const now = new Date();
+  utimesSync(home, now, now);
   return { home, root, planPath };
 }
 

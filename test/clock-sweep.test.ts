@@ -86,22 +86,20 @@ test("an excluded artifact that STILL fails is silent — that is the entry doin
 });
 
 test("an excluded artifact that becomes IMMUNE surfaces as a STALE entry, carrying its reason", () => {
-  // The rot check. If `emissions` stops failing shifted, the mechanism its exclusion cites no longer
-  // holds and the entry must not sit there silently widening the blind spot.
-  const { staleExclusions, drifted, ok } = classifySweep(
-    new Map([
-      ["emissions", passed],
-      ["prune-liveness", failed],
-      ["serve.glance", failed],
-    ]),
-  );
+  // The rot check, kept GENERIC over whichever suites CLOCK_ARTIFACTS currently names (W1-T1104
+  // removed `emissions` — measured passing shifted — so this must not pin that literal name; the
+  // property is "the FIRST artifact going immune is reported stale", not which suite it is today).
+  const [immuneSuite, ...stillFailingSuites] = [...CLOCK_ARTIFACTS.keys()];
+  const results = new Map<string, { failed: boolean; output: string }>([[immuneSuite, passed]]);
+  for (const s of stillFailingSuites) results.set(s, failed);
+  const { staleExclusions, drifted, ok } = classifySweep(results);
   assert.equal(ok, false, "a rotted exclusion must fail the sweep, not pass quietly");
   assert.deepEqual(drifted, [], "a stale exclusion is not a drift — they are different findings");
   assert.equal(staleExclusions.length, 1);
-  assert.equal(staleExclusions[0].suite, "emissions");
-  assert.match(
+  assert.equal(staleExclusions[0].suite, immuneSuite);
+  assert.equal(
     staleExclusions[0].reason,
-    /REAL on-disk ledger/,
+    CLOCK_ARTIFACTS.get(immuneSuite),
     "the report must carry WHY it was excluded, or nobody can judge whether removing it is right",
   );
 });

@@ -466,12 +466,25 @@ function printWithPaths(stateDir: string, credDir: string, scriptPath = SCRIPT):
   return { out: r.stdout ?? "", status: r.status ?? -1 };
 }
 
+// `deploy/host-update.sh` is a REAL bash subprocess (`spawnSync("bash", ...)` throughout this
+// file) that computes its own "now" through a real `date` call to render "valid for N more
+// minute(s)"/"EXPIRED N minute(s) ago" — a syscall `scripts/clock-shift.mjs` cannot reach, since
+// it monkeypatches only THIS process's global `Date`, never a child process's. Stamping
+// `expiresAt` from `Date.now()` (shifted under the clock-sweep probe) offset every fixture's
+// expiry by the FULL shift relative to the script's own real clock, so a "90 minutes ago"
+// expiry read as ~7 days VALID instead (measured: "valid for 9990 more minute(s)" at +7d, i.e.
+// 10080 - 90) — the same ts-vs-reader-clock mismatch #2250 fixed, except here the reader is a
+// subprocess no injected JS clock can shift at all. Deriving the baseline from the SAME real
+// `date` the script itself calls keeps the fixture's clock and the subject's clock the same one,
+// regardless of shift.
+const REAL_NOW_MS = Number(spawnSync("date", ["-u", "+%s"]).stdout.toString().trim()) * 1000;
+
 /** A credential directory whose token expires `offsetMs` from now (negative ⇒ already expired). */
 function credFixture(offsetMs: number): string {
   const dir = mkdtempSync(join(tmpdir(), "host-update-cred-"));
   writeFileSync(
     join(dir, ".credentials.json"),
-    JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-x", expiresAt: Date.now() + offsetMs } }),
+    JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-x", expiresAt: REAL_NOW_MS + offsetMs } }),
   );
   return dir;
 }

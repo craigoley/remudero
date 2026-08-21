@@ -76,7 +76,10 @@ export const SPAWN_REACHING = new Map([
  */
 export const CLOCK_ARTIFACTS = new Map([
   ["prune-liveness", "compares a real FILESYSTEM MTIME against the shifted clock — mtimes are not shiftable, so a just-created directory reads as 400 days old. Its fixture is already derived; there is no literal to convert"],
-  ["emissions", "reads the REAL on-disk ledger through a Date.now()-derived window cutoff — shifted, the window lands in the future and excludes every real line"],
+  // W1-T1104: `emissions` REMOVED — measured PASSING at +400d across repeated runs. Its stated
+  // mechanism ("reads the REAL on-disk ledger through a Date.now()-derived window cutoff") no
+  // longer holds; whatever fixture made that true has since been fixed elsewhere. Re-excluding it
+  // needs a freshly-measured mechanism, not a restored copy of this stale one.
   ["serve.glance", "drives a Playwright page whose BROWSER clock is unshifted, so server-rendered shifted times disagree with it (observed: `was \"in 9600h1m\"`)"],
 ]);
 

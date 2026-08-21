@@ -14,6 +14,7 @@
 // is real data already flowing, and the suite proves exactly that: the banner appears/clears
 // correctly off today's data, not a claim that the upstream regression-to-queued bug is fixed.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -134,11 +135,28 @@ async function withShell<T>(deps: ServeDeps, fn: (base: string) => Promise<T>): 
   }
 }
 
+// `openShell`'s Playwright page runs as a REAL, SEPARATE chromium process — its own JS engine
+// reads the REAL system clock, which `scripts/clock-shift.mjs` cannot reach (it monkeypatches
+// only THIS Node process's global `Date`). This suite's client-side `tickElapsed` re-derives
+// "elapsed" as `<browser's real Date.now()> - startedAt` from the `ts` this file writes into the
+// ledger, so a `ts` built from THIS process's (possibly shifted) `Date.now()` under clock-sweep's
+// future shift lands `startedAt` days in the FUTURE relative to the browser's real clock —
+// `elapsed` goes negative and never ticks forward, so "elapsed must tick live" never observes a
+// change. `REAL_NOW_MS` reads the SAME real clock the browser will, via the real `date` binary (a
+// separate OS process, immune to the in-process shim) — the same ts-vs-reader-clock alignment
+// #2250 established, applied here because the reader is a browser process no injected JS clock
+// can shift at all. Read ONCE at module load — a per-call `spawnSync` across this file's many
+// fixtures would turn setup into dozens of real subprocess spawns for no added accuracy.
+const REAL_NOW_MS = Number(spawnSync("date", ["-u", "+%s"]).stdout.toString().trim()) * 1000;
+function realNow(): Date {
+  return new Date(REAL_NOW_MS);
+}
+
 function runStart(taskId: string, runId = "r1"): string {
-  return JSON.stringify({ ts: new Date().toISOString(), run_id: runId, task_id: taskId, step: "run.start" }) + "\n";
+  return JSON.stringify({ ts: realNow().toISOString(), run_id: runId, task_id: taskId, step: "run.start" }) + "\n";
 }
 function reconDone(taskId: string, runId = "r1"): string {
-  return JSON.stringify({ ts: new Date().toISOString(), run_id: runId, task_id: taskId, step: "recon.done" }) + "\n";
+  return JSON.stringify({ ts: realNow().toISOString(), run_id: runId, task_id: taskId, step: "recon.done" }) + "\n";
 }
 
 let browser: Browser;
@@ -566,11 +584,11 @@ test("W1-T182: an escalation row renders the issue's real ask + a direct link + 
   const ledgerPath = deps.board.ledgerPath;
   appendFileSync(
     ledgerPath,
-    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n",
+    JSON.stringify({ ts: realNow().toISOString(), run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n",
   );
   appendFileSync(
     ledgerPath,
-    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" }) + "\n",
+    JSON.stringify({ ts: realNow().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" }) + "\n",
   );
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
@@ -654,7 +672,7 @@ test("W1-T223: a NEEDS ME item arriving while the section is collapsed adds head
 
       appendFileSync(
         deps.board.ledgerPath,
-        JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/1", class: "BLOCKED" }) + "\n",
+        JSON.stringify({ ts: realNow().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/1", class: "BLOCKED" }) + "\n",
       );
       await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis") === true, null, {
         timeout: 5000,
@@ -685,7 +703,7 @@ test("W1-T182: clicking 'Mark handled' closes the issue via the real route, and 
   const deps = { ...fixtureDeps(root, [task({ id: "W1-T1" })], github), issues };
   appendFileSync(
     deps.board.ledgerPath,
-    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: issueUrl, class: "HARD_STOP" }) + "\n",
+    JSON.stringify({ ts: realNow().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: issueUrl, class: "HARD_STOP" }) + "\n",
   );
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base, { token: WRITE_TOKEN });

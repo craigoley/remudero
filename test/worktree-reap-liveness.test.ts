@@ -60,6 +60,16 @@ import type { Config } from "../src/lib/config.js";
 
 const MIN = 60_000;
 const ago = (mins: number) => new Date(Date.now() - mins * MIN);
+// `newestActivityMs`/`reapStaleWorktrees` age-gate on REAL FILESYSTEM MTIMES, which
+// `scripts/clock-shift.mjs` cannot shift (it monkeypatches only this process's `Date`) — the
+// exact mechanism `CLOCK_ARTIFACTS`' `prune-liveness` entry (scripts/clock-sweep.mjs) already
+// names for this suite's own sibling. A file/dir created via `writeFileSync`/`mkdirSync` gets its
+// mtime from the REAL OS clock, so under clock-sweep's future shift a fixture meant to read as
+// "just written" instead reads as `Date.now() - mtimeMs` days old. Every fixture below that needs
+// a path to read as FRESH re-stamps it explicitly from the injected clock — the same "stamp from
+// the injected clock" remedy #2250 established for ledger `ts` fields — rather than trusting the
+// OS's own real-time write stamp.
+const touchNow = (p: string) => utimesSync(p, ago(0), ago(0));
 
 /** A worktrees root holding one entry, with a real nested tree inside it. */
 function fixture(entryName = "run-W1-T350-1785957031821") {
@@ -78,6 +88,7 @@ function fixture(entryName = "run-W1-T350-1785957031821") {
 function backdateAllButDeepFile(entry: string, mins: number): string {
   const deep = join(entry, "src", "lib", "feedback.ts");
   writeFileSync(deep, "export const x = 1;\n"); // fresh, now
+  touchNow(deep); // writeFileSync's own mtime is real-clock; re-stamp from the injected clock
   const past = ago(mins);
   utimesSync(join(entry, "src", "lib"), past, past);
   utimesSync(join(entry, "src"), past, past);
@@ -290,6 +301,7 @@ test("REGRESSION LOCK: the rung does NOT ledger an undecidable row for ordinary 
     const entry = join(worktreesRoot, "run-W1-T903-fresh");
     mkdirSync(join(entry, "src"), { recursive: true });
     writeFileSync(join(entry, "src", "a.ts"), "fresh\n");
+    touchNow(join(entry, "src", "a.ts"));
     const rows: string[] = [];
     runWorktreeReapRung({ root, claudeBin: "/bin/true" } as Config, (s) => rows.push(s));
     assert.equal(rows.includes("worktree.reap.undecidable"), false, "a recent-activity keep is silent");
@@ -306,6 +318,7 @@ test("the ROOT's own mtime is the FLOOR — an empty, freshly-created dir is not
   // whose lock is a SIBLING outside it. A zero floor here reaps exactly that. Measured while
   // writing this: it broke prune-liveness's own "PROTECTS ... within the age gate" test.
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-activity-empty-")));
+  touchNow(root);
   try {
     const probe = newestActivityMs(root);
     assert.equal(probe.complete, true);
@@ -323,6 +336,7 @@ test("`.git` and `node_modules` are never descended into — their churn is not 
     for (const d of [".git", "node_modules"]) {
       mkdirSync(join(root, d, "deep"), { recursive: true });
       writeFileSync(join(root, d, "deep", "fresh.txt"), "now\n"); // FRESH, and must be ignored
+      touchNow(join(root, d, "deep", "fresh.txt"));
     }
     mkdirSync(join(root, "src"), { recursive: true });
     writeFileSync(join(root, "src", "old.ts"), "stale\n");
@@ -386,6 +400,7 @@ test("a single unstatable ENTRY is skipped without failing the whole walk — th
     writeFileSync(join(blind, "f.txt"), "x\n");
     mkdirSync(join(root, "src"), { recursive: true });
     writeFileSync(join(root, "src", "a.ts"), "x\n"); // statable, and RECENT
+    touchNow(join(root, "src", "a.ts"));
     chmodSync(blind, 0o600);
 
     const probe = newestActivityMs(root);
