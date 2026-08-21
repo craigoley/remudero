@@ -1,0 +1,90 @@
+- id: W1-T1111
+  title: "THE `--auto` ARM LEG STILL CARRIES `--delete-branch` AND SO STILL NEEDS A BRANCH THE DAEMON DELIBERATELY DOES NOT HAVE — W1-T1050 dropped that flag from the immediate-merge legs and left it on the auto leg three lines above, so `gh pr merge <url> --auto --squash --delete-branch` fails `not on any branch` from the detached container checkout while the same call from a worker's on-a-branch worktree succeeds; and the TARGET IS NOT THE PROBLEM — every arm argv already passes `prUrl`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  rationale: |
+    RE-DERIVED 2026-08-21 at origin/main `15b237db`, from a scratch worktree whose HEAD was proved
+    equal to that sha. The observed row is the operator's, taken on the fleet host; the code answer
+    below is this file's own and was read rather than inferred.
+
+    (1) THE OBSERVATION, CITED. `automerge.arm_error_ignored (W1-T1079, permanent): could not
+    determine current branch: failed to run git: not on any branch`, on #2418 — the FIRST such row
+    ever recorded, because W1-T1079 shipped the cause-carrying field this afternoon. Before it,
+    172 `arm-error-ignored` rows carried no cause at all.
+
+    (2) AND THE STATED MECHANISM IS WRONG IN ONE PLACE, WHICH MATTERS BECAUSE IT CHANGES THE FIX.
+    `gh pr merge --auto` does NOT resolve its target from the current branch here: `realArmDeps`'s
+    `armAuto` passes the PR reference explicitly —
+    `["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"]`. So do both siblings:
+    `mergeDirect` is `["pr", "merge", prUrl, "--squash"]` and `disableAuto` is
+    `["pr", "merge", prUrl, "--disable-auto"]`. ALL THREE ARM CALL SITES PASS A REFERENCE. The
+    thing that still needs a checked-out branch is `--delete-branch`, which deletes the LOCAL
+    branch and therefore has to know which one you are on.
+
+    (3) W1-T1050 FIXED EXACTLY ONE LEG AND THE OTHER IS THREE LINES AWAY. `mergeDirect` carries the
+    comment `W1-T1050: NO --delete-branch — see the doc on ArmDeps.mergeDirect above for why`, and
+    its argv has none. `armAuto`, immediately above it, still has the flag. That PR's own subject —
+    "drop --delete-branch from the immediate-merge arm legs" — says which legs it treated. THE
+    REMEDY IS ALREADY WRITTEN, ONE FUNCTION UP, WITH ITS REASONING ATTACHED.
+
+    (4) AND THAT EXPLAINS THE SPLIT WITHOUT NEEDING A SECOND CAUSE. `realArmDeps()` is shared: the
+    sweep's arm and the in-run arm execute the SAME argv. What differs is the CWD. A worker arms
+    from its own worktree, which is on a branch, so `--delete-branch` resolves; the daemon arms from
+    a checkout `deploy/entrypoint.sh` puts in detached HEAD on every boot, so it cannot. Same
+    command, two cwds, one of which the flag cannot serve.
+
+    (5) THE DETACHED CHECKOUT IS NOT THE DEFECT AND MUST NOT BE TOUCHED. It is deliberate and
+    `checkCliFreshness` depends on it. Nothing in this task puts the daemon on a branch.
+
+    (6) THE CLASS IS CITED, NOT RE-FILED. Before W1-T1079 this failure was classified transient and
+    retried forever with its text discarded — one value for several outcomes, the class W1-T1081 and
+    W1-T1097 own. W1-T1079's fix is what made this diagnosable in a single row; this task fixes the
+    thing the row finally named.
+  design: |
+    (i) DROP `--delete-branch` FROM THE `--auto` LEG, FOR THE REASON ALREADY WRITTEN. The doc on
+    `ArmDeps.mergeDirect` states why it was dropped there; the same argument applies unchanged one
+    function up. This is a one-flag change, not a redesign.
+
+    (ii) SAY WHAT IS LOST, BECAUSE SOMETHING IS. The flag existed to clean up the head branch after
+    a merge. Dropping it leaves merged branches on the remote — the same cost W1-T1050 already
+    accepted for the immediate-merge legs, and the reaper is a separate concern. An implementer must
+    NOT reintroduce deletion by another route inside this task.
+
+    (iii) THE FALSIFIER IS THE ARGV, NOT A LIVE ARM. The existing suite already asserts the argv of
+    every arm call site; the new assertion belongs beside them. DO NOT drive a real `gh pr merge` in
+    a test — no live target, no host config.
+
+    (iv) OUT OF SCOPE, NAMED. No change to `mergeDirect` or `disableAuto`, whose argv are already
+    correct. No change to the detached checkout (rationale 5). No change to W1-T1079's error
+    classification, which is what surfaced this. Branch cleanup after merge is not filed here.
+  acceptance:
+    - claim: "the auto-merge arm no longer asks the local git for a branch it does not have"
+      proof: "unit test: test/live-write-guard-command-sites.test.ts"
+    - claim: "the immediate-merge leg keeps the argv it already has"
+      proof: "unit test: test/live-write-guard-command-sites.test.ts"
+    - claim: "every arm call site still names the pull request explicitly rather than by branch"
+      proof: "unit test: test/live-write-guard-command-sites.test.ts"
+    - claim: "the reason the flag was dropped from the sibling leg is recorded beside it"
+      proof: "grep: NO `--delete-branch` in src/run-task.ts"
+  origin: "recon#auto-leg-still-deletes-the-branch-2026-08-21"
+  plan_refs: ["W1-T1050", "W1-T1079", "W1-T1081", "W1-T1097"]
+  files: [src/run-task.ts, test/live-write-guard-command-sites.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — MEASURED, NOT ASSUMED:
+    at `risk: medium` the linter refuses with `spans 2 distinct subsystems/concerns
+    (live-write-guard-command-sites, run-task)`. The blast radius is one flag in one argv.
+
+    `test/live-write-guard-command-sites.test.ts` IS THE EXISTING HOME — it is the file W1-T1050
+    used for the same class of assertion — so it is declared rather than a new filename.
+
+    THE OBSERVED ROW IS THE OPERATOR'S, ON THE FLEET HOST. The operator checkout's own ledger does
+    not carry it; re-derive on the fleet, per form, with a coverage control taken first.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
