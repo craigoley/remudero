@@ -8986,7 +8986,7 @@
     - claim: "reviewer_outcome is recorded on the review.posted ledger line and printed in the console review summary"
       proof: "unit test: test/review.test.ts"
     - claim: "MASTER-PLAN Sec 9 names mount-governed vs deliberately-bounded phases (flat-400 claim corrected)"
-      proof: "grep: mount-governed in MASTER-PLAN.md"
+      proof: "grep: governs MOUNT-GOVERNED phases only in MASTER-PLAN.md"
   risk: high
   origin: retro#1784155126258
   plan_refs: ["§9", "§4B", "§5"]
