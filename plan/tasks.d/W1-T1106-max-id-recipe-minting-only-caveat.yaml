@@ -1,0 +1,91 @@
+- id: W1-T1106
+  title: "CLAUDE.md's max-id recipe is CORRECT FOR MINTING AND WRONG FOR DUPLICATE DETECTION, and says neither: `grep -oE 'T[0-9]+'` truncates the plan's 21 letter-suffixed ids to their numeric stems, so a `uniq -d` over that stream manufactures EIGHT phantom collisions — add the minting-only caveat and the whole-token duplicate-detection form beside it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  rationale: |
+    FILED FROM fb-1785860405044-c77b60 (2026-08-04, origin cli), item (1). Item (2) of that entry
+    (the commitlint title/push ordering) is NOT filed here: it is already settled — see `note:`.
+    THE RECIPE. CLAUDE.md carries, under "Compute a new task id from the max across BOTH
+    `plan/tasks.yaml` AND every `plan/tasks.d/*.yaml` shard":
+    `grep -rhoE '^\s*- id: W1-T[0-9]+' plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` -> max+1.
+    For its DOCUMENTED purpose — minting — it is correct, and this task does not change it: a
+    truncated stem is a SMALL number and can never be the max, so max+1 is unharmed.
+    THE TRAP IS THE SECOND USE, AND THE DOC IS SILENT ABOUT IT. Re-measured against the tree at
+    filing time, `plan/tasks.yaml` declares 21 letter-suffixed ids — W1-T1B/T1C/T1D, W1-T3B/T3C/
+    T3D/T3E/T3F, W1-T7B, W1-T9a/T9b/T9c, W1-T12a/T12b/T12c/T12d/T12e, W1-T20c/T20d, W1-T24b,
+    W1-T54b. The anchored first grep matches their prefix and the numeric second grep truncates the
+    token, so all 21 enter the stream as bare stems. Piping that stream through `sort | uniq -d` —
+    the obvious next step for anyone asking "does the plan carry a duplicate id?" — reports EIGHT
+    stems as duplicated: T1, T3, T7, T9, T12, T20, T24, T54. NONE of the eight is real. Six of them
+    (T1, T3, T7, T20, T24, T54) collide with a genuine numeric id that also exists in
+    `plan/tasks.yaml`; the other two (T9, T12) are letter-siblings colliding only with each other
+    (T9a/T9b/T9c, T12a-T12e), and NO numeric `W1-T9` or `W1-T12` exists anywhere in `plan/` — a
+    second, quieter way to be wrong from the same truncation.
+    OBSERVED, NOT THEORISED: 2026-08-04 during #1290, where the eight phantoms were investigated as
+    real before the truncation was spotted.
+    WHY A CAVEAT AND NOT A FIX TO THE RECIPE: the feedback is explicit and correct that the recipe
+    is not defective for the purpose it documents. The defect is a MISSING SCOPE STATEMENT plus a
+    missing second form; without both, the next reader re-derives the same eight phantoms.
+    ADJACENT MEASUREMENT, RECORDED SO IT IS NOT RE-BOUGHT, AND DELIBERATELY NOT IN SCOPE:
+    `scripts/task-id-existence-check.mjs` uses `/\bW1-T[0-9]+\b/g` and
+    `/^\s*-\s*id:\s*(W1-T[0-9]+)\s*$/`. Both are `\b`/`$`-anchored, so unlike the shell recipe they
+    do NOT truncate — they SKIP a letter-suffixed id entirely, on the citation side and the
+    declaration side alike. The two blindnesses are symmetric, so that script produces no false
+    finding today; it would simply fail to flag a citation of a NON-EXISTENT letter-suffixed id.
+    That is a separate, lower-severity question about shipped source and belongs to its own filing
+    if anyone wants it; this task changes no code.
+  design: |
+    ONE FILE, ONE BULLET. Amend the existing max-id bullet in `CLAUDE.md` (the one whose body is
+    the `grep -rhoE ... | grep -oE 'T[0-9]+'` recipe). Do NOT alter the recipe itself and do NOT
+    file a new bullet elsewhere — the caveat is worthless anywhere but touching the line that sets
+    the trap.
+    THE AMENDMENT MUST CARRY THREE THINGS:
+    (i) THE SCOPE STATEMENT, in words a skimmer cannot miss — the recipe is for MINTING ONLY and
+    is wrong for duplicate detection; say WHY max+1 is nonetheless safe (a truncated stem is never
+    the max), so a reader does not "fix" the minting form and break it.
+    (ii) THE EVIDENCE, concrete enough to be recognised when it recurs: the plan carries 21
+    letter-suffixed ids (name W1-T12a and at least the T1B/T3F/T9a/T54b family), the numeric regex
+    truncates them to stems, and `uniq -d` over that stream reports EIGHT collisions that do not
+    exist. Name the eight stems.
+    (iii) THE CORRECT SECOND FORM — anchor the WHOLE token, never the numeric part:
+    `grep -rhoE '^[[:space:]]*- id: [^[:space:]]+' plan/tasks.yaml plan/tasks.d/ | awk '{print $3}'
+    | sort | uniq -d`. Use POSIX classes, not `\s`/`\S`: this repo runs on both GNU and BSD grep and
+    the shorthand classes are a GNU extension. VERIFY THE FORM BEFORE COMMITTING IT — run it and
+    require an EMPTY result on a clean tree, and require it to print the id when a duplicate is
+    seeded (a recipe that reports nothing because it matched nothing is the same defect one layer
+    down; the shipped bullet must be one that was executed, not one that was composed).
+    NOT IN SCOPE: renumbering or normalising the 21 letter-suffixed ids, changing the id format,
+    touching `src/`, `scripts/` or `test/`, and anything about the commitlint ordering rule.
+  acceptance:
+    - claim: "the max-id bullet states in its own text that the recipe is for minting only"
+      proof: "grep: MINTING ONLY in CLAUDE.md"
+    - claim: "the bullet names a letter-suffixed id as the token the numeric regex truncates"
+      proof: "grep: W1-T12a in CLAUDE.md"
+    - claim: "a whole-token duplicate-detection form sits beside the minting recipe"
+      proof: "grep: uniq -d in CLAUDE.md"
+  risk: low
+  origin: feedback#fb-1785860405044-c77b60
+  plan_refs: ["§5C"]
+  files: [CLAUDE.md]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — the deliverable is text in one tracked file and all three proofs are greps over
+    that file. risk:low and budget 12.00 — one bullet in one doc, no code path, no dispatch
+    surface, and the only real work is EXECUTING the replacement recipe before quoting it.
+    files: is exactly `CLAUDE.md` — derived from where the recipe actually lives (verified at
+    filing time), not from where a reader might expect a doc change. This shard's own path is
+    deliberately absent, per the convention the other shards follow.
+    ITEM (2) OF THE ORIGIN FEEDBACK IS ALREADY DECIDED AND IS NOT FILED — recorded here so it is
+    not re-triaged: CLAUDE.md already carries "A corrected PR title is observed by a RE-RUN, not
+    only by a new sha — but `edited` still fires nothing" (W1-T351; re-derived 2026-08-06), which
+    documents the default `[opened, synchronize, reopened]` types, the retitle-THEN-push ordering,
+    and the re-run escape hatch. `.github/workflows/ci.yml` carries the same finding at the
+    commitlint step, where W1-T351 made the job read the title LIVE via `gh pr view --json title`.
+    That LIVE read is the origin feedback's own falsifying condition: a re-run re-lints the current
+    title with no push at all, so `edited` buys nothing and the ordering is a cheapness preference,
+    not a correctness one.
