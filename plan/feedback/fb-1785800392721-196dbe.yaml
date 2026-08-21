@@ -23,5 +23,25 @@ raw: "DISK FILLED TO ENOSPC AND CRASH-LOOPED THE DAEMON — 2026-08-03T23:32Z, /
   free-space or ENOSPC check belongs in the daemon's own health path."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2352
+summary:
+  headline: Disk Filled Causing Daemon Crash-Loop; Enable scratchReap and Investigate
+  what_happened: "Daemon crash-looped for 50 minutes when disk hit 2.6 GiB free,
+    restarting repeatedly and losing dispatch W1-T312 five times. Two root
+    causes identified: 5.4 GB of uncleared ledger-union temp files and ~490 MB
+    abandoned review clones; manual cleanup restored 11 GiB free."
+  decision: Enable scratchReap immediately to prevent abandoned clones recurring;
+    investigate whether ledger-union counting can stream-and-delete or needs
+    named scratch convention; add free-space or ENOSPC monitoring to daemon
+    health checks.
+  options:
+    - label: Enable scratchReap only
+      consequence: Solves abandoned clones (one-line change); ledger-union files will
+        fill disk again when union counts run; no new monitoring.
+    - label: Enable scratchReap + prioritize both investigations
+      consequence: Complete remediation path; requires engineering effort; prevents
+        recurring incidents and enables early detection.
+    - label: Hold pending full system audit
+      consequence: Ensures comprehensive understanding of all issues; leaves
+        production vulnerable to recurrence during investigation window.

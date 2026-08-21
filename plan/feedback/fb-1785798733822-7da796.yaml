@@ -19,6 +19,5 @@ raw: "ADDENDUM to fb-1785798596440-f9576e (dead spend guards) — confirmed at
   dispatch rather than only in a test."
 attachments: []
 origin: cli
-status: rejected
+status: new
 proposal_pr: null
-summary: null
