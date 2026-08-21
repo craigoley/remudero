@@ -7,6 +7,13 @@ import {
   refuseUnsupportedArgs,
   classifyReadFailure,
   readDiskFreeBytes,
+  // W1-T1082: the SAME judge + thresholds `rmd doctor` reports against — imported here, never
+  // re-derived, so the daemon and `rmd doctor` cannot disagree mid-incident (see
+  // escalateDiskHeadroomBreach's own doc, below).
+  judgeDiskHeadroom,
+  DISK_WARN_BYTES,
+  DISK_FAIL_BYTES,
+  humanBytes,
   type MemInfo,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
@@ -13278,6 +13285,94 @@ export function escalateHeadroomReserve(
 }
 
 /**
+ * W1-T1082 (THE DAEMON NEVER READS ITS OWN FREE SPACE): the daemon's `onDiskHeadroomBreach`
+ * hook — real free space, read off the daemon's own `startInFlightTicker` cadence
+ * (`daemon.ts`), has crossed below WARN (`DISK_WARN_BYTES`, 2 GiB) or FAIL (`DISK_FAIL_BYTES`,
+ * 512 MiB), judged by the SAME `judgeDiskHeadroom` `rmd doctor` reports against (doctor.ts) —
+ * imported, never re-derived, so the two surfaces cannot disagree mid-incident.
+ *
+ * ESCALATES AT WARN, NOT ONLY FAIL, AND THAT IS THE WHOLE POINT (design (iv)). By FAIL, the
+ * issue body, this function's OWN dedup marker below and the ledger row it lives on are all
+ * writes that may themselves lose to the same ENOSPC this hook exists to report ahead of —
+ * `escalateCrashLoop`'s own doc names the shape exactly: "a detector whose input can only be
+ * recorded by a write that ENOSPC rejects is structurally incapable of being the FIRST signal;
+ * it is the autopsy." This fires while writes still succeed.
+ *
+ * DEDUP IS TWO LAYERS, NOT ONE. `runDaemon`'s own in-process latch (daemon.ts's
+ * `diskHeadroomLatch`, shared across every phase this daemon run ticks) already calls this hook
+ * AT MOST ONCE per continuous breach — cleared the moment a later reading is back at OK — so a
+ * disk sitting below WARN for six hours produces exactly one call from a single continuous
+ * process (the #977 duplicate-issue class this repo has already paid for twice). This
+ * function's OWN ledger read exists for what the in-process latch cannot cover: a daemon
+ * RESTART mid-episode (disk pressure can itself crash-loop the daemon — the 2026-08-03 shape)
+ * resets that latch to `false`, and the very next tick would call this hook again for the SAME
+ * still-unresolved episode. Skip iff a prior `daemon.disk_headroom.escalated` marker's OWN `ts`
+ * (ledger-stamped at write, `appendLedger`'s contract) is within `episodeMs` of THIS reading's
+ * `ts` — the same "compare against an episode window" shape `escalatePostReviewStall` applies
+ * for a condition with no natural reset boundary (unlike `escalateHeadroomReserve`'s
+ * `resets_at`). The marker is written whether or not delivery succeeds — `escalateCircuitBreak`'s
+ * own stated reason: an undelivered notice costs one operator read, not an unbounded retry loop.
+ * The step is in `DECISION_RELEVANT_LEDGER_STEPS` (ledger.ts) because THIS function reads it
+ * back — a rotation dropping it would re-open one duplicate needs-human issue on every tick this
+ * condition persists, once the marker falls out of the retained view.
+ */
+export const DISK_HEADROOM_EPISODE_MS = 60 * 60 * 1000;
+
+export function escalateDiskHeadroomBreach(
+  info: { freeBytes: number; verdict: "WARN" | "FAIL"; ts: string },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; episodeMs?: number },
+): void {
+  const newestMs = Date.parse(info.ts);
+  if (!Number.isFinite(newestMs)) return;
+  const episodeMs = ctx.episodeMs ?? DISK_HEADROOM_EPISODE_MS;
+  const already = readLedgerLines(ctx.ledgerPath).some((l) => {
+    if (l.step !== "daemon.disk_headroom.escalated") return false;
+    const priorMs = Date.parse(String(l.ts ?? ""));
+    return Number.isFinite(priorMs) && newestMs - priorMs <= episodeMs;
+  });
+  if (already) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "DAEMON",
+      runId: ctx.runId,
+      summary: `disk headroom ${info.verdict}: ${humanBytes(info.freeBytes)} free`,
+      detail:
+        `W1-T1082: the daemon's own poll path read ${humanBytes(info.freeBytes)} free on its own filesystem, ` +
+        `below the ${humanBytes(DISK_WARN_BYTES)} WARN threshold ` +
+        `\`rmd doctor\` also judges against (\`doctor.ts\`'s \`judgeDiskHeadroom\`, one shared definition — the ` +
+        `two surfaces cannot disagree). This escalates at WARN rather than waiting for FAIL ` +
+        `(${humanBytes(DISK_FAIL_BYTES)}) because by FAIL the ledger this very notice writes to may itself fail ` +
+        `to append — the 2026-08-03 ENOSPC storm's own shape, where the first signal anyone had was ` +
+        `\`appendLedger\` throwing.`,
+      options: [
+        {
+          label: "reclaim disk space",
+          detail:
+            "`rmd doctor` names every other measured source on this host; scratch reaping, worker-home reaping " +
+            "and the tmp backstop are the usual owners (each has its own task — this notice only surfaces).",
+        },
+        {
+          label: "grow the volume",
+          detail: "If this host is routinely this close to full, the ceiling itself may be too small for its workload.",
+        },
+      ],
+      recommendation: "reclaim disk space",
+    },
+    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "DAEMON",
+    step: "daemon.disk_headroom.escalated",
+    free_bytes: info.freeBytes,
+    verdict: info.verdict,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * The daemon's `onHeadroomParkCeiling` hook: the headroom park outlived its ceiling, so the fleet
  * dispatched BLIND for one tick rather than idling forever.
  *
@@ -15162,6 +15257,19 @@ export async function daemonCommand(
         // W1-T372: observe-and-surface only — dispatch is NOT paused by this hook (unlike
         // onHeadroomBreach above); see escalateQuotaExhaustion's own doc for why.
         onQuotaExhausted: (info) => escalateQuotaExhaustion(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T1082: real free space + verdict, read on the SAME `startInFlightTicker` cadence as
+        // `daemon.alive` itself — the SAME root `rmd doctor` reads (`readDiskFreeBytes(config.root)`,
+        // `doctorCommand`, above) and the SAME `judgeDiskHeadroom` it judges against, one read call
+        // and one shared threshold definition, never a second copy.
+        readDiskHeadroom: () => {
+          const freeBytes = readDiskFreeBytes(config.root);
+          return { freeBytes, verdict: judgeDiskHeadroom(freeBytes).verdict };
+        },
+        // Dispatch is NOT paused by this hook (design (vii) — SURFACE, DO NOT GATE): see
+        // escalateDiskHeadroomBreach's own doc for the two-layer dedup (in-process latch +
+        // cross-restart ledger episode window) this wiring relies on.
+        onDiskHeadroomBreach: (info) =>
+          escalateDiskHeadroomBreach(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.
