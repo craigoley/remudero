@@ -230,6 +230,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
   const expectedTopLevelKeys = [
     "proofTimeoutMs", "pruneGraceMs", "worktreeReapGraceMs", "pollIntervalMs", "fixStrikeCap", "workerStall",
     "workerAbandon",
+    "sweepWallClockBoundMs",
     "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
@@ -523,6 +524,10 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // an available-memory floor; the ledger carried zero mem/rss/heap/swap/avail fields before
     // this task, so there is no source constant to cite as this field's origin.
     "sweep.memoryFloorMib",
+    // W1-T1044: `sweepWallClockBoundMs` joins them too — no prior literal ever bounded a sweep
+    // tick's wall-clock duration; this task's own rationale measured the healthy-vs-hung split
+    // from scratch (see plan/policy.yaml's row for the derivation).
+    "sweepWallClockBoundMs",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

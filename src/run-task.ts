@@ -119,6 +119,7 @@ import {
   daemonBoot,
   daemonExitCode,
   runDaemon,
+  DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS,
   type CrashLoopVerdict,
   type DaemonOpts,
   type DaemonSummary,
@@ -3780,10 +3781,19 @@ function renderEscalationEvidence<T>(items: readonly T[], format: (item: T) => s
 
 /** Outcome of one full pass through the fix rung. */
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down";
-  /** The last review computed — passing when `outcome === "fixed"`. */
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned";
+  /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
+   *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
+   *  abandoned never produced a new head to re-review. */
   review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   strikes: number;
+  /**
+   * W1-T1044: set only when `outcome === "spawn_abandoned"` — how long (ms) the abandoned
+   * `deps.spawn` call had been running when the wall-clock bound gave up on it. See
+   * {@link spawnFixWorkerBounded}'s own doc for why this is ledgered BEFORE the worker is
+   * reclaimed, never only reported here.
+   */
+  spawnAbandonedElapsedMs?: number;
   /**
    * Set when `outcome === "escalated"`, and — W1-T296 — also set when a
    * `"stood_down"` outcome escalated a foreign-authorship stand-down (the
@@ -4097,6 +4107,120 @@ export function detectReviewFalseBlock(check: {
 }
 
 /**
+ * W1-T1044: best-effort RECLAIM of a worker {@link spawnFixWorkerBounded} abandoned — scoped
+ * by THIS run's own `REMUDERO_RUN_ID` env marker (worker-containment.ts's W1-T117 attribution),
+ * reusing the SAME `defaultListCandidates`/`defaultReadMarkers`/`killProcessGroup` primitives
+ * the per-poll `sweepOrphans` closure (daemonCommand, below) already composes — never
+ * `sweepOrphanWorkers` itself, whose `isRunActive` gate deliberately LEAVES ALONE any process
+ * still holding its own `state/inflight/*.lock` (this run's lock IS still held — it has not
+ * failed or finished, only been abandoned by the bound), which is exactly the process this
+ * function exists to reach. Best-effort: a `ps`/kill hiccup here costs nothing more than the
+ * process staying alive for a LATER orphan sweep to find once its run truly ends — it never
+ * throws back into the rung that already ledgered the abandonment (`fix.spawn_abandoned`).
+ */
+export function reclaimAbandonedWorker(
+  info: { runId: string; taskId: string; elapsedMs: number },
+  // APPENDED LAST, the house convention, so no positional caller shifts: both call sites
+  // (`runTaskBody`'s `reclaimWorker` wiring and `reclaimWorkerImpl`'s default) pass `info` alone
+  // and keep today's behaviour byte-for-byte. Injected only so this function's own arms are
+  // reachable from a test — the primitives it wraps enumerate and signal REAL processes, so
+  // driving the defaults could neither exercise the match nor the failure without touching the
+  // host's process table.
+  deps: {
+    listCandidates?: typeof defaultListCandidates;
+    readMarkers?: typeof defaultReadMarkers;
+    kill?: typeof killProcessGroup;
+  } = {},
+): void {
+  const listCandidates = deps.listCandidates ?? defaultListCandidates;
+  const readMarkers = deps.readMarkers ?? defaultReadMarkers;
+  const kill = deps.kill ?? killProcessGroup;
+  try {
+    for (const candidate of listCandidates()) {
+      const markers = readMarkers(candidate.pid);
+      if (markers?.runId === info.runId) kill(candidate.pid);
+    }
+  } catch {
+    /* best-effort — see doc above */
+  }
+}
+
+/**
+ * W1-T1044 — bounds ONE `deps.spawn` call by WALL-CLOCK elapsed time, so a worker that never
+ * returns (this task's own measured incident: an `until` shell loop with no exit condition,
+ * `2>/dev/null` masking a broken `gh`) cannot park {@link runFixRung} — and, transitively, the
+ * `await deps.sweep()` call site that dispatches it (daemon.ts) — forever. Neither
+ * `SpawnWorkerArgs.maxTurns` nor `.maxBudgetUsd` can fire on a shell command that never
+ * returns: it burns no turn and no dollar. This is the ONLY thing that can.
+ *
+ * RECORDS BEFORE IT RECLAIMS (design note, W1-T1044's own task file): a killed worker's
+ * `verdict` row is only ever written when a run ENDS on its own, so an abandoned worker's
+ * thinking appears nowhere unless the abandonment itself is ledgered FIRST — `fix.spawn_abandoned`
+ * carries the task id, the run id and the elapsed time BEFORE `deps.reclaimWorker` ever runs.
+ *
+ * The real `deps.spawn` promise is NEVER cancelled by this function alone (there is no cancel
+ * primitive on the SDK-backed spawn) — abandoning only means this rung stops AWAITING it;
+ * `deps.reclaimWorker` (best-effort) is what actually stops the process. Whatever the real
+ * promise eventually does — resolve or reject — is logged separately so it is never silently
+ * dropped, mirroring the SAME discipline daemon.ts's own `await deps.sweep()` bound uses.
+ */
+async function spawnFixWorkerBounded(
+  deps: {
+    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    spawnWallClockBoundMs?: number;
+    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+  },
+  args: SpawnWorkerArgs,
+  ctx: { runId: string; taskId: string },
+): Promise<{ kind: "spawned"; result: WorkerResult } | { kind: "abandoned"; elapsedMs: number }> {
+  const boundMs = deps.spawnWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
+  const startedAt = Date.now();
+  const spawnPromise = deps.spawn(args);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<"abandoned">((resolve) => {
+    timer = setTimeout(() => resolve("abandoned"), boundMs);
+  });
+  try {
+    const winner = await Promise.race([spawnPromise, bound]);
+    if (winner === "abandoned") {
+      const elapsedMs = Date.now() - startedAt;
+      deps.log("fix.spawn_abandoned", {
+        run_id: ctx.runId,
+        task_id: ctx.taskId,
+        elapsed_ms: elapsedMs,
+        bound_ms: boundMs,
+      });
+      try {
+        await deps.reclaimWorker?.({ runId: ctx.runId, taskId: ctx.taskId, elapsedMs });
+      } catch (e) {
+        deps.log("fix.spawn_reclaim_failed", {
+          run_id: ctx.runId,
+          task_id: ctx.taskId,
+          error: String((e as Error)?.message ?? e),
+        });
+      }
+      // Never leave the real spawn's eventual outcome unhandled — it may still resolve or
+      // throw well after this rung has moved on (returned `spawn_abandoned` to its caller).
+      spawnPromise.then(
+        () => {},
+        (e) => {
+          deps.log("fix.spawn_settled_after_abandon", {
+            run_id: ctx.runId,
+            task_id: ctx.taskId,
+            error: String((e as Error)?.message ?? e),
+          });
+        },
+      );
+      return { kind: "abandoned", elapsedMs };
+    }
+    return { kind: "spawned", result: winner };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Dispatch ONE bounded fix worker per strike, up to `strikeCap` (config,
  * default 2), on a `blocked_review` verdict. Every dispatch receives the FULL
  * unmet_criteria set + the reviewer's reasons at once (never one criterion at
@@ -4258,6 +4382,28 @@ export async function runFixRung(opts: {
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     account: (r: WorkerResult) => WorkerResult;
+    /**
+     * W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND): the WALL-CLOCK BOUND (ms) on ONE
+     * `deps.spawn` call below — see this task's own rationale for the measured incident (a
+     * fix-rung worker's `until` shell loop with no exit condition ran 8,970s as a direct
+     * daemon child; neither `--max-turns` nor `--max-budget-usd` can fire on a shell command
+     * that never returns). Optional: omitted defaults to {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}
+     * (daemon.ts) — POLICY DATA (see that constant's own doc), never a literal at this call
+     * site; the real call sites here thread `plan/policy.yaml`'s `sweepWallClockBoundMs` row.
+     */
+    spawnWallClockBoundMs?: number;
+    /**
+     * W1-T1044: best-effort RECLAIM of a worker THIS bound abandoned — the daemon-side bound
+     * (daemon.ts's `deps.sweep` call site) frees the DAEMON but never touches what the sweep
+     * spawned; this is what stops an abandoned worker becoming an unreaped orphan (still
+     * holding its worktree, its lock and its live API session, still polling). Called AFTER
+     * the abandonment is ledgered (`fix.spawn_abandoned`), never before — see
+     * {@link spawnFixWorkerBounded}'s own doc for why recording precedes reclaiming. Optional:
+     * omitted, the worker is left running (exactly pre-W1-T1044 behavior) — reclaim is a
+     * best-effort improvement layered on top of the bound returning control, never a
+     * precondition for it.
+     */
+    reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
@@ -4545,7 +4691,20 @@ export async function runFixRung(opts: {
 
     let fixResult: WorkerResult;
     try {
-      fixResult = deps.account(await deps.spawn(fixArgs));
+      // W1-T1044: bounds this ONE spawn by wall-clock elapsed time — see
+      // spawnFixWorkerBounded's own doc for the measured incident this closes.
+      const spawnOutcome = await spawnFixWorkerBounded(deps, fixArgs, { runId: opts.runId, taskId: opts.taskId });
+      if (spawnOutcome.kind === "abandoned") {
+        deps.say(
+          `fix rung: ABANDONED strike ${attempt}/${opts.strikeCap} — worker spawn exceeded its ` +
+            `${spawnOutcome.elapsedMs}ms wall-clock bound (W1-T1044): ${opts.prUrl}`,
+        );
+        // Mirrors the spawn-infra-blocked path immediately below: no subprocess demonstrably
+        // ran to completion, so this round is never committed as a strike (W1-T127's own
+        // "a strike is only spent once a worker demonstrably ran" invariant).
+        return { outcome: "spawn_abandoned", review, strikes, spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
+      }
+      fixResult = deps.account(spawnOutcome.result);
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
       // No subprocess ever launched — nothing ran, nothing was billed. Log this as
@@ -5935,6 +6094,15 @@ async function runTask(
     /** W1-T1045: override the resolved clock bound (ms) — the SAME injection convention as
      *  every other opt-in seam above. Default: `policy.values.workerAbandon`, read below. */
     workerAbandonMs?: number;
+    /**
+     * W1-T1044: override for the fix rung's worker-spawn wall-clock bound (see
+     * `runFixRung`'s own `deps.spawnWallClockBoundMs` doc). Optional — omitted reads
+     * `plan/policy.yaml`'s `sweepWallClockBoundMs` row (`loadDefaultPolicy`), the SAME `??
+     * loadDefaultPolicy()` injection seam `test/config-reader-seams.test.ts` requires every
+     * unredirectable policy read to carry; a test overrides this directly to drive the bound
+     * without writing a fixture policy file.
+     */
+    spawnWallClockBoundMs?: number;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -7231,9 +7399,29 @@ async function runTask(
           // W1-T296: the pre-strike branch-authorship check's live-head
           // reader — same fresh-`gh`-read discipline as `readLiveState`.
           readLiveHead: ghLiveHead,
+          // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
+          // reclaim of whatever it abandoned — see runFixRung's own deps doc.
+          spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.sweepWallClockBoundMs,
+          reclaimWorker: reclaimAbandonedWorker,
         },
       });
       review = rung.review;
+      if (rung.outcome === "spawn_abandoned") {
+        // W1-T1044: the worker never demonstrably returned — never a strike (see
+        // spawnFixWorkerBounded's own doc), and the abandonment is already ledgered
+        // (`fix.spawn_abandoned`) + reclaimed before this rung returned. Blocked, exactly like
+        // the escalated/stood-down outcomes below, so the drain's stop-on-block invariant holds.
+        log("verdict", {
+          verdict: "blocked",
+          pr_url: prUrl,
+          reason: `fix rung abandoned — worker spawn exceeded its ${rung.spawnAbandonedElapsedMs}ms wall-clock bound`,
+          cost_usd: costUsd,
+          billing_mode: billingMode(impl.childEnvKeys),
+          account_label: impl.accountLabel,
+        });
+        say(`verdict: blocked — fix worker spawn abandoned (wall-clock bound): ${prUrl}`);
+        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+      }
       if (rung.outcome === "escalated") {
         log("verdict", {
           verdict: "blocked",
@@ -14151,6 +14339,11 @@ export async function daemonCommand(
     // `DaemonOpts.laneCount`'s own doc for the proof.
     laneCount: DEFAULT_SWEEP_POLICY.dispatchLanes,
     wipLimit: DEFAULT_SWEEP_POLICY.wipLimit,
+    // W1-T1044: the wall-clock bound on `await deps.sweep()` — the SAME `plan/policy.yaml` row
+    // `buildSweepEffects`'s own `spawnWallClockBoundMsOverride` fallback reads for the fix-rung
+    // worker-spawn bound (b), so the daemon-side bound (a) and (b) never drift onto two
+    // independently-tuned numbers.
+    sweepWallClockBoundMs: policy.values.sweepWallClockBoundMs,
   };
   const config = loadConfig();
   // Headroom governor switch (operator ruling fb-1784894405468-a4153e; default clause
@@ -17451,6 +17644,17 @@ export function buildSweepEffects(
   ghRunImpl: (file: string, args: readonly string[]) => void = (file, args) => {
     execFileSync(file, [...args], { stdio: "pipe" });
   },
+  // W1-T1044 — appended LAST, the same convention every dep above follows. OPTIONAL with no
+  // default expression (mirrors `armSessionPrsOverride`'s own shape immediately above): the
+  // `??` fallback below reads `plan/policy.yaml`'s `sweepWallClockBoundMs` row so production
+  // wiring picks up an operator's edit with no code change, while a test overrides this
+  // directly to drive the bound without writing a fixture policy file.
+  spawnWallClockBoundMsOverride?: number,
+  // W1-T1044 — appended LAST, same convention. Defaults to {@link reclaimAbandonedWorker}
+  // (the real process-group kill, scoped by this run's own `REMUDERO_RUN_ID` marker); a test
+  // overrides it with a recorder so the abandon-then-reclaim sequence is provable without a
+  // real spawned process.
+  reclaimWorkerImpl: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void> = reclaimAbandonedWorker,
 ): Pick<
   SweepDeps,
   | "arm"
@@ -17472,6 +17676,9 @@ export function buildSweepEffects(
   // operator's edit with no code change; a test overrides `armSessionPrsOverride` directly to
   // drive both sides of the gate without writing a fixture policy file.
   const armSessionPrs = armSessionPrsOverride ?? loadDefaultPolicy().values.sweep.armSessionPrs;
+  // W1-T1044: the SAME `plan/policy.yaml` row `daemonCommand`'s own `DaemonOpts.sweepWallClockBoundMs`
+  // reads for the daemon-side bound (a) — see this field's own doc for why one field feeds both.
+  const spawnWallClockBoundMs = spawnWallClockBoundMsOverride ?? loadDefaultPolicy().values.sweepWallClockBoundMs;
   // W1-T516 — an `armImpl` WRAPPER, not a change to the `arm` dep's own `pr.taskId` argument
   // below: test/arm-outcome-five-sites.test.ts source-locks that dep as an EXPRESSION body
   // passing `pr.taskId` straight through (the impl-BI fix, proving the outcome is RETURNED,
@@ -17814,6 +18021,12 @@ export function buildSweepEffects(
             // W1-T296: the SAME live-head reader every fix-rung call site
             // wires for the pre-strike branch-authorship check.
             readLiveHead: ghLiveHead,
+            // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
+            // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
+            // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The
+            // wall-clock bound + best-effort reclaim close it here.
+            spawnWallClockBoundMs,
+            reclaimWorker: reclaimWorkerImpl,
           },
         });
       } catch (e) {

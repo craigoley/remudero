@@ -206,7 +206,15 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // also SEAMED (`opts.workerAbandonMs ?? loadDefaultPolicy()`), resolving the clock bound
   // threaded into every real dispatch spawn's `clockBound` — see worker.ts's
   // `createWorkerClockBoundWatchdog`.
-  assert.equal(readers.length, 16, `expected 16 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  //
+  // Then W1-T1044 added TWO more, both SEAMED and both reading the SAME `sweepWallClockBoundMs`
+  // row: `runTask`'s `opts.spawnWallClockBoundMs ?? loadDefaultPolicy()` at its single
+  // `runFixRung` call site, and `buildSweepEffects`'s
+  // `spawnWallClockBoundMsOverride ?? loadDefaultPolicy()` at the sweep's own `dispatchFix` call
+  // site — the two placements that task requires (daemon-side + worker-spawn-side), one policy
+  // row read at two seamed sites. W1-T1045 and W1-T1044 landed independently, so the count is
+  // the sum of both, not either branch's own figure.
+  assert.equal(readers.length, 18, `expected 18 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

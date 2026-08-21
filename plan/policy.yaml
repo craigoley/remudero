@@ -132,6 +132,32 @@ workerAbandon:
   origin: "net-new"
   min: 1200000
   max: 7200000
+# W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND). The bound on (a) `await deps.sweep()`
+# (src/lib/daemon.ts's poll loop) and (b) ONE fix-rung worker spawn inside `runFixRung`
+# (src/run-task.ts) — the SAME field feeds both placements (see that task's own `note:` for
+# why two placements are required and neither alone is sufficient). MEASURED, not a round
+# figure: this task's own rationale re-derived healthy sweep ticks at 61.8s median / 111.8s
+# p90, against 21 confirmed hangs longer than 20 minutes (1200000ms), the shortest one 165.5
+# minutes. value: 559000 is 5x the measured p90 (111800ms) — comfortably past the whole
+# healthy population's own tail, and still 2.15x BELOW the shortest confirmed hang, so the
+# bound cannot fire on a merely-slow-but-healthy tick and cannot wait as long as even the
+# shortest observed one.
+#
+# OPTIONAL IN THE SCHEMA (src/lib/policy.ts): this row is read like `autoTriage`'s own
+# optional block — ABSENT means "use the committed default" (mirrored in policy.ts as
+# `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`), never a load failure, so an existing `policy.yaml`
+# fixture that predates this task keeps loading clean.
+#
+# min: 180000 (3 minutes) sits comfortably above the measured p90 (111.8s) with its own
+# margin — a tighter operator retune still cannot abandon a healthy-but-slow tick. max:
+# 900000 (15 minutes) stays safely under the shortest confirmed hang (20 minutes) even at
+# the loosest retune, so the bound cannot be widened past the point where it stops firing on
+# the class of hang it was measured against.
+sweepWallClockBoundMs:
+  value: 559000
+  origin: "net-new"
+  min: 180000
+  max: 900000
 
 sweep:
   staleDays:
