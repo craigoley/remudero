@@ -1,5 +1,5 @@
 /**
- * test/fix-rung-no-task.test.ts — impl-FY.
+ * test/fix-rung-no-task.test.ts — impl-FY, then W1-T1095.
  *
  * THE DEFECT. `dispatchFix` looked its PR's task up in the plan and RETURNED when it found none,
  * logging `sweep.fix.no_task`. An agent-authored PR has a descriptive branch and no
@@ -9,9 +9,18 @@
  * dispositioned `blocked-fixable, acted=false` — the sweep classifying a fixable PR and then doing
  * nothing, every poll, silently.
  *
- * NO GATEWAY IS REACHED HERE. Every test below drives PURE functions or the pure disposition
- * classifier. Nothing in this file constructs a gh gateway, and the suite is proven gateway-free by
- * the sabotage check in the report (a `gh` on PATH that exits non-zero on every invocation).
+ * NO GATEWAY IS REACHED HERE, for either concern below. Every test drives PURE functions, the
+ * pure disposition classifier, or `runFixRung` fed hand-rolled fakes (never a real subprocess or
+ * `gh` call) — the SAME discipline `test/strike-accounting.test.ts` established for driving the
+ * real dispatch loop. The one exception (a stub `gh` written to PATH for the REFUSAL test below)
+ * is a fake gateway, never a live one; the suite is proven gateway-free by the sabotage check in
+ * the report (a `gh` on PATH that exits non-zero on every invocation).
+ *
+ * W1-T1095 (added below, THE FIX RUNG CANNOT RESOLVE A BLOCKER OUTSIDE ITS OWN DIFF) is a
+ * SEPARATE, later concern that happens to share this rung's own test home per that task's own
+ * `note:` (an existing home is declared rather than a new file, so the concern count is not
+ * inflated by a filename) — it covers capability 1 of that task's three (record-and-resume:
+ * park against a prerequisite instead of retrying), never the no-task-PR defect above.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
