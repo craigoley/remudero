@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { runTask } from "../src/run-task.js";
+import { daemonCommand, runTask } from "../src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
@@ -306,3 +307,45 @@ test(
     }
   },
 );
+
+// ── REACHED: the closure the STRUCTURAL test pins is actually constructed and run ──────────────
+//
+// The structural test above pins WHAT the closure passes by reading run-task.ts's own source; it
+// cannot show the closure is ever built, because `daemonCommand` constructs it inline and hands it
+// to `runDaemon`. The behavioural tests above drive `runTask` with `owner` supplied DIRECTLY, so
+// they never execute that line either — which is why diff-coverage reported it as added-and-
+// uncovered. This drives the REAL `daemonCommand` through the same injected-runDaemon seam
+// test/daemon-triage-guard-wiring.test.ts already pins, captures the DaemonDeps it hands over, and
+// CALLS the captured `runOne` so the opts object — `owner: target.owner` included — is really
+// built. The task id is deliberately absent from the plan, so the dispatched `runTask` refuses at
+// once: the opts literal is evaluated before `runTask` is entered, which is the line under test,
+// and nothing spawns a worker or touches the network.
+test("REACHED: daemonCommand's runOne closure is really constructed and invoked, not merely present in the source", async () => {
+  const root = mkdtempSync(join(tmpdir(), "owner-threading-reached-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, OWNER_THREADING_PLAN);
+
+  let captured: DaemonDeps | undefined;
+  const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+    runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+      captured = deps;
+      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+    },
+  });
+  assert.equal(code, 0, "the injected runDaemon returns a clean 'stopped' summary -> exit 0");
+  assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
+  assert.equal(typeof captured!.runOne, "function", "the dispatch closure must be wired, not left undefined");
+
+  // Invoke it. A task id the plan does not carry makes the dispatched run refuse immediately —
+  // the point is that the closure's own opts object, which is what carries `owner`, is evaluated.
+  let reached = false;
+  try {
+    await captured!.runOne("NO-SUCH-TASK-FOR-OWNER-THREADING");
+    reached = true;
+  } catch {
+    reached = true; // a refusal by throw is still the closure having been entered
+  }
+  assert.ok(reached, "the closure was actually called, so its opts literal was evaluated");
+
+  rmSync(root, { recursive: true, force: true });
+});
