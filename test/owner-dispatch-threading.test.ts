@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { runTask } from "../src/run-task.js";
+import { daemonCommand, runTask } from "../src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
@@ -304,5 +305,96 @@ test(
       rmSync(root, { recursive: true, force: true });
       rmSync(originBare, { recursive: true, force: true });
     }
+  },
+);
+
+// ── The THIRD leg: the wired closure is actually INVOKED ──
+//
+// The two tests above prove the line EXISTS (structural, a source grep) and that `runTask`
+// CONSUMES `opts.owner` (behavioral, calling `runTask` directly with it). NEITHER ever calls
+// the closure `daemonCommand` actually wires, so `runOne`'s body — the
+// `runTask(taskId, { ... owner: target.owner })` object literal itself — was executed by no
+// suite at all, and `diff-coverage` blocked the added `owner: target.owner` line as having zero
+// covering tests.
+//
+// This closes that leg from BOTH ends, in-process, with no network, no clone and no spawn:
+//   (a) the DAEMON end — the `daemon.target` ledger line records the gateway the target
+//       resolved to, so the FOREIGN owner the closure captures is pinned to disk. Point
+//       `--repo` at this checkout's own owner instead and this assertion fails.
+//   (b) the DISPATCH end — invoking `captured.runOne(...)` evaluates the opts literal (the
+//       covered line) and delegates into `runTask`, which refuses from the target's OWN plan
+//       and names the id it was handed. A closure that is unwired, uninvocable, or reading a
+//       different plan fails this.
+// The owner VALUE's journey through `runTask` is the sibling BEHAVIORAL test's job, above;
+// this one exists because that test bypasses the closure entirely.
+test(
+  "INVOCATION: the daemon's wired runOne closure is actually callable and delegates into runTask " +
+    "against the resolved target — the leg the structural and behavioral tests both step over",
+  async () => {
+    const home = mkdtempSync(join(tmpdir(), "owner-threading-daemon-home-"));
+    const root = join(home, "Remudero");
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "remudero", "config.json"),
+      JSON.stringify({ claudeBin: "/bin/true", root }),
+    );
+    mkdirSync(join(root, "state"), { recursive: true });
+    const planPath = join(home, "tasks.yaml");
+    writeFileSync(planPath, OWNER_THREADING_PLAN);
+
+    const savedHome = process.env.HOME;
+    process.env.HOME = home;
+    let captured: DaemonDeps | undefined;
+    let refusal = "";
+    let ledger = "";
+    try {
+      const code = await daemonCommand(
+        ["--repo", "foreign-owner/widgets", "--plan", planPath, "--max", "0"],
+        {
+          runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+            captured = deps;
+            return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+          },
+        },
+      );
+      assert.equal(code, 0, "the injected runDaemon returns a clean 'stopped' summary -> exit 0");
+      assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
+      assert.equal(typeof captured.runOne, "function", "the daemon wires a runOne dispatch closure");
+
+      // THE POINT: actually call it. Everything above is just acquiring the handle.
+      await assert.rejects(
+        () => captured!.runOne("T-NOT-IN-THIS-PLAN"),
+        (e: Error) => {
+          refusal = e.message;
+          return true;
+        },
+        "the wired closure is invocable and its rejection comes from runTask, not from the closure",
+      );
+      ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+
+    // (a) THE DAEMON END: the resolved target — the very `target.owner` the closure closes over —
+    // is the FOREIGN owner, recorded on the daemon's own ledger line rather than inferred.
+    const targetLine = ledger
+      .split("\n")
+      .find((l) => l.includes('"step":"daemon.target"'));
+    assert.ok(targetLine, "the daemon ledgered its resolved target");
+    assert.match(
+      targetLine,
+      /"gateway":"foreign-owner\/widgets"/,
+      `the daemon resolved the owner-qualified target, not this checkout's own (line: ${targetLine})`,
+    );
+
+    // (b) THE DISPATCH END: control reached runTask's own plan lookup, carrying the id the
+    // closure was handed, resolved against the TARGET's plan path.
+    assert.match(
+      refusal,
+      /no task with id 'T-NOT-IN-THIS-PLAN' in plan/,
+      `runOne delegated into runTask with the id it was given (got: ${refusal})`,
+    );
   },
 );
