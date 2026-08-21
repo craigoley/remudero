@@ -1,0 +1,157 @@
+- id: W1-T1081
+  title: "SIX CATCH-OR-CLASSIFIER CONFLATIONS IN THIRTY HOURS LOOK LIKE A CLASS THAT WANTS A GATE, AND THE MEASUREMENT SAYS OTHERWISE — of 648 `catch` clauses in `src/` only 145 return a success-shaped literal without inspecting the error, a hand sample puts roughly a third of THOSE in the defect shape, and the only cheap static discriminator (does the author's prose reason about the collapse) reads CORRECT on two of three hand-judged defects INCLUDING `loadLearningsCorpus`, one of the six; write the rule, name the fold that pays for it, and add no check"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  rationale: |
+    MEASURED 2026-08-20 against origin/main `edbeefd2`, from a scratch worktree whose HEAD was
+    proved equal to that sha before any reading. The population was taken with a `@babel/parser`
+    AST walk over every non-declaration `*.ts` under `src/`, never a regex over source text, and
+    every zero below carries a live control.
+
+    (1) THE SIX ARE CITED, NOT RE-INVESTIGATED — BUT THEIR PRESENCE WAS RE-DERIVED. This shard
+    files the CLASS and no instance. At `edbeefd2`: `armFailureAction` is verbatim on main
+    (`src/run-task.ts`, `return /clean status/i.test(stderrText) ? "direct-merge" : "ignore";`);
+    `loadLearningsCorpus`'s `catch { return []; }` is on main; `PromotionResult.stage` still
+    answers `"judge"` for two outcomes; the pure-path proof conflation is filed and open as
+    W1-T1077; the `spawnSync` push classifier now prints `killed by <signal>` rather than reading
+    a null status as success; and `defaultReadLockFiles` returns ZERO hits across `src/` and
+    `test/` — LIVE CONTROL: `liveInflightRuns`, queried identically, returns 4 files, so that zero
+    is a real absence and consistent with the operator's account that two of the six are fixed.
+
+    (2) THE POPULATION, AS A RATIO RATHER THAN A RAW COUNT. 648 `catch` clauses in `src/`. 90
+    rethrow somewhere in the handler and are not swallows at all. Of the 558 that remain, 187
+    INSPECT the error — `e.code`, an `ENOENT`/`EACCES` test, `instanceof`, `.message`, a match —
+    and 371 do not, a ratio of one inspecting catch to two bare ones. Of those 371, 145 return a
+    success-shaped literal and 101 are an empty block. The 145 split by what their `try` calls:
+    filesystem 53, spawn/exec 37, parse 21, other 34. So the candidate surface is 145 of 648, and
+    the class is a minority of the file before any judgement about correctness is applied.
+
+    (3) HAND-CLASSIFYING A SAMPLE PUTS THE DEFECT FRACTION AT ROUGHLY A THIRD OF THAT, AND MOST OF
+    THE REST ARE RIGHT. Ten of the 145 were read in full. FIVE are correct and say so in their own
+    doc: `safeReadFailed` (`board.ts`) returns `true` and fails CLOSED deliberately, because
+    under-reporting an outage is the worse error; `sameAsIncoming` (`deployer.ts`) enumerates
+    "path absent from the ref, unreadable file, git error" and rules that ALL of them answer false
+    so the conservative abort stands; `defaultGetProcessStartTime` (`fs-race-safe.ts`) returns a
+    third value that `isHolderStale` reads as "no evidence either way"; `parseDraftAttemptCache`
+    (`inbox.ts`) treats empty as the normal pre-population state; `readDiskFreeBytes`
+    (`daemon-health.ts`) returns `undefined` rather than "a fake 0" so a caller renders "unknown".
+    TWO are documented and still collapse outcomes whose remedies differ — `dirSizeBytes`
+    (`clone-reaper.ts`) scores an unreadable directory as 0 bytes into a reaper decision, and
+    `commitsAhead` (`run-task.ts`) enumerates "no base ref / detached / unreadable" and rules they
+    all mean "nothing to PR". THREE are undocumented and collapse: `clearFlag`
+    (`fleet-control.ts`) reads an EACCES on a fleet-control flag as "another actor cleared it";
+    `issues-intake.ts`'s `list` answers `[]` for an auth failure, a rate limit and a genuinely
+    empty issue list alike; `ensureLabel` (`escalate.ts`) answers false for every gh failure.
+
+    (4) AND THE ONLY CHEAP STATIC DISCRIMINATOR FAILS, WHICH IS THE FINDING THAT DECIDES THIS
+    TASK. The obvious signal is whether the author REASONED about the collapse, which shows up as
+    vocabulary — fail-soft, best-effort, degrade, treat as, no evidence, unknown, conservative,
+    unreadable, concurrent. Over the 145, within eighteen lines of context: 107 carry it, 38 do
+    not. Controlled against the hand sample it is precise and BLIND. All five hand-judged CORRECT
+    cases land in the reasoned set, 5 of 5. But only ONE of the three hand-judged DEFECTIVE cases
+    lands in the unreasoned set — `clearFlag`'s own inline comment says "another actor cleared it
+    concurrently — treat as already-clear", which is reasoning vocabulary attached to a wrong
+    conclusion. AND `loadLearningsCorpus`, one of the six that motivated this whole task, READS AS
+    REASONED: its comment is `// no corpus directory yet`. A check on this signal would have been
+    silent on the flagship instance while flagging 38 mostly-fine catches — the crying-wolf
+    outcome, arrived at from the wrong direction.
+
+    (5) THE MECHANISM THAT ACTUALLY FOUND THEM IS ALREADY IN THE TREE, AND ONE INSTANCE WAS LIVED
+    RATHER THAN INFERRED. `diff-coverage` blocked #2346 twice — first on fifteen added lines,
+    then on seven — and the repair was not a wider test net but extracting `promotionLedgerSink`
+    out of `retroCommand`, which turned an inline ternary into a pure function whose two arms each
+    then needed their own test. Writing a test per arm is what forces an author to NAME the
+    outcomes, and naming them is what exposes a collapse. That is the same shape the operator
+    reports for the other five.
+
+    (6) BUT COVERAGE ONLY SEES ADDED LINES, SO IT IS A GATE ON NEW CONFLATIONS AND NOT A SWEEP.
+    None of the 145 already on main is visible to it, and nothing in this task proposes to make
+    them so. Its latency — that it refuses only after a push and a CI cycle — is already filed as
+    W1-T1074 and is not re-filed here.
+
+    (7) AND THE WARN-ONLY ROUTE IS FORECLOSED BY MEASUREMENT THIS REPO ALREADY HAS.
+    `proofScopeViolations` has been warning on 97 criteria since 2026-08-03, a warn never reaches
+    `lint-plan`'s exit code, and its remedy text made two shards undeliverable. That is cited from
+    W1-T1076, not re-derived. An advisory check here would land in the same place with a weaker
+    signal than that one had.
+  design: |
+    THE ANSWER IS A RULE, NOT A CHECK, AND THE SHARD SAYS SO IN ADVANCE SO THE IMPLEMENTER DOES
+    NOT QUIETLY BUILD ONE.
+
+    (i) NO NEW LINT CHECK, AND THE REASON IS RATIONALE (4), NOT TASTE. Scoping to catches around a
+    named I/O or spawn call does not help: 90 of the 145 are exactly that shape and most of them
+    are correct. Scoping to functions whose result reaches a ledger row or a verdict is the right
+    IDEA and is not statically decidable here — `commitsAhead` reaches a verdict through four call
+    hops and `clearFlag` reaches fleet control through a flag file. Advisory-on-changed-files is
+    the `proofScopeViolations` shape, and rationale (7) is what that costs.
+
+    (ii) WHAT THE RULE MUST SAY, IN ITS OWN VOICE. A `catch` that returns a success-shaped literal
+    is making a CLAIM: that every error reaching it has the same remedy. Name the outcomes it
+    collapses and the remedy each one needs. Where two remedies differ, the answer is a third
+    value the caller can see — the shape `defaultGetProcessStartTime` and `readDiskFreeBytes`
+    already use — or an inspected error, never a comment asserting the collapse is fine. The rule
+    must carry the measured counter-example, because it is what makes it stick: reasoning
+    vocabulary in the comment does NOT track correctness, and `loadLearningsCorpus` is the proof.
+
+    (iii) WHICH FOLD PAYS FOR IT, NAMED AND SIZED. `CLAUDE.md` is 62,626 bytes against a
+    zero-headroom cap of 62,644 — eighteen bytes free — so the charter's "compression is a
+    deliverable" applies literally. THE FOLD IS THE `ci-gate` STALE-RED BULLET under "CI and
+    merging", 587 bytes, whose own closing sentence reads "Both defects are FIXED; the citations
+    are the forensic detail". A bullet that exists only to say a defect was repaired is exactly
+    what the charter means by paying for growth. If the implementer disagrees, the alternative is
+    the `(b)` NUL bullet at 1,060 bytes, whose gate now holds the tracked population at zero —
+    but that one still carries a LIVE hazard for untracked files and bare `rg`, so it should be
+    tightened rather than removed, and the ci-gate bullet is the cleaner trade.
+
+    (iv) THE RULE GOES UNDER "Investigation discipline", BESIDE THE ZERO-IS-NOT-A-MEASUREMENT
+    FAMILY. Those bullets are about a query that answers wrongly rather than erroring; this is the
+    same failure one layer down, in the code being queried.
+
+    (v) FIX NOTHING HERE. Two of the six are already fixed, one is filed as W1-T1077, one is
+    `armFailureAction` and two are named in #2346's notes. This task adds no fix to any of them
+    and must not be widened into one.
+
+    (vi) OUT OF SCOPE, NAMED. W1-T1074's coverage latency. Any sweep of the 145 already on main.
+    Any change to `diff-coverage`, `coverage-ratchet` or `proofScopeViolations`.
+  acceptance:
+    - claim: "the rule tells an author to name the outcomes a success-shaped catch collapses"
+      proof: "grep: name the outcomes it collapses in CLAUDE.md"
+    - claim: "the rule says a differing remedy needs a third value the caller can see"
+      proof: "grep: a third value the caller can see in CLAUDE.md"
+    - claim: "the rule carries the measured counter-example that a reasoning comment does not track correctness"
+      proof: "grep: does NOT track correctness in CLAUDE.md"
+    - claim: "the rule names the coverage ratchet as the mechanism that already catches new ones"
+      proof: "grep: diff-coverage is the gate for NEW in CLAUDE.md"
+    - claim: "the growth is paid for by folding the bullet that says its own defects are fixed"
+      proof: "grep: Both defects are FIXED in CLAUDE.md"
+  origin: "recon#one-value-for-several-outcomes-2026-08-20"
+  plan_refs: ["W1-T1074", "W1-T1076", "W1-T1077", "W1-T1059"]
+  files: [CLAUDE.md]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: medium` IS THE HONEST BAND. One file, one bullet added and one folded; `subsystemsOf`
+    reads a single concern, so Rule 19 does not force a raise and inflating it would be theatre.
+
+    CRITERION 5 IS A FOLD PROOF AND IT INVERTS. `grep: Both defects are FIXED in CLAUDE.md` must
+    match TODAY and MISS after the implementing diff, because the fold removes that bullet. That
+    is deliberate: it is the only proof shape that makes the payment observable rather than
+    promised, and an implementer who adds the rule without folding leaves it matching. Read it as
+    "this text must be gone", and expect `check-proof` to report it as a match on the base and a
+    miss on the head — the reverse of every other criterion here.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five name `CLAUDE.md`, which is the file the
+    implementing diff actually changes, so each discriminates on the diff that will be judged
+    rather than going `executed_stale` the way a self-path grep does (W1-T1070).
+
+    EVERY FIGURE IS A QUERY. Re-derive the population with a `@babel/parser` walk over `src/`,
+    classifying a catch by whether its handler references the caught binding AND reads something
+    discriminating off it, and by whether its returns are all success-shaped literals. Re-derive
+    the discriminator's blindness by testing the reasoning vocabulary against a hand-classified
+    sample and checking specifically that `loadLearningsCorpus` lands on the reasoned side. The
+    counts will move as `src/` moves; the SHAPE of the failure is what this task rests on.
