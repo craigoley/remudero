@@ -923,10 +923,11 @@ test("W1-T921: a sweep close does not delete the head branch", () => {
 // verbatim), which needs a resolvable current branch — the daemon's checkout is deliberately
 // detached (the self-sync guard depends on it), so that lookup failed "not on any branch" even
 // when the API-side merge itself landed. The fix drops the flag from both immediate-merge call
-// sites (`realArmDeps().mergeDirect`, run-task.ts; `ghPrMergeSquash`, worker.ts) and leaves the
-// deferred `armAuto` call untouched — GitHub performs ITS deletion server-side, after the fact,
-// with no local branch ever in play. See the shard's own `design` for why `-R/--repo` and a cwd
-// change were rejected in favor of just dropping the flag.
+// sites (`realArmDeps().mergeDirect`, run-task.ts; `ghPrMergeSquash`, worker.ts). At the time,
+// the deferred `armAuto` call was left untouched on the theory that GitHub performs ITS deletion
+// server-side with no local branch ever in play — W1-T1111 (below) found that theory wrong:
+// `--delete-branch` resolves and deletes the LOCAL branch at ARM TIME, not at merge time, so the
+// same "not on any branch" failure reaches `armAuto` from the same detached daemon checkout.
 
 test("arm merge: the head ref is absent after a merge with no local delete", () => {
   const bare = mkdtempSync(join(tmpdir(), "w1t1050-mergeref-origin-"));
@@ -1040,8 +1041,8 @@ test("arm merge: an immediate merge from a detached HEAD does not ask for a curr
   }
 });
 
-test("arm merge: the auto arm still defers its branch deletion to the remote", () => {
-  const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-auto-shim-"));
+test("arm merge: the auto arm no longer asks the local git for a branch it does not have", () => {
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t1111-auto-shim-"));
   const logPath = join(shimDir, "argv.log");
   const savedPath = process.env.PATH;
   try {
@@ -1053,14 +1054,71 @@ test("arm merge: the auto arm still defers its branch deletion to the remote", (
 
     const argv = readFileSync(logPath, "utf8").trim();
     assert.ok(argv.includes("pr merge"), `not a merge invocation: ${argv}`);
+    assert.ok(argv.includes("https://github.com/acme/sandboxrepo/pull/1051"), `must name the PR explicitly rather than by branch — argv was ${argv}`);
     assert.ok(argv.includes("--auto"), `the deferred arm must still pass --auto — argv was ${argv}`);
+    assert.ok(argv.includes("--squash"), `the deferred arm must still pass --squash — argv was ${argv}`);
     assert.ok(
-      argv.includes("--delete-branch"),
-      `the deferred arm must keep --delete-branch so GitHub deletes server-side once it lands — argv was ${argv}`,
+      !argv.includes("--delete-branch"),
+      `W1-T1111: the auto arm must NOT ask gh for a local branch — that lookup fails "not on any ` +
+        `branch" from the daemon's deliberately detached checkout; GitHub still deletes the head ` +
+        `branch server-side via delete_branch_on_merge once the deferred merge lands — argv was ${argv}`,
     );
   } finally {
     process.env.PATH = savedPath;
     rmSync(shimDir, { recursive: true, force: true });
+  }
+});
+
+test("arm merge: an auto arm from a detached HEAD does not ask for a current branch", () => {
+  const repo = mkdtempSync(join(tmpdir(), "w1t1111-detached-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t1111-detached-shim-"));
+  const savedPath = process.env.PATH;
+  const savedCwd = process.cwd();
+  try {
+    execFileSync("git", ["init", "--quiet", "-b", "main", repo], { encoding: "utf8", env: GIT_ENV });
+    writeFileSync(join(repo, "f.txt"), "x");
+    git(repo, "add", "-A");
+    git(repo, "commit", "--quiet", "-m", "seed");
+    const sha = git(repo, "rev-parse", "HEAD").trim();
+    git(repo, "checkout", "--quiet", "--detach", sha);
+    assert.equal(
+      execFileSync("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim(),
+      "HEAD",
+      "precondition: the checkout really is detached",
+    );
+
+    // A faithful reproduction of #2418: this shim fails EXACTLY the way a real `gh` fails from a
+    // detached HEAD, but only when `--delete-branch` is present — proving the fix is "never ask"
+    // rather than "ask and happen to survive".
+    writeFileSync(
+      join(shimDir, "gh"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        '  *"pr merge"*"--delete-branch"*)',
+        '    if [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "HEAD" ]; then',
+        '      echo "could not determine current branch: failed to run git: not on any branch" 1>&2',
+        "      exit 1",
+        "    fi",
+        "    exit 0 ;;",
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    process.chdir(repo);
+
+    const d = realArmDeps();
+    assert.doesNotThrow(
+      () => withLiveWritesAllowed(() => d.armAuto("https://github.com/acme/sandboxrepo/pull/1051")),
+      "arming auto-merge from a detached HEAD must not fail asking gh for a current branch",
+    );
+  } finally {
+    process.chdir(savedCwd);
+    process.env.PATH = savedPath;
+    for (const d of [repo, shimDir]) rmSync(d, { recursive: true, force: true });
   }
 });
 

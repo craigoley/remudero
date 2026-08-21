@@ -1532,9 +1532,14 @@ export interface ArmDeps {
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
   ledgerLines: () => Array<Record<string, unknown>>;
-  /** `gh pr merge --auto --squash --delete-branch` — throws on refusal. Keeps the flag: GitHub
-   *  performs this deletion SERVER-SIDE once the deferred auto-merge lands, so no local branch
-   *  is ever touched and there is nothing here for a detached checkout to trip on. */
+  /** `gh pr merge --auto --squash` — arms the deferred merge; throws on refusal. W1-T1111: NO
+   *  `--delete-branch`. That flag resolves and deletes the LOCAL branch at the moment this call
+   *  runs, which needs a current branch — the daemon's checkout is deliberately detached (the
+   *  self-sync guard depends on it, see {@link mergeDirect}'s own note) and has none, so arming
+   *  from the daemon failed "not on any branch" even though the arm itself is harmless (#2418).
+   *  The repository already carries `delete_branch_on_merge: true`, so the head branch is still
+   *  deleted once the deferred merge actually lands — just server-side, at THAT later moment,
+   *  rather than by this call up front. */
   armAuto: (prUrl: string) => void;
   /** `gh pr merge --squash` — the clean-status completion. W1-T1050: NO `--delete-branch`. `gh`
    *  documents that flag as deleting the LOCAL branch too, which needs a current branch to
@@ -1585,7 +1590,9 @@ export function realArmDeps(): ArmDeps {
     ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
+      // W1-T1111: NO `--delete-branch` — see the doc on `ArmDeps.armAuto` above for why: it
+      // needs a resolvable current branch, and the daemon arms from a deliberately detached one.
+      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
