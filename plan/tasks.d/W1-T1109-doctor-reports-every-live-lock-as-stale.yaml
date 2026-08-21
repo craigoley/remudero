@@ -1,0 +1,124 @@
+- id: W1-T1109
+  title: "`rmd doctor`'s lock-vs-process arm REPORTS EVERY LOCK AS STALE, ALWAYS — it compares the lock FILENAME's task id against a set of RUN ids, which can never match, so a live run reads dead and the output invites clearing a lock a running worker holds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-21 on the Azure host `Remudero`, scratch worktree at origin/main, ledger and
+    locks READ-ONLY — no lock was cleared and the daemon's checkout was not moved.
+
+    (1) THE OBSERVED FAILURE IS THE DANGEROUS DIRECTION. At 18:14Z `doctor` printed
+    `[WARN] lock-vs-process  measured: 1 lock(s), 1 with no live pid` naming `W1-T1100`, while that
+    run was writing `ci.polling` rows through 18:15:33 and had already opened PR #2415 — 30 ledger
+    rows in the 18:1x minute alone. Its lock named pid 631772, alive at the time. A FALSE STALE
+    INVITES CLEARING A LOCK A LIVE WORKER HOLDS; a false live would merely delay.
+
+    (2) THE START-TIME HYPOTHESIS IS REFUTED, AND THE REAL CAUSE IS SIMPLER. `liveInflightRuns`
+    (`src/run-task.ts`) does a BARE liveness check — `readInflightLock` then `isPidAlive`, whose
+    default is `process.kill(pid, 0)` in `src/lib/drain-lock.ts`. THERE IS NO START-TIME COMPARISON
+    ON THIS PATH AT ALL. `STALE_START_TOLERANCE_MS` does exist, but in `src/lib/fs-race-safe.ts`,
+    governing a DIFFERENT lock mechanism; `liveInflightRuns` never consults it.
+
+    (3) THE CAUSE IS A TYPE MISMATCH IN `doctorCommand`'S OWN COMPARISON, AND IT IS UNCONDITIONAL:
+      `const lockFiles = lockRead.locks;`               // TASK ids — the filename minus `.lock`
+      `const liveIds = new Set(live.map((r) => r.runId));`  // RUN ids — `<taskId>-<epochMs>`
+      `const dead = lockFiles.filter((f) => !liveIds.has(f));`
+    A task id can never equal a run id, so `dead` IS ALWAYS THE COMPLETE LOCK LIST. The arm has
+    never once reported a lock as live, and its verdict is independent of whether the pid is alive.
+    `LiveInflightRun` already carries `taskId` beside `runId`, so the fix is one field.
+
+    (4) THIS CORRECTS W1-T1047's OWN SHIPPED ARM, AND THE REGRESSION CAME IN ITS COVERAGE FIX. The
+    original computed `locks.filter((r) => !r.alive)`; when `liveInflightRuns` was found to return
+    only LIVE runs, the comparison was rewritten against the live set and keyed on `runId` instead
+    of `taskId`. The rewrite was right about the mechanism and wrong about the field.
+
+    (5) WHICH PID THE LOCK NAMES, AND WHY NO START-TIME COMPARISON MAY BE ADDED LATER. The lock
+    records `pid: opts.info?.pid ?? process.pid` and `startedAt: opts.info?.startedAt ?? new
+    Date().toISOString()` (`src/lib/inflight-lock.ts`). A run executes IN THE DAEMON'S OWN PROCESS,
+    so `pid` is the daemon's — started whenever the daemon booted — while `startedAt` is when THIS
+    RUN took the lock. THE PAIR THEREFORE DESCRIBES DIFFERENT THINGS AND CANNOT BE COMPARED: any
+    future check that reads a pid older than its own lock as evidence of pid reuse would be wrong
+    for exactly this reason, on every long-lived daemon.
+
+    (6) THE BLAST RADIUS IS ONE CONSUMER, WHICH IS SMALLER THAN FEARED AND IS WORTH STATING. Every
+    call site of `liveInflightRuns` lives in `src/run-task.ts` and all but one use it correctly:
+    three compare `r.runId` against a RUN id (the `rmd down` recoverability read, the sweep's
+    `isRunActive`, and `peek`'s `isLive`), and two build `inFlightTaskIds` from `r.taskId`. ONLY
+    `doctorCommand` mixes the two. `deploy/recycle-container.sh` and `src/lib/drain-lock.ts` each
+    reference it ZERO times (live control: four files reference it at all), so the recycle wait and
+    W1-T978's `drain.lock` reclamation DO NOT consume this predicate and cannot act on its answer.
+
+    (7) AND NOTHING WOULD HAVE ACTED ON THE FALSE STALE AUTOMATICALLY, BECAUSE `doctor` ONLY
+    REPORTS. Its `lock-vs-process` arm is WARN-and-name by design and W1-T978 owns reclamation. The
+    harm is that an OPERATOR reading a confident "1 with no live pid" may clear the lock by hand,
+    which is a data-loss path even though no code walks it.
+
+    (8) THE FALSE-FIRE RATE IS NOT MEASURABLE FROM THE LEDGER, AND THAT IS ITSELF WORTH RECORDING.
+    `doctor` writes NO ledger row: `doctor`-prefixed steps read ZERO across the deduped union
+    (live controls in the same corpus: 230 `verdict` rows, 4,697 `ci.polling` rows). So there is no
+    history to count. What can be said is stronger than a rate: from (3) the arm fires on EVERY
+    lock, unconditionally, so every WARN it has ever printed with a lock present was false unless
+    that lock's pid happened to be dead for unrelated reasons.
+  design: |
+    (i) COMPARE THE SAME KIND OF ID. `liveInflightRuns` already returns `taskId` alongside `runId`,
+    and `readLockFilesFrom` already returns task ids, so the set must be built from `r.taskId`. One
+    field, no new read, no new call.
+
+    (ii) THE TEST MUST DISCRIMINATE ON THE KEY, NOT ONLY ON THE COUNT. A fixture whose live run and
+    lock file share a task id must report ZERO dead; one whose lock has no live counterpart must
+    report exactly that lock. A test that only asserts "some number of dead locks" passes against
+    the current defect, which is how it shipped.
+
+    (iii) DO NOT ADD A START-TIME OR AGE COMPARISON. Rationale (5) makes it unsound on this data:
+    the lock's `pid` and its `startedAt` describe different things whenever a run executes in the
+    daemon's process, which is the normal case. If pid reuse is ever worth defending against, that
+    is W1-T368's subject and needs holder identity beyond a bare pid, not a clock.
+
+    (iv) `doctor` CONTINUES TO ONLY REPORT. No reclamation, no clearing, no repair — W1-T978 owns
+    that and this task must not acquire it. The arm stays WARN-and-name.
+
+    (v) OUT OF SCOPE, NAMED. No change to `liveInflightRuns` itself, which is correct. No change to
+    any other `doctor` arm — W1-T1099 (#2409, merged) fixed this verb's `dispatch-liveness` arm
+    today and THIS IS A DIFFERENT ARM, cited and not re-filed. W1-T378 and W1-T381 concern
+    `reapStaleWorktrees` and worktree mtime, and W1-T368 concerns a recycled pid reading as LIVE —
+    the opposite direction; all three are adjacent, cited, and none absorbed. W1-T1081 owns the
+    one-value-for-several-outcomes class.
+  acceptance:
+    - claim: "a lock whose run is live is not reported as having no live pid"
+      proof: "unit test: W1-T1109: a live run's lock is not reported as stale"
+    - claim: "a lock with no live counterpart is still reported as stale"
+      proof: "unit test: W1-T1109: a lock with no live run is still reported as stale"
+    - claim: "the comparison keys on the task id so a run id can never be mistaken for one"
+      proof: "unit test: W1-T1109: the comparison keys on the task id"
+    - claim: "the arm continues to report only and reclaims nothing"
+      proof: "unit test: W1-T1109: the arm reports and reclaims nothing"
+  origin: "recon#doctor-lock-arm-reports-every-lock-stale-2026-08-21"
+  plan_refs: ["W1-T1047", "W1-T1099", "W1-T978", "W1-T1081", "W1-T368"]
+  files: [src/run-task.ts, test/doctor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared
+    path, so `src/run-task.ts` plus any `test/*.test.ts` reads as two concerns and `lint-plan`
+    refuses that below high — the correction it has already forced on W1-T1068, W1-T1069, W1-T1078,
+    W1-T1079, W1-T1095, W1-T1099 and W1-T1101. THE ACTUAL DIFF IS ONE FIELD IN ONE `map`.
+    DECISIONS.md's 2026-08-18 W1-T471 ruling is the standing acceptance that declaring
+    `src/run-task.ts` is not re-scoped around.
+
+    `test/doctor.test.ts` IS THE EXISTING HOME and is declared rather than a new file.
+
+    THE SEVERITY IS THE DIRECTION, NOT THE FREQUENCY. A health check that under-reports a problem
+    wastes a reader's time; one that reports a LIVE run as dead invites a destructive hand action.
+    That is why this is worth a task despite being a one-field fix, and why design (ii) insists the
+    test discriminate on the key — the defect shipped past a test that only counted.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the comparison by reading `doctorCommand`'s
+    `lockFiles`/`liveIds`/`dead` lines directly; re-derive the absence of a start-time check by
+    reading `liveInflightRuns` and `defaultIsPidAlive`; re-derive the consumer list with
+    `git grep -n 'liveInflightRuns(' -- src/` and check each call's key; re-derive the
+    no-ledger-history claim with a `doctor`-prefixed step count against a control step known to be
+    present in the same union.
