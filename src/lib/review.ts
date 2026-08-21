@@ -1315,14 +1315,35 @@ export const PROOF_ENV_ALLOWLIST = [
   "GIT_TERMINAL_PROMPT",
 ] as const;
 
+/** The `GIT_CONFIG_*` keys {@link buildProofEnv} only ever forwards TOGETHER (W1-T1096). The
+ * allowlist names index 0 and nothing higher, so a parent's `GIT_CONFIG_COUNT` of two or more
+ * describes pairs this allowlist cannot supply — git reads `GIT_CONFIG_COUNT` first and then
+ * demands every `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` it names, so forwarding the count
+ * without every pair it promises makes git exit 128 before doing any work, which is strictly
+ * worse than forwarding no count at all (git's no-count fallback is its normal, working
+ * resolution). */
+const GIT_CONFIG_TRIPLE = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] as const;
+
 /** Build the DECLARED child environment {@link defaultProofSpawner} passes to a proof's process:
  * copies ONLY the {@link PROOF_ENV_ALLOWLIST} keys present on `parent` (default: this process's own
  * `process.env`, i.e. whatever orchestrator — daemon or a bare CLI invocation — is running the
  * reviewer), never `parent` wholesale. Exported so a test can compare the declared env two
- * differently-shaped orchestrator environments produce, without needing two real orchestrators. */
+ * differently-shaped orchestrator environments produce, without needing two real orchestrators.
+ *
+ * The {@link GIT_CONFIG_TRIPLE} is forwarded ONLY as a consistent unit (W1-T1096): this allowlist
+ * can supply exactly one key/value pair (index 0), so the triple is only satisfiable when the
+ * parent's `GIT_CONFIG_COUNT` is exactly `"1"` and both `GIT_CONFIG_KEY_0` and
+ * `GIT_CONFIG_VALUE_0` are present — in every other shape (a higher count, or a count with no
+ * index-0 pair) none of the three cross, never a partial forward that hands git a count it
+ * cannot satisfy. */
 export function buildProofEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = {};
+  const tripleIsConsistent =
+    parent.GIT_CONFIG_COUNT === "1" &&
+    typeof parent.GIT_CONFIG_KEY_0 === "string" &&
+    typeof parent.GIT_CONFIG_VALUE_0 === "string";
   for (const key of PROOF_ENV_ALLOWLIST) {
+    if ((GIT_CONFIG_TRIPLE as readonly string[]).includes(key) && !tripleIsConsistent) continue;
     const val = parent[key];
     if (typeof val === "string") child[key] = val;
   }
