@@ -1064,23 +1064,47 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
 // deriveStatus + the base plan snapshot. This check performs no I/O and imports
 // neither status.ts nor any gh/exec surface.
 
-/** Trim + collapse-whitespace normalized key for a criterion's (claim, proof)
- *  pair — SET membership, not raw-list/positional equality, so reordering the
- *  `acceptance:` list or a pure formatting reflow never trips this check; only
- *  a criterion whose claim+proof text actually differs from every base-ref
- *  entry counts as added-or-changed. */
+/** Trim + collapse-whitespace normalized key for a criterion — keyed on the
+ *  CLAIM ALONE (W1-T1098; was claim+proof, see W1-T1098's rationale). SET
+ *  membership, not raw-list/positional equality, so reordering the
+ *  `acceptance:` list or a pure formatting reflow never trips this check; a
+ *  criterion whose claim text differs from every base-ref entry's claim
+ *  counts as added-or-changed, regardless of what its proof says.
+ *
+ *  WHY CLAIM-ONLY: rule 21's own violation message names the harm it exists
+ *  to prevent — a criterion that "would orphan silently" because MERGED is
+ *  terminal and nothing re-queues the task. Rewording a proof orphans
+ *  nothing: the CONTRACT the task promised (the claim) is unchanged, only
+ *  how it is checked. Keying on claim+proof made a reworded proof on an
+ *  already-merged task indistinguishable from a genuinely new criterion —
+ *  `lint-plan` refused a proof rewrite with the same message it uses for an
+ *  actual amendment, on a task nobody added a promise to.
+ *
+ *  WHAT THIS STOPS CATCHING (named, not hidden): a claim KEPT with its proof
+ *  swapped for a WEAKER one becomes invisible to rule 21 — the discriminating
+ *  `grep:` this task's own criterion once had, replaced by a whole-file
+ *  `unit test:` that always passes, would go unremarked here. `proof-dialect`
+ *  and `proof-resolvability` (this file) and `executed_stale` (review.ts)
+ *  each see PART of that gap — an unexecutable or non-discriminating proof —
+ *  but none of them compares a NEW proof against the one it replaced, so a
+ *  same-claim proof downgrade on an already-merged task is not caught by
+ *  this check or by any other check today. Building that comparison is out
+ *  of scope here; this comment exists so the next filing does not have to
+ *  rediscover the gap. */
 function criterionKey(c: AcceptanceCriterion): string {
   const norm = (s: string) => s.trim().replace(/\s+/g, " ");
-  return `${norm(c.claim ?? "")}\0${norm(c.proof ?? "")}`;
+  return norm(c.claim ?? "");
 }
 
 /**
- * Criteria in `currentCriteria` whose (claim+proof) pair does not appear
- * anywhere in `baseCriteria` — covers BOTH an outright ADDITION and a semantic
- * CHANGE to an existing criterion (a changed pair is, by set membership, a new
- * one). `baseCriteria` undefined (the task did not exist at the base ref, or
- * the caller could not resolve a base version) yields no additions — nothing
- * to diff against, so the check is a no-op for that task.
+ * Criteria in `currentCriteria` whose claim does not appear anywhere in
+ * `baseCriteria` — covers BOTH an outright ADDITION and a semantic CHANGE to
+ * an existing criterion's claim (a changed claim is, by set membership, a
+ * new one). A claim held constant while only its proof is reworded is NOT
+ * an addition (see {@link criterionKey}). `baseCriteria` undefined (the task
+ * did not exist at the base ref, or the caller could not resolve a base
+ * version) yields no additions — nothing to diff against, so the check is a
+ * no-op for that task.
  */
 export function criteriaAdded(
   baseCriteria: AcceptanceCriterion[] | undefined,
@@ -1096,7 +1120,9 @@ export function criteriaAdded(
  * `candidateTasks` — the follow-up escape hatch (W1-T180's design): the same PR
  * that amends a merged task's criteria also introduces a NEW task whose own
  * acceptance criteria include the amended ones, so the criteria have a home
- * that will actually be dispatched. Vacuously true when `added` is empty (there
+ * that will actually be dispatched. Matched by {@link criterionKey} — claim
+ * only, same as `criteriaAdded` — so the follow-up task's own proof wording
+ * need not match verbatim. Vacuously true when `added` is empty (there
  * is nothing to carry). The caller supplies `candidateTasks` as the OTHER tasks
  * newly introduced by the same changed set — this function does no scoping of
  * its own.
