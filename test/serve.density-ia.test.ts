@@ -9,7 +9,6 @@
 // UNMODIFIED (verified separately, run as-is). Everything below is additive proof for W1-T183's
 // own five acceptance bars, never a rewrite of an existing test.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,27 +141,8 @@ async function withShell<T>(deps: ServeDeps, fn: (base: string) => Promise<T>): 
   }
 }
 
-// `openShell`'s Playwright page runs as a REAL, SEPARATE chromium process — its own JS engine
-// reads the REAL system clock, which `scripts/clock-shift.mjs` cannot reach (it monkeypatches
-// only THIS Node process's global `Date`). This suite's client-side `tickElapsed` re-derives
-// "elapsed" as `<browser's real Date.now()> - startedAt` from the `ts` this file writes into the
-// ledger, so a `ts` built from THIS process's (possibly shifted) `Date.now()` under clock-sweep's
-// future shift lands `startedAt` days in the FUTURE relative to the browser's real clock —
-// `elapsed` goes negative and never crosses any threshold, so the anomaly flag this suite exists
-// to prove never fires. `REAL_NOW_MS` reads the SAME real clock the browser will, via the real
-// `date` binary (a separate OS process, immune to the in-process shim) — the same
-// ts-vs-reader-clock alignment #2250 established, applied here because the reader is a browser
-// process no injected JS clock can shift at all. Read ONCE at module load, like this suite's
-// sibling files' own `NOW`/`REAL_NOW_MS` constants — a density fixture seeds hundreds of rows, and
-// a per-call `spawnSync` would turn fixture setup into hundreds of real subprocess spawns (MEASURED:
-// that alone timed out this file's 30s Playwright waits).
-const REAL_NOW_MS = Number(spawnSync("date", ["-u", "+%s"]).stdout.toString().trim()) * 1000;
-function realNow(): Date {
-  return new Date(REAL_NOW_MS);
-}
-
 function runStart(taskId: string, runId = "r1"): string {
-  return JSON.stringify({ ts: realNow().toISOString(), run_id: runId, task_id: taskId, step: "run.start" }) + "\n";
+  return JSON.stringify({ ts: new Date().toISOString(), run_id: runId, task_id: taskId, step: "run.start" }) + "\n";
 }
 
 let browser: Browser;
@@ -396,13 +376,13 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
   appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
   appendFileSync(
     deps.board.ledgerPath,
-    JSON.stringify({ ts: realNow().toISOString(), run_id: "W1-T2-1", task_id: "W1-T2", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/2" }) + "\n",
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "W1-T2-1", task_id: "W1-T2", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/2" }) + "\n",
   );
   appendFileSync(
     deps.board.ledgerPath,
     [
-      JSON.stringify({ ts: realNow().toISOString(), run_id: "W1-T4-1", task_id: "W1-T4", step: "pr.opened", pr_url: prUrl }),
-      JSON.stringify({ ts: realNow().toISOString(), run_id: "W1-T4-1", task_id: "W1-T4", step: "verdict", verdict: "merged" }),
+      JSON.stringify({ ts: new Date().toISOString(), run_id: "W1-T4-1", task_id: "W1-T4", step: "pr.opened", pr_url: prUrl }),
+      JSON.stringify({ ts: new Date().toISOString(), run_id: "W1-T4-1", task_id: "W1-T4", step: "verdict", verdict: "merged" }),
     ].join("\n") + "\n",
   );
   await withShell(deps, async (base) => {
@@ -511,7 +491,7 @@ test("anomaly flag: a genuinely still-running task at 27h21m elapsed (open PR, D
   const root = tmpRoot();
   const byRef: Record<string, PrRef> = { "https://github.com/o/r/pull/1": { number: 1, url: "https://github.com/o/r/pull/1", state: "OPEN" } };
   const deps = fixtureDeps(root, [task({ id: "W1-T1" }), task({ id: "W1-T2" })], { github: fakeGitHub(byRef) });
-  const twentySevenH21mAgo = new Date(realNow().getTime() - (27 * 60 + 21) * 60 * 1000).toISOString();
+  const twentySevenH21mAgo = new Date(Date.now() - (27 * 60 + 21) * 60 * 1000).toISOString();
   appendFileSync(
     deps.board.ledgerPath,
     [
