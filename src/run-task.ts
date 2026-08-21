@@ -1546,11 +1546,14 @@ export interface ArmDeps {
  * `direct-merge-failed` into a `direct-merged`, never the other way, so a cautious `false` here
  * costs nothing beyond the pre-W1-T1050 status quo.
  */
-function isPrMergedNow(prUrl: string): boolean {
+export function isPrMergedNow(prUrl: string, fetch: GhApiFetcher = ghJson): boolean {
+  // `fetch` is appended LAST and defaulted, exactly as {@link ghLiveStateByNumber} already does
+  // for the same read — the sole caller passes `prUrl` alone and keeps today's behaviour
+  // byte-for-byte. Injected only so the refusal arms below are reachable without a live REST call.
   const target = prUrlTarget(prUrl);
   if (!target) return false;
   try {
-    return liveStateFromRest(target.owner, target.repo, target.number, ghJson) === "MERGED";
+    return liveStateFromRest(target.owner, target.repo, target.number, fetch) === "MERGED";
   } catch {
     return false;
   }

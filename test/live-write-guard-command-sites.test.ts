@@ -9,6 +9,7 @@ import {
   approveCommand,
   armAutoMergeAtOpen,
   buildSweepEffects,
+  isPrMergedNow,
   planCommand,
   realArmDeps,
   triageCommand,
@@ -1207,4 +1208,51 @@ test("W1-T921: the default close runner really shells out and still omits the fl
     process.env.PATH = savedPath;
     for (const d of [root, shimDir]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// ── isPrMergedNow: the ground truth attemptArm consults after a mergeDirect throw ──────────────
+//
+// Every arm of this read is a refusal path a healthy call never takes, and the sole caller passes
+// no fetcher, so nothing reached it. The `fetch` seam mirrors ghLiveStateByNumber's, which does
+// the same read; injecting it keeps these assertions off the network entirely.
+
+test("W1-T1050: isPrMergedNow reports MERGED from the REST read, by number, never a GraphQL pr view", () => {
+  const calls: string[][] = [];
+  const merged = isPrMergedNow("https://github.com/craigoley/remudero/pull/1900", (args) => {
+    calls.push(args);
+    return { number: 1900, state: "closed", merged: true };
+  });
+  assert.equal(merged, true);
+  assert.deepEqual(calls, [["api", "repos/craigoley/remudero/pulls/1900"]], "the argv is REST's by-number form");
+});
+
+test("W1-T1050: isPrMergedNow answers false for a PR that is merely closed, never merged", () => {
+  const closed = isPrMergedNow("https://github.com/craigoley/remudero/pull/1900", () => ({
+    number: 1900,
+    state: "closed",
+    merged: false,
+  }));
+  assert.equal(closed, false, "closed is not merged — the fold must not collapse the two");
+});
+
+test("W1-T1050: isPrMergedNow fails CLOSED on a URL it cannot resolve, without calling out at all", () => {
+  let called = 0;
+  for (const bad of ["", "not a url", "https://github.com/craigoley/remudero/issues/12", "https://github.com/craigoley/remudero/pull/abc"]) {
+    assert.equal(
+      isPrMergedNow(bad, () => {
+        called++;
+        return { merged: true };
+      }),
+      false,
+      `an unresolvable URL must answer false: ${JSON.stringify(bad)}`,
+    );
+  }
+  assert.equal(called, 0, "an unresolvable URL is refused before any read is attempted");
+});
+
+test("W1-T1050: isPrMergedNow fails CLOSED when the read itself throws — a merge it cannot confirm is not one", () => {
+  const answer = isPrMergedNow("https://github.com/craigoley/remudero/pull/1900", () => {
+    throw new Error("API rate limit exceeded");
+  });
+  assert.equal(answer, false, "a rate limit or network blip can only ever cost a direct-merged, never invent one");
 });
