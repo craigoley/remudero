@@ -1,0 +1,154 @@
+- id: W1-T1097
+  title: "`rmd check-acceptance` REPORTS `OK` AND EXITS 0 ON A BODY IT RESOLVED ZERO CRITERIA FROM, because `defective` compares `criteriaParsed` against `bulletsWritten` and BOTH read zero when the block scan bails before the first bullet — the verb every filing brief points a lane at cannot fail on the one input that matters; the correct predicate `acceptanceAuthorTimeCheck` already ships in the same module and is already CI-wired, so this is an exit code sourced from it, not a new rule"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-21 against origin/main `23ce6a86`, from a scratch worktree whose HEAD was
+    proved equal to that sha before any reading. The population figures come from driving the
+    reviewer's OWN `acceptanceBlockDiagnostics` over real merged PR bodies, never a re-implementation,
+    and every zero carries a control.
+
+    (1) RE-DERIVED, AND IT IS WORSE THAN "EXITS 0". A body whose `## Acceptance` header is followed
+    by a non-bullet line reads `header found: true`, `bullets written: 0`, `criteria parsed: 0`,
+    exit **0**, and prints *"OK — the parser resolves exactly what was written"*. Two perfectly
+    good bullets sitting below that line are invisible to both counters. LIVE CONTROLS on the same
+    invocation: a healthy body reads 2/2 and exits 0; a body with one claim WRAPPED reads 3 bullets
+    against 2 parsed and exits 1; a body with no header at all exits 1.
+
+    (2) THE MECHANISM IS THAT THE CHECK COMPARES TWO NUMBERS THAT CANNOT DISAGREE ON THIS INPUT.
+    `acceptanceBlockDiagnostics` sets `defective: !headerFound || parsed.length !== bulletsWritten
+    || emptyProofs > 0`, and its own doc records that `bulletsWritten` counts with the parser's OWN
+    `ACCEPTANCE_BULLET_RE` and stops scanning at the same line the parser stops at. So when the
+    scan bails before any bullet, both counters are 0, they agree, and `defective` is false. It is
+    not that the check is wrong about the input; it is that the check has no way to be wrong.
+
+    (3) PARTIAL PARSING IS POSSIBLE AND IS ALREADY LOUD — the adjacent case is covered, which
+    shrinks this task. `truncatedAtBullet` exists precisely for `parsed < bulletsWritten`, and over
+    the merged corpus below it fires on 100 real PR bodies, every one exiting 1 with the bullet
+    number named. Nothing here changes that arm.
+
+    (4) THE POPULATION IS REAL BUT NARROW, AND THE NARROWNESS IS THE FINDING. Over every PR merged
+    in the month to 2026-08-21 (1,490 of them), 1,327 carry an Acceptance header: 1,185 healthy,
+    100 partial-and-caught, and **42 that parse to zero with both counters agreeing** — the silent
+    shape. But 41 of those 42 also carry a `Remudero-Task:` trailer, so review resolves criteria
+    from the shard and the block is never consulted: no exposure at all. **Exactly ONE is
+    trailerless** — #1712, merged 2026-08-13, whose block is the unbulleted `claim:`/`proof:` shape
+    verbatim. One in a month is a real finding and it is a small one; this shard says so rather
+    than inflating it.
+
+    (5) AND THE HARM RUNS THE OPPOSITE WAY FROM THE OBVIOUS READING — READ THE CODE, NOT THE
+    INTUITION. A zero-criteria body does NOT slip through review. `judgeReview` computes
+    `const noCriteria = criteria.length === 0` and folds it into `state` FIRST:
+    `noCriteria || unmet.length > 0 || testTheater || ... ? "failure" : "success"`, and
+    `describeFailure`'s first line is `if (noCriteria) return FAIL — no acceptance criteria to
+    judge (fail closed)`. `planOnly` does NOT exempt it — that flag only changes the summary text
+    and `decideAutoMergeArm`'s treatment of a CAPPED verdict. So the required `remudero-review`
+    status goes RED and the PR is blocked. MEASURED against the two plan-only PRs cited as
+    self-merging: #2344 and #2348 both merged with `remudero-review: PASS — plan-only PR (1
+    criteria)` and `(4 criteria)` respectively — they passed BECAUSE criteria existed, not because
+    plan-only PRs skip review. The arm at PR-open is real; the required status is what holds the
+    line, and on zero criteria it holds.
+
+    (6) SO THE DEFECT IS A FALSE REFUSAL AND A LATENCY, NOT AN UNREVIEWED MERGE. The author runs
+    the verb the brief told them to run, is told OK, pushes, and CI answers *"FAIL — no acceptance
+    criteria to judge (fail closed)"* on a PR whose other checks are green — the shape CLAUDE.md
+    already records for #1721. And once that verdict is posted the sweep never re-reviews the sha,
+    so repairing the body clears nothing without a new head. The verb's whole purpose is to spend
+    a second instead of a CI cycle, and on this input it spends the CI cycle anyway.
+
+    (7) THE CORRECT PREDICATE ALREADY EXISTS IN THE SAME MODULE AND IS ALREADY WIRED IN CI.
+    `acceptanceAuthorTimeCheck` (W1-T952) returns `ok: false, defect: "empty-proofs"` when
+    `criteriaParsed === 0`, and `scripts/acceptance-author-gate.mjs` (W1-T1060) already calls it
+    from `.github/workflows/acceptance-author-gate.yml`. Both are on main. So the repo ALREADY
+    refuses a zero-criteria body — in CI, at the end of the round trip — and the only surface that
+    does not is the local verb every brief names.
+
+    (8) AND THE VERB ALREADY REFUSES A BODY IT SHOULD PASS, IN THE OTHER DIRECTION. A valid
+    trailered body with no `## Acceptance` header — the normal shape of an implementation PR —
+    exits **1** with *"DEFECTIVE: no Acceptance header"*, while `acceptanceAuthorTimeCheck` on the
+    same bytes returns `ok: true` with "trailer present — criteria resolve from plan/tasks.yaml".
+    Any fix that only adds a zero-criteria refusal without taking the trailer arm makes that worse.
+
+    (9) NOTHING BREAKS. `rmd check-acceptance` has NO programmatic caller: it appears in no script
+    and no workflow, only in `run-task.ts`'s own dispatch and help text. LIVE CONTROL on the
+    identical query: `check-proof` returns 22 hits across `scripts/` and `src/`. And no test pins
+    the current behaviour — `test/acceptance-block-diagnostics.test.ts` asserts exit 1 on a
+    truncating body, 0 on a clean one and 2 on a usage error, and asserts nothing about a
+    zero-parsed body.
+
+    (10) THE CLASS, NAMED AND NOT SCOPED IN. A check that cannot fail is the same defect as a catch
+    that answers one value for several outcomes: an instrument whose output does not vary with the
+    thing it measures. W1-T1081 files that class and this task does not re-file it, widen it, or
+    depend on it.
+  design: |
+    (i) THE VERB DELEGATES TO `acceptanceAuthorTimeCheck` FOR ITS EXIT CODE. That predicate already
+    gets BOTH arms right — it passes a trailered body (rationale 8) and refuses a zero-criteria one
+    (rationale 7) — and it is the same predicate the CI gate uses, so the local verb and the gate
+    can never disagree about the same bytes. Reusing it is the whole point: a second hand-rolled
+    rule here would be a second thing to drift.
+
+    (ii) THE DIAGNOSTIC OUTPUT STAYS. `checkAcceptanceCommand`'s printed lines — file, header found,
+    bullets written, criteria parsed, empty proofs, and the per-criterion dump — are what a lane
+    actually reads and must not change shape. This task changes what the verb RETURNS and adds one
+    message; it does not rewrite the report.
+
+    (iii) THE ZERO-CRITERIA MESSAGE MUST BE WRITTEN FOR THIS CASE, NOT INHERITED. Driven over a
+    crafted zero, `acceptanceAuthorTimeCheck` reports *"0 criterion/criteria have no proof — a
+    claim with nothing to execute"*, which is confusing when the real problem is that the block
+    ended before any bullet was seen. The verb must say what actually happened: the header was
+    found, the next line was not a bullet, and everything below it is invisible — name the first
+    offending line so the author can see it.
+
+    (iv) DO NOT CHANGE `parseAcceptanceBlock` OR `acceptanceBlockDiagnostics`. The parser's
+    permissive contract is deliberate and `acceptanceBlockDiagnostics`' own doc says so in terms:
+    making it reject would fail bodies that merge today. `defective` also has other consumers.
+    This task adds an exit-code source; it does not move the parser.
+
+    (v) NO NEW VERB, AND NO NEW RULE. The operator ruled this is an exit code. Nothing here adds a
+    CLI surface, a config flag, a lint check or a CLAUDE.md bullet.
+
+    (vi) OUT OF SCOPE, NAMED. The 41 trailered zero-parsed bodies need nothing — they resolve from
+    their shard. #1712 is merged and is not reopened. `judgeReview`'s fail-closed arm is correct and
+    stays. W1-T1081's class shard is neither absorbed nor extended.
+  acceptance:
+    - claim: "a body whose acceptance block resolves no criteria makes the verb exit non-zero"
+      proof: "unit test: W1-T1097: a zero-criteria body makes check-acceptance exit non-zero"
+    - claim: "a valid trailered body with no acceptance header still exits zero"
+      proof: "unit test: W1-T1097: a trailered body with no header still passes"
+    - claim: "the refusal names the header line and the first line that is not a bullet"
+      proof: "unit test: W1-T1097: the zero-criteria refusal names the offending line"
+    - claim: "a healthy body and a truncating body keep the exit codes they have today"
+      proof: "unit test: W1-T1097: healthy and truncating bodies keep their exit codes"
+    - claim: "the verb and the CI gate read the same predicate so they cannot disagree"
+      proof: "unit test: W1-T1097: the verb and the author-time gate agree on one body"
+  origin: "recon#check-acceptance-cannot-fail-2026-08-21"
+  plan_refs: ["W1-T952", "W1-T1060", "W1-T1081"]
+  files: [src/run-task.ts, test/acceptance-block-diagnostics.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `lint-plan` reads two
+    stems — `run-task` and `acceptance-block-diagnostics` — and refuses that at medium. The blast
+    radius is one return value in a read-only verb that writes no ledger line and no state file.
+    DECOMPOSITION IS DECLINED: the change is an exit code and its test, and the test file is the
+    existing home for `checkAcceptanceCommand`'s exit-code assertions.
+
+    `test/acceptance-block-diagnostics.test.ts` IS THE EXISTING HOME — it already drives
+    `checkAcceptanceCommand` over real temp files and pins exit 1, 0 and 2 — so it is declared
+    rather than a new filename, and `subsystemsOf` reads two stems and not three.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five are name-filtered `unit test:` forward
+    references, for which `proofScopePath` returns `undefined`, so `proof-scope` is silent on all
+    five; each names a test the implementer creates in a file this shard declares.
+
+    EVERY FIGURE IS A QUERY. Re-derive the population by importing `acceptanceBlockDiagnostics` and
+    running it over merged PR bodies from the REST list endpoint, splitting on whether the body also
+    matches `^Remudero-Task:\s*(\S+)\s*$` — the trailered ones are not exposed. Re-derive the
+    fail-closed arm by reading `judgeReview`'s `state` expression and `describeFailure`'s first
+    line rather than inferring from a merged PR. Re-derive the caller census with the same query
+    shape for `check-proof` as a live control. The counts will move; the shape will not.
