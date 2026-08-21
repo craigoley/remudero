@@ -14,11 +14,28 @@
  * the sabotage check in the report (a `gh` on PATH that exits non-zero on every invocation).
  */
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import { deriveDisposition, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
+import { deriveDisposition, DEFAULT_SWEEP_POLICY, type LiveStateResult, type OpenPrView } from "../src/lib/sweep.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { escalationTaskIdFor, fixHeadAcceptable, fixRungTaskFor, priorStrikesFor } from "../src/run-task.js";
+import {
+  escalationTaskIdFor,
+  fixHeadAcceptable,
+  fixRungTaskFor,
+  outOfDiffBlockerFor,
+  prerequisiteMerged,
+  priorStrikesFor,
+  runFixRung,
+  type FixRungOutcome,
+} from "../src/run-task.js";
+import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
+import type { Config } from "../src/lib/config.js";
+import type { IssueGateway } from "../src/lib/escalate.js";
+import type { Mount } from "../src/lib/mounts.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 const NOW = Date.parse("2026-08-02T12:00:00.000Z");
 
@@ -237,4 +254,464 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
   assert.equal(refusal.extra?.synthetic, true, "and the line says it was a synthetic-id dispatch");
   assert.equal(refusal.extra?.head, "run-W1-T999-1785600000000");
   assert.ok(!logs.some((l) => l.step === "fix.dispatch"), "no strike was spent");
+});
+
+// ── W1-T1095: THE FIX RUNG CANNOT RESOLVE A BLOCKER THAT LIVES OUTSIDE ITS OWN DIFF ──────────
+//
+// Capability 1 of 3 (design note (i) — record-and-resume, landed first because it is inert on
+// its own and makes the other two capabilities observable). Before this, a review that named an
+// out-of-diff prerequisite ("blocked on #N") was indistinguishable from an ordinary in-diff
+// deficiency: the rung struck against it up to `strikeCap`, then escalated as if a human were
+// needed, even though the remedy was a separate PR one merge away (#2363/#2365, this task's own
+// rationale (5)).
+//
+// STILL GATEWAY-FREE, same discipline as the tests above: every `runFixRung` drive below is
+// fed hand-rolled fakes for `spawn`/`waitForCiGreen`/`runReview`/`push`/`issues`/
+// `readLiveState`/`readPrerequisiteState` — never a real subprocess, `gh` call, or network
+// request. This is the SAME harness `test/strike-accounting.test.ts`/
+// `test/sweep-wall-clock-bound.test.ts` already established for driving the real dispatch loop
+// (never a hand-rolled reimplementation of its accounting).
+
+function fixRungCriterion(over: Partial<CriterionVerdict> & Pick<CriterionVerdict, "claim" | "met">): CriterionVerdict {
+  return { proof: "proof", reason: "", proof_exec: "not_executable", ...over };
+}
+
+function fixRungReview(
+  state: "success" | "failure",
+  criteria: CriterionVerdict[],
+  headSha = "deadbeef",
+  summary = state === "success" ? "all criteria met" : "unmet criteria",
+): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
+  return {
+    state,
+    criteria,
+    testTheater: false,
+    summary,
+    floorDegraded: false,
+    capped: false,
+    keywordOnly: false,
+    planOnly: false,
+    headSha,
+    reviewerOutcome: "success",
+  };
+}
+
+function fixRungWorkerResult(over: Partial<WorkerResult> = {}): WorkerResult {
+  return {
+    sessionId: "s",
+    costUsd: 0,
+    numTurns: 0,
+    text: "",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+    ...over,
+  };
+}
+
+const FIX_RUNG_TEST_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
+
+function fixRungTestOpts() {
+  return {
+    taskId: "W1-T1095FIX",
+    runId: "W1-T1095FIX-1730000000000",
+    task: { id: "W1-T1095FIX", title: "Some task blocked on a prerequisite" },
+    prUrl: "https://github.com/acme/remudero/pull/2365",
+    branch: "run-W1-T1095FIX-1730000000000",
+    worktreePath: "/tmp/rmd-w1-t1095-wt",
+    initialSessionId: "session-0",
+    mount: FIX_RUNG_TEST_MOUNT,
+    settingsFile: "/tmp/rmd-w1-t1095-settings.json",
+    config: {} as Config,
+    budgetUsd: 10,
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: "/tmp/rmd-w1-t1095-wt", reviewerMount: FIX_RUNG_TEST_MOUNT },
+  };
+}
+
+function fixRungTestLedgerPath(): string {
+  return join(mkdtempSync(join(tmpdir(), "rmd-w1-t1095-ledger-")), "ledger.ndjson");
+}
+
+function fixRungTestIssues(calls: Array<{ title: string; body: string; labels: string[] }> = []): IssueGateway {
+  return {
+    create(title, body, labels) {
+      calls.push({ title, body, labels });
+      return "https://github.com/acme/remudero/issues/9999";
+    },
+  };
+}
+
+/** Collects every `log(step, extra)` call, the raw shape the ledger-reading pure functions
+ *  (`priorStrikesFor` etc.) already read in `test/strike-accounting.test.ts`. */
+function fixRungTestLog(): {
+  lines: Array<{ task_id: string; step: string } & Record<string, unknown>>;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+} {
+  const lines: Array<{ task_id: string; step: string } & Record<string, unknown>> = [];
+  return {
+    lines,
+    log: (step, extra) => lines.push({ task_id: "W1-T1095FIX", step, ...(extra ?? {}) }),
+  };
+}
+
+const NEVER_SPAWN = async (): Promise<WorkerResult> => {
+  throw new Error("must never be called — an out-of-diff blocker parks BEFORE any strike is spent");
+};
+
+// ── the pure classifier itself ────────────────────────────────────────────────────────────────
+
+test("W1-T1095: outOfDiffBlockerFor recognizes the 'blocked on #N' idiom and nothing looser", () => {
+  const blocked = fixRungReview("failure", [
+    fixRungCriterion({ claim: "the ceiling still binds", met: false, reason: "blocked on #2363 — that PR must land first" }),
+  ]);
+  assert.equal(outOfDiffBlockerFor(blocked), 2363);
+
+  const summaryBlocked = fixRungReview(
+    "failure",
+    [fixRungCriterion({ claim: "the override threads through", met: false, reason: "needs more work" })],
+    "sha",
+    "blocked on #2365",
+  );
+  assert.equal(outOfDiffBlockerFor(summaryBlocked), 2365);
+
+  const merelyMentions = fixRungReview("failure", [
+    fixRungCriterion({ claim: "x", met: false, reason: "see #40 for prior art on this pattern" }),
+  ]);
+  assert.equal(outOfDiffBlockerFor(merelyMentions), undefined, "a bare PR mention is never mistaken for a park-worthy blocker");
+
+  const ordinary = fixRungReview("failure", [fixRungCriterion({ claim: "x", met: false, reason: "still missing a test" })]);
+  assert.equal(outOfDiffBlockerFor(ordinary), undefined);
+});
+
+test("W1-T1095: prerequisiteMerged is fail-safe — only an explicit MERGED read counts", () => {
+  assert.equal(prerequisiteMerged({ ok: true, state: "MERGED" }), true);
+  assert.equal(prerequisiteMerged({ ok: true, state: "OPEN" }), false);
+  assert.equal(prerequisiteMerged({ ok: false }), false, "a failed/indeterminate read never reads as merged");
+  assert.equal(prerequisiteMerged(undefined), false, "no reader at all never reads as merged");
+});
+
+// ── acceptance criterion 1 ──────────────────────────────────────────────────────────────────
+
+test("W1-T1095: an out-of-diff blocker parks against a prerequisite instead of retrying", async () => {
+  const { lines, log } = fixRungTestLog();
+  const outcome: FixRungOutcome = await runFixRung({
+    ...fixRungTestOpts(),
+    strikeCap: 2,
+    initialReview: fixRungReview("failure", [
+      fixRungCriterion({
+        claim: "the ArmDeps override threads through",
+        met: false,
+        reason: "blocked on #2363 — the plan-proof-debt ceiling PR must land first",
+      }),
+    ]),
+    deps: {
+      spawn: NEVER_SPAWN,
+      waitForCiGreen: async () => {
+        throw new Error("must never be called — parking happens before CI is ever awaited");
+      },
+      runReview: async () => {
+        throw new Error("must never be called — parking happens before any re-review");
+      },
+      push: () => {
+        throw new Error("must never be called — parking happens before any push");
+      },
+      issues: fixRungTestIssues(),
+      ledgerPath: fixRungTestLedgerPath(),
+      log,
+      say: () => {},
+      account: (r) => r,
+      // No `readPrerequisiteState` at all — omitted behaves as "not yet merged" (fail-safe).
+    },
+  });
+  assert.equal(outcome.outcome, "parked");
+  assert.equal(outcome.blockedOnPr, 2363);
+  assert.equal(outcome.strikes, 0, "no strike was ever spent trying to fix work that lives outside this diff");
+  assert.match(outcome.reason, /blocked on #2363/);
+  const parked = lines.find((l) => l.step === "fix.parked");
+  assert.ok(parked, `expected a fix.parked row; got ${JSON.stringify(lines.map((l) => l.step))}`);
+  assert.equal(parked!.blocked_on_pr, 2363);
+});
+
+// ── acceptance criterion 2 ──────────────────────────────────────────────────────────────────
+
+test("W1-T1095: a parked pull request consumes no strike", async () => {
+  const { lines, log } = fixRungTestLog();
+  const outcome: FixRungOutcome = await runFixRung({
+    ...fixRungTestOpts(),
+    strikeCap: 2,
+    initialReview: fixRungReview("failure", [
+      fixRungCriterion({ claim: "criterion A", met: false, reason: "blocked on #2363 — must land first" }),
+    ]),
+    deps: {
+      spawn: NEVER_SPAWN,
+      waitForCiGreen: async () => "green",
+      runReview: async () => fixRungReview("success", []),
+      push: () => {},
+      issues: fixRungTestIssues(),
+      ledgerPath: fixRungTestLedgerPath(),
+      log,
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+  assert.equal(outcome.outcome, "parked");
+  assert.ok(!lines.some((l) => l.step === "fix.dispatch"), "no fix.dispatch line — nothing for priorStrikesFor to ever count as a strike");
+  assert.equal(priorStrikesFor(lines, "W1-T1095FIX"), 0, "the strike counter, read back from the ledger, stays at zero");
+});
+
+// ── acceptance criterion 3 ──────────────────────────────────────────────────────────────────
+
+test("W1-T1095: a parked pull request resumes when its prerequisite merges", async () => {
+  const blockedReview = fixRungReview("failure", [
+    fixRungCriterion({ claim: "criterion A", met: false, reason: "blocked on #2363 — must land first" }),
+  ]);
+
+  // First: the prerequisite is still OPEN — parks, exactly like criterion 1/2 above.
+  {
+    const { log } = fixRungTestLog();
+    const outcome = await runFixRung({
+      ...fixRungTestOpts(),
+      strikeCap: 2,
+      initialReview: blockedReview,
+      deps: {
+        spawn: NEVER_SPAWN,
+        waitForCiGreen: async () => "green",
+        runReview: async () => fixRungReview("success", []),
+        push: () => {},
+        issues: fixRungTestIssues(),
+        ledgerPath: fixRungTestLedgerPath(),
+        log,
+        say: () => {},
+        account: (r) => r,
+        readPrerequisiteState: (n): LiveStateResult => {
+          assert.equal(n, 2363);
+          return { ok: true, state: "OPEN" };
+        },
+      },
+    });
+    assert.equal(outcome.outcome, "parked", "still open — still parked");
+  }
+
+  // Then: the SAME review, but the prerequisite has now merged — the rung resumes and
+  // dispatches a real strike instead of parking again.
+  {
+    const { lines, log } = fixRungTestLog();
+    let spawnCalls = 0;
+    const outcome = await runFixRung({
+      ...fixRungTestOpts(),
+      strikeCap: 2,
+      initialReview: blockedReview,
+      deps: {
+        spawn: async () => {
+          spawnCalls++;
+          return fixRungWorkerResult({ sessionId: "fix-session-resumed" });
+        },
+        waitForCiGreen: async () => "green",
+        runReview: async () => fixRungReview("success", []),
+        push: () => {},
+        issues: fixRungTestIssues(),
+        ledgerPath: fixRungTestLedgerPath(),
+        log,
+        say: () => {},
+        account: (r) => r,
+        readPrerequisiteState: (n): LiveStateResult => {
+          assert.equal(n, 2363);
+          return { ok: true, state: "MERGED" };
+        },
+      },
+    });
+    assert.equal(outcome.outcome, "fixed", "resumed and the strike resolved it — never parked again");
+    assert.equal(spawnCalls, 1, "a real fix worker was dispatched once the prerequisite merged");
+    const resumed = lines.find((l) => l.step === "fix.resumed");
+    assert.ok(resumed, `expected a fix.resumed row; got ${JSON.stringify(lines.map((l) => l.step))}`);
+    assert.equal(resumed!.blocked_on_pr, 2363);
+    assert.ok(!lines.some((l) => l.step === "fix.parked"), "this pass never parked");
+  }
+});
+
+// ── acceptance criterion 4 ──────────────────────────────────────────────────────────────────
+
+test("W1-T1095: every rung termination writes a reason", async () => {
+  // (a) fixed
+  {
+    const { lines, log } = fixRungTestLog();
+    const outcome = await runFixRung({
+      ...fixRungTestOpts(),
+      strikeCap: 2,
+      initialReview: fixRungReview("failure", [fixRungCriterion({ claim: "x", met: false, reason: "still missing a test" })], "sha-0"),
+      deps: {
+        spawn: async () => fixRungWorkerResult(),
+        waitForCiGreen: async () => "green",
+        runReview: async () => fixRungReview("success", [], "sha-1"),
+        push: () => {},
+        issues: fixRungTestIssues(),
+        ledgerPath: fixRungTestLedgerPath(),
+        log,
+        say: () => {},
+        account: (r) => r,
+      },
+    });
+    assert.equal(outcome.outcome, "fixed");
+    assert.ok(outcome.reason && outcome.reason.length > 0, "the outcome itself names a reason");
+    const resolved = lines.find((l) => l.step === "fix.resolved");
+    assert.ok(resolved && typeof resolved.reason === "string" && resolved.reason.length > 0, "the fix.resolved row names a reason");
+  }
+
+  // (b) escalated — plain strike-cap exhaustion (never rule15/instrument/false-block)
+  {
+    const { lines, log } = fixRungTestLog();
+    const outcome = await runFixRung({
+      ...fixRungTestOpts(),
+      strikeCap: 1,
+      initialReview: fixRungReview("failure", [fixRungCriterion({ claim: "x", met: false, reason: "still missing a test" })], "sha-0"),
+      deps: {
+        spawn: async () => fixRungWorkerResult(),
+        waitForCiGreen: async () => "green",
+        // A DIFFERENT head sha than the initial review — real progress, still failing — so
+        // detectReviewFalseBlock never fires and this reaches the plain exhaustion branch.
+        runReview: async () => fixRungReview("failure", [fixRungCriterion({ claim: "x", met: false, reason: "still missing a test" })], "sha-1"),
+        push: () => {},
+        issues: fixRungTestIssues(),
+        ledgerPath: fixRungTestLedgerPath(),
+        log,
+        say: () => {},
+        account: (r) => r,
+      },
+    });
+    assert.equal(outcome.outcome, "escalated");
+    assert.ok(outcome.reason && outcome.reason.length > 0, "the outcome itself names a reason");
+    const exhausted = lines.find((l) => l.step === "fix.exhausted");
+    assert.ok(exhausted && typeof exhausted.reason === "string" && exhausted.reason.length > 0, "the fix.exhausted row names a reason");
+  }
+
+  // (c) stood_down — a terminal live-state read before any strike is spent
+  {
+    const { lines, log } = fixRungTestLog();
+    const outcome = await runFixRung({
+      ...fixRungTestOpts(),
+      strikeCap: 2,
+      initialReview: fixRungReview("failure", [fixRungCriterion({ claim: "x", met: false, reason: "still missing a test" })]),
+      deps: {
+        spawn: NEVER_SPAWN,
+        waitForCiGreen: async () => {
+          throw new Error("must never be called");
+        },
+        runReview: async () => {
+          throw new Error("must never be called");
+        },
+        push: () => {
+          throw new Error("must never be called");
+        },
+        issues: fixRungTestIssues(),
+        ledgerPath: fixRungTestLedgerPath(),
+        log,
+        say: () => {},
+        account: (r) => r,
+        readLiveState: async (): Promise<LiveStateResult> => ({ ok: true, state: "CLOSED" }),
+      },
+    });
+    assert.equal(outcome.outcome, "stood_down");
+    assert.ok(outcome.reason && outcome.reason.length > 0, "the outcome itself names a reason");
+    const stoodDown = lines.find((l) => l.step === "fix.stood_down");
+    assert.ok(stoodDown && typeof stoodDown.reason === "string" && stoodDown.reason.length > 0, "the fix.stood_down row names a reason");
+  }
+
+  // (d) spawn_abandoned — a worker that never returns
+  {
+    const { lines, log } = fixRungTestLog();
+    const outcome = await runFixRung({
+      ...fixRungTestOpts(),
+      strikeCap: 2,
+      initialReview: fixRungReview("failure", [fixRungCriterion({ claim: "x", met: false, reason: "still missing a test" })]),
+      deps: {
+        spawn: () => new Promise<WorkerResult>(() => {}),
+        waitForCiGreen: async () => "green",
+        runReview: async () => fixRungReview("success", []),
+        push: () => {},
+        issues: fixRungTestIssues(),
+        ledgerPath: fixRungTestLedgerPath(),
+        log,
+        say: () => {},
+        account: (r) => r,
+        spawnWallClockBoundMs: 20,
+      },
+    });
+    assert.equal(outcome.outcome, "spawn_abandoned");
+    assert.ok(outcome.reason && outcome.reason.length > 0, "the outcome itself names a reason");
+    const abandoned = lines.find((l) => l.step === "fix.spawn_abandoned");
+    assert.ok(abandoned && typeof abandoned.reason === "string" && abandoned.reason.length > 0, "the fix.spawn_abandoned row names a reason");
+  }
+
+  // (e) parked — the new out-of-diff-blocker outcome
+  {
+    const { lines, log } = fixRungTestLog();
+    const outcome = await runFixRung({
+      ...fixRungTestOpts(),
+      strikeCap: 2,
+      initialReview: fixRungReview("failure", [
+        fixRungCriterion({ claim: "x", met: false, reason: "blocked on #2363 — must land first" }),
+      ]),
+      deps: {
+        spawn: NEVER_SPAWN,
+        waitForCiGreen: async () => "green",
+        runReview: async () => fixRungReview("success", []),
+        push: () => {},
+        issues: fixRungTestIssues(),
+        ledgerPath: fixRungTestLedgerPath(),
+        log,
+        say: () => {},
+        account: (r) => r,
+      },
+    });
+    assert.equal(outcome.outcome, "parked");
+    assert.ok(outcome.reason && outcome.reason.length > 0, "the outcome itself names a reason");
+    const parked = lines.find((l) => l.step === "fix.parked");
+    assert.ok(parked && typeof parked.reason === "string" && parked.reason.length > 0, "the fix.parked row names a reason");
+  }
+});
+
+// ── acceptance criterion 5 ──────────────────────────────────────────────────────────────────
+
+test("W1-T1095: in-diff work still stops at the existing strike ceiling", async () => {
+  const { lines, log } = fixRungTestLog();
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  let spawnCalls = 0;
+  const outcome: FixRungOutcome = await runFixRung({
+    ...fixRungTestOpts(),
+    strikeCap: 2,
+    initialReview: fixRungReview("failure", [fixRungCriterion({ claim: "criterion A", met: false, reason: "still broken" })], "sha-0"),
+    deps: {
+      spawn: async () => {
+        spawnCalls++;
+        return fixRungWorkerResult({ sessionId: `fix-session-${spawnCalls}` });
+      },
+      waitForCiGreen: async () => "green",
+      // A fresh head sha every strike (real, if insufficient, progress) so this never trips
+      // the review false-block escape — it must exhaust the cap like any ordinary in-diff
+      // deficiency, exactly as it did before W1-T1095.
+      runReview: async () =>
+        fixRungReview("failure", [fixRungCriterion({ claim: "criterion A", met: false, reason: "still broken" })], `sha-${spawnCalls}`),
+      push: () => {},
+      issues: fixRungTestIssues(issueCalls),
+      ledgerPath: fixRungTestLedgerPath(),
+      log,
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+  assert.equal(outcome.outcome, "escalated", "in-diff work still exhausts and escalates, never parks");
+  assert.equal(outcome.strikes, 2, "the strike cap (2) was reached — never bypassed, never widened");
+  assert.equal(spawnCalls, 2, "exactly strikeCap fix workers were dispatched — no third strike");
+  assert.equal(issueCalls.length, 1, "exactly one BLOCKED issue opened on exhaustion");
+  assert.ok(!lines.some((l) => l.step === "fix.parked"), "ordinary in-diff work is never parked");
 });
