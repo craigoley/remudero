@@ -1,0 +1,106 @@
+- id: W1-T1079
+  title: "THE LEDGER CANNOT ANSWER WHETHER W1-T1050 ALREADY FIXED THIS — a failed auto-merge arm is classified transient by a one-line binary and its error text is captured and then discarded, so 172 `arm-error-ignored` rows carry no cause and nothing can tell a permanent refusal from a network blip"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  rationale: |
+    THE RECON IS DONE AND IS CITED HERE, NOT RE-DERIVED (2026-08-20/21 on the Azure host `Remudero`,
+    scratch worktree at origin/main, ledger read-only, no config changed).
+
+    (1) THE LEAD IS NOT VOLUME, IT IS THAT THE QUESTION CANNOT BE ANSWERED. W1-T1050 merged at
+    2026-08-21T01:20:16Z, fixing an arm-path failure whose signature was `not on any branch` in the
+    detached container checkout. THE LEDGER CANNOT SAY WHETHER THAT FIX APPLIES HERE, because the
+    rows this task is about carry no error text at all. That is the defect: not that arms fail, but
+    that a fix can land for a neighbouring symptom and NOTHING IN THE RECORD CAN CONFIRM OR REFUTE
+    that it helped.
+
+    (2) THE WINDOW, STATED HONESTLY RATHER THAN AS A TREND. There are 172 `arm-error-ignored` rows
+    all-time, the newest at 2026-08-20T19:49. Zero have been written since W1-T1050 merged — but
+    that "zero" is five and a half hours of PRE-EXISTING silence plus under an hour of post-fix
+    elapsed time, which is not evidence of anything. AND IT IS THE WRONG LEG ANYWAY: W1-T1050
+    dropped `--delete-branch` from the DIRECT-MERGE leg, while `arm-error-ignored` is returned from
+    the `--auto` leg. Nobody should read the zero as a fix confirmed.
+
+    (3) THE MECHANISM IS TWO LINES. `armFailureAction` (`src/run-task.ts`) is a one-line binary:
+    `/clean status/i.test(stderrText) ? "direct-merge" : "ignore"`. Every failure that is not
+    literally the clean-status case is classified transient and retried on the next sweep pass,
+    forever. And `const msg = String(e.stderr ?? e.message)` IS captured in the same catch — the
+    direct-merge branch uses it — but the `return "arm-error-ignored"` path never records it, so not
+    one of the 172 rows carries its underlying error.
+
+    (4) THE DECISION WAS TO ARM, WHICH IS WHY THIS IS NOT A REVIEW PROBLEM. Of 26 PRs merged unarmed
+    in a 24-hour window, 13 carry `outcome: "arm-error-ignored"` alongside
+    `decision_reason: "verdict is a full PASS"`. The review passed and the fleet decided to arm; the
+    attempt failed and the reason was thrown away.
+
+    (5) THE OBVIOUS SYSTEMATIC CAUSE IS RULED OUT. `allow_auto_merge` reads TRUE on the repository,
+    so this is not auto-merge being disabled. Naming that here saves the next reader the check.
+
+    (6) AND THIS IS THE FOURTH "ONE VALUE FOR SEVERAL OUTCOMES" DEFECT FOUND IN TWO DAYS. The
+    siblings are cited as a class and NOT scoped in: `spawnSync` returning `status: null` on a
+    signalled child, which a push-path classifier read as success; `readdirSync` answering `[]` to
+    both ENOENT and EACCES, so a permissions fault reported as a healthy zero; and a pure-path proof
+    conflating a failing test with a broken runtime. Here the single value is `"ignore"`, standing
+    for both a transient blip and a permanent refusal.
+  design: |
+    (i) RECORD THE ERROR ON THE IGNORE PATH. `msg` already exists in that catch. Put it on the row
+    the way the direct-merge branch already puts its own `msg2` into its message, so every future
+    `arm-error-ignored` names what `gh pr merge --auto` actually said. THIS IS THE WHOLE POINT: it is
+    what makes rationale (1) answerable next time.
+
+    (ii) STOP ASSUMING TRANSIENCE. `armFailureAction` must distinguish at least a third case — a
+    failure that is neither the clean-status case nor plausibly transient — rather than folding
+    everything not matching one regex into `"ignore"`. The classifier stays PURE and stays the single
+    place the decision is made; what changes is that it can return more than two answers.
+
+    (iii) A RETRY CAP IS NOT THE PRIMARY REMEDY AND MUST NOT BE PROPOSED AS ONE. Without the error
+    text, a cap only hides the failures more quietly — the same rows, fewer of them, still with no
+    cause. If a cap is wanted later it is a separate decision, taken once the errors are legible.
+
+    (iv) THE SIBLINGS ARE CITED, NOT ABSORBED, AND AN IMPLEMENTER WOULD SENSIBLY DO THEM TOGETHER.
+    W1-T1052 (`a failed arm is recorded as a skip`) fixes the STEP NAME: `logArmAttribution` collapses
+    every non-arming outcome into `automerge.arm_skipped`, so a census of arm failures reads zero
+    against a success control that reads fine. That is the same rows seen from the naming side, and
+    this task does not rename anything. W1-T1050 is merged and fixed the direct-merge leg. Neither
+    subsumes this; whoever picks one up should read all three.
+
+    (v) OUT OF SCOPE, NAMED. No rename of `automerge.arm_skipped` (W1-T1052 owns it). No change to
+    the direct-merge leg (W1-T1050 merged). No retry cap, no change to `allow_auto_merge`, and no
+    change to what the review decides — the decision was already correct on all 13.
+  acceptance:
+    - claim: "a failed arm records the error text the attempt returned"
+      proof: "unit test: W1-T1079: a failed arm records the error text it received"
+    - claim: "a failure that is not the clean-status case is no longer classified transient by default"
+      proof: "unit test: W1-T1079: a non clean-status failure is not classified transient by default"
+    - claim: "the clean-status case still routes to the direct merge exactly as before"
+      proof: "unit test: W1-T1079: the clean-status case still routes to the direct merge"
+    - claim: "a successful arm is unchanged and records no error"
+      proof: "unit test: W1-T1079: a successful arm is unchanged and records no error"
+  origin: "recon#arm-fails-and-discards-its-reason-2026-08-21"
+  plan_refs: ["W1-T1050", "W1-T1052"]
+  files: [src/run-task.ts, test/arm-outcome-five-sites.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared path,
+    so `src/run-task.ts` plus any `test/*.test.ts` reads as two concerns and `lint-plan` refuses that
+    below high — the same correction it forced on W1-T1068, W1-T1069 and W1-T1078. THE ACTUAL DIFF IS
+    ONE FIELD ADDED TO AN EXISTING LEDGER CALL AND ONE PURE CLASSIFIER GAINING A THIRD RETURN.
+    DECOMPOSITION IS DECLINED: recording the error without changing the classifier leaves every
+    failure still labelled transient, and changing the classifier without recording the error leaves
+    the new label unexplainable.
+
+    `test/arm-outcome-five-sites.test.ts` IS THE EXISTING HOME and is declared rather than a new file,
+    so the concern count is not inflated by a filename.
+
+    THE ZERO IN RATIONALE (2) IS NOT A CONTROL AND MUST NOT BE READ AS ONE. It is stated so a later
+    reader does not mistake a short quiet window for a confirmed fix. When this is built, the FIRST
+    `arm-error-ignored` row carrying an error string is the evidence that was missing.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the row count and recency from the per-form ledger union
+    with a coverage control taken first; re-derive the classifier by reading `armFailureAction`
+    directly; re-derive `allow_auto_merge` from the repository record rather than inferring it.
