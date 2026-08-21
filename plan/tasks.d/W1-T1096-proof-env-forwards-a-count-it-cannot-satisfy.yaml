@@ -1,0 +1,153 @@
+- id: W1-T1096
+  title: "`buildProofEnv` forwards `GIT_CONFIG_COUNT` VERBATIM but only the index-0 pair, so any orchestrator carrying two or more env-config entries hands every proof a count git cannot satisfy — git exits 128 before running, and the spawner discards the stderr that would say why"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-21 on `Craigs-Mac-mini` (git 2.54.0) from a scratch worktree cut off
+    origin/main. No env VALUE is reproduced below — presence and counts only. Every zero carries a
+    positive control, and the one zero that cannot mean what it looks like is reported as
+    uninformative rather than as absence.
+
+    (1) THE ALLOWLIST NAMES INDEX 0 AND NOTHING HIGHER. `PROOF_ENV_ALLOWLIST` (`src/lib/review.ts`)
+    is `PATH`, `HOME`, `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`,
+    `GIT_CONFIG_VALUE_0`, `GIT_TERMINAL_PROMPT`. `buildProofEnv` copies each key present on the
+    parent, so `GIT_CONFIG_COUNT` crosses VERBATIM while every pair above index 0 is dropped.
+
+    (2) THE THREE OUTCOMES, MEASURED DIRECTLY UNDER `env -i`. With `COUNT=2` and only the index-0
+    pair, git prints `error: missing config key GIT_CONFIG_KEY_1` then `fatal: unable to parse
+    command-line config` and EXITS 128 — before doing any work at all. With NO count, git falls
+    back to its normal resolution and exits 0. With a CONSISTENT `COUNT=1` and that pair, git exits
+    0 AND honours the forwarded value. So the partial forward is strictly worse than forwarding
+    nothing, which is what makes this a defect rather than an omission: the code goes out of its
+    way to pass a variable whose only effect is to break the child.
+
+    (3) THE DEFECT ARRIVED WITH THE FIX IT UNDERMINES. `git log -S` puts BOTH `PROOF_ENV_ALLOWLIST`
+    and `GIT_CONFIG_COUNT` in a single commit, f730be94 (2026-08-19, #2181), and neither has been
+    revised since. W1-T499 IS THE PARENT AND IS CITED, NOT RE-DERIVED: it established that a proof
+    inheriting the orchestrator's whole environment lets the reviewer and CI disagree about the
+    same sha, and it closed that by declaring an env. This task does not reopen its recon, does not
+    dispute its ruling, and proposes no amendment to its merged shard. It reports that the declared
+    env reintroduced the same class of divergence through one truncated triple.
+
+    (4) THE REPO ALREADY KNOWS, AND WORKED AROUND IT ONE FIXTURE AT A TIME. `test/review.test.ts`
+    carries the failure verbatim in a comment — the `missing config key GIT_CONFIG_KEY_1` text, and
+    the observation that the test failed under the reviewer's own proof spawner while the identical
+    run passed under `npm test` — and neutralises it by deleting every `GIT_CONFIG_(COUNT|KEY_n|
+    VALUE_n|PARAMETERS)` from `process.env` around the call. THAT COMMENT'S ATTRIBUTION IS SUBTLY
+    WRONG AND IS WHY THE WORKAROUND DID NOT GENERALISE: it reads the broken triple as "ambient
+    config the fixture inherited", but the parent's triple is CONSISTENT — the allowlist truncated
+    it on the way in. The fault is in the spawner, so every future proof that shells git must
+    rediscover and re-neutralise it.
+
+    (5) WHERE THE COUNT COMES FROM: NOT THIS REPO. Nothing in `src/`, `deploy/entrypoint.sh`,
+    `.github/` or `scripts/` sets any `GIT_CONFIG_*` variable (controls: `entrypoint.sh` reads at
+    583 lines, 20 files scanned under `.github/`). The only setters are two TEST files, and NEITHER
+    can produce the inconsistency: `test/install-checkout-command.test.ts` and
+    `test/entrypoint-boot.test.ts` each write a CONSISTENT `COUNT=1` triple and restore what they
+    found. `NO_GUESSED_IDENTITY` in the entrypoint-boot test is therefore NOT the source — but that
+    file IS AN AMPLIFIER: it spreads `...process.env` at eight sites, so whatever triple its own
+    process holds is forwarded into real git invocations. ON THIS HOST NO `GIT_CONFIG_*` VARIABLE
+    IS SET AT ALL (zero present). THE FLEET HOST'S VALUE IS NOT MEASURABLE FROM HERE and is NOT
+    ASSUMED — the origin is the ambient shell or host environment of whichever process runs the
+    reviewer, and the exact count is an open question for an operator on that host. What does NOT
+    depend on the answer: the child is broken for ANY parent count of two or more.
+
+    (6) THE BLAST RADIUS IS NOT ONE PROOF. Of the distinct pure-path `unit test:` targets named by
+    proofs across `plan/tasks.yaml` and `plan/tasks.d/`, 299 exist on main, and 56 of those
+    reference git directly — as a literal `"git"` argv, a `spawnSync`/`execFileSync` on it, or
+    `resolveOwnerRepo`. THAT IS A FLOOR, NOT A TOTAL: it is a direct textual scan and cannot see a
+    test that reaches git transitively through production code, and 24 of 124 `src/` modules shell
+    git themselves. Control: `test/review.test.ts`, known to reach git through `resolveOwnerRepo`,
+    is in the matched set — an earlier control that tested only one arm of the pattern FAILED and
+    was corrected rather than carried.
+
+    (7) AND NO PAST FAILURE CAN CARRY THE SIGNATURE, SO THAT ZERO PROVES NOTHING. `missing config
+    key` returns zero across the whole deduped ledger union, with a per-form coverage control that
+    every form was genuinely read (`review.posted` reads non-zero in the gzipped form, the plain
+    rotations AND the live file). THE ZERO IS STRUCTURALLY GUARANTEED: `defaultProofSpawner` runs
+    with `stdio: ["ignore", "pipe", "ignore"]`, so a proof's stderr is DISCARDED AT THE SPAWNER and
+    never reaches the reviewer, and `reviewLedgerLegibilityFields` — the single projection the
+    `review.posted` row is built from — carries no stdout or stderr field at all. The corpus cannot
+    contain the string. This is reported as an UNINFORMATIVE zero, not as evidence the defect has
+    never fired, and it is also why the incident that prompted this recon could only be found by
+    running `check-proof` by hand.
+  design: |
+    (i) RANKED REMEDY: FORWARD THE TRIPLE ONLY AS A CONSISTENT UNIT, NEVER PAIR-BY-PAIR. When the
+    parent's `GIT_CONFIG_COUNT` is exactly the number of pairs the allowlist actually forwards, pass
+    all three; otherwise pass NONE of the three. Rationale (2) is the whole argument: git's
+    no-count fallback is clean, so dropping is safe, while an unsatisfiable count is fatal.
+
+    (ii) REJECT THE WIDENING REMEDY BY NAME. Forwarding every `GIT_CONFIG_KEY_*`/`VALUE_*` up to
+    the parent's count preserves parent behaviour, and that is precisely its defect: it re-admits
+    arbitrary config the orchestrator happens to carry into every proof, which is the inheritance
+    W1-T499 closed. A fix that restores the divergence its parent removed is not a fix.
+
+    (iii) WHAT BREAKS IF THE FORWARDED PAIR WAS LOAD-BEARING — NOTHING THAT IS NOT ALREADY BROKEN.
+    At a parent count of two or more, every pair above index 0 is ALREADY dropped today, so the
+    config is already lost; the only change is that git stops hard-failing on top of losing it. At a
+    parent count of exactly one the pair is preserved unchanged. So the proposed shape is never
+    worse than the status quo and is strictly better whenever the count is not one.
+
+    (iv) HONOUR W1-T499's STANDING WARNING. `src/lib/review.ts` is the reviewer: a wrong allowlist
+    breaks every proof on every PR at once. This task does NOT strip `process.env` wholesale, does
+    not remove `PATH`, `HOME`, `GIT_CONFIG_NOSYSTEM` or `GIT_TERMINAL_PROMPT`, and does not change
+    what a proof may see beyond making the git-config triple internally consistent. The falsifier
+    must include an env carrying a consistent single pair, to prove the narrow case still passes
+    through.
+
+    (v) THE FIXTURE WORKAROUND IN `test/review.test.ts` IS NOT REMOVED BY THIS TASK. It is correct
+    defensively and removing it would couple this change to an unrelated test's stability. What
+    SHOULD change is its comment's attribution, and that is a note for whoever next touches the
+    file rather than scope here — rationale (4) records the correction so it is not lost.
+
+    (vi) NOT IN SCOPE: the discarded stderr in `defaultProofSpawner`'s `stdio`, which is why this
+    was undiagnosable and is a real second finding — it belongs with the proof-diagnostics question
+    W1-T1077 already owns, not folded in here; `test/entrypoint-boot.test.ts`'s eight
+    `...process.env` spreads, which amplify but do not cause; and any change to what the ledger
+    records about a failed proof.
+  acceptance:
+    - claim: "a parent count larger than the pairs actually forwarded yields a child env carrying none of the three git-config variables"
+      proof: "unit test: test/proof-env-git-config-triple.test.ts"
+    - claim: "a parent carrying exactly one consistent pair still forwards that pair and its count unchanged"
+      proof: "unit test: test/proof-env-git-config-triple.test.ts"
+    - claim: "a parent with a count but no index-zero pair forwards no count rather than an unsatisfiable one"
+      proof: "unit test: test/proof-env-git-config-triple.test.ts"
+    - claim: "the other allowlisted variables cross unchanged in every one of those cases"
+      proof: "unit test: test/proof-env-git-config-triple.test.ts"
+  files: [src/lib/review.ts, test/proof-env-git-config-triple.test.ts]
+  status: queued
+  attempts: 0
+  origin: recon#proof-env-git-config-count-2026-08-21
+  plan_refs: ['W1-T499', 'W1-T1077', 'W1-T387']
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NO PROOF SHELLS GIT. Every criterion uses the
+    pure-path `unit test:` form naming `test/proof-env-git-config-triple.test.ts`, declared in
+    `files:`, so on the filing PR it resolves through W1-T456's `forwardReferenceFiles` carve-out to
+    `not_yet_built`. `buildProofEnv` is a pure function over an env object, so its falsifier needs
+    no git subprocess — which matters here more than usual: a proof that shelled git to prove a
+    git-config defect would be testing the very thing that is broken.
+
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` crosses a
+    `src/` module and `test/`, and the acceptance wording names the proof-execution and environment
+    surfaces, so `subsystemsOf` (`src/lib/task-linter.ts`) derives more than one tag. The diff
+    itself is one consistency check inside `buildProofEnv` and its falsifier.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT. `PROOF_ENV_ALLOWLIST`, `buildProofEnv` and
+    `defaultProofSpawner` all live in `src/lib/review.ts`. `test/review.test.ts` is deliberately NOT
+    declared — design (v) leaves its fixture untouched, and declaring a file the diff will not touch
+    would trip `inverseScopeUntouchedFiles`.
+
+    SWEPT BY SUBJECT AS WELL AS BY ID, AND THE SUBJECT SWEEP IS WHAT FOUND THE PARENT.
+    `W1-T499-proof-harness-inherits-the-daemon-environment.yaml` is on main and is cited as parent;
+    `W1-T1036` matched the same slug grep but is about a stale `index.lock` and is a different
+    subject. No open PR touches the allowlist.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1096` resolves to 0378e12aacb84f614978b4ae4176edd524ca36e2,
+    read back before filing; live control, `refs/rmd-id/W1-T999999` exits 2, so a resolve is
+    meaningful. THE ANCHOR MESSAGE WAS NOT JUDGED — `rmd next-task-id --reserve` and the fleet share
+    `reserveTaskIdRemote` and write the same form, so shape cannot identify a holder.

@@ -156,16 +156,46 @@ test("daemonBoot: BOTH factors (config intent allowApiKey=true + the key) log en
   assert.equal(lines[0].extra.billing_mode, "api", "the daemon deliberately drains on API credits");
 });
 
-test("daemonBoot: defaults to checking process.env when no env is injected", () => {
-  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const prior = process.env.ANTHROPIC_API_KEY;
-  delete process.env.ANTHROPIC_API_KEY;
-  try {
-    const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }));
-    assert.equal(result.env_clean, true);
-  } finally {
-    if (prior !== undefined) process.env.ANTHROPIC_API_KEY = prior;
+/**
+ * Save and remove every process.env key matching /^ANTHROPIC_/i for the duration of `fn`,
+ * then restore exactly what was removed (including keys whose value was ""; keys that were
+ * absent stay absent). This makes `env_clean` assertions over the REAL process.env
+ * deterministic regardless of what the host shell happens to export (W1-T1087) — a single
+ * hard-coded `delete process.env.ANTHROPIC_API_KEY` only scrubs one name, but `env_clean`
+ * (via `isBillingClean` in src/lib/env.ts) is false for ANY ANTHROPIC_* name, so a host
+ * exporting e.g. ANTHROPIC_BASE_URL failed this test identically on every branch.
+ */
+function withScrubbedAnthropicEnv<T>(fn: () => T): T {
+  const ANTHROPIC_KEY = /^ANTHROPIC_/i;
+  const saved: Record<string, string> = {};
+  for (const key of Object.keys(process.env)) {
+    if (ANTHROPIC_KEY.test(key)) {
+      saved[key] = process.env[key] as string;
+      delete process.env[key];
+    }
   }
+  try {
+    return fn();
+  } finally {
+    for (const key of Object.keys(saved)) {
+      process.env[key] = saved[key];
+    }
+  }
+}
+
+test("daemonBoot: defaults to checking process.env when no env is injected", () => {
+  withScrubbedAnthropicEnv(() => {
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }));
+    const surviving = Object.keys(process.env).filter((k) => /^ANTHROPIC_/i.test(k));
+    assert.equal(
+      result.env_clean,
+      true,
+      surviving.length > 0
+        ? `expected a clean env but found surviving ANTHROPIC_* keys: ${surviving.join(", ")}`
+        : "expected a clean env",
+    );
+  });
 });
 
 // ── daemonBoot: the injected temp-dir sweep (W1-T115, the 26,711-dir ENOSPC
@@ -2906,9 +2936,12 @@ test("W1-T513: a third startInFlightTicker call site now exists (retro, dispatch
   // calls) and forbade a third — see the design note this task's shard carries for why that
   // was safe advice only until the per-PR mutex below stopped being per-call.
   assert.equal(calls.length, 4, `expected 1 declaration + 3 call sites (retro, dispatch, sweep), found ${calls.length} occurrence(s) of startInFlightTicker(`);
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "retro"\)/, "the retro call site is unchanged");
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch"\)\.stop/, "the dispatch call site is unchanged");
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "sweep"\)\.stop/, "W1-T513's new sweep call site exists");
+  // W1-T1082: every call site now threads the SAME shared `diskHeadroomLatch` reference (never
+  // a fresh latch per call — see that variable's own doc in daemon.ts) as a trailing 5th
+  // argument, alongside the pre-existing 4 positional args these regexes already pinned.
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "retro", diskHeadroomLatch\)/, "the retro call site is unchanged");
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch\)\.stop/, "the dispatch call site is unchanged");
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch\)\.stop/, "W1-T513's new sweep call site exists");
 });
 
 test("W1-T463: DaemonOpts still carries exactly ONE lane-sizing knob (laneCount, dispatch-only) — no second, per-kind budget was introduced", () => {

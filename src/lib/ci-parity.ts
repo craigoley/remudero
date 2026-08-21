@@ -372,6 +372,54 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
   return path;
 }
 
+/**
+ * The full-suite-with-coverage leaf — ONE `node --test` run, instrumented, source-mapped,
+ * `test/**` excluded from the ratio, lcov written to `lcovPath` — shared by BOTH callers that
+ * need it: `--ci-parity`'s `coverage-ratchet` job entry above, and `--coverage`'s
+ * {@link runPreflightCoverage} below (W1-T1074). Factored out so the ONE expensive invocation
+ * both modes shell cannot drift between them the way a second hand-copied argv always does.
+ *
+ * Routed through scripts/test-with-retry.mjs, exactly as ci.yml's own coverage-ratchet job is
+ * (W1-T255) — a flaky test gets the SAME one-shot retry locally that CI gives it, instead of
+ * failing a local run on a flake CI itself would have gone green on.
+ */
+function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
+  try {
+    mkdirSync(join(repoRoot, "coverage"), { recursive: true });
+  } catch {
+    // best-effort — a spawn injected by a test may point repoRoot at a fixture that
+    // doesn't need a real coverage/ directory at all.
+  }
+  return shellOut(
+    spawn,
+    "node scripts/test-with-retry.mjs node --enable-source-maps --experimental-test-coverage --test-coverage-exclude=test/** --test --import tsx --import ./test/setup/tmp-hygiene.ts test/**/*.test.ts",
+    process.execPath,
+    [
+      join(repoRoot, "scripts", "test-with-retry.mjs"),
+      process.execPath,
+      "--enable-source-maps",
+      "--experimental-test-coverage",
+      "--test-coverage-exclude=test/**",
+      "--test-reporter=spec",
+      "--test-reporter-destination=stdout",
+      "--test-reporter=lcov",
+      `--test-reporter-destination=${lcovPath}`,
+      "--test",
+      "--import",
+      "tsx",
+      "--import",
+      TMP_HYGIENE_IMPORT,
+      "test/**/*.test.ts",
+    ],
+    // `stream: true` — the multi-minute step. This one already asks for
+    // `--test-reporter=spec --test-reporter-destination=stdout` EXPLICITLY, so it has been
+    // writing per-file progress lines the whole time and a non-streamed call would buffer every
+    // one of them. Nothing reads this step's stdout as data: the lcov it produces goes to
+    // `lcovPath` on disk, which every caller's later steps read from there.
+    { cwd: repoRoot, stream: true },
+  );
+}
+
 /** `npm run --silent <script>` — the shared shape for every job whose CI step is exactly an
  *  npm script, byte-identical to what ci.yml itself invokes (no re-derived argv to drift). */
 function npmScriptEntry(job: string, script: string): CiParityEntry {
@@ -433,45 +481,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
     run: (repoRoot, spawn) => {
       const lcovPath = join(repoRoot, "coverage", "lcov.info");
       const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => {
-        try {
-          mkdirSync(join(repoRoot, "coverage"), { recursive: true });
-        } catch {
-          // best-effort — a spawn injected by a test may point repoRoot at a fixture that
-          // doesn't need a real coverage/ directory at all.
-        }
-        // Routed through scripts/test-with-retry.mjs, exactly as ci.yml's own coverage-ratchet
-        // job is (W1-T255) — a flaky test gets the SAME one-shot retry locally that CI gives it,
-        // instead of failing --ci-parity on a flake CI itself would have gone green on.
-        return shellOut(
-          spawn,
-          "node scripts/test-with-retry.mjs node --enable-source-maps --experimental-test-coverage --test-coverage-exclude=test/** --test --import tsx --import ./test/setup/tmp-hygiene.ts test/**/*.test.ts",
-          process.execPath,
-          [
-            join(repoRoot, "scripts", "test-with-retry.mjs"),
-            process.execPath,
-            "--enable-source-maps",
-            "--experimental-test-coverage",
-            "--test-coverage-exclude=test/**",
-            "--test-reporter=spec",
-            "--test-reporter-destination=stdout",
-            "--test-reporter=lcov",
-            `--test-reporter-destination=${lcovPath}`,
-            "--test",
-            "--import",
-            "tsx",
-            "--import",
-            TMP_HYGIENE_IMPORT,
-            "test/**/*.test.ts",
-          ],
-          // `stream: true` — the second multi-minute step. This one already asks for
-          // `--test-reporter=spec --test-reporter-destination=stdout` EXPLICITLY, so it has been
-          // writing per-file progress lines the whole time and this process was buffering every
-          // one of them. Nothing reads this step's stdout as data: the lcov it produces goes to
-          // `lcovPath` on disk, which the ratchet and diff-coverage steps below read from there.
-          { cwd: repoRoot, stream: true },
-        );
-      });
+      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath));
       const ratchet = runStep("coverage-ratchet:ratchet", () =>
         shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
           cwd: repoRoot,
@@ -713,5 +723,214 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       return shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot });
     }),
   );
+  return { steps, ok: steps.every((s) => s.ok) };
+}
+
+// ── `rmd preflight --coverage` (W1-T1074) — diff-coverage, at author-time, on its OWN base ────
+//
+// THE GAP THIS CLOSES. `scripts/diff-coverage.mjs` is a correct gate that today runs ONLY in
+// CI's `coverage-ratchet` job — invisible to the author writing the code until a push, a CI
+// cycle and (on a reviewed PR) a spent review orphan have already gone by. `--ci-parity`'s own
+// `coverage-ratchet` entry mirrors it locally already, but only as one of fourteen jobs behind a
+// flag that is not habitual to run (rationale (6)); `--fast` cannot carry it at all, by design,
+// because a coverage lcov needs the full suite (design vi: `--fast` NEVER shells `npm test`).
+// This is therefore a FOURTH, ADDITIVE mode on the SAME `preflight` verb — never a new verb,
+// never a change to the default, `--ci-parity`, or `--fast` behaviour — dedicated to exactly
+// this one gate.
+//
+// THE HONEST COST. Opt-in and slow BY CONSTRUCTION: it shells the full `test/**/*.test.ts` glob
+// with `--experimental-test-coverage`, the same multi-minute run `--ci-parity`'s coverage-ratchet
+// job pays (shared via {@link testWithCoverageLeaf} above so the one expensive invocation cannot
+// drift between the two callers). A mode whose cost surprises the caller is one they stop
+// running, so `preflightCommand`'s own doc states it in minutes-not-seconds terms.
+//
+// THE RUNNER OWNS THE BASE (design ii), not the caller. `scripts/diff-coverage.mjs` itself takes
+// a `--diff` file/stdin and derives no base at all — CI supplies its own correctly, but a local
+// caller building that diff by hand can get it wrong in exactly the two ways rationale (9)
+// measured: a two-dot `--cached origin/main` diff that reads main's own commits as the caller's,
+// or a check run before committing that passes over an empty diff. `runPreflightCoverage` below
+// computes the SAME `origin/main...HEAD` three-dot range `--ci-parity` already uses
+// ({@link refreshOriginMain}, {@link mergeBaseDiffText}) and REFUSES rather than reports when the
+// inputs cannot support a verdict:
+//   - an EMPTY diff (`origin/main...HEAD` touches nothing) — there is no "coverage of this diff"
+//     to assert at all;
+//   - a DIRTY tree in a diffed file — the lcov this run is about to produce and the diff it
+//     compares against must come from the SAME tree, and an uncommitted edit to a diffed file
+//     means they would not.
+// Both refusals are named steps of their own (`coverage-mode:diff-scope`,
+// `coverage-mode:tree-clean`) and SHORT-CIRCUIT the run — unlike `--ci-parity`'s many independent
+// per-job steps, this mode is one linear pipeline (refuse → run the suite → assert instrumentation
+// → compare) where every later step's input depends on the one before it actually having produced
+// something trustworthy, so there is nothing honest left to report once an earlier stage refused.
+//
+// INSTRUMENTATION MUST BE ASSERTED BEFORE A PASS (design iii). `diff-coverage.mjs` reports
+// `OK` the instant no ADDED line it INSTRUMENTED reads as uncovered — and that quantifier ranges
+// only over what the run's lcov actually saw (rationale (7)/(8)): a changed source file lcov
+// never instrumented at all (no `SF:` record for it — no test loaded it) makes the OK verdict
+// trivially, vacuously true over an empty set. `coverage-mode:instrumentation` below closes that
+// LOCALLY, without touching `scripts/diff-coverage.mjs` itself (design iv: that script is a pure
+// lcov-times-diff comparator and CI feeds it correctly; whether it should ALSO refuse this is a
+// separate, unscoped question) — for every changed file under `src/` that is not itself a test,
+// it requires an `SF:` record in this run's own lcov, and reports `UNPROVEN`, NAMING the files,
+// rather than letting the run fall through to `diff-coverage.mjs`'s own vacuous `OK`.
+//
+// NO WEAKENING (design vi/vii): nothing here exempts an arm, lowers a threshold, or narrows what
+// `diff-coverage.mjs`/`coverage-ratchet` refuse — this mode's own `coverage-mode:diff-coverage`
+// step shells the REAL, unmodified script, over the SAME refreshed three-dot diff, and only ever
+// gets there once every earlier stage has already proven the inputs are trustworthy.
+
+/** Every path `origin/main...HEAD` touches, trimmed and non-empty — the CALLER never supplies
+ *  this (design ii): it is always the runner's OWN, freshly refreshed three-dot diff. */
+function computeChangedFiles(repoRoot: string, spawn: PreflightSpawn): string[] {
+  const res = spawn("git", ["diff", "--name-only", "origin/main...HEAD"], { cwd: repoRoot });
+  return res.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+/** Of `files`, the ones `git status --porcelain` reports dirty — an uncommitted change to a
+ *  diffed file, staged or not. NEVER `.trim()` the raw porcelain STRING before slicing: the
+ *  status column can legitimately start with a space (` M path`), and trimming the whole blob
+ *  first would eat that leading space off line one, shifting every `slice(3)` by one character
+ *  (same trap `lib/operator-sync.ts`'s `parsePorcelain` documents; duplicated locally per this
+ *  file's own test-seam convention rather than exported from a module this task does not
+ *  declare). Trimming is safe, and done, only PER LINE, after the fixed 3-char slice. */
+function dirtyDiffedFiles(repoRoot: string, spawn: PreflightSpawn, files: readonly string[]): string[] {
+  if (files.length === 0) return [];
+  const res = spawn("git", ["status", "--porcelain", "--", ...files], { cwd: repoRoot });
+  return res.stdout
+    .split("\n")
+    .map((l) => l.slice(3).trim())
+    .filter(Boolean);
+}
+
+/** The `SF:` paths an lcov report instruments — same one-line-per-record shape
+ *  `scripts/diff-coverage.mjs`'s own `parseLcovHitsByFile` reads, but this only needs the file
+ *  SET (not per-line hit data), so it stays a five-line parser rather than importing that
+ *  script's internals (design iv: that script is not touched, and not depended on, by this). */
+function lcovInstrumentedFiles(lcovText: string): Set<string> {
+  const files = new Set<string>();
+  for (const line of lcovText.split("\n")) {
+    if (line.startsWith("SF:")) files.add(line.slice(3).trim());
+  }
+  return files;
+}
+
+/** A "source file" for the instrumentation assertion (design iii): under `src/`, and not itself
+ *  a test — the same `src/` + not-a-test shape `src/lib/review.ts`'s own diff-scoped checks use
+ *  for "a change that should carry its own coverage", duplicated locally (that predicate is not
+ *  exported, and this task does not declare `src/lib/review.ts`). A file the diff only touches
+ *  under `test/`, `scripts/`, `docs/`, etc. makes no coverage claim either way. */
+function isChangedSourceFile(path: string): boolean {
+  if (!path.startsWith("src/")) return false;
+  if (/(^|\/)test(s)?\//.test(path)) return false;
+  if (/\.test\.[cm]?[jt]sx?$/.test(path)) return false;
+  if (/\.spec\./.test(path)) return false;
+  return true;
+}
+
+export interface PreflightCoverageDeps {
+  spawn?: PreflightSpawn;
+  /** Test seam — production reads the lcov this mode's OWN `coverage-mode:test-with-coverage`
+   *  step just wrote to disk; a falsifier hands a synthetic lcov instead of actually running the
+   *  full suite. */
+  lcovText?: string;
+}
+
+export interface PreflightCoverageResult {
+  steps: CiParityStepResult[];
+  ok: boolean;
+}
+
+/**
+ * `rmd preflight --coverage`'s engine (W1-T1074) — see the file-level comment above for the
+ * full design. Unlike {@link runCiParity}/{@link runPreflightFast}'s many-independent-jobs
+ * discipline, this is ONE linear pipeline that REFUSES (design ii) rather than reports once an
+ * earlier stage cannot support a trustworthy verdict, and only reports a real `OK`/`FAIL` once
+ * every earlier stage — base refresh, diff non-empty, tree clean, the full suite, instrumentation
+ * — has already succeeded (design iii).
+ */
+export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDeps = {}): PreflightCoverageResult {
+  const spawn = deps.spawn ?? defaultPreflightSpawn;
+  const steps: CiParityStepResult[] = [];
+
+  const refresh = runStep("coverage-mode:base-refresh", () => refreshOriginMain(repoRoot, spawn));
+  steps.push(refresh);
+  if (!refresh.ok) return { steps, ok: false };
+
+  const changedFiles = computeChangedFiles(repoRoot, spawn);
+  if (changedFiles.length === 0) {
+    steps.push({
+      name: "coverage-mode:diff-scope",
+      ok: false,
+      detail:
+        "coverage-mode:diff-scope: REFUSED — origin/main...HEAD (freshly refreshed) is an empty diff; there is no diff to assert coverage over",
+    });
+    return { steps, ok: false };
+  }
+  steps.push({
+    name: "coverage-mode:diff-scope",
+    ok: true,
+    detail: `coverage-mode:diff-scope: PASS — ${changedFiles.length} file(s) changed against a freshly refreshed origin/main...HEAD`,
+  });
+
+  const dirty = dirtyDiffedFiles(repoRoot, spawn, changedFiles);
+  if (dirty.length > 0) {
+    steps.push({
+      name: "coverage-mode:tree-clean",
+      ok: false,
+      detail:
+        `coverage-mode:tree-clean: REFUSED — uncommitted change(s) to diffed file(s), so the lcov this run would produce and the diff it compares against would not come from the same tree: ${dirty.join(", ")}`,
+    });
+    return { steps, ok: false };
+  }
+  steps.push({
+    name: "coverage-mode:tree-clean",
+    ok: true,
+    detail: "coverage-mode:tree-clean: PASS — the working tree is clean in every diffed file",
+  });
+
+  const lcovPath = join(repoRoot, "coverage", "lcov.info");
+  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath));
+  steps.push(test);
+  if (!test.ok) return { steps, ok: false };
+
+  let lcovText: string;
+  try {
+    lcovText = deps.lcovText ?? readFileSync(lcovPath, "utf8");
+  } catch (e) {
+    steps.push(toolchainFailure("coverage-mode:instrumentation", e));
+    return { steps, ok: false };
+  }
+
+  const instrumented = lcovInstrumentedFiles(lcovText);
+  const sourceFiles = changedFiles.filter(isChangedSourceFile);
+  const uninstrumented = sourceFiles.filter((f) => !instrumented.has(f));
+  if (uninstrumented.length > 0) {
+    steps.push({
+      name: "coverage-mode:instrumentation",
+      ok: false,
+      detail:
+        `coverage-mode:instrumentation: UNPROVEN — this run's lcov carries no SF: record for: ${uninstrumented.join(", ")} — ` +
+        "no test loaded them, so this run cannot trust ANY coverage verdict about them, positive or negative",
+    });
+    return { steps, ok: false };
+  }
+  steps.push({
+    name: "coverage-mode:instrumentation",
+    ok: true,
+    detail: `coverage-mode:instrumentation: PASS — this run's lcov carries an SF: record for every one of the ${sourceFiles.length} changed source file(s)`,
+  });
+
+  const diffText = mergeBaseDiffText(repoRoot, spawn);
+  const diffCoverage = runStep("coverage-mode:diff-coverage", () =>
+    shellOut(spawn, "diff-coverage.mjs (origin/main...HEAD, refreshed base)", process.execPath, [join(repoRoot, "scripts", "diff-coverage.mjs"), "--lcov", lcovPath], {
+      cwd: repoRoot,
+      input: diffText,
+    }),
+  );
+  steps.push(diffCoverage);
+
   return { steps, ok: steps.every((s) => s.ok) };
 }

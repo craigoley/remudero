@@ -1,0 +1,113 @@
+- id: W1-T1088
+  title: "the proof dialect has NO form for an ABSENCE and no author-facing surface says so — a criterion like `MASTER-PLAN no longer claims two lanes` can only be written as a grep that must MISS after the change, which is executed_fail and would fail the very PR that satisfied it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    VERIFIED AT HEAD BY READING THE THREE SURFACES, not from memory.
+    (1) THE DIALECT HAS EXACTLY THREE FORMS AND NONE IS NEGATABLE. src/lib/review.ts declares
+    DIALECT_GREP_RE, DIALECT_TEST_RE and DIALECT_DEMO_RE (W1-T277) and nothing else. A `grep:` proof
+    is judged on whether the pattern MATCHES; `executed_fail` OVERRIDES keyword coverage and FAILS the
+    PR, and a pattern matching both head and base is downgraded to `executed_stale` (W1-T273/W1-T362).
+    So a criterion whose deliverable is that some text is GONE has no expressible proof: the honest
+    pattern must miss after the work, and a miss is a failure. `demonstration:` is the only escape and
+    it is legal ONLY on `verify: human` (W1-T277), so it is not available to the lane that files most
+    tasks.
+    (2) THE AUTHOR-FACING SURFACE IS SILENT. src/lib/proof-grammar.ts (ACCEPTANCE_PROOF_GRAMMAR) is the
+    ONE copy of the grammar both filing lanes read on every fire — 43 lines at head. The strings
+    `absence`, `negative`, `MISS` and `positive` appear in it ZERO times. It states the two forms, the
+    required ` in <path>` clause, and the refused basic-regex metacharacters, and stops there. An
+    author reading it has no way to learn that one whole class of criterion cannot be written.
+    (3) THE COST IS ALREADY PAID, TWICE, IN THE SAME SHAPE. W1-T326's own note records an earlier draft
+    of that task carrying a third criterion proving `MASTER-PLAN no longer claims the daemon runs two
+    lanes`, caught before shipping and rewritten as two positives. feedback#fb-1785853266240-841899
+    records the SAME rediscovery on a later filing, whose author also had to rewrite both proofs, and
+    whose attempt additionally produced a pattern containing the words ` in `, which the path splitter
+    consumes. W1-T950's note records a third variant of the same wall from the other side (`the dialect
+    can express this string is present in this file; it cannot express re-run the generator then scan`).
+    Three filings, three private rediscoveries, nothing written down where the next filer reads.
+    (4) THE LINT ROUTE WAS ALREADY TRIED AND REFUSED. feedback#fb-1784808265903-d381f8 proposed blocking
+    `grep:` bodies that START with no/not/zero/never; it is `status: rejected`. This task therefore does
+    NOT propose a heuristic over negation words — it states the rule where the author is already
+    reading, which is the same remedy W1-T488 chose for the sibling literal-vs-regex asymmetry.
+  design: |
+    THE HOME IS THE SHARED FILING GRAMMAR, AND THAT CHOICE IS ARGUED, NOT ASSUMED.
+    `ACCEPTANCE_PROOF_GRAMMAR` (src/lib/proof-grammar.ts) is injected verbatim into BOTH task-filing
+    lanes (`rmd triage`, `rmd plan`) — exactly the population that hits this wall, and exactly the
+    prompt that produced the two recorded incidents. Its own header rations itself to BLOCKING rules on
+    the grounds that a warn cannot stall a filing; an absence proof clears that bar and then some,
+    because it does not merely warn, it FAILS the finished PR at review time. Say so in the PR body.
+
+    (i) THE ABSENCE LINE. Add to the grammar, in its existing terse register, that this dialect cannot
+    prove an absence: a `grep:` that must MISS after the change is `executed_fail`, so a criterion of
+    the form `X no longer says Y` must be RESTATED as what the text says INSTEAD — grep the replacement
+    string, never the removed one. LOAD-BEARING TEXT: the line must contain the literal lowercase
+    phrase `restate it positively`, because the first acceptance proof greps for it. Write the line to
+    read naturally with that phrase, never bolt it on.
+
+    (ii) THE ` in ` LINE. The same grammar already demands a ` in <path>` clause but never warns that
+    the PATTERN may not contain those same words: the parser splits on the LAST ` in ` before a
+    path-like token, so a pattern carrying them is silently re-cut into a different pattern and a
+    different path. CLAUDE.md carries this warning today; the filing prompt does not, and the filing
+    prompt is where the proof is written. LOAD-BEARING TEXT: the literal `mis-splits`, which the second
+    acceptance proof greps for.
+
+    (iii) KEEP IT SHORT — TWO LINES, NOT A SECTION. Every line is re-read on every fire. If a draft
+    runs longer than two lines, cut it rather than shipping prompt weight.
+
+    (iv) THE EXAMPLES MUST SURVIVE THE HARNESS. test/proof-grammar.test.ts extracts EVERY example proof
+    from this text and runs it through the real parser and the real metacharacter linter, so any
+    example added must parse — and an example of the REWRITE (the positive replacement-string form) is
+    worth more than a prohibition on its own. An example of the FORBIDDEN form must NOT be written in a
+    shape the extractor will try to run; if that cannot be done cleanly, describe it in words instead.
+
+    (v) CLAUDE.md IS A JUDGEMENT WITH A PRICE TAG, NOT A GIVEN. scripts/claude-md-budget-ratchet.mjs is
+    a byte CEILING WITH ZERO HEADROOM, so any bullet added there must be paid for by a fold in the same
+    PR. CLAUDE.md's existing proof bullets already carry the `executed_fail` override and the ` in `
+    trap, so the marginal value there is lower than in the grammar const. Decide it in the PR body with
+    a reason either way; `files:` declares CLAUDE.md so the option is open, and touching it is never
+    required by any criterion here.
+
+    EXPLICITLY NOT IN SCOPE: a new dialect or a negation operator (that is a review-executor change and
+    a new way to satisfy a gate — W1-T277's demonstration form is the precedent for how carefully that
+    must be gated); a linter heuristic over negation words (already refused, see rationale (4));
+    rewriting any existing task's proofs (standing rule 15, its own PR).
+  acceptance:
+    - claim: "the shared filing grammar states that an absence has no executable proof and names the positive rewrite"
+      proof: "grep: restate it positively in src/lib/proof-grammar.ts"
+    - claim: "the grammar warns that a grep pattern carrying the path-clause words is re-cut by the parser"
+      proof: "grep: mis-splits in src/lib/proof-grammar.ts"
+    - claim: "every example in the grammar still parses and executes through the real parser and metachar linter"
+      proof: "unit test: test/proof-grammar.test.ts"
+  risk: high
+  origin: feedback#fb-1785853266240-841899
+  plan_refs: ["§5C", "W1-T277", "W1-T326", "W1-T488"]
+  files: [src/lib/proof-grammar.ts, test/proof-grammar.test.ts, CLAUDE.md]
+  status: queued
+  attempts: 0
+  note: |
+    FILED FROM feedback#fb-1785853266240-841899 (part 1 of 2; part 2 is W1-T1089, a different
+    mechanism in different files — they are deliberately not bundled).
+    verify:auto — the deliverable is text at a known path plus an existing test that executes it; no
+    operator observation is required at any step.
+    risk:high IS RULE 19 SPAN, NOT BLAST RADIUS. `files:` names the prompt const, its test and
+    CLAUDE.md, which is >=2 concerns by `subsystemsOf` and would fail `sizingViolation` at medium (the
+    same call W1-T488 made over the same surfaces). The runtime blast radius is two lines of prompt
+    text; no gate, policy value or executor behaviour moves.
+    budget_usd 45 — below W1-T488's 55 because there is no linter half here: two lines, one judgement
+    about CLAUDE.md, and one existing test that must stay green.
+    ON THE PROOFS. Both greps name literals this task's own design (i)/(ii) makes load-bearing, the
+    W1-T326 construction; both read ZERO in src/lib/proof-grammar.ts at head (the file is 43 lines and
+    was read end to end), so each DISCRIMINATES against the merge base rather than landing
+    executed_stale. Neither pattern contains ` in `, a bracket, a star, a caret or a dollar, so
+    `parseDialectGrep` splits each at the single ` in ` that precedes its path. test/proof-grammar.test.ts
+    EXISTS today, so at least one proof executes for real. Every proof path is declared in `files:`
+    (W1-T310).
+    WHAT THIS DOES NOT CLAIM: it does not claim the dialect SHOULD gain an absence form. The recon
+    answer is that it has none, that the sanctioned workaround is to assert the replacement text, and
+    that the place to say so is the grammar both filing lanes read.
+    NO depends_on: W1-T488 touches three of the same paths but neither needs the other — file-overlap
+    serialisation at dispatch is the correct and sufficient interlock.

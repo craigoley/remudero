@@ -24,6 +24,6 @@ raw: "ESCALATION DEDUP HAS NO COVERAGE FOR A PR-LESS ESCALATION — escalate() i
   that rung's cadence rather than in the dedup key."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null

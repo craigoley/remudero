@@ -454,6 +454,17 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // above. A rotation dropping it re-opens one duplicate quota-exhaustion notice per tick for
   // as long as the bucket stays exhausted.
   "daemon.quota_exhausted.escalated",
+  // W1-T1082: `escalateDiskHeadroomBreach`'s (run-task.ts) own dedup marker — the SAME
+  // "compare THIS marker's own `ts` against an episode window" shape `escalatePostReviewStall`
+  // applies just below for a condition with no natural reset boundary (unlike
+  // `daemon.headroom_reserve.escalated`'s `resets_at`). The in-process latch in `runDaemon`
+  // (`daemon.ts`) already bounds one escalation per CONTINUOUS breach within a single process —
+  // this marker is what stops a daemon RESTART mid-episode (disk pressure can itself crash-loop
+  // the daemon) from re-opening a duplicate issue on the very next tick. A rotation dropping it
+  // re-opens one duplicate needs-human issue on every tick this condition persists, once the
+  // marker falls out of the retained view — the #977 class again, on the one alarm this task
+  // exists to make reachable before the disk that would otherwise swallow it fills up.
+  "daemon.disk_headroom.escalated",
   "dispatch.starvation.escalated",
   "verdict",
   "verdict.merged",

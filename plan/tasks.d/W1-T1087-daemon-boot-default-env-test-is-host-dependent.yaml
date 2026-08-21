@@ -1,0 +1,99 @@
+- id: W1-T1087
+  title: "the daemonBoot default-env test scrubs ANTHROPIC_API_KEY and nothing else, so any host that exports ANTHROPIC_BASE_URL fails test/daemon.test.ts identically on every branch AND on pristine origin/main — a red suite that costs each session a re-derivation before it can trust its own run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  rationale: "RECON RUN AT TRIAGE TIME OVER THE TREE, and the omission is an OVERSIGHT, not a
+    deliberate credential-only scope — the falsifying check in the feedback FAILS in both halves.
+    (1) THE EXACT SITE, ONE TEST. `test/daemon.test.ts` line 159, 'daemonBoot: defaults to checking
+    process.env when no env is injected': it saves and `delete`s `process.env.ANTHROPIC_API_KEY`,
+    calls `daemonBoot(log)` with NO env argument, asserts `result.env_clean === true`, and restores
+    the key in a `finally`. That one-key delete IS the whole 'scrub list' — there is no list, no
+    named set, and no comment explaining a chosen subset.
+    (2) THE PREDICATE IT ASSERTS AGAINST IS ALL-ANTHROPIC, NOT CREDENTIALS. `env_clean` comes from
+    `isBillingClean` (`src/lib/env.ts`): `!Object.keys(env).some((k) => ANTHROPIC_KEY.test(k))` with
+    `ANTHROPIC_KEY = /^ANTHROPIC_/i`. So `env_clean` is false for ANY `ANTHROPIC_*` name. A scrub of
+    one name cannot make that assertion hermetic; on a host exporting `ANTHROPIC_BASE_URL` the
+    assertion reads the host, not the code.
+    (3) THE SAME FILE ALREADY SAYS BASE_URL IS DIRTY — which settles 'deliberate' against itself.
+    Twenty-five lines earlier, line 122: 'daemonBoot: a NON-valve ANTHROPIC_* (e.g. BASE_URL) still
+    logs env_clean=false…' injects `ANTHROPIC_BASE_URL` precisely to prove `env_clean === false`. The
+    suite cannot simultaneously hold that BASE_URL dirties the env and that a scrub omitting it
+    leaves the env clean. The env.ts header is explicit too: 'Every OTHER ANTHROPIC_* key
+    (BASE_URL/MODEL/AUTH_TOKEN/…) still fails loud' — the boundary is deliberately NOT
+    credential-only.
+    (4) THE FALSIFIER, BOTH CLAUSES. The feedback said this is documentation-not-defect iff the suite
+    passes on a host without the variable AND the test's own doc names the omission. The first clause
+    holds (that is exactly why it is green in CI and red here — same sha, two environments). The
+    SECOND FAILS: the test carries no doc naming an omission, and the only doc that speaks to the set
+    (`assertCleanBoot`'s and env.ts's headers) says the opposite. So: defect in the test's
+    hermeticity, and the fix is the SCRUB, with the message as a secondary hardening.
+    (5) POPULATION IS ONE. Every other `daemonBoot(`/`assertCleanBoot(` call under `test/` injects an
+    explicit env object (`test/daemon.test.ts` ×13 others, `test/node-runtime-provenance.test.ts`,
+    `test/env.test.ts`, `test/worker-keychain.test.ts`, `test/feedback-landing-sweep.test.ts`). This
+    is the ONLY site that reads the real `process.env`, so this is a one-line class with one member —
+    do not open a sweep.
+    (6) WHAT IT COSTS. Reported as one suite red at 171/172 on this host, reproducing identically on
+    a branch and on pristine `origin/main`; at least one session spent its attention establishing
+    that the red was environmental before it could trust the rest of its run. Every future session on
+    a host with the variable exported pays that same toll."
+  design: |
+    (i) SCRUB THE PREDICATE'S WHOLE DOMAIN, NOT ONE NAME. In that test, save and remove EVERY key of
+    `process.env` matching `/^ANTHROPIC_/i` for the duration of the call, and restore ALL of them in
+    the `finally` (restore exactly what was saved, including keys whose value was the empty string;
+    do not resurrect keys that were absent). Matching the predicate — not enumerating BASE_URL,
+    AUTH_TOKEN, MODEL by hand — is the point: a hand-written list is the same defect one variable
+    later.
+    (ii) PUT IT IN A NAMED HELPER, because the name is what a future reader greps for and it is the
+    acceptance surface. Add a local helper in `test/daemon.test.ts` named EXACTLY
+    `withScrubbedAnthropicEnv(` that takes a callback, does the save/delete/restore around it, and is
+    used by the default-env test. The name is load-bearing: acceptance greps for it.
+    (iii) MAKE THE FAILURE SELF-EXPLAINING — the half of the feedback that survives regardless of the
+    scrub ruling. Give that assertion a message that NAMES the offending keys it actually found, so a
+    host that somehow still trips it says so instead of making the next session re-derive it, e.g. a
+    third argument to `assert.equal` built from the surviving `ANTHROPIC_*` key NAMES. NAMES ONLY —
+    never a value: `ANTHROPIC_API_KEY`'s value is a live credential and this repo's stated discipline
+    (`childEnvKeys`, `billingMode`) is that only key names are a safe proof surface. A message that
+    interpolated a value would turn a test log into a secret leak.
+    (iv) TEST-ONLY. `src/lib/env.ts` and `src/lib/daemon.ts` are CORRECT as they stand — `env_clean`
+    SHOULD read false for a daemon booted from a shell exporting `ANTHROPIC_BASE_URL`; that canary is
+    the feature. Change no production file, weaken no assertion, and do NOT make the test tolerate a
+    dirty env by asserting `env_clean` either way — it must still assert `true`, over an env it has
+    made deterministic.
+    (v) NOT IN SCOPE. The proof-harness/spawner environment leak is W1-T499 and is a different
+    mechanism (a spawned child inheriting the ORCHESTRATOR's env). This one is an in-process read of
+    the REAL host env by a test, fixed inside the test. Do not merge the two, and do not touch
+    `src/lib/review.ts`.
+  acceptance:
+    - claim: "the daemonBoot default-env test passes on a host exporting ANTHROPIC_BASE_URL (and any other non-valve ANTHROPIC_* name), and the rest of the suite is unchanged"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "the scrub covers every ANTHROPIC_* key by pattern and restores exactly what it removed, rather than deleting one hard-coded name"
+      proof: "grep: withScrubbedAnthropicEnv( in test/daemon.test.ts"
+    - claim: "if the clean-env assertion ever does fail, its message names the surviving ANTHROPIC_* keys (names only, never values) so the reader is not made to re-derive that the red is environmental"
+      proof: "unit test: test/daemon.test.ts"
+  origin: feedback#fb-1785849890442-f20963
+  plan_refs: ["W1-T499", "W1-T258", "W1-T12b"]
+  files: [test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the whole change is inside one test file and the proof is that file going
+    green; no human ruling is pending (rationale (3) settles the deliberate-vs-oversight question
+    against the suite's own adjacent test).
+    risk:low — ONE file, `test/` only, no `src/` path, no dispatch or spend path touched.
+    budget_usd 12.00 — a save/restore helper plus one assertion message.
+    `files:` IS DELIBERATELY JUST `test/daemon.test.ts`. `src/lib/daemon.ts` and `src/lib/env.ts` were
+    checked and are NOT declared: nothing here changes what `env_clean` means, and declaring them
+    would trip `inverseScopeUntouchedFiles` (a declared-but-untouched path fails review exactly as an
+    undeclared one does) while needlessly serialising this against every daemon task.
+    THE PROOF IS THE WHOLE FILE, and here that is the right form rather than a concession: the defect
+    IS 'one test in this file is red on this host', so the criterion is the file going green in an
+    environment that exports the variable. A name-filtered proof would run only the repaired test and
+    could not catch a scrub that broke a sibling by restoring the env wrongly.
+    FOR WHOEVER IMPLEMENTS: verify by EXPORTING `ANTHROPIC_BASE_URL=https://example.invalid` in the
+    shell that runs the suite and watching it go green, then unsetting it and watching it stay green.
+    A run without the variable exported proves nothing — that is the configuration in which the bug
+    was always invisible."

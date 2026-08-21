@@ -5670,9 +5670,13 @@ test("armFailureAction: GitHub's 'clean status' refusal (already-mergeable PR) r
   );
 });
 
-test("armFailureAction: any other arm failure (transient gh/network) stays ignore — the next sweep pass retries", () => {
-  assert.equal(armFailureAction("connect ETIMEDOUT api.github.com"), "ignore");
-  assert.equal(armFailureAction(""), "ignore");
+test("armFailureAction: a genuine transient gh/network signature classifies as transient — the next sweep pass retries", () => {
+  // W1-T1079: armFailureAction no longer folds every non-clean-status failure into one "ignore"
+  // bucket (that was the defect — a permanent refusal and a network blip read identically). A
+  // recognizable network signature still lands on "transient"; an unrecognized/empty one now
+  // defaults to "permanent" rather than assuming transience.
+  assert.equal(armFailureAction("connect ETIMEDOUT api.github.com"), "transient");
+  assert.equal(armFailureAction(""), "permanent");
 });
 
 test("armAutoMerge: a clean-status refusal COMPLETES as a direct merge — the gated-green state that made --auto refuse is exactly the mergeable state", () => {

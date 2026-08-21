@@ -24,6 +24,6 @@ raw: "A TASK DECLARING plan/policy.yaml MUST ALSO DECLARE src/lib/policy.ts —
   costs one line."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null

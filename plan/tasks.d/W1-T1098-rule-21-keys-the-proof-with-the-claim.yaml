@@ -1,0 +1,149 @@
+- id: W1-T1098
+  title: "STANDING RULE 21 KEYS A CRITERION ON CLAIM **AND** PROOF, so rewording a proof on a long-merged task is indistinguishable from adding a criterion — and the refusal lands ONLY where it has no authority: `lint-plan` is RED locally and GREEN in CI on the SAME BYTES (measured on #2380, not ours), because `statusResolvable` fails OPEN on the CI `which claude` trap; and because its input is a live GitHub projection the verdict MOVED from 4 failing to 1 on an unchanged tree within hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-21 against origin/main `23ce6a86`, from a scratch worktree whose HEAD was
+    proved equal to that sha before any reading. Every predicate below was DRIVEN — `criterionKey`'s
+    own normalisation, `proofDialectViolations`, `proofResolvabilityViolations`, and `rmd lint-plan
+    --base origin/main` itself — never re-implemented, and every zero carries a control.
+
+    (1) THE BRIEF'S PREMISE IS REFUTED AND THE SHARD SAYS SO FIRST. The record CAN be repaired.
+    #2380 ("clear the proof debt on four uncredited tasks") makes exactly the edit this task was
+    born from — proofs rewritten into the dialect, `files:` declared, claims untouched — and its
+    `lint-plan` check run reads **completed / success** in CI right now. Nothing here is filed on
+    the theory that the record is unrepairable, because it is not.
+
+    (2) WHAT IS TRUE IS THAT THE SAME BYTES FAIL LOCALLY. Fetched #2380's own head `c04078c6` into
+    a scratch worktree and ran the SAME command every filing brief tells a lane to run: `rmd
+    lint-plan --base origin/main` exits **1**, `4 task(s) checked — 1 failing`, and both violations
+    read `[post-merge-amendment] task W1-T54b is already MERGED, but this PR adds/changes acceptance
+    criterion …`. Same bytes, same command, opposite verdicts. THE REFUSAL LANDS ON THE AUTHOR AND
+    NOT ON THE PR.
+
+    (3) THE MECHANISM IS DOCUMENTED IN THE SOURCE, SO THIS IS NOT A GUESS. `lintPlanCommand` wraps
+    its projection read in a try/catch and its own comment names the reason: "FAIL OPEN,
+    deliberately, on ANY resolution failure (no `--base`, `loadConfig`'s CI `which claude` trap,
+    `gh` unauthenticated/unavailable): `statusResolvable` stays false and the check is skipped
+    rather than redding a plan-only PR during a GitHub outage." `postMergeAmendmentViolations`
+    returns `[]` at `!ctx.statusResolvable`. The fail-open posture is CORRECT and this task does
+    not touch it; the consequence is that rule 21 is structurally silent in the one environment
+    that decides whether a PR merges.
+
+    (4) AND ITS VERDICT IS NOT STABLE OVER TIME, WHICH NO AMOUNT OF RE-READING THE DIFF WOULD
+    EXPLAIN. `merged` comes from `proj?.merged` — a LIVE `projectPlan` read against GitHub. The
+    identical tree (`plan/tasks.yaml` sha256 `7c8f55bb5d8e`), same host, same command, reported
+    **4 failing** earlier on 2026-08-21 and **1 failing** hours later. Nothing in the tree changed
+    between the two runs. A gate whose answer moves on an unchanged input cannot be reasoned about
+    by the author it refuses.
+
+    (5) THE KEY IS THE REPAIRABLE PART. `criterionKey` (`src/lib/task-linter.ts`) is
+    `${norm(claim)}\0${norm(proof)}`, and `criteriaAdded` treats any pair absent from the base as
+    ADDED — so a reworded proof is, by set membership, a new criterion. DRIVEN over the four
+    tasks: **11 criteria read as added under the claim+proof key, and 0 under a claim-only key**,
+    with every claim byte-identical to origin/main. LIVE CONTROL on the same function: a
+    genuinely new claim is still reported as added under the claim-only key, so the change does
+    not blind the check to what it exists to catch.
+
+    (6) THE POPULATION, MEASURED, AND IT IS NOT SMALL. Over `plan/tasks.yaml` on origin/main: 269
+    monolith task records, 255 with an id at or below 500. **158 carry at least one BLOCKING
+    proof-dialect or proof-resolvability violation, 434 violations in total**; restricted to the
+    id<=500 cohort, **149 tasks and 417 violations, none of them `verify: human`**. Counting
+    `proof-dialect` alone reproduces the operator's figure to within drift: **133 tasks, 270
+    violations** today against the 275 reported. Every one of those 158 records reads an OPEN
+    `status:`; NONE reads blocked/merged/done — which is precisely why rule 21 has to ask a live
+    GitHub projection rather than the field, and why (4)'s instability is load-bearing rather than
+    incidental.
+
+    (7) HOW MANY WOULD ACTUALLY TRIP RULE 21 IS A QUERY AND NOT A NUMBER, AND (4) IS THE REASON.
+    The tripping subset is those of the 158 whose PROJECTION says merged, and that read moved by a
+    factor of four on an unchanged tree within one afternoon. Quoting a single figure here would
+    be the carried-count error this repo keeps paying for. Re-derive it by running `lint-plan
+    --base` against a tree that touches the records in question, and expect a different answer at a
+    different hour.
+
+    (8) THE ESCAPE HATCH IS REAL, NAMED, AND REFUSED. Rule 21 clears when the same PR files a
+    follow-up task carrying the added criteria (`followUpCarriesCriteria`). For these four that
+    means four newly-minted tasks carrying criteria for work merged weeks ago — filed `queued`,
+    `verify: auto`, `depends_on: []`, therefore eligible and dispatchable the moment they land:
+    roughly $20 of workers discovering the work is already done, plus four PRs to gate. That cost
+    figure is the OPERATOR'S and is recorded as reported rather than re-derived. A lint rule whose
+    only escape hatch spends money and pollutes the dispatch queue is the defect, not the remedy.
+
+    (9) ADJACENT, NEITHER SCOPED IN. #2363 (W1-T1078) widens `lint-plan`'s filing-subject regex so
+    a bare `plan:`/`docs:`/`chore:` commit stops counting as merge evidence; it is the CREDITING
+    defect and it is what moves these four into the proof-debt population in the first place. That
+    resolver is `classifyFailingMergeEvidence` — NOT the `deriveStatus`/`projectPlan` projection
+    rule 21 reads — so the two will still disagree after #2363 merges. Neither is fixed here.
+  design: |
+    (i) KEY `criteriaAdded` ON THE CLAIM, NOT ON CLAIM-PLUS-PROOF. Rule 21's own message states the
+    harm it prevents: a criterion "would orphan silently" because MERGED is terminal and nothing
+    re-queues the task. A reworded proof orphans nothing — the contract the task promised is
+    unchanged, and rationale (5) shows the claim-only key still catches a genuinely new one.
+
+    (ii) SAY WHAT THAT STOPS CATCHING, IN THE RULE'S OWN DOC, AND DO NOT PRETEND IT IS NOTHING. A
+    claim KEPT with its proof swapped for a WEAKER one becomes invisible to rule 21. That is the
+    attack that matters and it must be named rather than discovered later. Two things still see
+    part of it — `proof-dialect` and `proof-resolvability` refuse a proof that cannot execute at
+    all, and `executed_stale` (`src/lib/review.ts`) withdraws a proof that discriminates nothing —
+    but NEITHER compares a new proof against the one it replaced, so a discriminating `grep:`
+    swapped for a whole-file `unit test:` that always passes would go unremarked. This task does
+    NOT build that comparison; it names the gap so the next filing can.
+
+    (iii) DO NOT TOUCH THE FAIL-OPEN POSTURE. `statusResolvable` staying false on an unreadable
+    projection is deliberate and correct — redding every plan-only PR during a GitHub outage would
+    be strictly worse. What the fix must do is make the LOCAL refusal match the CI one, and with
+    (i) in place it does: a proof rewrite stops being an amendment in both environments.
+
+    (iv) THE TIME-VARIANCE IS RECORDED, NOT FIXED. Rationale (4) is a property of reading a live
+    projection per lint run. Making that read deterministic is a different, larger question
+    (caching, or keying off the trailer corpus instead) and is deliberately not scoped in.
+
+    (v) OUT OF SCOPE, NAMED. No weakening of `PROOF_DEBT_CEILING`. No exemption for any task. No
+    amendment to any merged shard. No change to `classifyFailingMergeEvidence` (#2363's surface),
+    to `proofDebtViolations`, or to the four records themselves — #2380 already carries that repair
+    and this task must not race it.
+  acceptance:
+    - claim: "a criterion whose claim is unchanged and whose proof is reworded is not counted as added"
+      proof: "unit test: test/task-linter.test.ts"
+    - claim: "a criterion with a genuinely new claim on a merged task is still refused"
+      proof: "unit test: test/task-linter.test.ts"
+    - claim: "the rule's own doc names the proof-weakening case it no longer sees"
+      proof: "grep: swapped for a WEAKER one in src/lib/task-linter.ts"
+    - claim: "the check stays silent when the derived status cannot be resolved at all"
+      proof: "unit test: test/task-linter.test.ts"
+    - claim: "the follow-up escape hatch keeps working for a real amendment"
+      proof: "unit test: test/task-linter.test.ts"
+  origin: "recon#rule-21-keys-proof-with-claim-2026-08-21"
+  plan_refs: ["W1-T180", "W1-T1078", "W1-T1081", "W1-T1097"]
+  files: [src/lib/task-linter.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND RULE 19 DOES **NOT** FORCE IT — MEASURED: this shard lints
+    clean at `risk: medium`, because `subsystemsOf` reads `src/lib/task-linter.ts` and
+    `test/task-linter.test.ts` as ONE concern. The band is set for BLAST RADIUS rather than span,
+    and that is the honest reason: the diff changes what a GATE counts as an added criterion, so a
+    mistake here silently widens or narrows a refusal every plan PR passes through. Saying Rule 19
+    demanded it would have been a false claim in the direction that flatters the filing.
+
+    `test/task-linter.test.ts` IS THE EXISTING HOME for `criterionKey`/`criteriaAdded`/
+    `postMergeAmendmentViolations` coverage, so it is declared rather than a new filename.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Four are pure-path `unit test:` proofs at a file
+    this shard declares, which execute the whole suite; the fifth is a `grep:` at
+    `src/lib/task-linter.ts`, also declared — both paths are ones the implementing diff changes, so
+    each discriminates on the diff that will be judged rather than going `executed_stale`.
+
+    EVERY FIGURE IS A QUERY, AND ONE OF THEM IS DELIBERATELY ABSENT. Re-derive the population by
+    running `proofDialectViolations` and `proofResolvabilityViolations` over
+    `git show origin/main:plan/tasks.yaml` and filtering to `severity === "block"`. Re-derive the
+    key comparison by normalising claim and proof the way `criterionKey` does and diffing the two
+    key sets against the base blob. DO NOT re-derive a count of "tasks that would trip rule 21" and
+    carry it — rationale (7) explains why that number is not stable, and the honest artifact is the
+    query, not its answer.

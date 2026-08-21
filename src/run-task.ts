@@ -7,6 +7,13 @@ import {
   refuseUnsupportedArgs,
   classifyReadFailure,
   readDiskFreeBytes,
+  // W1-T1082: the SAME judge + thresholds `rmd doctor` reports against — imported here, never
+  // re-derived, so the daemon and `rmd doctor` cannot disagree mid-incident (see
+  // escalateDiskHeadroomBreach's own doc, below).
+  judgeDiskHeadroom,
+  DISK_WARN_BYTES,
+  DISK_FAIL_BYTES,
+  humanBytes,
   type MemInfo,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
@@ -225,6 +232,7 @@ import {
   preflightFailureNotice,
   preflightSummaryPath,
   runCiParity,
+  runPreflightCoverage,
   runPreflightFast,
 } from "./lib/ci-parity.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
@@ -1619,14 +1627,46 @@ export type ArmOutcome =
   // `attemptArm` at all (every other non-arming outcome is a real gh/ledger failure or absence).
   | "irreversible-refused";
 
+/**
+ * W1-T1079: {@link attemptArm}'s outcome PLUS the raw failure text it captured, when there was
+ * one. Before this, only the bare {@link ArmOutcome} string reached {@link armAndLogOutcome} /
+ * {@link armIfVerdictPermits} — the `msg` a failed `gh pr merge --auto` threw existed in
+ * `attemptArm`'s own catch block but never left it, so all 172 `arm-error-ignored` ledger rows
+ * (and every `automerge.arm_failed` line the review lane produced) carried no cause. `error` is
+ * populated ONLY on the `arm-error-ignored` outcome — an `armed`/`direct-merged` success still
+ * carries none, and callers that only care about the outcome may keep treating the bare
+ * {@link ArmOutcome} string as before (see the `arm` param widening on both call sites below).
+ */
+export interface ArmAttemptResult {
+  outcome: ArmOutcome;
+  error?: string;
+}
+
 export function armAutoMerge(
   prUrl: string,
   taskId: string | undefined,
   deps: ArmDeps = realArmDeps(),
 ): ArmOutcome {
+  return armAutoMergeDetailed(prUrl, taskId, deps).outcome;
+}
+
+/**
+ * W1-T1079: the SAME gate + attempt {@link armAutoMerge} runs, but returns the raw failure text
+ * {@link attemptArm} captured alongside the outcome. {@link armAndLogOutcome} and {@link
+ * armIfVerdictPermits} need BOTH so the ledger row an `arm-error-ignored` failure produces can
+ * finally carry what `gh pr merge --auto` actually said, rather than only the bare outcome
+ * string those two ever saw before. `armAutoMerge` is a thin wrapper around this — a refactor of
+ * its own body into a shared implementation, not a second copy of the gate logic, so every other
+ * caller typed against the bare {@link ArmOutcome} return (which is most of them) is unaffected.
+ */
+export function armAutoMergeDetailed(
+  prUrl: string,
+  taskId: string | undefined,
+  deps: ArmDeps = realArmDeps(),
+): ArmAttemptResult {
   if (!taskId) {
     deps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
-    return "no-task-id";
+    return { outcome: "no-task-id" };
   }
   let headSha: string;
   try {
@@ -1635,7 +1675,7 @@ export function armAutoMerge(
     deps.say(
       `automerge.head_sha_unavailable (W1-T230): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
     );
-    return "head-unavailable";
+    return { outcome: "head-unavailable" };
   }
   // ONE ledger read feeds both the verdict and its override — the same construction the two
   // `decideAutoMergeArm` call sites above already use, so the override escape hatch survives
@@ -1646,7 +1686,7 @@ export function armAutoMerge(
   const decision = decideArmFromLedgerVerdict(prior, headSha, override);
   if (!decision.arm) {
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
-    return "ledger-refused";
+    return { outcome: "ledger-refused" };
   }
   return attemptArm(prUrl, deps);
 }
@@ -1660,10 +1700,10 @@ export function armAutoMerge(
 function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say">,
-): ArmOutcome {
+): ArmAttemptResult {
   try {
     deps.armAuto(prUrl);
-    return "armed";
+    return { outcome: "armed" };
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     // GitHub REFUSES to enable auto-merge on an ALREADY-mergeable PR ("Pull
@@ -1680,7 +1720,7 @@ function attemptArm(
       try {
         deps.mergeDirect(prUrl);
         deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
-        return "direct-merged";
+        return { outcome: "direct-merged" };
       } catch (e2) {
         const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
         // W1-T1050: `deps.mergeDirect`'s own `execFileSync` wraps the WHOLE merge attempt, so a
@@ -1692,15 +1732,20 @@ function attemptArm(
           deps.say(
             `automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`,
           );
-          return "direct-merged";
+          return { outcome: "direct-merged" };
         }
         deps.say(`automerge.direct_merge_failed: ${msg2} — ${prUrl}`);
-        return "direct-merge-failed";
+        return { outcome: "direct-merge-failed" };
       }
     }
-    // Anything else stays informational (a transient gh/network error — the
-    // next sweep pass re-derives and retries; the run flow's poll reads true state).
-    return "arm-error-ignored";
+    // W1-T1079: this used to be pure prose on `say` (stdout only) — the ledger row itself
+    // carried nothing, which is the defect this task closes. `msg` is now returned alongside
+    // the outcome so every caller that logs it can put it on the row (see `armAndLogOutcome`/
+    // `armIfVerdictPermits`). Still never retried MORE eagerly and never given its own retry
+    // cap here (design note iii) — only named, whichever of `armFailureAction`'s two non-
+    // clean-status classes it fell into.
+    deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
+    return { outcome: "arm-error-ignored", error: msg };
   }
 }
 
@@ -1824,7 +1869,7 @@ export function armAutoMergeAtOpen(
     );
     return "irreversible-refused";
   }
-  return attemptArm(prUrl, deps);
+  return attemptArm(prUrl, deps).outcome;
 }
 
 /**
@@ -2076,7 +2121,10 @@ export function armIfVerdictPermits(
     headRefName?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
   },
-  deps: { arm?: (prUrl: string, taskId: string) => ArmOutcome; ledgerLines?: () => Array<Record<string, unknown>> } = {},
+  deps: {
+    arm?: (prUrl: string, taskId: string) => ArmOutcome | ArmAttemptResult;
+    ledgerLines?: () => Array<Record<string, unknown>>;
+  } = {},
 ): ArmOutcome | "skipped" {
   if (ctx.headRefName?.startsWith("dependabot/")) {
     ctx.log("automerge.arm_skipped", { reason: "dependabot PR — the dep-review lane owns arming for these", head_sha: ctx.headSha });
@@ -2102,7 +2150,11 @@ export function armIfVerdictPermits(
   }
   // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
   // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
-  const outcome = (deps.arm ?? armAutoMerge)(ctx.prUrl, ctx.taskId);
+  const result = (deps.arm ?? armAutoMergeDetailed)(ctx.prUrl, ctx.taskId);
+  const outcome = typeof result === "string" ? result : result.outcome;
+  // W1-T1079: `deps.arm` (test fixtures, and every default before this task) may still return a
+  // bare ArmOutcome with no error text — that is fine, `error` is simply absent from the row.
+  const error = typeof result === "string" ? undefined : result.error;
   // impl-BI: the STEP NAME must match the outcome. This used to log `automerge.armed`
   // unconditionally with the outcome merely carried in a field — so a `ledger-refused` here
   // still read as an arm to anyone counting steps.
@@ -2119,6 +2171,9 @@ export function armIfVerdictPermits(
     reason: armOutcomeReason(outcome, decision.reason),
     decision_reason: decision.reason,
     head_sha: ctx.headSha,
+    // W1-T1079: the ONE field this task adds to this row — what `gh pr merge --auto` actually
+    // said, present only when the attempt actually threw (never on an armed/skipped outcome).
+    ...(error !== undefined ? { error } : {}),
   });
   return outcome;
 }
@@ -2148,7 +2203,12 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
     case "direct-merge-failed":
       return "GitHub refused --auto as already-clean and the direct-merge fallback then failed";
     case "arm-error-ignored":
-      return "`gh pr merge --auto` failed for a reason that is not the clean-status case — treated as transient and left for the next sweep pass";
+      // W1-T1079: no longer claims "treated as transient" unconditionally — armFailureAction
+      // now only calls a narrow set of signatures transient and defaults to permanent for
+      // everything else, so this row's own `error` field (not this fixed string) is what says
+      // which one a given attempt actually was. Left for the next sweep pass either way (design
+      // note iii — no retry-cap change here).
+      return "`gh pr merge --auto` failed for a reason that is not the clean-status case — see this row's `error` field for what gh actually said; left for the next sweep pass";
     case "irreversible-refused":
       return "the diff was classified IRREVERSIBLE (W1-T919/W1-T947) — auto-merge refuses regardless of verdict; an operator must arm this manually";
     case "skipped":
@@ -2182,16 +2242,23 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
  * which is what makes a sweep-armed merge and a hand-armed merge finally distinguishable on
  * the ledger. `pr_number`/`pr_url` are added by {@link logArmAttribution}, not here, so this
  * stays the single place that decides which outcomes count as armed.
+ *
+ * W1-T1079: `arm` may return the bare {@link ArmOutcome} it always could (every existing
+ * fixture/lane override keeps working unchanged) OR the richer {@link ArmAttemptResult} the new
+ * default, {@link armAutoMergeDetailed}, returns — either way the `error` text, when there is
+ * one, is merged onto the SAME row this function already wrote, not a second line.
  */
 export function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
   lane: ArmLane = "operator",
 ): ArmOutcome {
-  const outcome = arm(prUrl, taskId);
-  logArmAttribution(log, outcome, prUrl, taskId, lane, { outcome });
+  const result = arm(prUrl, taskId);
+  const outcome = typeof result === "string" ? result : result.outcome;
+  const error = typeof result === "string" ? undefined : result.error;
+  logArmAttribution(log, outcome, prUrl, taskId, lane, error !== undefined ? { outcome, error } : { outcome });
   return outcome;
 }
 
@@ -2210,11 +2277,29 @@ export function armReportPhrase(outcome: ArmOutcome): string {
  * PURE classifier for a failed `gh pr merge --auto` (exported for test): the
  * "clean status" class means the PR was ALREADY fully mergeable — auto-merge
  * had nothing to wait on and the correct completion is an immediate direct
- * merge (the caller only ever arms gated-green PRs). Everything else is
- * "ignore": informational, retried by the next sweep pass.
+ * merge (the caller only ever arms gated-green PRs).
+ *
+ * W1-T1079: everything else used to be a single "ignore" bucket, folded in as though every
+ * non-clean-status failure were transient and safe to leave for the next sweep pass. It is not:
+ * a permanent refusal (a branch-protection rule, a required review, a merge conflict) looks
+ * IDENTICAL to a network blip once the error text is discarded, which is exactly what made
+ * rationale (1) unanswerable — see this file's own `arm-error-ignored` rows. This now names a
+ * THIRD case: `"transient"` only for the narrow set of signatures that plausibly ARE a blip
+ * (rate limiting, a timeout, a dropped connection) — everything else defaults to `"permanent"`,
+ * the opposite of the old default. Both still route to the SAME `arm-error-ignored` outcome
+ * (design note iii — no retry-cap or control-flow change here); what changes is that the
+ * classification travels with the row instead of the row itself lying about it. Callers get the
+ * error TEXT itself (see {@link ArmAttemptResult}) regardless of which of these two it is, so
+ * this classification is documentation of intent, not the only signal a future reader has.
  */
-export function armFailureAction(stderrText: string): "direct-merge" | "ignore" {
-  return /clean status/i.test(stderrText) ? "direct-merge" : "ignore";
+export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "permanent" {
+  if (/clean status/i.test(stderrText)) return "direct-merge";
+  if (/timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|network|secondary rate limit|rate.limit|abuse detection|too many requests|5\d\d\b|GraphQL: (?:Something went wrong|Server Error)/i.test(
+    stderrText,
+  )) {
+    return "transient";
+  }
+  return "permanent";
 }
 
 /**
@@ -6170,6 +6255,20 @@ async function runTask(
      * without writing a fixture policy file.
      */
     spawnWallClockBoundMs?: number;
+    /**
+     * W1-T1062 (DISPATCH-PATH OWNER THREADING): overrides the owner this run clones from,
+     * gateways against, and opens its PR/issues against — every one of the eleven uses fed by
+     * the single `owner` binding just below. `resolveDaemonTarget`'s `--repo <owner>/<name>`
+     * resolution (via the SAME `resolveReviewTarget` splitter `rmd review --repo` already
+     * uses) is the one production source that sets this, threaded through `daemonCommand`'s
+     * `runOne` closure. Omitted — every OTHER caller (manual `rmd run-task`, `rmd drain`,
+     * `rmd wipe-test`) — this is `undefined` and `owner` resolves from THIS checkout's own
+     * origin (`resolveOwner()`), byte-identical to before this option existed. Threading this
+     * WITHOUT the daemon-side fix (or vice versa) is the partial-fix hazard the task record
+     * warns about: cloning under one owner and opening the PR under another is worse than
+     * today's honest self-owner-only behaviour.
+     */
+    owner?: string;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -6179,7 +6278,7 @@ async function runTask(
   const recordDecisionFn = opts.recordDecision ?? recordDecision;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
-  const owner = resolveOwner();
+  const owner = opts.owner ?? resolveOwner();
   // W1-T1045: THE CLOCK BOUND — read here, once, alongside every other opts-defaulted knob
   // above, and threaded into the `spawn` wrap-once shape below so every real dispatch spawn
   // (recon/implement/diagnose/decision-resume) gets it BY CONSTRUCTION, the same rationale
@@ -11495,17 +11594,29 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * `origin/main..HEAD` range so a caller can preflight an arbitrary range (e.g. re-checking
  * after amending).
  *
- * `--ci-parity` (W1-T294) and `--fast` (W1-T373) are each a SECOND/THIRD, ADDITIVE mode on
- * this same verb — never a second command, never a change to the three steps above, and never
- * a change to each other. `--ci-parity` runs {@link runCiParity}'s steps (one or more per
- * .github/workflows/ci.yml job — see lib/ci-parity.ts), which shells the FULL `npm run
- * test:ci` suite as part of the `ci` job's mirror and is therefore not a mode a worker can run
- * habitually. `--fast` runs {@link runPreflightFast}'s steps instead: the curated, seconds-
- * fast, network-free subset of deterministic npm-script gates (`FAST_GATE_STEPS`, lib/ci-
- * parity.ts) that actually blocks PRs — never the test suite. Either or both flags may be
- * passed; every mode's steps print after the hand-route steps, with the same independent-
- * step, print-everything, exit-non-zero-iff-any-failed discipline; omitting both flags leaves
- * the shipped hand route byte-for-byte unchanged.
+ * `--ci-parity` (W1-T294), `--fast` (W1-T373) and `--coverage` (W1-T1074) are each a SECOND/
+ * THIRD/FOURTH, ADDITIVE mode on this same verb — never a second command, never a change to
+ * the three steps above, and never a change to one another. `--ci-parity` runs
+ * {@link runCiParity}'s steps (one or more per .github/workflows/ci.yml job — see lib/ci-
+ * parity.ts), which shells the FULL `npm run test:ci` suite as part of the `ci` job's mirror
+ * and is therefore not a mode a worker can run habitually. `--fast` runs
+ * {@link runPreflightFast}'s steps instead: the curated, seconds-fast, network-free subset of
+ * deterministic npm-script gates (`FAST_GATE_STEPS`, lib/ci-parity.ts) that actually blocks
+ * PRs — never the test suite. `--coverage` runs {@link runPreflightCoverage} instead: JUST the
+ * diff-coverage gate, at author-time, on its OWN freshly self-derived `origin/main...HEAD`
+ * base — never a caller-supplied diff. It is OPT-IN AND SLOW BY CONSTRUCTION (minutes, not
+ * seconds — it shells the same full instrumented suite `--ci-parity`'s coverage-ratchet job
+ * does, because a coverage lcov needs the full suite and `--fast` cannot ever carry one, by
+ * design): it REFUSES rather than reports on an empty diff or a tree left dirty in a diffed
+ * file (the lcov and the diff must come from the same tree), and it will not report a PASS
+ * unless every changed source file actually has an lcov `SF:` instrumentation record — a file
+ * a scoped or partial run never loaded reports `UNPROVEN` and NAMES the file, rather than
+ * letting `scripts/diff-coverage.mjs`'s own vacuous-true-over-an-empty-set `OK` stand in for a
+ * real verdict. Any subset of these three flags may be passed; every mode's steps print after
+ * the hand-route steps, with the same independent-step, print-everything discipline (`--
+ * coverage`'s OWN steps short-circuit on an earlier refusal — see lib/ci-parity.ts — but a
+ * refusal still folds into the overall exit code exactly like any other mode's failure);
+ * omitting all three flags leaves the shipped hand route byte-for-byte unchanged.
  *
  * SUMMARY-FILE CONTAINMENT (W1-T455). A `deps.spawn` override means the caller is a test, not a
  * real worker, and a test has no business writing the orchestrator's adjudicated verdict — the
@@ -11515,7 +11626,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * (a real worker running the real binary) falls back to `preflightSummaryPath(repoRoot)`.
  */
 export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
-  const badArg = unknownArgError("preflight", rest, ["--from", "--to", "--summary-file"], ["--ci-parity", "--fast"]);
+  const badArg = unknownArgError("preflight", rest, ["--from", "--to", "--summary-file"], ["--ci-parity", "--fast", "--coverage"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -11528,6 +11639,7 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
   const result = runPreflight(repoRoot, { ...deps, range });
   const fast = rest.includes("--fast") ? runPreflightFast(repoRoot, { spawn: deps.spawn }) : undefined;
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
+  const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -11542,7 +11654,12 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
       console.log(step.detail);
     }
   }
-  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true);
+  if (coverage) {
+    for (const step of coverage.steps) {
+      console.log(step.detail);
+    }
+  }
+  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
   console.log(
     ok
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
@@ -11571,7 +11688,7 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
   const injectedSpawn = deps.spawn !== undefined;
   const summaryPath = explicitSummaryFile ?? (injectedSpawn ? undefined : preflightSummaryPath(repoRoot));
   const summary = buildPreflightSummary({
-    steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? [])],
+    steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
     headSha: readHeadShaForSummary(),
@@ -13282,6 +13399,94 @@ export function escalateHeadroomReserve(
 }
 
 /**
+ * W1-T1082 (THE DAEMON NEVER READS ITS OWN FREE SPACE): the daemon's `onDiskHeadroomBreach`
+ * hook — real free space, read off the daemon's own `startInFlightTicker` cadence
+ * (`daemon.ts`), has crossed below WARN (`DISK_WARN_BYTES`, 2 GiB) or FAIL (`DISK_FAIL_BYTES`,
+ * 512 MiB), judged by the SAME `judgeDiskHeadroom` `rmd doctor` reports against (doctor.ts) —
+ * imported, never re-derived, so the two surfaces cannot disagree mid-incident.
+ *
+ * ESCALATES AT WARN, NOT ONLY FAIL, AND THAT IS THE WHOLE POINT (design (iv)). By FAIL, the
+ * issue body, this function's OWN dedup marker below and the ledger row it lives on are all
+ * writes that may themselves lose to the same ENOSPC this hook exists to report ahead of —
+ * `escalateCrashLoop`'s own doc names the shape exactly: "a detector whose input can only be
+ * recorded by a write that ENOSPC rejects is structurally incapable of being the FIRST signal;
+ * it is the autopsy." This fires while writes still succeed.
+ *
+ * DEDUP IS TWO LAYERS, NOT ONE. `runDaemon`'s own in-process latch (daemon.ts's
+ * `diskHeadroomLatch`, shared across every phase this daemon run ticks) already calls this hook
+ * AT MOST ONCE per continuous breach — cleared the moment a later reading is back at OK — so a
+ * disk sitting below WARN for six hours produces exactly one call from a single continuous
+ * process (the #977 duplicate-issue class this repo has already paid for twice). This
+ * function's OWN ledger read exists for what the in-process latch cannot cover: a daemon
+ * RESTART mid-episode (disk pressure can itself crash-loop the daemon — the 2026-08-03 shape)
+ * resets that latch to `false`, and the very next tick would call this hook again for the SAME
+ * still-unresolved episode. Skip iff a prior `daemon.disk_headroom.escalated` marker's OWN `ts`
+ * (ledger-stamped at write, `appendLedger`'s contract) is within `episodeMs` of THIS reading's
+ * `ts` — the same "compare against an episode window" shape `escalatePostReviewStall` applies
+ * for a condition with no natural reset boundary (unlike `escalateHeadroomReserve`'s
+ * `resets_at`). The marker is written whether or not delivery succeeds — `escalateCircuitBreak`'s
+ * own stated reason: an undelivered notice costs one operator read, not an unbounded retry loop.
+ * The step is in `DECISION_RELEVANT_LEDGER_STEPS` (ledger.ts) because THIS function reads it
+ * back — a rotation dropping it would re-open one duplicate needs-human issue on every tick this
+ * condition persists, once the marker falls out of the retained view.
+ */
+export const DISK_HEADROOM_EPISODE_MS = 60 * 60 * 1000;
+
+export function escalateDiskHeadroomBreach(
+  info: { freeBytes: number; verdict: "WARN" | "FAIL"; ts: string },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; episodeMs?: number },
+): void {
+  const newestMs = Date.parse(info.ts);
+  if (!Number.isFinite(newestMs)) return;
+  const episodeMs = ctx.episodeMs ?? DISK_HEADROOM_EPISODE_MS;
+  const already = readLedgerLines(ctx.ledgerPath).some((l) => {
+    if (l.step !== "daemon.disk_headroom.escalated") return false;
+    const priorMs = Date.parse(String(l.ts ?? ""));
+    return Number.isFinite(priorMs) && newestMs - priorMs <= episodeMs;
+  });
+  if (already) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "DAEMON",
+      runId: ctx.runId,
+      summary: `disk headroom ${info.verdict}: ${humanBytes(info.freeBytes)} free`,
+      detail:
+        `W1-T1082: the daemon's own poll path read ${humanBytes(info.freeBytes)} free on its own filesystem, ` +
+        `below the ${humanBytes(DISK_WARN_BYTES)} WARN threshold ` +
+        `\`rmd doctor\` also judges against (\`doctor.ts\`'s \`judgeDiskHeadroom\`, one shared definition — the ` +
+        `two surfaces cannot disagree). This escalates at WARN rather than waiting for FAIL ` +
+        `(${humanBytes(DISK_FAIL_BYTES)}) because by FAIL the ledger this very notice writes to may itself fail ` +
+        `to append — the 2026-08-03 ENOSPC storm's own shape, where the first signal anyone had was ` +
+        `\`appendLedger\` throwing.`,
+      options: [
+        {
+          label: "reclaim disk space",
+          detail:
+            "`rmd doctor` names every other measured source on this host; scratch reaping, worker-home reaping " +
+            "and the tmp backstop are the usual owners (each has its own task — this notice only surfaces).",
+        },
+        {
+          label: "grow the volume",
+          detail: "If this host is routinely this close to full, the ceiling itself may be too small for its workload.",
+        },
+      ],
+      recommendation: "reclaim disk space",
+    },
+    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "DAEMON",
+    step: "daemon.disk_headroom.escalated",
+    free_bytes: info.freeBytes,
+    verdict: info.verdict,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * The daemon's `onHeadroomParkCeiling` hook: the headroom park outlived its ceiling, so the fleet
  * dispatched BLIND for one tick rather than idling forever.
  *
@@ -14372,6 +14577,16 @@ export function headroomPolicyFromCurve(curve: PolicyHeadroomRung[]): HeadroomPo
  * forever for no consumer — the inverse of the `sweep.absent_repush` case, where the count
  * IS the bound and rotation resets it.
  *
+ * EMITS UNCONDITIONALLY whenever the survey completes, actionable or not (W1-T1086 re-ruling
+ * of the prior `if (actionable.length)` gate): a survey landing entirely on non-actionable
+ * dispositions (e.g. `not-a-fleet-clone`) is otherwise indistinguishable in the ledger from an
+ * empty root, a wrong root, or a survey that threw. `dispositions` (via {@link tallyDispositions},
+ * already the full tally) names WHY nothing was actionable, and `roots_surveyed` — the count of
+ * roots THIS survey itself passed to the reaper — separates "surveyed nothing because there was
+ * nothing" from "surveyed nothing because the roots resolved to nowhere". `candidate_bytes`
+ * stays summed over `actionable` only, unchanged. A survey that THREW still writes nothing (see
+ * the try/catch below) — this makes a COMPLETED survey always speak, not a failed one.
+ *
  * Deps are injectable and appended LAST so no positional caller shifts; the default path
  * reads the real policy and the real roots.
  */
@@ -14389,22 +14604,22 @@ export function logCloneReapSurvey(
       deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.scratchReap);
     const { enabled, maxAgeHours } = readPolicy();
     const reap = deps.reap ?? reapStaleClones;
-    const summary = reap((deps.roots ?? cloneReapRoots)(), {
+    const roots = (deps.roots ?? cloneReapRoots)();
+    const summary = reap(roots, {
       dryRun: !enabled,
       maxAgeMs: maxAgeHours * 60 * 60 * 1000,
     });
     const actionable = summary.candidates.filter(
       (c) => c.disposition === "reaped" || c.disposition === "would-reap" || c.disposition === "in-use",
     );
-    if (actionable.length) {
-      log("daemon.clone_reap", {
-        dry_run: summary.dryRun,
-        reaped: summary.reaped.length,
-        bytes_reclaimed: summary.bytesReclaimed,
-        candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
-        dispositions: tallyDispositions(summary.candidates),
-      });
-    }
+    log("daemon.clone_reap", {
+      dry_run: summary.dryRun,
+      reaped: summary.reaped.length,
+      bytes_reclaimed: summary.bytesReclaimed,
+      candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
+      dispositions: tallyDispositions(summary.candidates),
+      roots_surveyed: roots.length,
+    });
     return summary;
   } catch {
     return null; // best-effort, exactly like the sibling boot sweeps — never blocks boot
@@ -15143,12 +15358,20 @@ export async function daemonCommand(
         // GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
+        // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
+        // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
+        // owner-qualified `--repo owner/name`) never reaches `runTask` — the dispatched run
+        // would silently fall back to `resolveOwner()` (THIS checkout's own owner), cloning and
+        // opening its PR against the WRONG owner. That partial fix is worse than today's honest
+        // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
+        // refuses.
         runOne: (taskId) =>
           runTask(taskId, {
             planPath: target.planPath,
             config,
             allowStale,
             skipGitSync: !!flagValue(rest, "--plan"),
+            owner: target.owner,
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
@@ -15166,6 +15389,19 @@ export async function daemonCommand(
         // W1-T372: observe-and-surface only — dispatch is NOT paused by this hook (unlike
         // onHeadroomBreach above); see escalateQuotaExhaustion's own doc for why.
         onQuotaExhausted: (info) => escalateQuotaExhaustion(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T1082: real free space + verdict, read on the SAME `startInFlightTicker` cadence as
+        // `daemon.alive` itself — the SAME root `rmd doctor` reads (`readDiskFreeBytes(config.root)`,
+        // `doctorCommand`, above) and the SAME `judgeDiskHeadroom` it judges against, one read call
+        // and one shared threshold definition, never a second copy.
+        readDiskHeadroom: () => {
+          const freeBytes = readDiskFreeBytes(config.root);
+          return { freeBytes, verdict: judgeDiskHeadroom(freeBytes).verdict };
+        },
+        // Dispatch is NOT paused by this hook (design (vii) — SURFACE, DO NOT GATE): see
+        // escalateDiskHeadroomBreach's own doc for the two-layer dedup (in-process latch +
+        // cross-restart ledger episode window) this wiring relies on.
+        onDiskHeadroomBreach: (info) =>
+          escalateDiskHeadroomBreach(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.
@@ -17976,7 +18212,12 @@ export function buildSweepEffects(
   // through `armAndLogOutcome` (rather than calling it bare), so a successful sweep arm
   // finally reaches the ledger with the PR identity + a `"sweep"` lane, not only the
   // sweep.disposed row.
-  armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+  // W1-T1079: default is now {@link armAutoMergeDetailed}, not the bare-outcome
+  // {@link armAutoMerge} — the sweep lane arms far more PRs than any other, so it is where
+  // most of the 172 error-less `arm-error-ignored` rows this task fixes came from. Every
+  // existing test fixture returning a bare {@link ArmOutcome} (e.g. `(): ArmOutcome => "armed"`)
+  // still satisfies this widened type unchanged.
+  armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
   // W1-T516 — appended LAST so no positional caller shifts, the same convention every dep
   // above follows. OPTIONAL with no default expression (rather than a bare `= loadDefaultPolicy()
   // ...` default), so the `??` fallback below is the injection SEAM test/config-reader-seams.test.ts
@@ -18051,7 +18292,7 @@ export function buildSweepEffects(
   // separately-passed number. `sweepArmTaskId` is skipped (raw `taskId` passed through
   // unchanged) when the number cannot be parsed at all — a malformed `prUrl` is exactly the
   // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
-  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = (prUrl, taskId) => {
+  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = (prUrl, taskId) => {
     const prNumber = prNumberFromRef(prUrl);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs));
   };
@@ -19755,24 +19996,30 @@ export interface DaemonTarget {
  * Resolve which repo/plan a `rmd daemon` run targets — PURE (no I/O), so the guard is
  * unit-testable. The daemon reads its plan from the CHECKOUT it runs in by default and scoped
  * the status gateway to a hardcoded "remudero"; this makes the target EXPLICIT:
- *   --repo <name>   scope the gateway to <owner>/<name> and read the plan from that repo's clone
+ *   --repo <name>         scope the gateway to THIS checkout's owner/<name> (bare name keeps
+ *                          the default owner — unchanged from before W1-T1062)
+ *   --repo <owner>/<name> scope the gateway to a FOREIGN owner's <name> — resolved through the
+ *                          SAME `resolveReviewTarget` splitter `rmd review --repo` already uses
+ *                          (W1-T1062: no parallel parser) — and read the plan from that clone
  *   --plan <path>   read the plan from an explicit file (overrides the derived path)
  *   --allow-self-target  acknowledge draining the daemon's OWN source repo (deliberate self-host)
  *   --dry-run       preview only (harmless — allowed even for self)
  * GUARD (W1-T12d): a bare `rmd daemon` would silently drain the repo that holds the daemon's own
  * source (self) unattended — REFUSED unless --allow-self-target (or --dry-run). Commissioning
  * targets the sandbox explicitly: `rmd daemon --repo remudero-sandbox`.
+ * W1-T1062 design (iii): `isSelf` compares BOTH owner and repo — this checkout's OWN repo name
+ * under a FOREIGN owner (`--repo other-owner/remudero`) is NOT self, so it can never reach the
+ * retro/auto-triage/github-posture hooks `daemonCommand` gates on `target.isSelf`.
  */
 export function resolveDaemonTarget(
   env: { selfOwner: string; selfRepo: string; repoRoot: string; reposDir: string },
   rest: string[],
 ): { target: DaemonTarget } | { error: string } {
-  const repoFlag = flagValue(rest, "--repo");
   const planFlag = flagValue(rest, "--plan");
   const allowSelf = rest.includes("--allow-self-target");
   const dryRun = rest.includes("--dry-run");
-  const repo = repoFlag ?? env.selfRepo;
-  const isSelf = repo === env.selfRepo;
+  const { owner, repo } = resolveReviewTarget({ owner: env.selfOwner, repo: env.selfRepo }, rest);
+  const isSelf = owner === env.selfOwner && repo === env.selfRepo;
   if (isSelf && !allowSelf && !dryRun) {
     return {
       error:
@@ -19784,7 +20031,11 @@ export function resolveDaemonTarget(
   const planPath =
     planFlag ??
     (isSelf ? join(env.repoRoot, "plan", "tasks.yaml") : join(env.reposDir, repo, "plan", "tasks.yaml"));
-  return { target: { owner: env.selfOwner, repo, planPath, isSelf, dryRun } };
+  // W1-T1062: the RESOLVED owner (bare `--repo <name>` ⇒ env.selfOwner, `--repo <owner>/<name>`
+  // ⇒ that owner — see resolveReviewTarget above), never env.selfOwner unconditionally. That one
+  // line was the hardcode the task record measured: a foreign-owner target's clone/gateway/PR
+  // all silently ran against THIS checkout's own owner instead of the one the operator named.
+  return { target: { owner, repo, planPath, isSelf, dryRun } };
 }
 
 /** Every `--option "label|detail"` in argv tail, in order given. */
