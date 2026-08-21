@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -733,4 +733,134 @@ test("impl-FR: repeated dispositions of the SAME unchanged PR open exactly one i
   });
   assert.equal(rec.created.length, 2, "a new head sha is a distinct state and gets its own issue");
   rmSync(tmp, { recursive: true, force: true });
+});
+
+// ── THE PRODUCTION PATH: no injected `arm`, so the REAL armAutoMerge runs ─────────────────
+//
+// Every other test in this file supplies its own `arm` (or, since W1-T1079, an `arm` returning
+// `{outcome, error}`) — deliberately, so the ledger-field assertions need no real gateway. The
+// consequence is that the `arm`-ABSENT branch of both call sites, the one production actually
+// takes, was executed by no test at all: `diff-coverage` reported the `armAutoMerge(...,
+// {...realArmDeps(), recordArmError})` call and its `recordArmError` sink as added-and-uncovered.
+//
+// This drives that branch for real, and hermetically. Nothing is stubbed inside run-task.ts:
+//   - HOME points at a throwaway config, so `ledgerPathFor(loadConfig())` reads a fixture ledger
+//     seeded with the `review.posted` row `decideArmFromLedgerVerdict` requires to permit an arm;
+//   - a fake `gh` on PATH answers the head-sha REST read (`ghJson` appends `-i`, so it emits a
+//     header block then the body) with the SAME sha that row carries, so the verdict matches head;
+//   - the arm attempt itself then hits `assertLiveWriteAllowed`, which THROWS inside a test
+//     runner by design — the real failure `attemptArm` catches and hands to `recordArmError`.
+// So the outcome is `arm-error-ignored` and the cause is captured, which is the whole of W1-T1079.
+
+function armRealPathFixture(taskId: string, headSha: string): { home: string; restore: () => void } {
+  const home = mkdtempSync(join(tmpdir(), "arm-real-path-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(
+    join(home, ".config", "remudero", "config.json"),
+    JSON.stringify({ claudeBin: "/bin/true", root }),
+  );
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(
+    join(root, "state", "ledger.ndjson"),
+    JSON.stringify({
+      step: "review.posted",
+      task_id: taskId,
+      head_sha: headSha,
+      state: "success",
+      capped: false,
+      plan_only: false,
+    }) + "\n",
+  );
+
+  const binDir = mkdtempSync(join(tmpdir(), "arm-real-path-bin-"));
+  const gh = join(binDir, "gh");
+  writeFileSync(
+    gh,
+    [
+      "#!/bin/bash",
+      // ghJson appends -i for `api` calls and splits on the blank line after the headers.
+      `printf 'HTTP/2 200\\r\\n\\r\\n{"head":{"sha":"${headSha}"},"number":1}'`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(gh, 0o755);
+
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  process.env.HOME = home;
+  process.env.PATH = `${binDir}:${savedPath}`;
+  return {
+    home,
+    restore: () => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      process.env.PATH = savedPath;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    },
+  };
+}
+
+test("PRODUCTION PATH: armIfVerdictPermits with NO injected arm runs the real armAutoMerge and records the arm failure's cause", () => {
+  const taskId = "W1-T1079-REAL-PATH";
+  const headSha = "1111111111111111111111111111111111111111";
+  const fixture = armRealPathFixture(taskId, headSha);
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let outcome: string;
+  try {
+    outcome = armIfVerdictPermits(
+      { state: "success", capped: false, planOnly: false },
+      {
+        prUrl: "https://github.com/craigoley/remudero/pull/1",
+        taskId,
+        headSha,
+        ledgerPath: join(fixture.home, "Remudero", "state", "ledger.ndjson"),
+        log: (step, extra) => rows.push({ step, extra }),
+      },
+      {},
+    );
+  } finally {
+    fixture.restore();
+  }
+
+  assert.equal(
+    outcome,
+    "arm-error-ignored",
+    "the real arm attempt is refused by the live-write guard, which is the arm-error-ignored branch",
+  );
+  const row = rows.find((r) => r.step.startsWith("automerge."));
+  assert.ok(row, `an automerge.* row is ledgered (saw: ${rows.map((r) => r.step).join(", ")})`);
+  assert.equal(
+    typeof row.extra?.error,
+    "string",
+    "W1-T1079: the cause is recorded rather than folded into silent transience",
+  );
+  assert.match(
+    String(row.extra?.error),
+    /gh-pr-merge|live write/i,
+    `the recorded cause names the boundary that refused (got: ${String(row.extra?.error)})`,
+  );
+});
+
+test("PRODUCTION PATH: armAndLogOutcome with NO injected arm records the same cause through its own sink", () => {
+  const taskId = "W1-T1079-REAL-PATH-2";
+  const headSha = "2222222222222222222222222222222222222222";
+  const fixture = armRealPathFixture(taskId, headSha);
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let outcome: ArmOutcome;
+  try {
+    outcome = armAndLogOutcome(
+      "https://github.com/craigoley/remudero/pull/2",
+      taskId,
+      (step, extra) => rows.push({ step, extra }),
+    );
+  } finally {
+    fixture.restore();
+  }
+
+  assert.equal(outcome, "arm-error-ignored", "the same real path, reached through the other call site");
+  const row = rows.find((r) => r.step.startsWith("automerge."));
+  assert.ok(row, `an automerge.* row is ledgered (saw: ${rows.map((r) => r.step).join(", ")})`);
+  assert.equal(typeof row.extra?.error, "string", "this call site has its OWN recordArmError sink — it must fill too");
 });
