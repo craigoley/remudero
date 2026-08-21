@@ -1,0 +1,154 @@
+- id: W1-T1095
+  title: "THE FIX RUNG CANNOT RESOLVE A BLOCKER THAT LIVES OUTSIDE ITS OWN DIFF — it cannot open a prerequisite PR, cannot record `blocked on #N` and resume, and cannot rebase, so a mechanically-fixable PR whose remedy is one merge away exhausts its two strikes and escalates as if a human were needed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-21 on the Azure host `Remudero` (Linux 6.17.0-1022-azure), bash 5.2.21, scratch
+    worktree at origin/main 23ce6a86. Ledger read-only over the per-form union (14 plain/live forms,
+    0 `.gz`, 146,897 deduped lines). No PR closed, no config changed.
+
+    (1) THE RUNG EXISTS, TERMINATES, AND IS NOT THE PROBLEM. Trigger: a `blocked_review` verdict
+    in-run, or the sweep's `blocked-fixable` disposition. Persistence: ONE bounded worker per strike
+    up to `sweep.strikeCap`, whose live value is 2 (`plan/policy.yaml`, bounds 1-10) — strike 1
+    resumes the failing implement session, strike 2 is a fresh worker on the SAME branch. Give-up:
+    exhausting the cap writes `fix.exhausted` and escalates as BLOCKED. It does not loop forever and
+    it does not fail silently at the cap. THIS SHARD DOES NOT PROPOSE BUILDING A FIX RUNG.
+
+    (2) BUT IT RESOLVES ONLY HALF OF WHAT IT IS HANDED. All-time: 89 `fix.dispatch`, 44
+    `fix.resolved` — 49%. Last week: 79 dispatched, 42 resolved, 8 exhausted, 28 `sweep.fix.error`.
+    By task: 61 distinct tasks reached `fix.dispatch`, 40 reached `fix.resolved`, and 21 WERE
+    DISPATCHED AND NEVER RESOLVED. That 21 is the population this shard is about.
+
+    (3) THE GAP IS THREE MISSING CAPABILITIES, AND THEY ARE SEPARATE. Read from source, each with a
+    live control:
+      - IT CANNOT OPEN A PREREQUISITE PR. `prUrl` is an INPUT to `runFixRung`; there is no
+        `gh pr create`, no `openPr` dep, no create path anywhere in the rung. It amends the PR it was
+        given, by design — `deriveStatus`'s ownership assert credits only a `run-<taskId>-<epochMs>`
+        head, so a fix on a fresh branch would be uncreditable. The constraint is real; the
+        consequence is that a remedy which MUST land in a different PR is unreachable.
+      - IT CANNOT RECORD "BLOCKED ON #N" AND RESUME. `blocked_on`, `blockedOn`, `waiting_on_pr`,
+        `depends_on_pr` and `resume_when` each read ZERO across `src/` (live control: task-level
+        `depends_on` reads 14 files, so the query sees the tree). There is no way to park a PR
+        against a prerequisite and pick it up when that prerequisite merges.
+      - IT CANNOT REBASE. `rebase`/`update-branch` read ZERO in the rung's span against a control of
+        9 `push` occurrences in the same span. So even if a prerequisite DID land, the blocked PR
+        could not take it.
+
+    (4) AND THE PREREQUISITE PATH IS NOT A DEAD END, WHICH IS WHY THIS IS WORTH BUILDING. The loop
+    closes without the operator today, measured: plan-only PRs arm and merge themselves
+    (`automerge.armed` on PR-2344 at 02:15:56Z and PR-2348 at 02:20:29Z), and the fleet merged 13
+    code PRs on its own identity in the preceding 24 hours. A prerequisite PR opened by the fleet
+    would merge on the same path everything else does.
+
+    (5) TODAY'S TWO HARD-BLOCKED PRs ARE MECHANICAL, NOT JUDGEMENT CALLS, AND BOTH FAIL EXACTLY ON
+    (3). #2363 is self-blocking: de-crediting four tasks moves them into a scanned population against
+    a `plan-proof-debt` ceiling of 0. The remedy is known and stated in CLAUDE.md — rewrite those
+    four tasks' proofs into the dialect and declare `files:`, AS A SEPARATE PLAN-ONLY PR THAT MERGES
+    FIRST, THEN REBASE. It must be separate because adding `plan/tasks.yaml` to #2363 would break
+    #2363's own body claim. That is capability one plus capability three, and the rung has neither.
+    #2365 needs an optional `ArmDeps` override threaded into two call sites — the same seam shape
+    every other injection point in that file already uses. A PATTERN THAT EXISTS ELSEWHERE IN THE
+    SAME FILE IS A COPY, NOT A DESIGN DECISION. Neither PR needs a human; both need a rung that can
+    reach outside its own diff.
+
+    (6) NOTHING READS PR AGE AT THE SCALE THE OPERATOR ASKED FOR. `updatedAt` IS read — as
+    `lastActivityAt`, feeding `sweep.staleDays`, whose live value is 14 DAYS. Nothing in
+    `selectReviewAdmission`, the disposition rungs or `deriveStatus` reads an hour-scale elapsed
+    time: `updated_at`/`updatedAt`/`ageMs` all read zero in `src/lib/status.ts` and
+    `src/lib/review.ts` (control: `createdAt` reads 1 in `sweep.ts`, so the corpus is visible).
+    W1-T1018's elapsed-time backoff DOES exist in this repo but is scoped to review orphans
+    (`reviewOrphanBackoffMinutes`); IT DOES NOT REACH THE FIX OR DISPOSITION PATH.
+
+    (7) AND A RED PR THAT CANNOT BE FIXED HAS NO CLOSE PATH. `sweep`'s usage claims
+    `stale/superseded->close-with-reason`, but the disposition doc is explicit that ONLY
+    `"superseded"` may ever gate a close, and superseded REQUIRES evidence that another PR already
+    covers the task. There is no disposition for "red, unfixable, and not superseded", so such a PR
+    is escalated and then left open indefinitely.
+
+    (8) ONE CORRECTION TO THE BRIEF, MADE RATHER THAN REPEATED. The revert of `ac9e1c6e` on #2354 was
+    NOT an automatic fleet revert: `03ceba5e` is authored by `cao825` with a stock
+    `This reverts commit ...` body, there is NO revert path anywhere in the rung's source, and ZERO
+    revert-shaped step names exist in the ledger. So the rung does not undo its own pushes. What IS
+    true is the part that matters: nothing recorded the revert either way, and a corrected version
+    re-landed six hours later as `1334cfc4`.
+  design: |
+    (i) THE THREE CAPABILITIES ARE THE DELIVERABLE, AND THEY LAND IN ORDER. Record-and-resume first
+    (it is inert on its own and makes the other two observable), then rebase, then prerequisite-PR
+    creation. An implementer may stop after any one and leave the rung strictly better than today.
+
+    (ii) EVERY TERMINATION WRITES A REASON, AND THE TWO LIVE FAILURE MODES ARE THE DESIGN TARGETS.
+    `arm-error-ignored` classifies every non-clean-status failure as transient and retries forever
+    without recording the error — 172 rows, not one carrying a cause (W1-T1079). The fix rung's own
+    give-up is bounded but its escalation names no evidence (W1-T487). AN UNBOUNDED RETRY AND A
+    SILENT GIVE-UP ARE THE SAME DEFECT: no decision is reached and nothing says why. Whatever is
+    built here must terminate, and every termination — resolved, parked, rebased, escalated or
+    abandoned — must write a row carrying its reason.
+
+    (iii) THE ATTEMPT CEILING IS DERIVED, NOT GUESSED. The measured resolve rate is 49% (44 of 89),
+    and the rung already caps at 2 strikes. A THIRD STRIKE IS NOT THE REMEDY: the 21
+    dispatched-but-never-resolved tasks are not failing for want of another attempt at the same diff
+    — #2363 and #2365 would fail an unbounded number of in-diff strikes. So THE CEILING STAYS AT 2
+    FOR IN-DIFF WORK, and the new capabilities get their own separate bound: AT MOST ONE prerequisite
+    PR per blocked PR, and AT MOST ONE rebase-and-retry after it lands. That caps the worst case at
+    two extra passes rather than an open-ended chain, and at $4-6 a pass it bounds the spend at one
+    prerequisite plus one retry.
+
+    (iv) PARKING IS NOT RETRYING. A PR parked on a prerequisite must NOT consume a strike and must
+    NOT be re-dispatched on a timer — it waits on the prerequisite's merge event. Otherwise this
+    reintroduces the unbounded retry it exists to replace.
+
+    (v) DO NOT AUTO-CLOSE, AUTO-MERGE A RED PR, SOFTEN A GATE, OR REMOVE THE OPERATOR'S MERGE GATE.
+    The ask is that a decision gets made and surfaced, not that the machine decides on his behalf.
+    The close path in rationale (7) is NAMED here and deliberately NOT built: closing a red PR is a
+    separate decision that needs its own filing.
+
+    (vi) THE ESCALATION SURFACE IS W1-T507's SUBJECT AND IS CITED, NOT RE-FILED. When a blocker
+    genuinely needs a person — a contested ruling, a policy change, or a choice between two
+    defensible designs — the surface that tells him is W1-T507's, not this task's.
+
+    (vii) OUT OF SCOPE, NAMED. No change to `strikeCap`'s value. No change to the ownership assert
+    that requires a `run-<taskId>-<epochMs>` head. No hour-scale age threshold (rationale 6 measures
+    the absence; setting one is a policy decision). W1-T487 (escalation names no evidence), W1-T307
+    (fix rung invalidates the body claim), W1-T457 (cancelled check reads red forever) and W1-T923
+    (a remedy-naming review failure cannot reach the rung) are adjacent and cited, none absorbed.
+  acceptance:
+    - claim: "a blocker whose remedy lies outside the pull request is parked against a prerequisite rather than retried"
+      proof: "unit test: W1-T1095: an out-of-diff blocker parks against a prerequisite instead of retrying"
+    - claim: "a parked pull request consumes no strike and is not re-dispatched on a timer"
+      proof: "unit test: W1-T1095: a parked pull request consumes no strike"
+    - claim: "a parked pull request resumes when its prerequisite merges"
+      proof: "unit test: W1-T1095: a parked pull request resumes when its prerequisite merges"
+    - claim: "every termination of the rung writes a row naming its reason"
+      proof: "unit test: W1-T1095: every rung termination writes a reason"
+    - claim: "in-diff work still stops at the existing strike ceiling"
+      proof: "unit test: W1-T1095: in-diff work still stops at the existing strike ceiling"
+  origin: "recon#fix-rung-cannot-reach-outside-its-diff-2026-08-21"
+  plan_refs: ["W1-T507", "W1-T1079", "W1-T487", "W1-T307", "W1-T457", "W1-T923"]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/fix-rung-no-task.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, and it is also honest about size: this task
+    genuinely reaches the rung (`src/run-task.ts`) and the disposition that feeds it
+    (`src/lib/sweep.ts`), plus a test home. DECOMPOSITION IS DECLINED at the task level but INVITED at
+    the delivery level: design (i) lands the three capabilities in an order where each is separately
+    shippable, so an implementer who runs out of budget stops at a coherent point rather than
+    half-way through one change.
+
+    `test/fix-rung-no-task.test.ts` IS AN EXISTING HOME and is declared rather than a new file, so the
+    concern count is not inflated by a filename — the correction `lint-plan` forced on W1-T1068,
+    W1-T1069, W1-T1078 and W1-T1079.
+
+    THE 49% IS NOT A VERDICT ON THE RUNG'S QUALITY. It resolves what it can reach. The 21
+    dispatched-but-never-resolved tasks are the ones whose remedy was never reachable from inside
+    their own diff, and this shard is about that reach — not about making the rung try harder.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the outcome counts from the per-form ledger union with a
+    coverage control taken first; re-derive each missing capability by grepping `src/` for its
+    symbols against a control that is known present; re-derive the strike cap from
+    `plan/policy.yaml` rather than from source, since the value was lifted there.
