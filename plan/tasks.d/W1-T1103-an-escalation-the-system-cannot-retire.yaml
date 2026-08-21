@@ -1,0 +1,135 @@
+- id: W1-T1103
+  title: "the escalation rung opens issues it can never retire — it escalates on a check that has merely NOT STARTED, half the board carries no label the retirement path filters on, and half carries no referent any lookup can resolve, so six false escalations sit open with nothing able to close them but a human"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    THE RECON IS CITED, NOT RE-DERIVED: the twelve open `needs-human` issues were classified on
+    2026-08-21 from one paginated read plus local git, and this shard carries that result rather
+    than repeating it.
+
+    (1) ZERO OBSERVED RUNS IS THE STATE EVERY CHECK PASSES THROUGH BEFORE IT STARTS. Five open
+    issues — #2301, #2302, #2304, #2305 and #2076 — each read `[ABSENT] required check has ZERO
+    observed check runs on head <sha>`, and EVERY referenced PR subsequently merged: #2297 at
+    81b7760c, #2298 at 75a1f3d1, #2299 at 00cf401d, #2286 at 47f66a3f, #2075 at b4604217. #2396 is
+    a sixth instance of the same family reached by a different route. The rung did not observe a
+    failure; it observed a beginning.
+
+    (2) AND THIS IS NOT A GAP IN THE TAXONOMY — IT IS A THIRD ARM THE TAXONOMY DOES NOT HAVE, WHICH
+    IS THE ONE THING THE SUBJECT SWEEP CHANGED ABOUT THIS FILING. W1-T176 (`queued`) RULED that a
+    required check with zero check runs is not ambiguous but a DETERMINISTIC-ACTION state, and
+    W1-T186 (`queued`) already names `checksState: "none"` as overloaded and splits it — CONFLICTED
+    (zero checks expected, merge main in), ABSENT (zero runs on a MERGEABLE PR, post the check),
+    PENDING (checks exist and are running, wait), FAILING. BOTH ARE CITED, NEITHER IS RE-FILED.
+    What the six measured instances show is that the split needs a THIRD reading of zero: a
+    mergeable PR whose workflow has not been SCHEDULED yet is indistinguishable, by run count
+    alone, from one whose required check is genuinely missing — and W1-T186 routes both to ABSENT.
+    So W1-T176's ruling is not wrong about a genuinely absent check; it is falsified as a rule
+    about a COUNT, because the count cannot carry the distinction.
+
+    (3) THE DISCRIMINATOR THE COUNT LACKS IS TIME, NOT MORE STATE. A head seconds old with zero
+    runs and a head hours old with zero runs are the same number and opposite situations. Nothing
+    in the current view separates them, which is why five PRs that were merely early were reported
+    as blocked.
+
+    (4) HALF THE BOARD IS INVISIBLE TO THE RETIREMENT PATH. `labels=needs-human` returns six of the
+    twelve open issues; #2076, #2300, #2301, #2302, #2304 and #2305 carry NO LABEL AT ALL. Every
+    consumer that filters on that label — the console queue, the reconciler's read side, any
+    operator query — is looking at half a board and cannot know it.
+
+    (5) AND HALF CAN NEVER SELF-RETIRE WHATEVER THEIR CONTENT. #2032 and #2360 carry no `Task:`
+    trailer at all, which is the `no_task_trailer: 2` in the reconciler's own drop counts for the
+    day. #2301, #2302 and #2304 carry a synthetic `PR-2297`-style label in that field while the
+    body reads `Task undefined`. #2063 carries `Task: daemon`, a pseudo-task no lookup resolves.
+    THEIR PRs MERGING DOES NOT HELP: nothing links a merge to an issue, so terminality of the
+    referent is unreachable when the referent itself is unresolvable.
+
+    (6) SO THE THREE PARTS ARE ONE CONCERN, AND THE CONCERN IS A LIFECYCLE, NOT A MESSAGE: an
+    escalation this system opens must be one this system can close. Escalating on an unstarted
+    check creates the false positive; the missing label hides it from the path that would retire
+    it; the unresolvable referent makes retirement impossible even when it is seen. Fixing any one
+    alone still leaves an issue only a human can close.
+
+    (7) THE FOURTH SHAPE IS CITED AND DELIBERATELY NOT SCOPED IN. #2063 is a starvation notice that
+    COUNTS recoverable blockers and names none of their ids, so it can be neither verified nor
+    retired; its premise has since failed outright, with hundreds of merges to main since it
+    opened. W1-T298 owns queue-starvation escalation and W1-T186 owns naming the observed blocker —
+    that pair is where the fix belongs, not here.
+  design: |
+    (i) DO NOT ESCALATE ON A CHECK THAT HAS NOT STARTED. The rung needs a third reading of zero
+    beside W1-T186's CONFLICTED and ABSENT: NOT-YET-SCHEDULED, decided on how long the head has
+    existed rather than on the run count, which cannot carry it. Below that threshold the
+    disposition is WAIT and no issue is opened; above it the existing ABSENT path is unchanged.
+    The threshold must be derived from this repo's own observed time-to-first-check, never a
+    guessed constant — a bound that fires on a healthy condition is this repo's recurring defect.
+
+    (ii) EVERY ESCALATION THIS SYSTEM OPENS CARRIES THE QUEUE LABEL. `escalate()`
+    (`src/lib/escalate.ts`) already applies `needs-human` alongside its per-class and ask-type
+    labels; the measured board shows six issues without it, so at least one opening path does not
+    go through that labelling. The falsifier is the property, not the path: no opened escalation
+    lacks the label the retirement path filters on.
+
+    (iii) CARRY A RESOLVABLE REFERENT OR DO NOT OPEN. An escalation whose `Task:` field is a
+    synthetic `PR-<n>` label, a pseudo-task, or absent is one no lookup can retire. The emitter
+    must either resolve a real referent — a plan task id, or the PR number in a field the
+    reconciler actually reads — or decline to open and say why, rather than creating a permanent
+    operator obligation.
+
+    (iv) THIS IS A LIFECYCLE GUARANTEE AND SHOULD BE TESTED AS ONE. The three arms above are worth
+    stating as a single property over a rendered escalation: it is labelled, it names a resolvable
+    referent, and it is not opened against a head too young to have been scheduled.
+
+    (v) DO NOT PROPOSE BULK-CLOSING ANY OPEN ISSUE. Five of the six are provably stale, and the
+    operator is ruling on each. An issue closed on a heuristic is a question nobody ever answers —
+    the remedy here is that the NEXT one can retire itself, never a sweep over the current board.
+
+    (vi) NOT IN SCOPE, EACH WITH ITS OWNER: W1-T176's ruling and W1-T186's four-way split, which
+    this task extends rather than replaces; W1-T283, which fixes what the console can SEE from the
+    plan-task side; W1-T345's referent-less dedup and W1-T347's moot-question guard, which act on
+    issues already open; and W1-T298 plus the starvation notice of rationale (7).
+  acceptance:
+    - claim: "a required check with zero runs on a head too young to have been scheduled disposes to wait and opens nothing"
+      proof: "unit test: test/escalation-retirability.test.ts"
+    - claim: "a genuinely absent required check on an older head still escalates exactly as it does today"
+      proof: "unit test: test/escalation-retirability.test.ts"
+    - claim: "every escalation this system opens carries the queue label the retirement path filters on"
+      proof: "unit test: test/escalation-retirability.test.ts"
+    - claim: "an escalation whose referent no lookup can resolve is refused rather than opened"
+      proof: "unit test: test/escalation-retirability.test.ts"
+  files: [src/lib/sweep.ts, src/lib/escalate.ts, test/escalation-retirability.test.ts]
+  status: queued
+  attempts: 0
+  origin: recon#needs-human-board-classification-2026-08-21
+  plan_refs: ['W1-T176', 'W1-T186', 'W1-T283', 'W1-T345', 'W1-T347', 'W1-T298']
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/escalation-retirability.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    THE SUBJECT SWEEP CHANGED THIS SHARD AND THAT IS RECORDED RATHER THAN HIDDEN. Sweeping shard
+    slugs across main AND all 120 remote heads for the escalation/retirement subject surfaced
+    W1-T186, whose own title already carries the phrase `zero check runs`, and its cited parent
+    W1-T176. Had this been filed from the recon alone it would have re-filed a taxonomy that
+    already exists. Rationale (2) states precisely what is new — a third reading of zero that
+    neither task has — instead of restating what they own.
+
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` crosses two
+    `src/` modules and `test/`, and the acceptance wording names the dispatch-sweep and escalation
+    surfaces, so `subsystemsOf` (`src/lib/task-linter.ts`) derives more than one tag.
+
+    BOTH `src/` FILES MUST BE DECLARED BECAUSE THE THREE ARMS SIT IN DIFFERENT MODULES: the
+    disposition and its ABSENT wording live in `src/lib/sweep.ts`, and the labels plus the open
+    path live in `src/lib/escalate.ts`. WHICH opening path drops the label is deliberately NOT
+    asserted here — it was not measured, and design (ii) states the property to hold rather than
+    guessing the site.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1103` resolves to f32aa92e8975342d72d24096b8f176615e63574e,
+    read back over git protocol before filing; live control, `refs/rmd-id/W1-T999999` exits 2, so a
+    resolve is meaningful. THE ANCHOR MESSAGE WAS NOT JUDGED — `rmd next-task-id --reserve` and the
+    fleet share `reserveTaskIdRemote` and write the same form, so shape cannot identify a holder.
+    The six ID surfaces and the subject sweep were run over `git ls-remote` and tree reads, never
+    REST, and re-run immediately before pushing.
