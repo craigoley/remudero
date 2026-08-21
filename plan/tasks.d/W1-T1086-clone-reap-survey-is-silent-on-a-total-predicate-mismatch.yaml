@@ -1,0 +1,154 @@
+- id: W1-T1086
+  title: "THE CLONE-REAP SURVEY IS SILENT ON A TOTAL PREDICATE MISMATCH — `daemon.clone_reap` is
+    gated on `actionable.length`, and `not-a-fleet-clone` is excluded from that set, so a survey
+    whose ownership predicate rejects EVERY candidate writes no ledger line at all and is
+    indistinguishable from a survey that found nothing; make the line unconditional and carry the
+    tally that names why"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "READ FROM SOURCE THIS TRIAGE PASS, not inherited from the reporting entry.
+    `logCloneReapSurvey` (src/run-task.ts) computes
+    `actionable = summary.candidates.filter(c => c.disposition === 'reaped' || 'would-reap' ||
+    'in-use')` and then emits `daemon.clone_reap` ONLY under `if (actionable.length)`. The
+    disposition vocabulary in src/lib/clone-reaper.ts is eight-wide — `outside-root`, `symlink`,
+    `not-a-fleet-clone`, `in-use`, `too-recent`, `would-reap`, `reaped`, `remove-failed` — so FIVE
+    of the eight are non-actionable and a survey landing entirely in those five is
+    indistinguishable, in the ledger, from a survey that walked an empty root, from a survey whose
+    roots were wrong, and from a survey that threw and returned null.
+    THE SILENCE IS DELIBERATE AND TESTED TODAY, which is why this is a re-ruling rather than a bug
+    report: test/clone-reap-wiring.test.ts asserts `a survey that found only foreign paths writes
+    no ledger line`. That ruling was a noise argument, and it is defensible — the boot comment at
+    the call site records that these roots are SHARED with another application and other sessions,
+    so `not-a-fleet-clone` is the normal majority disposition. This task does not dispute that the
+    disposition is normal. It disputes that its COUNT is uninteresting.
+    THE INCIDENT THAT SURFACED IT, AND THE HONEST LIMIT OF WHAT IT PROVES
+    (plan/feedback/fb-1785807201821-e4c9dc.yaml, 2026-08-04). 53,310 `rmd-*` temp dirs filled the
+    host to ENOSPC. The clone reaper surveyed the correct roots and CORRECTLY returned
+    `not-a-fleet-clone` for every one of them — they carry no `.git`. THE PREDICATE WAS RIGHT AND
+    THE REAPER WAS NOT THE CAUSE. So no live mismatch is claimed here and none was observed; what
+    was observed is that a run in which the predicate rejected tens of thousands of candidates
+    produced ZERO ledger evidence that it had looked at anything at all.
+    WHY THAT MATTERS AT ALL, GIVEN NO LIVE MISMATCH. This reaper owns a MEASURED leak — its own
+    file header records 36 abandoned review clones totalling 5866 MiB across the scratch roots, on
+    a host where `nothing has ever removed one` — and it has been ARMED since PR #1250 flipped
+    `scratchReap.enabled` true on 2026-08-03 (plan/policy.yaml). An armed reaper whose predicate
+    drifts to reject every real clone reports exactly what a healthy idle reaper reports: nothing.
+    That is the dark-organ shape this plan has unwound repeatedly — a wired organ that reclaims
+    nothing and says nothing about it.
+    THE SIBLING WAS ALREADY RULED THE OTHER WAY, ON THIS SAME HOST AND FROM THIS SAME FEEDBACK
+    ENTRY. W1-T320 fixes `daemon.tmp_sweep`'s twin defect — it logged `removed: 0, kept: 49979` on
+    ten straight boots — and its design point (iii) does NOT silence the line: it keeps the line
+    and makes it JUDGEABLE by adding the oldest-kept age, so `did nothing because nothing
+    qualified` separates from `did nothing while the population grew`. `daemon.clone_reap` is the
+    same organ class one call site over and currently carries the OPPOSITE ruling. This shard
+    aligns it."
+  design: |
+    ONE CONCERN: whether `logCloneReapSurvey` writes a line, and what that line must carry to be
+    judgeable. NOT the reaper's predicate, NOT its roots, NOT its arming.
+
+    (i) THE RULING, MADE HERE SO THE SHARD ASKS NOTHING. Three shapes were live; the FIRST is
+    chosen and the other two are refused, with reasons:
+      - CHOSEN — EMIT UNCONDITIONALLY whenever the survey completed, actionable or not. The
+        cadence is one line per daemon boot (the only real call site; `logDiskReclaimRung` passes
+        a no-op logger deliberately and that suppression stays), so the volume cost is one row per
+        boot — exactly what `daemon.tmp_sweep` already pays and what W1-T320 declined to cut.
+      - REFUSED — emit only when `candidates.length > 0`. It still cannot separate `the roots were
+        empty` from `the roots were wrong`, which is half the blindness being fixed.
+      - REFUSED — leave the line gated and prove the predicate somewhere else. That is a second
+        observability path for one organ, and the organ already has a line.
+
+    (ii) WHAT THE LINE MUST CARRY TO BE JUDGEABLE. The existing fields stay exactly as they are
+    (`dry_run`, `reaped`, `bytes_reclaimed`, `candidate_bytes`, `dispositions`) — a caller reading
+    the line today must not see a field change meaning. `dispositions` is already the full tally
+    via `tallyDispositions`, so a total mismatch reads as `{"not-a-fleet-clone": 53310}` and the
+    healthy-idle case reads as an empty tally; that distinction is the whole point and it needs no
+    new field. ADD ONLY what the empty case cannot otherwise express: how many roots were
+    surveyed, so `surveyed nothing because there was nothing` separates from `surveyed nothing
+    because the roots resolved to nowhere`. Take the count from the roots the survey ITSELF passed
+    to the reaper (`cloneReapRoots()` or the injected `deps.roots`) — never a second read of where
+    clones live. Do NOT add paths; a count is what makes the case decidable and paths are operator
+    detail the survey return value already carries.
+
+    (iii) `candidate_bytes` MUST STAY MEANINGFUL IN THE NEW CASE. It is currently summed over
+    `actionable` only. Keep it summed over `actionable` only — a `not-a-fleet-clone` entry is
+    recorded with `bytes: 0` by the reaper anyway, so widening the sum would add nothing and would
+    silently redefine a field an existing assertion reads.
+
+    (iv) THE OLD ASSERTION IS RE-DERIVED, NOT DELETED. `test/clone-reap-wiring.test.ts`'s
+    `stays silent when there is nothing actionable` encodes the ruling being reversed. It must be
+    rewritten to assert the NEW contract on the SAME fixture (two foreign paths in, one line out,
+    tally naming `not-a-fleet-clone` and `symlink`, `reaped: 0`, `bytes_reclaimed: 0`) rather than
+    removed — a deleted assertion leaves no record that the case was ever considered, and this
+    shard's whole subject is evidence that survives.
+
+    (v) STILL NOT A DECISION INPUT. `daemon.clone_reap` must remain ABSENT from
+    `DECISION_RELEVANT_LEDGER_STEPS` — nothing reads it to decide anything, and the function's own
+    header already rules this explicitly. Making a line unconditional is not the same as making it
+    load-bearing; adding it there would make every rotation carry it forever for no consumer.
+
+    (vi) BEST-EFFORT IS UNCHANGED. The whole body stays inside its existing try/catch returning
+    `null` on any throw — a survey that THREW still writes nothing, and that is correct and
+    deliberate: this task makes a COMPLETED survey always speak, not a failed one.
+
+    EXPLICITLY NOT IN SCOPE, each with its owner, so a reader does not re-file them:
+      - `daemon.tmp_sweep`'s ceiling, cadence and judgeability — W1-T320, filed from this same
+        feedback entry and queued. This shard touches neither src/lib/tmp.ts nor plan/policy.yaml.
+      - THE TEMP-DIR LEAK ITSELF and its test-helper vector — the helper
+        (test/setup/tmp-hygiene.ts, W1-T131) has a per-process exit-handler teardown and a
+        `reapableTmpPrefix` normalisation, and PR #1269 rode that import onto the direct
+        `node --test` spawns. Not this shard's, and not reopened by it.
+      - WHETHER `scratchReap` SHOULD BE ARMED AT ALL (PR #1250). The reporting entry asks for it to
+        be reconsidered on the grounds that arming it fixes none of the ENOSPC — which is true and
+        is exactly what this shard's rationale records — but "it does not fix THAT" is not a case
+        for disarming a reaper that owns a separate measured 5866 MiB. Untouched deliberately;
+        plan/policy.yaml is NOT in `files:` and that omission is the ruling.
+      - THE REAPER'S OWNERSHIP PREDICATE (`not-a-fleet-clone` requires a standalone git clone).
+        Verified CORRECT against the observed population this pass. No change proposed.
+  acceptance:
+    - claim: "a completed survey whose candidates are all non-actionable still writes one daemon.clone_reap line, carrying the disposition tally that names why nothing was actionable"
+      proof: "unit test: test/clone-reap-wiring.test.ts"
+    - claim: "a survey that found no candidates at all is distinguishable in the ledger from one that rejected every candidate it found"
+      proof: "unit test: test/clone-reap-wiring.test.ts"
+    - claim: "the line names how many roots were surveyed, taken from the roots the survey itself passed to the reaper, so an empty-roots survey is distinguishable from an empty-disk one"
+      proof: "unit test: test/clone-reap-wiring.test.ts"
+    - claim: "the existing actionable-case fields are unchanged in name and meaning when something is actionable"
+      proof: "unit test: test/clone-reap-wiring.test.ts"
+    - claim: "a survey that threw still writes nothing and returns null, and the step is still absent from the decision-relevant ledger steps"
+      proof: "unit test: test/clone-reap-wiring.test.ts"
+  risk: high
+  origin: "feedback#fb-1785807201821-e4c9dc"
+  plan_refs: ["W1-T320", "W1-T411", "W1-T1082"]
+  files: [src/run-task.ts, test/clone-reap-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS — recorded up front rather than shipped as a
+    lint violation. `subsystemsOf` reads two concerns off this `files:` list (the dispatcher module
+    and its suite), and W1-T411 records the same list shape failing sizing at `risk:medium` with
+    the exact message `spans 2 distinct subsystems/concerns … raise to risk:high or decompose`.
+    Decomposing is not available: the change is one conditional and one field in one function, and
+    its only assertions live in the one declared suite. THE ACTUAL BLAST RADIUS IS ONE LEDGER ROW
+    PER DAEMON BOOT — no reap decision, no age arithmetic, no predicate and no policy field is
+    touched, and the worst regression is a row nobody reads.
+    budget_usd 25 — above W1-T1061's 20 (one field on an existing row) because this also reverses a
+    shipped assertion and adds a roots-count, and well below W1-T320's 75, which ships a policy row
+    with a real reader plus a cadence hook.
+    verify:auto — every criterion is decidable in-process against the injectable `roots`/`reap`/
+    `policy` deps the function already accepts and the suite already uses. Nothing spawned, no
+    network, no operator.
+    `files:` DECLARES THE SUITE because a proof naming a path outside `files:` is a proof-scope
+    warning at filing and a scope-guard REFUSAL after the work is done — the W1-T309 lesson. The
+    suite EXISTS today (test/clone-reap-wiring.test.ts, which is where the assertion being reversed
+    lives), so no new file is created and the whole-file proof form executes on day one.
+    NO depends_on, established rather than assumed. W1-T320 edits src/lib/tmp.ts, src/run-task.ts,
+    src/lib/policy.ts and plan/policy.yaml; W1-T411 edits src/run-task.ts. The only overlap with
+    either is src/run-task.ts, and neither of them touches `logCloneReapSurvey`'s emission gate —
+    W1-T411 explicitly passes that function a NO-OP logger and leaves its own line alone. Whichever
+    lands second rebases; that is a merge obligation, not an ordering constraint.
+    RE-READ THE GATE BEFORE ACTING RATHER THAN QUOTING THIS SHARD. Every claim above was read off
+    src/run-task.ts and src/lib/clone-reaper.ts during triage of fb-1785807201821-e4c9dc; symbol
+    names and the disposition vocabulary drift, and the filter list is the thing most likely to
+    have grown a ninth member by the time this dispatches."

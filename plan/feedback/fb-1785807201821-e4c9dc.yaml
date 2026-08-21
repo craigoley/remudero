@@ -29,6 +29,6 @@ raw: "TEST FIXTURES LEAK TEMP DIRS AT SCALE AND daemon.tmp_sweep REAPS NONE OF
   owner rather than a repair."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
 summary: null
