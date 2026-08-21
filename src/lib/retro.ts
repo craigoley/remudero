@@ -20,7 +20,8 @@ import fsMarker from "node:fs";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { appendLedger, type LedgerLine } from "./ledger.js";
-import type { Lifecycle, LearningEntry } from "./learnings.js";
+import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD } from "./learnings.js";
+import type { Lifecycle, LearningEntry, PromotionResult } from "./learnings.js";
 import { resolveMountForClass, type Mounts } from "./mounts.js";
 import type { Task } from "./plan.js";
 import { findExportDefinition, isExportReachable } from "./reachability.js";
@@ -2367,6 +2368,118 @@ export async function phraseProceduralCandidate(
     src: `retro#procedural (${candidate.taskIds.join(", ")})`,
     files: [],
   };
+}
+
+// ── PROMOTION PROPOSALS (W1-T1059) ─────────────────────────────────────────
+//
+// `runPromotionPass` (learnings.ts) shipped under P32/W1-T146 with NO production
+// caller, so `promotion.scrub`/`promotion.verdict`/`promotion.promoted` could never
+// fire. This section is the caller's PURE half: it turns one pass's results into a
+// rendered PROPOSAL for the Architect to ratify. It writes nothing, anywhere — a
+// promoted entry reaches disk only through a reviewed PR (shard design (ii): "the
+// machine never ratifies on its own judgment"). The I/O half — loading the corpus and
+// supplying the judge — lives at the call site in run-task.ts, split out so every
+// decision below is a pure function with its own test.
+//
+// WHY THIS CLASSIFIER DOES NOT REUSE `PromotionStage`. `PromotionResult.stage` answers
+// `"judge"` for TWO DISTINCT OUTCOMES: a judge that decided `project-specific` (a
+// considered NO) and a judge that said `broadly-applicable` below the confidence
+// threshold (uncertainty, which by `planPromotionFromVerdict`'s own doc must never
+// promote). Only the free-text `reason` separates them. That is a real
+// one-value-for-several-outcomes conflation and it is REPORTED, NOT FIXED here —
+// learnings.ts is deliberately outside this task's declared `files:` (shard design
+// (vi)), and widening it would be fixing a second concern in silence. This module
+// therefore reads `verdict.applicability` and `verdict.confidence` directly rather than
+// branching on `stage`, so the two stay distinguishable in the report an Architect reads.
+
+/** What one {@link PromotionResult} means for the Architect, with the two `stage: "judge"` outcomes kept apart. */
+export type PromotionDisposition =
+  | "proposed"
+  | "declined-scrub"
+  | "declined-top-layer"
+  | "declined-project-specific"
+  | "declined-low-confidence";
+
+/**
+ * The pure decision on ONE promotion result (Standing rule 12 — judgment is advisory,
+ * acting on it is a pure function). One arm per outcome, and never a shared arm for two:
+ * a scrub block, a top-layer entry, a considered `project-specific` NO and a
+ * below-threshold `broadly-applicable` call are four different things to a reader
+ * deciding what to ratify.
+ */
+export function classifyPromotionResult(
+  result: PromotionResult,
+  confidenceThreshold: number = DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD,
+): PromotionDisposition {
+  if (result.stage === "scrub") return "declined-scrub";
+  if (result.stage === "top-layer") return "declined-top-layer";
+  if (result.promoted) return "proposed";
+  const verdict = result.verdict;
+  if (verdict && verdict.applicability === "broadly-applicable" && verdict.confidence < confidenceThreshold) {
+    return "declined-low-confidence";
+  }
+  return "declined-project-specific";
+}
+
+/** What {@link renderPromotionProposals} needs, so an empty corpus and an all-declined pass never render the same line. */
+export interface PromotionProposalInput {
+  /** Entries handed to the pass — NOT the number that reached the judge. */
+  corpusSize: number;
+  /** False when no judge was configured, in which case `results` is empty because the pass never ran. */
+  ranPass: boolean;
+  results: PromotionResult[];
+  confidenceThreshold?: number;
+}
+
+/**
+ * Render one pass as a retro-report section. THREE ZERO-LOOKING STATES ARE KEPT APART,
+ * because collapsing them is how "built and unreachable" stayed invisible for as long as
+ * it did: the pass did not run (no judge), the pass ran over an EMPTY corpus, and the
+ * pass ran over a real corpus and proposed nothing. Only the third is a finding about
+ * the corpus.
+ */
+export function renderPromotionProposals(input: PromotionProposalInput): string {
+  const head = "## Learnings promotion (P32/W1-T146) — proposals for the Architect to ratify";
+  if (!input.ranPass) {
+    return [
+      head,
+      "",
+      "The pass did NOT run: no promotion judge was supplied to this retro. Nothing was scrubbed,",
+      "judged or proposed. Supplying a judge makes the pass run over the active corpus and renders",
+      "its proposals here; it still writes nothing — ratification stays an Architect PR.",
+    ].join("\n");
+  }
+  if (input.corpusSize === 0) {
+    return [
+      head,
+      "",
+      "The pass ran over an EMPTY corpus — no entries were handed to it. This is not a statement",
+      "about what is promotable; it is a statement that nothing was read.",
+    ].join("\n");
+  }
+  const threshold = input.confidenceThreshold;
+  const rows = input.results.map((r) => ({ result: r, disposition: classifyPromotionResult(r, threshold) }));
+  const proposed = rows.filter((r) => r.disposition === "proposed");
+  const lines = [head, ""];
+  if (proposed.length === 0) {
+    lines.push("The pass ran over the active corpus and proposed nothing to promote.");
+  } else {
+    lines.push("PROPOSED — ratify by landing each entry at the named layer in a reviewed PR:");
+    for (const { result } of proposed) {
+      const to = result.promotedEntry?.layer ?? "?";
+      const confidence = result.verdict?.confidence ?? 0;
+      lines.push(`- ${result.entryId} -> ${to} (confidence ${confidence}) — ${result.verdict?.rationale ?? ""}`);
+    }
+  }
+  const declined = rows.filter((r) => r.disposition !== "proposed");
+  if (declined.length > 0) {
+    lines.push("", "DECLINED, by reason — each arm is a different decision, not one bucket:");
+    for (const { result, disposition } of declined) {
+      lines.push(`- ${result.entryId}: ${disposition} — ${result.reason}`);
+    }
+  }
+  lines.push("", "NOTHING ABOVE HAS BEEN WRITTEN. A promotion is a proposal; the Architect ratifies it in a PR.");
+  return lines.join("\n");
 }
 
 // ── Consolidation contradiction detection (W1-T88, ratifies P14, extends W1-T33) ──
