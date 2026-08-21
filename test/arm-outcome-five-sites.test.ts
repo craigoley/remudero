@@ -8,6 +8,8 @@ import {
   armIfVerdictPermits,
   armReportPhrase,
   armAutoMerge,
+  armAutoMergeDetailed,
+  armFailureAction,
   type ArmDeps,
   type ArmOutcome,
 } from "../src/run-task.js";
@@ -289,6 +291,133 @@ test("THE KEY: the literal RETRO is refused where runId arms, against one identi
   assert.match(said[0], /no ledgered review.posted verdict found/, "the refusal names itself, to stdout only");
   assert.equal(withRunId, "armed", "the id the trailer actually carries finds the verdict and arms");
   assert.equal(armCalls, 1, "exactly one real arm was issued — the key repair proven against one unchanged ledger");
+});
+
+// ── W1-T1079 — a failed arm no longer discards the error text it received ───────────
+// Same "one ledger, permits the arm" fixture THE KEY test above already proves reaches
+// `attemptArm` for real; here `armAuto` throws instead of succeeding, driving the exact catch
+// branch that used to return the bare string "arm-error-ignored" with `msg` going nowhere.
+function permittingArmDeps(headSha: string, taskId: string, overrides: Partial<ArmDeps> = {}): ArmDeps {
+  return {
+    headSha: () => headSha,
+    ledgerLines: () => [{ step: "review.posted", task_id: taskId, head_sha: headSha, state: "success" }],
+    armAuto: () => {
+      throw { stderr: "should be overridden by the test" };
+    },
+    mergeDirect: () => assert.fail("no direct merge should be reached by this fixture"),
+    disableAuto: () => assert.fail("nothing is disarmed here"),
+    say: () => {},
+    ...overrides,
+  };
+}
+
+test("W1-T1079: a failed arm records the error text it received", () => {
+  const HEAD = "beefcafe1234beefcafe1234beefcafe1234bee";
+  const TASK_ID = "W1-T1079";
+  // A REAL non-clean-status refusal shape (a missing review), not a network blip and not the
+  // clean-status case — exactly the shape that used to vanish into "arm-error-ignored" with no
+  // trace of what gh actually said.
+  const ERROR_TEXT = "GraphQL: Pull request Review Decision is required before merging (mergePullRequest)";
+  const said: string[] = [];
+  const deps = permittingArmDeps(HEAD, TASK_ID, {
+    armAuto: () => {
+      throw { stderr: ERROR_TEXT };
+    },
+    say: (m) => void said.push(m),
+  });
+  const r = recorder();
+
+  const outcome = armAndLogOutcome(
+    "https://github.com/craigoley/remudero/pull/1079",
+    TASK_ID,
+    r.log,
+    (prUrl, taskId) => armAutoMergeDetailed(prUrl, taskId, deps),
+  );
+
+  assert.equal(outcome, "arm-error-ignored", "sanity: this is still the outcome the classifier not matching direct-merge produces");
+  assert.equal(r.steps.length, 1, "exactly one ledger line for this attempt");
+  assert.equal(r.steps[0].step, "automerge.arm_failed", "W1-T1052: an attempted-and-failed arm files under arm_failed");
+  assert.equal(
+    r.steps[0].extra?.error,
+    ERROR_TEXT,
+    "the row carries the RAW text gh returned, not a summary or the classifier's own label",
+  );
+  assert.ok(
+    said.some((m) => m.includes(ERROR_TEXT)),
+    "the console line also names it (deps.say), same as the direct-merge-failed branch already did for msg2",
+  );
+});
+
+// ── W1-T1079 — armFailureAction no longer assumes transience by default ─────────────
+test("W1-T1079: a non clean-status failure is not classified transient by default", () => {
+  const PERMANENT_LOOKING = "GraphQL: Pull request Review Decision is required before merging (mergePullRequest)";
+
+  assert.equal(
+    armFailureAction(PERMANENT_LOOKING),
+    "permanent",
+    "an ordinary refusal with no network/rate-limit signature must not default to transient",
+  );
+  assert.notEqual(armFailureAction(PERMANENT_LOOKING), "transient");
+
+  // POSITIVE CONTROL — the third case is genuinely reachable, not just a renamed always-permanent
+  // default: a signature that plausibly IS a blip still classifies as transient.
+  assert.equal(
+    armFailureAction("connect ETIMEDOUT 140.82.112.3:443"),
+    "transient",
+    "sanity: a genuine network blip still has somewhere to land other than permanent",
+  );
+});
+
+// ── W1-T1079 — the clean-status case is an unchanged regression lock ────────────────
+test("W1-T1079: the clean-status case still routes to the direct merge", () => {
+  // The classifier itself, byte for byte the pre-existing behavior.
+  assert.equal(armFailureAction("GraphQL: Pull request is in clean status"), "direct-merge");
+
+  // And the BEHAVIOR: attemptArm still falls through to the direct-merge completion, unaffected
+  // by the classifier gaining a third answer for the branch it does NOT take here.
+  const HEAD = "cafebabe1234cafebabe1234cafebabe1234caf";
+  const TASK_ID = "W1-T1079-direct";
+  const said: string[] = [];
+  const deps = permittingArmDeps(HEAD, TASK_ID, {
+    armAuto: () => {
+      throw { stderr: "GraphQL: Pull request is in clean status" };
+    },
+    mergeDirect: () => {},
+    say: (m) => void said.push(m),
+  });
+  const r = recorder();
+
+  const outcome = armAndLogOutcome(
+    "https://github.com/craigoley/remudero/pull/1079",
+    TASK_ID,
+    r.log,
+    (prUrl, taskId) => armAutoMergeDetailed(prUrl, taskId, deps),
+  );
+
+  assert.equal(outcome, "direct-merged");
+  assert.deepEqual(r.steps.map((s) => s.step), ["automerge.armed", "automerge.clean_status_direct_merge"]);
+  assert.equal(r.steps[0].extra?.error, undefined, "a completed direct merge is a success, not an ignored error");
+  assert.ok(said.some((m) => m.includes("clean_status_direct_merge")));
+});
+
+// ── W1-T1079 — a successful arm stays exactly as before ─────────────────────────────
+test("W1-T1079: a successful arm is unchanged and records no error", () => {
+  const HEAD = "decafbad1234decafbad1234decafbad1234dec";
+  const TASK_ID = "W1-T1079-armed";
+  const deps = permittingArmDeps(HEAD, TASK_ID, { armAuto: () => {} });
+  const r = recorder();
+
+  const outcome = armAndLogOutcome(
+    "https://github.com/craigoley/remudero/pull/1079",
+    TASK_ID,
+    r.log,
+    (prUrl, taskId) => armAutoMergeDetailed(prUrl, taskId, deps),
+  );
+
+  assert.equal(outcome, "armed");
+  assert.deepEqual(r.steps.map((s) => s.step), ["automerge.armed"]);
+  assert.equal(r.steps[0].extra?.error, undefined, "a real arm never had an error to lose in the first place");
+  assert.ok(!("error" in (r.steps[0].extra ?? {})), "no error key at all, not merely an undefined one");
 });
 
 // ── 11: the console string ──────────────────────────────────────────────────────────

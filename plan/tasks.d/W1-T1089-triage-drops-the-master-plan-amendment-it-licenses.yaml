@@ -1,0 +1,124 @@
+- id: W1-T1089
+  title: "`rmd triage` stages only `plan/` while its own prompt and guards license a MASTER-PLAN.md amendment — the edit is never committed and is destroyed with the worktree, and neither Architect filing lane regenerates the line-numbered plan/plan-index.json the way retro and approve already do"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: |
+    TWO DEFECTS ON ONE CODE PATH, BOTH READ OUT OF THE SOURCE AT HEAD.
+    (1) THE TRIAGE LANE DROPS THE AMENDMENT IT INVITES. `triagePrompt` (src/lib/triage.ts) tells the
+    Architect in terms that `MASTER-PLAN.md remains a legitimate target for a plan amendment`;
+    `decideTriage` filters non-plan files with `!f.startsWith("plan/") && f !== "MASTER-PLAN.md"`, and
+    `nonPlanFilesInDiff` carries the same carve-out with a comment saying a triage may legitimately
+    touch it. But `triageCommand` (src/run-task.ts) stages with `git add -A -- plan/` and, on the
+    propose path, a second `git add -A -- plan/feedback/`. MASTER-PLAN.md lives at the repo ROOT and
+    matches NEITHER pathspec. The triage worker has no Bash tool, so it cannot stage or commit
+    anything itself; after the PR opens, `worktreeRemove` deletes the worktree. A plan amendment
+    written by a triage Architect is therefore discarded SILENTLY — the run still reports PROPOSED, the
+    PR still opens, the post-hoc plan-only guard sees nothing stray because the file never entered the
+    diff, and nothing anywhere says a file was dropped. `rmd approve` and `rmd plan` both stage
+    `plan/ MASTER-PLAN.md` (run-task.ts's approve path; `applyPlanProposalCommit`,
+    src/lib/plan-architect.ts), so triage is the lone outlier.
+    (2) NEITHER FILING LANE REGENERATES THE INDEX, AND THE INDEX IS LINE-NUMBERED.
+    scripts/generate-plan-index.mjs emits one entry per `## ` heading as `{heading, line, summary}` —
+    `line: idx + 1`. So ANY line-count change to MASTER-PLAN.md invalidates every entry below the edit,
+    not merely a new heading: an insertion of two lines near the top reflows the whole file while the
+    heading COUNT is unchanged. `regeneratePlanIndexAndCommit`/`regeneratePlanIndexFile`
+    (src/lib/plan-pr-emitter.ts, the W1-T136 fix for #287) have exactly TWO call sites in the tree:
+    retro (run-task.ts) and approve (run-task.ts). `applyPlanProposalCommit` has none, and neither does
+    the triage commit. THE GATE IS REAL AND POST-HOC: test/plan-index.test.ts asserts the committed
+    plan/plan-index.json is not stale and runs under `npm run test:ci` on every PR (.github/workflows/
+    ci.yml), so the lane that CAN legitimately amend MASTER-PLAN.md (`rmd plan`) opens PRs that go RED
+    on freshness, with no Architect able to repair them — the worker has no shell, and the harness has
+    already returned.
+    WHY THIS IS THE FIX AND NOT A DOCUMENTATION EDIT. feedback#fb-1785853266240-841899 reported this as
+    a wording defect — a rule said `adding a ## heading` where the mechanism needs `any line-count
+    change`. RECON RESULT: NO SUCH RULE EXISTS AT HEAD. `plan-index` appears in CLAUDE.md exactly once,
+    inside an unrelated `bodyContradictsDiff` fixture, and nowhere in docs/ORIENTATION.md as a
+    maintenance instruction. There is nothing narrow to widen; there is an unwritten rule that two
+    machine lanes already implement and two do not. Closing it in code makes the rule unnecessary for
+    every machine lane, and the generator already names the remedy for a human editing by hand
+    (`is STALE -- ... Run 'npm run plan-index' and commit the result.`).
+  design: |
+    ONE INVARIANT, STATED ONCE: a lane whose contract permits a MASTER-PLAN.md edit must STAGE that
+    edit and must ship a plan index regenerated FROM it.
+
+    (i) CONSOLIDATE ON THE EXISTING SHARED FUNCTION RATHER THAN ADDING A THIRD COPY.
+    `applyPlanProposalCommit(cwd, message)` already does `git add -A -- plan/ MASTER-PLAN.md` then
+    `git commit -m`, and already exists to be the ONE stage-and-commit both the harness and its tests
+    invoke. Teach it to regenerate the index FIRST — through `regeneratePlanIndexFile` from
+    src/lib/plan-pr-emitter.ts, never a reimplementation of the generator's parsing (the same
+    never-reimplement rule that module's own doc states) — and route the triage propose-path commit
+    through it. Ordering is load-bearing and approve already proves it: regenerate BEFORE the single
+    `git add`, so the regenerated file is swept into the same commit and needs no second one.
+
+    (ii) THE SECOND TRIAGE COMMIT STAYS NARROW. The post-PR `proposal_pr` write is deliberately scoped
+    to `plan/feedback/` and must remain so: it runs after the PR exists and has nothing to do with a
+    plan amendment. Do not widen it.
+
+    (iii) FAILURE OF THE GENERATOR MUST NOT DESTROY THE FILING. Both existing call sites wrap
+    regeneration in try/catch and log `plan_index.regen.error` rather than throwing, because a lost
+    index is a red check while a thrown exception is a lost proposal. Keep that discipline, and keep
+    the log key so the existing ledger reader sees no new vocabulary.
+
+    (iv) THE FALSIFIER IS THE TEST, IN BOTH DIRECTIONS, OVER A REAL FIXTURE REPO. Seed a git worktree
+    with a MASTER-PLAN.md and a matching committed plan/plan-index.json; edit MASTER-PLAN.md by
+    INSERTING TWO LINES ABOVE AN EXISTING HEADING WITHOUT ADDING ONE (the precise case the old folklore
+    missed: heading count unchanged, every line number below it wrong); run the real commit path; then
+    assert (a) the committed tree contains the MASTER-PLAN.md edit, and (b) the committed
+    plan/plan-index.json byte-equals a fresh regeneration. A variant with the regeneration step
+    suppressed must FAIL assertion (b), and a variant that stages the old way must fail (a) — a test
+    that cannot fail proves nothing.
+
+    (v) NO NEW PROSE RULE IS SHIPPED BY THIS TASK. See the rationale: the rule the feedback quoted does
+    not exist, and once every machine lane regenerates, the only reader who needs it is a human editing
+    MASTER-PLAN.md by hand, who already gets the generator's own remedial message from a red check.
+    CLAUDE.md is under a zero-headroom byte ratchet (scripts/claude-md-budget-ratchet.mjs), so a line
+    there would have to be bought with a fold; that trade is not worth making for a case the machine
+    now handles. State this reasoning in the PR body so the decision is on the record rather than an
+    omission.
+
+    EXPLICITLY NOT IN SCOPE: changing what the plan index CONTAINS (line numbers are what makes it
+    useful for retrieval — W1-T37); adding a git hook (there are none in this repo and introducing one
+    changes every contributor's local setup); the retro and approve lanes, which are already correct;
+    and any change to the plan-only guards, which already admit MASTER-PLAN.md.
+  acceptance:
+    - claim: "a triage proposal that amends MASTER-PLAN.md carries that amendment in its own commit rather than discarding it"
+      proof: "unit test: test/architect-lane-master-plan-commit.test.ts"
+    - claim: "a proposal commit touching MASTER-PLAN.md ships a plan index regenerated from it even when no heading was added"
+      proof: "unit test: test/architect-lane-master-plan-commit.test.ts"
+    - claim: "the shared proposal commit regenerates through the plan-PR emitter rather than reimplementing the generator"
+      proof: "grep: regeneratePlanIndexFile( in src/lib/plan-architect.ts"
+  risk: high
+  origin: feedback#fb-1785853266240-841899
+  plan_refs: ["§7B", "§5B", "W1-T37", "W1-T136"]
+  files: [src/run-task.ts, src/lib/plan-architect.ts, test/architect-lane-master-plan-commit.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED FROM feedback#fb-1785853266240-841899 (part 2 of 2; part 1 is W1-T1088, a documentation
+    defect in the proof dialect — different mechanism, different files, deliberately unbundled).
+    verify:auto — every claim is decidable in-process against a seeded fixture repo driven through the
+    REAL commit function and the REAL generator; nothing here needs an operator to watch a run.
+    risk:high IS RULE 19 SPAN AND IS ALSO HONEST ABOUT THE PATH. `files:` spans src/run-task.ts, a lib
+    module and a new test, so `sizingViolation` would fire at medium. The path itself is the one every
+    triage and plan filing commits through, which argues the same way: a mistake here does not corrupt
+    a plan, it fails to open a PR at all, and that is loud.
+    budget_usd 65 — one shared function taught two lines, one call site rerouted, and a two-direction
+    fixture test that must build a real git repo and run the real generator.
+    ON THE PROOFS. test/architect-lane-master-plan-commit.test.ts does not exist yet: a FORWARD
+    REFERENCE TO A PATH, which is the sanctioned safe form, and it is declared in `files:` so the
+    worker creates it. The grep names a SYMBOL WITH ITS CALL PAREN in a declared file — the call-site
+    form the linter itself demands — and it reads ZERO in src/lib/plan-architect.ts at head (that file
+    contains no occurrence of `plan-index` in any form), so it DISCRIMINATES rather than landing
+    executed_stale. Every proof path is declared (W1-T310).
+    THE EVIDENCE, SO A REVIEWER NEED NOT RE-DERIVE IT: `git add -A -- plan/` and
+    `git add -A -- plan/feedback/` are triageCommand's only two staging calls; `applyPlanProposalCommit`
+    (src/lib/plan-architect.ts) stages `plan/ MASTER-PLAN.md`; the approve path stages the same pair and
+    calls `regeneratePlanIndexFile` immediately before it; retro calls `regeneratePlanIndexAndCommit`;
+    those are the only two regeneration call sites in src/. scripts/generate-plan-index.mjs stores
+    `line: idx + 1` per `## ` heading, and test/plan-index.test.ts asserts the committed index is fresh
+    under `npm test`.
+    NO depends_on: every function this needs is already exported and merged.

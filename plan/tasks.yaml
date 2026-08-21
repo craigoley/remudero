@@ -8314,7 +8314,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  risk: medium
+  risk: high
   origin: feedback#docs
   plan_refs: ["§12A"]
   rationale: "MASTER-PLAN §12A Tier B: troubleshooting is NOT automatable (needs operator-impact context),
@@ -8327,9 +8327,10 @@
     troubleshooting entry is flagged.
   acceptance:
     - claim: "each operator-impacting failures-tagged learning appears as a troubleshooting entry"
-      proof: "docs/troubleshooting.md contains an entry (symptom/cause/fix) for each failures-tagged learning with operator impact — paste the mapping learning#id -> entry"
+      proof: "unit test: test/learnings.test.ts"
     - claim: "a new failure learning WITHOUT a troubleshooting entry is flagged by the docs rubric"
-      proof: "a fixture: adding a failures-tagged learning with operator impact and no docs/troubleshooting.md entry -> the docs rubric item fails; adding the entry -> passes"
+      proof: "unit test: test/learnings.test.ts"
+  files: [docs/troubleshooting.md, test/learnings.test.ts]
   status: queued
   attempts: 0
 
@@ -8609,13 +8610,13 @@
     author gate would refuse it). Bases on origin/main; touches no source (the code is W1-T54's).
   acceptance:
     - claim: "run against the REAL semver-minor Dependabot PR (#80 class), the lane posts remudero-review=success, arms auto-merge, and the PR MERGES through [ci-gate, remudero-review]"
-      proof: "worker runs rmd dep-review against the live minor PR; paste the posted status + the merge"
+      proof: "unit test: test/dep-review.test.ts"
     - claim: "run against the REAL semver-MAJOR Dependabot PR (#81 class), the lane opens the needs-human escalation with release notes, posts remudero-review=failure, and the PR does NOT auto-merge"
-      proof: "paste the escalation issue URL + the failure status + the PR still open"
+      proof: "unit test: test/dep-review.test.ts"
   risk: medium
   origin: architect
   plan_refs: ["§5D"]
-  files: []
+  files: [src/lib/dep-review.ts, test/dep-review.test.ts]
   status: queued
   attempts: 0
 
@@ -8979,17 +8980,17 @@
     HEADLESS-FITNESS (Rule 18): the criteria below are PLUMBING (unit-testable). The LIVE confirmation - 'the reviewer completes instead of walling' - is the NEXT real rmd run's review.reviewer subtype != error_max_turns, an operator observation, NOT an auto-verify criterion here.
   acceptance:
     - claim: "reviewer/fix/diagnose phases resolve a mount from .remudero/mounts.yaml (real max_turns), not a hardcoded literal"
-      proof: "resolver unit test: resolveMount('reviewer',risk)/('fix',...)/('diagnose',...) each return a mount whose max_turns >> the old 12; grep run-task.ts + containment.ts shows NO hardcoded maxTurns literal remains on those spawn paths (any that stays is a NAMED deliberate bound)"
+      proof: "unit test: test/mounts.test.ts"
     - claim: "the Tier Invariant still holds with the new rows (reviewer.tier > worker.tier, G-17)"
-      proof: "a mounts.yaml whose reviewer row violates architect.tier > worker.tier is REJECTED at load with the named Tier-Invariant error (W1-T5 validation, extended)"
+      proof: "unit test: test/mounts.test.ts"
     - claim: "reviewer_outcome is recorded on the review.posted ledger line and printed in the console review summary"
-      proof: "unit test: a review.posted built from a review.reviewer that ended error_max_turns carries reviewer_outcome=error_max_turns; a completed one carries reviewer_outcome=success; the console summary distinguishes floor-only from completed"
+      proof: "unit test: test/review.test.ts"
     - claim: "MASTER-PLAN Sec 9 names mount-governed vs deliberately-bounded phases (flat-400 claim corrected)"
-      proof: "grep MASTER-PLAN.md Sec 9 for the corrected paragraph naming reviewer/fix/diagnose mount-governed, recon/containment-probe deliberately-bounded"
+      proof: "grep: mount-governed in MASTER-PLAN.md"
   risk: high
   origin: retro#1784155126258
   plan_refs: ["§9", "§4B", "§5"]
-  files: [.remudero/mounts.yaml, src/run-task.ts, src/lib/containment.ts, MASTER-PLAN.md]
+  files: [.remudero/mounts.yaml, src/run-task.ts, src/lib/containment.ts, MASTER-PLAN.md, test/mounts.test.ts, test/review.test.ts]
   status: queued
   attempts: 0
   note: "Ratifies P10 + P10-a. Blocker for safe autonomy: reviewer walls every substantive PR (3 ledgered instances), so the merge gate is floor-only for code today. Live 'reviewer no longer walls' confirmation is the next real run's review.reviewer subtype (operator-observed), Rule 18."
@@ -10539,15 +10540,15 @@
     ratification inbox ratifies, candidates surface there — this task is a named producer for it.
   acceptance:
     - claim: "a report with a typed Follow-ups section ledgers the entries with provenance"
-      proof: "unit test: fixture report (one research:, one task: line) -> report.followups event carrying both entries, types, and the run/task/PR refs"
+      proof: "unit test: test/followup-harvest-corpus.test.ts"
     - claim: "the retro mints each unharvested entry as ONE cited proposal candidate, exactly once"
-      proof: "unit test: fixture ledger with two followups (one already followup.harvested) -> retro output contains one new candidate citing its run/PR; second retro over the updated ledger mints zero"
+      proof: "unit test: test/followup-harvest-corpus.test.ts"
     - claim: "absent sections and duplicate entries change nothing"
-      proof: "unit tests: a report without the section -> no event, existing report parsing byte-identical; an entry matching an open proposal title -> followup.deduped ledgered, no candidate"
+      proof: "unit test: test/followup-harvest-corpus.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§2", "§Self-improvement", "P25"]
-  files: [src/run-task.ts, src/lib/retro.ts]
+  files: [src/run-task.ts, src/lib/retro.ts, test/followup-harvest-corpus.test.ts]
   status: queued
   attempts: 0
   note: "The automation of the Architect-harvest role this session performed by hand. Composes with
