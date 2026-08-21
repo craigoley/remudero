@@ -26,6 +26,7 @@ import {
   judgeStaleGitLocks,
   parseMemInfo,
   readAlivePhases,
+  readCurrentRunAlivePhases,
   readGitLocks,
   readPauseAgeMs,
   refuseUnsupportedArgs,
@@ -90,6 +91,55 @@ test("doctor: consecutive alive rows in sweep phase report dispatch starvation",
   // and the reader picks the phases out of real ledger rows, ignoring everything else
   const phases = readAlivePhases([aliveRow("sweep", "t1"), { step: "verdict", phase: "nope" }, aliveRow("dispatch", "t2")]);
   assert.deepEqual(phases, ["sweep", "dispatch"], "only daemon.alive rows contribute a phase");
+});
+
+// ── W1-T1099 — the predicate must match its own printed threshold ──────────────────────────────
+
+test("W1-T1099: a window with no dispatch phase is starved whatever the phases are", () => {
+  // MEASURED (rationale (1)): `retro, retro, retro` passed the OLD predicate, which checked
+  // literally for `sweep` and nothing else — a threshold string promising "some dispatch phase"
+  // enforced by a rule that only ever looked for one hardcoded non-dispatch phase.
+  assert.equal(judgeDispatchStarvation(["retro", "retro", "retro"]).verdict, "WARN");
+  assert.equal(judgeDispatchStarvation(["sweep", "sweep", "sweep"]).verdict, "WARN");
+  assert.equal(judgeDispatchStarvation(["sweep", "retro", "sweep"]).verdict, "WARN", "a mix of non-dispatch phases must still warn");
+});
+
+test("W1-T1099: a window containing a dispatch phase is still healthy", () => {
+  assert.equal(judgeDispatchStarvation(["sweep", "dispatch", "retro"]).verdict, "OK");
+  assert.equal(judgeDispatchStarvation(["dispatch", "dispatch", "dispatch"]).verdict, "OK");
+});
+
+test("W1-T1099: a replaced run's phases are not judged as the current run's", () => {
+  // MEASURED (rationale (2)): a run that stopped cleanly 90 minutes ago left daemon.alive rows
+  // behind; the CURRENT run has written a daemon.-prefixed row of its own but no daemon.alive row
+  // yet. Reading unfiltered would judge the dead run's `sweep, sweep, sweep` as if it were live.
+  const replaced = (ts: string) => ({ step: "daemon.alive", phase: "sweep", ts, run_id: "DAEMON-OLD" });
+  const currentTick = { step: "daemon.iteration", ts: "2026-08-21T13:49:45Z", run_id: "DAEMON-NEW" };
+  const lines = [replaced("2026-08-21T11:07:00Z"), replaced("2026-08-21T11:07:05Z"), replaced("2026-08-21T11:07:10Z"), currentTick];
+
+  const phases = readCurrentRunAlivePhases(lines);
+  assert.deepEqual(phases, [], "the replaced run's rows belong to DAEMON-OLD, not the current DAEMON-NEW run");
+
+  // and wired through the judge, the replaced run's `sweep, sweep, sweep` must NOT read as OK —
+  // it must not be seen at all, which is a stronger guarantee than merely re-judging it starved.
+  assert.equal(judgeDispatchStarvation(readAlivePhases(lines).slice(-3)).verdict, "WARN", "control: unfiltered, the old run's own rows are starved too");
+  assert.equal(judgeDispatchStarvation(phases).verdict, "WARN", "current run: unknown, not the old run's healthy-looking OK");
+});
+
+test("W1-T1099: a current run with no alive rows reports unknown", () => {
+  assert.equal(judgeDispatchStarvation([]).verdict, "WARN");
+  assert.match(judgeDispatchStarvation([]).measured, /UNKNOWN/);
+  // POSITIVE CONTROL: this must not be OK — the old form's "too few rows" branch degraded silently
+  // to healthy, which is the false-green rationale (iii) names.
+  assert.notEqual(judgeDispatchStarvation([]).verdict, "OK");
+
+  // wired end to end: a live daemon that has written its own daemon.-prefixed row this run, but has
+  // declined every candidate and so never entered a rung, writes zero daemon.alive rows (rationale
+  // (3): startInFlightTicker wraps a rung's body, not the tick).
+  const lines = [{ step: "daemon.iteration", ts: "2026-08-21T13:49:45Z", run_id: "DAEMON-NEW" }];
+  const phases = readCurrentRunAlivePhases(lines);
+  assert.deepEqual(phases, []);
+  assert.equal(judgeDispatchStarvation(phases).verdict, "WARN");
 });
 
 // ── criterion 3 — ledger freshness, needing no daemon ─────────────────────────────────────────
