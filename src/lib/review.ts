@@ -167,6 +167,17 @@ export type PostableReviewState = ReviewState | "pending";
  *                          degrades to the keyword floor rather than a false `executed_fail`.
  *   exec-error          — the whitelisted check threw or timed out (or a `unit test:`/`grep:`
  *                          proof's named PATH is simply absent on the checkout).
+ *   runtime-broken       — (W1-T1077) a PURE-PATH (non-name-filtered) `unit test:` proof's file
+ *                          DID exist and DID get spawned, but its TAP stdout's only `not ok` line
+ *                          names the FILE ITSELF ({@link isFileWrapperResultName}) — no real
+ *                          subtest inside it ever reported a verdict. A broken `--import` loader, an
+ *                          uncaught module-load error: the run never reached a conclusion about the
+ *                          CRITERION, so it is not evidence the criterion is unmet. Distinct from the
+ *                          generic `exec-error` above (a timeout, ENOENT, or a genuinely absent path)
+ *                          because THIS cause is diagnosable from the stream already in hand — see
+ *                          {@link execWhitelistedProof}'s doc for the measured TAP shapes that tell
+ *                          this apart from a genuine named-test failure (which stays `executed_fail`,
+ *                          untouched, carrying no `proof_skip` at all).
  *   no-exec-context      — no PR-head checkout was supplied at all; execution was never attempted
  *                          for ANY criterion.
  *   forward-reference    — (W1-T456) an exact-path `unit test:` proof names a file ABSENT on the
@@ -186,6 +197,7 @@ export type ProofSkipReason =
   | "dialect-parse-error"
   | "prose-no-match"
   | "exec-error"
+  | "runtime-broken"
   | "no-exec-context"
   | "forward-reference";
 
@@ -1702,11 +1714,39 @@ export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFil
  * an environment/authoring problem, not evidence the criterion is unmet — so
  * it degrades to `exec_error` (the keyword floor) exactly like a thrown error.
  *
- * NAME-FILTERED PROOFS ARE THE ONE EXCEPTION to "the exit code is the verdict"
- * (W1-T178, round 2): a bare TEST NAME compiles to `--test-name-pattern` over
- * the WHOLE suite glob (`test/**\/*.test.ts`, {@link TEST_GLOB}), so the exit
- * code reflects EVERY file in that glob, not just the one named test a
- * criterion cares about. FIXTURE, hit live implementing this very task:
+ * A PURE-PATH (single-file, non-name-filtered) `unit test:` PROOF'S OWN CLEAN
+ * NONZERO EXIT ALSO THROWS NOW, when it is not a genuine named-test failure
+ * (W1-T1077). MEASURED live on this exact command shape
+ * (`node --test --import tsx --import <hygiene> <file>`): a genuinely FAILING
+ * test reports a top-level `not ok` line naming the TEST'S OWN TITLE
+ * (`code: 'ERR_ASSERTION'`); a BROKEN RUNTIME — an unresolvable `--import`
+ * loader, an uncaught module-load error — reports a top-level `not ok` line
+ * naming the FILE ITSELF (`not ok 1 - test/<file>.test.ts`,
+ * `code: 'ERR_TEST_FAILURE'`), with no real subtest ever registering, and BOTH
+ * shapes exit 1 identically. Before this fix the exit code alone decided
+ * `"fail"` either way, so a run that never reached a verdict about the
+ * criterion was refused as though it had. `pureTestNeverExecutedWrapperName`
+ * reads the SAME TAP stdout already captured below for this reason: if every
+ * `not ok` line is the file's own wrapper name ({@link isFileWrapperResultName},
+ * the SAME predicate {@link nameFilteredOutcome} already uses for the
+ * name-filtered branch below), the run never executed and this throws instead
+ * of returning `"fail"` — degrading to `exec_error` at the caller exactly like
+ * a timeout or a spawn error, never a false `executed_fail`. A genuine
+ * `ERR_ASSERTION` on a real subtest is UNCHANGED: still `"fail"`, still hard.
+ * An ABSENT file is also unchanged: `node --test` reports NO TAP output at all
+ * for a missing path (measured: empty stdout, `Could not find '<path>'` on
+ * stderr, which this function never reads), so
+ * `pureTestNeverExecutedWrapperName` finds no wrapper name either and this
+ * still falls through to `"fail"` — absence stays exactly as hard-refused as
+ * before, outside W1-T456's own forward-reference carve-out (checked by the
+ * caller, before this function is ever invoked).
+ *
+ * NAME-FILTERED PROOFS GO FURTHER STILL — the exit code is NEVER the verdict
+ * for them, not even as a fallback (W1-T178, round 2): a bare TEST NAME
+ * compiles to `--test-name-pattern` over the WHOLE suite glob
+ * (`test/**\/*.test.ts`, {@link TEST_GLOB}), so the exit code reflects EVERY
+ * file in that glob, not just the one named test a criterion cares about.
+ * FIXTURE, hit live implementing this very task:
  * `test/serve.find.test.ts` runs its file-scope `after` (`browser.close()`)
  * even on a pattern that matched none of ITS tests, which turns the ENTIRE
  * glob's exit code nonzero.
@@ -1783,8 +1823,61 @@ export function execWhitelistedProof(
     // absence; the former degrades to exec_error (the keyword floor) rather
     // than false-blocking on an environment/authoring problem.
     if (whitelisted.kind === "grep" && err.status === 2) throw err;
+    // W1-T1077: a PURE-PATH (non-name-filtered) `unit test:` proof's own clean nonzero exit is
+    // NOT automatically a genuine fail either — see this function's doc comment for the measured
+    // TAP shapes. Read the SAME stdout the name-filtered branch above already reads; only when
+    // every `not ok` line is the file's own wrapper name (no real subtest ever reported) does the
+    // run count as never-executed. An absent file reports NO TAP lines at all (stdout is empty),
+    // so this finds no wrapper name and falls through to the unchanged `"fail"` below — absence
+    // stays exactly as hard-refused as before.
+    if (whitelisted.kind === "test" && !whitelisted.nameFiltered) {
+      const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
+      const wrapperName = pureTestNeverExecutedWrapperName(stdout);
+      if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName);
+    }
     return "fail"; // a single-file/grep proof's own nonzero exit is a genuine fail
   }
+}
+
+/**
+ * (W1-T1077) Thrown by {@link execWhitelistedProof} for a pure-path `unit test:` proof whose only
+ * failing TAP line names its own file wrapper ({@link pureTestNeverExecutedWrapperName}) — the run
+ * never reached a verdict about the criterion. {@link judgeCriterion} recognises this via
+ * `instanceof` and records BOTH the classification (`proof_skip: "runtime-broken"`) and the
+ * wrapper name already parsed here — design (iv)'s "record the discriminator, not the stream": a
+ * bounded fact on the ledger, never the raw TAP/stdout capture, which would be unbounded and would
+ * carry the proof's runtime environment into a durable row.
+ */
+class PureProofNeverExecutedError extends Error {
+  constructor(readonly wrapperName: string) {
+    super(
+      `pure-path proof's file (${wrapperName}) never reached a real subtest — only its own TAP ` +
+        "wrapper reported `not ok`, meaning the file failed to load/run as a whole (a broken " +
+        "runtime: an unresolvable --import loader, an uncaught module-load error, …), not that the " +
+        "test it names actually failed",
+    );
+  }
+}
+
+/**
+ * (W1-T1077) A pure-path (single-file, non-name-filtered) `unit test:` proof's own TAP stdout: the
+ * file's own wrapper name (`test/foo.test.ts`) when EVERY `not ok` line in the stream names the
+ * file itself ({@link isFileWrapperResultName} — the SAME predicate {@link nameFilteredOutcome}
+ * already applies to draw this exact line for the name-filtered branch, reused rather than
+ * reimplemented) and no real subtest ever reported `not ok`; `undefined` otherwise — either a real
+ * subtest genuinely failed (a real, named `executed_fail`, unchanged) or the stream carries no
+ * `not ok` line at all (an absent file: MEASURED empty stdout, so nothing here to misread as a
+ * wrapper failure — absence keeps falling through to the caller's ordinary `"fail"`, unchanged).
+ */
+function pureTestNeverExecutedWrapperName(stdout: string): string | undefined {
+  let wrapperName: string | undefined;
+  for (const line of stdout.split("\n")) {
+    const m = TAP_RESULT_LINE_RE.exec(line);
+    if (!m || m[1] !== "not ok") continue;
+    if (!isFileWrapperResultName(m[2])) return undefined; // a real subtest failed — genuine fail, untouched
+    wrapperName = m[2];
+  }
+  return wrapperName;
 }
 
 /** A file's own trivial TAP wrapper line (`ok N - test/foo.test.ts`) reporting
@@ -2333,9 +2426,23 @@ export function judgeCriterion(
             met = false;
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
           }
-        } catch {
-          proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict above
-          proofSkip = "exec-error";
+        } catch (e) {
+          proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict for every OTHER thrown cause
+          if (e instanceof PureProofNeverExecutedError) {
+            // W1-T1077 design (iv): record the DISCRIMINATOR, not the stream — the classification
+            // plus the file-wrapper name execWhitelistedProof already parsed, so a `review.posted`
+            // row can say WHICH of "real failure" / "broken runtime" a failed pure-path proof was,
+            // never the raw TAP capture (unbounded, and it would carry the run's environment into
+            // a durable ledger row).
+            proofSkip = "runtime-broken";
+            reason =
+              `${reason} — NOTE: proof's file (${e.wrapperName}) never reached a real subtest — its ` +
+              `own TAP wrapper reported the failure (a broken runtime: an unresolvable --import ` +
+              `loader, an uncaught module-load error, …), not the named test; not executed, keyword ` +
+              `floor applied`;
+          } else {
+            proofSkip = "exec-error";
+          }
         }
       }
     } else if (isMalformedDialectProof(criterion.proof)) {
