@@ -6159,6 +6159,20 @@ async function runTask(
      * without writing a fixture policy file.
      */
     spawnWallClockBoundMs?: number;
+    /**
+     * W1-T1062 (DISPATCH-PATH OWNER THREADING): overrides the owner this run clones from,
+     * gateways against, and opens its PR/issues against — every one of the eleven uses fed by
+     * the single `owner` binding just below. `resolveDaemonTarget`'s `--repo <owner>/<name>`
+     * resolution (via the SAME `resolveReviewTarget` splitter `rmd review --repo` already
+     * uses) is the one production source that sets this, threaded through `daemonCommand`'s
+     * `runOne` closure. Omitted — every OTHER caller (manual `rmd run-task`, `rmd drain`,
+     * `rmd wipe-test`) — this is `undefined` and `owner` resolves from THIS checkout's own
+     * origin (`resolveOwner()`), byte-identical to before this option existed. Threading this
+     * WITHOUT the daemon-side fix (or vice versa) is the partial-fix hazard the task record
+     * warns about: cloning under one owner and opening the PR under another is worse than
+     * today's honest self-owner-only behaviour.
+     */
+    owner?: string;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -6168,7 +6182,7 @@ async function runTask(
   const recordDecisionFn = opts.recordDecision ?? recordDecision;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
-  const owner = resolveOwner();
+  const owner = opts.owner ?? resolveOwner();
   // W1-T1045: THE CLOCK BOUND — read here, once, alongside every other opts-defaulted knob
   // above, and threaded into the `spawn` wrap-once shape below so every real dispatch spawn
   // (recon/implement/diagnose/decision-resume) gets it BY CONSTRUCTION, the same rationale
@@ -14924,12 +14938,20 @@ export async function daemonCommand(
         // GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
+        // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
+        // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
+        // owner-qualified `--repo owner/name`) never reaches `runTask` — the dispatched run
+        // would silently fall back to `resolveOwner()` (THIS checkout's own owner), cloning and
+        // opening its PR against the WRONG owner. That partial fix is worse than today's honest
+        // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
+        // refuses.
         runOne: (taskId) =>
           runTask(taskId, {
             planPath: target.planPath,
             config,
             allowStale,
             skipGitSync: !!flagValue(rest, "--plan"),
+            owner: target.owner,
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
@@ -19536,24 +19558,30 @@ export interface DaemonTarget {
  * Resolve which repo/plan a `rmd daemon` run targets — PURE (no I/O), so the guard is
  * unit-testable. The daemon reads its plan from the CHECKOUT it runs in by default and scoped
  * the status gateway to a hardcoded "remudero"; this makes the target EXPLICIT:
- *   --repo <name>   scope the gateway to <owner>/<name> and read the plan from that repo's clone
+ *   --repo <name>         scope the gateway to THIS checkout's owner/<name> (bare name keeps
+ *                          the default owner — unchanged from before W1-T1062)
+ *   --repo <owner>/<name> scope the gateway to a FOREIGN owner's <name> — resolved through the
+ *                          SAME `resolveReviewTarget` splitter `rmd review --repo` already uses
+ *                          (W1-T1062: no parallel parser) — and read the plan from that clone
  *   --plan <path>   read the plan from an explicit file (overrides the derived path)
  *   --allow-self-target  acknowledge draining the daemon's OWN source repo (deliberate self-host)
  *   --dry-run       preview only (harmless — allowed even for self)
  * GUARD (W1-T12d): a bare `rmd daemon` would silently drain the repo that holds the daemon's own
  * source (self) unattended — REFUSED unless --allow-self-target (or --dry-run). Commissioning
  * targets the sandbox explicitly: `rmd daemon --repo remudero-sandbox`.
+ * W1-T1062 design (iii): `isSelf` compares BOTH owner and repo — this checkout's OWN repo name
+ * under a FOREIGN owner (`--repo other-owner/remudero`) is NOT self, so it can never reach the
+ * retro/auto-triage/github-posture hooks `daemonCommand` gates on `target.isSelf`.
  */
 export function resolveDaemonTarget(
   env: { selfOwner: string; selfRepo: string; repoRoot: string; reposDir: string },
   rest: string[],
 ): { target: DaemonTarget } | { error: string } {
-  const repoFlag = flagValue(rest, "--repo");
   const planFlag = flagValue(rest, "--plan");
   const allowSelf = rest.includes("--allow-self-target");
   const dryRun = rest.includes("--dry-run");
-  const repo = repoFlag ?? env.selfRepo;
-  const isSelf = repo === env.selfRepo;
+  const { owner, repo } = resolveReviewTarget({ owner: env.selfOwner, repo: env.selfRepo }, rest);
+  const isSelf = owner === env.selfOwner && repo === env.selfRepo;
   if (isSelf && !allowSelf && !dryRun) {
     return {
       error:
@@ -19565,7 +19593,11 @@ export function resolveDaemonTarget(
   const planPath =
     planFlag ??
     (isSelf ? join(env.repoRoot, "plan", "tasks.yaml") : join(env.reposDir, repo, "plan", "tasks.yaml"));
-  return { target: { owner: env.selfOwner, repo, planPath, isSelf, dryRun } };
+  // W1-T1062: the RESOLVED owner (bare `--repo <name>` ⇒ env.selfOwner, `--repo <owner>/<name>`
+  // ⇒ that owner — see resolveReviewTarget above), never env.selfOwner unconditionally. That one
+  // line was the hardcode the task record measured: a foreign-owner target's clone/gateway/PR
+  // all silently ran against THIS checkout's own owner instead of the one the operator named.
+  return { target: { owner, repo, planPath, isSelf, dryRun } };
 }
 
 /** Every `--option "label|detail"` in argv tail, in order given. */
