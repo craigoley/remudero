@@ -225,6 +225,7 @@ import {
   preflightFailureNotice,
   preflightSummaryPath,
   runCiParity,
+  runPreflightCoverage,
   runPreflightFast,
 } from "./lib/ci-parity.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
@@ -11491,17 +11492,29 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * `origin/main..HEAD` range so a caller can preflight an arbitrary range (e.g. re-checking
  * after amending).
  *
- * `--ci-parity` (W1-T294) and `--fast` (W1-T373) are each a SECOND/THIRD, ADDITIVE mode on
- * this same verb — never a second command, never a change to the three steps above, and never
- * a change to each other. `--ci-parity` runs {@link runCiParity}'s steps (one or more per
- * .github/workflows/ci.yml job — see lib/ci-parity.ts), which shells the FULL `npm run
- * test:ci` suite as part of the `ci` job's mirror and is therefore not a mode a worker can run
- * habitually. `--fast` runs {@link runPreflightFast}'s steps instead: the curated, seconds-
- * fast, network-free subset of deterministic npm-script gates (`FAST_GATE_STEPS`, lib/ci-
- * parity.ts) that actually blocks PRs — never the test suite. Either or both flags may be
- * passed; every mode's steps print after the hand-route steps, with the same independent-
- * step, print-everything, exit-non-zero-iff-any-failed discipline; omitting both flags leaves
- * the shipped hand route byte-for-byte unchanged.
+ * `--ci-parity` (W1-T294), `--fast` (W1-T373) and `--coverage` (W1-T1074) are each a SECOND/
+ * THIRD/FOURTH, ADDITIVE mode on this same verb — never a second command, never a change to
+ * the three steps above, and never a change to one another. `--ci-parity` runs
+ * {@link runCiParity}'s steps (one or more per .github/workflows/ci.yml job — see lib/ci-
+ * parity.ts), which shells the FULL `npm run test:ci` suite as part of the `ci` job's mirror
+ * and is therefore not a mode a worker can run habitually. `--fast` runs
+ * {@link runPreflightFast}'s steps instead: the curated, seconds-fast, network-free subset of
+ * deterministic npm-script gates (`FAST_GATE_STEPS`, lib/ci-parity.ts) that actually blocks
+ * PRs — never the test suite. `--coverage` runs {@link runPreflightCoverage} instead: JUST the
+ * diff-coverage gate, at author-time, on its OWN freshly self-derived `origin/main...HEAD`
+ * base — never a caller-supplied diff. It is OPT-IN AND SLOW BY CONSTRUCTION (minutes, not
+ * seconds — it shells the same full instrumented suite `--ci-parity`'s coverage-ratchet job
+ * does, because a coverage lcov needs the full suite and `--fast` cannot ever carry one, by
+ * design): it REFUSES rather than reports on an empty diff or a tree left dirty in a diffed
+ * file (the lcov and the diff must come from the same tree), and it will not report a PASS
+ * unless every changed source file actually has an lcov `SF:` instrumentation record — a file
+ * a scoped or partial run never loaded reports `UNPROVEN` and NAMES the file, rather than
+ * letting `scripts/diff-coverage.mjs`'s own vacuous-true-over-an-empty-set `OK` stand in for a
+ * real verdict. Any subset of these three flags may be passed; every mode's steps print after
+ * the hand-route steps, with the same independent-step, print-everything discipline (`--
+ * coverage`'s OWN steps short-circuit on an earlier refusal — see lib/ci-parity.ts — but a
+ * refusal still folds into the overall exit code exactly like any other mode's failure);
+ * omitting all three flags leaves the shipped hand route byte-for-byte unchanged.
  *
  * SUMMARY-FILE CONTAINMENT (W1-T455). A `deps.spawn` override means the caller is a test, not a
  * real worker, and a test has no business writing the orchestrator's adjudicated verdict — the
@@ -11511,7 +11524,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * (a real worker running the real binary) falls back to `preflightSummaryPath(repoRoot)`.
  */
 export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
-  const badArg = unknownArgError("preflight", rest, ["--from", "--to", "--summary-file"], ["--ci-parity", "--fast"]);
+  const badArg = unknownArgError("preflight", rest, ["--from", "--to", "--summary-file"], ["--ci-parity", "--fast", "--coverage"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -11524,6 +11537,7 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
   const result = runPreflight(repoRoot, { ...deps, range });
   const fast = rest.includes("--fast") ? runPreflightFast(repoRoot, { spawn: deps.spawn }) : undefined;
   const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
+  const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn }) : undefined;
 
   for (const step of result.steps) {
     console.log(step.detail);
@@ -11538,7 +11552,12 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
       console.log(step.detail);
     }
   }
-  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true);
+  if (coverage) {
+    for (const step of coverage.steps) {
+      console.log(step.detail);
+    }
+  }
+  const ok = result.ok && (fast?.ok ?? true) && (ciParity?.ok ?? true) && (coverage?.ok ?? true);
   console.log(
     ok
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
@@ -11567,7 +11586,7 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
   const injectedSpawn = deps.spawn !== undefined;
   const summaryPath = explicitSummaryFile ?? (injectedSpawn ? undefined : preflightSummaryPath(repoRoot));
   const summary = buildPreflightSummary({
-    steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? [])],
+    steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? []), ...(coverage?.steps ?? [])],
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAtMs,
     headSha: readHeadShaForSummary(),
