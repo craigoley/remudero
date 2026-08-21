@@ -15,6 +15,23 @@ raw: "AN ENV-HYGIENE TEST SCRUBS ANTHROPIC_API_KEY BUT NOT ANTHROPIC_BASE_URL �
   names the omission, this is documentation rather than a defect."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2368
+summary:
+  headline: Env-hygiene test fails—BASE_URL omitted from scrub list
+  what_happened: The test scrubs ANTHROPIC_API_KEY from output but omits
+    ANTHROPIC_BASE_URL. With the runner exporting BASE_URL, the test fails
+    consistently on this host—it looks like a regression but is actually
+    environmental, costing operator time to diagnose each run.
+  decision: Determine whether BASE_URL omission from the scrub list is deliberate
+    or an oversight.
+  options:
+    - label: Deliberate—test guards credentials only
+      consequence: Update the failure message to document why BASE_URL is
+        intentionally not scrubbed
+    - label: Oversight—add to scrub list
+      consequence: Add ANTHROPIC_BASE_URL to the scrub list; test passes and stops
+        generating false alarms
+    - label: Verify working-as-designed
+      consequence: If test passes on BASE_URL-free host and docs explain the omission,
+        close as intended behavior
