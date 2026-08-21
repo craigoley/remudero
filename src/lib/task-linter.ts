@@ -12,6 +12,7 @@ import {
 import {
   bestNearDuplicate,
   DEFAULT_DUPLICATE_CUTOFF,
+  DEFAULT_SHINGLE_K,
   type DuplicateCorpusEntry,
 } from "./knowledge-dedup.js";
 
@@ -1641,28 +1642,99 @@ export function advisoryRoutingViolations(task: Task): LintViolation[] {
 // pairwise score distribution over the live learnings corpus and open task titles that the
 // cutoff sits above.
 
-/** Every open task's (id, title) the caller supplies for {@link duplicateTitleViolations} to
- *  compare THIS task's title against. `undefined`/empty ⇒ the check is silent — same "no
- *  predicate, no opinion" contract {@link callSiteViolations} uses for `opts.moduleExists`. */
+/**
+ * W1-T1076: the shingle width the OPEN-PR SLUG corpus is scored at — 2, deliberately NOT
+ * {@link DEFAULT_SHINGLE_K}'s 3, and chosen per call exactly as `bestNearDuplicate`'s own
+ * `opts.k` was built to allow.
+ *
+ * WHY A SEPARATE CONSTANT AND NOT THE MODULE DEFAULT. Re-derived on the real predicate against
+ * origin/main over every shard in `plan/tasks.d/`, on the two pairs that were filed minutes apart
+ * on 2026-08-20 and that nothing caught:
+ *
+ *   pair A (W1-T1070/W1-T1071)  slug k=3 = 0.111  MISSED   slug k=2 = 0.200  caught
+ *   pair B (W1-T1074/W1-T1075)  slug k=3 = 1.000  caught   slug k=2 = 1.000  caught
+ *
+ * k=3 misses pair A outright. k=1 catches both and is unusable — the whole-plan false-positive
+ * load at cutoff {@link DEFAULT_DUPLICATE_CUTOFF} reads 196 pairs at k=1 against 34 at k=2 and 5
+ * at k=3 (re-derived, and every one of those counts moves as shards land — re-run it, never quote
+ * it). k=2 is the honest middle and pair A sits EXACTLY on the cutoff there, which is stated
+ * rather than smoothed over: this width catches that pair by the smallest possible margin.
+ *
+ * {@link DEFAULT_SHINGLE_K} itself is NOT changed — it is the measured default for the learnings
+ * corpus and the title consumer, and moving it is explicitly not this task's to do.
+ */
+export const DUPLICATE_SLUG_SHINGLE_K = 2;
+
+/** A plan shard path's `<id>` and filename `<slug>`, as a corpus entry whose `text` is the SLUG.
+ *  `undefined` for any path that is not a `plan/tasks.d/<id>-<slug>.yaml` shard — a PR's changed-
+ *  file list carries every kind of path, and only shard additions belong in the corpus. PURE. */
+export function shardSlugFromPath(path: string): DuplicateCorpusEntry | undefined {
+  const m = /(?:^|\/)tasks\.d\/(W1-T\d+[a-z]?)-(.+)\.ya?ml$/.exec(path.trim());
+  return m ? { id: m[1], text: m[2] } : undefined;
+}
+
+/**
+ * The SLUG corpus for {@link duplicateTitleViolations}, built from a set of changed-file paths.
+ * Deduped by id, first path per id wins. PURE — the caller does the GitHub read and hands the
+ * paths in, the same seam `opts.moduleExists` and `opts.resolveNameFilteredCandidates` already
+ * use, so this module still never reaches disk or network.
+ *
+ * THE TEXT IS THE SLUG ALONE, NEVER SLUG-PLUS-TITLE. Joining the two is measurably WORSE, which
+ * is counter-intuitive enough to be worth stating where an implementer will read it: at k=2 the
+ * joined text scores 0.049 and 0.121 on the two pairs above, against the slug's own 0.200 and
+ * 1.000. The house title style is long and deliberately distinctive prose, so it floods the
+ * shingle set and dilutes the signal the short topical slug carries.
+ */
+export function planShardSlugCorpus(paths: readonly string[]): DuplicateCorpusEntry[] {
+  const byId = new Map<string, DuplicateCorpusEntry>();
+  for (const path of paths) {
+    const entry = shardSlugFromPath(path);
+    if (entry && !byId.has(entry.id)) byId.set(entry.id, entry);
+  }
+  return [...byId.values()];
+}
+
+/** The corpus the caller supplies for {@link duplicateTitleViolations} to compare THIS task
+ *  against. `undefined`/empty ⇒ the check is silent — same "no predicate, no opinion" contract
+ *  {@link callSiteViolations} uses for `opts.moduleExists`.
+ *
+ *  W1-T1076 CHANGED WHAT `text` HOLDS, and the field name is kept for continuity with W1-T420
+ *  rather than because it is still perfectly descriptive: the live caller now supplies each OPEN
+ *  PR's added shard FILENAME SLUG (see {@link planShardSlugCorpus}), because the title scores
+ *  0.000 and 0.054 at k=3 on the two pairs this check exists to catch — wiring the corpus without
+ *  changing what is scored would have caught neither. A caller that still passes titles gets
+ *  W1-T420's original behaviour unchanged. */
 export type OpenTaskTitleCorpus = readonly DuplicateCorpusEntry[];
 
-/** ADVISORY (never blocks): this task's title scores >= cutoff against some OTHER open task's
- *  title. Absent `opts.openTaskTitles` ⇒ silent (the caller hasn't supplied a corpus). */
+/** ADVISORY (never blocks): this task scores >= cutoff against some OTHER entry in the supplied
+ *  corpus. Absent `opts.openTaskTitles` ⇒ silent (the caller hasn't supplied a corpus).
+ *
+ *  W1-T1076: scores `opts.duplicateSlug` — this shard's own filename slug — when the caller
+ *  supplies one, at `opts.duplicateShingleK`. Absent either, it falls back BYTE-FOR-BYTE to
+ *  W1-T420's title-at-{@link DEFAULT_SHINGLE_K} behaviour, so every caller and fixture that
+ *  predates the slug corpus is unaffected. */
 export function duplicateTitleViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const corpus = opts.openTaskTitles;
   if (!corpus || corpus.length === 0) return [];
   const cutoff = opts.duplicateTitleCutoff ?? DEFAULT_DUPLICATE_CUTOFF;
-  const match = bestNearDuplicate({ id: task.id, text: task.title }, corpus);
+  // THE SLUG WHEN THERE IS ONE, THE TITLE OTHERWISE — never the two joined; see
+  // {@link planShardSlugCorpus} for the measurement that rules the join out.
+  const scored = opts.duplicateSlug?.trim();
+  const candidateText = scored && scored.length > 0 ? scored : task.title;
+  const k = opts.duplicateShingleK ?? DEFAULT_SHINGLE_K;
+  const match = bestNearDuplicate({ id: task.id, text: candidateText }, corpus, { k });
   if (!match || match.score < cutoff) return [];
   return [
     {
       check: "duplicate-title",
       severity: "warn",
       message:
-        `task ${task.id}'s title scores ${match.score.toFixed(2)} (>= cutoff ${cutoff}) against open ` +
-        `task ${match.id}'s title — possible duplicate of ${match.id}. This is ADVISORY, never blocking: ` +
-        "sibling tasks in the same arc legitimately score high. If this really is the same filing, " +
-        `point to ${match.id} instead of re-filing; if it is a distinct concern, no action is needed.`,
+        `task ${task.id} scores ${match.score.toFixed(2)} (>= cutoff ${cutoff}, k=${k}) against ` +
+        `${match.id} — possible duplicate of ${match.id}. This is ADVISORY, never blocking: sibling ` +
+        "tasks in the same arc legitimately score high. TWO ANSWERS BOTH CLEAR IT, and both are " +
+        `additive: CITE ${match.id} (name it in plan_refs and say what it already covers), or SAY ` +
+        `WHY IT DIFFERS in the rationale. Never answer this by deleting a proof, narrowing files:, ` +
+        "or removing any other evidence — this check asks for a citation, never for less work.",
     },
   ];
 }
@@ -1876,6 +1948,13 @@ export interface LintOpts {
    *  severity override, unlike every other opt above — see the module comment ahead of
    *  {@link duplicateTitleViolations} for why. */
   duplicateTitleCutoff?: number;
+  /** W1-T1076: THIS task's own shard filename slug, for {@link duplicateTitleViolations} to
+   *  score instead of the title. Supplied by the caller (the linter reads no disk and cannot
+   *  derive it — `Task` carries no path). Absent/blank ⇒ the title is scored, exactly as before. */
+  duplicateSlug?: string;
+  /** W1-T1076: shingle width for {@link duplicateTitleViolations}. The live caller passes
+   *  {@link DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}, W1-T420's original. */
+  duplicateShingleK?: number;
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
