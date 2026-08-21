@@ -1040,7 +1040,14 @@ test("arm merge: an immediate merge from a detached HEAD does not ask for a curr
   }
 });
 
-test("arm merge: the auto arm still defers its branch deletion to the remote", () => {
+// W1-T1111 REPLACES W1-T1050's EXPECTATION HERE, AND THE REASON IS IN THIS FILE ALREADY. That
+// test asserted the auto leg must KEEP `--delete-branch`, on the doc note's claim that the
+// deletion is deferred server-side "so there is nothing here for a detached checkout to trip on".
+// The detached-HEAD shim above refutes it: that shim fails "could not determine current branch"
+// keyed on the flag being PRESENT and on nothing else, whatever gh does afterwards. The head is
+// still deleted — the repository carries `delete_branch_on_merge: true`, the same server-side path
+// `mergeDirect`'s own doc relies on.
+test("W1-T1111: the auto arm no longer asks gh to delete the local branch", () => {
   const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-auto-shim-"));
   const logPath = join(shimDir, "argv.log");
   const savedPath = process.env.PATH;
@@ -1055,8 +1062,15 @@ test("arm merge: the auto arm still defers its branch deletion to the remote", (
     assert.ok(argv.includes("pr merge"), `not a merge invocation: ${argv}`);
     assert.ok(argv.includes("--auto"), `the deferred arm must still pass --auto — argv was ${argv}`);
     assert.ok(
-      argv.includes("--delete-branch"),
-      `the deferred arm must keep --delete-branch so GitHub deletes server-side once it lands — argv was ${argv}`,
+      !argv.includes("--delete-branch"),
+      `the deferred arm must not ask gh for a local branch the daemon does not have — argv was ${argv}`,
+    );
+    // PAIRED POSITIVE CONTROL — the flags carrying the behaviour are still present, so the
+    // assertion above cannot pass by the argv having been gutted.
+    assert.ok(argv.includes("--squash"), `the deferred arm must still squash — argv was ${argv}`);
+    assert.ok(
+      argv.includes("/pull/1051"),
+      `the deferred arm must name the PR explicitly rather than resolve one from the branch — argv was ${argv}`,
     );
   } finally {
     process.env.PATH = savedPath;
@@ -1064,7 +1078,7 @@ test("arm merge: the auto arm still defers its branch deletion to the remote", (
   }
 });
 
-test("arm merge: both immediate call sites drop the local branch delete", () => {
+test("W1-T1111: no arm call site asks gh to delete the local branch", () => {
   const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-both-shim-"));
   const logPath = join(shimDir, "argv.log");
   const savedPath = process.env.PATH;
@@ -1074,9 +1088,11 @@ test("arm merge: both immediate call sites drop the local branch delete", () => 
 
     withLiveWritesAllowed(() => realArmDeps().mergeDirect("https://github.com/acme/sandboxrepo/pull/1055"));
     withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056"));
+    // W1-T1111: the auto leg joins the same sweep — it was the last one carrying the flag.
+    withLiveWritesAllowed(() => realArmDeps().armAuto("https://github.com/acme/sandboxrepo/pull/1057"));
 
     const lines = readFileSync(logPath, "utf8").trim().split("\n");
-    assert.equal(lines.length, 2, `expected exactly two gh invocations, got ${JSON.stringify(lines)}`);
+    assert.equal(lines.length, 3, `expected exactly three gh invocations, got ${JSON.stringify(lines)}`);
     for (const line of lines) {
       assert.ok(line.includes("pr merge") && line.includes("--squash"), `not a squash merge: ${line}`);
       assert.ok(

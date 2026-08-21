@@ -1532,9 +1532,16 @@ export interface ArmDeps {
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
   ledgerLines: () => Array<Record<string, unknown>>;
-  /** `gh pr merge --auto --squash --delete-branch` — throws on refusal. Keeps the flag: GitHub
-   *  performs this deletion SERVER-SIDE once the deferred auto-merge lands, so no local branch
-   *  is ever touched and there is nothing here for a detached checkout to trip on. */
+  /** `gh pr merge --auto --squash` — throws on refusal. W1-T1111: NO `--delete-branch`, for the
+   *  SAME reason `mergeDirect` below already carries — and the note this replaces was WRONG about
+   *  why this leg was exempt. It claimed the deletion is deferred server-side "so there is nothing
+   *  here for a detached checkout to trip on". `gh` validates the flag at INVOCATION, before it
+   *  defers anything: this repo's own shim in test/live-write-guard-command-sites.test.ts fails
+   *  "could not determine current branch: failed to run git: not on any branch" keyed on the flag
+   *  being PRESENT and nothing else, and W1-T1079's first cause-carrying row observed exactly that
+   *  string from the daemon's detached checkout. The head branch is still deleted: the repository
+   *  carries `delete_branch_on_merge: true`, which is the same server-side path `mergeDirect`'s
+   *  doc already relies on. */
   armAuto: (prUrl: string) => void;
   /** `gh pr merge --squash` — the clean-status completion. W1-T1050: NO `--delete-branch`. `gh`
    *  documents that flag as deleting the LOCAL branch too, which needs a current branch to
@@ -1585,7 +1592,8 @@ export function realArmDeps(): ArmDeps {
     ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
+      // W1-T1111: `--delete-branch` REMOVED — see the doc on `ArmDeps.armAuto` above.
+      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
