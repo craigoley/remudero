@@ -18783,7 +18783,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       renderSweepSummary(summary) +
       `\npost-fix re-verification: ${reverifySummary.total} open PR(s) checked · ${reverifySummary.redriven} redriven` +
       `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected` +
-      `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed` +
+      `\n${renderEscalationReconcileSummary(reconcileSummary)}` +
       `\nworktree reap: ${reapSummary.reaped.length} worktree(s) reaped · ${reapSummary.reapedLocks.length} widowed lock(s) reaped`,
   );
   return 0;
@@ -18810,6 +18810,57 @@ export function buildEscalationCloser(
  * `issues`/`github` for tests. Returns the pass summary; never throws (buildEscalationReconcile-
  * Candidates degrades a failed read to [], runEscalationReconcile contains per-issue throws).
  */
+/**
+ * W1-T1101: the reconcile summary as THIS caller sees it — `runEscalationReconcile`'s own shape
+ * (lib/sweep.ts, untouched by this task) plus the three intake counts `sweepEscalationReconcile`
+ * already holds in a local. The widening lives HERE, not on the library type, because the library
+ * function never measures these: `buildEscalationReconcileCandidates` does, one statement earlier,
+ * in this same file. Putting the fields on the shared type would have moved a run-task.ts
+ * measurement into lib/sweep.ts for no reader there.
+ */
+export interface SweepEscalationReconcileSummary extends EscalationReconcileSummary {
+  /**
+   * Open issues the read returned, one statement before the candidate loop — see
+   * {@link EscalationIntake}. Present iff an intake reached this caller, which happens UNLESS the
+   * issue-list read itself failed (the builder's `[]`-on-failure contract never calls its
+   * `onIntake` observer) — so `issuesSeen === undefined` is specifically "the read failed", not
+   * "nothing was measured".
+   */
+  issuesSeen?: number;
+  /** Dropped for carrying no `**Task:**` trailer — see {@link EscalationIntake}. */
+  droppedNoTaskTrailer?: number;
+  /** Dropped for naming neither a plan task nor any resolvable PR referent. */
+  droppedNoReferent?: number;
+}
+
+/**
+ * One-line human render of an escalation-reconcile pass, for `rmd sweep`'s console output
+ * (W1-T1101). The line this replaces printed `total` (the POST-DROP candidate count) under the
+ * label "open needs-human issue(s) checked" — so `total: 0` read identically whether nothing was
+ * open, everything open was dropped, or the issue-list read failed outright. This renders
+ * `issuesSeen` under that label instead (the count the read actually returned), names an
+ * unreadable list as exactly that rather than a bare zero, and — only when a drop shrank
+ * `issuesSeen` down to `total` — names the drop reasons, mirroring the ledger row's own
+ * healthy-path-stays-small asymmetry (see the `sweep.escalation_reconcile.summary` log call in
+ * `runEscalationReconcile`).
+ */
+export function renderEscalationReconcileSummary(s: SweepEscalationReconcileSummary): string {
+  if (s.issuesSeen === undefined) {
+    // No intake reached this pass — on `sweepEscalationReconcile`'s own call site (the only
+    // production caller), that happens exactly when `buildEscalationReconcileCandidates`' issue-list
+    // read threw and returned `[]` under its "do nothing this cycle" contract. `total`/`closed` are
+    // both correctly 0 in that case too, so rendering them here would be the identical, ambiguous
+    // zero this task exists to remove.
+    return "escalation reconcile: issue-list read FAILED this cycle (see sweep.escalation_reconcile.list_failed) — nothing checked, nothing closed";
+  }
+  const droppedTotal = s.issuesSeen - s.total;
+  const droppedNote =
+    droppedTotal > 0
+      ? ` · ${s.total} became candidate(s), ${droppedTotal} dropped (${s.droppedNoTaskTrailer ?? 0} no-task-trailer, ${s.droppedNoReferent ?? 0} no-referent)`
+      : "";
+  return `escalation reconcile: ${s.issuesSeen} open needs-human issue(s) checked · ${s.closed} closed${droppedNote}`;
+}
+
 export async function sweepEscalationReconcile(
   owner: string,
   repo: string,
@@ -18818,7 +18869,7 @@ export async function sweepEscalationReconcile(
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub } = {},
-): Promise<EscalationReconcileSummary> {
+): Promise<SweepEscalationReconcileSummary> {
   let intake: EscalationIntake | undefined;
   const candidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
     issues: opts.issues,
@@ -18827,7 +18878,7 @@ export async function sweepEscalationReconcile(
       intake = i;
     },
   });
-  return runEscalationReconcile(candidates, {
+  const summary = await runEscalationReconcile(candidates, {
     intake,
     closeIssue: buildEscalationCloser(owner, repo, opts.issues),
     ledgerPath,
@@ -18835,6 +18886,13 @@ export async function sweepEscalationReconcile(
     log,
     dryRun: opts.dryRun,
   });
+  // W1-T1101: the SAME counts the ledger row below has carried since #1084, now also riding on the
+  // returned summary so `renderEscalationReconcileSummary` (the CLI line) can see them. No new
+  // read, no change to what `runEscalationReconcile` measures or logs — the merge happens HERE,
+  // in the file that already holds `intake`, rather than widening lib/sweep.ts's shared type.
+  return intake
+    ? { ...summary, issuesSeen: intake.issuesSeen, droppedNoTaskTrailer: intake.droppedNoTaskTrailer, droppedNoReferent: intake.droppedNoReferent }
+    : summary;
 }
 
 /**
