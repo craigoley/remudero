@@ -12,6 +12,7 @@ import {
   type ArmOutcome,
 } from "../src/run-task.js";
 import { isInPlanScope, ORIENTATION_DOC } from "../src/lib/plan-architect.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 
 // ── THE DEFECT ────────────────────────────────────────────────────────────────────────
 // `armAutoMerge` RETURNS which of its seven branches it took; it never throws. Five of the
@@ -42,17 +43,16 @@ function recorder() {
   return { steps, log: (step: string, extra?: Record<string, unknown>) => void steps.push({ step, extra }) };
 }
 
-const NON_ARMING: ArmOutcome[] = [
-  "no-task-id",
-  "head-unavailable",
-  "ledger-refused",
-  "direct-merge-failed",
-  "arm-error-ignored",
-];
+// W1-T1052: split by whether `attemptArm` was genuinely reached — an outcome returned before
+// any attempt (never armed, never merged) versus one where the attempt was made and did not
+// stick. `armOutcomeArmed`'s own doc comment (lib/sweep.ts) draws exactly this line.
+const NEVER_ATTEMPTED: ArmOutcome[] = ["no-task-id", "head-unavailable", "ledger-refused"];
+const ATTEMPTED_AND_FAILED: ArmOutcome[] = ["direct-merge-failed", "arm-error-ignored"];
+const NON_ARMING: ArmOutcome[] = [...NEVER_ATTEMPTED, ...ATTEMPTED_AND_FAILED];
 
-// ── 1: a non-arming outcome ledgers the skip, never the arm ─────────────────────────
-test("armAndLogOutcome ledgers automerge.arm_skipped with the outcome when the arm refused", () => {
-  for (const outcome of NON_ARMING) {
+// ── 1a: an outcome that never reached an attempt ledgers the skip, never the arm ────
+test("armAndLogOutcome ledgers automerge.arm_skipped for an outcome that never reached an attempt", () => {
+  for (const outcome of NEVER_ATTEMPTED) {
     const r = recorder();
 
     const got = armAndLogOutcome("https://github.com/craigoley/remudero/pull/974", "RETRO-1785456064479", r.log, () => outcome);
@@ -66,6 +66,123 @@ test("armAndLogOutcome ledgers automerge.arm_skipped with the outcome when the a
     assert.equal(r.steps[0].extra?.outcome, outcome, `${outcome}: the reason travels on the line, not only to stdout`);
     assert.equal(r.steps[0].extra?.task_id, "RETRO-1785456064479", `${outcome}: attributable to the task it was refused for`);
   }
+});
+
+// ── 1b: W1-T1052 — an outcome where the attempt was made and failed ledgers the NEW step ──
+test("armAndLogOutcome ledgers automerge.arm_failed for an outcome where the attempt was made and did not stick (W1-T1052)", () => {
+  for (const outcome of ATTEMPTED_AND_FAILED) {
+    const r = recorder();
+
+    const got = armAndLogOutcome("https://github.com/craigoley/remudero/pull/974", "RETRO-1785456064479", r.log, () => outcome);
+
+    assert.equal(got, outcome, `${outcome}: the caller is handed the real outcome, not a boolean`);
+    assert.deepEqual(
+      r.steps.map((s) => s.step),
+      ["automerge.arm_failed"],
+      `${outcome}: an ATTEMPTED merge that failed must not be filed as automerge.arm_skipped`,
+    );
+    assert.equal(r.steps[0].extra?.outcome, outcome, `${outcome}: the reason travels on the line, not only to stdout`);
+    assert.equal(r.steps[0].extra?.task_id, "RETRO-1785456064479", `${outcome}: attributable to the task it was refused for`);
+  }
+});
+
+// ── W1-T1052 ACCEPTANCE — the record is renamed, not a new row added ────────────────
+// Every proof below is named `arm step name: …` to match plan/tasks.d/W1-T1052's own acceptance
+// criteria verbatim, so `remudero-review`'s `unit test:` dialect finds it by name.
+
+test("arm step name: an attempted merge that failed is not recorded as skipped", () => {
+  for (const outcome of ATTEMPTED_AND_FAILED) {
+    const r = recorder();
+    armAndLogOutcome("https://github.com/craigoley/remudero/pull/1052", "W1-T1052", r.log, () => outcome);
+    assert.equal(
+      r.steps.some((s) => s.step === "automerge.arm_skipped"),
+      false,
+      `${outcome}: an attempted-and-failed merge must never be filed under the step meaning it was skipped`,
+    );
+  }
+});
+
+test("arm step name: a genuine skip and a failed attempt no longer share one step", () => {
+  const skipSteps = new Set<string>();
+  for (const outcome of NEVER_ATTEMPTED) {
+    const r = recorder();
+    armAndLogOutcome("https://github.com/craigoley/remudero/pull/1052", "W1-T1052", r.log, () => outcome);
+    r.steps.forEach((s) => skipSteps.add(s.step));
+  }
+  const failedSteps = new Set<string>();
+  for (const outcome of ATTEMPTED_AND_FAILED) {
+    const r = recorder();
+    armAndLogOutcome("https://github.com/craigoley/remudero/pull/1052", "W1-T1052", r.log, () => outcome);
+    r.steps.forEach((s) => failedSteps.add(s.step));
+  }
+  assert.deepEqual([...skipSteps], ["automerge.arm_skipped"], "sanity: every genuine skip files under one step");
+  assert.deepEqual([...failedSteps], ["automerge.arm_failed"], "sanity: every failed attempt files under one step");
+  for (const step of failedSteps) {
+    assert.ok(!skipSteps.has(step), `"${step}" must not be shared between a genuine skip and a failed attempt`);
+  }
+});
+
+test("arm step name: the outcome field and the step name agree on every outcome", () => {
+  for (const outcome of NON_ARMING) {
+    const r = recorder();
+    armAndLogOutcome("https://github.com/craigoley/remudero/pull/1052", "W1-T1052", r.log, () => outcome);
+    assert.equal(r.steps.length, 1, `${outcome}: exactly one ledger line`);
+    assert.equal(r.steps[0].extra?.outcome, outcome, `${outcome}: the outcome field carries the real outcome`);
+    const expectedStep = ATTEMPTED_AND_FAILED.includes(outcome) ? "automerge.arm_failed" : "automerge.arm_skipped";
+    assert.equal(
+      r.steps[0].step,
+      expectedStep,
+      `${outcome}: the step name must agree with what the outcome field says happened`,
+    );
+  }
+  for (const outcome of ["armed", "direct-merged"] as ArmOutcome[]) {
+    const r = recorder();
+    armAndLogOutcome("https://github.com/craigoley/remudero/pull/1052", "W1-T1052", r.log, () => outcome);
+    assert.equal(r.steps[0].step, "automerge.armed", `${outcome}: an arming outcome still agrees with automerge.armed`);
+    assert.equal(r.steps[0].extra?.outcome, outcome);
+  }
+});
+
+test("arm step name: no reader keyed on the old literal is left behind", () => {
+  // NEGATIVE — neither the old nor the new arm-skip step name is ever READ (compared against)
+  // by production code in run-task.ts: every occurrence left is a WRITE site or a comment.
+  const readPattern = (step: string) =>
+    new RegExp(`\\.step\\s*(?:===|!==)\\s*["']${step.replace(/\./g, "\\.")}["']|case\\s*["']${step.replace(/\./g, "\\.")}["']\\s*:`, "g");
+  assert.deepEqual(
+    SRC.match(readPattern("automerge.arm_skipped")) ?? [],
+    [],
+    "no production reader may decide anything off automerge.arm_skipped — it stayed write-only across the rename",
+  );
+  assert.deepEqual(
+    SRC.match(readPattern("automerge.arm_failed")) ?? [],
+    [],
+    "the new automerge.arm_failed step must not have grown a reader either — it is write-only, like the step it split from",
+  );
+
+  // POSITIVE CONTROL — the same pattern DOES find a real read when one exists, proving the
+  // negative checks above are not just matching nothing. automerge.armed is genuinely read by
+  // lib/autonomy.ts and lib/receipt.ts (never in run-task.ts itself).
+  const autonomySrc = readFileSync(new URL("../src/lib/autonomy.ts", import.meta.url), "utf8");
+  const receiptSrc = readFileSync(new URL("../src/lib/receipt.ts", import.meta.url), "utf8");
+  const armedReads = [...(autonomySrc.match(readPattern("automerge.armed")) ?? []), ...(receiptSrc.match(readPattern("automerge.armed")) ?? [])];
+  assert.ok(armedReads.length > 0, "sanity: the read-pattern must actually catch a real consumer (automerge.armed)");
+});
+
+test("arm step name: the change adds no new ledger step", () => {
+  // Each non-arming event still writes EXACTLY ONE ledger line — the rename never doubles a
+  // line the way a genuinely NEW additional step (mirroring automerge.clean_status_direct_merge)
+  // would have. Rotation groups by step name and caps retention per group
+  // (MAX_RETAINED_LINES_PER_STEP), so one row per event, same as before the rename, is what
+  // keeps rotation volume unchanged.
+  for (const outcome of NON_ARMING) {
+    const r = recorder();
+    armAndLogOutcome("https://github.com/craigoley/remudero/pull/1052", "W1-T1052", r.log, () => outcome);
+    assert.equal(r.steps.length, 1, `${outcome}: exactly one ledger line — the rename must not add a second row`);
+  }
+  // Neither the old nor the new step name is a member of DECISION_RELEVANT_LEDGER_STEPS — no
+  // decision reads either back, so the rename creates no membership obligation on that set.
+  assert.equal(DECISION_RELEVANT_LEDGER_STEPS.has("automerge.arm_skipped"), false);
+  assert.equal(DECISION_RELEVANT_LEDGER_STEPS.has("automerge.arm_failed"), false);
 });
 
 // ── 2: REGRESSION LOCK — an arming outcome still logs the arm ───────────────────────
