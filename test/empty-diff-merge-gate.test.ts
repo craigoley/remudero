@@ -145,6 +145,11 @@ test("W1-T963: end-to-end — a sibling's landed fix closes an already-done tria
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T963_GIT_ENV });
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  // W1-T1089: applyPlanProposalCommit's `git add -A -- plan/ MASTER-PLAN.md` fails LOUD (fatal
+  // pathspec error) when the file is entirely absent — true of every real triage worktree (a
+  // full clone), so this fixture needs one too now that triage's propose-path commit routes
+  // through the same shared function `rmd plan` does.
+  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
   writeFileSync(
     join(seed, "plan", "tasks.yaml"),
     ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join(

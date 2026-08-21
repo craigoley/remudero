@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { shapeCommitMessage } from "./commit-message.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
+import { regeneratePlanIndexFile } from "./plan-pr-emitter.js";
 import type { Escalation } from "./escalate.js";
 
 /**
@@ -576,7 +577,24 @@ export function planCommitMessage(opts: {
  * hand-typed string standing in for one (the round-1 review's "semantic downgrade": a
  * fabricated `diff --git ...` block is not a run, it is prose shaped like a run).
  */
-export function applyPlanProposalCommit(cwd: string, commitMessage: string): void {
+export function applyPlanProposalCommit(
+  cwd: string,
+  commitMessage: string,
+  log: (step: string, extra?: Record<string, unknown>) => void = () => {},
+): void {
+  // W1-T1089 (#287 class, extended to every propose-outcome commit, not just approve/retro):
+  // regenerate plan/plan-index.json FIRST — through the REAL generator via
+  // regeneratePlanIndexFile, never a reimplementation of its parsing — so the single `git add`
+  // below sweeps the freshly regenerated index into the SAME commit as whatever MASTER-PLAN.md
+  // edit invalidated it. Mirrors the approve path's ordering exactly (run-task.ts). A
+  // regeneration failure must not turn a filing into a crash — the same discipline both
+  // existing call sites (approve, retro) already keep, and the same log key so the existing
+  // ledger reader sees no new vocabulary.
+  try {
+    regeneratePlanIndexFile({ worktreePath: cwd });
+  } catch (e) {
+    log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
+  }
   execFileSync("git", ["-C", cwd, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
   execFileSync("git", ["-C", cwd, "commit", "-m", commitMessage], { stdio: "inherit" });
 }
