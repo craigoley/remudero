@@ -199,7 +199,11 @@ test("W1-T1059: the caller makes all three promotion ledger steps fire", async (
 
 test("W1-T1059: a scrub-blocked entry never reaches the judge and a superseded entry never enters the pass", async () => {
   let judged = 0;
-  const secretEntry = entry({ id: "leak", fact: "the token is ghp_0123456789abcdefghijklmnopqrstuvwxyzAB" });
+  // The fake token is deliberately SHORT. `scrubEntry`'s `github-token` pattern needs 20+
+  // characters after the prefix; the CI leak-grep tripwire fires at 36+. Staying between the
+  // two exercises the real scrub without tripping the repo-wide secret gate, which refuses a
+  // static allowlist by design. Do not lengthen it.
+  const secretEntry = entry({ id: "leak", fact: "the token is ghp_EXAMPLEEXAMPLEEXAMPLE0123456" });
   const blockedText = await promotionProposalSectionFor({
     corpusDir: "/ignored",
     loadCorpus: () => [secretEntry],
