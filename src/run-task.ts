@@ -480,6 +480,7 @@ import {
   buildReviewPrompt,
   cappedAnnotation,
   cappedOverrideFromLedger,
+  cappedWordingApplies,
   decideAutoMergeArm,
   decideArmFromLedgerVerdict,
   fetchPrLifecycle,
@@ -3391,7 +3392,9 @@ async function runReview(args: {
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
   armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
   if (verdict.capped) {
-    say(cappedAnnotation(proofExec.length));
+    // W1-T1085: the annotation gets the SAME `planOnly` fact the status three-ways on, so one run
+    // stops emitting two contradictory sentences about one verdict. No decision changes here.
+    say(cappedAnnotation(proofExec.length, verdict.planOnly === true));
   } else if (verdict.floorDegraded) {
     say(floorDegradedAnnotation(proofExec.length));
   }
@@ -8677,7 +8680,9 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   console.log(
     `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
       (verdict.keywordOnly ? " — KEYWORD-ONLY: no proof was executed (no PR-head checkout)" : "") +
-      (verdict.capped ? " — CAPPED: not certified (0 proofs executed)" : ""),
+      // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
+      // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
+      (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
 
   // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
@@ -8707,7 +8712,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         `CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId}, head ${verdict.headSha.slice(0, 7)})`,
       );
     }
-  } else if (verdict.capped) {
+  } else if (cappedWordingApplies(verdict)) {
+    // W1-T1085: a SEPARATE call site from the capped annotation above, with the same defect —
+    // gated on `capped` alone. For a plan-only verdict both halves are false: it arms, and the
+    // override is structurally unreachable, so the hint is advice that cannot be followed. The
+    // status this run posts already states the truth, so nothing replaces it here.
     console.log(
       `NOTE: a CAPPED verdict cannot arm auto-merge without executed proof or an operator override: ` +
         `rmd review ${view.number} --override-capped-by <name> --override-capped-reason <text>`,

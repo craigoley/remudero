@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { reviewCommand } from "../src/run-task.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,6 +11,7 @@ import {
   applyVerdictStability,
   buildReviewPrompt,
   cappedAnnotation,
+  cappedWordingApplies,
   cappedOverrideFromLedger,
   checkCallersAudited,
   checkDocsAwareness,
@@ -3135,4 +3137,203 @@ test("W1-T460: preexistingProofHits' new fourth argument defaults safely — omi
   // An unreadable path is NOT a hit — the guard's never-a-false-positive contract is preserved,
   // and the honest outcome is carried by `proof_exec`, not by turning this into a true.
   assert.equal(preexistingProofHits(wp, () => "pass", BASE_DIR, new Set(["src/widget.ts"])), false);
+});
+
+// ── W1-T1085: the capped ANNOTATION must not contradict the STATUS the same run posts ─────────
+//
+// The status has been a three-way branch since W1-T205 (plan-only capped renders planOnlySummary,
+// capped renders cappedSummary, uncapped renders passSummary). The console annotation stayed a
+// two-way branch on `capped` alone, so a plan-only PR was told, in the same run, both that it was
+// gated deterministically AND that it was "not certified" and that arming was refused. Every
+// clause of the second sentence is false for that shape — measured on #2344, #2345 and #2348,
+// which armed and merged two to six seconds after their status was posted.
+//
+// A plan-only capped verdict, built through the REAL judgeReview rather than hand-shaped: a diff
+// touching only plan/tasks.d/ is in plan scope and is not enforcement data, and with no
+// headCheckoutDir every criterion is not_executable, so the verdict is capped AND plan-only.
+const PLAN_ONLY_SHARD_DIFF = `
+diff --git a/plan/tasks.d/W1-T9999-a-filed-task.yaml b/plan/tasks.d/W1-T9999-a-filed-task.yaml
++++ b/plan/tasks.d/W1-T9999-a-filed-task.yaml
+@@
++- id: W1-T9999
++  title: "a filed task"
+`.trim();
+
+function planOnlyCappedVerdict() {
+  return judgeReview(CRITERIA, { diff: PLAN_ONLY_SHARD_DIFF, report: RESPONSIVE_REPORT });
+}
+
+test("W1-T1085: a plan-only capped verdict is never told it is uncertified", () => {
+  const v = planOnlyCappedVerdict();
+  assert.equal(v.capped, true, "fixture assumption: the verdict really is capped");
+  assert.equal(v.planOnly, true, "fixture assumption: the diff really is plan-only");
+
+  const annotation = cappedAnnotation(v.criteria.length, v.planOnly);
+  assert.doesNotMatch(annotation, /not certified/, "a plan-only PR is certified — by the gates the status names");
+  assert.doesNotMatch(annotation, /keyword match is a claim/);
+  assert.doesNotMatch(annotation, /\bCAPPED\b/, "the word itself reads as something going wrong, and nothing did");
+
+  // PAIRED POSITIVE CONTROL: the SAME call with planOnly false still says all three, so the
+  // absences above are the new arm and not an annotation that stopped saying anything.
+  const codeAnnotation = cappedAnnotation(v.criteria.length, false);
+  assert.match(codeAnnotation, /not certified/);
+  assert.match(codeAnnotation, /keyword match is a claim/);
+  assert.match(codeAnnotation, /\bCAPPED\b/);
+});
+
+test("W1-T1085: a plan-only capped verdict is never told arming was refused", () => {
+  const v = planOnlyCappedVerdict();
+  const annotation = cappedAnnotation(v.criteria.length, v.planOnly);
+  assert.doesNotMatch(annotation, /refuses to arm/, "decideAutoMergeArm returns arm: true for this shape");
+  assert.doesNotMatch(annotation, /override/, "the override branch is never reached, so pointing at it is unfollowable advice");
+
+  // The SEPARATE call site — reviewCommand's own `--override-capped-by` hint — must be suppressed
+  // for the same verdict, and must still fire for a capped CODE PR.
+  assert.equal(cappedWordingApplies(v), false, "the hint is unfollowable for a plan-only verdict");
+  assert.equal(cappedWordingApplies({ capped: true, planOnly: false }), true, "PAIRED CONTROL: a capped code PR still gets the hint");
+  assert.equal(cappedWordingApplies({ capped: false, planOnly: false }), false, "an uncapped verdict never got the hint and still does not");
+
+  // PAIRED POSITIVE CONTROL on the text: the code-PR wording still says both.
+  const codeAnnotation = cappedAnnotation(v.criteria.length, false);
+  assert.match(codeAnnotation, /refuses to arm/);
+  assert.match(codeAnnotation, /override/);
+});
+
+test("W1-T1085: a capped verdict that is not plan-only keeps its wording", () => {
+  // The pre-existing assertion this task must not delete, made exact rather than a /CAPPED/ match:
+  // the capped wording is CORRECT wherever proof was expected and did not run, and this change
+  // must not weaken it. Byte-for-byte against the shipped text.
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.capped, true);
+  assert.equal(v.planOnly, false, "fixture assumption: a source diff is not plan-only");
+  assert.equal(
+    cappedAnnotation(v.criteria.length, v.planOnly),
+    `CAPPED: 0/${v.criteria.length} proofs executed — not certified (a keyword match is a claim, ` +
+      `never evidence). This refuses to arm auto-merge (see decideAutoMergeArm) until proof ` +
+      `executes or an operator grants an explicit, ledgered override.`,
+  );
+  // And the DEFAULT is that wording too — an existing caller that passes only the count is
+  // unchanged, which is what makes the new parameter additive rather than a behaviour change.
+  assert.equal(cappedAnnotation(v.criteria.length), cappedAnnotation(v.criteria.length, false));
+});
+
+test("W1-T1085: the annotation agrees with the status posted by the same run", () => {
+  // The contradiction, stated as the property rather than as two texts: for ONE verdict, the
+  // annotation and the posted summary must not disagree about whether anything went wrong.
+  // planOnlySummary is module-private and stays that way — the summary is read off the verdict
+  // judgeReview itself returns, which is where an operator sees it.
+  const planOnly = planOnlyCappedVerdict();
+  assert.match(planOnly.summary, /PASS — plan-only PR/, "fixture assumption: the status renders the carve-out");
+  assert.doesNotMatch(planOnly.summary, /not certified/);
+  const planOnlyAnnotation = cappedAnnotation(planOnly.criteria.length, planOnly.planOnly);
+  assert.equal(
+    /not certified/.test(planOnlyAnnotation),
+    /not certified/.test(planOnly.summary),
+    "annotation and status must agree on whether this PR is certified",
+  );
+
+  // PAIRED POSITIVE CONTROL: the same agreement holds on the OTHER side, where both DO say it.
+  const code = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+  assert.match(code.summary, /not certified/, "fixture assumption: the capped status says it");
+  assert.equal(
+    /not certified/.test(cappedAnnotation(code.criteria.length, code.planOnly)),
+    /not certified/.test(code.summary),
+    "the agreement is a property of both arms, not an absence in one",
+  );
+});
+
+test("W1-T1085: the arm decision is unchanged for every verdict shape", () => {
+  // This task changes TEXT only. decideAutoMergeArm is untouched, and this pins that: every shape
+  // it can be handed still decides exactly what it decided before, including the plan-only
+  // carve-out returning arm: true above the override branch — which is the fact that makes the
+  // old annotation false rather than merely blunt.
+  assert.equal(decideAutoMergeArm({ state: "success", capped: false, planOnly: false }, false).arm, true);
+  assert.equal(decideAutoMergeArm({ state: "success", capped: false, planOnly: true }, false).arm, true);
+  assert.equal(decideAutoMergeArm({ state: "success", capped: true, planOnly: true }, false).arm, true);
+  assert.equal(decideAutoMergeArm({ state: "success", capped: true, planOnly: false }, false).arm, false);
+  assert.equal(decideAutoMergeArm({ state: "failure", capped: false, planOnly: true }, false).arm, false);
+  // The carve-out returns ABOVE the override branch, so an override present on a plan-only
+  // verdict is never the reason it arms — the reason names the carve-out, not the grant.
+  const withOverride = decideAutoMergeArm({ state: "success", capped: true, planOnly: true }, false, { by: "craig", reason: "r" });
+  assert.equal(withOverride.arm, true);
+  assert.match(withOverride.reason, /plan-only/, "the plan-only branch answered, not the override branch");
+  // PAIRED CONTROL: the SAME override on a capped CODE verdict is what does the arming there.
+  const codeOverride = decideAutoMergeArm({ state: "success", capped: true, planOnly: false }, false, { by: "craig", reason: "r" });
+  assert.equal(codeOverride.arm, true);
+  assert.match(codeOverride.reason, /override granted by craig/);
+});
+
+// The WIRING half of criterion 2: the two reviewCommand call sites, driven through the real
+// command via its own injectable deps. The predicate above proves the decision; this proves the
+// command consults it — and it is the only thing that reaches those branches at all, since no
+// suite on main calls reviewCommand. A fake `gh` on PATH makes every shell-out inert; the
+// materialization is failed deliberately, which is the documented keyword-only fallback and
+// avoids a real worktree.
+async function runReviewCommandCapturing(planOnly: boolean): Promise<string[]> {
+  const out: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "rmd-t1085-bin-"));
+  writeFileSync(join(fakeBinDir, "gh"), "#!/bin/bash\necho '{}'\nexit 0\n");
+  chmodSync(join(fakeBinDir, "gh"), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+  // reviewCommand shells git (resolveOwnerRepo). This process inherits GIT_CONFIG_COUNT plus its
+  // GIT_CONFIG_KEY_*/VALUE_* siblings, and an environment that forwards the COUNT while dropping
+  // a KEY leaves git with `missing config key GIT_CONFIG_KEY_1: unable to parse command-line
+  // config` — MEASURED under the reviewer's own proof spawner, where this test failed while the
+  // identical run passed in `npm test`. That is ambient config the fixture inherited, so the
+  // fixture neutralises it rather than the harness working around it.
+  const savedGitConfigEnv = new Map<string, string>();
+  for (const k of Object.keys(process.env)) {
+    if (/^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+|PARAMETERS)$/.test(k)) {
+      savedGitConfigEnv.set(k, process.env[k] as string);
+      delete process.env[k];
+    }
+  }
+  console.log = (...a: unknown[]) => void out.push(a.join(" "));
+  console.error = (...a: unknown[]) => void out.push(a.join(" "));
+  try {
+    await reviewCommand(
+      "a-branch-name", // a NON-numeric arg keeps the view object passing through untouched
+      [],
+      {
+        fetchView: () => ({ headRefOid: "abc1234def", headRefName: "a-branch-name", body: "", url: "https://github.com/o/r/pull/77", number: 77 }),
+        loadConfig: () => ({ claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-t1085-root-")) }) as never,
+        materialize: (() => ({ worktreePath: undefined, failure: { errorClass: "test", message: "deliberate — keyword-only path" } })) as never,
+        runReview: (async () => ({
+          state: "success",
+          criteria: [],
+          testTheater: false,
+          summary: planOnly ? "remudero-review: PASS — plan-only PR (1 criteria)" : "remudero-review: CAPPED — 0/1 proofs executed",
+          floorDegraded: false,
+          capped: true,
+          keywordOnly: true,
+          planOnly,
+          headSha: "abc1234def",
+          reviewerOutcome: "success",
+        })) as never,
+        postReviewPending: (() => {}) as never,
+      },
+    );
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+    for (const [k, v] of savedGitConfigEnv) process.env[k] = v;
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+  }
+  return out;
+}
+
+test("W1-T1085: reviewCommand stops telling a plan-only PR it is uncertified and stops advertising an unreachable override", async () => {
+  const planOnly = (await runReviewCommandCapturing(true)).join("\n");
+  assert.doesNotMatch(planOnly, /CAPPED: not certified/, "the posted-status line must not contradict the status it just posted");
+  assert.doesNotMatch(planOnly, /--override-capped-by/, "the override branch is never reached for this shape, so the hint cannot be followed");
+
+  // PAIRED POSITIVE CONTROL: the SAME command over a capped CODE verdict still says both — the
+  // suppressions above are the plan-only arm, not a command that stopped printing.
+  const codePr = (await runReviewCommandCapturing(false)).join("\n");
+  assert.match(codePr, /CAPPED: not certified/);
+  assert.match(codePr, /--override-capped-by/);
 });

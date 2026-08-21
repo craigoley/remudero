@@ -3854,13 +3854,54 @@ export function isTddStrict(principles?: Record<string, unknown>): boolean {
  * review when {@link ReviewVerdict.capped} is true. Mirrors
  * {@link floorDegradedAnnotation}: pure + exported so the exact text is a
  * unit-testable falsifier, independent of the console call site (run-task.ts).
+ *
+ * W1-T1085 — `planOnly` APPENDED LAST AND DEFAULTED, so no existing caller shifts. The posted
+ * STATUS has been a three-way branch since W1-T205 (plan-only capped renders
+ * {@link planOnlySummary}, capped renders {@link cappedSummary}, uncapped renders
+ * {@link passSummary}) while this annotation stayed two-way, so one run emitted two contradictory
+ * sentences about the same verdict. Every clause of the capped wording is FALSE for a plan-only
+ * PR: it IS certified, by the deterministic gates the status names; it does NOT refuse to arm
+ * ({@link decideAutoMergeArm} branches on `planOnly` and returns `arm: true`); and the override it
+ * points at is never reached, because that branch returns above the override branch — so the
+ * advice cannot be followed even in principle.
+ *
+ * THE CAPPED WORDING IS UNCHANGED where proof was expected and did not run. This adds a second
+ * arm; it does not weaken the first.
  */
-export function cappedAnnotation(criteriaCount: number): string {
+export function cappedAnnotation(criteriaCount: number, planOnly = false): string {
+  if (planOnly) {
+    // Mirrors {@link planOnlySummary}'s own ruling — never "CAPPED", never "not certified":
+    // those words read as something going wrong, and for a plan-only PR nothing did.
+    return (
+      `PLAN-ONLY: 0/${criteriaCount} proofs executed and none was expected — filing or amending a ` +
+      `task has no code to run a proof against, so this is its permanent, correct shape (W1-T205). ` +
+      `Gated deterministically by lint-plan, the plan-PR emitter and the plan-index checks; ` +
+      `auto-merge arming is unaffected.`
+    );
+  }
   return (
     `CAPPED: 0/${criteriaCount} proofs executed — not certified (a keyword match is a claim, ` +
     `never evidence). This refuses to arm auto-merge (see decideAutoMergeArm) until proof ` +
     `executes or an operator grants an explicit, ledgered override.`
   );
+}
+
+/**
+ * W1-T1085 — is the CAPPED DEGRADATION WORDING actually true of this verdict? `reviewCommand`
+ * (run-task.ts) has TWO further call sites beyond {@link cappedAnnotation}, both gated on `capped`
+ * alone: the `— CAPPED: not certified (0 proofs executed)` suffix on its posted-status line, and
+ * the `--override-capped-by` hint below it. Both are false for a plan-only PR, the second for a
+ * structural reason: {@link decideAutoMergeArm} checks `planOnly` BEFORE the override branch, so
+ * such a verdict never reaches an override even when one is present, and `resolveAutoMergeArm`
+ * deliberately excludes `planOnly` from override-ledgering so the decision is not misattributed —
+ * which makes the hint advice that cannot be followed even in principle.
+ *
+ * A pure predicate rather than an inline condition at each `console.log`, so both arms are
+ * falsifiable on their own. Both sites stay exactly as they are for a capped CODE PR, which is
+ * the case the wording was written for.
+ */
+export function cappedWordingApplies(verdict: { capped?: boolean; planOnly?: boolean }): boolean {
+  return verdict.capped === true && verdict.planOnly !== true;
 }
 
 // ── THE AUTO-MERGE ARMING PATH (W1-T185, closes gap 1's criteria 2-3) ───────
