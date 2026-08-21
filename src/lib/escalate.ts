@@ -748,6 +748,54 @@ function extractPrRef(text: string): string | undefined {
   );
 }
 
+/**
+ * W1-T1103 (design iii) — does `e.taskId`, AS WRITTEN, name a referent SOME lookup can retire?
+ * `""` is deliberately excluded even though it is "a value": {@link renderIssueBody}'s `**Task:**
+ * ${e.taskId}` line needs at least one non-whitespace character after the colon for {@link
+ * "../run-task.js".buildEscalationReconcileCandidates}'s own `\S+` read to match at all — an
+ * empty taskId renders a line the reconciler treats as ABSENT (its own `droppedNoTaskTrailer`
+ * counter), which is rationale (5)'s `no_task_trailer: 2` measurement.
+ *
+ * `"undefined"`/`"null"` are the OTHER measured shape (rationale (5): "#2301, #2302 and #2304 ...
+ * the body reads `Task undefined`") — the textbook symptom of a caller stringifying a missing
+ * value (`` `${maybeUndefined}` ``) into something that satisfies `Escalation.taskId`'s `string`
+ * type at compile time while carrying no real referent at runtime. Neither string is a shape any
+ * real task id or GRILL's `TRIAGE-<feedbackId>` id ever takes, so excluding them cannot misfire
+ * on a legitimate caller.
+ *
+ * Real, resolvable non-plan ids — GRILL's `TRIAGE-fb-…`, the daemon-lane escalations' fixed
+ * task-level ids — are left alone: this function's caller ({@link resolvedTaskId}) only ever
+ * reaches its PR-referent fallback when THIS predicate is false, and neither of those shapes is.
+ */
+function isKnownBrokenTaskId(taskId: string): boolean {
+  const trimmed = taskId.trim();
+  return trimmed === "" || trimmed === "undefined" || trimmed === "null";
+}
+
+/**
+ * W1-T1103 (design iii) — RESOLVE A REFERENT OR SAY SO. Returns the taskId {@link escalate}/
+ * {@link escalateWithJudge} should actually render, or `undefined` when NOTHING resolvable is
+ * available — the caller refuses to open rather than mint a permanent operator obligation
+ * (rationale (5): "nothing links a merge to an issue, so terminality of the referent is
+ * unreachable when the referent itself is unresolvable").
+ *
+ * `e.taskId` passes through BYTE-IDENTICAL whenever it is not one of the known-broken sentinel
+ * shapes {@link isKnownBrokenTaskId} names — every existing caller (a real plan task id, GRILL's
+ * `TRIAGE-<feedbackId>`, a daemon-lane fixed id) is completely unaffected by this task.
+ *
+ * Only a KNOWN-BROKEN taskId falls to the PR-referent fallback — the SAME `extractPrRef` scan
+ * {@link findDuplicateEscalation}'s dedup already runs over `${e.summary}\n${e.detail}` (never a
+ * second, independently-drifting text scan), rendered as the `PR-<n>` synthetic shape
+ * `buildEscalationReconcileCandidates` (run-task.ts) ALREADY resolves via a bare PR-number lookup
+ * — no plan entry required, and no dependence on the rendered body ALSO happening to carry a full
+ * `/pull/<n>` URL the way {@link prReferentFromIssueText}'s OWN fallback needs.
+ */
+function resolvedTaskId(e: Escalation): string | undefined {
+  if (!isKnownBrokenTaskId(e.taskId)) return e.taskId;
+  const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
+  return prRef ? `PR-${prRef}` : undefined;
+}
+
 /** The `**Task:** <id>` line {@link renderIssueBody} writes on every issue — the same
  *  regex the escalation-lifecycle reconciler (run-task.ts) already reads task ids with. */
 const TASK_LINE_RE = /^\*\*Task:\*\*\s*(\S+)\s*$/m;
@@ -923,6 +971,19 @@ function recordDuplicateEscalation(e: Escalation, dup: OpenIssue, deps: Escalate
  * second, drifting copy. `opts.queueLabel` is the only thing that varies between a needs-human
  * open and a demoted one — everything else (title, class label, ask-type label, body, degrade
  * behavior) is byte-identical either way.
+ *
+ * W1-T1103 (design ii) — `opts.queueLabel` IS NEVER DEGRADED, unlike the class/ask-type labels
+ * below. The measured board (rationale (4)) found six open issues carrying NO label at all —
+ * `RETIRABLE_ESCALATION_LABELS` (sweep.ts) is the ONLY thing the reconciler filters open issues
+ * on, so a queue-label-less issue is invisible to it forever, whatever its class/ask-type labels
+ * say. `ensureLabel` is still attempted first (the common "never provisioned on this repo yet"
+ * case self-heals silently, same as before), but its return value is never consulted for this
+ * one label: it is unconditionally the first entry `create()` receives. The falsifier is the
+ * PROPERTY (W1-T99's own doc, quoted in the task rationale: "the falsifier is the property, not
+ * the path"), so this can no longer be a per-call race with whatever `ensureLabel` happened to
+ * answer that pass. A repo where this label genuinely cannot be attached fails `create()` itself
+ * — `escalate()`'s documented throw contract, degraded by `tryEscalate` to `escalation.failed` —
+ * which is a VISIBLE, retriable failure, never a silent, permanently un-retirable issue.
  */
 function createEscalationIssue(
   e: Escalation,
@@ -930,8 +991,9 @@ function createEscalationIssue(
   opts: { queueLabel: string; step: string; firstComment?: string; extra?: Record<string, unknown> },
 ): string {
   const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
-  const wanted = [opts.queueLabel, CLASS_LABEL[e.class], ASK_TYPE_LABEL[classifyAsk(e)]];
-  const labels: string[] = [];
+  deps.issues.ensureLabel?.(opts.queueLabel);
+  const wanted = [CLASS_LABEL[e.class], ASK_TYPE_LABEL[classifyAsk(e)]];
+  const labels: string[] = [opts.queueLabel];
   const degradedLabels: string[] = [];
   for (const label of wanted) {
     if (!deps.issues.ensureLabel || deps.issues.ensureLabel(label)) {
@@ -965,13 +1027,37 @@ function createEscalationIssue(
   return url;
 }
 
+/**
+ * W1-T1103 (design iii) — shared refuse-or-normalize step for {@link escalate}/{@link
+ * escalateWithJudge}: both cross this BEFORE the dedup search runs, mirroring the existing
+ * zero-options refusal immediately above each of their call sites, so a caller can never observe
+ * a partially-opened escalation whose Task field is a known-broken sentinel. Returns `e`
+ * unchanged when its own taskId already resolves — every existing caller (a real plan task id,
+ * GRILL's `TRIAGE-<feedbackId>`, a daemon-lane fixed id) is untouched by this task. Returns a
+ * COPY with taskId replaced by the `PR-<n>` synthetic referent when only that fallback resolves,
+ * so the dedup search, the judge prompt, and the rendered issue body all see the SAME normalized
+ * value — never the broken one a caller happened to pass in.
+ */
+function refuseUnlessResolvable(e: Escalation): Escalation {
+  const resolved = resolvedTaskId(e);
+  if (resolved === undefined) {
+    throw new Error(
+      `escalation (class ${e.class}, "${e.summary}") carries no resolvable referent — its Task field is ` +
+        `${JSON.stringify(e.taskId)} and no PR is nameable in its own summary/detail — refusing to open an ` +
+        `issue no lookup could ever retire (W1-T1103)`,
+    );
+  }
+  return resolved === e.taskId ? e : { ...e, taskId: resolved };
+}
+
 export function escalate(e: Escalation, deps: EscalateDeps): string {
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
-  const dup = findDuplicateEscalation(e, deps);
-  if (dup) return recordDuplicateEscalation(e, dup, deps);
-  return createEscalationIssue(e, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
+  const resolved = refuseUnlessResolvable(e);
+  const dup = findDuplicateEscalation(resolved, deps);
+  if (dup) return recordDuplicateEscalation(resolved, dup, deps);
+  return createEscalationIssue(resolved, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
 }
 
 /**
@@ -996,19 +1082,20 @@ export async function escalateWithJudge(
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
-  const dup = findDuplicateEscalation(e, deps);
-  if (dup) return recordDuplicateEscalation(e, dup, deps);
+  const resolved = refuseUnlessResolvable(e);
+  const dup = findDuplicateEscalation(resolved, deps);
+  if (dup) return recordDuplicateEscalation(resolved, dup, deps);
 
-  const verdict = await judgeEscalation(e, deps);
+  const verdict = await judgeEscalation(resolved, deps);
   if (verdict.decision === "demote") {
-    return createEscalationIssue(e, deps, {
+    return createEscalationIssue(resolved, deps, {
       queueLabel: FLEET_NOTICE_LABEL,
       step: "escalation.demoted",
       firstComment: verdict.reason,
       extra: { judge_reason: verdict.reason },
     });
   }
-  return createEscalationIssue(e, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
+  return createEscalationIssue(resolved, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
 }
 
 /**
