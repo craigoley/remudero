@@ -14463,6 +14463,16 @@ export function headroomPolicyFromCurve(curve: PolicyHeadroomRung[]): HeadroomPo
  * forever for no consumer — the inverse of the `sweep.absent_repush` case, where the count
  * IS the bound and rotation resets it.
  *
+ * EMITS UNCONDITIONALLY whenever the survey completes, actionable or not (W1-T1086 re-ruling
+ * of the prior `if (actionable.length)` gate): a survey landing entirely on non-actionable
+ * dispositions (e.g. `not-a-fleet-clone`) is otherwise indistinguishable in the ledger from an
+ * empty root, a wrong root, or a survey that threw. `dispositions` (via {@link tallyDispositions},
+ * already the full tally) names WHY nothing was actionable, and `roots_surveyed` — the count of
+ * roots THIS survey itself passed to the reaper — separates "surveyed nothing because there was
+ * nothing" from "surveyed nothing because the roots resolved to nowhere". `candidate_bytes`
+ * stays summed over `actionable` only, unchanged. A survey that THREW still writes nothing (see
+ * the try/catch below) — this makes a COMPLETED survey always speak, not a failed one.
+ *
  * Deps are injectable and appended LAST so no positional caller shifts; the default path
  * reads the real policy and the real roots.
  */
@@ -14480,22 +14490,22 @@ export function logCloneReapSurvey(
       deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.scratchReap);
     const { enabled, maxAgeHours } = readPolicy();
     const reap = deps.reap ?? reapStaleClones;
-    const summary = reap((deps.roots ?? cloneReapRoots)(), {
+    const roots = (deps.roots ?? cloneReapRoots)();
+    const summary = reap(roots, {
       dryRun: !enabled,
       maxAgeMs: maxAgeHours * 60 * 60 * 1000,
     });
     const actionable = summary.candidates.filter(
       (c) => c.disposition === "reaped" || c.disposition === "would-reap" || c.disposition === "in-use",
     );
-    if (actionable.length) {
-      log("daemon.clone_reap", {
-        dry_run: summary.dryRun,
-        reaped: summary.reaped.length,
-        bytes_reclaimed: summary.bytesReclaimed,
-        candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
-        dispositions: tallyDispositions(summary.candidates),
-      });
-    }
+    log("daemon.clone_reap", {
+      dry_run: summary.dryRun,
+      reaped: summary.reaped.length,
+      bytes_reclaimed: summary.bytesReclaimed,
+      candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
+      dispositions: tallyDispositions(summary.candidates),
+      roots_surveyed: roots.length,
+    });
     return summary;
   } catch {
     return null; // best-effort, exactly like the sibling boot sweeps — never blocks boot
