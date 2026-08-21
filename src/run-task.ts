@@ -1584,7 +1584,21 @@ export function isPrMergedNow(prUrl: string, fetch: GhApiFetcher = ghJson): bool
 export function realArmDeps(): ArmDeps {
   return {
     headSha: (prUrl) => readHeadShaRest(prUrl),
-    ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
+    // W1-T1000002: `attemptArm` calls this thunk on EVERY arm, so a host that cannot resolve a
+    // config would turn arming into a crash. `loadConfig` does far more than yield a root — it
+    // also resolves the `claude` binary via `which` — and neither that binary nor an
+    // instance config exists on a CI runner or a bare checkout, where `armAutoMergeAtOpen` is
+    // nonetheless exercised. An unreadable ledger is read as "no hold is RECORDED", which is
+    // what an empty line set already means to `automergeHoldFromLedger`. This cannot mask a
+    // real production hold: the daemon calls `loadConfig` to start at all, so a context that
+    // fails here has no hold ledger to honour in the first place.
+    ledgerLines: () => {
+      try {
+        return readLedgerLines(ledgerPathFor(loadConfig()));
+      } catch {
+        return [];
+      }
+    },
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
       execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
