@@ -353,6 +353,7 @@ import {
   renderGather,
   renderNetStateUnwiredAdvisories,
   renderPlanHealth,
+  renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
   saveMarker,
@@ -375,6 +376,7 @@ import {
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask } from "./lib/ledger.js";
+import type { LedgerLine } from "./lib/ledger.js";
 import { gunzipSync } from "node:zlib";
 import { ledgerRotationEntries, resolveLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
@@ -455,8 +457,10 @@ import {
   projectLearningsHome,
   renderDoctrinePreamble,
   renderExportBundle,
+  runPromotionPass,
   verifyBundlePin,
 } from "./lib/learnings.js";
+import type { LearningEntry, PromotionJudgeDeps } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-notes.js";
 import {
@@ -11798,6 +11802,82 @@ export function netStateAdvisorySectionFor(repoRoot: string): string {
  * function already had before this task, so an isolated caller (this function's direct unit
  * tests below) keeps working unchanged.
  */
+/**
+ * W1-T1059: the PURE decision on whether this retro's promotion pass gets a ledger sink, and
+ * what one row looks like. Split out of {@link retroCommand} deliberately: a `--dry-run` retro
+ * is a PURE PREVIEW — `buildGather`'s own doc records that the dry-run branch never wrote
+ * anything, and a ledger append is a write — so the choice is a decision with two arms, each
+ * testable without driving a whole retro. Returning `undefined` is not a degradation:
+ * `promoteEntry`'s `deps.log ?? (() => {})` makes an absent sink a silent no-op by design.
+ */
+export function promotionLedgerSink(opts: {
+  dryRun: boolean;
+  ledgerPath: string;
+  runId: string;
+  /** Injectable append so the real-pass arm is provable without touching a ledger file. */
+  append?: (path: string, line: LedgerLine) => void;
+}): PromotionJudgeDeps["log"] {
+  if (opts.dryRun) return undefined;
+  const append = opts.append ?? appendLedger;
+  return (event, data) =>
+    append(opts.ledgerPath, { run_id: opts.runId, task_id: "RETRO", step: event, lane: "retro", ...data });
+}
+
+/**
+ * W1-T1059: THE PRODUCTION CALLER for `runPromotionPass` (lib/learnings.ts), which shipped
+ * under P32/W1-T146 with none — leaving `promotion.scrub`, `promotion.verdict` and
+ * `promotion.promoted` declared and unreachable. This is the I/O half only: it reads the
+ * corpus and supplies the judge, then hands the results to the PURE
+ * `renderPromotionProposals` (lib/retro.ts), which owns every decision. The split is
+ * deliberate — each decision arm is a pure function with its own test, and nothing here
+ * decides anything.
+ *
+ * IT WRITES NOTHING, AND THAT IS A CONSTRAINT, NOT AN IMPLEMENTATION DETAIL. The shard's
+ * design (ii) is explicit: a promoted entry reaches disk only through a reviewed PR. This
+ * function loads, judges and renders; it never persists a promoted entry, never touches
+ * `learnings/`, and never touches the shared home. `promotedEntries` is rendered and dropped.
+ *
+ * THE JUDGE IS INJECTED AND HAS NO PRODUCTION DEFAULT, DELIBERATELY. Absent one the pass does
+ * NOT run, and the rendered section says so in as many words — rather than fabricating a
+ * fail-closed verdict, which would write `promotion.verdict` rows for a judge that never ran
+ * and record "the judge said project-specific" as a fact. That is the same
+ * one-value-for-several-outcomes shape this task's classifier exists to avoid, and inventing a
+ * judge spawner here (one spawn per active entry, per retro, unattended) is the overreach the
+ * shard's design (iii) forbids for the writer. Supplying `opts.judge` makes all three steps fire.
+ */
+export async function promotionProposalSectionFor(opts: {
+  corpusDir: string;
+  judge?: PromotionJudgeDeps["judge"];
+  log?: (event: string, data: Record<string, unknown>) => void;
+  confidenceThreshold?: number;
+  /** Injectable corpus read so a test drives the stage without a real `learnings/` tree. */
+  loadCorpus?: (dir: string) => LearningEntry[];
+}): Promise<string> {
+  try {
+    if (!opts.judge) {
+      return `\n\n${renderPromotionProposals({ corpusSize: 0, ranPass: false, results: [] })}`;
+    }
+    const load = opts.loadCorpus ?? loadLearningsCorpus;
+    const entries = load(opts.corpusDir);
+    const pass = await runPromotionPass(entries, {
+      judge: opts.judge,
+      log: opts.log,
+      confidenceThreshold: opts.confidenceThreshold,
+    });
+    return `\n\n${renderPromotionProposals({
+      corpusSize: entries.length,
+      ranPass: true,
+      results: pass.results,
+      confidenceThreshold: opts.confidenceThreshold,
+    })}`;
+  } catch (e) {
+    console.error(
+      `### [retro] learnings_promotion — pass failed, degrading to none: ${String((e as Error)?.message ?? e)}`,
+    );
+    return "";
+  }
+}
+
 export function planHealthSweepSectionFor(repoRoot: string, isMerged?: (task: Task) => boolean): string {
   try {
     const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
@@ -11888,6 +11968,12 @@ async function retroCommand(
      * pass leak into the orientation pass. Two instances, exactly as before.
      */
     github?: GitHub;
+    /**
+     * W1-T1059: the promotion judge for this retro's promotion-proposal stage — injected on the
+     * SAME axis as `spawn` and `github` above. Absent, the pass does not run and the section says
+     * so; see {@link promotionProposalSectionFor} for why no fail-closed default is fabricated.
+     */
+    promotionJudge?: PromotionJudgeDeps["judge"];
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
@@ -12046,10 +12132,20 @@ async function retroCommand(
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
   const planHealthSection = planHealthSweepSectionFor(repoRoot, isTaskMerged);
+  // W1-T1059: the promotion pass's production caller. Rides EVERY retro report, dry-run and real
+  // alike, exactly like the two advisory sections above — it is pure, so a `--dry-run` preview
+  // stays a pure read.
+  const promotionLedgerRunId = `RETRO-${Date.now()}`;
+  const promotionSection = await promotionProposalSectionFor({
+    corpusDir: projectLearningsHome(repoRoot),
+    judge: opts.promotionJudge,
+    log: promotionLedgerSink({ dryRun, ledgerPath, runId: promotionLedgerRunId }),
+  });
   const report =
     [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") +
     planStateTruthSection +
     planHealthSection +
+    promotionSection +
     netStateAdvisorySection;
 
   if (dryRun) {
