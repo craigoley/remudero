@@ -811,6 +811,19 @@ export interface SpawnWorkerArgs {
    * produced by live runs, never only by a test (Standing rule 14).
    */
   streamObserver?: WorkerStreamObserver;
+  /**
+   * W1-T1045: THE CLOCK BOUND. Omitted (every caller before this task) ⇒ byte-identical
+   * behavior — no `AbortController` is ever constructed and `options.abortController` stays
+   * unset. When set, a watchdog ({@link createWorkerClockBoundWatchdog}) aborts THIS call's own
+   * SDK query the moment `boundMs` elapses since the last observed stream activity (never on
+   * total run age — see that function's own doc), and `spawnWorker` throws {@link
+   * WorkerAbandonedError} carrying the evidence instead of whatever the SDK's iterator threw on
+   * abort. run-task.ts wires the REAL bound here (`policy.values.workerAbandon`) at its own
+   * dispatch-spawn wrapper, never at this call site directly (Standing rule 14: the real
+   * observer/bound is wired at the real spawn path, not merely available) — the advisory
+   * reviewer's and the architect's own direct `spawnWorker` calls omit it and are unaffected.
+   */
+  clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
 }
 
 /**
@@ -1007,29 +1020,72 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       assertLiveSpawnAllowed(`spawnWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
     const runQuery = args.queryFn ?? query;
-    return await withWorkerGroupTeardown(
-      pidRef,
-      () =>
-        collectWorkerResult(runQuery({ prompt: args.prompt, options }), {
-          childEnvKeys: Object.keys(childEnv).sort(),
-          stderrChunks,
-          // Logged verbatim as CONFIGURED inputs — never a read-back (effort is not
-          // in the SDK envelope at all; model here is the requested knob, which may
-          // differ from the envelope's `modelUsage` map keys for the model(s) actually
-          // billed). Unset ⇒ the honest "default" label, never a guessed value.
-          model: args.model ?? DEFAULT_MODEL_LABEL,
-          effort: args.effort ?? DEFAULT_EFFORT_LABEL,
-          accountLabel: accountId,
-          // W1-T303: mirrored verbatim from the SAME `options.maxTurns` this call was
-          // spawned with — see {@link WorkerResult.maxTurns}. `undefined` when the
-          // caller configured no cap, never a guessed value.
-          maxTurns: args.maxTurns,
-          lostGrants,
-          // W1-T942: forwarded verbatim — see SpawnWorkerArgs.streamObserver's doc.
-          streamObserver: args.streamObserver,
-        }),
-      teardownContained,
-    );
+
+    // W1-T1045: THE CLOCK BOUND — constructed here, still local/free (no timer is armed and no
+    // `AbortController` even exists below this point unless `args.clockBound` is set). See
+    // SpawnWorkerArgs.clockBound's own doc; omitted ⇒ `abandonment`/`stopWatchdog` stay
+    // unpopulated and every line below behaves exactly as it did before this task.
+    let abandonment: WorkerAbandonmentEvidence | undefined;
+    let stopWatchdog: (() => void) | undefined;
+    let streamObserver = args.streamObserver;
+    if (args.clockBound) {
+      const controller = new AbortController();
+      options.abortController = controller;
+      const watchdog = createWorkerClockBoundWatchdog(args.clockBound);
+      streamObserver = (event) => {
+        watchdog.observer(event);
+        args.streamObserver?.(event);
+      };
+      // Armed immediately before the query itself runs — see impl-EM's own guard, above.
+      stopWatchdog = watchdog.start((evidence) => {
+        abandonment = evidence;
+        controller.abort();
+      });
+    }
+
+    try {
+      return await withWorkerGroupTeardown(
+        pidRef,
+        () =>
+          collectWorkerResult(runQuery({ prompt: args.prompt, options }), {
+            childEnvKeys: Object.keys(childEnv).sort(),
+            stderrChunks,
+            // Logged verbatim as CONFIGURED inputs — never a read-back (effort is not
+            // in the SDK envelope at all; model here is the requested knob, which may
+            // differ from the envelope's `modelUsage` map keys for the model(s) actually
+            // billed). Unset ⇒ the honest "default" label, never a guessed value.
+            model: args.model ?? DEFAULT_MODEL_LABEL,
+            effort: args.effort ?? DEFAULT_EFFORT_LABEL,
+            accountLabel: accountId,
+            // W1-T303: mirrored verbatim from the SAME `options.maxTurns` this call was
+            // spawned with — see {@link WorkerResult.maxTurns}. `undefined` when the
+            // caller configured no cap, never a guessed value.
+            maxTurns: args.maxTurns,
+            lostGrants,
+            // W1-T942: forwarded verbatim (wrapped with the watchdog's own observer above when a
+            // clock bound is configured) — see SpawnWorkerArgs.streamObserver's doc.
+            streamObserver,
+            // W1-T1045: the SAME injected clock the watchdog itself polls against (when one was
+            // supplied) — every `WorkerStreamEvent.tsMs` this call's observer sees must come from
+            // ONE clock, never a real `Date.now()` racing a synthetic test clock the watchdog was
+            // given. `undefined` (⇒ collectWorkerResult's own `Date.now` default) when no clock
+            // bound is configured at all, byte-identical to before this task.
+            now: args.clockBound?.now,
+          }),
+        teardownContained,
+      );
+    } catch (err) {
+      // W1-T1045: runs on EVERY thrown error, but only REPLACES it when the watchdog itself
+      // tripped (`abandonment` populated) — any other transport failure passes through
+      // unchanged, exactly as before this task. Replacing rather than adding a second reject
+      // means run-task.ts checks ONE type (`instanceof WorkerAbandonedError`) rather than
+      // re-deriving "was this OUR abort" from the SDK's own thrown error shape, which is not a
+      // documented contract.
+      if (abandonment) throw new WorkerAbandonedError(abandonment, err);
+      throw err;
+    } finally {
+      stopWatchdog?.();
+    }
   } finally {
     // W1-T170: reap THIS spawn's per-spawn home on every exit path, including a
     // thrown error (validate/toolchain/keychain failures above, or a transport
@@ -1206,6 +1262,142 @@ export class WorkerStateTracker {
     this.state = next;
     return next;
   }
+}
+
+/**
+ * Evidence captured the MOMENT the clock-bound watchdog (W1-T1045, {@link
+ * createWorkerClockBoundWatchdog}) trips — BEFORE anything is released (the lock, the
+ * worktree, the process group; run-task.ts writes this evidence to the ledger before doing any
+ * of that). `lastState`/`lastStateMs` are `undefined` when the stream never produced even one
+ * classifiable `working`/`tool-executing` event before going silent — the same UNKNOWN
+ * polarity {@link WorkerStateTracker.currentState} keeps (never defaulted to `"working"`).
+ */
+export interface WorkerAbandonmentEvidence {
+  /** Milliseconds since the last observed stream activity (of ANY kind — see {@link
+   *  WorkerStreamEvent}) at the moment the bound tripped. Always > `boundMs`. */
+  elapsedMs: number;
+  /** The resolved bound this run was measured against — never re-derived by a reader, since
+   *  policy can move between when this fired and when anything reads it back. */
+  boundMs: number;
+  lastState?: WorkerState;
+  /** The injected clock's reading at the last observed activity — `undefined` iff `lastState`
+   *  is (nothing was ever observed before the bound tripped). */
+  lastStateMs?: number;
+}
+
+/**
+ * Thrown by {@link spawnWorker} when the W1-T1045 clock-bound watchdog trips: the stream
+ * produced no observed activity for longer than `args.clockBound.boundMs`, so this call's own
+ * `AbortController` was aborted and the SDK's iterator settled with an error rather than a
+ * result envelope (see {@link collectWorkerResult}'s `if (!sawResult) throw err` path — a
+ * stalled stream never produces one). Carries the {@link WorkerAbandonmentEvidence} the caller
+ * (run-task.ts) needs to write a terminal verdict without re-deriving the same judgment this
+ * watchdog already made; `cause` keeps the raw underlying error reachable for a post-mortem,
+ * never discarded.
+ *
+ * A NAMED, DUCK-TYPEABLE reason, matching this file's existing convention for a refusal a
+ * caller must recognize (`ClaudeToolchainBlockedError.reasonClass`, `WorkerKeychainError`) —
+ * never a bare string match against `.message`.
+ */
+export class WorkerAbandonedError extends Error {
+  readonly reasonClass = "worker_abandoned" as const;
+  readonly evidence: WorkerAbandonmentEvidence;
+  constructor(evidence: WorkerAbandonmentEvidence, cause?: unknown) {
+    super(
+      `worker abandoned: no observed stream activity for ${evidence.elapsedMs}ms, past the ` +
+        `${evidence.boundMs}ms clock bound (W1-T1045)`,
+      cause !== undefined ? { cause } : undefined,
+    );
+    this.name = "WorkerAbandonedError";
+    this.evidence = evidence;
+  }
+}
+
+/** Real-time polling cadence for {@link createWorkerClockBoundWatchdog} — cheap relative to
+ *  every bound this fires against (the policy floor is 1,200,000ms; see plan/policy.yaml's
+ *  `workerAbandon` row), matching `buildWorkerStateSensor`'s own `WORKER_STATE_POLL_MS`
+ *  (run-task.ts) sibling constant for the SAME "real timer, tiny relative to what it watches"
+ *  reasoning. */
+const WORKER_CLOCK_BOUND_POLL_MS = 5_000;
+
+/**
+ * THE CLOCK-BOUND WATCHDOG ITSELF (W1-T1045) — pure and independently testable, mirroring
+ * `buildWorkerStateSensor`'s own observer/poll split (run-task.ts) one layer down, inside the
+ * file that actually holds the live stream.
+ *
+ * Reuses {@link WorkerStateTracker}'s own "elapsed since last activity" math rather than
+ * re-deriving it: constructing one with `quietFloorMs: boundMs` makes its `check()` transition
+ * to `"quiet"` at EXACTLY the moment this watchdog must trip — the SAME `"quiet"` concept
+ * {@link DEFAULT_WORKER_QUIET_FLOOR_MS} names, at a much longer floor, on a tracker instance
+ * PRIVATE to this watchdog (never the run-level one `buildWorkerStateSensor` owns — the three
+ * thresholds {@link WorkerStreamEvent}'s own doc names stay decoupled).
+ *
+ * `observer` wraps a `WorkerStreamObserver` so every observed event (working/tool-executing/
+ * message — `"message"` heartbeats included, deliberately: see {@link WorkerStreamEvent}'s own
+ * doc for why a heartbeat still resets the quiet clock) resets the idle clock; `start(onTrip)`
+ * seeds that clock the moment polling begins (a synthetic `"message"` event) so a stream that
+ * yields ZERO events before going silent still trips at `boundMs` — never earlier, never never
+ * — and fires `onTrip` EXACTLY ONCE, carrying the evidence, the moment elapsed silence exceeds
+ * the bound. Criterion 6 (a stream still producing events is never tripped, however long it
+ * runs) holds because every event — via `observer` — pushes the tracker's own clock forward.
+ *
+ * `now`/`pollMs` are injectable, the SAME `now?: () => number` convention every clock-bearing
+ * function in this file already follows (`collectWorkerResult`, `WorkerStateTracker.check`), so
+ * a test trips this deterministically without a real multi-hour wait.
+ */
+export function createWorkerClockBoundWatchdog(opts: {
+  boundMs: number;
+  now?: () => number;
+  pollMs?: number;
+}): {
+  observer: WorkerStreamObserver;
+  /** Begin polling; returns a stop function. Calls `onTrip` at most ONCE. */
+  start: (onTrip: (evidence: WorkerAbandonmentEvidence) => void) => () => void;
+} {
+  const now = opts.now ?? Date.now;
+  const pollMs = opts.pollMs ?? WORKER_CLOCK_BOUND_POLL_MS;
+  const tracker = new WorkerStateTracker(opts.boundMs);
+  let lastActivityMs: number | undefined;
+  let lastState: WorkerState | undefined;
+
+  const observer: WorkerStreamObserver = (event) => {
+    lastActivityMs = event.tsMs;
+    const next = tracker.observe(event);
+    if (next) lastState = next;
+  };
+
+  const start = (onTrip: (evidence: WorkerAbandonmentEvidence) => void): (() => void) => {
+    // Seed the tracker's clock the moment polling begins — see this function's own doc for why
+    // a stream that never says anything at all must still trip.
+    const startedAtMs = now();
+    tracker.observe({ kind: "message", tsMs: startedAtMs });
+
+    let tripped = false;
+    const timer = setInterval(() => {
+      if (tripped) return;
+      const nowMs = now();
+      if (tracker.check(nowMs) === "quiet") {
+        tripped = true;
+        onTrip({
+          elapsedMs: nowMs - (lastActivityMs ?? startedAtMs),
+          boundMs: opts.boundMs,
+          lastState,
+          lastStateMs: lastActivityMs,
+        });
+      }
+    }, pollMs);
+    // DELIBERATELY NOT `.unref()`'d, unlike `buildWorkerStateSensor`'s own cosmetic poll
+    // (run-task.ts): that timer only feeds a display/telemetry row, so losing it costs nothing.
+    // THIS timer is the enforcement mechanism a genuinely stalled worker relies on — the SDK
+    // call itself holds no Node-level timer or handle while it's hung, so an unref'd interval
+    // here can let Node decide the event loop is idle and let the process exit (or, under a
+    // runner, be torn down) before it ever fires, silently defeating the whole bound. `stop()`
+    // (returned below) still clears it on every real exit path (spawnWorker's `finally`), so a
+    // HEALTHY run is never kept alive a moment longer than the call it's watching.
+    return () => clearInterval(timer);
+  };
+
+  return { observer, start };
 }
 
 export async function collectWorkerResult(
