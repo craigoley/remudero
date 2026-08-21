@@ -2906,9 +2906,12 @@ test("W1-T513: a third startInFlightTicker call site now exists (retro, dispatch
   // calls) and forbade a third — see the design note this task's shard carries for why that
   // was safe advice only until the per-PR mutex below stopped being per-call.
   assert.equal(calls.length, 4, `expected 1 declaration + 3 call sites (retro, dispatch, sweep), found ${calls.length} occurrence(s) of startInFlightTicker(`);
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "retro"\)/, "the retro call site is unchanged");
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch"\)\.stop/, "the dispatch call site is unchanged");
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "sweep"\)\.stop/, "W1-T513's new sweep call site exists");
+  // W1-T1082: every call site now threads the SAME shared `diskHeadroomLatch` reference (never
+  // a fresh latch per call — see that variable's own doc in daemon.ts) as a trailing 5th
+  // argument, alongside the pre-existing 4 positional args these regexes already pinned.
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "retro", diskHeadroomLatch\)/, "the retro call site is unchanged");
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch\)\.stop/, "the dispatch call site is unchanged");
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch\)\.stop/, "W1-T513's new sweep call site exists");
 });
 
 test("W1-T463: DaemonOpts still carries exactly ONE lane-sizing knob (laneCount, dispatch-only) — no second, per-kind budget was introduced", () => {

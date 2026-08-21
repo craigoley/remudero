@@ -1042,6 +1042,40 @@ export interface DaemonDeps {
    */
   onQuotaExhausted?: (info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string }) => void | Promise<void>;
   /**
+   * W1-T1082 (THE DAEMON NEVER READS ITS OWN FREE SPACE): real free disk space for THIS tick,
+   * pre-judged against the SAME thresholds `rmd doctor`'s own `judgeDiskHeadroom` reports
+   * against (doctor.ts) — read and judged in the CLI wiring (run-task.ts), never here, because
+   * this module stays fs-free AND threshold-free (the file header's "never touches the
+   * filesystem", extended to "never re-derives a threshold `rmd doctor` already owns" — a daemon
+   * that alarmed at a different number than `rmd doctor` reports would be a contradiction an
+   * operator has to adjudicate mid-incident). `freeBytes` is `undefined` (never a fake `0`) on
+   * any read failure — `readDiskFreeBytes`'s own fail-soft contract (daemon-health.ts) — and
+   * `runDaemon` below treats an undefined `freeBytes` as UNREADABLE, never as zero-bytes-free:
+   * it is still recorded on the `daemon.alive` row when present, but it never escalates (see
+   * `onDiskHeadroomBreach` below). Optional — omitted, `daemon.alive` simply carries no
+   * `disk_free_bytes`, exactly as before this dep existed.
+   */
+  readDiskHeadroom?: () => { freeBytes?: number; verdict: "OK" | "WARN" | "FAIL" };
+  /**
+   * Called AT MOST ONCE per continuous disk-headroom breach episode — the tick a reading FIRST
+   * crosses below WARN (2 GiB) or FAIL (512 MiB), cleared the instant a LATER reading is back at
+   * OK (mirrors `onHeadroomBreach`'s own `headroomReserveEscalated` latch exactly — see
+   * `runDaemon`'s `diskHeadroomLatch`, below). Escalates at WARN, not only FAIL: by FAIL, the
+   * issue body, this hook's own dedup marker and the ledger row it lives on are all writes that
+   * may themselves lose to the same ENOSPC this hook exists to report ahead of — the exact shape
+   * `escalateCrashLoop`'s doc names ("a detector whose input can only be recorded by a write
+   * that ENOSPC rejects is structurally incapable of being the FIRST signal; it is the
+   * autopsy"). Never called for an unreadable read (`readDiskHeadroom`'s `freeBytes` absent) —
+   * an unreadable disk is not evidence of a full one. Wrapped in the caller's own try/catch
+   * (same discipline as `onHeadroomBreach`/`onQuotaExhausted`) so a failed notification costs
+   * one logged line, never the daemon's liveness. The real command wires run-task.ts's
+   * `escalateDiskHeadroomBreach`, with its OWN cross-boot ledger dedup — this in-process latch
+   * alone resets to empty on every daemon restart, and disk pressure can itself crash-loop the
+   * daemon. Optional — omitted, the breach is still visible via `daemon.alive`'s own
+   * `disk_free_bytes` field, it just opens no issue.
+   */
+  onDiskHeadroomBreach?: (info: { freeBytes: number; verdict: "WARN" | "FAIL"; ts: string }) => void | Promise<void>;
+  /**
    * QUEUE STARVATION (recon oper#queue-starvation-2026-08-03): called on an idle tick whose
    * dispatch-filter census names at least one RECOVERABLE-class blocker — see {@link
    * StarvationCensus} and the predicate right above where this fires in the idle rung. Fires
@@ -1355,8 +1389,9 @@ async function sweepLightDuringRetro(
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
   run: () => Promise<void>,
+  diskHeadroomLatch: { escalated: boolean },
 ): Promise<void> {
-  const ticker = startInFlightTicker(deps, pollIntervalMs, log, "retro");
+  const ticker = startInFlightTicker(deps, pollIntervalMs, log, "retro", diskHeadroomLatch);
   try {
     await run();
   } finally {
@@ -1407,12 +1442,25 @@ async function sweepLightDuringRetro(
  * guard — run-task.test.ts's "daemonCommand: builds the real daemon deps (sweep +
  * sweepLight wiring)". A caller that omits the hook is a test, and gets no heartbeat
  * because it is running no dispatch worth reporting on.
+ *
+ * W1-T1082 (THE DAEMON NEVER READS ITS OWN FREE SPACE): this row is ALSO where real disk
+ * headroom rides — "no new step, no new row", the same discipline `holdSeen` above was added
+ * under. `deps.readDiskHeadroom` is consulted on this SAME cadence (never a second clock — the
+ * whole point of reusing this ticker rather than inventing one) and `disk_free_bytes` is
+ * carried on the row ONLY when the read actually succeeded: an unreadable read is absent from
+ * the row, never a fabricated `0` (`readDiskFreeBytes`'s own contract). Escalation
+ * (`onDiskHeadroomBreach`) fires at most once per continuous breach episode via
+ * `diskHeadroomLatch`, a reference SHARED across every phase/call of this function within one
+ * `runDaemon` run (see that variable's own doc) — never a fresh latch per call, which would
+ * re-escalate every time a NEW phase's ticker happened to start while the SAME breach was still
+ * open.
  */
 function startInFlightTicker(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
   phase: "dispatch" | "retro" | "sweep",
+  diskHeadroomLatch: { escalated: boolean },
 ): { stop: () => Promise<void> } {
   let active = true;
   const ticker = deps.sweepLight
@@ -1432,11 +1480,34 @@ function startInFlightTicker(
           // untouched — but the operator can now tell "seen, waiting for this batch to settle"
           // from "not seen yet" without escalating.
           const holdSeen = phase === "dispatch" ? Boolean(deps.checkPause?.()) : undefined;
+          // W1-T1082: pre-judged by the CLI wiring (run-task.ts's `judgeDiskHeadroom`, the SAME
+          // definition `rmd doctor` reports against) — this pure module never re-derives the
+          // WARN/FAIL boundary. A reading back at OK re-arms the latch so a LATER breach (a
+          // genuinely new episode) escalates again rather than staying silenced for this
+          // process's life — the same clearing discipline `headroomReserveEscalated` applies.
+          const diskHeadroom = deps.readDiskHeadroom?.();
+          if (diskHeadroom?.verdict === "OK") diskHeadroomLatch.escalated = false;
           log("daemon.alive", {
             phase,
             poll_interval_ms: pollIntervalMs,
             ...(holdSeen !== undefined ? { pause_seen: holdSeen } : {}),
+            ...(diskHeadroom?.freeBytes !== undefined ? { disk_free_bytes: diskHeadroom.freeBytes } : {}),
           });
+          // UNREADABLE (`freeBytes === undefined`) NEVER ESCALATES — an absent read is not
+          // evidence of a full disk, and treating it as one would page an operator over a
+          // transient `statfs` blip rather than an actual breach (design (ii)/(iv)).
+          if (diskHeadroom?.freeBytes !== undefined && diskHeadroom.verdict !== "OK" && !diskHeadroomLatch.escalated) {
+            diskHeadroomLatch.escalated = true;
+            try {
+              await deps.onDiskHeadroomBreach?.({
+                freeBytes: diskHeadroom.freeBytes,
+                verdict: diskHeadroom.verdict,
+                ts: (deps.now ?? (() => new Date()))().toISOString(),
+              });
+            } catch (e) {
+              log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
           try {
             await deps.sweepLight!();
           } catch (e) {
@@ -1924,6 +1995,17 @@ export async function runDaemon(
   // episode) escalates again rather than staying silenced for the rest of
   // this process's life.
   let headroomReserveEscalated = false;
+  // DISK HEADROOM ESCALATION DEDUP (W1-T1082): the SAME per-episode-latch shape
+  // `headroomReserveEscalated` applies just above, threaded (never redeclared) into every
+  // `startInFlightTicker`/`sweepLightDuringRetro` call below so ALL THREE phases (dispatch,
+  // sweep, retro) share the ONE latch for this daemon run — a breach first observed mid-dispatch
+  // must not re-escalate the moment a sweep tick observes the same still-unresolved reading.
+  // Cleared the instant a reading is back at OK, so a LATER breach (a genuinely new episode)
+  // escalates again rather than staying silenced for the rest of this process's life. Held as a
+  // mutable object, not a bare `let`, because `startInFlightTicker` is a free function called
+  // fresh per phase — a plain closed-over boolean would reset every call; this object is the
+  // SAME reference across all of them.
+  const diskHeadroomLatch: { escalated: boolean } = { escalated: false };
   // QUOTA EXHAUSTION ESCALATION DEDUP (W1-T372): the SAME per-episode-latch shape
   // `headroomReserveEscalated` applies just above, kept PER BUCKET (core, graphql) rather than
   // one flag — each bucket is read, records, and escalates independently (design (i)/(iv)), so
@@ -2269,7 +2351,7 @@ export async function runDaemon(
     // than aborted, and a ticker hiccup is ledgered (`daemon.sweep_light.failed`) but never
     // propagated.
     if (deps.sweep) {
-      const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep").stop;
+      const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch).stop;
       try {
         // W1-T1044: the WALL-CLOCK BOUND on `deps.sweep()` — see DaemonOpts.sweepWallClockBoundMs's
         // own doc for the measured incident this closes (a fix-rung worker's `until` shell loop
@@ -2670,7 +2752,7 @@ export async function runDaemon(
             // below — wrap it in the SAME light-sweep ticker so the loop's
             // sweep keeps dispositioning PRs while the retro runs, instead
             // of going dark for the retro's whole duration.
-            await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runRetroTrigger!(decision));
+            await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runRetroTrigger!(decision), diskHeadroomLatch);
           } catch (e) {
             log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
           }
@@ -2940,7 +3022,7 @@ export async function runDaemon(
               // (a CI-polling tail) and this loop is single-threaded, so an unwrapped await would
               // black out every sweep for that whole duration — the exact defect W1-T276 fixed for
               // the retro. The ticker keeps dispositioning PRs while triage runs.
-              await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runAutoTriage!(fired.feedbackId));
+              await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runAutoTriage!(fired.feedbackId), diskHeadroomLatch);
             } catch (e) {
               log("auto_triage.run_failed", {
                 feedback: fired.feedbackId,
@@ -3113,7 +3195,7 @@ export async function runDaemon(
     // aborted mid-call (a sweepLight() already in flight is allowed to finish before
     // the ticker stops). It also emits this dispatch's `daemon.alive` liveness rows —
     // see {@link startInFlightTicker} for why that row exists and why it is prefixed.
-    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch").stop;
+    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch).stop;
 
     // CONCURRENT DISPATCH (W1-T343, mirrors `runDrainLanes` exactly): `allSettled`, never
     // `all` — a sibling lane's rejection must never abort another lane already in flight;
