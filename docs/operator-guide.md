@@ -310,6 +310,55 @@ phase 3 disappears. It did not transfer to `task-id-existence`, and the reason i
 workflows, so a gate wired as an npm script is derived as a candidate wherever its invocation
 sits. Workflow placement was simply irrelevant to that half.
 
+## Where to run a verb, and why the wrong place answers confidently
+
+Every verb below is read-only or near enough, so the failure mode is not damage — it is a
+**confident wrong answer**. Each item here cost a wrong conclusion on 2026-08-21. The pattern is
+always the same: the verb ran somewhere it could not see the state it was describing, and said so
+in the same tone it uses when it *can*.
+
+- **`config.root` resolves from the invoking checkout, not from the fleet.** Run from `~/rmd-op`,
+  `rmd status` reports `daemon: not running — boot unknown` while the daemon is writing a ledger
+  row every minute; `rmd doctor` cannot find its own data; and `rmd peek <runId>` reports
+  `no tail recorded` against a directory holding a hundred-odd tails. Nothing warns you: the verbs
+  are reading a different `state/` and answering honestly about it. **Run fleet-state verbs where
+  the fleet's state is**, and if an answer contradicts the ledger, check which root you resolved
+  before believing it.
+
+- **`docker exec` defaults to `/app`, which is the baked image copy and is not a git work tree.**
+  `git rev-parse --is-inside-work-tree` there answers `fatal: not a git repository`. Its verb list
+  is frozen at image build time, so a verb that shipped hours ago is simply absent — `grep -c
+  '"doctor"' src/run-task.ts` reads `0` in `/app` and `2` in the live checkout. **The live checkout
+  is `/home/node/Remudero/remudero`; pass `-w`:**
+  `docker exec -w /home/node/Remudero/remudero remudero-daemon ./bin/rmd <verb>`.
+
+- **That checkout is deliberately detached, so it sits behind main between deploys.**
+  `deploy/entrypoint.sh` runs `git checkout --detach` on every boot, so `git rev-parse
+  --abbrev-ref HEAD` there answers `HEAD` and the tree stays pinned at whatever sha it booted on.
+  `run-task`, `drain` and `daemon` gate on `syncPlanOrRefuse` and will refuse rather than act on a
+  stale plan; `doctor`, `status` and `sweep` carry no such gate and will answer from the pinned
+  tree without comment. **Fetching and re-detaching to unstick it moves the daemon's own work tree
+  — check `state/inflight/` is empty first**, or you will move the ground under a running worker.
+
+- **`gh api --jq '.body'` appends a trailing newline, so a byte-for-byte comparison against the
+  source file is always off.** Measured on a real PR body: the captured text ends in a newline, and
+  stripping trailing newlines removes **two** characters, not one — the body's own plus jq's. **And
+  `wc -c` counts bytes while Python counts characters**: the same 4,775-character body measures
+  4,793 bytes, an 18-character gap made entirely of em-dashes. A body full of them reads as edited
+  when it is identical. **Strip trailing newlines and compare characters.**
+
+- **A rate-limited call returns a small JSON error payload with HTTP 403 — and it parses.** The
+  captured shape is an object with exactly `message`, `documentation_url` and `status`, where
+  `status` is the string `"403"`. It was read as content twice. **Guard structurally — assert the
+  shape you expected (a list, or a known key), never a size.** A size threshold is a guess that
+  happens to work until the error text changes.
+
+- **The secondary rate limit counts cadence, not volume.** A 403 arrived with 4,980 of 5,000
+  remaining, so "plenty left" is not a reason to believe a call will succeed. Batch into one
+  paginated request rather than many small ones, and never loop with a sleep. **`gh api rate_limit`
+  does not itself count against the limit** — two consecutive reads return the same `remaining` —
+  so it still answers when everything else is refusing.
+
 ## Crisis runbook: the procedures you need at 3am
 
 The rest of this guide is about reading state. These four are the ones you need when you have
