@@ -11111,8 +11111,12 @@ export function duplicateCorpusOpts(
  *  never evidence its implementation merged. This one boundary is the failing-split classifier's
  *  whole judgment surface — moving it swung the recon's count 47 → 156 → 167
  *  (state/recon-open-failing-composition.md) — which is why the printed summary names the rule
- *  and not just the counts. */
-export const LINT_FILING_SUBJECT_RE = /^(chore\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\))/i;
+ *  and not just the counts. Includes both the current conventional-commit filing subjects
+ *  (`chore(plan)`/`chore(triage)`/`chore(feedback)`/`docs(plan)`) AND the older bare `plan:`/
+ *  `docs:`/`chore:` convention this repo used before them (W1-T1078) — without the bare forms,
+ *  filing commits predating the scoped convention read as implementation evidence. */
+export const LINT_FILING_SUBJECT_RE =
+  /^(chore\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i;
 
 /** Splits lint-plan's failing tasks by MERGE EVIDENCE in a `git log` dump (`%s%x00%b%x01`
  *  format): a task "has a merged implementation" when any non-filing commit carries its id as a
@@ -11556,8 +11560,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       failingSplit = ` (${withImpl.length} with a merged implementation, ${without.length} with none)`;
       evidenceRuleLine =
         `\n  failing-split evidence: a Remudero-Task trailer or commit-subject citation on ${ref}, ` +
-        `with chore(plan)/chore(triage)/chore(feedback)/docs(plan) filing subjects excluded — ` +
-        `a filing cites a task; it does not implement it`;
+        `with chore(plan)/chore(triage)/chore(feedback)/docs(plan)/plan:/docs:/chore: filing ` +
+        `subjects excluded — a filing cites a task; it does not implement it`;
     } catch (e) {
       failingSplit = ` (merge-evidence unavailable: ${(e as Error).message})`;
     }
@@ -20620,9 +20624,15 @@ async function triageCommandLocked(
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
     // the worker produced, mirroring regenerateOrientation's post-worker deterministic commit.
     setFeedbackStatus(worktreePath, feedbackId, decision.status);
-    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/"], { stdio: "inherit" });
     const commitMessage = triageCommitMessage({ decision, feedbackId, taskId, grillIssueUrl });
-    execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "inherit" });
+    // W1-T1089: route through the SAME shared stage-and-commit function `rmd plan` uses
+    // (applyPlanProposalCommit, lib/plan-architect.ts) rather than triage's own inline `git
+    // add -A -- plan/`, which never matched MASTER-PLAN.md (a root-level file, not under
+    // plan/) — silently discarding any amendment the Architect made even though
+    // triagePrompt/decideTriage/nonPlanFilesInDiff all license one. The shared function's
+    // `plan/ MASTER-PLAN.md` pathspec now stages the amendment, and it regenerates
+    // plan/plan-index.json first so a stray or renumbered heading never ships stale.
+    applyPlanProposalCommit(worktreePath, commitMessage, log);
     gitPushRunBranch(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
@@ -21038,7 +21048,7 @@ export async function planCommand(
     log("plan.verdict", { action: "propose", detail: decision.detail, files: decision.files });
     say(formatPlanVerdictLine(mode, decision));
     const commitMessage = planCommitMessage({ decision, mode, brief, taskId });
-    applyPlanProposalCommit(worktreePath, commitMessage);
+    applyPlanProposalCommit(worktreePath, commitMessage, log);
     gitPushRunBranch(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off

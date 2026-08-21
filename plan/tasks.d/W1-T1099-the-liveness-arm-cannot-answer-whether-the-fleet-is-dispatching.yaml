@@ -1,0 +1,109 @@
+- id: W1-T1099
+  title: "`rmd doctor`'s dispatch-liveness arm CANNOT ANSWER WHETHER THE FLEET IS DISPATCHING — its predicate contradicts the threshold it prints and passes on any non-dispatch phase except one hardcoded value, and it judges phases from a daemon run that was replaced ninety minutes earlier"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  rationale: |
+    THE RECON IS DONE AND IS CITED HERE, NOT RE-DERIVED (2026-08-21, Azure host `Remudero`, scratch
+    worktree at origin/main, ledger read-only over the per-form union: 14 plain/live forms, 0 `.gz`).
+    TWO DEFECTS, ONE CONCERN: the arm cannot answer the question it exists to answer.
+
+    (1) THE PREDICATE CONTRADICTS ITS OWN PRINTED THRESHOLD. `judgeDispatchStarvation`
+    (`src/lib/doctor.ts`) computes `recent.every((p) => p === "sweep")`, so it warns ONLY when all
+    three rows are literally `sweep` — while the threshold string it prints beside the verdict states
+    *"some dispatch phase within the last 3 alive row(s)"*. Those are different rules. MEASURED:
+    `retro, retro, retro` PASSES, with a measured value containing no dispatch phase and a threshold
+    demanding one. Across every `daemon.alive` phase ever emitted — `dispatch` 4622, `sweep` 1294,
+    `retro` 1074 — the arm is BLIND TO 1074 OF 2368 NON-DISPATCH ROWS.
+
+    (2) AND IT JUDGES A DEAD RUN'S ROWS. `daemon.alive` rows carry a `run_id` and the arm reads them
+    without filtering on it. `DAEMON-1787314546328` was live and emitting `dispatch.skipped` at
+    13:49:45Z and has written ZERO `daemon.alive` rows; the three newest runs that DID write them
+    each stop cleanly — 15, 19 and 27 rows ending 11:07:18, 11:33:20 and 12:09:31. So the check read
+    phases from a daemon replaced ninety minutes earlier and called the fleet healthy.
+
+    (3) AND THE EMITTER'S SHAPE IS WHY (2) IS NOT A ONE-OFF — WITH ONE CORRECTION TO THE BRIEF.
+    `startInFlightTicker` (`src/lib/daemon.ts`) is the ONLY writer of `daemon.alive` (the only other
+    occurrence in `src/` is doctor's own reader). It is NOT dispatch-only: it is started at THREE
+    sites, labelled `retro`, `sweep` and `dispatch`. What it actually wraps is WORK IN FLIGHT — each
+    site starts it around a rung's body and clears it on every exit path. So a daemon that declines
+    every candidate and never enters a rung emits NOTHING, which is exactly the observed state in
+    (2): a live daemon streaming `dispatch.skipped` with no alive rows at all. The absence is
+    structural, not a fault in the emitter.
+
+    (4) THIS CORRECTS W1-T1047's OWN SHIPPED ARM. The doc comment directly above
+    `judgeDispatchStarvation` states the intended rule correctly — *"consecutive rows all reading
+    `sweep` with no `dispatch` among them"* — and the code narrowed it to one hardcoded phase. The
+    prose was right and the predicate was not.
+
+    (5) THE CLASS IS ALREADY FILED AND IS CITED, NOT RE-FILED. A health check that passes when the
+    thing it watches has stopped is the same shape as a check that cannot fail: W1-T1081 and
+    W1-T1097 own that class. This shard fixes one instance and adds nothing to the taxonomy.
+  design: |
+    (i) INVERT THE PREDICATE TO THE RULE IT ALREADY PRINTS. Replace
+    `recent.every((p) => p === "sweep")` with `!recent.includes("dispatch")`. That needs NO phase
+    enumeration and CANNOT GO BLIND WHEN A PHASE IS ADDED — the failure mode of the current form is
+    precisely that it named one phase and a second one appeared.
+
+    (ii) BOUND THE ROWS BY THE CURRENT RUN. The arm must read only the phases belonging to the
+    newest daemon run, never a replaced one. The freshness arm in the same module already resolves
+    the newest `daemon.`-prefixed row via `deriveLastPoll`, so the run identity is already available
+    in this file and needs no new read.
+
+    (iii) NO ROWS FOR THE CURRENT RUN MUST REPORT UNKNOWN, NOT OK. Given (3), a live daemon that has
+    entered no rung has no alive rows at all, and OK is an answer the arm has not earned — it is the
+    same false-green (2) produced, one level down. The arm should say the liveness of THIS run is
+    unknown and why, so the reader looks elsewhere rather than being told the fleet is fine.
+    DO NOT BUILD A NEW EMITTER. Making `daemon.alive` fire outside a rung is a different task with a
+    different blast radius; this one only stops the arm from answering a question it cannot see.
+
+    (iv) LEAVE `dispatch-stall` ALONE — IT IS CORRECT BY DESIGN. `judgeDispatchStall` returns OK at
+    `candidateCount === 0` deliberately, matching W1-T450's rule that a stall line fires *"when
+    eligible work… never on an empty queue"*, which W1-T1047's own `plan_refs` cites. No threshold
+    moves and no verdict changes in that arm.
+
+    (v) OUT OF SCOPE, NAMED. No new ledger step, no change to `startInFlightTicker`, no change to
+    `STARVATION_MIN_ROWS`, and no change to any other doctor arm. W1-T1081 and W1-T1097 are cited for
+    the class; neither is absorbed.
+  acceptance:
+    - claim: "a recent window carrying no dispatch phase is reported as starved whatever the other phases are"
+      proof: "unit test: W1-T1099: a window with no dispatch phase is starved whatever the phases are"
+    - claim: "a recent window containing a dispatch phase is still healthy"
+      proof: "unit test: W1-T1099: a window containing a dispatch phase is still healthy"
+    - claim: "phases belonging to a replaced daemon run are not judged as the current run's"
+      proof: "unit test: W1-T1099: a replaced run's phases are not judged as the current run's"
+    - claim: "a current run with no alive rows reports unknown rather than healthy"
+      proof: "unit test: W1-T1099: a current run with no alive rows reports unknown"
+  origin: "recon#doctor-liveness-arm-cannot-see-dispatch-2026-08-21"
+  plan_refs: ["W1-T1047", "W1-T1081", "W1-T1097", "W1-T450"]
+  files: [src/lib/doctor.ts, test/doctor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared path,
+    so a `src/` module plus any `test/*.test.ts` reads as two concerns and `lint-plan` refuses that
+    below high — the correction it has already forced on W1-T1068, W1-T1069, W1-T1078, W1-T1079 and
+    W1-T1095. THE ACTUAL DIFF IS ONE PREDICATE, ONE ROW FILTER, AND AN UNKNOWN ARM.
+
+    `test/doctor.test.ts` IS THE EXISTING HOME and is declared rather than a new file, so the concern
+    count is not inflated by a filename.
+
+    ONE SENTENCE CARRIED HERE RATHER THAN AS A SECOND CONCERN: `dispatch-stall`'s printed line pairs
+    a COUNT with a DURATION — `measured: 0 eligible candidate(s)` beside `threshold: <= 41.6h` — so
+    it reads as a comparison that was never made; the verdict is right and only the rendering
+    misleads, and an implementer already in this file may tidy it without widening `files:`.
+
+    THE BRIEF'S PREMISE ABOUT THE EMITTER IS CORRECTED IN RATIONALE (3) RATHER THAN REPEATED.
+    `startInFlightTicker` runs at three sites (`retro`, `sweep`, `dispatch`), not dispatch only; what
+    makes a non-dispatching daemon silent is that the ticker wraps a rung's BODY, so a daemon that
+    declines every candidate never starts one. The consequence the brief drew is right; the
+    mechanism is not what it said, and design (iii) depends on the mechanism.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the phase histogram from the per-form ledger union with a
+    coverage control taken first; re-derive the run-boundary evidence by grouping `daemon.alive` rows
+    by `run_id` and comparing against the newest `dispatch.skipped` row's `run_id`; re-derive the
+    emitter's call sites with `git grep -n 'startInFlightTicker(' -- src/`.

@@ -1,0 +1,141 @@
+- id: W1-T1100
+  title: "when the PR body cannot be fetched the reviewer substitutes the WORKER'S CHAT TEXT and hands it to three consumers that were written for a body — one fails CLOSED on a phantom claim, one fails OPEN because the worker describes its own change in the proof's own words, and nothing marks the evidence as a substitute"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-21 on `Craigs-Mac-mini` from a scratch worktree cut off origin/main. THE
+    GITHUB REST BUDGET WAS EXHAUSTED FOR PART OF THIS RECON, so every figure below comes from the
+    ledger union or from local source, and the two surfaces REST alone could answer are reported
+    as UNMEASURED and then closed a different way rather than being written down as zero.
+
+    (1) THE SUBSTITUTION IS EXPLICIT AND DELIBERATE, AND IT IS NOT THE DEFECT. `runTaskBody`
+    (`src/run-task.ts`) sets `let reviewReport = fullText(impl)` — the worker's own chat text — then
+    `try { reviewReport = await fetchPrBodyFn(prUrl) } catch { log("review.body_fetch_error", …) }`.
+    Its comment states the intent in terms: a failed read "falls back to the worker text rather than
+    blocking the review, so a `gh` outage degrades to the old behaviour instead of a stall." That
+    posture is correct and this task does not propose removing it.
+
+    (2) THE DEFECT IS THAT NOTHING DOWNSTREAM CAN TELL. `evidence.report` carries the same type and
+    the same field name whether it holds the body or the substitute, so every consumer reads it as
+    "the body". That is ONE VALUE FOR TWO OUTCOMES — "the body says X" and "the body was
+    unreadable" — the class already filed as W1-T1081 and W1-T1097. CITED, NOT RE-DERIVED AND NOT
+    RE-FILED; this shard is one instance of it, at the review's own input boundary.
+
+    (3) THE MEASURED COST, FIRST-PARTY. On #2395 the verdict read `body contradicts its own diff:
+    claimed "No code", actual changed files: src/lib/proof-grammar.ts (+4 more)`. THE STORED BODY
+    CONTAINS ZERO OCCURRENCES OF `code` AND THE DIFF IS ONE FILE. Running the real
+    `bodyContradictsDiff` against the real body and the real one-file list returns `[]`, under a
+    TWO-DIRECTION control: appending `"No code."` fires, and appending `"No code changes."` fires
+    reporting `claim: "No code"` — the verdict's own string, reproduced. A first control was
+    DISCARDED because it did not fire: `"no code duplication anywhere in the changeset"` is
+    correctly disqualified by `noClaimIsAboutChangeset` on the following word, which is the anchor
+    working as designed. W1-T1088 failed three times on this phantom, spent both fix-rung strikes
+    and escalated to issue #2396 — THE FIX RUNG BEHAVED CORRECTLY ON BAD INPUT.
+
+    (4) THE FALLBACK IS RARE IN EVERYTHING THAT CAN BE SEEN, AND THAT SHRINKS THE CLAIM RATHER THAN
+    THE DEFECT. `review.body_fetch_error` entered the tree on 2026-08-02 (60d25504, #1160). Over
+    the deduped ledger union it fires ZERO times, with a per-form coverage control proving all
+    three forms were read (`review.posted` reads non-zero in the gzipped form, the plain rotations
+    and the live file). Over the same corpus `changeset_contradiction` verdicts number 17 deduped,
+    spanning 2026-08-03 to 2026-08-12 — every one of them AFTER the fallback shipped, and every one
+    therefore judged a real body. THE OVERLAP IS ZERO. THE CAVEAT IS LOAD-BEARING AND IS STATED
+    RATHER THAN BURIED: this corpus is the mini's, its review rows thin to 6 and then 1 on
+    2026-08-13 and 08-14, and the #2395 incident is 2026-08-21 on the fleet host, which has no
+    route from here. So the observable window does not contain the incident, and this is a rate for
+    what can be seen, never a claim that the fallback has fired exactly once.
+
+    (5) THREE CONSUMERS READ `evidence.report`, AND THE SUBSTITUTION PUSHES TWO OF THEM IN OPPOSITE
+    DIRECTIONS. `bodyContradictsDiff` FAILS CLOSED — it exists to compare the body's claims against
+    the diff, so on a substitute it manufactures a contradiction from prose that was never a claim
+    about the changeset. `judgeCriterion`'s keyword-coverage floor FAILS OPEN — and this is the one
+    the recon was told to check specifically, so it was MEASURED rather than reasoned: against a
+    criterion whose proof names a path and a phrase, a worker-style narrative scored 3/5 and read
+    `met: true`, while a body-style sentence scored 2/5 and read `met: false`, with an unrelated
+    control at 0/5 proving the floor discriminates at all. The worker passes MORE easily because it
+    describes its own change in the proof's own vocabulary. `unwiredAdvisoriesFor` is the third and
+    is ADVISORY ONLY, folded into neither `state` nor `floorState`, so a wrong answer there blocks
+    nothing.
+
+    (6) SO ONE OUTAGE SIMULTANEOUSLY MANUFACTURES A FAILURE AND WEAKENS THE FLOOR THAT IS SUPPOSED
+    TO CATCH WHAT PROOFS MISS. That combination — not the phantom alone — is why this is worth a
+    task: the review does not merely answer wrongly, it answers wrongly in both directions at once
+    while reporting nothing unusual.
+  design: |
+    (i) THE REMEDY IS PROVENANCE, NOT REMOVAL. `ReviewEvidence` must be able to say WHERE its
+    report came from — the fetched body, or the worker text substituted after a failed fetch. The
+    fallback itself stays exactly as it is; what changes is that the substitution stops being
+    invisible to everything downstream.
+
+    (ii) A DETECTOR THAT NEEDS THE BODY MUST REFUSE, NOT JUDGE A SUBSTITUTE. `bodyContradictsDiff`
+    must not run when the report is substituted, and the verdict must say the body was unreadable
+    rather than naming a contradiction. THIS COSTS NOTHING REAL: a body-vs-diff check is impossible
+    without the body, so refusing removes only the ILLUSION of the check, never the check. The
+    review still proceeds — proof execution, the structural checks over the DIFF, and test-theater
+    detection all read the diff and the repo, not the body.
+
+    (iii) THE KEYWORD FLOOR IS THE HARDER HALF AND MUST NOT SILENTLY CLAIM SUBSTANTIATION. A
+    criterion "substantiated in report" against a substitute is a claim about the worker's prose,
+    not about the PR. Under a substituted report the floor must not report substantiation; the
+    verdict should rest on what proofs actually EXECUTED and name the missing body as the reason it
+    cannot say more. Rationale (5) is the measurement that makes this necessary rather than tidy.
+
+    (iv) DO NOT WEAKEN `bodyContradictsDiff` AND DO NOT REMOVE THE FALLBACK. The detector catches a
+    real defect when fed a real body — W1-T274 filed it for two PRs that merged on bodies
+    contradicting their own changesets — and blocking the review on a `gh` outage is the stall the
+    fallback exists to prevent. Neither is in question here.
+
+    (v) THE FAILURE MUST BE VISIBLE WITHOUT THE LEDGER. `review.body_fetch_error` already logs, but
+    rationale (4) shows the row is unreachable from any host but the one that wrote it, and a lane
+    diagnosing a phantom verdict reads the VERDICT. The substituted-report state belongs in what the
+    review posts, not only in a ledger row nobody off-host can open.
+
+    (vi) NOT IN SCOPE: `fetchPrBody`'s own retry or error handling, which is a different question
+    from what the reviewer does with the result; the fix rung, which behaved correctly on bad input;
+    `unwiredAdvisoriesFor`, which is advisory by design; and the general one-value-for-two-outcomes
+    rule, which W1-T1081 owns and this task must cite rather than restate.
+  acceptance:
+    - claim: "the review evidence records whether its report is the fetched body or a substitute"
+      proof: "unit test: test/review-evidence-provenance.test.ts"
+    - claim: "the body-versus-diff detector is not run at all against a substituted report"
+      proof: "unit test: test/review-evidence-provenance.test.ts"
+    - claim: "a substituted report never reports a criterion as substantiated on keyword coverage alone"
+      proof: "unit test: test/review-evidence-provenance.test.ts"
+    - claim: "a genuinely fetched body still reaches every consumer exactly as it does today"
+      proof: "unit test: test/review-evidence-provenance.test.ts"
+  files: [src/run-task.ts, src/lib/review.ts, test/review-evidence-provenance.test.ts]
+  status: queued
+  attempts: 0
+  origin: recon#body-detector-judges-a-substitute-2026-08-21
+  plan_refs: ['W1-T1081', 'W1-T1097', 'W1-T274', 'W1-T1016']
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NO PROOF SHELLS GIT. Every criterion uses the
+    pure-path `unit test:` form naming `test/review-evidence-provenance.test.ts`, declared in
+    `files:`, so on the filing PR it resolves through W1-T456's `forwardReferenceFiles` carve-out to
+    `not_yet_built`. The falsifier is a pure predicate over an evidence object and needs no
+    subprocess.
+
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` crosses two
+    `src/` modules and `test/`, so `subsystemsOf` (`src/lib/task-linter.ts`) derives more than one
+    tag. The diff is one field, one guard at each of two consumers, and the wiring that sets it.
+
+    BOTH FILES MUST BE DECLARED BECAUSE THE TWO HALVES SIT IN DIFFERENT MODULES: the substitution
+    happens in `runTaskBody` (`src/run-task.ts`) and every consumer lives in `src/lib/review.ts`. A
+    provenance flag that only one side knows about is the same defect with an extra field.
+    `src/run-task.ts` is declared per DECISIONS.md's 2026-08-18 W1-T471 ruling rather than avoided.
+
+    THE SWEEP WAS RUN WITHOUT REST FOR THE SURFACES REST COULD NOT ANSWER. The account's REST budget
+    was exhausted mid-recon, so the open-PR and merged-trailer queries returned an error payload;
+    those were recorded as UNMEASURED rather than as zero, and the open-PR surface was then closed a
+    stronger way — every remote head was fetched over git protocol and its TREE inspected for a
+    W1-T1100 shard, which reads actual files rather than body text. Live control: the same scan
+    finds a known shard on main.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1100` resolves to b8efffc2b1838abbb0f5b85a5a2e3213504e86a2, read
+    back over git protocol before filing; live control, `refs/rmd-id/W1-T999999` exits 2, so a
+    resolve is meaningful. THE ANCHOR MESSAGE WAS NOT JUDGED — `rmd next-task-id --reserve` and the
+    fleet share `reserveTaskIdRemote` and write the same form, so shape cannot identify a holder.
