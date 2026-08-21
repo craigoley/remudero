@@ -1514,13 +1514,51 @@ export interface ArmDeps {
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
   ledgerLines: () => Array<Record<string, unknown>>;
-  /** `gh pr merge --auto --squash --delete-branch` — throws on refusal. */
+  /** `gh pr merge --auto --squash --delete-branch` — throws on refusal. Keeps the flag: GitHub
+   *  performs this deletion SERVER-SIDE once the deferred auto-merge lands, so no local branch
+   *  is ever touched and there is nothing here for a detached checkout to trip on. */
   armAuto: (prUrl: string) => void;
-  /** `gh pr merge --squash --delete-branch` — the clean-status completion. */
+  /** `gh pr merge --squash` — the clean-status completion. W1-T1050: NO `--delete-branch`. `gh`
+   *  documents that flag as deleting the LOCAL branch too, which needs a current branch to
+   *  resolve — the daemon's checkout is deliberately detached (the self-sync guard depends on
+   *  it) and has none, so the call failed "not on any branch" even when the API-side merge
+   *  landed. The repository already carries `delete_branch_on_merge: true`, so the head branch
+   *  is still deleted, just server-side rather than by this call. */
   mergeDirect: (prUrl: string) => void;
   /** `gh pr merge --disable-auto` — withdraws an early arm, W1-T125. */
   disableAuto: (prUrl: string) => void;
+  /** W1-T1050: post-failure discriminator for a thrown {@link mergeDirect}. That call's own
+   *  `execFileSync` wraps the WHOLE merge attempt, so a non-zero exit does not by itself mean
+   *  GitHub refused the merge — it may mean the merge landed and a later step (a flaky
+   *  confirmation read, `gh`'s own bookkeeping) failed after it. Optional and consulted only on
+   *  a `mergeDirect` throw; a caller that omits it keeps the pre-W1-T1050 fail-closed behavior
+   *  (report `direct-merge-failed`), so this widens the interface without breaking any existing
+   *  fixture that constructs an {@link ArmDeps}/`Pick<ArmDeps, …>` without it. */
+  isMerged?: (prUrl: string) => boolean;
   say: (msg: string) => void;
+}
+
+/**
+ * W1-T1050: true when GitHub reports `prUrl` as MERGED right now — the ground truth `attemptArm`
+ * consults after a {@link ArmDeps.mergeDirect} throw, rather than trusting the exit code alone.
+ *
+ * FAIL-CLOSED ON A READ FAILURE, deliberately: a rate limit, network blip or unparsable URL
+ * answers `false`, the SAME direction {@link ghLiveState} already takes elsewhere in this file.
+ * A merge that cannot be confirmed must not be reported as one — this can only ever turn a
+ * `direct-merge-failed` into a `direct-merged`, never the other way, so a cautious `false` here
+ * costs nothing beyond the pre-W1-T1050 status quo.
+ */
+export function isPrMergedNow(prUrl: string, fetch: GhApiFetcher = ghJson): boolean {
+  // `fetch` is appended LAST and defaulted, exactly as {@link ghLiveStateByNumber} already does
+  // for the same read — the sole caller passes `prUrl` alone and keeps today's behaviour
+  // byte-for-byte. Injected only so the refusal arms below are reachable without a live REST call.
+  const target = prUrlTarget(prUrl);
+  if (!target) return false;
+  try {
+    return liveStateFromRest(target.owner, target.repo, target.number, fetch) === "MERGED";
+  } catch {
+    return false;
+  }
 }
 
 export function realArmDeps(): ArmDeps {
@@ -1536,7 +1574,8 @@ export function realArmDeps(): ArmDeps {
     },
     mergeDirect: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
-      execFileSync("gh", ["pr", "merge", prUrl, "--squash", "--delete-branch"], {
+      // W1-T1050: NO `--delete-branch` — see the doc on `ArmDeps.mergeDirect` above for why.
+      execFileSync("gh", ["pr", "merge", prUrl, "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -1551,6 +1590,7 @@ export function realArmDeps(): ArmDeps {
         stdio: "pipe",
       });
     },
+    isMerged: (prUrl) => isPrMergedNow(prUrl),
     say: (msg) => console.log(msg),
   };
 }
@@ -1607,7 +1647,10 @@ export function armAutoMerge(
  * ungated {@link armAutoMergeAtOpen} share the EXACT same completion logic
  * rather than duplicating it.
  */
-function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say">): ArmOutcome {
+function attemptArm(
+  prUrl: string,
+  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say">,
+): ArmOutcome {
   try {
     deps.armAuto(prUrl);
     return "armed";
@@ -1629,7 +1672,19 @@ function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect"
         deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
         return "direct-merged";
       } catch (e2) {
-        deps.say(`automerge.direct_merge_failed: ${String((e2 as Error)?.message ?? e2)} — ${prUrl}`);
+        const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
+        // W1-T1050: `deps.mergeDirect`'s own `execFileSync` wraps the WHOLE merge attempt, so a
+        // non-zero exit here does not by itself mean GitHub refused the merge — only that
+        // SOMETHING after it threw. Ask GitHub directly which half failed rather than collapsing
+        // both into one verdict (design note iv): a merge that landed must never be reported as
+        // a failed one, because that verdict is the input to every later diagnosis.
+        if (deps.isMerged?.(prUrl)) {
+          deps.say(
+            `automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`,
+          );
+          return "direct-merged";
+        }
+        deps.say(`automerge.direct_merge_failed: ${msg2} — ${prUrl}`);
         return "direct-merge-failed";
       }
     }
@@ -1749,7 +1804,7 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
-  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say"> = realArmDeps(),
+  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> = realArmDeps(),
   irreversible = false,
 ): ArmOutcome {
   if (irreversible) {

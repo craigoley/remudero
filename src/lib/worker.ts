@@ -3182,7 +3182,13 @@ export function ghPrView(prUrl: string): { state: string; mergeable: string; url
 
 export function ghPrMergeSquash(prUrl: string): string {
   assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl}`);
-  return execFileSync("gh", ["pr", "merge", prUrl, "--squash", "--delete-branch"], {
+  // W1-T1050: NO `--delete-branch`. `gh pr merge --help` documents the flag as deleting the
+  // LOCAL branch too, which needs a resolvable current branch — a caller running from the
+  // daemon's deliberately detached checkout (the self-sync guard depends on that) has none, so
+  // the call failed "not on any branch" even when the merge itself landed. The repository
+  // already carries `delete_branch_on_merge: true`, so the head branch is still deleted, just
+  // server-side rather than by this local call.
+  return execFileSync("gh", ["pr", "merge", prUrl, "--squash"], {
     encoding: "utf8",
   });
 }

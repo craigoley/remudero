@@ -5,7 +5,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { approveCommand, buildSweepEffects, planCommand, triageCommand } from "../src/run-task.js";
+import {
+  approveCommand,
+  armAutoMergeAtOpen,
+  buildSweepEffects,
+  isPrMergedNow,
+  planCommand,
+  realArmDeps,
+  triageCommand,
+} from "../src/run-task.js";
 import { ghPrMergeSquash, type WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
@@ -863,8 +871,13 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
 // THE ASSERTION IS THE ARGUMENT VECTOR, AND IT IS A PAIR. A single "close keeps the branch" read
 // cannot tell "survived a closure" from "survives generally", which is the control failure the
 // ruling itself records. So both acts are driven through one recording `gh` shim and shown to
-// DIFFER: the close carries no `--delete-branch`; the merge still does. The second direction is
-// mandatory — W1-T447 wants merged branches reaped, and this must not regress that.
+// DIFFER: the close carries no `--delete-branch`, and — as of W1-T1050 — neither does the merge
+// any more. What still tells them apart is the OUTCOME, not the argv: closing never touches the
+// branch either locally or on GitHub, while merging still ends with the head ref gone, because
+// the repository itself carries `delete_branch_on_merge: true` (see the W1-T1050 shard's own
+// rationale) and deletes it server-side regardless of what the CLI call asked for. The second
+// direction is still mandatory — W1-T447 wants merged branches reaped, and this must not
+// regress that — it is just pinned below on the ref being gone rather than on a flag.
 function recordingGhShim(dir: string, logPath: string): void {
   writeFileSync(
     join(dir, "gh"),
@@ -905,24 +918,229 @@ test("W1-T921: a sweep close does not delete the head branch", () => {
   }
 });
 
-test("W1-T921: a merge still deletes its branch", () => {
-  const shimDir = mkdtempSync(join(tmpdir(), "w1t921-merge-shim-"));
+// ── W1-T1050: THE IMMEDIATE-MERGE CALL NO LONGER NEEDS A CHECKED-OUT BRANCH ──────────────
+// `gh pr merge --squash --delete-branch` deletes the LOCAL branch too (`gh pr merge --help`,
+// verbatim), which needs a resolvable current branch — the daemon's checkout is deliberately
+// detached (the self-sync guard depends on it), so that lookup failed "not on any branch" even
+// when the API-side merge itself landed. The fix drops the flag from both immediate-merge call
+// sites (`realArmDeps().mergeDirect`, run-task.ts; `ghPrMergeSquash`, worker.ts) and leaves the
+// deferred `armAuto` call untouched — GitHub performs ITS deletion server-side, after the fact,
+// with no local branch ever in play. See the shard's own `design` for why `-R/--repo` and a cwd
+// change were rejected in favor of just dropping the flag.
+
+test("arm merge: the head ref is absent after a merge with no local delete", () => {
+  const bare = mkdtempSync(join(tmpdir(), "w1t1050-mergeref-origin-"));
+  const seed = mkdtempSync(join(tmpdir(), "w1t1050-mergeref-seed-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-mergeref-shim-"));
+  const savedPath = process.env.PATH;
+  try {
+    execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
+    writeFileSync(join(seed, "f.txt"), "x");
+    git(seed, "add", "-A");
+    git(seed, "commit", "--quiet", "-m", "seed");
+    git(seed, "remote", "add", "origin", bare);
+    git(seed, "push", "--quiet", "origin", "main");
+    git(seed, "checkout", "--quiet", "-b", "feature-1050");
+    writeFileSync(join(seed, "f2.txt"), "y");
+    git(seed, "add", "-A");
+    git(seed, "commit", "--quiet", "-m", "feature work");
+    git(seed, "push", "--quiet", "origin", "feature-1050");
+
+    // The shim stands in for GITHUB ITSELF, not for a real `gh`: this repo carries
+    // `delete_branch_on_merge: true` (measured live — see the shard's rationale), so the head
+    // branch is gone from the remote after ANY merge, unconditionally, on the SERVER side.
+    // `--delete-branch` reaching this shim fails exactly the way a real detached-checkout `gh`
+    // did before this fix ("not on any branch"); its absence still ends with the ref deleted,
+    // because the shim performs the SAME deletion the repo setting performs for real — the
+    // outcome this test pins, in place of the argv the old assertion pinned.
+    writeFileSync(
+      join(shimDir, "gh"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        '  *"pr merge"*"--delete-branch"*)',
+        '    echo "could not determine current branch: failed to run git: not on any branch" 1>&2',
+        "    exit 1 ;;",
+        '  *"pr merge"*)',
+        `    git -C ${JSON.stringify(bare)} branch -D feature-1050 >/dev/null`,
+        "    exit 0 ;;",
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1052"));
+
+    const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)"], { encoding: "utf8" });
+    assert.equal(
+      refs.includes("feature-1050"),
+      false,
+      `the head ref must be gone after the merge — refs were ${JSON.stringify(refs)}`,
+    );
+  } finally {
+    process.env.PATH = savedPath;
+    for (const d of [bare, seed, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("arm merge: an immediate merge from a detached HEAD does not ask for a current branch", () => {
+  const repo = mkdtempSync(join(tmpdir(), "w1t1050-detached-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-detached-shim-"));
+  const savedPath = process.env.PATH;
+  const savedCwd = process.cwd();
+  try {
+    execFileSync("git", ["init", "--quiet", "-b", "main", repo], { encoding: "utf8", env: GIT_ENV });
+    writeFileSync(join(repo, "f.txt"), "x");
+    git(repo, "add", "-A");
+    git(repo, "commit", "--quiet", "-m", "seed");
+    const sha = git(repo, "rev-parse", "HEAD").trim();
+    git(repo, "checkout", "--quiet", "--detach", sha);
+    assert.equal(
+      execFileSync("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim(),
+      "HEAD",
+      "precondition: the checkout really is detached",
+    );
+
+    // A faithful reproduction of the bug: this shim fails EXACTLY the way a real `gh` fails
+    // from a detached HEAD, but only when `--delete-branch` is present — proving the fix is
+    // "never ask" rather than "ask and happen to survive".
+    writeFileSync(
+      join(shimDir, "gh"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        '  *"pr merge"*"--delete-branch"*)',
+        '    if [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "HEAD" ]; then',
+        '      echo "could not determine current branch: failed to run git: not on any branch" 1>&2',
+        "      exit 1",
+        "    fi",
+        "    exit 0 ;;",
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    process.chdir(repo);
+
+    const d = realArmDeps();
+    assert.doesNotThrow(
+      () => withLiveWritesAllowed(() => d.mergeDirect("https://github.com/acme/sandboxrepo/pull/1050")),
+      "an immediate merge from a detached HEAD must not fail asking gh for a current branch",
+    );
+  } finally {
+    process.chdir(savedCwd);
+    process.env.PATH = savedPath;
+    for (const d of [repo, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("arm merge: the auto arm still defers its branch deletion to the remote", () => {
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-auto-shim-"));
   const logPath = join(shimDir, "argv.log");
   const savedPath = process.env.PATH;
   try {
     recordingGhShim(shimDir, logPath);
     process.env.PATH = `${shimDir}:${savedPath}`;
-    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/44"));
-    const merged = readFileSync(logPath, "utf8").trim();
-    assert.ok(merged.includes("pr merge"), `not a merge invocation: ${merged}`);
+
+    const d = realArmDeps();
+    withLiveWritesAllowed(() => d.armAuto("https://github.com/acme/sandboxrepo/pull/1051"));
+
+    const argv = readFileSync(logPath, "utf8").trim();
+    assert.ok(argv.includes("pr merge"), `not a merge invocation: ${argv}`);
+    assert.ok(argv.includes("--auto"), `the deferred arm must still pass --auto — argv was ${argv}`);
     assert.ok(
-      merged.includes("--delete-branch"),
-      `the merge path must keep deleting its branch (W1-T447) — argv was ${merged}`,
+      argv.includes("--delete-branch"),
+      `the deferred arm must keep --delete-branch so GitHub deletes server-side once it lands — argv was ${argv}`,
     );
   } finally {
     process.env.PATH = savedPath;
     rmSync(shimDir, { recursive: true, force: true });
   }
+});
+
+test("arm merge: both immediate call sites drop the local branch delete", () => {
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t1050-both-shim-"));
+  const logPath = join(shimDir, "argv.log");
+  const savedPath = process.env.PATH;
+  try {
+    recordingGhShim(shimDir, logPath);
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    withLiveWritesAllowed(() => realArmDeps().mergeDirect("https://github.com/acme/sandboxrepo/pull/1055"));
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056"));
+
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2, `expected exactly two gh invocations, got ${JSON.stringify(lines)}`);
+    for (const line of lines) {
+      assert.ok(line.includes("pr merge") && line.includes("--squash"), `not a squash merge: ${line}`);
+      assert.ok(
+        !line.includes("--delete-branch"),
+        `an immediate-merge call site still asks gh to delete locally: ${line}`,
+      );
+    }
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(shimDir, { recursive: true, force: true });
+  }
+});
+
+test("arm merge: a cleanup failure after a landed merge is not reported as a failed merge", () => {
+  const cleanStatusErr = () => {
+    const e = new Error("gh failed") as Error & { stderr: string };
+    e.stderr = "X Pull request #1050 is in clean status; auto-merge cannot be enabled";
+    return e;
+  };
+
+  // CASE A — the merge landed via the API, and only a LATER step threw (in production, what
+  // used to be `gh`'s own local `--delete-branch` bookkeeping; here, any post-merge failure).
+  // `isMerged` is the discriminator design note (iv) requires: GitHub's own truth, not this
+  // process's exit code, decides the verdict.
+  const landedSaid: string[] = [];
+  const landedOutcome = armAutoMergeAtOpen("https://github.com/acme/sandboxrepo/pull/1053", {
+    armAuto: () => { throw cleanStatusErr(); },
+    mergeDirect: () => { throw new Error("gh: could not confirm merge state: EOF"); },
+    isMerged: () => true,
+    say: (m) => { landedSaid.push(m); },
+  });
+  assert.equal(landedOutcome, "direct-merged", "the merge landed — it must be reported as merged, not failed");
+  assert.ok(
+    landedSaid.some((m) => m.includes("clean_status_direct_merge") && m.includes("post-merge step failed")),
+    `expected a landed-merge message naming the post-merge failure, got ${JSON.stringify(landedSaid)}`,
+  );
+
+  // CASE B — GitHub genuinely never merged it (`isMerged` answers false); the discriminator
+  // must not paper over a real refusal.
+  const refusedSaid: string[] = [];
+  const refusedOutcome = armAutoMergeAtOpen("https://github.com/acme/sandboxrepo/pull/1054", {
+    armAuto: () => { throw cleanStatusErr(); },
+    mergeDirect: () => { throw new Error("gh: 422 Validation Failed"); },
+    isMerged: () => false,
+    say: (m) => { refusedSaid.push(m); },
+  });
+  assert.equal(refusedOutcome, "direct-merge-failed", "a genuinely refused merge must still fail");
+  assert.ok(
+    refusedSaid.some((m) => m.includes("automerge.direct_merge_failed")),
+    `expected a real-failure message, got ${JSON.stringify(refusedSaid)}`,
+  );
+
+  // CASE C — a caller that supplies no `isMerged` at all keeps the pre-W1-T1050 fail-closed
+  // behavior, so the widened interface never breaks a fixture that predates it.
+  const noDiscriminatorOutcome = armAutoMergeAtOpen("https://github.com/acme/sandboxrepo/pull/1057", {
+    armAuto: () => { throw cleanStatusErr(); },
+    mergeDirect: () => { throw new Error("gh: 500 Internal Server Error"); },
+    say: () => {},
+  });
+  assert.equal(
+    noDiscriminatorOutcome,
+    "direct-merge-failed",
+    "omitting isMerged must not silently start reporting failures as merges",
+  );
 });
 
 test("W1-T921: the close argv is pinned against silent reinstatement", () => {
@@ -990,4 +1208,51 @@ test("W1-T921: the default close runner really shells out and still omits the fl
     process.env.PATH = savedPath;
     for (const d of [root, shimDir]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// ── isPrMergedNow: the ground truth attemptArm consults after a mergeDirect throw ──────────────
+//
+// Every arm of this read is a refusal path a healthy call never takes, and the sole caller passes
+// no fetcher, so nothing reached it. The `fetch` seam mirrors ghLiveStateByNumber's, which does
+// the same read; injecting it keeps these assertions off the network entirely.
+
+test("W1-T1050: isPrMergedNow reports MERGED from the REST read, by number, never a GraphQL pr view", () => {
+  const calls: string[][] = [];
+  const merged = isPrMergedNow("https://github.com/craigoley/remudero/pull/1900", (args) => {
+    calls.push(args);
+    return { number: 1900, state: "closed", merged: true };
+  });
+  assert.equal(merged, true);
+  assert.deepEqual(calls, [["api", "repos/craigoley/remudero/pulls/1900"]], "the argv is REST's by-number form");
+});
+
+test("W1-T1050: isPrMergedNow answers false for a PR that is merely closed, never merged", () => {
+  const closed = isPrMergedNow("https://github.com/craigoley/remudero/pull/1900", () => ({
+    number: 1900,
+    state: "closed",
+    merged: false,
+  }));
+  assert.equal(closed, false, "closed is not merged — the fold must not collapse the two");
+});
+
+test("W1-T1050: isPrMergedNow fails CLOSED on a URL it cannot resolve, without calling out at all", () => {
+  let called = 0;
+  for (const bad of ["", "not a url", "https://github.com/craigoley/remudero/issues/12", "https://github.com/craigoley/remudero/pull/abc"]) {
+    assert.equal(
+      isPrMergedNow(bad, () => {
+        called++;
+        return { merged: true };
+      }),
+      false,
+      `an unresolvable URL must answer false: ${JSON.stringify(bad)}`,
+    );
+  }
+  assert.equal(called, 0, "an unresolvable URL is refused before any read is attempted");
+});
+
+test("W1-T1050: isPrMergedNow fails CLOSED when the read itself throws — a merge it cannot confirm is not one", () => {
+  const answer = isPrMergedNow("https://github.com/craigoley/remudero/pull/1900", () => {
+    throw new Error("API rate limit exceeded");
+  });
+  assert.equal(answer, false, "a rate limit or network blip can only ever cost a direct-merged, never invent one");
 });
