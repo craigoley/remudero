@@ -71,6 +71,74 @@ test("classifier: chore(plan)-family filing subjects are NOT evidence — a fili
   assert.ok(!LINT_FILING_SUBJECT_RE.test("fix(plan-adjacent): x"), "an implementing subject must not");
 });
 
+test("W1-T1078: an older bare filing subject does not credit a task", () => {
+  // The pre-fix regex only excluded the current conventional-commit filing subjects
+  // (chore(plan)/chore(triage)/chore(feedback)/docs(plan)); the OLDER bare `plan:`/`docs:`/
+  // `chore:` convention this repo used before them slipped through and read as evidence.
+  const dump = dumpOf(
+    ["plan: file W1-T900 — the next thing", ""],
+    ["docs: reflow the plan around W1-T900", ""],
+    ["chore: renumber W1-T900", ""],
+  );
+  const { without } = classifyFailingMergeEvidence(["W1-T900"], dump);
+  assert.deepEqual(without, ["W1-T900"]);
+  for (const s of ["plan: x", "docs: x", "chore: x"])
+    assert.ok(LINT_FILING_SUBJECT_RE.test(s), `${s} must classify as a filing subject`);
+});
+
+test("W1-T1078: a genuine implementation subject still credits the task", () => {
+  // The positive control (design iii): the widening must not swallow real evidence, including a
+  // subject that merely CONTAINS the word "chore" without being the older bare filing form.
+  const dump = dumpOf(["fix(chore-scheduler): repair the queue (W1-T901)", ""]);
+  const { withImpl } = classifyFailingMergeEvidence(["W1-T901"], dump);
+  assert.deepEqual(withImpl, ["W1-T901"]);
+  assert.ok(
+    !LINT_FILING_SUBJECT_RE.test("fix(chore-scheduler): repair the queue (W1-T901)"),
+    "a genuine implementation subject must not classify as filing merely for containing 'chore'",
+  );
+});
+
+test("W1-T1078: the previously miscredited tasks move to the uncredited side", () => {
+  // The four real ids the recon named (rationale (1)): each rests ONLY on a bare `plan:`/`docs:`
+  // filing-shaped commit on origin/main — verified live via
+  // `git log --format='%s' origin/main | grep -iE '[(: ]W1-T(105|50|54b|63)[):., ]'`.
+  const ids = ["W1-T105", "W1-T50", "W1-T54b", "W1-T63"];
+  const dump = dumpOf(
+    ["plan: file W1-T105 (follow-up harvest — reports to proposal candidates; nothing discovered is lost) (#186)", ""],
+    ["docs: seed docs/troubleshooting.md from operator-impacting failures learnings (W1-T50) (#249)", ""],
+    ["docs: record the dep-review lane live-proof evidence (W1-T54b) (#91)", ""],
+    ["plan: ratify P10 -> W1-T63 (reviewer mount-governance + reviewer_outcome) (#98)", ""],
+  );
+  // The pre-fix filter (kept here ONLY as the before/after control, not re-exported): it did not
+  // know the bare forms, so these subjects were never excluded and rode straight into evidence.
+  const PRE_FIX_FILING_RE = /^(chore\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\))/i;
+  const classifyWith = (filingRe: RegExp, failingIds: string[], gitLogDump: string) => {
+    const nonFiling = gitLogDump
+      .split("\x01")
+      .map((entry) => entry.split("\x00"))
+      .filter((parts) => parts[0]?.trim() && !filingRe.test(parts[0].trim()));
+    const subjects = nonFiling.map((parts) => ` ${parts[0].toLowerCase()} `);
+    const withImpl: string[] = [];
+    const without: string[] = [];
+    for (const id of failingIds) {
+      const t = id.toLowerCase();
+      const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const subjectRe = new RegExp(`[(\\s,:]${escaped}[)\\s,:.]`);
+      (subjects.some((s) => subjectRe.test(s)) ? withImpl : without).push(id);
+    }
+    return { withImpl, without };
+  };
+  const before = classifyWith(PRE_FIX_FILING_RE, ids, dump);
+  assert.deepEqual(
+    before.withImpl.slice().sort(),
+    ids.slice().sort(),
+    "under the pre-fix regex all four rested only on a filing-shaped commit yet were credited",
+  );
+  const after = classifyFailingMergeEvidence(ids, dump);
+  assert.deepEqual(after.withImpl, [], "the shipped (widened) filter must credit none of the four");
+  assert.deepEqual(after.without.slice().sort(), ids.slice().sort());
+});
+
 test("classifier: id matching is delimiter-bounded — W1-T25 never rides W1-T250's commit", () => {
   const dump = dumpOf(["feat(gate): tighten the floor (W1-T250)", "Remudero-Task: W1-T250"]);
   const { without } = classifyFailingMergeEvidence(["W1-T25"], dump);
@@ -226,6 +294,34 @@ test("headline: an evidence failure prints an explicit unavailable marker and ne
     assert.match(stdout, /1 open failing \(merge-evidence unavailable: shallow clone/);
     assert.doesNotMatch(stdout, /with a merged implementation/, "no split may print without evidence");
     assert.doesNotMatch(stdout, /failing-split evidence:/, "no rule line without a split");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1078: the printed evidence rule matches the filter it describes", async () => {
+  const { tasksPath, dir } = buildFixture(fixtureTask("FIX-EVID-RULE", false));
+  try {
+    const { stdout } = await runLintPlan(["--plan", tasksPath], {
+      readMergeEvidenceLog: () => ({
+        dump: dumpOf(["feat(x): shipped it", "Remudero-Task: FIX-EVID-RULE"]),
+        ref: "origin/main",
+      }),
+    });
+    const match = stdout.match(/with (\S+) filing subjects excluded/);
+    assert.ok(match, "the evidence-rule line must name the excluded filing subject forms");
+    const namedForms = match[1].split("/");
+    // Every form the printed rule NAMES must actually be excluded by the shipped filter — a
+    // sentence that claims more than the regex does is the same invisible-rule defect the split
+    // was built to avoid.
+    for (const form of namedForms) {
+      const probe = form.endsWith(":") ? `${form} something` : `${form}: something`;
+      assert.ok(LINT_FILING_SUBJECT_RE.test(probe), `"${form}" is named in the rule but not excluded by the filter`);
+    }
+    // And every form the filter actually excludes — including the OLDER bare forms this task
+    // adds — must be NAMED, or the sentence undercounts what it filters.
+    for (const form of ["chore(plan)", "chore(triage)", "chore(feedback)", "docs(plan)", "plan:", "docs:", "chore:"])
+      assert.ok(namedForms.includes(form), `"${form}" is excluded by the filter but missing from the printed rule`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
