@@ -1134,7 +1134,11 @@ test("a draft pull request is never direct-merged", () => {
   // but the one invariant this test locks is the one attemptArm's fallback keys on: it is NOT
   // the "clean status" class (a draft is, definitionally, not yet mergeable at all).
   const draftStderr = "GraphQL: Pull request is in draft state and pending review (mergePullRequest)";
-  assert.equal(armFailureAction(draftStderr), "ignore", "a draft refusal must never classify as clean-status");
+  // W1-T1079: a draft refusal is not clean-status AND is not plausibly transient (it will not
+  // resolve on its own before the next sweep pass the way a network blip might), so it now
+  // classifies "permanent" rather than the old default "ignore" — the invariant this test
+  // actually locks (see the comment above) is only that it never reads as clean-status.
+  assert.equal(armFailureAction(draftStderr), "permanent", "a draft refusal must never classify as clean-status");
 
   const merged: string[] = [];
   const deps = armDepsForDraftTest({

@@ -5670,9 +5670,15 @@ test("armFailureAction: GitHub's 'clean status' refusal (already-mergeable PR) r
   );
 });
 
-test("armFailureAction: any other arm failure (transient gh/network) stays ignore — the next sweep pass retries", () => {
+test("armFailureAction: a plausibly transient gh/network failure stays ignore — the next sweep pass retries", () => {
   assert.equal(armFailureAction("connect ETIMEDOUT api.github.com"), "ignore");
-  assert.equal(armFailureAction(""), "ignore");
+});
+
+// W1-T1079: the OLD default for "any other" non-clean-status failure was "ignore" — this is
+// the exact defect the task fixes (rationale (3): everything not clean-status was assumed
+// transient). An unrecognized/empty message no longer gets the benefit of that assumption.
+test("armFailureAction: an unrecognized non-clean-status failure is no longer classified transient by default (W1-T1079)", () => {
+  assert.equal(armFailureAction(""), "permanent");
 });
 
 test("armAutoMerge: a clean-status refusal COMPLETES as a direct merge — the gated-green state that made --auto refuse is exactly the mergeable state", () => {

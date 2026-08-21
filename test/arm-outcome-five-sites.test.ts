@@ -8,6 +8,7 @@ import {
   armIfVerdictPermits,
   armReportPhrase,
   armAutoMerge,
+  armFailureAction,
   type ArmDeps,
   type ArmOutcome,
 } from "../src/run-task.js";
@@ -289,6 +290,127 @@ test("THE KEY: the literal RETRO is refused where runId arms, against one identi
   assert.match(said[0], /no ledgered review.posted verdict found/, "the refusal names itself, to stdout only");
   assert.equal(withRunId, "armed", "the id the trailer actually carries finds the verdict and arms");
   assert.equal(armCalls, 1, "exactly one real arm was issued — the key repair proven against one unchanged ledger");
+});
+
+// ── W1-T1079 ACCEPTANCE — the arm fails and no longer discards its reason ───────────
+// Every proof below is named `W1-T1079: …` to match plan/tasks.d/W1-T1079's own acceptance
+// criteria verbatim, so `remudero-review`'s `unit test:` dialect finds it by name.
+
+/** A ledger permitting the arm — the shared W1-T230 shape every test below needs. */
+function armPermittingLedgerLines(taskId: string): Array<Record<string, unknown>> {
+  return [{ step: "review.posted", task_id: taskId, state: "success", head_sha: "abc1234", proof_exec: ["executed_pass"] }];
+}
+
+test("W1-T1079: a failed arm records the error text it received", () => {
+  const said: string[] = [];
+  const captured: string[] = [];
+  const failMsg = "GraphQL: something went sideways that is not the clean-status case";
+  const deps: ArmDeps = {
+    headSha: () => "abc1234",
+    ledgerLines: () => armPermittingLedgerLines("W1-T1079"),
+    armAuto: () => {
+      const e = new Error("gh failed") as Error & { stderr: string };
+      e.stderr = failMsg;
+      throw e;
+    },
+    mergeDirect: () => assert.fail("clean-status never fires for a non clean-status failure"),
+    disableAuto: () => assert.fail("nothing is disarmed here"),
+    say: (m) => void said.push(m),
+    recordArmError: (message) => void captured.push(message),
+  };
+
+  const outcome = armAutoMerge("https://github.com/craigoley/remudero/pull/1079", "W1-T1079", deps);
+
+  assert.equal(outcome, "arm-error-ignored");
+  assert.deepEqual(
+    captured,
+    [failMsg],
+    "the caught error text reaches the caller instead of being thrown away on this exact branch",
+  );
+  assert.ok(
+    said.some((m) => m.includes(failMsg)),
+    "the console line names it too, mirroring the direct-merge branch's own msg2",
+  );
+
+  // THE WHOLE POINT (rationale (1)): the same text lands on the LEDGER ROW itself, not merely
+  // on a spy — `logArmAttribution`'s extra object is what a future reader actually queries.
+  const steps: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  armAndLogOutcome(
+    "https://github.com/craigoley/remudero/pull/1079",
+    "W1-T1079",
+    (step, extra) => void steps.push({ step, extra }),
+    () => ({ outcome: "arm-error-ignored", error: failMsg }),
+  );
+  assert.equal(steps[0].extra?.error, failMsg, "the arm-error-ignored ledger row now carries the cause");
+});
+
+test("W1-T1079: a non clean-status failure is not classified transient by default", () => {
+  const unrecognized = "some gh error shape this classifier has never seen before";
+  assert.notEqual(
+    armFailureAction(unrecognized),
+    "ignore",
+    "the old classifier folded EVERY non-clean-status failure into the transient bucket — that was the bug",
+  );
+  assert.equal(
+    armFailureAction(unrecognized),
+    "permanent",
+    "an unrecognized non-clean-status failure now defaults to NOT assumed transient",
+  );
+  // A recognized transient signature is unaffected — a genuine network blip still stays quiet.
+  assert.equal(armFailureAction("connect ETIMEDOUT api.github.com"), "ignore");
+});
+
+test("W1-T1079: the clean-status case still routes to the direct merge", () => {
+  const cleanStatusMsg = "X Pull request #591 is in clean status; auto-merge cannot be enabled";
+  assert.equal(armFailureAction(cleanStatusMsg), "direct-merge", "unchanged classification");
+
+  const merged: string[] = [];
+  const deps: ArmDeps = {
+    headSha: () => "abc1234",
+    ledgerLines: () => armPermittingLedgerLines("W1-T1079"),
+    armAuto: () => {
+      const e = new Error("gh failed") as Error & { stderr: string };
+      e.stderr = cleanStatusMsg;
+      throw e;
+    },
+    mergeDirect: (u) => void merged.push(u),
+    disableAuto: () => assert.fail("nothing is disarmed here"),
+    say: () => {},
+  };
+
+  const outcome = armAutoMerge("https://github.com/craigoley/remudero/pull/591", "W1-T1079", deps);
+
+  assert.equal(outcome, "direct-merged", "unchanged: still completes as a direct merge exactly as before this task");
+  assert.deepEqual(merged, ["https://github.com/craigoley/remudero/pull/591"]);
+});
+
+test("W1-T1079: a successful arm is unchanged and records no error", () => {
+  const captured: string[] = [];
+  let armCalls = 0;
+  const deps: ArmDeps = {
+    headSha: () => "abc1234",
+    ledgerLines: () => armPermittingLedgerLines("W1-T1079"),
+    armAuto: () => void armCalls++,
+    mergeDirect: () => assert.fail("no direct merge fires on a success"),
+    disableAuto: () => assert.fail("nothing is disarmed here"),
+    say: () => {},
+    recordArmError: (message) => void captured.push(message),
+  };
+
+  const outcome = armAutoMerge("https://github.com/craigoley/remudero/pull/1", "W1-T1079", deps);
+
+  assert.equal(outcome, "armed");
+  assert.equal(armCalls, 1);
+  assert.deepEqual(captured, [], "a success never calls recordArmError — nothing to record");
+
+  const steps: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  armAndLogOutcome(
+    "https://github.com/craigoley/remudero/pull/1",
+    "W1-T1079",
+    (step, extra) => void steps.push({ step, extra }),
+    () => "armed",
+  );
+  assert.equal(steps[0].extra?.error, undefined, "the armed ledger row carries no error field at all");
 });
 
 // ── 11: the console string ──────────────────────────────────────────────────────────
