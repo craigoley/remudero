@@ -1952,6 +1952,33 @@ export function withdrawArmIfVerdictRefuses(
  */
 export type ArmLane = "review" | "operator" | "sweep";
 
+/**
+ * W1-T1052 — TRUE for the two {@link ArmOutcome} values that mean an arm was genuinely
+ * ATTEMPTED (`attemptArm`'s `deps.armAuto`/`deps.mergeDirect` was actually invoked) and did
+ * not stick. Mirrors the three-way split {@link armOutcomeArmed}'s own doc comment (lib/sweep.ts)
+ * already draws — `no-task-id` / `head-unavailable` / `ledger-refused` are returned BEFORE any
+ * attempt, `irreversible-refused` is a deliberate refusal that never reaches one either, and only
+ * `direct-merge-failed` / `arm-error-ignored` are "the attempt was made and did not stick". This
+ * reuses that classification rather than re-deriving a fourth one.
+ */
+function armOutcomeAttemptedAndFailed(outcome: ArmOutcome | "skipped"): boolean {
+  return outcome === "direct-merge-failed" || outcome === "arm-error-ignored";
+}
+
+/**
+ * W1-T1052 — THE STEP NAME A NON-ARMING OUTCOME IS FILED UNDER. `automerge.arm_skipped` used
+ * to cover every non-arming outcome, including the two {@link armOutcomeAttemptedAndFailed}
+ * checks for — a step name asserting nothing was attempted, filed for an event where an arm was
+ * genuinely attempted and failed. `automerge.arm_failed` is the new name for exactly those two;
+ * every other non-arming outcome (never attempted, or a deliberate refusal such as
+ * `irreversible-refused`) keeps `automerge.arm_skipped`, which remains accurate for them. A
+ * RENAME at the two affected outcomes, not an addition: each event still writes exactly one
+ * ledger line, just under the name that matches what actually happened.
+ */
+function armSkipStepName(outcome: ArmOutcome | "skipped"): string {
+  return armOutcomeAttemptedAndFailed(outcome) ? "automerge.arm_failed" : "automerge.arm_skipped";
+}
+
 function logArmAttribution(
   log: (step: string, extra?: Record<string, unknown>) => void,
   outcome: ArmOutcome,
@@ -1961,7 +1988,7 @@ function logArmAttribution(
   extra: Record<string, unknown> = {},
 ): void {
   const prNumber = prNumberFromRef(prUrl);
-  log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", {
+  log(armOutcomeArmed(outcome) ? "automerge.armed" : armSkipStepName(outcome), {
     ...extra,
     task_id: taskId,
     pr_number: prNumber,
@@ -2080,7 +2107,9 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
  * of this rule is precisely how the sweep and the run flow drifted apart in the first place.
  *
  * The step names match the ones {@link armIfVerdictPermits} already established, so a reader
- * grepping the ledger for `automerge.arm_skipped` finds every non-arm from every lane.
+ * grepping the ledger for `automerge.arm_skipped` OR `automerge.arm_failed` (W1-T1052 split
+ * the latter out of the former — see {@link armSkipStepName}) finds every non-arm from every
+ * lane, and the two are told apart without reading the `outcome` field.
  *
  * W1-T449: `lane` names which caller acted — every Architect verb above defaults to
  * `"operator"`; `buildSweepEffects`'s `arm` member is the one caller that passes `"sweep"`,
