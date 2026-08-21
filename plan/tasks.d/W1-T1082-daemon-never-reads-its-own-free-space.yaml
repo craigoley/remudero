@@ -1,0 +1,156 @@
+- id: W1-T1082
+  title: "THE DAEMON NEVER READS ITS OWN FREE SPACE, SO EVERY DISK-PRESSURE SIGNAL IT HAS IS A LAGGING ONE WRITTEN TO THE DISK THAT IS FULL — `readDiskFreeBytes` and doctor's measured WARN/FAIL thresholds both exist and neither is reachable from the poll loop, so the first thing the fleet notices about ENOSPC is `appendLedger` throwing, by which time the ledger the crash-loop detector reads can no longer be appended to"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    MEASURED FROM SOURCE in this worktree, this triage pass — no host was touched and no ledger was
+    read for this filing.
+
+    (1) THE READER EXISTS, IS EXPORTED, AND THE DAEMON NEVER CALLS IT. `readDiskFreeBytes`
+    (`src/lib/daemon-health.ts`) is `statfsSync(path).bavail * bsize` with an injectable `statfs`
+    seam and a fail-soft `undefined` (never a fake `0`). Its call sites are `buildDaemonHealthRoute`
+    (the console route, reachable only through `rmd serve`), `doctor.ts`, and `daemonHealth` wiring
+    in `src/run-task.ts`. `grep -n "disk\|statfs\|ENOSPC" src/lib/daemon.ts` returns ZERO hits on
+    any of the three — the poll loop has no notion of free space at all. Positive control in the
+    same file: `headroom` reads dozens of hits, because the SPEND governor is wired into that loop
+    exactly the way this is not.
+
+    (2) THE THRESHOLDS EXIST AND ARE ALREADY DERIVED FROM A MEASURED INCIDENT, so this task
+    introduces no new number to argue about. `DISK_FAIL_BYTES = 512 MiB` and
+    `DISK_WARN_BYTES = 2 GiB` (`src/lib/doctor.ts`), with the derivation written beside them: this
+    host reached 55 MiB free with a live daemon on it and ordinary commands could not write their
+    own stdout, so FAIL sits an order of magnitude above where that happened and WARN above that
+    again. `judgeDiskHeadroom` is pure and already unit-covered.
+
+    (3) BUT `rmd doctor` IS PULL-ONLY, AND THAT IS ITS DESIGN, NOT ITS DEFECT. W1-T1047's own
+    design says it in terms: one command that works from a cold ssh session on a sick box. It
+    answers when an operator asks. Nothing asks it on a cadence, and the originating incident is
+    precisely the case where nobody asked for fifty minutes.
+
+    (4) THE ONE PUSH ALARM THAT COVERS THIS SHAPE IS LAGGING AND IS BLINDED BY THE VERY CONDITION.
+    `escalateCrashLoop` (`src/run-task.ts`) was wired for THIS incident — its own doc names it:
+    "the detector merged 2026-07-22 (#590) and sat unasked while the 2026-08-03 ENOSPC storm
+    relaunched the daemon ten times with ZERO escalation". That closes the crash-loop gap and is
+    NOT re-filed here. What it cannot do is fire early: `detectDaemonCrashLoop` reads `daemon.boot`
+    timestamps out of the ledger, and `escalateCrashLoop` dedups by READING a
+    `daemon.crashloop.escalated` marker it also WRITES. Every one of those reads and writes is on
+    the filesystem that is out of space — the originating report is `appendLedger threw ENOSPC`.
+    A detector whose input can only be recorded by a write that ENOSPC rejects is structurally
+    incapable of being the FIRST signal; it is the autopsy.
+
+    (5) THE OFF-MACHINE WATCHER PUBLISHES THE NUMBER AND JUDGES NOTHING. `scripts/fleet-heartbeat.sh`
+    already probes `df -Pk "$RMD_ROOT"` and publishes `disk_free_kb` in every beat payload, and
+    `.github/workflows/fleet-heartbeat-watch.yml` judges exactly one thing — beat AGE against
+    `STALE_AFTER_MINUTES` — and reproduces the payload into the issue body without reading a field
+    of it. `grep -i "disk\|free" .github/workflows/fleet-heartbeat-watch.yml` returns nothing. So a
+    host can beat punctually, on time, every five minutes, while reporting 200 MiB free, and the
+    watcher stays green.
+
+    (6) WHAT THE TWO SIBLING ASKS IN THE ORIGINATING FEEDBACK NEEDED, AND WHY NEITHER IS HERE.
+    The abandoned review clones are closed: `plan/policy.yaml`'s `scratchReap` row records
+    `enabled: true`, flipped on by PR #1250 on 2026-08-03 and live since. The 2.7 GB per-session
+    ledger-union scratch files are closed by W1-T379's `rmd ledger-grep`, whose design rule (i) is
+    "STREAM AND DEDUPE — it must never materialise the union to a temp file"; `resolveLedgerUnion`
+    is on main and is consumed by six modules, and CLAUDE.md records the streaming verb as the
+    sanctioned in-process reader and zgrep as the out-of-process idiom. Neither is re-derived here.
+    THIS TASK IS ONLY THE THIRD ASK: whether a free-space check belongs in the daemon's own health
+    path. The answer this shard files is YES, LEADING AND CHEAP, and the design says what that means.
+  design: |
+    ONE CONCERN: the daemon notices disk pressure while it still has room to say so.
+
+    (i) READ FREE SPACE ON THE CADENCE THE DAEMON ALREADY HAS, WITH NO SECOND CLOCK. The tick that
+    already runs is `startInFlightTicker` (`src/lib/daemon.ts`), the sole writer of `daemon.alive`,
+    which fires every poll interval and carries `phase` and `poll_interval_ms`. Reuse it or the
+    poll loop's existing pass — do NOT introduce a timer, an interval, or a second sleep consumer;
+    that file's own comment explains why racing a second consumer against the injected clock breaks
+    every suite that counts sleeps as its idle proxy.
+
+    (ii) RIDE THE EXISTING ROW, DO NOT MINT A STEP. `daemon.alive` gains `disk_free_bytes` and its
+    verdict, exactly as `holdSeen` was added to that same row rather than given a step of its own
+    ("no new step, no new row" — the comment is in `startInFlightTicker`). This also satisfies the
+    W1-T1064 lesson without cost: an emitter conditional on having found something makes silence
+    ambiguous, and a field on an unconditional row is never silent. An unreadable read must be
+    ABSENT, never `0` — `readDiskFreeBytes` already returns `undefined` for exactly this reason and
+    a `0` here would read as the most alarming value in the range off a read that never happened.
+
+    (iii) ONE DEFINITION OF THE THRESHOLDS, NOT A SECOND COPY. `DISK_WARN_BYTES`/`DISK_FAIL_BYTES`
+    and `judgeDiskHeadroom` live in `doctor.ts` today. Either import them or re-home them beside
+    `readDiskFreeBytes` in `daemon-health.ts` (which `doctor.ts` already imports from, so that
+    direction adds no cycle and `.dependency-cruiser.cjs` stays quiet) — but there must be exactly
+    ONE definition and one derivation comment afterwards. A daemon that alarms at a different number
+    than `rmd doctor` reports is a contradiction an operator has to adjudicate mid-incident.
+
+    (iv) ESCALATE AT **WARN**, NOT AT FAIL, AND SAY WHY IN THE CODE. The whole point is to spend the
+    escalation while writes still succeed. At FAIL (512 MiB) the issue body, the dedup marker and
+    the ledger row are all still writes that may lose; at WARN (2 GiB) they do not. FAIL keeps
+    reporting on the row but must not be the first thing that speaks.
+
+    (v) DEDUP BY EPISODE AND RE-ARM ON RECOVERY — `escalateCrashLoop`'s discipline, not a new one.
+    Skip iff a prior `daemon.disk_headroom.escalated` marker's episode key is within the episode
+    window of this reading, and clear the latch when a later reading is back above WARN, the way
+    the daemon's headroom latch clears on `remaining > 0`. A disk that sits at 1.9 GiB for six hours
+    must produce ONE issue, not one per poll — that is the #977 duplicate class and this repo has
+    already paid for it twice.
+
+    (vi) THE MARKER IS READ TO DEDUP, SO IT MUST SURVIVE ROTATION. Add the new escalated step to
+    the retained/decision-relevant step set in `src/lib/ledger.ts` for the reason that file already
+    records beside `daemon.crashloop.escalated`: a rotation that archives the marker re-opens one
+    duplicate needs-human issue per tick for as long as the condition lasts. The per-tick
+    `disk_free_bytes` FIELD is not a step and needs no retention entry.
+
+    (vii) SURFACE, DO NOT GATE. No pause, no refusal to dispatch, no self-repair. `escalateCrashLoop`
+    is explicit that a breach does not block boot, and `--fix` is refused by doctor by name because a
+    second actor mutating state a live daemon depends on is this host's measured hazard. Reaping is
+    already owned elsewhere (`scratchReap`, W1-T320, W1-T411, W1-T1064); this task adds a SIGNAL.
+
+    EXPLICITLY NOT IN SCOPE, each with its owner: the tmp backstop's ceiling and cadence (W1-T320);
+    worker-home reaping (W1-T1064); the one-shot disk reclaim rung (W1-T411); the ledger short-write
+    that a full disk causes, which W1-T1064 already names as a durability question of its own; and
+    teaching `fleet-heartbeat-watch.yml` to judge the `disk_free_kb` it already publishes — that is a
+    real second gap (rationale (5)), it lives in a workflow rather than the daemon, and it is named
+    here so the next reader files it deliberately instead of absorbing it.
+    VERIFY EVERY SYMBOL FROM SOURCE BEFORE WIRING — distrust the names in this note; they drift.
+  acceptance:
+    - claim: "the daemon's own poll path reads real free space through the existing exported reader and rides it on the liveness row it already writes, on every pass, healthy or not"
+      proof: "unit test: test/daemon-disk-headroom.test.ts"
+    - claim: "a reading below the WARN threshold escalates exactly once per episode — a second tick still below it opens no second issue"
+      proof: "unit test: test/daemon-disk-headroom.test.ts"
+    - claim: "free space recovering above the threshold re-arms the latch, so a genuinely new episode escalates again rather than being deduped forever"
+      proof: "unit test: test/daemon-disk-headroom.test.ts"
+    - claim: "an unreadable free-space read is reported as absent and escalates nothing, never as a zero-bytes-free fact"
+      proof: "unit test: test/daemon-disk-headroom.test.ts"
+    - claim: "the daemon and rmd doctor judge the same reading against one shared threshold definition, so the two surfaces cannot disagree mid-incident"
+      proof: "unit test: test/daemon-disk-headroom.test.ts"
+    - claim: "the escalation marker is retained across a ledger rotation, so a rotation cannot re-open one duplicate issue per tick"
+      proof: "unit test: test/daemon-disk-headroom.test.ts"
+  risk: high
+  origin: "feedback#fb-1785800392721-196dbe"
+  plan_refs: ["W1-T215", "W1-T1047", "W1-T320", "W1-T411", "W1-T1064", "W1-T379"]
+  files: [src/lib/daemon.ts, src/lib/daemon-health.ts, src/lib/doctor.ts, src/lib/ledger.ts, src/run-task.ts, test/daemon-disk-headroom.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — every arm is decidable in-process: `readDiskFreeBytes` takes an injected `statfs`,
+    the daemon's clock and issue gateway are already injectable (`escalateCrashLoop` takes an
+    `issues?: IssueGateway`), and no test needs a real filesystem at a real fill level.
+
+    risk:high IS RULE 19's SPAN, NOT BLAST RADIUS. The change is additive and surfaces only — it
+    gates nothing, deletes nothing and dispatches nothing — but it touches the daemon poll path, an
+    escalation path and the ledger retention set across five source files, and a mis-sized dedup
+    turns a signal into a wall of issues, which is the failure that mutes an alarm permanently.
+
+    budget_usd 55 — the reading and the judgement are small and already written; the cost is the
+    episode/re-arm falsifier in both directions plus the rotation-survival proof.
+
+    WHY THIS IS NOT A RE-DECISION OF ITS OWN FEEDBACK'S OTHER TWO ASKS: both are already closed and
+    are cited rather than re-derived — `scratchReap.enabled: true` (PR #1250) for the abandoned
+    review clones, and `rmd ledger-grep`/`resolveLedgerUnion` (W1-T379, stream-never-materialise)
+    for the 2.7 GB per-session union scratch files. This shard exists only for the third ask, which
+    no task, policy row or decision in the corpus answers today.
+
+    NO depends_on: `readDiskFreeBytes`, `judgeDiskHeadroom`, `startInFlightTicker`,
+    `escalateCrashLoop` and the retained-step set are all on main.

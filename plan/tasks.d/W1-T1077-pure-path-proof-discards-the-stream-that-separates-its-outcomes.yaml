@@ -1,0 +1,159 @@
+- id: W1-T1077
+  title: "a pure-path `unit test:` proof reads its verdict from an exit code that is 1 for a failing test, an absent file AND a broken runtime alike — the TAP stream that separates them is already in hand and already parsed for the OTHER branch, so a run that never executed is refused as a failing test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-21 from a scratch worktree cut off origin/main, by running `node --test` under
+    the reviewer's own argv in all three conditions and reading the code that consumes it. Every
+    zero carries a positive control, and two of the brief's own hypotheses were REFUTED by
+    measurement and are reported as such rather than dropped.
+
+    (1) THE EXIT CODE SEPARATES NOTHING. Under the reviewer's exact invocation
+    (`node --test --import tsx --import ./test/setup/tmp-hygiene.ts <path>`), an ABSENT file, a
+    genuinely FAILING test and a BROKEN RUNTIME (an unresolvable `--import` loader) all exit 1.
+    `execWhitelistedProof` (`src/lib/review.ts`) reads a pure-path proof's verdict from exactly
+    that code — `return "pass"` on 0, `return "fail"` on any clean nonzero — so all three collapse
+    to `executed_fail`, the hard refusal that overrides the keyword floor.
+
+    (2) MEASURED CONSEQUENCE, FIRST-PARTY. On #2312 four identical pure-path proofs failed
+    identically on a head where all four PASSED under the reviewer's own executor (`exit: 0`, 58
+    hits) and where CI ran the full suite green on the same sha. A re-review on a TREE-IDENTICAL
+    head then passed 4/4, which is what establishes the refusal as environmental and FALSE rather
+    than as a flake. It cost a head, a CI cycle and one of two review-orphan slots. And the
+    pure-path form is what CLAUDE.md prescribes for a shard, so this is the default case.
+
+    (3) THE ASYMMETRY IS REASONED — BUT FOR A REASON THAT DOES NOT REACH THE PURE-PATH BRANCH.
+    The `resolution.status === "absent"` fast path is gated on `whitelisted.nameFiltered`, and its
+    own comment says why it exists: a bare test NAME compiles to `--test-name-pattern` over the
+    WHOLE suite glob, so a zero-candidate name would load every file, hang on the ones driving a
+    real headless browser, be killed at the proof timeout and yield `exec_error` while leaking a
+    browser. THAT COST IS A PROPERTY OF THE GLOB, NOT OF ABSENCE. A pure-path proof runs one file
+    and cannot hang that way, so the guard was never withheld from it on absence grounds — the
+    question simply never arose there.
+
+    (4) SO THE HARD REFUSAL FOR ABSENCE IS CORRECT, AND THIS SHARD DOES NOT TOUCH IT. On an
+    implementing PR a missing test file IS the criterion unmet. The one legitimate absence — a
+    shard-declared forward reference — was already decided deliberately and narrowly by W1-T456,
+    whose `forwardReference` guard checks `!existsSync(join(cwd, label))` against
+    `forwardReferenceFiles` BEFORE spawning. Absence is settled. The defect narrows to the case
+    where the file exists and the run never really happened.
+
+    (5) THE BRIEF'S HYPOTHESIS THAT NOTHING FREE SEPARATES A BROKEN RUNTIME FROM A FAILING TEST IS
+    REFUTED, AND THE SEPARATOR IS ALREADY IMPLEMENTED IN THIS FILE. Measured: a failing test emits
+    a top-level `not ok` naming the TEST TITLE, carrying `code: 'ERR_ASSERTION'`. A broken runtime
+    emits a top-level `not ok` naming the FILE ITSELF (`not ok 1 - test/<file>.test.ts`), carrying
+    `code: 'ERR_TEST_FAILURE'` with an `ERR_MODULE_NOT_FOUND` diagnostic above it, and NO real
+    subtest ever reports. `isFileWrapperResultName` (`src/lib/review.ts`) is exactly the predicate
+    that tells those two names apart, and `nameFilteredOutcome` already reads the stream this way —
+    for the name-filtered branch only. The pure-path branch discards a stream it already holds and
+    trusts the exit code instead. Nothing new needs inventing and no second spawn is required.
+
+    (6) AND THE BRIEF'S PROPOSED REMEDY — RECORD THE FIRST LINE OF STDERR — IS MEASURABLY USELESS
+    FOR THE CASE IT TARGETS. Measured stderr sizes: absent file 41 bytes (`Could not find
+    '<path>'`), failing test ZERO bytes, broken runtime ZERO bytes. Stderr separates only the case
+    that is already settled by `existsSync`, and is empty for BOTH cases that actually need
+    telling apart. The informative bytes are on STDOUT (817 and 1766 bytes respectively) — the TAP
+    stream rationale (5) names. This file already knows the shape of that trap: a comment on the
+    grep path records that BSD grep exits 1 with empty stderr for two different meanings.
+
+    (7) NOTHING PERSISTS EITHER STREAM, SO A FALSE REFUSAL IS UNDIAGNOSABLE OFF-HOST.
+    `reviewLedgerLegibilityFields` (`src/lib/review.ts`) is the single projection the
+    `review.posted` row is built from, and it carries `capped`, `keyword_only`, `plan_only`,
+    `capped_reason`, `unexecutable_count`, `unexecutable_proofs`, `partially_executed`,
+    `failure_class` and `failure_reason` — no exit code, no stdout, no stderr. AND
+    `unexecutable_proofs` DOES NOT COVER THIS: an `executed_fail` proof is not unexecutable, so a
+    falsely-refused proof appears in no field at all. That is why the #2312 lane could not
+    diagnose its own refusal and had to reason from outside the system.
+
+    (8) THE CAUSE OF THE #2312 ENVIRONMENT IS ALREADY FILED AND IS DELIBERATELY NOT RE-FILED HERE.
+    W1-T499 (`status: queued`, unbuilt) records that `defaultProofSpawner` passes no `env`, so a
+    proof inherits the orchestrator's whole environment and the reviewer and CI can disagree about
+    the same sha — which is exactly the #2312 shape. THIS SHARD IS THE OTHER HALF: even with the
+    environment fixed, any future runtime breakage still reports as a failing test and still leaves
+    no trace. Found by sweeping shard SLUGS on main for the SUBJECT, not the id.
+
+    (9) THE CLASS, NAMED BUT NOT SCOPED IN. This is the third one-value-for-several-outcomes defect
+    found in two days, after `spawnSync` returning `status: null` on a signalled child and
+    `readdirSync` answering `[]` to both ENOENT and EACCES. Those two fail OPEN; this one fails
+    CLOSED, which is why it costs a head rather than shipping a bug.
+  design: |
+    (i) READ THE STREAM FOR A PURE-PATH PROOF TOO, REUSING THE EXISTING PREDICATE. The pure-path
+    branch must classify from the TAP stdout it already receives — on the success path and on a
+    thrown nonzero exit's attached stdout, exactly as the name-filtered branch already does — never
+    from the exit code alone. `isFileWrapperResultName` is the discriminator and must not be
+    reimplemented beside itself.
+
+    (ii) A RUN THAT NEVER EXECUTED IS `exec_error`, NEVER `executed_fail`. When the only top-level
+    `not ok` names the file itself and no real subtest reported, the run did not reach a verdict
+    about the criterion, so it must degrade to the keyword floor under the outcome this function
+    already uses for a timeout kill and a spawn error. THIS IS NOT A WEAKENING: a genuine
+    `ERR_ASSERTION` failure on a named test still hard-fails and still overrides the floor. What
+    changes is only that "the file never ran" stops being reported as "the test failed".
+
+    (iii) ABSENCE IS OUT OF SCOPE AND MUST STAY HARD. Rationale (4) settles it; W1-T456's
+    `forwardReference` guard already owns the one legitimate absence. Adding a general pre-spawn
+    `existsSync` softening for pure-path proofs would convert a correct refusal into a floor pass
+    on an implementing PR, which is the opposite of this task.
+
+    (iv) RECORD THE DISCRIMINATOR, NOT THE STREAM. A `review.posted` row must be able to say which
+    of the two a failed pure-path proof was, so the next lane can tell a real failure from an
+    environment fault without shelling into the container. Rationale (6) rules out the stderr line;
+    what is worth persisting is the CLASSIFICATION plus the file-wrapper name already parsed — a
+    bounded field, not an unbounded log. Whole-stream capture is refused: it is unbounded, it lands
+    in a rotating ledger, and it would carry the environment a proof ran under into a durable row.
+
+    (v) DO NOT WEAKEN THE PROOF GATE ANYWHERE ELSE. No change to the merge-base staleness check, to
+    `MIN_COVERAGE`, to what a `grep:` proof refuses, or to the name-filtered branch's existing
+    behaviour, which is already correct and is the model being extended.
+
+    (vi) NOT IN SCOPE: `defaultProofSpawner`'s missing `env`, which is W1-T499 and would fix one
+    cause rather than the conflation; `ensureDeps`/`ensureBrowsersOnce`, which are how a broken
+    runtime ARISES rather than how it is misreported; and any new ledger step, since the projection
+    named in rationale (7) is the place a field belongs.
+  acceptance:
+    - claim: "a pure-path proof whose only failing line names the test file itself degrades to the keyword floor instead of refusing"
+      proof: "unit test: test/pure-path-proof-outcomes.test.ts"
+    - claim: "a pure-path proof whose named test genuinely fails still refuses and still overrides the floor"
+      proof: "unit test: test/pure-path-proof-outcomes.test.ts"
+    - claim: "an absent pure-path target keeps refusing exactly as it does today outside the declared forward-reference carve-out"
+      proof: "unit test: test/pure-path-proof-outcomes.test.ts"
+    - claim: "the posted review row can say which of the two a failed pure-path proof was"
+      proof: "unit test: test/pure-path-proof-outcomes.test.ts"
+  files: [src/lib/review.ts, test/pure-path-proof-outcomes.test.ts]
+  status: queued
+  attempts: 0
+  origin: recon#pure-path-proof-conflates-outcomes-2026-08-21
+  plan_refs: ['W1-T499', 'W1-T456', 'W1-T362', 'W1-T273', 'W1-T112']
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/pure-path-proof-outcomes.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built` rather than
+    executing against an absent file. That the shard reporting this defect must itself rely on that
+    carve-out is the point of rationale (4), not an oversight.
+
+    `risk: high` IS SET UP FRONT AND IT IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` crosses a
+    `src/` module and `test/`, and the acceptance wording names the proof-execution and ledger
+    surfaces, so `subsystemsOf` (`src/lib/task-linter.ts`) derives more than one tag. The diff
+    itself is one branch in `execWhitelistedProof`, one reuse of an existing predicate, and one
+    bounded field.
+
+    `files:` IS TIGHT AND ITS OWN PATH IS ABSENT. `execWhitelistedProof`, `nameFilteredOutcome`,
+    `isFileWrapperResultName` and `reviewLedgerLegibilityFields` all live in `src/lib/review.ts`,
+    so the whole change is one module plus its test. `src/lib/ledger.ts` is deliberately NOT
+    declared: the field rides the existing projection and adds no step, so declaring it would trip
+    `inverseScopeUntouchedFiles` and serialise this task needlessly.
+
+    SUBJECT SWEEP, NOT ONLY ID SWEEP. Shard slugs on main were grepped for the proof/execution
+    subject before this was written; that is how W1-T499 was found and how rationale (8) narrowed
+    the scope away from re-filing it. The id sweep alone would have reported a clean six surfaces
+    and missed the overlap entirely.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1077` resolves to 7905b17c32e8950c32d56dc88cf78993ede2062d,
+    read back before filing; live control, `refs/rmd-id/W1-T999999` exits 2, so a resolve is
+    meaningful. The anchor MESSAGE WAS NOT JUDGED — `rmd next-task-id --reserve` and the fleet share
+    `reserveTaskIdRemote` and write the same form, so the shape cannot identify a holder.
