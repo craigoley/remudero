@@ -1,0 +1,141 @@
+- id: W1-T1116
+  title: "A SWEEP DISPOSITION REPORTS THE ACTION IT INTENDED AND NEVER THE REFUSAL THAT OVERRODE IT — the `mergeable` arm's `alreadyDone` switch sets no `standDownReason` on any of its three disjuncts, so a correctly-held PR is indistinguishable from a broken one and two readers diagnosed a never-clearing dedup from those rows in one night"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  rationale: |
+    THE RECON IS DONE AND IS CITED HERE, NOT RE-DERIVED (2026-08-22, Azure host `Remudero`, scratch
+    worktree at origin/main, ledger read-only, daemon's checkout untouched).
+
+    (1) THE BEHAVIOUR BEING HELD IS CORRECT AND MUST NOT BE WEAKENED. #2432 disposed
+    `mergeable acted=False` at 01:38:08, 01:41:15 and 01:43:47 with reason
+    `review success, required checks green — arming auto-merge`, no `automerge` row of any kind,
+    `mergeable_state: clean`, combined status `success`, `auto_merge: null`. The cause is
+    `refused = riskRefused.has(<pr>@<sha>) && !cappedOverrideFromLedger(...)` — W1-T970's own
+    comment describes exactly this non-action shape as intended. THE GATE IS THE POINT. Nothing
+    here weakens the risk judge, auto-overrides a refusal, or clears `riskRefused` on anything but
+    a new head or an explicit operator act.
+
+    (2) AND THE RISK ROW ITSELF IS WELL-FORMED, SO IT IS NOT THE SUBJECT. The
+    `risk_judge.escalated` row for #2432 carries `issue_url`, `pr_number` and `head_sha`, and issue
+    #2433 holds the verdict (`[BLOCKED] W1-T1110: risk judge ESCALATED (high, confidence 0.70)`).
+    The pointer exists. It is simply one row away from the row an operator reads.
+
+    (3) THE GAP IS THAT `alreadyDone` NEVER NAMES ITSELF. Measured in source: `src/lib/sweep.ts`
+    carries a dozen `standDownReason = ...` assignments, and EVERY ONE of them sits in the ACTION
+    switch (from `deferred to full sweep (light pass)` at ~3981 through `floorStandDown` at ~4196).
+    The `alreadyDone` switch that precedes it — the `mergeable` arm at ~3884 included — contains
+    ZERO. So when `alreadyDone` short-circuits, `acted` goes false and no field on the row says
+    why, for ANY disjunct.
+
+    (4) THE THREE DISJUNCTS, AND NONE SURFACES ITSELF.
+      `alreadyDone = pr.autoMergeArmed === true || prior.armed.has(<pr>@<sha>) || refused`
+      - `autoMergeArmed` — GitHub already armed it. An operator reading only the row cannot tell.
+      - `prior.armed` — this sweep armed it at this sha before. Cannot tell.
+      - `refused` — the risk judge escalated this head and no operator override exists. Cannot
+        tell, and this is the one with a live pointer (`issue_url` on the sibling row) going unused.
+      A FOURTH GUARD EXISTS AND IS ALSO SILENT: the `wait` arm forces `alreadyDone = true`
+      unconditionally (W1-T114), so a `wait` also renders as `acted:false` with no cause — by
+      design there, but indistinguishable here.
+
+    (5) THE COST IS MEASURED IN MISDIAGNOSIS, NOT IN HELD PRs. Both the operator and his assistant
+    diagnosed a never-clearing dedup from these rows in one night, twice, before a lane read the
+    code. That diagnosis was wrong: #2432 has ZERO `mergeable acted:true` rows, so `prior.armed` is
+    empty for `2432@cf61b803` and cannot gate it. A row that cannot distinguish "correctly held"
+    from "stuck" costs a recon every time it is read.
+
+    (6) THE SPLIT, BY DISTINCT HEAD RATHER THAN BY ROW — AND THE ROW-RATE IN THE BRIEF DOES NOT
+    REPRODUCE. `sweep.disposed` writes one row per sweep pass, so a row count measures sweep
+    frequency, not PRs: the union carries 1,171 `mergeable acted=false` rows against 16
+    `acted=true`, which is not the 48/15 the commissioning brief cites and must not be repeated.
+    BY DISTINCT `<pr>@<sha>` — the meaningful unit — there are 66 heads that ever reached a
+    `mergeable` disposition: 16 ever armed, 50 never did. Of those 50 held heads, 3 have a
+    `risk_judge.escalated` row (control: 9 such keys exist overall), 26 ever carried a
+    `stand_down_reason` from the action path, and 21 CARRY NO CAUSE ON ANY ROW AT ALL. That last
+    number is this shard's real size: twenty-one heads held with nothing anywhere saying why.
+
+    (7) THE CHEAP ESCAPE EXISTS AND IS NOT ADVERTISED FOR THIS CASE. `cappedOverrideFromLedger`
+    reads an `automerge.capped_override_granted` line (written by `src/run-task.ts`, surfaced as
+    `rmd review --override-capped-by/--override-capped-reason`), and the risk-refused disjunct
+    consults THAT SAME FUNCTION — so the capped-verdict override does release a risk refusal. But
+    it is documented for the CAPPED case: `override-capped-by` appears in three files under `docs/`
+    while `cappedOverrideFromLedger` appears in none, and no escalation-issue body, usage string or
+    doc tells an operator it releases a RISK refusal. THE ONLY DISCOVERABLE ESCAPE IS THEREFORE A
+    NEW HEAD — which discards a posted verdict, because a verdict binds to its sha, and spends one
+    of two review orphan slots.
+  design: |
+    (i) `reason` CARRIES THE REFUSAL WHEN ONE FIRES, AND NAMES THE ISSUE. The `mergeable` arm's
+    `alreadyDone` branch must set a `standDownReason` naming WHICH disjunct fired, and for the
+    risk-refused case must carry the `issue_url` the sibling `risk_judge.escalated` row already
+    holds. THE POINTER EXISTS ONE ROW AWAY; this only moves it to the row a reader reaches first.
+
+    (ii) NAME IT THE WAY THE LIGHT-PASS ARM ALREADY DOES ONE BRANCH AWAY. `standDownReason =
+    "deferred to full sweep (light pass)"` is the established shape for a non-action that explains
+    itself, in the same switch statement. This is a copy of a local pattern, not a new vocabulary.
+
+    (iii) ADD NO TIMER AND DELETE NO DEDUP. Every disjunct keeps its current semantics: a new head
+    still re-earns the attempt, an operator override still releases, and nothing expires on a clock.
+    W1-T1110's remedy — clear on the terminal row that already exists — DOES NOT TRANSFER here and
+    must not be imported: the `mergeable` dedup is already sha-keyed and is provably not what held
+    #2432.
+
+    (iv) THE OTHER THREE DISJUNCTS GET THE SAME TREATMENT, INCLUDING `wait`. A row that says
+    `acted:false` with no cause is the defect regardless of which branch produced it; fixing only
+    the risk case would leave the same misreading available for the other three.
+
+    (v) DO NOT MAKE THE OVERRIDE AUTOMATIC. Rationale (7) is a DISCOVERABILITY finding, not a
+    licence: the remedy is that the row names the escape, never that the sweep takes it.
+
+    (vi) OUT OF SCOPE, NAMED. No change to the risk judge, to `riskRefused`'s clearing conditions,
+    or to `cappedOverrideFromLedger`. W1-T1061 (the arm outcome recorded as prose inside a reason
+    string) and W1-T1052 (a failed arm recorded under a skip step name) are adjacent and cited —
+    W1-T1061 touches the SAME `standDownReason` field one branch away, so an implementer would
+    sensibly do them together, and neither is absorbed here. W1-T970 and W1-T1110 are cited and
+    re-filed neither. #2426 is the same shape in the opposite direction (a verdict naming a row
+    that carries no cause) and is cited only.
+  acceptance:
+    - claim: "a mergeable disposition held by a risk refusal names that refusal on its own row"
+      proof: "unit test: W1-T1116: a risk-refused hold names the refusal on its own row"
+    - claim: "the row names the escalation issue the sibling row already points at"
+      proof: "unit test: W1-T1116: the held row names the escalation issue"
+    - claim: "a hold caused by an existing arm is distinguishable from one caused by a refusal"
+      proof: "unit test: W1-T1116: an already-armed hold is distinguishable from a refusal"
+    - claim: "an armed disposition still acts and is unchanged"
+      proof: "unit test: W1-T1116: an armed disposition still acts unchanged"
+    - claim: "no disjunct clears on a timer and none loses its existing semantics"
+      proof: "unit test: W1-T1116: no disjunct clears on a timer"
+  origin: "recon#disposition-reports-intent-never-refusal-2026-08-22"
+  plan_refs: ["W1-T970", "W1-T1110", "W1-T1061", "W1-T1052", "W1-T114"]
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `subsystemsOf` derives a tag per declared
+    path, so a `src/lib` module plus any `test/*.test.ts` reads as two concerns and `lint-plan`
+    refuses that below high — the correction it has already forced on W1-T1068, W1-T1069, W1-T1078,
+    W1-T1079, W1-T1095, W1-T1099, W1-T1101 and W1-T1109. THE ACTUAL DIFF IS A `standDownReason`
+    ASSIGNMENT PER DISJUNCT IN ONE SWITCH.
+
+    `test/sweep.test.ts` IS AN EXISTING HOME and is declared rather than a new file.
+
+    ONE OBSERVATION, TRUE AND ORTHOGONAL, RECORDED RATHER THAN SCOPED IN: `prior.armed` populates
+    ONLY from `sweep.disposed` rows where `acted === true` and `disposition === "mergeable"`,
+    sha-keyed. So NONE of `automerge.armed`, `automerge.arm_failed`, `automerge.arm_error_ignored`,
+    `automerge.clean_status_direct_merge` or `automerge.disarmed` currently clears or gates an arm —
+    the arm-side terminal rows and the sweep-side dedup are entirely separate vocabularies. That is
+    not this task's defect and no criterion depends on it; it is written down because the next
+    reader will otherwise assume the terminal rows participate.
+
+    THE BRIEF'S 48/15 RATE DOES NOT REPRODUCE AND IS DELIBERATELY NOT CARRIED. Rationale (6) gives
+    the row counts (1,171 / 16) and the by-head counts (50 held / 16 armed of 66) and explains why
+    only the second is meaningful. A shard that asserts a cause it has not separated is the mistake
+    this whole investigation already made once.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the `standDownReason` distribution with
+    `git grep -n 'standDownReason =' -- src/lib/sweep.ts` and compare the line numbers against the
+    `alreadyDone` switch's own span; re-derive the by-head split from the per-form ledger union with
+    a coverage control taken first, keying on `<pr_number>@<head_sha>` and never on row counts.
