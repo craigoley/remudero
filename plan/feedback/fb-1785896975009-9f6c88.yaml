@@ -35,6 +35,6 @@ raw: "CORRECTION TO fb-1785870873355-d91fc2 — THE SHIPS-UNWIRED FLOOR IS WORKI
   'scanned 0'. That is an observability gap, not a correctness gap."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
 summary: null
