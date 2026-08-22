@@ -159,3 +159,28 @@
     is cited rather than re-argued: it removed this exact command from the REVIEW worktree path,
     where nothing downstream needed a branch — a distinction that does not transfer to a rung that
     commits and pushes.
+
+    AMENDED 2026-08-22 — A FOURTH CONTENDER, AND NO SOURCE READ CAN FIND IT. Rationale (3) names
+    the writers derivable from source, and all of them are the fleet's. There is a fourth that is
+    the OPERATOR'S: every scratch worktree cut for a lane is cut off
+    `/home/craigoleyagent/rmd-state2/remudero`, which IS the daemon's live checkout — the host side
+    of the container's `/home/node/Remudero/remudero`. VERIFIED two ways. A linked worktree's `.git`
+    file reads `gitdir: /home/craigoleyagent/rmd-state2/remudero/.git/worktrees/<name>`, so it has
+    no `.git` of its own and shares the primary one. And the mapping is fixed by the daemon's own
+    `daemon.paths` row, which names `ledger_path: /home/node/Remudero/state/ledger.ndjson` — the
+    file that exists on the host at `/home/craigoleyagent/rmd-state2/state/ledger.ndjson`. So
+    `worktreeAdd`, the fix rung's `checkout -B`, the daemon's boot fetch and EVERY operator lane
+    write the same `.git/config`. At the time of writing that one `.git` carries 52 registered
+    worktrees.
+
+    THIS IS RECORDED AS AN OBSERVED CONTENDER, NOT A PROPOSED REMEDY. It explains why rationale
+    (4)'s holder search could not name a holder from the ledger: an operator lane writes no ledger
+    row at all, so it is invisible to every instrument that task used. Whether lanes should work
+    from a separate clone instead of a worktree on the daemon's checkout is an operator call and is
+    explicitly NOT this task's scope — nothing in the criteria changes.
+
+    AND THE SAME SHARED `.git` CARRIES OTHER CROSS-LANE STATE, WHICH IS THE GENERAL SHAPE. It holds
+    one stash based at `2991c85` (#1772) carrying `src/lib/daemon.ts`, `src/lib/inflight-lock.ts`,
+    `src/run-task.ts` and three test files. `git status` shows it in NO worktree, so a lane can
+    neither see it nor be warned by it, and `git stash pop` in any worktree would reach it. The
+    lock is the failure that got measured; the shared directory is the condition underneath it.
