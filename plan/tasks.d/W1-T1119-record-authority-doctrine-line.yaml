@@ -1,0 +1,91 @@
+- id: W1-T1119
+  title: "the recommend-vs-record ruling is enforced at two gates and told to no worker — the always-injected doctrine preamble carries exactly two lines (distrust, autonomy) and nothing says an agent may RECOMMEND a direction but may never RECORD one; add it as the third invariant line so it reaches every rendered implement prompt and the post-compaction anchor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "THE OPERATOR RULING (feedback fb-1785882211812-bafd8f, the decision-authority audit)
+    named THREE remedies. TWO ARE SHIPPED AND VERIFIED AT THIS SHA: the review floor —
+    decisionsEntryProvenanceViolations + DECISIONS_PROVENANCE_MARKERS (src/lib/review.ts, W1-T352) —
+    refuses a diff that ADDS an unmarked DECISIONS.md entry; and rulingVerifyViolation
+    (src/lib/task-linter.ts, W1-T353) blocks a task whose files: include DECISIONS.md at
+    verify != human, which isDispatchEligible then parks. The permanent record of the ruling itself is
+    W1-T355 (verify:human, queued). THE THIRD REMEDY, named FIRST in the operator's own text — 'one
+    sentence in the record-authoring prompt layers' — HAS NO OWNER: measured at this sha,
+    renderDoctrinePreamble (src/lib/learnings.ts) emits exactly two lines, DISTRUST_RULE (Standing
+    rule 7) and AUTONOMY_CLAUSE (Standing rule 8); the phrase 'may never RECORD' appears NOWHERE under
+    src/. Every worker prompt in this repo's history has carried the autonomy clause ('the loop never
+    waits on a human') and no counterweight naming the one class of act that is NOT the worker's to
+    take.
+    WHY THE TWO SHIPPED GATES DO NOT MAKE THIS REDUNDANT — they are both keyed on the literal path
+    DECISIONS.md (DECISIONS_MD_PATH in review.ts, DECISIONS_LOG_PATH in task-linter.ts). A
+    direction-closing record written into MASTER-PLAN prose, a docs/ decision record, or a
+    plan/decisions.d shard passes both untouched. That is the corridor the audit named: W1-T326's
+    filing agent identified the ratification channel and routed around it IN WRITING. A path-keyed
+    gate cannot reach a record that chooses a different path; a line in the prompt reaches the
+    authoring moment on every surface, and costs ZERO escalation volume — the operator's explicit
+    constraint on this fix.
+    WHY THIS IS NOT 'a prose rule does not survive an agent that argues' (W1-T352's rationale): that
+    argument was for making the DECISIONS.md check BLOCKING rather than advisory, and it won. This
+    line is the belt to that check's braces, not a substitute for it."
+  design: |
+    ONE THIRD INVARIANT DOCTRINE LINE. Additive; no gate, no new escalation path, no classifier.
+    (i) THE CONSTANT: add RECORD_AUTHORITY_RULE beside DISTRUST_RULE / AUTONOMY_CLAUSE
+    (src/lib/learnings.ts), stating BOTH halves of the ruling — an agent may RECOMMEND a direction
+    (including a 'no') but may never RECORD one, and a direction-closing record carries an operator
+    attribution line or a ratification hook (a P-series proposal, a verify:human task) rather than
+    landing as settled fact.
+    (ii) RENDERED BY renderDoctrinePreamble, third, AFTER the existing two — the preamble is the
+    cache-stable prefix (W1-T35), so the new line goes at the END of the stable block and the one-time
+    cache bust is stated in the PR body rather than discovered.
+    (iii) PROVENANCE OR IT DOESN'T GO IN A PROMPT (Standing rule 1): the line is emitted with a
+    citation exactly as its two siblings are, via the same citation() helper. Its src id names the
+    OPERATOR RULING, not a Standing rule number — feedback#fb-1785882211812-bafd8f — because §12
+    carries no rule for this today (verified: Standing rules end at 25) and inventing a rule number
+    here would be an agent recording a direction, which is the very act this line forbids. Verify
+    assertProvenance/extractContext accept the rendered block FROM SOURCE before wiring.
+    (iv) FALSIFIER, BOTH DIRECTIONS: renderImplementPrompt's output contains the new line and still
+    contains both existing doctrine lines in their existing order; the line lands in the STABLE
+    PREFIX (the cache-ordering assertion in test/learnings.test.ts must still hold with three lines);
+    and the doctrine block must not leak into the matched-learnings block, the same invariant the
+    existing pair is already pinned by.
+    NOT IN SCOPE, each with its reason: amending MASTER-PLAN §12 with a new Standing rule (ruling-
+    shaped — the operator's, and the permanent record is W1-T355's DECISIONS.md transcription);
+    editing DECISIONS.md (W1-T355 owns it, verify:human); widening either shipped gate beyond the
+    DECISIONS.md path; the recon/architect/triage prompt builders (they render no doctrine preamble
+    today, and adding one to each is a second concern under Standing rule 19); wiring GATE_ACTION's
+    timeboxed_question (confirmed ZERO production call sites at this sha — planRiskGate's only
+    consumers are test/risk-score.ts — but wiring it is an escalation-VOLUME change the operator's
+    text explicitly fenced off, and it belongs with W1-T360's disposition, not here).
+  acceptance:
+    - claim: "renderDoctrinePreamble emits a third invariant line stating that an agent may recommend a direction but may never record one, alongside the unchanged distrust and autonomy lines, each still carrying its citation"
+      proof: "unit test: test/learnings.test.ts"
+    - claim: "a rendered implement prompt carries the new line inside the cache-stable prefix, and the doctrine block still never leaks into the matched-learnings block"
+      proof: "unit test: test/learnings.test.ts"
+    - claim: "the rule is a named exported constant the preamble renders, not prose inlined at one call site"
+      proof: "grep: RECORD_AUTHORITY_RULE in src/lib/learnings.ts"
+  risk: medium
+  origin: feedback#fb-1785882211812-bafd8f
+  plan_refs: ["§8A", "§12", "W1-T352", "W1-T353", "W1-T355"]
+  files: [src/lib/learnings.ts, test/learnings.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — string assertions over a pure renderer, fully in-process. This task is NOT
+    ruling-shaped: it writes a prompt constant, not a ruling, and its files: exclude DECISIONS.md, so
+    rulingVerifyViolation correctly does not fire.
+    risk:medium, argued: the diff is one constant and one rendered line in ONE file, which argues low;
+    it reads medium only because the preamble is injected into EVERY implement prompt fleet-wide and
+    an edit here busts the prompt cache once for every worker rendered after it (the renderer's own
+    header says this block must change rarely). No behavioural gate changes, so the failure directions
+    are a wasted cache warm-up or an ignored sentence — never blocked work.
+    budget_usd 40 — one constant, one render line, three assertions; below W1-T353's 55 because there
+    is no check table, no severity registration and no dispatch path involved.
+    OVERLAPS, cited not duplicated: W1-T941 (knowledge budget) explicitly excludes 'the two
+    always-injected doctrine lines' from its cap, so a third line does not disturb its arithmetic —
+    the implementing PR should say so; W1-T352/W1-T353 are the two shipped gates this complements;
+    W1-T355 owns the permanent record of the same ruling and is verify:human by design.
+    PROOF NOTE: the grep pattern is new text this change ADDS (zero hits at the merge base, verified),
+    so it discriminates rather than reading executed_stale; plain word characters and underscores
+    only, no BRE metacharacters, and the pattern contains no ' in ' to mis-split the path clause."
