@@ -2981,6 +2981,29 @@ export type ArmOutcomeName =
   | "irreversible-refused";
 
 /**
+ * W1-T1117: `armFailureAction`'s (run-task.ts) return value, mirrored here rather than imported
+ * for the same reason {@link ArmOutcomeName} already is — `lib/sweep.ts` stays free of a
+ * run-task.ts dependency. `"direct-merge"` is deliberately absent: that class never reaches an
+ * `"arm-error-ignored"` outcome (it takes the direct-merge fallback instead), so it can never be
+ * the `failureClass` a caller attaches below.
+ */
+export type ArmFailureClass = "transient" | "retryable" | "unknown";
+
+/**
+ * W1-T1117: the richer shape `SweepDeps.arm` may return instead of the bare {@link
+ * ArmOutcomeName} — the SAME "outcome ∪ richer object" widening run-task.ts's own
+ * `ArmAttemptResult` already established for `armAutoMergeDetailed`, reused here rather than
+ * reinvented. `failureClass` is populated ONLY alongside the `"arm-error-ignored"` outcome (see
+ * the "mergeable" arm below for how it changes the dedup decision); every other outcome either
+ * never attempted a merge (no failure to classify) or resolved to a different, already-distinct
+ * outcome (`direct-merged` / `direct-merge-failed`), so this field carries nothing for them.
+ */
+export interface ArmAttemptOutcome {
+  outcome: ArmOutcomeName;
+  failureClass?: ArmFailureClass;
+}
+
+/**
  * TRUE only for outcomes that genuinely armed or merged.
  *
  *   armed          — `gh pr merge --auto` succeeded; auto-merge is registered.
@@ -2988,11 +3011,16 @@ export type ArmOutcomeName =
  *                    outright. A success, though not an arm: the PR leaves `openPrs` next pass,
  *                    so nothing is left to retry.
  *
- * Every other outcome armed NOTHING and must be retried on a later pass:
+ * Every other outcome armed NOTHING:
  *   no-task-id / head-unavailable / ledger-refused  — returned before any arm was attempted.
  *   direct-merge-failed / arm-error-ignored         — the attempt was made and did not stick.
  *   irreversible-refused                            — a deliberate refusal (W1-T947), not a
  *                                                      failure; never armed here or later.
+ * Whether a "not armed" outcome is RETRIED on a later pass is a separate question this function
+ * does not answer — see the "mergeable" arm's own dedup logic below, which (W1-T1117) treats an
+ * `"arm-error-ignored"` outcome carrying an `"unknown"` {@link ArmFailureClass} as terminal
+ * (seeds the dedup, no retry) while every other non-armed outcome, including a `"transient"`/
+ * `"retryable"`-classified `arm-error-ignored`, keeps re-deriving every pass exactly as before.
  */
 export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
   // An `undefined` return is a fake/effect that predates this signature — treat it as armed,
@@ -3017,8 +3045,14 @@ export interface SweepDeps {
    * `void` remains valid so existing fakes that return nothing keep compiling; an undefined
    * return is treated as "armed" (the pre-existing assumption) rather than silently standing
    * down, so this change cannot make a working lane worse.
+   *
+   * W1-T1117: may also return the richer {@link ArmAttemptOutcome} — every existing fake
+   * returning a bare {@link ArmOutcomeName} (or `void`) keeps compiling and behaving exactly as
+   * before; only production wiring (`buildSweepEffects`, run-task.ts) attaches a `failureClass`.
    */
-  arm: (pr: OpenPrView) => ArmOutcomeName | void | Promise<ArmOutcomeName | void>;
+  arm: (
+    pr: OpenPrView,
+  ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
   /** Close a superseded/abandoned PR with a stated reason. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /**
@@ -4122,16 +4156,35 @@ export async function runSweep(
               // seven branches it took, and five of them armed nothing. Discarding it is what
               // let `acted:true` be recorded for a PR that was never armed.
               const armResult = await deps.arm(pr);
+              // W1-T1117: `deps.arm` may return the bare `ArmOutcomeName` it always could, or the
+              // richer `ArmAttemptOutcome` (outcome + failureClass) — unwrap to the outcome name
+              // once, here, so every read below (including `armOutcome`/`armOutcomeArmed`, both
+              // unchanged) stays on the plain string it already expected.
+              const armOutcomeName = typeof armResult === "object" && armResult !== null ? armResult.outcome : armResult;
               // W1-T1061: capture the concrete outcome onto the OUTER `armOutcome` (read by
               // `finalizeDisposition` below) whenever one came back — a `void` return is the
               // legacy "treat as armed" shape `armOutcomeArmed` already special-cases, and it
               // names no real branch, so no field is written for it either.
-              if (armResult !== undefined) armOutcome = armResult;
-              if (!armOutcomeArmed(armResult)) {
+              if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
+              if (!armOutcomeArmed(armOutcomeName)) {
                 acted = false;
                 // The refusal used to go only to `say` -> stdout -> daemon.out.log, leaving no
                 // trace in the ledger where anyone looks. Name it on the disposed line.
-                standDownReason = `arm outcome: ${String(armResult)}`;
+                standDownReason = `arm outcome: ${String(armOutcomeName)}`;
+                // W1-T1117 (design ii/iv): an `arm-error-ignored` outcome classified `"unknown"`
+                // is the ONE non-armed outcome that must NOT retry — the classifier could not
+                // decode the failure at all, so nothing says the SAME attempt will ever succeed
+                // (unlike `"transient"`/`"retryable"`, which stay on the `acted:false` line just
+                // set above, exactly as every arm-error-ignored outcome already behaved). This
+                // reinstates the terminal (dedup-seeding) shape the plan record's rationale (1)
+                // always intended for a genuinely non-retryable refusal — see this arm's own
+                // `deps.arm` production wiring (run-task.ts's `buildSweepEffects`) for where
+                // `failureClass` is actually populated.
+                const failureClass = typeof armResult === "object" && armResult !== null ? armResult.failureClass : undefined;
+                if (armOutcomeName === "arm-error-ignored" && failureClass === "unknown") {
+                  acted = true;
+                  standDownReason = undefined;
+                }
               }
               break;
             }
