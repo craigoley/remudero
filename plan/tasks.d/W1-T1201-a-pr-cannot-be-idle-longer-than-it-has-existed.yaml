@@ -1,0 +1,173 @@
+- id: W1-T1201
+  title: "the sweep's staleness rule compares a shifted clock against `lastActivityAt` with nothing bounding the result, so a +400d test run closed eleven live pull requests hours old — a PR cannot be idle longer than it has existed, and `ageDays` is never clamped to the PR's own creation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree at origin/main, BY READING ONLY. The suite,
+    `clock-sweep` and every `runSweep` test were left unrun — running them is the defect. The
+    daemon was already stopped and was left stopped.
+
+    (1) THE INCIDENT. Eleven live PRs — #2376, #2403, #2417, #2419, #2427, #2428, #2429, #2430,
+    #2431, #2434 and #2474 — were each closed with `Closed by rmd sweep: abandoned — no activity in
+    400d (>= 14d threshold)`, all hours old, all reopened by the operator. The string is the
+    `stale` row of `DISPOSITION_RULES` (`src/lib/sweep.ts`), whose predicate is
+    `ageDays >= policy.staleDays` with `staleDays` at 14, and whose effect reaches
+    `ghRunImpl("gh", ["pr", "close", pr.prUrl, "--comment", …])`.
+
+    (2) THE INVARIANT THAT WOULD HAVE STOPPED IT REGARDLESS OF ANY EXCLUSION LIST: A PR CANNOT BE
+    IDLE LONGER THAN IT HAS EXISTED. `ageDays` is derived from `pr.lastActivityAt` — populated as
+    `lastActivityAt: pr.updatedAt` at two projection sites in `src/run-task.ts` — measured against
+    the sweep-pass clock. NOTHING BOUNDS THE RESULT. Shift the clock forward and every PR in the
+    repository reads as abandoned simultaneously, which is exactly the observed shape: eleven at
+    once, not one.
+
+    (3) AND THE CLAMP IS AVAILABLE AT NO EXTRA ROUND TRIP, THOUGH IT IS NOT FREE TODAY.
+    `OpenPrView` carries `lastActivityAt` and NO creation field, and `createdAt` appears nowhere in
+    `src/lib/open-prs-rest.ts`. But the projection already reads `pr.updatedAt`, `pr.headRefOid`,
+    `pr.autoMergeRequest` and `pr.headRefName` off the SAME PR node, and `createdAt` sits on that
+    node beside `updatedAt`. So the cost is one field in the selection set plus one field on the
+    view — never a second request. THIS IS ARITHMETIC, NOT JUDGEMENT: no LLM belongs anywhere near
+    the sweep's action path.
+
+    (4) THE CONTAINMENT LIST IS SCOPED TO THE WRONG HAZARD, AND ITS OWN HEADER SAYS WHICH.
+    `SPAWN_REACHING` in `scripts/clock-sweep.mjs` holds ten entries justified by MODEL SPEND — one
+    measured at "$1.42 of model spend, plus pushed branches" — and describes its members as
+    reaching "the real worker spawn primitive with no stub". A test that issues a live GitHub WRITE
+    spends no model tokens at all, so nothing about that justification selects for it.
+
+    (5) THE EIGHT NAMED FILES ARE NOT THE POPULATION, AND THAT IS THE FINDING THAT DECIDES Q3.
+    Read from source: 16 test files call `buildSweepEffects`, and SIX construct it against the REAL
+    `craigoley`/`remudero` — `post-review-stall-escalation`, `run-task`, `sweep-absent-repush`,
+    `transient-escalations`, `fix-rung-no-task` and `review-orphan-wiring`. ONLY ONE of those six
+    appears in the eight, and NONE of the six is in `SPAWN_REACHING`.
+    `post-review-stall-escalation.test.ts` is the sharpest instance: it builds real effects against
+    the real repo, overrides `close:` ZERO times, and calls `effects.postReview!` on PR **#1339** —
+    a live write to a real pull request, in no exclusion list, and absent from the eight entirely.
+
+    (6) WHAT THIS RECON COULD NOT ESTABLISH, STATED RATHER THAN GUESSED. Reaching the CLOSE path
+    needs four things together — `runSweep`, real effects, a real `craigoley/remudero` `prUrl`, and
+    the stale rule firing — and NO file read here combines all four. `fix-dedup-seed` spreads real
+    effects with `dryRun: false` and defeats the live-write guard three times, but its owner/repo
+    are synthetic (`acme`/`w1t1127-*`), so its real `close` targets a repository that does not
+    exist. `run-task`'s own `runSweep` stubs `close` and uses `github.com/o/r/pull/1`. WHICH TEST
+    ISSUED THE ELEVEN CLOSES IS THEREFORE NOT DECIDABLE FROM SOURCE, and settling it needs the
+    host-side `gh` trail this host cannot read. The clamp in (2) does not depend on that answer,
+    which is the point of preferring it.
+  design: |
+    (i) CLAMP `ageDays` TO THE PR'S OWN LIFETIME. `ageDays` becomes the LESSER of "time since last
+    activity" and "time since creation". Pure arithmetic on two timestamps already in the payload,
+    evaluated before any disposition rule reads it, so every consumer inherits the bound rather
+    than each re-deriving it.
+
+    (ii) WHAT ELSE THE CLAMP CATCHES, WHICH IS WHY IT IS THE RIGHT LAYER. Any forward clock skew on
+    the sweeping host; a fixture or projection carrying a stale `updatedAt`; a mis-parsed or
+    zero-valued date resolving to the epoch; and any future shifted-clock harness nobody has
+    written yet. All of them present as "idle longer than it has existed", and all of them are
+    refused by one comparison that needs no list to be kept current.
+
+    (iii) THE CLAMP MUST NOT SILENTLY RESCUE — IT MUST SAY SO. A disposition suppressed because
+    idleness exceeded lifetime is EVIDENCE OF A BROKEN CLOCK, not a routine no-op, and must be
+    recorded so the next reader sees the cause rather than an absence. A rescue nobody can see is
+    how a shifted clock stays invisible until it closes eleven PRs.
+
+    (iv) A SECOND EXCLUSION SET, NOT A WIDER ONE — AND DERIVED, NOT LISTED. `SPAWN_REACHING`'s
+    justification is measured model spend; a write-reaching set's is an irreversible outward
+    effect, and the two select different files (rationale 5). BUT A BY-NAME LIST FAILS OPEN THE
+    MOMENT SOMEONE ADDS A FILE, and rationale (5) is that failure already realised — five of six
+    real-repo effect builders are in no list at all. The set must therefore be DERIVED from source
+    the way this recon derived it: a test that constructs `buildSweepEffects` (or any real effects
+    factory) against a non-synthetic owner/repo is detectable statically. Anything matching that
+    shape must be either excluded or explicitly marked safe, and the sweep must FAIL when a file
+    matches and is neither — the completeness pattern
+    `test/instrument-surface-completeness.test.ts` already establishes for gate rules.
+
+    (v) DO NOT DISABLE `clock-sweep`. The drift it measures is real and W1-T1104 owns it. This task
+    makes the sweep survivable under a shifted clock; it does not stop the shifting.
+
+    (vi) NOT IN SCOPE, NAMED: the derived write-reaching set of (iv), which is a different file
+    (`scripts/clock-sweep.mjs`), a different failure mode and its own falsifier — it needs its own
+    task rather than riding this diff; `staleDays` itself, which is correctly 14 and is not the
+    defect; and W1-T1104's nine drifting suites.
+  acceptance:
+    - claim: "a pull request is never judged idle for longer than it has existed"
+      proof: "unit test: test/sweep-age-clamp.test.ts"
+    - claim: "a shifted clock no longer routes a young pull request to the stale disposition"
+      proof: "unit test: test/sweep-age-clamp.test.ts"
+    - claim: "a genuinely abandoned pull request still reaches the stale disposition unchanged"
+      proof: "unit test: test/sweep-age-clamp.test.ts"
+    - claim: "a suppression caused by idleness exceeding lifetime is recorded rather than silent"
+      proof: "unit test: test/sweep-age-clamp.test.ts"
+    - claim: "the open pull request view carries the creation timestamp the clamp reads"
+      proof: "unit test: test/sweep-age-clamp.test.ts"
+  files: [src/lib/sweep.ts, src/run-task.ts, test/sweep-age-clamp.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#shifted-clock-closed-live-prs-2026-08-22"
+  plan_refs: ["W1-T1104", "W1-T114", "W1-T1110"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/sweep-age-clamp.test.ts`, declared in `files:`, so on the filing PR it resolves
+    through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    THE WHOLE RECON WAS READ-ONLY AND THAT WAS A CONSTRAINT, NOT A PREFERENCE. The suite,
+    `clock-sweep` and every `runSweep` test were left unrun; the eleven closes are the operator's
+    measurement and the source analysis is this shard's. Rationale (6) records exactly what reading
+    could NOT settle rather than inferring it.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The change sits in front of every sweep disposition
+    against a live repository; a mistake either suppresses real staleness or leaves the closes
+    reachable.
+
+    BOTH `src/` FILES ARE DECLARED BECAUSE THE FIELD AND THE ARITHMETIC ARE APART: `OpenPrView` and
+    the disposition rules live in `src/lib/sweep.ts`, and the two projection sites that populate
+    `lastActivityAt` from `pr.updatedAt` live in `src/run-task.ts`. A clamp added without the
+    creation field has nothing to clamp against.
+
+    `scripts/clock-sweep.mjs` IS DELIBERATELY NOT DECLARED — design (iv) and (vi). It is a
+    different failure mode with its own falsifier, and it is NOT instrument surface under
+    `INSTRUMENT_SURFACE`, so the separation is a scoping choice rather than a Rule 25 obligation.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1201` resolves to 10902f148a9970a18afdf979ab6a08c14b8a2739,
+    read over git protocol; live control, `refs/rmd-id/W1-T999999` exits 2. THE ANCHOR MESSAGE WAS
+    NOT JUDGED. Eight id surfaces plus a subject sweep across open-PR heads and trees, and every
+    control was an id VERIFIED PRESENT ON MAIN (`W1-T1110`, `W1-T1104`, `W1-T1036` — each with a
+    shard file and a declared `- id:`), never one whose PR was still open.
+
+    AMENDED 2026-08-22 — THE FORENSIC HALF, RE-DERIVED OVER THE LEDGER UNION AND THE ACTIONS LOG,
+    AND IT SHARPENS THE CONTAINMENT ARGUMENT RATHER THAN RESTATING IT.
+
+    (a) THE ELEVEN CLOSES APPEAR NOWHERE IN THE FLEET LEDGER. Every `sweep.disposed` row in the
+    union carrying `disposition: stale` — 584 of them — reads `superseded-by #N`. Not one reads
+    `abandoned`, against a 584-match positive control for `superseded` on the SAME scan, so the
+    zero is a real absence and not a broken query.
+
+    (b) AND THE CLOSE WINDOW IS NOT EMPTY, WHICH IS THE POINT. Between 20:00 and 20:20 on
+    2026-08-21 the daemon wrote 449 rows, including 14-22 rows on EACH of #2376, #2403, #2417,
+    #2419, #2427, #2428, #2430 and #2431 — dispositioning them `blocked-fixable`, `mergeable`,
+    `blocked-ambiguous` and `wait`. ZERO `stale` dispositions in that window. The sweep was looking
+    straight at those pull requests and treating them as LIVE while something else closed them, so
+    the ledger does not merely fail to record the closes: it contradicts them. (#2434 carries no
+    row in that window at all, so the daemon had no opinion on it either way.)
+
+    (c) CI IS EXCLUDED STRUCTURALLY, NOT ONLY BY TIMING. No clock-sweep workflow ran between 19:30
+    and 20:10 — the distinct workflow names in that window are CI, CI gate, CodeQL, Semgrep,
+    OSV-Scanner, OpenSSF Scorecard, Code Quality on #2429/#2430/#2431 and main, Acceptance author
+    gate, Dependency Review and main-plan-guard. `clock-sweep.yml` EXISTS and is not among them.
+    And no workflow in `.github/workflows/` closes a pull request at all: a grep for close verbs
+    across the whole directory returns nothing. So CI could not have done this even had it run.
+
+    (d) SO THE WRITE CAME FROM A SUITE RUN ON THE HOST, AND THAT IS THE CONTAINMENT ARGUMENT IN ITS
+    STRONGEST FORM. A test that drives real effects writes PERMANENTLY to GitHub and TRANSIENTLY to
+    its own scratch `config.root`. The action survives; its record does not.
+
+    (e) THE FILE CANNOT NOW BE NAMED, AND THIS SHARD SAYS SO RATHER THAN LEAVING A READER LOOKING.
+    The worktree that held that run's ledger is gone, so no forensic route remains to the specific
+    test file. That is precisely why the remedy must be the DERIVED SET and the `createdAt` clamp
+    rather than an exclusion for whichever file did it: an exclusion list can only name what the
+    evidence can name, and here the evidence cannot. The clamp is arithmetic and holds against a
+    file nobody can identify.

@@ -2175,9 +2175,15 @@ export function worktreeAdd(
   } = {},
 ): void {
   execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "inherit" });
+  // W1-T1129: `base` (e.g. "origin/main") is a remote-tracking start point, so plain
+  // `-b <branch>` would ALSO write `branch.<branch>.remote`/`.merge` into the repo's ONE
+  // shared `.git/config` — a write every other concurrent worktreeAdd/checkout -B call
+  // races for the same `.git/config.lock` (rationale (3)/(4)). Nothing here reads that
+  // tracking config, so `--no-track` keeps the branch (still at `base`'s commit, still
+  // pushable) and drops only the config write.
   execFileSync(
     "git",
-    ["-C", repoDir, "worktree", "add", "-b", branch, worktreePath, base],
+    ["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base],
     { stdio: "inherit" },
   );
   // W1-T405: record the base BEFORE the currency check below — a refusal throws out of

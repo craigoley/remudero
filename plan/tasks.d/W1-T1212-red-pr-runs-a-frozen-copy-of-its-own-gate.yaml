@@ -1,0 +1,114 @@
+- id: W1-T1212
+  title: "a red PR runs a FROZEN copy of the very gate that blocks it — `pull_request` evaluates the merge ref, whose base parent is pinned at the PR's last synchronize, so a gate fixed on main never reaches the PRs it would unblock; and the one rung that could update a branch draws only from `armedButStalled`, which a red PR can never enter"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    THE RECON IS THE OPERATOR'S AND IS CITED, NOT RE-DERIVED. This shard adds the seam, the
+    discriminator and the refusals; it does not re-measure the mechanism. Filed by reading only,
+    from a scratch worktree at origin/main — neither the suite nor any `runSweep` test was run.
+
+    (1) THE MECHANISM, SETTLED. #2477 merged at 12:35Z, adding
+    `select(($req | index($n)) != null)` to `.github/workflows/ci-gate.yml` so the fail arm
+    considers only the REQUIRED contexts. `refs/pull/2434/merge` has parents `533d8d84` and
+    `bd68cefd`; `533d8d84` is NOT main's tip, and that merge ref contains ZERO occurrences of the
+    new filter. `ci-gate` then ran on that stale ref at 13:50Z — AFTER the fix merged — and failed
+    on `clock-sweep`, a check main's `ci-gate` would now ignore. The gate that blocks #2434 is a
+    copy of the gate that no longer exists.
+
+    (2) THE LOOP, AND WHY NOTHING BREAKS IT TODAY. `selectUpdateBranchTarget` (`src/lib/sweep.ts`)
+    draws its candidate set from `armedButStalled`, whose first veto is `autoMergeArmed !== true`.
+    A RED PR IS NEVER ARMED. So it is never updated, so it never picks up the fix that would make
+    it green, so it stays red and unarmed. The cycle has no exit that does not involve a human.
+
+    (3) THE POPULATION IS NOT A CORNER CASE. The eleven open PRs are 3, 7, 11, 11, 13, 20, 20, 28,
+    39, 53 and 76 commits behind main. At the observed merge rate of roughly fifty a day a PR falls
+    out of date in about an hour, so "behind, with a frozen gate" is the STEADY STATE of this repo,
+    not an edge the fleet visits occasionally.
+
+    (4) WHY BEHIND-NESS ALONE IS THE WRONG TRIGGER. `required_status_checks.strict` is FALSE on
+    main, so being behind is not itself a merge blocker and updating for behind-ness would fire on
+    essentially every open PR, every pass. Each update mints a NEW HEAD, and a new head discards
+    whatever verdict was pinned to the old one and spends an orphan slot — W1-T528's own doc costs
+    this out as N+(N-1)+…+1 reviews for a set of N. A bare widening of the selector is a rebase
+    storm that pays that bill for nothing.
+  design: |
+    (i) THE DISCRIMINATOR IS THE POINT, AND IT IS EXACT. Update only when the BLOB SHA of a
+    workflow that is CURRENTLY FAILING on this PR differs between the PR's merge ref and main. Both
+    halves are already in reach: the failing check names come from the rollup the sweep reads, and
+    a blob sha is a single contents read per file. It is cheap, it is exact, and it fires ONLY when
+    an update would actually change the outcome — a PR failing a gate whose definition has not
+    moved learns nothing from a new head and must not get one.
+
+    (ii) THE SEAM. `armedButStalled` stays exactly as it is — it answers "armed and behind", which
+    is a different question and still has its own consumer. The new predicate is a SIBLING, not a
+    widening of that one, and `selectUpdateBranchTarget` selects across the union. One PR per pass
+    and `oldestActivityFirst` are unchanged: they are what keep this from becoming the storm
+    rationale (4) describes, and they already guarantee a loser this pass is strictly older next.
+
+    (iii) THE WRITE ALREADY EXISTS AND MUST BE REUSED. W1-T1095's capability three shipped
+    `ghUpdateBranchArgv` (`src/run-task.ts`), the `gh api` form that needs no local branch and no
+    checkout. This task WIRES that, it does not re-file it, and it introduces no second way to
+    press the same button.
+
+    (iv) REFUSED BY NAME, SO THEY ARE NOT REDISCOVERED. Do NOT update a CONFLICTED PR — resolving a
+    conflict is judgement, and an update request against one is refused by GitHub anyway
+    (`UpdateBranchOutcome` already carries `"conflict"` for exactly that). Do NOT update on
+    BEHIND-NESS ALONE, for rationale (4)'s reason. Do NOT fire twice on the same PR for the same
+    workflow: once a PR has been updated for workflow W, a second update for W is a no-op that
+    still costs a head, so the pair must be remembered and skipped.
+
+    (v) WHAT MUST STAY TRUE OF THE EXISTING PATH. The draft veto and the in-flight-head veto
+    (`taskIdFromRunBranch` against `inFlightTaskIds`) apply to the widened set unchanged — a live
+    worker pushing to a head must not race an update, and an operator's draft is still a hold.
+
+    (vi) NOT IN SCOPE, NAMED: the `armedButStalled` population itself; `strict` on branch
+    protection, which is an operator setting and not this rung's business; any change to review
+    admission or to what a new head costs downstream; and the separate question of whether a
+    posted verdict should survive a head change at all.
+  acceptance:
+    - claim: "a red unarmed PR whose failing workflow moved on main is selected for an update"
+      proof: "unit test: test/update-branch-stale-gate.test.ts"
+    - claim: "a red PR whose failing workflow is identical to main's is not selected"
+      proof: "unit test: test/update-branch-stale-gate.test.ts"
+    - claim: "a conflicted PR is never selected however stale its gate copy is"
+      proof: "unit test: test/update-branch-stale-gate.test.ts"
+    - claim: "being behind main with no failing workflow selects nothing"
+      proof: "unit test: test/update-branch-stale-gate.test.ts"
+    - claim: "the same PR is not selected a second time for the same workflow"
+      proof: "unit test: test/update-branch-stale-gate.test.ts"
+    - claim: "a draft and an in-flight head stay vetoed on the widened set"
+      proof: "unit test: test/update-branch-stale-gate.test.ts"
+  files: [src/lib/sweep.ts, src/run-task.ts, test/update-branch-stale-gate.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#red-pr-frozen-gate-2026-08-22"
+  plan_refs: ["W1-T528", "W1-T1095"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/update-branch-stale-gate.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS RULE 19 SPAN AND BLAST RADIUS BOTH, AND SAYS WHICH IS WHICH. The SPAN is that
+    the predicate lives in `src/lib/sweep.ts` while the fact it needs — a workflow blob sha at two
+    refs — is I/O that only `src/run-task.ts` can fetch; a predicate with no way to obtain its own
+    input is not a decomposition. The BLAST RADIUS is that a wrong answer here mints heads on live
+    PRs, and every head discards a verdict.
+
+    THE OVERLAP IS DELIBERATE AND NAMED. `src/lib/sweep.ts` is also declared by W1-T1213, filed
+    alongside this one. `overlappingPaths` will serialize the two, which is correct: they edit the
+    same module for unrelated reasons and must not land concurrently.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1212` resolves to
+    601338d508b55ca2ec24db4181ccc9bacf0eb3ba, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight
+    surfaces were swept with a control PRE-QUALIFIED FOR EACH — a declared `- id:` on main, a shard
+    FILENAME on main, any occurrence in main's tree, the reservation refs, a LIVE `run-W1-T*` head
+    (a merged id's branch is deleted and reads zero for the wrong reason), main's commit messages
+    (an id that has never appeared in one reads zero there whatever its state), open PR
+    titles-plus-bodies, and merged PR bodies including the `Remudero-Task:` trailer. The subject
+    anchors were counted PER OPEN HEAD against main's own baseline rather than tested for presence.

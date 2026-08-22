@@ -341,6 +341,18 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              reframe-once bookkeeping.
  *   - "fix.dispatch" / "fix.review"         → run-task.ts's deriveStrikeHistory and the
  *                                              fix rung's own strike cap.
+ *   - "fix.ci_not_green" / "fix.resolved"   → sweep.ts's fixRungStalledWithoutNewHead (W1-T1110)
+ *                                              — read alongside a non-"success" "fix.review" to
+ *                                              decide whether a dispatch that set the
+ *                                              `blocked-fixable`/`conflicted` dedup key already
+ *                                              ENDED without landing a new head, and so must not
+ *                                              keep deduping this PR against a head nothing will
+ *                                              ever move again. "fix.resolved" was display-only
+ *                                              (see the exclusion note below) until this task gave
+ *                                              it a SECOND, real reader here — losing either line
+ *                                              across a rotation re-strands (or wrongly re-arms) a
+ *                                              stuck fix dispatch exactly like losing "sweep.disposed"
+ *                                              itself would.
  *   - "dep-review.decided"                  → sweep.ts's depReview readback — the terminal
  *                                              arm/escalate/refuse decision for a Dependabot PR.
  *   - "review.posted"                       → run-task.ts's currentStrikeRegimeFor (the
@@ -386,10 +398,14 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  * `ops.alerts_polled`, `issues.polled`, `inbox.polled`, ...) — exactly the high-frequency,
  * no-decision-consequence lines that drove the measured growth and are safe to archive — AND
  * excludes the handful of steps ("recon.done", "implement.resumed", "implement.done" as a
- * phase transition, "fix.resolved") that status.ts's `deriveRunState` reads ONLY to label a
- * cosmetic `phase`/`elapsedMs` for the board/status display: `daemon.ts`'s `reconstructOrphan`
- * proves those never gate a real decision — its `&& projection.prUrl` guard is a no-op for
- * every case a `run.start`/`pr.opened` line (both already covered above) didn't already set.
+ * phase transition) that status.ts's `deriveRunState` reads ONLY to label a cosmetic
+ * `phase`/`elapsedMs` for the board/status display: `daemon.ts`'s `reconstructOrphan` proves
+ * those never gate a real decision — its `&& projection.prUrl` guard is a no-op for every case a
+ * `run.start`/`pr.opened` line (both already covered above) didn't already set. `"fix.resolved"`
+ * used to sit in this same display-only group (status.ts's read of it is still cosmetic on its
+ * own) — W1-T1110 gave it a SECOND, genuinely deciding reader (sweep.ts's
+ * `fixRungStalledWithoutNewHead`, listed above), so it now belongs in the retained set instead;
+ * a step is excluded here only while EVERY one of its readers is display-only.
  *
  * ALSO deliberately EXCLUDES `daemon.headroom` and `console.kick_refused`/
  * `console.kick_dispatched` (W1-T275) even though real consumers read them
@@ -490,6 +506,21 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "ratify.reframed",
   "fix.dispatch",
   "fix.review",
+  // W1-T1110: sweep.ts's `fixRungStalledWithoutNewHead` reads these two (alongside "fix.review"
+  // above) to decide whether a `blocked-fixable`/`conflicted` dedup's dispatch already CONCLUDED
+  // without landing a new head — see that function's own doc. Losing either across a rotation
+  // reads a stalled dispatch as still in flight and re-strands the PR against a head nothing will
+  // ever move again, the exact deadlock this task fixes.
+  "fix.ci_not_green",
+  "fix.resolved",
+  // W1-T1095 (capability 3): run-task.ts's `fixRebaseAlreadySpent` reads this row to enforce the
+  // shard's "AT MOST ONE rebase-and-retry per blocked PR" bound (design iii). It is the ONLY
+  // record of that bound — there is no timer and no state file — so losing it across a rotation
+  // would silently restore an unbounded rebase-and-retry, which is the retry loop this capability
+  // exists to avoid becoming. Its siblings `fix.rebase_refused`/`fix.rebase_failed` are
+  // deliberately NOT here: nothing decides on them, and a step belongs in this set only while a
+  // real deciding reader consults it.
+  "fix.rebased",
   "dep-review.decided",
   "review.posted",
   "review.post_refused",

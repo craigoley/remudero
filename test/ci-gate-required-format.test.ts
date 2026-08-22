@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -103,4 +105,107 @@ test("ci-gate-required-format: the format is one entry per line, and the convent
     "expected the convention comment to name the collision class (concurrent edits colliding " +
       "on the same line)",
   );
+});
+
+// ── W1-T1131: the FAIL arm consults REQUIRED, not only IGNORE ───────────────────────────────
+//
+// evaluate_fails() used to select every check run with a failing conclusion, filtered ONLY
+// against IGNORE (which holds nothing but "ci-gate" itself) — it never read REQUIRED at all.
+// So any of the eleven-plus non-required check runs that can land on a PR head (advisory
+// scanners, informational jobs, clock-sweep, ...) could hold every merge, while the printed
+// message claimed a "required" check had failed (#2434: clock-sweep, which its own workflow
+// header says is deliberately absent from ci-gate.yml, held merge with all 14 required checks
+// green). The fix restricts evaluate_fails to names present in REQUIRED.
+//
+// This suite drives the REAL bash+jq script embedded in ci-gate.yml's one step (extracted from
+// the file on disk, never re-typed here) as a subprocess, with a stub `gh` binary on PATH
+// standing in for the GitHub API — the same harness test/ci-gate-dedupe.test.ts uses.
+
+type CheckRun = {
+  name: string;
+  status: "completed" | "in_progress" | "queued";
+  conclusion: string | null;
+  started_at: string;
+};
+
+async function loadAggregateScript(): Promise<string> {
+  const raw = await readFile(CI_GATE_PATH, "utf8");
+  const doc = parseYaml(raw) as { jobs: Record<string, any> };
+  const steps = doc.jobs["ci-gate"].steps as Array<{ name: string; run: string }>;
+  const step = steps.find((s) => typeof s.run === "string" && s.run.includes("runs_json"));
+  assert.ok(step, "expected ci-gate.yml's ci-gate job to have a step whose run script defines runs_json()");
+  return step!.run;
+}
+
+async function writeFakeGh(dir: string, checkRuns: CheckRun[]): Promise<void> {
+  const page = JSON.stringify([{ check_runs: checkRuns }]);
+  const body = `#!/usr/bin/env bash\ncat <<'FIXTURE_EOF'\n${page}\nFIXTURE_EOF\n`;
+  await writeFile(join(dir, "gh"), body, { mode: 0o755 });
+}
+
+async function runAggregateScript(
+  script: string,
+  required: string[],
+  ignore: string[],
+  checkRuns: CheckRun[],
+  timeoutMs = 20_000,
+) {
+  const dir = await mkdtemp(join(tmpdir(), "ci-gate-required-format-"));
+  try {
+    await writeFakeGh(dir, checkRuns);
+    return spawnSync("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        GH_TOKEN: "fake-token",
+        REPO: "example/example",
+        SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        REQUIRED: JSON.stringify(required),
+        IGNORE: JSON.stringify(ignore),
+        GRACE_WINDOW_SECONDS: "0",
+        GRACE_POLL_INTERVAL_SECONDS: "1",
+      },
+      encoding: "utf8",
+      timeout: timeoutMs,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("ci-gate-required-format (W1-T1131): a failing check that is NOT in REQUIRED (and not in IGNORE either) no longer holds the merge — the fail arm consults REQUIRED, not only IGNORE (the #2434 clock-sweep fixture)", async () => {
+  const script = await loadAggregateScript();
+  const result = await runAggregateScript(script, ["ci"], [], [
+    { name: "ci", status: "completed", conclusion: "success", started_at: "2026-08-01T00:00:00Z" },
+    { name: "clock-sweep", status: "completed", conclusion: "failure", started_at: "2026-08-01T00:01:00Z" },
+  ]);
+  const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  assert.equal(result.status, 0, out);
+  assert.match(out, /ci-gate: all required checks terminal, no failures — merge may proceed\./);
+  assert.doesNotMatch(out, /FAILED/);
+  assert.doesNotMatch(out, /- clock-sweep/);
+});
+
+test("ci-gate-required-format (W1-T1131): a failing check that IS in REQUIRED still holds the merge exactly as before", async () => {
+  const script = await loadAggregateScript();
+  const result = await runAggregateScript(script, ["ci"], [], [
+    { name: "ci", status: "completed", conclusion: "failure", started_at: "2026-08-01T00:00:00Z" },
+  ]);
+  const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  assert.notEqual(result.status, 0, out);
+  assert.match(out, /::error::ci-gate: required check\(s\) FAILED — holding merge:/);
+  assert.match(out, /- ci/);
+});
+
+test("ci-gate-required-format (W1-T1131): the hold message names only checks that are actually in REQUIRED — a required failure alongside a non-required failure reports only the required name", async () => {
+  const script = await loadAggregateScript();
+  const result = await runAggregateScript(script, ["ci"], [], [
+    { name: "ci", status: "completed", conclusion: "failure", started_at: "2026-08-01T00:00:00Z" },
+    { name: "clock-sweep", status: "completed", conclusion: "failure", started_at: "2026-08-01T00:01:00Z" },
+  ]);
+  const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  assert.notEqual(result.status, 0, out);
+  assert.match(out, /::error::ci-gate: required check\(s\) FAILED — holding merge:/);
+  assert.match(out, /- ci/);
+  assert.doesNotMatch(out, /- clock-sweep/);
 });

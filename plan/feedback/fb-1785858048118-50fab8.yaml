@@ -33,6 +33,6 @@ raw: "RUNTIME CONFIG BELONGS IN A CONFIG STORE WITH A DASHBOARD, NOT IN SOURCE â
   over-engineering and per-value literals with a documented deploy are honest."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null

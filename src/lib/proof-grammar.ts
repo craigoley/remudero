@@ -39,4 +39,8 @@ export const ACCEPTANCE_PROOF_GRAMMAR: readonly string[] = [
   "  A `grep:` with no ` in <path>` clause is REFUSED, and the path may not contain `*` or `..`. The",
   "  pattern is a BASIC regex — `[ * ^ $` are refused; `(` and `)` are safe, so `someSymbol(` is the",
   "  idiomatic way to prove a call site.",
+  "  A `grep:` that must MISS after your change reads executed_fail and fails the very PR that",
+  "  satisfies it — restate it positively: grep the text your change ADDS, never what it removes.",
+  "  A `grep:` PATTERN must never contain ` in ` — the parser splits on the LAST ` in ` before a",
+  "  path-like token, so a pattern carrying those words mis-splits into a different pattern and path.",
 ];

@@ -27,6 +27,6 @@ raw: "THE OUTPUT CONTRACT HAS NO EXIT FOR 'THE WORK IS DONE BUT PREFLIGHT WILL
   not in a new exit."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null

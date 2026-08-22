@@ -1,0 +1,109 @@
+- id: W1-T1104
+  title: "NINE TEST SUITES PASS TODAY AND FAIL IN THE FUTURE — the `clock-sweep` job's own summary reads `WALL-CLOCK DRIFT — 9 suite(s) pass today and FAIL in the future` under a +400d shift, one more than issue #2032's title suggests and two more than a reading of its truncated body gives; each reads the wall clock directly instead of the injected seam #2250 already established, so the suite fails on the DATE rather than on behaviour — and the same run reports a STALE EXCLUSION, a suite listed as a clock artifact that now passes shifted"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  rationale: |
+    RE-DERIVED 2026-08-21 against origin/main `94543e79`, from a scratch worktree whose HEAD was
+    proved equal to that sha before any reading. The harness is in the tree — `scripts/clock-sweep.mjs`,
+    `.github/workflows/clock-sweep.yml`, `test/clock-sweep.test.ts` — so this was re-run rather than
+    quoted.
+
+    (1) THE COUNT IS NINE, AND THE ISSUE SAYS SO ITSELF. Issue #2032's captured output ends
+    `WALL-CLOCK DRIFT — 9 suite(s) pass today and FAIL in the future.` The nine, read off its own
+    per-suite rows: `cost-governor`, `daemon-crashloop-wiring`, `fleet-heartbeat`,
+    `host-update-reclaim`, `run-task`, `serve.density-ia`, `serve.live-state`,
+    `sweep-repair-filing` and `worktree-reap-liveness`. A reading that stops at seven has stopped
+    at the point the issue body was truncated to fit GitHub's size limit; the last two rows are
+    `[ 97/108]` and `[107/108]`.
+
+    (2) AND IT WAS RE-RUN ON THIS HOST, NOT TAKEN ON TRUST. `node scripts/clock-sweep.mjs --only
+    <suite>` reproduces the failure for `cost-governor`, `fleet-heartbeat` and
+    `worktree-reap-liveness` — three of the nine, sampled across the range. LIVE CONTROL on the
+    same invocation: `--only board`, a suite the same run reports passing shifted, reads `ok`. So
+    the drift is a property of these suites and not of the harness or of CI.
+
+    (3) THERE IS A TENTH FINDING IN THE SAME RUN AND IT POINTS THE OTHER WAY. `STALE EXCLUSIONS —
+    1 suite(s) listed as clock artifacts now PASS shifted.` Two rows read `fail (known artifact)`
+    — `prune-liveness` and `serve.glance` — and the harness reports that one of the suites on its
+    exclusion list no longer needs to be there. An exclusion that has gone stale is the same
+    defect class in reverse: a suppression nobody re-checks.
+
+    (4) THE SEAM ALREADY EXISTS AND ITS SHAPE IS SETTLED — #2250 IS THE PRECEDENT AND IS CITED,
+    NOT RE-DERIVED. That PR fixed ONE fixture's clock stamping. This is the same remedy applied
+    where the sweep says it is still missing; nothing here re-litigates how the seam should look.
+
+    (5) THIS ANSWERS ISSUE #2032, WHICH CANNOT RETIRE ITSELF. That issue carries no `Task:`
+    trailer — it is one of the two `no_task_trailer` drops in the reconciler's counts — so nothing
+    will ever close it automatically. RECORDED HERE SO AN OPERATOR CAN CLOSE IT BY HAND once this
+    lands; this task does not close it and must not.
+  design: |
+    (i) NINE SUITES ARE ONE CONCERN, AND THE REASON IS THE REMEDY, NOT THE COUNT. There is one
+    defect — a suite reads the wall clock where an injected seam exists — one remedy shape applied
+    nine times, and ONE falsifier that covers all of them: re-run the sweep shifted. Splitting it
+    into nine tasks would ship nine PRs whose only difference is a filename, and the fleet's own
+    standing guidance is to fix this class in BULK for exactly that reason. A split is justifiable
+    only if a suite turns out to need a DIFFERENT remedy — see (iv).
+
+    (ii) THE BAND IS SET WITH THE REASON WRITTEN DOWN RATHER THAN ARGUED WITH. `lint-plan`'s Rule
+    19 sizing counts filename stems, and nine test files are nine stems, so `risk: medium` is
+    refused. `risk: high` is set UP FRONT and is RULE 19'S SPAN, not blast radius: the diff touches
+    test files only, changes no product code, and a mistake makes a test fail rather than a
+    behaviour change.
+
+    (iii) ONE ARM PER SUITE, AND THE ARMS ARE INDEPENDENT. Each suite's clock source is replaced
+    separately and each is separately falsifiable by `--only <suite>`. An implementer who runs out
+    of budget stops after any suite and leaves the sweep strictly better, exactly as W1-T1095's
+    design (i) allows for its three capabilities.
+
+    (iv) IF A SUITE RESISTS THE SEAM, SPLIT IT OUT RATHER THAN WIDENING THIS ONE. `run-task` is the
+    likeliest — it is the largest suite in the tree and CLAUDE.md already records that it
+    intermittently crashes at FILE level under coverage. If its clock source cannot be replaced
+    with the same seam the other eight take, file that as its own task with the measured reason
+    and land the eight.
+
+    (v) THE STALE EXCLUSION IS IN SCOPE AND IS ONE LINE. Rationale (3)'s finding is a removal from
+    the harness's own exclusion list, verified by the sweep reporting zero stale exclusions
+    afterwards. It is in scope because it is the same instrument and the same falsifier; it is
+    NOT a licence to add exclusions.
+
+    (vi) OUT OF SCOPE, NAMED. No change to the shift value, the candidate derivation, or
+    `SPAWN_REACHING`. No suite added to the exclusion list — a suite that drifts gets the seam, not
+    a suppression. No product code changed. Issue #2032 is not closed by this task.
+  acceptance:
+    - claim: "every suite the sweep reports drifting now passes under the shifted clock"
+      proof: "unit test: test/clock-sweep.test.ts"
+    - claim: "each repaired suite takes its time from the injected seam rather than the wall clock"
+      proof: "grep: clock-sweep in scripts/clock-sweep.mjs"
+    - claim: "the sweep reports no remaining wall-clock drift"
+      proof: "unit test: test/clock-sweep.test.ts"
+    - claim: "the exclusion list carries no suite that now passes shifted"
+      proof: "unit test: test/clock-sweep.test.ts"
+    - claim: "a suite that genuinely resists the seam is filed separately rather than excluded"
+      proof: "grep: SPAWN_REACHING in scripts/clock-sweep.mjs"
+  origin: "issue#2032"
+  plan_refs: ["W1-T1105"]
+  files: [scripts/clock-sweep.mjs, test/clock-sweep.test.ts, test/cost-governor.test.ts, test/fleet-heartbeat.test.ts, test/worktree-reap-liveness.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `files:` NAMES THE HARNESS PLUS THE THREE SUITES RE-DERIVED ON THIS HOST, not all nine. The
+    other six are named in rationale (1) and an implementer will need to add them to `files:` as
+    it reaches them — declaring nine test filenames up front would inflate the Rule 19 stem count
+    for suites nobody has yet confirmed still drift at implement time, and the sweep is the thing
+    that decides which ones do. Re-run `node scripts/clock-sweep.mjs` before touching a file.
+
+    THE PROOFS DELIBERATELY NAME THE HARNESS, NOT THE NINE SUITES. `test/clock-sweep.test.ts` is
+    the instrument that decides whether the drift is gone; a proof naming an individual repaired
+    suite would pass whether or not the seam was used, because that suite passes today.
+
+    THIS SHARD CARRIES NO PROOF THAT GREPS ITS OWN PATH.
+
+    EVERY FIGURE IS A QUERY. Re-derive the drift set with `node scripts/clock-sweep.mjs` and the
+    per-suite check with `--only <suite>`, taking a passing suite as a control on the same
+    invocation. The nine will change as suites are repaired; the summary line is the artifact to
+    read, never a count carried from this file.

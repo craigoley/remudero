@@ -23,9 +23,11 @@ import {
   judgeLockDivergence,
   judgeMemory,
   judgePauseHonoured,
+  judgeRepairStall,
   judgeStaleGitLocks,
   parseMemInfo,
   readAlivePhases,
+  readCurrentRunAlivePhases,
   readGitLocks,
   readPauseAgeMs,
   refuseUnsupportedArgs,
@@ -74,6 +76,98 @@ test("doctor: a non-empty eligible pool past the dispatch bound is a FAIL", () =
   assert.equal(judgeDispatchStall(3, 90 * MIN, undefined).verdict, "WARN");
 });
 
+// ── W1-T1209 — the repair-rung stall, a sibling of dispatch-stall ──────────────────────────────
+//
+// `fix.dispatch` read ZERO for twenty-one hours on 2026-08-22 while the sweep kept disposing open
+// pull requests `blocked-fixable` every pass, and nothing anywhere said the repair rung was down.
+// Each test below is one of the shard's five named acceptance claims.
+
+test("W1-T1209: candidates with no dispatch in the derived window read FAIL", () => {
+  const stalled = judgeRepairStall(4, 90 * MIN, 30 * MIN, "3x the widest observed fix.dispatch gap");
+  assert.equal(stalled.verdict, "FAIL");
+  assert.match(stalled.measured, /4 disposed blocked-fixable/);
+  assert.match(stalled.measured, /nothing dispatched in/);
+  assert.match(stalled.threshold, /3x the widest observed fix\.dispatch gap/, "the bound explains its own derivation, never a round figure");
+
+  // POSITIVE CONTROL: the same disposals INSIDE the bound are OK, so FAIL comes from the age and
+  // not merely from a nonzero disposed count.
+  assert.equal(judgeRepairStall(4, 10 * MIN, 30 * MIN).verdict, "OK");
+  // an unknown bound degrades to WARN rather than inventing one.
+  assert.equal(judgeRepairStall(4, 90 * MIN, undefined).verdict, "WARN");
+  // an unknown dispatch age degrades to WARN too, even with a known bound.
+  assert.equal(judgeRepairStall(4, undefined, 30 * MIN).verdict, "WARN");
+});
+
+test("W1-T1209: an empty repair queue with no dispatch reads OK", () => {
+  // THE CONJUNCTION'S OWN FALSIFIER (design note iii): without this case the arm is a bare gap
+  // detector, and the first quiet weekend retires it as a false alarm.
+  const quiet = judgeRepairStall(0, 900 * MIN, 30 * MIN);
+  assert.equal(quiet.verdict, "OK");
+  assert.match(quiet.measured, /^0 blocked-fixable disposal\(s\)/);
+
+  // even with no dispatch EVER and no bound at all, an empty queue stays OK — nothing was chosen
+  // for repair, so a gap in `fix.dispatch` measures nothing.
+  assert.equal(judgeRepairStall(0, undefined, undefined).verdict, "OK");
+});
+
+test("W1-T1209: the repair-stall bound is derived and its derivation is printed", () => {
+  const derived = judgeRepairStall(2, 40 * MIN, 20 * MIN, "3x the widest observed fix.dispatch gap (host-observed cadence)");
+  assert.match(derived.threshold, /3x the widest observed fix\.dispatch gap \(host-observed cadence\)/, "the printed threshold carries its own derivation, never a bare number");
+  assert.match(derived.threshold, /20m/, "the bound itself is printed beside its derivation");
+
+  // no derivation string supplied still prints the bound on its own — the caller MAY omit prose,
+  // but the number itself is never hidden.
+  assert.match(judgeRepairStall(2, 40 * MIN, 20 * MIN).threshold, /20m/);
+  // no bound at all says so rather than guessing one — this arm carries no hardcoded ceiling.
+  assert.equal(judgeRepairStall(2, 40 * MIN, undefined).threshold, "no observed cadence yet");
+});
+
+test("W1-T1209: the repair-stall arm performs no action of its own", () => {
+  const fail = judgeRepairStall(3, 90 * MIN, 30 * MIN, "derivation");
+  assert.equal(fail.verdict, "FAIL");
+  // REPORT ONLY (design note iv): the FAIL detail cites the owners of the contention and the dedup
+  // gate rather than clearing either, and never a fix-dispatch/escalate verb of its own.
+  assert.match(fail.detail!, /W1-T1129/);
+  assert.match(fail.detail!, /W1-T1127/);
+  assert.match(fail.detail!, /doctor only reports/);
+
+  // PURITY AS THE PROOF OF "NO ACTION": a function with a side effect (a dispatch, a gate clear, an
+  // escalation) is not idempotent on identical inputs in a test process free of that state: it would
+  // either throw on the second call (a gate already cleared) or leave visible residue. Calling it
+  // twice with the same inputs yields a byte-identical Check both times.
+  assert.deepEqual(judgeRepairStall(3, 90 * MIN, 30 * MIN, "derivation"), fail);
+  assert.deepEqual(judgeRepairStall(3, 90 * MIN, 30 * MIN, "derivation"), fail);
+});
+
+test("W1-T1209: the existing doctor arms are unchanged", () => {
+  const report = buildDoctorReport(baseInputs());
+  assert.ok(report.checks.some((c) => c.name === "repair-stall"), "the new arm is wired into the composed report");
+
+  // every pre-existing arm's verdict is exactly what it was before this addition. A caller that
+  // does not yet supply a real `blocked-fixable`-disposal count (run-task.ts's real reader is a
+  // separate, out-of-scope task per the shard's design note v) defaults to 0, so the new arm reads
+  // OK and disturbs nothing else in the report.
+  const preExisting = [
+    "ledger-freshness",
+    "dispatch-stall",
+    "dispatch-liveness",
+    "pause-honoured",
+    "lock-vs-process",
+    "lane-less-workers",
+    "git-locks",
+    "disk-headroom",
+    "memory",
+  ];
+  for (const name of preExisting) {
+    const check = report.checks.find((c) => c.name === name);
+    assert.ok(check, `${name} is still present in the composed report`);
+    assert.equal(check!.verdict, "OK", `${name}'s verdict is unaffected by the new repair-stall arm`);
+  }
+  assert.equal(report.worst, "OK");
+  assert.equal(report.exitCode, 0);
+  assert.equal(report.checks.length, preExisting.length + 1, "exactly one new check joined the report");
+});
+
 // ── criterion 2 — dispatch starvation, a reader for a field nothing read ───────────────────────
 
 test("doctor: consecutive alive rows in sweep phase report dispatch starvation", () => {
@@ -90,6 +184,55 @@ test("doctor: consecutive alive rows in sweep phase report dispatch starvation",
   // and the reader picks the phases out of real ledger rows, ignoring everything else
   const phases = readAlivePhases([aliveRow("sweep", "t1"), { step: "verdict", phase: "nope" }, aliveRow("dispatch", "t2")]);
   assert.deepEqual(phases, ["sweep", "dispatch"], "only daemon.alive rows contribute a phase");
+});
+
+// ── W1-T1099 — the predicate must match its own printed threshold ──────────────────────────────
+
+test("W1-T1099: a window with no dispatch phase is starved whatever the phases are", () => {
+  // MEASURED (rationale (1)): `retro, retro, retro` passed the OLD predicate, which checked
+  // literally for `sweep` and nothing else — a threshold string promising "some dispatch phase"
+  // enforced by a rule that only ever looked for one hardcoded non-dispatch phase.
+  assert.equal(judgeDispatchStarvation(["retro", "retro", "retro"]).verdict, "WARN");
+  assert.equal(judgeDispatchStarvation(["sweep", "sweep", "sweep"]).verdict, "WARN");
+  assert.equal(judgeDispatchStarvation(["sweep", "retro", "sweep"]).verdict, "WARN", "a mix of non-dispatch phases must still warn");
+});
+
+test("W1-T1099: a window containing a dispatch phase is still healthy", () => {
+  assert.equal(judgeDispatchStarvation(["sweep", "dispatch", "retro"]).verdict, "OK");
+  assert.equal(judgeDispatchStarvation(["dispatch", "dispatch", "dispatch"]).verdict, "OK");
+});
+
+test("W1-T1099: a replaced run's phases are not judged as the current run's", () => {
+  // MEASURED (rationale (2)): a run that stopped cleanly 90 minutes ago left daemon.alive rows
+  // behind; the CURRENT run has written a daemon.-prefixed row of its own but no daemon.alive row
+  // yet. Reading unfiltered would judge the dead run's `sweep, sweep, sweep` as if it were live.
+  const replaced = (ts: string) => ({ step: "daemon.alive", phase: "sweep", ts, run_id: "DAEMON-OLD" });
+  const currentTick = { step: "daemon.iteration", ts: "2026-08-21T13:49:45Z", run_id: "DAEMON-NEW" };
+  const lines = [replaced("2026-08-21T11:07:00Z"), replaced("2026-08-21T11:07:05Z"), replaced("2026-08-21T11:07:10Z"), currentTick];
+
+  const phases = readCurrentRunAlivePhases(lines);
+  assert.deepEqual(phases, [], "the replaced run's rows belong to DAEMON-OLD, not the current DAEMON-NEW run");
+
+  // and wired through the judge, the replaced run's `sweep, sweep, sweep` must NOT read as OK —
+  // it must not be seen at all, which is a stronger guarantee than merely re-judging it starved.
+  assert.equal(judgeDispatchStarvation(readAlivePhases(lines).slice(-3)).verdict, "WARN", "control: unfiltered, the old run's own rows are starved too");
+  assert.equal(judgeDispatchStarvation(phases).verdict, "WARN", "current run: unknown, not the old run's healthy-looking OK");
+});
+
+test("W1-T1099: a current run with no alive rows reports unknown", () => {
+  assert.equal(judgeDispatchStarvation([]).verdict, "WARN");
+  assert.match(judgeDispatchStarvation([]).measured, /UNKNOWN/);
+  // POSITIVE CONTROL: this must not be OK — the old form's "too few rows" branch degraded silently
+  // to healthy, which is the false-green rationale (iii) names.
+  assert.notEqual(judgeDispatchStarvation([]).verdict, "OK");
+
+  // wired end to end: a live daemon that has written its own daemon.-prefixed row this run, but has
+  // declined every candidate and so never entered a rung, writes zero daemon.alive rows (rationale
+  // (3): startInFlightTicker wraps a rung's body, not the tick).
+  const lines = [{ step: "daemon.iteration", ts: "2026-08-21T13:49:45Z", run_id: "DAEMON-NEW" }];
+  const phases = readCurrentRunAlivePhases(lines);
+  assert.deepEqual(phases, []);
+  assert.equal(judgeDispatchStarvation(phases).verdict, "WARN");
 });
 
 // ── criterion 3 — ledger freshness, needing no daemon ─────────────────────────────────────────

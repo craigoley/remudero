@@ -134,7 +134,10 @@ function gitFixture(root: string): { repoDir: string } {
 /** A fake `gh` answering only what this run reaches: `pr view --json headRefName`
  *  (checkPrOwnership), `--json body` + `pr edit` (ensureTaskTrailer), `--json statusCheckRollup`
  *  (answered RED on the first poll, so the run reaches its terminal blocked_ci verdict with no
- *  sleep and no review spawn) and `pr create` (every run below now gets far enough to need it). */
+ *  sleep and no review spawn) and the REST create `gh api --method POST repos/.../pulls`
+ *  (every run below now gets far enough to need it — W1-T1202 moved this off `gh pr create
+ *  --fill`/GraphQL onto REST, so the PR url now comes back as `html_url` in a JSON response,
+ *  never scraped off human-readable stdout). */
 function fakeGh(branch: string, prUrl: string): string {
   const fakeBinDir = mkdtempSync(join(tmpdir(), "scope-overrun-bin-"));
   const fakeGhPath = join(fakeBinDir, "gh");
@@ -149,7 +152,7 @@ function fakeGh(branch: string, prUrl: string): string {
       "  if [[ \"$5\" == 'statusCheckRollup' ]]; then echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"FAILURE\"}]}'; exit 0; fi",
       "fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
-      `if [[ "$1" == 'pr' && "$2" == 'create' ]]; then echo '${prUrl}'; exit 0; fi`,
+      `if [[ "$1" == 'api' && "$2" == '--method' && "$3" == 'POST' ]]; then echo '{"html_url":"${prUrl}","number":99}'; exit 0; fi`,
       "exit 1",
       "",
     ].join("\n"),

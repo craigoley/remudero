@@ -618,6 +618,8 @@ import {
   DEFAULT_FIX_CLASSES,
   detectPostReviewStall,
   isCappedReviewOrphanEscalation,
+  type ArmAttemptOutcome,
+  type ArmOutcomeName,
 } from "./lib/sweep.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
@@ -1358,33 +1360,70 @@ interface RollupEntry {
 }
 
 /**
- * Build the `gh pr create --fill` invocation for a plan/triage/retro PR, with the
- * `cwd` pinned to the run's WORKTREE. The cwd is load-bearing, not cosmetic: the
- * head branch (`run-<id>`) is a local ref ONLY inside that worktree, so `--fill`
- * (which resolves `origin/main...<branch>` locally to fill title/body) throws
- * `ambiguous argument` from any other cwd. The harness process cwd is never the
- * worktree, so a harness-opened PR silently failed and left an orphan branch with
- * no PR. The build/retro WORKER paths avoid this by opening the PR from inside the
- * worktree (their own cwd); the harness paths must pass the cwd explicitly. Pure so
- * a unit test can assert the cwd without spawning gh.
+ * W1-T1202: reproduce `gh pr create --fill`'s own body-derivation rule LOCALLY, over
+ * `origin/main..HEAD` in the run's worktree — the single commit's body when the branch
+ * carries exactly one commit ahead of `origin/main`, or the list of commit subjects
+ * (oldest first) when it carries several. This is what makes {@link ghPrCreateFillCommand}'s
+ * switch to the REST create a faithful reproduction rather than an invention: REST has
+ * no server-side autofill, so this is the one place that lack is made up, LOCALLY,
+ * exactly as `--fill` already did.
+ *
+ * Returns `""` (never throws) on ANY git failure — the same best-effort contract
+ * {@link lastCommitSubject} already keeps at these exact call sites, and for the same
+ * reason: by the time this runs the branch is already pushed, so a refusal here would
+ * strand it with no PR, which is the failure this task exists to remove. AN EMPTY BODY
+ * IS AN ACCEPTABLE OUTCOME; A THROWN ONE IS NOT.
+ */
+export function fillDerivedBody(worktreePath: string): string {
+  try {
+    const range = "origin/main..HEAD";
+    const count = parseInt(
+      execFileSync("git", ["-C", worktreePath, "rev-list", "--count", range], { encoding: "utf8" }).trim(),
+      10,
+    );
+    if (!count || count <= 0) return "";
+    if (count === 1) {
+      return execFileSync("git", ["-C", worktreePath, "log", "-1", range, "--format=%b"], { encoding: "utf8" }).trim();
+    }
+    const subjects = execFileSync("git", ["-C", worktreePath, "log", "--reverse", range, "--format=%s"], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n")
+      .filter((s) => s.length > 0);
+    return subjects.map((s) => `* ${s}`).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Build the REST create invocation (`gh api --method POST repos/{owner}/{repo}/pulls`)
+ * for a plan/triage/retro/implement PR — W1-T1202's transport swap off `gh pr create
+ * --fill`, which is GraphQL (W1-T372's incident: a GraphQL exhaustion nobody's lane
+ * caused threw at this exact push boundary and discarded a COMPLETED run, against a
+ * REST bucket that was 97% free at the same minute). `cwd` stays pinned to the run's
+ * WORKTREE — no longer for `gh` itself (a REST create needs no local ref resolution:
+ * `head`/`base` are explicit strings in the argv below), but because THIS function now
+ * also reads the worktree's own git history locally, for the title/body fallbacks
+ * immediately below. No longer "pure" in the zero-syscall sense the old `--fill`
+ * builder was, but still synchronous, network-free (no `gh` is ever spawned here) and
+ * deterministic given the worktree's committed state — a unit test can still assert
+ * its argv without spawning `gh`.
  *
  * W1-T327 (THE TITLE): `title`, appended LAST and optional so none of the four
- * existing positional call sites shifts. When a caller has one, it is emitted as an
- * explicit `--title` ALONGSIDE `--fill` — `gh pr create --help` documents that an
- * explicit `--title` takes precedence over `--fill`'s autofill while `--fill` still
- * supplies the body, so this is additive, never a second title-computation path.
- * Every real call site passes the SAME string the commit itself used (the shaped
- * header for triage/plan, the worktree's actual last-commit subject for
- * implement/retro — see `lastCommitSubject`) — never a re-derivation, so the title
- * and the commit cannot drift apart.
- * DECISION (design point iii): when no title is available, this falls back to
- * `--fill` ALONE, exactly today's behavior — never a refusal. By the time this
- * builder runs the branch is typically already pushed, so refusing here would
- * strand it with no PR, the same orphan-branch failure this doc comment already
- * records for the cwd bug above; a `--fill`-derived title is a pre-existing,
- * narrower risk (a red commitlint check, not a lost run) that this task's four
- * updated call sites eliminate in the common case without introducing a new,
- * worse failure mode in the rare one.
+ * existing positional call sites shifts. Every real call site passes the SAME string
+ * the commit itself used (the shaped header for triage/plan, the worktree's actual
+ * last-commit subject for implement/retro — see `lastCommitSubject`) — never a
+ * re-derivation, so the title and the commit cannot drift apart.
+ * DECISION (design point iv): when no title is given, this falls back to
+ * {@link lastCommitSubject} itself (the SAME derivation the two non-filing call sites
+ * already perform before calling in) — never a refusal. Only when THAT is also
+ * unavailable does this fall back to the branch name as the title, and that fallback
+ * is stated as a line in the body, per design (iv) — never a silent substitution.
+ *
+ * DECISION (design point iii): the body is {@link fillDerivedBody} — REST's lack of
+ * `--fill`'s autofill costs this small local helper, not an invented body.
  */
 export function ghPrCreateFillCommand(
   worktreePath: string,
@@ -1395,13 +1434,32 @@ export function ghPrCreateFillCommand(
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
-  // site at once and cannot be bypassed by a new one.
+  // site at once and cannot be bypassed by a new one. The transport moved; the guard
+  // and its key ("gh-pr-create") did not (design ii).
   assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
-  const args = ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch];
-  if (title && title.trim().length > 0) {
-    args.push("--title", title.trim());
+  const given = title && title.trim().length > 0 ? title.trim() : undefined;
+  const derived = given ?? lastCommitSubject(worktreePath);
+  const resolvedTitle = derived ?? branch;
+  const bodyParts = [fillDerivedBody(worktreePath)];
+  if (derived === undefined) {
+    // design (iv): the branch-name fallback is stated in the body, never silent.
+    bodyParts.push(`(no commit-derived title was available — this PR is titled after its branch, \`${branch}\`)`);
   }
-  args.push("--fill");
+  const body = bodyParts.filter((p) => p.length > 0).join("\n\n");
+  const args = [
+    "api",
+    "--method",
+    "POST",
+    `repos/${owner}/${repo}/pulls`,
+    "-f",
+    `title=${resolvedTitle}`,
+    "-f",
+    `body=${body}`,
+    "-f",
+    `head=${branch}`,
+    "-f",
+    "base=main",
+  ];
   return {
     command: "gh",
     args,
@@ -1410,12 +1468,60 @@ export function ghPrCreateFillCommand(
 }
 
 /**
+ * Execute a {@link ghPrCreateFillCommand}-built REST create argv and read `html_url`
+ * (and `number`) back off the parsed response — design (v): the four call sites stop
+ * scraping a `gh pr create --fill` regex out of human-readable stdout and take the url
+ * from the create response instead. A response that parses but carries no usable
+ * `html_url` returns `{}`, exactly the "no PR opened" case each of the four `if
+ * (!prUrl)` call sites already carries — this changes how the url is obtained, never
+ * what its absence signifies.
+ *
+ * A THROWN invocation (non-zero exit — `gh api`'s own failure mode) is classified with
+ * the EXISTING {@link isGhRateLimitError} (design vi): a rate-limited create is said and
+ * ledgered aloud, NAMING the branch that is already pushed, and then rethrown — no
+ * retry/backoff/wait-for-reset is built here (W1-T529 owns that; W1-T1202 design (vii)
+ * lists it explicitly out of scope). This is legibility only: a throttled create must
+ * read as THROTTLED, not surface as a bare `Command failed: gh ...` that reads as
+ * "nothing happened".
+ */
+export function runGhPrCreate(
+  prCreate: { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } },
+  branch: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (msg: string) => void,
+  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string = execFileSync,
+): { prUrl?: string; prNumber?: number } {
+  let out: string;
+  try {
+    out = exec(prCreate.command, prCreate.args, prCreate.options);
+  } catch (e) {
+    if (isGhRateLimitError(e)) {
+      log("pr_create.rate_limited", { branch, error: String((e as Error)?.message ?? e) });
+      say(
+        `PR create (REST) is RATE LIMITED — branch ${branch} is already pushed but no PR was opened; ` +
+          `not retried here (W1-T1202; retry/backoff is W1-T529's)`,
+      );
+    }
+    throw e;
+  }
+  try {
+    const parsed = JSON.parse(out) as { html_url?: string; number?: number };
+    return {
+      prUrl: typeof parsed?.html_url === "string" ? parsed.html_url : undefined,
+      prNumber: typeof parsed?.number === "number" ? parsed.number : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
  * The subject line of the worktree's actual last commit — read back from git, never
  * re-derived — for the two `ghPrCreateFillCommand` call sites (implement, retro)
  * where a worker LLM authored the commit and no harness-computed subject variable
  * exists to pass instead. Returns undefined (never throws) on any git failure, which
  * is exactly the "no title available" case {@link ghPrCreateFillCommand}'s own doc
- * comment decides: the caller then falls back to `--fill` alone.
+ * comment decides: the caller then falls back to the branch name as the title.
  */
 export function lastCommitSubject(worktreePath: string): string | undefined {
   try {
@@ -1532,9 +1638,14 @@ export interface ArmDeps {
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
   ledgerLines: () => Array<Record<string, unknown>>;
-  /** `gh pr merge --auto --squash --delete-branch` — throws on refusal. Keeps the flag: GitHub
-   *  performs this deletion SERVER-SIDE once the deferred auto-merge lands, so no local branch
-   *  is ever touched and there is nothing here for a detached checkout to trip on. */
+  /** `gh pr merge --auto --squash` — arms the deferred merge; throws on refusal. W1-T1111: NO
+   *  `--delete-branch`. That flag resolves and deletes the LOCAL branch at the moment this call
+   *  runs, which needs a current branch — the daemon's checkout is deliberately detached (the
+   *  self-sync guard depends on it, see {@link mergeDirect}'s own note) and has none, so arming
+   *  from the daemon failed "not on any branch" even though the arm itself is harmless (#2418).
+   *  The repository already carries `delete_branch_on_merge: true`, so the head branch is still
+   *  deleted once the deferred merge actually lands — just server-side, at THAT later moment,
+   *  rather than by this call up front. */
   armAuto: (prUrl: string) => void;
   /** `gh pr merge --squash` — the clean-status completion. W1-T1050: NO `--delete-branch`. `gh`
    *  documents that flag as deleting the LOCAL branch too, which needs a current branch to
@@ -1585,7 +1696,9 @@ export function realArmDeps(): ArmDeps {
     ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
+      // W1-T1111: NO `--delete-branch` — see the doc on `ArmDeps.armAuto` above for why: it
+      // needs a resolvable current branch, and the daemon arms from a deliberately detached one.
+      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -1742,8 +1855,11 @@ function attemptArm(
     // carried nothing, which is the defect this task closes. `msg` is now returned alongside
     // the outcome so every caller that logs it can put it on the row (see `armAndLogOutcome`/
     // `armIfVerdictPermits`). Still never retried MORE eagerly and never given its own retry
-    // cap here (design note iii) — only named, whichever of `armFailureAction`'s two non-
-    // clean-status classes it fell into.
+    // cap here (design note iii) — only named, whichever of `armFailureAction`'s three non-
+    // clean-status classes it fell into. W1-T1117: the sweep lane reads this same classification
+    // back off `error` (see `buildSweepEffects`'s `arm` effect below) to decide whether the
+    // failure seeds the head-keyed dedup — that decision lives there, not here, so this call
+    // stays purely informational, exactly as design note iii requires.
     deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
     return { outcome: "arm-error-ignored", error: msg };
   }
@@ -2283,23 +2399,79 @@ export function armReportPhrase(outcome: ArmOutcome): string {
  * non-clean-status failure were transient and safe to leave for the next sweep pass. It is not:
  * a permanent refusal (a branch-protection rule, a required review, a merge conflict) looks
  * IDENTICAL to a network blip once the error text is discarded, which is exactly what made
- * rationale (1) unanswerable — see this file's own `arm-error-ignored` rows. This now names a
- * THIRD case: `"transient"` only for the narrow set of signatures that plausibly ARE a blip
- * (rate limiting, a timeout, a dropped connection) — everything else defaults to `"permanent"`,
- * the opposite of the old default. Both still route to the SAME `arm-error-ignored` outcome
- * (design note iii — no retry-cap or control-flow change here); what changes is that the
- * classification travels with the row instead of the row itself lying about it. Callers get the
- * error TEXT itself (see {@link ArmAttemptResult}) regardless of which of these two it is, so
- * this classification is documentation of intent, not the only signal a future reader has.
+ * rationale (1) unanswerable — see this file's own `arm-error-ignored` rows. This named a THIRD
+ * case: `"transient"` only for the narrow set of signatures that plausibly ARE a blip (rate
+ * limiting, a timeout, a dropped connection) — everything else defaulted to `"permanent"`.
+ *
+ * W1-T1117: that allowlist was ITSELF too narrow — every member is a TRANSPORT/SERVER fault, so
+ * a SEMANTIC-but-retryable refusal (GitHub's own message names the remedy: "Base branch was
+ * modified. Review and try the merge again.") fell through to the `"permanent"` default even
+ * though the correct action is identical to `"transient"`'s: leave it for the next sweep pass.
+ * Two changes here: (1) a FOURTH case, `"retryable"`, as its own narrow allowlist — never a
+ * default, exactly like `"transient"` — for a semantic refusal GitHub itself says to retry;
+ * `"Base branch was modified"` is its first and, on today's evidence, only member (rationale 5
+ * in the task's own plan record). (2) the catch-all is renamed `"unknown"`, not `"permanent"`:
+ * `gh pr merge` collapses GitHub's structured GraphQL error into stderr PROSE (rationale 7), so
+ * this classifier can never actually PROVE a refusal is permanent from the string alone —
+ * `"unknown"` says so honestly instead of asserting a certainty it does not have. `"unknown"`
+ * still takes the SAME non-retrying path `"permanent"` took before it: see the "mergeable" arm's
+ * dedup in `lib/sweep.ts`'s {@link buildSweepEffects}, which is the ONE place a class other than
+ * `"transient"`/`"retryable"` now actually stops a next-pass retry (previously nothing did —
+ * every `arm-error-ignored` outcome, whatever its classification, retried forever; see that
+ * effect's own W1-T1117 note for why). This function itself still routes every non-clean-status
+ * class to the SAME `arm-error-ignored` outcome (design note iii — no retry-cap or control-flow
+ * change HERE); what changes is that the classification travels with the row, and — new in
+ * W1-T1117 — the sweep lane actually reads it back. Callers get the error TEXT itself (see
+ * {@link ArmAttemptResult}) regardless of which class it is, so this classification is
+ * documentation of intent, not the only signal a future reader has.
  */
-export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "permanent" {
+export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "retryable" | "unknown" {
   if (/clean status/i.test(stderrText)) return "direct-merge";
   if (/timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|network|secondary rate limit|rate.limit|abuse detection|too many requests|5\d\d\b|GraphQL: (?:Something went wrong|Server Error)/i.test(
     stderrText,
   )) {
     return "transient";
   }
-  return "permanent";
+  // W1-T1117 (design i): GitHub's own message names the remedy — a base that moved mid-call is
+  // a merge RACE, not a refusal. The ONLY member of this allowlist today (rationale 5); a second
+  // signature is a follow-up once actually observed, never guessed here (design vii/note above).
+  if (/base branch was modified/i.test(stderrText)) return "retryable";
+  return "unknown";
+}
+
+/**
+ * PURE (W1-T1117): fold one arm attempt's bare outcome plus the raw failure text `attemptArm`
+ * captured into the shape the sweep lane records.
+ *
+ * THE DECISION HALF OF `buildSweepEffects`' `arm` EFFECT, EXTRACTED. It lived inline in that
+ * closure, where the only way to reach any of its three arms was to drive a whole sweep pass
+ * with a fake gateway — so the narrowing arm below was reachable by no test at all and
+ * `diff-coverage` blocked the PR on exactly that line. Extracting it is the repair the same
+ * gate already forced on `promotionLedgerSink` (#2346): the decision becomes a unit fixture and
+ * each arm gets its own test, which is what makes an author name the outcomes rather than
+ * discover them.
+ *
+ * THE THREE ARMS:
+ *  - any outcome that is not `"arm-error-ignored"`, or one with no captured text (every existing
+ *    fake returns a bare `ArmOutcome` string), passes through UNCHANGED;
+ *  - a `"direct-merge"` classification returns the bare outcome. `attemptArm` only ever returns
+ *    `"arm-error-ignored"` for a failure it did NOT already classify `"direct-merge"` (that
+ *    branch takes the direct-merge fallback instead), so production cannot reach this — it is
+ *    narrowed explicitly so the return type stays exact rather than widening
+ *    {@link ArmAttemptOutcome.failureClass} to a class this outcome can never carry, and it is
+ *    tested directly because a guard nothing exercises is a guard nobody can trust;
+ *  - everything else carries the classification alongside the outcome, which is the whole point:
+ *    the "mergeable" arm's dedup (lib/sweep.ts) reads it back to tell a retryable/transport
+ *    failure from one the classifier could not decode.
+ */
+export function sweepArmAttemptOutcome(
+  outcome: ArmOutcomeName,
+  attemptError: string | undefined,
+): ArmOutcomeName | ArmAttemptOutcome {
+  if (outcome !== "arm-error-ignored" || attemptError === undefined) return outcome;
+  const failureClass = armFailureAction(attemptError);
+  if (failureClass === "direct-merge") return outcome;
+  return { outcome, failureClass };
 }
 
 /**
@@ -3064,6 +3236,14 @@ async function runReview(args: {
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
   report: string;
+  /**
+   * (W1-T1100) True when `report` is the worker's own chat text, substituted after a failed
+   * PR-body fetch — see {@link "./lib/review.js".ReviewEvidence.reportIsSubstitute}'s doc for
+   * the two consumers this protects and why. Threaded straight into `judgeReview`'s evidence
+   * below. Absent ⇒ `report` is trusted as the real body, exactly as every caller that predates
+   * this task already gets.
+   */
+  reportIsSubstitute?: boolean;
   settingsFile: string;
   config: Config;
   budgetUsd?: number;
@@ -3249,6 +3429,8 @@ async function runReview(args: {
   const computed = judgeReview(criteria, {
     diff,
     report,
+    // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
+    reportIsSubstitute: args.reportIsSubstitute,
     semantic,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
@@ -3436,6 +3618,13 @@ async function runReview(args: {
     // holdout-pass-rate for this run, `null` when not measurable (no holdout
     // criteria declared). See ReviewVerdict.rewardHackingGap's doc.
     reward_hacking_gap: verdict.rewardHackingGap,
+    // W1-T1118: the reachability scan's EXAMINED population, riding this ALREADY-EMITTED row
+    // rather than a new ledger line — a NUMBER (0 included) when the scan ran, `null` when the
+    // `if (checkoutDir)` guard skipped it entirely. See ReviewVerdict.reachabilityScanned's doc
+    // for the three-state silence this separates: no checkout (`null`), scanned N and cleared all
+    // N (`N` with no `review.unwired_advisory` line below), and a diff that added no exported
+    // function at all (`0`).
+    reachability_scanned: verdict.reachabilityScanned ?? null,
   });
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
@@ -3932,13 +4121,62 @@ function renderEscalationEvidence<T>(items: readonly T[], format: (item: T) => s
 }
 
 /** Outcome of one full pass through the fix rung. */
+/**
+ * PURE: the ONLY difference between the two non-spending fix-rung terminations — `"stood_down"`
+ * (W1-T177) and `"parked"` (W1-T1095). Both emit the same `"blocked"` verdict row and the same
+ * return value; they differ in the ledger `reason`, one extra ledger field, and the console
+ * phrase, which is exactly what this returns.
+ *
+ * WHY IT IS A FUNCTION AND NOT A SECOND BRANCH. `parked` shipped as its own near-identical block
+ * inside `runTaskBody`, a closure nested in `runTask` that no test drives directly, so every
+ * added line of it was reachable by nothing and `diff-coverage` blocked on all of them. Folding
+ * the two together puts `parked` on the emission the stood-down tests already exercise and
+ * leaves the genuinely differing part here, where each arm is a unit fixture. Same repair the
+ * coverage gate forced on `promotionLedgerSink` (#2346).
+ */
+export function fixRungTerminationVerdict(
+  rung: Pick<FixRungOutcome, "outcome" | "reason" | "standDownReason" | "blockedOnPr">,
+): { reason: string; extra: Record<string, unknown>; phrase: string } {
+  if (rung.outcome === "parked") {
+    return {
+      reason: rung.reason,
+      extra: { blocked_on_pr: rung.blockedOnPr },
+      phrase: `parked on prerequisite #${rung.blockedOnPr}`,
+    };
+  }
+  if (rung.outcome === "rebased") {
+    // W1-T1095 (capability 3): the head MOVED, so this rung is over — see `runFixRung`'s own
+    // comment at the return site for why continuing against a now-stale worktree would push
+    // nothing. Carries the same `blocked_on_pr` field the parked arm does, because it is the
+    // same prerequisite that put this PR here.
+    return {
+      reason: rung.reason,
+      extra: { blocked_on_pr: rung.blockedOnPr },
+      phrase: `rebased onto its base (prerequisite #${rung.blockedOnPr})`,
+    };
+  }
+  return {
+    reason: `stood down — ${rung.standDownReason}`,
+    extra: {},
+    phrase: `stood down (${rung.standDownReason})`,
+  };
+}
+
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned";
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
   review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   strikes: number;
+  /**
+   * W1-T1095 (design note ii — "every termination writes a reason"): a short, ALWAYS-PRESENT
+   * machine-legible reason naming why THIS pass ended the way it did — never blank, regardless
+   * of `outcome`. Distinct from `standDownReason` (a longer, human-facing sentence set only for
+   * `"stood_down"`): this field is populated on every branch, including `"fixed"` (where nothing
+   * else on this type otherwise says why the loop stopped) and the plain-exhaustion escalate.
+   */
+  reason: string;
   /**
    * W1-T1044: set only when `outcome === "spawn_abandoned"` — how long (ms) the abandoned
    * `deps.spawn` call had been running when the wall-clock bound gave up on it. See
@@ -3962,6 +4200,14 @@ export interface FixRungOutcome {
    * with a second reason source — see {@link branchAuthorshipStandDownReason}.
    */
   standDownReason?: string;
+  /**
+   * W1-T1095: set only when `outcome === "parked"` — the prerequisite PR number
+   * {@link outOfDiffBlockerFor} found. The rung spent ZERO strikes reaching this outcome
+   * (design note iv — parking is not retrying) and expects to be invoked again later (the
+   * SAME way every other dispatch is re-polled); the next call resumes normally the moment
+   * {@link prerequisiteMerged} reads this PR as merged.
+   */
+  blockedOnPr?: number;
 }
 
 /**
@@ -4259,6 +4505,331 @@ export function detectReviewFalseBlock(check: {
 }
 
 /**
+ * W1-T1095 (capability 1 of 3, RECORD-AND-RESUME — design note (i)): recognizes the "blocked
+ * on #N" idiom in a review's own summary or an UNMET criterion's own reason — the phrase a
+ * reviewer already writes when a criterion cannot be satisfied from INSIDE this diff because it
+ * depends on another, not-yet-merged pull request. This is the gap rationale (3) measured:
+ * `blocked_on`/`waiting_on_pr`/`depends_on_pr` all read ZERO across `src/` before this — there
+ * was no way for the rung to even RECORD that the remedy lives elsewhere, so it spent strikes
+ * (and eventually escalated) on work no fix worker could ever complete from inside the PR.
+ *
+ * Deliberately narrow: this matches ONE literal idiom, never infers a prerequisite from prose
+ * shape or from a bare PR-number mention — a review that happens to REFERENCE a PR number in
+ * passing (e.g. "see #40 for prior art") is never mistaken for a park-worthy blocker. Met
+ * criteria are never consulted — only what's still failing can name what's still blocking.
+ */
+export function outOfDiffBlockerFor(review: { summary: string; criteria: CriterionVerdict[] }): number | undefined {
+  const texts = [review.summary, ...review.criteria.filter((c) => !c.met).map((c) => c.reason)];
+  for (const text of texts) {
+    const m = /\bblocked on #(\d+)\b/i.exec(text ?? "");
+    if (m) return Number(m[1]);
+  }
+  return undefined;
+}
+
+/**
+ * W1-T1095 (capability 1 — the resume half): has the prerequisite {@link outOfDiffBlockerFor}
+ * named already MERGED? Mirrors every other live-state read in this file's fail-SAFE direction
+ * ({@link LiveStateResult}'s own `ok:false` contract) — an indeterminate or failed read is never
+ * treated as merged, so a `gh` hiccup keeps a parked PR parked (costs one skipped poll) rather
+ * than risk spending a strike against a prerequisite that may still be open (the far worse
+ * failure — see every other `ok:false` site in this file for the same asymmetric choice).
+ */
+export function prerequisiteMerged(liveState: LiveStateResult | undefined): boolean {
+  return liveState?.ok === true && liveState.state === "MERGED";
+}
+
+/**
+ * W1-T1095 (capability 3 — REBASE): the observed facts the rebase decision reads. Split from
+ * its I/O so every arm below is a unit fixture — the same split `fixRungTerminationVerdict`
+ * (above) already took when the coverage gate forced it.
+ */
+export interface FixRebaseFacts {
+  /** The prerequisite `outOfDiffBlockerFor` named, which `prerequisiteMerged` has just read
+   *  as MERGED. Present on every call — this decision is only ever reached on the resume path. */
+  prerequisitePr: number;
+  /** Did the review this rung is acting on already PASS? A new head DISCARDS a posted verdict
+   *  and spends one of two review-orphan slots (W1-T225/W1-T1018), so a passing review is the
+   *  one state where rebasing costs more than it can possibly buy. */
+  reviewPassed: boolean;
+  /** GitHub's own `mergeable` reading. `"CONFLICTING"` is the SWEEP's path, never this rung's —
+   *  it already resolves non-deletion conflicts and correctly refuses deletion ones. Anything
+   *  other than a definite `"MERGEABLE"` refuses (fail-safe, the same direction every other
+   *  read in this file takes on state it cannot resolve). */
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | undefined;
+  /** `compare(base...head).behind_by` — how many commits the base carries that this head does
+   *  not. `undefined` when the comparison could not be read. */
+  behindBy: number | undefined;
+  /** Has a `fix.rebased` row already been written for this pull request? The shard's design (iii)
+   *  bounds this at AT MOST ONE rebase-and-retry per blocked pull request. */
+  alreadyRebased: boolean;
+}
+
+/** {@link decideFixRebase}'s verdict — `reason` is written to the ledger on BOTH arms, so a
+ *  refusal is never silent (design note ii: every termination writes a row naming its reason). */
+export interface FixRebaseDecision {
+  rebase: boolean;
+  reason: string;
+}
+
+/**
+ * W1-T1095 (capability 3): should this resumed pull request take its base before the next strike?
+ *
+ * WHY "BEHIND MAIN" IS NOT ITSELF THE JUSTIFICATION, MEASURED. This repository's `main`
+ * protection reads `strict: false`, so GitHub does NOT refuse to merge a pull request merely
+ * because its base moved — and with strict off it never even reports the `BEHIND` merge state
+ * (the live board reads `BLOCKED`/`DIRTY` only). An arm gated on "behind" alone would therefore
+ * be permanently inert here, which is the unwired-arm shape this fleet keeps filing.
+ *
+ * THE FIELD THAT DOES JUSTIFY IT IS `behind_by`, READ ONLY ON THE RESUME PATH, AND IT MEANS
+ * SOMETHING SPECIFIC THERE: the review itself said this pull request is `blocked on #N`,
+ * `prerequisiteMerged` has just read #N as MERGED, and a non-zero `behind_by` proves #N's merge
+ * commit is NOT in this head's tree. So the next strike would re-run a fix worker against a
+ * checkout that still lacks the remedy the review named, and fail for exactly the reason it
+ * already failed. That is why the rebase is the remedy rather than a tidy-up.
+ *
+ * ORDER IS LOAD-BEARING — the two REFUSALS THAT PROTECT SOMETHING come first, so a passing
+ * review or a spent bound can never be overridden by a later arm.
+ */
+export function decideFixRebase(facts: FixRebaseFacts): FixRebaseDecision {
+  if (facts.reviewPassed) {
+    return {
+      rebase: false,
+      reason: "review already passed — a new head would discard the posted verdict and spend a review-orphan slot",
+    };
+  }
+  if (facts.alreadyRebased) {
+    return {
+      rebase: false,
+      reason: `already rebased once for this pull request (prerequisite #${facts.prerequisitePr}) — the bound is one rebase-and-retry`,
+    };
+  }
+  if (facts.mergeable === "CONFLICTING") {
+    return {
+      rebase: false,
+      reason: "the head conflicts with its base — the conflict path belongs to the sweep, not this rung",
+    };
+  }
+  if (facts.mergeable !== "MERGEABLE") {
+    return {
+      rebase: false,
+      reason: `merge state is not a definite MERGEABLE (${facts.mergeable ?? "unreadable"}) — refusing to rebase on state that cannot be resolved`,
+    };
+  }
+  if (facts.behindBy === undefined) {
+    return {
+      rebase: false,
+      reason: "cannot read how far behind its base this head is — refusing to rebase on an unreadable comparison",
+    };
+  }
+  if (facts.behindBy <= 0) {
+    return {
+      rebase: false,
+      reason: `the head already contains its base — prerequisite #${facts.prerequisitePr} is present, nothing to take`,
+    };
+  }
+  return {
+    rebase: true,
+    reason: `prerequisite #${facts.prerequisitePr} merged and this head is ${facts.behindBy} commit(s) behind its base — updating the branch so the merged remedy is in the tree`,
+  };
+}
+
+/**
+ * W1-T1095 (capability 3): the argv for GitHub's own update-branch endpoint — a PURE API call
+ * that needs NO local branch and NO checkout, which is the whole reason it is used here rather
+ * than a local rebase. The daemon is DETACHED on every boot, and a call that assumed otherwise
+ * is exactly what broke `armAuto`'s `--delete-branch` (W1-T1111).
+ *
+ * NOT `gh pr update-branch`: that subcommand does not exist in the `gh` this fleet runs (2.45.0
+ * ships no `update-branch` under `gh pr`), so naming it would ship a command that fails on every
+ * invocation. This is the REST endpoint that subcommand wraps in newer builds, reached through
+ * `gh api` — the same argv-builder shape `ghCreatePrArgs` (lib/plan-pr-emitter.ts) uses, exported
+ * so the argv itself is a unit fixture rather than an inline string.
+ */
+export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`];
+}
+
+/**
+ * W1-T1095 (capability 3): the real update-branch WRITE. `execFileSync` is injectable so the
+ * argv and the failure mapping are unit-testable without a live pull request; the live-write
+ * guard fires FIRST, so a test that reaches this by accident is refused loudly rather than
+ * quietly mutating a real head.
+ *
+ * A failure NEVER throws back into the rung — it is returned as `{ ok: false, error }` and
+ * ledgered by {@link runFixRebase} as `fix.rebase_failed`. A rebase that did not happen must
+ * read as a rebase that did not happen.
+ */
+export function ghUpdateBranch(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  exec: typeof execFileSync = execFileSync,
+): { ok: boolean; error?: string } {
+  assertLiveWriteAllowed("gh-pr-update-branch", `updating the base of ${owner}/${repo}#${prNumber}`);
+  try {
+    exec("gh", ghUpdateBranchArgv(owner, repo, prNumber), { stdio: "pipe" });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message ?? e) };
+  }
+}
+
+/**
+ * W1-T1095 (capability 3): has this pull request already spent its ONE rebase? A pure fold over
+ * rows already written — no new read, no timer, no state file. PR-NUMBER keyed, not task-id
+ * keyed: the bound the shard states is "at most one rebase-and-retry per blocked PR", and one
+ * task can own more than one pull request over its life.
+ */
+export function fixRebaseAlreadySpent(lines: ReadonlyArray<Record<string, unknown>>, prNumber: number): boolean {
+  return lines.some((l) => l.step === "fix.rebased" && l.pr_number === prNumber);
+}
+
+/** The two REST reads {@link runFixRebase} needs, behind one injectable seam so the decision
+ *  above stays pure and this orchestrator stays thin. `mergeable` comes from `GET /pulls/{n}`,
+ *  `behindBy` from `GET /compare/{base}...{head}` — both REST, never `--json` (GraphQL), the
+ *  same quota split W1-T511 measured and this file already follows everywhere else. */
+export interface FixRebaseMergeFacts {
+  mergeable?: string;
+  behindBy?: number;
+}
+
+/**
+ * W1-T1095 (capability 3): the I/O half — gather the two observations, ask {@link decideFixRebase},
+ * and WRITE A ROW EITHER WAY. There is no silent exit from this function: every return has
+ * ledgered a `fix.rebased`, `fix.rebase_refused` or `fix.rebase_failed` row naming its reason
+ * first (design note ii — "every termination ... must write a row carrying its reason", and a
+ * refusal to rebase is a termination like any other).
+ *
+ * ALL THE JUDGEMENT LIVES IN {@link decideFixRebase}; this function decides nothing except what
+ * cannot be decided without I/O — whether the URL parses and whether the write dep is wired.
+ */
+export async function runFixRebase(
+  args: { prUrl: string; prerequisitePr: number; reviewPassed: boolean; strikes: number },
+  io: {
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+    ledgerLines: () => Array<Record<string, unknown>>;
+    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
+    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+  },
+): Promise<{ rebased: boolean; reason: string }> {
+  const target = prUrlTarget(args.prUrl);
+  if (!target) {
+    const reason = `pull request url does not parse (${args.prUrl}) — cannot address the update-branch endpoint`;
+    io.log("fix.rebase_refused", { strike: args.strikes, blocked_on_pr: args.prerequisitePr, reason });
+    return { rebased: false, reason };
+  }
+  if (!io.updateBranch) {
+    const reason = "no update-branch dep wired — the rebase capability is not reachable from this call site";
+    io.log("fix.rebase_refused", { strike: args.strikes, pr_number: target.number, blocked_on_pr: args.prerequisitePr, reason });
+    return { rebased: false, reason };
+  }
+
+  const observed = io.readMergeFacts ? await io.readMergeFacts(target.number) : {};
+  const mergeable =
+    observed.mergeable === "MERGEABLE" || observed.mergeable === "CONFLICTING" || observed.mergeable === "UNKNOWN"
+      ? observed.mergeable
+      : undefined;
+  const decision = decideFixRebase({
+    prerequisitePr: args.prerequisitePr,
+    reviewPassed: args.reviewPassed,
+    mergeable,
+    behindBy: observed.behindBy,
+    alreadyRebased: fixRebaseAlreadySpent(io.ledgerLines(), target.number),
+  });
+
+  if (!decision.rebase) {
+    io.log("fix.rebase_refused", {
+      strike: args.strikes,
+      pr_number: target.number,
+      blocked_on_pr: args.prerequisitePr,
+      behind_by: observed.behindBy,
+      reason: decision.reason,
+    });
+    io.say(`fix rung: NOT rebasing — ${decision.reason}: ${args.prUrl}`);
+    return { rebased: false, reason: decision.reason };
+  }
+
+  const result = await io.updateBranch(target.number);
+  if (!result.ok) {
+    const reason = `update-branch failed — ${result.error ?? "no error reported"}`;
+    io.log("fix.rebase_failed", {
+      strike: args.strikes,
+      pr_number: target.number,
+      blocked_on_pr: args.prerequisitePr,
+      reason,
+    });
+    io.say(`fix rung: rebase FAILED — ${reason}: ${args.prUrl}`);
+    return { rebased: false, reason };
+  }
+
+  io.log("fix.rebased", {
+    strike: args.strikes,
+    pr_number: target.number,
+    blocked_on_pr: args.prerequisitePr,
+    behind_by: observed.behindBy,
+    reason: decision.reason,
+  });
+  io.say(`fix rung: REBASED — ${decision.reason}: ${args.prUrl}`);
+  return { rebased: true, reason: decision.reason };
+}
+
+/**
+ * W1-T1095 (capability 3): map GitHub's two REST payloads onto {@link FixRebaseMergeFacts} —
+ * PURE, so the mapping is a unit fixture and the network read below stays a one-line wrapper.
+ *
+ * `mergeable === false` OR `mergeable_state === "dirty"` is the DEFINITE conflict reading and is
+ * the only thing that yields `"CONFLICTING"`; `mergeable === true` is the only thing that yields
+ * `"MERGEABLE"`. Everything else — a `null` GitHub has not computed yet, an absent field, a
+ * payload that is not an object — is `"UNKNOWN"`, which {@link decideFixRebase} refuses on. The
+ * asymmetry is deliberate and matches every other read in this file: never resolve toward acting
+ * on state the API has not actually asserted.
+ */
+export function mergeFactsFromRest(pr: unknown, compare: unknown): FixRebaseMergeFacts {
+  const p = (pr ?? {}) as { mergeable?: unknown; mergeable_state?: unknown };
+  const c = (compare ?? {}) as { behind_by?: unknown };
+  const mergeable =
+    p.mergeable === false || p.mergeable_state === "dirty"
+      ? "CONFLICTING"
+      : p.mergeable === true
+        ? "MERGEABLE"
+        : "UNKNOWN";
+  return {
+    mergeable,
+    behindBy: typeof c.behind_by === "number" ? c.behind_by : undefined,
+  };
+}
+
+/**
+ * W1-T1095 (capability 3): the real two-read wiring — `GET /pulls/{n}` for the merge state and
+ * `GET /compare/{base}...{head}` for `behind_by`, both REST (never `--json`, which is GraphQL and
+ * a separate, already-measured-scarce quota — W1-T511). Fails SOFT to an empty reading on ANY
+ * error, which {@link decideFixRebase} then refuses on, so a `gh` hiccup can only ever cost a
+ * skipped rebase — never an unconsidered one.
+ */
+export function fixRebaseMergeFactsFromRest(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: GhApiFetcher = ghJson,
+): FixRebaseMergeFacts {
+  try {
+    const pr = fetch(["api", `repos/${owner}/${repo}/pulls/${prNumber}`]) as {
+      base?: { ref?: string };
+      head?: { sha?: string };
+    };
+    const base = pr?.base?.ref;
+    const head = pr?.head?.sha;
+    const compare =
+      base && head ? fetch(["api", `repos/${owner}/${repo}/compare/${base}...${head}`]) : undefined;
+    return mergeFactsFromRest(pr, compare);
+  } catch {
+    return {};
+  }
+}
+
+/**
  * W1-T1044: best-effort RECLAIM of a worker {@link spawnFixWorkerBounded} abandoned — scoped
  * by THIS run's own `REMUDERO_RUN_ID` env marker (worker-containment.ts's W1-T117 attribution),
  * reusing the SAME `defaultListCandidates`/`defaultReadMarkers`/`killProcessGroup` primitives
@@ -4342,6 +4913,7 @@ async function spawnFixWorkerBounded(
         task_id: ctx.taskId,
         elapsed_ms: elapsedMs,
         bound_ms: boundMs,
+        reason: "spawn wall-clock bound exceeded",
       });
       try {
         await deps.reclaimWorker?.({ runId: ctx.runId, taskId: ctx.taskId, elapsedMs });
@@ -4556,6 +5128,37 @@ export async function runFixRung(opts: {
      * precondition for it.
      */
     reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    /**
+     * W1-T1095 (capability 1's resume half): an OPTIONAL fresh live-state read of an
+     * ARBITRARY prerequisite PR number (never `opts.prUrl` itself) — consulted ONLY when
+     * {@link outOfDiffBlockerFor} finds a "blocked on #N" review, to decide whether N has
+     * merged yet. Mirrors `readLiveState`'s own contract exactly ({@link LiveStateResult});
+     * omitted, or a failed/indeterminate read, behaves as "not yet merged" — the SAME
+     * fail-safe direction every other live-state read in this rung already takes (see
+     * {@link prerequisiteMerged}'s own doc). The real call site (`buildSweepEffects`) wires
+     * this to the SAME `ghLiveState` reader every other spending site here already uses,
+     * against the prerequisite's own PR URL in this task's repo.
+     */
+    readPrerequisiteState?: (prNumber: number) => LiveStateResult | Promise<LiveStateResult>;
+    /**
+     * W1-T1095 (capability 3 — REBASE): the two REST observations {@link runFixRebase} needs
+     * once a prerequisite has merged — `mergeable` and `behind_by`. Optional: a call site that
+     * omits it leaves `mergeable` unreadable, which {@link decideFixRebase} REFUSES on, so an
+     * unwired reader can only ever decline to rebase, never rebase blindly.
+     */
+    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
+    /**
+     * W1-T1095 (capability 3): the update-branch WRITE — {@link ghUpdateBranchArgv} over `gh api`.
+     * Optional, and its absence is ledgered as a refusal rather than assumed: the rung must never
+     * report a rebase it did not perform.
+     */
+    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+    /**
+     * W1-T1095 (capability 3): the ledger rows the ONE-rebase-per-pull-request bound is folded
+     * from ({@link fixRebaseAlreadySpent}). Defaults to reading `deps.ledgerPath`, the same
+     * `ledgerLines?` seam `armAuto`/`disarmAuto` already take.
+     */
+    ledgerLines?: () => Array<Record<string, unknown>>;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
@@ -4659,11 +5262,81 @@ export async function runFixRung(opts: {
         deps.say(
           `fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`,
         );
-        return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown.reason, issueUrl };
+        return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason, issueUrl };
       }
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
-      return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown.reason };
+      return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
+    }
+
+    // W1-T1095 (capability 1 — RECORD-AND-RESUME): a review naming an OUT-OF-DIFF blocker
+    // ("blocked on #N") cannot be resolved by dispatching more code inside THIS diff — see this
+    // task's rationale (3): the rung previously had no way to even RECORD that the remedy lives
+    // elsewhere, so it kept striking (and eventually escalating) against work no fix worker
+    // could ever complete from inside the PR. PARK instead: write a `fix.parked` row naming the
+    // prerequisite and return WITHOUT spending a strike (design note iv — parking is not
+    // retrying; `strikes` is read, never incremented, on this path). Checked every round, not
+    // just the first, so a strike that itself regresses into naming a fresh prerequisite still
+    // parks rather than grinding toward exhaustion.
+    //
+    // The prerequisite's OWN live state is re-read FIRST: a MERGED prerequisite means the
+    // blocker is already gone, so this round falls through and proceeds as an ordinary strike
+    // instead — this is capability 3, "a parked pull request resumes when its prerequisite
+    // merges": nothing else on this rung treats a parked PR specially, it is simply re-invoked
+    // (the same way every other dispatch already is) and this check now reads differently.
+    const outOfDiffBlocker = outOfDiffBlockerFor(review);
+    if (outOfDiffBlocker !== undefined) {
+      const prerequisiteState = deps.readPrerequisiteState
+        ? await deps.readPrerequisiteState(outOfDiffBlocker)
+        : undefined;
+      if (!prerequisiteMerged(prerequisiteState)) {
+        const parkReason = `blocked on #${outOfDiffBlocker} — a prerequisite outside this diff, not yet merged`;
+        deps.log("fix.parked", { strike: strikes, blocked_on_pr: outOfDiffBlocker, reason: parkReason });
+        deps.say(`fix rung: PARKED — ${parkReason}; no strike spent, will resume once it merges: ${opts.prUrl}`);
+        return { outcome: "parked", review, strikes, reason: parkReason, blockedOnPr: outOfDiffBlocker };
+      }
+      deps.log("fix.resumed", { strike: strikes, blocked_on_pr: outOfDiffBlocker });
+      deps.say(`fix rung: RESUMING — prerequisite #${outOfDiffBlocker} has merged; dispatching normally: ${opts.prUrl}`);
+
+      // W1-T1095 (capability 3 — REBASE): the prerequisite has merged, but this head does not
+      // yet CONTAIN it. Take the base before spending the next strike, or the fix worker re-runs
+      // against a checkout that still lacks the remedy the review named and fails identically.
+      // Every arm of this call ledgers its reason, including every refusal — see `runFixRebase`.
+      const rebase = await runFixRebase(
+        {
+          prUrl: opts.prUrl,
+          prerequisitePr: outOfDiffBlocker,
+          // STRUCTURALLY FALSE HERE, AND SAID SO RATHER THAN DRESSED UP: the rung only ever
+          // reaches this line while `review.state` is narrowed to `"failure"` (a passing review
+          // returns `outcome: "fixed"` before any of this), so the compiler itself rejects
+          // `review.state === "success"` as a comparison with no overlap. The guard still exists
+          // in `decideFixRebase` — it is the operator's stated safety requirement and is proven
+          // by its own unit fixture — but at TODAY'S single call site it is defence in depth,
+          // not a live arm. Naming that is the point; an inert arm sold as a live one is the
+          // defect this fleet keeps filing.
+          reviewPassed: false,
+          strikes,
+        },
+        {
+          log: deps.log,
+          say: deps.say,
+          ledgerLines: deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)),
+          readMergeFacts: deps.readMergeFacts,
+          updateBranch: deps.updateBranch,
+        },
+      );
+      if (rebase.rebased) {
+        // THE HEAD MOVED, SO THIS RUNG IS OVER — and this return is the whole reason the rebase
+        // is safe. `update-branch` merges the base into the REMOTE head branch, so the local
+        // `opts.worktreePath` this rung would hand the next fix worker is now behind origin;
+        // that worker's `gitPushRunBranch` is a plain (non-force) push and would be rejected as
+        // non-fast-forward, and the sweep's push dep SWALLOWS failures ("the worker may already
+        // have pushed"), so the strike would be spent and land nothing, silently. Returning here
+        // spends NO strike and lets the next poll materialise a fresh worktree at the new head —
+        // the same re-invoked-later shape parking already uses, never a local fetch/reset (which
+        // would take `.git/config.lock` on a repo the fleet runs six lanes against).
+        return { outcome: "rebased", review, strikes, reason: rebase.reason, blockedOnPr: outOfDiffBlocker };
+      }
     }
 
     // W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15): a diff
@@ -4705,7 +5378,7 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "rule15_violation" });
       deps.say(`fix rung: escalated (rule 15 violation) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, issueUrl };
+      return { outcome: "escalated", review, strikes, reason: "rule15_violation", issueUrl };
     }
 
     // W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE): a diff that
@@ -4762,7 +5435,7 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "instrument_entangled" });
       deps.say(`fix rung: escalated (instrument entanglement) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, issueUrl };
+      return { outcome: "escalated", review, strikes, reason: "instrument_entangled", issueUrl };
     }
 
     // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
@@ -4854,7 +5527,7 @@ export async function runFixRung(opts: {
         // Mirrors the spawn-infra-blocked path immediately below: no subprocess demonstrably
         // ran to completion, so this round is never committed as a strike (W1-T127's own
         // "a strike is only spent once a worker demonstrably ran" invariant).
-        return { outcome: "spawn_abandoned", review, strikes, spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
+        return { outcome: "spawn_abandoned", review, strikes, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
       }
       fixResult = deps.account(spawnOutcome.result);
     } catch (e) {
@@ -5047,7 +5720,7 @@ export async function runFixRung(opts: {
       if (preFalseBlockStandDown) {
         deps.log("fix.stood_down", { site: "rung.false_block", strikes, reason: preFalseBlockStandDown.reason });
         deps.say(`fix rung: standing down before false-block escalation — ${preFalseBlockStandDown.reason}`);
-        return { outcome: "stood_down", review, strikes, standDownReason: preFalseBlockStandDown.reason };
+        return { outcome: "stood_down", review, strikes, reason: preFalseBlockStandDown.reason, standDownReason: preFalseBlockStandDown.reason };
       }
       const stillUnmet = review.criteria.filter((c) => !c.met);
       deps.log("fix.false_block", {
@@ -5091,14 +5764,14 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "false_block" });
       deps.say(`fix rung: escalated (review false-block) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, issueUrl };
+      return { outcome: "escalated", review, strikes, reason: "false_block", issueUrl };
     }
   }
 
   if (review.state === "success") {
-    deps.log("fix.resolved", { strikes });
+    deps.log("fix.resolved", { strikes, reason: "review passed" });
     deps.say(`fix rung: resolved after ${strikes} strike(s) — review now passes`);
-    return { outcome: "fixed", review, strikes };
+    return { outcome: "fixed", review, strikes, reason: "review passed" };
   }
 
   // W1-T177 SITE (ii) — TERMINAL-STATE CHECK immediately before the
@@ -5110,7 +5783,7 @@ export async function runFixRung(opts: {
   if (preEscalateStandDown) {
     deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown.reason });
     deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown.reason}`);
-    return { outcome: "stood_down", review, strikes, standDownReason: preEscalateStandDown.reason };
+    return { outcome: "stood_down", review, strikes, reason: preEscalateStandDown.reason, standDownReason: preEscalateStandDown.reason };
   }
 
   // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
@@ -5183,9 +5856,14 @@ export async function runFixRung(opts: {
     },
     { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
   );
-  deps.log("fix.exhausted", { strikes, issue_url: issueUrl });
+  const exhaustionReason = stillConflicted
+    ? "merge_conflict_unresolved"
+    : noReviewYet
+    ? "ci_never_green"
+    : "review_still_failing";
+  deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: exhaustionReason });
   deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
-  return { outcome: "escalated", review, strikes, issueUrl };
+  return { outcome: "escalated", review, strikes, reason: exhaustionReason, issueUrl };
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
@@ -7398,8 +8076,7 @@ async function runTask(
     }
     if (!prUrl) {
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
-      const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
-      prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+      prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     }
     if (!prUrl) {
       log("verdict", {
@@ -7479,9 +8156,16 @@ async function runTask(
     //
     // Best-effort, same discipline as W1-T256: a failed read falls back to the worker text rather
     // than blocking the review, so a `gh` outage degrades to the old behaviour instead of a stall.
+    //
+    // W1-T1100: `reviewReportIsSubstitute` starts true (the fallback value already assigned above
+    // is the substitute) and flips to false ONLY on a successful fetch — so a throw leaves it
+    // true, matching `reviewReport` staying the worker's text. Threaded into `runReviewFn` below
+    // so `bodyContradictsDiff` and the keyword floor both know this is not the PR body.
     let reviewReport = fullText(impl);
+    let reviewReportIsSubstitute = true;
     try {
       reviewReport = await fetchPrBodyFn(prUrl);
+      reviewReportIsSubstitute = false;
     } catch (e) {
       log("review.body_fetch_error", { error: String((e as Error)?.message ?? e) });
     }
@@ -7491,6 +8175,7 @@ async function runTask(
       prUrl,
       task,
       report: reviewReport,
+      reportIsSubstitute: reviewReportIsSubstitute,
       settingsFile,
       config,
       budgetUsd,
@@ -7565,6 +8250,16 @@ async function runTask(
           // W1-T296: the pre-strike branch-authorship check's live-head
           // reader — same fresh-`gh`-read discipline as `readLiveState`.
           readLiveHead: ghLiveHead,
+          // W1-T1095: the SAME `ghLiveState` reader, aimed at whatever prerequisite PR number
+          // a "blocked on #N" review names, in THIS task's own owner/repo — see runFixRung's
+          // own `readPrerequisiteState` doc for the fail-safe (not-merged) default this takes
+          // on a failed/indeterminate read.
+          readPrerequisiteState: (n) => ghLiveState(`https://github.com/${owner}/${task.repo}/pull/${n}`),
+          // W1-T1095 (capability 3): the two REST observations and the update-branch write.
+          // Both are PURE API — no branch, no checkout — because the daemon is detached on every
+          // boot, the assumption that broke `armAuto`'s `--delete-branch` (W1-T1111).
+          readMergeFacts: (n) => fixRebaseMergeFactsFromRest(owner, task.repo, n),
+          updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc.
           spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.sweepWallClockBoundMs,
@@ -7601,21 +8296,36 @@ async function runTask(
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
-      if (rung.outcome === "stood_down") {
-        // W1-T177: this run's own PR went terminal (merged/closed) mid-rung —
-        // stand down rather than spend another strike or escalate. Reuses the
-        // existing "blocked" verdict (never a spend, never a bypass) so the
-        // drain's stop-on-block invariant still holds; the ledger line above
-        // names the SITE and the STATE, not just "blocked".
+      if (rung.outcome === "stood_down" || rung.outcome === "parked" || rung.outcome === "rebased") {
+        // TWO NON-SPENDING TERMINATIONS, ONE EMISSION.
+        //
+        // W1-T177 (`stood_down`): this run's own PR went terminal (merged/closed) mid-rung —
+        // stand down rather than spend another strike or escalate.
+        //
+        // W1-T1095 (`parked`): the remedy lives OUTSIDE this diff — never a strike spent, never
+        // an issue opened (design note v: the operator's merge gate is never softened by this
+        // rung). The PR stays open exactly like every other "blocked" verdict; the next poll
+        // that reaches this same rung re-checks the prerequisite and resumes automatically the
+        // moment it merges (capability 3 — see `outOfDiffBlockerFor`/`prerequisiteMerged`).
+        //
+        // BOTH reuse the existing "blocked" verdict (never a spend, never a bypass) so the
+        // drain's stop-on-block invariant still holds; the ledger line names the SITE and the
+        // STATE, not just "blocked". What differs between them is ONLY the reason, one extra
+        // ledger field and the console phrasing — `fixRungTerminationVerdict` owns exactly that
+        // difference as a pure function with a unit fixture per arm, so `parked` shares this
+        // already-exercised emission instead of being a second near-identical block that no
+        // test can reach.
+        const termination = fixRungTerminationVerdict(rung);
         log("verdict", {
           verdict: "blocked",
           pr_url: prUrl,
-          reason: `stood down — ${rung.standDownReason}`,
+          reason: termination.reason,
+          ...termination.extra,
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
         });
-        say(`verdict: blocked — stood down (${rung.standDownReason}): ${prUrl}`);
+        say(`verdict: blocked — ${termination.phrase}: ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
     }
@@ -12582,8 +13292,7 @@ async function retroCommand(
         return 1;
       }
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath));
-      const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
-      prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+      prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     }
     if (!prUrl) {
       log("retro.error", { error: "no PR opened" });
@@ -17026,6 +17735,15 @@ interface RawOpenPr {
   statusCheckRollup?: RollupCheck[];
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
+  /**
+   * W1-T1201 — the PR's creation timestamp, projected onto `OpenPrView.createdAt` below for
+   * `deriveDisposition`'s age clamp. Optional so this type stays satisfied by today's
+   * `mapRestPr` output (lib/open-prs-rest.ts), which does not carry it yet — see that gap named
+   * in this task's own rationale. Wiring a real producer here is a follow-up (`created_at` sits
+   * on the SAME REST row `updated_at` already comes from); until then this is always `undefined`,
+   * the same fail-toward-unclamped default `OpenPrView.createdAt` documents.
+   */
+  createdAt?: string;
 }
 
 const REVIEW_CTX = "remudero-review";
@@ -17675,6 +18393,11 @@ export function buildOpenPrViews(
       strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
       lastActivityAt: pr.updatedAt,
+      // W1-T1201: the age clamp's other half — see `RawOpenPr.createdAt`'s own doc for why this
+      // is `undefined` in the real gateway today (no producer in lib/open-prs-rest.ts yet) and
+      // OpenPrView.createdAt's doc (lib/sweep.ts) for the fail-toward-unclamped default that
+      // makes carrying it through unconditionally here safe either way.
+      createdAt: pr.createdAt,
       headSha: pr.headRefOid,
       autoMergeArmed: pr.autoMergeRequest != null,
       // W1-T54 routing: Dependabot PRs go to the dep-review lane, never the
@@ -18024,6 +18747,34 @@ export function buildFixRungDispatchArgs(args: {
 }
 
 /**
+ * W1-T1129: the fix rung's throwaway worktree AND its named local branch, extracted from
+ * `dispatchFix` (its one call site) purely so this exact git sequence is directly unit-testable
+ * against a real repo, with no behaviour change beyond the `--no-track` below.
+ *
+ * `origin/<branch>` is a remote-tracking start point, so a plain `checkout -B <branch>
+ * origin/<branch>` defaults to ALSO writing `branch.<branch>.remote`/`.merge` into
+ * `.git/config` — a config write that, in a worktree, lands in the ONE file the main
+ * checkout and every sibling worktree share, and races every other concurrent lane's own
+ * config write for the same `.git/config.lock` (rationale (1)/(3)/(4)). Nothing in `src/`
+ * ever reads that tracking config — `gitPushRunBranch` pushes an explicit `origin HEAD`
+ * refspec (rationale (5)) — so the write is created, contended over, and never consulted.
+ * The review lane's `realReviewWorktreeDeps` already skips `checkout -B` entirely for this
+ * same reason (see its own comment, above); the fix rung cannot follow it there because it
+ * PUSHES, and a detached HEAD has no branch for `git push origin HEAD` to resolve (rationale
+ * (7)). `--no-track` keeps the named local branch — still landing at `origin/<branch>`'s
+ * commit, still pushable — while dropping only the tracking-config write.
+ */
+export function createFixRungWorktree(repoDir: string, worktreePath: string, branch: string): void {
+  execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
+  execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
+  execFileSync(
+    "git",
+    ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`, "--no-track"],
+    { stdio: "pipe" },
+  );
+}
+
+/**
  * Wire the four gated effects to their real implementations. dispatchFix
  * reconstructs a W1-T76 `runFixRung` invocation for a PR discovered COLD (no live
  * run/session): it checks the PR head branch out into a scratch worktree, seeds a
@@ -18318,7 +19069,36 @@ export function buildSweepEffects(
     // the review lane already mints and ledgers under (gated on `armSessionPrs`) rather than
     // arming nothing for a session PR (no `Remudero-Task:` trailer). `pr.taskId` itself is
     // still passed straight through here, unchanged from before this task.
-    arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, sweepArmImpl, "sweep"),
+    //
+    // W1-T1117: `attemptError` is a SIDE CHANNEL, not a second `gh pr merge` attempt — the
+    // wrapped closure passed to `armAndLogOutcome` still calls `sweepArmImpl` exactly ONCE; it
+    // only also stashes the raw failure text `armAndLogOutcome` itself discards down to the bare
+    // outcome string it returns. `armFailureAction` is then re-read (never re-derived by some
+    // second classifier) off that SAME text `attemptArm` already classified for the console line,
+    // so the "mergeable" arm's dedup (lib/sweep.ts) can tell a semantic-but-retryable/transport
+    // failure — never seed the dedup, the base/network condition bounds the retry, not this code
+    // — from one the classifier could not decode at all, which DOES seed it (design iv: an
+    // `"unknown"` failure takes the same non-retrying shape a genuinely permanent one would).
+    // Every other outcome (including a bare "arm-error-ignored" with no captured text, which
+    // cannot happen from this adapter but keeps every existing fake/test that returns a plain
+    // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
+    arm: (pr) => {
+      let attemptError: string | undefined;
+      const outcome = armAndLogOutcome(
+        pr.prUrl,
+        pr.taskId,
+        log,
+        (prUrl, taskId) => {
+          const result = sweepArmImpl(prUrl, taskId);
+          if (typeof result !== "string") attemptError = result.error;
+          return result;
+        },
+        "sweep",
+      );
+      // The fold itself is `sweepArmAttemptOutcome` (pure, beside `armFailureAction`) so each of
+      // its arms is a unit fixture rather than a branch only a whole sweep pass can reach.
+      return sweepArmAttemptOutcome(outcome, attemptError);
+    },
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means
@@ -18494,6 +19274,20 @@ export function buildSweepEffects(
 
     dispatchFix: async (pr, evidence) => {
       let worktreePath = "";
+      // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
+      // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
+      // (`prior.fixed`, sweep.ts) is keyed off THAT line's later effect (an `acted:true` row),
+      // never off this closure returning cleanly. Before this task, EVERY throw here — a
+      // `git checkout -B` racing `.git/config`'s lock included — was swallowed unconditionally,
+      // so `runSweep` always saw a clean return and recorded `acted:true`, seeding the dedup for
+      // a head that never received a single `fix.*` ledger row. `fixRungStalledWithoutNewHead`
+      // (sweep.ts, W1-T1110) can only re-arm that gate by reading rows THIS run wrote — with none
+      // written, it reads `false` forever, and the head is stuck (the plan record's rationale).
+      // A throw BEFORE `fix.dispatch` must therefore reach `runSweep`'s own `catch` (which already
+      // sets `acted = false` — untouched by this task) instead of being swallowed here. A throw
+      // AFTER `fix.dispatch` is unchanged: the strike is real, `runSweep` must keep recording
+      // `acted:true` exactly as it always has, so it is still swallowed below.
+      let dispatchStarted = false;
       try {
         // W1-T177 SITE (v): an INDEPENDENT fresh live-state read, via the
         // SAME `readLiveState`/`ghLiveState` fail-open contract every other
@@ -18527,9 +19321,7 @@ export function buildSweepEffects(
           return;
         }
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
-        execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
-        execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${realBranch}`], { stdio: "pipe" });
-        execFileSync("git", ["-C", worktreePath, "checkout", "-B", realBranch, `origin/${realBranch}`], { stdio: "pipe" });
+        createFixRungWorktree(repoDir, worktreePath, realBranch);
 
         const mountsTable = loadMounts(mountsPath(repoRoot));
         const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
@@ -18615,7 +19407,12 @@ export function buildSweepEffects(
             // question's "what the fix worker tried" input). `extra`'s own
             // `task_id` wins over the outer default (spread order in `log`'s
             // body), so this is a pure override, not a second ledger writer.
-            log: (s, extra) => log(s, { task_id: task.id, ...extra }),
+            log: (s, extra) => {
+              // W1-T1127: the ONE line `fixRungStalledWithoutNewHead`/`priorActionsFromLedger`
+              // treat as "a real strike was spent" — see this closure's own doc, above.
+              if (s === "fix.dispatch") dispatchStarted = true;
+              log(s, { task_id: task.id, ...extra });
+            },
             say,
             account: (r) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
             // W1-T177: the SAME live-state reader every fix-rung call site
@@ -18625,6 +19422,14 @@ export function buildSweepEffects(
             // W1-T296: the SAME live-head reader every fix-rung call site
             // wires for the pre-strike branch-authorship check.
             readLiveHead: ghLiveHead,
+            // W1-T1095: the SAME `ghLiveState` reader, aimed at whatever prerequisite PR
+            // number a "blocked on #N" review names, in this SAME owner/repo — see
+            // runFixRung's own `readPrerequisiteState` doc.
+            readPrerequisiteState: (n) => ghLiveState(`https://github.com/${owner}/${repo}/pull/${n}`),
+            // W1-T1095 (capability 3): same two seams as the run-loop call site above — pure
+            // API reads plus the guarded update-branch write, never a local rebase.
+            readMergeFacts: (n) => fixRebaseMergeFactsFromRest(owner, repo, n),
+            updateBranch: (n) => ghUpdateBranch(owner, repo, n),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
             // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The
@@ -18635,6 +19440,13 @@ export function buildSweepEffects(
         });
       } catch (e) {
         log("sweep.fix.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+        // W1-T1127: still ledgered above (nothing is repaired by going quiet) — but a failure
+        // that struck BEFORE the worker ran must propagate, not return cleanly, so `runSweep`'s
+        // own `catch` (sweep.ts) records `acted: false` instead of seeding the dedup gate against
+        // a head that wrote no `fix.*` row. A failure AFTER the worker ran (`dispatchStarted`)
+        // stays swallowed here — that strike is real and must keep seeding the gate exactly as
+        // it does today.
+        if (!dispatchStarted) throw e;
       } finally {
         if (worktreePath) {
           try {
@@ -18765,7 +19577,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       renderSweepSummary(summary) +
       `\npost-fix re-verification: ${reverifySummary.total} open PR(s) checked · ${reverifySummary.redriven} redriven` +
       `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected` +
-      `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed` +
+      `\n${renderEscalationReconcileSummary(reconcileSummary)}` +
       `\nworktree reap: ${reapSummary.reaped.length} worktree(s) reaped · ${reapSummary.reapedLocks.length} widowed lock(s) reaped`,
   );
   return 0;
@@ -18792,6 +19604,57 @@ export function buildEscalationCloser(
  * `issues`/`github` for tests. Returns the pass summary; never throws (buildEscalationReconcile-
  * Candidates degrades a failed read to [], runEscalationReconcile contains per-issue throws).
  */
+/**
+ * W1-T1101: the reconcile summary as THIS caller sees it — `runEscalationReconcile`'s own shape
+ * (lib/sweep.ts, untouched by this task) plus the three intake counts `sweepEscalationReconcile`
+ * already holds in a local. The widening lives HERE, not on the library type, because the library
+ * function never measures these: `buildEscalationReconcileCandidates` does, one statement earlier,
+ * in this same file. Putting the fields on the shared type would have moved a run-task.ts
+ * measurement into lib/sweep.ts for no reader there.
+ */
+export interface SweepEscalationReconcileSummary extends EscalationReconcileSummary {
+  /**
+   * Open issues the read returned, one statement before the candidate loop — see
+   * {@link EscalationIntake}. Present iff an intake reached this caller, which happens UNLESS the
+   * issue-list read itself failed (the builder's `[]`-on-failure contract never calls its
+   * `onIntake` observer) — so `issuesSeen === undefined` is specifically "the read failed", not
+   * "nothing was measured".
+   */
+  issuesSeen?: number;
+  /** Dropped for carrying no `**Task:**` trailer — see {@link EscalationIntake}. */
+  droppedNoTaskTrailer?: number;
+  /** Dropped for naming neither a plan task nor any resolvable PR referent. */
+  droppedNoReferent?: number;
+}
+
+/**
+ * One-line human render of an escalation-reconcile pass, for `rmd sweep`'s console output
+ * (W1-T1101). The line this replaces printed `total` (the POST-DROP candidate count) under the
+ * label "open needs-human issue(s) checked" — so `total: 0` read identically whether nothing was
+ * open, everything open was dropped, or the issue-list read failed outright. This renders
+ * `issuesSeen` under that label instead (the count the read actually returned), names an
+ * unreadable list as exactly that rather than a bare zero, and — only when a drop shrank
+ * `issuesSeen` down to `total` — names the drop reasons, mirroring the ledger row's own
+ * healthy-path-stays-small asymmetry (see the `sweep.escalation_reconcile.summary` log call in
+ * `runEscalationReconcile`).
+ */
+export function renderEscalationReconcileSummary(s: SweepEscalationReconcileSummary): string {
+  if (s.issuesSeen === undefined) {
+    // No intake reached this pass — on `sweepEscalationReconcile`'s own call site (the only
+    // production caller), that happens exactly when `buildEscalationReconcileCandidates`' issue-list
+    // read threw and returned `[]` under its "do nothing this cycle" contract. `total`/`closed` are
+    // both correctly 0 in that case too, so rendering them here would be the identical, ambiguous
+    // zero this task exists to remove.
+    return "escalation reconcile: issue-list read FAILED this cycle (see sweep.escalation_reconcile.list_failed) — nothing checked, nothing closed";
+  }
+  const droppedTotal = s.issuesSeen - s.total;
+  const droppedNote =
+    droppedTotal > 0
+      ? ` · ${s.total} became candidate(s), ${droppedTotal} dropped (${s.droppedNoTaskTrailer ?? 0} no-task-trailer, ${s.droppedNoReferent ?? 0} no-referent)`
+      : "";
+  return `escalation reconcile: ${s.issuesSeen} open needs-human issue(s) checked · ${s.closed} closed${droppedNote}`;
+}
+
 export async function sweepEscalationReconcile(
   owner: string,
   repo: string,
@@ -18800,7 +19663,7 @@ export async function sweepEscalationReconcile(
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub } = {},
-): Promise<EscalationReconcileSummary> {
+): Promise<SweepEscalationReconcileSummary> {
   let intake: EscalationIntake | undefined;
   const candidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
     issues: opts.issues,
@@ -18809,7 +19672,7 @@ export async function sweepEscalationReconcile(
       intake = i;
     },
   });
-  return runEscalationReconcile(candidates, {
+  const summary = await runEscalationReconcile(candidates, {
     intake,
     closeIssue: buildEscalationCloser(owner, repo, opts.issues),
     ledgerPath,
@@ -18817,6 +19680,13 @@ export async function sweepEscalationReconcile(
     log,
     dryRun: opts.dryRun,
   });
+  // W1-T1101: the SAME counts the ledger row below has carried since #1084, now also riding on the
+  // returned summary so `renderEscalationReconcileSummary` (the CLI line) can see them. No new
+  // read, no change to what `runEscalationReconcile` measures or logs — the merge happens HERE,
+  // in the file that already holds `intake`, rather than widening lib/sweep.ts's shared type.
+  return intake
+    ? { ...summary, issuesSeen: intake.issuesSeen, droppedNoTaskTrailer: intake.droppedNoTaskTrailer, droppedNoReferent: intake.droppedNoReferent }
+    : summary;
 }
 
 /**
@@ -19682,6 +20552,9 @@ export async function fixCommand(
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
     lastActivityAt: raw.updatedAt,
+    // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
+    // doc for why this is `undefined` in the real gateway today.
+    createdAt: raw.createdAt,
     headSha: raw.headRefOid,
     autoMergeArmed: raw.autoMergeRequest != null,
     reviewSummary: undefined,
@@ -20638,8 +21511,7 @@ async function triageCommandLocked(
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
-    const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
-    const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("triage.error", { error: "no PR opened" });
       worktreeRemove(repoDir, worktreePath);
@@ -21054,8 +21926,7 @@ export async function planCommand(
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
-    const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
-    const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
       worktreeRemove(repoDir, worktreePath);

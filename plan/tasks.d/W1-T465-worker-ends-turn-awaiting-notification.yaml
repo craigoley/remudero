@@ -90,20 +90,60 @@
   files: [src/run-task.ts, test/worker-no-wait-contract.test.ts, test/run-task.test.ts]
   status: queued
   attempts: 0
-  note: "`risk: high` IS SET UP FRONT. The band is Rule 19's SPAN across `src/` and `test/`, not blast
-    radius — the blast radius is prompt text plus, at most, one discriminator.
-    `files:` IS DELIBERATELY SHORT. The prompt lives in `src/run-task.ts` (measured: 236 `REPORT`, 108
-    `acceptance`, 25 `ALREADY_SATISFIED` hits there), so no second source file is implicated unless
-    design (iii) adds a discriminator elsewhere — IF IT DOES, DECLARE THAT PATH AND DROP ANY DECLARED
-    PATH THE IMPLEMENTATION DOES NOT TOUCH. `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a
-    declared-but-untouched path just as `scopeViolationFiles` fails an undeclared one, and SEVEN
-    files: corrections were needed this week. `test/run-task.test.ts` is declared because it is where
-    prompt-shape assertions live; RE-COUNT IT BY INVOCATION before trusting that.
-    THE 99 UNEXPLAINED ROWS ARE NOT EVIDENCE FOR THIS SHAPE and must not be recruited into it later.
-    They predate `report_excerpt` (#1584) and no artifact survives that could classify them. Anyone
-    tempted to attribute the $370.85 to this defect should stop: the defensible figure is **$29.85
-    across five runs**.
-    RE-DERIVE BEFORE BUILDING. The corpus grows hourly and this shard's own commissioning brief
-    carried figures that did not reproduce — 39/17/3 against a measured 107/107/8. Check the field
-    name is `cost_usd`, dedupe on run_id+ts (each run appears as both a `verdict` row and a
-    `daemon.block.independent_failure` row), and count OCCURRENCES rather than LINES."
+  note: |
+    MEASUREMENT AMENDMENT, 2026-08-21 — THE FINDING STANDS, IT HAS A PRICE, AND THE TRANSCRIPT NARROWS THE
+    REMEDY. Nothing else in this shard changes: not the title, not `files:`, not the acceptance block, not
+    `status:`. The work is NOT done.
+
+    THE MEASURED COST. Four instances carrying `no_pr_shape: awaiting-notification`, $45.13 in total:
+    W1-T903 on 2026-08-16 (103 turns, $10.04), W1-T1029 on 2026-08-19 (93 turns, $6.92), W1-T1000002 on
+    2026-08-21 at 10:46 (188 turns, $18.67) and W1-T1095 on 2026-08-21 at 16:06 (131 turns, $9.50) — TWO
+    ON THE SAME DAY, $28.17 between them. The date is given because THE FIGURE WILL GO STALE; the shape
+    will not.
+
+    THE FRAMING IS NOT "A WORKER PARKS". IT IS THAT A WORKER HOLDS TOOLS PROMISING A WAKEUP THAT NO
+    CHANNEL DELIVERS. `state/runs/W1-T1095-1787327212452.tail` records the run in its own words:
+    *"Waiting for the full test suite to finish (monitored in the background). I'll proceed to commit,
+    push, and open the PR once it completes cleanly."* then *"I'll stop polling now and wait for the
+    Monitor's completion notification."* It used `ScheduleWakeup` and `Monitor` — TOOLS IN ITS OWN
+    TOOLSET — and behaved correctly given what it was handed. ALL THE WORK WAS DONE: four files changed,
+    typecheck clean, targeted suites green, PR body drafted, test titles checked against the acceptance
+    proofs. ONLY THE COMMIT AND PUSH WERE OUTSTANDING.
+
+    THREE THINGS MUST COINCIDE, AND ANY TWO ARE SURVIVABLE: a legitimate reason to wait, tools that
+    promise a callback, and a rule saying stop polling. That is why this is not fixed by telling workers
+    to try harder.
+
+    REMEDY CANDIDATES, NAMED WITHOUT CHOOSING — the choice is the implementer's or the operator's:
+      (a) REMOVE OR STUB THE WAKEUP TOOLS from the worker's toolset. Cheapest and most honest: A TOOL
+          THAT CANNOT WORK SHOULD NOT BE OFFERED.
+      (b) DELIVER THE NOTIFICATION — build the channel the tools already promise.
+      (c) REFUSE AT `commits_ahead: 0` after substantial turns, converting a silent success into a
+          terminal outcome that says why.
+
+    THE DETECTION IS ALREADY DONE, WHICH IS WHY (c) IS CHEAP IF CHOSEN. The verdict row ALREADY carries
+    `no_pr_shape: awaiting-notification` — the orchestrator names this exact shape and then records
+    `subtype: success` anyway. Nothing new has to be classified.
+
+    AND `no_pr` IS ALREADY BOUNDED, SO THIS IS NOT AN UNBOUNDED LOOP. `isDispatchBreakerTripped`
+    (`src/lib/status.ts`) counts `dispatchesWithoutNewOwnedPr` against `DEFAULT_MAX_TASK_DISPATCHES = 5`,
+    re-derived from the ledger so it survives restarts, wired into eligibility via `isCircuitTripped` in
+    `drain.ts` and `daemon.ts`. Measured: 23 `no_pr` verdicts across 19 tasks, four ever repeated, all at
+    exactly two, none since 2026-08-10. THE DEFECT IS THE SPEND PER INSTANCE, NOT A RUNAWAY.
+
+    ON #2306's NO-POLLING RULE: NOT THE CAUSE, BUT THE EARLIER "NO ECHO" READING IS WITHDRAWN. An earlier
+    pass of this amendment claimed none of the four runs echoes the rule. THAT WAS TOO STRONG AND IS
+    RETRACTED HERE so it is not inherited: W1-T1095 echoes it in substance — *"I'll stop polling now"* —
+    even without citing it. What still holds is that the rule is NOT THE CAUSE: the behaviour predates
+    #2306 by five days, W1-T903 and W1-T1029 show the identical shape before it existed, and the same-day
+    pair is a coincidence of timing. THE RULE'S WORDING MUST NOT BE WEAKENED — the operator lockout it
+    prevents is separately measured, and the worker that echoed it was following it correctly.
+
+    A TOOLING NOTE THAT COST THIS RECON AN HOUR. `rmd peek` reported "no tail recorded" for all four run
+    ids because it resolves `config.root` from the INVOKING CHECKOUT; 111 tails are present on the fleet
+    state volume, including this one at 11,452 bytes. The tails were never missing — the verb was looking
+    in the wrong place. Anyone diagnosing a run from a different checkout will hit this.
+
+    ORIGINAL NOTE, UNCHANGED, follows.
+
+    `risk: high` IS SET UP FRONT. The band is Rule 19's SPAN across `src/` and `test/`, not blast radius — the blast radius is prompt text plus, at most, one discriminator. `files:` IS DELIBERATELY SHORT. The prompt lives in `src/run-task.ts` (measured: 236 `REPORT`, 108 `acceptance`, 25 `ALREADY_SATISFIED` hits there), so no second source file is implicated unless design (iii) adds a discriminator elsewhere — IF IT DOES, DECLARE THAT PATH AND DROP ANY DECLARED PATH THE IMPLEMENTATION DOES NOT TOUCH. `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a declared-but-untouched path just as `scopeViolationFiles` fails an undeclared one, and SEVEN files: corrections were needed this week. `test/run-task.test.ts` is declared because it is where prompt-shape assertions live; RE-COUNT IT BY INVOCATION before trusting that. THE 99 UNEXPLAINED ROWS ARE NOT EVIDENCE FOR THIS SHAPE and must not be recruited into it later. They predate `report_excerpt` (#1584) and no artifact survives that could classify them. Anyone tempted to attribute the $370.85 to this defect should stop: the defensible figure is **$29.85 across five runs**. RE-DERIVE BEFORE BUILDING. The corpus grows hourly and this shard's own commissioning brief carried figures that did not reproduce — 39/17/3 against a measured 107/107/8. Check the field name is `cost_usd`, dedupe on run_id+ts (each run appears as both a `verdict` row and a `daemon.block.independent_failure` row), and count OCCURRENCES rather than LINES.

@@ -10,6 +10,7 @@ import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
   buildPlanPrCommitMessage,
+  createPlanPrRest,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   regeneratePlanIndexAndCommit,
@@ -136,8 +137,13 @@ test("filingAcceptanceCriteria: one criterion about the filing itself, naming th
   assert.equal(parseAcceptanceBlock(renderAcceptanceBlock(criteria)).length, 1);
 });
 
-test("filingAcceptanceCriteria: throws with zero filed task ids", () => {
-  assert.throws(() => filingAcceptanceCriteria([], ["plan/tasks.yaml"]));
+test("filingAcceptanceCriteria: throws with zero filed task ids, naming what is missing", () => {
+  // A mutant that empties this message to "" still throws — `assert.throws` with no matcher
+  // cannot see that. Reading the message is what makes the mutant red.
+  assert.throws(
+    () => filingAcceptanceCriteria([], ["plan/tasks.yaml"]),
+    /at least one filed task id is required/,
+  );
 });
 
 // ── 4. Gate-compliant commit-message assembly — the #387 falsifier ──────────────────────────
@@ -205,6 +211,22 @@ test("buildPlanPrBody: includes the trailer when taskId is given (the implementi
   });
   assert.match(body, /^Remudero-Task: W1-T5$/m);
   assert.equal(parseAcceptanceBlock(body).length, 1);
+});
+
+// ── 5b. Ratification PR REST create — the "produced no html_url/number" falsifier ───────────
+//
+// W1-T1105: this mutant (the throw message emptied to "") SURVIVED against
+// test/approve-resumable-rest.test.ts's own coverage of createPlanPrRest, because that suite's
+// `assert.throws(() => createPlanPrRest(...))` (no matcher) only observes that something threw,
+// never what it says. Read the message here, in this module's own suite, so a caller relying on
+// the text can trust it stays non-empty.
+
+test("createPlanPrRest: a malformed create response throws naming what is missing, not just \"something threw\"", () => {
+  const fetch = () => ({});
+  assert.throws(
+    () => createPlanPrRest(fetch, "craigoley", "remudero", { title: "t", body: "b", head: "run-x", base: "main" }),
+    /produced no html_url\/number/,
+  );
 });
 
 // ── 6. Plan-index regeneration — the #287 falsifier ──────────────────────────────────────────

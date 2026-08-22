@@ -152,3 +152,25 @@
     fail-closed arm by reading `judgeReview`'s `state` expression and `describeFailure`'s first
     line rather than inferring from a merged PR. Re-derive the caller census with the same query
     shape for `check-proof` as a live control. The counts will move; the shape will not.
+
+    AMENDED 2026-08-22 — A SHARPER INSTANCE, AND IT IS NOT A MALFORMED BODY. On W1-T1095's
+    capability-3 PR the body is correct: it parses six of six criteria with zero empty proofs, and
+    it is still never read. `reviewCommand` (`src/run-task.ts`) sets `const criteria =
+    task.acceptance ?? []` and hands ONLY that to `buildReviewPrompt` (`src/lib/review.ts`), so
+    once a `Remudero-Task:` trailer resolves a shard, the PR's own Acceptance block is not a
+    criteria source at all. W1-T1095's five criteria describe CAPABILITY ONE, which #2411 already
+    shipped, so the verdict posts green having examined nothing in this diff.
+
+    THE MECHANISM IS THIS SHARD'S OWN DESIGN NOTE (i), NOT AN AUTHORING MISTAKE. It licenses
+    landing the three capabilities across separate PRs — "an implementer may stop after any one" —
+    so by construction every PR after the first is judged against the first one's criteria. Any
+    multi-capability shard with that license inherits the same shape; the population in rationale
+    (4) counted trailered bodies as "no exposure at all", and this is the case that reading misses:
+    the exposure is not an unjudged body, it is a judged-but-irrelevant criteria set.
+
+    THE TRADE-OFF IS NAMED HERE AND NOT DECIDED. Dropping the trailer would make the reviewer fall
+    back to the body's own block, which is the one that describes the diff. It would also drop one
+    of the two merge-credit paths — but only one: `findMergedByHeadBranch` matches `^run-(.+)-\d+$`
+    on the head ref (`src/lib/status.ts`) and credits a trailerless merge, so the cost falls only on
+    a PR whose branch is not `run-<taskId>-<digits>`. Whether the criteria set should follow the
+    trailer, the body, or the union of both is an operator ruling this shard does not make.

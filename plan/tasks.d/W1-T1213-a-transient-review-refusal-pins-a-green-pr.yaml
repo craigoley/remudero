@@ -1,0 +1,113 @@
+- id: W1-T1213
+  title: "a REFUSED review attempt is filed in the same dedup set as a DELIVERED verdict, so a refusal that was correct for a condition since ended pins its head forever — and a green PR never earns a new head, so nothing in the system can ever clear it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    THE RECON IS THE OPERATOR'S AND IS CITED, NOT RE-DERIVED. Filed by reading only, from a scratch
+    worktree at origin/main — neither the suite nor any `runSweep` test was run.
+
+    (1) THE COLLAPSE. `priorActionsFromLedger` (`src/lib/sweep.ts`) builds ONE set, `postReviewed`,
+    keyed `${taskId}@${headSha}`, and adds to it on `review.posted` OR `review.post_refused`. The
+    `post-review` arm of `alreadyDone` then reads that single set. Its own doc concedes which of the
+    two facts it is actually there for: "this set exists mainly to dedup a REFUSAL, which does not
+    change GitHub's status."
+
+    (2) WHY THAT IS UNRECOVERABLE RATHER THAN MERELY UNTIDY. A refusal leaves GitHub's status
+    untouched, so the PR keeps reading `reviewState: "none"` and keeps routing to `post-review`
+    forever — and the dedup keeps declining forever. The only key that clears it is a NEW HEAD, and
+    a GREEN PR HAS NOTHING THAT WOULD EVER MINT ONE: the fix rung does not touch a green PR, and the
+    update-branch rung requires an armed one. There is no owner for the release.
+
+    (3) THE SPECIMEN. #2431 is green on every check, carries ZERO `remudero-review` status, and has
+    been open since 20:00Z the previous day. Its refusal was `PR is already closed — refusing to
+    post remudero-review against a closed lifecycle` at 20:13 and 20:15, during the shifted-clock
+    incident. THAT REFUSAL WAS CORRECT WHEN IT WAS WRITTEN. The condition it names — the PR being
+    closed — ended when the PR was reopened, and nothing re-reads it.
+
+    (4) THIS IS W1-T1110's SHAPE, AT A THIRD DISPOSITION. `blocked-fixable`/`conflicted` got
+    `fixRungStalledWithoutNewHead`, which re-arms a dedup whose attempt provably ended without
+    landing a head. `post-review` got nothing. The defect class is the same one both times: A
+    RECORDED ATTEMPT IS READ AS A COMPLETED OUTCOME.
+  design: |
+    (i) YES — THE TWO SETS SHOULD SIMPLY BE SEPARATE, AND THAT IS THE FIRST HALF OF THE FIX. A
+    DELIVERED VERDICT and a REFUSED ATTEMPT are not the same fact and must not share a key. This is
+    the one-value-for-two-outcomes class: a single membership test cannot answer "has this head been
+    judged?" and "has an attempt to judge it been declined?", and every consumer that asks the first
+    question silently receives the second. Splitting them is also nearly free, because the
+    `review.posted` half is close to vestigial already — the set's own doc records that a posted
+    verdict flips `reviewState` away from `"none"` on the next `buildOpenPrViews` read, so such a
+    row stops matching the `post-review` rule at all.
+
+    (ii) NO TIMER, AND THE FALSIFIER IS EXACT RATHER THAN MERELY CHEAP. The predicate is a refusal
+    with NO SUBSEQUENT `review.posted` for that key and NO NEW HEAD — the absence-of-an-owner shape
+    W1-T1067 established, where a release that depends on a signal nobody will ever send is not a
+    release. For the lifecycle refusal specifically the falsifier needs no clock at all: every
+    `OpenPrView` is built from `state=open`, so a PR that is in the sweep's view is BY CONSTRUCTION
+    open, and a refusal recorded because the PR was closed is PROVABLY stale the moment that PR
+    appears in the view again.
+
+    (iii) RE-TEST THE REFUSAL'S OWN GATE, DO NOT ASSUME IT PASSES. The re-arm returns the head to
+    the post-review lane; it does not decide the review. `decideReviewStatusPost` (`src/lib/review.ts`,
+    the W1-T228 lifecycle rule) still runs and may refuse again — which writes a FRESH refusal row
+    and re-dedups. That is what bounds the loop without a counter: a re-attempt happens only when
+    something the refusal depended on has actually changed.
+
+    (iv) A REFUSAL IS NOT A VERDICT AND MUST NOT BECOME ONE. Clearing the dedup must not
+    manufacture a PASS, must not arm anything, and must not touch the auto-merge path. The only
+    effect is that the head becomes eligible to be reviewed again.
+
+    (v) NOT IN SCOPE, NAMED: `review.post_failed`, which is a different step with its own
+    semantics; the `mergeable` arm's `riskRefused` map, which already expires on a new head or an
+    explicit operator override; W1-T1206's live-write guard and the clock-sweep incident that
+    PRODUCED this refusal, cited and not re-filed; and any change to what a new head costs a
+    pinned verdict.
+  acceptance:
+    - claim: "a refused review attempt and a delivered verdict no longer share one dedup set"
+      proof: "unit test: test/post-review-refusal-rearm.test.ts"
+    - claim: "a refusal whose named condition has provably ended stops suppressing its head"
+      proof: "unit test: test/post-review-refusal-rearm.test.ts"
+    - claim: "a head with a delivered verdict is still deduped exactly as today"
+      proof: "unit test: test/post-review-refusal-rearm.test.ts"
+    - claim: "a refusal that is still live keeps suppressing its head and no clock is consulted"
+      proof: "unit test: test/post-review-refusal-rearm.test.ts"
+    - claim: "clearing the dedup posts no verdict and arms nothing"
+      proof: "unit test: test/post-review-refusal-rearm.test.ts"
+  files: [src/lib/sweep.ts, test/post-review-refusal-rearm.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#transient-review-refusal-pins-green-pr-2026-08-22"
+  plan_refs: ["W1-T228", "W1-T254", "W1-T1067", "W1-T1110", "W1-T1206"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/post-review-refusal-rearm.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19 SPAN — the `files:` list is one module and its test.
+    The change decides whether a head is offered for review again; too loose and a head is
+    re-reviewed on every pass, too tight and this defect survives the fix.
+
+    THE OVERLAP IS DELIBERATE AND NAMED. `src/lib/sweep.ts` is also declared by W1-T1212, filed
+    alongside this one. `overlappingPaths` will serialize the two, which is correct: they edit the
+    same module for unrelated reasons and must not land concurrently.
+
+    THE SPECIMEN'S OWN REFUSAL ROWS WERE NOT READ FROM THIS HOST. Rationale (3)'s two timestamps and
+    the refusal text are the operator's, taken on the fleet container; the local ledger corpus
+    cannot reach that window — its newest `review.posted` row is 2026-08-14 — and that limit is
+    recorded here rather than papered over. What WAS verified locally is the source: the refusal
+    string is `decideReviewStatusPost`'s own, and `postReviewed`'s two feeding steps are read
+    directly from `priorActionsFromLedger`.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1213` resolves to
+    5873b01b8a10fc0912fc0412523e72e653bc9b8e, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight
+    surfaces were swept with a control PRE-QUALIFIED FOR EACH — a declared `- id:` on main, a shard
+    FILENAME on main, any occurrence in main's tree, the reservation refs, a LIVE `run-W1-T*` head
+    (a merged id's branch is deleted and reads zero for the wrong reason), main's commit messages
+    (an id that has never appeared in one reads zero there whatever its state), open PR
+    titles-plus-bodies, and merged PR bodies including the `Remudero-Task:` trailer. The subject
+    anchors were counted PER OPEN HEAD against main's own baseline rather than tested for presence.
