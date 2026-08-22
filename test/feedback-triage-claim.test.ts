@@ -407,8 +407,20 @@ test("W1-T1132 END TO END: a claimed entry makes the SECOND lane refuse WITHOUT 
     const planter = tmp("claim-planter-");
     try {
       execFileSync("git", ["clone", "--quiet", bare, planter], { encoding: "utf8", env: GIT_ENV });
+      // A REPO-LOCAL identity, same as `repoDir` below: `triageClaimReserverFor`'s `mintAnchor`
+      // runs `git commit-tree` through bare `spawnSync` (no `env` override), which inherits the
+      // fixture's empty `HOME` and finds no identity anywhere. Without this, `commit-tree` fails
+      // and its `deps.run` — which reads `stdout` without checking `status` — silently returns an
+      // EMPTY anchor, turning `attempt`'s push into `:refs/rmd-triage/<id>` (a delete-if-present,
+      // not a create) that no-ops on a ref that does not exist yet and still exits 0. The planted
+      // "first host" claim then never actually lands on `bare`, so the second lane's own push
+      // hits no contention and this test cannot prove what its name says.
+      git(planter, "config", "user.name", "remudero-test-other");
+      git(planter, "config", "user.email", "other@remudero.invalid");
       const other = triageClaimReserverFor(planter);
-      assert.equal(other.attempt(feedbackId, other.mintAnchor()), "created", "the first host holds the claim");
+      const otherAnchor = other.mintAnchor();
+      assert.notEqual(otherAnchor, "", "mintAnchor must produce a real commit, not a silently-failed empty one");
+      assert.equal(other.attempt(feedbackId, otherAnchor), "created", "the first host holds the claim");
     } finally {
       rmSync(planter, { recursive: true, force: true });
     }
