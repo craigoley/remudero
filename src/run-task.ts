@@ -20518,16 +20518,74 @@ export function buildSweepHook(
 }
 
 /**
+ * W1-T1211 — IS AN IN-FLIGHT TASK RUN ACTUALLY SPENDING A WORKER RIGHT NOW, PER THE LEDGER
+ * `buildSweepLightHook` ALREADY READS — never a process/pid probe (`liveInflightRuns` is
+ * host-local and carries W1-T1109's unrelated lock-vs-run-id consumer defect; design note ii of
+ * the task record forbids building on it here). An "in-flight task run" is the SAME `run.start`
+ * (open) / `verdict` (close) pair `deriveRunState` (status.ts) already keys a task's own lane on
+ * — never `daemon.start`/`drain.start`/etc, which are fleet lanes, not `runOne` dispatches.
+ *
+ * SAFE-DEFAULT, NEVER LOOSENS ON AMBIGUITY: this returns `true` (nothing is spending, the fix
+ * rung may act) ONLY when there is at least one open task run AND every open task run's most
+ * recently logged step is exactly `"ci.polling"` (run-task.ts's `waitForCiGreen` cadence log —
+ * see that call site) — the worker's own evidence that it is done and GitHub is the sole
+ * blocker (the task record's rationale (1)/(4)). Zero open runs (nothing recognizable in the
+ * ledger yet) or ANY open run whose latest step is something else — including a run that died
+ * mid-phase and logged nothing further — returns `false`, standing the fix rung down exactly as
+ * before this task: a run that crashed mid-phase holds no worker either, so treating it as
+ * "still spending" never dispatches anything wrongly, it only costs one deferred pass (design
+ * note ii: "the failure is safe").
+ */
+export function fixRungMayActBesideInFlightRun(lines: ReadonlyArray<Record<string, unknown>>): boolean {
+  // Per open task_id, the most recently seen step since its last `run.start` — `undefined`
+  // means "opened but nothing logged since", which the loop below treats as NOT confirmed idle.
+  const openTaskRuns = new Map<string, string | undefined>();
+  for (const line of lines) {
+    // Read into bare locals BEFORE the typeof guard, never inline off the `line` property
+    // access — test/ledger-rotation.test.ts's DECISION_RELEVANT_LEDGER_STEPS consumer-scan
+    // regexes grep every consumer file's raw text for a property-access equality/inequality
+    // check quoting a literal; an inline guard here once got its OWN type-guard literal
+    // mistaken for a decision-relevant step name (status.ts's `deriveRunState` carries the
+    // same fix, with the same comment).
+    const rawTaskId = line.task_id;
+    const taskId = typeof rawTaskId === "string" ? rawTaskId : undefined;
+    const rawStep = line.step;
+    const step = typeof rawStep === "string" ? rawStep : undefined;
+    if (!taskId || !step) continue;
+    if (step === "run.start") {
+      openTaskRuns.set(taskId, undefined);
+      continue;
+    }
+    if (step === "verdict") {
+      openTaskRuns.delete(taskId);
+      continue;
+    }
+    if (openTaskRuns.has(taskId)) openTaskRuns.set(taskId, step);
+  }
+  if (openTaskRuns.size === 0) return false;
+  for (const latestStep of openTaskRuns.values()) {
+    if (latestStep !== "ci.polling") return false;
+  }
+  return true;
+}
+
+/**
  * W1-T254 (the #707 fix) — the daemon's RESTRICTED LIGHT-SWEEP hook, ticked by
  * `DaemonDeps.sweepLight` WHILE `runOne` is in flight (see daemon.ts's doc on
  * that field). Wires the SAME `buildOpenPrViews` + `buildSweepEffects` +
  * `runSweep` the full sweep hook above uses — never a second, independently
- * built reconciler — but passes `actionable: d => d === "post-review"` so
- * ONLY the deterministic, sha-pinned, mutex-serialized re-post can fire here;
- * dispatchFix/close/escalate/depReview/arm always stand down
- * ("deferred to full sweep (light pass)") and re-derive on the next FULL
- * sweep instead, preserving the single-threaded reason those lanes exist
- * for. Deliberately excludes the credit-backfill rung and the inbox-draft
+ * built reconciler. `actionable` always admits `"post-review"` — the
+ * deterministic, sha-pinned, mutex-serialized re-post — and, as of W1-T1211,
+ * ALSO admits `"blocked-fixable"`/`"conflicted"` (the two dispositions that
+ * drive `dispatchFix`) but ONLY while {@link fixRungMayActBesideInFlightRun}
+ * reads every in-flight task run as `ci.polling` — no worker actually
+ * spending, so a fix-rung dispatch takes the host from zero workers to one,
+ * never two-against-one on the measured 6-against-4 host (the task record's
+ * rationale (3)/(4)). `close`/`escalate`/`depReview`/`arm` are UNCHANGED by
+ * this: they always stand down here ("deferred to full sweep (light pass)")
+ * and re-derive on the next FULL sweep, preserving the single-threaded
+ * reason those four (and dispatchFix beside a genuinely spending worker)
+ * exist for. Deliberately excludes the credit-backfill rung and the inbox-draft
  * rung the full hook also runs — both are heavier, not concurrency-safe
  * alongside an in-flight `runOne`, and unrelated to the #707 cadence gap
  * this ticker exists to close. Best-effort, own try/catch: a hiccup here
@@ -20559,6 +20617,9 @@ export function buildSweepLightHook(
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
+      // W1-T1211: read once per tick, BEFORE this pass writes anything of its own to the
+      // ledger — never `liveInflightRuns` (design note ii); see `fixRungMayActBesideInFlightRun`.
+      const fixRungMayAct = fixRungMayActBesideInFlightRun(readLedgerLines(ledgerPath));
       await runSweepLightPass(
         openPrs,
         {
@@ -20566,13 +20627,14 @@ export function buildSweepLightHook(
           ledgerPath,
           runId,
           log,
-          actionable: (d) => d === "post-review",
+          actionable: (d) => d === "post-review" || (fixRungMayAct && (d === "blocked-fixable" || d === "conflicted")),
           // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
           // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
           // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N
           // single-PR calls here could each pick "the oldest of one" and update-branch N PRs in
           // one tick, exactly the N+(N-1)+…+1 cost this shard exists to prevent. `updateBranch`
-          // joins dispatchFix/close/escalate/depReview/arm on the list that stands down here
+          // is always `undefined` here (unconditionally, unlike dispatchFix's W1-T1211 gate
+          // above) and joins close/escalate/depReview/arm on the list that stands down here
           // until the NEXT FULL sweep (`sweepCommand`/the daemon poll rung, both of which call
           // `runSweep` ONCE over the whole set) picks it back up.
           updateBranch: undefined,
