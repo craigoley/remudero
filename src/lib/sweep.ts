@@ -2648,7 +2648,7 @@ export type UpdateBranchOutcome = "updated" | "conflict" | "error";
  * EIGHT OF NINE open PRs read `behind` and SEVEN of those were armed, unchanged
  * for hours. But this predicate is deliberately INERT about that — it reports
  * and does not act, because acting means minting a NEW HEAD, and a verdict is
- * sha-pinned (`priorActionsFromLedger` keys `postReviewed` on
+ * sha-pinned (`priorActionsFromLedger` keys `reviewDelivered` on
  * `${taskId}@${headSha}`), so every update discards the verdict it was waiting
  * on. Clearing N that way costs N+(N-1)+…+1 reviews. The action half needs a
  * selection rule and its own ruling; this shard scopes it OUT.
@@ -2684,7 +2684,7 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
  * OWN SET, NEVER A SECOND PREDICATE COMPUTING THE SAME TWO FACTS (design note i).
  *
  * ONE PER PASS, OLDEST HEAD FIRST (design ii): updating mints a NEW head and a verdict is
- * sha-pinned (`priorActionsFromLedger` keys `postReviewed` on `${taskId}@${headSha}`), so every
+ * sha-pinned (`priorActionsFromLedger` keys `reviewDelivered` on `${taskId}@${headSha}`), so every
  * update discards the verdict it was waiting on — updating the WHOLE stalled set each pass costs
  * N+(N-1)+…+1 reviews (observed: updating one put four others behind and the fleet re-updated
  * them itself). {@link oldestActivityFirst} is the SAME comparator {@link selectReviewAdmission}
@@ -3341,26 +3341,48 @@ interface PriorActions {
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
   /**
-   * `taskId@head` keys with an actual OUTCOME for that head — a posted
-   * `review.posted` verdict OR an explicit `review.post_refused` refusal
-   * (W1-T254). NOT keyed off `sweep.disposed acted:true` like every other
-   * set here: an `acted:true` post-review dispose only proves the LANE WAS
-   * INVOKED, never that it reached a verdict (e.g. `postReviewStatusGuarded`
-   * can refuse internally without throwing) — keying dedup on the attempt
-   * used to suppress the SAME head forever after a single no-op invocation
-   * (a latent sibling of the #707 bug). Both ledger steps carry `head_sha`;
-   * a posted verdict ALSO flips the PR's live `reviewState` away from
-   * "none" on the next `buildOpenPrViews` read, so the row stops matching
-   * the post-review disposition rule at all — this set exists mainly to
-   * dedup a REFUSAL, which does not change GitHub's status and would
-   * otherwise re-route to post-review, and re-invoke, every single pass.
+   * `taskId@head` keys with a DELIVERED `review.posted` verdict for that exact head
+   * (W1-T254/W1-T1213). NOT keyed off `sweep.disposed acted:true` like every other set
+   * here: an `acted:true` post-review dispose only proves the LANE WAS INVOKED, never
+   * that it reached a verdict (e.g. `postReviewStatusGuarded` can refuse internally
+   * without throwing) — keying dedup on the attempt used to suppress the SAME head
+   * forever after a single no-op invocation (a latent sibling of the #707 bug). A
+   * posted verdict ALSO flips the PR's live `reviewState` away from "none" on the next
+   * `buildOpenPrViews` read, so the row stops matching the post-review disposition rule
+   * at all — this set exists mainly as a fast, ledger-local echo of that fact.
+   *
+   * W1-T1213: split off `reviewRefused` below — a DELIVERED VERDICT and a REFUSED
+   * ATTEMPT are not the same fact and must not share one key. See `reviewRefused`'s
+   * own doc for why a REFUSAL alone needs a set at all.
    */
-  postReviewed: Set<string>;
+  reviewDelivered: Set<string>;
+  /**
+   * `taskId@head` keys with an explicit `review.post_refused` refusal (W1-T254) that
+   * still suppresses this head — i.e. every refusal EXCEPT the one class
+   * {@link isReopenedClosedLifecycleRefusal} names as provably stale. A refusal leaves
+   * GitHub's live status untouched (unlike a posted verdict — see `reviewDelivered`'s
+   * doc), so without a key here the post-review lane would re-route to, and re-invoke,
+   * the SAME declined head every single pass.
+   *
+   * W1-T1213: `priorActionsFromLedger` (below) never admits the "PR is already closed"
+   * lifecycle refusal into this set. That refusal's own named condition — the PR being
+   * closed — is FALSIFIED BY CONSTRUCTION the moment this dedup is even consulted again:
+   * every {@link OpenPrView} comes from a `state=open` read, so a PR reaching this check
+   * is, by construction, open. Excluding that one refusal class re-arms the head for
+   * the post-review lane WITHOUT deciding anything — `decideReviewStatusPost`
+   * (`src/lib/review.ts`) still runs on the next attempt and re-tests the same lifecycle
+   * gate fresh, and can refuse again (writing a fresh row, re-dedupping). Every OTHER
+   * refusal reason — including the sibling "PR is already merged" half of that same
+   * branch (a merged PR can never return to `state=open`, so it has no falsifier) and
+   * the "attempt threw" refusal this module writes further below — keeps suppressing
+   * forever, no clock consulted.
+   */
+  reviewRefused: Set<string>;
   /**
    * W1-T970 — `${prNumber}@${headSha}` keys, built off the risk judge's OWN step
-   * (`risk_judge.escalated`), the SAME shape `postReviewed` above takes off `review.posted`/
-   * `review.post_refused`: a set built from another lane's own ledger line, never from
-   * `sweep.disposed`. PR-NUMBER-KEYED, NOT TASK-ID-KEYED — deliberately unlike `postReviewed`:
+   * (`risk_judge.escalated`), the SAME shape `reviewDelivered`/`reviewRefused` above take off
+   * `review.posted`/`review.post_refused`: a set built from another lane's own ledger line, never
+   * from `sweep.disposed`. PR-NUMBER-KEYED, NOT TASK-ID-KEYED — deliberately unlike those two:
    * the sibling sets `armed`/`fixed`/`escalated` already key on `pr_number`, the sweep has
    * `pr.prNumber` in hand at the lookup, and `runRiskJudge` (risk-judge.ts) now emits it, so
    * there is no `??` fallback anywhere on this path — the exact `${pr.taskId ?? ""}@${pr.headSha}`
@@ -3450,26 +3472,49 @@ function budgetFloorStandDown(e: unknown, disposition: Disposition): string | un
   return `gh budget at or below the stand-down floor (${e.resource} at ${e.remaining}/${e.limit}) — ${cost}`;
 }
 
+/**
+ * W1-T1213 — is `reason` the SPECIFIC "PR is already closed" half of `decideReviewStatusPost`'s
+ * (`src/lib/review.ts`) lifecycle refusal? Matched on that function's own literal, verbatim —
+ * the task's own recon confirms the string is `decideReviewStatusPost`'s, so this is the
+ * intended read, not a guess at prose that could drift.
+ *
+ * DELIBERATELY NOT the "PR is already merged" sibling half of the SAME branch: a merged PR has
+ * no GitHub transition back to `state=open`, so that refusal has no falsifier and must keep
+ * suppressing forever, exactly like every other refusal reason (design (ii)/(v)).
+ */
+function isReopenedClosedLifecycleRefusal(reason: unknown): boolean {
+  return typeof reason === "string" && reason.startsWith("PR is already closed — refusing to post remudero-review");
+}
+
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
   const closed = new Set<number>();
   const escalated = new Set<string>();
   const depReviewed = new Set<string>();
-  const postReviewed = new Set<string>();
+  const reviewDelivered = new Set<string>();
+  const reviewRefused = new Set<string>();
   const riskRefused = new Map<string, string | undefined>();
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   for (const line of lines) {
-    // W1-T254: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
-    // `sweep.disposed`. See PriorActions.postReviewed's doc.
+    // W1-T254/W1-T1213: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
+    // `sweep.disposed`. See PriorActions.reviewDelivered/reviewRefused's docs.
     if (line.step === "review.posted" || line.step === "review.post_refused") {
       if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
-        postReviewed.add(`${line.task_id}@${line.head_sha}`);
+        const key = `${line.task_id}@${line.head_sha}`;
+        if (line.step === "review.posted") {
+          reviewDelivered.add(key);
+        } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
+          // W1-T1213: the "PR is already closed" refusal is excluded here, never added to
+          // `reviewRefused` — see that field's own doc for why reaching this fold at all
+          // already proves the refusal's named condition (the PR being closed) has ended.
+          reviewRefused.add(key);
+        }
       }
       continue;
     }
-    // W1-T970: OUTCOME-KEYED off the risk judge's OWN step, exactly like `postReviewed` above —
-    // never `sweep.disposed`. PR-NUMBER-KEYED, NOT TASK-ID-KEYED (see PriorActions.riskRefused's
+    // W1-T970: OUTCOME-KEYED off the risk judge's OWN step, exactly like `reviewDelivered`/
+    // `reviewRefused` above — never `sweep.disposed`. PR-NUMBER-KEYED, NOT TASK-ID-KEYED (see PriorActions.riskRefused's
     // doc for why) — both fields are REQUIRED, no `??` fallback, so a pre-W1-T970 escalation row
     // (written before `runRiskJudge` emitted these fields) is never matched.
     if (line.step === "risk_judge.escalated") {
@@ -3530,7 +3575,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       // `review.posted`/`review.post_refused` branch above.
     }
   }
-  return { armed, fixed, closed, escalated, depReviewed, postReviewed, riskRefused, absentRepushes };
+  return { armed, fixed, closed, escalated, depReviewed, reviewDelivered, reviewRefused, riskRefused, absentRepushes };
 }
 
 /**
@@ -3814,7 +3859,7 @@ const inFlightReviewKeys = new Set<string>();
  * no longer `policy.dispatchLanes`), each against
  * a DISTINCT `${taskId}@${headSha}` key claimed synchronously during the walk
  * (real mutual exclusion the single-threaded walk used to supply for free —
- * see `PriorActions.postReviewed`'s doc). A review beyond budget stands down
+ * see `PriorActions.reviewDelivered`/`reviewRefused`'s docs). A review beyond budget stands down
  * this pass and is re-derived on the next one — a ceiling, never a target: a
  * pass with zero eligible reviews starts zero lanes. `summary.actions` still
  * comes back in `openPrs` order regardless of which phase finalized each PR.
@@ -3927,8 +3972,8 @@ export async function runSweep(
 
   // ── W1-T473/W1-T513 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────
   // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs and
-  // never had before W1-T473: `prior.postReviewed` (built once, above, from
-  // the ledger) is a snapshot taken BEFORE this pass's own postReview calls
+  // never had before W1-T473: `prior.reviewDelivered`/`prior.reviewRefused` (built once, above,
+  // from the ledger) are a snapshot taken BEFORE this pass's own postReview calls
   // can write anything back — safe under a single-threaded walk (no second
   // reader exists between that read and a ledger write), unsafe the moment
   // two `post-review` PRs are handled at once. This set is consulted and
@@ -4221,13 +4266,22 @@ export async function runSweep(
       case "dep-review":
         alreadyDone = prior.depReviewed.has(`${pr.prNumber}@${pr.headSha}`);
         break;
-      case "post-review":
-        // W1-T254: OUTCOME-keyed — see PriorActions.postReviewed's doc. Keyed
+      case "post-review": {
+        // W1-T254: OUTCOME-keyed — see PriorActions.reviewDelivered/reviewRefused's docs. Keyed
         // by taskId (never prNumber — review.posted/review.post_refused carry
         // no PR number, only the taskId the review lane itself resolved,
         // matching `lastPostedReviewStatusFromLedger`'s established key).
-        alreadyDone = prior.postReviewed.has(`${pr.taskId ?? ""}@${pr.headSha}`);
+        //
+        // W1-T1213: a DELIVERED verdict suppresses this head forever, exactly as before. A
+        // REFUSED attempt also suppresses — UNLESS `priorActionsFromLedger` excluded it from
+        // `reviewRefused` as the stale "PR is already closed" refusal, in which case reaching
+        // this very check already proves the PR is open again, and the head is offered to the
+        // post-review lane once more (which re-tests `decideReviewStatusPost` fresh — see that
+        // set's own doc; this clears the dedup, it does not post a verdict or arm anything).
+        const reviewKey = `${pr.taskId ?? ""}@${pr.headSha}`;
+        alreadyDone = prior.reviewDelivered.has(reviewKey) || prior.reviewRefused.has(reviewKey);
         break;
+      }
       case "wait":
         // W1-T114: WAIT never gates an effect — there is nothing to dispatch,
         // only time to let pass. Forcing `alreadyDone` true (rather than
@@ -4606,7 +4660,7 @@ export async function runSweep(
           false,
           true,
           undefined,
-          `duplicate review key (${reviewKey}) already claimed this pass — see PriorActions.postReviewed's doc`,
+          `duplicate review key (${reviewKey}) already claimed this pass — see PriorActions.reviewDelivered/reviewRefused's docs`,
           undefined,
           undefined,
         );
@@ -4747,8 +4801,8 @@ export async function runSweep(
                 error: actionError,
               });
               // W1-T529 design (v) — THE MISSING DEDUP KEY. `sweep.action_failed` alone leaves
-              // NO key `PriorActions.postReviewed` can see: that set is built ONLY from
-              // `review.posted`/`review.post_refused` lines (see its own doc above), never from
+              // NO key `PriorActions.reviewDelivered`/`reviewRefused` can see: those sets are built
+              // ONLY from `review.posted`/`review.post_refused` lines (see their own docs above), never from
               // `sweep.disposed`/`sweep.action_failed`. Without this, a thrown attempt —
               // including a guarded call standing down at the floor once one is wired ahead of
               // this call (lib/open-prs-rest.ts's `GhCallPacer`) — re-attempts THIS EXACT HEAD
@@ -4764,7 +4818,7 @@ export async function runSweep(
                 run_id: deps.runId,
                 // W1-T529 (v) — THE EMPTY STRING, NEVER THE "SWEEP" PLACEHOLDER, AND THE DIFFERENCE
                 // IS THE WHOLE DEDUP. The consult site reads
-                // `prior.postReviewed.has(`${pr.taskId ?? ""}@${pr.headSha}`)`, so a task-id-less PR
+                // `prior.reviewRefused.has(`${pr.taskId ?? ""}@${pr.headSha}`)`, so a task-id-less PR
                 // looks up `@<sha>`. Writing "SWEEP" here produced `SWEEP@<sha>`: a row that reads
                 // correctly in the ledger, matches nothing, and left the attempt repeating every
                 // pass — MEASURED against this file before the fix, 3 attempts across 3 passes for a
@@ -4976,7 +5030,7 @@ export async function runSweepLightPass(
 /**
  * W1-T526 — WHICH ONE OPEN PR, IF ANY, {@link runSweepLightPass} admits into `post-review` this
  * pass. Branch protection's `strict: true` means only ONE open PR can merge before every OTHER
- * one reads `behind`, and a `behind` PR's next push mints a NEW head sha — `postReviewed`
+ * one reads `behind`, and a `behind` PR's next push mints a NEW head sha — `reviewDelivered`
  * (`priorActionsFromLedger`, above) is sha-pinned, so that push throws away the very verdict
  * this lane just posted. Before this task `runSweepLightPass` fanned every post-review-eligible
  * PR out to its own concurrent `runSweep` call (design note, its own doc above), so a queue of N
