@@ -140,3 +140,22 @@
     explaining WHY a head is gated is archived while the gate itself is retained indefinitely.
     That is why two of the four gated PRs' causes were nearly unrecoverable, and it is stated here
     so the next reader does not have to rediscover it — not as work this task performs.
+
+    A SECOND, DISTINCT FAILURE AT THE SAME CALL SITE — MEASURED ON THE OTHER HOST, AND NEITHER
+    OBSERVATION REFUTES THE OTHER. Over the mini's deduped ledger union, NINE of sixteen
+    `sweep.fix.error` rows between 2026-07-18 and 2026-08-12 are this same `checkout -B`, and every
+    one of the nine reads `fatal: '<branch>' is already used by worktree at …` — A BRANCH-NAME
+    COLLISION, NOT A LOCK. `could not lock config file` reads ZERO in that corpus. That is a WINDOW
+    LIMIT rather than a contradiction: the mini's newest `sweep.disposed` is 2026-08-13, so its
+    window cannot reach the fleet's 2026-08-22 lock rows at all. TWO HOSTS, TWO WINDOWS, ONE CALL
+    SITE, TWO CONTENTION FAILURES.
+
+    WHAT THAT MEANS FOR THE REMEDY, STATED WITHOUT DISTURBING THIS TASK'S OWN CRITERIA: dropping the
+    tracking write closes the LOCK failure and does NOT close the COLLISION — `checkout -B`
+    force-creates a branch name, which still throws whenever another worktree already holds it,
+    tracked or not. This shard's third criterion requires the run branch to stay pushable, which is
+    why detaching is refused here; closing the second failure therefore needs something beyond the
+    tracking flag, and that is NAMED rather than decided in this task. W1-T232 is the precedent and
+    is cited rather than re-argued: it removed this exact command from the REVIEW worktree path,
+    where nothing downstream needed a branch — a distinction that does not transfer to a rung that
+    commits and pushes.
