@@ -1,0 +1,161 @@
+- id: W1-T1129
+  title: "THE FIX RUNG TAKES `.git/config.lock` TO SET UPSTREAM TRACKING NOTHING EVER READS, AND LOSES IT TO A CONCURRENT WRITER ON A REPO THE DESIGN RUNS SIX LANES AGAINST — `git checkout -B <branch> origin/<branch>` writes `branch.<name>.remote/.merge` into the SHARED `.git/config`, and the review lane already refuses that exact call for the same reason and says so in its own comment"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main`
+    before any reading, against LOCAL SOURCE and the LEDGER UNION (`ledger.ndjson` plus every
+    rotated `ledger.*.ndjson`). Every zero carries a positive control on the same scan. The
+    daemon's checkout was not touched and no lock was cleared by this recon.
+
+    (1) IT IS NOT A ONE-OFF AND IT IS NOT SLOWING DOWN. Of the `sweep.fix.error` rows in the
+    union, 27 carry `could not lock config file .git/config: File exists`; the remaining 11 are
+    `gh pr view` failures and carry no lock text. The lock failures run continuously from
+    2026-08-20T14:07:30.901Z to 2026-08-22T08:03:30.566Z, including #2455 at 05:16:23.048Z and
+    #2434 at 08:03:30.566Z — the identical `git checkout -B` pair. Every currently-gated PR
+    carries one immediately before its gate.
+
+    (2) W1-T1036 SHIPPED AND IS NOT THE ANSWER, WHICH IS THE POINT. #2268 merged
+    2026-08-20T05:31:13Z and `isConfigLockStale` (`src/lib/worker.ts`) requires ALL THREE of: the
+    lock older than a 2000ms grace, a `pgrep git` probe that RAN, and that probe finding NO live
+    git process. Under contention a git process IS alive — the one holding the lock — so the
+    predicate correctly declines, exactly as its own doc demands ("THIS PREDICATE MAY NOT BE
+    LOOSENED TOWARD RECLAMATION"). Nothing here asks it to be loosened and it is not re-filed.
+    Note the order: the first lock failure in the union is 8.6 hours AFTER that reclaimer merged,
+    and the four days of `sweep.fix.error` rows before it contain none. That is a correlation
+    reported as one — a plausible reading is that clearing dead locks let the fleet run at a
+    concurrency where live contention became the binding constraint, but this recon did not
+    establish causation and does not claim it.
+
+    (3) WHO CONTENDS — THE WRITERS ARE NAMEABLE FROM SOURCE. Five call sites write the SHARED
+    `.git/config` of one checkout (a worktree's config IS the main repo's config):
+      a. `src/run-task.ts` — the fix rung's `git checkout -B <branch> origin/<branch>`, which sets
+         upstream tracking. THIS is the call that fails.
+      b. `src/run-task.ts` — the fix rung's own `git worktree add <path> origin/<branch>`,
+         immediately before it.
+      c. `src/lib/worker.ts` — the dispatch worker's `git worktree add -b <branch> <path> <base>`.
+         W1-T1036's own title records that this writes `branch.<name>.remote/.merge`.
+      d. `src/lib/worker.ts` — `git config core.hooksPath hooks`, an explicit config write run per
+         worktree, which in a worktree lands in the common config.
+      e. `src/run-task.ts` — the review lane's `git worktree add <path> origin/<branch>`, detached.
+    Concurrency is the design, not an accident: `plan/policy.yaml` sets `dispatchLanes: 3` and
+    W1-T1049 records that `runSweep` reads a second, independent review-lane ceiling of 3, "and
+    the two ceilings ADD on the host" for a configured worst case of six concurrent workers. Any
+    of (c)/(d)/(e) can overlap (a)/(b). The sweep's own dispatch loop is serial and AWAITED, so it
+    cannot contend with itself — which is why the holder must be another lane.
+
+    (4) AND THE LEDGER NAMES THE VICTIM ON ALL 27 OCCASIONS AND THE HOLDER ON NONE. There is no
+    step recording that a process took or released `.git/config.lock`. `worktree.add` is the only
+    ledgered materialisation, and the nearest one preceding ANY of the 27 failures is over
+    forty minutes earlier in every case, so the holder is one of the UNLEDGERED writers above.
+    A CANDIDATE WAS TESTED AND ELIMINATED: every one of the 27 failures follows a
+    `sweep.post_fix_reverification.summary` row by 1.52-6.66s, which looks like a mechanism until
+    the base rate is taken — that row appears 1154 times and only 27 are followed by a failure.
+    It marks the start of a full pass, so it dates the failure inside the pass and says nothing
+    about who holds the lock. Identifying the holder is not possible with the instruments that
+    exist today; this task therefore removes the write rather than racing to name the writer.
+
+    (5) THE FIX RUNG DOES NOT NEED WHAT THE LOCK IS TAKEN FOR. Upstream tracking is the config
+    write. Nothing in `src/` reads it: zero hits for `@{u}`, `@{upstream}` or `--set-upstream-to`
+    (control: `rev-parse` appears at 15 sites in `src/run-task.ts` alone on the same scan), and
+    `gitPushRunBranch` pushes an explicit `origin HEAD` refspec, with its `setUpstream` option
+    passed at exactly one call site — `src/spike.ts`'s push fallback — never by the fix rung or
+    the sweep. So the tracking configuration written by (a) is created, contended over, and never
+    consulted.
+
+    (6) THE REPO HAS ALREADY MADE THIS DECISION ONCE, IN A COMMENT, FOR THIS REASON. The review
+    lane's `realReviewWorktreeDeps` (`src/run-task.ts`) states: "NO `checkout -B` — `worktree add
+    <path> origin/<branch>` alone already leaves `<path>` at the right commit, DETACHED, and
+    detached is all a review's file reads ever need. A named local branch here only exists to
+    collide with whatever else holds that name." The fix rung is the lane that did not get that
+    treatment.
+
+    (7) BUT `--detach` IS NOT AVAILABLE TO THE FIX RUNG, AND SAYING OTHERWISE WOULD BE WRONG. The
+    fix rung PUSHES: `gitPushRunBranch` runs `git push origin HEAD`, which from a detached HEAD
+    has no branch to resolve and fails. The fix rung genuinely needs a named local branch. What it
+    does not need is the TRACKING that branch acquires by default when its start point is a
+    remote-tracking ref. `--no-track` on the branch-creating call keeps the named branch and drops
+    the config write; the same applies to the dispatch worker's `worktree add -b` at (c). This is
+    the difference between removing the contention and retrying around it, and no retry, backoff
+    or timer is proposed anywhere in this task.
+
+    (8) THE SECOND HALF IS ALREADY FILED AND IS NOT RE-FILED HERE. `dispatchFix` catches its own
+    throw, logs `sweep.fix.error` and returns normally, so `runSweep`'s existing `catch` — which
+    already sets `acted = false` — never fires, and the disposed row records `acted: true` with no
+    `actionError` field 81ms later on #2455 and 41ms later on #2434. `acted` SHOULD be false on a
+    caught error, and the cost is small and one-directional: a dispatch that genuinely started and
+    then failed late would also stop seeding the dedup, so the next pass may re-attempt it — which
+    is what the strike cap already bounds, and is strictly better than a gate no producer can
+    open. THAT REMEDY IS W1-T1127's, filed as #2466 and OPEN AT THE TIME OF WRITING — which is
+    why it does not yet appear on main. This task is its producer, not a second copy of it: fixing
+    the recorder makes a failed dispatch legible, fixing the contention stops it failing.
+
+    (9) NOT IN SCOPE, NAMED. No liveness check on `prior.fixed` is proposed: `dispatchFix` is
+    awaited to completion, so the `acted: true` row is always written after the run has ended and
+    a liveness read would open the gate on every pass. No retry, no backoff, no timer. W1-T1036's
+    staleness reclaimer is untouched and must not be loosened. `dispatchLanes` and the review-lane
+    ceiling are not re-tuned — W1-T1049 owns that argument, and lowering concurrency would mask
+    this rather than remove it. Whether `git config core.hooksPath` should use `--worktree` is a
+    real adjacent question and is deliberately left to its own task.
+  acceptance:
+    - claim: "the fix rung creates its run branch without writing upstream tracking"
+      proof: "unit test: test/git-config-lock-contention.test.ts"
+    - claim: "the branch still lands at the same commit the tracked form produced"
+      proof: "unit test: test/git-config-lock-contention.test.ts"
+    - claim: "the run branch is still pushable, which is why detaching is not the remedy"
+      proof: "unit test: test/git-config-lock-contention.test.ts"
+    - claim: "the dispatch worker's worktree creation also stops writing tracking config"
+      proof: "unit test: test/git-config-lock-contention.test.ts"
+    - claim: "a genuinely stale lock is still reclaimed on the existing three-rung predicate"
+      proof: "unit test: test/git-config-lock-contention.test.ts"
+  files: [src/run-task.ts, src/lib/worker.ts, test/git-config-lock-contention.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#git-config-lock-contention-2026-08-22"
+  plan_refs: ["W1-T1036", "W1-T1127", "W1-T1049", "W1-T1110", "W1-T1116"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:`
+    form naming `test/git-config-lock-contention.test.ts`, declared in `files:`, so on the filing
+    PR it resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The change alters how every fix dispatch and every
+    dispatch worker materialises a branch in the live repository the daemon runs from, so a
+    mistake breaks worker creation for every lane at once rather than failing an assertion.
+    Claiming Rule 19 forced the band would be a false claim in the direction that flatters the
+    filing.
+
+    BOTH `src/` FILES ARE DECLARED BECAUSE FIXING ONE SIDE LEAVES THE OTHER CONTENDING. Removing
+    the tracking write from the fix rung alone removes the observed VICTIM; the dispatch worker's
+    own branch-creating `worktree add -b` and its `git config core.hooksPath` write remain
+    candidate HOLDERS of the same lock. A remedy that only de-tracks the loser would leave the
+    race intact and the next failure somewhere else.
+
+    ROTATION NOTE, CARRIED AS A NOTE AND NOT AS A SECOND CONCERN: `sweep.disposed` is in
+    `DECISION_RELEVANT_LEDGER_STEPS` and survives rotation; `sweep.fix.error` is not. The row
+    explaining WHY a head is gated is archived while the gate itself is retained indefinitely.
+    That is why two of the four gated PRs' causes were nearly unrecoverable, and it is stated here
+    so the next reader does not have to rediscover it — not as work this task performs.
+
+    A SECOND, DISTINCT FAILURE AT THE SAME CALL SITE — MEASURED ON THE OTHER HOST, AND NEITHER
+    OBSERVATION REFUTES THE OTHER. Over the mini's deduped ledger union, NINE of sixteen
+    `sweep.fix.error` rows between 2026-07-18 and 2026-08-12 are this same `checkout -B`, and every
+    one of the nine reads `fatal: '<branch>' is already used by worktree at …` — A BRANCH-NAME
+    COLLISION, NOT A LOCK. `could not lock config file` reads ZERO in that corpus. That is a WINDOW
+    LIMIT rather than a contradiction: the mini's newest `sweep.disposed` is 2026-08-13, so its
+    window cannot reach the fleet's 2026-08-22 lock rows at all. TWO HOSTS, TWO WINDOWS, ONE CALL
+    SITE, TWO CONTENTION FAILURES.
+
+    WHAT THAT MEANS FOR THE REMEDY, STATED WITHOUT DISTURBING THIS TASK'S OWN CRITERIA: dropping the
+    tracking write closes the LOCK failure and does NOT close the COLLISION — `checkout -B`
+    force-creates a branch name, which still throws whenever another worktree already holds it,
+    tracked or not. This shard's third criterion requires the run branch to stay pushable, which is
+    why detaching is refused here; closing the second failure therefore needs something beyond the
+    tracking flag, and that is NAMED rather than decided in this task. W1-T232 is the precedent and
+    is cited rather than re-argued: it removed this exact command from the REVIEW worktree path,
+    where nothing downstream needed a branch — a distinction that does not transfer to a rung that
+    commits and pushes.
