@@ -178,6 +178,7 @@ import {
   type OpenIssue,
   type PresenceMode, prReferentFromIssueText,} from "./lib/escalate.js";
 import {
+  boardPrsRestArgs,
   createGhCallPacer,
   fetchOpenPrsRest,
   fetchSinglePrRest,
@@ -14887,6 +14888,55 @@ export function readPushedRunBranchesOutput(
     return "";
   }
 }
+
+/** Bounded page walk — same shape and bound `reapBranchesCommand`'s own `state=all` read already
+ *  uses (8 pages, 100/page = 800 rows), never a per-branch lookup. */
+const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
+
+/**
+ * W1-T1207 — the ONE additional read {@link DrainDeps.readClosedRunBranchPrs} needs: a batched,
+ * paginated `pulls?state=closed` sweep, over the SAME `boardPrsRestArgs` shape `rmd reap-branches`
+ * already reads (design (iii): "the capability is precedented and the cost is ONE additional
+ * batched call per pass, never one lookup per branch"). Returns raw `<head-ref>\t<unmerged>` rows
+ * for {@link closedUnmergedRunBranchTaskIds} (drain.ts) to parse ONCE PER PASS, above the dispatch
+ * loop — never re-read per candidate, mirroring `readPushedRunBranchesOutput`'s own contract.
+ *
+ * `state=closed` returns BOTH merged and unmerged pull requests — GitHub has no separate
+ * "abandoned" state — so `merged_at != null` is the discriminator; a merged row is emitted too
+ * (as `unmerged=false`) rather than filtered here, so the raw-output contract stays a straight
+ * transcription of what the API returned and every interpretation lives in the one parser that
+ * already owns it.
+ *
+ * BOUNDED, sorted newest-updated-first (`boardPrsRestArgs`'s own `sort=updated&direction=desc`):
+ * a run branch is a RECENT artifact (its name embeds the epoch millis it was pushed at) and
+ * `rmd reap-branches` already accepts this same bound for the identical "did this branch's PR
+ * close" question, so this read stops at {@link RUN_BRANCH_CLOSED_PR_MAX_PAGES} pages, or the
+ * first page shorter than a full page, whichever comes first.
+ *
+ * FAILS TOWARD STILL BLOCKING, THE OPPOSITE DIRECTION FROM `readPushedRunBranchesOutput`'s OWN
+ * FAIL OPEN: a throw here (network blip, auth, rate limit) yields `""`, which parses to an EMPTY
+ * exclusion set (drain.ts's `closedUnmergedRunBranchTaskIds("")`), so every pushed run branch
+ * keeps blocking exactly as it did before this dependency existed — see that field's own doc for
+ * why this direction, not the other one, is the only safe default for a guard deciding whether a
+ * duplicate build starts.
+ */
+export function readRunBranchClosedPrsOutput(owner: string, repo: string, fetch: GhApiFetcher = ghJson): string {
+  const lines: string[] = [];
+  try {
+    for (let page = 1; page <= RUN_BRANCH_CLOSED_PR_MAX_PAGES; page++) {
+      const rows = fetch(boardPrsRestArgs(owner, repo, "closed", page, 100)) as RestPullRow[];
+      for (const row of rows) {
+        const ref = row.head?.ref;
+        if (!ref) continue;
+        lines.push(`${ref}\t${row.merged_at == null}`);
+      }
+      if (rows.length < 100) break;
+    }
+  } catch {
+    return "";
+  }
+  return lines.join("\n");
+}
 /**
  * The post-drain rundown PUSH (W1-T141/W1-T144), extracted from drainCommand so the glue —
  * build the classified rundown, print it, and push it through the SAME digest channel
@@ -15213,6 +15263,13 @@ async function drainCommand(
         // EMPTY set, so no task is refused — precisely today's behaviour. The degraded outcome is
         // "no improvement", never "dispatch wrongly blocked".
         readPushedRunBranches: () => readPushedRunBranchesOutput(),
+        // W1-T1207 — THE SIBLING READ design (iii) ADDS: a run branch whose PR is CLOSED AND
+        // UNMERGED must stop blocking dispatch (a leftover, not a signal — design (i)), so the
+        // predicate above needs the PR's state as well as the branch's existence. ONE batched,
+        // paginated `pulls?state=closed` sweep per pass, parsed once by
+        // `closedUnmergedRunBranchTaskIds` (drain.ts) and subtracted from the pushed-branch set —
+        // never a second predicate threaded through the chain, and never one lookup per branch.
+        readClosedRunBranchPrs: () => readRunBranchClosedPrsOutput(owner, repo),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(owner, repo, prNumber),
