@@ -77,7 +77,23 @@ export const SPAWN_REACHING = new Map([
  */
 export const CLOCK_ARTIFACTS = new Map([
   ["prune-liveness", "compares a real FILESYSTEM MTIME against the shifted clock — mtimes are not shiftable, so a just-created directory reads as 400 days old. Its fixture is already derived; there is no literal to convert"],
-  ["emissions", "reads the REAL on-disk ledger through a Date.now()-derived window cutoff — shifted, the window lands in the future and excludes every real line"],
+  // W1-T1104: `emissions` REMOVED — measured PASSING at +400d by the sweep running in CI, which is
+  // the only environment whose verdict this gate acts on. Its stated mechanism ("reads the REAL
+  // on-disk ledger through a Date.now()-derived window cutoff") no longer holds there.
+  //
+  // IT WAS BRIEFLY RESTORED ON A LOCAL MEASUREMENT THAT WAS NOT EVIDENCE, and the mistake is
+  // recorded because the next person will be tempted the same way: in a dev container the suite
+  // fails at +400d — twice, reproducibly — but it ALSO fails UNSHIFTED there, so the failure has
+  // nothing to do with the clock and says nothing about this exclusion. Two runs in one container
+  // are one measurement taken twice. THE CONTROL THAT SETTLES IT IS THE UNSHIFTED RUN, not a
+  // repeat of the shifted one:
+  //   node --test --import tsx test/emissions.test.ts            # must PASS, or your box is the
+  //   FK_SHIFT_DAYS=400 node --test --import tsx \               # variable, not the clock
+  //     --import "$PWD/scripts/clock-shift.mjs" test/emissions.test.ts
+  // (the absolute `--import` matters — a bare `scripts/clock-shift.mjs` resolves as a PACKAGE and
+  // dies with ERR_MODULE_NOT_FOUND, which reads as a clock failure and is not one.)
+  //
+  // Re-excluding it needs a mechanism measured where the gate runs, not a restored copy of this one.
   ["serve.glance", "drives a Playwright page whose BROWSER clock is unshifted, so server-rendered shifted times disagree with it (observed: `was \"in 9600h1m\"`)"],
 ]);
 
@@ -183,6 +199,26 @@ export function failingTitles(output) {
   return [...output.matchAll(/^not ok \d+ - (.+)$/gm)].map((m) => m[1].trim()).slice(0, 5);
 }
 
+/**
+ * TEMPORARY DIAGNOSTIC (W1-T1104 round 2): the report's own `failingTitles` names WHICH test
+ * failed but never WHY, and this task hit a suite (four of them, in fact) that failed
+ * deterministically in CI across three separate runs while passing every local repro attempted —
+ * `failingTitles` alone gave no way to tell an assertion mismatch from an unrelated throw. This
+ * captures the first raw TAP diagnostic block (the YAML under the first `not ok` line) so a report
+ * read on a machine nobody can log into still carries the actual failure, not just its title.
+ */
+export function firstFailureDetail(output) {
+  const lines = String(output).split("\n");
+  const start = lines.findIndex((l) => /^not ok \d+ - /.test(l));
+  if (start === -1) return "";
+  const out = [];
+  for (let i = start; i < lines.length && out.length < 30; i++) {
+    if (i > start && /^(not ok|ok) \d+ - /.test(lines[i])) break;
+    out.push(lines[i]);
+  }
+  return out.join("\n").trimEnd();
+}
+
 // Every collaborator injected LAST with a real default, so the CLI call stays `main()` while a
 // test can exercise the list / pass / drift / stale-exclusion paths without spawning anything.
 // Returns the exit code rather than calling process.exit, so assertions read a value.
@@ -241,6 +277,11 @@ export function main({
       for (const t of failingTitles(d.output)) log(`    failing test  : ${t}`);
       log(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
       log(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
+      const detail = firstFailureDetail(d.output);
+      if (detail) {
+        log(`    detail        :`);
+        for (const line of detail.split("\n")) log(`      ${line}`);
+      }
     }
     // A RATCHET, not absolute cleanliness (W1-T1128): the verdict compares against the recorded
     // ceiling, and each of the three relations gets its own line so an operator can tell "still
