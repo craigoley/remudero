@@ -18645,6 +18645,34 @@ export function buildFixRungDispatchArgs(args: {
 }
 
 /**
+ * W1-T1129: the fix rung's throwaway worktree AND its named local branch, extracted from
+ * `dispatchFix` (its one call site) purely so this exact git sequence is directly unit-testable
+ * against a real repo, with no behaviour change beyond the `--no-track` below.
+ *
+ * `origin/<branch>` is a remote-tracking start point, so a plain `checkout -B <branch>
+ * origin/<branch>` defaults to ALSO writing `branch.<branch>.remote`/`.merge` into
+ * `.git/config` — a config write that, in a worktree, lands in the ONE file the main
+ * checkout and every sibling worktree share, and races every other concurrent lane's own
+ * config write for the same `.git/config.lock` (rationale (1)/(3)/(4)). Nothing in `src/`
+ * ever reads that tracking config — `gitPushRunBranch` pushes an explicit `origin HEAD`
+ * refspec (rationale (5)) — so the write is created, contended over, and never consulted.
+ * The review lane's `realReviewWorktreeDeps` already skips `checkout -B` entirely for this
+ * same reason (see its own comment, above); the fix rung cannot follow it there because it
+ * PUSHES, and a detached HEAD has no branch for `git push origin HEAD` to resolve (rationale
+ * (7)). `--no-track` keeps the named local branch — still landing at `origin/<branch>`'s
+ * commit, still pushable — while dropping only the tracking-config write.
+ */
+export function createFixRungWorktree(repoDir: string, worktreePath: string, branch: string): void {
+  execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
+  execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
+  execFileSync(
+    "git",
+    ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`, "--no-track"],
+    { stdio: "pipe" },
+  );
+}
+
+/**
  * Wire the four gated effects to their real implementations. dispatchFix
  * reconstructs a W1-T76 `runFixRung` invocation for a PR discovered COLD (no live
  * run/session): it checks the PR head branch out into a scratch worktree, seeds a
@@ -19191,9 +19219,7 @@ export function buildSweepEffects(
           return;
         }
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
-        execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
-        execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${realBranch}`], { stdio: "pipe" });
-        execFileSync("git", ["-C", worktreePath, "checkout", "-B", realBranch, `origin/${realBranch}`], { stdio: "pipe" });
+        createFixRungWorktree(repoDir, worktreePath, realBranch);
 
         const mountsTable = loadMounts(mountsPath(repoRoot));
         const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
