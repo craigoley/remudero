@@ -219,7 +219,9 @@ test("W1-T963: end-to-end — a sibling's landed fix closes an already-done tria
         `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
         'case "$*" in',
         '  *"pr list"*) echo "[]" ;;',
-        '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/998" ;;',
+        // W1-T1202: `pr create` (GraphQL) moved to `gh api --method POST repos/.../pulls`
+        // (REST) — the url now comes back as `html_url` in a JSON response.
+        '  *"api --method POST"*) echo \'{"html_url":"https://github.com/craigoley/remudero/pull/998","number":998}\' ;;',
         `  *"--json headRefName"*) git -C ${JSON.stringify(bare)} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
         "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
         '  *"pr diff"*) echo "" ;;',
