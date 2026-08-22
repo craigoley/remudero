@@ -384,7 +384,7 @@ import {
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
-import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask } from "./lib/ledger.js";
+import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask, DECISION_RELEVANT_LEDGER_STEPS } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { gunzipSync } from "node:zlib";
 import { ledgerRotationEntries, resolveLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
@@ -614,6 +614,7 @@ import {
   type PostReviewStallVerdict,
   type RepairFilingCapture,
   type StrikeAttempt,
+  type Disposition,
   type SweepDeps,
   type SweepPolicy,
   type UpdateBranchOutcome,
@@ -3064,6 +3065,11 @@ export async function pollToGate(
             : `no progress for ${STALL_WINDOW} consecutive polls`,
       };
     }
+      // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
+      // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
+      // WORKING one, and the polling row beside it cannot carry that decision because the rotator
+      // is right to shed it. See `runIsAwaitingExternal`.
+      if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state: v.state,
@@ -3262,6 +3268,11 @@ async function waitForCiGreen(
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     const ci = (v.statusCheckRollup ?? []).find((c) => (c.name ?? c.context) === "ci");
+    // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
+    // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
+    // WORKING one, and the polling row beside it cannot carry that decision because the rotator
+    // is right to shed it. See `runIsAwaitingExternal`.
+    if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     if (stall.stalled) {
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
@@ -20546,6 +20557,116 @@ export function buildSweepHook(
  * behind a slow one in the same pass — the SAME dedup/disposition/ledger path per PR, no second
  * lane, no new per-PR mutex (design (ii)/(iv): each PR is handed to exactly one call).
  */
+/**
+ * W1-T1211 — THE LEDGER STEP A RUN WRITES ONCE WHEN IT STARTS WAITING ON SOMETHING EXTERNAL.
+ *
+ * Emitted ONCE on entry to each wait loop, never per poll. That is the whole reason it exists
+ * rather than reading `ci.polling`: the polling rows fire every fifth iteration for the life of the
+ * wait (5,411 of them in the ledger union against 1,205 `fix.dispatch`), and `src/lib/ledger.ts`
+ * names them "pure telemetry/polling noise … exactly the high-frequency, no-decision-consequence
+ * lines that drove the measured growth". A decision cannot be built on a row the rotator is right
+ * to shed, so this task writes a low-frequency one instead — see this task's own design note (i-a).
+ */
+export const AWAITING_EXTERNAL_LEDGER_STEP = "run.awaiting_external";
+
+/**
+ * W1-T1211 — WHAT THE LIGHT PASS MAY ACT ON THIS TICK.
+ *
+ * `buildSweepLightHook` wires `actionable` while `runOne` is in flight, and every lane except
+ * `post-review` stands down as "deferred to full sweep (light pass)". The RESTRICTION's
+ * justification is spend-and-capacity — `src/lib/sweep.ts` records 3 dispatch lanes + 3 review
+ * lanes against a host measured to fit about four concurrent workers — and of those five lanes
+ * ONLY `dispatchFix` spawns a worker. `close`, `escalate`, `depReview` and `arm` are API calls.
+ *
+ * So the blanket is wider than its reason for exactly one case: a run that is WAITING rather than
+ * working. Measured (this task's shard): one lock held 41 minutes wrote 347 light passes and ZERO
+ * full sweeps while `fix.dispatch` read zero for twenty-one hours.
+ *
+ * The other four lanes are DELIBERATELY UNCHANGED (design note iii) — widening the blanket further
+ * is a separate argument this task does not make.
+ */
+export function lightPassActionable(disposition: Disposition, fixRungAllowed: boolean): boolean {
+  if (disposition === "post-review") return true;
+  // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker.
+  if (disposition === "blocked-fixable" || disposition === "conflicted") return fixRungAllowed;
+  return false;
+}
+
+/**
+ * W1-T1211 — IS THIS RUN DEMONSTRABLY WAITING RATHER THAN SPENDING A WORKER?
+ *
+ * TRUE only when the task's LATEST RETAINED row is {@link AWAITING_EXTERNAL_LEDGER_STEP}. Reading
+ * the latest retained row rather than the latest row of any kind is what makes this survive a
+ * rotation: the polling telemetry beside it is shed by design, and a predicate that depended on it
+ * would silently invert the moment the rotator ran.
+ *
+ * DELIBERATELY NOT `liveInflightRuns`: that pid-checks a lock, which is HOST-LOCAL (a pid on
+ * another host is unreadable), and it carries W1-T1109's consumer defect — the lock-vs-process arm
+ * compares a lock FILENAME's task id against a set of RUN ids, which can never match. Nothing here
+ * builds on it (design note ii).
+ *
+ * FAILS SAFE IN BOTH DIRECTIONS. No rows for the task, or a latest retained row that is any other
+ * step, reads FALSE — the fix rung stands down exactly as it does today. And a run that DIED while
+ * waiting has no worker either, so treating its stale row as "waiting" reaches the same conclusion
+ * by a different route rather than a wrong one.
+ *
+ * WRITTEN AS A DIRECT `.step ===` COMPARISON ON PURPOSE, like `reviewPostRefusedFor` above:
+ * `test/ledger-rotation.test.ts` derives `DECISION_RELEVANT_LEDGER_STEPS` membership by scanning
+ * consumer source for exactly that shape, so this makes the dependency VISIBLE to the check that
+ * exists to find it. The step is registered in that set by this same change.
+ */
+export function runIsAwaitingExternal(lines: ReadonlyArray<Record<string, unknown>>, taskId: string): boolean {
+  let latestTs = "";
+  let awaiting = false;
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    const rawStep: unknown = line.step;
+    const step = typeof rawStep === "string" ? rawStep : "";
+    if (!DECISION_RELEVANT_LEDGER_STEPS.has(step)) continue; // the retained core only — see this function's doc
+    const ts = typeof line.ts === "string" ? line.ts : "";
+    if (ts >= latestTs) {
+      latestTs = ts;
+      // THE STRING LITERAL, NOT THE CONSTANT, ON PURPOSE. `test/ledger-rotation.test.ts` scans
+      // consumer source for a step-equality comparison against a quoted name; comparing against the
+      // exported identifier instead would hide this dependency from the very guard that exists to
+      // find it, and the predicate would then rest on retention nobody had registered. (The comment
+      // itself must not spell that pattern out either — the scanner reads comments too.)
+      awaiting = line.step === "run.awaiting_external";
+    }
+  }
+  return awaiting;
+}
+
+/**
+ * W1-T1211 — MAY THE FIX RUNG ACT ALONGSIDE THE RUNS CURRENTLY IN FLIGHT?
+ *
+ * TRUE only when EVERY in-flight run is demonstrably waiting. One run still working is enough to
+ * stand the rung down, which is the property the restriction genuinely buys (design note iv: never
+ * run the fix rung beside a spending worker). An EMPTY in-flight set is vacuously true — there is
+ * nothing to be concurrent with.
+ */
+export function fixRungAllowedBesideInFlight(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  inFlightTaskIds: readonly string[],
+): boolean {
+  return inFlightTaskIds.every((taskId) => runIsAwaitingExternal(lines, taskId));
+}
+
+/**
+ * W1-T1211: the in-flight TASK ids, read from `state/inflight/*.lock` FILENAMES.
+ *
+ * A directory read, never a pid probe — see {@link runIsAwaitingExternal}'s doc for why
+ * `liveInflightRuns` is refused here. This reads no lock CONTENT, releases nothing, and ages
+ * nothing out: W1-T1067's stranded `drain.lock` is the precedent for what a clock-shaped release
+ * does when its signal never arrives, and this path has no clock at all.
+ */
+export function inFlightTaskIdsFrom(inflightDir: string): string[] {
+  if (!existsSync(inflightDir)) return [];
+  return readdirSync(inflightDir)
+    .filter((entry) => entry.endsWith(".lock"))
+    .map((entry) => entry.slice(0, -".lock".length));
+}
+
 export function buildSweepLightHook(
   owner: string,
   repo: string,
@@ -20559,6 +20680,12 @@ export function buildSweepLightHook(
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
+      // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
+      // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
+      const fixRungAllowed = fixRungAllowedBesideInFlight(
+        readLedgerLines(ledgerPath),
+        inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
+      );
       await runSweepLightPass(
         openPrs,
         {
@@ -20566,7 +20693,11 @@ export function buildSweepLightHook(
           ledgerPath,
           runId,
           log,
-          actionable: (d) => d === "post-review",
+          // W1-T1211: `post-review` always, and the fix rung TOO when every in-flight run is
+          // demonstrably waiting rather than working — see `lightPassActionable` and
+          // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
+          // sees one consistent answer.
+          actionable: (d) => lightPassActionable(d, fixRungAllowed),
           // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
           // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
           // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N
