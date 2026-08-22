@@ -3567,16 +3567,35 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
  * strike on the same head — design (i)'s idempotence (two dispatches racing the same sha must
  * still not both spend a strike) survives unchanged.
  *
- * `undefined`/no matching lines ⇒ `false`: a cold blocked-fixable dispatch with no resolvable
- * task carries no `task_id` to key against, and this must never throw or false-positive on
- * nothing to read.
+ * `undefined` taskId ⇒ `false`: a cold blocked-fixable dispatch with no resolvable task carries
+ * no `task_id` to key against, and this must never throw or false-positive on nothing to read.
+ *
+ * W1-T1210 — A TASKID WITH NO `fix.dispatch` ROW OF ITS OWN IS THE SAME "CONCLUDED WITHOUT
+ * LANDING A NEW HEAD" SHAPE, ONE STEP EARLIER. `dispatchFix` (sweep.ts's own caller) can throw
+ * before `runFixRung` ever starts — `.git/config.lock` contention was the observed cause
+ * (rationale, incident note) — and the `sweep.disposed` row that seeds `prior.fixed` gets
+ * written with `acted: true` regardless (the swallow W1-T1127 closed GOING FORWARD, not
+ * retroactively for rows it already wrote). Such a seed owns no `fix.dispatch` row at all — not
+ * even the first line a real rung writes — so it can never produce a `fix.review`/
+ * `fix.ci_not_green`/`fix.resolved` for this function to read, and the loop above leaves
+ * `stalled` at its `false` initial value forever, exactly as if the rung were still healthily in
+ * flight. It is not: nothing ever started. The absence of `fix.dispatch` itself — read from rows
+ * already in the ledger, no new read, no state file, no clock (design (ii)/(v)) — is the
+ * falsifier: a taskId that HAS a `fix.dispatch` row keeps the loop's existing verdict untouched
+ * (acceptance: "a gate with an owning fix row still suppresses"); a taskId with NONE is treated
+ * as stalled too (acceptance: "a gate with no owning fix row no longer suppresses"), so the
+ * caller's `alreadyDone` clears and the next pass is eligible to re-derive — never itself a
+ * dispatch (design (iv); the strike cap at the spending site, untouched, still bounds whatever
+ * follows).
  */
 function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
   if (!taskId) return false;
   let stalled = false;
+  let dispatched = false;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "fix.dispatch") {
+      dispatched = true;
       stalled = false;
     } else if (line.step === "fix.ci_not_green") {
       stalled = true;
@@ -3586,7 +3605,8 @@ function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, tas
       stalled = false;
     }
   }
-  return stalled;
+  // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
+  return stalled || !dispatched;
 }
 
 // ── W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half) ──
