@@ -77,7 +77,11 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
   // decision on their own — its `&& projection.prUrl` guard is a no-op for any case a
   // run.start/pr.opened line (both already decision-relevant, independently) did not
   // already establish. See DECISION_RELEVANT_LEDGER_STEPS's own doc comment for the proof.
-  const verifiedDisplayOnly = new Set(["recon.done", "implement.resumed", "implement.done", "fix.resolved"]);
+  // W1-T1110: "fix.resolved" used to sit here too — status.ts's own read of it is still
+  // cosmetic, but sweep.ts's fixRungStalledWithoutNewHead now reads it too, and THAT read
+  // decides whether a stalled fix dispatch re-arms — a real decision, so it moved to
+  // DECISION_RELEVANT_LEDGER_STEPS instead (see that Set's own doc for the citation).
+  const verifiedDisplayOnly = new Set(["recon.done", "implement.resumed", "implement.done"]);
 
   const equalityRead = /\.step\s*(?:===|!==)\s*["']([^"']+)["']/g;
   const switchOnStep = /switch\s*\(\s*(?:line|l|record)\.step\s*\)\s*\{([\s\S]*?)\n\}/g;
