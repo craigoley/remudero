@@ -359,22 +359,24 @@ not see, in the same tone it uses when it can. Each was reproduced on `Craigs-Ma
   `git rev-parse --abbrev-ref HEAD` there answers `HEAD` and the tree stays pinned at whatever sha
   it booted on. The verbs that gate on `syncPlanOrRefuse` refuse rather than act on a stale plan;
   the ones that do not will answer from the pinned tree without comment. **Fetching and
-  re-detaching to unstick it moves the daemon's own work tree — check `state/inflight/` is empty
-  first**, or you will move the ground under a running worker.
+  re-detaching to unstick it moves the daemon's own work tree —
+  check `state/inflight/` is empty first**, or you will move the ground under a running worker.
 
 - **`gh api --jq '.body'` appends a trailing newline, so a byte-for-byte comparison against the
   source file is always off by one.** Measured on a real PR body: the jq capture is exactly the
   body plus one `\n`, and because the body already ends in a newline, stripping trailing newlines
   removes two characters rather than one. **And `wc -c` counts bytes while Python counts
   characters** — the same body measured 2,587 characters and 2,601 bytes, the gap made entirely of
-  multi-byte punctuation. A body full of em-dashes reads as edited when it is identical. **Strip
-  trailing newlines and compare characters.**
+  multi-byte punctuation. A body full of em-dashes reads as edited when it is identical.
+  **Strip trailing newlines and compare characters.**
 
 - **A rate-limited call returns a small JSON error payload with HTTP 403 — and it parses.** The
   captured shape is an object with exactly `message`, `documentation_url` and `status`, where
   `status` is the **string** `"403"`. It was read as content twice. **Guard structurally — assert
   the shape you expected (a list, or a known key), never a size.** A size threshold is a guess that
-  happens to work until the error text changes.
+  happens to work until the error text changes. **And you can check the budget freely: reading
+  `gh api rate_limit` does not itself count against the limit**, so a script that is unsure may
+  ask before it acts rather than guessing from a failure it has already caused.
 
 
 ## Crisis runbook: the procedures you need at 3am
