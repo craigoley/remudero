@@ -137,3 +137,37 @@
     NOT JUDGED. Eight id surfaces plus a subject sweep across open-PR heads and trees, and every
     control was an id VERIFIED PRESENT ON MAIN (`W1-T1110`, `W1-T1104`, `W1-T1036` — each with a
     shard file and a declared `- id:`), never one whose PR was still open.
+
+    AMENDED 2026-08-22 — THE FORENSIC HALF, RE-DERIVED OVER THE LEDGER UNION AND THE ACTIONS LOG,
+    AND IT SHARPENS THE CONTAINMENT ARGUMENT RATHER THAN RESTATING IT.
+
+    (a) THE ELEVEN CLOSES APPEAR NOWHERE IN THE FLEET LEDGER. Every `sweep.disposed` row in the
+    union carrying `disposition: stale` — 584 of them — reads `superseded-by #N`. Not one reads
+    `abandoned`, against a 584-match positive control for `superseded` on the SAME scan, so the
+    zero is a real absence and not a broken query.
+
+    (b) AND THE CLOSE WINDOW IS NOT EMPTY, WHICH IS THE POINT. Between 20:00 and 20:20 on
+    2026-08-21 the daemon wrote 449 rows, including 14-22 rows on EACH of #2376, #2403, #2417,
+    #2419, #2427, #2428, #2430 and #2431 — dispositioning them `blocked-fixable`, `mergeable`,
+    `blocked-ambiguous` and `wait`. ZERO `stale` dispositions in that window. The sweep was looking
+    straight at those pull requests and treating them as LIVE while something else closed them, so
+    the ledger does not merely fail to record the closes: it contradicts them. (#2434 carries no
+    row in that window at all, so the daemon had no opinion on it either way.)
+
+    (c) CI IS EXCLUDED STRUCTURALLY, NOT ONLY BY TIMING. No clock-sweep workflow ran between 19:30
+    and 20:10 — the distinct workflow names in that window are CI, CI gate, CodeQL, Semgrep,
+    OSV-Scanner, OpenSSF Scorecard, Code Quality on #2429/#2430/#2431 and main, Acceptance author
+    gate, Dependency Review and main-plan-guard. `clock-sweep.yml` EXISTS and is not among them.
+    And no workflow in `.github/workflows/` closes a pull request at all: a grep for close verbs
+    across the whole directory returns nothing. So CI could not have done this even had it run.
+
+    (d) SO THE WRITE CAME FROM A SUITE RUN ON THE HOST, AND THAT IS THE CONTAINMENT ARGUMENT IN ITS
+    STRONGEST FORM. A test that drives real effects writes PERMANENTLY to GitHub and TRANSIENTLY to
+    its own scratch `config.root`. The action survives; its record does not.
+
+    (e) THE FILE CANNOT NOW BE NAMED, AND THIS SHARD SAYS SO RATHER THAN LEAVING A READER LOOKING.
+    The worktree that held that run's ledger is gone, so no forensic route remains to the specific
+    test file. That is precisely why the remedy must be the DERIVED SET and the `createdAt` clamp
+    rather than an exclusion for whichever file did it: an exclusion list can only name what the
+    evidence can name, and here the evidence cannot. The clamp is arithmetic and holds against a
+    file nobody can identify.
