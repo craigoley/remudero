@@ -183,6 +183,27 @@ test("a sweep with fewer drifting suites than the ceiling exits clean and says s
   assert.match(out, /^PASS — /m, "still a PASS -- exiting clean must read as clean");
 });
 
+test("a sweep whose drifting-suite count exactly matches the ceiling exits clean and says AT CEILING", () => {
+  // The third relation (W1-T1128): neither an improvement (BELOW) nor a regression (OVER), so it
+  // gets its own line rather than being folded into either neighbor.
+  const lines: string[] = [];
+  const code = main({
+    argv: [],
+    derive: () => ["learnings"],
+    run: () => ({ failed: true, output: "not ok 1 - a fixture date goes stale\n" }),
+    ceiling: 1,
+    log: (m) => lines.push(m),
+    write: () => {},
+  });
+  assert.equal(code, 0, "drifted.length === ceiling is NOT a regression and must exit clean");
+  const out = lines.join("\n");
+  assert.match(out, /AT CEILING/, "matching the ceiling exactly must be named, not folded into BELOW or OVER");
+  assert.match(out, /ceiling of 1/);
+  assert.doesNotMatch(out, /BELOW CEILING/);
+  assert.doesNotMatch(out, /OVER CEILING/);
+  assert.match(out, /^PASS — /m, "still a PASS -- exiting clean must read as clean");
+});
+
 test("the recorded ceiling carries the rule that it may fall and must never rise", () => {
   // Reads the REAL committed baseline directly (same idiom as
   // test/claude-md-budget-ratchet.test.ts's "the real baseline carries ZERO headroom" test), so
