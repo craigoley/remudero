@@ -1,0 +1,160 @@
+- id: W1-T1120
+  title: "W1-T323's 5% FALSE-POSITIVE THRESHOLD IS ARITHMETICALLY A ZERO-TOLERANCE TEST AT THE SAMPLE SIZE THE WINDOW WILL ACTUALLY CLOSE ON — at most 5% of n flagged PRs admits one false positive only from n=20 up, and the narrow denominator is heading for n around 5; record the granularity, settle WHICH ROWS ARE THE DENOMINATOR first, and park the ruling for the operator who set the threshold rather than letting a flip run improvise one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  rationale: |
+    FILED FROM feedback#fb-1785896975009-9f6c88, which is itself a CORRECTION of
+    feedback#fb-1785870873355-d91fc2 and whose other three parts are ALREADY OWNED (see design's
+    closing section). This shard exists for the ONE part nothing owns: whether W1-T323's stated
+    criterion can be met at the sample size its own window produces.
+
+    EVERY COUNT HERE IS A QUERY AND NOT A NUMBER TO CARRY. Re-derive before acting; the arithmetic
+    in (2) is the only claim here that cannot move.
+
+    (1) THE CRITERION, QUOTED FROM ITS OWN SHARD. W1-T323's rationale states the measurement
+    W1-T322 defined: *"WINDOW = 14 days or 100 merged PRs from its merge, whichever first;
+    THRESHOLD = false-positive rate at most 5% of flagged PRs, adjudicated from the
+    review.unwired_advisory ledger lines against source."* Its design (ii) then hard-branches on
+    that number: at or under threshold, flip to a review FAIL; over threshold, do not flip, file
+    the false-positive fixes and re-measure. There is no third branch and no minimum sample size.
+
+    (2) THE ARITHMETIC, WHICH IS THE WHOLE FINDING AND IS NOT A MEASUREMENT.
+    A rate over n flagged PRs with k adjudicated false positives can only take the values k/n.
+    "At most 5%" requires k/n <= 0.05, i.e. k <= n/20. For every n < 20 that bound is below 1, so
+    the ONLY passing value of k is 0: A ZERO-TOLERANCE TEST FOR EVERY n BELOW 20, wearing a
+    percentage that implies tolerance it cannot deliver. THE FIRST TOLERANT SAMPLE IS EXACTLY 20 —
+    n=20, k=1 reads 5.0% and passes; n=19, k=1 reads 5.26% and fails. The reporting entry's worked
+    case is the same fact from below: at n=5 the achievable rates are 0%, 20%, 40%, and a single
+    false positive lands on 20% and forces the do-not-flip branch.
+
+    (3) WHY IT BITES NOW RATHER THAN THEORETICALLY. W1-T322's advisory shipped 2026-08-04 (#1292,
+    per W1-T1017 rationale (3)), so BOTH window limbs — 14 days, and 100 merged PRs — are at or
+    past their close as this shard is filed (2026-08-22). The adjudication W1-T323 gates on is DUE,
+    not pending, and it will be performed against whatever n the window actually produced. The
+    reporting entry observed roughly 1 unwired_export firing per 18 merged PRs, which puts the
+    narrow denominator at about 5-6 over a 100-PR limb; W1-T1017's independent read of origin/main
+    counts 4 unwired_export rows over 2026-08-11..08-18. Both are re-derivable from
+    state/ledger.ndjson unioned with state/ledger.*.ndjson, full-line deduped. Either way n lands
+    an order of magnitude below 20.
+
+    (4) THE DENOMINATOR IS UNSETTLED, AND SETTLING IT MAY DISSOLVE THE WHOLE PROBLEM — SO IT IS
+    QUESTION ONE, NOT A FOOTNOTE. "Flagged PRs, adjudicated from the review.unwired_advisory ledger
+    lines" has two readings, and they differ by an order of magnitude:
+      - NARROW — only `unwired_export` rows, the reason code W1-T323's flip actually changes the
+        severity of. n around 4-6. The zero-tolerance trap in (2) is live.
+      - WIDE — every row on the step, which also carries `inverse_scope` and `scope_violation`
+        (W1-T1017 measured 87 rows over 57 distinct PRs: scope_violation 52, inverse_scope 31,
+        unwired_export 4). n around 57, where 5% admits two false positives and the stated test is
+        measurable exactly as written.
+    The WIDE reading is what the quoted sentence literally says; the NARROW reading is what the
+    flip actually does, since W1-T323 changes one floor's severity and the other two codes are
+    other floors' contracts (W1-T401's direction pair). An adjudicator who picks silently will
+    produce a number nobody can audit, and the two picks can disagree about whether to flip.
+
+    (5) WHAT IS NOT CLAIMED. The instrument is NOT broken and this shard asserts no such thing:
+    #1312 (W1-T332) is a recorded true positive naming three real dead symbols while correctly
+    staying silent on a sibling with callers, and W1-T1017 counts four unwired_export rows. The
+    defect is in the CRITERION'S GRANULARITY, not in the scan, the markers, the reason codes or the
+    advisory's retention.
+  design: |
+    ONE CONCERN: whether W1-T323's flip criterion is decidable at its own sample size. This shard
+    is a RECORD AND A PARKED RULING, satisfied by its own text on merge, in the shape W1-T1014 and
+    W1-T484 already established. No src/ file changes and none is declared.
+
+    (i) THIS SHARD MUST NOT PICK ONE. The threshold is the operator's, set with W1-T322, and
+    W1-T322's contract says so explicitly — W1-T323's design closes *"NOT IN SCOPE: changing the
+    scan, the markers, the window, or the threshold — those are W1-T322's contract; renegotiating
+    them is a new filing, not a flip."* This IS that new filing, and its deliverable is the
+    arithmetic plus the option set, not a chosen option. `verify: human` is the mechanism that
+    enforces it: `isDispatchEligible` (src/lib/drain.ts) returns false at `t.verify !== "auto"`
+    before the linter is consulted, so no lane can pick an option on the operator's behalf.
+
+    (ii) QUESTION ONE IS THE DENOMINATOR, AND IT IS ANSWERED BEFORE ANYTHING ELSE. Rationale (4).
+    The adjudication must state, in the W1-T323 PR body, which rows it counted and why, BEFORE it
+    states a rate. Under the WIDE reading n is already large enough that the stated 5% test is
+    measurable as written and options (a)-(c) below never arise.
+
+    (iii) THE THREE OPTIONS FOR THE NARROW READING, EACH WITH ITS COST, NONE PREFERRED.
+      (a) ACCEPT THE ZERO-TOLERANCE READING AS WRITTEN. One adjudicated false positive means do not
+          flip, file the fix, re-measure — exactly what W1-T323 design (ii) already prescribes.
+          Costs a re-measurement cycle and nothing else; changes no plan text. The honest objection
+          is that the criterion then advertises a tolerance it never had.
+      (b) REQUIRE A MINIMUM FLAGGED COUNT BEFORE THE FLIP IS ADJUDICATED AT ALL, n >= 20. The rate
+          becomes measurable at its stated granularity. Costs calendar: at the observed 1 firing
+          per 14-18 merged PRs, n=20 needs roughly 280-360 merged PRs, several times the original
+          window. The floor stays advisory throughout, which is the safe direction but a long one.
+      (c) RESTATE THE CRITERION AT SMALL n AS AN ABSOLUTE COUNT — "0 adjudicated false positives
+          over at least n flagged PRs" — which is operationally identical to (a) and says so.
+          Costs one edit to W1-T322's stated measurement and a note on W1-T323. Nothing measured
+          changes; the criterion stops implying a granularity it does not have.
+
+    (iv) WHATEVER IS RULED, THE ADJUDICATION MUST RECORD n. W1-T323's first acceptance criterion
+    today confirms "the window closed and the adjudicated false-positive rate". A rate without its
+    denominator cannot be re-checked, and a denominator derived by hand is precisely how the
+    reporting entry's original 266-review base went wrong. The ruling should land as an amendment
+    to W1-T323's own shard so the flip run reads it in place.
+
+    (v) ALREADY OWNED, CITED AND NOT RE-FILED — the other three parts of the reporting entry:
+      - THE ADVISORY'S RETENTION ("the first rotation after now strips every advisory line"):
+        SHIPPED. W1-T1017 (#2193) registered `review.unwired_advisory` in
+        `DECISION_RELEVANT_LEDGER_STEPS`; MASTER-PLAN's RETRO-1787193680272 credits it. The urgent
+        part of this entry is already closed and must not be re-filed as new work.
+      - THE UNOBSERVABLE ZERO CASE ("silence conflates scanned 4, cleared 4 with scanned 0"):
+        FILED as W1-T1118 from the reporting entry's predecessor, carrying the
+        `reachability_scanned` field on `review.posted`. That shard explicitly defers the small-n
+        threshold question to this one; this shard returns the compliment and takes no position on
+        the field.
+      - THE DENOMINATOR CORRECTION ITSELF (3 PRs / 6 exports, not 266 reviews; W1-T325 added no
+        exports; #1312 is a true positive): already recorded verbatim in W1-T1118 rationale (1).
+      - THE SCAN, ITS MARKERS, ITS REASON CODES, ITS SEAM DISCOUNT: W1-T322's contract, untouched.
+  acceptance:
+    - claim: "the shard records the granularity that makes an at-most-5% rate a zero-tolerance test below twenty flagged PRs"
+      proof: "grep: A ZERO-TOLERANCE TEST FOR EVERY n BELOW 20 in plan/tasks.d/W1-T1120-flip-threshold-unmeetable-at-small-n.yaml"
+    - claim: "the shard names the smallest sample at which a single false positive is tolerable rather than asserting the threshold is unmeetable"
+      proof: "grep: THE FIRST TOLERANT SAMPLE IS EXACTLY 20 in plan/tasks.d/W1-T1120-flip-threshold-unmeetable-at-small-n.yaml"
+    - claim: "the shard settles nothing itself and parks the ruling for the operator who set the threshold"
+      proof: "grep: THIS SHARD MUST NOT PICK ONE in plan/tasks.d/W1-T1120-flip-threshold-unmeetable-at-small-n.yaml"
+    - claim: "the counts are recorded as re-derivable queries rather than numbers carried into a later read"
+      proof: "grep: EVERY COUNT HERE IS A QUERY AND NOT A NUMBER TO CARRY in plan/tasks.d/W1-T1120-flip-threshold-unmeetable-at-small-n.yaml"
+    - claim: "the retention half and the observability half are cited to their existing owners instead of being re-filed here"
+      proof: "grep: CITED AND NOT RE-FILED in plan/tasks.d/W1-T1120-flip-threshold-unmeetable-at-small-n.yaml"
+  risk: medium
+  origin: "feedback#fb-1785896975009-9f6c88"
+  plan_refs: ["W1-T323", "W1-T322", "W1-T1017", "W1-T1118", "W1-T1014", "W1-T401"]
+  files: [plan/tasks.d/W1-T1120-flip-threshold-unmeetable-at-small-n.yaml]
+  status: queued
+  attempts: 0
+  note: |
+    THIS TASK IS SATISFIED BY ITS OWN TEXT ON MERGE, AND THAT IS DELIBERATE RATHER THAN A DODGE —
+    the same shape as W1-T1014 and W1-T484, named here so a later reader does not mistake it for an
+    unimplemented task. The deliverable the reporting entry asked for is literally *"the shard
+    should say so"*; all five criteria are `grep:` proofs against this file and pass the moment it
+    lands. What REMAINS after that is the ruling, and `verify: human` parks it.
+
+    `files:` DECLARES ONLY THIS SHARD, WHICH IS THE HONEST LIST. No src/ path is touched, so
+    `partitionByFileOverlap` serialises this against nothing and it never blocks a code lane.
+    W1-T323's own shard is deliberately NOT declared: amending it is the RULING's change, not this
+    record's, and pre-declaring it would let a lane edit the criterion this task exists to park.
+
+    `risk: medium` — Rule 19 counts span, and this is one plan shard, one concern. It argues down
+    (no src/, no dispatch path, no spend, no behaviour) and up only because the text feeds a
+    high-risk severity flip; medium is the honest middle.
+
+    `budget_usd 12` — a record, below W1-T1014's 30 because the measurement work is already done
+    upstream (W1-T1017's ledger read, the reporting entry's PR walk) and the load-bearing claim in
+    rationale (2) is arithmetic that needs no host access.
+
+    NO depends_on, ESTABLISHED RATHER THAN ASSUMED. W1-T1017 is shipped. W1-T1118 is queued and
+    independent — it changes what a future review records, not what this window already holds.
+    W1-T323 CONSUMES this record but must not gate it: blocking a record behind the decision it
+    informs is the sequencing error W1-T1017 rationale (2) already named once on this same pair.
+
+    GREP-PROOF SAFETY, CHECKED AGAINST parseDialectGrep RATHER THAN ASSUMED. No pattern carries a
+    bracket, star, caret, dollar or the words ` in `, so each splits at the single ` in ` before its
+    path; every path is this file, is declared in `files:`, and contains no `*` or `..`. Each
+    pattern is stated POSITIVELY over text this change ADDS, so none can read executed_fail on the
+    PR that satisfies it.
