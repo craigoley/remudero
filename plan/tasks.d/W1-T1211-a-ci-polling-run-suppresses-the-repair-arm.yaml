@@ -126,3 +126,36 @@
     (a merged id's branch is deleted and would read zero), and an id that genuinely appears in a
     main commit subject for the `git log` surface (W1-T1110 does NOT, and was rejected as a control
     for that surface for exactly that reason).
+
+    AMENDED 2026-08-22 — THE MEASUREMENT, TAKEN AFTER FILING, AND IT SAYS SOMETHING NARROWER AND
+    WORSE THAN "A RUN HANGS".
+
+    (a) THE SUPPRESSION IS EXACT. Between `state/inflight/W1-T1205.lock` being taken at 14:59:03Z
+    and released at 15:40:11Z the daemon wrote 347 `sweep.pass` rows carrying `enumerated: 1` — the
+    light pass, which fans out one row per pull request — and ZERO full sweeps. The last full pass
+    was 14:46:46Z, BEFORE the lock. Control: 143 full sweeps were written across the day, so the
+    zero is an absence and not a broken scan.
+
+    (b) AND THE RUN WAS HEALTHY THROUGHOUT. `ci.polling` ran 11 rows from 15:23:20Z to 15:30:15Z,
+    then `pr.polling` from 15:36 to 15:39, then `pr.merged` at 15:40:11Z followed immediately by
+    `worktree.remove` and a `verdict`. It waited on CI, it waited on the merge, and it finished. No
+    hang, no stall, no stranded lock, nothing to reap.
+
+    (c) SO THE ARGUMENT IS NOT THAT A RUN HANGS — IT IS THAT A HEALTHY ONE IS ENOUGH. A normal
+    41-minute run suppressed the repair arm for its entire duration, BY DESIGN: W1-T254 restricted
+    the light hook to `actionable: d => d === "post-review"` precisely so the single-threaded lanes
+    stay single-threaded while `runOne` is in flight, and dispatchFix/close/escalate/depReview/arm
+    all stand down as "deferred to full sweep (light pass)". Nothing malfunctioned. That is the
+    finding, and a reader who takes this shard as a lock-hygiene or stuck-run task has taken the
+    wrong one.
+
+    (d) WHICH FIXES THE SHAPE OF THE REMEDY. `state/inflight/` needs no reaper here and the lock
+    released cleanly on its own; the change this task is about is WHAT THE LIGHT HOOK MAY DO WHILE A
+    HEALTHY RUN WAITS, not how locks are cleaned up.
+
+    (e) AND IT REPRODUCED WHILE THIS NOTE WAS BEING WRITTEN, WHICH IS THE STRONGEST FORM OF THE
+    CLAIM. The moment the lock released, a full sweep ran at 15:41:58Z (`enumerated: 13`) — 107
+    seconds later, the first in 55 minutes. Two further runs then took locks at 15:43
+    (`W1-T1201.lock`, `W1-T1206.lock`), and the repair arm is suppressed again. So this is not one
+    incident recovered from: it is the steady state of a busy board, and the earlier note's "empty
+    again" reading describes one quiet moment rather than the condition.
