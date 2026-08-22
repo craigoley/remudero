@@ -34,16 +34,26 @@
     returns green, and the sweep's `mergeable` row requires `checksState === "green"`. Neither can
     have armed here.
 
-    (4) SO WHERE THE ARM CAME FROM IS NOT DETERMINABLE FROM GITHUB, AND THAT IS ITSELF A FINDING.
-    `runRiskJudge` has EXACTLY ONE caller (`src/run-task.ts`), the deferred arm
-    (`armAutoMergeAtOpen`, W1-T975) sits strictly AFTER it, and the escalate branch RETURNS before
-    reaching that line — so on the code at origin/main this run could not have armed at all. The
-    observation contradicts the source, which means the source being read is not the code that ran.
-    Two live hypotheses, and the shard does not pick one: the orchestrator's module graph predates
-    W1-T975 (a merged fix reaches workers immediately and the loaded orchestrator not at all until
-    it restarts), or a second process armed on a non-green rollup. SETTLING THIS IS STEP ONE, ON
-    THE FLEET HOST, over the ledger union: the `automerge.armed` row for `pr 2506 @ 42870357` and
-    its `run_id`, against `daemon.boot`'s recorded sha.
+    (4) THE ARM CAME FROM THE SWEEP, AND `runTask`'s OWN ORDERING IS CORRECT. AN EARLIER REVISION
+    OF THIS SHARD LEFT THIS OPEN AND HANDED IT TO THE IMPLEMENTER AS A FLEET QUERY; IT IS ANSWERED
+    FROM SOURCE AND NEEDS NO QUERY. `runRiskJudge` has EXACTLY ONE caller (`src/run-task.ts`), the
+    deferred arm (`armAutoMergeAtOpen`) sits strictly AFTER it, and the escalate branch RETURNS
+    before reaching that line — so this run never armed, and the arm at 16:12:27Z came from the
+    SWEEP's own "checks green + review success" predicate reacting to the `success` status posted
+    two seconds earlier. W1-T975's comments name that window as a KNOWN RESIDUAL GAP in as many
+    words — "sweep.ts's own 'checks green + review success' arming predicate reacting to this same
+    capped verdict's posted `success` status before this decision lands — if the sweep armed the PR
+    in that window" — and the two `disarmAutoMerge` calls were KEPT, deliberately, as best-effort
+    defences for exactly this case.
+
+    (4B) SO THE DEFECT IS NOT AN ORDERING ERROR. It is that THE SWEEP'S ARMING PREDICATE CANNOT SEE
+    A PENDING RISK JUDGE, and the only defence against that is a withdrawal that must WIN A RACE
+    AGAINST GITHUB'S MERGE QUEUE. A DOCUMENTED RESIDUAL GAP WITH A BEST-EFFORT DEFENCE IS THE SHAPE
+    THAT FAILED HERE — the gap was known, written down, and left open because the mitigation was
+    judged good enough; #2506 is what "good enough" costs when the race is lost. Closing the gap
+    SWEEP-SIDE (a predicate that can observe a judge still deliberating on this head) is a SEPARATE
+    concern with its own argument and is NOT scoped into this shard, which is about what happens
+    when the defence loses.
 
     (5) EVERY SURFACE THAT SHOULD HAVE NOTICED REPORTED SUCCESS — THIS IS THE PART THAT IS FULLY
     ESTABLISHED FROM SOURCE. `disarmAutoMerge` returns a `DisarmOutcome`. The risk-judge escalate
@@ -100,8 +110,8 @@
 
     (vi) NOT IN SCOPE, NAMED: whether #2506's diff satisfies W1-T1206 (operator's, rationale 7);
     any change to the risk judge's own verdict, confidence or prompt; `W1-T970`'s `riskRefused`
-    map, which already expires on a new head or an explicit override; and the arm-site attribution
-    itself, which is a QUERY this shard hands the implementer rather than a change.
+    map, which already expires on a new head or an explicit override; and the SWEEP-SIDE closure of
+    the residual gap named in rationale (4B), which needs its own predicate and its own ruling.
   acceptance:
     - claim: "a withdrawal GitHub refused is never recorded as a completed withdrawal"
       proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
@@ -138,11 +148,17 @@
     check-run records. The two console lines the operator quoted, and every ledger row, are NOT
     reachable from this checkout and were not asserted from it.
 
-    THE CONTRADICTION IN RATIONALE (4) IS LEFT OPEN ON PURPOSE. A reading of source that the
-    observed behaviour contradicts means the environment differs from the tree, not that one of
-    them is wrong; the remedy is to re-take the measurement somewhere else — here, the container's
-    own ledger — rather than to pick whichever explanation is more convenient. The implementer
-    settles it first, because which site armed decides whether anything ALSO needs to change there.
+    THE ARM-SITE QUESTION IS ANSWERED FROM SOURCE — NO FLEET QUERY IS NEEDED. `94971a5` (#2212,
+    W1-T975) moved the single `armAutoMergeAtOpen` call in `runTask` from immediately after
+    `pr.opened` to immediately before `pollToGate`, after ci green, review pass, the capped gate and
+    the risk judge — its own commit message says exactly that, and its diff shows ONE removal at the
+    early site and ONE addition at the late one. THE `wip` IN THAT SUBJECT IS NOT AN INCOMPLETE
+    CHANGE: the message's `remaining:` note is about a background test-suite run and a PR body still
+    to be written. The same commit touches ZERO `disarmAutoMerge(prUrl);` lines, which is the
+    diff-level confirmation of its own stated intent to keep both "as defensive no-ops against the
+    documented residual sweep-race gap". So `runTask`'s ordering is correct, the arm was the
+    sweep's, and the residual gap was known and accepted — rationale (4)/(4B) now say so, replacing
+    an earlier revision that left it open.
 
     ID PROVENANCE. `refs/rmd-id/W1-T1215` resolves to
     546da675931a0237192b1f3f5290c760d1f6f9a7, read over git protocol; live negative control,
