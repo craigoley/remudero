@@ -243,6 +243,12 @@ export interface NextRunnableOpts {
    * outpaces the cached PR snapshot — so this callback is PR-number-free where `onSkip` is not.
    * The refusal is a SKIP, never a terminal state (design (iv)): the task is not marked done,
    * burns no strike, and is offered again on a later pass once the branch is gone.
+   *
+   * W1-T1205: fired ALONGSIDE (never instead of) `opts.onFiltered?.(t, "run-branch-already-
+   * pushed")` — this callback feeds the ledger row, `onFiltered` feeds any reader of the neutral
+   * {@link DispatchFilterReason} tally (status-board.ts's `deriveQueueHead`, W1-T1205's own
+   * caller). Before W1-T1205 this exclusion reached ONLY this ledger row, invisible to every
+   * other surface; the tally entry is what makes it nameable there too.
    */
   onSkipRunBranch?: (task: Task) => void;
 }
@@ -351,11 +357,24 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
 }
 
 /**
- * Why the eligibility filter declined a task. These are the FOUR conditions that used to return
- * silently — every later filter (indeterminate, circuit, lifetime cap, open PR) already ledgers
- * itself. Order matters and is the filter's own: see {@link tallyDispatchFilters} on first-match.
+ * Why the eligibility filter declined a task. FIVE of these are the conditions that used to
+ * return silently — every OTHER filter (indeterminate, circuit, lifetime cap, open PR) already
+ * ledgers itself through its own dedicated `onXxx` callback. `"run-branch-already-pushed"`
+ * (W1-T1205) is the exception that proves that split deliberate rather than accidental: it is
+ * ALSO ledgered through its own callback (`onSkipRunBranch`, mirroring `onSkip`'s in-flight
+ * legibility), but design (iii) of W1-T1205 puts it here too — unlike an open PR or a tripped
+ * breaker, nothing is IN FLIGHT and nothing clears it on its own, so a caller reading only this
+ * tally (queue-head's own consumer, `deriveQueueHead`) must still be able to name it, never see
+ * a task vanish with no reason recorded anywhere this union is consulted. Order matters and is
+ * the filter's own: see {@link tallyDispatchFilters} on first-match.
  */
-export type DispatchFilterReason = "already-merged" | "verify-not-auto" | "blocked" | "unmet-deps" | "continued-this-pass";
+export type DispatchFilterReason =
+  | "already-merged"
+  | "verify-not-auto"
+  | "blocked"
+  | "unmet-deps"
+  | "continued-this-pass"
+  | "run-branch-already-pushed";
 
 /** How many ids each bucket names before truncating — a count tells the operator something is
  *  wrong, ids tell him WHICH, and 8 keeps the line readable against today's largest bucket (18). */
@@ -391,6 +410,7 @@ export function tallyDispatchFilters(): {
     blocked: [],
     "unmet-deps": [],
     "continued-this-pass": [],
+    "run-branch-already-pushed": [],
   };
   const snapshot = (): IdleReasonTally =>
     (Object.keys(seen) as DispatchFilterReason[]).reduce((acc, r) => {
@@ -512,6 +532,13 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   // in-flight (or stood down) is decided by that richer check first.
   if (opts.hasPushedRunBranch?.(t.id)) {
     opts.onSkipRunBranch?.(t);
+    // W1-T1205: ALSO the named DispatchFilterReason — `onSkipRunBranch` alone left this
+    // exclusion reachable only through a `dispatch.skipped` ledger row, invisible to any reader
+    // that consults `onFiltered`/the tally instead of grepping the ledger (status-board.ts's
+    // `deriveQueueHead`, this task's own caller). Fired ALONGSIDE, never instead of,
+    // `onSkipRunBranch` — same "called alongside" discipline `onSinglePathCredit`/
+    // `onStaleCreditExcluded` already use elsewhere on this chain.
+    opts.onFiltered?.(t, "run-branch-already-pushed");
     return false; // A run branch for this id is already on origin — never a duplicate fresh build.
   }
   return true;
