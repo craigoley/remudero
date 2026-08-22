@@ -41,6 +41,6 @@ raw: "THE DAILY-CEILING OVERRIDE STORE HAS NO READERS AND NO WRITERS — verifie
   daemon read after all, (1) is moot and only the write surface is missing."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null
