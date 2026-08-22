@@ -100,9 +100,11 @@ test("W1-T1214: a filing is never refused for carrying no trailer", () => {
 });
 
 test("W1-T1214: the refusal names both satisfying routes", () => {
+  // NOT "chore: ..." -- that bare form is itself filing-shaped (W1-T1078, LINT_FILING_SUBJECT_RE)
+  // and would be exempt before either credit limb is asked, defeating the point of this fixture.
   const result = evaluateCreditSurfaceGate({
-    headCommitMessage: "chore: unrelated tidy-up with no trailer\n",
-    headRef: "chore/tidy-up",
+    headCommitMessage: "refactor(cli): unrelated tidy-up with no trailer\n",
+    headRef: "refactor/tidy-up",
   });
   assert.equal(result.ok, false);
   assert.match(result.message, /Remudero-Task/, "names the trailer route");
