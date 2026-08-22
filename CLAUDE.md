@@ -241,7 +241,9 @@ forensic detail, so the narrative does not need to live here.
   shard.** "Next number after the last one I saw" collides with tasks that landed concurrently or
   live in a shard you didn't read, and `rmd lint-plan` then blocks the push.
   `grep -rhoE '^\s*- id: W1-T[0-9]+' plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` → max+1.
-  *(#770 — renumbered to W1-T257; #775 — to W1-T261; same collision twice in one session)*
+  **MINTING-ONLY — truncates letter-suffixed ids; duplicate detection compares whole ids:
+  `sort | uniq -d` on `- id:` lines.**
+  *(#770/#775 renumbered to W1-T257/W1-T261 — same collision twice)*
 - **A `warn` NEVER REACHES `lint-plan`'s EXIT CODE — this bullet claimed the changed-tasks pass
   promotes one, and a session acted on that twice.** `lintPlanCommand` (`src/run-task.ts`) increments
   `failing` only inside `if (blocking.length)`, then `return failing > 0 ? 1 : 0`. `proof-resolvability`
