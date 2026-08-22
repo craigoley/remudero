@@ -30,5 +30,21 @@ raw: "CONFIRMED WITHIN THE HOUR — fb-1785898381737-50b031's hypothesis is now 
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2489
+summary:
+  headline: Completed job lost to GitHub quota; needs recovery logic
+  what_happened: A 40-minute deployment job failed when GitHub API quota was
+    exhausted (5031/5000 used) during PR creation. The system has no recovery
+    mechanism, so the job was discarded and had to restart completely.
+  decision: Implement automatic retry on GitHub quota failures and add quota
+    monitoring to fleet health checks.
+  options:
+    - label: "Full fix: retry + monitoring + console throttle"
+      consequence: Jobs survive quota errors; fleet alerts when quota empty; console
+        stops draining quota. 5–6 hour implementation.
+    - label: "Urgent: retry only"
+      consequence: Stops 40-minute job losses immediately; jobs recover after reset;
+        other safeguards deferred. 2–3 hours.
+    - label: Verify assumptions first
+      consequence: Investigate if cheaper GitHub API exists or retry already built;
+        clarifies scope before committing. 1–2 hours.
