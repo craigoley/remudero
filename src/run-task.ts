@@ -24911,6 +24911,23 @@ function logCliInvocation(cmd: string | undefined, argv: string[]): void {
   }
 }
 
+/**
+ * W1-T1134: verbs exempt from `main()`'s CLI freshness gate because they only READ the
+ * ledger/state/plan and print — they never decide-then-act on a stale plan, which is the
+ * failure `checkCliFreshness` exists to prevent (see the `else` branch in {@link main}, and its
+ * comment, for the verbs that keep the gate). A DECLARED LIST, named beside its reason at each
+ * call site, deliberately not a heuristic over the verb string and not conditioned on
+ * `--dry-run` (a flag can be absent and the verb still dispatch) — see design (ii) of the
+ * W1-T1134 task record. Exactly two members today:
+ *   - `doctor`  — read-only by construction; its own registry entry refuses `--fix` by name.
+ *   - `status`  — its only write is the machine-owned `state/status.json` cache, never a
+ *                 decision this gate protects (the one judgement call design (v) calls out).
+ * `sweep`/`inbox` stay OUT even though their `--dry-run` forms are read-only: exempting the verb
+ * name would also exempt their real (non-dry-run) dispatch. `run-task`/`drain`/`triage`/`fix`/
+ * `approve`/`review`/`lint-plan` are untouched and keep falling to the gate's `else` branch.
+ */
+const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status"]);
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 export async function main(
   // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
@@ -24987,6 +25004,32 @@ export async function main(
     // verb's own entry point from a guard whose refusal is the exact problem it exists to fix.
     // src/lib/operator-sync.ts owns its own, independent safety (the BLOCKING/off-main refusals
     // and the preserve-aside-before-discard ordering), unrelated to this gate's dirty check.
+  } else if (READ_ONLY_FRESHNESS_EXEMPT_VERBS.has(cmd ?? "")) {
+    // W1-T1134: THE GATE'S AXIS IS DISPATCH-OR-DECIDE, NOT "WRITES NOTHING" (rationale (5) of
+    // the task record). `checkCliFreshness`'s off-main arm refuses because fast-forwarding
+    // "would move your work's base out from under it" — a refusal to MUTATE. The blanket `else`
+    // below escalates that into a refusal to RUN, which is right for a verb whose ANSWER is
+    // derived from the plan and then ACTED ON (`run-task`, `drain`, `triage`, `fix`, `approve`,
+    // `review`, `lint-plan` — all unchanged, all still fall to the `else`), but wrong for a verb
+    // that only reads the ledger/state/plan and prints. `deploy/entrypoint.sh` detaches the
+    // daemon's checkout on every boot, so these are exactly the verbs an operator reaches for on
+    // that host and finds refused until the next merge to `main`.
+    //
+    // THE EXEMPT SET IS THIS DECLARED LIST — see READ_ONLY_FRESHNESS_EXEMPT_VERBS below — not a
+    // heuristic over the verb name and not `--dry-run` flag-sniffing (design (ii)): a flag can be
+    // absent and the verb still dispatch, so `sweep`/`inbox` stay OUT even though their
+    // `--dry-run` forms are read-only — exempting the verb name would also exempt their
+    // non-dry-run dispatch. `doctor`'s own registry entry is READ-ONLY by construction (`--fix`
+    // is refused by name; every check reads the ledger, state/, plan/, /proc or ps) and is
+    // explicitly built for "a cold ssh session while remudero-serve is down" — precisely when
+    // this gate would otherwise block it. `status` is the one genuine judgement call (design
+    // (v)): its own registry entry says "writes nothing", but `src/lib/status.ts` documents that
+    // its `state/status.json` cache write is real — included here anyway because that write is a
+    // machine-owned cache, never a decision this gate exists to protect, so it sits on the same
+    // side of the dispatch-or-decide axis as `doctor`.
+    //
+    // Does NOT touch `checkCliFreshness`'s own predicate, message or ledger row (W1-T446 owns
+    // that) — only where the gate applies, never what it decides (design (i)).
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env);
     if (freshness.status === "refused") {
