@@ -1,0 +1,127 @@
+- id: W1-T1131
+  title: "`ci-gate` HOLDS A MERGE ON ANY FAILING CHECK, NOT ONLY A REQUIRED ONE, AND ITS ERROR MESSAGE CLAIMS OTHERWISE — `evaluate_fails` selects every check run with a failing conclusion, filtered only against `IGNORE` (which holds `ci-gate` alone) and never consulting the fourteen-name `REQUIRED` list, then reports the result as `required check(s) FAILED`; eleven check runs on a PR head are in neither list, so any one of them can hold every merge while the operator hunts for a required-set entry that does not exist"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    RE-READ 2026-08-22 at origin/main `d2fd29c6`, from a scratch worktree whose HEAD was proved
+    equal to that sha. The #2434 measurement is #2468's and is cited, not re-derived; the workflow
+    text and the population below are this file's own.
+
+    (1) THE TWO LISTS DO DIFFERENT JOBS, AND ONLY ONE IS CONSULTED WHERE IT MATTERS. `REQUIRED` is
+    fourteen names. `IGNORE` is exactly `["ci-gate"]` — a SELF-exclusion, with the comment "ci-gate
+    is self; remudero-review is a separate required context posted directly by the orchestrator".
+    Step 1 waits on `REQUIRED`. Step 2's `evaluate_fails` filters ONLY on `IGNORE` and never reads
+    `REQUIRED` at all: it selects every run whose conclusion is failure/timed_out/cancelled/
+    action_required/startup_failure. So `REQUIRED` governs the WAIT and nothing else.
+
+    (2) THE CODE COMMENT IS HONEST; THE MESSAGE IS NOT. Beside `evaluate_fails` the workflow says
+    "FAIL if ANY check (excluding IGNORE) concluded as a real failure" — an accurate description of
+    what it does. Twelve lines later it emits `::error::ci-gate: required check(s) FAILED — holding
+    merge:` and prints the very list that was never filtered against `REQUIRED`. The success line
+    has the same defect in the other direction: "all required checks terminal, no failures" is
+    printed for a condition that covered every check.
+
+    (3) THE OBSERVED INSTANCE, CITED. On #2434 the gate reported `required check(s) FAILED —
+    holding merge: clock-sweep` with all fourteen required checks green. `clock-sweep` is not in
+    `REQUIRED`, and `.github/workflows/clock-sweep.yml`'s own header states it is "NOT A REQUIRED
+    CHECK, AND NOT A PR TRIGGER … deliberately absent from ci-gate.yml". BOTH FILES MATCH THEIR
+    AUTHOR'S INTENT AND THE GATE DOES NOT — and an operator reading the message hunts for a
+    required-set entry that cannot be found. That cost a wrong ruling.
+
+    (4) THE BLAST RADIUS IS ELEVEN NAMES, AND THAT IS A FLOOR. Over one open PR's head, 26 distinct
+    check runs are observed; 14 are `REQUIRED`, 1 is `IGNORE`, and ELEVEN are in NEITHER —
+    `Analyze (actions)`, `Analyze (javascript-typescript)`, `CodeQL`, `Review`, `Scan`,
+    `Semgrep OSS`, `acceptance-author-gate`, `assertion-discrimination`, `leak-grep`,
+    `osv-scanner`, `task-id-existence`. LIVE CONTROL on the same read: zero `REQUIRED` names were
+    missing from that head, so the query saw the whole set. It is a FLOOR because a check that is
+    not a PR trigger can still land on a head — `clock-sweep` is exactly that, and it appears in
+    none of the 26.
+
+    (5) FIVE OF THE ELEVEN ARE THIRD-PARTY SECURITY SCANNERS. `CodeQL`, `Semgrep OSS`, `Scan`,
+    `Review` and `osv-scanner` are named by vendors, change without notice, and report advisory
+    findings. Any one of them concluding failure holds every merge in the repository today.
+
+    (6) HOW MANY MERGES THEY HAVE HELD IS A QUERY THIS FILE DELIBERATELY DOES NOT ANSWER WITH A
+    NUMBER. A `ci-gate` conclusion naming a non-required check is countable from the Actions API by
+    reading each `ci-gate` run's annotation against the `REQUIRED` list of that commit — but the
+    list itself has changed over time, so a count taken against TODAY's fourteen names would
+    misattribute older holds. #2434 is the one confirmed instance; re-derive the rest per-commit or
+    not at all.
+  design: |
+    (i) SHIP THE MESSAGE FIX WHATEVER ELSE IS RULED, AND SHIP IT FIRST. "required check(s) FAILED"
+    naming a check that is not required is a LEGIBILITY defect and it is fully separable from the
+    policy question: correcting both strings changes no verdict, holds no merge differently, and
+    removes the false lead that cost the ruling. An implementer blocked on (ii) must still land
+    (i). The success line must be corrected in the same breath — it makes the same claim.
+
+    (ii) THE FAIL ARM SHOULD READ `REQUIRED`, AND THE LISTS THEMSELVES ARE THE EVIDENCE OF INTENT.
+    An author who meant "everything blocks unless excused" would have put the advisory names in
+    `IGNORE`; `IGNORE` holds one entry and it is the gate itself. An author who meant "only these
+    block" would enumerate them; `REQUIRED` is fourteen deliberately-chosen names. The asymmetry —
+    a curated allowlist beside a one-line self-exclusion — is what the author meant, and
+    `clock-sweep.yml`'s header confirms it from the other side: its author believed absence from
+    ci-gate.yml made it non-blocking.
+
+    (iii) AND THE COUNTER-ARGUMENT IS REAL, SO NAME WHAT IS LOST. An advisory check that cannot
+    block is a check nobody fixes. The remedy is not to make everything block: it is that promoting
+    an advisory check to blocking becomes an EXPLICIT act — adding its name to `REQUIRED`, which is
+    exactly what that list is for and what a reviewer can see in a diff. Inverting `IGNORE` into an
+    advisory list is the worse shape: it would require enumerating eleven third-party names that
+    change without notice, and it fails OPEN the moment a vendor adds a check nobody listed.
+
+    (iv) DO NOT NARROW THE WAIT. Step 1's `REQUIRED` read is correct and stays. This task changes
+    what FAILS, never what is waited for, and must not make the gate proceed before a required
+    check is terminal.
+
+    (v) OUT OF SCOPE, NAMED, AND NEITHER RE-FILED. W1-T1128 owns the `clock-sweep` ratchet and
+    W1-T1104 owns the fixture drift that makes it red. THIS IS THE GATE, NOT THE CHECK: fixing
+    `clock-sweep` would remove today's instance and leave the other ten. No change to the wait cap
+    (W1-T312), to the re-aggregate grace window (W1-T261), or to `remudero-review`, which is a
+    commit status and not a check run.
+  acceptance:
+    - claim: "the fail arm consults the required list rather than only the ignore list"
+      proof: "unit test: test/ci-gate-required-format.test.ts"
+    - claim: "a failing check that is not required no longer holds the merge"
+      proof: "unit test: test/ci-gate-required-format.test.ts"
+    - claim: "a failing required check still holds the merge exactly as it does today"
+      proof: "unit test: test/ci-gate-required-format.test.ts"
+    - claim: "the hold message no longer calls a check required unless it is"
+      proof: "unit test: test/ci-gate-required-format.test.ts"
+    - claim: "the wait still blocks until every required check is terminal"
+      proof: "grep: not_ready in .github/workflows/ci-gate.yml"
+  origin: "recon#ci-gate-holds-on-any-check-2026-08-22"
+  plan_refs: ["W1-T261", "W1-T312", "W1-T1104", "W1-T1128"]
+  files: [.github/workflows/ci-gate.yml, test/ci-gate-required-format.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS — MEASURED, NOT ASSUMED:
+    at `risk: medium` the linter refuses with `spans 2 distinct subsystems/concerns (ci-gate,
+    ci-gate-required-format)`. The blast radius is one jq filter and two echo strings in a workflow
+    that changes no product code.
+
+    `files:` IS WORKFLOW PLUS TEST AND CARRIES NO `src/` PATH, DELIBERATELY. `.github/workflows/`
+    is INSTRUMENT SURFACE and Rule 25 forces a failure when instrument surface rides beside a `src/`
+    PRODUCT path in one PR. `test/` is excluded from `isProductPath` by construction, so the test
+    home is safe to declare; a `src/` path is not, and an implementer who adds one has entangled the
+    instrument with the code it grades.
+
+    `test/ci-gate-required-format.test.ts` IS AN EXISTING HOME — it already asserts the shape of the
+    `REQUIRED` list — so it is declared rather than a new filename.
+
+    THE FOUR `unit test:` PROOFS ARE PURE-PATH AND EXECUTE THE WHOLE SUITE. That is deliberate: the
+    behaviour under test lives in a shell step inside YAML, so the assertions have to drive the
+    parsed workflow rather than a TypeScript symbol, and naming individual titles that do not exist
+    yet would resolve to nothing.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    EVERY FIGURE IS A QUERY. Re-derive the eleven by listing check-run names on a PR head and
+    subtracting `REQUIRED` ∪ `IGNORE` parsed from the workflow itself, with "no REQUIRED name
+    missing from the head" as the coverage control. Do NOT carry a merges-held count — rationale
+    (6) explains why one taken against today's list would misattribute older holds.
