@@ -10,6 +10,7 @@ import {
   armAutoMerge,
   armAutoMergeDetailed,
   armFailureAction,
+  sweepArmAttemptOutcome,
   type ArmDeps,
   type ArmOutcome,
 } from "../src/run-task.js";
@@ -258,18 +259,44 @@ test("SITE sweep adapter returns the arm outcome so the sweep can read it at all
   // test used to lock no longer matches. The invariant it actually guards — EVERY path through
   // this effect returns something armOutcomeArmed can read, never an implicit `undefined` — is
   // checked directly against the site's own window instead of one regex over the whole file.
+  //
+  // AND THE FOLD ITSELF MOVED OUT. `diff-coverage` blocked the braced body: its narrowing guard
+  // was reachable only by driving a whole sweep pass, so no test could reach that line. The
+  // decision now lives in `sweepArmAttemptOutcome`, a pure function with a fixture per arm — so
+  // this test asserts the invariant across BOTH halves rather than pinning literals to whichever
+  // half currently holds them. Pinning a literal to a location is what made it stale here twice.
   const anchor = "arm: (pr) => {";
   const at = SRC.indexOf(anchor);
   assert.ok(at > 0, `anchor not found, the test is stale: ${anchor}`);
   const w = SRC.slice(at, at + 1400);
   assert.match(w, /const outcome = armAndLogOutcome\(\s*pr\.prUrl,\s*pr\.taskId,\s*log,/, "still calls the SAME shared wrapper with the SAME prUrl/taskId/log every other lane uses");
-  assert.match(w, /if \(outcome !== "arm-error-ignored" \|\| attemptError === undefined\) return outcome;/, "the base outcome is returned, never discarded");
-  assert.match(w, /return \{ outcome, failureClass \};/, "a classified failure is returned as the richer shape, never discarded either");
+  assert.match(w, /return sweepArmAttemptOutcome\(outcome, attemptError\);/, "the adapter's LAST statement is a return — no path falls off the end into an implicit undefined");
   assert.equal(
     SRC.includes("arm: (pr) => {\n      armAutoMerge(pr.prUrl, pr.taskId);\n    },"),
     false,
     "the original discarding form (no return at all) is gone",
   );
+
+  // The fold it delegates to is total: both of its returns are present, so neither the bare
+  // outcome nor the richer classified shape can be dropped on the way back to the sweep.
+  const foldAt = SRC.indexOf("export function sweepArmAttemptOutcome(");
+  assert.ok(foldAt > 0, "the extracted fold is gone — the adapter now delegates to nothing");
+  const fold = SRC.slice(foldAt, foldAt + 700);
+  assert.match(fold, /if \(outcome !== "arm-error-ignored" \|\| attemptError === undefined\) return outcome;/, "the base outcome is returned, never discarded");
+  assert.match(fold, /return \{ outcome, failureClass \};/, "a classified failure is returned as the richer shape, never discarded either");
+
+  // AND THE PROPERTY, DRIVEN — not just grepped. Every shape the adapter can hand the fold comes
+  // back as something `armOutcomeArmed` can read; none returns undefined.
+  for (const [outcome, err] of [
+    ["armed", undefined],
+    ["arm-error-ignored", undefined],
+    ["arm-error-ignored", "Base branch was modified."],
+    ["arm-error-ignored", "Pull request is in clean status"],
+    ["arm-error-ignored", "something unclassifiable"],
+  ] as const) {
+    const folded = sweepArmAttemptOutcome(outcome, err);
+    assert.notEqual(folded, undefined, `${outcome}/${String(err)} must never fold to undefined`);
+  }
 });
 
 // ── 10: THE KEY — the same ledger, two ids, opposite outcomes ───────────────────────
