@@ -69,9 +69,34 @@ test("the REAL committed CLAUDE.md is currently within the recorded size budget 
   assert.match(result.stdout, /OK -- CLAUDE.md is at or under the size budget cap/);
 });
 
-test("the real baseline carries ZERO headroom -- capBytes equals measuredBytes, unlike the learnings baseline", () => {
+// THE ZERO-HEADROOM INVARIANT WAS RETIRED ON 2026-08-22 AND IS REPLACED, NOT DELETED.
+//
+// It used to assert `capBytes === measuredBytes`, on the charter's reasoning that every addition
+// should be paid for by a fold. That held the file at its own size, so an edit paid a fold tax
+// whether or not it had anything left worth folding — CLAUDE.md hit the cap with ONE BYTE of room
+// twice on the same day and both lanes spent more effort compressing prose than writing the rule
+// they came to write. The operator raised the cap to a round 64 KiB and granted deliberate
+// headroom; scripts/claude-md-budget-baseline.json's bumpRationale carries that record.
+//
+// What replaces it must still have teeth, or the baseline becomes unfalsifiable paperwork: the cap
+// stays the DECLARED round boundary rather than drifting upward silently, the measured figure stays
+// honest against the file on disk, and the raise stays on the record in prose. A future raise
+// therefore has to change this constant deliberately and say why — which is the whole point of the
+// gate — instead of a lane nudging capBytes by whatever a red run happened to need.
+test("the real baseline pins the DECLARED cap, a measured figure that matches the file, and a written reason", () => {
   const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "claude-md-budget-baseline.json"), "utf8"));
-  assert.equal(baseline.capBytes, baseline.measuredBytes, JSON.stringify(baseline));
+  assert.equal(baseline.capBytes, 65536, `the cap must stay the declared 64 KiB boundary: ${JSON.stringify(baseline)}`);
+  assert.equal(
+    baseline.measuredBytes,
+    readFileSync(join(REPO_ROOT, "CLAUDE.md")).length,
+    "measuredBytes must be the real byte length of the committed CLAUDE.md, not a stale capture",
+  );
+  assert.ok(baseline.measuredBytes <= baseline.capBytes, JSON.stringify(baseline));
+  assert.match(
+    String(baseline.bumpRationale ?? ""),
+    /2026-08-22/,
+    "a cap raise must stay on the record in prose — an unexplained number is what this gate exists to prevent",
+  );
 });
 
 test("claude-md-budget-ratchet module: importing (not spawning as the entry script) does not re-invoke main() -- process.argv[1] is undefined when eval'd", () => {
