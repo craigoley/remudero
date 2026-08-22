@@ -618,6 +618,20 @@ export interface ReviewVerdict {
    */
   unwiredAdvisories?: UnwiredAdvisory[];
   /**
+   * W1-T1118: the reachability scan's EXAMINED count, riding this verdict so `review.posted`
+   * (run-task.ts) can carry it without a second ledger line — see {@link
+   * "./reachability.js".ReachabilityScanResult}'s doc for the three-state contract this exists to
+   * separate:
+   *   - a NUMBER — {@link scanUnreachedExports} ran and examined this many deduped added exported
+   *     functions (0 is honest: the diff added none, not "the scan didn't run");
+   *   - `null` — the scan did NOT run at all, the same `checkoutDir` skip {@link unwiredAdvisories}'s
+   *     `unwired_export` code already degrades on (no head checkout to read).
+   * OBSERVABILITY ONLY, exactly like `unwiredAdvisories` above: never folds into `state`,
+   * `floorState` or `capped`, and its presence/value never changes which advisories fire or which
+   * reason codes they carry.
+   */
+  reachabilityScanned?: number | null;
+  /**
    * W1-T352 (DECISIONS.md ENTRY PROVENANCE FLOOR): the header text of every entry this diff ADDS
    * to DECISIONS.md (a `## …` line) that carries, among that SAME entry's own added lines,
    * NEITHER the machine auto-choose stamp NOR an operator-attribution line — see {@link
@@ -3252,6 +3266,11 @@ function unresolvedTaskScopeOverlaps(
  * degradation {@link judgeCriterion}'s own `execCtx` already applies to proof execution.
  * `inverse_scope`/`scope_violation`/`unresolved_task_scope` need no checkout (each is a pure
  * diff-files/declared-files comparison) and always run.
+ *
+ * Also returns `reachabilityScanned` (W1-T1118, see {@link ReviewVerdict.reachabilityScanned}'s
+ * doc): the scan's own `examined` count when `checkoutDir` was present, `null` when the
+ * `if (checkoutDir)` guard skipped it — read off {@link scanUnreachedExports}'s result, never a
+ * second diff walk.
  */
 function unwiredAdvisoriesFor(
   diff: string,
@@ -3261,11 +3280,13 @@ function unwiredAdvisoriesFor(
   taskDeclaredFiles: string[] | undefined,
   openTaskIds: ReadonlySet<string> | undefined,
   openTaskDeclaredFiles: ReadonlyMap<string, readonly string[]> | undefined,
-): UnwiredAdvisory[] {
+): { advisories: UnwiredAdvisory[]; reachabilityScanned: number | null } {
   const out: UnwiredAdvisory[] = [];
+  let reachabilityScanned: number | null = null;
 
   if (checkoutDir) {
-    const unreached: UnreachedExport[] = scanUnreachedExports(diff, checkoutDir);
+    const { unreached, examined } = scanUnreachedExports(diff, checkoutDir);
+    reachabilityScanned = examined;
     if (unreached.length > 0) {
       const wired = wiredAtPairs(report);
       const knownOpenIds = openTaskIds ?? new Set<string>();
@@ -3318,7 +3339,7 @@ function unwiredAdvisoriesFor(
     });
   }
 
-  return out;
+  return { advisories: out, reachabilityScanned };
 }
 
 // ── DECISIONS.md entry provenance floor (W1-T352) ──────────────────────────
@@ -3480,7 +3501,7 @@ export function judgeReview(
   // W1-T322 (SHIPS-UNWIRED advisory floor): computed alongside the structural checks above but
   // folded into NEITHER `state` NOR `floorState` below — see {@link ReviewVerdict.unwiredAdvisories}'s
   // doc for why (ADVISORY ONLY, by design, until W1-T323's measured flip).
-  const unwiredAdvisories = unwiredAdvisoriesFor(
+  const { advisories: unwiredAdvisories, reachabilityScanned } = unwiredAdvisoriesFor(
     evidence.diff,
     evidence.report,
     diffFiles,
@@ -3642,6 +3663,7 @@ export function judgeReview(
       : undefined,
     unprovenancedDecisionsEntries,
     unwiredAdvisories,
+    reachabilityScanned,
     rewardHackingGap,
     unexecutableCount,
     unexecutableProofs,
