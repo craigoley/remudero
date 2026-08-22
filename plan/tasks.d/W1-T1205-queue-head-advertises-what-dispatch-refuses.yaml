@@ -1,0 +1,127 @@
+- id: W1-T1205
+  title: "`rmd status`'s QUEUE HEAD promises `next dispatchables` and derives them from a WEAKER predicate than the dispatcher's, so it advertises tasks dispatch will never take — and the filter that excluded them reaches no surface at all, existing only as a `dispatch.skipped` ledger row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree at origin/main, BY READING ONLY. The suite and
+    every `runSweep` test were left unrun — one drove real effects and closed eleven live PRs.
+
+    (1) THE TWO CALLERS PASS DIFFERENT OPTIONS, AND THAT IS THE WHOLE DEFECT.
+    `deriveQueueHead` (`src/lib/status-board.ts`) calls
+    `runnableCandidates(plan, isMerged, limit, { isIndeterminate, isCircuitTripped })` — TWO
+    predicates. The dispatcher supplies more, including `hasPushedRunBranch`
+    (`NextRunnableOpts.hasPushedRunBranch`, consumed at `src/lib/drain.ts`'s
+    `if (opts.hasPushedRunBranch?.(t.id))`). Same selector, weaker options, so the surface's set is
+    a strict SUPERSET of the dispatcher's.
+
+    (2) THE SURFACE'S OWN PROMISE SETTLES WHAT IT INTENDS. `rmd status`'s help text describes the
+    section as **`QUEUE HEAD (next dispatchables, …)`**. It does not promise a wider queue, an
+    inventory, or a stuck list — it promises what dispatch will take next. So this is not a
+    deliberate difference to be documented; it is the surface failing its own stated contract.
+    Measured live: queue head printed W1-T1098, W1-T1101, W1-T1104, W1-T1109 and W1-T1128 while
+    the dispatcher's eligible set was `{W1-T201, W1-T1132}` — AN EMPTY INTERSECTION. Every row the
+    operator was shown was one dispatch would refuse.
+
+    (3) AND THE EXCLUDING CLASS REACHES NO SURFACE AT ALL. `run-branch-already-pushed` is absent
+    from both taxonomies: `StarvationCensus` is `{ circuitBroken, blocked, unmetDeps }`, and
+    `DispatchFilterReason` is `"already-merged" | "verify-not-auto" | "blocked" | "unmet-deps" |
+    "continued-this-pass"`. Its only trace is one `dispatch.skipped` ledger row. So a task can be
+    permanently un-dispatchable with nothing on any console, panel or CLI saying so.
+
+    (4) THE MECHANISM IS PERMANENT, NOT TRANSIENT, AND THAT IS WHY IT MATTERS.
+    `hasPushedRunBranch` is derived from a live `git ls-remote --heads origin 'run-*'` every pass —
+    `src/lib/drain.ts` documents it as "the output of a SINGLE `git ls-remote --heads origin
+    'run-*'` call — measured at 199 ms for 46 refs" — with NO expiry and no consultation of the
+    PR's state. GitHub deletes a head branch on MERGE but not on CLOSE. So a PR closed unmerged
+    leaves its run branch standing forever, and the task it belongs to is silently and permanently
+    un-dispatched. Five tasks were in exactly that state this morning — W1-T1098, W1-T1101,
+    W1-T1104, W1-T1109, W1-T1000002 — each from a PR closed in error, each branch still ahead of
+    main across several files.
+
+    (5) THE PRIOR ART IS CITED AND IS A DIFFERENT SURFACE. W1-T507 (#1886, MERGED) surfaced
+    `verify: human` ON THE WEB CONSOLE. This is the CLI's queue head and a different exclusion
+    class; W1-T507 is cited, not re-filed.
+  design: |
+    (i) QUEUE HEAD MUST BIND THE DISPATCHER'S OWN PREDICATE SET. `panel-graph.ts` already
+    establishes the pattern in this repo — its FRONTIER "binds drain.ts's OWN `runnableCandidates`
+    (the exact selector the dispatcher itself uses)". Queue head must pass the same options the
+    dispatcher passes, so the two cannot drift by construction rather than by review.
+
+    (ii) SHOWING ONLY DISPATCHABLES WOULD HIDE THE STUCK ONES, SO SHOW BOTH AND LABEL THEM.
+    Rationale (2) says the promise is `next dispatchables`, and a surface that silently drops five
+    permanently-stuck tasks is how this went unnoticed. The section must therefore distinguish what
+    dispatch will take from what it is refusing AND WHY — never a single undifferentiated list, and
+    never a silent omission.
+
+    (iii) `DispatchFilterReason` YES; `StarvationCensus` NOT AS IT STANDS — AND THE DISTINCTION IS
+    THE CENSUS'S OWN CONTRACT. `DispatchFilterReason` is a neutral tally of why a task was filtered
+    and this class plainly belongs in it. `StarvationCensus` is documented as the RECOVERABLE-class
+    census, and excludes `verify-not-auto` because it "permanently needs a human, waiting never
+    helps". `run-branch-already-pushed` is the sharper case the brief names: waiting never helps
+    AND NOTHING IS OWED BY ANYONE — no human holds it, no lane will clear it. Dropping a
+    permanently-stuck class into a recoverable census would break the census's meaning. Either it
+    gains an explicit NON-recoverable bucket as a stated contract change, or it stays out and the
+    class is surfaced through the filter tally. Choose deliberately; do not widen by accident.
+
+    (iv) WHAT SHOULD CLEAR AN ORPHANED RUN BRANCH — AND THE ANSWER IS THAT CLEARING IS NOT THE
+    DISPATCH FIX. `rmd reap-branches` is a DRY RUN by design ("Reports which remote branches WOULD
+    be deletable"), and it is the right owner for REPORTING an orphaned run branch whose PR closed
+    unmerged. It must not delete: a branch 1-5 commits ahead across several files carries unmerged
+    work, and deleting it destroys the only copy. BUT DISPATCH SHOULD NOT WAIT FOR ANY OF THAT. The
+    correctness fix is that a run branch whose PR is CLOSED is not evidence of work in flight, so
+    the predicate must stop reading it as such. Tidiness and dispatchability are separate
+    questions, and conflating them is what makes an operator delete work to unstick a queue.
+
+    (v) NOT IN SCOPE, NAMED: the `hasPushedRunBranch` predicate's own PR-state awareness of (iv),
+    which is the unblocking fix and belongs in the module that supplies the reader — a different
+    file, a different falsifier, its own task; `rmd reap-branches`'s classification; W1-T507's
+    console surface; and W1-T298's starvation escalation, which fires on a different condition.
+  acceptance:
+    - claim: "queue head is derived from the same predicate set the dispatcher applies"
+      proof: "unit test: test/queue-head-dispatch-parity.test.ts"
+    - claim: "a task excluded by a pushed run branch is named on the surface rather than omitted"
+      proof: "unit test: test/queue-head-dispatch-parity.test.ts"
+    - claim: "the surface distinguishes what dispatch will take from what it is refusing"
+      proof: "unit test: test/queue-head-dispatch-parity.test.ts"
+    - claim: "the pushed-run-branch exclusion is a named dispatch filter reason rather than a ledger row alone"
+      proof: "unit test: test/queue-head-dispatch-parity.test.ts"
+    - claim: "the recoverable-class census keeps its existing membership unchanged"
+      proof: "unit test: test/queue-head-dispatch-parity.test.ts"
+  files: [src/lib/status-board.ts, src/lib/drain.ts, test/queue-head-dispatch-parity.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#queue-head-advertises-undispatchables-2026-08-22"
+  plan_refs: ["W1-T507", "W1-T298", "W1-T1201"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/queue-head-dispatch-parity.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    THE RECON WAS READ-ONLY BY INSTRUCTION AND BY HAZARD. Neither the suite nor any `runSweep`
+    test was run; the live queue-head-versus-dispatcher comparison is the operator's measurement
+    and the source analysis is this shard's.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. Queue head is the surface an operator picks work
+    from, and the filter tally feeds the idle-reason panels; a mistake either hides real work or
+    advertises more of what dispatch refuses.
+
+    BOTH `src/` FILES ARE DECLARED BECAUSE THE PROMISE AND THE VOCABULARY ARE APART:
+    `deriveQueueHead` is in `src/lib/status-board.ts`, and `DispatchFilterReason` with the
+    `hasPushedRunBranch` consumption is in `src/lib/drain.ts`. Binding the predicate without a name
+    for the exclusion would swap one silent omission for another.
+
+    THE SUBJECT SWEEP COUNTED MATCHES PER HEAD AGAINST MAIN'S BASELINE RATHER THAN TESTING
+    PRESENCE. Every branch descends from main and carries main's shards, so a presence test returns
+    a hit on all 134 heads and means nothing. The baseline on main is one subject shard
+    (`W1-T298-queue-starvation-escalates`), and no head exceeded it — so no in-flight sibling
+    exists.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1205` resolves to 8fbc18837a89150d280ac9bceafc66a08f6ee297,
+    read over git protocol; live control, `refs/rmd-id/W1-T999999` exits 2. THE ANCHOR MESSAGE WAS
+    NOT JUDGED. Eight id surfaces, and every control was an id VERIFIED PRESENT ON MAIN
+    (`W1-T1110`, `W1-T507`, `W1-T1104` — each with a shard file and a declared `- id:`).
