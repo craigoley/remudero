@@ -283,6 +283,14 @@ test("W1-T1132 REAL GIT: the reserver creates, contends, reads its holder and dr
   try {
     execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
     execFileSync("git", ["init", "--quiet", "-b", "main", work], { encoding: "utf8", env: GIT_ENV });
+    // A REPO-LOCAL identity: `triageClaimReserverFor`'s `mintAnchor` runs `git commit-tree`
+    // through bare `spawnSync` (no `env` override), so it inherits whatever HOME the process has
+    // rather than this file's `GIT_ENV`. Without this, `commit-tree` fails, and `mintAnchor`'s
+    // `deps.run(...).stdout.trim()` reads stdout without checking `status`, silently returning an
+    // empty anchor — the exact false-pass W1-T1132's own end-to-end test hit (see the sibling
+    // commit that added this to `planter`/`repoDir` there).
+    git(work, "config", "user.name", "remudero-test-work");
+    git(work, "config", "user.email", "work@remudero.invalid");
     writeFileSync(join(work, "seed.txt"), "seed\n");
     git(work, "add", "-A");
     git(work, "commit", "--quiet", "-m", "chore(triage): feedback#fb-real-done — already decided, no task");
@@ -318,6 +326,11 @@ test("W1-T1132 REAL GIT: an unreachable origin classifies as unreachable, and un
   const work = tmp("rmd-claim-noremote-");
   try {
     execFileSync("git", ["init", "--quiet", "-b", "main", work], { encoding: "utf8", env: GIT_ENV });
+    // See the sibling test above: `mintAnchor`'s `commit-tree` runs through a bare `spawnSync`
+    // with no `env` override, so a repo-local identity is required or the mint silently returns
+    // an empty string instead of failing loudly.
+    git(work, "config", "user.name", "remudero-test-work");
+    git(work, "config", "user.email", "work@remudero.invalid");
     git(work, "remote", "add", "origin", join(work, "does-not-exist.git"));
     const reserver = triageClaimReserverFor(work);
     // A push to a remote that is not there is NOT contention. Conflating the two is exactly what
