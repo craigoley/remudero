@@ -527,6 +527,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // without landing a new head — see that function's own doc. Losing either across a rotation
   // reads a stalled dispatch as still in flight and re-strands the PR against a head nothing will
   // ever move again, the exact deadlock this task fixes.
+  // W1-T1211: run-task.ts's `runIsAwaitingExternal` reads this row to decide whether the light pass
+  // may let the fix rung act beside an in-flight run — a run that has written it has finished its
+  // worker turn and is waiting on GitHub. Written ONCE per wait, never per poll, which is why it
+  // belongs here and `ci.polling`/`pr.polling` (named as telemetry noise above) do not: losing this
+  // row across a rotation reads a WAITING run as WORKING and silently re-freezes the fix rung for
+  // that run's whole duration, which is the twenty-one-hour stall the task measured.
+  "run.awaiting_external",
   "fix.ci_not_green",
   "fix.resolved",
   // W1-T1095 (capability 3): run-task.ts's `fixRebaseAlreadySpent` reads this row to enforce the
