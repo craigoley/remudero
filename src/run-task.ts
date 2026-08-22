@@ -3949,13 +3949,51 @@ function renderEscalationEvidence<T>(items: readonly T[], format: (item: T) => s
 }
 
 /** Outcome of one full pass through the fix rung. */
+/**
+ * PURE: the ONLY difference between the two non-spending fix-rung terminations — `"stood_down"`
+ * (W1-T177) and `"parked"` (W1-T1095). Both emit the same `"blocked"` verdict row and the same
+ * return value; they differ in the ledger `reason`, one extra ledger field, and the console
+ * phrase, which is exactly what this returns.
+ *
+ * WHY IT IS A FUNCTION AND NOT A SECOND BRANCH. `parked` shipped as its own near-identical block
+ * inside `runTaskBody`, a closure nested in `runTask` that no test drives directly, so every
+ * added line of it was reachable by nothing and `diff-coverage` blocked on all of them. Folding
+ * the two together puts `parked` on the emission the stood-down tests already exercise and
+ * leaves the genuinely differing part here, where each arm is a unit fixture. Same repair the
+ * coverage gate forced on `promotionLedgerSink` (#2346).
+ */
+export function fixRungTerminationVerdict(
+  rung: Pick<FixRungOutcome, "outcome" | "reason" | "standDownReason" | "blockedOnPr">,
+): { reason: string; extra: Record<string, unknown>; phrase: string } {
+  if (rung.outcome === "parked") {
+    return {
+      reason: rung.reason,
+      extra: { blocked_on_pr: rung.blockedOnPr },
+      phrase: `parked on prerequisite #${rung.blockedOnPr}`,
+    };
+  }
+  return {
+    reason: `stood down — ${rung.standDownReason}`,
+    extra: {},
+    phrase: `stood down (${rung.standDownReason})`,
+  };
+}
+
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned";
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
   review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   strikes: number;
+  /**
+   * W1-T1095 (design note ii — "every termination writes a reason"): a short, ALWAYS-PRESENT
+   * machine-legible reason naming why THIS pass ended the way it did — never blank, regardless
+   * of `outcome`. Distinct from `standDownReason` (a longer, human-facing sentence set only for
+   * `"stood_down"`): this field is populated on every branch, including `"fixed"` (where nothing
+   * else on this type otherwise says why the loop stopped) and the plain-exhaustion escalate.
+   */
+  reason: string;
   /**
    * W1-T1044: set only when `outcome === "spawn_abandoned"` — how long (ms) the abandoned
    * `deps.spawn` call had been running when the wall-clock bound gave up on it. See
@@ -3979,6 +4017,14 @@ export interface FixRungOutcome {
    * with a second reason source — see {@link branchAuthorshipStandDownReason}.
    */
   standDownReason?: string;
+  /**
+   * W1-T1095: set only when `outcome === "parked"` — the prerequisite PR number
+   * {@link outOfDiffBlockerFor} found. The rung spent ZERO strikes reaching this outcome
+   * (design note iv — parking is not retrying) and expects to be invoked again later (the
+   * SAME way every other dispatch is re-polled); the next call resumes normally the moment
+   * {@link prerequisiteMerged} reads this PR as merged.
+   */
+  blockedOnPr?: number;
 }
 
 /**
@@ -4276,6 +4322,41 @@ export function detectReviewFalseBlock(check: {
 }
 
 /**
+ * W1-T1095 (capability 1 of 3, RECORD-AND-RESUME — design note (i)): recognizes the "blocked
+ * on #N" idiom in a review's own summary or an UNMET criterion's own reason — the phrase a
+ * reviewer already writes when a criterion cannot be satisfied from INSIDE this diff because it
+ * depends on another, not-yet-merged pull request. This is the gap rationale (3) measured:
+ * `blocked_on`/`waiting_on_pr`/`depends_on_pr` all read ZERO across `src/` before this — there
+ * was no way for the rung to even RECORD that the remedy lives elsewhere, so it spent strikes
+ * (and eventually escalated) on work no fix worker could ever complete from inside the PR.
+ *
+ * Deliberately narrow: this matches ONE literal idiom, never infers a prerequisite from prose
+ * shape or from a bare PR-number mention — a review that happens to REFERENCE a PR number in
+ * passing (e.g. "see #40 for prior art") is never mistaken for a park-worthy blocker. Met
+ * criteria are never consulted — only what's still failing can name what's still blocking.
+ */
+export function outOfDiffBlockerFor(review: { summary: string; criteria: CriterionVerdict[] }): number | undefined {
+  const texts = [review.summary, ...review.criteria.filter((c) => !c.met).map((c) => c.reason)];
+  for (const text of texts) {
+    const m = /\bblocked on #(\d+)\b/i.exec(text ?? "");
+    if (m) return Number(m[1]);
+  }
+  return undefined;
+}
+
+/**
+ * W1-T1095 (capability 1 — the resume half): has the prerequisite {@link outOfDiffBlockerFor}
+ * named already MERGED? Mirrors every other live-state read in this file's fail-SAFE direction
+ * ({@link LiveStateResult}'s own `ok:false` contract) — an indeterminate or failed read is never
+ * treated as merged, so a `gh` hiccup keeps a parked PR parked (costs one skipped poll) rather
+ * than risk spending a strike against a prerequisite that may still be open (the far worse
+ * failure — see every other `ok:false` site in this file for the same asymmetric choice).
+ */
+export function prerequisiteMerged(liveState: LiveStateResult | undefined): boolean {
+  return liveState?.ok === true && liveState.state === "MERGED";
+}
+
+/**
  * W1-T1044: best-effort RECLAIM of a worker {@link spawnFixWorkerBounded} abandoned — scoped
  * by THIS run's own `REMUDERO_RUN_ID` env marker (worker-containment.ts's W1-T117 attribution),
  * reusing the SAME `defaultListCandidates`/`defaultReadMarkers`/`killProcessGroup` primitives
@@ -4359,6 +4440,7 @@ async function spawnFixWorkerBounded(
         task_id: ctx.taskId,
         elapsed_ms: elapsedMs,
         bound_ms: boundMs,
+        reason: "spawn wall-clock bound exceeded",
       });
       try {
         await deps.reclaimWorker?.({ runId: ctx.runId, taskId: ctx.taskId, elapsedMs });
@@ -4573,6 +4655,18 @@ export async function runFixRung(opts: {
      * precondition for it.
      */
     reclaimWorker?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
+    /**
+     * W1-T1095 (capability 1's resume half): an OPTIONAL fresh live-state read of an
+     * ARBITRARY prerequisite PR number (never `opts.prUrl` itself) — consulted ONLY when
+     * {@link outOfDiffBlockerFor} finds a "blocked on #N" review, to decide whether N has
+     * merged yet. Mirrors `readLiveState`'s own contract exactly ({@link LiveStateResult});
+     * omitted, or a failed/indeterminate read, behaves as "not yet merged" — the SAME
+     * fail-safe direction every other live-state read in this rung already takes (see
+     * {@link prerequisiteMerged}'s own doc). The real call site (`buildSweepEffects`) wires
+     * this to the SAME `ghLiveState` reader every other spending site here already uses,
+     * against the prerequisite's own PR URL in this task's repo.
+     */
+    readPrerequisiteState?: (prNumber: number) => LiveStateResult | Promise<LiveStateResult>;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
@@ -4676,11 +4770,41 @@ export async function runFixRung(opts: {
         deps.say(
           `fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`,
         );
-        return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown.reason, issueUrl };
+        return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason, issueUrl };
       }
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
-      return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown.reason };
+      return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
+    }
+
+    // W1-T1095 (capability 1 — RECORD-AND-RESUME): a review naming an OUT-OF-DIFF blocker
+    // ("blocked on #N") cannot be resolved by dispatching more code inside THIS diff — see this
+    // task's rationale (3): the rung previously had no way to even RECORD that the remedy lives
+    // elsewhere, so it kept striking (and eventually escalating) against work no fix worker
+    // could ever complete from inside the PR. PARK instead: write a `fix.parked` row naming the
+    // prerequisite and return WITHOUT spending a strike (design note iv — parking is not
+    // retrying; `strikes` is read, never incremented, on this path). Checked every round, not
+    // just the first, so a strike that itself regresses into naming a fresh prerequisite still
+    // parks rather than grinding toward exhaustion.
+    //
+    // The prerequisite's OWN live state is re-read FIRST: a MERGED prerequisite means the
+    // blocker is already gone, so this round falls through and proceeds as an ordinary strike
+    // instead — this is capability 3, "a parked pull request resumes when its prerequisite
+    // merges": nothing else on this rung treats a parked PR specially, it is simply re-invoked
+    // (the same way every other dispatch already is) and this check now reads differently.
+    const outOfDiffBlocker = outOfDiffBlockerFor(review);
+    if (outOfDiffBlocker !== undefined) {
+      const prerequisiteState = deps.readPrerequisiteState
+        ? await deps.readPrerequisiteState(outOfDiffBlocker)
+        : undefined;
+      if (!prerequisiteMerged(prerequisiteState)) {
+        const parkReason = `blocked on #${outOfDiffBlocker} — a prerequisite outside this diff, not yet merged`;
+        deps.log("fix.parked", { strike: strikes, blocked_on_pr: outOfDiffBlocker, reason: parkReason });
+        deps.say(`fix rung: PARKED — ${parkReason}; no strike spent, will resume once it merges: ${opts.prUrl}`);
+        return { outcome: "parked", review, strikes, reason: parkReason, blockedOnPr: outOfDiffBlocker };
+      }
+      deps.log("fix.resumed", { strike: strikes, blocked_on_pr: outOfDiffBlocker });
+      deps.say(`fix rung: RESUMING — prerequisite #${outOfDiffBlocker} has merged; dispatching normally: ${opts.prUrl}`);
     }
 
     // W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15): a diff
@@ -4722,7 +4846,7 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "rule15_violation" });
       deps.say(`fix rung: escalated (rule 15 violation) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, issueUrl };
+      return { outcome: "escalated", review, strikes, reason: "rule15_violation", issueUrl };
     }
 
     // W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE): a diff that
@@ -4779,7 +4903,7 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "instrument_entangled" });
       deps.say(`fix rung: escalated (instrument entanglement) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, issueUrl };
+      return { outcome: "escalated", review, strikes, reason: "instrument_entangled", issueUrl };
     }
 
     // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
@@ -4871,7 +4995,7 @@ export async function runFixRung(opts: {
         // Mirrors the spawn-infra-blocked path immediately below: no subprocess demonstrably
         // ran to completion, so this round is never committed as a strike (W1-T127's own
         // "a strike is only spent once a worker demonstrably ran" invariant).
-        return { outcome: "spawn_abandoned", review, strikes, spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
+        return { outcome: "spawn_abandoned", review, strikes, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
       }
       fixResult = deps.account(spawnOutcome.result);
     } catch (e) {
@@ -5064,7 +5188,7 @@ export async function runFixRung(opts: {
       if (preFalseBlockStandDown) {
         deps.log("fix.stood_down", { site: "rung.false_block", strikes, reason: preFalseBlockStandDown.reason });
         deps.say(`fix rung: standing down before false-block escalation — ${preFalseBlockStandDown.reason}`);
-        return { outcome: "stood_down", review, strikes, standDownReason: preFalseBlockStandDown.reason };
+        return { outcome: "stood_down", review, strikes, reason: preFalseBlockStandDown.reason, standDownReason: preFalseBlockStandDown.reason };
       }
       const stillUnmet = review.criteria.filter((c) => !c.met);
       deps.log("fix.false_block", {
@@ -5108,14 +5232,14 @@ export async function runFixRung(opts: {
       );
       deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "false_block" });
       deps.say(`fix rung: escalated (review false-block) — ${issueUrl}`);
-      return { outcome: "escalated", review, strikes, issueUrl };
+      return { outcome: "escalated", review, strikes, reason: "false_block", issueUrl };
     }
   }
 
   if (review.state === "success") {
-    deps.log("fix.resolved", { strikes });
+    deps.log("fix.resolved", { strikes, reason: "review passed" });
     deps.say(`fix rung: resolved after ${strikes} strike(s) — review now passes`);
-    return { outcome: "fixed", review, strikes };
+    return { outcome: "fixed", review, strikes, reason: "review passed" };
   }
 
   // W1-T177 SITE (ii) — TERMINAL-STATE CHECK immediately before the
@@ -5127,7 +5251,7 @@ export async function runFixRung(opts: {
   if (preEscalateStandDown) {
     deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown.reason });
     deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown.reason}`);
-    return { outcome: "stood_down", review, strikes, standDownReason: preEscalateStandDown.reason };
+    return { outcome: "stood_down", review, strikes, reason: preEscalateStandDown.reason, standDownReason: preEscalateStandDown.reason };
   }
 
   // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
@@ -5200,9 +5324,14 @@ export async function runFixRung(opts: {
     },
     { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
   );
-  deps.log("fix.exhausted", { strikes, issue_url: issueUrl });
+  const exhaustionReason = stillConflicted
+    ? "merge_conflict_unresolved"
+    : noReviewYet
+    ? "ci_never_green"
+    : "review_still_failing";
+  deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: exhaustionReason });
   deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
-  return { outcome: "escalated", review, strikes, issueUrl };
+  return { outcome: "escalated", review, strikes, reason: exhaustionReason, issueUrl };
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
@@ -7590,6 +7719,11 @@ async function runTask(
           // W1-T296: the pre-strike branch-authorship check's live-head
           // reader — same fresh-`gh`-read discipline as `readLiveState`.
           readLiveHead: ghLiveHead,
+          // W1-T1095: the SAME `ghLiveState` reader, aimed at whatever prerequisite PR number
+          // a "blocked on #N" review names, in THIS task's own owner/repo — see runFixRung's
+          // own `readPrerequisiteState` doc for the fail-safe (not-merged) default this takes
+          // on a failed/indeterminate read.
+          readPrerequisiteState: (n) => ghLiveState(`https://github.com/${owner}/${task.repo}/pull/${n}`),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc.
           spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.sweepWallClockBoundMs,
@@ -7626,21 +7760,36 @@ async function runTask(
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
-      if (rung.outcome === "stood_down") {
-        // W1-T177: this run's own PR went terminal (merged/closed) mid-rung —
-        // stand down rather than spend another strike or escalate. Reuses the
-        // existing "blocked" verdict (never a spend, never a bypass) so the
-        // drain's stop-on-block invariant still holds; the ledger line above
-        // names the SITE and the STATE, not just "blocked".
+      if (rung.outcome === "stood_down" || rung.outcome === "parked") {
+        // TWO NON-SPENDING TERMINATIONS, ONE EMISSION.
+        //
+        // W1-T177 (`stood_down`): this run's own PR went terminal (merged/closed) mid-rung —
+        // stand down rather than spend another strike or escalate.
+        //
+        // W1-T1095 (`parked`): the remedy lives OUTSIDE this diff — never a strike spent, never
+        // an issue opened (design note v: the operator's merge gate is never softened by this
+        // rung). The PR stays open exactly like every other "blocked" verdict; the next poll
+        // that reaches this same rung re-checks the prerequisite and resumes automatically the
+        // moment it merges (capability 3 — see `outOfDiffBlockerFor`/`prerequisiteMerged`).
+        //
+        // BOTH reuse the existing "blocked" verdict (never a spend, never a bypass) so the
+        // drain's stop-on-block invariant still holds; the ledger line names the SITE and the
+        // STATE, not just "blocked". What differs between them is ONLY the reason, one extra
+        // ledger field and the console phrasing — `fixRungTerminationVerdict` owns exactly that
+        // difference as a pure function with a unit fixture per arm, so `parked` shares this
+        // already-exercised emission instead of being a second near-identical block that no
+        // test can reach.
+        const termination = fixRungTerminationVerdict(rung);
         log("verdict", {
           verdict: "blocked",
           pr_url: prUrl,
-          reason: `stood down — ${rung.standDownReason}`,
+          reason: termination.reason,
+          ...termination.extra,
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
         });
-        say(`verdict: blocked — stood down (${rung.standDownReason}): ${prUrl}`);
+        say(`verdict: blocked — ${termination.phrase}: ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
     }
@@ -18650,6 +18799,10 @@ export function buildSweepEffects(
             // W1-T296: the SAME live-head reader every fix-rung call site
             // wires for the pre-strike branch-authorship check.
             readLiveHead: ghLiveHead,
+            // W1-T1095: the SAME `ghLiveState` reader, aimed at whatever prerequisite PR
+            // number a "blocked on #N" review names, in this SAME owner/repo — see
+            // runFixRung's own `readPrerequisiteState` doc.
+            readPrerequisiteState: (n) => ghLiveState(`https://github.com/${owner}/${repo}/pull/${n}`),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
             // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The
