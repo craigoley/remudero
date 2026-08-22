@@ -225,3 +225,33 @@ test("W1-T1208: the falsifier drives argv and spawns no subprocess", () => {
   assert.ok(Array.isArray(rows));
   assert.ok(Array.isArray(updateBranchArgs) && updateBranchArgs.every((a) => typeof a === "string"));
 });
+
+test("a malformed page THROWS rather than reading as zero open escalations", () => {
+  // THE FAIL-CLOSED CONTRACT. Callers treat a throw as "do nothing this cycle"; they treat `[]`
+  // as a confirmed "no open escalations". Papering a broken payload over as `[]` would retire
+  // live escalations on a bad read. So a page that is not an array must throw, never degrade.
+  //
+  // TWO GUARDS, AND THEY CATCH DIFFERENT SHAPES — asserted apart so neither can rot into the
+  // other. A well-formed JSON value that simply is not a page array reaches the array check;
+  // anything that does not parse as a complete JSON document is stopped earlier, by the
+  // page-splitter, with its own message.
+  assert.throws(
+    () => parseLabelledIssuesRest('{"message":"Bad credentials"}'),
+    /expected a JSON array page/,
+    "an error OBJECT — the shape a rate-limited or unauthorised gh read actually returns",
+  );
+  for (const [label, payload] of [
+    ["a bare JSON string", '"not a page"'],
+    ["a JSON number", "42"],
+  ] as const) {
+    assert.throws(
+      () => parseLabelledIssuesRest(payload),
+      /splitConcatenatedJsonPages: truncated JSON/,
+      `${label} is stopped by the SPLITTER, one guard earlier — and still throws, never yields []`,
+    );
+  }
+
+  // PAIRED POSITIVE CONTROL: a well-formed EMPTY page really does yield `[]`, so the throws
+  // above are the guards firing and not a parser that can never return an empty result.
+  assert.deepEqual(parseLabelledIssuesRest("[]"), [], "a genuinely empty page is an empty list");
+});
