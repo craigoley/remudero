@@ -1,0 +1,115 @@
+- id: W1-T1207
+  title: "`hasPushedRunBranch` was built to close a SECONDS-WIDE cache blind spot and has no upper bound, so a run branch left standing by a closed-unmerged PR reads as work in flight forever and permanently un-dispatches its task"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree at origin/main, BY READING ONLY. Neither the suite
+    nor any `runSweep` test was run.
+
+    (1) THE PREDICATE'S OWN DOC SAYS WHAT IT IS FOR, AND IT IS NARROW. W1-T534 introduced
+    `hasPushedRunBranch` (`NextRunnableOpts`, `src/lib/drain.ts`) to AUGMENT `isOpenPr`, never
+    replace it, because "`isOpenPr` reads a CACHED projection … re-derived once per drain TICK, so
+    a PR opened — or a branch merely PUSHED, ahead of its PR — after that snapshot was taken is
+    invisible to it". It exists to close ONE blind spot: the window between a branch being pushed
+    and the cached projection catching up. THAT WINDOW IS SECONDS TO MINUTES WIDE.
+
+    (2) BUT THE EVIDENCE IT READS HAS NO UPPER BOUND. The closure is built from one
+    `git ls-remote --heads origin 'run-*'` sweep per pass — `runBranchTaskIds` parses the output —
+    with no expiry and no consultation of the PR's state. GitHub deletes a head branch on MERGE but
+    NOT ON CLOSE, so a closed-unmerged PR leaves its branch standing indefinitely and the probe
+    keeps answering true for a task nothing is working on.
+
+    (3) THE MEASURED CONSEQUENCE, AND WHY IT IS LATENT RATHER THAN FIXED. Five tasks were excluded
+    this morning — W1-T1098, W1-T1101, W1-T1104, W1-T1109, W1-T1000002 — each from a PR closed in
+    error, each branch still 1-5 commits ahead across 2-8 files. Reopening those PRs moved them
+    into `isOpenPr`, which is the correct answer for an open PR; it did not touch the predicate. THE
+    DEFECT IS LATENT AGAIN, NOT REPAIRED, and the next closed-unmerged PR reproduces it.
+
+    (4) A RUN BRANCH WHOSE PR IS CLOSED IS NOT EVIDENCE OF WORK IN FLIGHT. That is the whole claim,
+    and it is a claim about what the branch MEANS rather than about whether it should exist.
+
+    (5) THE SIBLINGS ARE CITED AND NEITHER IS RE-FILED. The queue-head shard on #2490 owns the
+    SURFACE half — that `rmd status` advertises tasks the dispatcher refuses. W1-T1201 owns the
+    staleness clamp whose absence closed those PRs in the first place. This task owns only the
+    predicate's reading.
+  design: |
+    (i) THE PR STATES, DECIDED BY WHAT THE PROBE IS FOR. OPEN and DRAFT still mean in flight — a
+    dispatch would collide with a live run, which is exactly what W1-T534 built this to prevent.
+    MERGED needs no rule at all: GitHub deletes the head, so the branch is gone and the probe
+    self-clears. CLOSED-UNMERGED must STOP blocking: there is a PR, and it says the work is not in
+    flight, so the branch is a leftover rather than a signal.
+
+    (ii) THE THIRD STATE IS A BRANCH WITH NO PR AT ALL, AND IT MUST KEEP BLOCKING — WHICH IS NOT
+    THE OBVIOUS ANSWER. That case is LITERALLY the blind spot rationale (1) quotes: "a branch
+    merely PUSHED, ahead of its PR". Treating it as dispatchable would reintroduce the collision
+    W1-T534 exists to prevent, and the cost of being wrong is asymmetric — a false block delays one
+    task, a false dispatch races a live run. So no-PR keeps blocking, and its escape hatch is the
+    operator through the reporting path in (iv), NOT a clock.
+
+    (iii) THE COST, MEASURED FROM SOURCE, AND WHAT IS ALREADY FREE. The sweep's batched gateway
+    fetches `repos/{owner}/{repo}/pulls?state=open&per_page=100` — OPEN ONLY — so it cannot supply
+    closed-PR state as it stands. Two things are already free: the open-PR set it does fetch, and
+    the ledger rows the sweep already loads, in which a sweep-initiated close is recorded. NEITHER
+    covers an OPERATOR-initiated close, which is exactly how the five arose, so a read is genuinely
+    needed for that arm. The cheap shape exists in-repo already: `boardPrsRestArgs(owner, repo,
+    "closed", page, perPage)` builds a batched closed-PR page, and `rmd reap-branches` already
+    performs a paginated `state=all` read — so the capability is precedented and the cost is ONE
+    additional batched call per pass, never one lookup per branch, which is the cost argument
+    W1-T534's own doc makes about `ls-remote`.
+
+    (iv) NOTHING HERE DELETES A BRANCH, AND THAT IS STATED RATHER THAN IMPLIED. `rmd reap-branches`
+    is a DRY RUN by design and remains the owner of REPORTING an orphaned run branch. Those
+    branches carry unmerged work and are its only copy — 1-5 commits across 2-8 files in the
+    measured five. DISPATCHABILITY IS DECIDED BY READING, NOT BY TIDYING, and a design that unstuck
+    the queue by deleting work would be worse than the defect.
+
+    (v) NOT IN SCOPE, NAMED: the queue-head surface (#2490) and W1-T1201's clamp, both cited above;
+    `reap-branches`'s classification output; and any expiry, timer or age bound on the probe —
+    rationale (1) shows the window is legitimate, so the fix is to read the PR's state, never to
+    guess when the branch stopped mattering.
+  acceptance:
+    - claim: "a run branch whose pull request is closed and unmerged no longer blocks dispatch"
+      proof: "unit test: test/run-branch-pr-state.test.ts"
+    - claim: "a run branch whose pull request is open or draft still blocks dispatch"
+      proof: "unit test: test/run-branch-pr-state.test.ts"
+    - claim: "a run branch with no pull request at all still blocks, closing the window the probe was built for"
+      proof: "unit test: test/run-branch-pr-state.test.ts"
+    - claim: "the branch state is read once per pass rather than once per candidate"
+      proof: "unit test: test/run-branch-pr-state.test.ts"
+    - claim: "no dispatch path deletes or rewrites a run branch"
+      proof: "unit test: test/run-branch-pr-state.test.ts"
+  files: [src/lib/drain.ts, src/run-task.ts, test/run-branch-pr-state.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#dead-run-branch-reads-as-in-flight-2026-08-22"
+  plan_refs: ["W1-T534", "W1-T1201"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/run-branch-pr-state.test.ts`, declared in `files:`, so on the filing PR it resolves
+    through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The predicate decides whether a task is dispatched
+    at all; a mistake either strands work permanently or races a live run.
+
+    BOTH `src/` FILES ARE DECLARED BECAUSE THE OPTION AND ITS SUPPLIER ARE APART:
+    `NextRunnableOpts.hasPushedRunBranch` and its consumption live in `src/lib/drain.ts`, and the
+    closure that supplies it — built from the per-pass `ls-remote` sweep — is wired in
+    `src/run-task.ts`. Changing the predicate's meaning without changing what feeds it would leave
+    the two disagreeing.
+
+    THE QUEUE-HEAD SHARD IS CITED BY PR RATHER THAN BY ID BECAUSE IT HAS NOT MERGED. W1-T1201 is in
+    the same position — its shard is NOT on main, so it was deliberately NOT used as a sweep
+    control; only ids verified present on main (`W1-T1110`, `W1-T507`) were.
+
+    THE SUBJECT SWEEP COUNTED MATCHES PER HEAD AGAINST MAIN'S BASELINE rather than testing
+    presence: every branch descends from main and carries main's shards, so presence is meaningless.
+    Main's baseline for this subject is six shards and no head exceeded it.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1207` resolves to 0f7109d608a47bcd45ae18de8e7a990c979fa509,
+    read over git protocol; live control, `refs/rmd-id/W1-T999999` exits 2. THE ANCHOR MESSAGE WAS
+    NOT JUDGED.
