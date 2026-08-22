@@ -177,6 +177,26 @@ export function failingTitles(output) {
   return [...output.matchAll(/^not ok \d+ - (.+)$/gm)].map((m) => m[1].trim()).slice(0, 5);
 }
 
+/**
+ * TEMPORARY DIAGNOSTIC (W1-T1104 round 2): the report's own `failingTitles` names WHICH test
+ * failed but never WHY, and this task hit a suite (four of them, in fact) that failed
+ * deterministically in CI across three separate runs while passing every local repro attempted —
+ * `failingTitles` alone gave no way to tell an assertion mismatch from an unrelated throw. This
+ * captures the first raw TAP diagnostic block (the YAML under the first `not ok` line) so a report
+ * read on a machine nobody can log into still carries the actual failure, not just its title.
+ */
+export function firstFailureDetail(output) {
+  const lines = String(output).split("\n");
+  const start = lines.findIndex((l) => /^not ok \d+ - /.test(l));
+  if (start === -1) return "";
+  const out = [];
+  for (let i = start; i < lines.length && out.length < 30; i++) {
+    if (i > start && /^(not ok|ok) \d+ - /.test(lines[i])) break;
+    out.push(lines[i]);
+  }
+  return out.join("\n").trimEnd();
+}
+
 // Every collaborator injected LAST with a real default, so the CLI call stays `main()` while a
 // test can exercise the list / pass / drift / stale-exclusion paths without spawning anything.
 // Returns the exit code rather than calling process.exit, so assertions read a value.
@@ -243,6 +263,11 @@ export function main({
       for (const t of failingTitles(d.output)) log(`    failing test  : ${t}`);
       log(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
       log(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
+      const detail = firstFailureDetail(d.output);
+      if (detail) {
+        log(`    detail        :`);
+        for (const line of detail.split("\n")) log(`      ${line}`);
+      }
     }
   }
   if (staleExclusions.length) {

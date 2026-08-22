@@ -22,6 +22,7 @@ const mod = (await import(SWEEP_URL)) as {
   ) => { drifted: Array<{ suite: string }>; staleExclusions: Array<{ suite: string; reason: string }>; ok: boolean };
   deriveCandidates: (testDir?: string) => string[];
   failingTitles: (output: string) => string[];
+  firstFailureDetail: (output: string) => string;
   runnableCandidates: (candidates: string[]) => string[];
   runSuite: (
     suite: string,
@@ -47,6 +48,7 @@ const {
   classifySweep,
   deriveCandidates,
   failingTitles,
+  firstFailureDetail,
   runnableCandidates,
   runSuite,
   bisectFuse,
@@ -144,6 +146,31 @@ test("failingTitles extracts the failing test names a report must name", () => {
   const tap = ["ok 1 - fine", "not ok 2 - a disposition flipped to stale", "not ok 3 - second one", "# fail 2"].join("\n");
   assert.deepEqual(failingTitles(tap), ["a disposition flipped to stale", "second one"]);
   assert.deepEqual(failingTitles("ok 1 - all good\n# fail 0"), [], "a green run names nothing");
+});
+
+test("firstFailureDetail carries the raw diagnostic block of the FIRST failing test — a title alone cannot tell an assertion mismatch from an unrelated throw", () => {
+  const tap = [
+    "TAP version 13",
+    "ok 1 - fine",
+    "not ok 2 - a disposition flipped to stale",
+    "  ---",
+    "  duration_ms: 3.5",
+    "  error: 'ENOENT: no such file or directory'",
+    "  code: 'ERR_TEST_FAILURE'",
+    "  ...",
+    "not ok 3 - second one",
+    "  ---",
+    "  error: 'a different failure entirely'",
+    "  ...",
+  ].join("\n");
+  const detail = firstFailureDetail(tap);
+  assert.match(detail, /^not ok 2 - a disposition flipped to stale$/m, "starts at the first failing line");
+  assert.match(detail, /ENOENT: no such file or directory/, "carries the first failure's own diagnostic");
+  assert.doesNotMatch(detail, /a different failure entirely/, "stops before the SECOND failing test's block");
+});
+
+test("firstFailureDetail is empty on a green run — nothing to name", () => {
+  assert.equal(firstFailureDetail("ok 1 - all good\n# fail 0"), "");
 });
 
 test("the shift is a single large value — a second shorter shift would add cost, not signal", () => {
