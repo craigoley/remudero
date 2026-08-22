@@ -76,10 +76,20 @@ export const SPAWN_REACHING = new Map([
  */
 export const CLOCK_ARTIFACTS = new Map([
   ["prune-liveness", "compares a real FILESYSTEM MTIME against the shifted clock — mtimes are not shiftable, so a just-created directory reads as 400 days old. Its fixture is already derived; there is no literal to convert"],
-  // W1-T1104: `emissions` REMOVED — measured PASSING at +400d across repeated runs. Its stated
-  // mechanism ("reads the REAL on-disk ledger through a Date.now()-derived window cutoff") no
-  // longer holds; whatever fixture made that true has since been fixed elsewhere. Re-excluding it
-  // needs a freshly-measured mechanism, not a restored copy of this stale one.
+  // W1-T1104: `emissions` was removed here on a measurement that did not hold, and is RESTORED
+  // with a fresh one taken 2026-08-22 on this branch, at +400d, twice, both runs identical:
+  // `emissionsCommand renders the real report over the real corpus` FAILS, and the report it
+  // renders names the mechanism itself — `window 30d (since 2027-08-27)`. The shifted clock moves
+  // the window's floor past every real ledger line, so `rmd daemon` and `rmd sweep` — verbs that
+  // DO carry lines — read `0 line(s)` and are classified UNREACHABLE-IN-PRACTICE, which is
+  // exactly the regex that test refuses. So the original reason below is not stale prose; it is
+  // a live description, re-derived rather than restored on trust.
+  //
+  // REPRODUCE (the absolute `--import` matters — a bare `scripts/clock-shift.mjs` resolves as a
+  // PACKAGE and dies with ERR_MODULE_NOT_FOUND, which reads as a clock failure and is not one):
+  //   FK_SHIFT_DAYS=400 node --test --import tsx --import "$PWD/scripts/clock-shift.mjs" \
+  //     test/emissions.test.ts
+  ["emissions", "reads the REAL on-disk ledger through a Date.now()-derived window cutoff — shifted, the window lands in the future and excludes every real line"],
   ["serve.glance", "drives a Playwright page whose BROWSER clock is unshifted, so server-rendered shifted times disagree with it (observed: `was \"in 9600h1m\"`)"],
 ]);
 

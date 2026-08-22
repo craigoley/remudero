@@ -218,7 +218,7 @@ function sub(call: Call): string {
 
 // `fleet-heartbeat.sh` runs as a REAL bash subprocess (`spawnSync("bash", ...)`, `runBeat` below)
 // and computes its own "now" through a REAL `date -u` call (`epoch_of`'s GNU/BSD branches, and
-// every stub above that falls through to `/usr/bin/date`) — a syscall the clock-sweep probe
+// every stub above that falls through to the platform `date` binary) — a syscall the probe
 // cannot reach, since `scripts/clock-shift.mjs` monkeypatches only THIS process's global `Date`,
 // never a child process's. Building these fixtures from `new Date()` under a shift stamped every
 // ledger row's `ts` days into the FUTURE relative to the script's own real clock, so
