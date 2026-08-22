@@ -838,6 +838,21 @@ export interface OpenPrView {
   supersessionVerdict?: SupersessionVerdict;
   /** ISO-8601 timestamp of the PR's last activity (for the stale window). */
   lastActivityAt: string;
+  /**
+   * W1-T1201 — ISO-8601 timestamp of the PR's CREATION, read ONLY by {@link deriveDisposition}'s
+   * age clamp: A PR CANNOT BE IDLE LONGER THAN IT HAS EXISTED, so the age fed to
+   * `DISPOSITION_RULES` is the LESSER of "days since last activity" and "days since this
+   * timestamp" — the incident this closes: eleven live PRs, hours old, were closed `abandoned —
+   * no activity in 400d` by a shifted-clock test run, because `ageDays` (derived from
+   * `lastActivityAt` alone) had no upper bound relative to the PR's own creation.
+   *
+   * OPTIONAL so every existing fixture and producer stays valid — absent or unparseable reads as
+   * NO bound (today's pre-clamp arithmetic, unchanged), never as "just created", the same
+   * fail-toward-today's-behaviour default this module gives every field a caller hasn't wired
+   * yet (mirrors `checksPendingSince`/`supersessionVerdict` — see `KNOWN_UNWIRED`,
+   * lib/producer-completeness.ts).
+   */
+  createdAt?: string;
   /** The head commit sha — keys fix-dispatch idempotence (a new push re-earns a strike). */
   headSha: string;
   /** The head BRANCH name. Needed by the ABSENT-check-suite remedy, which pushes an empty
@@ -2429,6 +2444,21 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
  * needs (the PR's age in days) and returns the first {@link DISPOSITION_RULES}
  * row whose predicate matches. The mapping from state to disposition is entirely
  * in the data table.
+ *
+ * W1-T1201 (design i) — AGE IS CLAMPED TO THE PR'S OWN LIFETIME, HERE, ONCE, BEFORE ANY ROW
+ * READS IT: `ageDays` is the LESSER of "days since last activity" and "days since
+ * {@link OpenPrView.createdAt}", so every `DISPOSITION_RULES` row that reads the computed value
+ * (today, only the bare `ageDays >= policy.staleDays` stale row) inherits the bound rather than
+ * re-deriving it. `createdAt` absent or unparseable clamps to `+Infinity` (no bound) — today's
+ * pre-clamp arithmetic, unchanged, the same fail-toward-existing-behaviour this module gives
+ * every unwired field.
+ *
+ * THE CLAMP DOES NOT SILENTLY RESCUE (design iii): when it actually changes the outcome — the
+ * raw activity age crosses the stale threshold but the clamped age does not — the returned
+ * `reason` names the suppression explicitly, appended to whichever OTHER row's reason actually
+ * fired, rather than reading identically to an ordinary non-stale disposition. A rescue nobody
+ * can see is how a shifted clock stays invisible until it closes eleven PRs (this task's own
+ * incident).
  */
 export function deriveDisposition(
   pr: OpenPrView,
@@ -2436,7 +2466,10 @@ export function deriveDisposition(
   now: number = Date.now(),
 ): DispositionResult {
   const parsed = Date.parse(pr.lastActivityAt);
-  const ageDays = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : (now - parsed) / MS_PER_DAY;
+  const activityAgeDays = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : (now - parsed) / MS_PER_DAY;
+  const createdParsed = pr.createdAt === undefined ? Number.NaN : Date.parse(pr.createdAt);
+  const lifetimeAgeDays = Number.isNaN(createdParsed) ? Number.POSITIVE_INFINITY : (now - createdParsed) / MS_PER_DAY;
+  const ageDays = Math.min(activityAgeDays, lifetimeAgeDays);
   const rule = DISPOSITION_RULES.find((r) => r.when(pr, policy, ageDays, now));
   if (!rule) {
     // UNREACHABLE — the terminal row matches unconditionally. This guards the
@@ -2444,7 +2477,22 @@ export function deriveDisposition(
     // The safe fallback is the LEAST permissive disposition — escalate, never arm.
     return { disposition: "blocked-ambiguous", reason: "default (no rule matched) — escalating" };
   }
-  return { disposition: rule.disposition, reason: rule.reason(pr, policy, ageDays, now) };
+  const reason = rule.reason(pr, policy, ageDays, now);
+  // W1-T1201 (design iii): the clamp above can only ever SUPPRESS the bare `ageDays >=
+  // policy.staleDays` stale row — the only row that reads the computed scalar (this function's
+  // own doc). When the raw (unclamped) activity age would have crossed that threshold but the
+  // lifetime-clamped age does not, that suppression is a BROKEN-CLOCK SIGNAL, never a routine
+  // non-event, so it is folded into whichever other row's reason actually fired.
+  const clockSkewSuppressedStale =
+    lifetimeAgeDays < activityAgeDays && activityAgeDays >= policy.staleDays && ageDays < policy.staleDays;
+  if (!clockSkewSuppressedStale) return { disposition: rule.disposition, reason };
+  return {
+    disposition: rule.disposition,
+    reason:
+      `${reason} — AGE CLAMP (W1-T1201): raw activity age ${Math.floor(activityAgeDays)}d would cross the ` +
+      `${policy.staleDays}d stale threshold, but this PR has existed only ${Math.floor(lifetimeAgeDays)}d ` +
+      `(created ${pr.createdAt}) — a PR cannot be idle longer than it has existed, so stale was suppressed`,
+  };
 }
 
 /**

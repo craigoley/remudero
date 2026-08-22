@@ -931,7 +931,9 @@ test("W1-T348: a triage PROPOSE writes a validated decisionSummary onto the feed
         "#!/bin/sh",
         'case "$*" in',
         '  *"pr list"*) echo "[]" ;;',
-        '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/999" ;;',
+        // W1-T1202: `pr create` (GraphQL) moved to `gh api --method POST repos/.../pulls`
+        // (REST) — the url now comes back as `html_url` in a JSON response.
+        '  *"api --method POST"*) echo \'{"html_url":"https://github.com/craigoley/remudero/pull/999","number":999}\' ;;',
         `  *"--json headRefName"*) git -C ${bare} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
         "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
         '  *"pr diff"*) echo "" ;;',
@@ -1057,7 +1059,9 @@ test("W1-T348: a THROWING decision-summary rung still writes the `proposed` tran
         "#!/bin/sh",
         'case "$*" in',
         '  *"pr list"*) echo "[]" ;;',
-        '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/999" ;;',
+        // W1-T1202: `pr create` (GraphQL) moved to `gh api --method POST repos/.../pulls`
+        // (REST) — the url now comes back as `html_url` in a JSON response.
+        '  *"api --method POST"*) echo \'{"html_url":"https://github.com/craigoley/remudero/pull/999","number":999}\' ;;',
         `  *"--json headRefName"*) git -C ${bare} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
         "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
         '  *"pr diff"*) echo "" ;;',

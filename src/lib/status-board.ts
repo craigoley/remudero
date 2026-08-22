@@ -72,7 +72,7 @@ import {
 } from "./digest.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { runnableCandidates, type MergedSet } from "./drain.js";
+import { IDLE_REASON_ID_CAP, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import { drainNowFilePath, pauseFilePath, pendingKicks, quietHoursFilePath, stopFilePath } from "./fleet-control.js";
 import { readInflightLock } from "./inflight-lock.js";
 import { DEFAULT_SUPERVISOR_INTERVAL_S } from "./launchd.js";
@@ -325,7 +325,11 @@ export interface BlockersSection {
 }
 
 // ── QUEUE HEAD (W1-T280) — the next dispatchables, with the four-re-dispatch falsifier named
-// as a per-row flag (attempt count + observed per-cycle cost) ─────────────────────────────────
+// as a per-row flag (attempt count + observed per-cycle cost). BINDS THE DISPATCHER'S OWN
+// `hasPushedRunBranch` PREDICATE (W1-T1205): `rows` is exactly `runnableCandidates`'s eligible
+// set for the SAME options the real dispatcher applies, and a task excluded for having a run
+// branch already on origin is named in `refused` rather than vanishing with no trace beyond a
+// `dispatch.skipped` ledger row ────────────────────────────────────────────────────────────────
 
 export interface QueueHeadRow {
   taskId: string;
@@ -343,8 +347,49 @@ export interface QueueHeadRow {
   observedPerCycleCostUsd?: number;
 }
 
+/**
+ * W1-T1205: one task `runnableCandidates` (drain.ts) — the SAME selector {@link QueueHeadRow}s
+ * above are built from — REFUSED, with the reason it refused for, so the row is named on this
+ * surface rather than vanishing from it with no trace beyond a ledger row (design (ii): "show
+ * both and label them"). Deliberately scoped to `"run-branch-already-pushed"` only (see {@link
+ * QueueHeadSection.refused}'s own doc for why the other {@link DispatchFilterReason}s are not
+ * duplicated here) — `reason` still carries the full union type so a caller can render it
+ * without a second enum, but this section's own derivation never pushes anything else onto it.
+ */
+export interface QueueHeadRefusedRow {
+  taskId: string;
+  title: string;
+  reason: DispatchFilterReason;
+}
+
 export interface QueueHeadSection {
   rows: QueueHeadRow[];
+  /**
+   * W1-T1205 (rationale (2)/(3)): tasks the dispatcher's OWN eligibility chain
+   * (`isDispatchEligible`, drain.ts) refuses for a reason this board can now name — never a
+   * second, silent list. Before this task `hasPushedRunBranch` was not part of the predicate set
+   * {@link deriveQueueHead} bound, so `rows` could (and, measured live, did) advertise tasks
+   * dispatch would refuse; this closes exactly that gap by binding the SAME `hasPushedRunBranch`
+   * predicate the real dispatcher applies and naming what it excludes, rather than only widening
+   * `rows` silently.
+   *
+   * SCOPED TO `"run-branch-already-pushed"`, NOT EVERY {@link DispatchFilterReason} — deliberate,
+   * not an oversight (design's own NOT-IN-SCOPE discipline): `"already-merged"` is DONE, not
+   * refused; `"verify-not-auto"` is PERMANENTLY parked and already has its own surface (W1-T507's
+   * console panel, cited not re-filed); `"blocked"`/`"unmet-deps"`/`"continued-this-pass"` were
+   * never part of THIS defect's measured symptom (rationale (2)'s empty-intersection reproduction
+   * was entirely `hasPushedRunBranch`-driven) and widening the surface to them is a different,
+   * unfiled change. Empty when nothing was excluded for this reason — never a placeholder row.
+   * Capped at {@link IDLE_REASON_ID_CAP} entries (drain.ts's OWN bound for exactly this "how many
+   * ids to name" question, reused rather than a second constant) — see {@link
+   * QueueHeadSection.refusedTruncated} for the count this drops.
+   */
+  refused: QueueHeadRefusedRow[];
+  /** How many `"run-branch-already-pushed"` exclusions {@link refused} could not name because it
+   *  hit {@link IDLE_REASON_ID_CAP} — `0` when nothing was dropped. A count, never a silent cap:
+   *  the same "say how many, even when you can't say which" discipline `IdleReasonBucket.truncated`
+   *  (drain.ts) already applies to this exact question. */
+  refusedTruncated: number;
   /** Present when dispatch eligibility (merge state) could not be resolved — no reachable
    *  GitHub gateway, so nothing here would be trustworthy enough to print as "next up". */
   unknownReason?: string;
@@ -620,6 +665,19 @@ export interface StatusBoardDeps {
   resolveHeadroomEnabled?: () => boolean;
   /** Max rows QUEUE HEAD and BLOCKERS' blocked-PR class each show; defaults to 5. */
   queueHeadLimit?: number;
+  /**
+   * W1-T1205: raw `git ls-remote --heads origin 'run-*'` output, parsed by drain.ts's {@link
+   * runBranchTaskIds} into the SAME `hasPushedRunBranch` predicate the real dispatcher binds
+   * (`DrainDeps.readPushedRunBranches`/`DaemonDeps.readPushedRunBranches`) — QUEUE HEAD needs its
+   * OWN reader rather than sharing a closure with either, because it is a separate, unbatched
+   * call site (design (i): "pass the SAME OPTIONS the dispatcher passes", not the same call).
+   * Defaults to a real `git ls-remote` in `repoDir` (mirrors {@link resolveOriginMainSha}'s own
+   * "lib/ shells git directly" precedent immediately below this field) — LIVE, no-fetch, git
+   * PROTOCOL (never the REST/GraphQL budget), measured at 199 ms for 46 refs (drain.ts's own
+   * doc). Returns `""` (never throws) when it cannot be read (no git, no remote, offline),
+   * degrading `hasPushedRunBranch` to "nothing observed pushed" rather than blocking the board.
+   */
+  readPushedRunBranches?: (repoDir: string) => string;
 }
 
 // ── origin/main (local, no fetch) ───────────────────────────────────────────────────────────
@@ -635,6 +693,18 @@ function defaultResolveOriginMainSha(repoDir: string): string | undefined {
     return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/** Real default for {@link StatusBoardDeps.readPushedRunBranches} — see that field's own doc. */
+function defaultReadPushedRunBranches(repoDir: string): string {
+  try {
+    return execFileSync("git", ["-C", repoDir, "ls-remote", "--heads", "origin", "run-*"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).toString();
+  } catch {
+    return "";
   }
 }
 
@@ -1340,16 +1410,48 @@ export function deriveQueueHead(
   ghUnknownReason: string | undefined,
   limit: number,
   nowMs: number,
+  // W1-T1205: OPTIONAL and TRAILING, so every existing caller (doctorCommand's own
+  // `deriveQueueHead` call, which deliberately stays network-free — see that command's header)
+  // keeps compiling and keeps its byte-identical no-exclusion behaviour without passing this.
+  // `buildStatusBoard` (below) is the one caller that supplies a real reader.
+  hasPushedRunBranch?: (taskId: string) => boolean,
 ): QueueHeadSection {
   if (!plan || !projections || ghUnknownReason) {
-    const section: QueueHeadSection = { rows: [], unknownReason: ghUnknownReason ?? "plan/tasks.yaml is unreadable" };
+    const section: QueueHeadSection = {
+      rows: [],
+      refused: [],
+      refusedTruncated: 0,
+      unknownReason: ghUnknownReason ?? "plan/tasks.yaml is unreadable",
+    };
     section.nextAction = pickNextAction(QUEUE_HEAD_NEXT_ACTIONS, section);
     return section;
   }
   const isMerged: MergedSet = (id) => projections.get(id)?.merged === true;
   const isIndeterminate = (id: string) => projections.get(id)?.indeterminate === true;
   const isCircuitTripped = (id: string) => isDispatchBreakerTripped(lines, id);
-  const candidates = runnableCandidates(plan, isMerged, limit, { isIndeterminate, isCircuitTripped });
+  // W1-T1205 (design (i)): binds the SAME `hasPushedRunBranch` predicate the real dispatcher
+  // applies (drain.ts's `isDispatchEligible`), so this selector's eligible set can never again
+  // drift wider than the dispatcher's own — the exact defect this task exists to close. `refused`
+  // collects the named exclusion (design (ii): show both, label them) rather than letting the
+  // task simply vanish from the candidate list with no trace here. `onFiltered` fires for every
+  // matching task in the WHOLE plan (runnableCandidates walks it in full, unbounded by `limit` —
+  // see that function's own doc), so this is capped exactly like `tallyDispatchFilters`'s own
+  // buckets are, counting what it drops rather than growing without bound.
+  const refused: QueueHeadRefusedRow[] = [];
+  let refusedTotal = 0;
+  const candidates = runnableCandidates(plan, isMerged, limit, {
+    isIndeterminate,
+    isCircuitTripped,
+    hasPushedRunBranch,
+    onFiltered: (task, reason) => {
+      // Scoped to this one reason — see `QueueHeadSection.refused`'s own doc for why the other
+      // `DispatchFilterReason`s are deliberately not duplicated onto this surface.
+      if (reason !== "run-branch-already-pushed") return;
+      refusedTotal++;
+      if (refused.length < IDLE_REASON_ID_CAP) refused.push({ taskId: task.id, title: task.title, reason });
+    },
+  });
+  const refusedTruncated = Math.max(0, refusedTotal - refused.length);
   const rows: QueueHeadRow[] = candidates.map((t) => {
     const attempts = dispatchesWithoutNewOwnedPr(lines, t.id);
     const perpetual = attempts >= PERPETUAL_ATTEMPT_THRESHOLD;
@@ -1361,7 +1463,7 @@ export function deriveQueueHead(
     }
     return row;
   });
-  const section: QueueHeadSection = { rows };
+  const section: QueueHeadSection = { rows, refused, refusedTruncated };
   // W1-T450: candidates present AND no run.start newer than the observed-cadence bound ⇒ a
   // stall — never computed at all when `rows` is empty, so the honest "nothing dispatchable"
   // idle state (design (i)) can never grow a stall it doesn't deserve.
@@ -1408,6 +1510,18 @@ const QUEUE_HEAD_NEXT_ACTIONS: readonly NextActionRule<QueueHeadSection>[] = [
       const r = ctx.rows.find((row) => row.perpetual)!;
       const cost = r.observedPerCycleCostUsd !== undefined ? `~$${r.observedPerCycleCostUsd.toFixed(2)}/cycle` : "an unknown per-cycle cost";
       return `${r.taskId} has re-dispatched ${r.attempts} times with nothing new merged (${cost}) — investigate before it trips the circuit breaker`;
+    },
+  },
+  {
+    // W1-T1205 (rationale (4)): PERMANENT, not transient — GitHub deletes a PR's head branch on
+    // MERGE but not on CLOSE, so a run branch left standing after an unmerged-close never clears
+    // on its own. Named here so an operator sees it without grepping `dispatch.skipped` rows.
+    applies: (ctx) => ctx.refused.length > 0,
+    action: (ctx) => {
+      const r = ctx.refused[0]!;
+      const additional = ctx.refused.length - 1 + ctx.refusedTruncated;
+      const more = additional > 0 ? ` (+${additional} more)` : "";
+      return `${r.taskId}${more} has a run branch already pushed to origin — dispatch will refuse it until that branch is gone (see \`rmd reap-branches\`)`;
     },
   },
 ];
@@ -1747,7 +1861,16 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
   const blockers = deriveBlockers(lines, projections, deps.github, queueHeadLimit);
-  const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit, nowMs);
+  // W1-T1205: the SAME `hasPushedRunBranch` predicate the real dispatcher binds
+  // (drain.ts/daemon.ts's own `readPushedRunBranches` + `runBranchTaskIds` pairing), read here
+  // rather than shared with either — this is its own, unbatched call site (see
+  // `StatusBoardDeps.readPushedRunBranches`'s own doc for why). ONE sweep per render, never one
+  // per candidate.
+  const readPushedRunBranches = deps.readPushedRunBranches ?? defaultReadPushedRunBranches;
+  const pushedRunBranchIds = runBranchTaskIds(readPushedRunBranches(deps.repoDir));
+  const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit, nowMs, (id) =>
+    pushedRunBranchIds.has(id),
+  );
   const grepAnchorTrue = deps.grepAnchorTrue ?? ((a: EvidenceAnchor) => gitGrepAnchorTrue(deps.repoDir, "origin/main", a));
   const readProposalRegistry =
     deps.readProposalRegistry ?? (() => parseProposalRegistry(readTextFileIfExists(join(root, "state", "inbox-proposals.json"))));
@@ -1904,9 +2027,10 @@ function renderQueueHeadBlock(q: QueueHeadSection): string[] {
   const out = ["── QUEUE HEAD ───────────────────────────────────────────"];
   if (q.unknownReason) {
     out.push(`unknown — ${q.unknownReason}`);
-  } else if (q.rows.length === 0) {
+  } else if (q.rows.length === 0 && q.refused.length === 0) {
     out.push("nothing dispatchable");
   } else {
+    if (q.rows.length === 0) out.push("nothing dispatchable");
     for (const r of q.rows) {
       const cost = r.observedPerCycleCostUsd !== undefined ? `, ~$${r.observedPerCycleCostUsd.toFixed(4)}/cycle` : "";
       const flag = r.perpetual ? ` — PERPETUAL (attempts ${r.attempts}${cost})` : ` (attempts ${r.attempts})`;
@@ -1917,6 +2041,14 @@ function renderQueueHeadBlock(q: QueueHeadSection): string[] {
         `STALL: ${q.stall.candidateCount} candidate(s), nothing dispatched in ${formatAgeMs(q.stall.sinceMs)}` +
           ` (bound ${formatAgeMs(q.stall.boundMs)} — ${q.stall.boundDerivation})`,
       );
+    }
+    // W1-T1205 (design (ii)): what dispatch is REFUSING, named — never silently absent from a
+    // list that only ever showed what it would take.
+    for (const r of q.refused) {
+      out.push(`REFUSED: ${r.taskId} — ${r.title} (run branch already pushed to origin)`);
+    }
+    if (q.refusedTruncated > 0) {
+      out.push(`REFUSED: (+${q.refusedTruncated} more not shown)`);
     }
   }
   if (q.nextAction) out.push(`next action: ${q.nextAction}`);
