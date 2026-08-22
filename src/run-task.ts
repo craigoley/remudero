@@ -535,7 +535,7 @@ import {
 import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-audit.js";
 import { buildReceipt } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision } from "./lib/auto-triage.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import {
   checkGithubPosture,
   readGithubPosture,
@@ -11654,6 +11654,47 @@ export function gitRunAdapter(
   };
 }
 
+/**
+ * The real cross-host triage claim reserver, bound to ONE worktree (W1-T1132).
+ *
+ * `worktreePath`, NOT the module-level `repoRoot`: the claim must be taken on the SAME `origin`
+ * this run would publish its triage PR to — the identical reason the id reservation beside it
+ * builds its runner this way, and the identical failure if it does not (under a test driving a
+ * fixture origin, the install root points at a different server entirely).
+ *
+ * EXTRACTED RATHER THAN INLINED for the reason {@link gitRunAdapter}'s own doc gives: as an inline
+ * closure it runs ONLY on the real path — every claim test supplies its own reserver — so
+ * `diff-coverage` blocks the diff on lines no test can reach. Here one test drives it against a
+ * real local bare repo and the seam is genuinely exercised.
+ */
+export function triageClaimReserverFor(worktreePath: string): TriageClaimReserver {
+  return gitTriageClaimReserver({
+    // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention), and a
+    // throwing runner would make it indistinguishable from an unreachable remote — the exact
+    // conflation `classifyPushFailure` exists to prevent.
+    run: gitRunAdapter((args) => spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" })),
+  });
+}
+
+/**
+ * Merged commit subjects on `origin/main`, newest first — the evidence arm's only input.
+ *
+ * BOUNDED BY CONSTRUCTION. `-n` caps the read because this runs on the losing lane's refusal path,
+ * where the answer decides whether a claim is stale, not whether work proceeds: a bound that is
+ * too small costs one claim left for an operator to drop, never a wrong triage. An unbounded log
+ * read on a repo with thousands of commits is the `spawnSync git ENOBUFS` failure this file has
+ * already been bitten by once.
+ *
+ * A FAILED READ RETURNS EMPTY, which classifies as "no observable outcome" — the fail-closed
+ * direction: an unreadable log leaves the claim in place for a person rather than dropping
+ * someone else's live claim on a read that did not happen.
+ */
+export function mergedTriageSubjects(worktreePath: string, limit = 500): string[] {
+  const r = spawnSync("git", ["-C", worktreePath, "log", "origin/main", "--pretty=%s", `-n${limit}`], { encoding: "utf8" });
+  if (r.status !== 0) return [];
+  return (r.stdout ?? "").split("\n").filter((l) => l.length > 0);
+}
+
 /** Injectable seams for `--reserve` (W1-T1055) — the reserver itself, the git runner behind the
  *  holder read, and the holder classifier. Real callers pass none of them; a test drives every arm
  *  (created / taken-then-created / unreachable) without a git remote. */
@@ -21403,6 +21444,11 @@ async function triageCommandLocked(
   // catch arm's rethrow. A reservation that outlived its run would burn the id permanently, which
   // is the phantom-id class this must not add to (W1-T199/224/247/263 already exist).
   let localIdBlock: TaskIdReservationBlock | undefined;
+  // W1-T1132: declared OUTSIDE the try for the SAME reason `localIdBlock` is — the finally must be
+  // able to release on EVERY exit, success or throw. Only the anchor matters there: a lane that
+  // LOST the claim holds nothing to release.
+  let triageClaim: TriageClaimResult | undefined;
+  let claimReserver: TriageClaimReserver | undefined;
   try {
     // Read the entry from the FRESH worktree (origin/main snapshot), not repoRoot, which may be
     // a stale checkout — same discipline retro's next-task read follows.
@@ -21430,6 +21476,35 @@ async function triageCommandLocked(
       say(`feedback#${feedbackId} is already ${entry.status} — refusing to re-triage; nothing to do`);
       worktreeRemove(repoDir, worktreePath);
       return 1;
+    }
+
+    // ── THE CROSS-HOST CLAIM (W1-T1132), TAKEN BEFORE THE ARCHITECT CALL ────────────────────
+    // HERE, not before the write: the loser's RESEARCH is the actual cost. Everything below this
+    // line — the mint, the reservation, `runRelintLoop`'s spawn — is either cheap and local or the
+    // paid Architect call itself, and the two collisions this closes (#2452/#2462, mirror-image
+    // verdicts that could not merge) were two lanes that had both already spent by the time either
+    // published anything a guard could read. W1-T300's open-PR guard still runs and still refuses
+    // an entry whose PR is already open; this refuses the minutes-long window BEFORE that PR
+    // exists, which no read of published work can see.
+    //
+    // AFTER the `status: new` check on purpose: an entry that is already triaged wants no claim
+    // taken on it at all, and refusing it there keeps this ref namespace to entries genuinely in
+    // flight.
+    // `repoDir`, NOT `worktreePath` — MEASURED, not assumed. The worktree is a worktree OF this
+    // clone and shares its `origin`, so both reach the same remote; but every refusal arm below
+    // calls `worktreeRemove` before returning, and the release in this function's `finally` then
+    // ran `git -C <deleted path>` and silently failed to drop the claim it held. The clone
+    // outlives the worktree, which is what the release arm actually needs. (Still emphatically
+    // not the module-level `repoRoot`: that is the INSTALL root and points at whatever remote the
+    // install happened to point at — the trap the id reservation beside this already names.)
+    claimReserver = triageClaimReserverFor(repoDir);
+    // `mergedSubjects` is read LAZILY — only the LOSING lane ever needs it, so the winner pays
+    // nothing for the evidence arm's input.
+    triageClaim = claimTriageWithLogging(log, feedbackId, claimReserver, { mergedSubjects: () => mergedTriageSubjects(repoDir) });
+    if (!triageClaim.proceed) {
+      say(`REFUSED — ${triageClaim.reason}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 2;
     }
 
     // ID MINT (the 2/2 collision evidence: W1-T256->257 #770, W1-T260->261 #775; lineage
@@ -21780,6 +21855,12 @@ async function triageCommandLocked(
     // see task-id-reservation.ts's own doctrine). The REMOTE half is never released — nothing
     // releases a remote reservation, deliberately (same module, same doctrine).
     localIdBlock?.releaseAll();
+    // W1-T1132 RELEASE ARM 1 (HOLDER): explicit, on completion, success or throw — never a timer.
+    // Guarded on the ANCHOR rather than on `triageClaim` being set: a lane that refused because
+    // the claim was already taken holds nothing, and calling the release there would ask the
+    // decision a question it has already answered on the contention path.
+    if (triageClaim?.anchor !== undefined && claimReserver !== undefined)
+      releaseTriageClaimWithLogging(log, feedbackId, claimReserver, triageClaim.anchor);
   }
 }
 
