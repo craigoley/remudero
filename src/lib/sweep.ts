@@ -4,8 +4,14 @@ import { appendLedger } from "./ledger.js";
 import { readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import { loadDefaultCostAnomalyPolicy, recordCostAnomalies, type CostAnomalyPolicy } from "./cost-anomaly.js";
-import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger, REVIEW_CONTEXT } from "./review.js";
-import type { ArmDecision, CriterionVerdict } from "./review.js";
+import {
+  automergeHoldFromLedger,
+  cappedOverrideFromLedger,
+  decideAutoMergeArm,
+  postedArmFactsFromLedger,
+  REVIEW_CONTEXT,
+} from "./review.js";
+import type { ArmDecision, AutomergeHold, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
 import { FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type AskType, type IssueGateway, type OpenIssue } from "./escalate.js";
 import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
@@ -3026,7 +3032,11 @@ export type ArmOutcomeName =
   // W1-T947: `armAutoMergeAtOpen` refused because the diff is classified IRREVERSIBLE
   // (W1-T919) — mirrored here for the same reason every other member is, so `armOutcomeArmed`
   // (below) keeps type-checking against run-task.ts's `ArmOutcome` without importing it.
-  | "irreversible-refused";
+  | "irreversible-refused"
+  // W1-T1000002: `attemptArm` refused because an operator hold stands over this PR — mirrored
+  // here for the same reason `irreversible-refused` is: a deliberate refusal, never armed here
+  // or later (until the hold is released, at which point a fresh pass re-derives whole).
+  | "hold-refused";
 
 /**
  * W1-T1117: `armFailureAction`'s (run-task.ts) return value, mirrored here rather than imported
@@ -3101,6 +3111,22 @@ export interface SweepDeps {
   arm: (
     pr: OpenPrView,
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
+  /**
+   * W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE. Called ONLY when an operator hold
+   * ({@link import("./review.js").automergeHoldFromLedger}) stands over a PR {@link
+   * OpenPrView.autoMergeArmed} already reports armed — the converging half of the hold design:
+   * a disarm alone is undone by the very next pass (the arming dedup reads GitHub's live armed
+   * bit, which a disarm resets), so this fires EVERY pass the hold still stands and the PR still
+   * reads armed, which is exactly as often as it takes, and zero times once GitHub's own bit
+   * reads false. SAFE WHEN NOT ARMED — the real wiring is `disarmAutoMerge` (run-task.ts), which
+   * never throws — so no extra probe per PR per pass is needed to learn whether an arm exists
+   * before withdrawing it.
+   *
+   * Optional: omitted (every pre-existing fixture), a held-and-armed PR is still refused by
+   * `alreadyDone` above (never re-armed BY THIS LANE) but nothing withdraws the STANDING arm —
+   * never a silent regression for a fixture built before this task existed.
+   */
+  disarmAutoMerge?: (pr: OpenPrView, hold: AutomergeHold) => void | Promise<void>;
   /** Close a superseded/abandoned PR with a stated reason. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /**
@@ -4027,6 +4053,11 @@ export async function runSweep(
 
     // Is this action already true (deduped)? Keyed per disposition.
     let alreadyDone: boolean;
+    // W1-T1000002: set ONLY by the "mergeable" case below, ONLY when an operator hold stands
+    // over a PR GitHub ALREADY reports armed — the converging withdrawal fires unconditionally
+    // (never gated on `acted`, which a held PR always has false) so a standing arm this lane did
+    // not place is withdrawn on the very pass that observes it, not merely refused going forward.
+    let holdToWithdraw: AutomergeHold | undefined;
     // W1-T1110: set ONLY by the "blocked-fixable"/"conflicted" case below, when a PRIOR
     // dispatch against this exact head is still deduping (`prior.fixed.has(...)` true AND its
     // rung has not stalled out — see `fixRungStalledWithoutNewHead`'s own doc). Named here, not
@@ -4053,15 +4084,24 @@ export async function runSweep(
         const refused =
           prior.riskRefused.has(riskRefusedKey) &&
           !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) !== undefined);
+        // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM — see review.ts's
+        // `automergeHoldFromLedger` doc. Deliberately NEVER sha-keyed (unlike `refused` above):
+        // a hold binds the PR, not any one head, so a push while held changes nothing here.
+        // `acted:false` follows from `alreadyDone:true` exactly like `refused` — no dedup key is
+        // seeded, so the pass re-derives whole the moment an operator releases it (design (iii)/
+        // (vii): no separate resume path, the SAME property `refused`'s W1-T970 precedent gives).
+        const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
+        if (hold && pr.autoMergeArmed === true) holdToWithdraw = hold;
         const armedByGitHub = pr.autoMergeArmed === true;
         const armedByPriorPass = !armedByGitHub && prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
-        alreadyDone = armedByGitHub || armedByPriorPass || refused;
+        alreadyDone = armedByGitHub || armedByPriorPass || refused || hold !== undefined;
         // W1-T1116: NAME WHICH DISJUNCT FIRED — this switch previously left every one of these
         // three silent (rationale (3)/(4)), the exact gap the "blocked-fixable"/"conflicted" arm
         // above (W1-T1110) already closed for its own dedup, and the ONLY reason two readers
         // misdiagnosed a correctly-held #2432 as a never-clearing dedup in one night (rationale
         // (5)). Order matches the `||` above: an operator reading the row learns the FIRST true
-        // disjunct, exactly the one that actually short-circuited `alreadyDone`.
+        // disjunct, exactly the one that actually short-circuited `alreadyDone`. W1-T1000002 adds
+        // the hold as a fourth disjunct and a fourth reason, in the same order as the `||`.
         if (armedByGitHub) {
           dedupStandDownReason = "auto-merge already armed (observed on GitHub) — nothing to re-arm";
         } else if (armedByPriorPass) {
@@ -4075,6 +4115,8 @@ export async function runSweep(
           dedupStandDownReason = issueUrl
             ? `risk judge escalated this head, no operator override recorded — see ${issueUrl}`
             : "risk judge escalated this head, no operator override recorded";
+        } else if (hold !== undefined) {
+          dedupStandDownReason = "an operator merge hold stands over this PR — refusing to arm until it is released";
         }
         break;
       }
@@ -4437,6 +4479,39 @@ export async function runSweep(
             });
           }
         }
+      }
+    }
+
+    // W1-T1000002 — CONVERGE: WITHDRAW WHAT THIS LANE DID NOT ARM. Runs regardless of `acted`
+    // (a held PR always has `acted:false` from the dedup above, so the ordinary action switch
+    // never reaches `deps.arm`) — a disarm alone is undone by the very next pass (the arming
+    // dedup reads GitHub's OWN live armed bit), so the withdrawal must be issued on every pass
+    // that still observes hold-stands-and-armed, not merely once. Safe when not armed and never
+    // throws (see `SweepDeps.disarmAutoMerge`'s own doc), so this costs nothing on the common
+    // quiet pass — `holdToWithdraw` is `undefined` for every disposition but a held, armed
+    // "mergeable" one.
+    if (holdToWithdraw && deps.disarmAutoMerge) {
+      try {
+        await deps.disarmAutoMerge(pr, holdToWithdraw);
+        const withdrawalLine = {
+          run_id: deps.runId,
+          task_id: pr.taskId ?? "SWEEP",
+          step: "automerge.hold_withdrawal",
+          pr_number: pr.prNumber,
+          pr_url: pr.prUrl,
+          head_sha: pr.headSha,
+          hold_by: holdToWithdraw.by,
+          hold_reason: holdToWithdraw.reason,
+        };
+        log("automerge.hold_withdrawal", withdrawalLine);
+        // Skipped under --dry-run, exactly like `finalizeDisposition`'s own `sweep.disposed`
+        // row below — a preview must leave no trace.
+        if (!deps.dryRun) appendLine(deps.ledgerPath, withdrawalLine);
+      } catch (e) {
+        log("sweep.hold_withdrawal_failed", {
+          pr_number: pr.prNumber,
+          error: String((e as Error)?.message ?? e),
+        });
       }
     }
 

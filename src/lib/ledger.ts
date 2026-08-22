@@ -393,6 +393,22 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              one it credited, permanently — a credit-based
  *                                              `depends_on` a hand-completed task can otherwise
  *                                              never satisfy.
+ *   - "automerge.hold_engaged" /             → review.ts's automergeHoldFromLedger — an
+ *     "automerge.hold_released"                operator's merge hold, consulted by sweep.ts's
+ *                                              `alreadyDone` for `disposition: "mergeable"`
+ *                                              (W1-T1000002) exactly where "automerge.
+ *                                              capped_override_granted" and "risk_judge.escalated"
+ *                                              are consulted immediately above. UNLIKE those two,
+ *                                              this pair is deliberately NEVER sha-keyed — a hold
+ *                                              must survive a push, so losing either line across a
+ *                                              rotation either lifts a hold the operator believes
+ *                                              still stands (dropping "hold_engaged") or re-freezes
+ *                                              a PR the operator already released (dropping
+ *                                              "hold_released", the "last one wins" read finding
+ *                                              only the stale engage). Both directions are exactly
+ *                                              the "the line IS the bound" failure this Set exists
+ *                                              to prevent, applied to a hold instead of a cap/risk
+ *                                              refusal.
  *
  * Deliberately EXCLUDES pure telemetry/polling noise (`ci.polling`, `pr.polling`,
  * `ops.alerts_polled`, `issues.polled`, `inbox.polled`, ...) — exactly the high-frequency,
@@ -626,6 +642,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // "sweep.absent_repush" shape this Set exists to prevent, applied to a dependency edge
   // instead of a re-push cap.
   "manual.completed",
+  // W1-T1000002: review.ts's automergeHoldFromLedger reads both back, "last one wins" over the
+  // whole ledger with NO head-sha binding (see this Set's own doc comment above for why a hold
+  // must outlive a push) — sweep.ts's `alreadyDone` for `disposition: "mergeable"` and the arm
+  // completion in run-task.ts (`attemptArm`) both consult it before ever registering an arm.
+  "automerge.hold_engaged",
+  "automerge.hold_released",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: the mutation check in
   // test/ledger-rotation.test.ts anchors on those three lines followed by `]);` and asserts the
   // needle occurs EXACTLY once. A block appended after them silently breaks that anchor — this

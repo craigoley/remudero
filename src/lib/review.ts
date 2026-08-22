@@ -4448,6 +4448,67 @@ export function cappedOverrideFromLedger(
 }
 
 /**
+ * W1-T1000002 — AN OPERATOR MERGE HOLD, THE SAME LEDGERED SHAPE {@link CappedOverride} ALREADY
+ * IS, WITH THE SIGN FLIPPED. A `CappedOverride` is a human's permission to arm anyway; this is a
+ * human's REFUSAL to let anything arm at all — "who" and "why" named the same way.
+ *
+ * DELIBERATELY NOT SHA-BOUND, unlike {@link CappedOverride}: `cappedOverrideFromLedger` expires
+ * on a new head because a new diff deserves a fresh judgement, but a hold is a decision about the
+ * PR (or the whole fleet) standing right now, not about any one diff — a routine `git push` must
+ * never silently lift it, or an operator who believes work is frozen would have no way to know
+ * otherwise. Cleared by nothing but an explicit `automerge.hold_released` row; never by time,
+ * never by a new commit.
+ */
+export interface AutomergeHold {
+  /** Who engaged the hold — never inferred, never anonymous, mirroring {@link CappedOverride.by}. */
+  by: string;
+  /** Why — mirroring {@link CappedOverride.reason}. */
+  reason: string;
+}
+
+/**
+ * Recover the current auto-merge hold for `prNumber`, "last one wins" — the SAME scanning idiom
+ * {@link cappedOverrideFromLedger} and every other precedence helper in this codebase already
+ * use, over the WHOLE ledger rather than a sha-bound window (see {@link AutomergeHold}'s own doc
+ * for why). Written by an operator verb as `automerge.hold_engaged` / `automerge.hold_released`,
+ * each carrying `by`/`reason` (a hold with either missing is refused at write time — the row
+ * itself is the only notification anyone gets, so an anonymous or reasonless one is worse than
+ * none).
+ *
+ * PR-SCOPED OR FLEET-SCOPED: a row carrying no `pr_number` is FLEET-WIDE and applies to every PR
+ * this function is ever asked about; a row carrying one applies only to that PR. Both kinds are
+ * folded into the SAME chronological scan — whichever kind (fleet or this-PR) was written most
+ * recently decides this PR's current state, exactly like `cappedOverrideFromLedger`'s single
+ * `found` accumulator, just widened to two applicability tests instead of one exact match.
+ *
+ * Consulted by sweep.ts's `alreadyDone` for `disposition: "mergeable"` (a held PR is refused,
+ * never armed, and never counted as a dedup key so it re-derives whole once released — see that
+ * call site's own doc) and by run-task.ts's `attemptArm`, the ONE completion both the ledger-
+ * gated `armAutoMerge` and the ungated `armAutoMergeAtOpen` reach — closing the at-open race a
+ * converging disarm alone cannot (see design (v) of W1-T1000002's task record).
+ */
+export function automergeHoldFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prNumber: number,
+): AutomergeHold | undefined {
+  let held: AutomergeHold | undefined;
+  for (const line of lines) {
+    const scopedToThisPr = typeof line.pr_number !== "number" || line.pr_number === prNumber;
+    if (!scopedToThisPr) continue;
+    if (line.step === "automerge.hold_engaged") {
+      if (typeof line.by === "string" && typeof line.reason === "string" && line.by && line.reason) {
+        held = { by: line.by, reason: line.reason };
+      }
+      continue;
+    }
+    if (line.step === "automerge.hold_released") {
+      held = undefined;
+    }
+  }
+  return held;
+}
+
+/**
  * The LOUD console annotation for a keyword-only verdict (W1-T185 — closes the
  * second W1-T128 gap) — printed once per review when {@link
  * ReviewVerdict.keywordOnly} is true and the verdict was NOT already capped
