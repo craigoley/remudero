@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
+import { classifyPushFailure } from "./task-id-reservation.js";
 
 /**
  * lib/auto-triage.ts — the daemon's SECOND work-generating rung (recon-DC #2).
@@ -45,6 +47,324 @@ import { join } from "node:path";
 /** The lock BOTH the daemon rung and the `rmd triage` CLI path acquire. One writer, ever. */
 export function triageLockPath(root: string): string {
   return join(root, "state", "triage.lock");
+}
+
+// ── THE CROSS-HOST TRIAGE CLAIM (W1-T1132) ───────────────────────────────────────────────────
+//
+// WHAT THE LOCK ABOVE CANNOT DO, AND WHY THIS IS NOT A SECOND SPELLING OF IT. `triageLockPath` is
+// a file under `<root>/state` reclaimed by PID liveness (`drain-lock.ts`), so it protects ONE
+// host. W1-T300's in-flight guard IS cross-host — it reads an OPEN triage PR on GitHub, which
+// every host shares — and W1-T1019's wiring landed 2026-08-20. The collisions this closes are
+// 2026-08-22, TWO DAYS LATER: #2452 and #2462 wrote mirror-image verdicts for entries the other
+// had already decided, and neither could merge because resolving them means PICKING A TRIAGE
+// VERDICT, which no merge strategy can do.
+//
+// THE DEFECT IS THE SIGNAL'S TIMING, NOT ITS REACH. A triage PR does not exist until the triage
+// FINISHES. The entry is read, grounded, researched and only then written, with an Architect call
+// in the middle, so the window between "lane starts" and "lane publishes" is MINUTES. Two lanes
+// starting anywhere inside it both ask "is there an open PR for this entry", both are correctly
+// told NO, and both spend. A guard that reads PUBLISHED work cannot see work in flight — so this
+// claim is taken BEFORE the Architect call, which is the one thing an open-PR read can never be.
+// It ADDS to W1-T300's guard; that guard still correctly refuses an entry whose PR is already open.
+//
+// MIRRORS `reserveTaskIdRemote` (W1-T509) RATHER THAN INVENTING A PRIMITIVE. Same substrate (a
+// ref on origin, created only if absent, so the winner is decided by git's own atomic ref update),
+// same anchor shape (an orphan commit whose payload is unrelated to every other writer's), and the
+// SAME `classifyPushFailure` — imported, not re-derived, because two copies of "is this contention
+// or an unreachable remote" is two places for it to drift. A PID is deliberately NOT used: a
+// second host cannot ask whether a pid on the first is alive, which is exactly why the file lock
+// could never have been widened into this.
+//
+// THE LOSER REFUSES; IT DOES NOT ADVANCE. `reserveTaskIdRemote` advances on contention because for
+// a MINT the next id serves the caller equally well. A triage has no substitute: the second lane's
+// output is either a contradicting verdict that cannot merge, or a rediscovery of a verdict already
+// reached. Both are waste, so the loser refuses THIS entry and is free to take a different one.
+
+/** The ref one feedback id's triage claim occupies. The id is the whole token, so two entries can
+ *  never fold onto one ref. Under `refs/rmd-triage/`, a namespace `git clone`/`git fetch` does not
+ *  replicate by default and `git ls-remote --heads` (which `reapBranchesCommand` enumerates) cannot
+ *  see — the same two properties that made `refs/rmd-id/` safe to introduce. */
+export function triageClaimRef(feedbackId: string): string {
+  return `refs/rmd-triage/${feedbackId}`;
+}
+
+/** One claim attempt's outcome. `taken` is contention; `unreachable` is a failed READ of the world
+ *  and must never be read as "free" — see {@link decideTriageClaim}'s fail-closed arm. */
+export type TriageClaimOutcome = "created" | "taken" | "unreachable";
+
+/** Whether this lane may proceed, and the sentence a human or a ledger row gets either way. */
+export interface TriageClaimDecision {
+  readonly proceed: boolean;
+  readonly reason: string;
+}
+
+/**
+ * PURE. Turn one attempt outcome into the proceed/refuse verdict and its wording.
+ *
+ * AN UNREACHABLE ORIGIN REFUSES, matching `reserveTaskIdRemote`'s own fail-closed choice for the
+ * same reason: proceeding optimistically is precisely today's behaviour, and today's behaviour
+ * spent two Architect calls on unmergeable mirror-image verdicts. Refusing is loud and costs
+ * nothing — the caller has not yet spent when this fires.
+ */
+export function decideTriageClaim(outcome: TriageClaimOutcome, ctx: { feedbackId: string; holder?: string }): TriageClaimDecision {
+  if (outcome === "created") return { proceed: true, reason: `claimed ${triageClaimRef(ctx.feedbackId)} for this run` };
+  if (outcome === "taken") {
+    // NAMED, NOT ANONYMOUS: the ref AND the anchor a live holder wrote. "Someone else is doing it"
+    // is unactionable; a ref an operator can `git ls-remote` and an anchor they can `git show` is
+    // the difference between a refusal and a mystery.
+    const held = ctx.holder ? ` (held by ${ctx.holder})` : "";
+    return {
+      proceed: false,
+      reason:
+        `feedback#${ctx.feedbackId} is already being triaged by another lane — ${triageClaimRef(ctx.feedbackId)}${held}. ` +
+        `Refusing before the Architect call: a second verdict for one entry either contradicts the first ` +
+        `(neither can merge) or rediscovers it (the call is spent for nothing).`,
+    };
+  }
+  return {
+    proceed: false,
+    reason:
+      `cannot reach origin to claim ${triageClaimRef(ctx.feedbackId)} — refusing rather than triaging ` +
+      `optimistically, which is the behaviour that spent two Architect calls on verdicts that could not merge`,
+  };
+}
+
+/**
+ * PURE. Does any merged commit subject name this feedback entry?
+ *
+ * THE EVIDENCE THAT ALREADY EXISTS — the same shape W1-T1110 established, and the reason arm two
+ * of the release below needs no new record: this repo's triage merges carry the entry in their
+ * subject (`chore(triage): feedback#<id> — already decided, no task`, `chore(plan): triage
+ * feedback#<id> — add W1-T…`). Matched as a plain substring, never a regex: a feedback id is
+ * caller-supplied and carries `-` freely, and a pattern built from one would be a metacharacter
+ * bug waiting for the first id that contains one.
+ */
+export function feedbackOutcomeObserved(subjects: readonly string[], feedbackId: string): boolean {
+  return subjects.some((s) => s.includes(feedbackId));
+}
+
+/** Which of the three release arms applies. There is no fourth, and deliberately no timer. */
+export type TriageClaimReleaseArm = "holder" | "evidence" | "operator";
+
+export interface TriageClaimReleaseDecision {
+  readonly arm: TriageClaimReleaseArm;
+  readonly release: boolean;
+  readonly reason: string;
+}
+
+/**
+ * PURE. The three-arm release, in order, with NO TIME-BASED EXPIRY.
+ *
+ *  1. HOLDER — the lane that took the claim drops it on completion, in a `finally`, success or not.
+ *  2. EVIDENCE — a claim whose entry has an OBSERVABLE triage outcome is releasable by ANY host.
+ *     The entry is demonstrably done, so the claim is demonstrably stale; no liveness question is
+ *     asked because none can be answered.
+ *  3. OPERATOR — anything else. Cross-host liveness is NOT decidable (that is the whole reason a
+ *     pid lock could not be widened), so the honest answer is a person, not a guess.
+ *
+ * WHY NOT A TIMER, BY NAME. W1-T1067's stranded `drain.lock` is the precedent for what a
+ * time-or-restart-shaped release does when the releasing signal never arrives. And the failure
+ * runs the other way too: a triage is MINUTES long with an Architect call in the middle, so any
+ * expiry short enough to clear a stuck claim promptly is short enough to fire on healthy work —
+ * this repo's own recurring "a bound that fires on a HEALTHY condition" defect. A claim that
+ * outlives its lane is a visible ref an operator can drop; a claim that expires under a running
+ * lane re-opens the exact race this exists to close.
+ */
+export function decideTriageClaimRelease(i: { heldByThisRun: boolean; outcomeObserved: boolean; feedbackId: string }): TriageClaimReleaseDecision {
+  if (i.heldByThisRun) return { arm: "holder", release: true, reason: `this run holds ${triageClaimRef(i.feedbackId)} and is done with it` };
+  if (i.outcomeObserved)
+    return {
+      arm: "evidence",
+      release: true,
+      reason: `feedback#${i.feedbackId} already has a merged triage outcome, so its claim is stale and any host may drop it`,
+    };
+  return {
+    arm: "operator",
+    release: false,
+    reason:
+      `${triageClaimRef(i.feedbackId)} is held by another lane with no merged outcome yet — leaving it. ` +
+      `Cross-host liveness is not decidable, so clearing it is an operator call: ` +
+      `git push origin :${triageClaimRef(i.feedbackId)}`,
+  };
+}
+
+/** The one I/O seam. Every method is a git round trip; every DECISION above is pure and tested
+ *  without one. */
+export interface TriageClaimReserver {
+  /** A payload unique to THIS writer — two writers must never produce the same value, or the
+   *  create-if-absent stops discriminating and the claim silently stops claiming. */
+  mintAnchor(): string;
+  /** Create-if-absent of {@link triageClaimRef}. Never throws: an unreachable remote is an
+   *  OUTCOME, because a throw at this seam reads identically to contention at the caller. */
+  attempt(feedbackId: string, anchor: string): TriageClaimOutcome;
+  /** The anchor currently at the claim ref, or `undefined` when absent or unreadable. */
+  holder(feedbackId: string): string | undefined;
+  /** Delete the claim ref. `expect` makes the delete conditional on the ref still carrying THAT
+   *  anchor, so the holder arm can never delete a claim that has since become someone else's. */
+  drop(feedbackId: string, opts?: { expect?: string }): boolean;
+}
+
+export interface TriageClaimGitDeps {
+  /** Runs a git argv; returns its exit status, stdout and stderr. Injected by tests. */
+  run(args: string[]): { status: number; stdout: string; stderr: string };
+  /** Overrides the anchor so a test can make two writers distinguishable. */
+  anchor?: () => string;
+}
+
+/**
+ * The real reserver: an orphan commit over the empty tree, pushed to the entry's own ref.
+ *
+ * `commit-tree` with NO `-p` is what makes this writer's payload unrelated to every other's —
+ * the same argument `gitRemoteRefReserver` makes, and the reason this mirrors it rather than
+ * inventing a second scheme. The message carries pid+host+time so an operator inspecting a stuck
+ * claim can see who took it, and it doubles as the uniqueness source: two writers on one host in
+ * the same millisecond still differ by pid.
+ */
+export function gitTriageClaimReserver(deps: TriageClaimGitDeps): TriageClaimReserver {
+  return {
+    mintAnchor() {
+      if (deps.anchor) return deps.anchor();
+      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
+      const msg = `rmd-triage claim ${process.pid}@${hostname()} ${new Date().toISOString()}`;
+      return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
+    },
+    attempt(feedbackId, anchor) {
+      const res = deps.run(["push", "origin", `${anchor}:${triageClaimRef(feedbackId)}`]);
+      if (res.status === 0) return "created";
+      return classifyPushFailure(res.stderr);
+    },
+    holder(feedbackId) {
+      const res = deps.run(["ls-remote", "origin", triageClaimRef(feedbackId)]);
+      if (res.status !== 0) return undefined;
+      const sha = res.stdout.trim().split(/\s+/)[0];
+      return sha ? sha : undefined;
+    },
+    drop(feedbackId, opts = {}) {
+      const ref = triageClaimRef(feedbackId);
+      const args = opts.expect
+        ? ["push", `--force-with-lease=${ref}:${opts.expect}`, "origin", `:${ref}`]
+        : ["push", "origin", `:${ref}`];
+      return deps.run(args).status === 0;
+    },
+  };
+}
+
+/** What a claim attempt hands back: the verdict, and — only when this lane WON — the anchor the
+ *  release arm needs. */
+export interface TriageClaimResult extends TriageClaimDecision {
+  readonly anchor?: string;
+  /** Set when contention was met AND the holder's claim was dropped as stale on the evidence arm. */
+  readonly staleReleased?: boolean;
+}
+
+/**
+ * Take the claim for `feedbackId`, or refuse.
+ *
+ * ON CONTENTION THIS ALSO RUNS THE RELEASE'S EVIDENCE ARM, which is what makes that arm reachable
+ * in production rather than only in a test: the lane that LOSES is exactly the lane holding fresh
+ * proof of whether the entry is already done. If a merged subject names the entry, the claim is
+ * stale and this drops it so the next lane is not refused by a dead ref. The refusal stands either
+ * way — an entry with a merged outcome does not want re-triaging, which is the duplicate this
+ * whole task exists to stop.
+ */
+export function claimTriage(
+  feedbackId: string,
+  reserver: TriageClaimReserver,
+  opts: { mergedSubjects?: () => readonly string[] } = {},
+): TriageClaimResult {
+  const anchor = reserver.mintAnchor();
+  const outcome = reserver.attempt(feedbackId, anchor);
+  if (outcome === "created") return { ...decideTriageClaim(outcome, { feedbackId }), anchor };
+  const decision = decideTriageClaim(outcome, { feedbackId, holder: outcome === "taken" ? reserver.holder(feedbackId) : undefined });
+  if (outcome !== "taken") return decision;
+  const observed = feedbackOutcomeObserved(opts.mergedSubjects?.() ?? [], feedbackId);
+  const released = releaseTriageClaim(feedbackId, reserver, { outcomeObserved: observed });
+  return { ...decision, reason: `${decision.reason} ${released.reason}`, staleReleased: released.dropped };
+}
+
+/** {@link decideTriageClaimRelease}'s verdict plus whether the ref was actually dropped. */
+export interface TriageClaimReleaseResult extends TriageClaimReleaseDecision {
+  readonly dropped: boolean;
+}
+
+/**
+ * Apply the three-arm release. `anchor` present ⇒ this run is the holder (arm 1); absent, the
+ * decision falls to the evidence arm and then to the operator. The DECISION is
+ * {@link decideTriageClaimRelease}'s alone — this function only performs the I/O it authorises,
+ * which is why the operator arm can be asserted without a git remote existing at all.
+ */
+export function releaseTriageClaim(
+  feedbackId: string,
+  reserver: TriageClaimReserver,
+  i: { anchor?: string; outcomeObserved?: boolean } = {},
+): TriageClaimReleaseResult {
+  const decision = decideTriageClaimRelease({
+    heldByThisRun: i.anchor !== undefined,
+    outcomeObserved: i.outcomeObserved === true,
+    feedbackId,
+  });
+  if (!decision.release) return { ...decision, dropped: false };
+  return { ...decision, dropped: reserver.drop(feedbackId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
+}
+
+/**
+ * {@link claimTriage} plus the ONE durable ledger row every caller needs — the same shape, and for
+ * the same measured reason, as `withIdReservationLogging` (W1-T949 design (iv)): the policy lives
+ * in one function with every arm reachable from a unit test, and the lane body in `run-task.ts`
+ * carries the call and nothing else. A `log(...)` written inline in that lane body can only be
+ * executed by driving a whole triage run into contention against a real remote.
+ */
+export function claimTriageWithLogging(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  feedbackId: string,
+  reserver: TriageClaimReserver,
+  opts: { mergedSubjects?: () => readonly string[] } = {},
+): TriageClaimResult {
+  const result = claimTriage(feedbackId, reserver, opts);
+  log("triage.claim", {
+    feedback_id: feedbackId,
+    ref: triageClaimRef(feedbackId),
+    proceed: result.proceed,
+    stale_released: result.staleReleased === true,
+    reason: result.reason,
+  });
+  return result;
+}
+
+/**
+ * {@link releaseTriageClaim} for the HOLDER arm, plus its ledger row.
+ *
+ * BEST-EFFORT BY CONSTRUCTION: this runs in a `finally`, so a throw here would replace whatever
+ * outcome the lane actually reached — including a legitimate error — with a release failure. The
+ * cost of swallowing is one ref an operator drops by hand, and the row says so; the cost of
+ * throwing is a lost verdict. `arm` is always `holder` here (the caller supplies an anchor), and
+ * it is recorded anyway so a later sweep can count the arms without inferring one from silence.
+ */
+export function releaseTriageClaimWithLogging(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  feedbackId: string,
+  reserver: TriageClaimReserver,
+  anchor: string,
+): TriageClaimReleaseResult {
+  let result: TriageClaimReleaseResult;
+  try {
+    result = releaseTriageClaim(feedbackId, reserver, { anchor });
+  } catch (e) {
+    result = {
+      arm: "holder",
+      release: true,
+      dropped: false,
+      reason: `releasing ${triageClaimRef(feedbackId)} threw: ${String((e as Error)?.message ?? e)}`,
+    };
+  }
+  log("triage.claim_released", {
+    feedback_id: feedbackId,
+    ref: triageClaimRef(feedbackId),
+    arm: result.arm,
+    dropped: result.dropped,
+    reason: result.reason,
+  });
+  return result;
 }
 
 /** Marker recording the last fire, so the interval and daily cap survive a daemon restart. */
