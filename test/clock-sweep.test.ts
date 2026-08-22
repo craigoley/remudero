@@ -31,6 +31,7 @@ const mod = (await import(SWEEP_URL)) as {
   };
   deriveCandidates: (testDir?: string) => string[];
   failingTitles: (output: string) => string[];
+  firstFailureDetail: (output: string) => string;
   runnableCandidates: (candidates: string[]) => string[];
   runSuite: (
     suite: string,
@@ -59,6 +60,7 @@ const {
   classifySweep,
   deriveCandidates,
   failingTitles,
+  firstFailureDetail,
   runnableCandidates,
   runSuite,
   bisectFuse,
@@ -102,22 +104,20 @@ test("an excluded artifact that STILL fails is silent — that is the entry doin
 });
 
 test("an excluded artifact that becomes IMMUNE surfaces as a STALE entry, carrying its reason", () => {
-  // The rot check. If `emissions` stops failing shifted, the mechanism its exclusion cites no longer
-  // holds and the entry must not sit there silently widening the blind spot.
-  const { staleExclusions, drifted, ok } = classifySweep(
-    new Map([
-      ["emissions", passed],
-      ["prune-liveness", failed],
-      ["serve.glance", failed],
-    ]),
-  );
+  // The rot check, kept GENERIC over whichever suites CLOCK_ARTIFACTS currently names (W1-T1104
+  // removed `emissions` — measured passing shifted — so this must not pin that literal name; the
+  // property is "the FIRST artifact going immune is reported stale", not which suite it is today).
+  const [immuneSuite, ...stillFailingSuites] = [...CLOCK_ARTIFACTS.keys()];
+  const results = new Map<string, { failed: boolean; output: string }>([[immuneSuite, passed]]);
+  for (const s of stillFailingSuites) results.set(s, failed);
+  const { staleExclusions, drifted, ok } = classifySweep(results);
   assert.equal(ok, false, "a rotted exclusion must fail the sweep, not pass quietly");
   assert.deepEqual(drifted, [], "a stale exclusion is not a drift — they are different findings");
   assert.equal(staleExclusions.length, 1);
-  assert.equal(staleExclusions[0].suite, "emissions");
-  assert.match(
+  assert.equal(staleExclusions[0].suite, immuneSuite);
+  assert.equal(
     staleExclusions[0].reason,
-    /REAL on-disk ledger/,
+    CLOCK_ARTIFACTS.get(immuneSuite),
     "the report must carry WHY it was excluded, or nobody can judge whether removing it is right",
   );
 });
@@ -222,10 +222,15 @@ test("the recorded ceiling carries the rule that it may fall and must never rise
 });
 
 test("a stale exclusion still fails regardless of the drift ceiling", () => {
-  // `emissions` is a real CLOCK_ARTIFACTS entry; passing shifted makes it stale. A ceiling of 100
-  // is deliberately far above any plausible drift count, so a pass here could ONLY come from the
-  // ceiling wrongly forgiving a stale exclusion.
-  const { staleExclusions, drifted, ok } = classifySweep(new Map([["emissions", passed]]), CLOCK_ARTIFACTS, 100);
+  // GENERIC over whichever suite CLOCK_ARTIFACTS currently names first (the same reason the
+  // "becomes IMMUNE" test above reads `[...CLOCK_ARTIFACTS.keys()]` rather than a literal name):
+  // W1-T1104 already removed `emissions` from the map once (measured passing shifted in CI), so a
+  // test pinned to that literal name would fail the moment the map's membership moves, for a
+  // reason that has nothing to do with the property under test here — a ceiling never forgiving a
+  // stale exclusion. A ceiling of 100 is deliberately far above any plausible drift count, so a
+  // pass here could ONLY come from the ceiling wrongly forgiving a stale exclusion.
+  const [anyArtifact] = CLOCK_ARTIFACTS.keys();
+  const { staleExclusions, drifted, ok } = classifySweep(new Map([[anyArtifact, passed]]), CLOCK_ARTIFACTS, 100);
   assert.equal(drifted.length, 0);
   assert.equal(staleExclusions.length, 1);
   assert.equal(ok, false, "a stale exclusion must fail even under a wildly generous ceiling");
@@ -263,6 +268,31 @@ test("failingTitles extracts the failing test names a report must name", () => {
   const tap = ["ok 1 - fine", "not ok 2 - a disposition flipped to stale", "not ok 3 - second one", "# fail 2"].join("\n");
   assert.deepEqual(failingTitles(tap), ["a disposition flipped to stale", "second one"]);
   assert.deepEqual(failingTitles("ok 1 - all good\n# fail 0"), [], "a green run names nothing");
+});
+
+test("firstFailureDetail carries the raw diagnostic block of the FIRST failing test — a title alone cannot tell an assertion mismatch from an unrelated throw", () => {
+  const tap = [
+    "TAP version 13",
+    "ok 1 - fine",
+    "not ok 2 - a disposition flipped to stale",
+    "  ---",
+    "  duration_ms: 3.5",
+    "  error: 'ENOENT: no such file or directory'",
+    "  code: 'ERR_TEST_FAILURE'",
+    "  ...",
+    "not ok 3 - second one",
+    "  ---",
+    "  error: 'a different failure entirely'",
+    "  ...",
+  ].join("\n");
+  const detail = firstFailureDetail(tap);
+  assert.match(detail, /^not ok 2 - a disposition flipped to stale$/m, "starts at the first failing line");
+  assert.match(detail, /ENOENT: no such file or directory/, "carries the first failure's own diagnostic");
+  assert.doesNotMatch(detail, /a different failure entirely/, "stops before the SECOND failing test's block");
+});
+
+test("firstFailureDetail is empty on a green run — nothing to name", () => {
+  assert.equal(firstFailureDetail("ok 1 - all good\n# fail 0"), "");
 });
 
 test("the shift is a single large value — a second shorter shift would add cost, not signal", () => {
