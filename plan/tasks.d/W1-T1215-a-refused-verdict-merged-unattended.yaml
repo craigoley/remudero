@@ -1,0 +1,155 @@
+- id: W1-T1215
+  title: "a risk-refused change MERGED UNATTENDED — the withdrawal lost the race by seven seconds, and every part of the system that should have noticed reported success: the disarm's return value is discarded at two of its three call sites, `automerge.disarmed` is logged unconditionally there, and the one message GitHub returns for BOTH \"never armed\" and \"already merged\" is classified benign"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 on #2506, by reading only, from a scratch worktree at origin/main. Neither
+    the suite nor any `runSweep` test was run. THE LEDGER ROWS THEMSELVES WERE NOT READ FROM THIS
+    HOST — the fleet runs in a container and this checkout's newest `automerge.*` row is a week
+    older than the incident — so every timestamp below is GitHub's own, and the two console lines
+    are the operator's. Where that separation matters it is stated rather than smoothed over.
+
+    (1) THE ORDERING, FROM GITHUB'S OWN EVENTS. PR #2506 opened 15:58:37Z on
+    `run-W1-T1206-1787413395717` at head `42870357`. `remudero-review=success` posted 16:12:25Z
+    ("PASS — 5 criteria substantiated, no test theater"). `auto_squash_enabled` — the ARM —
+    16:12:27Z. `coverage-ratchet` completed 16:12:34Z. `ci-gate`, the last required check,
+    16:12:49Z. MERGED 16:12:52Z. Head ref deleted 16:12:53Z. Issue #2509 opened 16:12:59Z:
+    `risk judge ESCALATED (high, confidence 0.85)`, carrying the sentence "Auto-merge was NOT
+    allowed to proceed unattended."
+
+    (2) THE WINDOW IS THE DEFECT AND ITS WIDTH IS THE ARGUMENT. Arm to escalation: THIRTY-TWO
+    SECONDS. Merge to escalation: SEVEN. The judge was still deliberating while GitHub merged, and
+    the withdrawal arrived after the thing it was withdrawing had already happened. A remedy whose
+    correctness depends on winning a seven-second race against a third party's merge queue is not
+    a gate.
+
+    (3) AND THE ARM PRECEDED GREEN BY TWENTY-TWO SECONDS, WHICH RULES OUT BOTH CI-GATED ARM PATHS.
+    `ci-gate` did not conclude until 16:12:49Z and there was exactly ONE `ci-gate` run on that head,
+    so at 16:12:27Z the rollup was not green. `triageCommand` arms only after `waitForCiGreen`
+    returns green, and the sweep's `mergeable` row requires `checksState === "green"`. Neither can
+    have armed here.
+
+    (4) SO WHERE THE ARM CAME FROM IS NOT DETERMINABLE FROM GITHUB, AND THAT IS ITSELF A FINDING.
+    `runRiskJudge` has EXACTLY ONE caller (`src/run-task.ts`), the deferred arm
+    (`armAutoMergeAtOpen`, W1-T975) sits strictly AFTER it, and the escalate branch RETURNS before
+    reaching that line — so on the code at origin/main this run could not have armed at all. The
+    observation contradicts the source, which means the source being read is not the code that ran.
+    Two live hypotheses, and the shard does not pick one: the orchestrator's module graph predates
+    W1-T975 (a merged fix reaches workers immediately and the loaded orchestrator not at all until
+    it restarts), or a second process armed on a non-green rollup. SETTLING THIS IS STEP ONE, ON
+    THE FLEET HOST, over the ledger union: the `automerge.armed` row for `pr 2506 @ 42870357` and
+    its `run_id`, against `daemon.boot`'s recorded sha.
+
+    (5) EVERY SURFACE THAT SHOULD HAVE NOTICED REPORTED SUCCESS — THIS IS THE PART THAT IS FULLY
+    ESTABLISHED FROM SOURCE. `disarmAutoMerge` returns a `DisarmOutcome`. The risk-judge escalate
+    dep and the capped/irreversible branch BOTH call it as a bare statement, DISCARD the return
+    value, and then log `automerge.disarmed` unconditionally. W1-T1056 fixed exactly this at the
+    THIRD site (`withdrawArmIfVerdictRefuses`), which branches on `disarmOutcomeWithdrawn` and
+    writes `automerge.disarm_skipped` on a failure — and that fix's own comment names this
+    incident's question verbatim: the row "an incident reader consults when asking 'did the arm
+    fire, and why did a refused PR merge anyway?'". The two sites it did not reach are the two that
+    fired here.
+
+    (6) AND THE CLASSIFIER READS THE WRONG FACT OUT OF THE RIGHT STRING. `classifyDisarmFailure`
+    maps `can't disable auto-merge` / `disablePullRequestAutoMerge` to `"not-armed"` — benign,
+    nothing to withdraw — calibrated on #2234 where that is what it meant. GitHub returns THE SAME
+    MESSAGE for a PR that is already MERGED, which is what #2506 reported. One string, two
+    opposite outcomes: the most benign reading and the most severe, told apart by nothing.
+
+    (7) WHAT THE LOST RACE COST HERE, RECORDED AS STAKES AND NOT SCOPED IN. #2506's whole diff is
+    `test/clock-sweep-effect-completeness.test.ts +172/-0`; `scripts/clock-sweep.mjs`, W1-T1206's
+    OTHER declared file, is untouched. Whether that diff should have merged is a question about
+    W1-T1206 and belongs to the operator, NOT to this shard, which is about the race and the
+    reporting. It is recorded only because it establishes that the window is not academic: the one
+    time this gate lost, the change it was guarding went in.
+  design: |
+    (i) THE OUTCOME MUST FOLLOW THE OUTCOME, AT ALL THREE SITES. Finish W1-T1056 where it stopped:
+    both remaining `disarmAutoMerge` call sites branch on `disarmOutcomeWithdrawn` and write
+    `automerge.disarm_skipped` when the withdrawal did not happen. No new vocabulary, no second
+    predicate — the corrected site already establishes both, and this only applies them.
+
+    (ii) SPLIT THE ONE MESSAGE ON A FACT, NOT A GUESS. `"not-armed"` and `"already merged"` are
+    opposite conclusions from one string, so the string cannot decide it. The `ArmDeps` seam
+    ALREADY carries `isMerged` — W1-T1050 added it as a post-failure discriminator for a thrown
+    `mergeDirect`, which is the SAME shape and the same optional, failure-path-only cost, so this
+    reuses that seam rather than inventing a second one. A merged PR is `"lost-race"`, a genuinely unarmed one
+    stays `"not-armed"`, and anything unrecognised keeps failing towards `"failed"`, preserving the
+    fail-closed polarity `classifyDisarmFailure`'s own doc argues for.
+
+    (iii) A LOST RACE IS `HARD_STOP`-CLASS, NOT AN IGNORED ARM ERROR. Today the only trace is
+    `deps.say` narration — console text, no ledger step, no escalation. A verdict that REFUSED a
+    change, on a change that MERGED anyway, is the strongest signal this system can produce and
+    must escalate as such, carrying what a ruling needs: the merge sha, the refusing verdict and
+    its confidence, the judge's own reasons, and the arm's `run_id` from rationale (4)'s query.
+
+    (iv) NOTHING REVERTS, AND THAT IS DELIBERATE. This shard proposes NO automatic revert, no
+    force-push, no branch restoration, and no re-opening. Whether a merged commit should be backed
+    out is an OPERATOR RULING; the rung's whole job is to make that ruling possible and unmissable.
+    An escalation that acts is a second unattended write on top of the first one.
+
+    (v) NARROWING THE WINDOW IS NOT THIS SHARD'S REMEDY, AND THE REASON IS MEASURED. W1-T975 already
+    moved the run's arm to after the judge, and its doc records that disarm-as-remedy went
+    0-for-5 — "the sweep RE-ARMS on checks-green + review-success, which nullified five of five
+    measured disarm races". A sixth attempt to win the race is the wrong lesson from a race that
+    has never been won. What must change is that losing it is LOUD.
+
+    (vi) NOT IN SCOPE, NAMED: whether #2506's diff satisfies W1-T1206 (operator's, rationale 7);
+    any change to the risk judge's own verdict, confidence or prompt; `W1-T970`'s `riskRefused`
+    map, which already expires on a new head or an explicit override; and the arm-site attribution
+    itself, which is a QUERY this shard hands the implementer rather than a change.
+  acceptance:
+    - claim: "a withdrawal GitHub refused is never recorded as a completed withdrawal"
+      proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
+    - claim: "an already-merged pull request is told apart from one that was never armed"
+      proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
+    - claim: "an unrecognised failure still fails towards failed rather than towards benign"
+      proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
+    - claim: "a refused verdict that merged anyway escalates as a hard stop"
+      proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
+    - claim: "the escalation carries the merge sha the verdict and the judge's reasons"
+      proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
+    - claim: "nothing reverts reopens or force-pushes on a lost race"
+      proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
+    - claim: "an ordinary successful withdrawal costs no extra request and is unchanged"
+      proof: "unit test: test/disarm-lost-race-hard-stop.test.ts"
+  files: [src/run-task.ts, test/disarm-lost-race-hard-stop.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#refused-verdict-merged-unattended-2026-08-22"
+  plan_refs: ["W1-T125", "W1-T947", "W1-T970", "W1-T975", "W1-T1050", "W1-T1052", "W1-T1056"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/disarm-lost-race-hard-stop.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19 SPAN — the `files:` list is one module and its test.
+    The change decides when the fleet declares a hard stop; too loose and every benign unarmed
+    disarm pages an operator, too tight and an unattended merge stays invisible.
+
+    WHAT IS ESTABLISHED FROM SOURCE VERSUS WHAT IS OBSERVED. Rationale (5) and (6) are read
+    directly from `src/run-task.ts` at origin/main and are checkable without the fleet: the two
+    bare `disarmAutoMerge(prUrl);` statements with an unconditional `automerge.disarmed` beside
+    them, and `classifyDisarmFailure`'s mapping. Rationale (1)'s timestamps are GitHub's event and
+    check-run records. The two console lines the operator quoted, and every ledger row, are NOT
+    reachable from this checkout and were not asserted from it.
+
+    THE CONTRADICTION IN RATIONALE (4) IS LEFT OPEN ON PURPOSE. A reading of source that the
+    observed behaviour contradicts means the environment differs from the tree, not that one of
+    them is wrong; the remedy is to re-take the measurement somewhere else — here, the container's
+    own ledger — rather than to pick whichever explanation is more convenient. The implementer
+    settles it first, because which site armed decides whether anything ALSO needs to change there.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1215` resolves to
+    546da675931a0237192b1f3f5290c760d1f6f9a7, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight
+    surfaces were swept with a control PRE-QUALIFIED FOR EACH — a declared `- id:` on main, a shard
+    FILENAME on main, any occurrence in main's tree, the reservation refs, a LIVE `run-W1-T*` head
+    (a merged id's branch is deleted and reads zero for the wrong reason), main's commit messages
+    (an id that has never appeared in one reads zero there whatever its state), open PR
+    titles-plus-bodies, and merged PR bodies including the `Remudero-Task:` trailer. The subject
+    anchors were counted PER OPEN HEAD against main's own baseline rather than tested for presence.
