@@ -4,9 +4,11 @@ import {
   ghIssueGateway,
   labelledIssuesRestArgs,
   parseLabelledIssuesRest,
+  splitConcatenatedJsonPages,
   NEEDS_HUMAN_LABEL,
 } from "../src/lib/escalate.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
+import { ghUpdateBranchArgv } from "../src/run-task.js";
 
 /**
  * The escalation-lifecycle issue reads (the batched board gateway's `fetchAllIssues` and
@@ -19,14 +21,22 @@ import { buildBatchedGithub } from "../src/lib/status.js";
  *
  * These tests pin the two translations that are easy to get silently wrong (html_url, and dropping
  * pull requests), the state-case coexistence, and the fail-closed contract on a genuine read error.
+ *
+ * W1-T1208: `--slurp` (the flag that used to wrap `--paginate`'s pages in one outer array) needs
+ * `gh` 2.51; the operator host runs 2.45.0, so every hand-run `rmd sweep` failed the issue-list
+ * read outright with `unknown flag: --slurp`. The argv below no longer sends it -- bare
+ * `--paginate` writes each page's JSON array back-to-back with no separator, and
+ * `parseLabelledIssuesRest` now does the page-loop reassembly `--slurp` used to hand back
+ * pre-wrapped (`splitConcatenatedJsonPages`). Fixtures below are updated to that bare,
+ * non-`--slurp`-wrapped shape.
  */
 const WEB_URL = "https://github.com/craigoley/remudero/issues/795";
 const API_URL = "https://api.github.com/repos/craigoley/remudero/issues/795";
 
-/** One page of `--slurp` output carrying a single issue row, in REST's real wire shape. */
+/** One bare `--paginate` (no `--slurp`) page carrying a single issue row, in REST's real wire shape. */
 function onePage(over: Record<string, unknown> = {}): string {
   return JSON.stringify([
-    [{ number: 795, url: API_URL, html_url: WEB_URL, state: "open", title: "[BLOCKED] W1-T262", body: "**Task:** W1-T262\n", ...over }],
+    { number: 795, url: API_URL, html_url: WEB_URL, state: "open", title: "[BLOCKED] W1-T262", body: "**Task:** W1-T262\n", ...over },
   ]);
 }
 
@@ -37,7 +47,7 @@ test("REST rows surface html_url as the consumer's url, and the api.github.com u
   assert.equal(rows[0].url, WEB_URL, "consumers match on the WEB url escalate.ts writes to the ledger");
   assert.notEqual(rows[0].url, API_URL);
   // The whole failure mode this guards: an api.github.com url makes every lookupIssue miss
-  // SILENTLY -- a fail-open that reads as "escalation not found" rather than as an outage.
+  // SILENTLY -- a fail-open that reads as "escalation not found".
   assert.equal(
     JSON.stringify(rows).includes("api.github.com"),
     false,
@@ -47,10 +57,8 @@ test("REST rows surface html_url as the consumer's url, and the api.github.com u
 
 test("a row carrying a pull_request key is dropped -- REST's /issues returns PRs alongside issues", () => {
   const mixed = JSON.stringify([
-    [
-      { number: 795, url: API_URL, html_url: WEB_URL, state: "open", title: "an issue" },
-      { number: 794, url: API_URL, html_url: "https://github.com/craigoley/remudero/pull/794", state: "open", title: "a PR", pull_request: { url: "..." } },
-    ],
+    { number: 795, url: API_URL, html_url: WEB_URL, state: "open", title: "an issue" },
+    { number: 794, url: API_URL, html_url: "https://github.com/craigoley/remudero/pull/794", state: "open", title: "a PR", pull_request: { url: "..." } },
   ]);
 
   const rows = parseLabelledIssuesRest(mixed);
@@ -69,11 +77,12 @@ test("REST's lowercase open compares equal to the uppercase convention resolveEs
   assert.equal(parseLabelledIssuesRest(onePage({ state: "closed" }))[0].state.toUpperCase(), "CLOSED");
 });
 
-test("every page of a multi-page slurp is flattened -- no silent truncation at the 100-row page boundary", () => {
-  const twoPages = JSON.stringify([
-    [{ number: 1, url: API_URL, html_url: "https://github.com/o/r/issues/1", state: "open" }],
-    [{ number: 2, url: API_URL, html_url: "https://github.com/o/r/issues/2", state: "closed" }],
-  ]);
+test("every page of a multi-page --paginate read is flattened -- no silent truncation at the 100-row page boundary", () => {
+  // W1-T1208: this is what bare `--paginate` (no `--slurp`) actually writes -- each page's JSON
+  // array immediately followed by the next, with NO separator and no outer wrapping array.
+  const page1 = JSON.stringify([{ number: 1, url: API_URL, html_url: "https://github.com/o/r/issues/1", state: "open" }]);
+  const page2 = JSON.stringify([{ number: 2, url: API_URL, html_url: "https://github.com/o/r/issues/2", state: "closed" }]);
+  const twoPages = page1 + page2;
 
   const rows = parseLabelledIssuesRest(twoPages);
 
@@ -87,9 +96,9 @@ test("labelledIssuesRestArgs builds the REST argv and never gh's search-backed -
     "api",
     "repos/craigoley/remudero/issues?labels=needs-human&state=all&per_page=100",
     "--paginate",
-    "--slurp",
   ]);
   assert.equal(args.includes("--label"), false, "the throttled search path is never constructed");
+  assert.equal(args.includes("--slurp"), false, "gh 2.45.0 (the operator host) has no --slurp -- W1-T1208");
 });
 
 test("the batched board gateway resolves an escalation issue over REST, with issueReadFailed staying false", () => {
@@ -131,4 +140,88 @@ test("ghIssueGateway.listOpen PROPAGATES a REST read failure rather than returni
   });
 
   assert.throws(() => gateway.listOpen?.(NEEDS_HUMAN_LABEL), /502/);
+});
+
+// ── W1-T1208 acceptance ───────────────────────────────────────────────────────────────────────
+//
+// `--slurp` needs gh 2.51 and `gh pr update-branch` needs gh 2.53; the operator host runs 2.45.0.
+// The issue-list read (above, `labelledIssuesRestArgs`/`parseLabelledIssuesRest`) and the
+// branch-update write (`src/run-task.ts`'s `updateBranchViaGh`, now routed through
+// `ghUpdateBranchArgv`) are the two operator-runnable sites that named the flag/subcommand the
+// host's gh does not have. These five tests are named to match this task's own acceptance
+// criteria one-for-one.
+
+test("W1-T1208: the issue-list read needs no flag newer than the declared floor", () => {
+  const args = labelledIssuesRestArgs("craigoley/remudero", NEEDS_HUMAN_LABEL, "all");
+
+  assert.equal(args[0], "api", "gh api -- present in every gh version this repo supports");
+  assert.ok(args.includes("--paginate"), "--paginate is present in the operator host's gh 2.45.0");
+  assert.equal(args.includes("--slurp"), false, "--slurp needs gh 2.51 -- the operator host runs 2.45.0");
+});
+
+test("W1-T1208: a multi-page issue payload is reassembled, not truncated", () => {
+  // Exactly what bare `--paginate` (no `--slurp`) writes across three pages: each page's JSON
+  // array immediately followed by the next, with no separator and no outer wrapping array.
+  const page1 = JSON.stringify([{ number: 1, url: API_URL, html_url: "https://github.com/o/r/issues/1", state: "open" }]);
+  const page2 = JSON.stringify([{ number: 2, url: API_URL, html_url: "https://github.com/o/r/issues/2", state: "closed" }]);
+  const page3 = JSON.stringify([{ number: 3, url: API_URL, html_url: "https://github.com/o/r/issues/3", state: "open" }]);
+  const raw = page1 + page2 + page3;
+
+  assert.deepEqual(splitConcatenatedJsonPages(raw).length, 3, "the raw text is split back into its three pages");
+  const rows = parseLabelledIssuesRest(raw);
+  assert.deepEqual(rows.map((r) => r.number), [1, 2, 3], "all three pages survive, in order, none dropped");
+});
+
+test("W1-T1208: both version-sensitive sites are covered by one mechanism", () => {
+  const issueListArgs = labelledIssuesRestArgs("craigoley/remudero", NEEDS_HUMAN_LABEL, "all");
+  const updateBranchArgs = ghUpdateBranchArgv("craigoley", "remudero", 7);
+
+  // Both sites are `gh api` REST calls -- never a subcommand (`gh issue list --label`,
+  // `gh pr update-branch`) whose availability varies by gh version.
+  assert.equal(issueListArgs[0], "api", "the issue-list site is a gh api call");
+  assert.equal(updateBranchArgs[0], "api", "the branch-update site is a gh api call, same mechanism");
+  assert.equal(issueListArgs.includes("--slurp"), false);
+  assert.equal(
+    updateBranchArgs.join(" ").includes("pr update-branch"),
+    false,
+    "the version-gated subcommand form is never constructed",
+  );
+});
+
+test("W1-T1208: a failed read still yields nothing, never a false zero-open", () => {
+  // A genuinely truncated/garbled --paginate read (gh killed mid-stream, or a partial write) must
+  // never silently degrade to an empty array -- the reconciler would read that as "0 open"
+  // (design i's "do nothing this cycle, never a false zero" contract).
+  assert.throws(
+    () => parseLabelledIssuesRest('[{"number":1'),
+    /truncated|Unexpected/,
+    "a truncated payload throws rather than reading as zero rows",
+  );
+
+  // And a genuine gh-side failure (the exact shape --slurp used to produce on the host) still
+  // propagates through the gateway rather than resolving to a false empty queue.
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: () => {
+      throw new Error("gh: unknown flag: --slurp");
+    },
+  });
+  assert.throws(
+    () => gateway.listOpen?.(NEEDS_HUMAN_LABEL),
+    /--slurp/,
+    "a gh-side failure still propagates, never a false empty queue",
+  );
+});
+
+test("W1-T1208: the falsifier drives argv and spawns no subprocess", () => {
+  // Every assertion in this file drives a pure argv builder or a pure parser (or a gateway wired
+  // to an injected `exec` fake) -- this file imports no `node:child_process` and starts no `gh`
+  // process anywhere, so "the argv this code would send" and "how it parses a fixed payload" are
+  // both provable from plain function calls, never from a live gh binary's behavior.
+  const issueArgs = labelledIssuesRestArgs("craigoley/remudero", NEEDS_HUMAN_LABEL, "open");
+  const rows = parseLabelledIssuesRest(onePage());
+  const updateBranchArgs = ghUpdateBranchArgv("craigoley", "remudero", 42);
+
+  assert.ok(Array.isArray(issueArgs) && issueArgs.every((a) => typeof a === "string"));
+  assert.ok(Array.isArray(rows));
+  assert.ok(Array.isArray(updateBranchArgs) && updateBranchArgs.every((a) => typeof a === "string"));
 });

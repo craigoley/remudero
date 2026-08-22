@@ -3906,7 +3906,10 @@ test("W1-T528: an exempted update-branch call reaches gh once and reports update
     assert.equal(outcome, "updated", "a clean exit is reported as updated");
     const calls = ghCalls(gh.log);
     assert.equal(calls.length, 1, "exactly one gh call — this leaf never retries within a pass");
-    assert.match(calls[0], /pr update-branch/, "and it is the update-branch call, not a merge");
+    // W1-T1208: the REST `gh api` PUT, not the `gh pr update-branch` subcommand — that
+    // subcommand needs gh 2.53 and this fleet's operator host runs 2.45.0.
+    assert.match(calls[0], /api --method PUT repos\/acme\/remudero\/pulls\/7\/update-branch/, "it is the REST update-branch call, never the subcommand or a merge");
+    assert.equal(calls[0].includes("pr update-branch"), false, "the version-gated subcommand form is never invoked");
   } finally {
     gh.restore();
   }

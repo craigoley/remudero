@@ -2542,8 +2542,9 @@ export function sweepArmAttemptOutcome(
 }
 
 /**
- * W1-T528: PURE classifier for a failed `gh pr update-branch`, same shape as {@link
- * armFailureAction} directly above. Design clause (v): this shard does NOT pretend to have
+ * W1-T528: PURE classifier for a failed update-branch request (W1-T1208: the REST `gh api` PUT,
+ * not the `gh pr update-branch` subcommand), same shape as {@link armFailureAction} directly
+ * above. Design clause (v): this shard does NOT pretend to have
  * observed a real 422/diverged response — it was never called against a live PR (a call on a
  * real PR discards a real verdict). Anything that plausibly names a conflict or a divergence is
  * classified `"conflict"` — reported and never retried by {@link updateBranchViaGh}'s own caller;
@@ -2556,23 +2557,41 @@ export function classifyUpdateBranchFailure(stderrText: string): "conflict" | "e
 }
 
 /**
- * W1-T528's real gateway: `gh pr update-branch <url>`, GitHub's own REST-backed wrapper for the
- * update button nothing else presses (see W1-T520's `armedButStalled`, lib/sweep.ts). Called AT
- * MOST ONCE per sweep pass, on the ONE PR `selectUpdateBranchTarget` chose — never a retry loop
- * of its own (see `SweepDeps.updateBranch`'s own doc for why the caller never calls this twice
- * for the same target within one pass).
+ * W1-T1208: `pr.prUrl`'s `owner`/`repo`, for the REST argv below — `ArmedStalledPr` carries only
+ * the PR's own number and URL, never owner/repo separately, so this is the one place that splits
+ * them back out. `undefined` on a URL shape this repo never actually produces (defensive, not
+ * reachable from `selectUpdateBranchTarget`'s own PR views).
+ */
+function ownerRepoFromPrUrl(prUrl: string): { owner: string; repo: string } | undefined {
+  const m = prUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/);
+  return m ? { owner: m[1], repo: m[2] } : undefined;
+}
+
+/**
+ * W1-T528's real gateway, REST since W1-T1208 — NOT `gh pr update-branch <url>` (GitHub's own
+ * subcommand wrapper): that subcommand needs `gh` 2.53, the operator host runs 2.45.0, and a
+ * `gh pr update-branch` argv there fails every invocation with `unknown subcommand`. This calls
+ * the SAME REST endpoint that subcommand wraps, via {@link ghUpdateBranchArgv} (W1-T1095
+ * capability 3, `runFixRebase`'s own gateway) — the update-branch site now shares its one
+ * `gh api` mechanism with the issue-list read `labelledIssuesRestArgs` also moved onto (design
+ * iii: one mechanism for both version-sensitive sites, not a fix that repairs one and leaves the
+ * other for the first unlucky sweep pass). Called AT MOST ONCE per sweep pass, on the ONE PR
+ * `selectUpdateBranchTarget` chose — never a retry loop of its own (see `SweepDeps.updateBranch`'s
+ * own doc for why the caller never calls this twice for the same target within one pass).
  *
  * REUSES the `"gh-pr-merge"` live-write boundary rather than a dedicated `"gh-pr-update-branch"`
  * one: `lib/live-write-guard.ts`'s `LiveWriteBoundary` union lives outside this task's declared
  * `files:` (Rule 19) — see `updateBranch`'s follow-up note. Both boundaries guard the identical
- * hazard class (a mutating `gh pr` write against the live repo from an offline test), so this is
+ * hazard class (a mutating `gh` write against the live repo from an offline test), so this is
  * an honest reuse, not a bypass; a dedicated label is a one-line follow-up once that file is in
  * scope for some other task.
  */
 export async function updateBranchViaGh(pr: ArmedStalledPr): Promise<UpdateBranchOutcome> {
-  assertLiveWriteAllowed("gh-pr-merge", `requesting gh pr update-branch on ${pr.prUrl}`);
+  assertLiveWriteAllowed("gh-pr-merge", `requesting the update-branch REST endpoint on ${pr.prUrl}`);
+  const ownerRepo = ownerRepoFromPrUrl(pr.prUrl);
+  if (!ownerRepo) return "error";
   try {
-    execFileSync("gh", ["pr", "update-branch", pr.prUrl], { stdio: "pipe" });
+    execFileSync("gh", ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber), { stdio: "pipe" });
     return "updated";
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
@@ -4707,11 +4726,13 @@ export function decideFixRebase(facts: FixRebaseFacts): FixRebaseDecision {
  * than a local rebase. The daemon is DETACHED on every boot, and a call that assumed otherwise
  * is exactly what broke `armAuto`'s `--delete-branch` (W1-T1111).
  *
- * NOT `gh pr update-branch`: that subcommand does not exist in the `gh` this fleet runs (2.45.0
- * ships no `update-branch` under `gh pr`), so naming it would ship a command that fails on every
- * invocation. This is the REST endpoint that subcommand wraps in newer builds, reached through
- * `gh api` — the same argv-builder shape `ghCreatePrArgs` (lib/plan-pr-emitter.ts) uses, exported
- * so the argv itself is a unit fixture rather than an inline string.
+ * NOT `gh pr update-branch`: that subcommand needs `gh` 2.53 and this fleet's operator host runs
+ * 2.45.0 (W1-T1208), so naming it would ship a command that fails on every invocation there. This
+ * is the REST endpoint that subcommand wraps in newer builds, reached through `gh api` — the same
+ * argv-builder shape `ghCreatePrArgs` (lib/plan-pr-emitter.ts) uses, exported so the argv itself
+ * is a unit fixture rather than an inline string. Since W1-T1208, {@link updateBranchViaGh} (the
+ * sweep-side gateway) is the SECOND caller alongside `runFixRebase` — one `gh api` mechanism for
+ * both version-sensitive update-branch call sites, not one fixed and one left on the subcommand.
  */
 export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number): string[] {
   return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`];
@@ -19102,9 +19123,9 @@ export function buildSweepEffects(
   // `buildAccountUsageRoute`/`ceilingPolicy` already use, not a new pattern.
   armSessionPrsOverride?: boolean,
   // W1-T528 — appended LAST, the same convention every dep above follows: without it, a
-  // successful `gh pr update-branch` request is unreachable from any offline test, because the
+  // successful update-branch request is unreachable from any offline test, because the
   // adapter always called the real `updateBranchViaGh` (a live, mutating `gh` call). Default is
-  // `updateBranchViaGh` itself, so production wiring is unchanged.
+  // `updateBranchViaGh` itself (REST since W1-T1208), so production wiring is unchanged.
   updateBranchImpl: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome> = updateBranchViaGh,
   // W1-T905 — appended LAST, the same convention every dep above follows. Wraps the real
   // `captureFeedback` with the SAME caller-side `existsSync` dedup `src/lib/issues-intake.ts`'s
