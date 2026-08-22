@@ -1,0 +1,119 @@
+- id: W1-T1210
+  title: "A FIX-RUNG GATE WHOSE OWNING DISPATCH LEFT NO ROW CAN NEVER BE CLEARED — `prior.fixed` clears on a new head or on the rung's own terminal rows, and a seed written by a dispatch that threw before starting has neither, so three pull requests are permanently out of the repair queue with an operator hand-push as the only remedy"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main` before
+    any reading. No suite was run and the daemon's checkout was not moved. Every zero carries a
+    control taken on the same scan.
+
+    (1) THE TWO CLEARING PATHS, AND WHY NEITHER REACHES THIS SEED. `prior.fixed` is keyed
+    `${pr}@${headSha}`. It clears when a NEW HEAD is pushed (the key no longer matches), or when
+    W1-T1110's `fixRungStalledWithoutNewHead` reads the fix rung's own terminal rows — `fix.review`,
+    `fix.ci_not_green`, `fix.resolved` — and concludes the dispatch ended without landing a head. A
+    seed written by a dispatch that threw BEFORE the worker started has no terminal row of any kind,
+    and the head does not move because nothing ran. Both paths are structurally unreachable.
+
+    (2) W1-T1127 STOPS THE NEXT ONE AND REWRITES NOTHING ALREADY WRITTEN. #2476 merged
+    2026-08-22T11:58:11Z as `95cb13f1`, so a pre-dispatch throw no longer seeds the gate. Every seed
+    written BEFORE that merge is still in the ledger, and the ledger is append-only. The fix is
+    correct and it is not retroactive; this task is about what it left behind.
+
+    (3) THE POPULATION, MEASURED, WITH A LIVE CONTROL. Three open pull requests are sitting on
+    pre-merge seeds and standing down every pass: #2403 (head `71b10e0`, task W1-T1098), #2434
+    (`bd68cef`, W1-T1104) and #2474 (`023f76d`, W1-T1131). Each task carries hundreds of ledger rows
+    — 347, 803 and 189 respectively — and ZERO `fix.*` rows of any kind, against a control task that
+    carries four. So the scan sees the corpus and the absence is real: there is nothing for
+    `fixRungStalledWithoutNewHead` to read, and there never will be.
+
+    (4) THE CLAIM IS NARROW ON PURPOSE. An existing gate WITH NO OWNING DISPATCH ROW must be
+    clearable. Not every gate, not a gate that is merely old, and not a gate whose dispatch ran and
+    is still in flight — that one is exactly what the dedup exists to protect, and W1-T1110's
+    re-arm already handles the case where it concluded.
+
+    (5) NOT A TIMER AND NOT AN AGE BOUND, AND THE PRECEDENT IS IN THE TREE. W1-T1067's stranded
+    `drain.lock` is the same shape: a lock whose owner is gone is cleared on the ABSENCE OF ITS
+    OWNER, never on how long it has sat. Elapsed time answers a different question and gets the
+    healthy case wrong in both directions — a slow dispatch is cleared too early, a fast failure sits
+    for the whole window. THE PREDICATE IS THE ABSENCE OF ANY `fix.*` ROW FOR THAT `<pr>@<sha>`.
+
+    (6) WHAT IT COSTS TODAY. Three pull requests are permanently out of the repair queue. The sweep
+    still disposes them `blocked-fixable` every pass — it wants to repair them — and then stands
+    down on "fix already dispatched for this head — awaiting its outcome", awaiting an outcome that
+    cannot arrive. The only remedy available right now is an operator pushing a head by hand, which
+    is the manual drain the rung exists to remove.
+
+    (7) OWNERSHIP, CITED AND NOT RE-FILED. W1-T1110 owns the re-arm on terminal rows and is correct
+    for the case it was built for. W1-T1127 owns the seeding site and is correct going forward.
+    W1-T1129 owns the `.git/config.lock` contention that produced the throws. NONE of them owns the
+    seeds already written, which is the entire subject of this task.
+  design: |
+    (i) THE EXISTING DEDUP IS NOT WEAKENED. A gate whose dispatch DID write a `fix.*` row keeps
+    behaving exactly as it does today: suppressed while in flight, re-armed by W1-T1110 once the
+    rung's own rows show it concluded. Only the no-row case changes.
+
+    (ii) THE PREDICATE IS ABSENCE, KEYED THE WAY THE GATE IS KEYED. The question is "does any
+    `fix.*` row exist for this `<pr>@<sha>`", answered from rows already in the ledger. No new read,
+    no state file, no clock. A design that consults elapsed time anywhere is refused by (v).
+
+    (iii) THE FALSIFIER MUST COVER BOTH DIRECTIONS OR IT PROVES NOTHING. A gate with no owning row
+    clears; a gate WITH one does not. A test that only shows the first cannot tell this change from
+    deleting the dedup outright, which is the failure mode that would let two dispatches race the
+    same head.
+
+    (iv) CLEARING IS NOT DISPATCHING. This task makes the next pass ELIGIBLE to re-derive. The
+    strike cap and its exhaustion escalation are untouched, so whatever follows is bounded exactly as
+    it is today.
+
+    (v) OUT OF SCOPE, NAMED. No timer, no age bound, no backoff — W1-T1067 is the precedent and it
+    is cited rather than re-argued. The contention (W1-T1129) and the seeding site (W1-T1127) are
+    separately owned. Whether the three currently-stuck pull requests should also be unstuck by hand
+    before this lands is an operator call and is not decided here.
+  acceptance:
+    - claim: "a gate whose owning dispatch left no row of its own no longer suppresses the next pass"
+      proof: "unit test: W1-T1210: a gate with no owning fix row no longer suppresses"
+    - claim: "a gate whose dispatch did write a row still suppresses exactly as it does today"
+      proof: "unit test: W1-T1210: a gate with an owning fix row still suppresses"
+    - claim: "the decision is made from rows already written and consults no clock"
+      proof: "unit test: W1-T1210: the clearing predicate reads rows and no elapsed time"
+    - claim: "clearing makes the next pass eligible and does not itself dispatch"
+      proof: "unit test: W1-T1210: clearing the gate dispatches nothing by itself"
+    - claim: "the strike ceiling and its escalation at the cap are unchanged"
+      proof: "unit test: W1-T1210: the strike ceiling is unchanged by the clearing path"
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#gate-with-no-owning-dispatch-2026-08-22"
+  plan_refs: ["W1-T1110", "W1-T1127", "W1-T1129", "W1-T1067", "W1-T1209"]
+  note: |
+    THE INCIDENT IS THE ARGUMENT, AND IT IS RECORDED HERE BECAUSE THE NARROWNESS OF THE CLAIM ONLY
+    MAKES SENSE AGAINST IT. On 2026-08-22 contention on `.git/config.lock` killed every fix dispatch
+    before its worker started; `dispatchFix` swallowed the throw and the disposed row recorded
+    `acted: true`; that seeded this gate; the next pass stood down on "fix already dispatched for
+    this head". Contention killed the dispatch, the swallow recorded success, the gate blocked the
+    retry, and one failure removed a pull request from the repair queue permanently — for twenty-one
+    hours, unwatched. W1-T1127 closed the seeding site the same day. The seeds it left behind are
+    what this task is for.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NONE IS PURE-PATH. All five are name-filtered
+    `unit test:` forward references, for which `proofScopePath` returns `undefined`, so `proof-scope`
+    is silent on each. `test/sweep.test.ts` already exists and already passes, so a pure-path proof
+    would have returned `verdict: pass` today, before any of this work.
+
+    `test/sweep.test.ts` IS THE EXISTING HOME and is declared rather than a new filename — it is
+    where W1-T1110's own re-arm cases live, and the two behaviours must be falsified side by side.
+    Two stems, not three.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. Loosening this dedup in the wrong direction lets two
+    dispatches race one head and spend two strikes on it; leaving it as it is keeps pull requests out
+    of the repair queue forever. Both failures are live-repository failures, not assertion failures.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the stuck population from the ledger union by taking
+    `sweep.disposed` rows whose `stand_down_reason` names an already-dispatched head, then asking
+    whether ANY `fix.*` row exists for that task — with a task known to carry `fix.*` rows as the
+    live control. The three pull request numbers will change; the shape will not.

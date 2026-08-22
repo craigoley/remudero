@@ -1,0 +1,132 @@
+- id: W1-T1214
+  title: "A HAND-PUSHED IMPLEMENTATION PR REACHES `origin/main` CREDITED ON NEITHER GIT SURFACE — the trailer is appended inside the harness run loop, so a branch pushed from an operator lane never passes through it, and a descriptive branch name carries no head-ref credit either; nothing anywhere refuses a merge that will land uncredited"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main` before
+    any reading. No suite was run. Every zero carries a control taken on the same scan.
+
+    (1) WHY THE HARNESS SEAM WORKS AT ALL, STATED FIRST SO NOBODY REACHES FOR THE WRONG ONE. This
+    repository's merge settings read `squash_merge_commit_message: "COMMIT_MESSAGES"`, so GitHub
+    composes the squash BODY from the commit messages rather than from the pull request body. That
+    is precisely why writing the trailer into the run's own commit survives the squash, and why
+    `gh pr merge --body`/`--body-file` is NOT the seam and must not be reached for. W1-T1012 (#2240,
+    merged 2026-08-19) is correct, is scoped to the harness, and is CITED HERE, NOT RE-FILED — its
+    seam does not move.
+
+    (2) THE GAP IS WHO PASSES THROUGH THAT SEAM. `appendTaskTrailerToCommit` (`src/run-task.ts`) is
+    called at two sites, the implement lane and the retro lane, and both are inside the harness run
+    loop. A branch pushed from an operator lane's scratch worktree never enters that loop, so its
+    commit is never amended and its merge lands with no `Remudero-Task` line.
+
+    (3) Q3 — THE SIZE, MEASURED IN THE POST-FIX WINDOW WITH ITS OWN CONTROL. Since W1-T1012 merged
+    at 2026-08-19T21:34:59Z, `origin/main` has taken 80 implementation-shaped commits. TWELVE carry
+    no trailer. The CONTROL is the same population's other side: 85% of post-fix implementation
+    merges ARE trailered, so the harness path is working and the twelve are the exception rather
+    than the rule. (Filing- and docs-shaped commits are excluded from that count by construction —
+    they SHOULD carry no trailer, which is W1-T1004's rule and is not disturbed here.)
+
+    (4) AND FOUR OF THE TWELVE ARE STILL CREDITED, WHICH NARROWS THE CLAIM. `findMergedByHeadBranch`
+    credits a `run-<taskId>-<digits>` head with no trailer at all. Four of the twelve sit on exactly
+    that shape and are therefore credited by the head-ref path despite the missing trailer. The
+    remaining EIGHT sit on descriptive branches — `fix/…`, `retro/…`, `ci/…`, `w1t…` — and are
+    credited by NEITHER path. Those eight are the population this task is about.
+
+    (5) Q2 — AND THE TWO RULES DO NOT CONTRADICT EACH OTHER, WHICH IS THE OPPOSITE OF THE OBVIOUS
+    READING. #2343's precedent is about PLAN and NOTE edits: a note amendment must not take a
+    `run-<taskId>-<digits>` branch, because that shape would credit the task as IMPLEMENTED when
+    only its record changed — the W1-T1004 class of false credit. It says nothing about
+    implementation work, for which the run-shaped branch is the correct convention and the head-ref
+    credit is intended. So there is no contradiction to resolve: what happened is that operator
+    lanes used descriptive branches for IMPLEMENTATION work, where the convention would have
+    credited them. The rule was not followed; it was not in conflict.
+
+    (6) AND BRANCH SHAPE CANNOT DISCRIMINATE HAND-PUSHED FROM HARNESS-PUSHED, WHICH MATTERS FOR ANY
+    REMEDY THAT TRIES. Two of the four run-shaped trailerless merges were pushed BY HAND onto
+    branches the harness had created earlier — an operator amending and force-pushing an existing
+    run branch produces a harness-shaped head with no harness-appended trailer. A check keyed on
+    branch shape alone would read those as harness runs.
+
+    (7) Q1 — THE SEAM IS NOT DECIDED HERE, BECAUSE THE EVIDENCE DOES NOT DECIDE IT.
+      PUSH-TIME APPEND (amend the tip as the branch is pushed): catches every lane, harness or hand,
+      at one choke point. COSTS: it REWRITES A COMMIT THE OPERATOR MAY HAVE ALREADY SIGNED, tagged,
+      or cited by sha in a PR body or an issue — and this session alone has cited head shas in
+      review comments. Amending after a signature invalidates it silently.
+      MERGE-TIME APPEND (compose the squash message): touches nothing the operator holds. COSTS: it
+      fights `squash_merge_commit_message: "COMMIT_MESSAGES"` — passing an explicit body overrides
+      the setting that makes the harness seam work, so the two mechanisms would then disagree about
+      where the message comes from, and every arm leg (`armAuto`, `mergeDirect`, the sweep's own
+      merge) would need the same override or the repair is a half one.
+      NEITHER IS OBVIOUSLY RIGHT AND THIS SHARD DOES NOT CHOOSE.
+
+    (8) WHAT IS DECIDED IS THAT NOTHING REFUSES AN UNCREDITED MERGE. There is no check anywhere that
+    asks whether a pull request about to merge will land credited on ANY git surface: no script
+    under `scripts/` reads `Remudero-Task` at author time, and the two credit readers are consumers,
+    not gates. An invariant that is satisfied 85% of the time by convention and never checked is a
+    convention, not an invariant.
+  design: |
+    (i) THE DELIVERABLE IS THE REFUSAL, NOT THE APPEND. Whichever seam is eventually chosen for
+    writing the trailer, a pull request whose merge would land credited on neither surface should be
+    refused at author time with a message naming both ways to satisfy it. That is decidable today
+    and does not pre-empt Q1.
+
+    (ii) THE PREDICATE IS A DISJUNCTION, AND BOTH LIMBS ARE EXISTING RULES. Either the head commit
+    carries `^Remudero-Task: <id>$`, or the head ref matches `run-<taskId>-<digits>`. Satisfying
+    EITHER is enough, because either is enough for the readers. No new credit vocabulary is
+    introduced — inventing a third surface is the defect, not the remedy.
+
+    (iii) IT MUST NOT FIRE ON A FILING. A plan, docs, feedback or triage pull request carries no
+    trailer BY RULE (W1-T1004), so the check must classify before it judges, and a filing that
+    trips it would be the exact false credit W1-T1004 exists to prevent. That case needs its own
+    falsifier.
+
+    (iv) THE READ SIDE IS NOT TOUCHED. `findMergedByHeadBranch`, the union reader and
+    `findMergedByTrailer` are unchanged. A second credit vocabulary is the problem this task is
+    about, not its remedy.
+
+    (v) OUT OF SCOPE, NAMED. Q1's seam choice is an operator ruling and is deliberately left open.
+    W1-T1012's harness append is untouched. W1-T1004's filing rule is untouched. Whether the eight
+    already-merged uncredited commits should be back-credited is a separate question this task does
+    not answer.
+  acceptance:
+    - claim: "an implementation pull request that would land credited on neither surface is refused"
+      proof: "unit test: W1-T1214: an implementation pr credited on neither surface is refused"
+    - claim: "a head commit carrying the trailer satisfies the check on its own"
+      proof: "unit test: W1-T1214: a trailer on the head commit satisfies the check"
+    - claim: "a run-shaped head ref satisfies the check on its own"
+      proof: "unit test: W1-T1214: a run-shaped head ref satisfies the check"
+    - claim: "a plan or docs filing is never refused for carrying no trailer"
+      proof: "unit test: W1-T1214: a filing is never refused for carrying no trailer"
+    - claim: "the refusal names both ways to satisfy it rather than only one"
+      proof: "unit test: W1-T1214: the refusal names both satisfying routes"
+  files: [scripts/credit-surface-gate.mjs, test/credit-surface-gate.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#hand-pushed-implementation-uncredited-2026-08-22"
+  plan_refs: ["W1-T1012", "W1-T1004", "W1-T437", "W1-T485"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NONE IS PURE-PATH. All five are name-filtered
+    `unit test:` forward references, for which `proofScopePath` returns `undefined`, so `proof-scope`
+    is silent on each. Both declared paths are NEW, so a pure-path proof would resolve
+    `not_yet_built` rather than passing vacuously — but the name-filtered form is used anyway so the
+    proofs discriminate on the CASE and not merely on the file existing.
+
+    A NEW SCRIPT AND ITS OWN TEST ARE DECLARED, DELIBERATELY, AND THE COST IS ACCEPTED.
+    `scripts/acceptance-author-gate.mjs` is the shape being copied — an author-time refusal with its
+    own test — and putting this check inside that file would make one script answer two unrelated
+    questions. Two stems either way.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. A check that fires on a filing re-creates W1-T1004's
+    false credit; a check that never fires leaves the invariant a convention. Both failures are
+    about which work the fleet believes it has done, which is the record every cost and autonomy
+    figure is derived from.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the population by walking `origin/main` since
+    W1-T1012's merge, classifying each commit by subject shape, and counting `^Remudero-Task:` in
+    its message — with the trailered share of the SAME population as the control, and the
+    filing-shaped commits excluded rather than counted as failures.

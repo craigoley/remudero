@@ -1,0 +1,128 @@
+- id: W1-T1211
+  title: "the light-sweep ticker treats ANY in-flight `runOne` as a spending worker, so a run that is merely polling CI — no worker, no spend — stands the whole repair arm down for the ten-to-fifteen minutes every PR spends in CI, which on a working fleet is almost always"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree at origin/main, BY READING ONLY. Neither the suite
+    nor any `runSweep` test was run. The fleet-side observations are the operator's; the source and
+    ledger analysis is this shard's, and where the reachable corpus cannot answer, that is stated.
+
+    (1) THE OBSERVED STALL. `state/inflight/W1-T1205.lock` was held from 14:59:03Z with its recent
+    rows all `ci.polling` (15:25:33, 15:26:05, 15:26:56) and ZERO `claude` processes in the
+    container. Four consecutive sweeps — 15:20:54, 15:22:17, 15:23:51, 15:25:13 — disposed every
+    `blocked-fixable` PR as `deferred to full sweep (light pass)`, `acted: false`, and
+    `fix.dispatch` had read zero for twenty-one hours.
+
+    (2) WHAT THE LIGHT PASS IS ACTUALLY PROTECTING — AND IT IS NOT WHAT THE BRIEF'S FOUR OPTIONS
+    OFFER. `DaemonDeps`' own doc (`src/lib/daemon.ts`) says the ticker exists because "`runOne` is
+    UNBOUNDED (a task can hold the daemon inside one call for a whole session)" and `deps.sweep`
+    only runs BETWEEN iterations — #707 was a PR going green-but-review-absent and sitting
+    invisible for runOne's whole remaining duration. THE TICKER IS A LATENCY FIX. The RESTRICTION
+    to post-review is a separate claim: "every other lane (dispatchFix/close/escalate/depReview/arm)
+    must stay strictly single-threaded, so it never runs from here."
+
+    (3) AND THAT RESTRICTION IS JUSTIFIED FOR EXACTLY ONE OF THE FIVE LANES. `dispatchFix` SPAWNS A
+    WORKER, and worker concurrency is a real, measured host constraint — `src/lib/sweep.ts` records
+    "3 dispatch lanes + 3 review lanes = 6 concurrent Claude workers on a host measured to fit about
+    4". `close`, `escalate`, `depReview` and `arm` spawn nothing; they are API calls. So the
+    single-threadedness claim is a SPEND-AND-CAPACITY argument that only `dispatchFix` needs, applied
+    as a blanket.
+
+    (4) WHICH ANSWERS THE QUESTION THE BRIEF PUTS: A CI-POLLING RUN SHOULD NOT COUNT. The constraint
+    is concurrent WORKERS, and a run in `ci.polling` has none — the container showed zero `claude`
+    processes. Dispatching a fix worker beside it takes the host from zero workers to one, which is
+    below every ceiling. The lane budget is not the binding constraint here and neither is `.git`
+    contention: W1-T1129 (#2479) explains the ten `checkout -B` throws and is CITED, NOT RE-FILED,
+    but a config-lock throw does not hold a lane down for twenty-one hours. W1-T1127 (#2476, MERGED)
+    is the seed fix, correct, and not the cause here.
+
+    (5) SIZED FROM THE LEDGER, WITH THE WINDOW STATED RATHER THAN IMPLIED. The exact fraction the
+    brief asks for is NOT MEASURABLE FROM THIS HOST: the reachable corpus's newest `ci.polling` row
+    is 2026-08-14 and its newest `fix.dispatch` is 2026-08-12, both a week before the incident
+    (per-form coverage control: `run.start` reads non-zero in the gzipped form, the plain rotations
+    AND the live file). What IS measurable over that earlier window: 491 distinct runs polled CI,
+    with a MEDIAN polling span of 133 seconds, a p90 of 721, and a maximum of 29,941 — over eight
+    hours. 124 of the 491 polled for five minutes or more and 68 for ten or more. Every one of
+    those spans is a window in which the repair arm stood down while nothing was spending, and the
+    operator's measurement of ten-to-fifteen minutes of CI per PR today makes that window WIDER
+    than this corpus shows, not narrower.
+  design: |
+    (i) THE SEAM IS THE RUN'S PHASE, NOT A PROCESS PROBE. The run itself already writes what it is
+    doing: a `ci.polling` row means the worker is done and GitHub is the blocker. That is evidence
+    the ledger the sweep already reads carries, which is the same shape W1-T1110 established — read
+    what exists rather than inventing a new signal.
+
+    (ii) WHAT EACH SEAM MISSES, STATED BOTH WAYS. A PHASE read misses a run that died mid-phase —
+    but a dead run has no worker either, so the conclusion is unchanged and the failure is safe. A
+    WORKER-PROCESS read via `liveInflightRuns` is HOST-LOCAL: it pid-checks a lock, and a pid on
+    another host is unreadable, so on a multi-host fleet it answers about the wrong machine. AND IT
+    HAS A KNOWN CONSUMER DEFECT — W1-T1109 (#2431) records that the lock-vs-process arm compares a
+    lock FILENAME's task id against a set of RUN ids, which can never match. NOTHING HERE MAY BUILD
+    ON `liveInflightRuns` UNTIL THAT LANDS, and this design does not.
+
+    (iii) ONLY `dispatchFix` IS UNGATED, AND ONLY WHEN NOTHING IS SPENDING. Rationale (3) shows the
+    blanket is wider than its justification, but widening it further is not this task's business:
+    `close`, `escalate`, `depReview` and `arm` keep standing down, unchanged. What changes is that
+    the fix rung may act while the in-flight run is demonstrably not spending.
+
+    (iv) REFUSED BY NAME, SO THEY ARE NOT REDISCOVERED. Do not remove the light pass — #707's
+    unbounded latency is real and the ticker fixes it. Do not raise `dispatchLanes` — the ceiling is
+    correct and the host already measures 6-against-4 at the current setting. Do not run the fix
+    rung concurrently with a SPENDING worker — that is the one thing the restriction genuinely
+    buys. And NO TIMER OR AGE BOUND ON THE LOCK: W1-T1067's stranded `drain.lock` is the precedent
+    for what a clock-shaped release does when its signal never arrives, and a run legitimately
+    polling CI for eight hours (rationale 5) would be killed by any bound short enough to help.
+
+    (v) W1-T526's REVIEW ADMISSION IS UNTOUCHED AND IS CITED, NOT RE-FILED. Its admission path and
+    the review lane budget both continue to read the same gate; nothing here changes what
+    `post-review` is allowed to do, which is the one lane the ticker was built to keep alive.
+
+    (vi) NOT IN SCOPE, NAMED: the blanket over the four non-spawning lanes (rationale 3), which is a
+    separate widening with its own argument; `liveInflightRuns` and W1-T1109's consumer defect;
+    W1-T1129's config contention; and any change to `pollIntervalMs` or the ticker's cadence.
+  acceptance:
+    - claim: "a run whose latest phase is polling CI no longer stands the fix rung down"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+    - claim: "a run with a spending worker still stands the fix rung down exactly as today"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+    - claim: "the close escalate dep-review and arm lanes keep standing down in the light pass"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+    - claim: "the phase is read from the ledger the sweep already loads rather than from a process probe"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+    - claim: "no lock is released or aged out by this path"
+      proof: "unit test: test/light-pass-ci-idle.test.ts"
+  files: [src/run-task.ts, test/light-pass-ci-idle.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#ci-polling-run-suppresses-repair-2026-08-22"
+  plan_refs: ["W1-T254", "W1-T526", "W1-T1067", "W1-T1109", "W1-T1127", "W1-T1129", "W1-T1110"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/light-pass-ci-idle.test.ts`, declared in `files:`, so on the filing PR it resolves
+    through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The change decides whether a worker-spawning lane may
+    run beside an in-flight run; a mistake either keeps the repair arm suppressed or puts two
+    workers on a host measured to fit about four while another lane is already spending.
+
+    ONLY `src/run-task.ts` IS DECLARED because the light ticker's restriction is a WIRING decision —
+    `actionable: (d) => d === "post-review"` is passed there. `src/lib/sweep.ts`'s gate is correct
+    and unchanged: it applies whatever predicate it is handed, and widening the gate itself would
+    change every caller rather than the one that is wrong.
+
+    THE SIZING IS A PROXY AND SAYS SO. Rationale (5) reports what the reachable corpus can show over
+    an EARLIER window and states plainly that the requested last-week fraction is unmeasurable from
+    this host. An implementer on the fleet should re-derive it there before tuning anything to it.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1211` resolves to 6cf17976fccdce4793cc4a5ea196533c77234d70,
+    read over git protocol; live control, `refs/rmd-id/W1-T999999` exits 2. THE ANCHOR MESSAGE WAS
+    NOT JUDGED. Eight surfaces were swept with a control PRE-QUALIFIED FOR EACH: an id with a shard
+    file on main, one with a declared `- id:`, a live `run-W1-T*` head for the remote-head surface
+    (a merged id's branch is deleted and would read zero), and an id that genuinely appears in a
+    main commit subject for the `git log` surface (W1-T1110 does NOT, and was rejected as a control
+    for that surface for exactly that reason).

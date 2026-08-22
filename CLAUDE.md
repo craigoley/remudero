@@ -177,8 +177,8 @@ forensic detail, so the narrative does not need to live here.
   `grep -c '^SF:<path>$' <lcov>` must be non-zero for every source file in the diff.** A scoped run
   whose suites never import a changed file emits no records for it, so "every added source line lcov
   instruments is covered" is trivially true over an EMPTY SET. This is the vacuous-pass family, not
-  a coverage result. *(#1399 — an `OK` with zero `SF:` records for both `src/run-task.ts` and
-  `src/lib/review.ts` while CI's coverage-ratchet was failing on 10 uncovered lines)*
+  a coverage result. *(#1399 — an `OK` with zero `SF:` records for either changed file while CI's
+  coverage-ratchet failed on 10 uncovered lines)*
 - **Build the lcov and the diff from the SAME tree — commit before measuring — AND NAME THE SHA in
   what you report.** An lcov from a dirty working tree measured against `git diff origin/main...HEAD`
   (which excludes uncommitted work) misaligns line numbers and reports untouched pre-existing code
@@ -186,7 +186,7 @@ forensic detail, so the narrative does not need to live here.
   `origin/main` MOVES under you mid-session, so a re-run silently compares a stale lcov against a
   fresh diff — stamp the sha into the filename or the report line, and re-derive both sides after
   any pull. *(#1399 — two phantom "uncovered" lines that were the pre-existing `floorDegraded`
-  branch; filename-reuse variant measured 2026-08-14)*
+  branch; filename-reuse variant 2026-08-14)*
 - **`diff-coverage` flags ADDED lines, so restructuring an untested region inherits its debt at the
   gate — measure MAIN's coverage of that region before assuming the PR caused it.** Rewriting a
   block converts a silent pre-existing gap into a blocking failure. *(#1399 — every line of the
@@ -211,22 +211,22 @@ forensic detail, so the narrative does not need to live here.
   `git ls-remote --heads origin 'run-<id>-*'`   # is someone working on it RIGHT NOW
   `gh api "repos/<owner>/<repo>/pulls?state=closed&per_page=100" --jq '[.[]|select(.merged_at!=null)|select(.body//""|test("(?m)^Remudero-Task:[ \t]*<id>[ \t]*$"))|.number]'`   # has it ALREADY SHIPPED
   Anchor the trailer test exactly (`^Remudero-Task:\s*<id>\s*$`, multiline) — GitHub's search is NOT
-  exact-phrase, and unioning COMMIT SUBJECTS over-credits because `chore(plan): file W1-T411` names a
-  task the filing never implemented. Add the head-ref query above when the trailer scan returns zero.
+  exact-phrase, and unioning COMMIT SUBJECTS over-credits: `chore(plan): file W1-T411` names a
+  task the filing never implemented. Add the head-ref query when the trailer scan reads zero.
 - **Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.** A
   main-only subject scan cannot see an in-flight sibling shard, the one case it exists to catch:
-  `git ls-remote --heads origin`, then read each head's tree — real files, no REST call. **One
+  `git ls-remote --heads origin`, then read each head's tree — real files, no REST call. COUNT per
+  head against main's own count; presence hits EVERY head, all carrying main's shards. **One
   prompt, one lane**, too: NO SWEEP SEES UNPUSHED WORK, so that half is the operator's discipline,
   never a check. *(2026-08-22: a re-sweep at 11:22:23Z missed a PR opened 11:14:46Z — two shards on
-  one subject, #2471 closed duplicated; #2408/#2411 on 08-21.)*
+  one subject, #2471 duplicated; #2408/#2411 on 08-21.)*
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** It is the only thing
   that makes session work visible to the fleet: `isDispatchEligible` (`drain.ts`) consults
   `opts.isOpenPr`, and `projectPlan` attributes an OPEN PR by `/^run-(.+)-\d+$/` against
   `headRefName` — NOT by the trailer — so a PR on `fix/…`, `docs/…`, `chore/…` or `claude/…` is
   invisible to dispatch however it is trailered. MEASURED 2026-08-12: 70 merges, 29 `run-*` heads and
-  41 session-shaped — a MAJORITY invisible. The convention costs one branch name and does double
-  duty: visible to dispatch while open, and credited on merge even when the body forgets the trailer
-  (again, #1657). *(#984; the branch-name credit path and both commands added 2026-08-12)*
+  41 session-shaped — a MAJORITY invisible. The convention costs one branch name and does double duty:
+  visible to dispatch while open, credited on merge even when the body forgets the trailer (#1657). *(#984; the branch-name credit path and both commands added 2026-08-12)*
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names**, and feed it the
   trailer-built merged set above. W1-T169 was rank 23 behind three unmet deps, not the head. A
@@ -284,10 +284,10 @@ forensic detail, so the narrative does not need to live here.
   the id is TAKEN; renumber, never re-push.
 - **A contested reservation is never deleted and an unfiled one is never free — the
   LOSER of a race renumbers.** A reserved id with no shard anywhere is HELD, not abandoned; deleting
-  the ref re-opens the race it settled, and reclaiming one is an operator decision. *(2026-08-18: two
-  hosts minted `refs/rmd-id/W1-T967` 5.76s apart; the first read back its own nonce, and a re-read
-  after the PR opened returned the other host's commit, because it carried `+`. The loser could name
-  the winner only because the message embeds pid+host+time — the ref carries no identity field.)*
+  the ref re-opens the race it settled, and reclaiming one is an operator decision. *(2026-08-18: two hosts
+  minted `refs/rmd-id/W1-T967` 5.76s apart; the first read back its own nonce, then after the PR
+  opened re-read the other's commit — it carried `+`. Only the message's pid+host+time named the
+  winner; the ref has no identity field.)*
 - **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
   `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
   Decomposing a predicate from its own falsifier is not a real decomposition. **And NEVER file an
@@ -295,8 +295,8 @@ forensic detail, so the narrative does not need to live here.
   side returns the OTHER side's entire list — so an undeclared task overlaps every candidate, and
   placed first it serializes the whole dispatch pool behind it (measured: one empty-`files:` task at
   the queue head held admissions to 1 lane where 11 disjoint tasks waited; W1-T476 files the
-  ordering fix, but the authoring rule stands regardless). *(#1400 shipped the
-  violation and pushed open-failing 176→177; #1401 pre-empted it and stayed at 176; #1779)*
+  ordering fix, but the authoring rule stands regardless). *(#1400 shipped it, pushing open-failing 176→177;
+  #1401 pre-empted it and stayed at 176; #1779)*
 - **Decoding rule citations — where each family canonically lives.** "Rule N" / "Standing rule N"
   = MASTER-PLAN **§12** (1–25, plus 3B/8B); the linter enforces several by name — 15:
   `criterionFieldTampered` + `rule15FilingViolation`, 17: `provenanceViolation`, 18:
@@ -380,8 +380,8 @@ forensic detail, so the narrative does not need to live here.
   `MAX_RETAINED_LINES_PER_STEP = 200` newest per step and archives the rest, so most history exists
   ONLY in older archives — deleting any destroys unique data and the newest subsumes nothing.
   Claims of the form "N occurrences", and especially "zero in the entire history", are unsupportable
-  without every form. *(recon-AE §0 — the `.gz`-only idiom returned a silent **0** for a pattern
-  with 3 real hits, its own positive control passing at 257k the whole time)*
+  without every form. *(recon-AE §0 — the `.gz`-only idiom returned a silent **0** for a pattern with 3
+  real hits, its control passing at 257k throughout)*
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.**
   `automerge.armed` once logged `outcome: "ledger-refused"` beside `reason: "verdict is a full PASS"`
   — outcome from the gate that refused, reason from `decideAutoMergeArm` which had APPROVED, with
@@ -466,12 +466,13 @@ forensic detail, so the narrative does not need to live here.
   *(W1-T312, W1-T380/#1392, W1-T382/#1401)*
 - **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS.
   RUN ONE ON EVERY SWEEP WHOSE ANSWER YOU INTEND TO ACT ON.**
-  FOUR distinct instruments here answer WRONG rather than erroring; do not expect this list complete
-  — three of the four were found by ACCIDENT within one week, each by a falsifier that
-  reddened nothing or a target visible in the file — never by reading the query. Enumerating the
-  hazards has lost that race twice; the control is the only instrument that generalises — it tests
-  the QUERY, not your memory of which tool is broken. A control costs one command: match something
-  you can SEE, in the same corpus, with the same tool and flags.
+  FOUR distinct instruments here answer WRONG rather than erroring; expect more — three were found by
+  ACCIDENT in one week, by a falsifier that reddened nothing or a target visible in the file, never
+  by reading the query. Enumerating hazards has lost that race twice; the control generalises — it
+  tests the QUERY, not your memory of which tool is broken. A control costs one command: match something
+  you can SEE, in the same corpus, with the same tool and flags. AND QUALIFY IT FOR THE SURFACE:
+  an open PR's id reads zero on main, a merged id's deleted branch reads zero on heads, an unwritten
+  id reads zero on `git log --grep`.
   **Two directions a control can be too weak: (c) — A CONTROL THAT PROVES THE CORPUS IS READABLE
   DOES NOT PROVE THE QUERY COVERS IT — and (a), where the control passes because you unwittingly ran
   a DIFFERENT engine than the sweep did.**
@@ -601,8 +602,8 @@ forensic detail, so the narrative does not need to live here.
   drain change by watching the next live run; prove it in-process against the choke point's own
   objects, and treat judge behaviour as unobservable until a restart. `src/lib/self-sync.ts` says so
   itself: it covers process STARTUP only and hands in-process staleness to the WS-2 self-updater.
-  *(re-derived 2026-08-11; the operator-facing table is docs/operator-guide.md's
-  "What a merged fix reaches before you restart")*
+  *(re-derived 2026-08-11; operator table: docs/operator-guide.md's "What a merged
+  fix reaches before you restart")*
 - **A suite failing WIDE with ONE repeated message is an environment fault — read the message
   before the diff. THE DISCRIMINATOR IS THE RATIO, NOT A VERSION NUMBER.** `Cannot find package
   'tsx'` means the shared `node_modules` is empty (the bullet above), and the fleet then looks

@@ -1360,33 +1360,70 @@ interface RollupEntry {
 }
 
 /**
- * Build the `gh pr create --fill` invocation for a plan/triage/retro PR, with the
- * `cwd` pinned to the run's WORKTREE. The cwd is load-bearing, not cosmetic: the
- * head branch (`run-<id>`) is a local ref ONLY inside that worktree, so `--fill`
- * (which resolves `origin/main...<branch>` locally to fill title/body) throws
- * `ambiguous argument` from any other cwd. The harness process cwd is never the
- * worktree, so a harness-opened PR silently failed and left an orphan branch with
- * no PR. The build/retro WORKER paths avoid this by opening the PR from inside the
- * worktree (their own cwd); the harness paths must pass the cwd explicitly. Pure so
- * a unit test can assert the cwd without spawning gh.
+ * W1-T1202: reproduce `gh pr create --fill`'s own body-derivation rule LOCALLY, over
+ * `origin/main..HEAD` in the run's worktree — the single commit's body when the branch
+ * carries exactly one commit ahead of `origin/main`, or the list of commit subjects
+ * (oldest first) when it carries several. This is what makes {@link ghPrCreateFillCommand}'s
+ * switch to the REST create a faithful reproduction rather than an invention: REST has
+ * no server-side autofill, so this is the one place that lack is made up, LOCALLY,
+ * exactly as `--fill` already did.
+ *
+ * Returns `""` (never throws) on ANY git failure — the same best-effort contract
+ * {@link lastCommitSubject} already keeps at these exact call sites, and for the same
+ * reason: by the time this runs the branch is already pushed, so a refusal here would
+ * strand it with no PR, which is the failure this task exists to remove. AN EMPTY BODY
+ * IS AN ACCEPTABLE OUTCOME; A THROWN ONE IS NOT.
+ */
+export function fillDerivedBody(worktreePath: string): string {
+  try {
+    const range = "origin/main..HEAD";
+    const count = parseInt(
+      execFileSync("git", ["-C", worktreePath, "rev-list", "--count", range], { encoding: "utf8" }).trim(),
+      10,
+    );
+    if (!count || count <= 0) return "";
+    if (count === 1) {
+      return execFileSync("git", ["-C", worktreePath, "log", "-1", range, "--format=%b"], { encoding: "utf8" }).trim();
+    }
+    const subjects = execFileSync("git", ["-C", worktreePath, "log", "--reverse", range, "--format=%s"], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n")
+      .filter((s) => s.length > 0);
+    return subjects.map((s) => `* ${s}`).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Build the REST create invocation (`gh api --method POST repos/{owner}/{repo}/pulls`)
+ * for a plan/triage/retro/implement PR — W1-T1202's transport swap off `gh pr create
+ * --fill`, which is GraphQL (W1-T372's incident: a GraphQL exhaustion nobody's lane
+ * caused threw at this exact push boundary and discarded a COMPLETED run, against a
+ * REST bucket that was 97% free at the same minute). `cwd` stays pinned to the run's
+ * WORKTREE — no longer for `gh` itself (a REST create needs no local ref resolution:
+ * `head`/`base` are explicit strings in the argv below), but because THIS function now
+ * also reads the worktree's own git history locally, for the title/body fallbacks
+ * immediately below. No longer "pure" in the zero-syscall sense the old `--fill`
+ * builder was, but still synchronous, network-free (no `gh` is ever spawned here) and
+ * deterministic given the worktree's committed state — a unit test can still assert
+ * its argv without spawning `gh`.
  *
  * W1-T327 (THE TITLE): `title`, appended LAST and optional so none of the four
- * existing positional call sites shifts. When a caller has one, it is emitted as an
- * explicit `--title` ALONGSIDE `--fill` — `gh pr create --help` documents that an
- * explicit `--title` takes precedence over `--fill`'s autofill while `--fill` still
- * supplies the body, so this is additive, never a second title-computation path.
- * Every real call site passes the SAME string the commit itself used (the shaped
- * header for triage/plan, the worktree's actual last-commit subject for
- * implement/retro — see `lastCommitSubject`) — never a re-derivation, so the title
- * and the commit cannot drift apart.
- * DECISION (design point iii): when no title is available, this falls back to
- * `--fill` ALONE, exactly today's behavior — never a refusal. By the time this
- * builder runs the branch is typically already pushed, so refusing here would
- * strand it with no PR, the same orphan-branch failure this doc comment already
- * records for the cwd bug above; a `--fill`-derived title is a pre-existing,
- * narrower risk (a red commitlint check, not a lost run) that this task's four
- * updated call sites eliminate in the common case without introducing a new,
- * worse failure mode in the rare one.
+ * existing positional call sites shifts. Every real call site passes the SAME string
+ * the commit itself used (the shaped header for triage/plan, the worktree's actual
+ * last-commit subject for implement/retro — see `lastCommitSubject`) — never a
+ * re-derivation, so the title and the commit cannot drift apart.
+ * DECISION (design point iv): when no title is given, this falls back to
+ * {@link lastCommitSubject} itself (the SAME derivation the two non-filing call sites
+ * already perform before calling in) — never a refusal. Only when THAT is also
+ * unavailable does this fall back to the branch name as the title, and that fallback
+ * is stated as a line in the body, per design (iv) — never a silent substitution.
+ *
+ * DECISION (design point iii): the body is {@link fillDerivedBody} — REST's lack of
+ * `--fill`'s autofill costs this small local helper, not an invented body.
  */
 export function ghPrCreateFillCommand(
   worktreePath: string,
@@ -1397,13 +1434,32 @@ export function ghPrCreateFillCommand(
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
-  // site at once and cannot be bypassed by a new one.
+  // site at once and cannot be bypassed by a new one. The transport moved; the guard
+  // and its key ("gh-pr-create") did not (design ii).
   assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
-  const args = ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch];
-  if (title && title.trim().length > 0) {
-    args.push("--title", title.trim());
+  const given = title && title.trim().length > 0 ? title.trim() : undefined;
+  const derived = given ?? lastCommitSubject(worktreePath);
+  const resolvedTitle = derived ?? branch;
+  const bodyParts = [fillDerivedBody(worktreePath)];
+  if (derived === undefined) {
+    // design (iv): the branch-name fallback is stated in the body, never silent.
+    bodyParts.push(`(no commit-derived title was available — this PR is titled after its branch, \`${branch}\`)`);
   }
-  args.push("--fill");
+  const body = bodyParts.filter((p) => p.length > 0).join("\n\n");
+  const args = [
+    "api",
+    "--method",
+    "POST",
+    `repos/${owner}/${repo}/pulls`,
+    "-f",
+    `title=${resolvedTitle}`,
+    "-f",
+    `body=${body}`,
+    "-f",
+    `head=${branch}`,
+    "-f",
+    "base=main",
+  ];
   return {
     command: "gh",
     args,
@@ -1412,12 +1468,60 @@ export function ghPrCreateFillCommand(
 }
 
 /**
+ * Execute a {@link ghPrCreateFillCommand}-built REST create argv and read `html_url`
+ * (and `number`) back off the parsed response — design (v): the four call sites stop
+ * scraping a `gh pr create --fill` regex out of human-readable stdout and take the url
+ * from the create response instead. A response that parses but carries no usable
+ * `html_url` returns `{}`, exactly the "no PR opened" case each of the four `if
+ * (!prUrl)` call sites already carries — this changes how the url is obtained, never
+ * what its absence signifies.
+ *
+ * A THROWN invocation (non-zero exit — `gh api`'s own failure mode) is classified with
+ * the EXISTING {@link isGhRateLimitError} (design vi): a rate-limited create is said and
+ * ledgered aloud, NAMING the branch that is already pushed, and then rethrown — no
+ * retry/backoff/wait-for-reset is built here (W1-T529 owns that; W1-T1202 design (vii)
+ * lists it explicitly out of scope). This is legibility only: a throttled create must
+ * read as THROTTLED, not surface as a bare `Command failed: gh ...` that reads as
+ * "nothing happened".
+ */
+export function runGhPrCreate(
+  prCreate: { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } },
+  branch: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (msg: string) => void,
+  exec: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string = execFileSync,
+): { prUrl?: string; prNumber?: number } {
+  let out: string;
+  try {
+    out = exec(prCreate.command, prCreate.args, prCreate.options);
+  } catch (e) {
+    if (isGhRateLimitError(e)) {
+      log("pr_create.rate_limited", { branch, error: String((e as Error)?.message ?? e) });
+      say(
+        `PR create (REST) is RATE LIMITED — branch ${branch} is already pushed but no PR was opened; ` +
+          `not retried here (W1-T1202; retry/backoff is W1-T529's)`,
+      );
+    }
+    throw e;
+  }
+  try {
+    const parsed = JSON.parse(out) as { html_url?: string; number?: number };
+    return {
+      prUrl: typeof parsed?.html_url === "string" ? parsed.html_url : undefined,
+      prNumber: typeof parsed?.number === "number" ? parsed.number : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
  * The subject line of the worktree's actual last commit — read back from git, never
  * re-derived — for the two `ghPrCreateFillCommand` call sites (implement, retro)
  * where a worker LLM authored the commit and no harness-computed subject variable
  * exists to pass instead. Returns undefined (never throws) on any git failure, which
  * is exactly the "no title available" case {@link ghPrCreateFillCommand}'s own doc
- * comment decides: the caller then falls back to `--fill` alone.
+ * comment decides: the caller then falls back to the branch name as the title.
  */
 export function lastCommitSubject(worktreePath: string): string | undefined {
   try {
@@ -7972,8 +8076,7 @@ async function runTask(
     }
     if (!prUrl) {
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
-      const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
-      prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+      prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     }
     if (!prUrl) {
       log("verdict", {
@@ -13230,8 +13333,7 @@ async function retroCommand(
         return 1;
       }
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath));
-      const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
-      prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+      prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     }
     if (!prUrl) {
       log("retro.error", { error: "no PR opened" });
@@ -17674,6 +17776,15 @@ interface RawOpenPr {
   statusCheckRollup?: RollupCheck[];
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
+  /**
+   * W1-T1201 — the PR's creation timestamp, projected onto `OpenPrView.createdAt` below for
+   * `deriveDisposition`'s age clamp. Optional so this type stays satisfied by today's
+   * `mapRestPr` output (lib/open-prs-rest.ts), which does not carry it yet — see that gap named
+   * in this task's own rationale. Wiring a real producer here is a follow-up (`created_at` sits
+   * on the SAME REST row `updated_at` already comes from); until then this is always `undefined`,
+   * the same fail-toward-unclamped default `OpenPrView.createdAt` documents.
+   */
+  createdAt?: string;
 }
 
 const REVIEW_CTX = "remudero-review";
@@ -18323,6 +18434,11 @@ export function buildOpenPrViews(
       strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
       lastActivityAt: pr.updatedAt,
+      // W1-T1201: the age clamp's other half — see `RawOpenPr.createdAt`'s own doc for why this
+      // is `undefined` in the real gateway today (no producer in lib/open-prs-rest.ts yet) and
+      // OpenPrView.createdAt's doc (lib/sweep.ts) for the fail-toward-unclamped default that
+      // makes carrying it through unconditionally here safe either way.
+      createdAt: pr.createdAt,
       headSha: pr.headRefOid,
       autoMergeArmed: pr.autoMergeRequest != null,
       // W1-T54 routing: Dependabot PRs go to the dep-review lane, never the
@@ -18669,6 +18785,34 @@ export function buildFixRungDispatchArgs(args: {
     mergeConflict: evidence.mergeConflict,
     reviewBase: args.reviewBase,
   };
+}
+
+/**
+ * W1-T1129: the fix rung's throwaway worktree AND its named local branch, extracted from
+ * `dispatchFix` (its one call site) purely so this exact git sequence is directly unit-testable
+ * against a real repo, with no behaviour change beyond the `--no-track` below.
+ *
+ * `origin/<branch>` is a remote-tracking start point, so a plain `checkout -B <branch>
+ * origin/<branch>` defaults to ALSO writing `branch.<branch>.remote`/`.merge` into
+ * `.git/config` — a config write that, in a worktree, lands in the ONE file the main
+ * checkout and every sibling worktree share, and races every other concurrent lane's own
+ * config write for the same `.git/config.lock` (rationale (1)/(3)/(4)). Nothing in `src/`
+ * ever reads that tracking config — `gitPushRunBranch` pushes an explicit `origin HEAD`
+ * refspec (rationale (5)) — so the write is created, contended over, and never consulted.
+ * The review lane's `realReviewWorktreeDeps` already skips `checkout -B` entirely for this
+ * same reason (see its own comment, above); the fix rung cannot follow it there because it
+ * PUSHES, and a detached HEAD has no branch for `git push origin HEAD` to resolve (rationale
+ * (7)). `--no-track` keeps the named local branch — still landing at `origin/<branch>`'s
+ * commit, still pushable — while dropping only the tracking-config write.
+ */
+export function createFixRungWorktree(repoDir: string, worktreePath: string, branch: string): void {
+  execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
+  execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
+  execFileSync(
+    "git",
+    ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`, "--no-track"],
+    { stdio: "pipe" },
+  );
 }
 
 /**
@@ -19218,9 +19362,7 @@ export function buildSweepEffects(
           return;
         }
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
-        execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
-        execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${realBranch}`], { stdio: "pipe" });
-        execFileSync("git", ["-C", worktreePath, "checkout", "-B", realBranch, `origin/${realBranch}`], { stdio: "pipe" });
+        createFixRungWorktree(repoDir, worktreePath, realBranch);
 
         const mountsTable = loadMounts(mountsPath(repoRoot));
         const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
@@ -19476,7 +19618,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       renderSweepSummary(summary) +
       `\npost-fix re-verification: ${reverifySummary.total} open PR(s) checked · ${reverifySummary.redriven} redriven` +
       `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected` +
-      `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed` +
+      `\n${renderEscalationReconcileSummary(reconcileSummary)}` +
       `\nworktree reap: ${reapSummary.reaped.length} worktree(s) reaped · ${reapSummary.reapedLocks.length} widowed lock(s) reaped`,
   );
   return 0;
@@ -19503,6 +19645,57 @@ export function buildEscalationCloser(
  * `issues`/`github` for tests. Returns the pass summary; never throws (buildEscalationReconcile-
  * Candidates degrades a failed read to [], runEscalationReconcile contains per-issue throws).
  */
+/**
+ * W1-T1101: the reconcile summary as THIS caller sees it — `runEscalationReconcile`'s own shape
+ * (lib/sweep.ts, untouched by this task) plus the three intake counts `sweepEscalationReconcile`
+ * already holds in a local. The widening lives HERE, not on the library type, because the library
+ * function never measures these: `buildEscalationReconcileCandidates` does, one statement earlier,
+ * in this same file. Putting the fields on the shared type would have moved a run-task.ts
+ * measurement into lib/sweep.ts for no reader there.
+ */
+export interface SweepEscalationReconcileSummary extends EscalationReconcileSummary {
+  /**
+   * Open issues the read returned, one statement before the candidate loop — see
+   * {@link EscalationIntake}. Present iff an intake reached this caller, which happens UNLESS the
+   * issue-list read itself failed (the builder's `[]`-on-failure contract never calls its
+   * `onIntake` observer) — so `issuesSeen === undefined` is specifically "the read failed", not
+   * "nothing was measured".
+   */
+  issuesSeen?: number;
+  /** Dropped for carrying no `**Task:**` trailer — see {@link EscalationIntake}. */
+  droppedNoTaskTrailer?: number;
+  /** Dropped for naming neither a plan task nor any resolvable PR referent. */
+  droppedNoReferent?: number;
+}
+
+/**
+ * One-line human render of an escalation-reconcile pass, for `rmd sweep`'s console output
+ * (W1-T1101). The line this replaces printed `total` (the POST-DROP candidate count) under the
+ * label "open needs-human issue(s) checked" — so `total: 0` read identically whether nothing was
+ * open, everything open was dropped, or the issue-list read failed outright. This renders
+ * `issuesSeen` under that label instead (the count the read actually returned), names an
+ * unreadable list as exactly that rather than a bare zero, and — only when a drop shrank
+ * `issuesSeen` down to `total` — names the drop reasons, mirroring the ledger row's own
+ * healthy-path-stays-small asymmetry (see the `sweep.escalation_reconcile.summary` log call in
+ * `runEscalationReconcile`).
+ */
+export function renderEscalationReconcileSummary(s: SweepEscalationReconcileSummary): string {
+  if (s.issuesSeen === undefined) {
+    // No intake reached this pass — on `sweepEscalationReconcile`'s own call site (the only
+    // production caller), that happens exactly when `buildEscalationReconcileCandidates`' issue-list
+    // read threw and returned `[]` under its "do nothing this cycle" contract. `total`/`closed` are
+    // both correctly 0 in that case too, so rendering them here would be the identical, ambiguous
+    // zero this task exists to remove.
+    return "escalation reconcile: issue-list read FAILED this cycle (see sweep.escalation_reconcile.list_failed) — nothing checked, nothing closed";
+  }
+  const droppedTotal = s.issuesSeen - s.total;
+  const droppedNote =
+    droppedTotal > 0
+      ? ` · ${s.total} became candidate(s), ${droppedTotal} dropped (${s.droppedNoTaskTrailer ?? 0} no-task-trailer, ${s.droppedNoReferent ?? 0} no-referent)`
+      : "";
+  return `escalation reconcile: ${s.issuesSeen} open needs-human issue(s) checked · ${s.closed} closed${droppedNote}`;
+}
+
 export async function sweepEscalationReconcile(
   owner: string,
   repo: string,
@@ -19511,7 +19704,7 @@ export async function sweepEscalationReconcile(
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub } = {},
-): Promise<EscalationReconcileSummary> {
+): Promise<SweepEscalationReconcileSummary> {
   let intake: EscalationIntake | undefined;
   const candidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
     issues: opts.issues,
@@ -19520,7 +19713,7 @@ export async function sweepEscalationReconcile(
       intake = i;
     },
   });
-  return runEscalationReconcile(candidates, {
+  const summary = await runEscalationReconcile(candidates, {
     intake,
     closeIssue: buildEscalationCloser(owner, repo, opts.issues),
     ledgerPath,
@@ -19528,6 +19721,13 @@ export async function sweepEscalationReconcile(
     log,
     dryRun: opts.dryRun,
   });
+  // W1-T1101: the SAME counts the ledger row below has carried since #1084, now also riding on the
+  // returned summary so `renderEscalationReconcileSummary` (the CLI line) can see them. No new
+  // read, no change to what `runEscalationReconcile` measures or logs — the merge happens HERE,
+  // in the file that already holds `intake`, rather than widening lib/sweep.ts's shared type.
+  return intake
+    ? { ...summary, issuesSeen: intake.issuesSeen, droppedNoTaskTrailer: intake.droppedNoTaskTrailer, droppedNoReferent: intake.droppedNoReferent }
+    : summary;
 }
 
 /**
@@ -20393,6 +20593,9 @@ export async function fixCommand(
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
     lastActivityAt: raw.updatedAt,
+    // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
+    // doc for why this is `undefined` in the real gateway today.
+    createdAt: raw.createdAt,
     headSha: raw.headRefOid,
     autoMergeArmed: raw.autoMergeRequest != null,
     reviewSummary: undefined,
@@ -21383,8 +21586,7 @@ async function triageCommandLocked(
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
-    const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
-    const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("triage.error", { error: "no PR opened" });
       worktreeRemove(repoDir, worktreePath);
@@ -21805,8 +22007,7 @@ export async function planCommand(
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
-    const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
-    const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+    const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
       worktreeRemove(repoDir, worktreePath);

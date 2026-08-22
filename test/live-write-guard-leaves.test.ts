@@ -98,6 +98,9 @@ test("LEAF GUARD gh-pr-merge: ghPrMergeSquash REFUSES under the test runner and 
 // route through it (run-task.ts:3545/:5147/:8390/:8601), so refusing here covers all four.
 // The observable refusal is therefore the throw plus the ABSENCE of a returned command —
 // a caller that cannot get an argv cannot open a PR.
+//
+// W1-T1202: the builder moved from `gh pr create --fill` (GraphQL) to `gh api --method
+// POST repos/{owner}/{repo}/pulls` (REST) — same guard, same key, different argv shape.
 test("LEAF GUARD gh-pr-create: the ghPrCreateFillCommand builder REFUSES, so its four executors get no argv to run", () => {
   let caught: unknown;
   let built: unknown;
@@ -110,31 +113,32 @@ test("LEAF GUARD gh-pr-create: the ghPrCreateFillCommand builder REFUSES, so its
   assert.match(String((caught as Error).message), /gh-pr-create/, "the error names its own boundary");
   assert.equal(built, undefined, "no argv was produced — an executor has nothing to run");
 
-  // WOULD-HAVE-FIRED control: exempted, the builder yields the real `gh pr create` argv.
+  // WOULD-HAVE-FIRED control: exempted, the builder yields the real REST-create argv.
   const ok = withLiveWritesAllowed(() => ghPrCreateFillCommand("/tmp/wt", "acme", "remudero", "run-T1-123"));
   assert.equal(ok.command, "gh");
-  assert.deepEqual(ok.args.slice(0, 4), ["pr", "create", "--repo", "acme/remudero"]);
+  assert.deepEqual(ok.args.slice(0, 4), ["api", "--method", "POST", "repos/acme/remudero/pulls"]);
+  assert.ok(!ok.args.includes("pr"), "no `gh pr create` subcommand — GraphQL is never issued");
+  assert.ok(!ok.args.includes("create"), "no `gh pr create` subcommand — GraphQL is never issued");
 });
 
-// W1-T327: `--fill` alone lets `gh pr create` invent a title from the branch/commits, and
+// W1-T327: `--fill` alone let `gh pr create` invent a title from the branch/commits, and
 // nothing in this repo can repair one afterwards (the three `gh pr edit` sites all pass
 // `--body` only) — a non-conventional title then fails the REQUIRED `commitlint` check on a
 // PR whose commits are individually clean. The fix authors the title instead of inheriting
-// one: ghPrCreateFillCommand now takes an explicit `title` and emits `--title`.
-test("LEAF GUARD gh-pr-create: an explicit title is emitted as --title and passes the REAL commitlint gate", () => {
+// one: ghPrCreateFillCommand takes an explicit `title` and emits it as `-f title=<title>`
+// (W1-T1202: the REST equivalent of the old `--title` flag).
+test("LEAF GUARD gh-pr-create: an explicit title is emitted as -f title=<title> and passes the REAL commitlint gate", () => {
   const title = "feat(serve): add fuzzy search to the board (W1-T157)";
   const ok = withLiveWritesAllowed(() =>
     ghPrCreateFillCommand("/tmp/wt", "acme", "remudero", "run-T1-123", title),
   );
 
-  // REGRESSION LOCK: if `--title` is ever dropped from the argv again, this fails —
-  // the whole point of W1-T327 is that `--fill` alone is what lets a non-conventional
-  // title through uncontested.
-  const idx = ok.args.indexOf("--title");
-  assert.notEqual(idx, -1, "the argv must carry --title — an omitted --title is the W1-T327 defect");
-  assert.equal(ok.args[idx + 1], title, "the exact subject is passed through verbatim, never re-derived");
-  assert.ok(ok.args.includes("--fill"), "--fill stays too — gh docs: an explicit --title overrides --fill's " +
-    "title but --fill still autofills the body, so this is additive, not a replacement");
+  // REGRESSION LOCK: if the authored title is ever dropped from the argv again, this
+  // fails — the whole point of W1-T327 is that an un-authored title is what lets a
+  // non-conventional title through uncontested.
+  const titleIdx = ok.args.indexOf(`title=${title}`);
+  assert.notEqual(titleIdx, -1, "the argv must carry a title=<title> field — an omitted title is the W1-T327 defect");
+  assert.equal(ok.args[titleIdx - 1], "-f", "title is carried as a -f field, the REST create's mechanism");
 
   const lint = lintHeader(title);
   assert.equal(lint.status, 0, `the emitted title must pass the real commitlint CLI:\n${lint.stdout}${lint.stderr}`);
@@ -150,10 +154,19 @@ test("LEAF GUARD gh-pr-create: a branch-shaped, non-conventional title is what c
   assert.match(lint.stdout + lint.stderr, /subject-empty|type-empty/);
 });
 
-test("LEAF GUARD gh-pr-create: an omitted title falls back to --fill alone — the documented no-title decision", () => {
+test("LEAF GUARD gh-pr-create: an omitted title (and unreadable git history) falls back to the branch name — the documented no-title decision", () => {
+  // "/tmp/wt" is not a real git repo, so lastCommitSubject's own read fails too (design
+  // iv's SECOND fallback tier) — the builder must still produce a usable title rather
+  // than refuse, falling back to the branch name (the LAST tier), and it must say so in
+  // the body rather than silently substituting it.
   const ok = withLiveWritesAllowed(() => ghPrCreateFillCommand("/tmp/wt", "acme", "remudero", "run-T1-123"));
-  assert.ok(!ok.args.includes("--title"), "no title given => old --fill-only argv, unchanged");
-  assert.ok(ok.args.includes("--fill"), "--fill is still present so a PR still opens rather than refusing");
+  assert.ok(ok.args.includes("title=run-T1-123"), "no title anywhere => falls back to the branch name");
+  const bodyField = ok.args.find((a) => a.startsWith("body="));
+  assert.match(
+    bodyField ?? "",
+    /run-T1-123/,
+    "the branch-name fallback is STATED in the body, never a silent substitution (design iv)",
+  );
 });
 
 // lastCommitSubject feeds the title into the implement/retro call sites (the two paths whose
