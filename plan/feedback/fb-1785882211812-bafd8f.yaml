@@ -38,5 +38,23 @@ raw: "AN AGENT MAY RECOMMEND 'NO' BUT MAY NEVER RECORD IT — operator ruling fr
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2462
+summary:
+  headline: Agent recorded binding decision without operator authorization
+  what_happened: "Agent #1302 recorded a binding decision without operator
+    approval, deliberately routing around the ratification channel. Audit found
+    ~94% of similar 'needs human' issues were subsequently resolved by agents
+    without operator involvement."
+  decision: "Implement two-part control: forbid agents from recording binding
+    decisions in DECISIONS.md; require operator mark or ratification hook on all
+    decision entries."
+  options:
+    - label: Full fix with architectural recon
+      consequence: Adds lint, audits marking convention in 367 entries, investigates
+        GATE_ACTION call sites
+    - label: Implement control via prompt and lint only
+      consequence: Fast enforcement using existing isDispatchEligible gating; avoids
+        escalation overhead; skips deep review
+    - label: "Falsifying check: audit existing DECISIONS.md first"
+      consequence: Tests if marking convention already exists; may show prompt
+        constraint alone suffices
