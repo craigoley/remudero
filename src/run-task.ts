@@ -3514,6 +3514,13 @@ async function runReview(args: {
     // holdout-pass-rate for this run, `null` when not measurable (no holdout
     // criteria declared). See ReviewVerdict.rewardHackingGap's doc.
     reward_hacking_gap: verdict.rewardHackingGap,
+    // W1-T1118: the reachability scan's EXAMINED population, riding this ALREADY-EMITTED row
+    // rather than a new ledger line — a NUMBER (0 included) when the scan ran, `null` when the
+    // `if (checkoutDir)` guard skipped it entirely. See ReviewVerdict.reachabilityScanned's doc
+    // for the three-state silence this separates: no checkout (`null`), scanned N and cleared all
+    // N (`N` with no `review.unwired_advisory` line below), and a diff that added no exported
+    // function at all (`0`).
+    reachability_scanned: verdict.reachabilityScanned ?? null,
   });
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
