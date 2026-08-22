@@ -253,15 +253,22 @@ test("SITE approve reads the arm outcome rather than discarding it", () => {
 
 // ── 9: the SIXTH site the brief did not name — #968 was inert without it ────────────
 test("SITE sweep adapter returns the arm outcome so the sweep can read it at all", () => {
-  assert.match(
-    SRC,
-    /arm: \(pr\) => arm(?:AutoMerge|AndLogOutcome)\(pr\.prUrl, pr\.taskId[^)]*\),/,
-    "the adapter RETURNS the outcome — as a braced body it resolved to undefined, which armOutcomeArmed treats as armed, so the sweep's own check could never fire",
-  );
+  // W1-T1117: the adapter grew a braced body (to also classify a failed arm's `error` text for
+  // the sweep's dedup — see lib/sweep.ts's "mergeable" arm), so the single-expression regex this
+  // test used to lock no longer matches. The invariant it actually guards — EVERY path through
+  // this effect returns something armOutcomeArmed can read, never an implicit `undefined` — is
+  // checked directly against the site's own window instead of one regex over the whole file.
+  const anchor = "arm: (pr) => {";
+  const at = SRC.indexOf(anchor);
+  assert.ok(at > 0, `anchor not found, the test is stale: ${anchor}`);
+  const w = SRC.slice(at, at + 1400);
+  assert.match(w, /const outcome = armAndLogOutcome\(\s*pr\.prUrl,\s*pr\.taskId,\s*log,/, "still calls the SAME shared wrapper with the SAME prUrl/taskId/log every other lane uses");
+  assert.match(w, /if \(outcome !== "arm-error-ignored" \|\| attemptError === undefined\) return outcome;/, "the base outcome is returned, never discarded");
+  assert.match(w, /return \{ outcome, failureClass \};/, "a classified failure is returned as the richer shape, never discarded either");
   assert.equal(
     SRC.includes("arm: (pr) => {\n      armAutoMerge(pr.prUrl, pr.taskId);\n    },"),
     false,
-    "the discarding form is gone",
+    "the original discarding form (no return at all) is gone",
   );
 });
 
@@ -352,19 +359,21 @@ test("W1-T1079: a failed arm records the error text it received", () => {
 test("W1-T1079: a non clean-status failure is not classified transient by default", () => {
   const PERMANENT_LOOKING = "GraphQL: Pull request Review Decision is required before merging (mergePullRequest)";
 
+  // W1-T1117 renamed the catch-all from "permanent" to "unknown" — this classifier reads stderr
+  // PROSE and can never actually prove a refusal is permanent, only that it did not recognize it.
   assert.equal(
     armFailureAction(PERMANENT_LOOKING),
-    "permanent",
-    "an ordinary refusal with no network/rate-limit signature must not default to transient",
+    "unknown",
+    "an ordinary refusal with no network/rate-limit/base-branch-race signature must not default to transient",
   );
   assert.notEqual(armFailureAction(PERMANENT_LOOKING), "transient");
 
-  // POSITIVE CONTROL — the third case is genuinely reachable, not just a renamed always-permanent
+  // POSITIVE CONTROL — the third case is genuinely reachable, not just a renamed always-unknown
   // default: a signature that plausibly IS a blip still classifies as transient.
   assert.equal(
     armFailureAction("connect ETIMEDOUT 140.82.112.3:443"),
     "transient",
-    "sanity: a genuine network blip still has somewhere to land other than permanent",
+    "sanity: a genuine network blip still has somewhere to land other than unknown",
   );
 });
 

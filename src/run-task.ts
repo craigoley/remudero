@@ -1749,8 +1749,11 @@ function attemptArm(
     // carried nothing, which is the defect this task closes. `msg` is now returned alongside
     // the outcome so every caller that logs it can put it on the row (see `armAndLogOutcome`/
     // `armIfVerdictPermits`). Still never retried MORE eagerly and never given its own retry
-    // cap here (design note iii) — only named, whichever of `armFailureAction`'s two non-
-    // clean-status classes it fell into.
+    // cap here (design note iii) — only named, whichever of `armFailureAction`'s three non-
+    // clean-status classes it fell into. W1-T1117: the sweep lane reads this same classification
+    // back off `error` (see `buildSweepEffects`'s `arm` effect below) to decide whether the
+    // failure seeds the head-keyed dedup — that decision lives there, not here, so this call
+    // stays purely informational, exactly as design note iii requires.
     deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
     return { outcome: "arm-error-ignored", error: msg };
   }
@@ -2290,23 +2293,44 @@ export function armReportPhrase(outcome: ArmOutcome): string {
  * non-clean-status failure were transient and safe to leave for the next sweep pass. It is not:
  * a permanent refusal (a branch-protection rule, a required review, a merge conflict) looks
  * IDENTICAL to a network blip once the error text is discarded, which is exactly what made
- * rationale (1) unanswerable — see this file's own `arm-error-ignored` rows. This now names a
- * THIRD case: `"transient"` only for the narrow set of signatures that plausibly ARE a blip
- * (rate limiting, a timeout, a dropped connection) — everything else defaults to `"permanent"`,
- * the opposite of the old default. Both still route to the SAME `arm-error-ignored` outcome
- * (design note iii — no retry-cap or control-flow change here); what changes is that the
- * classification travels with the row instead of the row itself lying about it. Callers get the
- * error TEXT itself (see {@link ArmAttemptResult}) regardless of which of these two it is, so
- * this classification is documentation of intent, not the only signal a future reader has.
+ * rationale (1) unanswerable — see this file's own `arm-error-ignored` rows. This named a THIRD
+ * case: `"transient"` only for the narrow set of signatures that plausibly ARE a blip (rate
+ * limiting, a timeout, a dropped connection) — everything else defaulted to `"permanent"`.
+ *
+ * W1-T1117: that allowlist was ITSELF too narrow — every member is a TRANSPORT/SERVER fault, so
+ * a SEMANTIC-but-retryable refusal (GitHub's own message names the remedy: "Base branch was
+ * modified. Review and try the merge again.") fell through to the `"permanent"` default even
+ * though the correct action is identical to `"transient"`'s: leave it for the next sweep pass.
+ * Two changes here: (1) a FOURTH case, `"retryable"`, as its own narrow allowlist — never a
+ * default, exactly like `"transient"` — for a semantic refusal GitHub itself says to retry;
+ * `"Base branch was modified"` is its first and, on today's evidence, only member (rationale 5
+ * in the task's own plan record). (2) the catch-all is renamed `"unknown"`, not `"permanent"`:
+ * `gh pr merge` collapses GitHub's structured GraphQL error into stderr PROSE (rationale 7), so
+ * this classifier can never actually PROVE a refusal is permanent from the string alone —
+ * `"unknown"` says so honestly instead of asserting a certainty it does not have. `"unknown"`
+ * still takes the SAME non-retrying path `"permanent"` took before it: see the "mergeable" arm's
+ * dedup in `lib/sweep.ts`'s {@link buildSweepEffects}, which is the ONE place a class other than
+ * `"transient"`/`"retryable"` now actually stops a next-pass retry (previously nothing did —
+ * every `arm-error-ignored` outcome, whatever its classification, retried forever; see that
+ * effect's own W1-T1117 note for why). This function itself still routes every non-clean-status
+ * class to the SAME `arm-error-ignored` outcome (design note iii — no retry-cap or control-flow
+ * change HERE); what changes is that the classification travels with the row, and — new in
+ * W1-T1117 — the sweep lane actually reads it back. Callers get the error TEXT itself (see
+ * {@link ArmAttemptResult}) regardless of which class it is, so this classification is
+ * documentation of intent, not the only signal a future reader has.
  */
-export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "permanent" {
+export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "retryable" | "unknown" {
   if (/clean status/i.test(stderrText)) return "direct-merge";
   if (/timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|network|secondary rate limit|rate.limit|abuse detection|too many requests|5\d\d\b|GraphQL: (?:Something went wrong|Server Error)/i.test(
     stderrText,
   )) {
     return "transient";
   }
-  return "permanent";
+  // W1-T1117 (design i): GitHub's own message names the remedy — a base that moved mid-call is
+  // a merge RACE, not a refusal. The ONLY member of this allowlist today (rationale 5); a second
+  // signature is a follow-up once actually observed, never guessed here (design vii/note above).
+  if (/base branch was modified/i.test(stderrText)) return "retryable";
+  return "unknown";
 }
 
 /**
@@ -18343,7 +18367,41 @@ export function buildSweepEffects(
     // the review lane already mints and ledgers under (gated on `armSessionPrs`) rather than
     // arming nothing for a session PR (no `Remudero-Task:` trailer). `pr.taskId` itself is
     // still passed straight through here, unchanged from before this task.
-    arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, sweepArmImpl, "sweep"),
+    //
+    // W1-T1117: `attemptError` is a SIDE CHANNEL, not a second `gh pr merge` attempt — the
+    // wrapped closure passed to `armAndLogOutcome` still calls `sweepArmImpl` exactly ONCE; it
+    // only also stashes the raw failure text `armAndLogOutcome` itself discards down to the bare
+    // outcome string it returns. `armFailureAction` is then re-read (never re-derived by some
+    // second classifier) off that SAME text `attemptArm` already classified for the console line,
+    // so the "mergeable" arm's dedup (lib/sweep.ts) can tell a semantic-but-retryable/transport
+    // failure — never seed the dedup, the base/network condition bounds the retry, not this code
+    // — from one the classifier could not decode at all, which DOES seed it (design iv: an
+    // `"unknown"` failure takes the same non-retrying shape a genuinely permanent one would).
+    // Every other outcome (including a bare "arm-error-ignored" with no captured text, which
+    // cannot happen from this adapter but keeps every existing fake/test that returns a plain
+    // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
+    arm: (pr) => {
+      let attemptError: string | undefined;
+      const outcome = armAndLogOutcome(
+        pr.prUrl,
+        pr.taskId,
+        log,
+        (prUrl, taskId) => {
+          const result = sweepArmImpl(prUrl, taskId);
+          if (typeof result !== "string") attemptError = result.error;
+          return result;
+        },
+        "sweep",
+      );
+      if (outcome !== "arm-error-ignored" || attemptError === undefined) return outcome;
+      const failureClass = armFailureAction(attemptError);
+      // `attemptArm` only ever returns `"arm-error-ignored"` for a failure it did NOT already
+      // classify `"direct-merge"` (that branch takes the direct-merge fallback instead), so this
+      // is unreachable in practice — narrowed explicitly so the return type stays exact rather
+      // than widening `ArmAttemptOutcome.failureClass` to a class this outcome can never carry.
+      if (failureClass === "direct-merge") return outcome;
+      return { outcome, failureClass };
+    },
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means
