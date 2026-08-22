@@ -19,6 +19,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -39,8 +42,14 @@ const mod = (await import(GATE_URL)) as {
     message: string;
   };
   isFilingShapedSubject: (subject: string) => boolean;
+  readHeadCommitMessage: (worktreePath: string) => string | undefined;
+  resolveHeadRef: (
+    flagValue: string | undefined,
+    env?: Record<string, string | undefined>,
+  ) => { ok: boolean; headRef?: string; message?: string };
+  main: (argv: string[]) => void;
 };
-const { evaluateCreditSurfaceGate, isFilingShapedSubject } = mod;
+const { evaluateCreditSurfaceGate, isFilingShapedSubject, readHeadCommitMessage, resolveHeadRef, main } = mod;
 
 // ── The five task acceptance criteria, each its own named `unit test:` proof ──────────────────
 
@@ -157,4 +166,206 @@ test("credit surface gate: an empty/missing head ref is not run-shaped and does 
     headRef: undefined,
   });
   assert.equal(result.ok, false);
+});
+
+// ── readHeadCommitMessage — the impure git edge ──────────────────────────────────────────────
+//
+// Reads THIS repo's real HEAD (never a fixture copy, per the file's own doc), and separately
+// proves the best-effort `undefined`-on-failure contract against a path with no git repo at all,
+// matching `lastCommitSubject`'s own contract this function's doc cites.
+
+test("credit surface gate: readHeadCommitMessage reads the real worktree HEAD", () => {
+  const message = readHeadCommitMessage(REPO_ROOT);
+  assert.equal(typeof message, "string");
+  assert.ok((message as string).length > 0, "a real repo's HEAD commit message is non-empty");
+});
+
+test("credit surface gate: readHeadCommitMessage returns undefined rather than throwing on a bad path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-credit-surface-gate-nogit-"));
+  try {
+    const message = readHeadCommitMessage(dir);
+    assert.equal(message, undefined, "a directory with no git repo yields undefined, not a throw");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── resolveHeadRef — flag vs. $GITHUB_HEAD_REF precedence ───────────────────────────────────────
+
+test("credit surface gate: resolveHeadRef refuses when neither the flag nor the env is set", () => {
+  const refused = resolveHeadRef(undefined, {});
+  assert.equal(refused.ok, false);
+  assert.match(refused.message!, /REFUSED/);
+  assert.match(refused.message!, /--head-ref/, "the refusal names the flag that would fix it");
+  assert.match(refused.message!, /GITHUB_HEAD_REF/, "and the environment variable too");
+
+  // POSITIVE CONTROL 1 — the flag alone resolves.
+  const viaFlag = resolveHeadRef("fix/tidy-up", {});
+  assert.equal(viaFlag.ok, true);
+  assert.equal(viaFlag.headRef, "fix/tidy-up");
+
+  // POSITIVE CONTROL 2 — the environment alone resolves too.
+  const viaEnv = resolveHeadRef(undefined, { GITHUB_HEAD_REF: "run-W1-T2519-1787425298842" });
+  assert.equal(viaEnv.ok, true);
+  assert.equal(viaEnv.headRef, "run-W1-T2519-1787425298842");
+
+  // and the flag wins over the environment, the same documented precedence
+  // resolveEventPath (scripts/acceptance-author-gate.mjs) uses.
+  const both = resolveHeadRef("flag-wins", { GITHUB_HEAD_REF: "env-loses" });
+  assert.equal(both.headRef, "flag-wins");
+});
+
+test("credit surface gate: resolveHeadRef also refuses on an empty-string flag/env value", () => {
+  const emptyFlag = resolveHeadRef("", {});
+  assert.equal(emptyFlag.ok, false);
+
+  const emptyEnv = resolveHeadRef(undefined, { GITHUB_HEAD_REF: "" });
+  assert.equal(emptyEnv.ok, false);
+});
+
+// ── main()'s own branches, in-process ────────────────────────────────────────────────────────
+//
+// process.exitCode/console.log/console.error are saved and monkey-patched around each call —
+// leaving them set/patched would corrupt this suite's own process, the same
+// `withExitCode` shape test/acceptance-author-gate.test.ts uses for the analogous entry point.
+
+async function withExitCode(fn: () => void): Promise<{ exitCode: typeof process.exitCode; err: string[]; out: string[] }> {
+  const priorExit = process.exitCode;
+  const err: string[] = [];
+  const out: string[] = [];
+  const realErr = console.error;
+  const realOut = console.log;
+  console.error = (...a: unknown[]) => void err.push(a.join(" "));
+  console.log = (...a: unknown[]) => void out.push(a.join(" "));
+  try {
+    fn();
+    return { exitCode: process.exitCode, err, out };
+  } finally {
+    console.error = realErr;
+    console.log = realOut;
+    process.exitCode = priorExit;
+  }
+}
+
+test("credit surface gate: main REFUSES with exit 1 when no head ref can be resolved", async () => {
+  const priorEnv = process.env.GITHUB_HEAD_REF;
+  delete process.env.GITHUB_HEAD_REF;
+  try {
+    const r = await withExitCode(() => main([]));
+    assert.equal(r.exitCode, 1, "an unresolvable head ref is a refusal, not a pass");
+    assert.equal(r.err.length, 1, "the refusal is reported once, on stderr");
+    assert.match(r.err[0], /REFUSED — no head ref/);
+    assert.deepEqual(r.out, [], "a refusal prints no OK line");
+  } finally {
+    if (priorEnv === undefined) delete process.env.GITHUB_HEAD_REF;
+    else process.env.GITHUB_HEAD_REF = priorEnv;
+  }
+});
+
+test("credit surface gate: main REFUSES with exit 1 when the worktree path has no readable HEAD", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-credit-surface-gate-main-nogit-"));
+  try {
+    const r = await withExitCode(() => main(["--head-ref", "fix/whatever", "--worktree-path", dir]));
+    assert.equal(r.exitCode, 1);
+    assert.equal(r.err.length, 1);
+    assert.match(r.err[0], /cannot read the HEAD commit message/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("credit surface gate: main REFUSES with exit 1 and the gate's own message on an uncredited head", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-credit-surface-gate-main-uncredited-"));
+  try {
+    execFileSync("git", ["-C", dir, "init", "-q"]);
+    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "feat(cli): add a new flag"]);
+
+    const r = await withExitCode(() => main(["--head-ref", "feat/add-new-flag", "--worktree-path", dir]));
+    assert.equal(r.exitCode, 1);
+    assert.equal(r.err.length, 1);
+    assert.match(r.err[0], /credit-surface-gate: REFUSED — this merge would land credited on NEITHER surface/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("credit surface gate: main prints OK with exit 0 when the head ref alone credits", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-credit-surface-gate-main-credited-"));
+  try {
+    execFileSync("git", ["-C", dir, "init", "-q"]);
+    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "feat(cli): add a new flag"]);
+
+    const r = await withExitCode(() =>
+      main(["--head-ref", "run-W1-T2519-1787425298842", "--worktree-path", dir]),
+    );
+    assert.equal(r.exitCode, 0);
+    assert.deepEqual(r.err, [], "a pass prints nothing on stderr");
+    assert.equal(r.out.length, 1);
+    assert.match(r.out[0], /credit-surface-gate: OK/);
+    assert.match(r.out[0], /run-shaped head ref/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── the real CLI process, end-to-end ─────────────────────────────────────────────────────────
+//
+// Every test above calls `main` in-process, so the direct-execution guard at the bottom of the
+// script (`if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href)`) was never
+// observed — that condition is only true when the file is the process's actual entry point. This
+// spawns the real script the same way CI would (`node --import tsx
+// scripts/credit-surface-gate.mjs ...`), matching test/acceptance-author-gate.test.ts's own
+// `runGate` shape for its analogous CLI.
+
+function runGate(args: string[]) {
+  return spawnSync(process.execPath, ["--import", "tsx", SCRIPT, ...args], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+}
+
+test("credit surface gate: the real CLI process exits 0 and prints OK for a credited head", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-credit-surface-gate-cli-credited-"));
+  try {
+    execFileSync("git", ["-C", dir, "init", "-q"]);
+    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "fix(drain): stuff\n\nRemudero-Task: W1-T2519\n"]);
+
+    const run = runGate(["--head-ref", "fix/drain-stuck", "--worktree-path", dir]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /credit-surface-gate: OK/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("credit surface gate: the real CLI process exits 1 for an uncredited head", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-credit-surface-gate-cli-uncredited-"));
+  try {
+    execFileSync("git", ["-C", dir, "init", "-q"]);
+    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "feat(cli): add a new flag"]);
+
+    const run = runGate(["--head-ref", "feat/add-new-flag", "--worktree-path", dir]);
+    assert.equal(run.status, 1, run.stdout + run.stderr);
+    assert.match(run.stderr, /credit-surface-gate: REFUSED — this merge would land credited on NEITHER surface/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("credit surface gate: the real CLI process exits 1 with no --head-ref and no GITHUB_HEAD_REF", () => {
+  const run = spawnSync(process.execPath, ["--import", "tsx", SCRIPT], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_HEAD_REF: "" },
+  });
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.match(run.stderr, /REFUSED — no head ref/);
 });
