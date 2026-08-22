@@ -85,13 +85,13 @@
     change that re-queued everything would satisfy the first and fail the second.
   acceptance:
     - claim: "a required check whose latest attempt is cancelled is named apart from one that genuinely failed"
-      proof: "unit test: a cancelled required check is named apart from a failing one"
+      proof: "unit test: test/cancelled-required-check-requeue.test.ts"
     - claim: "the sweep re-queues that check at most once for a given head sha, bounded by a ledgered record"
-      proof: "unit test: the sweep re-queues a cancelled required check once per head sha"
+      proof: "unit test: test/cancelled-required-check-requeue.test.ts"
     - claim: "a second cancellation on the same head re-queues nothing and raises a human-facing escalation"
-      proof: "unit test: a second cancellation on the same head escalates instead of re-queueing"
+      proof: "unit test: test/cancelled-required-check-requeue.test.ts"
     - claim: "the re-queue targets the single job, never the workflow run that carries an already-green ci"
-      proof: "unit test: the re-queue targets one job and never the whole workflow run"
+      proof: "unit test: test/cancelled-required-check-requeue.test.ts"
   note: |
     risk: high IS SET UP FRONT. Rule 19 SPAN: the files cross the sweep's predicate, the CLI wiring
     that supplies its deps, and a new suite. The blast radius is genuinely high as well — this adds
@@ -107,9 +107,11 @@
     run-task.ts=7; `REQUIRED_CHECK_FAIL` reads sweep.ts=3, run-task.ts=4; `runSweep`'s only
     real-deps call sites are in run-task.ts. No other src file is named.
 
-    PROOF NOTES: all four proofs are the NAME-FILTERED `unit test:` form and every one FORWARD
-    REFERENCES a test the implementer creates — a `grep:` proof at an existing path would be a
-    forward reference at a path that already exists, which the reviewer refuses. Each title was
-    verified to match ZERO files today via `grep -rlF` over `test/` and `src/`, against a control
-    title known to match one. Each is plain prose under 100 characters with no comma and no
-    metacharacter, so `looksLikeScenarioNarrative` does not fire.
+    PROOF NOTES: all four proofs are the PURE-PATH `unit test:` form naming
+    `test/cancelled-required-check-requeue.test.ts`, which this shard's own `files:` declares. That
+    is the ONLY form a forward reference can take: `judgeCriterion` (src/lib/review.ts) gates its
+    forward-reference carve-out on `!whitelisted.nameFiltered`, and its own comment says a bare
+    test-NAME proof "has no single target path to look up in `files:`, so it is untouched". A
+    name-filtered title therefore resolves to zero tests on the head and is graded `no-match`
+    rather than `not_yet_built` — measured on this PR's first head, which the reviewer failed. The
+    path form is also what every merged `chore(plan)` filing in the corpus uses.
