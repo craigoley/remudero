@@ -2065,7 +2065,7 @@ export function armAutoMergeAtOpen(
  * require changing `postReviewStatusGuarded` (out of this task's scope), so
  * this is the minimal, best-effort, in-scope mitigation.
  */
-export type DisarmOutcome = "disarmed" | "not-armed" | "failed";
+export type DisarmOutcome = "disarmed" | "not-armed" | "lost-race" | "failed";
 
 /**
  * W1-T1056's NEIGHBOUR, CITED AND NOT RE-DERIVED. W1-T1052 IS A DIFFERENT FAILURE in the same
@@ -2093,8 +2093,18 @@ export type DisarmOutcome = "disarmed" | "not-armed" | "failed";
  * same fail-open shape that lets an absent reading masquerade as a negative one, and here it
  * would resurrect the very false record this task exists to remove.
  */
-export function classifyDisarmFailure(stderrText: string): "not-armed" | "failed" {
-  return /can't disable auto-merge|disablePullRequestAutoMerge/i.test(stderrText) ? "not-armed" : "failed";
+export function classifyDisarmFailure(
+  stderrText: string,
+  // W1-T1215: appended LAST and optional so no positional caller shifts and every existing
+  // fixture keeps its exact meaning — `undefined` is "not asked", which reads as before.
+  merged?: boolean,
+): "not-armed" | "lost-race" | "failed" {
+  // W1-T1215: the string alone CANNOT decide this. GitHub returns the SAME message for a PR
+  // that was never armed (#2234, benign) and for one that is ALREADY MERGED (#2506, the most
+  // severe outcome this system can produce). Unrecognised still fails towards `"failed"`,
+  // preserving the fail-closed polarity this function's own doc argues for.
+  if (!/can't disable auto-merge|disablePullRequestAutoMerge/i.test(stderrText)) return "failed";
+  return merged === true ? "lost-race" : "not-armed";
 }
 
 /**
@@ -2111,7 +2121,10 @@ export function disarmOutcomeWithdrawn(outcome: DisarmOutcome | void): boolean {
 
 export function disarmAutoMerge(
   prUrl: string,
-  deps: Pick<ArmDeps, "disableAuto" | "say"> = realArmDeps(),
+  // W1-T1215: `isMerged` widens the deps OPTIONALLY and is consulted ONLY from the catch below,
+  // so the ordinary (successful) withdrawal costs exactly the requests it costs today. This is
+  // the SAME seam and the same discipline W1-T1050 added for a thrown `mergeDirect`.
+  deps: Pick<ArmDeps, "disableAuto" | "say"> & Partial<Pick<ArmDeps, "isMerged">> = realArmDeps(),
 ): DisarmOutcome {
   try {
     deps.disableAuto(prUrl);
@@ -2120,9 +2133,176 @@ export function disarmAutoMerge(
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
-    return classifyDisarmFailure(msg);
+    return classifyDisarmFailure(msg, deps.isMerged?.(prUrl));
   }
 }
+
+/**
+ * W1-T1215 — the arm's OWN `run_id`, read off the ledger rows `logArmAttribution` already writes.
+ *
+ * PURE, and deliberately not a GitHub read: when a refused verdict merged anyway, the ruling needs
+ * to know WHICH lane armed it, and that fact is already on the `automerge.armed` row (this file's
+ * `logArmAttribution` puts `pr_url` on every one, and the ledger appender stamps `run_id`). Newest
+ * wins — a PR armed, disarmed and re-armed reports the arm that was standing when the merge landed.
+ * Returns `undefined` rather than guessing when no such row is present, which an escalation renders
+ * as "unattributed" instead of asserting a lane that did not arm.
+ */
+export function armRunIdFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prUrl: string,
+): string | undefined {
+  let runId: string | undefined;
+  for (const line of lines) {
+    if (line.step !== "automerge.armed") continue;
+    if (line.pr_url !== prUrl) continue;
+    if (typeof line.run_id === "string") runId = line.run_id;
+  }
+  return runId;
+}
+
+/**
+ * W1-T1215 — the MERGE commit's sha, read only on the lost-race path.
+ *
+ * `isPrMergedNow` answers WHETHER; a ruling also needs WHICH COMMIT, because that is the thing an
+ * operator would have to reason about. Same shape as that function — `prUrlTarget`, one REST read,
+ * `fetch` appended LAST and defaulted so the sole production caller passes `prUrl` alone — and the
+ * same swallow-and-report-nothing posture: this runs while an escalation is already being built, so
+ * it must never throw and mask the escalation itself. `merge_commit_sha` is on the single-PR REST
+ * payload; `RestPullRow` does not declare it (it has no other consumer), so it is read off the raw
+ * row rather than by widening a type this task does not own.
+ */
+export function mergeShaNow(prUrl: string, fetch: GhApiFetcher = ghJson): string | undefined {
+  const target = prUrlTarget(prUrl);
+  if (!target) return undefined;
+  try {
+    const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as {
+      merge_commit_sha?: unknown;
+    };
+    return typeof row?.merge_commit_sha === "string" && row.merge_commit_sha.length > 0
+      ? row.merge_commit_sha
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * W1-T1215 — the escalation a LOST RACE produces: `HARD_STOP`, never `BLOCKED`.
+ *
+ * WHY HARD_STOP AND NOT BLOCKED. `BLOCKED` says "this cannot proceed until someone acts"; the whole
+ * point here is that it ALREADY proceeded. A verdict that REFUSED a change, on a change that MERGED
+ * anyway, is the strongest signal this system can emit, and `HARD_STOP` is the only class
+ * `escalate`'s own `notify()` gate pages an operator for (the other being `MANUAL`) — a lost race
+ * that lands as an unread `BLOCKED` row is the same silence this task exists to end.
+ *
+ * IT ACTS ON NOTHING, AND THAT IS THE DESIGN (shard clause iv). No revert, no reopen, no
+ * force-push, no branch restoration. Whether a merged commit is backed out is an OPERATOR RULING;
+ * an escalation that acted would be a second unattended write on top of the first one. Every option
+ * below is therefore something a PERSON does.
+ */
+export function lostRaceEscalation(input: {
+  prUrl: string;
+  taskId: string;
+  runId: string;
+  refusal: string;
+  mergeSha?: string;
+  confidence?: number;
+  reasons?: readonly string[];
+  armRunId?: string;
+}): {
+  class: "HARD_STOP";
+  taskId: string;
+  runId: string;
+  summary: string;
+  detail: string;
+  options: Array<{ label: string; detail: string }>;
+  recommendation: string;
+} {
+  const sha = input.mergeSha ?? "unresolved";
+  const confidence = typeof input.confidence === "number" ? input.confidence.toFixed(2) : "n/a";
+  const reasons = input.reasons && input.reasons.length > 0 ? input.reasons.join("\n  - ") : "none recorded";
+  return {
+    class: "HARD_STOP",
+    taskId: input.taskId,
+    runId: input.runId,
+    summary: `REFUSED VERDICT MERGED UNATTENDED — the withdrawal lost the race — ${input.prUrl}`,
+    detail:
+      `${input.refusal}\n\n` +
+      `The withdrawal was attempted and GitHub reported the pull request already MERGED, so the ` +
+      `arm this run refused was never withdrawn.\n\n` +
+      `merge sha:    ${sha}\n` +
+      `confidence:   ${confidence}\n` +
+      `armed by run: ${input.armRunId ?? "unattributed — no automerge.armed row for this pull request"}\n` +
+      `judge reasons:\n  - ${reasons}\n\n` +
+      `NOTHING WAS REVERTED, REOPENED OR FORCE-PUSHED. Whether this commit stands is your ruling.`,
+    options: [
+      {
+        label: "accept-the-merge",
+        detail: "read the merged diff and, if it is acceptable, record that and continue — no action on the commit.",
+      },
+      {
+        label: "back-it-out-by-hand",
+        detail: "revert the merge sha above yourself; the fleet deliberately does not revert on its own.",
+      },
+    ],
+    recommendation: "accept-the-merge",
+  };
+}
+
+/**
+ * W1-T1215 — the WHOLE disposition of one withdrawal attempt, as a pure decision.
+ *
+ * WHY THIS IS A FUNCTION AND NOT THREE LINES AT EACH CALL SITE. The interesting behaviour — which
+ * ledger step the row gets, and whether a lost race escalates — is identical at both sites, and
+ * inside `runTask` it is unreachable by any unit test: a test would have to drive a whole run to
+ * the capped branch AND make GitHub refuse the withdrawal AND report the PR merged. Extracting it
+ * leaves each call site with lines that execute whenever the branch executes at all, and puts every
+ * lost-race-only line somewhere a test can reach directly.
+ *
+ * THE READS ARE LAZY AND FAILURE-PATH ONLY. `mergeSha`/`ledgerLines` are consulted ONLY when the
+ * outcome is `"lost-race"`, so an ordinary refused-arm disposition costs no request and no ledger
+ * read — the same discipline `disarmAutoMerge` applies to `isMerged`.
+ */
+export function disposeDisarm(
+  outcome: DisarmOutcome | void,
+  ctx: {
+    prUrl: string;
+    taskId: string;
+    runId: string;
+    ledgerPath: string;
+    reason: string;
+    refusal: string;
+    confidence?: number;
+    reasons?: readonly string[];
+  },
+  deps: {
+    mergeSha?: (prUrl: string) => string | undefined;
+    ledgerLines?: () => Array<Record<string, unknown>>;
+  } = {},
+): {
+  step: "automerge.disarmed" | "automerge.disarm_skipped";
+  row: Record<string, unknown>;
+  escalation?: ReturnType<typeof lostRaceEscalation>;
+} {
+  const step = disarmOutcomeWithdrawn(outcome) ? "automerge.disarmed" : "automerge.disarm_skipped";
+  const row: Record<string, unknown> = { reason: ctx.reason, outcome: outcome ?? null };
+  if (outcome !== "lost-race") return { step, row };
+  return {
+    step,
+    row,
+    escalation: lostRaceEscalation({
+      prUrl: ctx.prUrl,
+      taskId: ctx.taskId,
+      runId: ctx.runId,
+      refusal: ctx.refusal,
+      mergeSha: (deps.mergeSha ?? mergeShaNow)(ctx.prUrl),
+      confidence: ctx.confidence,
+      reasons: ctx.reasons,
+      armRunId: armRunIdFromLedger((deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(), ctx.prUrl),
+    }),
+  };
+}
+
 
 /**
  * impl-BF — WITHDRAW an auto-merge arm when the verdict just computed refuses to arm.
@@ -8493,16 +8673,22 @@ async function runTask(
       // to this same capped verdict's posted `success` status before this
       // decision lands) — if the sweep armed the PR in that window, this
       // withdraws it before escalating.
-      disarmAutoMerge(prUrl);
       // W1-T947: CAPPED and IRREVERSIBLE are different facts about the PR — the reason below,
       // and the escalation it feeds, must name the one that actually fired (design clause iii).
       const reason = irreversible
         ? "diff classified irreversible (W1-T919) — auto-merge refused unattended"
         : "capped verdict refused auto-merge";
-      log("automerge.disarmed", { reason });
+      // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged `automerge.disarmed`
+      // unconditionally, so a withdrawal GitHub refused read as a completed one. `disposeDisarm`
+      // holds the whole decision (and every lost-race-only read) where a test can reach it.
+      const disposition = disposeDisarm(disarmAutoMerge(prUrl), { prUrl, taskId, runId, ledgerPath, reason, refusal: armDecision.reason });
+      log(disposition.step, disposition.row);
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const issueUrl = escalate(
-        irreversible
+        // W1-T1215: the lost race outranks BOTH arms below — "auto-merge was NOT armed" is simply
+        // false once it armed and merged, so that must not be what an operator reads.
+        disposition.escalation ??
+        (irreversible
           ? {
               class: "BLOCKED",
               taskId,
@@ -8542,7 +8728,7 @@ async function runTask(
                 },
               ],
               recommendation: "add-proof",
-            },
+            }),
         { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
       );
       log("verdict", {
@@ -8606,10 +8792,23 @@ async function runTask(
         // defensive no-op against a sweep race as the capped-refusal branch
         // above, in case the sweep armed the PR in the window between the review
         // posting and this decision.
-        disarmAutoMerge(prUrl);
-        log("automerge.disarmed", { reason: "risk judge escalated — auto-merge refused" });
+        // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged
+        // `automerge.disarmed` unconditionally beside it, so the withdrawal #2506 attempted —
+        // which GitHub refused because the pull request had ALREADY MERGED — was recorded as a
+        // completed withdrawal. Same predicate and same vocabulary `withdrawArmIfVerdictRefuses`
+        // already established (W1-T1056); this only applies them at the site that fired.
+        const disposition = disposeDisarm(disarmAutoMerge(prUrl), {
+          prUrl, taskId, runId, ledgerPath,
+          reason: "risk judge escalated — auto-merge refused",
+          refusal: `risk judge ESCALATED (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${action.reason}`,
+          confidence: verdict.confidence,
+          reasons: verdict.reasons,
+        });
+        log(disposition.step, disposition.row);
+        // W1-T1215: a REFUSED verdict on a change that MERGED ANYWAY is not a BLOCKED row — the
+        // thing BLOCKED says cannot proceed has already proceeded, so it escalates HARD_STOP.
         return escalate(
-          {
+          disposition.escalation ?? {
             class: "BLOCKED",
             taskId,
             runId,
