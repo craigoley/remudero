@@ -37,6 +37,6 @@ raw: "AN AGENT MAY RECOMMEND 'NO' BUT MAY NEVER RECORD IT — operator ruling fr
   alone may suffice."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null
