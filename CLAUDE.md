@@ -162,9 +162,9 @@ forensic detail, so the narrative does not need to live here.
   Middle types, bracketed by executed statements, get no `DA:0`. *(#777 — head and tail both failed)*
 - **Put any coverage-load-bearing test in its OWN `test/*.test.ts` file — never append it to
   `test/run-task.test.ts`.** That file intermittently crashes at FILE level under
-  `--experimental-test-coverage` (the W1-T240 registry tests), zeroing the coverage record for
-  everything in it — so a diff-coverage-critical test can lose its own coverage nondeterministically
-  and fail on a rerun unrelated to your change. *(#781)*
+  `--experimental-test-coverage` (the W1-T240 registry tests) — and the crash zeroes the ENTIRE
+  lcov, so `diff-coverage` reads the 0-byte file as `OK` VACUOUSLY; only the `SF:` count check
+  (the vacuous-pass bullet below) catches it. *(#781)*
 - **When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are
   unreachable — write one test that really shells out, and one per catch arm.** #978 shipped 182
   lines of tests that all supplied their own `PreflightSpawn`, so `defaultPreflightSpawn` never ran
