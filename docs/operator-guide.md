@@ -310,6 +310,44 @@ phase 3 disappears. It did not transfer to `task-id-existence`, and the reason i
 workflows, so a gate wired as an npm script is derived as a candidate wherever its invocation
 sits. Workflow placement was simply irrelevant to that half.
 
+## Where to run a verb, and why the wrong place answers confidently
+
+Every item below is read-only or near enough, so the failure mode is not damage — it is a
+**confident wrong answer**. The pattern is always the same: a tool answered about state it could
+not see, in the same tone it uses when it can. Each was reproduced on `Craigs-Mac-mini` on
+2026-08-22; where a claim did **not** reproduce here, that is said rather than repeated.
+
+- **A gate piped through `head` gives you `head`'s exit code.** `(exit 1) | head -3` leaves `$?` at
+  **0** while `${PIPESTATUS[0]}` is **1**. A `diff-coverage` calibration read `EXIT=0` while the
+  tool itself exited 1 with lines named, because exemption output sat above the verdict and the
+  pipe swallowed the status. Read `${PIPESTATUS[0]}`, or do not pipe.
+
+- **`git checkout -- <path>` restores from the INDEX, not from `origin/main`.** Stage an edit, then
+  overwrite the file, then `git checkout --` it: you get the **staged** copy back, not the
+  committed one. A "revert this file and see what fails" experiment therefore passes vacuously
+  whenever the index already holds the edited version. Use `git show origin/main:<path>` when you
+  mean the merge base.
+
+- **A clean working tree does not mean a clean index, and `commit --amend` ships the difference.**
+  In a reused worktree `git diff` can report nothing while `git diff --cached` reports a staged
+  change — the working tree matches the index, and only the index differs from `HEAD`. Amending
+  there silently ships whatever someone else staged. Check `git diff --cached --stat` before every
+  `commit --amend`.
+
+- **`tsx` strips types without checking them, so a unit suite can read fully green while `tsc`
+  fails.** A file declaring `const n: number = "definitely not a number"` **executes** under `tsx`
+  and prints the string; `tsc` on the same file reports `TS2322: Type 'string' is not assignable to
+  type 'number'`. A type-level defect is invisible to the whole test suite, and a file can be
+  load-bearing with no test able to say so. `tsc --noEmit` is a separate gate for a reason — never
+  read a green suite as a green typecheck.
+
+- **A `gh` subcommand's existence is version-dependent; the REST form is not.** `gh pr
+  update-branch` arrived in 2.53, so on an older CLI four invocations can error while reading as
+  successful work. This machine is **2.92.0** and has the subcommand; a fleet host measured
+  **2.45.0** and did not. Rather than tracking which host has which, prefer the version-independent
+  form — `gh api --method PUT repos/{owner}/{repo}/pulls/{n}/update-branch` — and run `gh
+  --version` before relying on any subcommand you have not used on that host.
+
 ## Crisis runbook: the procedures you need at 3am
 
 The rest of this guide is about reading state. These four are the ones you need when you have
