@@ -1,0 +1,120 @@
+- id: W1-T1209
+  title: "NOTHING WATCHES THE REPAIR ARM — `fix.dispatch` read zero for twenty-one hours while the sweep kept choosing `blocked-fixable` every pass and ten dispatches threw, and no alert, no escalation and no ledger row said the fixer was down; `rmd doctor` has a `dispatch-stall` arm and no repair-stall sibling"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main` before
+    any reading. No suite was run and the daemon's checkout was not moved. Every zero carries a
+    control taken on the same scan.
+
+    (1) THE OUTAGE, AND ITS LENGTH. `fix.dispatch` read ZERO for the whole of 2026-08-22; the newest
+    row anywhere in the ledger union is 2026-08-21T18:20:21.505Z. Twenty-one hours. Across the same
+    day the sweep disposed `blocked-fixable` on six open pull requests every pass, and TEN
+    `sweep.fix.error` rows were written — every attempted dispatch threw. Nothing anywhere said the
+    repair arm was down.
+
+    (2) THE SWEEP COUNTS DISPOSITIONS AND NEVER CHECKS THAT THE ACTION HAPPENED. `sweep.summary`
+    carries `blocked-fixable: N` and `actions_taken`, but nothing compares "how often did I choose
+    to repair" against "how often did a repair actually start". A rung can be chosen forever and
+    never fire, and every counter stays healthy.
+
+    (3) `rmd doctor` HAS THE PATTERN AND NOT THE ARM. `judgeDispatchStall` (`src/lib/doctor.ts`)
+    already answers "the queue has candidates and nothing has dispatched recently", and prints its
+    measured value beside its threshold. There is no sibling for the repair rung: `dispatch` appears
+    35 times in that module against a control, and no arm is named for fix-rung liveness. The
+    operator's only route today is to notice the board is not moving.
+
+    (4) THE PREDICATE MUST BE DERIVED, NOT GUESSED — THIS IS THE RECURRING DEFECT HERE. The
+    dispatch-stall arm derives its bound from THIS host's own observed cadence (three times the
+    longest observed gap) and prints the derivation beside the number; it does not carry a constant.
+    A repair-stall arm that hardcodes a ceiling reproduces exactly the failure W1-T1099 records for
+    the liveness arm, whose printed threshold and actual predicate disagreed.
+
+    (5) AND THE FAULT CONDITION IS A CONJUNCTION, NOT A GAP. A gap in `fix.dispatch` is only a fault
+    when something was disposed `blocked-fixable` in the SAME window. Otherwise an empty repair
+    queue — the healthy state — reads as an outage, and an arm that cries wolf on a quiet board is
+    worse than no arm: it trains the operator to ignore it. THE MEASURE IS "the sweep chose to
+    repair and no repair started", never "no repair started".
+
+    (6) WHY THIS WENT UNSEEN FOR A DAY, AND IT IS THE ARGUMENT FOR THE ARM. Contention on
+    `.git/config.lock` (W1-T1129) killed each dispatch before the worker started. `dispatchFix`
+    caught its own throw, logged `sweep.fix.error` and returned normally, so the disposed row
+    recorded `acted: true` and seeded the fix-rung dedup (W1-T1127). The next pass then read "fix
+    already dispatched for this head — awaiting its outcome" and stood down. Contention killed the
+    dispatch, the swallow recorded success, the gate blocked the retry, and ONE FAILURE REMOVED A
+    PULL REQUEST FROM THE REPAIR QUEUE PERMANENTLY — for twenty-one hours, unwatched. Every one of
+    those steps is now separately filed; NONE of them is a watch, which is why the outage ran a full
+    day before a human found it by hand.
+
+    (7) OWNERSHIP, CITED AND NOT RE-FILED. W1-T1047 established the doctor-arm pattern this task
+    copies: local, read-only, no network, a measured value printed beside its threshold, and a
+    meaningful exit code. W1-T1099 records its sibling's inverted predicate and is the reason (4) is
+    stated as a constraint rather than a preference. Neither is reopened here.
+  design: |
+    (i) ONE NEW ARM, IN THE EXISTING MODULE, IN THE EXISTING SHAPE. A pure `judge*` decider split
+    from its readers, exactly like every arm beside it, so the predicate is a unit fixture and the
+    I/O is injected. No new verb, no new output format, no change to any existing arm's verdict.
+
+    (ii) THE BOUND IS DERIVED FROM THIS HOST'S OWN LEDGER AND ITS DERIVATION IS PRINTED. Whatever
+    the arm computes, the line must show the measured gap, the bound, and how the bound was reached
+    — the same discipline `judgeDispatchStall` already prints. A hardcoded ceiling is refused by
+    design note (i) of this task, not merely discouraged.
+
+    (iii) THE CONJUNCTION IS LOAD-BEARING AND MUST HAVE ITS OWN FALSIFIER. A test in which the
+    repair queue is EMPTY and no dispatch has happened must read OK. Without that case the arm is
+    indistinguishable from a bare gap detector, and the first quiet weekend retires it.
+
+    (iv) REPORT ONLY. This arm does not dispatch, does not clear a gate, does not escalate and does
+    not open an issue. `rmd doctor` is read-only by construction (W1-T1047 refuses `--fix` by name)
+    and that property is not weakened here.
+
+    (v) OUT OF SCOPE, NAMED. The contention (W1-T1129), the swallow (W1-T1127) and the unclearable
+    gate are each separately owned; this task WATCHES, it does not repair. Whether the arm should
+    also feed an alert channel rather than only `rmd doctor`'s exit code is a real adjacent question
+    and is deliberately left out.
+  acceptance:
+    - claim: "a repair queue with candidates and no dispatch in the derived window reads as a fault"
+      proof: "unit test: W1-T1209: candidates with no dispatch in the derived window read FAIL"
+    - claim: "an empty repair queue with no dispatch reads healthy rather than as an outage"
+      proof: "unit test: W1-T1209: an empty repair queue with no dispatch reads OK"
+    - claim: "the bound is derived from observed data and its derivation is printed beside it"
+      proof: "unit test: W1-T1209: the repair-stall bound is derived and its derivation is printed"
+    - claim: "the arm reports and never dispatches, clears or escalates anything"
+      proof: "unit test: W1-T1209: the repair-stall arm performs no action of its own"
+    - claim: "every existing doctor arm's verdict is unchanged by this addition"
+      proof: "unit test: W1-T1209: the existing doctor arms are unchanged"
+  files: [src/lib/doctor.ts, test/doctor.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#nothing-watches-the-repair-arm-2026-08-22"
+  plan_refs: ["W1-T1047", "W1-T1099", "W1-T1127", "W1-T1129", "W1-T1110"]
+  note: |
+    THE INCIDENT IS THE ARGUMENT, AND IT IS RECORDED HERE IN FULL BECAUSE THE ARM IS ONLY WORTH
+    BUILDING IF THE FAILURE IT WATCHES FOR IS REAL. On 2026-08-22 contention on `.git/config.lock`
+    killed every fix dispatch before its worker started; `dispatchFix` swallowed the throw and the
+    disposed row recorded `acted: true`; that seeded the dedup gate; the next pass stood down on
+    "fix already dispatched for this head". Contention killed the dispatch, the swallow recorded
+    success, the gate blocked the retry, and one failure removed a pull request from the repair
+    queue permanently — for twenty-one hours, unwatched, while the board stayed red.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NONE IS PURE-PATH. All five are name-filtered
+    `unit test:` forward references, for which `proofScopePath` returns `undefined`, so `proof-scope`
+    is silent on each. `test/doctor.test.ts` already exists and already passes, so a pure-path proof
+    would have returned `verdict: pass` today, before any of this work — an executed proof that
+    discriminates nothing.
+
+    `test/doctor.test.ts` IS THE EXISTING HOME and is declared rather than a new filename: it is the
+    file W1-T1047 established for exactly these arms. Two stems, not three.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. This arm decides whether an operator is told the
+    fleet's repair rung is down. A false OK reproduces the twenty-one-hour silence; a false FAIL on
+    a quiet board trains the operator to ignore the one instrument that would have caught it.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the gap from the ledger union rather than this shard —
+    `fix.dispatch` newest row against `sweep.disposed` rows carrying `blocked-fixable` in the same
+    window, with a task known to carry `fix.*` rows as the live control.
