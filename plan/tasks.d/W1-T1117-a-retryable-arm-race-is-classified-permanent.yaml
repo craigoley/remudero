@@ -1,0 +1,145 @@
+- id: W1-T1117
+  title: "`armFailureAction`'s `transient` arm is an allowlist of TRANSPORT failures only, so a merge race whose own GitHub message says `try the merge again` falls through to `permanent` — and because a failed arm still records `acted: true`, the head-keyed dedup then strands it on a head the moving base never changes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree at origin/main, from LOCAL SOURCE. The fleet-side
+    observations are the operator's and are carried, not re-derived. Where the ledger could not
+    answer, that is reported as unmeasurable rather than as a zero.
+
+    (1) W1-T1079 WAS RIGHT AND IS NOT BEING REVERSED. Before it, 172 `arm-error-ignored` rows
+    carried no cause at all and every failure was assumed transient and retried forever. Recording
+    the reason is what made the distinct failure modes visible in the first place, and the default
+    must stay refusal, not retry.
+
+    (2) THE CLASSIFIER IS ALREADY THREE-VALUED — THE DEFECT IS NARROWER AND MORE PRECISE THAN
+    "BINARY". `armFailureAction` (`src/run-task.ts`) returns `direct-merge` | `transient` |
+    `permanent`. Read at origin/main, its `transient` arm is an ALLOWLIST and every member of it is
+    a TRANSPORT OR SERVER fault: `timed out`, `ETIMEDOUT`, `ECONNRESET`, `ECONNREFUSED`,
+    `EAI_AGAIN`, `network`, `secondary rate limit`, `rate.limit`, `abuse detection`, `too many
+    requests`, a `5xx`, and `GraphQL: Something went wrong`/`Server Error`. NOT ONE ENTRY IS A
+    SEMANTIC-BUT-RETRYABLE CONDITION. A merge race is semantic, so it cannot match, and the
+    `return "permanent"` default catches it.
+
+    (3) SO GITHUB INSTRUCTS A RETRY AND THE CLASSIFIER RECORDS `permanent`. Observed on #2443:
+    `automerge.arm_error_ignored (W1-T1079, permanent): GraphQL: Base branch was modified. Review
+    and try the merge again. (mergePullRequest)`. The remedy is in the message and the
+    classification contradicts it. Observed on #2440: `GraphQL: Pull Request is not mergeable
+    (mergePullRequest)`, which is genuinely AMBIGUOUS — a real conflict and a base that moved
+    mid-call produce the same sentence.
+
+    (4) AND THE DEDUP DOES NOT BOUND THIS — IT STRANDS IT. THIS INVERTS THE OBVIOUS READING AND IS
+    THE FINDING THAT MATTERS. `arm-error-ignored` is documented in `src/lib/sweep.ts` as "the
+    attempt was made and did not stick", so it disposes `acted: true`, and
+    `priorActionsFromLedger`'s `mergeable` arm then adds `${pr}@${head_sha}` to `armed`. THE RACE
+    MOVES THE BASE, NOT THE HEAD. The key therefore never changes, nothing re-earns the attempt,
+    and "the next pass clears it by itself" is FALSE for exactly the failure mode that most
+    deserves a next pass. This is the W1-T1110 deadlock shape one lane over: an attempt recorded as
+    terminal against a key the triggering condition cannot move.
+
+    (5) THE POPULATION IS SMALL AND IS NAMED HERE RATHER THAN COUNTED. `clean status` →
+    `direct-merge`, already correct. The transport set → `transient`, already correct. `not on any
+    branch` → FIXED UPSTREAM by W1-T1111, which dropped `--delete-branch` from `armAuto`, so it no
+    longer occurs. `Base branch was modified` → misclassified `permanent`, should retry. `Pull
+    Request is not mergeable` → misclassified `permanent` with false confidence, since it is not
+    decidable from the string.
+
+    (6) THE LEDGER CANNOT SUPPLY A RATE FROM THIS HOST AND THE ZERO IS STRUCTURAL, NOT EVIDENCE.
+    `arm_error_ignored` reads ZERO across the deduped union with a per-form coverage control
+    proving all three forms were read (`automerge.armed` reads 520 in the gzipped form and 225 in
+    the plain rotations). BUT the classifier shipped 2026-08-21 (`5db454b5`, #2392) and this
+    corpus's newest `automerge.armed` row is 2026-08-14 — IT PREDATES THE STEP BY A WEEK. The zero
+    is guaranteed by construction and says nothing about frequency. An implementer must re-derive
+    the message set on the fleet host before tuning anything to it.
+
+    (7) NO STABLE CODE IS AVAILABLE ON THE CURRENT PATH, AND THAT IS A CONSTRAINT RATHER THAN A
+    CHOICE. `armAuto` runs `execFileSync("gh", ["pr", "merge", …])` with `stdio: "pipe"`, so the
+    only failure signal is stderr PROSE. GitHub's GraphQL API does return a structured
+    `errors[].type`, but `gh pr merge` collapses it, and nothing in `src/` calls `gh api graphql`
+    at all. Keying a classifier on prose is the fragility the brief names — the honest response is
+    to make the fragility VISIBLE rather than to pretend a code exists.
+  design: |
+    (i) ADD A FOURTH CLASS FOR SEMANTIC-BUT-RETRYABLE, AS AN ALLOWLIST, NEVER A DEFAULT. A merge
+    race is neither a transport blip nor a refusal. `transient` must keep meaning "the transport
+    failed"; the new class means "GitHub declined this attempt and the same attempt may succeed".
+    `Base branch was modified` is its first and, on today's evidence, only member. The DEFAULT
+    STAYS REFUSAL — W1-T1079's central correction is preserved.
+
+    (ii) A RETRYABLE FAILURE MUST NOT SEED THE HEAD-KEYED DEDUP. Rationale (4) is the whole reason
+    the classification matters: labelling the race correctly changes nothing while the row still
+    disposes `acted: true`. The retryable class must take the `acted: false` shape every other
+    stand-down in that switch already uses — the property W1-T527 established and W1-T1110 reused —
+    so the next pass re-derives and re-attempts.
+
+    (iii) NO COUNTER, AND THE CEILING QUESTION DISSOLVES. A counter was considered and is refused:
+    the retry is bounded by the CONDITION, not by a clock or a tally. One attempt per sweep pass,
+    only while the race recurs, and it stops when the base stops moving. What W1-T1079 cured was
+    retrying a PERMANENT failure forever; retrying a genuine race until it clears is the correct
+    behaviour, and a ceiling derived from a frequency this host cannot measure (rationale 6) would
+    be a guessed constant — the bound-that-fires-on-a-healthy-condition defect this repo keeps
+    paying for.
+
+    (iv) AN UNRECOGNISED MESSAGE MUST READ `unknown`, NOT `permanent`. Rationale (7) says the
+    classifier cannot key on a code, so it must fail LOUD instead of confidently. `Pull Request is
+    not mergeable` is the live example: undecidable from the string. An `unknown` class that
+    records the raw text and takes the same non-retrying path `permanent` takes today changes no
+    behaviour, and makes a GitHub wording change appear as a rising `unknown` count rather than as
+    a silent misclassification.
+
+    (v) DO NOT REPLACE `gh pr merge` WITH A HAND-ROLLED `gh api graphql` MUTATION TO GET A CODE.
+    That trades a maintained wrapper for a mutation this repo would own forever, and it is a much
+    larger blast radius than the defect. If a code is ever wanted, it is its own task with its own
+    argument.
+
+    (vi) NOT IN SCOPE, NAMED: `strikeCap` and the fix rung, untouched; W1-T1111's
+    `--delete-branch` fix, already shipped; W1-T1110's `prior.fixed` clearing, a sibling in the fix
+    lane rather than the arm lane; and any change to what `direct-merge` means.
+  acceptance:
+    - claim: "a base-branch race is classified retryable rather than permanent"
+      proof: "unit test: test/arm-failure-classification.test.ts"
+    - claim: "a transport failure keeps its existing transient classification"
+      proof: "unit test: test/arm-failure-classification.test.ts"
+    - claim: "an unrecognised failure reads unknown and still does not retry"
+      proof: "unit test: test/arm-failure-classification.test.ts"
+    - claim: "a retryable arm failure leaves the head free for the next pass to re-attempt"
+      proof: "unit test: test/arm-failure-classification.test.ts"
+    - claim: "the clean-status completion still routes to a direct merge"
+      proof: "unit test: test/arm-failure-classification.test.ts"
+  files: [src/run-task.ts, src/lib/sweep.ts, test/arm-failure-classification.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#arm-error-classification-2026-08-22"
+  plan_refs: ["W1-T1079", "W1-T1110", "W1-T1111", "W1-T970", "W1-T527"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/arm-failure-classification.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+    `armFailureAction` is already a pure function over a string, so its falsifier needs no
+    subprocess and no live PR.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The change alters whether the sweep RE-ATTEMPTS a
+    merge against a live repository, so a mistake spends real API calls on real PRs rather than
+    failing an assertion. Claiming Rule 19 forced the band would be a false claim in the direction
+    that flatters the filing.
+
+    BOTH `src/` FILES MUST BE DECLARED BECAUSE THE TWO HALVES SIT APART: the classifier is
+    `armFailureAction` in `src/run-task.ts`, and the `acted` disposition that decides whether the
+    head stays gated is the `mergeable` arm in `src/lib/sweep.ts`. Design (ii) is explicit that
+    changing only the classifier fixes nothing.
+
+    A SEPARATE OBSERVATION, DELIBERATELY UNSCOPED AND FOR THE OPERATOR TO MINT: the daemon
+    restarted 16 times on freshness in one night, every summary reading `attempted: (none)` and
+    `idle ticks: 1`. A fast merge cadence means main advances before a tick completes, so the
+    daemon spends its time re-booting rather than dispatching. That is a different concern with a
+    different owner and is named here only so it is not lost.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1117` resolves to 12d0b114fa732e0d90047806adc4e1d1270e475a,
+    read back over git protocol; live control, `refs/rmd-id/W1-T999999` exits 2. THE ANCHOR MESSAGE
+    WAS NOT JUDGED. Six id surfaces were swept plus a subject sweep, and the check covered the
+    shard FILENAME and the declared `- id:` inside every shard on main, not the reservation ref
+    alone — 443 declarations scanned, zero naming this id.
