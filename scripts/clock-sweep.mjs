@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TEST_DIR = join(REPO, "test");
+const BASELINE_PATH = join(REPO, "scripts", "clock-sweep-baseline.json");
 
 /** The one shift. See the header for why one, and why this size. */
 export const SWEEP_SHIFT_DAYS = 400;
@@ -113,12 +114,28 @@ export function runnableCandidates(candidates) {
 }
 
 /**
+ * The recorded drift CEILING (W1-T1128, scripts/clock-sweep-baseline.json). `classifySweep` used
+ * to require `drifted.length === 0` -- ABSOLUTE cleanliness -- a bound the real workflow has never
+ * once satisfied across its whole run history (9 runs: 4 failure / 5 cancelled / 0 success, both
+ * triggers). This is a RATCHET like `scripts/coverage-baseline.json` and
+ * `scripts/mutation-baseline.json`: it fails on REGRESSION above the recorded figure, never on
+ * absolute cleanliness. See the baseline file's own `_comment` for the never-raise rule.
+ */
+export const DRIFT_BASELINE = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
+export const DRIFT_CEILING = DRIFT_BASELINE.driftCeiling;
+
+/**
  * Turn raw per-suite results into the two things an operator needs: what DRIFTED, and where the
  * exclusion list has ROTTED. Pure, so both are unit-testable without running a single suite.
  *
+ * `ceiling` is the RATCHET (W1-T1128): a sweep is `ok` when `drifted.length` does not exceed it,
+ * never only when it is zero -- but a STALE EXCLUSION is not a drift and is NEVER forgiven by any
+ * ceiling, however generous, because it is a silently SHRINKING exclusion list, not a suite that
+ * merely hasn't been fixed yet.
+ *
  * @param results Map<suite, {failed: boolean}>
  */
-export function classifySweep(results, artifacts = CLOCK_ARTIFACTS) {
+export function classifySweep(results, artifacts = CLOCK_ARTIFACTS, ceiling = DRIFT_CEILING) {
   const drifted = [];
   const staleExclusions = [];
   for (const [suite, r] of results) {
@@ -129,7 +146,12 @@ export function classifySweep(results, artifacts = CLOCK_ARTIFACTS) {
     }
     if (r.failed) drifted.push({ suite, ...r });
   }
-  return { drifted, staleExclusions, ok: drifted.length === 0 && staleExclusions.length === 0 };
+  return {
+    drifted,
+    staleExclusions,
+    ceiling,
+    ok: drifted.length <= ceiling && staleExclusions.length === 0,
+  };
 }
 
 // `exec` is injected LAST with the real default so a test can drive the whole orchestration
@@ -168,6 +190,7 @@ export function main({
   argv = process.argv.slice(2),
   run = runSuite,
   derive = deriveCandidates,
+  ceiling = DRIFT_CEILING,
   log = console.log,
   write = (s) => process.stdout.write(s),
 } = {}) {
@@ -201,22 +224,13 @@ export function main({
     const verdict = r.failed ? (CLOCK_ARTIFACTS.has(suite) ? "fail (known artifact)" : "FAIL") : "ok";
     write(`  [${String(done).padStart(3)}/${runnable.length}] ${verdict.padEnd(21)} ${suite}\n`);
   }
-  const { drifted, staleExclusions, ok } = classifySweep(results);
+  const { drifted, staleExclusions, ok } = classifySweep(results, CLOCK_ARTIFACTS, ceiling);
 
   log("");
-  if (ok) {
-    // Counted from what actually RAN, never `runnable.length - CLOCK_ARTIFACTS.size` — that goes
-    // NEGATIVE under `--only`, and a summary line that prints "-2 suites immune" is worse than none.
-    const artifactsRun = runnable.filter((s) => CLOCK_ARTIFACTS.has(s)).length;
-    log(
-      `PASS — ${runnable.length - artifactsRun} suite(s) immune at +${SWEEP_SHIFT_DAYS}d` +
-        (artifactsRun ? `; ${artifactsRun} known artifact(s) still failing as expected.` : "."),
-    );
-    return 0;
-  }
-
   // ── THE REPORT. An operator reads this months from now with no context, so it names the suite,
-  // the failing test, the fuse, and what to do — never just "the shifted run failed".
+  // the failing test, the fuse, and what to do — never just "the shifted run failed". Printed
+  // whenever there IS drift, even a run that stays under the ceiling and therefore still exits
+  // 0 — a ratchet that hides its own number is not actionable (W1-T1128 design iv).
   if (drifted.length) {
     log(`WALL-CLOCK DRIFT — ${drifted.length} suite(s) pass today and FAIL in the future.`);
     log(`This is the shape that took main red on 2026-08-02 and blocked every open PR at once.`);
@@ -228,11 +242,40 @@ export function main({
       log(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
       log(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
     }
+    // A RATCHET, not absolute cleanliness (W1-T1128): the verdict compares against the recorded
+    // ceiling, and each of the three relations gets its own line so an operator can tell "still
+    // broken, unchanged", "just got worse" and "just got better -- lower the ceiling" apart.
+    if (drifted.length > ceiling) {
+      log(`\nOVER CEILING — ${drifted.length} drifting suite(s) exceeds the recorded ceiling of ${ceiling}.`);
+      log(`This is a REGRESSION against scripts/clock-sweep-baseline.json: fix the new drift, or if a`);
+      log(`bump is a deliberate, reviewed decision, raise driftCeiling there and say why.`);
+    } else if (drifted.length < ceiling) {
+      log(`\nBELOW CEILING — ${drifted.length} drifting suite(s) is under the recorded ceiling of ${ceiling}.`);
+      log(`Drift genuinely improved; lower driftCeiling in scripts/clock-sweep-baseline.json to lock it in.`);
+    } else {
+      log(`\nAT CEILING — ${drifted.length} drifting suite(s) matches the recorded ceiling of ${ceiling} exactly.`);
+    }
   }
   if (staleExclusions.length) {
     log(`\nSTALE EXCLUSIONS — ${staleExclusions.length} suite(s) listed as clock artifacts now PASS shifted.`);
     log(`Their stated mechanism no longer holds; remove them from CLOCK_ARTIFACTS in scripts/clock-sweep.mjs.`);
+    log(`A stale exclusion is never forgiven by the drift ceiling -- it always fails the sweep.`);
     for (const s of staleExclusions) log(`  test/${s.suite}.test.ts — was excluded because: ${s.reason}`);
+  }
+  if (ok) {
+    // Counted from what actually RAN, never `runnable.length - CLOCK_ARTIFACTS.size` — that goes
+    // NEGATIVE under `--only`, and a summary line that prints "-2 suites immune" is worse than
+    // none. `drifted.length` is ALSO subtracted here (W1-T1128): under the ceiling ratchet, `ok`
+    // no longer implies zero drift, and a suite that just failed shifted is not "immune" merely
+    // because the run stayed under the ceiling -- that would misreport the very thing the WALL-
+    // CLOCK DRIFT section above just named.
+    const artifactsRun = runnable.filter((s) => CLOCK_ARTIFACTS.has(s)).length;
+    const immune = runnable.length - artifactsRun - drifted.length;
+    const notes = [];
+    if (artifactsRun) notes.push(`${artifactsRun} known artifact(s) still failing as expected`);
+    if (drifted.length) notes.push(`${drifted.length} drifting suite(s) within the ceiling (see above)`);
+    log(`\nPASS — ${immune} suite(s) immune at +${SWEEP_SHIFT_DAYS}d` + (notes.length ? `; ${notes.join("; ")}.` : "."));
+    return 0;
   }
   return 1;
 }
