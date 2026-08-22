@@ -1,0 +1,134 @@
+- id: W1-T1130
+  title: "the fix rung's `git checkout -B` writes tracking config into a `.git/config` three lanes share, so a concurrent writer fails the dispatch — and the catch logs `sweep.fix.error` and returns NORMALLY, so `acted: true` is written moments later with no `actionError` and a failed dispatch is recorded identically to a successful one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree at origin/main, from local source and the deduped
+    ledger union. The daemon's checkout was not moved. The operator's fleet-side observations are
+    carried; where the reachable corpus disagrees or cannot see them, that is stated rather than
+    smoothed over.
+
+    (1) THIS IS CONTENTION, NOT STALENESS, AND W1-T1036 IS CITED NOT RE-FILED. W1-T1036 (#2268)
+    reclaims a STALE `config.lock` past a grace period when no live git process holds it. Two live
+    git operations racing for the same lock is a different failure with a different remedy, and its
+    own title already names the mechanism this task acts on: `worktreeAdd` writes
+    `branch.<name>.remote/.merge` into `.git/config`.
+
+    (2) THE WRITERS, AND WHICH PAIRS CAN OVERLAP. Three write `.git/config` in the shared checkout:
+    `worktreeAdd` (`src/lib/worker.ts`) on every worker worktree; the fix rung's
+    `execFileSync("git", ["-C", worktreePath, "checkout", "-B", …])` in `src/run-task.ts`; and the
+    daemon's own fetch/checkout path. A WORKTREE DOES NOT HAVE ITS OWN CONFIG — `-C worktreePath`
+    still writes the PARENT'S `.git/config`, which is why a per-worktree command contends with
+    every other lane. CONCURRENCY IS THE DESIGN, NOT AN ACCIDENT: `plan/policy.yaml` sets
+    `dispatchLanes: 3` (max 4), and W1-T1049 gave the review lane its own budget on top, so any two
+    of those writers can be live at once by construction.
+    CORRECTION TO ONE CANDIDATE: the entrypoint's boot `git config --global` writes
+    `$HOME/.gitconfig`, a DIFFERENT FILE, and cannot contend for `.git/config`. It is named here so
+    it is not chased.
+
+    (3) THE HISTORICAL POPULATION SAYS THE SAME LINE FAILS TWO WAYS, AND THE RECORD DISAGREES WITH
+    THE PREMISE ABOUT WHICH. Over the deduped union there are 16 `sweep.fix.error` rows spanning
+    2026-07-18 to 2026-08-12 (per-form control: `sweep.disposed` reads non-zero in the gzipped
+    form, the plain rotations AND the live file). NINE of the sixteen are that exact `checkout -B`
+    — and every one of the nine reads `fatal: '<branch>' is already used by worktree at …`, the
+    BRANCH-NAME COLLISION, not a lock. `could not lock config file` reads ZERO in the reachable
+    corpus. THAT IS NOT A REFUTATION OF THE OPERATOR'S MEASUREMENT: this corpus's newest
+    `sweep.disposed` is 2026-08-13 and the config-lock rows are dated 2026-08-22, so the window
+    simply does not reach them. The honest reading is that ONE call site has two distinct
+    contention failures — a collision this corpus can see nine times, and a lock the operator
+    observed today and this host cannot.
+
+    (4) AND W1-T232 ALREADY REMOVED THIS EXACT COMMAND ONE PATH OVER. The review worktree used to
+    run the same `checkout -B` "purely to give the throwaway worktree a branch NAME — nothing
+    downstream ever reads it", and it was dropped because it "THROWS the moment any other worktree
+    already holds it", reproduced verbatim on 2026-07-21 at the cost of five capped verdicts. The
+    fix rung is NOT the same case — it commits and pushes, so it may genuinely need a branch — but
+    the precedent establishes both the hazard and the house remedy.
+
+    (5) THE SECOND HALF IS WHY NONE OF THIS WAS VISIBLE. The dispatch's `catch` logs
+    `sweep.fix.error` and DOES NOT RETHROW, so `dispatchFix` returns normally, `runSweep`'s own
+    catch never fires, and the `sweep.disposed` row that follows carries `acted: true` with no
+    `actionError` field. A dispatch that never started is recorded identically to one that ran —
+    the one-value-for-two-outcomes class this board keeps paying for, and the reason four gated PRs
+    each carry a `sweep.fix.error` row immediately before their gate.
+
+    (6) THE ROW THAT EXPLAINS THE GATE IS ARCHIVED WHILE THE GATE IS KEPT. `sweep.fix.error` is
+    absent from `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`) while `sweep.disposed`
+    appears in it — measured against a 61-step list. So rotation retains the `acted: true` row that
+    gates the head indefinitely and archives the only row that says why. This is a NOTE on the
+    defect above, not a second concern, and it is why a later reader sees a gate with no cause.
+  design: |
+    (i) REMOVE THE CONFIG WRITE RATHER THAN RETRY AROUND IT. `checkout -B <branch>
+    origin/<branch>` sets upstream tracking BECAUSE the start point is a remote-tracking ref, and
+    that write is what takes the lock. `--no-track` suppresses it and is the narrow, certainly-safe
+    step: the branch is still created, nothing else changes.
+
+    (ii) DETACHING WOULD REMOVE BOTH FAILURES, AND MUST BE VERIFIED BEFORE IT IS CHOSEN. A detached
+    worktree takes no lock AND cannot collide on a branch name, which would close rationale (3)'s
+    nine observed failures as well as the lock. Both orchestrator-side pushes already use an
+    EXPLICIT refspec (`<sha>:refs/heads/<branch>`) and rely on no upstream, which is evidence the
+    tracking is unused — but the fix WORKER is an agent that may run its own `git commit`/`git
+    push`, and no source read here establishes that it does not need a named branch. AN
+    IMPLEMENTER MUST ESTABLISH THAT BEFORE DETACHING; `--no-track` needs no such proof.
+
+    (iii) A CAUGHT DISPATCH ERROR MUST NOT DISPOSE `acted: true`. It must take the `acted: false`
+    shape every other stand-down uses and carry the error into the `actionError` field the disposed
+    row already has, so the row says what happened instead of impersonating a success.
+    THE COST, STATED PLAINLY: the head is no longer deduped, so the next pass re-attempts. That is
+    CORRECT while the cause is contention, which self-clears — but it is unbounded if the cause is
+    permanent, because a dispatch that dies before `runFixRung` spends no strike and `strikeCap`
+    never engages. Naming the error on the row is what makes that visible rather than silent, and
+    W1-T1110's clearing predicate is the sibling shape to follow.
+
+    (iv) DO NOT ADD A LIVENESS CHECK ON `prior.fixed`. `dispatchFix` is awaited to completion, so
+    the `acted: true` row is always written AFTER the run ends; a liveness read would find no live
+    process and open the gate on every pass. Refused by name so it is not rediscovered.
+
+    (v) NOT IN SCOPE, NAMED: W1-T1036's stale-lock reclaim, which handles the disjoint case;
+    `worktreeAdd`'s own config write, which is the same mechanism in the worker lane and deserves
+    the same treatment under its own task rather than being widened into here; and
+    `DECISION_RELEVANT_LEDGER_STEPS` membership, which rationale (6) records as a note for the
+    operator rather than a change this task makes.
+  acceptance:
+    - claim: "the fix rung creates its branch without writing tracking config"
+      proof: "unit test: test/sweep-fix-dispatch-contention.test.ts"
+    - claim: "a dispatch that throws disposes acted false rather than impersonating a success"
+      proof: "unit test: test/sweep-fix-dispatch-contention.test.ts"
+    - claim: "the disposed row names the dispatch error instead of leaving the field absent"
+      proof: "unit test: test/sweep-fix-dispatch-contention.test.ts"
+    - claim: "a dispatch that succeeds still disposes acted true exactly as it does today"
+      proof: "unit test: test/sweep-fix-dispatch-contention.test.ts"
+  files: [src/run-task.ts, test/sweep-fix-dispatch-contention.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#git-config-lock-contention-2026-08-22"
+  plan_refs: ["W1-T1036", "W1-T232", "W1-T1110", "W1-T1049"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/sweep-fix-dispatch-contention.test.ts`, declared in `files:`, so on the filing PR
+    it resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. Both halves change what the sweep does to a live
+    repository — whether a dispatch runs at all, and whether a head stays gated — so a mistake
+    either stalls every fix or re-dispatches in a loop.
+
+    `src/run-task.ts` IS THE ONLY `src/` FILE DECLARED because both halves live in it: the
+    `checkout -B` and the `catch` that swallows its failure are the same function. `worktreeAdd`
+    (`src/lib/worker.ts`) writes the same config from the worker lane and is deliberately NOT
+    declared — design (v) — because widening this into a second lane would put two independently
+    falsifiable claims in one diff.
+
+    THE PREMISE WAS CHECKED AGAINST THE RECORD RATHER THAN ASSUMED. The reachable corpus contains
+    nine `checkout -B` failures and zero config-lock ones, and rationale (3) states why that is a
+    window limit rather than a contradiction. An implementer working on the fleet host should
+    re-derive the message split there before assuming either failure dominates.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1130` resolves to eeecfa0b863dd1f2b14cef5406c5ca1e58b904aa,
+    read over git protocol; live control, `refs/rmd-id/W1-T999999` exits 2. THE ANCHOR MESSAGE WAS
+    NOT JUDGED. Six id surfaces plus a subject sweep, covering the shard FILENAME and the declared
+    `- id:` inside every shard on main — 447 declarations scanned, zero naming this id.
