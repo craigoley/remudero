@@ -3932,6 +3932,36 @@ function renderEscalationEvidence<T>(items: readonly T[], format: (item: T) => s
 }
 
 /** Outcome of one full pass through the fix rung. */
+/**
+ * PURE: the ONLY difference between the two non-spending fix-rung terminations — `"stood_down"`
+ * (W1-T177) and `"parked"` (W1-T1095). Both emit the same `"blocked"` verdict row and the same
+ * return value; they differ in the ledger `reason`, one extra ledger field, and the console
+ * phrase, which is exactly what this returns.
+ *
+ * WHY IT IS A FUNCTION AND NOT A SECOND BRANCH. `parked` shipped as its own near-identical block
+ * inside `runTaskBody`, a closure nested in `runTask` that no test drives directly, so every
+ * added line of it was reachable by nothing and `diff-coverage` blocked on all of them. Folding
+ * the two together puts `parked` on the emission the stood-down tests already exercise and
+ * leaves the genuinely differing part here, where each arm is a unit fixture. Same repair the
+ * coverage gate forced on `promotionLedgerSink` (#2346).
+ */
+export function fixRungTerminationVerdict(
+  rung: Pick<FixRungOutcome, "outcome" | "reason" | "standDownReason" | "blockedOnPr">,
+): { reason: string; extra: Record<string, unknown>; phrase: string } {
+  if (rung.outcome === "parked") {
+    return {
+      reason: rung.reason,
+      extra: { blocked_on_pr: rung.blockedOnPr },
+      phrase: `parked on prerequisite #${rung.blockedOnPr}`,
+    };
+  }
+  return {
+    reason: `stood down — ${rung.standDownReason}`,
+    extra: {},
+    phrase: `stood down (${rung.standDownReason})`,
+  };
+}
+
 export interface FixRungOutcome {
   outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
@@ -7705,39 +7735,36 @@ async function runTask(
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
-      if (rung.outcome === "stood_down") {
-        // W1-T177: this run's own PR went terminal (merged/closed) mid-rung —
-        // stand down rather than spend another strike or escalate. Reuses the
-        // existing "blocked" verdict (never a spend, never a bypass) so the
-        // drain's stop-on-block invariant still holds; the ledger line above
-        // names the SITE and the STATE, not just "blocked".
-        log("verdict", {
-          verdict: "blocked",
-          pr_url: prUrl,
-          reason: `stood down — ${rung.standDownReason}`,
-          cost_usd: costUsd,
-          billing_mode: billingMode(impl.childEnvKeys),
-          account_label: impl.accountLabel,
-        });
-        say(`verdict: blocked — stood down (${rung.standDownReason}): ${prUrl}`);
-        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
-      }
-      if (rung.outcome === "parked") {
-        // W1-T1095: a remedy that lives OUTSIDE this diff — never a strike spent, never an
-        // issue opened (design note v: the operator's merge gate is never softened by this
+      if (rung.outcome === "stood_down" || rung.outcome === "parked") {
+        // TWO NON-SPENDING TERMINATIONS, ONE EMISSION.
+        //
+        // W1-T177 (`stood_down`): this run's own PR went terminal (merged/closed) mid-rung —
+        // stand down rather than spend another strike or escalate.
+        //
+        // W1-T1095 (`parked`): the remedy lives OUTSIDE this diff — never a strike spent, never
+        // an issue opened (design note v: the operator's merge gate is never softened by this
         // rung). The PR stays open exactly like every other "blocked" verdict; the next poll
         // that reaches this same rung re-checks the prerequisite and resumes automatically the
         // moment it merges (capability 3 — see `outOfDiffBlockerFor`/`prerequisiteMerged`).
+        //
+        // BOTH reuse the existing "blocked" verdict (never a spend, never a bypass) so the
+        // drain's stop-on-block invariant still holds; the ledger line names the SITE and the
+        // STATE, not just "blocked". What differs between them is ONLY the reason, one extra
+        // ledger field and the console phrasing — `fixRungTerminationVerdict` owns exactly that
+        // difference as a pure function with a unit fixture per arm, so `parked` shares this
+        // already-exercised emission instead of being a second near-identical block that no
+        // test can reach.
+        const termination = fixRungTerminationVerdict(rung);
         log("verdict", {
           verdict: "blocked",
           pr_url: prUrl,
-          reason: rung.reason,
-          blocked_on_pr: rung.blockedOnPr,
+          reason: termination.reason,
+          ...termination.extra,
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
           account_label: impl.accountLabel,
         });
-        say(`verdict: blocked — parked on prerequisite #${rung.blockedOnPr}: ${prUrl}`);
+        say(`verdict: blocked — ${termination.phrase}: ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
     }

@@ -34,6 +34,7 @@ import {
   escalationTaskIdFor,
   fixHeadAcceptable,
   fixRungTaskFor,
+  fixRungTerminationVerdict,
   outOfDiffBlockerFor,
   prerequisiteMerged,
   priorStrikesFor,
@@ -723,4 +724,39 @@ test("W1-T1095: in-diff work still stops at the existing strike ceiling", async 
   assert.equal(spawnCalls, 2, "exactly strikeCap fix workers were dispatched — no third strike");
   assert.equal(issueCalls.length, 1, "exactly one BLOCKED issue opened on exhaustion");
   assert.ok(!lines.some((l) => l.step === "fix.parked"), "ordinary in-diff work is never parked");
+});
+
+// ── The one difference between the two non-spending terminations, as a unit ──────────────────
+//
+// `parked` originally shipped as its own near-identical emission block inside `runTaskBody` — a
+// closure nested in `runTask` that no test drives directly — so every added line was reachable
+// by nothing and `diff-coverage` blocked on all of them. The blocks are now folded, and the
+// genuinely differing part is `fixRungTerminationVerdict`. These are its two arms.
+
+test("W1-T1095: a parked termination names its prerequisite in the reason, the row and the console line", () => {
+  const t = fixRungTerminationVerdict({
+    outcome: "parked",
+    reason: "blocked on #2411 — the remedy is out of this diff",
+    blockedOnPr: 2411,
+  });
+  assert.equal(t.reason, "blocked on #2411 — the remedy is out of this diff", "the rung's own reason, verbatim");
+  assert.deepEqual(t.extra, { blocked_on_pr: 2411 }, "the prerequisite rides on the ledger row as a FIELD");
+  assert.equal(t.phrase, "parked on prerequisite #2411");
+});
+
+test("W1-T1095: a stood-down termination is byte-identical to what it emitted before the fold", () => {
+  const t = fixRungTerminationVerdict({
+    outcome: "stood_down",
+    reason: "pr went terminal mid-rung",
+    standDownReason: "the PR was merged while the rung was running",
+  });
+  // The pre-fold strings, asserted verbatim: this fold must not have moved the stood-down text.
+  assert.equal(t.reason, "stood down — the PR was merged while the rung was running");
+  assert.equal(t.phrase, "stood down (the PR was merged while the rung was running)");
+  assert.deepEqual(t.extra, {}, "and it adds NO blocked_on_pr field — that is the parked arm's alone");
+  // PAIRED POSITIVE CONTROL: the two arms genuinely differ, so neither assertion above is
+  // satisfied by a helper that returns one shape for everything.
+  const parked = fixRungTerminationVerdict({ outcome: "parked", reason: "r", blockedOnPr: 7 });
+  assert.notEqual(parked.phrase, t.phrase);
+  assert.notDeepEqual(parked.extra, t.extra);
 });
