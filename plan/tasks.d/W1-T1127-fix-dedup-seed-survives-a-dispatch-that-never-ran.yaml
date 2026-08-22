@@ -1,0 +1,139 @@
+- id: W1-T1127
+  title: "`prior.fixed` IS SEEDED BY THE SWEEP'S INTENT AND CLEARED ONLY BY THE FIX RUNG'S OWN ROWS, SO A DISPATCH THAT THREW BEFORE THE WORKER STARTED LEAVES A GATE NOTHING CAN OPEN — `dispatchFix` catches its own failure, logs `sweep.fix.error` and returns normally, so `runSweep` records `acted: true` 81ms later and the head is deduped forever against a run that never wrote a single `fix.*` row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main`
+    before any reading, against LOCAL SOURCE and the LEDGER UNION (`ledger.ndjson` plus every
+    rotated `ledger.*.ndjson`). Every zero below carries a positive control on the same scan.
+
+    (1) THE OBSERVED STATE. Four PRs stand down on `blocked-fixable`, `acted: false`, with
+    `stand_down_reason: "fix already dispatched for this head (<sha>) — awaiting its outcome
+    before spending another strike"`: #2411 (head 3ef8277, from 04:06:42Z), #2434 (8bedb8c, then
+    again on its NEW head bd68cef from 08:29:54Z), #2444 (e08014d), #2455 (484a476, from
+    05:18:53Z). `state/inflight/` is empty, the directory exists, and no worker process runs
+    (control: 8 node processes visible to the same `ps`).
+
+    (2) NO `fix.dispatch` ROW EXISTS FOR ANY OF THEM, AND THE ZERO IS CONTROLLED. Keyed by
+    `task_id` — the only key those rows carry — W1-T1095, W1-T1104, W1-T1117 and
+    TRIAGE-fb-1785870618971-72dd3c each read ZERO `fix.dispatch` rows while carrying 671, 682,
+    210 and 225 ledger rows respectively, so the scan and the key are both right. Control:
+    W1-T1100 reads 3 `fix.dispatch` rows off 165 total. The newest `fix.dispatch` anywhere in the
+    union is W1-T1100 at 2026-08-21T18:20:21.505Z.
+
+    (3) THE PRODUCER THAT SETS THE GATE IS NOT THE PRODUCER THAT CAN CLEAR IT. `priorActionsFromLedger`
+    seeds `fixed` from any `sweep.disposed` row with `acted === true` whose disposition is
+    `blocked-fixable`/`conflicted`, keyed `${pr}@${head_sha}`. W1-T1110's re-arm,
+    `fixRungStalledWithoutNewHead`, reads the fix rung's OWN rows — `fix.dispatch`,
+    `fix.ci_not_green`, `fix.review`, `fix.resolved` — keyed by `task_id`, and its documented
+    contract is that no matching lines means `false`. So a head gated by a dispatch that wrote
+    none of those rows can never be un-gated: `alreadyDone = dispatchedThisHead &&
+    !fixRungStalledWithoutNewHead(...)` stays true on every subsequent pass, forever.
+
+    (4) AND THE CAUSE IS A SWALLOWED THROW, NOT A DEAD WORKER — THIS IS NARROWER AND MORE FIXABLE
+    THAN "A DISPATCH DIED". `dispatchFix` (`src/run-task.ts`) wraps its whole body in a `try`
+    whose `catch` logs `sweep.fix.error` and RETURNS NORMALLY. `runSweep` already sets
+    `acted = false` in its own `catch` around the action switch (`src/lib/sweep.ts`), so a
+    genuinely thrown action never seeds the dedup — that machinery works and is not being
+    changed. It simply never fires, because nothing propagates.
+
+    (5) MEASURED AT MILLISECOND RESOLUTION ON #2455. `sweep.fix.error` at 05:16:23.048Z —
+    `Command failed: git ... checkout -B run-W1-T1117-... error: could not lock config file
+    .git/config: File exists`. The very next row, 05:16:23.129Z, is that PR's `sweep.disposed`
+    with `acted: true`, `"required checks red — ci-log fix, strike 1/2"`, and NO `actionError`
+    field at all. The first stand-down follows at 05:18:53.501Z and has repeated on every pass
+    since. #2434 shows the same pair at 08:03:30.566Z and 08:03:30.607Z. All four PRs carry a
+    `sweep.fix.error` row preceding their gate; #2411's is 2026-08-21T18:24:29.884Z, #2444's is
+    2026-08-22T02:01:39.391Z.
+
+    (6) A NEW HEAD DOES NOT RESCUE IT. The key is sha-scoped, so a push should re-earn the
+    attempt — and #2434 did get a new head (8bedb8c → bd68cef). The dispatch against the NEW head
+    threw the same `config.lock` error and re-seeded the gate 41ms later, so the PR is now stuck
+    on its second head for the same reason. Sha-keying bounds the blast radius of one bad seed; it
+    does not bound a producer that fails repeatedly.
+
+    (7) WHY THIS IS VISIBLE AT ALL — AND THE ATTRIBUTION IS NOT WHAT THE BRIEF SAID. The string
+    that exposes this was introduced by W1-T1110 (#2432, commit 91714932), whose
+    `dedupStandDownReason` names the `blocked-fixable`/`conflicted` dedup on the disposed row.
+    W1-T1116 (#2453, commit 842cdf83) then generalised the same field to the `mergeable` and
+    `wait` arms. Both merged 2026-08-22 and both are correct; NEITHER is re-filed here, and this
+    task is not a revision of either. Before W1-T1110 these rows carried `acted: false` and
+    nothing else, and the four stuck PRs would have read exactly like an unwired action path —
+    which is the misdiagnosis W1-T1110's own rationale records two readers making.
+
+    (8) LIVENESS IS THE WRONG CLEARING CONDITION, AND NOT MERELY COSTLY — IT IS DEGENERATE HERE.
+    The brief's premise is that a dispatch with no `inflight` lock and no live process has ended
+    whether or not it said so. That is true and it is not the useful question, because
+    `dispatchFix` is AWAITED to completion: `src/run-task.ts`'s own W1-T1044 note records a
+    fix-rung worker running 8,970s "as a direct child of the daemon, parking `await deps.sweep()`
+    for the whole of it". The `acted: true` row is therefore written only AFTER the run has ended.
+    At the moment the gate is first consulted — the next pass — the dispatch has by construction
+    already finished, so a liveness read returns "not live" EVERY time, for EVERY gated PR.
+    Clearing on liveness would open the gate on every pass, reduce `prior.fixed` to a no-op, and
+    reinstate the unbounded re-dispatch only the strike cap partially bounds. That is a larger
+    defect than the one being repaired.
+
+    (9) AND THE INSTRUMENT THAT WOULD CORROBORATE IT IS ITSELF UNFIXED. #2418 DID land
+    (2026-08-21T19:04:42Z) but it is the plan FILING for W1-T1109, not the fix; W1-T1109 reads
+    `status: queued` on main and the defect is still present — `doctorCommand` compares lock
+    FILENAMES (task ids) against a set of RUN ids, so every lock reads stale. The primitive is
+    sound: `liveInflightRuns` pid-checks each lock and returns BOTH `taskId` and `runId`; only the
+    consumer picks the wrong field. So `rmd doctor`'s lock output must not be read as evidence
+    about this task, and W1-T1109 is not a blocker for it either — it is simply not the surface.
+
+    (10) WHAT SEEDING FROM `fix.dispatch` ALONE WOULD COST. The seed exists so that two sweep
+    passes do not both dispatch against the same head. `fix.dispatch` is written by the worker
+    INSIDE the fix rung, after preflight, the `gh pr view`, worktree add, checkout, settings
+    render and spawn. Seeding from it alone leaves that entire startup path unguarded, and in the
+    failure this task is about the row NEVER appears — so the gate would not merely be late, it
+    would be absent exactly when a dispatch is failing repeatedly and cheaply enough to re-enter.
+    `fix.dispatch` can corroborate the seed; it cannot replace it.
+
+    (11) THE EVIDENCE ROTS FASTER THAN THE STATE IT JUSTIFIES. `sweep.disposed` is in
+    `DECISION_RELEVANT_LEDGER_STEPS` and survives rotation. `sweep.fix.error` is not (control:
+    `sweep.disposed` appears 5 times in that module, `sweep.fix.error` zero), so the row naming
+    WHY a head was gated is archived while the gate itself is retained indefinitely. That is not
+    this task's remedy, but it is why #2411's and #2444's causes were nearly unrecoverable.
+
+    (12) NOT IN SCOPE, NAMED. No timer, and none is proposed — nothing here is time-based. The
+    strike cap and its exhaustion escalation are untouched. W1-T1110's `fixRungStalledWithoutNewHead`
+    is correct for the case it was built for (a dispatch that ran and concluded) and is not being
+    reversed; this task is about the case where it has nothing to read. The `config.lock`
+    contention that made `git checkout -B` fail is a separate surface and is not repaired here.
+    Retroactively clearing the four already-gated heads is an operator action, not a code change:
+    no repair rewrites a ledger row already written.
+  acceptance:
+    - claim: "a fix dispatch whose own failure is swallowed no longer records the strike as spent"
+      proof: "unit test: test/fix-dedup-seed.test.ts"
+    - claim: "the failure is still ledgered, so nothing is repaired by going quiet"
+      proof: "unit test: test/fix-dedup-seed.test.ts"
+    - claim: "a dispatch that reaches the worker still seeds the dedup exactly as it does today"
+      proof: "unit test: test/fix-dedup-seed.test.ts"
+    - claim: "two passes over one unchanged head still dispatch only once"
+      proof: "unit test: test/fix-dedup-seed.test.ts"
+    - claim: "a preflight stand-down is distinguishable from a failed dispatch on the disposed row"
+      proof: "unit test: test/fix-dedup-seed.test.ts"
+  files: [src/run-task.ts, test/fix-dedup-seed.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#fix-dedup-seed-asymmetry-2026-08-22"
+  plan_refs: ["W1-T1110", "W1-T1116", "W1-T1109", "W1-T1117", "W1-T254", "W1-T1044"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:`
+    form naming `test/fix-dedup-seed.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The change decides whether a fix-rung strike is
+    recorded as spent against live PRs, so a mistake either re-dispatches real workers against
+    real repositories or re-introduces the deadlock it repairs. Claiming Rule 19 forced the band
+    would be a false claim in the direction that flatters the filing.
+
+    ONLY `src/run-task.ts` IS DECLARED ON THE SOURCE SIDE, DELIBERATELY. `src/lib/sweep.ts`
+    already sets `acted = false` in the `catch` around its action switch, so the containment this
+    task needs exists there and is correct; the defect is that `dispatchFix` never lets it fire.
+    Declaring sweep.ts would widen the scope to a file that needs no change.

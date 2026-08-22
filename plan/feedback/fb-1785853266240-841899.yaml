@@ -22,22 +22,6 @@ raw: "TWO GRAMMAR/RULE GAPS FOUND WHILE FILING #1282, both mechanical and both
   staleness self-corrects and only the rule's wording is wrong."
 attachments: []
 origin: cli
-status: proposed
-proposal_pr: https://github.com/craigoley/remudero/pull/2379
-summary:
-  headline: "Approve fixes for two grammar rule gaps before filing #1282"
-  what_happened: "This filing revealed two documentation gaps: the grammar can't
-    verify absence claims (assertions about missing text) but provides no
-    guidance, and the index rule is too narrow—mentions only ## headings when
-    ANY line-count change actually matters."
-  decision: Choose how to resolve these two gaps.
-  options:
-    - label: Documentation fix
-      consequence: Document absence-claim constraint; correct index rule wording; no
-        code changes; filing proceeds.
-    - label: Automate index regeneration
-      consequence: Add CI hook to auto-regenerate index; prevents recurring staleness;
-        addresses one gap.
-    - label: Document and automate
-      consequence: Clarify absence-claim handling; add index automation; fully
-        addresses both gaps.
+status: rejected
+proposal_pr: null
+summary: null

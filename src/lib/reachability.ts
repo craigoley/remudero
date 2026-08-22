@@ -167,21 +167,38 @@ function addedExportedFunctions(diff: string): UnreachedExport[] {
 }
 
 /**
+ * {@link scanUnreachedExports}'s result (W1-T1118): the violations it always returned, ALONGSIDE
+ * the population it always computed and used to discard — `examined` is the deduped count of
+ * `export function` names the diff added, the same dedup key (`file::name`) `unreached` itself
+ * uses. Read this as three cases, never two: `unreached.length > 0` (advisory fires), `examined >
+ * 0 && unreached.length === 0` (scanned N, cleared all N), `examined === 0` (the diff added no
+ * exported function at all). The caller distinguishes the fourth case — the scan never ran — by
+ * never calling this function in the first place (see {@link unwiredAdvisoriesFor}'s `checkoutDir`
+ * guard), never by a sentinel value here.
+ */
+export interface ReachabilityScanResult {
+  readonly unreached: UnreachedExport[];
+  readonly examined: number;
+}
+
+/**
  * THE ENTRY POINT (design (i)): given a diff's added `export function` names and a checkout,
  * report each whose only references outside its defining file are tests — i.e. every added
  * export {@link isExportReachable} returns `false` for. Dedupes by (file, name) — a diff that
- * touches the same added definition across multiple hunks reports it once.
+ * touches the same added definition across multiple hunks reports it once. `examined` (W1-T1118)
+ * is that SAME dedup's population count, computed from the one walk this function already does —
+ * never a second pass over `diff`, so the count and the violations can never drift apart.
  */
-export function scanUnreachedExports(diff: string, checkoutDir: string): UnreachedExport[] {
-  const out: UnreachedExport[] = [];
+export function scanUnreachedExports(diff: string, checkoutDir: string): ReachabilityScanResult {
+  const unreached: UnreachedExport[] = [];
   const seen = new Set<string>();
   for (const candidate of addedExportedFunctions(diff)) {
     const key = `${candidate.file}::${candidate.name}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (!isExportReachable(candidate.name, candidate.file, checkoutDir)) out.push(candidate);
+    if (!isExportReachable(candidate.name, candidate.file, checkoutDir)) unreached.push(candidate);
   }
-  return out;
+  return { unreached, examined: seen.size };
 }
 
 /**

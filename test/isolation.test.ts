@@ -264,3 +264,87 @@ test("IsolationError: an UNPARSEABLE probe report (NaN counts) round-trips as ob
     },
   );
 });
+
+// ── W1-T1112: the verdict row must carry the cause itself, not just point at
+// the sibling `isolation.probe` row written the same millisecond. The live
+// case (W1-T981): the probe spawn never boots (no Claude config in the fresh
+// worker home) ⇒ the transcript never contains a REPORT block (unparseable
+// counts) AND the underlying worker call errored (isError=true) — so the
+// verdict fires on the exact unproven path this task must fix. ─────────────
+
+test("probeIsolation: isolation_preflight_failed carries stderr_excerpt itself — a reader never has to find the sibling isolation.probe row", async () => {
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  await assert.rejects(() =>
+    probeIsolation({
+      settingsFile: "unused",
+      log: (step, extra) => events.push({ step, extra }),
+      exec: async () => ({
+        transcript: "Claude configuration file not found at: /home/node/Remudero/worker-home-abc123",
+        aliasCount: NaN,
+        functionCount: NaN,
+        isError: true,
+      }),
+    }),
+  );
+  const probeRow = events.find((e) => e.step === "isolation.probe");
+  const failedRow = events.find((e) => e.step === "isolation_preflight_failed");
+  assert.ok(probeRow, "the sibling isolation.probe row must still be written");
+  assert.ok(failedRow, "the run-terminating isolation_preflight_failed row must be written");
+  // The cause is on BOTH rows now — the verdict explains itself without a reader
+  // having to go find the sibling.
+  assert.match(String(probeRow?.extra?.stderr_excerpt), /Claude configuration file not found/);
+  assert.match(String(failedRow?.extra?.stderr_excerpt), /Claude configuration file not found/);
+  assert.equal(probeRow?.extra?.stderr_excerpt, failedRow?.extra?.stderr_excerpt);
+});
+
+test("probeIsolation: a CLEAN probe (isolated=true) writes NO stderr_excerpt on the isolation.probe row at all", async () => {
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  await probeIsolation({
+    settingsFile: "unused",
+    log: (step, extra) => events.push({ step, extra }),
+    exec: cleanExec,
+  });
+  const probeRow = events.find((e) => e.step === "isolation.probe");
+  assert.ok(probeRow);
+  assert.equal("stderr_excerpt" in (probeRow?.extra ?? {}), false);
+});
+
+test("probeIsolation: a CONTAMINATED-but-non-erroring spawn (parsed nonzero counts, isError falsy) still writes NO stderr_excerpt on EITHER row", async () => {
+  // The spawn itself succeeded (no isError) — the worker just reported nonzero
+  // counts. There is no spawn error text to carry, on the sibling row or the
+  // verdict row, and the run still fails closed on the nonzero count alone.
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  await assert.rejects(() =>
+    probeIsolation({
+      settingsFile: "unused",
+      log: (step, extra) => events.push({ step, extra }),
+      exec: async () => ({ transcript: "REPORT\naliases: 3\nfunctions: 0", aliasCount: 3, functionCount: 0 }),
+    }),
+  );
+  const probeRow = events.find((e) => e.step === "isolation.probe");
+  const failedRow = events.find((e) => e.step === "isolation_preflight_failed");
+  assert.equal("stderr_excerpt" in (probeRow?.extra ?? {}), false);
+  assert.equal("stderr_excerpt" in (failedRow?.extra ?? {}), false);
+});
+
+test("probeIsolation: an UNPARSEABLE count (NaN, isError true) still REFUSES the run — the excerpt explains the cause, it never softens fail-closed", async () => {
+  await assert.rejects(
+    () =>
+      probeIsolation({
+        settingsFile: "unused",
+        exec: async () => ({
+          transcript: "Claude configuration file not found at: /home/node/Remudero/worker-home-abc123",
+          aliasCount: NaN,
+          functionCount: NaN,
+          isError: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof IsolationError);
+      assert.equal((e as IsolationError).observed, "unproven");
+      assert.match((e as Error).message, /isolation_preflight_failed/);
+      assert.match((e as Error).message, /UNPROVEN/i);
+      return true;
+    },
+  );
+});

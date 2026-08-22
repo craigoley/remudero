@@ -1,0 +1,147 @@
+- id: W1-T1132
+  title: "the duplicate-triage guard IS wired and IS cross-host, and it still cannot stop this — its only shared signal is a PUBLISHED triage PR, which does not exist until the work is finished, so two lanes starting inside the same multi-minute grind both read `no open PR` and both spend an Architect call"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree at origin/main, over local git and the merge
+    history. THE SUBJECT SWEEP CHANGED THIS SHARD AND THE ORIGINAL PREMISE WAS WRONG; the
+    correction is recorded here rather than quietly dropped.
+
+    (1) THE PREMISE THAT FEEDBACK TRIAGE HAS NO CROSS-HOST CLAIM IS FALSE, AND TWO EXISTING TASKS
+    OWN THE GROUND. W1-T300 filed this defect ("auto-triage re-dispatches a feedback id whose first
+    triage PR has not merged yet — the same entry was ground twice, five minutes apart") and
+    shipped a guard. W1-T1019 then found that guard UNWIRED. BOTH ARE CITED, NEITHER IS RE-FILED.
+    The wiring has since landed: `63837dc7`, 2026-08-20, "wire the feedback in-flight guard's deps
+    at construction" (#2273), supplying `isFeedbackOpenPr` and `readFeedbackLiveState` at
+    `src/run-task.ts`.
+
+    (2) AND THE GUARD IS ALREADY CROSS-HOST, WHICH IS WHY A NEW REF NAMESPACE IS NOT THE ARGUMENT.
+    `isFeedbackOpenPr` resolves an OPEN PR and `readFeedbackLiveState` reads that PR's GitHub state.
+    GitHub is shared by every host, so this signal was never per-host. `state/triage.lock`
+    (`triageLockPath`, `src/lib/auto-triage.ts`) is per-host and its own doc says it protects
+    "daemon-vs-daemon only" — but it is the SECOND gate here, not the only one.
+
+    (3) THE DEFECT SURVIVED THE WIRING, WHICH IS THE WHOLE FINDING. The wiring landed 2026-08-20.
+    The collisions the operator measured are 2026-08-22 — TWO DAYS LATER. #2452 wrote
+    `status: rejected` where main reads `status: proposed, proposal_pr: #2439`; #2462 wrote
+    `status: proposed, proposal_pr: #2462` where main reads `status: rejected`. Mirror images, both
+    SEMANTIC conflicts: resolving either means PICKING A TRIAGE VERDICT, which no merge strategy
+    can do, so both closed as superseded and both Architect calls were spent for nothing.
+
+    (4) THE MECHANISM IS THE SIGNAL'S TIMING, NOT ITS REACH. The guard's only shared evidence is a
+    PUBLISHED triage PR — and a triage PR does not exist until the triage FINISHES. The entry is
+    read, grounded, researched and only then written, with an LLM call in the middle, so the window
+    between "lane starts" and "lane publishes" is MINUTES. Two lanes starting anywhere inside that
+    window both ask "is there an open PR for this entry", both are correctly told NO, and both
+    proceed. A guard that reads published work cannot see work in flight.
+
+    (5) THE SHAPE OF THE FIX IS PROVEN ONE LAYER UP AND IS CITED, NOT RE-DERIVED. W1-T509 gave task
+    ids a claim at `refs/rmd-id/<taskId>`, taken at the START of the work and visible to every host
+    at once; `reserveTaskIdRemote` (`src/lib/task-id-reservation.ts`) is its gateway. MEASURED:
+    `git ls-remote origin 'refs/rmd-*'` returns 228 refs and every one is `rmd-id`. What feedback
+    entries lack is not a shared signal — it is one that exists BEFORE the work does.
+
+    (6) AND IT IS NOT TWO — IT IS TEN, WITH THE SHAPE CLASSIFIED RATHER THAN COUNTED. Of 88
+    distinct feedback ids named in main's squash subjects, 10 carry two triage subjects. SEVEN are
+    one PR filing a task plus a LATER one concluding `already decided, no task`. TWO have BOTH
+    concluding `already decided, no task` — two Architect calls, zero output. One is a third shape.
+    THE SEVEN DID NOT POISON THE PLAN and that is said plainly rather than inflated: the second lane
+    reached the correct verdict. What it cost was a full Architect call to rediscover work already
+    done. The operator's two are the severer form — the verdicts contradicted instead of
+    converging, so neither could land.
+
+    (7) THE EXISTING RELEASE MECHANISM DOES NOT TRANSFER, WHICH DECIDES THE DESIGN.
+    `triageLockPath` is acquired through the `drain-lock.ts` primitive — atomic `O_EXCL` create,
+    DEAD PID RECLAIMED. A pid is HOST-LOCAL. A second host reading a remote ref cannot ask whether
+    a pid on the first host is alive, so pid-liveness — the only thing that releases the current
+    lock on a crash — is unavailable to a claim taken across hosts.
+  design: |
+    (i) THE CLAIM MUST EXIST BEFORE THE WORK DOES — THAT IS THE ENTIRE DELTA OVER W1-T300.
+    Rationale (4) is the argument: the guard already reaches every host, and still fails because
+    its evidence is published only at the END. A claim taken at the START, before the entry is
+    researched, is the one thing an open-PR read cannot be. It ADDS to W1-T300's guard rather than
+    replacing it — that guard still correctly refuses an entry whose PR is already open.
+
+    (ii) THE LOSER REFUSES; IT DOES NOT WAIT AND IT DOES NOT ADVANCE. `--reserve` retries and
+    advances because for a MINT the next id serves the caller equally well. A triage has no such
+    substitute: the second lane's output is either a contradicting verdict that cannot merge, or a
+    rediscovery of a verdict already reached. Both are waste. The loser must REFUSE this entry,
+    report which claim it lost to, and move to a DIFFERENT entry — which is also why the claim is
+    worth taking even though the work is long.
+
+    (iii) RELEASE IS EXPLICIT AND EVIDENCE-BASED, AND A TIMER IS REFUSED BY NAME. Three arms, in
+    order: the holder releases on completion in a `finally`; a claim whose entry has an OBSERVABLE
+    triage outcome — a merged subject naming that entry, the evidence rationale (4) is counted from
+    — is releasable by any host, which is the read-the-evidence-that-already-exists shape W1-T1110
+    established; and anything else needs an operator, because rationale (6) proves cross-host
+    liveness is not decidable. NO TIME-BASED EXPIRY: W1-T1067 is the precedent for what a
+    time-or-restart-shaped release does when the releasing signal never arrives, and a triage held
+    for minutes would make a short expiry fire on healthy work — this repo's own recurring defect.
+
+    (iv) THE PER-HOST LOCK STAYS. It correctly stops a hand-run racing the daemon ON ONE HOST and
+    is cheaper than a network round trip for that case. The remote claim is a SECOND, wider gate,
+    not a replacement, and removing the local one would trade a cross-host defect for a
+    same-host one.
+
+    (v) NOT IN SCOPE, NAMED: W1-T300's guard and W1-T1019's wiring of it, both of which stay
+    exactly as they are and are cited rather than altered; `reserveTaskIdRemote`'s own design, from
+    W1-T509; the `refs/rmd-id` namespace and task-id minting; W1-T1067's drain-lock stranding; and
+    whether a losing lane should re-queue the entry, which is a scheduling decision of its own.
+
+    (vi) THE ADJACENCY, NOTED AND DELIBERATELY NOT SCOPED IN: W1-T1076's shard-slug check catches a
+    DUPLICATE SHARD and cannot see duplicate TRIAGE of one entry — the same waste one step earlier.
+    Whoever builds that should know this exists; neither task needs the other.
+  acceptance:
+    - claim: "a second host triaging a claimed entry refuses before spending the architect call"
+      proof: "unit test: test/feedback-triage-claim.test.ts"
+    - claim: "the refusal names the claim it lost to rather than failing anonymously"
+      proof: "unit test: test/feedback-triage-claim.test.ts"
+    - claim: "a completed triage releases its claim without waiting for anything"
+      proof: "unit test: test/feedback-triage-claim.test.ts"
+    - claim: "a claim whose entry already has an observable triage outcome is releasable by any host"
+      proof: "unit test: test/feedback-triage-claim.test.ts"
+    - claim: "the existing per-host lock still refuses a hand-run racing the daemon"
+      proof: "unit test: test/feedback-triage-claim.test.ts"
+  files: [src/lib/auto-triage.ts, src/run-task.ts, test/feedback-triage-claim.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#feedback-triage-no-cross-host-claim-2026-08-22"
+  plan_refs: ["W1-T300", "W1-T1019", "W1-T509", "W1-T1067", "W1-T1110", "W1-T1076"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/feedback-triage-claim.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. A claim taken before every triage sits in front of
+    the rung that files tasks; a mistake either blocks triage fleet-wide or admits the duplicate it
+    exists to stop.
+
+    BOTH `src/` FILES ARE DECLARED BECAUSE THE LOCK AND ITS TWO ACQUIRE SITES ARE APART:
+    `triageLockPath` is defined in `src/lib/auto-triage.ts`, and both the daemon rung and the
+    `rmd triage` CLI path acquire it from `src/run-task.ts`. A claim wired at only one acquire site
+    leaves the other racing, which is the same shape as the defect.
+
+    THE COUNT IN RATIONALE (4) IS CLASSIFIED, NOT ASSERTED. Ten paired entries were each read and
+    split by SHAPE — seven filed-then-already-decided, two already-decided twice, one other —
+    because "two triage PRs" alone would have overstated the harm for the seven where the plan was
+    never poisoned. The waste is the Architect call in every case; the unresolvable-PR outcome is
+    the operator's two, not these ten.
+
+    THE SUBJECT SWEEP IS WHAT MADE THIS SHARD CORRECT, AND THE FIRST DRAFT WAS WRONG. Sweeping
+    slugs across main AND every in-flight head surfaced `W1-T300-triage-inflight-dedup` and
+    `W1-T1019-triage-inflight-guard-shipped-unwired`. Filed from the brief alone this would have
+    claimed feedback triage has no cross-host claim at all and proposed a new ref namespace to
+    supply one — when the guard already exists, is wired as of 2026-08-20, and already reads a
+    source every host shares. Rationale (1)-(4) states what is actually left instead.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1132` resolves to 0d310a18efec4b4822bf6e78dbe9745a7b703808,
+    read over git protocol; live control, `refs/rmd-id/W1-T999999` exits 2. THE ANCHOR MESSAGE WAS
+    NOT JUDGED. Eight id surfaces were swept plus a subject sweep, including the declared `- id:`
+    inside every shard on main, and EVERY CONTROL USED AN ID VERIFIED PRESENT ON MAIN
+    (`W1-T1110`) rather than one whose PR was still open — a control that reads zero because its
+    own filing has not merged proves nothing.

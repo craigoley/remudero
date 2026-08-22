@@ -35,9 +35,8 @@ forensic detail, so the narrative does not need to live here.
 - **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
   each follow-up commit.** `bodyContradictsDiff` (`src/lib/review.ts`, W1-T274) OPENS THE DIFF and
   FAILS the PR — MEASURED 2026-08-12: #1685 refused with *"body contradicts its own diff: claimed
-  'exactly one file'"*, over the same three files #974 carried. #974 merged (PRE-W1-T274, which is the
-  only reason it merged at all) claiming *"exactly one file: MASTER-PLAN.md. No src/, no test/, no
-  docs/ORIENTATION.md"* while carrying `MASTER-PLAN.md` + `docs/ORIENTATION.md` + `plan/plan-index.json`
+  'exactly one file'"*, over the same three files #974 carried. #974 merged (PRE-W1-T274) claiming
+  *"exactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md"* while carrying `MASTER-PLAN.md` + `docs/ORIENTATION.md` + `plan/plan-index.json`
   — and what was load-bearing is that THE BODY NAMED THE VERY FILE THE DIFF TOUCHED. The detector's own
   doc says it in terms: *"NOT because of plan scope"* — **#974 KEPT its `planOnly` carve-out.**
   **NEVER ASSERT SCOPE MEMBERSHIP FROM MEMORY; RUN THE PREDICATE** —
@@ -80,9 +79,8 @@ forensic detail, so the narrative does not need to live here.
   that phrase warns of is writing `| proof:`: the pipe already delimits, so the label doubles, the
   proof becomes `proof: grep: …`, and `check-proof` refuses it (`parse: REFUSED`, exit 2) — that
   capped #1598 at 0/3. After a pipe, write the BARE proof.
-  **RUN BOTH VERBS — NEITHER CATCHES THE OTHER'S FAILURE, MEASURED BOTH WAYS:** that doubled-label
-  body passes `check-acceptance` with `OK` and exit 0 while `check-proof` refuses it, and an
-  unbulleted body fails `check-acceptance` while every proof string inside it is individually valid.
+  **RUN BOTH VERBS — NEITHER CATCHES THE OTHER'S FAILURE:** that doubled-label body passes
+  `check-acceptance` `OK`/exit 0; an unbulleted body fails it while every proof inside is valid.
   `gh api repos/<o>/<r>/pulls/<n> --jq .body > /tmp/b.md && RMD_SELF_SYNC_DONE=1 ./bin/rmd check-acceptance /tmp/b.md`
   **GUARD THE FETCH ON STRUCTURE, NEVER ON SIZE**: reject on a non-200 HTTP code or a missing/null
   `.body` key before judging the file — a 537-byte rate-limit payload landed in `/tmp/b.md` and
@@ -215,6 +213,12 @@ forensic detail, so the narrative does not need to live here.
   Anchor the trailer test exactly (`^Remudero-Task:\s*<id>\s*$`, multiline) — GitHub's search is NOT
   exact-phrase, and unioning COMMIT SUBJECTS over-credits because `chore(plan): file W1-T411` names a
   task the filing never implemented. Add the head-ref query above when the trailer scan returns zero.
+- **Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.** A
+  main-only subject scan cannot see an in-flight sibling shard, the one case it exists to catch:
+  `git ls-remote --heads origin`, then read each head's tree — real files, no REST call. **One
+  prompt, one lane**, too: NO SWEEP SEES UNPUSHED WORK, so that half is the operator's discipline,
+  never a check. *(2026-08-22: a re-sweep at 11:22:23Z missed a PR opened 11:14:46Z — two shards on
+  one subject, #2471 closed duplicated; #2408/#2411 on 08-21.)*
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** It is the only thing
   that makes session work visible to the fleet: `isDispatchEligible` (`drain.ts`) consults
   `opts.isOpenPr`, and `projectPlan` attributes an OPEN PR by `/^run-(.+)-\d+$/` against
@@ -241,7 +245,9 @@ forensic detail, so the narrative does not need to live here.
   shard.** "Next number after the last one I saw" collides with tasks that landed concurrently or
   live in a shard you didn't read, and `rmd lint-plan` then blocks the push.
   `grep -rhoE '^\s*- id: W1-T[0-9]+' plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` → max+1.
-  *(#770 — renumbered to W1-T257; #775 — to W1-T261; same collision twice in one session)*
+  **MINTING-ONLY — truncates letter-suffixed ids; duplicate detection compares whole ids:
+  `sort | uniq -d` on `- id:` lines.**
+  *(#770/#775 renumbered to W1-T257/W1-T261 — same collision twice)*
 - **A `warn` NEVER REACHES `lint-plan`'s EXIT CODE — this bullet claimed the changed-tasks pass
   promotes one, and a session acted on that twice.** `lintPlanCommand` (`src/run-task.ts`) increments
   `failing` only inside `if (blocking.length)`, then `return failing > 0 ? 1 : 0`. `proof-resolvability`
@@ -386,8 +392,8 @@ forensic detail, so the narrative does not need to live here.
   Architect lanes logged `automerge.armed` unconditionally. Measured over the unioned ledger: 176
   rows; 135 blind, 17 provably false, 119 undecidable — OVERLAPPING categories, not a partition
   (they sum past 176) — the blind rows recorded no `head_sha`, so
-  they can never be adjudicated. Any historical claim resting on that step name is unsound for rows
-  written before #981. **AND THE LANES ARE NOT EQUALLY GATED — THE OBVIOUS READING IS BACKWARDS, SO
+  they can never be adjudicated. Any claim resting on that step name is unsound for rows
+  before #981. **AND THE LANES ARE NOT EQUALLY GATED — THE OBVIOUS READING IS BACKWARDS, SO
   READ BOTH ARMS BEFORE ARGUING FROM ONE:** `grep -n 'return attemptArm' src/run-task.ts` prints
   them side by side. `triageCommand` arms only AFTER `waitForCiGreen` returns green, and
   `armAutoMerge` then reads `priorReviewVerdictFromLedger` and gates on `decideArmFromLedgerVerdict`
@@ -398,9 +404,8 @@ forensic detail, so the narrative does not need to live here.
   than triage PRs, which only add plan text.** Operator ruling on W1-T489: DOCUMENTED, not changed.
   The unattended rate is real now that W1-T469 fires the rung on `partition.serialized.length > 0`
   rather than idleness, bounded by `autoTriage.maxPerDay`/`minIntervalMinutes` (`plan/policy.yaml`).
-  Cost per run is a QUERY, not a number to carry — re-derive it over the
-  ledger union (archive rule below) rather than quoting the figure `src/lib/auto-triage.ts` already
-  carries. *(#981; the lane-asymmetry half W1-T489, 2026-08-14)*
+  Cost per run is a QUERY, not a number to carry (name-the-query rule above): re-derive it
+  over the ledger union rather than quoting `src/lib/auto-triage.ts`'s figure. *(#981; the lane-asymmetry half W1-T489, 2026-08-14)*
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.** A control filtering on the
   absolute path counts the wrapper, returns 1, and reports a false pass, which would make every
@@ -648,25 +653,23 @@ forensic detail, so the narrative does not need to live here.
   it), while its own **entrypoint script and every apt-level binary come from the image**. A path
   read from the mount ships the instant it merges; a path baked into the image sits inert in a
   MERGED, GREEN-EVERYWHERE commit until `.github/workflows/acr-build.yml` (`workflow_dispatch`
-  only, run by the operator from the Actions tab — deliberately not on every merge or every push;
-  see that workflow's own header) is triggered and the new image is deployed. The failure mode is
+  only, run by the operator from the Actions tab) is triggered and the new image is
+  deployed. The failure mode is
   not a red check: docker still restarts the container, the daemon still logs `exited N`, and every
   diagnostic that reads the MOUNT still says the code is current — because it is; only the image is
   not. MEASURED 2026-08-14: the running image was 124 commits behind `origin/main`, including a
-  Dockerfile fix and an entrypoint fix, and neither showed up as a failure anywhere off-host.
+  Dockerfile fix and an entrypoint fix, neither showing as a failure off-host.
 
-  | ships on merge (the mount)                          | needs an image rebuild (the image)         |
-  |------------------------------------------------------|---------------------------------------------|
-  | `src/`, `test/`, `plan/`, `scripts/`, `bin/`          | `deploy/entrypoint.sh` — the EXECUTED entrypoint (`COPY … /usr/local/bin/rmd-entrypoint`) |
+  | ships on merge (the mount) | needs an image rebuild (the image) |
+  |---|---|
+  | `src/`, `test/`, `plan/`, `scripts/`, `bin/` | `deploy/entrypoint.sh` — the EXECUTED entrypoint (`COPY … /usr/local/bin/rmd-entrypoint`) |
   | `deploy/*.sh` run BY THE OPERATOR from the checkout (`host-update.sh`, `verify-image.sh`) | `deploy/Dockerfile` itself — every apt binary (`jq`, `tini`, `bubblewrap`, `socat`), the node version, the `/app` snapshot |
   | `package.json` / the lockfile — via the mount and `ensureInstallFresh`, no rebuild needed | — |
 
-  **`node_modules` is the row people get wrong, because it resolves to the MOUNT, not the image.**
-  `/app` carries its own `node_modules` that the entrypoint never falls back to; the one the daemon
-  actually loads from is the same inode as the checkout's, so a dependency bump behaves like a
-  mount-side change even though "a dependency" sounds image-shaped. `scripts/fleet-heartbeat.sh`
-  publishes `image_build_sha` (read from `/etc/rmd-build-sha`, baked in by the Dockerfile) alongside
-  the two checkout shas it already carried (`daemon_boot_head_sha`, `install_head_sha`) so this
+  **`node_modules` resolves to the MOUNT, not the image** — `/app` carries its own that the
+  entrypoint never falls back to, and the one the daemon loads is the same inode as the checkout's,
+  so a dependency bump is a mount-side change. `scripts/fleet-heartbeat.sh` publishes
+  `image_build_sha` (from `/etc/rmd-build-sha`) alongside the two checkout shas it already carried (`daemon_boot_head_sha`, `install_head_sha`) so this
   boundary is checkable from the beat without shelling into the host. *(W1-T496, 2026-08-14)*
 
 ## Code traps

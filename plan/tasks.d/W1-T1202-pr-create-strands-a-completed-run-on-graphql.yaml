@@ -1,0 +1,195 @@
+# W1-T1202 — the harness's OWN push boundary is the last `gh pr create` on the GraphQL budget.
+# Filed from feedback fb-1785899307058-60fbcf. This is the "separate task" W1-T903's design (i)
+# explicitly deferred when it took the ratification path off GraphQL and scoped the four
+# `--fill` sites out. Nothing here re-derives that `gh pr create` is GraphQL — W1-T372,
+# W1-T903 and src/lib/daemon-health.ts's own header already hold the verbatim evidence.
+
+- id: W1-T1202
+  title: "every harness-opened PR is created with `gh pr create --fill`, which is GraphQL — so a GraphQL exhaustion nobody's lane caused throws at the push boundary of a COMPLETED run and the work is re-dispatched from scratch, while the REST bucket sits nearly full: convert the four `ghPrCreateFillCommand` sites to the REST create and reproduce `--fill`'s body locally"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: |
+    THE FILING THIS COMPLETES IS ALREADY IN THE TREE AND NAMED THIS TASK. W1-T903 takes the
+    RATIFICATION path off GraphQL by creating its PR over `gh api --method POST
+    repos/{owner}/{repo}/pulls`, and its design (i) says in as many words: "THE FOUR `--fill`
+    SITES ARE OUT OF SCOPE AND THE REASON IS THE BODY, NOT THE TRANSPORT … That is a separate
+    task and must not be folded in here." THIS IS THAT TASK. The transport question is therefore
+    SETTLED, not re-opened: REST create is the chosen shape, and W1-T903 already recorded the
+    endpoint and that its response carries both `number` and `html_url`, so nothing needs a
+    second read-back call.
+
+    THE COST, CITED RATHER THAN RE-DERIVED. W1-T372's rationale holds the incident verbatim: run
+    W1-T333-1785895930303 finished its implement work, threw at 2026-08-05T02:54:07.579Z on
+    `Command failed: gh pr create --repo craigoley/remudero --base main --head
+    run-W1-T333-1785895930303 --title test(config-reader-seams): allowlist the cost ceiling
+    default reader (W1-T333) --fill` followed by `GraphQL: API rate limit already exceeded for
+    user ID 4397075`, and the branch survived with no PR pointing at it. GraphQL was measured at
+    5031/5000 used, remaining 0, while REST core held 4848/5000 REMAINING at the same minute.
+    A COMPLETED risk:high RUN WAS DISCARDED AND RE-DISPATCHED (W1-T333-1785898499462, 02:57:41Z)
+    AGAINST A BUCKET THAT WAS 97% FREE.
+
+    THE CALL SITES, READ AT THIS FILING RATHER THAN INFERRED. `ghPrCreateFillCommand`
+    (src/run-task.ts) builds `["pr","create","--repo",…,"--base","main","--head",branch]`, pushes
+    an explicit `--title` when one is available (W1-T327) and ALWAYS appends `--fill`. It has
+    exactly four executors, all in src/run-task.ts and each of the shape
+    `execFileSync(prCreate.command, prCreate.args, prCreate.options)` followed by a regex over
+    stdout for the PR url:
+      implement (`runTask`)  — title from `lastCommitSubject(worktreePath)`
+      retro (`retroCommand`) — title from `lastCommitSubject(worktreePath)`
+      triage                 — title from `commitMessage.split("\n")[0]`
+      plan                   — title from `commitMessage.split("\n")[0]`
+    THE IMPLEMENT EXECUTOR HAS NO `try`. The throw leaves `runTask` entirely, which is why the
+    incident reads as `run.error` and not as a verdict — and why, as the feedback puts it, the
+    failure was DIAGNOSABLE ONLY BY LUCK: had the message been swallowed it would have read as
+    another `no_pr`, the silent shape that cost six dispatches on W1-T314.
+
+    WHY THE TITLE IS ALREADY SOLVED AND ONLY THE BODY IS NEW WORK. All four sites already author
+    a title, so a REST create needs no title invention — W1-T327 did that half. `--fill` is
+    supplying the BODY, and PLATFORM FACT CHECKED FOR THIS FILING: `gh pr create --fill` derives
+    the body from the branch's commits — the commit body for a single-commit branch, the list of
+    commit titles for a multi-commit one — and an explicit `--title` overrides the derived title.
+    That is a purely LOCAL derivation over `origin/main..HEAD`, reproducible with the `git log`
+    the harness already shells for `lastCommitSubject`. So REST's lack of autofill costs a small
+    local helper, NOT an invented body and NOT a review-gate change — which is the finding that
+    makes this task small and the reason W1-T903 could defer it safely.
+
+    AND THE RETRY HALF OF THE FEEDBACK IS DELIBERATELY NOT BUILT, BY THE FILER'S OWN TEST. The
+    feedback asks for a push-boundary retry after the reset window AND states its own falsifier:
+    "if gh pr create can be made to use REST … the retry half is moot". It can, and W1-T903 has
+    already proven the shape, so the retry is stood down rather than argued — which is also what
+    the standing posture requires (W1-T529 design (iii): DEGRADE, DO NOT RETRY; W1-T511 design
+    (iv): a deferral, if ever built, must be BOUNDED). A wait-for-reset sleep at a push boundary
+    would be a new unbounded-in-practice hold on a dispatch lane, and this task removes the cause
+    instead.
+  design: |
+    THE SHAPE: one builder swapped from `gh pr create` to `gh api`, four executors reading the
+    response instead of scraping stdout, and one local body derivation. No retry, no sleep, no
+    new ledger step, no new pacer.
+
+    (i) CREATE OVER REST, AT THE BUILDER. Replace what `ghPrCreateFillCommand` emits with a `gh
+    api --method POST repos/{owner}/{repo}/pulls` invocation carrying `title`, `body`, `head` and
+    `base`, and read `html_url` (and `number`) back off the response. The BUILDER is the right
+    site for exactly the reason its own comment already gives for the live-write guard: "this
+    function exists only to produce a `gh pr create` argv, so refusing here covers every call
+    site at once and cannot be bypassed by a new one". The same argument makes it the one place
+    the transport can move without four divergent copies.
+
+    (ii) KEEP THE LIVE-WRITE GUARD AND ITS KEY. `assertLiveWriteAllowed("gh-pr-create", …)` stays
+    at the builder with the SAME key string. A transport change must not become a guard change:
+    the guard's population is "the harness opens a PR", which is unchanged, and the existing
+    guard suites assert against that key.
+
+    (iii) THE BODY IS DERIVED LOCALLY AND FAITHFULLY, NOT INVENTED. Reproduce `--fill`'s own rule
+    over `origin/main..HEAD`: the single commit's body when the branch has one commit, the list
+    of commit subjects when it has several. Read it with `git log` in the worktree, and return
+    `undefined`/empty on ANY git failure rather than throwing — the same best-effort contract
+    `lastCommitSubject` already keeps at these exact call sites, and for the same stated reason
+    (by the time the builder runs the branch is already pushed, so a refusal here strands it with
+    no PR, which is the failure this task exists to remove). AN EMPTY BODY IS AN ACCEPTABLE
+    OUTCOME; A THROWN ONE IS NOT.
+
+    (iv) THE TITLE PATH IS UNCHANGED. All four sites already pass an authored title (W1-T327) and
+    keep passing it. The one behaviour `--fill` supplied that REST cannot is the branch-name
+    fallback title for a multi-commit branch — and that fallback is precisely the defect W1-T327
+    was filed to remove, so losing it is a gain. When no title is available, send the derived
+    first commit subject; only if that is also unavailable may the body-less/title-less case fall
+    back to the branch name, and the choice must be stated in the PR body.
+
+    (v) THE FOUR EXECUTORS STOP SCRAPING STDOUT. Each site currently regexes
+    `https://github.com/…/pull/\d+` out of `gh pr create`'s human output. Take the url from the
+    parsed REST response instead. The four `if (!prUrl)` failure branches and their existing
+    ledger lines (`verdict failed / no PR opened`, `retro.error`, `triage.error`, `plan.error`)
+    KEEP THEIR PRESENT MEANING AND WORDING — this task changes how the url is obtained, not what
+    the absence of one signifies.
+
+    (vi) A THROTTLED CREATE MUST READ AS THROTTLED. If the REST create itself fails on a limit,
+    classify with the EXISTING `isGhRateLimitError` (src/lib/status.ts) — the module's own doc
+    calls it "the one place that decision is made so every guarded call site shares the same
+    rule" — and say so, naming the pushed branch, rather than surfacing a bare command failure
+    that reads as "nothing happened". BUILD NO SECOND CLASSIFIER AND NO SECOND PARSER: W1-T525
+    owns the metered seam and W1-T529 owns the floor.
+
+    (vii) NOT IN SCOPE, EACH WITH ITS OWNER. Any retry, sleep, backoff or wait-for-reset at the
+    push boundary — rationale's last paragraph, and W1-T529 design (iii). Observing or alarming
+    on quota — W1-T372, which puts BOTH buckets on the daemon's health tick and escalates on the
+    crossing into exhaustion; this task must add no quota read of its own. The ratification
+    path's own create and its resume — W1-T903, which is filed and must not be duplicated here.
+    The console's board-poll consumption that drained the bucket — W1-T999 (pacer + TTL),
+    W1-T522/W1-T523 (the REST conversions). Adopting an already-pushed implement branch on a
+    later dispatch — NOT filed and NOT taken here: it is a dispatcher concern, not a transport
+    one, and it should be argued on evidence gathered AFTER this removes the common cause.
+  acceptance:
+    - claim: "a harness-opened pull request is created over the REST endpoint and no gh pr create is issued"
+      proof: "unit test: test/pr-create-rest-transport.test.ts"
+    - claim: "the pull request url comes from the create response rather than from scraped command output"
+      proof: "unit test: test/pr-create-rest-transport.test.ts"
+    - claim: "the body is derived from the branch commits and an unreadable git history yields an empty body instead of a throw"
+      proof: "unit test: test/pr-create-rest-transport.test.ts"
+    - claim: "the authored title still reaches the created pull request at every call site"
+      proof: "unit test: test/pr-create-rest-transport.test.ts"
+    - claim: "the live write guard still refuses at the builder under the same key"
+      proof: "unit test: test/pr-create-rest-transport.test.ts"
+    - claim: "a rate limited create surfaces as throttled and names the branch that is already pushed"
+      proof: "unit test: test/pr-create-rest-transport.test.ts"
+  risk: high
+  origin: feedback#fb-1785899307058-60fbcf
+  plan_refs: ["W1-T903", "W1-T372", "W1-T327", "W1-T529", "W1-T511", "W1-T999"]
+  files: [src/run-task.ts, test/pr-create-rest-transport.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — every claim is an assertion over an injected exec seam and a fixture git
+    history, with no operator present. It builds a mechanism and writes no DECISIONS.md entry, so
+    W1-T353's verify:human rule for ruling-shaped tasks does not apply.
+
+    risk:high IS SET UP FRONT and is Rule 19's SPAN plus a genuine blast radius: `files:` spans
+    src/ and test/, and the builder this changes is on the terminal path of EVERY harness-opened
+    PR — implement, retro, triage and plan. A wrong argv here opens no PRs at all, fleet-wide,
+    which is why criteria 4 and 5 pin the title and the guard rather than only the transport.
+
+    budget_usd 65 — one builder rewritten, four executors re-pointed at a parsed response, one
+    local body derivation, and a falsifier that must COUNT invocations (zero `gh pr create`)
+    rather than merely observe a happy path.
+
+    files: IS TWO PATHS AND BOTH ARE TOUCHED. src/run-task.ts is declared because
+    `ghPrCreateFillCommand` is DEFINED there and all four executors are there — read at this
+    filing, not inferred — so there is no smaller honest declaration. THE W1-T471 SERIALISATION
+    COST IS ACCEPTED IN WRITING: a large share of the queue declares that file, and this shard
+    will batch against none of them. src/lib/status.ts is NOT declared: `isGhRateLimitError` is
+    IMPORTED unchanged per design (vi), and declaring an untouched path fails
+    `inverseScopeUntouchedFiles` (src/lib/review.ts) exactly as an undeclared touched one fails
+    `scopeViolationFiles`. src/lib/plan-pr-emitter.ts is NOT declared: W1-T903 declares it for
+    the ratification path's REST helper, and claiming it here would serialise this behind that
+    task for no edit — if an implementer concludes the two creates should share one helper, THE
+    SHARD MUST BE AMENDED FIRST rather than the path added mid-run. src/lib/open-prs-rest.ts is
+    NOT declared for the same reason (W1-T525 and W1-T529 both declare it).
+
+    THE TEST HOME IS NEW ON PURPOSE. test/run-task.test.ts is the highest-contention suite in
+    the tree and CLAUDE.md records it intermittently zeroing coverage at file level;
+    test/live-write-guard-command-sites.test.ts already covers the guard from the guard's side
+    and is left alone by design (ii). A transport falsifier that counts `gh` invocations belongs
+    in its own file — the same reasoning W1-T523 used for test/status-rest-transport.test.ts and
+    W1-T903 used for test/approve-resumable-rest.test.ts.
+
+    PROOF NOTES: all six proofs are the WHOLE-FILE path form over
+    test/pr-create-rest-transport.test.ts, which does not exist today (checked: no test path
+    matching pr-create exists). That is a FORWARD REFERENCE TO A PATH, which CLAUDE.md records
+    as safe — unlike forward-referencing a symbol name, which is a guess — and the path is
+    declared in files: so the implementer creates it. No `grep:` proof is used, so the
+    line-based, basic-regex and must-MISS traps do not arise.
+
+    PLATFORM FACT, CHECKED FOR THIS FILING RATHER THAN ASSUMED: `gh pr create --fill` uses the
+    commit information for title and body — the first/only commit's subject and body for a
+    single-commit branch, and the BRANCH NAME as title with the list of commit titles as body for
+    a multi-commit one — and an explicit `--title` overrides the derived title. That is what
+    makes design (iii) a faithful local reproduction rather than an invention, and design (iv)'s
+    note that the lost branch-name fallback is a gain rather than a regression.
+
+    WHAT THIS TASK IS WORTH, STATED HONESTLY: it does not stop GraphQL exhaustion and reduces
+    nobody else's burn. It moves the fleet's LAST push-boundary write off the bucket that hits
+    zero and onto the one that was 97% free during the measured incident, so an exhaustion
+    somebody else caused stops costing a completed run.

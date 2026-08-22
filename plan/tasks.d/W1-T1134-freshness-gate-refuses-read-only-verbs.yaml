@@ -1,0 +1,139 @@
+- id: W1-T1134
+  title: "THE CLI FRESHNESS GATE IS VERB-AGNOSTIC, SO IT REFUSES READ-ONLY VERBS ON THE ONE HOST THAT HOLDS THE DATA THEY READ — `main()`'s blanket `else` exits 1 on a DETACHED HEAD that is behind, and the daemon's checkout is detached by design on every boot, so `doctor`, `status` and the `--dry-run` verbs are reachable only in the gap between a restart and the next merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main` before
+    any reading, against LOCAL SOURCE. The daemon's checkout was not moved by this recon. Every zero
+    carries a control taken on the same scan.
+
+    (1) THE OBSERVED REFUSAL. Run from `docker exec -w /home/node/Remudero/remudero`, `doctor`,
+    `sweep --dry-run`, `correct`, `run-task`, `inbox --dry-run` and `status` all exit 1 with
+    `rmd is behind origin/main (c66b504..2e93251) but this checkout is on a DETACHED HEAD`.
+
+    (2) THE GATE IS A BLANKET `else`, AND IT ALREADY HAS THREE CARVE-OUTS. `main()`
+    (`src/run-task.ts`) branches on the verb: `daemon`/`serve` go to `serviceFreshnessGate` and
+    ALWAYS proceed; `deploy-run` gets no gate at all; `sync` is exempt (W1-T907); and every other
+    verb falls into an `else` that calls `checkCliFreshness` and `process.exit(1)` on a refusal.
+    So the mechanism this task needs already exists and is already exercised three times — this is
+    extending an established pattern, not inventing one.
+
+    (3) THE REFUSAL'S OWN REASONING DOES NOT REACH THESE VERBS. The comment beside the `else` states
+    it plainly: "Every OTHER verb keeps the refusal: `review`, `lint-plan`, `triage`, `approve` and
+    the rest read the plan, and a stale plan gives a wrong answer — which is the whole point of the
+    gate." That is correct for a verb whose ANSWER is derived from the plan and then ACTED ON. It is
+    not the case for a verb that reads the ledger and prints. `checkCliFreshness`'s off-main arm
+    (`src/lib/self-sync.ts`) refuses because fast-forwarding "would move your work's base out from
+    under it" — a refusal to MUTATE, which the entry gate then escalates into a refusal to RUN.
+
+    (4) AND THE WINDOW IS MINUTES ON A BUSY DAY. `deploy/entrypoint.sh` runs
+    `git -C "$TREE" checkout --detach "$TARGET"` on every boot, so the daemon's checkout is detached
+    BY DESIGN. It re-checks-out only when the daemon exits `DAEMON_EXIT_STALE` (75, `EX_TEMPFAIL`,
+    `src/lib/daemon.ts`), and it will not take that exit while a worker holds an `inflight` lock. So
+    these verbs work between a restart and the next merge to `main`, and not after.
+
+    (5) THE CLASSIFICATION IS NOT "WRITES NOTHING", AND SAYING SO WOULD BE WRONG. Measured per verb:
+      - `doctor` is READ-ONLY by construction — its own registry entry says `--fix` is refused by
+        name, and every check reads the ledger, `state/`, `plan/`, `/proc` or `ps`. It writes
+        nothing. It is also explicitly built for "a cold ssh session while remudero-serve is down",
+        which is precisely when the gate blocks it.
+      - `status` DOES write: `src/lib/status.ts` records that "the only file it writes is the
+        status.json cache". A machine-owned cache, not a decision — but not nothing.
+      - `sweep --dry-run` is NOT literally trace-free either. `src/lib/sweep.ts` claims every ledger
+        write in the module is "guarded by `!deps.dryRun`", and `log("sweep.pass", { …, dry_run:
+        deps.dryRun === true })` is written unguarded. One diagnostic row, carrying its own dry-run
+        flag. NAMED HERE, NOT FIXED HERE — it is a one-line contradiction in a different module's
+        contract and belongs to whoever owns that contract.
+      - `run-task` GENUINELY DISPATCHES and must keep the gate. Its zero-cost refusal is only the
+        already-merged case (`REFUSED: <id> is already merged — pass --rerun`, W1-T319), and that
+        refusal lives INSIDE `runTask`, after the gate — it is not a reason to exempt the verb.
+      - `drain` and `daemon` dispatch. `daemon`/`serve` already have their own gate and are
+        untouched by this.
+    SO THE AXIS IS DISPATCH-OR-DECIDE, NOT WRITES-NOTHING, and that is the same axis the gate's own
+    comment reaches for when it says "a drain acting on a stale plan".
+
+    (6) THE OPERATOR COST IS REAL AND WAS PAID TWICE TODAY. The only workaround is fetching and
+    re-detaching the daemon's own tree. That is exactly the hazard `deploy/recycle-container.sh`
+    refuses for — its header records "a SECOND recycle, run without pausing first, found three
+    workers mid-run. Killing them would have lost the work and stranded their `state/inflight/*.lock`
+    files", and its refusals are described as "the deliverable, not the happy path". The manual
+    fetch-and-re-detach has no such refusal, and it was performed twice on 2026-08-22 with a live
+    worker present. A gate that makes the safe verb unavailable and leaves only the unguarded manual
+    path is worse than the risk it names.
+
+    (7) OWNERSHIP, CITED AND NOT RE-FILED. W1-T445 owns WHICH TREE the predicate may fast-forward
+    and established the off-main refusal this arm implements. W1-T446 owns the DIRTY half of the
+    predicate. W1-T907's `rmd sync` is the sanctioned recovery, and is ALSO the precedent for this
+    task's shape: it is already exempted from this same gate, on the stated ground that gating it
+    "would mean it could only ever run when it had nothing left to do". None of the three is
+    reopened here — this task does not touch `src/lib/self-sync.ts` at all.
+  design: |
+    (i) THE CHANGE IS WHERE THE GATE APPLIES, NEVER WHAT IT DECIDES. `checkCliFreshness` keeps its
+    predicate, its message and its ledger row exactly as they are; W1-T446 remains the only task
+    that may alter them. This task changes only the verb dispatch in `main()`.
+
+    (ii) THE EXEMPT SET IS DECLARED, NOT INFERRED. A verb is exempt only by being named, in one
+    place, beside a stated reason — the same shape the three existing carve-outs already take. No
+    heuristic over verb names, no "looks read-only" inference, and no `--dry-run` flag sniffing: a
+    flag can be absent and the verb still dispatch.
+
+    (iii) EVERY DISPATCHING VERB KEEPS THE GATE, AND THE TEST MUST PROVE IT. `run-task`, `drain`,
+    `triage`, `fix`, `approve`, `review` and `lint-plan` are unchanged. A falsifier that only shows
+    the exempt verbs running proves half the property; the other half is that a dispatching verb
+    still exits 1 on the same input.
+
+    (iv) DO NOT REMOVE THE GATE AND DO NOT PUT THE DAEMON ON A BRANCH. Both were considered and both
+    are refused here: the gate is load-bearing for the dispatching verbs, and the detached checkout
+    is deliberate (`deploy/entrypoint.sh`'s own header explains why a local branch would not be
+    moved by a fetch).
+
+    (v) OUT OF SCOPE, NAMED. The unguarded `sweep.pass` row on a dry run (rationale 5) is recorded
+    and not repaired. `status`'s cache write is recorded and not changed. Whether `status` belongs
+    in the exempt set at all is the one genuine judgement call in the set, and the implementer
+    should state which way they took it rather than leaving it implicit.
+  acceptance:
+    - claim: "a read-only verb runs from a detached checkout that is behind origin/main"
+      proof: "unit test: W1-T1134: a read-only verb runs from a detached checkout that is behind"
+    - claim: "a dispatching verb still refuses on that same checkout"
+      proof: "unit test: W1-T1134: a dispatching verb still refuses on the same checkout"
+    - claim: "the exempt set is a declared list rather than a heuristic over verb names"
+      proof: "unit test: W1-T1134: the exempt set is declared, not inferred from the verb name"
+    - claim: "the freshness predicate itself is unchanged by this task"
+      proof: "unit test: W1-T1134: the freshness predicate is unchanged by this task"
+    - claim: "the existing deploy-run and sync carve-outs keep behaving exactly as they do today"
+      proof: "unit test: W1-T1134: the existing deploy-run and sync carve-outs are unchanged"
+  files: [src/run-task.ts, test/deploy-run-freshness-exempt.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#freshness-gate-refuses-read-only-verbs-2026-08-22"
+  plan_refs: ["W1-T445", "W1-T446", "W1-T907", "W1-T1010", "W1-T924"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NONE IS PURE-PATH, DELIBERATELY. All five are
+    NAME-FILTERED `unit test:` forward references, for which `proofScopePath` returns `undefined`, so
+    `proof-scope` is silent on each. A pure-path proof would have been WORSE here than in a usual
+    filing: the test home already EXISTS and already passes, so `check-proof` would return
+    `verdict: pass` today, before any of this work is done — an executed proof that discriminates
+    nothing. A name that does not exist yet cannot pass by accident.
+
+    `test/deploy-run-freshness-exempt.test.ts` IS THE EXISTING HOME and is declared rather than a new
+    filename: it already drives `main()`'s freshness gate through an injected `checkFreshness` and
+    already asserts one carve-out from it. Reusing it keeps `subsystemsOf` at two stems instead of
+    three. The unchanged-predicate criterion is proved by a NEW named case in that same home, not by
+    naming `test/self-sync-branch-guard.test.ts`, which sits outside `files:` — `lint-plan` warned on
+    exactly that and the warning was taken rather than argued with.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. A mistake here either lets a dispatching verb act on a
+    stale plan — the exact failure the gate exists to prevent — or leaves the operator with no
+    read-only instrument on the host that holds the data. Claiming Rule 19 forced the band would be a
+    false claim in the direction that flatters the filing.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the refusal by running the verbs from the container's
+    working directory rather than from a worktree. Re-derive the carve-outs by reading `main()`'s
+    verb branch directly, not this shard. Re-derive the window by reading `deploy/entrypoint.sh`'s
+    detach and `DAEMON_EXIT_STALE`. The shas in rationale (1) will be stale within the hour; the
+    shape will not.

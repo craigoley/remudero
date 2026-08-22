@@ -1,0 +1,95 @@
+- id: W1-T1112
+  title: "THE ISOLATION VERDICT NAMES THE ONE ROW THAT CANNOT EXPLAIN IT — `isolation_preflight_failed` carries the counts, the names and the prose reason but NEVER `stderr_excerpt`, while the sibling `isolation.probe` row written the same millisecond carries the spawn's actual error text; so an operator following the verdict's own pointer reads `the probe's alias/function counts could not be parsed — isolation UNPROVEN` and concludes nothing is diagnosable, when the cause is sitting one row away"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  rationale: |
+    RE-DERIVED 2026-08-21 at origin/main `15b237db`, from a scratch worktree whose HEAD was proved
+    equal to that sha. The code answer is this file's own; the fleet row counts are the operator's
+    and are labelled as such.
+
+    (1) THE TWO ROWS, AND WHICH ONE CARRIES THE CAUSE. `src/lib/isolation.ts` logs `isolation.probe`
+    with `...(r.isError ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {})` — the spawn's own
+    error text, present only when the underlying worker call errored. It then logs
+    `isolation_preflight_failed` with `alias_count`, `function_count`, `alias_names`,
+    `function_names` and `reason` — AND NO `stderr_excerpt`. The thrown message names the second:
+    `isolation_preflight_failed: <reason> — FAIL CLOSED, the run does not proceed`.
+
+    (2) SO THE POINTER POINTS AWAY FROM THE EVIDENCE. A reader who follows the verdict's own row
+    name finds four nulls and a prose sentence saying the counts could not be parsed. The sentence
+    is true and useless: it says the instrument could not read, not why. The reason it could not
+    read — the worker never booted — exists, on the sibling row, written the same millisecond, and
+    nothing in the verdict says to look there.
+
+    (3) THE FAILURE IS RARE, WHICH IS WHY THE POINTER MATTERS RATHER THAN THE RATE. Re-derived over
+    the operator checkout's own ledger union — 1 live file, 6 plain rotations, 666 `.gz`, each form
+    separately controlled non-zero — 611 distinct `isolation.probe` rows: 605 with both counts
+    parsed, 6 with a null count, against 12 `isolation_preflight_failed` rows. The operator reports
+    247 clean against 3 parse failures on the FLEET at two of the three instances. TWO HOSTS, TWO
+    WINDOWS: neither rate is the other's, and this shard quotes each to its own corpus.
+
+    (4) AND THE MINI CANNOT SEE THE EXCERPT AT ALL, WHICH IS ITSELF A CONTROLLED FINDING. ZERO of
+    those 611 rows carry `stderr_excerpt` — the field is written only when the spawn itself errored,
+    and this corpus holds no such spawn. The `Claude configuration file not found at:
+    /home/node/Remudero/worker-home-<uuid>` excerpt the operator observed is a FLEET row and is
+    cited, never re-derived here.
+
+    (5) THE CAUSE IS ALREADY OWNED AND IS NOT RE-FILED. W1-T981 files that a fresh worker home has
+    no Claude config BY CONSTRUCTION — and `src/lib/worker-home.ts` says it in its own words: the
+    config path is "DELIBERATELY ABSENT from WORKER_HOME_SYMLINKS and WORKER_HOME_RC_FILES alike.
+    Disposition (A), 'ACCEPT AND DOCUMENT', chosen over seeding (B) or granting it back (C)". SO
+    THE ANSWER TO "DID THE GRANT FAIL, RACE, OR NEVER HAPPEN" IS: NEVER MADE, BY A RECORDED RULING.
+    `WORKER_HOME_SYMLINKS` does grant `.claude` — the directory — which is a different path from
+    the config file the CLI looks for. This task changes none of that.
+
+    (6) THE CLASS IS CITED, NOT RE-FILED. A row that answers "unparseable" for both "the probe ran
+    and read nothing" and "the probe never ran" is one value for several outcomes — W1-T1081's and
+    W1-T1097's class. This task does not widen it; it fixes the single pointer that makes that
+    collapse unrecoverable for a reader.
+  design: |
+    (i) THE VERDICT'S OWN ROW MUST CARRY THE CAUSE OR NAME WHERE IT IS. Two shapes are acceptable
+    and an implementer may choose either with the reason written down: put `stderr_excerpt` on
+    `isolation_preflight_failed` too, or have the thrown message and the row name the sibling
+    explicitly. What is NOT acceptable is leaving a reader to discover that a second row exists.
+
+    (ii) DO NOT COLLAPSE THE TWO ROWS. They answer different questions — one is every probe's
+    outcome, the other is a run-terminating verdict — and `isolation.probe` is written on clean runs
+    too. Merging them would lose the clean-run line the retro's own miners read.
+
+    (iii) DO NOT CHANGE WHAT FAILS CLOSED. An unparseable count must still refuse the run; nothing
+    here softens `assessIsolation`. The task is about what the refusal SAYS, never whether it fires.
+
+    (iv) DO NOT SEED OR GRANT THE CONFIG. Rationale (5): that disposition is recorded and W1-T981
+    owns any change to it. An implementer who "fixes" the absence inside this task has taken a
+    ruling that is not theirs.
+
+    (v) OUT OF SCOPE, NAMED. No change to `WORKER_HOME_SYMLINKS`, to `capStderrExcerpt`'s cap, or to
+    the containment probe's sibling pair in `src/lib/containment.ts`, which has the same shape and
+    deserves its own look once this one is settled.
+  acceptance:
+    - claim: "the run-terminating row can explain itself without a reader finding a second row"
+      proof: "unit test: test/isolation.test.ts"
+    - claim: "a clean probe still writes no error excerpt at all"
+      proof: "unit test: test/isolation.test.ts"
+    - claim: "an unparseable count still refuses the run"
+      proof: "unit test: test/isolation.test.ts"
+    - claim: "the sibling row is the one that carries the spawn's own error text today"
+      proof: "grep: capStderrExcerpt in src/lib/isolation.ts"
+  origin: "recon#verdict-names-the-row-without-the-cause-2026-08-21"
+  plan_refs: ["W1-T981", "W1-T1081", "W1-T1097"]
+  files: [src/lib/isolation.ts, test/isolation.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: medium` — verify against the linter rather than assuming; if Rule 19 refuses the span,
+    raise it and record the refusal rather than arguing with it.
+
+    THE THREE INSTANCES (W1-T519 on 08-15, W1-T1099 and W1-T1104 today) ARE THE OPERATOR'S, ON THE
+    FLEET. Rationale (3) and (4) record the mini's own figures separately and the control that
+    proves the excerpt is absent there. Re-derive on the fleet, per form, control first.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
