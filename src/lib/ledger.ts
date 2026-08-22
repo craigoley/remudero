@@ -513,6 +513,14 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // ever move again, the exact deadlock this task fixes.
   "fix.ci_not_green",
   "fix.resolved",
+  // W1-T1095 (capability 3): run-task.ts's `fixRebaseAlreadySpent` reads this row to enforce the
+  // shard's "AT MOST ONE rebase-and-retry per blocked PR" bound (design iii). It is the ONLY
+  // record of that bound — there is no timer and no state file — so losing it across a rotation
+  // would silently restore an unbounded rebase-and-retry, which is the retry loop this capability
+  // exists to avoid becoming. Its siblings `fix.rebase_refused`/`fix.rebase_failed` are
+  // deliberately NOT here: nothing decides on them, and a step belongs in this set only while a
+  // real deciding reader consults it.
+  "fix.rebased",
   "dep-review.decided",
   "review.posted",
   "review.post_refused",

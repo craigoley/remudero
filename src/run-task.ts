@@ -4040,6 +4040,17 @@ export function fixRungTerminationVerdict(
       phrase: `parked on prerequisite #${rung.blockedOnPr}`,
     };
   }
+  if (rung.outcome === "rebased") {
+    // W1-T1095 (capability 3): the head MOVED, so this rung is over — see `runFixRung`'s own
+    // comment at the return site for why continuing against a now-stale worktree would push
+    // nothing. Carries the same `blocked_on_pr` field the parked arm does, because it is the
+    // same prerequisite that put this PR here.
+    return {
+      reason: rung.reason,
+      extra: { blocked_on_pr: rung.blockedOnPr },
+      phrase: `rebased onto its base (prerequisite #${rung.blockedOnPr})`,
+    };
+  }
   return {
     reason: `stood down — ${rung.standDownReason}`,
     extra: {},
@@ -4048,7 +4059,7 @@ export function fixRungTerminationVerdict(
 }
 
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked";
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
@@ -4425,6 +4436,296 @@ export function prerequisiteMerged(liveState: LiveStateResult | undefined): bool
 }
 
 /**
+ * W1-T1095 (capability 3 — REBASE): the observed facts the rebase decision reads. Split from
+ * its I/O so every arm below is a unit fixture — the same split `fixRungTerminationVerdict`
+ * (above) already took when the coverage gate forced it.
+ */
+export interface FixRebaseFacts {
+  /** The prerequisite `outOfDiffBlockerFor` named, which `prerequisiteMerged` has just read
+   *  as MERGED. Present on every call — this decision is only ever reached on the resume path. */
+  prerequisitePr: number;
+  /** Did the review this rung is acting on already PASS? A new head DISCARDS a posted verdict
+   *  and spends one of two review-orphan slots (W1-T225/W1-T1018), so a passing review is the
+   *  one state where rebasing costs more than it can possibly buy. */
+  reviewPassed: boolean;
+  /** GitHub's own `mergeable` reading. `"CONFLICTING"` is the SWEEP's path, never this rung's —
+   *  it already resolves non-deletion conflicts and correctly refuses deletion ones. Anything
+   *  other than a definite `"MERGEABLE"` refuses (fail-safe, the same direction every other
+   *  read in this file takes on state it cannot resolve). */
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | undefined;
+  /** `compare(base...head).behind_by` — how many commits the base carries that this head does
+   *  not. `undefined` when the comparison could not be read. */
+  behindBy: number | undefined;
+  /** Has a `fix.rebased` row already been written for this pull request? The shard's design (iii)
+   *  bounds this at AT MOST ONE rebase-and-retry per blocked pull request. */
+  alreadyRebased: boolean;
+}
+
+/** {@link decideFixRebase}'s verdict — `reason` is written to the ledger on BOTH arms, so a
+ *  refusal is never silent (design note ii: every termination writes a row naming its reason). */
+export interface FixRebaseDecision {
+  rebase: boolean;
+  reason: string;
+}
+
+/**
+ * W1-T1095 (capability 3): should this resumed pull request take its base before the next strike?
+ *
+ * WHY "BEHIND MAIN" IS NOT ITSELF THE JUSTIFICATION, MEASURED. This repository's `main`
+ * protection reads `strict: false`, so GitHub does NOT refuse to merge a pull request merely
+ * because its base moved — and with strict off it never even reports the `BEHIND` merge state
+ * (the live board reads `BLOCKED`/`DIRTY` only). An arm gated on "behind" alone would therefore
+ * be permanently inert here, which is the unwired-arm shape this fleet keeps filing.
+ *
+ * THE FIELD THAT DOES JUSTIFY IT IS `behind_by`, READ ONLY ON THE RESUME PATH, AND IT MEANS
+ * SOMETHING SPECIFIC THERE: the review itself said this pull request is `blocked on #N`,
+ * `prerequisiteMerged` has just read #N as MERGED, and a non-zero `behind_by` proves #N's merge
+ * commit is NOT in this head's tree. So the next strike would re-run a fix worker against a
+ * checkout that still lacks the remedy the review named, and fail for exactly the reason it
+ * already failed. That is why the rebase is the remedy rather than a tidy-up.
+ *
+ * ORDER IS LOAD-BEARING — the two REFUSALS THAT PROTECT SOMETHING come first, so a passing
+ * review or a spent bound can never be overridden by a later arm.
+ */
+export function decideFixRebase(facts: FixRebaseFacts): FixRebaseDecision {
+  if (facts.reviewPassed) {
+    return {
+      rebase: false,
+      reason: "review already passed — a new head would discard the posted verdict and spend a review-orphan slot",
+    };
+  }
+  if (facts.alreadyRebased) {
+    return {
+      rebase: false,
+      reason: `already rebased once for this pull request (prerequisite #${facts.prerequisitePr}) — the bound is one rebase-and-retry`,
+    };
+  }
+  if (facts.mergeable === "CONFLICTING") {
+    return {
+      rebase: false,
+      reason: "the head conflicts with its base — the conflict path belongs to the sweep, not this rung",
+    };
+  }
+  if (facts.mergeable !== "MERGEABLE") {
+    return {
+      rebase: false,
+      reason: `merge state is not a definite MERGEABLE (${facts.mergeable ?? "unreadable"}) — refusing to rebase on state that cannot be resolved`,
+    };
+  }
+  if (facts.behindBy === undefined) {
+    return {
+      rebase: false,
+      reason: "cannot read how far behind its base this head is — refusing to rebase on an unreadable comparison",
+    };
+  }
+  if (facts.behindBy <= 0) {
+    return {
+      rebase: false,
+      reason: `the head already contains its base — prerequisite #${facts.prerequisitePr} is present, nothing to take`,
+    };
+  }
+  return {
+    rebase: true,
+    reason: `prerequisite #${facts.prerequisitePr} merged and this head is ${facts.behindBy} commit(s) behind its base — updating the branch so the merged remedy is in the tree`,
+  };
+}
+
+/**
+ * W1-T1095 (capability 3): the argv for GitHub's own update-branch endpoint — a PURE API call
+ * that needs NO local branch and NO checkout, which is the whole reason it is used here rather
+ * than a local rebase. The daemon is DETACHED on every boot, and a call that assumed otherwise
+ * is exactly what broke `armAuto`'s `--delete-branch` (W1-T1111).
+ *
+ * NOT `gh pr update-branch`: that subcommand does not exist in the `gh` this fleet runs (2.45.0
+ * ships no `update-branch` under `gh pr`), so naming it would ship a command that fails on every
+ * invocation. This is the REST endpoint that subcommand wraps in newer builds, reached through
+ * `gh api` — the same argv-builder shape `ghCreatePrArgs` (lib/plan-pr-emitter.ts) uses, exported
+ * so the argv itself is a unit fixture rather than an inline string.
+ */
+export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`];
+}
+
+/**
+ * W1-T1095 (capability 3): the real update-branch WRITE. `execFileSync` is injectable so the
+ * argv and the failure mapping are unit-testable without a live pull request; the live-write
+ * guard fires FIRST, so a test that reaches this by accident is refused loudly rather than
+ * quietly mutating a real head.
+ *
+ * A failure NEVER throws back into the rung — it is returned as `{ ok: false, error }` and
+ * ledgered by {@link runFixRebase} as `fix.rebase_failed`. A rebase that did not happen must
+ * read as a rebase that did not happen.
+ */
+export function ghUpdateBranch(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  exec: typeof execFileSync = execFileSync,
+): { ok: boolean; error?: string } {
+  assertLiveWriteAllowed("gh-pr-update-branch", `updating the base of ${owner}/${repo}#${prNumber}`);
+  try {
+    exec("gh", ghUpdateBranchArgv(owner, repo, prNumber), { stdio: "pipe" });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message ?? e) };
+  }
+}
+
+/**
+ * W1-T1095 (capability 3): has this pull request already spent its ONE rebase? A pure fold over
+ * rows already written — no new read, no timer, no state file. PR-NUMBER keyed, not task-id
+ * keyed: the bound the shard states is "at most one rebase-and-retry per blocked PR", and one
+ * task can own more than one pull request over its life.
+ */
+export function fixRebaseAlreadySpent(lines: ReadonlyArray<Record<string, unknown>>, prNumber: number): boolean {
+  return lines.some((l) => l.step === "fix.rebased" && l.pr_number === prNumber);
+}
+
+/** The two REST reads {@link runFixRebase} needs, behind one injectable seam so the decision
+ *  above stays pure and this orchestrator stays thin. `mergeable` comes from `GET /pulls/{n}`,
+ *  `behindBy` from `GET /compare/{base}...{head}` — both REST, never `--json` (GraphQL), the
+ *  same quota split W1-T511 measured and this file already follows everywhere else. */
+export interface FixRebaseMergeFacts {
+  mergeable?: string;
+  behindBy?: number;
+}
+
+/**
+ * W1-T1095 (capability 3): the I/O half — gather the two observations, ask {@link decideFixRebase},
+ * and WRITE A ROW EITHER WAY. There is no silent exit from this function: every return has
+ * ledgered a `fix.rebased`, `fix.rebase_refused` or `fix.rebase_failed` row naming its reason
+ * first (design note ii — "every termination ... must write a row carrying its reason", and a
+ * refusal to rebase is a termination like any other).
+ *
+ * ALL THE JUDGEMENT LIVES IN {@link decideFixRebase}; this function decides nothing except what
+ * cannot be decided without I/O — whether the URL parses and whether the write dep is wired.
+ */
+export async function runFixRebase(
+  args: { prUrl: string; prerequisitePr: number; reviewPassed: boolean; strikes: number },
+  io: {
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+    ledgerLines: () => Array<Record<string, unknown>>;
+    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
+    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+  },
+): Promise<{ rebased: boolean; reason: string }> {
+  const target = prUrlTarget(args.prUrl);
+  if (!target) {
+    const reason = `pull request url does not parse (${args.prUrl}) — cannot address the update-branch endpoint`;
+    io.log("fix.rebase_refused", { strike: args.strikes, blocked_on_pr: args.prerequisitePr, reason });
+    return { rebased: false, reason };
+  }
+  if (!io.updateBranch) {
+    const reason = "no update-branch dep wired — the rebase capability is not reachable from this call site";
+    io.log("fix.rebase_refused", { strike: args.strikes, pr_number: target.number, blocked_on_pr: args.prerequisitePr, reason });
+    return { rebased: false, reason };
+  }
+
+  const observed = io.readMergeFacts ? await io.readMergeFacts(target.number) : {};
+  const mergeable =
+    observed.mergeable === "MERGEABLE" || observed.mergeable === "CONFLICTING" || observed.mergeable === "UNKNOWN"
+      ? observed.mergeable
+      : undefined;
+  const decision = decideFixRebase({
+    prerequisitePr: args.prerequisitePr,
+    reviewPassed: args.reviewPassed,
+    mergeable,
+    behindBy: observed.behindBy,
+    alreadyRebased: fixRebaseAlreadySpent(io.ledgerLines(), target.number),
+  });
+
+  if (!decision.rebase) {
+    io.log("fix.rebase_refused", {
+      strike: args.strikes,
+      pr_number: target.number,
+      blocked_on_pr: args.prerequisitePr,
+      behind_by: observed.behindBy,
+      reason: decision.reason,
+    });
+    io.say(`fix rung: NOT rebasing — ${decision.reason}: ${args.prUrl}`);
+    return { rebased: false, reason: decision.reason };
+  }
+
+  const result = await io.updateBranch(target.number);
+  if (!result.ok) {
+    const reason = `update-branch failed — ${result.error ?? "no error reported"}`;
+    io.log("fix.rebase_failed", {
+      strike: args.strikes,
+      pr_number: target.number,
+      blocked_on_pr: args.prerequisitePr,
+      reason,
+    });
+    io.say(`fix rung: rebase FAILED — ${reason}: ${args.prUrl}`);
+    return { rebased: false, reason };
+  }
+
+  io.log("fix.rebased", {
+    strike: args.strikes,
+    pr_number: target.number,
+    blocked_on_pr: args.prerequisitePr,
+    behind_by: observed.behindBy,
+    reason: decision.reason,
+  });
+  io.say(`fix rung: REBASED — ${decision.reason}: ${args.prUrl}`);
+  return { rebased: true, reason: decision.reason };
+}
+
+/**
+ * W1-T1095 (capability 3): map GitHub's two REST payloads onto {@link FixRebaseMergeFacts} —
+ * PURE, so the mapping is a unit fixture and the network read below stays a one-line wrapper.
+ *
+ * `mergeable === false` OR `mergeable_state === "dirty"` is the DEFINITE conflict reading and is
+ * the only thing that yields `"CONFLICTING"`; `mergeable === true` is the only thing that yields
+ * `"MERGEABLE"`. Everything else — a `null` GitHub has not computed yet, an absent field, a
+ * payload that is not an object — is `"UNKNOWN"`, which {@link decideFixRebase} refuses on. The
+ * asymmetry is deliberate and matches every other read in this file: never resolve toward acting
+ * on state the API has not actually asserted.
+ */
+export function mergeFactsFromRest(pr: unknown, compare: unknown): FixRebaseMergeFacts {
+  const p = (pr ?? {}) as { mergeable?: unknown; mergeable_state?: unknown };
+  const c = (compare ?? {}) as { behind_by?: unknown };
+  const mergeable =
+    p.mergeable === false || p.mergeable_state === "dirty"
+      ? "CONFLICTING"
+      : p.mergeable === true
+        ? "MERGEABLE"
+        : "UNKNOWN";
+  return {
+    mergeable,
+    behindBy: typeof c.behind_by === "number" ? c.behind_by : undefined,
+  };
+}
+
+/**
+ * W1-T1095 (capability 3): the real two-read wiring — `GET /pulls/{n}` for the merge state and
+ * `GET /compare/{base}...{head}` for `behind_by`, both REST (never `--json`, which is GraphQL and
+ * a separate, already-measured-scarce quota — W1-T511). Fails SOFT to an empty reading on ANY
+ * error, which {@link decideFixRebase} then refuses on, so a `gh` hiccup can only ever cost a
+ * skipped rebase — never an unconsidered one.
+ */
+export function fixRebaseMergeFactsFromRest(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: GhApiFetcher = ghJson,
+): FixRebaseMergeFacts {
+  try {
+    const pr = fetch(["api", `repos/${owner}/${repo}/pulls/${prNumber}`]) as {
+      base?: { ref?: string };
+      head?: { sha?: string };
+    };
+    const base = pr?.base?.ref;
+    const head = pr?.head?.sha;
+    const compare =
+      base && head ? fetch(["api", `repos/${owner}/${repo}/compare/${base}...${head}`]) : undefined;
+    return mergeFactsFromRest(pr, compare);
+  } catch {
+    return {};
+  }
+}
+
+/**
  * W1-T1044: best-effort RECLAIM of a worker {@link spawnFixWorkerBounded} abandoned — scoped
  * by THIS run's own `REMUDERO_RUN_ID` env marker (worker-containment.ts's W1-T117 attribution),
  * reusing the SAME `defaultListCandidates`/`defaultReadMarkers`/`killProcessGroup` primitives
@@ -4735,6 +5036,25 @@ export async function runFixRung(opts: {
      * against the prerequisite's own PR URL in this task's repo.
      */
     readPrerequisiteState?: (prNumber: number) => LiveStateResult | Promise<LiveStateResult>;
+    /**
+     * W1-T1095 (capability 3 — REBASE): the two REST observations {@link runFixRebase} needs
+     * once a prerequisite has merged — `mergeable` and `behind_by`. Optional: a call site that
+     * omits it leaves `mergeable` unreadable, which {@link decideFixRebase} REFUSES on, so an
+     * unwired reader can only ever decline to rebase, never rebase blindly.
+     */
+    readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
+    /**
+     * W1-T1095 (capability 3): the update-branch WRITE — {@link ghUpdateBranchArgv} over `gh api`.
+     * Optional, and its absence is ledgered as a refusal rather than assumed: the rung must never
+     * report a rebase it did not perform.
+     */
+    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+    /**
+     * W1-T1095 (capability 3): the ledger rows the ONE-rebase-per-pull-request bound is folded
+     * from ({@link fixRebaseAlreadySpent}). Defaults to reading `deps.ledgerPath`, the same
+     * `ledgerLines?` seam `armAuto`/`disarmAuto` already take.
+     */
+    ledgerLines?: () => Array<Record<string, unknown>>;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
@@ -4873,6 +5193,46 @@ export async function runFixRung(opts: {
       }
       deps.log("fix.resumed", { strike: strikes, blocked_on_pr: outOfDiffBlocker });
       deps.say(`fix rung: RESUMING — prerequisite #${outOfDiffBlocker} has merged; dispatching normally: ${opts.prUrl}`);
+
+      // W1-T1095 (capability 3 — REBASE): the prerequisite has merged, but this head does not
+      // yet CONTAIN it. Take the base before spending the next strike, or the fix worker re-runs
+      // against a checkout that still lacks the remedy the review named and fails identically.
+      // Every arm of this call ledgers its reason, including every refusal — see `runFixRebase`.
+      const rebase = await runFixRebase(
+        {
+          prUrl: opts.prUrl,
+          prerequisitePr: outOfDiffBlocker,
+          // STRUCTURALLY FALSE HERE, AND SAID SO RATHER THAN DRESSED UP: the rung only ever
+          // reaches this line while `review.state` is narrowed to `"failure"` (a passing review
+          // returns `outcome: "fixed"` before any of this), so the compiler itself rejects
+          // `review.state === "success"` as a comparison with no overlap. The guard still exists
+          // in `decideFixRebase` — it is the operator's stated safety requirement and is proven
+          // by its own unit fixture — but at TODAY'S single call site it is defence in depth,
+          // not a live arm. Naming that is the point; an inert arm sold as a live one is the
+          // defect this fleet keeps filing.
+          reviewPassed: false,
+          strikes,
+        },
+        {
+          log: deps.log,
+          say: deps.say,
+          ledgerLines: deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)),
+          readMergeFacts: deps.readMergeFacts,
+          updateBranch: deps.updateBranch,
+        },
+      );
+      if (rebase.rebased) {
+        // THE HEAD MOVED, SO THIS RUNG IS OVER — and this return is the whole reason the rebase
+        // is safe. `update-branch` merges the base into the REMOTE head branch, so the local
+        // `opts.worktreePath` this rung would hand the next fix worker is now behind origin;
+        // that worker's `gitPushRunBranch` is a plain (non-force) push and would be rejected as
+        // non-fast-forward, and the sweep's push dep SWALLOWS failures ("the worker may already
+        // have pushed"), so the strike would be spent and land nothing, silently. Returning here
+        // spends NO strike and lets the next poll materialise a fresh worktree at the new head —
+        // the same re-invoked-later shape parking already uses, never a local fetch/reset (which
+        // would take `.git/config.lock` on a repo the fleet runs six lanes against).
+        return { outcome: "rebased", review, strikes, reason: rebase.reason, blockedOnPr: outOfDiffBlocker };
+      }
     }
 
     // W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15): a diff
@@ -7792,6 +8152,11 @@ async function runTask(
           // own `readPrerequisiteState` doc for the fail-safe (not-merged) default this takes
           // on a failed/indeterminate read.
           readPrerequisiteState: (n) => ghLiveState(`https://github.com/${owner}/${task.repo}/pull/${n}`),
+          // W1-T1095 (capability 3): the two REST observations and the update-branch write.
+          // Both are PURE API — no branch, no checkout — because the daemon is detached on every
+          // boot, the assumption that broke `armAuto`'s `--delete-branch` (W1-T1111).
+          readMergeFacts: (n) => fixRebaseMergeFactsFromRest(owner, task.repo, n),
+          updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc.
           spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.sweepWallClockBoundMs,
@@ -7828,7 +8193,7 @@ async function runTask(
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
-      if (rung.outcome === "stood_down" || rung.outcome === "parked") {
+      if (rung.outcome === "stood_down" || rung.outcome === "parked" || rung.outcome === "rebased") {
         // TWO NON-SPENDING TERMINATIONS, ONE EMISSION.
         //
         // W1-T177 (`stood_down`): this run's own PR went terminal (merged/closed) mid-rung —
@@ -18919,6 +19284,10 @@ export function buildSweepEffects(
             // number a "blocked on #N" review names, in this SAME owner/repo — see
             // runFixRung's own `readPrerequisiteState` doc.
             readPrerequisiteState: (n) => ghLiveState(`https://github.com/${owner}/${repo}/pull/${n}`),
+            // W1-T1095 (capability 3): same two seams as the run-loop call site above — pure
+            // API reads plus the guarded update-branch write, never a local rebase.
+            readMergeFacts: (n) => fixRebaseMergeFactsFromRest(owner, repo, n),
+            updateBranch: (n) => ghUpdateBranch(owner, repo, n),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
             // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The
