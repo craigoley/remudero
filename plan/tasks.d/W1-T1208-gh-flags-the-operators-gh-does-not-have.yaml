@@ -1,0 +1,142 @@
+- id: W1-T1208
+  title: "TWO OPERATOR-RUNNABLE CODE PATHS INVOKE `gh` FLAGS THE OPERATOR'S `gh` DOES NOT HAVE, AND ONE OF THEM READS AS AN EMPTY QUEUE — `--slurp` needs 2.51 and `pr update-branch` needs 2.53, the container is pinned at 2.63.2 and the host runs 2.45.0, so the same code answers correctly in one place and fails in the other"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main` before
+    any reading. The daemon's checkout was not moved and no suite was run. Every zero carries a
+    control taken on the same scan.
+
+    (1) THE OBSERVED FAILURE. `rmd sweep` run by hand on this host prints
+    `escalation reconcile: issue-list read FAILED this cycle`. The ledger that invocation writes to
+    (`$HOME/Remudero/state/ledger.ndjson`, resolved from the invoking checkout) carries SEVEN
+    `sweep.escalation_reconcile.list_failed` rows against SEVEN reconcile runs — every hand-run
+    invocation, none succeeding — each carrying the same error: `unknown flag: --slurp`.
+
+    (2) THE FLEET IS UNAFFECTED, WHICH IS THE WHOLE SHAPE. The fleet ledger union carries 1,347
+    `sweep.escalation_reconcile.summary` rows and closes at 03:11, 03:14, 12:00 and 14:01 on
+    2026-08-22. `sweep.escalation_reconcile.list_failed` reads ZERO in every fleet form, with
+    `sweep.disposed` non-zero in all seventeen as the coverage control. The reconciler is not
+    inert; it is unavailable to the operator.
+
+    (3) THE CAUSE IS A VERSION SPLIT, NOT A PERMISSION OR A LIMIT.
+    `labelledIssuesRestArgs` (`src/lib/escalate.ts:134`) returns
+    `["api", …, "--paginate", "--slurp"]`, and its own doc at 127-129 records why `--slurp` is
+    load-bearing: bare `--paginate` concatenates pages into JSON `JSON.parse` rejects. `--slurp`
+    arrived in gh 2.51. The container is pinned at `ARG GH_VERSION=2.63.2`
+    (`deploy/Dockerfile:33`); the host runs 2.45.0.
+
+    (4) Q1 — THERE ARE EXACTLY TWO SUCH SITES, AND BOTH ARE OPERATOR-RUNNABLE. Measured against the
+    host's own `gh --help` output rather than a version table:
+      - `src/lib/escalate.ts:134` — `--slurp`, reached by `rmd sweep`'s escalation reconciler via
+        `listRetirableEscalationIssues` -> `buildEscalationReconcileCandidates` -> `sweepCommand`.
+        FAILING TODAY.
+      - `src/run-task.ts:2404` — `gh pr update-branch`, in `updateBranchViaGh`, wired as
+        `updateBranchImpl` (default) into `buildSweepEffects`' `updateBranch` and reached by the
+        SAME `rmd sweep`. NOT YET OBSERVED FAILING, because `selectUpdateBranchTarget` picks at
+        most one target per pass and often none — but it fails identically the first time it fires
+        on this host.
+      CONTROLLED: of the flags this repo actually uses, `--paginate`, `--jq`, `--method` and
+      `--template` are all present in the host's 2.45.0 (`gh api --help` matches 3, 2, 3, 2);
+      `--slurp` matches ZERO and `gh pr --help` matches ZERO for `update-branch`, against a live
+      control of ONE for `pr merge`. So the enumeration is two, not "at least two".
+
+    (5) Q2 — AND THE REPOSITORY ALREADY CONTAINS THE ANSWER FOR ONE OF THEM. `ghUpdateBranchArgv`
+    (`src/run-task.ts:4546`, W1-T1095 capability 3) performs the SAME operation as
+    `updateBranchViaGh` with `["api", "--method", "PUT", "repos/…/pulls/…/update-branch"]` — the
+    REST endpoint the subcommand wraps, using only flags 2.45.0 has. Two forms of one operation
+    coexist in one file, and only one of them runs on the host.
+      A VERSION FLOOR CHECKED AT ENTRY: fails loudly and early, covers every future flag without
+      being re-derived, and is one check rather than N rewrites. COSTS: it makes a working host
+      unusable for verbs that never touch the flag — the same over-refusal W1-T1134 is about — and
+      it needs a declared minimum that someone must raise deliberately whenever a new flag is
+      adopted, which is a second registration list.
+      A FLAG-FREE FORM: needs no floor at all, keeps every verb runnable on any supported gh, and
+      for `update-branch` is a copy of code already in the tree. COSTS: it must be re-derived per
+      call site, `--slurp`'s replacement is a real page loop rather than a flag swap (the doc at
+      escalate.ts:127-129 explains exactly what that loop must reassemble), and nothing stops the
+      next author reaching for a newer flag.
+      ONLY THE HOST IS EXPOSED. The container is pinned, so a floor would never fire there and a
+      flag-free form buys the fleet nothing — this is entirely about the operator's own machine.
+      THE CHOICE IS NAMED AND NOT MADE HERE.
+
+    (6) Q3 — AND IT WAS INVISIBLE FOR A DAY BECAUSE THE FAILURE RENDERED AS A HEALTHY EMPTY QUEUE.
+    The first failure is 2026-08-21T14:41:34Z. Before W1-T1101 (#2419) merged this afternoon, this
+    exact state printed `escalation reconcile: 0 open needs-human issue(s) checked · 0 closed` —
+    indistinguishable from a reconciler that ran and found nothing. W1-T1101 is CITED AND NOT
+    RE-FILED: it is the reason this is legible, and the first hand-run after it merged surfaced a
+    fault that had been silent since the previous afternoon.
+
+    (7) AND THIS IS W1-T1134's SHAPE WITH THE SPLIT ONE LAYER DOWN. W1-T1134 is the freshness gate
+    refusing operator-runnable verbs because the daemon's CHECKOUT is detached; this is the same
+    "correct in one place, wrong in the other" failure with the split on the `gh` BINARY instead.
+    CITED, NOT RE-FILED, and no part of its remedy is assumed here.
+  design: |
+    (i) THE `[]`-ON-FAILURE CONTRACT IS NOT WEAKENED. `buildEscalationReconcileCandidates`'
+    "do nothing this cycle, never a false 'zero open'" is the only reason this was ever visible.
+    Nothing here touches it, and no criterion below depends on changing it.
+
+    (ii) NO TIMER AND NO RETRY. A retry against a flag the binary does not have fails every time;
+    a timer only spreads the same failure out. Both are refused explicitly.
+
+    (iii) WHICHEVER REMEDY IS TAKEN, IT MUST BE ONE MECHANISM FOR BOTH SITES. Fixing `--slurp` and
+    leaving `pr update-branch` is the same defect with one instance repaired, and the second site
+    is the one nobody has hit yet — which is exactly why it will be hit unattended.
+
+    (iv) A FALSIFIER MUST DRIVE THE ARGV, NOT A LIVE `gh`. Both sites are argv builders or thin
+    wrappers around one, so the discriminating test is over the produced argument list and its
+    parse of a multi-page payload — never a subprocess, and never a version probe against whatever
+    `gh` happens to be installed where the suite runs.
+
+    (v) OUT OF SCOPE, NAMED. Which remedy to take (rationale 5) is an operator ruling. The
+    container pin at `deploy/Dockerfile:33` is not changed. W1-T1101's rendering and W1-T1134's
+    gate are cited and untouched. Whether `updateBranchViaGh` and `ghUpdateBranchArgv` should be
+    collapsed into one implementation is a real adjacent question and is left to whoever takes the
+    ruling in (5).
+  acceptance:
+    - claim: "the issue-list read works on a gh that predates the flag it currently requires"
+      proof: "unit test: W1-T1208: the issue-list read needs no flag newer than the declared floor"
+    - claim: "a multi-page issue list is still reassembled correctly rather than truncated"
+      proof: "unit test: W1-T1208: a multi-page issue payload is reassembled, not truncated"
+    - claim: "the branch-update site is covered by the same mechanism as the issue-list site"
+      proof: "unit test: W1-T1208: both version-sensitive sites are covered by one mechanism"
+    - claim: "a failed read still returns nothing rather than a confident empty queue"
+      proof: "unit test: W1-T1208: a failed read still yields nothing, never a false zero-open"
+    - claim: "the discriminating test drives the argument list and never a live gh"
+      proof: "unit test: W1-T1208: the falsifier drives argv and spawns no subprocess"
+  files: [src/lib/escalate.ts, src/run-task.ts, test/escalation-issue-list-rest.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#gh-version-split-on-operator-paths-2026-08-22"
+  plan_refs: ["W1-T1101", "W1-T1134", "W1-T1095", "W1-T528", "W1-T349"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NONE IS PURE-PATH. All five are NAME-FILTERED
+    `unit test:` forward references, for which `proofScopePath` returns `undefined`, so `proof-scope`
+    is silent on each. A pure-path proof would have been actively misleading here:
+    `test/escalation-issue-list-rest.test.ts` ALREADY EXISTS and already passes, so `check-proof`
+    would return `verdict: pass` today, before any of this work — an executed proof that
+    discriminates nothing.
+
+    `test/escalation-issue-list-rest.test.ts` IS THE EXISTING HOME and is declared rather than a new
+    filename: it is the file that already covers `labelledIssuesRestArgs`. Reusing it keeps
+    `subsystemsOf` at three stems instead of four.
+
+    BOTH `src/` FILES ARE DECLARED BECAUSE FIXING ONE SITE LEAVES THE CLASS OPEN. `--slurp` lives in
+    `src/lib/escalate.ts` and `gh pr update-branch` in `src/run-task.ts`; design (iii) requires one
+    mechanism for both, and a shard declaring only the failing one would licence exactly the
+    half-repair it forbids.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The issue-list read decides which escalations are
+    retired, and the branch-update site mutates a live pull request. A mistake in the page loop
+    silently truncates the queue — which is a false "nothing to retire", the very reading this task
+    exists to make impossible.
+
+    THE MEASUREMENTS ARE QUERIES. Re-derive the failure rate from the OPERATOR-side ledger
+    (`$HOME/Remudero/state/ledger.ndjson`), not the fleet union — the two are different files and
+    the distinction is the finding. Re-derive the flag inventory from the host's own `gh api --help`
+    and `gh pr --help` rather than a version table, with a flag known present as the control.
