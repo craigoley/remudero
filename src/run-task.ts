@@ -618,6 +618,8 @@ import {
   DEFAULT_FIX_CLASSES,
   detectPostReviewStall,
   isCappedReviewOrphanEscalation,
+  type ArmAttemptOutcome,
+  type ArmOutcomeName,
 } from "./lib/sweep.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
@@ -2331,6 +2333,41 @@ export function armFailureAction(stderrText: string): "direct-merge" | "transien
   // signature is a follow-up once actually observed, never guessed here (design vii/note above).
   if (/base branch was modified/i.test(stderrText)) return "retryable";
   return "unknown";
+}
+
+/**
+ * PURE (W1-T1117): fold one arm attempt's bare outcome plus the raw failure text `attemptArm`
+ * captured into the shape the sweep lane records.
+ *
+ * THE DECISION HALF OF `buildSweepEffects`' `arm` EFFECT, EXTRACTED. It lived inline in that
+ * closure, where the only way to reach any of its three arms was to drive a whole sweep pass
+ * with a fake gateway — so the narrowing arm below was reachable by no test at all and
+ * `diff-coverage` blocked the PR on exactly that line. Extracting it is the repair the same
+ * gate already forced on `promotionLedgerSink` (#2346): the decision becomes a unit fixture and
+ * each arm gets its own test, which is what makes an author name the outcomes rather than
+ * discover them.
+ *
+ * THE THREE ARMS:
+ *  - any outcome that is not `"arm-error-ignored"`, or one with no captured text (every existing
+ *    fake returns a bare `ArmOutcome` string), passes through UNCHANGED;
+ *  - a `"direct-merge"` classification returns the bare outcome. `attemptArm` only ever returns
+ *    `"arm-error-ignored"` for a failure it did NOT already classify `"direct-merge"` (that
+ *    branch takes the direct-merge fallback instead), so production cannot reach this — it is
+ *    narrowed explicitly so the return type stays exact rather than widening
+ *    {@link ArmAttemptOutcome.failureClass} to a class this outcome can never carry, and it is
+ *    tested directly because a guard nothing exercises is a guard nobody can trust;
+ *  - everything else carries the classification alongside the outcome, which is the whole point:
+ *    the "mergeable" arm's dedup (lib/sweep.ts) reads it back to tell a retryable/transport
+ *    failure from one the classifier could not decode.
+ */
+export function sweepArmAttemptOutcome(
+  outcome: ArmOutcomeName,
+  attemptError: string | undefined,
+): ArmOutcomeName | ArmAttemptOutcome {
+  if (outcome !== "arm-error-ignored" || attemptError === undefined) return outcome;
+  const failureClass = armFailureAction(attemptError);
+  if (failureClass === "direct-merge") return outcome;
+  return { outcome, failureClass };
 }
 
 /**
@@ -18393,14 +18430,9 @@ export function buildSweepEffects(
         },
         "sweep",
       );
-      if (outcome !== "arm-error-ignored" || attemptError === undefined) return outcome;
-      const failureClass = armFailureAction(attemptError);
-      // `attemptArm` only ever returns `"arm-error-ignored"` for a failure it did NOT already
-      // classify `"direct-merge"` (that branch takes the direct-merge fallback instead), so this
-      // is unreachable in practice — narrowed explicitly so the return type stays exact rather
-      // than widening `ArmAttemptOutcome.failureClass` to a class this outcome can never carry.
-      if (failureClass === "direct-merge") return outcome;
-      return { outcome, failureClass };
+      // The fold itself is `sweepArmAttemptOutcome` (pure, beside `armFailureAction`) so each of
+      // its arms is a unit fixture rather than a branch only a whole sweep pass can reach.
+      return sweepArmAttemptOutcome(outcome, attemptError);
     },
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so

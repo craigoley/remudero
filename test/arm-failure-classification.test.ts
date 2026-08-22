@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { armAutoMerge, armFailureAction, type ArmDeps } from "../src/run-task.js";
+import { armAutoMerge, armFailureAction, sweepArmAttemptOutcome, type ArmDeps } from "../src/run-task.js";
 import { runSweep, DEFAULT_SWEEP_POLICY, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
@@ -164,4 +164,58 @@ test("W1-T1117: a bare ArmOutcomeName string (no failureClass) keeps its pre-exi
   const second = await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
   assert.equal(first.actions[0].acted, false);
   assert.equal(second.actions[0].acted, false, "an old fake with no failureClass never seeds the dedup — unchanged from before this task");
+});
+
+// ── The fold between the classifier and the sweep row, as a unit ─────────────────────────────
+//
+// `buildSweepEffects`' `arm` effect used to make this decision inline, where the only way to
+// reach an arm was to drive a whole sweep pass — so its narrowing guard was reachable by no
+// test and `diff-coverage` blocked on that exact line. `sweepArmAttemptOutcome` is that
+// decision extracted; these three tests are its three arms, one each.
+
+test("sweepArmAttemptOutcome: an outcome that is not arm-error-ignored passes through unchanged", () => {
+  assert.equal(sweepArmAttemptOutcome("armed", undefined), "armed");
+  assert.equal(sweepArmAttemptOutcome("armed", "Base branch was modified."), "armed");
+  assert.equal(sweepArmAttemptOutcome("direct-merged", "anything at all"), "direct-merged");
+  // A bare arm-error-ignored with NO captured text is the pre-W1-T1117 shape every existing fake
+  // still returns, and it must stay a bare string rather than gaining a fabricated class.
+  assert.equal(sweepArmAttemptOutcome("arm-error-ignored", undefined), "arm-error-ignored");
+});
+
+test("sweepArmAttemptOutcome: a classified failure carries its class alongside the outcome", () => {
+  assert.deepEqual(sweepArmAttemptOutcome("arm-error-ignored", "Base branch was modified. Review and try the merge again."), {
+    outcome: "arm-error-ignored",
+    failureClass: "retryable",
+  });
+  assert.deepEqual(sweepArmAttemptOutcome("arm-error-ignored", "ETIMEDOUT talking to github.com"), {
+    outcome: "arm-error-ignored",
+    failureClass: "transient",
+  });
+  assert.deepEqual(sweepArmAttemptOutcome("arm-error-ignored", "something gh could not explain"), {
+    outcome: "arm-error-ignored",
+    failureClass: "unknown",
+  });
+  // PAIRED POSITIVE CONTROL: each class above is the one `armFailureAction` itself returns for
+  // that text, so the fold reads the classifier back rather than re-deriving a second opinion.
+  for (const text of [
+    "Base branch was modified. Review and try the merge again.",
+    "ETIMEDOUT talking to github.com",
+    "something gh could not explain",
+  ]) {
+    const folded = sweepArmAttemptOutcome("arm-error-ignored", text);
+    assert.equal(typeof folded === "object" ? folded.failureClass : undefined, armFailureAction(text));
+  }
+});
+
+test("sweepArmAttemptOutcome: a direct-merge classification returns the bare outcome and never a failure class", () => {
+  // `attemptArm` cannot produce this pairing — a clean-status failure takes the direct-merge
+  // fallback instead of returning arm-error-ignored — so this guard exists to keep the return
+  // type exact rather than widening `ArmAttemptOutcome.failureClass` to a class the outcome can
+  // never carry. It is tested directly because a guard nothing exercises is a guard nobody can
+  // trust, and because leaving it unexercised is what blocked this PR.
+  const cleanStatus = "Pull request is in clean status";
+  assert.equal(armFailureAction(cleanStatus), "direct-merge", "positive control: this text IS the direct-merge class");
+  const folded = sweepArmAttemptOutcome("arm-error-ignored", cleanStatus);
+  assert.equal(folded, "arm-error-ignored", "the bare outcome, never an object carrying direct-merge");
+  assert.equal(typeof folded, "string");
 });
