@@ -1,0 +1,165 @@
+- id: W1-T1216
+  title: "THE FLEET HOLD IS PER-HOST STATE ON A DEMONSTRABLY MULTI-HOST FLEET — `pauseFilePath` writes `<config.root>/state/PAUSE`, `config.root` defaults to `join(homedir(), \"Remudero\")`, and `state/` is gitignored, so an operator pausing on one machine writes a file the daemon on another can never read; and `doctor`'s `pause-honoured` arm cannot detect it because BOTH of its inputs are host-local"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main`
+    before any reading, against LOCAL SOURCE and the LEDGER UNION (all three forms: `ledger.ndjson`,
+    `ledger.*.ndjson`, `ledger.*.ndjson.gz` — per-form file counts 1 / 6 / 666, every form non-empty
+    and read). Every zero below carries a control pre-qualified for the surface it is asked about.
+
+    (1) THE DESIGN IS CORRECT AND IS NOT THE SUBJECT. `fleet-control.ts` distinguishes STOP —
+    auto-consumed, one-shot, "halt the CURRENTLY running drain", cleared by the drain that observed
+    it — from PAUSE, "a persistent maintenance hold cleared ONLY by `rmd resume`". That split is
+    right and nothing here proposes changing it. The subject is WHERE the marker lives.
+
+    (2) THE MARKER IS KEYED TO `config.root`, WHICH RESOLVES PER HOST. `pauseFilePath(root)` returns
+    `join(root, "state", "PAUSE")`. `config.root` defaults to `join(homedir(), "Remudero")` — two
+    sites in `src/lib/config.ts`, the literal default and the `if (!parsed.root)` backfill — so the
+    operator's mini and the Azure container resolve DIFFERENT directories from identical code. And
+    `state/` is gitignored (`.gitignore` entry `state/`, confirmed by `git check-ignore -v
+    state/PAUSE`; control: `git check-ignore -v src/lib/fleet-control.ts` returns nothing), so the
+    marker cannot travel by the one channel every host already shares.
+
+    (3) THE READ HAS EXACTLY ONE WIRING POINT, AND IT IS THE SAME PER-HOST ROOT.
+    `checkPause: () => pauseDetail(config.root)` in `src/run-task.ts` is the daemon's only supplier.
+    A hold written under a different root is not merely late to that read — it is invisible to it.
+
+    (4) THE IDENTITY IS ALREADY CAPTURED AND THEN STRANDED. `FleetControlInfo` carries `pid` and
+    `host` and `writeFlag` stamps both into the marker. So the file knows which machine asked for
+    the hold, and is then stored where only that machine can read it. Nothing needs to be invented
+    to say who paused; what is missing is a place to put it that another host can see.
+
+    (5) Q1, STRUCTURAL — `doctor`'s `pause-honoured` ARM CANNOT SEE A CROSS-HOST FAILURE, BY
+    CONSTRUCTION, AND THIS IS THE CERTAIN HALF OF Q1. `judgePauseHonoured` takes two inputs.
+    `pauseAgeMs` comes from `readPauseAgeMs(root, nowMs)`, which is `statSync(pauseFilePath(root))`
+    on the INVOKING host's root. `lastDispatchAgeMs` comes from `deriveDispatchCadence` over
+    `readLedgerLines(ledgerPathFor(config))` — the call site's own comment says these "come from
+    rows this host already wrote". In the failure this task is about, the host holding the PAUSE has
+    no dispatch of its own to be newer than the flag, so its arm reads OK; and the host that is
+    dispatching has no PAUSE file, so `pauseAgeMs` is undefined and its arm returns the literal
+    "not paused". BOTH HOSTS REPORT OK WHILE THE FLEET IS IN EXACTLY THE STATE THE ARM EXISTS TO
+    CATCH. The arm is correct for the single-host case it was earned on and is not being reversed.
+
+    (6) Q1, EMPIRICAL — A POPULATION EXISTS; ITS MECHANISM IS UNDECIDABLE, AND THAT IS STATED
+    RATHER THAN INFLATED. Across the union, 9 `fleet.pause` rows and 12 `fleet.resume` rows. Five of
+    the nine pause windows contain dispatch-shaped rows (`run.start`/`daemon.iteration`) strictly
+    newer than the pause and older than the next resume; four contain none. Positive control on the
+    scan: 258,952 `run.start` rows across the union. Two windows put the FIRST such dispatch at
+    +2h27m and +1h42m after the pause, which no once-per-tick read can explain.
+    THE COUNT WAS WRONG ON FIRST READING AND THE CORRECTION IS RECORDED: the raw cross-archive
+    tally was 4,742, and rotations duplicate heavily — deduped on `ts`+`step`+`task_id`+`run_id` it
+    is 185 distinct rows, roughly a twenty-fifth of the raw figure.
+    AND THE ATTRIBUTION CANNOT BE MADE: measured on those same rows, the count of host-identifying
+    fields is ZERO — which is W1-T972's premise, confirmed here rather than assumed. So these
+    windows cannot be assigned to the cross-host mechanism, to a hand-run under a different HOME,
+    or to a restart. They establish that pauses have been outlived by dispatch; they do not
+    establish why, and no claim is made that they do.
+
+    (7) AND THE OTHER CANDIDATE EXPLANATION IS ALREADY CLOSED, WHICH NARROWS WHAT IS LEFT.
+    W1-T1065 — the pause read once per tick with admission minutes later — HAS SHIPPED: `daemon.ts`
+    carries "RE-CHECK STOP/PAUSE IMMEDIATELY BEFORE ADMISSION (W1-T1065)" and a second
+    `deps.checkPause?.()` at the admission point. Every window in (6) predates it. So the tick
+    explanation is retired going forward and is cited, not re-filed; what it cannot cover — a hold
+    the reader never had access to at all — is this task.
+
+    (8) THE DEFECT IS NOT "TWO MACHINES", IT IS "A DIFFERENT `config.root`". A container, a second
+    machine, and a hand-run under a different HOME are the same failure: the hold is keyed to a
+    directory the actor resolves for itself, so any actor that resolves a different one proceeds. Six
+    verbs answered about the wrong machine today for this same reason, and the mini's own `rmd status`
+    reported a PAUSE from stale local state while the fleet dispatched normally — the symptom in both
+    directions from one cause.
+
+    (9) Q2 — A GIT REF IS THE RIGHT SHAPE, AND THE FLEET ALREADY PROVES IT. `git ls-remote origin
+    'refs/rmd-*'` returns 246 refs, all `refs/rmd-id/`: shared state on the one substrate every host
+    already authenticates to, needing no second store, no new service and no new credential. W1-T509's
+    orphan-commit compare-and-set is cited for its two-host race result, not re-derived.
+
+    (10) AND THE READ DISCRIMINATES THE ONE THING A HOLD MUST DISCRIMINATE — MEASURED. A hold that
+    fails OPEN on a network error is worse than a local one, so the reader must tell "no hold" from
+    "cannot tell". `git ls-remote` does: an ABSENT ref exits 0 with zero lines; an UNREACHABLE remote
+    exits 128; a PRESENT ref exits 0 with one line (control, run against a ref known to exist). The
+    fail-closed direction therefore has a signal to key on rather than needing one invented.
+
+    (11) THE COST IS ONE SINGLE-REF READ PER TICK. Three timed reads of one ref: 276ms, 247ms, 308ms.
+    The daemon's own `poll_interval_ms` is 60000, as its `daemon.pause` rows carry. `ls-remote` speaks
+    the git protocol, so it spends no REST or GraphQL budget — the argument `drain.ts` already makes
+    for its own once-per-pass ref sweep.
+
+    (12) EXTERNAL CONFIRMATION, CITED AND NOT COPIED. `gastownhall/gastown` draws the same
+    manual-versus-auto line (`internal/estop/estop.go`, with `gt thaw` as its resume) and stores the
+    hold as a label on a git-backed record, so it travels between hosts. The DESIGN agrees with this
+    repo's; only the STORAGE differs. Nothing is imported from it.
+  design: |
+    (i) THE SHARED HOLD IS AN ADDITION, NEVER A REPLACEMENT. The local file keeps working exactly as
+    it does today and is consulted first. An operator on a disconnected host must still be able to
+    stop their own daemon, and a change that made the hold depend on reaching `origin` would take
+    that away — which is a worse failure than the one being fixed.
+
+    (ii) UNREACHABLE MEANS HELD. A read that failed is not permission to proceed. This is the same
+    principle `reserveTaskIdRemote` applies and the OPPOSITE action: there, an unreachable remote
+    refuses to MINT; here, it refuses to DISPATCH. In both cases the failed read is never scored as
+    "free". Rationale (10) is why this is implementable rather than aspirational — the exit codes
+    already separate absent from unreadable.
+
+    (iii) STOP IS UNCHANGED AND STAYS LOCAL AND ONE-SHOT. STOP exists to halt the drain that observes
+    it and auto-clears as that drain exits. It is scoped to a running process on one host, so it has
+    no cross-host question to answer, and giving it a shared marker would turn a one-shot into
+    something that can outlive its own drain — precisely the property `consumeStop`'s doc says STOP
+    must never have.
+
+    (iv) `rmd resume` REMAINS THE ONLY THING THAT CLEARS A PAUSE. No timer, no expiry, no
+    auto-consume, and no clearing on restart. A hold with a lifetime is a hold that releases itself
+    while the maintenance it was taken for is still running.
+
+    (v) NOT IN SCOPE, NAMED: W1-T1065's admission-time re-check, which has shipped and is cited;
+    W1-T936's freshness-exit ordering; W1-T972's ledger host identity, which rationale (6) depends on
+    and does not fix; W1-T483's heartbeat; W1-T509's reservation design and the `refs/rmd-id`
+    namespace; and whether `config.root` should be made host-explicit everywhere, which is a much
+    wider change than one hold.
+  acceptance:
+    - claim: "a daemon whose own host never saw the pause still refuses to dispatch"
+      proof: "unit test: test/fleet-hold-shared.test.ts"
+    - claim: "an unreachable origin holds rather than releasing"
+      proof: "unit test: test/fleet-hold-shared.test.ts"
+    - claim: "the local file alone still pauses a host that cannot reach origin"
+      proof: "unit test: test/fleet-hold-shared.test.ts"
+    - claim: "stop stays one-shot and never becomes a persistent hold"
+      proof: "unit test: test/fleet-hold-shared.test.ts"
+    - claim: "resume is still the only thing that clears a pause"
+      proof: "unit test: test/fleet-hold-shared.test.ts"
+  files: [src/lib/fleet-control.ts, src/run-task.ts, test/fleet-hold-shared.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#fleet-hold-is-per-host-2026-08-22"
+  plan_refs: ["W1-T1065", "W1-T936", "W1-T972", "W1-T483", "W1-T509", "W1-T1040"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/fleet-hold-shared.test.ts`, declared in `files:`, so on this filing PR it resolves
+    through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19'S SPAN. The hold decides whether the fleet spawns at
+    all: a mistake either strands every host on a hold nobody can clear, or ignores an operator stop
+    during the maintenance it was taken for. Claiming Rule 19 forced the band would be a false claim
+    in the direction that flatters the filing.
+
+    BOTH SOURCE FILES ARE DECLARED BECAUSE THE FLAG AND ITS ONLY READER ARE APART.
+    `pauseFilePath`/`pauseDetail` live in `src/lib/fleet-control.ts`; the daemon's single
+    `checkPause: () => pauseDetail(config.root)` wiring lives in `src/run-task.ts`. A shared read
+    added at only one of those leaves the other resolving the old per-host answer.
+
+    THE Q1 ANSWER IS SPLIT ON PURPOSE AND THE WEAKER HALF IS LABELLED AS WEAK. The structural half
+    (5) is certain and comes from source. The empirical half (6) establishes a population and
+    explicitly declines to attribute it, because the rows carry no host identity — and it records
+    that the first count taken was 4,742 raw and 185 deduped, so a later reader is not misled by the
+    figure that was wrong.
+
+    THE SUBJECT SWEEP IS WHAT KEPT THIS FROM BEING A RE-FILE. Sweeping the hold's vocabulary across
+    every shard on main surfaced W1-T1065, W1-T936, W1-T972 and W1-T483 — four tasks in the same
+    multi-host family. Each was read before this was written; none owns the marker's LOCATION, and
+    all four are cited rather than re-filed.
