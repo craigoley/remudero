@@ -222,10 +222,15 @@ test("the recorded ceiling carries the rule that it may fall and must never rise
 });
 
 test("a stale exclusion still fails regardless of the drift ceiling", () => {
-  // `emissions` is a real CLOCK_ARTIFACTS entry; passing shifted makes it stale. A ceiling of 100
-  // is deliberately far above any plausible drift count, so a pass here could ONLY come from the
-  // ceiling wrongly forgiving a stale exclusion.
-  const { staleExclusions, drifted, ok } = classifySweep(new Map([["emissions", passed]]), CLOCK_ARTIFACTS, 100);
+  // GENERIC over whichever suite CLOCK_ARTIFACTS currently names first (the same reason the
+  // "becomes IMMUNE" test above reads `[...CLOCK_ARTIFACTS.keys()]` rather than a literal name):
+  // W1-T1104 already removed `emissions` from the map once (measured passing shifted in CI), so a
+  // test pinned to that literal name would fail the moment the map's membership moves, for a
+  // reason that has nothing to do with the property under test here — a ceiling never forgiving a
+  // stale exclusion. A ceiling of 100 is deliberately far above any plausible drift count, so a
+  // pass here could ONLY come from the ceiling wrongly forgiving a stale exclusion.
+  const [anyArtifact] = CLOCK_ARTIFACTS.keys();
+  const { staleExclusions, drifted, ok } = classifySweep(new Map([[anyArtifact, passed]]), CLOCK_ARTIFACTS, 100);
   assert.equal(drifted.length, 0);
   assert.equal(staleExclusions.length, 1);
   assert.equal(ok, false, "a stale exclusion must fail even under a wildly generous ceiling");
