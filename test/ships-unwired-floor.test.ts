@@ -345,15 +345,114 @@ diff --git a/src/lib/seam.ts b/src/lib/seam.ts
 `.trim();
 
     assert.equal(isExportReachable("seamFn", "src/lib/seam.ts", checkoutDir), true);
-    assert.deepEqual(scanUnreachedExports(diff, checkoutDir), []);
+    assert.deepEqual(scanUnreachedExports(diff, checkoutDir), { unreached: [], examined: 1 });
 
     const v = judgeReview(SIMPLE_CRITERIA, { diff, report: SIMPLE_REPORT, headCheckoutDir: checkoutDir });
     assert.equal(v.unwiredAdvisories?.length ?? 0, 0);
+    assert.equal(v.reachabilityScanned, 1, "examined=1 even though it cleared — a HEALTHY CLEAR, not silence");
 
     // FALSIFIER: strip the in-file reference — now it IS the true-orphan shape and must flag.
     writeFile(checkoutDir, "src/lib/seam.ts", ["export function seamFn(): number {", "  return 1;", "}"].join("\n"));
     assert.equal(isExportReachable("seamFn", "src/lib/seam.ts", checkoutDir), false);
-    assert.deepEqual(scanUnreachedExports(diff, checkoutDir), [{ name: "seamFn", file: "src/lib/seam.ts" }]);
+    assert.deepEqual(scanUnreachedExports(diff, checkoutDir), {
+      unreached: [{ name: "seamFn", file: "src/lib/seam.ts" }],
+      examined: 1,
+    });
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T1118 (reachabilityScanned) ─────────────────────────────────────────────────────────
+// "the ships-unwired scan's silence is three states in one" — this floor's own OWN acceptance
+// criteria, driven end to end through `judgeReview`: (a) no checkout ⇒ `null`, never a fake 0;
+// (b) examined N and cleared all N ⇒ `N`, distinguishable from (a); (c) the diff added no
+// exported function at all ⇒ `0`, distinguishable from both (a) and (b); and the field changes
+// NOTHING about the advisories/reasonCode/state that already fired before it existed.
+
+test("W1-T1118: reachabilityScanned separates 'never ran' (null) from 'examined N and cleared all N' (N) from 'added no export at all' (0) — three distinct renders, never one silence", () => {
+  const checkoutDir = makeCheckout();
+  try {
+    writeFile(checkoutDir, "src/lib/cleared.ts", "export function clearedFn(): number {\n  return 1;\n}\n");
+    writeFile(checkoutDir, "src/lib/caller.ts", "import { clearedFn } from './cleared.js';\nexport const n = clearedFn();\n");
+    const diffWithReachedExport = `
+diff --git a/src/lib/cleared.ts b/src/lib/cleared.ts
++++ b/src/lib/cleared.ts
+@@
++export function clearedFn(): number {
++  return 1;
++}
+`.trim();
+    const diffWithNoExport = `
+diff --git a/src/lib/plain.ts b/src/lib/plain.ts
++++ b/src/lib/plain.ts
+@@
+-const x = 1;
++const x = 2;
+`.trim();
+
+    // (a) NO CHECKOUT — the `if (checkoutDir)` skip: the scan never ran, so `null`, never 0.
+    const neverRan = judgeReview(SIMPLE_CRITERIA, { diff: diffWithReachedExport, report: SIMPLE_REPORT });
+    assert.equal(neverRan.reachabilityScanned, null, "no checkout ⇒ null — the scan did not run, not a count");
+
+    // (b) SCANNED 1, CLEARED IT — a healthy clear. Distinguishable from (a): a real number, not null.
+    const clearedAll = judgeReview(SIMPLE_CRITERIA, {
+      diff: diffWithReachedExport,
+      report: SIMPLE_REPORT,
+      headCheckoutDir: checkoutDir,
+    });
+    assert.equal(clearedAll.reachabilityScanned, 1);
+    assert.equal(
+      clearedAll.unwiredAdvisories?.length ?? 0,
+      0,
+      "cleared ⇒ no advisory, yet reachabilityScanned still records the 1 export it examined",
+    );
+    assert.notEqual(
+      clearedAll.reachabilityScanned,
+      neverRan.reachabilityScanned,
+      "ACCEPTANCE #1: scanned-and-cleared must render differently from never-ran",
+    );
+
+    // (c) THE DIFF ADDED NO EXPORTED FUNCTION AT ALL — 0 is the honest answer, never an absent scan.
+    const addedNone = judgeReview(SIMPLE_CRITERIA, {
+      diff: diffWithNoExport,
+      report: SIMPLE_REPORT,
+      headCheckoutDir: checkoutDir,
+    });
+    assert.equal(addedNone.reachabilityScanned, 0, "0 is real — the diff added none — never coerced to null");
+    assert.notEqual(
+      addedNone.reachabilityScanned,
+      neverRan.reachabilityScanned,
+      "ACCEPTANCE #3: added-none (0) must render differently from never-ran (null)",
+    );
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1118 (ACCEPTANCE #5): reachabilityScanned changes NOTHING about the advisories, their reason codes, or the verdict state a case already fired before this field existed", () => {
+  const checkoutDir = makeCheckout();
+  try {
+    writeFile(checkoutDir, "src/lib/orphan3.ts", "export function orphanFn3(): number {\n  return 1;\n}\n");
+    const diffUnreached = `
+diff --git a/src/lib/orphan3.ts b/src/lib/orphan3.ts
++++ b/src/lib/orphan3.ts
+@@
++export function orphanFn3(): number {
++  return 1;
++}
+`.trim();
+    const flagged = judgeReview(SIMPLE_CRITERIA, { diff: diffUnreached, report: SIMPLE_REPORT, headCheckoutDir: checkoutDir });
+
+    // Same shape ACCEPTANCE #1 already asserts: ADVISORY ONLY, one grouped entry, the same
+    // reason code and symbols — unchanged by reachabilityScanned riding alongside it.
+    assert.equal(flagged.state, "success", "still ADVISORY ONLY — reachabilityScanned never touches state");
+    assert.equal(flagged.unwiredAdvisories?.length, 1);
+    assert.equal(flagged.unwiredAdvisories?.[0].reasonCode, "unwired_export");
+    assert.deepEqual(flagged.unwiredAdvisories?.[0].symbols, ["src/lib/orphan3.ts::orphanFn3"]);
+
+    // And the fourth readable state design (ii) names: N WITH an advisory.
+    assert.equal(flagged.reachabilityScanned, 1, "N with an advisory fires — the fourth of the four readable states");
   } finally {
     rmSync(checkoutDir, { recursive: true, force: true });
   }
@@ -544,20 +643,42 @@ esac
         ledgerPath,
         runId: "REVIEW-UNWIRED-1",
       });
-      return lines.filter((l) => l.step === "review.unwired_advisory");
+      return {
+        advised: lines.filter((l) => l.step === "review.unwired_advisory"),
+        posted: lines.find((l) => l.step === "review.posted"),
+      };
     };
 
-    const advised = await runOnce(checkoutDir);
+    const withCheckout = await runOnce(checkoutDir);
 
-    assert.equal(advised.length, 1, "one ledger line for the one advisory the scan produced");
-    assert.equal(advised[0].extra.reason_code, "unwired_export", "the line carries the reason code W1-T323 will measure");
-    assert.deepEqual(advised[0].extra.symbols, ["src/lib/stranded.ts::strandedFn"], "and the offending symbol");
-    assert.equal(advised[0].extra.head_sha, "deadbeefcafe01", "attributed to the head sha it scanned");
-    assert.equal(advised[0].extra.pr_url, "https://github.com/acme/remudero/pull/1292");
+    assert.equal(withCheckout.advised.length, 1, "one ledger line for the one advisory the scan produced");
+    assert.equal(
+      withCheckout.advised[0].extra.reason_code,
+      "unwired_export",
+      "the line carries the reason code W1-T323 will measure",
+    );
+    assert.deepEqual(withCheckout.advised[0].extra.symbols, ["src/lib/stranded.ts::strandedFn"], "and the offending symbol");
+    assert.equal(withCheckout.advised[0].extra.head_sha, "deadbeefcafe01", "attributed to the head sha it scanned");
+    assert.equal(withCheckout.advised[0].extra.pr_url, "https://github.com/acme/remudero/pull/1292");
+    // W1-T1118: the SAME already-existing review.posted row now names what the scan examined —
+    // no second ledger line. One export was examined, and it was flagged (not cleared).
+    assert.equal(
+      withCheckout.posted?.extra.reachability_scanned,
+      1,
+      "review.posted carries the examined count alongside the advisory it just ledgered above",
+    );
 
     // CONTROL: no headCheckoutDir -> no scan -> the loop body never runs. Without this, a test
     // asserting only the presence of lines could pass on a loop that ran unconditionally.
-    assert.deepEqual(await runOnce(undefined), [], "no checkout to scan ledgers no advisory at all");
+    const withoutCheckout = await runOnce(undefined);
+    assert.deepEqual(withoutCheckout.advised, [], "no checkout to scan ledgers no advisory at all");
+    // W1-T1118: this is exactly the state the reporting entry could not tell apart from "scanned
+    // 0" — `null`, never a fake 0, on the SAME review.posted row the case above also populated.
+    assert.equal(
+      withoutCheckout.posted?.extra.reachability_scanned,
+      null,
+      "no checkout ⇒ null on review.posted, never a count of zero",
+    );
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });

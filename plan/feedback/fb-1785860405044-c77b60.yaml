@@ -21,6 +21,23 @@ raw: "TWO IDIOM TRAPS THAT COST CI ROUNDS AND FALSE FINDINGS, both mechanical.
   path, the ordering does not matter and only the id recipe needs its caveat."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2439
+summary:
+  headline: "Fix two CI mechanical traps: ID detection and title edits"
+  what_happened: ID duplicate-detection grep truncates letter-suffixed IDs,
+    creating 8 false collisions (#1290). PR title edits alone don't re-trigger
+    CI without a subsequent push, wasting rounds (#1287).
+  decision: "Approve CLAUDE.md caveat for ID-detection immediately. Authorize
+    recon on title-edit fix: cost the 'edited' trigger option, verify no
+    existing re-trigger path, then decide between automation and documentation."
+  options:
+    - label: Add 'edited' to ci.yml pull_request trigger types
+      consequence: Title edits auto-trigger CI re-runs; measure cost overhead of
+        body-edit re-runs at current merge rate
+    - label: Document required edit-then-push ordering in CLAUDE.md
+      consequence: Eliminates CI overhead; effectiveness depends on documentation
+        discoverability and user compliance
+    - label: "Run falsifying check: verify title edits don't already re-trigger"
+      consequence: If they already do through another path, only the ID caveat is
+        needed and both options above become unnecessary

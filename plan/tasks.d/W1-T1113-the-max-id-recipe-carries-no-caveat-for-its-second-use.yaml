@@ -1,0 +1,110 @@
+- id: W1-T1113
+  title: "CLAUDE.md's max-id recipe is documented for MINTING only, and its numeric tail truncates the 21 letter-suffixed ids the plan actually carries — reused for DUPLICATE DETECTION it manufactures eight phantom collisions, and nothing on the page warns the next reader"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    MEASURED AT HEAD, NOT RECALLED. Three checks, all rerunnable.
+    (1) THE RECIPE. CLAUDE.md's `Compute a new task id from the max` bullet ends
+    `grep -rhoE '^\s*- id: W1-T[0-9]+' plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` -> max+1.
+    Its stated purpose is MINTING, and for minting it is CORRECT: the numeric tail is exactly what
+    max+1 needs. This task does NOT call it a defect and does NOT change what it computes.
+    (2) THE SECOND USE IS WHERE IT LIES. `grep -c '^- id: W1-T[0-9]*[A-Za-z]' plan/tasks.yaml`
+    returns 21 at head: W1-T1B/1C/1D, W1-T3B/3C/3D/3E/3F, W1-T9a/9b/9c, W1-T12a/12b/12c/12d/12e,
+    W1-T20c/20d, W1-T7B, W1-T54b, W1-T24b. The trailing `grep -oE 'T[0-9]+'` drops each suffix, so
+    all 21 collapse onto EIGHT numeric stems -- 1, 3, 7, 9, 12, 20, 24, 54 -- every one of which is
+    ALSO a real distinct id in the plan. Anyone who pipes that same recipe into `sort | uniq -d`
+    looking for collisions therefore reads EIGHT duplicate groups that do not exist. Observed
+    2026-08-04 during #1290 and re-derived here from the current tree; the count is a stem count,
+    not a guess.
+    (3) NOTHING ON THE PAGE SAYS SO. `grep -ci 'letter-suffixed\|duplicate detection' CLAUDE.md`
+    reads 0, and so does the same grep over LEARNINGS.md and DECISIONS.md. The bullet's own citation
+    trail (#770, #775) is entirely about minting. The next reader re-derives the same confusion --
+    which is the whole cost class this page exists to stop.
+    WHY THE EXISTING MACHINERY DOES NOT COVER IT. `rmd next-task-id` and
+    scripts/task-id-existence-check.mjs both parse ids in code and never hand this shell recipe to a
+    human -- they are not the surface that misled anyone. The surface that did is the copy-pasteable
+    line in CLAUDE.md, and a caveat is the only thing that reaches it.
+    PART 2 OF THE SOURCE FEEDBACK IS ALREADY ANSWERED AND IS NOT FILED. The same entry asked whether
+    `edited` should be added to ci.yml's `pull_request` types or whether an ordering rule should be
+    documented. CLAUDE.md ALREADY carries the ruling, in the bullet beginning `A corrected PR title
+    is observed by a RE-RUN, not only by a new sha -- but `edited` still fires nothing`: W1-T351
+    made ci.yml's commitlint job read the title LIVE via `gh pr view --json title`, so a re-run picks
+    up a retitle with no push, and the documented cheapest path is retitle THEN push. The trigger was
+    NOT widened. That half needs no task and no CI-minutes estimate.
+  design: |
+    ONE CAVEAT, IN THE BULLET THAT ALREADY OWNS THE RECIPE. Do not open a new section and do not
+    write a second bullet: the reader who is about to misuse the recipe is reading THAT bullet, and a
+    rule stored anywhere else is a rule they will not meet.
+
+    (i) SAY BOTH HALVES. The line must (a) mark the numeric-tail form as MINTING-ONLY and name why it
+    cannot be reused -- it truncates the 21 letter-suffixed ids to their stems and manufactures eight
+    phantom collisions -- and (b) give the WORKING form for the other use, which anchors the whole
+    token rather than the numeric tail (`- id: ` capture of the full id, `sort | uniq -d`). A
+    prohibition with no replacement recipe gets ignored under time pressure; ship the replacement.
+    LOAD-BEARING TEXT, both greps in `acceptance:` depend on it: the bullet must contain the literal
+    lowercase phrases `truncates letter-suffixed ids` and `duplicate detection compares whole ids`.
+    Write sentences that read naturally around them; never bolt the phrases on as a tag.
+
+    (ii) DO NOT TOUCH WHAT THE RECIPE COMPUTES. The minting form stays byte-identical and stays the
+    recommended answer for max+1. This is an added caveat about a SECOND use, not a correction.
+
+    (iii) THE BYTE CEILING IS THE REAL CONSTRAINT AND IT IS ZERO-HEADROOM.
+    scripts/claude-md-budget-ratchet.mjs enforces capBytes == measuredBytes (62644 at head, W1-T503 /
+    MASTER-PLAN 8A), so growth goes CI-red until the SAME PR pays for it. PREFER A FOLD: this bullet
+    and the adjacent `rmd next-task-id` bullet overlap heavily on id-derivation prose, which is where
+    the bytes should come from. A cap bump is permitted only as a fallback and only with a written
+    `bumpRationale` in scripts/claude-md-budget-baseline.json saying why growth is right here -- the
+    baseline's own comment forbids raising it to paper over an unreviewed addition. State which route
+    was taken, and the measured before/after byte figures, in the PR body.
+
+    (iv) KEEP IT TO TWO LINES. If the draft runs longer, cut it; the page is rationed.
+
+    EXPLICITLY NOT IN SCOPE: changing `rmd next-task-id`, src/lib/task-id.ts, or
+    scripts/task-id-existence-check.mjs (that script's own `\bW1-T[0-9]+\b` / anchored `- id:` regexes
+    have the same blind spot from the other side -- a separate, code-level finding that needs its own
+    measurement and its own task, not a rider on a documentation caveat); renaming or renumbering any
+    letter-suffixed id; the PR-title ordering half of the source feedback, already documented (see
+    rationale).
+  acceptance:
+    - claim: "the max-id bullet marks the numeric recipe as minting-only and names the truncation of letter-suffixed ids"
+      proof: "grep: truncates letter-suffixed ids in CLAUDE.md"
+    - claim: "the same bullet gives the whole-token form to use when checking for real collisions"
+      proof: "grep: duplicate detection compares whole ids in CLAUDE.md"
+    - claim: "the CLAUDE.md byte ceiling still holds with zero headroom after the addition"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+  risk: high
+  origin: feedback#fb-1785860405044-c77b60
+  plan_refs: ["§8A", "W1-T503", "W1-T488"]
+  files: [CLAUDE.md, scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    FILED FROM feedback#fb-1785860405044-c77b60 (part 1 of 2). Part 2, the commitlint title-edit
+    ordering, is ALREADY DECIDED in CLAUDE.md via W1-T351 and is deliberately NOT filed -- re-deciding
+    it would be the failure mode, not the deliverable.
+    verify:auto -- the deliverable is literal text at a known path plus an existing ratchet test that
+    must stay green; no operator observation is needed at any step.
+    risk:high IS RULE 19 SPAN, NOT BLAST RADIUS. `files:` names three distinct basenames (CLAUDE.md,
+    the ratchet baseline, the ratchet test), which `subsystemsOf` counts as >=2 concerns and which
+    would block on `sizingViolation` at medium -- the same call W1-T1088 made over the same page. The
+    runtime blast radius is two lines of documentation; no gate, policy value or executable behaviour
+    moves, and the minting recipe itself is byte-identical afterwards.
+    budget_usd 30 -- below W1-T1088's 45: no prompt const, no new test, one bullet and one byte-budget
+    judgement.
+    ON THE PROOFS. Both greps name literals design (i) makes load-bearing (the W1-T326 construction).
+    Both read ZERO in CLAUDE.md at head (measured: `grep -ci` returns 0 for each), so each
+    DISCRIMINATES against the merge base instead of landing executed_stale. Both are stated
+    POSITIVELY -- they grep text the change ADDS, never text it removes, so neither can land
+    executed_fail on the PR that satisfies it. Neither pattern contains ` in `, a bracket, a star, a
+    caret, a dollar or an unescaped dot, so `parseDialectGrep` splits each at the single ` in ` before
+    its path. test/claude-md-budget-ratchet.test.ts EXISTS today, so at least one proof executes for
+    real. Every proof path is declared in `files:` (W1-T310).
+    scripts/claude-md-budget-baseline.json is declared so the fallback cap bump is legal under the
+    branch scope guard; design (iii) prefers a fold and touching the baseline is required by no
+    criterion here.
+    NO depends_on: nothing else queued touches CLAUDE.md's id bullets; file-overlap serialisation at
+    dispatch is the correct and sufficient interlock against anything that does.

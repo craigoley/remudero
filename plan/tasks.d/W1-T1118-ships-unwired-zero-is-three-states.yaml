@@ -1,0 +1,179 @@
+- id: W1-T1118
+  title: "THE SHIPS-UNWIRED SCAN'S SILENCE IS THREE STATES IN ONE — `scanUnreachedExports` returns
+    only violations, `unwiredAdvisoriesFor` emits under `if (unreached.length > 0)` and skips the
+    scan entirely under `if (checkoutDir)`, so 'no checkout, the scan never ran', 'examined N and
+    cleared all N' and 'the diff added no exported function at all' write the SAME absence; carry
+    the examined count on the `review.posted` row that already exists, adding no line per review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    READ FROM SOURCE THIS TRIAGE PASS, and the reporting entry's HEADLINE ALARM IS RECORDED AS
+    FALSIFIED rather than inherited.
+
+    (1) WHAT THE REPORTING ENTRY GOT WRONG, STATED FIRST SO NOBODY RE-DERIVES IT.
+    feedback#fb-1785870873355-d91fc2 claimed the floor might never be reaching its input at all
+    ("cannot distinguish CLEAN from NEVER RAN"), citing `unwired_export` at 0 against 266
+    `review.posted` rows. Its OWN falsifying check has since fired, twice over:
+      - feedback#fb-1785896975009-9f6c88 (the reporter's own correction, 2026-08-05) records
+        `unwired_export` firing on PR #1312 (W1-T332) naming three real dead symbols
+        (`policy.ts::writeDailyCostCeilingOverride`, `::clearDailyCostCeilingOverride`,
+        `::resolveDailyCostCeiling`) while correctly STAYING SILENT on a sibling with callers —
+        intra-PR discrimination a blanket-firing scan could not produce. The 266 denominator was
+        wrong twice: advisories never land on `review.posted` (they are a separate step), and only
+        3 post-deploy PRs added a src/ export at all.
+      - W1-T1017's independent measurement (origin/main 02d5b89) reads `unwired_export` 4 over
+        2026-08-11..08-18, inside 87 advisory rows.
+    So THE INSTRUMENT REACHES ITS INPUT AND DISCRIMINATES. This shard therefore files the NARROW
+    residual the correction itself preserved, verbatim: *"the zero case is still unobservable, so
+    silence conflates 'scanned 4, cleared 4' with 'scanned 0'. That is an observability gap, not a
+    correctness gap."*
+
+    (2) THE THREE-WAY CONFLATION IS IN THE CODE, NOT INFERRED. In `unwiredAdvisoriesFor`
+    (src/lib/review.ts) the scan sits under `if (checkoutDir)`, and its result under
+    `if (unreached.length > 0)`, then filters by `wiredAtPairs` and `shipsUnwiredIds`. The entry
+    point `scanUnreachedExports(diff, checkoutDir)` (src/lib/reachability.ts) returns
+    `UnreachedExport[]` — VIOLATIONS ONLY. Its candidate population, the deduped
+    `addedExportedFunctions(diff)` list, is computed inside the loop and DISCARDED. Three distinct
+    states therefore produce byte-identical evidence:
+      (a) no head checkout — the scan never ran (a documented, deliberate skip whose own doc calls
+          it "silently skipped (not a false 'nothing to advise')", which is exactly the state the
+          ledger cannot express);
+      (b) the diff added exported functions and every one was reached — the healthy clear;
+      (c) the diff added no exported function at all — nothing to scan.
+    And in `src/run-task.ts` the emitter loop is `for (const advisory of verdict.unwiredAdvisories
+    ?? []) log("review.unwired_advisory", …)` — no advisory, no row. Nothing else on the
+    `review.posted` row mentions reachability.
+
+    (3) THE DENOMINATOR IS THE CONSUMER, WHICH IS WHY THIS IS WORTH A TASK AT ALL. W1-T323's flip
+    criterion is a false-positive RATE over flagged PRs. A rate needs a base, and today the base is
+    reconstructible only by hand — which is precisely what the correction entry had to do (3 PRs /
+    6 exports, derived by re-walking the merges) and precisely how the original 266 base went
+    wrong. One count on a row that already exists turns that hand-derivation into a query.
+
+    (4) THE CLASS IS ALREADY RULED, ONE INSTRUMENT OVER, AND THIS SHARD FOLLOWS THAT RULING RATHER
+    THAN RE-ARGUING IT. W1-T1086 reverses exactly this shape on `daemon.clone_reap` — a survey
+    gated on `actionable.length` that cannot distinguish "found nothing" from "rejected
+    everything" — and CHOSE "emit what the run examined, keep the tally judgeable" over "leave it
+    gated and prove the predicate elsewhere". W1-T320 made the same call on `daemon.tmp_sweep`, and
+    W1-T1101 on the escalation-reconcile summary line. The reporting entry names this the
+    CLONE-REAPER shape; it is, and the ruling on the shape already exists.
+
+    (5) THE CHEAPEST FORM IS FORCED BY THE ENTRY'S OWN CONSTRAINT ("without adding a line per
+    review"). Of the three routes it lists — a periodic count, a field on the verdict, a one-off
+    test that seeds an unwired export — the FIELD is cheapest and is chosen: `review.posted` is
+    ALREADY one row per review, so the marginal ledger cost is zero rows and one key. A periodic
+    count is a second observability path for an organ that already has a row (W1-T1086 refused that
+    exact alternative). The one-off test is not observability at all — it proves the scan fires
+    ONCE, which the #1312 firing has already proved in production for free.
+  design: |
+    ONE CONCERN: whether a review can say what its reachability scan EXAMINED. Not what the scan
+    decides, not what it flags, not whether the floor blocks.
+
+    (i) THE COUNT COMES FROM THE SCAN, NOT FROM A SECOND WALK. `scanUnreachedExports` already
+    enumerates and dedupes its candidates; expose that population count alongside the violations
+    (a second return field, a companion export, or a result object — the implementer's call, argued
+    in the PR body). A SECOND diff walk in review.ts is refused for the reason
+    `scopeAdvisorySection`'s own doc already gives about `scopeViolationFiles`: two walks over one
+    question drift, and then the row and the advisory disagree about the same PR.
+
+    (ii) THE FIELD RIDES `review.posted`, AND ITS ABSENT CASE IS A VALUE, NOT A MISSING KEY.
+    LOAD-BEARING LITERAL: the row key is `reachability_scanned`, because this task's grep proof
+    names it — write the emitter to read naturally with it, never bolt it on. Its contract:
+      - a NUMBER — the count of added exported functions the scan examined (0 is a real, honest
+        answer meaning "the diff added none");
+      - `null` — the scan DID NOT RUN, the `if (checkoutDir)` skip. Never 0 for this case; a fake 0
+        is the `readDiskFreeBytes` mistake W1-T1081's rule already names, inverted.
+    So `null` / `0` / `N with no advisory` / `N with an advisory` are four readable states where
+    today there is one silence.
+
+    (iii) ADVISORY SEMANTICS ARE UNTOUCHED, AND THAT IS A CONSTRAINT ON THE DIFF. The field is
+    OBSERVABILITY: it must never fold into `state`, `floorState` or `capped`, must not change when
+    an advisory is emitted or which reason codes fire, and must not change the `UnwiredAdvisory`
+    shape any existing reader (the PR comment section, the ledger row) already consumes.
+
+    (iv) NO NEW STEP AND NO ROTATION QUESTION. Nothing new is registered in
+    `DECISION_RELEVANT_LEDGER_STEPS`: `review.posted` is already there, and `review.unwired_advisory`
+    was registered by W1-T1017 — that half is done and is CITED, NOT RE-FILED. A new step here would
+    be a second path for an organ that already has a row.
+
+    (v) THE FALSIFIER MUST PROVE THE DISTINCTION, NOT THE FIELD'S EXISTENCE. A test asserting the
+    key is present proves nothing; the assertions that matter are that (a) and (b) and (c) of
+    rationale (2) render DIFFERENTLY from one another on otherwise identical inputs.
+
+    EXPLICITLY NOT IN SCOPE, EACH WITH ITS OWNER, so a reader does not re-file them:
+      - W1-T323's FLIP, ITS 5% THRESHOLD, ITS WINDOW, AND ANY MINIMUM SAMPLE SIZE. This task takes
+        no position and changes no criterion. The reporting entry asks whether the flip should
+        require at least one true positive first: that precondition is MOOT ON THE RECORD — #1312
+        is a true positive and W1-T1017 counts four `unwired_export` rows, so the criterion is not
+        the unsatisfiable shape the entry feared. The separate question of whether a 5% rate is
+        achievable at small n is raised by feedback#fb-1785896975009-9f6c88 and belongs to that
+        entry's own triage and to the operator who set the threshold, not here.
+      - THE SCAN'S PREDICATE, its seam-default discount, its markers and its reason codes —
+        W1-T322's contract, untouched.
+      - THE RETRO-TIME CONSUMER and its population (`net_state_claim` over NET STATE prose) —
+        MASTER-PLAN P40(iv) owns that argument; this shard touches only the review-time path and
+        does not touch src/lib/retro.ts.
+      - ADVISORY RETENTION — W1-T1017, already shipped.
+      - THE APPEND-LAST / INJECTABLE-PARAMETER SHAPE the scan structurally cannot see — W1-T365.
+  acceptance:
+    - claim: "a review whose scan examined added exports and cleared every one is distinguishable from a review whose scan never ran"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "a review with no head checkout records that the scan did not run rather than a count of zero"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "a diff that added no exported function reads as a scan that examined none, not as an absent scan"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "the examined count rides the review row that already exists, so no extra ledger line is written per review"
+      proof: "grep: reachability_scanned in src/run-task.ts"
+    - claim: "the advisories, their reason codes and the verdict state are unchanged by this field in every case that fired before"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+  origin: "feedback#fb-1785870873355-d91fc2"
+  plan_refs: ["W1-T322", "W1-T323", "W1-T1017", "W1-T1086", "W1-T1081", "W1-T1101"]
+  files: [src/lib/reachability.ts, src/lib/review.ts, src/run-task.ts, test/ships-unwired-floor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, recorded up front rather than shipped as a
+    lint refusal. `subsystemsOf` reads several concerns off this `files:` list (reachability,
+    review, the dispatcher module, its suite) and `lint-plan` refuses that below high — the same
+    correction already forced on W1-T1017, W1-T1086 and W1-T1101. THE ACTUAL DIFF IS ONE COUNT
+    THREADED THROUGH AN EXISTING RETURN AND ONE KEY ON AN EXISTING ROW; no gate, policy value,
+    severity or verdict field moves.
+
+    `files:` DERIVED BY READING THE CHAIN, not guessed: `scanUnreachedExports` and
+    `addedExportedFunctions` live in src/lib/reachability.ts; `unwiredAdvisoriesFor` and the
+    `ReviewVerdict.unwiredAdvisories` field live in src/lib/review.ts; the `log("review.posted", …)`
+    call and the `review.unwired_advisory` loop live in src/run-task.ts; every SHIPS-UNWIRED
+    assertion lives in test/ships-unwired-floor.test.ts, which EXISTS today, so the whole-file proof
+    form executes on day one. src/lib/retro.ts is DELIBERATELY ABSENT — the retro consumer is P40(iv)'s
+    argument and widening into it is how one observability field becomes a population re-definition.
+
+    ON THE GREP PROOF. `reachability_scanned` reads ZERO in src/run-task.ts at head, so it
+    DISCRIMINATES against the merge base rather than landing `executed_stale`, and it is stated
+    positively — it greps text the change ADDS. The pattern carries no bracket, star, caret, dollar
+    or the words ` in `, so `parseDialectGrep` splits it at the single ` in ` before its path, and
+    its path is declared in `files:` (W1-T310). The remaining four criteria take the whole-file
+    `unit test:` form deliberately: they are BEHAVIOURAL distinctions, and a grep cannot express
+    "these two cases render differently".
+
+    verify:auto — every criterion is decidable in-process against the diff/checkout/report fixtures
+    the suite already builds. Nothing spawned, no network, no operator judgement.
+
+    budget_usd 30 — above W1-T1101's 12 (one template string over data the row already holds)
+    because the count does not exist yet and must be threaded out of the scan; far below W1-T322's
+    100, which built the scan and both consumers.
+
+    NO depends_on, ESTABLISHED RATHER THAN ASSUMED. W1-T1017 (the retention half) is shipped.
+    W1-T323 is `verify: human` and gated on an operator reading; it consumes this field's output but
+    nothing here waits on it, and this task must not be blocked behind a calendar fact. W1-T365 and
+    W1-T1086 overlap on paths only — file-overlap serialisation at dispatch is the correct and
+    sufficient interlock.
+
+    RE-READ THE GATE BEFORE ACTING RATHER THAN QUOTING THIS SHARD. Every claim above was read off
+    src/lib/review.ts, src/lib/reachability.ts and src/run-task.ts during triage of
+    fb-1785870873355-d91fc2; the skip condition, the filter chain and the emitted row's key list are
+    the things most likely to have moved.

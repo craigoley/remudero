@@ -25,6 +25,6 @@ raw: "WORKER FOLLOW-UPS TYPED 'task:' HAVE NO CONSUMER — the ci:test ENOBUFS
   than it looks and the fix is in that filter."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null

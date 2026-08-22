@@ -1,0 +1,134 @@
+- id: W1-T1128
+  title: "`clock-sweep` gates on ABSOLUTE cleanliness and has never once been green in its entire life, and it fires only on PRs touching its own five files — so the only changes that can reduce the drift are the only changes it blocks, while every other PR sails past untouched"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree at origin/main, from local source plus one read of
+    the Actions run history. Every zero below carries a control, and one premise this recon was
+    handed turned out to be wrong and is corrected rather than repeated.
+
+    (1) IT HAS NEVER BEEN GREEN, ACROSS ITS WHOLE LIFE AND BOTH TRIGGERS. The workflow's run
+    history holds NINE runs total — `total_count: 9`, all nine returned, so there is no pagination
+    gap — spanning 2026-08-02T17:04:05Z to 2026-08-22T07:35:28Z. Conclusions: 4 `failure`, 5
+    `cancelled`, and ZERO `success`. Split by trigger, the zero holds on both sides:
+    `pull_request` 3 failure / 3 cancelled, `schedule` 1 failure / 2 cancelled — so the SCHEDULED
+    runs on main have never gone green either. CONTROL: the identical query shape against `ci.yml`
+    returns 16 successes of 20, so the query can see a success and this zero is real absence rather
+    than a broken read.
+
+    (2) AND IT ONLY FIRES WHERE IT HURTS. `clock-sweep.yml`'s `pull_request` trigger carries a
+    `paths:` filter naming exactly five files — `scripts/clock-shift.mjs`, `scripts/clock-sweep.mjs`,
+    `test/clock-shift-probe.test.ts`, `test/clock-sweep.test.ts` and the workflow itself. A PR that
+    fixes a drifting FIXTURE does not match, but a PR that touches the instrument does. So the gate
+    is invisible to the whole repository and blocking on precisely the changes aimed at the
+    instrument it measures.
+
+    (3) THE PREMISE THAT IT WAS PROMOTED TO REQUIRED IS FALSE, AND THE TRUTH IS SHARPER.
+    `clock-sweep` is NOT in `ci-gate.yml`'s `REQUIRED` list — that list holds fourteen names (`ci`,
+    `lint-plan`, `depcruise`, `containment-probe`, `coverage-ratchet`, `mutation-ratchet`,
+    `jscpd-gate`, `claims`, `learnings-budget-ratchet`, `commitlint`, `api-client-drift`,
+    `no-hand-rolled-fetch`, `scan-pr / osv-scan`, `License Review`) and this is not one of them.
+    The workflow's own header says so too, in terms: "NOT A REQUIRED CHECK, AND NOT A PR TRIGGER …
+    It is deliberately absent from ci-gate.yml." BOTH FILES STILL AGREE WITH THEIR AUTHOR.
+
+    (4) THE HOLD COMES FROM AN UNSCOPED FAIL ARM. `evaluate_fails` in `ci-gate.yml` selects EVERY
+    check run whose conclusion is failure/timed_out/cancelled/action_required/startup_failure,
+    filtered only against `IGNORE` (which holds `ci-gate` alone). It never consults `REQUIRED`.
+    `REQUIRED` governs the WAIT — which checks must be present and terminal before concluding — and
+    nothing else. So an advisory check red-lights the merge, and the error the operator observed
+    ("required check(s) FAILED — holding merge: clock-sweep") NAMES A CHECK THAT IS NOT REQUIRED.
+    The message is wrong about its own semantics. THAT IS A SECOND, SEPARABLE DEFECT AND IS NOT
+    SCOPED HERE — see design (v).
+
+    (5) THE COST IS THE THIRD FIX-BLOCKED-BY-ITS-OWN-DEFECT SHAPE ON THIS BOARD IN A DAY. #2434 is
+    W1-T1104's own build, seaming six of the nine drifting suites, and it is held by the gate that
+    measures that drift, with eighteen other checks green beside it.
+
+    (6) THE CLASS, FROM CLAUDE.md, AND THIS IS THE SHARPER FORM OF IT. That file names "a bound
+    that fires on a HEALTHY condition" as this repo's recurring defect, with the instruction to
+    check that the population the bound separates has ever been observed. Here the population is
+    empty in the strongest possible sense: THE BOUND HAS NEVER ONCE BEEN SATISFIABLE. Not a
+    mis-sized threshold — a threshold no state of the repository has ever met.
+  design: |
+    (i) A RATCHET, FOLLOWING THE CONVENTION FOUR GATES HERE ALREADY USE. `coverage-ratchet`,
+    `mutation-ratchet`, `claude-md-budget-ratchet` and `assertion-discrimination` all fail on
+    REGRESSION against a recorded baseline rather than on absolute cleanliness, and each keeps its
+    figure in `scripts/<name>-baseline.json` with a `_comment` carrying the rule in prose. Follow
+    that shape rather than inventing one; the CEILING-shaped sibling is
+    `scripts/claude-md-budget-baseline.json`, whose comment is the model for wording a bound that
+    must never move in the permissive direction.
+
+    (ii) THE CHANGE IS ONE PREDICATE. `classifySweep` (`scripts/clock-sweep.mjs`) currently returns
+    `ok: drifted.length === 0 && staleExclusions.length === 0` — absolute cleanliness. It must
+    become a comparison against the recorded ceiling instead, so a run that does not REGRESS is
+    green.
+
+    (iii) BASELINE AT TODAY'S DRIFTING-SUITE COUNT, MEASURED AT CAPTURE, NEVER GUESSED. Recording
+    the count the sweep actually reports today makes main green immediately and makes #2434 the
+    first notch DOWN. The implementer must capture it by running the sweep, exactly as every other
+    baseline file records its own capture command.
+
+    (iv) THE NEVER-MOVE RULE IS CARRIED IN THE FILE, NOT ONLY IN THIS SHARD. The baseline is a
+    CEILING: it may fall when drift is genuinely fixed and must NEVER be raised to paper over a
+    regression. That sentence belongs in the `_comment`, where every other baseline file puts its
+    own, because a rule that lives only in a plan shard is unenforced prose to whoever edits the
+    JSON.
+
+    (v) NOT IN SCOPE, AND BOTH EXCLUSIONS ARE DELIBERATE. The nine drifting suites are W1-T1104's,
+    and #2434 is already fixing six — this task must not touch a fixture. And the unscoped
+    `evaluate_fails` arm of rationale (4) is a REAL second defect with a different owner and a
+    different blast radius: `.github/workflows/` is INSTRUMENT_SURFACE, and changing what fails the
+    merge gate for every PR in the repository is not a change to smuggle in behind a ratchet. It is
+    named here so the operator can mint it.
+
+    (vi) DO NOT DROP IT FROM THE GATE. Rationale (3) shows it is not in the required set to begin
+    with, but the point stands: the answer to a check that cannot pass is to make passing mean
+    something, never to stop looking. A ratchet keeps the signal and makes it actionable.
+  acceptance:
+    - claim: "a sweep whose drifting-suite count is at the recorded ceiling exits clean"
+      proof: "unit test: test/clock-sweep.test.ts"
+    - claim: "a sweep that drifts further than the ceiling still fails"
+      proof: "unit test: test/clock-sweep.test.ts"
+    - claim: "a sweep with fewer drifting suites than the ceiling exits clean and says so"
+      proof: "unit test: test/clock-sweep.test.ts"
+    - claim: "the recorded ceiling carries the rule that it may fall and must never rise"
+      proof: "unit test: test/clock-sweep.test.ts"
+    - claim: "a stale exclusion still fails regardless of the drift ceiling"
+      proof: "unit test: test/clock-sweep.test.ts"
+  files: [scripts/clock-sweep.mjs, scripts/clock-sweep-baseline.json, test/clock-sweep.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#clock-sweep-never-satisfiable-2026-08-22"
+  plan_refs: ["W1-T1104", "W1-T503", "W1-T25"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/clock-sweep.test.ts`, which ALREADY EXISTS on main — so unlike a forward
+    reference these proofs execute against the real file from the first pass, and each must
+    therefore name behaviour this task adds rather than behaviour already there.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The change decides whether a merge gate holds, so a
+    mistake either re-blocks every instrument PR or silently stops reporting drift. The diff itself
+    is one predicate, one JSON file and its falsifiers.
+
+    THE SCOPE IS DELIBERATELY FREE OF `src/`, AND THAT IS LOAD-BEARING RATHER THAN INCIDENTAL.
+    `scripts/[^/]*-baseline.json` IS instrument surface (`INSTRUMENT_SURFACE`, `src/lib/review.ts`),
+    and `detectInstrumentEntanglement` fires when instrument surface and a `src/` PRODUCT path ride
+    in the same PR (`test/` excluded). This `files:` list contains no `src/` path at all, so the
+    baseline can land beside its own predicate without entangling. An implementer who widens the
+    scope into `src/` will trip Rule 25 and should split instead.
+
+    `scripts/clock-sweep.mjs` IS NOT ITSELF INSTRUMENT SURFACE — the patterns cover
+    `*-ratchet.mjs`, `diff-coverage.mjs`, `*-baseline.json`, `mutation-relevant-paths.json`,
+    `stryker.conf.json` and three named gate scripts, and this file matches none. Adding the
+    baseline JSON needs no `INSTRUMENT_SURFACE` edit either, since the `-baseline.json` pattern
+    already covers it.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1128` resolves to 8b357e7961d822eead2169747b1bd8383456a060,
+    read over git protocol; live control, `refs/rmd-id/W1-T999999` exits 2. THE ANCHOR MESSAGE WAS
+    NOT JUDGED. Six id surfaces plus a subject sweep, and the check covered the shard FILENAME and
+    the declared `- id:` inside every shard on main — 447 declarations scanned, zero naming this id.

@@ -253,6 +253,21 @@ export interface ReviewEvidence {
   /** The implement worker's REPORT text (where proofs are pasted). */
   report: string;
   /**
+   * (W1-T1100) True when `report` is NOT the PR body — `runTaskBody` (run-task.js) substitutes
+   * the worker's own chat text after a failed `fetchPrBodyFn` read, so a `gh` outage degrades to
+   * judging the worker's narrative rather than stalling the review (deliberate; that fallback is
+   * NOT what this flag changes). Left unmarked, the substitute used to reach every consumer
+   * exactly like a real body, with two OPPOSITE failure shapes measured live on #2395: {@link
+   * bodyContradictsDiff} fails CLOSED, manufacturing a contradiction from prose that was never a
+   * claim about the changeset, while `judgeCriterion`'s keyword-coverage floor fails OPEN, scoring
+   * the worker's own narrative HIGHER than an honest body because it describes its own change in
+   * the proof's own vocabulary. Both consumers read this flag below and refuse to judge a
+   * substitute as though it were the body. Absent/false ⇒ byte-identical to pre-W1-T1100
+   * behaviour — every caller/fixture that predates this task keeps trusting `report` as the real
+   * body, exactly as it does today.
+   */
+  reportIsSubstitute?: boolean;
+  /**
    * Optional per-criterion semantic verdicts from the fresh LLM reviewer,
    * index-aligned to the criteria list. `false` FORCES that criterion to fail;
    * `true`/`undefined` defer to the mechanical floor. Semantic can only
@@ -602,6 +617,20 @@ export interface ReviewVerdict {
    * PR, the reason code and the symbols — the dataset W1-T323's measurement reads.
    */
   unwiredAdvisories?: UnwiredAdvisory[];
+  /**
+   * W1-T1118: the reachability scan's EXAMINED count, riding this verdict so `review.posted`
+   * (run-task.ts) can carry it without a second ledger line — see {@link
+   * "./reachability.js".ReachabilityScanResult}'s doc for the three-state contract this exists to
+   * separate:
+   *   - a NUMBER — {@link scanUnreachedExports} ran and examined this many deduped added exported
+   *     functions (0 is honest: the diff added none, not "the scan didn't run");
+   *   - `null` — the scan did NOT run at all, the same `checkoutDir` skip {@link unwiredAdvisories}'s
+   *     `unwired_export` code already degrades on (no head checkout to read).
+   * OBSERVABILITY ONLY, exactly like `unwiredAdvisories` above: never folds into `state`,
+   * `floorState` or `capped`, and its presence/value never changes which advisories fire or which
+   * reason codes they carry.
+   */
+  reachabilityScanned?: number | null;
   /**
    * W1-T352 (DECISIONS.md ENTRY PROVENANCE FLOOR): the header text of every entry this diff ADDS
    * to DECISIONS.md (a `## …` line) that carries, among that SAME entry's own added lines,
@@ -1315,14 +1344,35 @@ export const PROOF_ENV_ALLOWLIST = [
   "GIT_TERMINAL_PROMPT",
 ] as const;
 
+/** The `GIT_CONFIG_*` keys {@link buildProofEnv} only ever forwards TOGETHER (W1-T1096). The
+ * allowlist names index 0 and nothing higher, so a parent's `GIT_CONFIG_COUNT` of two or more
+ * describes pairs this allowlist cannot supply — git reads `GIT_CONFIG_COUNT` first and then
+ * demands every `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` it names, so forwarding the count
+ * without every pair it promises makes git exit 128 before doing any work, which is strictly
+ * worse than forwarding no count at all (git's no-count fallback is its normal, working
+ * resolution). */
+const GIT_CONFIG_TRIPLE = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] as const;
+
 /** Build the DECLARED child environment {@link defaultProofSpawner} passes to a proof's process:
  * copies ONLY the {@link PROOF_ENV_ALLOWLIST} keys present on `parent` (default: this process's own
  * `process.env`, i.e. whatever orchestrator — daemon or a bare CLI invocation — is running the
  * reviewer), never `parent` wholesale. Exported so a test can compare the declared env two
- * differently-shaped orchestrator environments produce, without needing two real orchestrators. */
+ * differently-shaped orchestrator environments produce, without needing two real orchestrators.
+ *
+ * The {@link GIT_CONFIG_TRIPLE} is forwarded ONLY as a consistent unit (W1-T1096): this allowlist
+ * can supply exactly one key/value pair (index 0), so the triple is only satisfiable when the
+ * parent's `GIT_CONFIG_COUNT` is exactly `"1"` and both `GIT_CONFIG_KEY_0` and
+ * `GIT_CONFIG_VALUE_0` are present — in every other shape (a higher count, or a count with no
+ * index-0 pair) none of the three cross, never a partial forward that hands git a count it
+ * cannot satisfy. */
 export function buildProofEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = {};
+  const tripleIsConsistent =
+    parent.GIT_CONFIG_COUNT === "1" &&
+    typeof parent.GIT_CONFIG_KEY_0 === "string" &&
+    typeof parent.GIT_CONFIG_VALUE_0 === "string";
   for (const key of PROOF_ENV_ALLOWLIST) {
+    if ((GIT_CONFIG_TRIPLE as readonly string[]).includes(key) && !tripleIsConsistent) continue;
     const val = parent[key];
     if (typeof val === "string") child[key] = val;
   }
@@ -2233,6 +2283,16 @@ export function judgeCriterion(
   reportTokens: Set<string>,
   semantic?: boolean,
   execCtx?: ProofExecContext,
+  /**
+   * (W1-T1100) True when `reportTokens` was tokenized from a SUBSTITUTE — the worker's own chat
+   * text, not the PR body — because `fetchPrBodyFn` failed. A worker naturally echoes a proof's
+   * own vocabulary while describing the change it just made, so keyword coverage over a
+   * substitute is not evidence the BODY substantiates anything; it is evidence the worker can
+   * read its own diff. See {@link ReviewEvidence.reportIsSubstitute}'s doc for the measured #2395
+   * fixture. Real, WHITELISTED proof EXECUTION below is unaffected — it observes repo state, not
+   * report text, so it can still flip a criterion to `executed_pass` regardless of this flag.
+   */
+  reportSubstituted?: boolean,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
 
@@ -2275,7 +2335,18 @@ export function judgeCriterion(
   } else {
     const covered = kws.filter((k) => reportTokens.has(k));
     const coverage = covered.length / kws.length;
-    if (coverage < MIN_COVERAGE) {
+    if (reportSubstituted) {
+      // W1-T1100 (design (iii)): the floor may not report substantiation off a substitute, in
+      // EITHER direction of coverage — a high-coverage substitute is the #2395 fail-OPEN case
+      // (the worker describes its own change in the proof's own words), not evidence the body
+      // substantiates anything. Rest on what proofs actually EXECUTED (below, unaffected) and
+      // name the missing body as the reason the floor cannot say more.
+      met = false;
+      reason =
+        `proof unmet: PR body unreadable — judged against the worker's own text (substituted after ` +
+        `a failed body fetch), so keyword coverage (${covered.length}/${kws.length} proof keywords) ` +
+        `is withheld as substantiation`;
+    } else if (coverage < MIN_COVERAGE) {
       met = false;
       reason = `proof unmet: report does not substantiate it (matched ${covered.length}/${kws.length} proof keywords)`;
     } else {
@@ -3195,6 +3266,11 @@ function unresolvedTaskScopeOverlaps(
  * degradation {@link judgeCriterion}'s own `execCtx` already applies to proof execution.
  * `inverse_scope`/`scope_violation`/`unresolved_task_scope` need no checkout (each is a pure
  * diff-files/declared-files comparison) and always run.
+ *
+ * Also returns `reachabilityScanned` (W1-T1118, see {@link ReviewVerdict.reachabilityScanned}'s
+ * doc): the scan's own `examined` count when `checkoutDir` was present, `null` when the
+ * `if (checkoutDir)` guard skipped it — read off {@link scanUnreachedExports}'s result, never a
+ * second diff walk.
  */
 function unwiredAdvisoriesFor(
   diff: string,
@@ -3204,11 +3280,13 @@ function unwiredAdvisoriesFor(
   taskDeclaredFiles: string[] | undefined,
   openTaskIds: ReadonlySet<string> | undefined,
   openTaskDeclaredFiles: ReadonlyMap<string, readonly string[]> | undefined,
-): UnwiredAdvisory[] {
+): { advisories: UnwiredAdvisory[]; reachabilityScanned: number | null } {
   const out: UnwiredAdvisory[] = [];
+  let reachabilityScanned: number | null = null;
 
   if (checkoutDir) {
-    const unreached: UnreachedExport[] = scanUnreachedExports(diff, checkoutDir);
+    const { unreached, examined } = scanUnreachedExports(diff, checkoutDir);
+    reachabilityScanned = examined;
     if (unreached.length > 0) {
       const wired = wiredAtPairs(report);
       const knownOpenIds = openTaskIds ?? new Set<string>();
@@ -3261,7 +3339,7 @@ function unwiredAdvisoriesFor(
     });
   }
 
-  return out;
+  return { advisories: out, reachabilityScanned };
 }
 
 // ── DECISIONS.md entry provenance floor (W1-T352) ──────────────────────────
@@ -3377,7 +3455,7 @@ export function judgeReview(
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>
-    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx),
+    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx, evidence.reportIsSubstitute),
   );
   const testTheater = detectTestTheater(evidence.diff);
 
@@ -3401,7 +3479,13 @@ export function judgeReview(
   // W1-T274: see {@link ReviewVerdict.changesetContradictions}'s doc. A pure
   // comparison of two values already computed above (`evidence.report`,
   // `diffFiles`) — no new fetch, no new gateway.
-  const changesetContradictions = bodyContradictsDiff(evidence.report, diffFiles);
+  //
+  // W1-T1100 (design (ii)): a detector that exists to compare the BODY's claims against the diff
+  // must REFUSE on a substitute, not judge one — a body-vs-diff check is impossible without the
+  // body, so this withholds the check entirely rather than manufacturing a contradiction from
+  // prose that was never a claim about the changeset (measured live on #2395: "No code." fired
+  // against a one-file diff whose real, unreadable-that-day body never said it).
+  const changesetContradictions = evidence.reportIsSubstitute ? [] : bodyContradictsDiff(evidence.report, diffFiles);
 
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s
   // doc. Reuses the SAME `diffFiles` every other structural check above
@@ -3417,7 +3501,7 @@ export function judgeReview(
   // W1-T322 (SHIPS-UNWIRED advisory floor): computed alongside the structural checks above but
   // folded into NEITHER `state` NOR `floorState` below — see {@link ReviewVerdict.unwiredAdvisories}'s
   // doc for why (ADVISORY ONLY, by design, until W1-T323's measured flip).
-  const unwiredAdvisories = unwiredAdvisoriesFor(
+  const { advisories: unwiredAdvisories, reachabilityScanned } = unwiredAdvisoriesFor(
     evidence.diff,
     evidence.report,
     diffFiles,
@@ -3579,6 +3663,7 @@ export function judgeReview(
       : undefined,
     unprovenancedDecisionsEntries,
     unwiredAdvisories,
+    reachabilityScanned,
     rewardHackingGap,
     unexecutableCount,
     unexecutableProofs,
