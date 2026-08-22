@@ -118,3 +118,33 @@
     THE MEASUREMENTS ARE QUERIES. Re-derive the gap from the ledger union rather than this shard —
     `fix.dispatch` newest row against `sweep.disposed` rows carrying `blocked-fixable` in the same
     window, with a task known to carry `fix.*` rows as the live control.
+
+    AMENDED 2026-08-22 — THE CAUSE, FOUND AFTER FILING, AND THIS ARM IS NOT IT. A run held
+    `state/inflight/W1-T1205.lock` from 14:59:03Z, and for its whole life the daemon ticked the
+    RESTRICTED light pass only: 347 `sweep.pass` rows carrying `enumerated: 1` in that window and
+    ZERO full sweeps, the last full pass having run at 14:46:46Z before the lock was taken. The
+    light hook passes `actionable: d => d === "post-review"` (its own doc, run-task.ts), so
+    dispatchFix/close/escalate/depReview/arm all stand down as "deferred to full sweep (light
+    pass)". That is why four consecutive passes deferred every `blocked-fixable` PR.
+
+    AND THE RUN WAS NOT STUCK — THE OBVIOUS READING IS WRONG AND THE CORRECTION MATTERS. Its recent
+    rows were `ci.polling` (11 rows, 15:23:20Z-15:30:15Z) and then `pr.polling` (15:36-15:39), and
+    it ended normally: `pr.merged` at 15:40:11Z, then `worktree.remove` and `verdict`. Zero `claude`
+    processes is the EXPECTED state while a run waits on CI, not evidence of a hang. So the
+    suppression is not what a broken run does; it is what a HEALTHY 41-minute run does, by design —
+    W1-T254 restricted the light hook deliberately, to keep the single-threaded lanes single-
+    threaded while `runOne` is in flight.
+
+    SO THIS ARM WOULD NOT HAVE PREVENTED THE OUTAGE, AND A READER MUST NOT TAKE THE WATCH FOR THE
+    FIX. It observes; it dispatches nothing and clears nothing (design note iv). What it would have
+    changed is the LATENCY OF DISCOVERY: a conjunction of "candidates disposed `blocked-fixable`"
+    with "no `fix.dispatch` in the derived window" would have gone FAIL within about an hour of
+    14:59:03Z instead of the twenty-one hours it actually took, which ended with a human reading
+    the board by hand. That is the whole value of this task and it is worth stating as a bound
+    rather than as a repair.
+
+    THE FIX IS A SEPARATE TASK AND IS NOT ABSORBED HERE: a run idling on CI should not suppress the
+    repair arm for its whole duration. The two are genuinely different — one changes what the light
+    hook is allowed to do while a run waits, the other only notices when nothing has been done. Cite
+    that task by PR number here once it is filed; this shard's `files:` and criteria do not move for
+    it.
