@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { automergeHoldFromLedger } from "../src/lib/review.js";
-import { armAutoMergeAtOpen } from "../src/run-task.js";
+import { armAutoMergeAtOpen, armOutcomeReason, buildSweepEffects, realArmDeps } from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { captureFeedback } from "../src/lib/feedback.js";
 import { LANDING_BRANCH } from "../src/lib/feedback-landing.js";
@@ -355,4 +355,61 @@ test("a landing call with NO ledgerLines dep at all still arms — fail-open, un
   );
 
   assert.ok(calls.some((c) => c[0] === "pr" && c[1] === "merge"), "no ledgerLines dep means no hold is ever visible — arms as before this task");
+});
+
+// ── The three arms the hold adds that no fixture above reaches ───────────────────────────────
+//
+// Each is a branch a real hold takes and a test never did: the `[]`-on-failure contract that
+// keeps arming alive on a host with no resolvable config, the phrase the refusal reports, and
+// the converging withdrawal's own call site. `diff-coverage` named all three.
+
+test("realArmDeps: a config that cannot be resolved yields NO ledger lines rather than throwing", () => {
+  const deps = realArmDeps(() => {
+    throw new Error("loadConfig: `which claude` found nothing — the CI trap");
+  });
+  // THE CONTRACT: arming must survive a host that cannot resolve a config. `attemptArm` calls
+  // this thunk on EVERY arm, so a throw here would turn arming into a crash — and a host with
+  // no config has no hold ledger to honour in the first place, so `[]` is the honest answer.
+  assert.deepEqual(deps.ledgerLines(), [], "a failed config read is an empty ledger, never a throw");
+  // PAIRED POSITIVE CONTROL: the same seam with a working loader returns an ARRAY from the real
+  // reader, so the `[]` above is the catch arm firing and not a thunk that can only ever be empty.
+  const real = realArmDeps();
+  assert.ok(Array.isArray(real.ledgerLines()), "the default loader still produces a real read");
+});
+
+test("armOutcomeReason: a hold refusal names the hold and says only a release lifts it", () => {
+  const reason = armOutcomeReason("hold-refused", "verdict is a full PASS");
+  assert.match(reason, /operator merge hold/i, "the ledger row names WHAT refused, not just that something did");
+  assert.match(reason, /only an explicit release lifts it/i, "and names the ONE thing that lifts it — never a retry, never a push");
+  // PAIRED POSITIVE CONTROL: the SAME decision reason under a different outcome reads
+  // differently, so the assertions above are not satisfied by a switch returning one string.
+  assert.notEqual(armOutcomeReason("armed", "verdict is a full PASS"), reason);
+  assert.equal(armOutcomeReason("armed", "verdict is a full PASS"), "verdict is a full PASS");
+});
+
+test("the sweep's converging withdrawal calls the disarm leaf with the held PR's own url", () => {
+  const disarmed: string[] = [];
+  // `disarmImpl` is the 21st parameter — the LAST, per this function's own append-only
+  // convention — so every dep between `log` and it is defaulted here rather than restated.
+  const effects = buildSweepEffects(
+    "craigoley",
+    "remudero",
+    { root: "/nonexistent-for-this-fixture" } as never,
+    "/nonexistent-for-this-fixture/ledger.ndjson",
+    "RUN-hold-withdrawal",
+    { tasks: [], byId: new Map() },
+    () => {},
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    (prUrl: string) => void disarmed.push(prUrl),
+  );
+  effects.disarmAutoMerge?.(
+    { prUrl: "https://github.com/craigoley/remudero/pull/2376" } as never,
+    { by: "craig", reason: "holding for review" } as never,
+  );
+  assert.deepEqual(
+    disarmed,
+    ["https://github.com/craigoley/remudero/pull/2376"],
+    "the adapter passes the PR's OWN url through to the leaf — never a rebuilt or defaulted one",
+  );
 });

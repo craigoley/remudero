@@ -1692,7 +1692,14 @@ export function isPrMergedNow(prUrl: string, fetch: GhApiFetcher = ghJson): bool
   }
 }
 
-export function realArmDeps(): ArmDeps {
+export function realArmDeps(
+  // W1-T1000002: INJECTABLE, appended as the only parameter, the same convention `reviewRunner`/
+  // `spawnImpl`/`disarmImpl` already follow in `buildSweepEffects`. The `[]`-on-failure contract
+  // in `ledgerLines` below is the whole reason arming survives a host that cannot resolve a
+  // config — and it was unreachable from any test, because a real `loadConfig` succeeds here.
+  // A thrower proves the contract; the default keeps every existing caller byte-identical.
+  loadConfigImpl: typeof loadConfig = loadConfig,
+): ArmDeps {
   return {
     headSha: (prUrl) => readHeadShaRest(prUrl),
     // W1-T1000002: `attemptArm` calls this thunk on EVERY arm, so a host that cannot resolve a
@@ -1705,7 +1712,7 @@ export function realArmDeps(): ArmDeps {
     // fails here has no hold ledger to honour in the first place.
     ledgerLines: () => {
       try {
-        return readLedgerLines(ledgerPathFor(loadConfig()));
+        return readLedgerLines(ledgerPathFor(loadConfigImpl()));
       } catch {
         return [];
       }
