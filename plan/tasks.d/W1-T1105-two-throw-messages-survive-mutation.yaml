@@ -1,0 +1,115 @@
+- id: W1-T1105
+  title: "TWO `throw new Error(…)` MESSAGES CAN BE EMPTIED WITHOUT A RED — `filingAcceptanceCriteria`'s and `ratifyPrCreateRest`'s, both in `src/lib/plan-pr-emitter.ts`, and neither string is asserted anywhere under `test/`; BUT THE PREMISE THAT EVERY SURVIVOR IS THIS SHAPE IS REFUTED — of the survivors issue #2360 actually lists, these two are the whole of the emptied-throw-message family and the rest are eleven other mutator kinds across five modules, scoped out here with the census that shows why"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  rationale: |
+    RE-DERIVED 2026-08-21 against origin/main `94543e79`, from a scratch worktree whose HEAD was
+    proved equal to that sha before any reading. The survivor census below was parsed out of issue
+    #2360's own captured output, not summarised from its title.
+
+    (1) THE SHAPE IS REAL AND IT IS EXACTLY TWO SITES. Both are in `src/lib/plan-pr-emitter.ts`:
+    `filingAcceptanceCriteria: at least one filed task id is required` (line 192) and
+    `rmd approve: \`gh api ... pulls\` (POST) produced no html_url/number` (line 388). Stryker
+    replaced each message with `""` and the mutant SURVIVED, which means nothing anywhere observes
+    what either error says — only that something threw.
+
+    (2) AND NEITHER MESSAGE IS ASSERTED ANYWHERE UNDER `test/` — NOT BY A TEST AND NOT BY A GREP.
+    A substring search for each message across the whole of `test/` returns nothing. LIVE CONTROL
+    on the same corpus: 53 files under `test/` do assert on source TEXT (the source-text-assertion
+    idiom this fleet uses in at least two places), so the query can see that shape and this zero is
+    a real absence. NOTHING BLOCKS THIS WORK LATER: no existing grep pins either string, so adding
+    a real assertion cannot collide with one.
+
+    (3) THE BRIEFED PREMISE — "every surviving mutant is an unasserted error message" — IS
+    REFUTED, AND THIS SHARD LEADS WITH THAT RATHER THAN INHERITING IT. Parsing every `[Survived]`
+    row the issue body carries yields TWELVE distinct mutator kinds, not one: StringLiteral,
+    Regex, ConditionalExpression, MethodExpression, ArrowFunction, EqualityOperator,
+    LogicalOperator, ArrayDeclaration, OptionalChaining, BlockStatement, ArithmeticOperator and
+    BooleanLiteral. The emptied-throw-message family is TWO of them. The visible survivors are
+    dominated instead by string and regex literals inside rendered output — `.map((p) => \`\`)`,
+    `lines.join("")`, a route pattern emptied — and by predicate flips like `if (true)` and
+    `> 0` becoming `>= 0`.
+
+    (4) AND THEY ARE CONCENTRATED IN FIVE MODULES, WHICH IS THE REAL FINDING AND IS NOT THIS
+    TASK'S. By file, the visible survivors sit in `src/lib/plan-pr-emitter.ts`,
+    `src/lib/rule-efficacy.ts`, `src/lib/operator-sync.ts`, `src/lib/recap.ts` and
+    `src/lib/tier.ts` — five modules whose RENDERED OUTPUT is asserted loosely or not at all. That
+    is a different defect from an unasserted throw message and it needs its own filing with its
+    own falsifier.
+
+    (5) THE CENSUS IS A FLOOR, NOT A TOTAL, AND SAYING OTHERWISE WOULD BE A FALSE COUNT. Issue
+    #2360's body carries `_[log truncated -- earlier lines dropped to fit GitHub's issue-body
+    limit; the full log is in the run and the uploaded artifact]_`. Every figure in (3) and (4) is
+    taken over what SURVIVED truncation, so the real distribution can only be wider — never
+    narrower in the direction that would rescue the briefed premise. Re-derive from the run's
+    uploaded artifact, not from the issue body, before acting on any number here.
+
+    (6) THIS ANSWERS ISSUE #2360, WHICH CANNOT RETIRE ITSELF. It carries no `Task:` trailer — one
+    of the two `no_task_trailer` drops in the reconciler's counts — so nothing closes it
+    automatically. RECORDED SO AN OPERATOR CAN CLOSE IT BY HAND once this lands. This task does not
+    close it, and it does not clear `mutation-nightly` on its own: two survivors of many.
+  design: |
+    (i) ASSERT WHAT THE ERROR SAYS, AT BOTH SITES, IN THE EXISTING HOME. `test/plan-pr-emitter.ts`
+    already exists and already drives both functions' modules; the assertions belong there rather
+    than in a new file, so the concern count is not inflated by a filename. An assertion that only
+    checks that SOMETHING threw is what let these mutants live — the test must read the message.
+
+    (ii) TWO SITES IS THE WHOLE SCOPE AND THE TITLE SAYS SO. This task does not chase the other
+    survivor families. It is deliberately small: the value is that a message which cannot be
+    emptied silently is a message a caller can rely on, and two is what the evidence supports.
+
+    (iii) THE FALSIFIER IS THE GATE ITSELF, RE-RUN. Emptying either message by hand must make the
+    new assertion red; the gate re-run must no longer list those two sites as survived. Anything
+    weaker — asserting `throws` without a message matcher — reproduces the defect.
+
+    (iv) DO NOT WIDEN THE ASSERTION INTO A SOURCE-TEXT GREP. Rationale (2) establishes that no grep
+    pins these strings today, and adding one would pin the message from OUTSIDE the behaviour,
+    which is the assertion-a-comment-can-satisfy shape W1-T1051 files. Assert through the thrown
+    error, never by reading the source.
+
+    (v) OUT OF SCOPE, NAMED, WITH THE REASON. The other survivor families in rationale (3) and the
+    five under-asserted modules in (4) are a separate concern: their remedy is to assert rendered
+    output and predicate boundaries, not error messages, and their falsifier is different. W1-T1051
+    (an assertion a comment can satisfy) is adjacent and cited, not absorbed. No change to
+    `stryker.conf.json`, to `scripts/mutation-nightly-scope.json`, or to the mutation ratchet's
+    threshold — a survivor is fixed by asserting, never by narrowing the scope that found it.
+  acceptance:
+    - claim: "emptying the filing-criteria error message makes a test fail"
+      proof: "unit test: test/plan-pr-emitter.test.ts"
+    - claim: "emptying the approve-post error message makes a test fail"
+      proof: "unit test: test/plan-pr-emitter.test.ts"
+    - claim: "each assertion reads the thrown message rather than only that something threw"
+      proof: "unit test: test/plan-pr-emitter.test.ts"
+    - claim: "the filing-criteria message text appears in the suite that asserts it"
+      proof: "grep: at least one filed task id is required in test/plan-pr-emitter.test.ts"
+  origin: "issue#2360"
+  plan_refs: ["W1-T1051", "W1-T1104"]
+  files: [test/plan-pr-emitter.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: medium` IS THE HONEST BAND — one test file, two assertions, no product code. Rule 19
+    reads one concern here and does not force a raise; inflating it would be theatre.
+
+    `test/plan-pr-emitter.test.ts` IS THE EXISTING HOME and is declared rather than a new filename,
+    the correction `lint-plan` forced on W1-T1068, W1-T1069, W1-T1078 and W1-T1079.
+
+    THE FOURTH CRITERION'S PROOF IS A FORWARD REFERENCE INTO THE DECLARED TEST FILE, AND THAT
+    PLACEMENT WAS MEASURED. Naming `src/lib/plan-pr-emitter.ts` instead drew a `proof-scope` warn
+    whose own remedy text says to add that path to `files:` — which would declare a PRODUCT file
+    this task must never edit and hand a worker the scope to do it. That is the trap W1-T1070
+    files: the check is right that the path is out of scope, and its first suggested fix is the
+    harmful one. The proof therefore names the SUITE, where the message string must appear once
+    the assertion exists; it reads zero on origin/main today.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    EVERY FIGURE IS A QUERY, AND ONE IS DELIBERATELY ABSENT. Re-derive the survivor census by
+    parsing `[Survived] <kind>` rows out of the mutation run's UPLOADED ARTIFACT rather than the
+    issue body, which is truncated. Do not carry a total: rationale (5) explains why the numbers in
+    this file are a floor.

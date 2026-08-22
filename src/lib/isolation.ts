@@ -389,6 +389,13 @@ export async function probeIsolation(opts: {
       alias_names: evidence.aliasNames ?? null,
       function_names: evidence.functionNames ?? null,
       reason: verdict.reason,
+      // W1-T1112: this row is the run-terminating VERDICT — the one a reader follows
+      // when the run dies — so it must carry the spawn's own error text itself, not
+      // just point at the sibling `isolation.probe` row written the same millisecond.
+      // SAME condition as that row's `stderr_excerpt` (W1-T238): present only when the
+      // underlying worker call itself errored, so a proven-broken (nonzero count) or
+      // unproven (unparseable count) verdict on a CLEAN spawn still carries no excerpt.
+      ...(r.isError ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
     });
     // OBSERVED (W1-T91/P23 part i): the actual measured counts when both parsed
     // cleanly (a proven-broken state — nonzero leakage), or the literal "unproven"

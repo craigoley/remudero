@@ -1,0 +1,135 @@
+- id: W1-T1110
+  title: "THE FIX RUNG'S DEDUP DEADLOCKS AND SAYS NOTHING WHILE IT DOES — `prior.fixed` is keyed `pr@headSha` and populated from any `sweep.disposed` row with `acted: true`, so it records that a fix WAS DISPATCHED and never that one SUCCEEDED; the entry clears only on a new head, and the head only changes if a fix runs, so a dispatch that failed before pushing stands the PR down forever — and because that arm writes no `stand_down_reason`, 127 identical stand-downs on one PR read exactly like an unwired action path, which is the conclusion two readers reached today"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    THE MEASUREMENT IS THE OPERATOR'S, TAKEN ON THE FLEET HOST, AND THIS SHARD DOES NOT RESTATE IT
+    AS ITS OWN. The code answer below was re-read at origin/main `b257c100` from a scratch worktree
+    whose HEAD was proved equal to that sha; the ROW COUNTS were not, and cannot be from here.
+
+    (1) WHAT THE FLEET SHOWS, CITED. On 2026-08-21, `blocked-fixable` with `acted: false` and NO
+    `stand_down_reason` covers exactly three PRs — #2376 with 127 stand-downs, #2403 with 75,
+    #2411 with 34 — against 413 `blocked-fixable acted:false` and 81 `acted:true` rows overall.
+    Every one of those rows NAMES the action it declined: `required checks red — ci-log fix,
+    strike 1/2`. #2376 had been open seven hours.
+
+    (2) AND THE MINI'S CORPUS DOES NOT DESCRIBE THAT, WHICH IS ITSELF WORTH RECORDING RATHER THAN
+    PAPERING OVER. The operator checkout's own ledger union — 1 live file, 6 plain rotations and
+    666 `.gz`, every form separately controlled non-zero — contains ZERO rows for the cited run
+    `DAEMON-1787336614999`, against a control of 727 distinct `DAEMON-` ids in the live file
+    alone. Its rate for this same stand-down reads median 0.1h and max 0.4h across 26 PRs. THAT
+    NUMBER IS NOT THE FLEET'S AND MUST NOT BE QUOTED AS IF IT WERE: two hosts, two ledgers, and
+    the one that matters is not readable from the other.
+
+    (3) THE DEDUP RECORDS AN ATTEMPT, NOT AN OUTCOME — THIS IS THE ANSWER TO "WHICH DOES IT
+    RECORD". `priorActionsFromLedger` (`src/lib/sweep.ts`) qualifies a line at
+    `if (line.step !== "sweep.disposed" || line.acted !== true) continue;` and then, for
+    `blocked-fixable` (and `conflicted`, sharing the set), does
+    `fixed.add(\`${pr}@${head_sha}\`)`. The ONLY thing that reaches that set is "the sweep
+    dispatched a fix on this head". `fix.review`, `fix.resolved` and `fix.ci_not_green` never
+    touch it. So a fix that ran and WORKED and a fix that ran and FAILED leave byte-identical
+    state, and the predicate that reads it cannot tell them apart.
+
+    (4) AND THAT IS WHY IT DEADLOCKS. The key carries `headSha`, so the entry clears when the head
+    changes — and nothing else clears it: it is rebuilt from the ledger every pass, there is no
+    expiry, and no failed-fix path re-arms it. But the head only changes if a fix RUNS AND PUSHES.
+    A dispatch that failed before committing leaves the key set and the head unmoved, so every
+    subsequent pass reads `alreadyDone` and stands down. `let acted = !alreadyDone && !deps.dryRun`
+    is where that becomes a non-action.
+
+    (5) AND THE NON-ACTION IS SILENT, WHICH IS THE HALF THAT COST TODAY. That arm sets no
+    `stand_down_reason`. The light-pass arm one branch away sets
+    `standDownReason = "deferred to full sweep (light pass)"` and is the model: same field, same
+    line, already shipped. Because the dedup arm writes nothing, 127 identical rows on #2376 are
+    indistinguishable from a disposition whose action path was never wired — the reading BOTH the
+    operator and his assistant arrived at independently today, from the same rows.
+
+    (6) HOW THE THREE ESCAPED, MEASURED FROM GIT RATHER THAN ASSUMED. All three carry new heads
+    today. Of the 8 commits the three hold ahead of `origin/main`, THREE MOVE THE HEAD WITHOUT
+    ADDING WORK — two `Merge branch 'main'` commits on #2376 and one `chore(wip)` on #2411. That
+    is the dedup-clearing shape: a push whose only effect is a new sha. The commit subjects are
+    the evidence; intent beyond them is not claimed here.
+
+    (7) THE STRIKE CAP ALREADY BOUNDS THE RETRY, AND IT ESCALATES. `plan/policy.yaml` carries
+    `strikeCap: value 2` (origin `lifted:src/lib/sweep.ts:255`), `priorStrikes` counts
+    `fix.dispatch` rows, and the exhaustion row fires at `priorStrikes >= policy.strikeCap`,
+    disposing `blocked-ambiguous` with `fix strikes exhausted (n/cap) — escalating`. So a retry is
+    bounded and terminates LOUDLY without the dedup's help.
+  design: |
+    (i) THE DEDUP IS NOT REDUNDANT WITH THE STRIKE CAP AND MUST NOT BE DELETED FOR THAT REASON.
+    They bound different things. The cap bounds retries ACROSS heads and escalates at 2. The dedup
+    gives IDEMPOTENCE WITHIN one head — without it, two polls seconds apart would each dispatch
+    against the same sha and burn both strikes before the first finished. Removing it leaves the
+    retry bounded (rationale 7) but doubles the worst-case spend per head and reaches the
+    escalation faster for the wrong reason. THE DEFECT IS NOT THAT IT EXISTS; it is that it never
+    expires, never re-arms, and never explains.
+
+    (ii) THE ARM MUST NAME ITSELF. `standDownReason` on the `alreadyDone` path, saying what is
+    already done and on which head — the light-pass arm's exact shape, one branch away. This alone
+    would have prevented today's misreading, and it is the smallest half of the fix.
+
+    (iii) A DISPATCH THAT DID NOT MOVE THE HEAD MUST RE-ARM. The set records an attempt
+    (rationale 3), so the repair is to stop treating an attempt as terminal: when a `fix.dispatch`
+    for this `pr@head` is followed by evidence the fix ENDED WITHOUT A NEW HEAD, the entry must not
+    suppress the next pass. The evidence already exists in the ledger — `fix.review`,
+    `fix.resolved`, `fix.ci_not_green` — and an implementer must READ one of those rather than
+    inventing a new step or a timer. A time-based expiry is explicitly refused: it would make the
+    sweep re-dispatch on a clock, which is the unbounded-retry shape the cap exists to prevent.
+
+    (iv) THE CAP STAYS AT 2 AND NOTHING HERE MERGES A RED PR. `strikeCap` is not read, written or
+    widened, no PR is auto-merged, no gate is softened, and the escalation at the cap is untouched.
+    If re-arming makes a PR reach the cap it escalates, which is the correct terminal state and is
+    the outcome today's deadlock prevents.
+
+    (v) CITED, NOT ABSORBED — THREE STATES, ONE OF WHICH SAYS SO. W1-T1095 owns the OUT-OF-DIFF
+    PARKED case and W1-T465 owns the AWAITING-NOTIFICATION case; this task owns the DEDUPED case. A
+    parked PR waits on another PR, an awaiting one waits on a notification, and a deduped one waits
+    on a head that nothing will move. Only the parked one currently writes a reason. W1-T514 is the
+    nearest neighbour and is also cited rather than absorbed: it made the ESCALATE dedup head-keyed
+    like this one already is — the same family, the opposite direction, and it does not cover a
+    head-keyed set that never expires.
+
+    (vi) OUT OF SCOPE, NAMED. No change to `priorActionsFromLedger`'s other sets (`armed`,
+    `closed`, `escalated`, `depReviewed`) — each has its own consumer and its own re-arm story. No
+    new ledger step. No change to the light-pass `actionable` gate, which is correct.
+  acceptance:
+    - claim: "the dedup arm names on its ledger row that the head was already dispatched"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "a dispatch that ended without moving the head no longer suppresses the next pass"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "a dispatch that did move the head still suppresses a second attempt on that head"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the strike ceiling and its escalation at the cap are unchanged"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the light-pass stand-down keeps naming itself exactly as it does today"
+      proof: "grep: deferred to full sweep in src/lib/sweep.ts"
+  origin: "recon#fix-dedup-deadlocks-2026-08-21"
+  plan_refs: ["W1-T465", "W1-T514", "W1-T1095"]
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT AND RULE 19 DOES **NOT** FORCE IT — MEASURED: this shard lints
+    clean at `risk: medium`, because `subsystemsOf` reads `src/lib/sweep.ts` and `test/sweep.test.ts`
+    as ONE concern. The band is BLAST RADIUS, and that is the honest reason: the change alters when
+    the sweep SPENDS A FIX-RUNG STRIKE against a live PR, so a mistake costs real worker time on a
+    real repository rather than a failed assertion. Claiming Rule 19 demanded it would have been a
+    false claim in the direction that flatters the filing.
+
+    `test/sweep.test.ts` IS THE EXISTING HOME for `priorActionsFromLedger` and disposition
+    coverage, so it is declared rather than a new filename.
+
+    THE ROW COUNTS IN RATIONALE (1) ARE THE OPERATOR'S AND ARE NOT RE-DERIVABLE FROM THE OPERATOR
+    CHECKOUT. Rationale (2) records the control that proves it — the cited run is absent from the
+    mini's full union while 727 other daemon runs are present. An implementer must re-derive on
+    the FLEET host, per form, with a coverage control taken first, and must not substitute the
+    mini's rate.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Four are pure-path `unit test:` proofs at a
+    declared file; the fifth greps a declared source file for the light-pass string that must
+    survive unchanged.

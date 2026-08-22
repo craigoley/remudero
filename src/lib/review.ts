@@ -253,6 +253,21 @@ export interface ReviewEvidence {
   /** The implement worker's REPORT text (where proofs are pasted). */
   report: string;
   /**
+   * (W1-T1100) True when `report` is NOT the PR body — `runTaskBody` (run-task.js) substitutes
+   * the worker's own chat text after a failed `fetchPrBodyFn` read, so a `gh` outage degrades to
+   * judging the worker's narrative rather than stalling the review (deliberate; that fallback is
+   * NOT what this flag changes). Left unmarked, the substitute used to reach every consumer
+   * exactly like a real body, with two OPPOSITE failure shapes measured live on #2395: {@link
+   * bodyContradictsDiff} fails CLOSED, manufacturing a contradiction from prose that was never a
+   * claim about the changeset, while `judgeCriterion`'s keyword-coverage floor fails OPEN, scoring
+   * the worker's own narrative HIGHER than an honest body because it describes its own change in
+   * the proof's own vocabulary. Both consumers read this flag below and refuse to judge a
+   * substitute as though it were the body. Absent/false ⇒ byte-identical to pre-W1-T1100
+   * behaviour — every caller/fixture that predates this task keeps trusting `report` as the real
+   * body, exactly as it does today.
+   */
+  reportIsSubstitute?: boolean;
+  /**
    * Optional per-criterion semantic verdicts from the fresh LLM reviewer,
    * index-aligned to the criteria list. `false` FORCES that criterion to fail;
    * `true`/`undefined` defer to the mechanical floor. Semantic can only
@@ -2254,6 +2269,16 @@ export function judgeCriterion(
   reportTokens: Set<string>,
   semantic?: boolean,
   execCtx?: ProofExecContext,
+  /**
+   * (W1-T1100) True when `reportTokens` was tokenized from a SUBSTITUTE — the worker's own chat
+   * text, not the PR body — because `fetchPrBodyFn` failed. A worker naturally echoes a proof's
+   * own vocabulary while describing the change it just made, so keyword coverage over a
+   * substitute is not evidence the BODY substantiates anything; it is evidence the worker can
+   * read its own diff. See {@link ReviewEvidence.reportIsSubstitute}'s doc for the measured #2395
+   * fixture. Real, WHITELISTED proof EXECUTION below is unaffected — it observes repo state, not
+   * report text, so it can still flip a criterion to `executed_pass` regardless of this flag.
+   */
+  reportSubstituted?: boolean,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
 
@@ -2296,7 +2321,18 @@ export function judgeCriterion(
   } else {
     const covered = kws.filter((k) => reportTokens.has(k));
     const coverage = covered.length / kws.length;
-    if (coverage < MIN_COVERAGE) {
+    if (reportSubstituted) {
+      // W1-T1100 (design (iii)): the floor may not report substantiation off a substitute, in
+      // EITHER direction of coverage — a high-coverage substitute is the #2395 fail-OPEN case
+      // (the worker describes its own change in the proof's own words), not evidence the body
+      // substantiates anything. Rest on what proofs actually EXECUTED (below, unaffected) and
+      // name the missing body as the reason the floor cannot say more.
+      met = false;
+      reason =
+        `proof unmet: PR body unreadable — judged against the worker's own text (substituted after ` +
+        `a failed body fetch), so keyword coverage (${covered.length}/${kws.length} proof keywords) ` +
+        `is withheld as substantiation`;
+    } else if (coverage < MIN_COVERAGE) {
       met = false;
       reason = `proof unmet: report does not substantiate it (matched ${covered.length}/${kws.length} proof keywords)`;
     } else {
@@ -3398,7 +3434,7 @@ export function judgeReview(
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>
-    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx),
+    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx, evidence.reportIsSubstitute),
   );
   const testTheater = detectTestTheater(evidence.diff);
 
@@ -3422,7 +3458,13 @@ export function judgeReview(
   // W1-T274: see {@link ReviewVerdict.changesetContradictions}'s doc. A pure
   // comparison of two values already computed above (`evidence.report`,
   // `diffFiles`) — no new fetch, no new gateway.
-  const changesetContradictions = bodyContradictsDiff(evidence.report, diffFiles);
+  //
+  // W1-T1100 (design (ii)): a detector that exists to compare the BODY's claims against the diff
+  // must REFUSE on a substitute, not judge one — a body-vs-diff check is impossible without the
+  // body, so this withholds the check entirely rather than manufacturing a contradiction from
+  // prose that was never a claim about the changeset (measured live on #2395: "No code." fired
+  // against a one-file diff whose real, unreadable-that-day body never said it).
+  const changesetContradictions = evidence.reportIsSubstitute ? [] : bodyContradictsDiff(evidence.report, diffFiles);
 
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s
   // doc. Reuses the SAME `diffFiles` every other structural check above

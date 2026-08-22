@@ -1532,9 +1532,14 @@ export interface ArmDeps {
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
   ledgerLines: () => Array<Record<string, unknown>>;
-  /** `gh pr merge --auto --squash --delete-branch` — throws on refusal. Keeps the flag: GitHub
-   *  performs this deletion SERVER-SIDE once the deferred auto-merge lands, so no local branch
-   *  is ever touched and there is nothing here for a detached checkout to trip on. */
+  /** `gh pr merge --auto --squash` — arms the deferred merge; throws on refusal. W1-T1111: NO
+   *  `--delete-branch`. That flag resolves and deletes the LOCAL branch at the moment this call
+   *  runs, which needs a current branch — the daemon's checkout is deliberately detached (the
+   *  self-sync guard depends on it, see {@link mergeDirect}'s own note) and has none, so arming
+   *  from the daemon failed "not on any branch" even though the arm itself is harmless (#2418).
+   *  The repository already carries `delete_branch_on_merge: true`, so the head branch is still
+   *  deleted once the deferred merge actually lands — just server-side, at THAT later moment,
+   *  rather than by this call up front. */
   armAuto: (prUrl: string) => void;
   /** `gh pr merge --squash` — the clean-status completion. W1-T1050: NO `--delete-branch`. `gh`
    *  documents that flag as deleting the LOCAL branch too, which needs a current branch to
@@ -1585,7 +1590,9 @@ export function realArmDeps(): ArmDeps {
     ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
+      // W1-T1111: NO `--delete-branch` — see the doc on `ArmDeps.armAuto` above for why: it
+      // needs a resolvable current branch, and the daemon arms from a deliberately detached one.
+      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash"], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -3064,6 +3071,14 @@ async function runReview(args: {
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
   report: string;
+  /**
+   * (W1-T1100) True when `report` is the worker's own chat text, substituted after a failed
+   * PR-body fetch — see {@link "./lib/review.js".ReviewEvidence.reportIsSubstitute}'s doc for
+   * the two consumers this protects and why. Threaded straight into `judgeReview`'s evidence
+   * below. Absent ⇒ `report` is trusted as the real body, exactly as every caller that predates
+   * this task already gets.
+   */
+  reportIsSubstitute?: boolean;
   settingsFile: string;
   config: Config;
   budgetUsd?: number;
@@ -3249,6 +3264,8 @@ async function runReview(args: {
   const computed = judgeReview(criteria, {
     diff,
     report,
+    // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
+    reportIsSubstitute: args.reportIsSubstitute,
     semantic,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
@@ -7608,9 +7625,16 @@ async function runTask(
     //
     // Best-effort, same discipline as W1-T256: a failed read falls back to the worker text rather
     // than blocking the review, so a `gh` outage degrades to the old behaviour instead of a stall.
+    //
+    // W1-T1100: `reviewReportIsSubstitute` starts true (the fallback value already assigned above
+    // is the substitute) and flips to false ONLY on a successful fetch — so a throw leaves it
+    // true, matching `reviewReport` staying the worker's text. Threaded into `runReviewFn` below
+    // so `bodyContradictsDiff` and the keyword floor both know this is not the PR body.
     let reviewReport = fullText(impl);
+    let reviewReportIsSubstitute = true;
     try {
       reviewReport = await fetchPrBodyFn(prUrl);
+      reviewReportIsSubstitute = false;
     } catch (e) {
       log("review.body_fetch_error", { error: String((e as Error)?.message ?? e) });
     }
@@ -7620,6 +7644,7 @@ async function runTask(
       prUrl,
       task,
       report: reviewReport,
+      reportIsSubstitute: reviewReportIsSubstitute,
       settingsFile,
       config,
       budgetUsd,
