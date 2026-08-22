@@ -143,7 +143,7 @@ test("ci-gate-reaggregate: a required check FAILURE at the first read that flips
   assert.equal(result.status, 0, out);
   assert.match(out, /entering a 5s grace window/);
   assert.match(out, /- coverage-ratchet/);
-  assert.match(out, /ci-gate: all required checks terminal, no failures — merge may proceed\./);
+  assert.match(out, /ci-gate: every REQUIRED check is terminal and no check failed — merge may proceed\./);
   // Proves a RE-READ actually happened (more than the single initial call) rather than the
   // script simply ignoring the failure.
   assert.ok(callCount > 1, `expected more than one runs_json() call, got ${callCount}`);
@@ -167,8 +167,13 @@ test("ci-gate-reaggregate: a required check that is STILL failing at the grace-w
   const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   assert.notEqual(result.status, 0, out);
   assert.match(out, /entering a 5s grace window/);
-  assert.match(out, /::error::ci-gate: required check\(s\) FAILED — holding merge:/);
+  assert.match(out, /::error::ci-gate: check\(s\) FAILED — holding merge/);
   assert.match(out, /- coverage-ratchet/);
+  // W1-T1131: the grace-window WARNING names the SAME `fails` list the error line does, so it
+  // must not call it "required" either. Asserted here because nothing pinned this third emit —
+  // reverting it alone reddened no test until this line existed.
+  assert.match(out, /::warning::ci-gate: check\(s\) failing — entering a/);
+  assert.doesNotMatch(out, /required check\(s\) failing/);
 });
 
 test("ci-gate-reaggregate: a rerun still IN PROGRESS when the grace window elapses never masks the original failure as a pass", async () => {
@@ -193,7 +198,7 @@ test("ci-gate-reaggregate: a rerun still IN PROGRESS when the grace window elaps
   ]);
   const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   assert.notEqual(result.status, 0, out);
-  assert.match(out, /::error::ci-gate: required check\(s\) FAILED — holding merge:/);
+  assert.match(out, /::error::ci-gate: check\(s\) FAILED — holding merge/);
   assert.match(out, /- coverage-ratchet/);
 });
 
@@ -215,7 +220,7 @@ test("ci-gate-reaggregate: a member completing FAILURE (fresh attempt, never a s
   ]);
   const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   assert.notEqual(result.status, 0, out);
-  assert.match(out, /::error::ci-gate: required check\(s\) FAILED — holding merge:/);
+  assert.match(out, /::error::ci-gate: check\(s\) FAILED — holding merge/);
   assert.match(out, /- refactor-campaign/);
 });
 
@@ -238,7 +243,7 @@ test("ci-gate-reaggregate: an absent required check still blocks through the gra
   assert.match(out, /waiting for required check\(s\) to complete:/);
   assert.match(out, /- missing-check/);
   assert.doesNotMatch(out, /merge may proceed\./);
-  assert.doesNotMatch(out, /required check\(s\) FAILED/);
+  assert.doesNotMatch(out, /check\(s\) FAILED — holding merge/);
 });
 
 test("ci-gate-reaggregate: ci-gate's own IGNORE-listed entry is excluded from the required/failing set even when it appears as FAILURE during a grace-window re-read", async () => {
@@ -348,7 +353,7 @@ test("ci-gate-reaggregate (W1-T312): a required check that never completes withi
   assert.match(out, /::error::ci-gate: TIMED OUT waiting for required check\(s\) to complete/, out);
   assert.match(out, /- missing-check/);
   // Distinct from the FAILED-check message path (step 2/3) -- a timeout must never read as one.
-  assert.doesNotMatch(out, /required check\(s\) FAILED/);
+  assert.doesNotMatch(out, /check\(s\) FAILED — holding merge/);
   // The remedy: a NEW sha, not a re-run of this one.
   assert.match(out, /NEW sha/i);
 });

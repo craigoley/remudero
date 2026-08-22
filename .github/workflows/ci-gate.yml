@@ -235,7 +235,7 @@ jobs:
               | .[]' <<< "${runs}")"
             [ -z "${not_ready}" ] && break
             if [ "$(date +%s)" -ge "${deadline}" ]; then
-              # W1-T312: this is a TIMEOUT, distinct from step 2/3's "required check(s) FAILED" --
+              # W1-T312: this is a TIMEOUT, distinct from step 2/3's "check(s) FAILED" hold --
               # nothing here concluded a failure, the wait cap simply elapsed first. Re-running the
               # SAME sha changes nothing (the check(s) below are still not registered/completed);
               # the only remedy is a NEW commit/sha to re-trigger the still-pending check(s).
@@ -281,7 +281,9 @@ jobs:
           #    rerun can never be misread as a pass by landing on a still-`in_progress` snapshot.
           if [ -n "${fails}" ]; then
             grace_deadline=$(( $(date +%s) + GRACE_WINDOW_SECONDS ))
-            echo "::warning::ci-gate: required check(s) failing — entering a ${GRACE_WINDOW_SECONDS}s grace window for a same-sha rerun to land before concluding:"
+            # W1-T1131: same correction as the error line below — this names the SAME `fails`
+            # list, which was never filtered against REQUIRED.
+            echo "::warning::ci-gate: check(s) failing — entering a ${GRACE_WINDOW_SECONDS}s grace window for a same-sha rerun to land before concluding:"
             printf '%s\n' "${fails}" | sed 's/^/  - /'
             while [ -n "${fails}" ] && [ "$(date +%s)" -lt "${grace_deadline}" ]; do
               sleep "${GRACE_POLL_INTERVAL_SECONDS}"
@@ -300,8 +302,13 @@ jobs:
           fi
 
           if [ -n "${fails}" ]; then
-            echo "::error::ci-gate: required check(s) FAILED — holding merge:"
+            # W1-T1131: this arm filters ONLY against IGNORE — it never reads REQUIRED (see the
+            # `evaluate_fails` comment above: "FAIL if ANY check (excluding IGNORE)"). Saying
+            # "required" here sent a reader hunting for a REQUIRED-set entry that does not exist.
+            echo "::error::ci-gate: check(s) FAILED — holding merge (ANY failing check holds, not only a REQUIRED one):"
             printf '%s\n' "${fails}" | sed 's/^/  - /'
             exit 1
           fi
-          echo "ci-gate: all required checks terminal, no failures — merge may proceed."
+          # W1-T1131: names BOTH conditions that were actually met — step 1 waits on REQUIRED,
+          # step 2 fails on ANY check. The old wording claimed only the first.
+          echo "ci-gate: every REQUIRED check is terminal and no check failed — merge may proceed."
