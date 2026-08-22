@@ -2261,10 +2261,24 @@ test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/tri
   // already use, so it is ledgered with its lane. That does not weaken this invariant — the
   // wrapper is the shape this test already blesses above, and the assertion immediately below
   // is what actually holds the line by proving the wrapper contains no arm-decision gate.
+  //
+  // W1-T1117 gave this site a braced body (to classify a failed arm's `error` text for the
+  // sweep's own dedup, never a second arm-decision gate — see lib/sweep.ts's "mergeable" arm),
+  // so the single-expression regex this test used to lock no longer matches. The invariant is
+  // checked directly against the site's own window instead: it still calls `armAndLogOutcome`
+  // unconditionally, and that window carries no `decideAutoMergeArm`/`resolveAutoMergeArm` gate.
+  const sweepArmSiteAt = runTaskSrc.indexOf("arm: (pr) => {");
+  assert.ok(sweepArmSiteAt > 0, "the sweep arm effect site is gone — this test is stale");
+  const sweepArmSite = runTaskSrc.slice(sweepArmSiteAt, sweepArmSiteAt + 1400);
   assert.match(
-    runTaskSrc,
-    /arm: \(pr\) => arm(?:AutoMerge|AndLogOutcome)\(/,
+    sweepArmSite,
+    /const outcome = armAndLogOutcome\(/,
     "the sweep arm effect still arms UNCONDITIONALLY — directly, or through the reporting wrapper, but never behind the raised floor",
+  );
+  assert.doesNotMatch(
+    sweepArmSite,
+    /decideAutoMergeArm|resolveAutoMergeArm/,
+    "the sweep arm effect must stay UNGATED — putting the raised floor here would stall every sweep-armed PR without the W1-T205 carve-out",
   );
 
   const wrapper = runTaskSrc.slice(runTaskSrc.indexOf("export function armAndLogOutcome("));
