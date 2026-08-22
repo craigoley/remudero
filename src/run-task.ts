@@ -17633,6 +17633,15 @@ interface RawOpenPr {
   statusCheckRollup?: RollupCheck[];
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
+  /**
+   * W1-T1201 — the PR's creation timestamp, projected onto `OpenPrView.createdAt` below for
+   * `deriveDisposition`'s age clamp. Optional so this type stays satisfied by today's
+   * `mapRestPr` output (lib/open-prs-rest.ts), which does not carry it yet — see that gap named
+   * in this task's own rationale. Wiring a real producer here is a follow-up (`created_at` sits
+   * on the SAME REST row `updated_at` already comes from); until then this is always `undefined`,
+   * the same fail-toward-unclamped default `OpenPrView.createdAt` documents.
+   */
+  createdAt?: string;
 }
 
 const REVIEW_CTX = "remudero-review";
@@ -18282,6 +18291,11 @@ export function buildOpenPrViews(
       strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
       lastActivityAt: pr.updatedAt,
+      // W1-T1201: the age clamp's other half — see `RawOpenPr.createdAt`'s own doc for why this
+      // is `undefined` in the real gateway today (no producer in lib/open-prs-rest.ts yet) and
+      // OpenPrView.createdAt's doc (lib/sweep.ts) for the fail-toward-unclamped default that
+      // makes carrying it through unconditionally here safe either way.
+      createdAt: pr.createdAt,
       headSha: pr.headRefOid,
       autoMergeArmed: pr.autoMergeRequest != null,
       // W1-T54 routing: Dependabot PRs go to the dep-review lane, never the
@@ -20410,6 +20424,9 @@ export async function fixCommand(
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
     lastActivityAt: raw.updatedAt,
+    // W1-T1201: same age-clamp projection as buildOpenPrViews above — see RawOpenPr.createdAt's
+    // doc for why this is `undefined` in the real gateway today.
+    createdAt: raw.createdAt,
     headSha: raw.headRefOid,
     autoMergeArmed: raw.autoMergeRequest != null,
     reviewSummary: undefined,
