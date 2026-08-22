@@ -1406,7 +1406,7 @@ test("BEHAVIORAL (W1-T7B): error_max_budget_usd is NEVER retried — dollars are
   }
 });
 
-test("BEHAVIORAL (W1-T268): a real runTask run whose implement worker commits IN-SCOPE but gh pr create's own output never parses to a url reaches the 'no PR opened' failed verdict carrying billing_mode + account_label", async (t) => {
+test("BEHAVIORAL (W1-T268): a real runTask run whose implement worker commits IN-SCOPE but the REST create's own response never parses to a url reaches the 'no PR opened' failed verdict carrying billing_mode + account_label", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "runtask-noprurl-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN); // declares files: [src/lib/daemon.ts]
@@ -1417,15 +1417,18 @@ test("BEHAVIORAL (W1-T268): a real runTask run whose implement worker commits IN
   const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
   const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
 
-  // `gh pr create --fill` echoes text with no matchable PR url — the orchestrator's
-  // own regex (a literal https://github.com/.../pull/<digits>) never matches, so
-  // `prUrl` stays undefined even though the push itself succeeded.
+  // W1-T1202: the REST create (`gh api --method POST repos/.../pulls`) succeeds (exit 0)
+  // but its JSON response carries no `html_url` — the orchestrator's parsed-response read
+  // finds nothing usable, so `prUrl` stays undefined even though the push itself succeeded.
   const fakeBinDir = mkdtempSync(join(tmpdir(), "runtask-noprurl-bin-"));
   writeFileSync(
     join(fakeBinDir, "gh"),
-    ["#!/bin/bash", "if [[ \"$1\" == 'pr' && \"$2\" == 'create' ]]; then echo 'no url in this output'; exit 0; fi", "exit 1", ""].join(
-      "\n",
-    ),
+    [
+      "#!/bin/bash",
+      "if [[ \"$1\" == 'api' && \"$2\" == '--method' && \"$3\" == 'POST' ]]; then echo '{\"message\":\"no url in this response\"}'; exit 0; fi",
+      "exit 1",
+      "",
+    ].join("\n"),
   );
   chmodSync(join(fakeBinDir, "gh"), 0o755);
   const savedPath = process.env.PATH;
@@ -1463,7 +1466,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run whose implement worker commits IN
 
     assert.equal(res.verdict, "failed");
     assert.equal(res.merged, false);
-    assert.equal(res.prUrl, undefined, "gh pr create's output never parsed to a url");
+    assert.equal(res.prUrl, undefined, "the REST create's response never parsed to a url");
 
     // The branch DID reach origin — the push succeeded; only PR creation failed to parse.
     execFileSync("git", ["-C", join(root, "repos", "remudero"), "ls-remote", "--exit-code", "origin", branch], {
@@ -5619,11 +5622,13 @@ test("escalateCircuitBreak: a THROWING gh gateway still writes the dedup marker,
 });
 
 test("ghPrCreateFillCommand: plan/triage PR-create runs gh with cwd pinned to the run worktree, not the process cwd", () => {
-  // The harness opens plan/triage/retro PRs itself (no worker step) and `gh pr create
-  // --fill` resolves `origin/main...<branch>` LOCALLY. The head branch is a local ref
-  // only inside its run worktree, so gh MUST run with cwd = that worktree — from any
-  // other cwd (the rmd process's own dir) --fill throws `ambiguous argument` and no PR
-  // opens, leaving an orphan branch. This asserts the cwd is the fix, not process.cwd().
+  // The harness opens plan/triage/retro PRs itself (no worker step). W1-T1202 moved this
+  // builder off `gh pr create --fill` (GraphQL) onto `gh api --method POST
+  // repos/{owner}/{repo}/pulls` (REST) — the REST create itself needs no local ref
+  // resolution (head/base are explicit strings), but the builder now ALSO reads the
+  // worktree's own git history locally (fillDerivedBody/lastCommitSubject), and the head
+  // branch is a local ref only inside its run worktree — so cwd still MUST be the
+  // worktree, not the rmd process's own dir, or those local reads see the wrong repo.
   const worktree = "/Users/x/Remudero/repos/remudero/worktrees/run-TRIAGE-fb-abc-123";
   // Builds the argv only — nothing is executed here — but the guard fires on the PR-create
   // boundary itself, so the builder needs the exemption to be reachable at all.
@@ -5633,9 +5638,11 @@ test("ghPrCreateFillCommand: plan/triage PR-create runs gh with cwd pinned to th
   assert.equal(built.options.cwd, worktree, "cwd MUST be the run worktree — this is the whole fix");
   assert.notEqual(built.options.cwd, process.cwd(), "cwd must NOT default to the process cwd, where the branch is unresolvable");
   assert.equal(built.command, "gh");
-  assert.deepEqual(built.args, [
-    "pr", "create", "--repo", "craigoley/remudero", "--base", "main", "--head", "run-TRIAGE-fb-abc-123", "--fill",
-  ]);
+  assert.deepEqual(built.args.slice(0, 4), ["api", "--method", "POST", "repos/craigoley/remudero/pulls"]);
+  assert.ok(!built.args.includes("pr"), "no `gh pr create` subcommand — GraphQL is never issued (W1-T1202)");
+  const headIdx = built.args.indexOf("head=run-TRIAGE-fb-abc-123");
+  assert.notEqual(headIdx, -1, "the REST create's head field carries the branch");
+  assert.ok(built.args.includes("base=main"), "the REST create's base field is main");
 });
 
 // ── armAutoMerge: the clean-status arm no-op (20 acted lines, zero arms) ─────
