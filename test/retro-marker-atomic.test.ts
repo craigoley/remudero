@@ -492,8 +492,9 @@ function setupFakeRetroFixture(
     /** `gh pr view --json body` response -- default already carries the trailer AND a
      *  valid Acceptance block so neither repair path fires. */
     body?: string;
-    /** The Architect's fabricated REPORT carries NO `PR_URL:` line -- forces the
-     *  `gh pr create --fill` fallback path (our fake `gh` answers it with a fresh URL). */
+    /** The Architect's fabricated REPORT carries NO `PR_URL:` line -- forces the REST
+     *  create fallback path (`gh api --method POST repos/.../pulls`, W1-T1202; our fake
+     *  `gh` answers it with a fresh `html_url`). */
     noPrUrl?: boolean;
     /** `gh pr view --json headRefName` returns no `headRefName` at all (an UNRESOLVED
      *  head ref, distinct from a resolved-but-wrong one) -- checkPrOwnership's `?? null`
@@ -624,8 +625,8 @@ function setupFakeRetroFixture(
       // retroCommand exits right after the marker-advance line with no further gh calls.
       `  if [[ "$5" == 'statusCheckRollup' ]]; then echo '{"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}'; exit 0; fi`,
       `fi`,
-      // pr create --fill ...  (the no-PR_URL-in-report fallback)
-      `if [[ "$1" == 'pr' && "$2" == 'create' ]]; then echo 'https://github.com/craigoley/remudero/pull/424242'; exit 0; fi`,
+      // the REST create (the no-PR_URL-in-report fallback, W1-T1202)
+      `if [[ "$1" == 'api' && "$2" == '--method' && "$3" == 'POST' ]]; then echo '{"html_url":"https://github.com/craigoley/remudero/pull/424242","number":424242}'; exit 0; fi`,
       // pr diff <url>  (the plan-only guard, codeFilesInDiff) -- or a transient `gh`
       // FAILURE, to exercise retroCommand's outer catch (W1-T242 round 2 sweep).
       opts.diffFails

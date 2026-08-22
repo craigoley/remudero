@@ -216,7 +216,17 @@ function sub(call: Call): string {
   return call.argv[i] ?? "";
 }
 
-const NOW = new Date();
+// `fleet-heartbeat.sh` runs as a REAL bash subprocess (`spawnSync("bash", ...)`, `runBeat` below)
+// and computes its own "now" through a REAL `date -u` call (`epoch_of`'s GNU/BSD branches, and
+// every stub above that falls through to the platform `date` binary) — a syscall the probe
+// cannot reach, since `scripts/clock-shift.mjs` monkeypatches only THIS process's global `Date`,
+// never a child process's. Building these fixtures from `new Date()` under a shift stamped every
+// ledger row's `ts` days into the FUTURE relative to the script's own real clock, so
+// `now_epoch - epoch_of(ts)` went NEGATIVE (measured: `-604739` at +7d) instead of a real age —
+// the ledger-`ts`-vs-reader-clock mismatch #2250 fixed, except here the reader is a subprocess no
+// injected JS clock can shift at all. Deriving NOW from the SAME real `date -u` the script itself
+// calls keeps the fixture's clock and the subject's clock the same one, regardless of shift.
+const NOW = new Date(String(spawnSync("date", ["-u", "+%Y-%m-%dT%H:%M:%S.000Z"]).stdout).trim());
 // MILLISECONDS ARE KEPT. `appendLedger` writes `new Date().toISOString()`, so every real ledger
 // ts looks like `2026-07-20T08:20:00.000Z`. A fixture that stripped them would exercise a format
 // the script never actually meets — and the BSD branch of `epoch_of` exists precisely because

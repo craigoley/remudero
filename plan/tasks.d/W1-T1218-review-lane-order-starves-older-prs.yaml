@@ -1,0 +1,177 @@
+- id: W1-T1218
+  title: "THE REVIEW LANE STARVES OLDER PRs BY CONSTRUCTION — `runSweep` builds `pendingReviews` by push in PR-iteration order, never sorts it, then takes `slice(0, reviewLanes)` and defers the rest; and `openPrsRestArgs` requests `pulls?state=open&per_page=100` with no `sort`, so GitHub returns newest-first. While the fleet files PRs faster than the budget clears them, a PR below the cut is deferred every pass forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main`
+    before any reading, against LOCAL SOURCE and live GitHub reads. The suite was NOT run
+    (W1-T1206). Every zero carries a control. SYMBOLS ARE CITED, NOT LINE NUMBERS: the brief's
+    `sweep.ts:4424`/`4461` are now `4567`/`4604` on main, which is why the names are what this
+    shard anchors on.
+
+    (1) THE MECHANISM, ALL THREE PARTS IN SOURCE. `pendingReviews.push({ index: prIndex, pr, ... })`
+    sits inside `runSweep`'s per-PR walk, so insertion order IS iteration order. Nothing sorts it
+    anywhere. `const runNow = pendingReviews.slice(0, reviewLanes)` and
+    `deferredToNextPass = pendingReviews.slice(reviewLanes)` then cut it by position alone. And
+    `openPrsRestArgs` returns `["api", "repos/<o>/<r>/pulls?state=open&per_page=100"]` — no `sort`,
+    no `direction`.
+
+    (2) THE ORDER IS NEWEST-FIRST, MEASURED WITH THE SWEEP'S OWN ARGV RATHER THAN ASSUMED FROM
+    GITHUB'S DOCS. Running that exact query string returned PRs strictly descending by
+    `created_at`: 2026-08-22T20:17:39Z, 20:01:49Z, 19:23:10Z, 17:54:00Z, 11:36:17Z, and last
+    2026-08-21T20:46:40Z. So the entries that fill the lanes are the newest PRs and the ones that
+    fall past the cut are the oldest — every pass, deterministically.
+
+    (3) AND THE SAME MODULE ALREADY KNOWS THIS MATTERS, WHICH IS WHY THIS IS AN OMISSION AND NOT A
+    DESIGN. `boardPrsRestArgs`, in `open-prs-rest.ts` beside `openPrsRestArgs`, requests
+    `sort=updated&direction=desc` and its own doc says that ordering is "LOAD-BEARING, not
+    cosmetic". One enumeration in that file states its order and depends on it; the one the review
+    lane consumes states none.
+
+    (4) THE STAND-DOWN'S OWN PROMISE IS CONDITIONAL AND THE CONDITION IS UNSTATED. The deferral
+    comment says the row is "re-derived next pass, typically within one poll interval (measured
+    ~60s median)". That holds only while the pending set is SMALLER than the budget. Once it is
+    larger, "next pass" re-derives the same set in the same order and re-defers the same tail. The
+    row written for each deferred entry is `acted:false` with `review budget exhausted this pass
+    (N lane(s) in use) — re-derived next pass`, which is true of that pass and says nothing about
+    the sequence.
+
+    (5) Q1 — THE THREE CANDIDATE KEYS GENUINELY DISAGREE, MEASURED ON LIVE PRs. Creation time and
+    head-push time invert: the PR that is OLDEST by creation (2026-08-21T20:46:40Z) has the
+    SECOND-NEWEST head (pushed 2026-08-22T20:15:36Z), while a PR created nine hours later that day
+    (11:36:17Z) still carries its original head (11:34:30Z). Another created at 19:23:10Z has a
+    head pushed at 20:16:34Z. So the key chosen decides who is starved, and picking one by
+    intuition would have been a coin toss.
+
+    (6) AND `reviewPendingSince` — THE FIELD THAT LOOKS LIKE "FIRST SEEN PENDING" — CANNOT BE THE
+    KEY, WHICH IS THE FINDING THAT NARROWS Q1. Its doc (W1-T913) defines it as the `ts` at which
+    THIS RUN's `postReviewPending` posted a pending status for the CURRENT head, present only when
+    `reviewState === "pending"`, and `undefined` when unreadable — read as STALE by
+    `reviewPendingIsStale`. A PR the lane budget deferred never had a pending posted for it, so
+    this field is `undefined` for exactly the starved population. It records that a review STARTED,
+    not that one was WAITED FOR.
+
+    (7) WHAT IS ACTUALLY IN HAND, WHICH IS WHY THE REMEDY NEEDS NO NEW READ. `OpenPrView` already
+    carries `createdAt?: string` (W1-T1201, added for `deriveDisposition`'s age clamp),
+    `lastActivityAt: string`, `headSha` and `prNumber`. Head PUSH TIME is NOT carried — only the
+    sha — so a sort on the key section (5) argues is best would need a new field or a new read.
+    `lastActivityAt` moves on any activity including a comment, and W1-T1201's own doc records the
+    incident where that field unbounded closed eleven live PRs.
+
+    (8) Q2 — RAISING `reviewLanes` IS NOT A FIX, AND IT IS ALSO REFUSED BY AN EXISTING GATE.
+    A larger cap moves the starvation line; it does not remove it, because the defect is the
+    ORDER, not the width: with the newest-first enumeration, whatever sits below the cut is
+    the same set every pass at any cap. And it cannot be raised anyway —
+    `plan/policy.yaml`'s `sweep.reviewLanes` row is `value: 3, min: 1, max: 3`, and
+    `validateReviewLanesRow` throws `PolicyError` on a value outside its declared bound. That
+    bound is deliberate: the row's own comment records ~1.33 GiB peak per Claude worker against
+    ~5.85 GiB available — ABOUT FOUR CONCURRENT WORKERS OF ANY KIND — and says today's configured
+    worst case of 3 builders plus 3 reviewers is already SIX, over the whole host. THE BRIEF PUT
+    THAT CEILING IN `sweep.ts`; IT IS NOT THERE. It lives in `plan/policy.yaml` and in W1-T1049's
+    shard, and the correction is recorded here rather than quietly carried.
+
+    (9) Q3, CARRIED AND NOT SCOPED IN — NOTHING COUNTS CONSECUTIVE DEFERRALS. Searched across
+    `src/`, the count of occurrences of `consecutiveDefer`, `deferCount`, `deferralCount`,
+    `timesDeferred` and `ageInPasses` is zero each; the single `deferrals` hit is
+    `dispatch-overlap.ts`'s file-overlap partition, a different mechanism. Control: `priorStrikesFor`
+    — a counter that does exist — is found in two files, so the scan sees counters fine. Each
+    deferral writes an independent `acted:false` row; nothing aggregates them, so "deferred N
+    passes running" is a quantity the system cannot express. That is the same shape as the
+    armed-but-conflicted and armed-then-closed cases: THE LEDGER RECORDS INTENT AND NEVER
+    REACHABILITY. It is named here for the operator to mint separately; this task does not build it.
+
+    (10) THE STRUCTURAL PRECEDENT IS ONE LAYER OVER, AND IS CITED RATHER THAN RE-DERIVED. W1-T476
+    fixed the DISPATCH side's equivalent — a head ordered by something other than what the
+    admission cared about, then truncated — with `packDisjointFirst`, a sort before the cut and no
+    new state. This is the same repair on the review side, and its own doc's stability argument
+    (the pack never reorders what it cannot improve) is the model for criterion 2 below.
+
+    (11) NEIGHBOURS READ AND DISTINGUISHED, NONE RE-FILED. W1-T513 is the light sweep starving
+    behind the TICK — scheduling latency, not queue order, and its remedy would not change who is
+    below the cut. W1-T526 is how MANY reviews a strict:true queue costs — quantity, not order.
+    W1-T473 gave reviews their own concurrency budget, which is the machinery this sorts.
+    W1-T1049 owns the lane ceiling and the host sum. W1-T1213 is a refusal pinning a head.
+    W1-T298 is the DISPATCH queue's starvation census. None of them owns the ordering of
+    `pendingReviews`.
+
+    (12) THE POPULATION IS INTERMITTENT, AND THIS IS SAID RATHER THAN LEFT TO IMPLY URGENCY THE
+    MEASUREMENT DOES NOT SUPPORT. The starvation condition is "pending set larger than the budget",
+    which requires a filing rate above the clearing rate. At the time of this recon the open queue
+    stood well under the budget, so nothing was being starved right then. The defect is structural
+    and fires whenever the queue is deep, not continuously — and the fix costs nothing when the
+    queue is shallow, because a sort over a set smaller than the budget changes no outcome at all.
+  design: |
+    (i) SORT BEFORE THE SLICE, OLDEST FIRST, AND NOTHING ELSE. `pendingReviews` is ordered
+    ascending before `slice(0, reviewLanes)` runs. Starvation becomes impossible by construction:
+    the oldest eligible review always takes a lane, so no entry can be below the cut on every
+    pass. No new state, no policy change, no cap change, no second data source.
+
+    (ii) THE KEY IS `createdAt`, WITH `prNumber` AS THE TIEBREAK AND THE FALLBACK. Rationale (5)
+    shows head-push time is the better WAITING key and (7) shows it is not carried, so sorting on
+    it is a different task with a new field. `createdAt` is already in hand and is a correct
+    STARVATION key regardless: the oldest PR always takes a lane. It is OPTIONAL, and (7) says an
+    absent value must not be read as "just created" — so `prNumber` ascending is the tiebreak AND
+    the substitute when it is missing, being always present and exactly monotone with creation.
+    THE COST IS NAMED: a long-lived PR whose head is ninety seconds old can take a lane ahead of a
+    younger PR whose head has waited hours. That is a fairness imperfection, not a starvation one,
+    and rationale (5) measures a live instance of it rather than leaving it abstract.
+
+    (iii) NOTHING ELSE IN THE LANE CHANGES. The budget, the `Math.max(1, ...)` floor, the
+    `reviewKey` mutual exclusion, the release of `claimedReviewKeys` for deferred jobs, and the
+    `acted:false` stand-down row all stay exactly as they are. A criterion pins the stand-down so
+    a later edit cannot trade one property for another.
+
+    (iv) A SET SMALLER THAN THE BUDGET MUST BE UNAFFECTED — W1-T476's stability argument applied
+    here. When every pending entry gets a lane, the sort changes no outcome, and a criterion says
+    so, so the change is provably inert in the common case and only acts when the queue is deep.
+
+    (v) NOT IN SCOPE, NAMED: raising `reviewLanes`, refused by its own policy bound (rationale
+    (8)); adding head-push time to `OpenPrView`, which rationale (7) shows is the strictly better
+    key and a separate change; W1-T513's tick latency; W1-T526's review quantity; and the
+    consecutive-deferral counter of rationale (9), which is named for the operator to mint and is
+    deliberately not built here — a fairness fix and an observability gap are two concerns.
+  acceptance:
+    - claim: "when the pending set exceeds the budget the oldest eligible review takes a lane"
+      proof: "unit test: test/review-lane-fairness.test.ts"
+    - claim: "a pending set no larger than the budget produces the same outcome as before"
+      proof: "unit test: test/review-lane-fairness.test.ts"
+    - claim: "the deferred remainder still stands down without persisting new state"
+      proof: "unit test: test/review-lane-fairness.test.ts"
+    - claim: "a pending entry carrying no creation timestamp still takes a deterministic position"
+      proof: "unit test: test/review-lane-fairness.test.ts"
+    - claim: "the review budget and its floor are unchanged"
+      proof: "unit test: test/review-lane-fairness.test.ts"
+  files: [src/lib/sweep.ts, test/review-lane-fairness.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#review-lane-order-starves-older-prs-2026-08-22"
+  plan_refs: ["W1-T476", "W1-T473", "W1-T1049", "W1-T513", "W1-T526", "W1-T913", "W1-T1201"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/review-lane-fairness.test.ts`, declared in `files:`, so on this filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19'S SPAN — two files, one concern, and the linter
+    accepts the band either way. The change decides which LIVE pull requests get reviewed on a
+    given pass; a mistake either reviews the wrong three or, by mis-sorting, starves a different
+    set silently, which is harder to see than the defect it replaces.
+
+    THE BRIEF'S REMEDY IS ADOPTED, ITS KEY IS NOT ASSUMED. "Sort oldest-first before the slice" is
+    exactly design (i). Which timestamp counts as "oldest" was left open, and rationale (5)-(7)
+    settles it by measurement: the keys invert on live data, the field that looks like
+    first-seen-pending is undefined for precisely the starved population, and head-push time is
+    not carried at all.
+
+    ONE CORRECTION IS RECORDED RATHER THAN CARRIED. The ~four-concurrent-worker host ceiling is
+    NOT in `sweep.ts`. It is in `plan/policy.yaml`'s `reviewLanes` row and in W1-T1049's shard,
+    and it does more than the brief credited: it makes raising the cap a `PolicyError`, not merely
+    a bad idea.
+
+    AND THE URGENCY IS STATED HONESTLY. Rationale (12): the starvation condition needs a queue
+    deeper than the budget, and the queue was shallow at recon time. The defect is structural, not
+    continuous, and the fix is inert whenever the queue is shallow — which is also why it is safe.

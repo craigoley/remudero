@@ -466,11 +466,15 @@ jobs:
       # cost of leaving it out is that `rmd preflight --ci-parity` does not mirror this step
       # locally — a fidelity gap, not a gate failure.
       #
-      # The cap carries ZERO HEADROOM: CLAUDE.md's own charter says every addition must be paid for
+      # The cap is a size CEILING: CLAUDE.md's own charter says every addition should be paid for
       # by a fold ("compression is a deliverable, not just accretion"), so
-      # scripts/claude-md-budget-baseline.json's capBytes is the measured size at capture, not a
-      # figure with room to grow into. It only ever ratchets UP, by a reviewed bump that says why
-      # growth is right — never down to make a red PR pass.
+      # scripts/claude-md-budget-baseline.json's capBytes was originally the measured size at
+      # capture, with no room to grow into. THE OPERATOR RETIRED THAT ZERO-HEADROOM SHAPE ON
+      # 2026-08-22 and raised the cap to a round 64 KiB, after CLAUDE.md hit it with one byte of
+      # room twice the same day and both lanes spent more effort folding prose than writing the
+      # rule they came to write — see that baseline's bumpRationale. The gate is unchanged and
+      # still fails closed; only the number moved. It only ever ratchets UP, by a reviewed bump
+      # that says why growth is right — never down to make a red PR pass.
       - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap)
         run: npm run --silent claude-md-budget-ratchet
 

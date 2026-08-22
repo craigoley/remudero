@@ -919,8 +919,11 @@ test(
     "— source-level reachability proof (same technique as the neighboring 'runFixRung is REUSED' test " +
     "in test/run-task.test.ts) that early arming is withdrawn before the human escalation, never after",
   () => {
-    const disarmIdx = runTaskSrc.indexOf("disarmAutoMerge(prUrl);");
-    assert.ok(disarmIdx >= 0, "disarmAutoMerge(prUrl) must be called somewhere in run-task.ts");
+    // W1-T1215: the call no longer stands as a bare statement — its return is handed straight to
+    // `disposeDisarm`, because discarding it is what let a withdrawal GitHub REFUSED be recorded
+    // as a completed one (#2506). The ordering this test exists to pin is unchanged.
+    const disarmIdx = runTaskSrc.indexOf("disposeDisarm(disarmAutoMerge(prUrl)");
+    assert.ok(disarmIdx >= 0, "the capped-refusal branch must still disarm before escalating");
     const nextEscalateIdx = runTaskSrc.indexOf("escalate(", disarmIdx);
     assert.ok(nextEscalateIdx >= 0, "an escalate( call must follow the disarm");
     assert.ok(
@@ -934,8 +937,11 @@ test(
       // W1-T947: the literal capped-only reason is now ONE branch of a computed `reason` that
       // also names an irreversible refusal — asserting the variable is logged, not the old
       // hardcoded string, which no longer appears verbatim (see the two tests above this one).
-      /const reason = irreversible[\s\S]*log\("automerge\.disarmed", \{ reason \}\)/,
-      "the disarm is ledgered with an attributable reason, matching this file's never-silent idiom",
+      // W1-T1215: the row now FOLLOWS THE OUTCOME rather than asserting one. `disposition.step` is
+      // `automerge.disarmed` only when the withdrawal actually happened, and `automerge.disarm_skipped`
+      // otherwise — an unconditional `log("automerge.disarmed", ...)` here was the defect itself.
+      /log\(disposition\.step, disposition\.row\)/,
+      "the disarm is ledgered with an attributable reason AND an honest step, never a fixed one",
     );
     // And the disarm site is textually INSIDE the `if (!armDecision.arm)` capped-
     // refusal branch, not the OLD post-review arm site this task removes.

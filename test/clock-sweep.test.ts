@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -16,12 +17,21 @@ const mod = (await import(SWEEP_URL)) as {
   CLOCK_ARTIFACTS: ReadonlyMap<string, string>;
   SPAWN_REACHING: ReadonlyMap<string, string>;
   SWEEP_SHIFT_DAYS: number;
+  DRIFT_CEILING: number;
+  DRIFT_BASELINE: { _comment: string; driftCeiling: number };
   classifySweep: (
     results: Map<string, { failed: boolean; output?: string }>,
     artifacts?: ReadonlyMap<string, string>,
-  ) => { drifted: Array<{ suite: string }>; staleExclusions: Array<{ suite: string; reason: string }>; ok: boolean };
+    ceiling?: number,
+  ) => {
+    drifted: Array<{ suite: string }>;
+    staleExclusions: Array<{ suite: string; reason: string }>;
+    ceiling: number;
+    ok: boolean;
+  };
   deriveCandidates: (testDir?: string) => string[];
   failingTitles: (output: string) => string[];
+  firstFailureDetail: (output: string) => string;
   runnableCandidates: (candidates: string[]) => string[];
   runSuite: (
     suite: string,
@@ -36,6 +46,7 @@ const mod = (await import(SWEEP_URL)) as {
     argv?: string[];
     run?: (suite: string, days: number) => { failed: boolean; output?: string };
     derive?: () => string[];
+    ceiling?: number;
     log?: (m: string) => void;
     write?: (m: string) => void;
   }) => number;
@@ -44,9 +55,12 @@ const {
   CLOCK_ARTIFACTS,
   SPAWN_REACHING,
   SWEEP_SHIFT_DAYS,
+  DRIFT_CEILING,
+  DRIFT_BASELINE,
   classifySweep,
   deriveCandidates,
   failingTitles,
+  firstFailureDetail,
   runnableCandidates,
   runSuite,
   bisectFuse,
@@ -65,11 +79,15 @@ const failed = { failed: true, output: "" };
 const passed = { failed: false, output: "" };
 
 test("a non-excluded suite that fails shifted IS reported — the list cannot swallow a real failure", () => {
+  // Pinned at ceiling 0 (W1-T1128): this fixture's whole point is that the ONE real failure
+  // cannot be swallowed, independent of whatever the real recorded ceiling happens to be today.
   const { drifted, staleExclusions, ok } = classifySweep(
     new Map([
       ["post-fix-reverification", failed],
       ["sweep", passed],
     ]),
+    CLOCK_ARTIFACTS,
+    0,
   );
   assert.equal(ok, false);
   assert.deepEqual(drifted.map((d) => d.suite), ["post-fix-reverification"]);
@@ -86,22 +104,20 @@ test("an excluded artifact that STILL fails is silent — that is the entry doin
 });
 
 test("an excluded artifact that becomes IMMUNE surfaces as a STALE entry, carrying its reason", () => {
-  // The rot check. If `emissions` stops failing shifted, the mechanism its exclusion cites no longer
-  // holds and the entry must not sit there silently widening the blind spot.
-  const { staleExclusions, drifted, ok } = classifySweep(
-    new Map([
-      ["emissions", passed],
-      ["prune-liveness", failed],
-      ["serve.glance", failed],
-    ]),
-  );
+  // The rot check, kept GENERIC over whichever suites CLOCK_ARTIFACTS currently names (W1-T1104
+  // removed `emissions` — measured passing shifted — so this must not pin that literal name; the
+  // property is "the FIRST artifact going immune is reported stale", not which suite it is today).
+  const [immuneSuite, ...stillFailingSuites] = [...CLOCK_ARTIFACTS.keys()];
+  const results = new Map<string, { failed: boolean; output: string }>([[immuneSuite, passed]]);
+  for (const s of stillFailingSuites) results.set(s, failed);
+  const { staleExclusions, drifted, ok } = classifySweep(results);
   assert.equal(ok, false, "a rotted exclusion must fail the sweep, not pass quietly");
   assert.deepEqual(drifted, [], "a stale exclusion is not a drift — they are different findings");
   assert.equal(staleExclusions.length, 1);
-  assert.equal(staleExclusions[0].suite, "emissions");
-  assert.match(
+  assert.equal(staleExclusions[0].suite, immuneSuite);
+  assert.equal(
     staleExclusions[0].reason,
-    /REAL on-disk ledger/,
+    CLOCK_ARTIFACTS.get(immuneSuite),
     "the report must carry WHY it was excluded, or nobody can judge whether removing it is right",
   );
 });
@@ -112,6 +128,112 @@ test("every exclusion reason names a MECHANISM — 'flaky' is not a reason", () 
     assert.ok(reason.length >= 40, `${suite}'s reason is too thin to be a mechanism: ${reason}`);
     assert.doesNotMatch(reason, /^\s*(flaky|todo|tbd|unstable)\b/i, `${suite} has a placeholder reason`);
   }
+});
+
+// ── THE DRIFT CEILING (W1-T1128). `classifySweep` used to require `drifted.length === 0` --
+// ABSOLUTE cleanliness -- a bound the real workflow has never once satisfied (9 runs: 4 failure /
+// 5 cancelled / 0 success, across both its `pull_request` and `schedule` triggers). It is now a
+// RATCHET against the recorded ceiling in scripts/clock-sweep-baseline.json, the same shape
+// scripts/coverage-baseline.json and scripts/mutation-baseline.json already use: a run that does
+// not REGRESS past the recorded figure is green. Every test below pins its OWN ceiling rather than
+// reading the real DRIFT_CEILING, so these stay meaningful however the real baseline is ratcheted.
+
+test("a sweep whose drifting-suite count is at the recorded ceiling exits clean", () => {
+  const { drifted, ok } = classifySweep(
+    new Map([
+      ["a", failed],
+      ["b", failed],
+      ["c", passed],
+    ]),
+    CLOCK_ARTIFACTS,
+    2,
+  );
+  assert.equal(drifted.length, 2);
+  assert.equal(ok, true, "drifted.length === ceiling is NOT a regression and must exit clean");
+});
+
+test("a sweep that drifts further than the ceiling still fails", () => {
+  const { drifted, ok } = classifySweep(
+    new Map([
+      ["a", failed],
+      ["b", failed],
+      ["c", failed],
+    ]),
+    CLOCK_ARTIFACTS,
+    2,
+  );
+  assert.equal(drifted.length, 3);
+  assert.equal(ok, false, "drifted.length > ceiling IS a regression and must fail");
+});
+
+test("a sweep with fewer drifting suites than the ceiling exits clean and says so", () => {
+  const lines: string[] = [];
+  const code = main({
+    argv: [],
+    derive: () => ["learnings"],
+    run: () => ({ failed: true, output: "not ok 1 - a fixture date goes stale\n" }),
+    ceiling: 5,
+    log: (m) => lines.push(m),
+    write: () => {},
+  });
+  assert.equal(code, 0, "one drifting suite under a ceiling of 5 must still exit clean");
+  const out = lines.join("\n");
+  assert.match(out, /BELOW CEILING/, "an improvement over the ceiling must be called out, not folded into a plain PASS");
+  assert.match(out, /ceiling of 5/);
+  assert.match(out, /^PASS — /m, "still a PASS -- exiting clean must read as clean");
+});
+
+test("a sweep whose drifting-suite count exactly matches the ceiling exits clean and says AT CEILING", () => {
+  // The third relation (W1-T1128): neither an improvement (BELOW) nor a regression (OVER), so it
+  // gets its own line rather than being folded into either neighbor.
+  const lines: string[] = [];
+  const code = main({
+    argv: [],
+    derive: () => ["learnings"],
+    run: () => ({ failed: true, output: "not ok 1 - a fixture date goes stale\n" }),
+    ceiling: 1,
+    log: (m) => lines.push(m),
+    write: () => {},
+  });
+  assert.equal(code, 0, "drifted.length === ceiling is NOT a regression and must exit clean");
+  const out = lines.join("\n");
+  assert.match(out, /AT CEILING/, "matching the ceiling exactly must be named, not folded into BELOW or OVER");
+  assert.match(out, /ceiling of 1/);
+  assert.doesNotMatch(out, /BELOW CEILING/);
+  assert.doesNotMatch(out, /OVER CEILING/);
+  assert.match(out, /^PASS — /m, "still a PASS -- exiting clean must read as clean");
+});
+
+test("the recorded ceiling carries the rule that it may fall and must never rise", () => {
+  // Reads the REAL committed baseline directly (same idiom as
+  // test/claude-md-budget-ratchet.test.ts's "the real baseline carries ZERO headroom" test), so
+  // this fails the moment the file's own rule is weakened or dropped, not just when the exported
+  // constant drifts from it.
+  const baseline = JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "clock-sweep-baseline.json"), "utf8"),
+  );
+  assert.equal(typeof baseline.driftCeiling, "number");
+  assert.ok(baseline.driftCeiling >= 0);
+  assert.equal(baseline.driftCeiling, DRIFT_CEILING, "the module must read the SAME file this test does");
+  assert.equal(baseline._comment, DRIFT_BASELINE._comment);
+  assert.match(baseline._comment, /never/i, "the comment must state the rule, not just carry a number");
+  assert.match(baseline._comment, /rais(e|ed)/i, "must name the forbidden direction");
+  assert.match(baseline._comment, /fall/i, "must name the permitted direction");
+});
+
+test("a stale exclusion still fails regardless of the drift ceiling", () => {
+  // GENERIC over whichever suite CLOCK_ARTIFACTS currently names first (the same reason the
+  // "becomes IMMUNE" test above reads `[...CLOCK_ARTIFACTS.keys()]` rather than a literal name):
+  // W1-T1104 already removed `emissions` from the map once (measured passing shifted in CI), so a
+  // test pinned to that literal name would fail the moment the map's membership moves, for a
+  // reason that has nothing to do with the property under test here — a ceiling never forgiving a
+  // stale exclusion. A ceiling of 100 is deliberately far above any plausible drift count, so a
+  // pass here could ONLY come from the ceiling wrongly forgiving a stale exclusion.
+  const [anyArtifact] = CLOCK_ARTIFACTS.keys();
+  const { staleExclusions, drifted, ok } = classifySweep(new Map([[anyArtifact, passed]]), CLOCK_ARTIFACTS, 100);
+  assert.equal(drifted.length, 0);
+  assert.equal(staleExclusions.length, 1);
+  assert.equal(ok, false, "a stale exclusion must fail even under a wildly generous ceiling");
 });
 
 // ── THE SPAWN GUARD. Not "they happen not to match the derivation today" — that is a coincidence a
@@ -146,6 +268,31 @@ test("failingTitles extracts the failing test names a report must name", () => {
   const tap = ["ok 1 - fine", "not ok 2 - a disposition flipped to stale", "not ok 3 - second one", "# fail 2"].join("\n");
   assert.deepEqual(failingTitles(tap), ["a disposition flipped to stale", "second one"]);
   assert.deepEqual(failingTitles("ok 1 - all good\n# fail 0"), [], "a green run names nothing");
+});
+
+test("firstFailureDetail carries the raw diagnostic block of the FIRST failing test — a title alone cannot tell an assertion mismatch from an unrelated throw", () => {
+  const tap = [
+    "TAP version 13",
+    "ok 1 - fine",
+    "not ok 2 - a disposition flipped to stale",
+    "  ---",
+    "  duration_ms: 3.5",
+    "  error: 'ENOENT: no such file or directory'",
+    "  code: 'ERR_TEST_FAILURE'",
+    "  ...",
+    "not ok 3 - second one",
+    "  ---",
+    "  error: 'a different failure entirely'",
+    "  ...",
+  ].join("\n");
+  const detail = firstFailureDetail(tap);
+  assert.match(detail, /^not ok 2 - a disposition flipped to stale$/m, "starts at the first failing line");
+  assert.match(detail, /ENOENT: no such file or directory/, "carries the first failure's own diagnostic");
+  assert.doesNotMatch(detail, /a different failure entirely/, "stops before the SECOND failing test's block");
+});
+
+test("firstFailureDetail is empty on a green run — nothing to name", () => {
+  assert.equal(firstFailureDetail("ok 1 - all good\n# fail 0"), "");
 });
 
 test("the shift is a single large value — a second shorter shift would add cost, not signal", () => {
@@ -263,6 +410,7 @@ test("main returns 1 on drift and names the suite, the failing test, the fuse an
       failed: days >= 14,
       output: "not ok 1 - a fixture date goes stale\n",
     }),
+    ceiling: 0, // pinned (W1-T1128): this fixture's ONE drift must still block at a zero ceiling.
     log: (m) => lines.push(m),
     write: () => {},
   });

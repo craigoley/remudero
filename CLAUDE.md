@@ -35,9 +35,8 @@ forensic detail, so the narrative does not need to live here.
 - **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
   each follow-up commit.** `bodyContradictsDiff` (`src/lib/review.ts`, W1-T274) OPENS THE DIFF and
   FAILS the PR — MEASURED 2026-08-12: #1685 refused with *"body contradicts its own diff: claimed
-  'exactly one file'"*, over the same three files #974 carried. #974 merged (PRE-W1-T274, which is the
-  only reason it merged at all) claiming *"exactly one file: MASTER-PLAN.md. No src/, no test/, no
-  docs/ORIENTATION.md"* while carrying `MASTER-PLAN.md` + `docs/ORIENTATION.md` + `plan/plan-index.json`
+  'exactly one file'"*, over the same three files #974 carried. #974 merged (PRE-W1-T274) claiming
+  *"exactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md"* while carrying `MASTER-PLAN.md` + `docs/ORIENTATION.md` + `plan/plan-index.json`
   — and what was load-bearing is that THE BODY NAMED THE VERY FILE THE DIFF TOUCHED. The detector's own
   doc says it in terms: *"NOT because of plan scope"* — **#974 KEPT its `planOnly` carve-out.**
   **NEVER ASSERT SCOPE MEMBERSHIP FROM MEMORY; RUN THE PREDICATE** —
@@ -80,9 +79,8 @@ forensic detail, so the narrative does not need to live here.
   that phrase warns of is writing `| proof:`: the pipe already delimits, so the label doubles, the
   proof becomes `proof: grep: …`, and `check-proof` refuses it (`parse: REFUSED`, exit 2) — that
   capped #1598 at 0/3. After a pipe, write the BARE proof.
-  **RUN BOTH VERBS — NEITHER CATCHES THE OTHER'S FAILURE, MEASURED BOTH WAYS:** that doubled-label
-  body passes `check-acceptance` with `OK` and exit 0 while `check-proof` refuses it, and an
-  unbulleted body fails `check-acceptance` while every proof string inside it is individually valid.
+  **RUN BOTH VERBS — NEITHER CATCHES THE OTHER'S FAILURE:** that doubled-label body passes
+  `check-acceptance` `OK`/exit 0; an unbulleted body fails it while every proof inside is valid.
   `gh api repos/<o>/<r>/pulls/<n> --jq .body > /tmp/b.md && RMD_SELF_SYNC_DONE=1 ./bin/rmd check-acceptance /tmp/b.md`
   **GUARD THE FETCH ON STRUCTURE, NEVER ON SIZE**: reject on a non-200 HTTP code or a missing/null
   `.body` key before judging the file — a 537-byte rate-limit payload landed in `/tmp/b.md` and
@@ -98,16 +96,16 @@ forensic detail, so the narrative does not need to live here.
   verdict lands CAPPED at `proof_exec: 0/N`, which will not arm auto-merge. #1194 posted 0/3 that
   way, and **#1189 MERGED at 2/4** — only its two `grep:` proofs ever ran, and nothing said so.
   Write `unit test: <exact-title substring>`: the prefix is required, and what follows it must be a
-  bare title, NOT the `test/foo.test.ts::title` form — that form satisfies `rmd lint-plan` but the
-  executor feeds the whole string to `--test-name-pattern` and matches zero tests. In a **plan
-  shard**, use the pure-path form `unit test: test/foo.test.ts`: it lint-passes and executes the
-  whole file. `rmd check-proof '<proof>'` — the second of the two verbs the bullet above requires —
-  is the reviewer's own parser AND executor (W1-T387: it judges the run through
+  bare title, NOT the `test/foo.test.ts::title` form — that lint-passes but feeds the whole string
+  to `--test-name-pattern`. In a **plan shard** use ONLY the pure-path form
+  `unit test: test/foo.test.ts`: `judgeCriterion`'s `not_yet_built` carve-out needs `!nameFiltered`
+  AND that path in the shard's `files:` (`shardDeclaredFilesInDiff`), so a TITLE silently grades
+  `no-match` = TEST THEATRE. A plan-only PR hides it (W1-T205 runs 0 of N): it bites a filing
+  declaring a `src/` file. `rmd check-proof '<proof>'` — the second of the two verbs the bullet
+  above requires — is the reviewer's own parser AND executor (W1-T387: it judges the run through
   `execWhitelistedProof` itself, not a second hand-rolled exit-code check). Read its `verdict:`
-  line, never the raw `exit:` line — a name-filtered proof that resolves to a file but names no real
-  test title exits 0 and looks green (`exit: 0`, `hits: 17` is a MEASURED real example) while its
-  `verdict:` correctly reads `no-match`; `rmd check-proof --help` states the full verdict→exit-code
-  mapping. *(#766, #773, #777, #1189, #1194)*
+  line, never the raw `exit:` — that same zero-match case exits 0 with `hits: 17` (MEASURED) while
+  `verdict:` reads `no-match`; `--help` states the full mapping. *(#766, #773, #777, #1189, #1194)*
 - **A `unit test:` title is matched as a LITERAL substring after escaping — the OPPOSITE of a
   `grep:` pattern, which is a BASIC REGEX.** `parseTestTarget` (`src/lib/review.ts`) compiles a
   bare title to `--test-name-pattern escapeRegExp(trimmed)`, so `.` `(` `)` `[` `]` and every other
@@ -137,9 +135,8 @@ forensic detail, so the narrative does not need to live here.
   and base is downgraded to `executed_stale` (W1-T273) because it discriminates nothing — **and
   W1-T362 extended `executed_stale` to `unit test:` proofs too, so DISCRIMINATION, not mere
   execution, is the bar for every dialect**: a proof reading 1/1 across head and base substantiates
-  nothing. Run a control
-  pattern that must NOT match, because `grep -r` with no file operand searches the cwd instead of stdin
-  and will fake a match for every pattern you test. *(#1120 — a `-F`-verified proof failed the review)*
+  nothing. Run a control pattern that must NOT match: `grep -r` with no file operand searches the
+  cwd, not stdin, and fakes a match for anything. *(#1120 — a `-F`-verified proof failed the review)*
 - **A plan-only PR is not automatically CAPPED — prefer certification over the W1-T205 carve-out.**
   `planOnly` (`src/lib/review.ts`) exempts a plan-only diff from the proof-execution FLOOR; it does
   not stop real proofs from executing. `grep: <pattern> in <path>` proofs with an EXPLICIT path do
@@ -164,9 +161,9 @@ forensic detail, so the narrative does not need to live here.
   Middle types, bracketed by executed statements, get no `DA:0`. *(#777 — head and tail both failed)*
 - **Put any coverage-load-bearing test in its OWN `test/*.test.ts` file — never append it to
   `test/run-task.test.ts`.** That file intermittently crashes at FILE level under
-  `--experimental-test-coverage` (the W1-T240 registry tests), zeroing the coverage record for
-  everything in it — so a diff-coverage-critical test can lose its own coverage nondeterministically
-  and fail on a rerun unrelated to your change. *(#781)*
+  `--experimental-test-coverage` (the W1-T240 registry tests) — and the crash zeroes the ENTIRE
+  lcov, so `diff-coverage` reads the 0-byte file as `OK` VACUOUSLY; only the `SF:` count check
+  (the vacuous-pass bullet below) catches it. *(#781)*
 - **When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are
   unreachable — write one test that really shells out, and one per catch arm.** #978 shipped 182
   lines of tests that all supplied their own `PreflightSpawn`, so `defaultPreflightSpawn` never ran
@@ -179,8 +176,8 @@ forensic detail, so the narrative does not need to live here.
   `grep -c '^SF:<path>$' <lcov>` must be non-zero for every source file in the diff.** A scoped run
   whose suites never import a changed file emits no records for it, so "every added source line lcov
   instruments is covered" is trivially true over an EMPTY SET. This is the vacuous-pass family, not
-  a coverage result. *(#1399 — an `OK` with zero `SF:` records for both `src/run-task.ts` and
-  `src/lib/review.ts` while CI's coverage-ratchet was failing on 10 uncovered lines)*
+  a coverage result. *(#1399 — an `OK` with zero `SF:` records for either changed file while CI's
+  coverage-ratchet failed on 10 uncovered lines)*
 - **Build the lcov and the diff from the SAME tree — commit before measuring — AND NAME THE SHA in
   what you report.** An lcov from a dirty working tree measured against `git diff origin/main...HEAD`
   (which excludes uncommitted work) misaligns line numbers and reports untouched pre-existing code
@@ -188,7 +185,7 @@ forensic detail, so the narrative does not need to live here.
   `origin/main` MOVES under you mid-session, so a re-run silently compares a stale lcov against a
   fresh diff — stamp the sha into the filename or the report line, and re-derive both sides after
   any pull. *(#1399 — two phantom "uncovered" lines that were the pre-existing `floorDegraded`
-  branch; filename-reuse variant measured 2026-08-14)*
+  branch; filename-reuse variant 2026-08-14)*
 - **`diff-coverage` flags ADDED lines, so restructuring an untested region inherits its debt at the
   gate — measure MAIN's coverage of that region before assuming the PR caused it.** Rewriting a
   block converts a silent pre-existing gap into a blocking failure. *(#1399 — every line of the
@@ -213,16 +210,22 @@ forensic detail, so the narrative does not need to live here.
   `git ls-remote --heads origin 'run-<id>-*'`   # is someone working on it RIGHT NOW
   `gh api "repos/<owner>/<repo>/pulls?state=closed&per_page=100" --jq '[.[]|select(.merged_at!=null)|select(.body//""|test("(?m)^Remudero-Task:[ \t]*<id>[ \t]*$"))|.number]'`   # has it ALREADY SHIPPED
   Anchor the trailer test exactly (`^Remudero-Task:\s*<id>\s*$`, multiline) — GitHub's search is NOT
-  exact-phrase, and unioning COMMIT SUBJECTS over-credits because `chore(plan): file W1-T411` names a
-  task the filing never implemented. Add the head-ref query above when the trailer scan returns zero.
+  exact-phrase, and unioning COMMIT SUBJECTS over-credits: `chore(plan): file W1-T411` names a
+  task the filing never implemented. Add the head-ref query when the trailer scan reads zero.
+- **Sweep the SUBJECT over open PR heads, not only `origin/main` — the id half already does.** A
+  main-only subject scan cannot see an in-flight sibling shard, the one case it exists to catch:
+  `git ls-remote --heads origin`, then read each head's tree — real files, no REST call. COUNT per
+  head against main's own count; presence hits EVERY head, all carrying main's shards. **One
+  prompt, one lane**, too: NO SWEEP SEES UNPUSHED WORK, so that half is the operator's discipline,
+  never a check. *(2026-08-22: a re-sweep at 11:22:23Z missed a PR opened 11:14:46Z — two shards on
+  one subject, #2471 duplicated; #2408/#2411 on 08-21.)*
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** It is the only thing
   that makes session work visible to the fleet: `isDispatchEligible` (`drain.ts`) consults
   `opts.isOpenPr`, and `projectPlan` attributes an OPEN PR by `/^run-(.+)-\d+$/` against
   `headRefName` — NOT by the trailer — so a PR on `fix/…`, `docs/…`, `chore/…` or `claude/…` is
   invisible to dispatch however it is trailered. MEASURED 2026-08-12: 70 merges, 29 `run-*` heads and
-  41 session-shaped — a MAJORITY invisible. The convention costs one branch name and does double
-  duty: visible to dispatch while open, and credited on merge even when the body forgets the trailer
-  (again, #1657). *(#984; the branch-name credit path and both commands added 2026-08-12)*
+  41 session-shaped — a MAJORITY invisible. The convention costs one branch name and does double duty:
+  visible to dispatch while open, credited on merge even when the body forgets the trailer (#1657). *(#984; the branch-name credit path and both commands added 2026-08-12)*
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names**, and feed it the
   trailer-built merged set above. W1-T169 was rank 23 behind three unmet deps, not the head. A
@@ -280,10 +283,10 @@ forensic detail, so the narrative does not need to live here.
   the id is TAKEN; renumber, never re-push.
 - **A contested reservation is never deleted and an unfiled one is never free — the
   LOSER of a race renumbers.** A reserved id with no shard anywhere is HELD, not abandoned; deleting
-  the ref re-opens the race it settled, and reclaiming one is an operator decision. *(2026-08-18: two
-  hosts minted `refs/rmd-id/W1-T967` 5.76s apart; the first read back its own nonce, and a re-read
-  after the PR opened returned the other host's commit, because it carried `+`. The loser could name
-  the winner only because the message embeds pid+host+time — the ref carries no identity field.)*
+  the ref re-opens the race it settled, and reclaiming one is an operator decision. *(2026-08-18: two hosts
+  minted `refs/rmd-id/W1-T967` 5.76s apart; the first read back its own nonce, then after the PR
+  opened re-read the other's commit — it carried `+`. Only the message's pid+host+time named the
+  winner; the ref has no identity field.)*
 - **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
   `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
   Decomposing a predicate from its own falsifier is not a real decomposition. **And NEVER file an
@@ -291,8 +294,8 @@ forensic detail, so the narrative does not need to live here.
   side returns the OTHER side's entire list — so an undeclared task overlaps every candidate, and
   placed first it serializes the whole dispatch pool behind it (measured: one empty-`files:` task at
   the queue head held admissions to 1 lane where 11 disjoint tasks waited; W1-T476 files the
-  ordering fix, but the authoring rule stands regardless). *(#1400 shipped the
-  violation and pushed open-failing 176→177; #1401 pre-empted it and stayed at 176; #1779)*
+  ordering fix, but the authoring rule stands regardless). *(#1400 shipped it, pushing open-failing 176→177;
+  #1401 pre-empted it and stayed at 176; #1779)*
 - **Decoding rule citations — where each family canonically lives.** "Rule N" / "Standing rule N"
   = MASTER-PLAN **§12** (1–25, plus 3B/8B); the linter enforces several by name — 15:
   `criterionFieldTampered` + `rule15FilingViolation`, 17: `provenanceViolation`, 18:
@@ -376,8 +379,8 @@ forensic detail, so the narrative does not need to live here.
   `MAX_RETAINED_LINES_PER_STEP = 200` newest per step and archives the rest, so most history exists
   ONLY in older archives — deleting any destroys unique data and the newest subsumes nothing.
   Claims of the form "N occurrences", and especially "zero in the entire history", are unsupportable
-  without every form. *(recon-AE §0 — the `.gz`-only idiom returned a silent **0** for a pattern
-  with 3 real hits, its own positive control passing at 257k the whole time)*
+  without every form. *(recon-AE §0 — the `.gz`-only idiom returned a silent **0** for a pattern with 3
+  real hits, its control passing at 257k throughout)*
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.**
   `automerge.armed` once logged `outcome: "ledger-refused"` beside `reason: "verdict is a full PASS"`
   — outcome from the gate that refused, reason from `decideAutoMergeArm` which had APPROVED, with
@@ -388,8 +391,8 @@ forensic detail, so the narrative does not need to live here.
   Architect lanes logged `automerge.armed` unconditionally. Measured over the unioned ledger: 176
   rows; 135 blind, 17 provably false, 119 undecidable — OVERLAPPING categories, not a partition
   (they sum past 176) — the blind rows recorded no `head_sha`, so
-  they can never be adjudicated. Any historical claim resting on that step name is unsound for rows
-  written before #981. **AND THE LANES ARE NOT EQUALLY GATED — THE OBVIOUS READING IS BACKWARDS, SO
+  they can never be adjudicated. Any claim resting on that step name is unsound for rows
+  before #981. **AND THE LANES ARE NOT EQUALLY GATED — THE OBVIOUS READING IS BACKWARDS, SO
   READ BOTH ARMS BEFORE ARGUING FROM ONE:** `grep -n 'return attemptArm' src/run-task.ts` prints
   them side by side. `triageCommand` arms only AFTER `waitForCiGreen` returns green, and
   `armAutoMerge` then reads `priorReviewVerdictFromLedger` and gates on `decideArmFromLedgerVerdict`
@@ -400,9 +403,8 @@ forensic detail, so the narrative does not need to live here.
   than triage PRs, which only add plan text.** Operator ruling on W1-T489: DOCUMENTED, not changed.
   The unattended rate is real now that W1-T469 fires the rung on `partition.serialized.length > 0`
   rather than idleness, bounded by `autoTriage.maxPerDay`/`minIntervalMinutes` (`plan/policy.yaml`).
-  Cost per run is a QUERY, not a number to carry — re-derive it over the
-  ledger union (archive rule below) rather than quoting the figure `src/lib/auto-triage.ts` already
-  carries. *(#981; the lane-asymmetry half W1-T489, 2026-08-14)*
+  Cost per run is a QUERY, not a number to carry (name-the-query rule above): re-derive it
+  over the ledger union rather than quoting `src/lib/auto-triage.ts`'s figure. *(#981; the lane-asymmetry half W1-T489, 2026-08-14)*
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.** A control filtering on the
   absolute path counts the wrapper, returns 1, and reports a false pass, which would make every
@@ -463,12 +465,13 @@ forensic detail, so the narrative does not need to live here.
   *(W1-T312, W1-T380/#1392, W1-T382/#1401)*
 - **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS.
   RUN ONE ON EVERY SWEEP WHOSE ANSWER YOU INTEND TO ACT ON.**
-  FOUR distinct instruments here answer WRONG rather than erroring; do not expect this list complete
-  — three of the four were found by ACCIDENT within one week, each by a falsifier that
-  reddened nothing or a target visible in the file — never by reading the query. Enumerating the
-  hazards has lost that race twice; the control is the only instrument that generalises — it tests
-  the QUERY, not your memory of which tool is broken. A control costs one command: match something
-  you can SEE, in the same corpus, with the same tool and flags.
+  FOUR distinct instruments here answer WRONG rather than erroring; expect more — three were found by
+  ACCIDENT in one week, by a falsifier that reddened nothing or a target visible in the file, never
+  by reading the query. Enumerating hazards has lost that race twice; the control generalises — it
+  tests the QUERY, not your memory of which tool is broken. A control costs one command: match something
+  you can SEE, in the same corpus, with the same tool and flags. AND QUALIFY IT FOR THE SURFACE:
+  an open PR's id reads zero on main, a merged id's deleted branch reads zero on heads, an unwritten
+  id reads zero on `git log --grep`.
   **Two directions a control can be too weak: (c) — A CONTROL THAT PROVES THE CORPUS IS READABLE
   DOES NOT PROVE THE QUERY COVERS IT — and (a), where the control passes because you unwittingly ran
   a DIFFERENT engine than the sweep did.**
@@ -598,8 +601,8 @@ forensic detail, so the narrative does not need to live here.
   drain change by watching the next live run; prove it in-process against the choke point's own
   objects, and treat judge behaviour as unobservable until a restart. `src/lib/self-sync.ts` says so
   itself: it covers process STARTUP only and hands in-process staleness to the WS-2 self-updater.
-  *(re-derived 2026-08-11; the operator-facing table is docs/operator-guide.md's
-  "What a merged fix reaches before you restart")*
+  *(re-derived 2026-08-11; operator table: docs/operator-guide.md's "What a merged
+  fix reaches before you restart")*
 - **A suite failing WIDE with ONE repeated message is an environment fault — read the message
   before the diff. THE DISCRIMINATOR IS THE RATIO, NOT A VERSION NUMBER.** `Cannot find package
   'tsx'` means the shared `node_modules` is empty (the bullet above), and the fleet then looks
@@ -650,25 +653,23 @@ forensic detail, so the narrative does not need to live here.
   it), while its own **entrypoint script and every apt-level binary come from the image**. A path
   read from the mount ships the instant it merges; a path baked into the image sits inert in a
   MERGED, GREEN-EVERYWHERE commit until `.github/workflows/acr-build.yml` (`workflow_dispatch`
-  only, run by the operator from the Actions tab — deliberately not on every merge or every push;
-  see that workflow's own header) is triggered and the new image is deployed. The failure mode is
+  only, run by the operator from the Actions tab) is triggered and the new image is
+  deployed. The failure mode is
   not a red check: docker still restarts the container, the daemon still logs `exited N`, and every
   diagnostic that reads the MOUNT still says the code is current — because it is; only the image is
   not. MEASURED 2026-08-14: the running image was 124 commits behind `origin/main`, including a
-  Dockerfile fix and an entrypoint fix, and neither showed up as a failure anywhere off-host.
+  Dockerfile fix and an entrypoint fix, neither showing as a failure off-host.
 
-  | ships on merge (the mount)                          | needs an image rebuild (the image)         |
-  |------------------------------------------------------|---------------------------------------------|
-  | `src/`, `test/`, `plan/`, `scripts/`, `bin/`          | `deploy/entrypoint.sh` — the EXECUTED entrypoint (`COPY … /usr/local/bin/rmd-entrypoint`) |
+  | ships on merge (the mount) | needs an image rebuild (the image) |
+  |---|---|
+  | `src/`, `test/`, `plan/`, `scripts/`, `bin/` | `deploy/entrypoint.sh` — the EXECUTED entrypoint (`COPY … /usr/local/bin/rmd-entrypoint`) |
   | `deploy/*.sh` run BY THE OPERATOR from the checkout (`host-update.sh`, `verify-image.sh`) | `deploy/Dockerfile` itself — every apt binary (`jq`, `tini`, `bubblewrap`, `socat`), the node version, the `/app` snapshot |
   | `package.json` / the lockfile — via the mount and `ensureInstallFresh`, no rebuild needed | — |
 
-  **`node_modules` is the row people get wrong, because it resolves to the MOUNT, not the image.**
-  `/app` carries its own `node_modules` that the entrypoint never falls back to; the one the daemon
-  actually loads from is the same inode as the checkout's, so a dependency bump behaves like a
-  mount-side change even though "a dependency" sounds image-shaped. `scripts/fleet-heartbeat.sh`
-  publishes `image_build_sha` (read from `/etc/rmd-build-sha`, baked in by the Dockerfile) alongside
-  the two checkout shas it already carried (`daemon_boot_head_sha`, `install_head_sha`) so this
+  **`node_modules` resolves to the MOUNT, not the image** — `/app` carries its own that the
+  entrypoint never falls back to, and the one the daemon loads is the same inode as the checkout's,
+  so a dependency bump is a mount-side change. `scripts/fleet-heartbeat.sh` publishes
+  `image_build_sha` (from `/etc/rmd-build-sha`) alongside the two checkout shas it already carried (`daemon_boot_head_sha`, `install_head_sha`) so this
   boundary is checkable from the beat without shelling into the host. *(W1-T496, 2026-08-14)*
 
 ## Code traps

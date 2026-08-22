@@ -1,0 +1,176 @@
+- id: W1-T1217
+  title: "A TEST FIXTURE RACES GIT'S OWN BACKGROUND REPACK AND RED-LINES WHATEVER PR IS UNLUCKY — a fixture pushes into a local bare repo and clones it six lines later; a local clone HARDLINKS loose objects (measured: link count 2), `receive.autogc` and `gc.auto` are unset so git's defaults apply, and the spawned `git gc --auto` can delete the objects mid-clone; no fixture anywhere in the suite disables it, and the failure lands inside a file the failing PR does not touch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-22 from a scratch worktree whose HEAD was proved equal to `origin/main` before
+    any reading, against LOCAL SOURCE and the GitHub Actions API. The suite was NOT run — W1-T1206
+    is why — so every claim below comes from source, from a self-contained git probe outside the
+    repo, or from CI's own logs. Every zero carries a control.
+
+    (1) THE OBSERVED FAILURE, CITED EXACTLY. `not ok 2331 — W1-T1127: a dispatch that reaches the
+    worker still seeds the dedup`, failing with `fatal: failed to copy file to
+    '…/repos/w1t1127-live-repo/.git/objects/b8/f99f5be53f536f79ef622abaa77b9942a9e142': No such
+    file or directory`. That is `realRepoFixture` SETUP, before any code under test runs, in a file
+    the failing PR does not touch — its whole diff is `--no-track` on two git invocations plus an
+    extracted `createFixRungWorktree`. The PR was red with no defect in its diff.
+
+    (2) THE SHAPE IS IN THE SOURCE, NOT INFERRED. `realRepoFixture` pushes `main`, checks out a
+    branch, commits, pushes that branch, and then — six lines later — runs `git clone <bare>
+    <repoDir>`. Its `GIT_ENV` spreads `process.env` and sets author/committer identity; it sets no
+    gc key.
+
+    (3) THE MECHANISM IS MEASURED, IN A THROWAWAY REPO OUTSIDE THIS TREE. A local `git clone`
+    HARDLINKS loose objects: after cloning, a sample loose object in the SOURCE repo reads a link
+    count of 2, while a worktree file in the same repo reads 1 (the control). So the clone depends
+    on those loose files still existing while it links them — which is exactly what a concurrent
+    `git gc --auto` repack removes when it packs them. In the same probe, `git config --get
+    receive.autogc` and `git config --get gc.auto` both exit 1 — unset, so git's own defaults
+    govern, and a push can spawn the repack.
+
+    (4) Q1, THE POPULATION, AND THE CONTROL SAYS THERE IS NO PRECEDENT TO MATCH. In `test/`, 48
+    files run a `git clone` (control: 79 run a `git init`), and 31 of those 48 also push — the
+    push-then-clone shape. Across `test/`, `scripts/` and `.github/`, the number of files setting
+    `gc.auto` is zero, `autogc` zero, and `gc.autoDetach` zero. That zero is controlled: `user.email`
+    is set in 70 test files, so the scan sees git configuration in fixtures perfectly well. NOTHING
+    IN THE SUITE DISABLES AUTOMATIC GC, so this task cannot be "match the existing precedent" — it
+    has to establish one.
+
+    (5) BUT THE MECHANISM HAS A PRECEDENT, WHICH IS WHY NO NEW IDIOM IS NEEDED.
+    `test/entrypoint-boot.test.ts` already forces a git config through the environment with
+    `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0`, and several files already use
+    `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`. The shape a gc setting would take is
+    the shape this repo already uses; only the key is new.
+
+    (6) Q2, AND THE INVOCATION COUNT DECIDES IT. A per-fixture edit fixes the instance and lets the
+    next fixture regress — and there are 29 files defining their own `GIT_ENV`-shaped object, with
+    no shared git-env export anywhere in `test/setup/` (which holds `tmp-hygiene.ts`,
+    `offline-github.ts`, `open-shell.ts`, `reapable-prefix.ts`). The decisive measurement is that
+    `--import ./test/setup/tmp-hygiene.ts` appears at NINE invocation sites — `package.json`'s
+    `test` and `test:ci`, three workflow steps, `scripts/check.mjs`, `scripts/host-parity.ts` and
+    two in `scripts/mutation-ratchet.mjs`. A NEW setup module means editing all nine and getting
+    every future one right; setting the key inside the module already imported at all nine means
+    editing one file, and every invocation — present and future — inherits it.
+
+    (7) AND THE RESIDUE IS NAMED RATHER THAN ASSUMED AWAY. A process-level environment only reaches
+    a `git` whose env derives from `process.env`. Of the 31 push-then-clone files, 13 spread
+    `...process.env` into their git env and 18 do not, so a process-env setting alone covers under
+    half the class. The 18 are enumerable and small (`already-satisfied-exit`, `arm-at-open`,
+    `commit-msg-hook`, `implement-role-sentence`, `install-root`, `moving-base-changed-files`,
+    `no-pr-followups-harvested`, `owner-dispatch-threading`, `plan-blob-buffer`, `recon-degrade`,
+    `recon-gaps-relayed`, `retro-marker-atomic`, `run-task`, `scope-guard-overrun`,
+    `spawn-nopid-diagnosis`, `sweep-wall-clock-bound`, `worker-clock-bound`,
+    `worker-preflight-visibility`). Design (iii) says what must happen to them.
+
+    (8) Q3, THE CI COST — AND TWO CORRECTIONS TO THE QUERY BEFORE ANY FIGURE IS QUOTED.
+    FIRST, THE WIDE PATTERN IS USELESS. `No such file or directory` unqualified matched 16 times in
+    one ordinary failed run, and every match was deliberate fixture output — `could not open
+    'absent.txt'`, `cannot change to '/no/such/path/at/all'`. Only the form qualified by a
+    `.git/objects` path discriminates.
+    SECOND, THE NAIVE CENSUS IS BLIND EXACTLY WHERE THE FAILURE LIVES.
+    `/actions/runs/{id}/jobs` returns the jobs of the LATEST attempt only, so every superseded
+    attempt is invisible to it — and the one confirmed occurrence is in a superseded attempt. A
+    sweep of the 20 most recent failed `ci.yml` runs through that endpoint found the signature zero
+    times, with all 20 logs readable; that zero is COVERAGE, not absence, and is reported as such.
+    WHAT WAS SWEPT EXHAUSTIVELY: over the whole window there are 1,015 `ci.yml` runs, of which 9
+    carry a superseded attempt. Every superseded attempt of all 9 was enumerated — 27 job logs read,
+    2 unavailable, every one read carrying a non-zero control — and exactly one carries the
+    signature: run 32582765791 attempt 1, job 97054511830, branch `run-W1-T1129-1787400101778`,
+    which is the failure quoted in (1). THE QUERY IS THEREFORE QUALIFIED: it found the instance it
+    was built to find, in the corpus half that could hold it. NO TOTAL IS CLAIMED for the
+    latest-attempt half, because it was sampled and not censused; the query is recorded instead so
+    a later reader can re-run it rather than trust a number.
+
+    (9) THE COMPOUNDING COST, STATED WITHOUT PROPOSING ITS REMEDY. `scripts/test-with-retry.mjs` is
+    ONE bounded whole-command retry, and it is evidence-preserving by design (`FLAKE-RETRY:` on
+    stdout and in the step summary). A single flake is absorbed; two distinct flakes across two
+    attempts are not — and that is what happened here: one run of that branch failed BOTH attempts
+    on `today's population is exactly what DECLARED says it is`, and another run's first attempt
+    failed on this clone race. The repair rung then spends its strikes on a PR whose diff has no
+    defect. RAISING THE RETRY BUDGET IS NOT PROPOSED HERE AND IS NOT THIS TASK: W1-T1018 is the
+    file that owns retry-budget policy, and W1-T1041 owns the suite running twice per PR. Both are
+    cited; neither is re-filed.
+
+    (10) THE ALARMING ALTERNATIVE IS REFUTED, AND THE REFUTATION WAS RE-DERIVED RATHER THAN COPIED.
+    A temp-dir sweep reaping the fixture mid-run would be far worse than a repack race. It is not
+    what happened: every test call site of `sweepStaleTempDirs` passes an explicit fixture `root`
+    (`one-shot-disk-reclaim-rung`, `reapable-prefix`), and `DEFAULT_TEMP_SWEEP_MAX_AGE_MS` is 24
+    hours, so the production boot sweep cannot reap a directory seconds old even if it ran. The
+    hypothesis in (3) is chosen because the alternative is excluded, not merely because it is
+    tidier.
+
+    (11) WHAT IS STILL A HYPOTHESIS, SAID PLAINLY. The race has NOT been reproduced — the suite is
+    unsafe to run (W1-T1206), and a race that fires on repack timing would not reproduce on demand
+    anyway. What is measured is the shape, the hardlink dependency, the unset defaults, the absent
+    mitigation, and one CI occurrence. The remedy is cheap, is confined to test setup, and is
+    correct whether or not this particular occurrence had this particular cause — which is why it
+    is worth doing before a reproduction exists.
+  design: |
+    (i) DISABLE AUTOMATIC GC FOR EVERY GIT THE SUITE SPAWNS, IN THE ONE MODULE ALREADY IMPORTED
+    EVERYWHERE. Rationale (6) is the argument: `test/setup/tmp-hygiene.ts` is loaded at all nine
+    invocation sites, so setting the keys there costs one edit and cannot be missed by a future
+    invocation, while a new setup module costs nine edits and a standing obligation to remember a
+    tenth. Both halves of the race are covered: `gc.auto=0` stops the clone side, `receive.autogc=false`
+    stops the push from spawning one at all.
+
+    (ii) THROUGH `GIT_CONFIG_*`, NOT A WRITTEN CONFIG FILE. Rationale (5)'s precedent: the env form
+    reaches a `git` in a temp directory that has no config of its own yet, which a repo-local
+    `git config` call cannot do because the repo does not exist until the clone finishes. It also
+    leaves no file for a fixture's own cleanup to have to know about.
+
+    (iii) THE RESIDUE IS CLOSED BY A GUARD, NOT BY GOOD INTENTIONS. A process-level env reaches only
+    the 13 of 31 that spread `...process.env` (rationale (7)). The remaining 18 must either adopt
+    the spread or be named by a test that FAILS when a fixture running both a push and a clone
+    builds a git env the setting cannot reach. Without that guard this fixes the instance and the
+    next fixture regresses — which is precisely the failure mode Q2 asks about.
+
+    (iv) NOTHING ABOUT TEMP-DIRECTORY HYGIENE CHANGES. `tmp-hygiene.ts` already wraps `mkdtempSync`
+    and sweeps on exit; that behaviour is load-bearing for the mutation runs and is not touched. A
+    criterion pins it so a later edit cannot quietly trade one hygiene for another.
+
+    (v) NOT IN SCOPE, NAMED: the retry budget (W1-T1018) and the suite running twice per PR
+    (W1-T1041), both cited and neither re-filed; W1-T459's `ps eww` beat, a DIFFERENT declared
+    flake; W1-T515's live-plan-tree writers; W1-T1206, which is why the suite was not run; and
+    reproducing the race, which rationale (11) says is not available and is not required.
+  acceptance:
+    - claim: "a git spawned by a fixture that inherits the process environment runs with automatic gc disabled"
+      proof: "unit test: test/git-fixture-gc-hygiene.test.ts"
+    - claim: "a push into a local bare repo cannot spawn a background repack"
+      proof: "unit test: test/git-fixture-gc-hygiene.test.ts"
+    - claim: "the setting reaches the suite without adding an import flag to any invocation site"
+      proof: "unit test: test/git-fixture-gc-hygiene.test.ts"
+    - claim: "a fixture whose git environment the setting cannot reach is named by a failing test"
+      proof: "unit test: test/git-fixture-gc-hygiene.test.ts"
+    - claim: "temp-directory hygiene behaves exactly as it does today"
+      proof: "unit test: test/git-fixture-gc-hygiene.test.ts"
+  files: [test/setup/tmp-hygiene.ts, test/git-fixture-gc-hygiene.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#fixture-races-git-background-repack-2026-08-22"
+  plan_refs: ["W1-T1206", "W1-T1018", "W1-T1041", "W1-T459", "W1-T515", "W1-T1127"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/git-fixture-gc-hygiene.test.ts`, declared in `files:`, so on this filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19'S SPAN — the two files are one concern and the linter
+    accepts the band either way. `test/setup/tmp-hygiene.ts` is loaded into EVERY test child
+    process at nine invocation sites; a mistake there does not fail one suite, it fails all of them,
+    and it fails them in setup where the message names no test.
+
+    THE Q3 FIGURE IS DELIBERATELY HALF A CENSUS AND SAYS SO. The superseded-attempt half was swept
+    exhaustively over the window; the latest-attempt half was sampled. Rationale (8) records both
+    corrections that got there — the wide pattern's false matches, and the endpoint that cannot see
+    a superseded attempt — because a later reader repeating the naive query will get a clean zero
+    and would otherwise conclude the flake does not exist.
+
+    THE FIX IS CHEAP AND THE HYPOTHESIS IS NOT PROVEN, AND THOSE TWO FACTS ARE STATED TOGETHER
+    RATHER THAN ONE BEING USED TO HIDE THE OTHER. Rationale (11) says what is unmeasured. The
+    remedy is two git config keys in one already-shared module; it is worth taking on a strong
+    hypothesis because its cost is near zero and its failure mode is a suite that repacks slightly
+    less often.

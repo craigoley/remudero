@@ -189,6 +189,51 @@ export function judgeDispatchStall(candidateCount: number, sinceMs: number | und
 }
 
 /**
+ * W1-T1209 — REPAIR-RUNG STALL. `fix.dispatch` read ZERO for twenty-one hours on 2026-08-22 while
+ * the sweep kept disposing open pull requests `blocked-fixable` every pass — ten dispatches threw,
+ * `dispatchFix` swallowed its own throw and recorded `acted: true`, and that seeded the fix-rung
+ * dedup gate that then stood down every retry. Nothing anywhere said the repair rung was down; a
+ * human found it by reading the board.
+ *
+ * THE FAULT IS A CONJUNCTION, EXACTLY LIKE {@link judgeDispatchStall}, AND FOR THE SAME REASON: a
+ * gap in `fix.dispatch` only means something when the sweep chose `blocked-fixable` in the SAME
+ * window. An empty repair queue is the healthy state, and an arm that cries wolf on a quiet board
+ * trains the operator to ignore the one instrument that would have caught the real outage.
+ *
+ * THE BOUND IS A CALLER-SUPPLIED, DERIVED NUMBER — NEVER A CONSTANT HERE. Exactly like
+ * `judgeDispatchStall`, this function never guesses a ceiling; it prints whatever bound and
+ * derivation string the caller measured from this host's own `fix.dispatch` cadence, which is the
+ * constraint design note (ii) of this task states as a refusal, not a preference (see W1-T1099's
+ * sibling arm, whose printed threshold once disagreed with its own predicate).
+ *
+ * REPORT ONLY. This arm dispatches nothing, clears no gate and escalates nothing — the contention
+ * (W1-T1129), the swallow (W1-T1127) and the light-hook suppression are each separately owned.
+ */
+export function judgeRepairStall(disposedBlockedFixableCount: number, sinceMs: number | undefined, boundMs: number | undefined, boundDerivation?: string): Check {
+  const threshold = boundMs === undefined ? "no observed cadence yet" : `<= ${humanMs(boundMs)}${boundDerivation ? ` (${boundDerivation})` : ""}`;
+  if (disposedBlockedFixableCount === 0) {
+    return { name: "repair-stall", verdict: "OK", measured: "0 blocked-fixable disposal(s) in window", threshold };
+  }
+  if (sinceMs === undefined || boundMs === undefined) {
+    return {
+      name: "repair-stall",
+      verdict: "WARN",
+      measured: `${disposedBlockedFixableCount} disposed blocked-fixable, fix.dispatch age unknown`,
+      threshold,
+    };
+  }
+  return {
+    name: "repair-stall",
+    verdict: sinceMs > boundMs ? "FAIL" : "OK",
+    measured: `${disposedBlockedFixableCount} disposed blocked-fixable, nothing dispatched in ${humanMs(sinceMs)}`,
+    threshold,
+    ...(sinceMs > boundMs
+      ? { detail: "W1-T1129 owns the lock contention, W1-T1127 owns the dedup gate that swallowed it — doctor only reports" }
+      : {}),
+  };
+}
+
+/**
  * DISPATCH LIVENESS — a READER for a field that is emitted and read by nothing. `daemon.alive`
  * carries `phase`, and a window with no `dispatch` phase among it — WHATEVER the other phases
  * are, not only a hardcoded `sweep` — is a daemon that is awake but never dispatching. WARN, not
@@ -480,6 +525,14 @@ export interface DoctorInputs {
   dispatchSinceMs?: number;
   dispatchBoundMs?: number;
   dispatchBoundDerivation?: string;
+  /** W1-T1209 — repair-rung stall. Candidates disposed `blocked-fixable` in the derived window;
+   *  defaults to 0 (no evidence of a fault) for callers that do not yet supply a real count, which
+   *  is the fail-closed-toward-quiet direction design note (iii) requires: an arm that cannot see
+   *  the disposals must never invent a FAIL. */
+  repairDisposedCount?: number;
+  repairDispatchSinceMs?: number;
+  repairDispatchBoundMs?: number;
+  repairDispatchBoundDerivation?: string;
   mem: MemInfo;
   diskFreeBytes?: number;
   pauseAgeMs?: number;
@@ -502,6 +555,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
   const checks: Check[] = [
     judgeLedgerFreshness(ledger.ageMs, ledger.boundMs),
     judgeDispatchStall(inputs.candidateCount, inputs.dispatchSinceMs, inputs.dispatchBoundMs, inputs.dispatchBoundDerivation),
+    judgeRepairStall(inputs.repairDisposedCount ?? 0, inputs.repairDispatchSinceMs, inputs.repairDispatchBoundMs, inputs.repairDispatchBoundDerivation),
     judgeDispatchStarvation(readCurrentRunAlivePhases(inputs.ledgerLines)),
     judgePauseHonoured(inputs.pauseAgeMs, lastDispatchAgeMs),
     judgeLockDivergence(inputs.totalLocks, inputs.deadLocks, inputs.locksUnreadableReason),

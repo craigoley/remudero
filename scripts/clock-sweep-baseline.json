@@ -1,0 +1,20 @@
+{
+  "_comment": "Wall-clock drift ratchet CEILING (W1-T1128). `classifySweep` previously required drifted.length === 0 -- ABSOLUTE cleanliness -- and that bound had never once been satisfiable: `clock-sweep.yml`'s entire run history (9 runs, both the `pull_request` and `schedule` triggers) reads 4 failure / 5 cancelled / 0 success. `driftCeiling` is a CEILING, not a floor and not a target: it may FALL when drift is genuinely fixed (each suite W1-T1104 repairs is a fall) and must NEVER be RAISED to paper over a new regression -- a PR that pushes the drifting-suite count past this ceiling must go CI-red on scripts/clock-sweep.mjs until that PR fixes the new drift or a reviewed, justified bump says why growth is right this time. A STALE EXCLUSION is never covered by this ceiling and still fails the sweep outright, at any driftCeiling -- see classifySweep.",
+  "capturedAt": "2026-08-22",
+  "captureCommand": "node scripts/clock-sweep.mjs",
+  "capturedAgainst": "origin/main @ 95cb13f1",
+  "driftCeiling": 11,
+  "driftingSuitesAtCapture": [
+    "cost-governor",
+    "daemon-crashloop-wiring",
+    "daemon-triage-guard-wiring",
+    "fleet-heartbeat",
+    "host-update-reclaim",
+    "install-symlink-refusal",
+    "run-task",
+    "serve-service-boot",
+    "serve.density-ia",
+    "serve.live-state",
+    "worktree-reap-liveness"
+  ]
+}

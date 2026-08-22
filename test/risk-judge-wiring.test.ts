@@ -53,14 +53,18 @@ test("on ESCALATE, the wiring withdraws the early arm-at-open BEFORE calling esc
   const escalateDepsIdx = runTaskSrc.indexOf("escalate: (verdict, action) => {");
   assert.ok(escalateDepsIdx >= 0, "the risk judge's escalate dependency closure must exist");
 
-  const disarmIdx = runTaskSrc.indexOf("disarmAutoMerge(prUrl);", escalateDepsIdx);
-  assert.ok(disarmIdx > escalateDepsIdx, "disarmAutoMerge(prUrl) must be called inside the escalate closure");
+  // W1-T1215: the return is no longer discarded — it goes to `disposeDisarm`, which decides the
+  // ledger step and whether a lost race escalates. The BEFORE-escalate ordering is unchanged.
+  const disarmIdx = runTaskSrc.indexOf("disposeDisarm(disarmAutoMerge(prUrl)", escalateDepsIdx);
+  assert.ok(disarmIdx > escalateDepsIdx, "the withdrawal must still happen inside the escalate closure");
 
   const realEscalateCallIdx = runTaskSrc.indexOf("return escalate(", escalateDepsIdx);
   assert.ok(realEscalateCallIdx > disarmIdx, "the real escalate() call must come AFTER the disarm, never before");
-  assert.ok(realEscalateCallIdx - disarmIdx < 200, "the escalate() call must be the SAME closure's own call, not an unrelated one elsewhere");
+  assert.ok(realEscalateCallIdx - disarmIdx < 700, "the escalate() call must be the SAME closure's own call, not an unrelated one elsewhere");
 
-  const disarmedLedgerIdx = runTaskSrc.indexOf('log("automerge.disarmed", { reason: "risk judge escalated', escalateDepsIdx);
+  // W1-T1215: the step is computed from the outcome, so this pins the LOG rather than a literal
+  // step name — asserting `automerge.disarmed` verbatim here would re-assert the removed defect.
+  const disarmedLedgerIdx = runTaskSrc.indexOf("log(disposition.step, disposition.row)", escalateDepsIdx);
   assert.ok(
     disarmedLedgerIdx > disarmIdx && disarmedLedgerIdx < realEscalateCallIdx,
     "the disarm must be ledgered, attributably, between the disarm call and the escalate call",

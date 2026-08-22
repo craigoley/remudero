@@ -499,6 +499,10 @@ test("main(): `rmd wipe-test --help` prints the per-command help and exits 0 BEF
 // W1-T79 refused-exit (run-task.ts:8028-8029): a "refused" freshness result must print its
 // message and exit 1, never falling through to dispatch. In CI the real check returns "guarded"
 // (never "refused"), so this branch is only reachable via the injected-freshness seam on main().
+// W1-T1134: argv deliberately uses `review`, NOT `status` — `status` (like `doctor`) is now a
+// declared member of `READ_ONLY_FRESHNESS_EXEMPT_VERBS` and no longer reaches this `else`
+// branch at all, so it would never invoke the injected `checkFreshness` this test drives.
+// `review` is untouched by that exemption and still falls to the gate's `else`.
 test("main(): a 'refused' freshness result prints the exact remedy message and exits 1 (never dispatches)", async (t) => {
   const errs: string[] = [];
   t.mock.method(
@@ -512,7 +516,7 @@ test("main(): a 'refused' freshness result prints the exact remedy message and e
     errs.push(a.map(String).join(" "));
   });
   const originalArgv = process.argv;
-  process.argv = ["node", "run-task.js", "status"];
+  process.argv = ["node", "run-task.js", "review"];
   try {
     let caught: unknown;
     await main({

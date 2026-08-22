@@ -1489,6 +1489,135 @@ test("W1-T180 ACCEPTANCE 5: the check stays PURE — task-linter.ts imports neit
   assert.equal(v.length, 1);
 });
 
+// ── POST-MERGE-AMENDMENT KEYS ON CLAIM, NOT CLAIM+PROOF (W1-T1098) ───────────
+
+test("W1-T1098 ACCEPTANCE 1: a criterion whose claim is unchanged and whose proof is reworded is not counted as added", () => {
+  // Same claim as W1_T155_BASE_CRITERIA's single entry; proof text rewritten
+  // into a different (still valid) dialect string. Claim-only keying must
+  // treat this as unchanged, not as a newly added criterion.
+  const reworkedProof = [
+    { claim: "status regresses to queued on a read failure is fixed", proof: "unit test: test/status.test.ts::regression" },
+  ];
+  assert.deepEqual(criteriaAdded(W1_T155_BASE_CRITERIA, reworkedProof), []);
+
+  const amended = task({ id: "W1-T155", files: ["src/lib/status.ts"], acceptance: reworkedProof });
+  const res = lintTask(amended, {
+    postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
+  });
+  assert.equal(res.ok, true, "a proof-only reword on an already-merged task must not trip rule 21");
+  assert.ok(!res.violations.some((v) => v.check === "post-merge-amendment"));
+});
+
+test("W1-T1098 ACCEPTANCE 2 (control): a criterion with a genuinely new claim on a merged task is still refused", () => {
+  const genuinelyNew = [
+    ...W1_T155_BASE_CRITERIA,
+    { claim: "a brand new promise this task never made before", proof: "unit test: test/status.test.ts::brand new" },
+  ];
+  const added = criteriaAdded(W1_T155_BASE_CRITERIA, genuinelyNew);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].claim, "a brand new promise this task never made before");
+
+  const amended = task({ id: "W1-T155", files: ["src/lib/status.ts"], acceptance: genuinelyNew });
+  const res = lintTask(amended, {
+    postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
+  });
+  assert.equal(res.ok, false, "a genuinely new claim on a merged task must still be refused");
+  const v = res.violations.find((x) => x.check === "post-merge-amendment");
+  assert.ok(v);
+  assert.match(v!.message, /brand new promise/);
+});
+
+test("W1-T1098 ACCEPTANCE 4: the check stays silent when the derived status cannot be resolved at all, even with a genuinely new claim", () => {
+  const amended = task({
+    id: "W1-T155",
+    files: ["src/lib/status.ts"],
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a genuinely new claim", proof: "unit test: test/status.test.ts::new" }],
+  });
+  const res = lintTask(amended, {
+    postMergeAmendment: {
+      statusResolvable: false, // fail OPEN: the derived status is unreadable
+      merged: true,
+      baseAcceptance: W1_T155_BASE_CRITERIA,
+      followUpFiled: false,
+    },
+  });
+  assert.equal(res.ok, true, "an unresolvable status must never produce a violation, claim-only keying or not");
+  assert.ok(!res.violations.some((v) => v.check === "post-merge-amendment"));
+});
+
+test("W1-T1098 ACCEPTANCE 5: the follow-up escape hatch keeps working for a real (claim-level) amendment under claim-only keying", () => {
+  const addedCriterion = { claim: "a brand new promise carried by the follow-up", proof: "unit test: test/status.test.ts::carried" };
+  const amended = task({ id: "W1-T155", files: ["src/lib/status.ts"], acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
+  // The follow-up task carries the SAME claim with a DIFFERENT proof wording —
+  // claim-only keying means the escape hatch still recognizes it as carried.
+  const followUp = task({
+    id: "W1-T179",
+    files: ["src/lib/status.ts"],
+    acceptance: [{ claim: addedCriterion.claim, proof: "unit test: test/status.test.ts::carried (follow-up wording)" }],
+  });
+  const changedSet = [amended, followUp];
+  for (const t of changedSet) {
+    const added = criteriaAdded(W1_T155_BASE_CRITERIA, t.acceptance ?? []);
+    const followUpFiled = followUpCarriesCriteria(
+      added,
+      changedSet.filter((c) => c.id !== t.id),
+    );
+    const res = lintTask(t, {
+      postMergeAmendment: {
+        statusResolvable: true,
+        merged: t.id === "W1-T155",
+        baseAcceptance: t.id === "W1-T155" ? W1_T155_BASE_CRITERIA : undefined,
+        followUpFiled,
+      },
+    });
+    assert.equal(res.ok, true, `${t.id} must pass — the follow-up carries the amended claim even with reworded proof text`);
+  }
+});
+
+test("W1-T1098 ACCEPTANCE 3: the proof-weakening case the rule no longer sees is DEMONSTRATED, not asserted from a comment", () => {
+  // WHY THIS IS BEHAVIOURAL AND NOT A DOC GREP. This test used to assert that the phrase
+  // "swapped for a WEAKER one" appeared in the rule's source. `assertion-discrimination`
+  // (W1-T1051) correctly refused it: the literal lives ONLY in a comment, so the assertion
+  // could not tell "the rule really stopped seeing this case" from "someone wrote the words
+  // down". The baseline escape is unavailable here — `scripts/*-baseline.json` is an
+  // INSTRUMENT_SURFACE path and adding one beside a `src/` change fails Rule 25 — and it would
+  // be the wrong answer anyway. The case is shown instead.
+  //
+  // THE CASE: a merged task whose criterion keeps its CLAIM but has its proof swapped for a
+  // strictly weaker one. Under claim+proof keying this read as a new criterion and tripped the
+  // rule; under claim-only keying it is invisible, which is the deliberate blind spot the
+  // rule's doc records.
+  const weakened = task({
+    id: "W1-T155",
+    files: ["src/lib/status.ts"],
+    acceptance: W1_T155_BASE_CRITERIA.map((c, i) =>
+      i === 0 ? { claim: c.claim, proof: "grep: status in src/lib/status.ts" } : c,
+    ),
+  });
+  const added = criteriaAdded(W1_T155_BASE_CRITERIA, weakened.acceptance ?? []);
+  assert.deepEqual(added, [], "claim-only keying sees NO added criterion when only the proof changed");
+  const res = lintTask(weakened, {
+    postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
+  });
+  assert.equal(res.ok, true, "so a weakened proof on a merged task draws nothing — the documented blind spot, demonstrated");
+  assert.ok(!res.violations.some((v) => v.check === "post-merge-amendment"));
+
+  // PAIRED POSITIVE CONTROL: the SAME fixture with a genuinely new CLAIM still trips the rule,
+  // so the silence above is claim-only keying and not a check that can no longer fire at all.
+  const reallyAmended = task({
+    id: "W1-T155",
+    files: ["src/lib/status.ts"],
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a genuinely new promise", proof: "unit test: test/status.test.ts::new" }],
+  });
+  const control = lintTask(reallyAmended, {
+    postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
+  });
+  assert.ok(
+    control.violations.some((v) => v.check === "post-merge-amendment"),
+    "a new claim on a merged task still trips post-merge-amendment",
+  );
+});
+
 // ── ADVISORY-ROUTING (W1-T519 — a security-shaped filing is PUBLISHED before it's fixed) ────
 
 test("ACCEPTANCE 1 (W1-T519): security-shaped task draws an advisory-routing warn", () => {

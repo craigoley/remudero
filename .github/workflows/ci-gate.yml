@@ -248,11 +248,18 @@ jobs:
             sleep "${WAIT_POLL_INTERVAL_SECONDS}"
           done
 
-          # 2) FAIL if ANY check (excluding IGNORE) concluded as a real failure. Skipped / neutral
-          #    / success all pass — so a path-filter-skipped (or absent) check never blocks.
+          # 2) FAIL if a REQUIRED check (excluding IGNORE) concluded as a real failure. A check
+          #    that is not in REQUIRED can NEVER hold the merge, no matter its conclusion — only
+          #    REQUIRED gates, exactly as step 1 only WAITS on REQUIRED. (W1-T1131: this used to
+          #    filter ONLY against IGNORE — a one-name self-exclusion — so any of the other
+          #    non-required check runs on a head (advisory scanners, informational jobs) could
+          #    hold every merge while the error message below claimed a "required" check had
+          #    failed, even though no REQUIRED-list entry was involved.) Skipped / neutral /
+          #    success all pass — so a path-filter-skipped (or absent) required check never blocks.
           evaluate_fails() {
-            jq -r --argjson ig "${IGNORE}" '
+            jq -r --argjson req "${REQUIRED}" --argjson ig "${IGNORE}" '
               .[] | .name as $n | .conclusion as $c
+                  | select(($req | index($n)) != null)
                   | select(($ig | index($n)) == null)
                   | select(["failure","timed_out","cancelled","action_required","startup_failure"] | index($c))
                   | $n' <<< "$1"

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -29,6 +29,19 @@ function fixtureHome(): { home: string; root: string; planPath: string } {
   mkdirSync(join(root, "state"), { recursive: true });
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n"); // an explicit --plan skips the git self-sync entirely
+  // `home` starts with RMD_TMP_PREFIX ("rmd-"), the exact prefix daemonCommand's OWN real
+  // boot-time `sweepStaleTempDirs` (lib/tmp.ts) reaps anything under os.tmpdir() matching, by
+  // AGE (`now() - mtimeMs > maxAgeMs`, plan/policy.yaml's `sweep.tmpMaxAgeMs`, 1h). Every
+  // mkdirSync/writeFileSync above this line updates `home`'s own mtime to the REAL OS clock —
+  // under clock-sweep's future shift that real mtime reads as ancient, so the daemon's own real
+  // housekeeping sweep deleted this fixture (planPath included, hence the ENOENT on `tasks.yaml`
+  // measured under +7d) before `daemonCommand` or the later `loadPlan(planPath)` call ever read
+  // it. Stamping `home`'s mtime from the (possibly shifted) injected clock — LAST, after every
+  // write under it — keeps this fixture's own age reading consistent with `Date.now()`
+  // regardless of shift, the same "stamp from the injected clock" remedy already applied to
+  // test/cost-governor.test.ts's and test/run-task.test.ts's identical `rmd-`-prefixed fixtures.
+  const now = new Date();
+  utimesSync(home, now, now);
   return { home, root, planPath };
 }
 

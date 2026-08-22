@@ -272,6 +272,13 @@ Rotate whenever a token has been exposed. Treat *exposed* broadly: a token that 
 file, a terminal transcript, a screenshot, or a chat window is compromised and must be rotated
 rather than merely un-shared.
 
+**On this fleet the console does not run under launchd at all — it runs in a container.**
+`remudero-serve`, launched by `deploy/serve-container.sh`, is what `console.remudero.com` reaches;
+the launchd unit above is the shape for a machine that runs `rmd serve` directly. The container
+binds `0.0.0.0` inside its own network namespace rather than the tailnet address, which takes two
+declarations rather than one — see [Bringing up the console
+container](#bringing-up-the-console-container-remudero-serve) in the crisis runbook.
+
 ## Shipping a new CI gate: three PRs, in this order
 
 A new gate — a workflow job plus the script it runs — cannot land as one PR, and merging the
@@ -309,6 +316,93 @@ phase 3 disappears. It did not transfer to `task-id-existence`, and the reason i
 `test/instrument-surface-completeness.test.ts` harvests `package.json`'s scripts map as well as the
 workflows, so a gate wired as an npm script is derived as a candidate wherever its invocation
 sits. Workflow placement was simply irrelevant to that half.
+
+## Where to run a verb, and why the wrong place answers confidently
+
+Every item below is read-only or near enough, so the failure mode is not damage — it is a
+**confident wrong answer**. The pattern is always the same: a tool answered about state it could
+not see, in the same tone it uses when it can. Each was reproduced on `Craigs-Mac-mini` on
+2026-08-22; where a claim did **not** reproduce here, that is said rather than repeated.
+
+- **A gate piped through `head` gives you `head`'s exit code.** `(exit 1) | head -3` leaves `$?` at
+  **0** while `${PIPESTATUS[0]}` is **1**. A `diff-coverage` calibration read `EXIT=0` while the
+  tool itself exited 1 with lines named, because exemption output sat above the verdict and the
+  pipe swallowed the status. Read `${PIPESTATUS[0]}`, or do not pipe.
+
+- **`git checkout -- <path>` restores from the INDEX, not from `origin/main`.** Stage an edit, then
+  overwrite the file, then `git checkout --` it: you get the **staged** copy back, not the
+  committed one. A "revert this file and see what fails" experiment therefore passes vacuously
+  whenever the index already holds the edited version. Use `git show origin/main:<path>` when you
+  mean the merge base.
+
+- **A clean working tree does not mean a clean index, and `commit --amend` ships the difference.**
+  In a reused worktree `git diff` can report nothing while `git diff --cached` reports a staged
+  change — the working tree matches the index, and only the index differs from `HEAD`. Amending
+  there silently ships whatever someone else staged. Check `git diff --cached --stat` before every
+  `commit --amend`.
+
+- **`tsx` strips types without checking them, so a unit suite can read fully green while `tsc`
+  fails.** A file declaring `const n: number = "definitely not a number"` **executes** under `tsx`
+  and prints the string; `tsc` on the same file reports `TS2322: Type 'string' is not assignable to
+  type 'number'`. A type-level defect is invisible to the whole test suite, and a file can be
+  load-bearing with no test able to say so. `tsc --noEmit` is a separate gate for a reason — never
+  read a green suite as a green typecheck.
+
+- **A `gh` subcommand's existence is version-dependent; the REST form is not.** `gh pr
+  update-branch` arrived in 2.53, so on an older CLI four invocations can error while reading as
+  successful work. This machine is **2.92.0** and has the subcommand; a fleet host measured
+  **2.45.0** and did not. Rather than tracking which host has which, prefer the version-independent
+  form — `gh api --method PUT repos/{owner}/{repo}/pulls/{n}/update-branch` — and run `gh
+  --version` before relying on any subcommand you have not used on that host.
+
+- **`docker exec` defaults to `/app`, which is the baked image copy and is not a git work tree.**
+  The Dockerfile sets `WORKDIR /app` and copies a snapshot there, so that directory's verb list is
+  frozen at image build time and a verb that shipped hours ago is simply absent. **The live
+  checkout is `/home/node/Remudero/remudero`; pass `-w`:**
+  `docker exec -w /home/node/Remudero/remudero remudero-daemon ./bin/rmd <verb>`.
+
+- **That checkout is deliberately detached, so it sits behind main between deploys.**
+  `deploy/entrypoint.sh` runs `git -C "$TREE" checkout --detach "$TARGET"` on every boot, so
+  `git rev-parse --abbrev-ref HEAD` there answers `HEAD` and the tree stays pinned at whatever sha
+  it booted on. The verbs that gate on `syncPlanOrRefuse` refuse rather than act on a stale plan;
+  the ones that do not will answer from the pinned tree without comment. **Fetching and
+  re-detaching to unstick it moves the daemon's own work tree —
+  check `state/inflight/` is empty first**, or you will move the ground under a running worker.
+
+- **`gh api --jq '.body'` appends a trailing newline, so a byte-for-byte comparison against the
+  source file is always off by one.** Measured on a real PR body: the jq capture is exactly the
+  body plus one `\n`, and because the body already ends in a newline, stripping trailing newlines
+  removes two characters rather than one. **And `wc -c` counts bytes while Python counts
+  characters** — the same body measured 2,587 characters and 2,601 bytes, the gap made entirely of
+  multi-byte punctuation. A body full of em-dashes reads as edited when it is identical.
+  **Strip trailing newlines and compare characters.**
+
+- **A rate-limited call returns a small JSON error payload with HTTP 403 — and it parses.** The
+  captured shape is an object with exactly `message`, `documentation_url` and `status`, where
+  `status` is the **string** `"403"`. It was read as content twice. **Guard structurally — assert
+  the shape you expected (a list, or a known key), never a size.** A size threshold is a guess that
+  happens to work until the error text changes. **And you can check the budget freely: reading
+  `gh api rate_limit` does not itself count against the limit**, so a script that is unsure may
+  ask before it acts rather than guessing from a failure it has already caused.
+
+- **`/actions/runs/{id}/jobs` returns only the LATEST attempt's jobs, so a re-run erases the
+  failure you are looking for.** A forensic sweep of twenty failed runs read zero hits while the
+  one confirmed occurrence sat in a superseded attempt. Confirmed against this repo's live API
+  (2026-08-22, from a cloud worktree): run `31515044468` — the 2026-08-11 x509 re-run,
+  `run_attempt: 2` — answers with ONE successful job by default, and only `?filter=all` returns
+  both, including the attempt-1 `ci-gate` **failure** that exists nowhere else. The run object's
+  `run_attempt` says how many attempts there are; **enumerate them explicitly** —
+  `gh api "repos/{owner}/{repo}/actions/runs/{id}/jobs?filter=all"` — and note the check-runs
+  list keeps the same latest-only default, so the superseded failure is absent there too.
+
+- **`gh api .../check-runs` paginates at 30, and a first page full of green reads as "all
+  green".** A PR read as fully green had two failures sitting past the page boundary (measured on
+  the mini). The truncation reproduces on any sha — confirmed against this repo's live API
+  (2026-08-22): `per_page=5` on PR #1569's head returns 5 of `total_count: 22`, and
+  `per_page=100` returns all 22. **Pass `per_page=100` and compare `total_count` against the rows
+  you actually received** — `gh api "repos/{owner}/{repo}/commits/{sha}/check-runs?per_page=100"`
+  — and if `total_count` is still larger than what came back, page.
+
 
 ## Crisis runbook: the procedures you need at 3am
 
@@ -431,6 +525,81 @@ Like its siblings, this is a plain bash-and-docker script, on purpose: it must k
 with no node, no `rmd` and no checkout, which rules out an `rmd` verb outright — every verb runs
 `checkCliFreshness` first, which would fast-forward the very checkout the container being recycled
 is bind-mounting.
+
+### Bringing up the console container (`remudero-serve`)
+
+The console the fleet is actually read from — `console.remudero.com` — is a **separate container**,
+`remudero-serve`, and `deploy/serve-container.sh` is its launch config. Until that script existed
+the container had been launched by hand and its shape survived only in `docker inspect`, one
+`docker rm` away from being lost; the only written trace was a doc comment in `resolveServeHosts`
+that names the container as a thing that exists.
+
+```sh
+./deploy/serve-container.sh                 # create it (refuses if one already exists)
+./deploy/serve-container.sh --replace       # stop + rm the existing one first
+./deploy/serve-container.sh --dry-run       # print the docker run, change nothing
+TAG=<sha> ./deploy/serve-container.sh       # pin a build instead of :latest
+```
+
+**Two parts of the shape are not discoverable from the flags, and each one produces a console that
+starts cleanly and answers nobody.**
+
+*The wildcard bind takes two things typed together: the env var permits it, the flag selects it.*
+`assertBindableHost` (`src/lib/serve.ts`, W1-T915) refuses `0.0.0.0` outright unless
+`RMD_SERVE_NETWORK=container` is set — and setting that variable does not itself choose the
+wildcard. With it set and no `--host`, `resolveServeHosts` still returns loopback, because the
+default is unchanged containerised or not ("exposure must be typed, never inherited"). So the
+container carries **both** `-e RMD_SERVE_NETWORK=container` **and** `--host 0.0.0.0`, and a launch
+with only one of the two either refuses at boot or binds loopback and is unreachable. Loopback is
+the wrong bind here for a reason that has nothing to do with trust: a sibling container reaches
+this one over its address *inside* the container network namespace, never over its loopback.
+
+*The container must sit on `rmd-net`, because the tunnel resolves it by name.* cloudflared's
+ingress rule for the public hostname points at `http://remudero-serve:4317` — a **name**, answered
+by Docker's embedded DNS, which only resolves for containers sharing a user-defined network. A
+console on the default bridge has an address and no name: the tunnel fails to resolve it and the
+public hostname 502s while the container looks healthy from the host. That is also why nothing
+publishes a port — `-p` is not how the console is reached, and adding one would put a
+bearer-token-guarded write surface on every network the *host* joins, which is exactly what
+W1-T915's refusal exists to prevent.
+
+**Why it is a separate container and not a second process in the daemon.** The daemon container
+restarts itself constantly by design: `deploy/entrypoint.sh` relaunches on exit code 75 (freshness)
+in-container so docker's restart budget is not spent. Measured from the live container's log on
+2026-08-22: **25 freshness restarts that day and 25 the day before**, median gap ~39 minutes and
+the shortest 3. A serve process sharing that container would die on every one of them — the console
+down several dozen times a day, and down permanently whenever a restart wedges, which is precisely
+when the board is the thing you need. The two containers also carry different restart policies on
+purpose: `unless-stopped` for the console, `on-failure:5` for the daemon.
+
+**What the script refuses, and why each refusal is there.** It will not run from inside the image;
+it will not create `rmd-net` for you (a silently-created network gets the right name and leaves the
+tunnel on the old one — a console that resolves nothing, reported as success); it refuses a state
+mount that disagrees with the running daemon's, because a console pointed at a different tree
+renders a different fleet and reports no error at all; it refuses when no `GH_TOKEN` is available
+in the shell or capturable from the daemon container, because a console without one starts and then
+fails every read, which reads as "GitHub is down"; and it never replaces an existing console
+without `--replace`, since re-running a script to check something should not take down the surface
+you are checking from.
+
+`GH_TOKEN` is passed to `docker run` **by name** (`-e GH_TOKEN`, not `-e GH_TOKEN=<value>`), so the
+value never lands in the process table where any user on the host can read it with `ps`. The script
+matches the startup banner to prove the bind and never echoes it, because that banner carries the
+read token in the URL — the rotation rule above applies to a terminal transcript exactly as it
+applies to a log file.
+
+**Afterwards, check the three things that decide reachability**, all of which the script checks
+itself and prints: the container is running, it is attached to `rmd-net`, and the log carries
+`listening on http://0.0.0.0:4317`. If cloudflared is not on `rmd-net` the script warns rather than
+fixing it — `docker network connect rmd-net cloudflared` is the repair.
+
+**A cold console can take minutes to answer its first request, and that is not the container being
+broken.** Measured 2026-08-22 against a freshly started `remudero-serve`: the process was executing
+`gh api repos/<owner>/<repo>/commits/<branch>/status` serially across the repo's 85 `run-*`
+branches, and while it did, even a trivial route did not answer and further requests simply queued
+behind it. TCP connects succeed throughout, so the container looks up and the page looks hung. Read
+`docker exec remudero-serve ps -eo etime,args` before concluding the console is down: if it is
+walking branch statuses, it is working, slowly.
 
 ### Attaching a data disk to the container host
 
