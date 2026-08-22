@@ -106,6 +106,10 @@ DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 # check that catches a container started from a locally-tagged image such as `rmd-local:latest`,
 # whose name contains nothing this script would otherwise match.
 STATE_MOUNT_DEST="/home/node/Remudero"
+# W1-T1222: the console's port, PUBLISHED ON THE HOST'S LOOPBACK ONLY (see the serve block below —
+# never 0.0.0.0). Matches src/lib/serve.ts's DEFAULT_SERVE_PORT so the shipped dashboard's
+# `?daemon=` default (http://localhost:4317) keeps resolving out of the box.
+SERVE_PORT="${RMD_SERVE_PORT:-4317}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -328,9 +332,30 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
   # clean shutdown and must come back from EVERY exit, so it takes unless-stopped, not on-failure.
   # launchd.ts records daemon-independence as a requirement: stopping the fleet must never blind
   # the operator, which is why this is not folded into the container above.
+  #
+  # W1-T1222: THE PUBLISH AND THE BIND HOST, TOGETHER, ARE WHAT GIVE THIS CONTAINER AN ADDRESS.
+  # Before this block, remudero-serve ran with no -p and no RMD_SERVE_HOST, so
+  # src/lib/serve.ts's DEFAULT_SERVE_HOST (127.0.0.1) bound loopback INSIDE the container's own
+  # network namespace — reachable from nothing outside it, Docker's -p NAT included, so seven
+  # merged console features arrived on a surface with no address.
+  #
+  # -p BINDS THE HOST'S loopback, never 0.0.0.0 — assertBindableHost's refusal (R-5) is deliberate
+  # and this does not widen it; a published port is still an operator act, same as it always was.
+  # RMD_SERVE_HOST=0.0.0.0 and RMD_SERVE_NETWORK=container are the pair resolveServeHosts (that
+  # same file) requires TOGETHER before it accepts a wildcard bind — the one carve-out W1-T915
+  # shipped, and it opens only the container's own namespace, never the host's other networks or
+  # the public internet on its own (co-locating the Cloudflare tunnel client, or another -p, stay
+  # separate operator acts). RMD_SERVE_HOST keeps its own default here rather than a fixed value so
+  # an operator can still override it to a tailnet address instead (see resolveServeHosts's own
+  # doc); RMD_SERVE_NETWORK is the container-namespace declaration itself and is not a value an
+  # operator has any reason to change, but stays a passthrough rather than a literal so a copy of
+  # this line never drifts from what src/lib/serve.ts actually reads.
   docker run -d --name remudero-serve \\
     --restart=unless-stopped \\
     --user 1000:1000 \\
+    -p 127.0.0.1:${SERVE_PORT}:${SERVE_PORT} \\
+    -e RMD_SERVE_HOST="\${RMD_SERVE_HOST:-0.0.0.0}" \\
+    -e RMD_SERVE_NETWORK="\${RMD_SERVE_NETWORK:-container}" \\
     -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     ${REF} \\
     ./bin/rmd serve

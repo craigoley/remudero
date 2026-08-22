@@ -600,3 +600,102 @@ test("MUTANT: dropping the credential mount from the REAL block is caught by the
   const real = printWithPaths(dead, credFixture(8 * 3600_000));
   assert.ok(real.out.includes(":/home/node/.claude"), "the real script must carry what the mutant dropped");
 });
+
+// ── W1-T1222: THE SERVE CONTAINER MUST HAVE AN ADDRESS ──────────────────────────────────────
+//
+// W1-T915 gave `resolveServeHosts` (src/lib/serve.ts) a container-network carve-out —
+// RMD_SERVE_HOST=0.0.0.0 accepted ONLY alongside RMD_SERVE_NETWORK=container — but the printed
+// `remudero-serve` invocation never exercised it: no --publish, no RMD_SERVE_HOST, no
+// RMD_SERVE_NETWORK. So the console kept binding DEFAULT_SERVE_HOST (loopback) INSIDE the
+// container's own network namespace, reachable from nothing outside it — not Docker's -p NAT, not
+// a sibling container — so seven merged console features arrived on a surface with no address.
+//
+// THESE ASSERTIONS ARE SCOPED TO THE SERVE BLOCK ALONE. A test that only checked "a publish flag
+// exists somewhere in the output" would pass just as well if the flag leaked onto the daemon block
+// by accident, so the daemon block is extracted and pinned unchanged in the very same run.
+
+/** The `docker run -d --name remudero-serve ... ./bin/rmd serve` block alone. */
+function serveBlock(out: string): string {
+  const start = out.indexOf("docker run -d --name remudero-serve");
+  assert.ok(start >= 0, "the serve invocation must be printed at all");
+  const end = out.indexOf("./bin/rmd serve", start);
+  assert.ok(end >= 0, "the serve invocation must end in ./bin/rmd serve");
+  return out.slice(start, end + "./bin/rmd serve".length);
+}
+
+/** The `docker run -d --name remudero-daemon ... ./bin/rmd daemon ...` block alone, cut at the
+ *  daemon invocation's own last flag rather than at the next `docker run` — the comment ABOVE the
+ *  serve invocation talks ABOUT the serve block ("no -p and no RMD_SERVE_HOST") and would falsely
+ *  trip a substring check on the daemon side if included. */
+function daemonBlock(out: string): string {
+  const start = out.indexOf("docker run -d --name remudero-daemon");
+  assert.ok(start >= 0, "the daemon invocation must be printed at all");
+  const end = out.indexOf("--allow-self-target", start);
+  assert.ok(end >= 0, "the daemon block must end at its own --allow-self-target flag");
+  return out.slice(start, end + "--allow-self-target".length);
+}
+
+test("W1-T1222: the printed serve recipe publishes a loopback-bound port", () => {
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.equal(run.status, 0);
+  const serve = serveBlock(run.out);
+  assert.match(serve, /-p 127\.0\.0\.1:\d+:\d+/, "the published port must bind the HOST'S loopback");
+  assert.doesNotMatch(serve, /-p 0\.0\.0\.0/, "never publish on every host interface");
+  assert.doesNotMatch(serve, /--publish[= ]0\.0\.0\.0/, "never publish on every host interface");
+});
+
+test("W1-T1222: the printed serve recipe passes the bind host through", () => {
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.equal(run.status, 0);
+  const serve = serveBlock(run.out);
+  assert.match(serve, /-e RMD_SERVE_HOST=/, "the bind host must be passed through to the container");
+  assert.match(serve, /-e RMD_SERVE_NETWORK=/, "the container-network declaration must be passed through too");
+  // W1-T915's carve-out in assertBindableHost only accepts 0.0.0.0 alongside RMD_SERVE_NETWORK=
+  // container (src/lib/serve.ts) — the printed defaults must be the exact pair that clears it.
+  assert.match(serve, /RMD_SERVE_HOST:-0\.0\.0\.0/, "the default bind host must be the container carve-out value");
+  assert.match(serve, /RMD_SERVE_NETWORK:-container/, "the default network declaration must be 'container'");
+});
+
+test("W1-T1222: the daemon recipe is unchanged by the serve publish", () => {
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.equal(run.status, 0);
+  const daemon = daemonBlock(run.out);
+  assert.doesNotMatch(daemon, /-p /, "the daemon container must gain no published port");
+  assert.doesNotMatch(daemon, /RMD_SERVE_HOST/, "the daemon container must not carry the serve bind host");
+  assert.doesNotMatch(daemon, /RMD_SERVE_NETWORK/, "the daemon container must not carry the serve network declaration");
+  for (const { flag, why } of REQUIRED_FLAGS) {
+    assert.ok(daemon.includes(flag), `daemon invocation lost ${flag} to the serve change — ${why}`);
+  }
+});
+
+test("W1-T1222: serve keeps its own restart policy and its own container", () => {
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.equal(run.status, 0);
+  const serve = serveBlock(run.out);
+  assert.match(serve, /--restart=unless-stopped/, "serve must still come back from EVERY exit, not just failures");
+  assert.doesNotMatch(serve, /--restart=on-failure/, "serve must not inherit the daemon's restart policy");
+  assert.ok(serve.includes("--name remudero-serve"), "serve must remain its own container, not folded into the daemon's");
+  const daemon = daemonBlock(run.out);
+  assert.match(daemon, /--restart=on-failure:5/, "the daemon keeps its own restart policy independent of serve");
+});
+
+test("MUTANT: dropping the serve publish from the REAL block is caught by the loopback-bound-port test", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const line = "    -p 127.0.0.1:${SERVE_PORT}:${SERVE_PORT} \\\\\n";
+  assert.equal(src.split(line).length - 1, 1, "the mutation target must be unique by occurrence count");
+  const dir = mkdtempSync(join(tmpdir(), "host-update-mutant-serve-"));
+  const mutant = join(dir, "host-update.sh");
+  writeFileSync(mutant, src.replace(line, ""), { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000), mutant);
+  assert.doesNotMatch(serveBlock(run.out), /-p 127\.0\.0\.1:/, "the mutant must really drop the publish");
+  // …and the healthy script must still carry it, or this proves nothing about the guard.
+  const real = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.match(serveBlock(real.out), /-p 127\.0\.0\.1:/, "the real script must carry what the mutant dropped");
+});
