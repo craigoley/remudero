@@ -378,6 +378,24 @@ not see, in the same tone it uses when it can. Each was reproduced on `Craigs-Ma
   `gh api rate_limit` does not itself count against the limit**, so a script that is unsure may
   ask before it acts rather than guessing from a failure it has already caused.
 
+- **`/actions/runs/{id}/jobs` returns only the LATEST attempt's jobs, so a re-run erases the
+  failure you are looking for.** A forensic sweep of twenty failed runs read zero hits while the
+  one confirmed occurrence sat in a superseded attempt. Confirmed against this repo's live API
+  (2026-08-22, from a cloud worktree): run `31515044468` — the 2026-08-11 x509 re-run,
+  `run_attempt: 2` — answers with ONE successful job by default, and only `?filter=all` returns
+  both, including the attempt-1 `ci-gate` **failure** that exists nowhere else. The run object's
+  `run_attempt` says how many attempts there are; **enumerate them explicitly** —
+  `gh api "repos/{owner}/{repo}/actions/runs/{id}/jobs?filter=all"` — and note the check-runs
+  list keeps the same latest-only default, so the superseded failure is absent there too.
+
+- **`gh api .../check-runs` paginates at 30, and a first page full of green reads as "all
+  green".** A PR read as fully green had two failures sitting past the page boundary (measured on
+  the mini). The truncation reproduces on any sha — confirmed against this repo's live API
+  (2026-08-22): `per_page=5` on PR #1569's head returns 5 of `total_count: 22`, and
+  `per_page=100` returns all 22. **Pass `per_page=100` and compare `total_count` against the rows
+  you actually received** — `gh api "repos/{owner}/{repo}/commits/{sha}/check-runs?per_page=100"`
+  — and if `total_count` is still larger than what came back, page.
+
 
 ## Crisis runbook: the procedures you need at 3am
 
