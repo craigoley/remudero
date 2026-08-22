@@ -90,6 +90,7 @@ import {
   type ReadinessContext,
 } from "./inbox.js";
 import { loadPlan, type MergedResolver, type Plan } from "./plan.js";
+import { automergeHoldFromLedger, type AutomergeHold } from "./review.js";
 import {
   DEFAULT_MAX_TASK_DISPATCHES,
   dispatchesWithoutNewOwnedPr,
@@ -566,15 +567,43 @@ export interface ImageDriftRow {
 }
 
 /**
+ * W1-T1000003 — A MERGE HOLD ENGAGED BY AN OPERATOR (review.ts's `automergeHoldFromLedger`,
+ * written by W1-T1000002's `automerge.hold_engaged`/`automerge.hold_released` ledger rows).
+ * NOT a blocker (design fence (ii) of the task record): a blocker is something ELSE stopping
+ * progress the operator would want fixed; a hold is the operator's OWN standing refusal to let
+ * anything merge, so it renders here, in the escalation surface, never re-derived from check or
+ * review fields — see {@link deriveMergeHeld}'s own doc for the reader it consumes verbatim.
+ */
+export interface MergeHeldRow {
+  /** Absent for a FLEET-scoped hold (no `pr_number` on the ledger row) — applies to every open
+   *  request, not one. Present for a PR-scoped hold, naming the held request. */
+  prNumber?: number;
+  /** Opportunistic enrichment from the SAME `automerge.hold_engaged` row's own `task_id`
+   *  field — "latest wins", never the fact that decides whether the hold is still standing
+   *  (that is {@link automergeHoldFromLedger} alone, exactly as sweep.ts's `alreadyDone` and
+   *  run-task.ts's `attemptArm` already consult it). Absent when the row never carried one, or
+   *  for a fleet-scoped hold with no single task to name. */
+  taskId?: string;
+  /** Who engaged the hold — {@link AutomergeHold.by}, carried through unchanged. */
+  by: string;
+  /** Why — {@link AutomergeHold.reason}, carried through unchanged; never a reason this board
+   *  invents from a check or review field. */
+  reason: string;
+}
+
+/**
  * NEEDS ME — the board's own escalation surface (distinct from `rmd serve`'s HTML "Needs me"
  * panel, which is task-escalation-driven; design note (viii) scopes this task to EXACTLY the
  * console surfaces `rmd status` text and `--json` project, "the whole surface here"). Today
- * carries the cost-anomaly rows W1-T931 shipped plus W1-T1021's image-drift finding; a future
- * sentinel is a new field here, not a new section.
+ * carries the cost-anomaly rows W1-T931 shipped plus W1-T1021's image-drift finding plus
+ * W1-T1000003's merge-hold rows; a future sentinel is a new field here, not a new section.
  */
 export interface NeedsMeSection {
   costAnomaly: CostAnomalyRow[];
   imageDrift?: ImageDriftRow;
+  /** W1-T1000003: currently-standing operator merge holds — empty (never `undefined`) when
+   *  none stand, so the quiet case renders no row at all (design (iii)). */
+  mergeHeld: MergeHeldRow[];
 }
 
 export interface StatusBoardModel {
@@ -1668,6 +1697,65 @@ function deriveHeadroom(lines: Array<Record<string, unknown>>, nowMs: number, en
  * one row per run id here means an operator never sees the SAME run named twice in NEEDS ME
  * regardless of how many `cost.anomaly` lines it actually accumulated.
  */
+const AUTOMERGE_HOLD_ENGAGED_STEP = "automerge.hold_engaged";
+const AUTOMERGE_HOLD_RELEASED_STEP = "automerge.hold_released";
+
+/** No real GitHub PR is ever numbered this — used ONLY to ask {@link automergeHoldFromLedger}
+ *  "is a FLEET-scoped hold (no `pr_number`) currently standing", since a PR-scoped row can never
+ *  match a PR number that does not exist. See {@link deriveMergeHeld}'s own doc. */
+const MERGE_HELD_FLEET_SENTINEL_PR = -1;
+
+/**
+ * W1-T1000003: the newest `automerge.hold_engaged` row's own `task_id`, scoped exactly like
+ * {@link automergeHoldFromLedger} itself (a fleet-scoped row carries no `pr_number` and applies
+ * to every PR; a PR-scoped row applies only to its own). ENRICHMENT ONLY — this never decides
+ * whether the hold still stands; that decision is `automergeHoldFromLedger`'s alone, called
+ * unchanged in {@link deriveMergeHeld} just below.
+ */
+function latestHoldTaskId(lines: ReadonlyArray<Record<string, unknown>>, prNumber: number): string | undefined {
+  let taskId: string | undefined;
+  for (const l of lines) {
+    if (l.step !== AUTOMERGE_HOLD_ENGAGED_STEP) continue;
+    const scopedToThisPr = typeof l.pr_number !== "number" || l.pr_number === prNumber;
+    if (!scopedToThisPr) continue;
+    if (typeof l.task_id === "string" && l.task_id) taskId = l.task_id;
+  }
+  return taskId;
+}
+
+/**
+ * W1-T1000003 — THE HOLD ROW(S) THIS BOARD RENDERS, KEYED ON review.ts's
+ * {@link automergeHoldFromLedger} ALONE — never a second taxonomy re-derived from check or
+ * review fields (design fence (ii) of the task record: "the board mints no blocker taxonomy of
+ * its own", applied here to the escalation surface too). One row per PR number a hold row ever
+ * named, present ONLY while `automergeHoldFromLedger` still reports that PR held; a released
+ * hold clears on the very next call (design (iv) — no marker, no acknowledgement to keep in
+ * sync). A hold engaged with NO `pr_number` at all (fleet-wide) and no PR-scoped row ever
+ * recorded renders as exactly one row naming no PR — "every open request", not one.
+ */
+function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHeldRow[] {
+  const prNumbers = new Set<number>();
+  for (const l of lines) {
+    if (l.step !== AUTOMERGE_HOLD_ENGAGED_STEP && l.step !== AUTOMERGE_HOLD_RELEASED_STEP) continue;
+    if (typeof l.pr_number === "number") prNumbers.add(l.pr_number);
+  }
+  const rows: MergeHeldRow[] = [];
+  for (const prNumber of [...prNumbers].sort((a, b) => a - b)) {
+    const hold = automergeHoldFromLedger(lines, prNumber);
+    if (!hold) continue;
+    rows.push({ prNumber, taskId: latestHoldTaskId(lines, prNumber), by: hold.by, reason: hold.reason });
+  }
+  if (prNumbers.size === 0) {
+    // No PR-scoped hold row was ever recorded, so the ONLY way a currently-standing hold could
+    // exist is fleet-scoped — a real PR number always accompanies a PR-scoped row, so a sentinel
+    // that no PR is ever numbered can only ever match a fleet-wide row (see AutomergeHold's own
+    // "scopedToThisPr" test: `typeof line.pr_number !== "number"`).
+    const fleetHold = automergeHoldFromLedger(lines, MERGE_HELD_FLEET_SENTINEL_PR);
+    if (fleetHold) rows.push({ by: fleetHold.by, reason: fleetHold.reason });
+  }
+  return rows;
+}
+
 function deriveNeedsMe(lines: ReadonlyArray<Record<string, unknown>>): NeedsMeSection {
   const byRunId = new Map<string, CostAnomalyRow>();
   for (const l of lines) {
@@ -1704,7 +1792,12 @@ function deriveNeedsMe(lines: ReadonlyArray<Record<string, unknown>>): NeedsMeSe
     imageDrift = { buildSha, bakedSha, ts };
   }
 
-  return { costAnomaly, imageDrift };
+  // W1-T1000003: currently-standing operator merge holds — a pure re-read of the SAME hold
+  // reader sweep.ts/run-task.ts already consult, never a second gateway or ledger pass (this
+  // module already has `lines` in hand from the read `deriveNeedsMe`'s caller performed once).
+  const mergeHeld = deriveMergeHeld(lines);
+
+  return { costAnomaly, imageDrift, mergeHeld };
 }
 
 /**
@@ -2165,9 +2258,13 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
  *  "no rule matches, no line" doctrine elsewhere. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   const out = ["── NEEDS ME ─────────────────────────────────────────────"];
-  if (n.costAnomaly.length === 0 && !n.imageDrift) {
+  if (n.costAnomaly.length === 0 && !n.imageDrift && n.mergeHeld.length === 0) {
     out.push("nothing needs you");
     return out;
+  }
+  for (const r of n.mergeHeld) {
+    const target = r.prNumber !== undefined ? `PR #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""}` : "the whole fleet";
+    out.push(`merge held : ${target} — held by ${r.by}: ${r.reason}`);
   }
   for (const r of n.costAnomaly) {
     out.push(
