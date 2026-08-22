@@ -78,7 +78,12 @@ export function isTestRunner(env: NodeJS.ProcessEnv = process.env): boolean {
  *  source-line records is stamped `DA:<line>,0`, and diff-coverage then flags it as an
  *  uncovered added line. Measured: DA=0 at the head, DA=1 here. See CLAUDE.md,
  *  "Lessons from 2026-07-25". */
-export type LiveWriteBoundary = "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create";
+/** W1-T1095 (capability 3) adds `"gh-pr-update-branch"`: the fix rung's rebase is a real,
+ *  irreversible write to a live pull request (it mints a NEW head sha, discarding whatever
+ *  verdict was posted against the old one), so it belongs behind this boundary exactly like
+ *  the merge and push writes beside it. Reusing one of those four would have mislabelled the
+ *  refusal in the error a blocked test reads. */
+export type LiveWriteBoundary = "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create" | "gh-pr-update-branch";
 
 /** Thrown at a boundary rather than returning silently: a swallowed refusal would
  * read as "the effect did not happen for some other reason", which is the same

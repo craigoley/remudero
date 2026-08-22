@@ -283,6 +283,11 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   const closed: Array<{ pr: OpenPrView; reason: string }> = [];
   const fixed: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
   const escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }> = [];
+  // W1-T1210: resolved BEFORE the object literal so `dispatchFix`'s own closure (below) can log
+  // to the SAME ledger/run this fixture's `ledgerPath`/`runId` fields (possibly overridden by the
+  // caller) end up reporting — never a second, independently-tracked path/id.
+  const resolvedLedgerPath = overrides.ledgerPath ?? ledgerPath();
+  const resolvedRunId = overrides.runId ?? "SWEEP-1";
   return {
     armed,
     closed,
@@ -290,10 +295,22 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
     escalated,
     arm: (p) => { armed.push(p); },
     close: (p, reason) => { closed.push({ pr: p, reason }); },
-    dispatchFix: (p, evidence) => { fixed.push({ pr: p, evidence }); },
+    // W1-T1210: logs the SAME `fix.dispatch` ledger row the REAL `dispatchFix` (run-task.ts's
+    // `buildSweepEffects`) always writes before returning cleanly — see that closure's own
+    // W1-T1127 doc: "`dispatchStarted` TRUE only once `runFixRung` has demonstrably spent a real
+    // strike — i.e. its OWN `fix.dispatch` line ... has been written." A dispatch that instead
+    // throws BEFORE that line (the incident this task's own fix addresses) never reaches here at
+    // all — `runSweep`'s own catch records `acted:false`, so a test wanting THAT shape overrides
+    // `dispatchFix` locally to a bare recorder (no ledger write), never relying on this default.
+    dispatchFix: (p, evidence) => {
+      fixed.push({ pr: p, evidence });
+      if (p.taskId) {
+        appendLedger(resolvedLedgerPath, { run_id: resolvedRunId, task_id: p.taskId, step: "fix.dispatch", strike: (p.priorStrikes ?? 0) + 1 });
+      }
+    },
     escalate: (p, reason, question) => { escalated.push({ pr: p, reason, question }); },
-    ledgerPath: ledgerPath(),
-    runId: "SWEEP-1",
+    ledgerPath: resolvedLedgerPath,
+    runId: resolvedRunId,
     now: () => NOW,
     ...overrides,
   };
@@ -1463,6 +1480,135 @@ test("W1-T1110 acceptance 4 — the strike ceiling and its escalation at the cap
   assert.match(String(summary.actions[0].reason), /fix strikes exhausted \(2\/2\)/, "the cap itself (2) is untouched");
   assert.equal(deps.escalated.length, 1, "exhaustion still escalates loudly");
   assert.equal(deps.fixed.length, 0, "no fix dispatch fires once the cap is reached — the dedup re-arm never widens the cap");
+});
+
+// ── W1-T1210 — a gate seeded by a dispatch that THREW BEFORE run-task.ts ever started (the
+//    observed `.git/config.lock` incident) owns no `fix.dispatch` row at all, so it has neither
+//    of `prior.fixed`'s two clearing paths (a new head, or W1-T1110's own re-arm reading
+//    `fix.review`/`fix.ci_not_green`/`fix.resolved`) and stood down FOREVER. Fixed by treating
+//    "no owning `fix.dispatch` row for this taskId" the same as "concluded without landing a new
+//    head" in `fixRungStalledWithoutNewHead` — see that function's own W1-T1210 doc.
+//
+//    `noRowDispatchFix` below reproduces the historical incident exactly: `dispatchFix` returns
+//    cleanly (so `runSweep` still records `sweep.disposed acted:true`, seeding `prior.fixed`) but
+//    — unlike the fixture's normal `dispatchFix` (updated by this task to log the SAME
+//    `fix.dispatch` row the real `buildSweepEffects` closure always writes once `runFixRung`
+//    demonstrably starts) — writes NO ledger row at all, exactly the shape a throw swallowed
+//    BEFORE `runFixRung` started used to leave behind, pre-W1-T1127. ──────────────────────────
+
+function noRowDispatchFix(sink: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }>): SweepDeps["dispatchFix"] {
+  return (p, evidence) => {
+    sink.push({ pr: p, evidence });
+  };
+}
+
+test("W1-T1210: a gate with no owning fix row no longer suppresses", async () => {
+  const shared = ledgerPath();
+  const fixed1: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
+  await runSweep([blockedFixablePr()], fakeDeps({ ledgerPath: shared, runId: "SWEEP-1", dispatchFix: noRowDispatchFix(fixed1) }));
+  assert.equal(fixed1.length, 1, "the seeding pass dispatched — acted:true, but logged no fix.* row (the incident shape)");
+
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  await runSweep([blockedFixablePr()], deps2);
+  assert.equal(
+    deps2.fixed.length,
+    1,
+    "a seed with no owning fix.dispatch row must not dedup this PR against a head nothing will ever move — it is eligible again",
+  );
+});
+
+test("W1-T1210: a gate with an owning fix row still suppresses", async () => {
+  const shared = ledgerPath();
+  const deps1 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-1" });
+  await runSweep([blockedFixablePr()], deps1);
+  assert.equal(deps1.fixed.length, 1);
+
+  // Unlike the no-row case above, the dispatch's own worker DID start — the fixture's (realistic,
+  // W1-T1210-updated) `dispatchFix` logged its `fix.dispatch` row, and the rung is genuinely
+  // still in flight (no `fix.review`/`fix.ci_not_green`/`fix.resolved` yet). The EXISTING dedup
+  // (W1-T1110) must keep suppressing exactly as it does today — this task widens nothing (design
+  // (i)).
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  await runSweep([blockedFixablePr()], deps2);
+  assert.equal(
+    deps2.fixed.length,
+    0,
+    "an owning fix.dispatch row with no conclusion yet is a real in-flight rung — still deduped",
+  );
+});
+
+test("W1-T1210: the clearing predicate reads rows and no elapsed time", async () => {
+  // The no-owning-row seed from the first test above, re-asserted with a fixed sweep clock far
+  // in the future: if the predicate consulted elapsed time (a timer or age bound — refused by
+  // design (v), W1-T1067's precedent), an old seed would clear for a DIFFERENT reason than a
+  // fresh one. It must clear identically at any distance, because the read is over rows already
+  // written, never over `Date.now()`/a `seeded_at` field.
+  const soonShared = ledgerPath();
+  const soonFixed1: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
+  await runSweep([blockedFixablePr()], fakeDeps({ ledgerPath: soonShared, runId: "SWEEP-1", dispatchFix: noRowDispatchFix(soonFixed1) }));
+  const soonDeps2 = fakeDeps({ ledgerPath: soonShared, runId: "SWEEP-2", now: () => NOW + 60_000 });
+  await runSweep([blockedFixablePr()], soonDeps2);
+
+  const farShared = ledgerPath();
+  const farFixed1: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
+  await runSweep([blockedFixablePr()], fakeDeps({ ledgerPath: farShared, runId: "SWEEP-3", dispatchFix: noRowDispatchFix(farFixed1) }));
+  // 12 days — deliberately short of `DEFAULT_SWEEP_POLICY.staleDays` (14): far enough past the
+  // one-minute case above to falsify a timer, without also tripping the UNRELATED "abandoned, no
+  // activity" stale-disposition rule the fixture's fixed `lastActivityAt` would otherwise hit,
+  // which would confound this test with a disposition change that has nothing to do with the
+  // clearing predicate under test here.
+  const farDeps4 = fakeDeps({ ledgerPath: farShared, runId: "SWEEP-4", now: () => NOW + 1000 * 60 * 60 * 24 * 12 });
+  await runSweep([blockedFixablePr()], farDeps4);
+
+  assert.equal(soonDeps2.fixed.length, 1, "clears one minute after the seed");
+  assert.equal(farDeps4.fixed.length, 1, "clears identically 12 days after the seed — no age bound anywhere");
+});
+
+test("W1-T1210: clearing the gate dispatches nothing by itself", async () => {
+  const shared = ledgerPath();
+  const fixed1: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
+  await runSweep([blockedFixablePr()], fakeDeps({ ledgerPath: shared, runId: "SWEEP-1", dispatchFix: noRowDispatchFix(fixed1) }));
+  assert.equal(fixed1.length, 1);
+  // No fix.* rows appended — the same no-owning-row seed as above, so the gate is now clear.
+
+  // A DRY preview evaluates the very same `alreadyDone`/clearing read `runSweep` always does
+  // (computed unconditionally before the dry-run check) — proving the read itself is a pure
+  // fold over ledger rows with no dispatch side effect of its own: `deps.dispatchFix` is never
+  // called, and no ledger trace is left for a later pass to react to (design (iv): clearing
+  // makes the NEXT pass eligible, it is not itself an action).
+  const dry = fakeDeps({ ledgerPath: shared, dryRun: true });
+  const preview = await runSweep([blockedFixablePr()], dry);
+  assert.equal(dry.fixed.length, 0, "evaluating the clearing predicate never itself calls dispatchFix");
+  assert.equal(preview.actionsTaken, 0, "a dry preview takes no action even once the gate reads clear");
+  assert.equal(
+    readLedgerLines(shared).filter((l) => l.step === "sweep.disposed").length,
+    1,
+    "the dry preview leaves no ledger trace of its own",
+  );
+
+  // Only a REAL pass afterward — the existing, unchanged blocked-fixable dispatch path,
+  // strike-cap-gated exactly as it always was — actually spends the strike.
+  const real = fakeDeps({ ledgerPath: shared, runId: "SWEEP-3" });
+  await runSweep([blockedFixablePr()], real);
+  assert.equal(real.fixed.length, 1, "the next REAL pass dispatches — clearing only made it eligible");
+});
+
+test("W1-T1210: the strike ceiling is unchanged by the clearing path", async () => {
+  // strikesExhaustedPr never reaches the blocked-fixable/conflicted dedup arm this task touches
+  // (its disposition is blocked-ambiguous, routed purely off `priorStrikes` — see
+  // DISPOSITION_RULES) — the SAME regression lock W1-T1110's own acceptance 4 already
+  // established, re-asserted here under this task's own name because the clearing path this
+  // task adds is now a second reason a naive read might think the cap could be bypassed.
+  const deps = fakeDeps();
+  const summary = await runSweep([strikesExhaustedPr()], deps);
+  assert.equal(
+    summary.actions[0].disposition,
+    "blocked-ambiguous",
+    "exhaustion still routes off the disposition rule, not the (now-clearable) blocked-fixable dedup",
+  );
+  assert.match(String(summary.actions[0].reason), /fix strikes exhausted \(2\/2\)/, "the cap itself (2) is untouched");
+  assert.equal(deps.escalated.length, 1, "exhaustion still escalates loudly");
+  assert.equal(deps.fixed.length, 0, "the clearing path (scoped to blocked-fixable/conflicted only) never reaches an exhausted PR");
 });
 
 // ── W1-T177: TERMINAL-STATE CHECK AT EVERY SPENDING SITE — a sweep disposition

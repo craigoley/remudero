@@ -4,8 +4,14 @@ import { appendLedger } from "./ledger.js";
 import { readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
 import { installPolicyPath, loadDefaultPolicy, PolicyError } from "./policy.js";
 import { loadDefaultCostAnomalyPolicy, recordCostAnomalies, type CostAnomalyPolicy } from "./cost-anomaly.js";
-import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger, REVIEW_CONTEXT } from "./review.js";
-import type { ArmDecision, CriterionVerdict } from "./review.js";
+import {
+  automergeHoldFromLedger,
+  cappedOverrideFromLedger,
+  decideAutoMergeArm,
+  postedArmFactsFromLedger,
+  REVIEW_CONTEXT,
+} from "./review.js";
+import type { ArmDecision, AutomergeHold, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
 import { FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type AskType, type IssueGateway, type OpenIssue } from "./escalate.js";
 import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
@@ -832,6 +838,21 @@ export interface OpenPrView {
   supersessionVerdict?: SupersessionVerdict;
   /** ISO-8601 timestamp of the PR's last activity (for the stale window). */
   lastActivityAt: string;
+  /**
+   * W1-T1201 — ISO-8601 timestamp of the PR's CREATION, read ONLY by {@link deriveDisposition}'s
+   * age clamp: A PR CANNOT BE IDLE LONGER THAN IT HAS EXISTED, so the age fed to
+   * `DISPOSITION_RULES` is the LESSER of "days since last activity" and "days since this
+   * timestamp" — the incident this closes: eleven live PRs, hours old, were closed `abandoned —
+   * no activity in 400d` by a shifted-clock test run, because `ageDays` (derived from
+   * `lastActivityAt` alone) had no upper bound relative to the PR's own creation.
+   *
+   * OPTIONAL so every existing fixture and producer stays valid — absent or unparseable reads as
+   * NO bound (today's pre-clamp arithmetic, unchanged), never as "just created", the same
+   * fail-toward-today's-behaviour default this module gives every field a caller hasn't wired
+   * yet (mirrors `checksPendingSince`/`supersessionVerdict` — see `KNOWN_UNWIRED`,
+   * lib/producer-completeness.ts).
+   */
+  createdAt?: string;
   /** The head commit sha — keys fix-dispatch idempotence (a new push re-earns a strike). */
   headSha: string;
   /** The head BRANCH name. Needed by the ABSENT-check-suite remedy, which pushes an empty
@@ -2423,6 +2444,21 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
  * needs (the PR's age in days) and returns the first {@link DISPOSITION_RULES}
  * row whose predicate matches. The mapping from state to disposition is entirely
  * in the data table.
+ *
+ * W1-T1201 (design i) — AGE IS CLAMPED TO THE PR'S OWN LIFETIME, HERE, ONCE, BEFORE ANY ROW
+ * READS IT: `ageDays` is the LESSER of "days since last activity" and "days since
+ * {@link OpenPrView.createdAt}", so every `DISPOSITION_RULES` row that reads the computed value
+ * (today, only the bare `ageDays >= policy.staleDays` stale row) inherits the bound rather than
+ * re-deriving it. `createdAt` absent or unparseable clamps to `+Infinity` (no bound) — today's
+ * pre-clamp arithmetic, unchanged, the same fail-toward-existing-behaviour this module gives
+ * every unwired field.
+ *
+ * THE CLAMP DOES NOT SILENTLY RESCUE (design iii): when it actually changes the outcome — the
+ * raw activity age crosses the stale threshold but the clamped age does not — the returned
+ * `reason` names the suppression explicitly, appended to whichever OTHER row's reason actually
+ * fired, rather than reading identically to an ordinary non-stale disposition. A rescue nobody
+ * can see is how a shifted clock stays invisible until it closes eleven PRs (this task's own
+ * incident).
  */
 export function deriveDisposition(
   pr: OpenPrView,
@@ -2430,7 +2466,10 @@ export function deriveDisposition(
   now: number = Date.now(),
 ): DispositionResult {
   const parsed = Date.parse(pr.lastActivityAt);
-  const ageDays = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : (now - parsed) / MS_PER_DAY;
+  const activityAgeDays = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : (now - parsed) / MS_PER_DAY;
+  const createdParsed = pr.createdAt === undefined ? Number.NaN : Date.parse(pr.createdAt);
+  const lifetimeAgeDays = Number.isNaN(createdParsed) ? Number.POSITIVE_INFINITY : (now - createdParsed) / MS_PER_DAY;
+  const ageDays = Math.min(activityAgeDays, lifetimeAgeDays);
   const rule = DISPOSITION_RULES.find((r) => r.when(pr, policy, ageDays, now));
   if (!rule) {
     // UNREACHABLE — the terminal row matches unconditionally. This guards the
@@ -2438,7 +2477,22 @@ export function deriveDisposition(
     // The safe fallback is the LEAST permissive disposition — escalate, never arm.
     return { disposition: "blocked-ambiguous", reason: "default (no rule matched) — escalating" };
   }
-  return { disposition: rule.disposition, reason: rule.reason(pr, policy, ageDays, now) };
+  const reason = rule.reason(pr, policy, ageDays, now);
+  // W1-T1201 (design iii): the clamp above can only ever SUPPRESS the bare `ageDays >=
+  // policy.staleDays` stale row — the only row that reads the computed scalar (this function's
+  // own doc). When the raw (unclamped) activity age would have crossed that threshold but the
+  // lifetime-clamped age does not, that suppression is a BROKEN-CLOCK SIGNAL, never a routine
+  // non-event, so it is folded into whichever other row's reason actually fired.
+  const clockSkewSuppressedStale =
+    lifetimeAgeDays < activityAgeDays && activityAgeDays >= policy.staleDays && ageDays < policy.staleDays;
+  if (!clockSkewSuppressedStale) return { disposition: rule.disposition, reason };
+  return {
+    disposition: rule.disposition,
+    reason:
+      `${reason} — AGE CLAMP (W1-T1201): raw activity age ${Math.floor(activityAgeDays)}d would cross the ` +
+      `${policy.staleDays}d stale threshold, but this PR has existed only ${Math.floor(lifetimeAgeDays)}d ` +
+      `(created ${pr.createdAt}) — a PR cannot be idle longer than it has existed, so stale was suppressed`,
+  };
 }
 
 /**
@@ -2978,7 +3032,34 @@ export type ArmOutcomeName =
   // W1-T947: `armAutoMergeAtOpen` refused because the diff is classified IRREVERSIBLE
   // (W1-T919) — mirrored here for the same reason every other member is, so `armOutcomeArmed`
   // (below) keeps type-checking against run-task.ts's `ArmOutcome` without importing it.
-  | "irreversible-refused";
+  | "irreversible-refused"
+  // W1-T1000002: `attemptArm` refused because an operator hold stands over this PR — mirrored
+  // here for the same reason `irreversible-refused` is: a deliberate refusal, never armed here
+  // or later (until the hold is released, at which point a fresh pass re-derives whole).
+  | "hold-refused";
+
+/**
+ * W1-T1117: `armFailureAction`'s (run-task.ts) return value, mirrored here rather than imported
+ * for the same reason {@link ArmOutcomeName} already is — `lib/sweep.ts` stays free of a
+ * run-task.ts dependency. `"direct-merge"` is deliberately absent: that class never reaches an
+ * `"arm-error-ignored"` outcome (it takes the direct-merge fallback instead), so it can never be
+ * the `failureClass` a caller attaches below.
+ */
+export type ArmFailureClass = "transient" | "retryable" | "unknown";
+
+/**
+ * W1-T1117: the richer shape `SweepDeps.arm` may return instead of the bare {@link
+ * ArmOutcomeName} — the SAME "outcome ∪ richer object" widening run-task.ts's own
+ * `ArmAttemptResult` already established for `armAutoMergeDetailed`, reused here rather than
+ * reinvented. `failureClass` is populated ONLY alongside the `"arm-error-ignored"` outcome (see
+ * the "mergeable" arm below for how it changes the dedup decision); every other outcome either
+ * never attempted a merge (no failure to classify) or resolved to a different, already-distinct
+ * outcome (`direct-merged` / `direct-merge-failed`), so this field carries nothing for them.
+ */
+export interface ArmAttemptOutcome {
+  outcome: ArmOutcomeName;
+  failureClass?: ArmFailureClass;
+}
 
 /**
  * TRUE only for outcomes that genuinely armed or merged.
@@ -2988,11 +3069,16 @@ export type ArmOutcomeName =
  *                    outright. A success, though not an arm: the PR leaves `openPrs` next pass,
  *                    so nothing is left to retry.
  *
- * Every other outcome armed NOTHING and must be retried on a later pass:
+ * Every other outcome armed NOTHING:
  *   no-task-id / head-unavailable / ledger-refused  — returned before any arm was attempted.
  *   direct-merge-failed / arm-error-ignored         — the attempt was made and did not stick.
  *   irreversible-refused                            — a deliberate refusal (W1-T947), not a
  *                                                      failure; never armed here or later.
+ * Whether a "not armed" outcome is RETRIED on a later pass is a separate question this function
+ * does not answer — see the "mergeable" arm's own dedup logic below, which (W1-T1117) treats an
+ * `"arm-error-ignored"` outcome carrying an `"unknown"` {@link ArmFailureClass} as terminal
+ * (seeds the dedup, no retry) while every other non-armed outcome, including a `"transient"`/
+ * `"retryable"`-classified `arm-error-ignored`, keeps re-deriving every pass exactly as before.
  */
 export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
   // An `undefined` return is a fake/effect that predates this signature — treat it as armed,
@@ -3017,8 +3103,30 @@ export interface SweepDeps {
    * `void` remains valid so existing fakes that return nothing keep compiling; an undefined
    * return is treated as "armed" (the pre-existing assumption) rather than silently standing
    * down, so this change cannot make a working lane worse.
+   *
+   * W1-T1117: may also return the richer {@link ArmAttemptOutcome} — every existing fake
+   * returning a bare {@link ArmOutcomeName} (or `void`) keeps compiling and behaving exactly as
+   * before; only production wiring (`buildSweepEffects`, run-task.ts) attaches a `failureClass`.
    */
-  arm: (pr: OpenPrView) => ArmOutcomeName | void | Promise<ArmOutcomeName | void>;
+  arm: (
+    pr: OpenPrView,
+  ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
+  /**
+   * W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE. Called ONLY when an operator hold
+   * ({@link import("./review.js").automergeHoldFromLedger}) stands over a PR {@link
+   * OpenPrView.autoMergeArmed} already reports armed — the converging half of the hold design:
+   * a disarm alone is undone by the very next pass (the arming dedup reads GitHub's live armed
+   * bit, which a disarm resets), so this fires EVERY pass the hold still stands and the PR still
+   * reads armed, which is exactly as often as it takes, and zero times once GitHub's own bit
+   * reads false. SAFE WHEN NOT ARMED — the real wiring is `disarmAutoMerge` (run-task.ts), which
+   * never throws — so no extra probe per PR per pass is needed to learn whether an arm exists
+   * before withdrawing it.
+   *
+   * Optional: omitted (every pre-existing fixture), a held-and-armed PR is still refused by
+   * `alreadyDone` above (never re-armed BY THIS LANE) but nothing withdraws the STANDING arm —
+   * never a silent regression for a fixture built before this task existed.
+   */
+  disarmAutoMerge?: (pr: OpenPrView, hold: AutomergeHold) => void | Promise<void>;
   /** Close a superseded/abandoned PR with a stated reason. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /**
@@ -3459,16 +3567,35 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
  * strike on the same head — design (i)'s idempotence (two dispatches racing the same sha must
  * still not both spend a strike) survives unchanged.
  *
- * `undefined`/no matching lines ⇒ `false`: a cold blocked-fixable dispatch with no resolvable
- * task carries no `task_id` to key against, and this must never throw or false-positive on
- * nothing to read.
+ * `undefined` taskId ⇒ `false`: a cold blocked-fixable dispatch with no resolvable task carries
+ * no `task_id` to key against, and this must never throw or false-positive on nothing to read.
+ *
+ * W1-T1210 — A TASKID WITH NO `fix.dispatch` ROW OF ITS OWN IS THE SAME "CONCLUDED WITHOUT
+ * LANDING A NEW HEAD" SHAPE, ONE STEP EARLIER. `dispatchFix` (sweep.ts's own caller) can throw
+ * before `runFixRung` ever starts — `.git/config.lock` contention was the observed cause
+ * (rationale, incident note) — and the `sweep.disposed` row that seeds `prior.fixed` gets
+ * written with `acted: true` regardless (the swallow W1-T1127 closed GOING FORWARD, not
+ * retroactively for rows it already wrote). Such a seed owns no `fix.dispatch` row at all — not
+ * even the first line a real rung writes — so it can never produce a `fix.review`/
+ * `fix.ci_not_green`/`fix.resolved` for this function to read, and the loop above leaves
+ * `stalled` at its `false` initial value forever, exactly as if the rung were still healthily in
+ * flight. It is not: nothing ever started. The absence of `fix.dispatch` itself — read from rows
+ * already in the ledger, no new read, no state file, no clock (design (ii)/(v)) — is the
+ * falsifier: a taskId that HAS a `fix.dispatch` row keeps the loop's existing verdict untouched
+ * (acceptance: "a gate with an owning fix row still suppresses"); a taskId with NONE is treated
+ * as stalled too (acceptance: "a gate with no owning fix row no longer suppresses"), so the
+ * caller's `alreadyDone` clears and the next pass is eligible to re-derive — never itself a
+ * dispatch (design (iv); the strike cap at the spending site, untouched, still bounds whatever
+ * follows).
  */
 function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
   if (!taskId) return false;
   let stalled = false;
+  let dispatched = false;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "fix.dispatch") {
+      dispatched = true;
       stalled = false;
     } else if (line.step === "fix.ci_not_green") {
       stalled = true;
@@ -3478,7 +3605,8 @@ function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, tas
       stalled = false;
     }
   }
-  return stalled;
+  // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
+  return stalled || !dispatched;
 }
 
 // ── W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half) ──
@@ -3945,6 +4073,11 @@ export async function runSweep(
 
     // Is this action already true (deduped)? Keyed per disposition.
     let alreadyDone: boolean;
+    // W1-T1000002: set ONLY by the "mergeable" case below, ONLY when an operator hold stands
+    // over a PR GitHub ALREADY reports armed — the converging withdrawal fires unconditionally
+    // (never gated on `acted`, which a held PR always has false) so a standing arm this lane did
+    // not place is withdrawn on the very pass that observes it, not merely refused going forward.
+    let holdToWithdraw: AutomergeHold | undefined;
     // W1-T1110: set ONLY by the "blocked-fixable"/"conflicted" case below, when a PRIOR
     // dispatch against this exact head is still deduping (`prior.fixed.has(...)` true AND its
     // rung has not stalled out — see `fixRungStalledWithoutNewHead`'s own doc). Named here, not
@@ -3971,15 +4104,24 @@ export async function runSweep(
         const refused =
           prior.riskRefused.has(riskRefusedKey) &&
           !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) !== undefined);
+        // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM — see review.ts's
+        // `automergeHoldFromLedger` doc. Deliberately NEVER sha-keyed (unlike `refused` above):
+        // a hold binds the PR, not any one head, so a push while held changes nothing here.
+        // `acted:false` follows from `alreadyDone:true` exactly like `refused` — no dedup key is
+        // seeded, so the pass re-derives whole the moment an operator releases it (design (iii)/
+        // (vii): no separate resume path, the SAME property `refused`'s W1-T970 precedent gives).
+        const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
+        if (hold && pr.autoMergeArmed === true) holdToWithdraw = hold;
         const armedByGitHub = pr.autoMergeArmed === true;
         const armedByPriorPass = !armedByGitHub && prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
-        alreadyDone = armedByGitHub || armedByPriorPass || refused;
+        alreadyDone = armedByGitHub || armedByPriorPass || refused || hold !== undefined;
         // W1-T1116: NAME WHICH DISJUNCT FIRED — this switch previously left every one of these
         // three silent (rationale (3)/(4)), the exact gap the "blocked-fixable"/"conflicted" arm
         // above (W1-T1110) already closed for its own dedup, and the ONLY reason two readers
         // misdiagnosed a correctly-held #2432 as a never-clearing dedup in one night (rationale
         // (5)). Order matches the `||` above: an operator reading the row learns the FIRST true
-        // disjunct, exactly the one that actually short-circuited `alreadyDone`.
+        // disjunct, exactly the one that actually short-circuited `alreadyDone`. W1-T1000002 adds
+        // the hold as a fourth disjunct and a fourth reason, in the same order as the `||`.
         if (armedByGitHub) {
           dedupStandDownReason = "auto-merge already armed (observed on GitHub) — nothing to re-arm";
         } else if (armedByPriorPass) {
@@ -3993,6 +4135,8 @@ export async function runSweep(
           dedupStandDownReason = issueUrl
             ? `risk judge escalated this head, no operator override recorded — see ${issueUrl}`
             : "risk judge escalated this head, no operator override recorded";
+        } else if (hold !== undefined) {
+          dedupStandDownReason = "an operator merge hold stands over this PR — refusing to arm until it is released";
         }
         break;
       }
@@ -4122,16 +4266,35 @@ export async function runSweep(
               // seven branches it took, and five of them armed nothing. Discarding it is what
               // let `acted:true` be recorded for a PR that was never armed.
               const armResult = await deps.arm(pr);
+              // W1-T1117: `deps.arm` may return the bare `ArmOutcomeName` it always could, or the
+              // richer `ArmAttemptOutcome` (outcome + failureClass) — unwrap to the outcome name
+              // once, here, so every read below (including `armOutcome`/`armOutcomeArmed`, both
+              // unchanged) stays on the plain string it already expected.
+              const armOutcomeName = typeof armResult === "object" && armResult !== null ? armResult.outcome : armResult;
               // W1-T1061: capture the concrete outcome onto the OUTER `armOutcome` (read by
               // `finalizeDisposition` below) whenever one came back — a `void` return is the
               // legacy "treat as armed" shape `armOutcomeArmed` already special-cases, and it
               // names no real branch, so no field is written for it either.
-              if (armResult !== undefined) armOutcome = armResult;
-              if (!armOutcomeArmed(armResult)) {
+              if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
+              if (!armOutcomeArmed(armOutcomeName)) {
                 acted = false;
                 // The refusal used to go only to `say` -> stdout -> daemon.out.log, leaving no
                 // trace in the ledger where anyone looks. Name it on the disposed line.
-                standDownReason = `arm outcome: ${String(armResult)}`;
+                standDownReason = `arm outcome: ${String(armOutcomeName)}`;
+                // W1-T1117 (design ii/iv): an `arm-error-ignored` outcome classified `"unknown"`
+                // is the ONE non-armed outcome that must NOT retry — the classifier could not
+                // decode the failure at all, so nothing says the SAME attempt will ever succeed
+                // (unlike `"transient"`/`"retryable"`, which stay on the `acted:false` line just
+                // set above, exactly as every arm-error-ignored outcome already behaved). This
+                // reinstates the terminal (dedup-seeding) shape the plan record's rationale (1)
+                // always intended for a genuinely non-retryable refusal — see this arm's own
+                // `deps.arm` production wiring (run-task.ts's `buildSweepEffects`) for where
+                // `failureClass` is actually populated.
+                const failureClass = typeof armResult === "object" && armResult !== null ? armResult.failureClass : undefined;
+                if (armOutcomeName === "arm-error-ignored" && failureClass === "unknown") {
+                  acted = true;
+                  standDownReason = undefined;
+                }
               }
               break;
             }
@@ -4336,6 +4499,39 @@ export async function runSweep(
             });
           }
         }
+      }
+    }
+
+    // W1-T1000002 — CONVERGE: WITHDRAW WHAT THIS LANE DID NOT ARM. Runs regardless of `acted`
+    // (a held PR always has `acted:false` from the dedup above, so the ordinary action switch
+    // never reaches `deps.arm`) — a disarm alone is undone by the very next pass (the arming
+    // dedup reads GitHub's OWN live armed bit), so the withdrawal must be issued on every pass
+    // that still observes hold-stands-and-armed, not merely once. Safe when not armed and never
+    // throws (see `SweepDeps.disarmAutoMerge`'s own doc), so this costs nothing on the common
+    // quiet pass — `holdToWithdraw` is `undefined` for every disposition but a held, armed
+    // "mergeable" one.
+    if (holdToWithdraw && deps.disarmAutoMerge) {
+      try {
+        await deps.disarmAutoMerge(pr, holdToWithdraw);
+        const withdrawalLine = {
+          run_id: deps.runId,
+          task_id: pr.taskId ?? "SWEEP",
+          step: "automerge.hold_withdrawal",
+          pr_number: pr.prNumber,
+          pr_url: pr.prUrl,
+          head_sha: pr.headSha,
+          hold_by: holdToWithdraw.by,
+          hold_reason: holdToWithdraw.reason,
+        };
+        log("automerge.hold_withdrawal", withdrawalLine);
+        // Skipped under --dry-run, exactly like `finalizeDisposition`'s own `sweep.disposed`
+        // row below — a preview must leave no trace.
+        if (!deps.dryRun) appendLine(deps.ledgerPath, withdrawalLine);
+      } catch (e) {
+        log("sweep.hold_withdrawal_failed", {
+          pr_number: pr.prNumber,
+          error: String((e as Error)?.message ?? e),
+        });
       }
     }
 

@@ -64,6 +64,39 @@ export function runBranchTaskIds(lsRemoteOutput: string): ReadonlySet<string> {
   return ids;
 }
 
+/**
+ * W1-T1207 (design (i)+(iii)): task ids whose `run-<id>-<epochMs>` branch belongs to a pull
+ * request that is CLOSED AND UNMERGED — parsed from a batched, paginated `pulls?state=closed`
+ * sweep (the SAME shape `rmd reap-branches` already reads; see run-task.ts's
+ * `readRunBranchClosedPrsOutput`), never one lookup per branch — matching `runBranchTaskIds`'s
+ * own ls-remote cost argument ("a single sweep, never one round trip per candidate").
+ *
+ * WHY ONLY THIS ONE STATE. A MERGED pull request's head branch is deleted by GitHub, so it can
+ * never appear on the `ls-remote` sweep {@link runBranchTaskIds} parses in the first place — the
+ * predicate self-clears and needs no rule here (design (i)). An OPEN or DRAFT pull request still
+ * means the work is in flight, so its branch must keep blocking — this function names only the
+ * ids whose PR closed WITHOUT merging, the one state that must stop blocking.
+ *
+ * Rows are `<head-ref>\t<unmerged>`, `unmerged` being the literal string `"true"` when
+ * `merged_at` was `null` on that row (i.e. the PR closed without merging) and `"false"` when it
+ * was set (a merged row — included because a `state=closed` page mixes both, but skipped here
+ * since a merged head can never be a still-pushed branch anyway). A line that doesn't parse, or
+ * whose second column isn't exactly `"true"`, is skipped rather than thrown — the same
+ * degrade-not-crash discipline {@link runBranchTaskIds} already applies to a malformed ref.
+ */
+export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const rawLine of closedPrRows.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const [ref, unmerged] = line.split("\t");
+    if (!ref || unmerged !== "true") continue;
+    const id = taskIdFromRunBranch(ref);
+    if (id !== undefined) ids.add(id);
+  }
+  return ids;
+}
+
 /** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
 export interface NextRunnableOpts {
   /** Returns the open PR number for a task whose latest PR is currently OPEN. */
@@ -232,6 +265,17 @@ export interface NextRunnableOpts {
    * the closure from ONE {@link runBranchTaskIds} sweep per PASS — never one `ls-remote` per
    * candidate, which is the whole cost argument — e.g. `(id) => sweep.has(id)`. Omitted ⇒
    * behaves EXACTLY as before this check existed.
+   *
+   * W1-T1207: THIS PROBE HAS NO UPPER BOUND OF ITS OWN, AND MUST NOT GAIN ONE HERE — the fix is
+   * to read the pull request's state, never to guess when a branch stopped mattering (design
+   * (v)). A branch's PR being OPEN or DRAFT, or there being no PR at all, both keep this true,
+   * exactly as before; a branch is a leftover, not a signal, ONLY once its PR is CLOSED AND
+   * UNMERGED (design (i)) — GitHub does not delete the head on close, only on merge, so a
+   * closed-unmerged PR would otherwise leave this predicate answering `true` forever for a task
+   * nothing is working on. The caller is expected to build this closure as `sweep.has(id) &&
+   * !closedUnmerged.has(id)`, subtracting {@link closedUnmergedRunBranchTaskIds}'s own once-
+   * per-pass sweep — never a second predicate threaded separately through this chain, so the
+   * "one sweep, never one call per candidate" cost argument above holds for the subtraction too.
    */
   hasPushedRunBranch?: (taskId: string) => boolean;
   /**
@@ -243,6 +287,12 @@ export interface NextRunnableOpts {
    * outpaces the cached PR snapshot — so this callback is PR-number-free where `onSkip` is not.
    * The refusal is a SKIP, never a terminal state (design (iv)): the task is not marked done,
    * burns no strike, and is offered again on a later pass once the branch is gone.
+   *
+   * W1-T1205: fired ALONGSIDE (never instead of) `opts.onFiltered?.(t, "run-branch-already-
+   * pushed")` — this callback feeds the ledger row, `onFiltered` feeds any reader of the neutral
+   * {@link DispatchFilterReason} tally (status-board.ts's `deriveQueueHead`, W1-T1205's own
+   * caller). Before W1-T1205 this exclusion reached ONLY this ledger row, invisible to every
+   * other surface; the tally entry is what makes it nameable there too.
    */
   onSkipRunBranch?: (task: Task) => void;
 }
@@ -351,11 +401,24 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
 }
 
 /**
- * Why the eligibility filter declined a task. These are the FOUR conditions that used to return
- * silently — every later filter (indeterminate, circuit, lifetime cap, open PR) already ledgers
- * itself. Order matters and is the filter's own: see {@link tallyDispatchFilters} on first-match.
+ * Why the eligibility filter declined a task. FIVE of these are the conditions that used to
+ * return silently — every OTHER filter (indeterminate, circuit, lifetime cap, open PR) already
+ * ledgers itself through its own dedicated `onXxx` callback. `"run-branch-already-pushed"`
+ * (W1-T1205) is the exception that proves that split deliberate rather than accidental: it is
+ * ALSO ledgered through its own callback (`onSkipRunBranch`, mirroring `onSkip`'s in-flight
+ * legibility), but design (iii) of W1-T1205 puts it here too — unlike an open PR or a tripped
+ * breaker, nothing is IN FLIGHT and nothing clears it on its own, so a caller reading only this
+ * tally (queue-head's own consumer, `deriveQueueHead`) must still be able to name it, never see
+ * a task vanish with no reason recorded anywhere this union is consulted. Order matters and is
+ * the filter's own: see {@link tallyDispatchFilters} on first-match.
  */
-export type DispatchFilterReason = "already-merged" | "verify-not-auto" | "blocked" | "unmet-deps" | "continued-this-pass";
+export type DispatchFilterReason =
+  | "already-merged"
+  | "verify-not-auto"
+  | "blocked"
+  | "unmet-deps"
+  | "continued-this-pass"
+  | "run-branch-already-pushed";
 
 /** How many ids each bucket names before truncating — a count tells the operator something is
  *  wrong, ids tell him WHICH, and 8 keeps the line readable against today's largest bucket (18). */
@@ -391,6 +454,7 @@ export function tallyDispatchFilters(): {
     blocked: [],
     "unmet-deps": [],
     "continued-this-pass": [],
+    "run-branch-already-pushed": [],
   };
   const snapshot = (): IdleReasonTally =>
     (Object.keys(seen) as DispatchFilterReason[]).reduce((acc, r) => {
@@ -512,6 +576,13 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   // in-flight (or stood down) is decided by that richer check first.
   if (opts.hasPushedRunBranch?.(t.id)) {
     opts.onSkipRunBranch?.(t);
+    // W1-T1205: ALSO the named DispatchFilterReason — `onSkipRunBranch` alone left this
+    // exclusion reachable only through a `dispatch.skipped` ledger row, invisible to any reader
+    // that consults `onFiltered`/the tally instead of grepping the ledger (status-board.ts's
+    // `deriveQueueHead`, this task's own caller). Fired ALONGSIDE, never instead of,
+    // `onSkipRunBranch` — same "called alongside" discipline `onSinglePathCredit`/
+    // `onStaleCreditExcluded` already use elsewhere on this chain.
+    opts.onFiltered?.(t, "run-branch-already-pushed");
     return false; // A run branch for this id is already on origin — never a duplicate fresh build.
   }
   return true;
@@ -1275,6 +1346,27 @@ export interface DrainDeps {
    */
   readPushedRunBranches?: () => string;
   /**
+   * W1-T1207 (design (iii)): raw `pulls?state=closed` rows for the SAME run-branch sweep above —
+   * ONE BATCHED, PAGINATED read per pass, never one lookup per branch, parsed by {@link
+   * closedUnmergedRunBranchTaskIds} into the set the caller subtracts from `readPushedRunBranches`'
+   * blocking set immediately above the dispatch loop. Exists ONLY to answer "did an OPERATOR close
+   * this run branch's pull request without merging it" — a sweep-INITIATED close is already free
+   * from the ledger row it writes (design (iii)'s "two things are already free"), so this read is
+   * needed only for the operator-initiated half, which is exactly how the five measured exclusions
+   * (W1-T1098, W1-T1101, W1-T1104, W1-T1109, W1-T1000002) arose.
+   *
+   * FAILS TOWARD STILL BLOCKING — the OPPOSITE direction from `readPushedRunBranches`'s own fail
+   * OPEN: a throw (network blip, auth) is expected to degrade to `""`, which parses to an EMPTY
+   * exclusion set, so every pushed run branch keeps blocking exactly as it did before this
+   * dependency existed. That asymmetry is deliberate (design (ii)): "a false block delays one
+   * task, a false dispatch races a live run" — an unreadable closed-PR sweep must never become the
+   * reason a task dispatches.
+   *
+   * Optional — omitted, `hasPushedRunBranch` behaves EXACTLY as before this existed: it blocks on
+   * ANY pushed run branch regardless of its pull request's state.
+   */
+  readClosedRunBranchPrs?: () => string;
+  /**
    * The per-task dispatch CIRCUIT BREAKER (P29(ii)), re-derived from the
    * ledger each call — same freshness contract as `refreshMerged`/`isOpenPr`.
    * Optional — omitted, dispatch behaves exactly as before this breaker
@@ -1459,6 +1551,14 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const pushedRunBranches = deps.readPushedRunBranches
     ? runBranchTaskIds(deps.readPushedRunBranches())
     : undefined;
+  // W1-T1207 — SAME one-sweep-per-pass hoist, for the arm that stops a leftover branch from
+  // blocking forever: task ids whose pushed run branch's pull request is CLOSED AND UNMERGED.
+  // Subtracted from `pushedRunBranches` below so an OPEN/DRAFT PR (or no PR at all) still blocks
+  // exactly as before, and only a closed-unmerged one — the "not evidence of work in flight"
+  // case design (i) names — stops blocking.
+  const closedUnmergedRunBranches = deps.readClosedRunBranchPrs
+    ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
+    : undefined;
   while (attempted.length < max) {
     // FLEET CONTROL (W1-T11): checked FIRST, every tick — a hard STOP wins any
     // race against PAUSE and against picking up the next task. Neither check
@@ -1569,9 +1669,15 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // resolved ONCE above this loop, so this closure is a set-membership test and never a round
       // trip. Undefined when no reader was injected ⇒ `hasPushedRunBranch` stays undefined ⇒
       // `nextRunnable` behaves exactly as before, which is what keeps this additive.
+      //
+      // W1-T1207: `&& !closedUnmergedRunBranches?.has(id)` is the whole fix — a branch stays
+      // blocking (unchanged) unless its PR is CLOSED AND UNMERGED, in which case it is excluded
+      // from the AND and this predicate answers `false`. `closedUnmergedRunBranches` is `undefined`
+      // when no reader was injected, so `?.has(id)` is `undefined`, `!undefined` is `true`, and the
+      // predicate is byte-identical to before this existed — additive on this axis too.
       ...(pushedRunBranches
         ? {
-            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id),
+            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id) && !closedUnmergedRunBranches?.has(id),
             // RIDES THE EXISTING ROW (W1-T534 design (v)): `dispatch.skipped` with its own reason,
             // never a new step and never `dispatch.stood_down`, which has no reader at all. The
             // task is NOT marked done and burns NO strike — it is offered again once the branch is
@@ -1811,6 +1917,14 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   const pushedRunBranches = deps.readPushedRunBranches
     ? runBranchTaskIds(deps.readPushedRunBranches())
     : undefined;
+  // W1-T1207 — SAME one-sweep-per-pass hoist, for the arm that stops a leftover branch from
+  // blocking forever: task ids whose pushed run branch's pull request is CLOSED AND UNMERGED.
+  // Subtracted from `pushedRunBranches` below so an OPEN/DRAFT PR (or no PR at all) still blocks
+  // exactly as before, and only a closed-unmerged one — the "not evidence of work in flight"
+  // case design (i) names — stops blocking.
+  const closedUnmergedRunBranches = deps.readClosedRunBranchPrs
+    ? closedUnmergedRunBranchTaskIds(deps.readClosedRunBranchPrs())
+    : undefined;
   while (attempted.length < max) {
     const stopped = deps.checkStop?.();
     if (stopped) {
@@ -1908,9 +2022,15 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       // resolved ONCE above this loop, so this closure is a set-membership test and never a round
       // trip. Undefined when no reader was injected ⇒ `hasPushedRunBranch` stays undefined ⇒
       // `nextRunnable` behaves exactly as before, which is what keeps this additive.
+      //
+      // W1-T1207: `&& !closedUnmergedRunBranches?.has(id)` is the whole fix — a branch stays
+      // blocking (unchanged) unless its PR is CLOSED AND UNMERGED, in which case it is excluded
+      // from the AND and this predicate answers `false`. `closedUnmergedRunBranches` is `undefined`
+      // when no reader was injected, so `?.has(id)` is `undefined`, `!undefined` is `true`, and the
+      // predicate is byte-identical to before this existed — additive on this axis too.
       ...(pushedRunBranches
         ? {
-            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id),
+            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id) && !closedUnmergedRunBranches?.has(id),
             // RIDES THE EXISTING ROW (W1-T534 design (v)): `dispatch.skipped` with its own reason,
             // never a new step and never `dispatch.stood_down`, which has no reader at all. The
             // task is NOT marked done and burns NO strike — it is offered again once the branch is

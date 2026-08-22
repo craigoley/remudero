@@ -1,0 +1,144 @@
+- id: W1-T1206
+  title: "A PULL-REQUEST CLOSE IS NOT ONE OF THE LIVE-WRITE GUARD'S BOUNDARIES, SO THE GUARD FIRED AND STILL LET A SHIFTED-CLOCK SUITE CLOSE ELEVEN LIVE PULL REQUESTS — and the by-name exclusion list that was supposed to keep effect-reaching suites out of that sweep subtracts nothing from its actual candidate population"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    THE MECHANISM IS ALREADY ESTABLISHED AND IS CITED HERE RATHER THAN RE-DERIVED — see the
+    2026-08-22 recon behind W1-T1201 and the amendment on its note. This shard adds the ruling and
+    the remedy shape, not a second measurement of the same facts.
+
+    (1) WHAT IS SETTLED. `deriveCandidates` (`scripts/clock-sweep.mjs`) takes every
+    `test/*.test.ts` matching BOTH `AGE_SURFACE_RE` and `DATE_LITERAL_RE` — 123 of 601 files — and
+    `runSuite` shells `node --test` at `SWEEP_SHIFT_DAYS = 400`. Five of the six real-repo effect
+    builders survive into that runnable set: `run-task`, `sweep-absent-repush`,
+    `transient-escalations`, `fix-rung-no-task` and `review-orphan-wiring`.
+    `post-review-stall-escalation` matches no age token and is never a candidate.
+
+    (2) THE EXCLUSION LIST IS INERT ON THAT POPULATION. `SPAWN_REACHING` subtracts NOTHING from the
+    derived candidate set: its six names are not candidates themselves, so the list that exists to
+    keep effect-reaching suites out of the sweep removes none of them.
+
+    (3) AND THE GUARD WAS ARMED — IT IS NOT THAT IT FAILED TO FIRE. `NODE_TEST_CONTEXT` is set under
+    `node --test`, so `assertLiveWriteAllowed` fires. Its boundary union is
+    `git-push | gh-pr-create | gh-pr-merge | gh-issue-create | gh-pr-update-branch`. There is no
+    `gh-pr-close`, and none of its call sites is a close. `src/run-task.ts` records the decision at
+    the sweep's close dep: W1-T920's design note (vi) offered either a fenced `gh-pr-close`
+    boundary or reversibility by construction, and chose the latter — a close without
+    `--delete-branch` (W1-T921) preserves the head, so the act was judged reversible.
+
+    (4) Q1 — THE REVERSIBILITY ARGUMENT HELD, AND IT IS STILL THE WRONG AXIS. It held on its own
+    terms: all eleven were reopened, so the close WAS recoverable. But recoverability is not the
+    property that was needed.
+      - IT WENT UNNOTICED FOR EIGHTEEN HOURS. A reversible act nobody sees is indistinguishable
+        from an irreversible one for as long as it goes unseen, and the cost accrues over that
+        interval, not at the moment of the write.
+      - ITS RECORD WENT TO A SCRATCH `config.root` THAT NO LONGER EXISTS. The action reached GitHub
+        permanently while its ledger row went to a directory that has since been removed, so the
+        fleet ledger contains no trace of it at all. Reversibility says nothing about whether the
+        act is legible afterwards, and here it was not.
+      - IT PERMANENTLY UN-DISPATCHED FIVE TASKS. GitHub does not delete a run branch on close, so
+        the branches survived — but the tasks they carried stopped being dispatchable, and reopening
+        the pull requests does not by itself restore the dispatch state that closing them destroyed.
+      SO THE AXIS IS DETECTABILITY, NOT REVERSIBILITY. W1-T919's 2026-08-16 ruling gates the fleet
+      on irreversibility, and W1-T920 applied that ruling faithfully. WITH THIS EVIDENCE W1-T920
+      WOULD HAVE DECIDED DIFFERENTLY, and the reason is available without reopening W1-T919: option
+      (b) was chosen because the act was reversible, but the evidence now shows the failure was
+      never the act — it was that nothing anywhere recorded it. A test that mutates the live repo
+      and leaves no durable trace defeats a reversibility argument by making reversal depend on
+      somebody noticing.
+
+    (5) Q2 — THE TWO REMEDIES, WEIGHED RATHER THAN CHOSEN, BECAUSE THE CHOICE IS AN OPERATOR RULING.
+      (a) ADD THE `gh-pr-close` BOUNDARY W1-T920 DECLINED. Complete for this failure: a close under
+      `NODE_TEST_CONTEXT` would be refused outright, and the boundary set becomes the full list of
+      outward effects rather than four of five. WHAT IT MISSES: it reopens a closed design decision
+      and only fixes the effects someone thought to enumerate — the next unfenced effect is invisible
+      in exactly the same way, and the guard would still be a by-name list of verbs. It also refuses
+      nothing that is not routed through the guard's own helpers; a suite shelling `gh` directly
+      bypasses it.
+      (b) REQUIRE ANY LIVE WRITE UNDER `NODE_TEST_CONTEXT` TO LEAVE A DURABLE RECORD OUTSIDE THE
+      SCRATCH ROOT. Narrower and orthogonal: it does not prevent the write, it makes it legible, and
+      it attacks the property (4) identifies as the real one. It would have turned eighteen silent
+      hours into a row somebody could find. WHAT IT MISSES: it prevents nothing at all. The eleven
+      would still have been closed; they would merely have been closed visibly. It is also the
+      weaker guarantee to specify — "durable" means a path outside every scratch root, and getting
+      that wrong reproduces the original loss.
+      THEY ARE NOT ALTERNATIVES IN THE USUAL SENSE: (a) is prevention for one known effect, (b) is
+      detection for all of them. Taking (b) alone leaves the close happening; taking (a) alone
+      leaves the next unfenced effect silent. THIS SHARD DOES NOT CHOOSE.
+
+    (6) Q3 — AND THE EXCLUSION LIST CANNOT BE THE ANSWER ON ITS OWN, WHICHEVER REMEDY IS TAKEN. A
+    by-name set fails OPEN the moment a file is added: the file simply is not in the list, and
+    nothing asks. It already has failed open — five real-repo builders are in no list, which is
+    rationale (2). THE SHAPE IS A DERIVED CHECK BESIDE THE DECLARED LIST, AND THE PRECEDENT IS
+    `test/instrument-surface-completeness.test.ts` (W1-T402): `INSTRUMENT_SURFACE` stays the sole
+    declared blocking authority and is never touched by the alarm, while the alarm derives candidate
+    paths FROM THE LIVE TREE every run and fails the moment a derived candidate is neither covered
+    nor excused by a REASONED exclusion — "a bare exclusion (no reason, or a blank one) does not
+    count", in that file's own words. That is the discipline this task adopts, applied to
+    `SPAWN_REACHING` over `deriveCandidates`' own population.
+  design: |
+    (i) THE DELIVERABLE IS THE ALARM, AND THE PREVENTION RULING IS NOT PRE-EMPTED. What this task
+    builds is the derived completeness check of rationale (6). Whether the fleet also takes (a) or
+    (b) from rationale (5) is an operator ruling, and either can be built later WITHOUT redoing this
+    — the alarm names the population both would act on.
+
+    (ii) `SPAWN_REACHING` STAYS THE DECLARED AUTHORITY AND IS NOT REPLACED. The alarm never
+    subtracts, never adds, and never runs a suite. It reads the same candidate derivation the sweep
+    already performs and asks whether every candidate that can reach an outward effect is either
+    excluded or excused with a stated reason — the `INSTRUMENT_SURFACE_EXCLUSIONS` split exactly.
+
+    (iii) "CAN REACH AN OUTWARD EFFECT" MUST BE DERIVED FROM THE TREE, NOT ASSERTED. A check that
+    hardcodes the five names reproduces the by-name failure it exists to close. The implementer
+    derives reachability from source and states the derivation in the test's own header, the way
+    the precedent states its extension-alternation trap.
+
+    (iv) THE ALARM MUST NOT RUN THE SWEEP, SHIFT A CLOCK, OR SPAWN. It is a static read. A
+    completeness check that reaches the effects it is checking for is the defect twice.
+
+    (v) OUT OF SCOPE, NAMED AND CITED. W1-T1201 owns the `createdAt` clamp — that is the ARITHMETIC
+    that made a shifted clock read every pull request as abandoned; this task is the WRITE PATH that
+    let the resulting closes reach GitHub, and neither subsumes the other. W1-T1134 is the freshness
+    gate and is unrelated beyond sharing a host. W1-T920 and W1-T921 are cited for the decision and
+    the branch-preservation half; NEITHER IS RE-FILED, and this task does not amend either.
+  acceptance:
+    - claim: "a candidate suite that can reach an outward effect and is in no exclusion list fails the check"
+      proof: "unit test: W1-T1206: an effect-reaching candidate absent from the exclusion list fails"
+    - claim: "an exclusion carrying no stated reason does not count as an excuse"
+      proof: "unit test: W1-T1206: a bare exclusion without a reason does not excuse a candidate"
+    - claim: "the declared exclusion set is read and never modified by the check"
+      proof: "unit test: W1-T1206: the check never adds to or subtracts from the declared set"
+    - claim: "reachability is derived from the tree rather than hardcoded as a list of names"
+      proof: "unit test: W1-T1206: reachability is derived, not a hardcoded name list"
+    - claim: "the check completes without shifting a clock, running a suite or spawning"
+      proof: "unit test: W1-T1206: the completeness check spawns nothing and shifts no clock"
+  files: [scripts/clock-sweep.mjs, test/clock-sweep-effect-completeness.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#close-is-not-a-live-write-boundary-2026-08-22"
+  plan_refs: ["W1-T920", "W1-T921", "W1-T1201", "W1-T1134", "W1-T402", "W1-T919"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NONE IS PURE-PATH. All five are NAME-FILTERED
+    `unit test:` forward references, for which `proofScopePath` returns `undefined`, so `proof-scope`
+    is silent on each. A pure-path proof naming `scripts/clock-sweep.mjs`'s existing test home would
+    have returned `verdict: pass` today, before any of this work exists — an executed proof that
+    discriminates nothing. A name that does not exist yet cannot pass by accident.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19. The subject is the path by which a test reached the
+    live repository and closed pull requests nobody had asked to close. A mistake here either
+    re-arms that path or adds a check that itself reaches it. Claiming Rule 19 forced the band would
+    be a false claim in the direction that flatters the filing.
+
+    A NEW TEST FILE IS DECLARED RATHER THAN AN EXISTING HOME, DELIBERATELY, AND THE COST IS
+    ACCEPTED. `test/clock-sweep.test.ts` exists, but design (iv) requires this check to be a static
+    read that never spawns, and putting it beside a suite that drives the sweep invites exactly the
+    entanglement the check exists to detect. Two stems either way.
+
+    THE MEASUREMENTS ARE CITED, NOT RE-TAKEN. Rationale (1)-(3) restate the recon behind W1-T1201's
+    amended note. Re-derive the candidate population by reading `AGE_SURFACE_RE` and
+    `DATE_LITERAL_RE` out of `scripts/clock-sweep.mjs` and applying them to `test/` — never by
+    running the script, which is the thing under investigation.

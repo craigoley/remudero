@@ -35,6 +35,23 @@ raw: "CORRECTION TO fb-1785870873355-d91fc2 — THE SHIPS-UNWIRED FLOOR IS WORKI
   'scanned 0'. That is an observability gap, not a correctness gap."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2464
+summary:
+  headline: Floor works; advisory data auto-deletes before W1-T323 reads it
+  what_happened: "Original filing incorrectly declared the floor non-functional;
+    it correctly flagged three dead code exports in PR #1312. However,
+    review.unwired_advisory lacks a retention category and will be purged at the
+    next rotation, and W1-T323's 5% threshold is mathematically unachievable
+    with current sample sizes (n<20 yields only 0%, 20%, 40% achievable rates)."
+  decision: Register review.unwired_advisory retention category before next
+    rotation and revise W1-T323 threshold logic to account for discrete
+    probability below n=20
+  options:
+    - label: Fix both issues immediately
+      consequence: Advisory data preserved, W1-T323 proceeds with mathematically sound
+        thresholds
+    - label: Archive data manually, defer threshold fix
+      consequence: Data saved but gate uses impossible math, may reject valid deploys
+    - label: Pause W1-T323 until sample size reaches n≥20
+      consequence: Guarantees achievable thresholds but delays deployment gate 1–2 days

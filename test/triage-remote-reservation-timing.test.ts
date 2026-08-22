@@ -100,10 +100,11 @@ const SUMMARY_PAYLOAD = {
   ],
 };
 
-/** Standard gh shim: `pr list` empty (so the mint's open-PR source sees nothing), `pr create`
- *  answers a fixed URL, `--json headRefName` answers from the bare origin's OWN pushed `run-*`
- *  branch (read live off disk), `pr diff` empty. Identical shape to test/triage.test.ts's W1-T348
- *  shim — this file drives the same real round-trip, not a shortcut past it. */
+/** Standard gh shim: `pr list` empty (so the mint's open-PR source sees nothing), the REST
+ *  create (`gh api --method POST repos/.../pulls`, W1-T1202) answers a fixed `html_url`,
+ *  `--json headRefName` answers from the bare origin's OWN pushed `run-*` branch (read live
+ *  off disk), `pr diff` empty. Identical shape to test/triage.test.ts's W1-T348 shim — this
+ *  file drives the same real round-trip, not a shortcut past it. */
 function writeGhShim(shimDir: string, bare: string): void {
   writeFileSync(
     join(shimDir, "gh"),
@@ -111,7 +112,7 @@ function writeGhShim(shimDir: string, bare: string): void {
       "#!/bin/sh",
       'case "$*" in',
       '  *"pr list"*) echo "[]" ;;',
-      '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/999" ;;',
+      '  *"api --method POST"*) echo \'{"html_url":"https://github.com/craigoley/remudero/pull/999","number":999}\' ;;',
       `  *"--json headRefName"*) git -C ${bare} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
       "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
       '  *"pr diff"*) echo "" ;;',

@@ -18,6 +18,6 @@ raw: "ADDENDUM to fb-1785899307058-60fbcf — THE GRAPHQL DRAIN IS PER OPEN TAB,
   then the server polls too and closing the tab is only a partial mitigation."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null

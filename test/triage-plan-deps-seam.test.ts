@@ -228,8 +228,9 @@ test("SEAM REACHABILITY: an injected spawn carries planCommand PAST the worker t
 // needs to take the propose branch instead of bailing "inconsistent".
 //
 // The push is REAL and lands in the throwaway bare origin this fixture created — offline,
-// no network, no live repo. `gh pr create` fails on the shim immediately afterwards, which
-// is fine: the push has already happened by then, and that is what is being proven.
+// no network, no live repo. The REST create (`gh api --method POST repos/.../pulls`,
+// W1-T1202) fails on the shim immediately afterwards, which is fine: the push has already
+// happened by then, and that is what is being proven.
 test("SEAM REACHABILITY: a worker-shaped fake spawn drives triageCommand all the way to its git push", async () => {
   const feedbackId = `fb-seam-push-${Date.now()}`;
 
@@ -265,13 +266,14 @@ test("SEAM REACHABILITY: a worker-shaped fake spawn drives triageCommand all the
   // …and did NOT bail at the inconsistent branch, which is what stopped every earlier attempt.
   // …and did NOT bail at the "inconsistent" branch, which is where every earlier attempt
   // stopped. The run now reaches the git push (run-task.ts:8381, measured DA=1) and only
-  // then fails at `gh pr create`, which the shim refuses — so the failure NAMES the step
-  // AFTER the push, which is the observable proof the push line executed.
+  // then fails at the REST create (`gh api --method POST repos/.../pulls`, W1-T1202),
+  // which the shim refuses — so the failure NAMES the step AFTER the push, which is the
+  // observable proof the push line executed.
   const errs = ledger.filter((l) => l.step === "triage.error");
   assert.equal(errs.length, 1, "exactly one terminal error");
   assert.match(
     String(errs[0].error),
-    /gh pr create/,
-    "the run got past the git push and died at gh pr create — NOT at the inconsistent branch",
+    /gh api.*pulls/,
+    "the run got past the git push and died at the REST create — NOT at the inconsistent branch",
   );
 });

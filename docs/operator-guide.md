@@ -310,6 +310,75 @@ phase 3 disappears. It did not transfer to `task-id-existence`, and the reason i
 workflows, so a gate wired as an npm script is derived as a candidate wherever its invocation
 sits. Workflow placement was simply irrelevant to that half.
 
+## Where to run a verb, and why the wrong place answers confidently
+
+Every item below is read-only or near enough, so the failure mode is not damage — it is a
+**confident wrong answer**. The pattern is always the same: a tool answered about state it could
+not see, in the same tone it uses when it can. Each was reproduced on `Craigs-Mac-mini` on
+2026-08-22; where a claim did **not** reproduce here, that is said rather than repeated.
+
+- **A gate piped through `head` gives you `head`'s exit code.** `(exit 1) | head -3` leaves `$?` at
+  **0** while `${PIPESTATUS[0]}` is **1**. A `diff-coverage` calibration read `EXIT=0` while the
+  tool itself exited 1 with lines named, because exemption output sat above the verdict and the
+  pipe swallowed the status. Read `${PIPESTATUS[0]}`, or do not pipe.
+
+- **`git checkout -- <path>` restores from the INDEX, not from `origin/main`.** Stage an edit, then
+  overwrite the file, then `git checkout --` it: you get the **staged** copy back, not the
+  committed one. A "revert this file and see what fails" experiment therefore passes vacuously
+  whenever the index already holds the edited version. Use `git show origin/main:<path>` when you
+  mean the merge base.
+
+- **A clean working tree does not mean a clean index, and `commit --amend` ships the difference.**
+  In a reused worktree `git diff` can report nothing while `git diff --cached` reports a staged
+  change — the working tree matches the index, and only the index differs from `HEAD`. Amending
+  there silently ships whatever someone else staged. Check `git diff --cached --stat` before every
+  `commit --amend`.
+
+- **`tsx` strips types without checking them, so a unit suite can read fully green while `tsc`
+  fails.** A file declaring `const n: number = "definitely not a number"` **executes** under `tsx`
+  and prints the string; `tsc` on the same file reports `TS2322: Type 'string' is not assignable to
+  type 'number'`. A type-level defect is invisible to the whole test suite, and a file can be
+  load-bearing with no test able to say so. `tsc --noEmit` is a separate gate for a reason — never
+  read a green suite as a green typecheck.
+
+- **A `gh` subcommand's existence is version-dependent; the REST form is not.** `gh pr
+  update-branch` arrived in 2.53, so on an older CLI four invocations can error while reading as
+  successful work. This machine is **2.92.0** and has the subcommand; a fleet host measured
+  **2.45.0** and did not. Rather than tracking which host has which, prefer the version-independent
+  form — `gh api --method PUT repos/{owner}/{repo}/pulls/{n}/update-branch` — and run `gh
+  --version` before relying on any subcommand you have not used on that host.
+
+- **`docker exec` defaults to `/app`, which is the baked image copy and is not a git work tree.**
+  The Dockerfile sets `WORKDIR /app` and copies a snapshot there, so that directory's verb list is
+  frozen at image build time and a verb that shipped hours ago is simply absent. **The live
+  checkout is `/home/node/Remudero/remudero`; pass `-w`:**
+  `docker exec -w /home/node/Remudero/remudero remudero-daemon ./bin/rmd <verb>`.
+
+- **That checkout is deliberately detached, so it sits behind main between deploys.**
+  `deploy/entrypoint.sh` runs `git -C "$TREE" checkout --detach "$TARGET"` on every boot, so
+  `git rev-parse --abbrev-ref HEAD` there answers `HEAD` and the tree stays pinned at whatever sha
+  it booted on. The verbs that gate on `syncPlanOrRefuse` refuse rather than act on a stale plan;
+  the ones that do not will answer from the pinned tree without comment. **Fetching and
+  re-detaching to unstick it moves the daemon's own work tree —
+  check `state/inflight/` is empty first**, or you will move the ground under a running worker.
+
+- **`gh api --jq '.body'` appends a trailing newline, so a byte-for-byte comparison against the
+  source file is always off by one.** Measured on a real PR body: the jq capture is exactly the
+  body plus one `\n`, and because the body already ends in a newline, stripping trailing newlines
+  removes two characters rather than one. **And `wc -c` counts bytes while Python counts
+  characters** — the same body measured 2,587 characters and 2,601 bytes, the gap made entirely of
+  multi-byte punctuation. A body full of em-dashes reads as edited when it is identical.
+  **Strip trailing newlines and compare characters.**
+
+- **A rate-limited call returns a small JSON error payload with HTTP 403 — and it parses.** The
+  captured shape is an object with exactly `message`, `documentation_url` and `status`, where
+  `status` is the **string** `"403"`. It was read as content twice. **Guard structurally — assert
+  the shape you expected (a list, or a known key), never a size.** A size threshold is a guess that
+  happens to work until the error text changes. **And you can check the budget freely: reading
+  `gh api rate_limit` does not itself count against the limit**, so a script that is unsure may
+  ask before it acts rather than guessing from a failure it has already caused.
+
+
 ## Crisis runbook: the procedures you need at 3am
 
 The rest of this guide is about reading state. These four are the ones you need when you have
