@@ -31,16 +31,24 @@ import { test } from "node:test";
 import { deriveDisposition, DEFAULT_SWEEP_POLICY, type LiveStateResult, type OpenPrView } from "../src/lib/sweep.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import {
+  decideFixRebase,
   escalationTaskIdFor,
   fixHeadAcceptable,
+  fixRebaseAlreadySpent,
+  fixRebaseMergeFactsFromRest,
   fixRungTaskFor,
   fixRungTerminationVerdict,
+  ghUpdateBranch,
+  ghUpdateBranchArgv,
+  mergeFactsFromRest,
   outOfDiffBlockerFor,
   prerequisiteMerged,
   priorStrikesFor,
+  runFixRebase,
   runFixRung,
   type FixRungOutcome,
 } from "../src/run-task.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -759,4 +767,323 @@ test("W1-T1095: a stood-down termination is byte-identical to what it emitted be
   const parked = fixRungTerminationVerdict({ outcome: "parked", reason: "r", blockedOnPr: 7 });
   assert.notEqual(parked.phrase, t.phrase);
   assert.notDeepEqual(parked.extra, t.extra);
+});
+
+// ── W1-T1095 capability 3 — REBASE ──────────────────────────────────────────────────────────
+//
+// The rung can now PARK on a prerequisite and RESUME when it merges (capability 1, above). But a
+// resumed pull request still does not CONTAIN the merged prerequisite, so the next strike would
+// re-run a fix worker against a checkout that lacks the very remedy the review named. These
+// tests drive the decision and its thin I/O wrapper directly; no gateway is reached — the
+// `updateBranch`/`readMergeFacts` seams are fakes on every path, and the one test that calls the
+// real write asserts the live-write guard REFUSES it.
+
+/** The facts a rebase-worthy resumed PR presents — every test below mutates exactly one field,
+ *  so each assertion discriminates on that field alone rather than on a lucky default. */
+const REBASE_OK = {
+  prerequisitePr: 2411,
+  reviewPassed: false,
+  mergeable: "MERGEABLE" as const,
+  behindBy: 3,
+  alreadyRebased: false,
+};
+
+test("W1-T1095: a resumed pull request behind its base is rebased, and the reason names the field that justified it", () => {
+  const d = decideFixRebase(REBASE_OK);
+  assert.equal(d.rebase, true);
+  assert.match(d.reason, /prerequisite #2411 merged/);
+  assert.match(d.reason, /3 commit\(s\) behind its base/, "the reason names behind_by, not a bare 'behind main'");
+});
+
+test("W1-T1095: a rebase never fires on a pull request whose review already passed", () => {
+  const d = decideFixRebase({ ...REBASE_OK, reviewPassed: true });
+  assert.equal(d.rebase, false, "a new head would discard the posted verdict");
+  assert.match(d.reason, /review already passed/);
+  assert.match(d.reason, /review-orphan slot/, "and it says what the new head would cost");
+  // DISCRIMINATION: the only difference from the rebasing case above is this one field.
+  assert.equal(decideFixRebase({ ...REBASE_OK, reviewPassed: false }).rebase, true);
+});
+
+test("W1-T1095: a rebase fires at most once per pull request", () => {
+  const d = decideFixRebase({ ...REBASE_OK, alreadyRebased: true });
+  assert.equal(d.rebase, false);
+  assert.match(d.reason, /already rebased once/);
+  assert.match(d.reason, /the bound is one rebase-and-retry/);
+});
+
+test("W1-T1095: the rebase refuses a conflicted head and leaves the conflict path to the sweep", () => {
+  const d = decideFixRebase({ ...REBASE_OK, mergeable: "CONFLICTING" });
+  assert.equal(d.rebase, false);
+  assert.match(d.reason, /conflicts with its base/);
+  assert.match(d.reason, /belongs to the sweep/);
+});
+
+test("W1-T1095: the rebase refuses an unreadable merge state rather than acting on it", () => {
+  for (const mergeable of ["UNKNOWN" as const, undefined]) {
+    const d = decideFixRebase({ ...REBASE_OK, mergeable });
+    assert.equal(d.rebase, false, `mergeable=${String(mergeable)} must not rebase`);
+    assert.match(d.reason, /not a definite MERGEABLE/);
+  }
+  assert.match(decideFixRebase({ ...REBASE_OK, mergeable: undefined }).reason, /unreadable/);
+});
+
+test("W1-T1095: the rebase refuses an unreadable comparison, and refuses a head already level with its base", () => {
+  const unreadable = decideFixRebase({ ...REBASE_OK, behindBy: undefined });
+  assert.equal(unreadable.rebase, false);
+  assert.match(unreadable.reason, /cannot read how far behind/);
+
+  for (const behindBy of [0, -1]) {
+    const level = decideFixRebase({ ...REBASE_OK, behindBy });
+    assert.equal(level.rebase, false, `behindBy=${behindBy} has nothing to take`);
+    assert.match(level.reason, /already contains its base/);
+  }
+});
+
+test("W1-T1095: the update-branch call is a pure API argv needing no branch and no checkout", () => {
+  const argv = ghUpdateBranchArgv("craigoley", "remudero", 2411);
+  assert.deepEqual(argv, ["api", "--method", "PUT", "repos/craigoley/remudero/pulls/2411/update-branch"]);
+  // FALSIFIER: nothing in the argv names a branch, a worktree, or a local git verb — the daemon
+  // is detached on every boot, which is what broke armAuto's --delete-branch (W1-T1111).
+  for (const forbidden of ["checkout", "worktree", "rebase", "branch", "-C"]) {
+    assert.ok(!argv.includes(forbidden), `argv must not carry ${forbidden}`);
+  }
+});
+
+test("W1-T1095: the one-rebase bound is folded from the ledger, per pull request", () => {
+  const lines = [
+    { step: "fix.rebased", pr_number: 2411 },
+    { step: "fix.rebase_refused", pr_number: 2434 },
+    { step: "fix.dispatch", pr_number: 2434 },
+  ];
+  assert.equal(fixRebaseAlreadySpent(lines, 2411), true);
+  assert.equal(fixRebaseAlreadySpent(lines, 2434), false, "a refusal is not a spent rebase");
+  assert.equal(fixRebaseAlreadySpent([], 2411), false);
+});
+
+test("W1-T1095: GitHub's REST payloads map onto the facts, resolving toward refusal on anything undecided", () => {
+  assert.deepEqual(mergeFactsFromRest({ mergeable: true }, { behind_by: 4 }), {
+    mergeable: "MERGEABLE",
+    behindBy: 4,
+  });
+  assert.equal(mergeFactsFromRest({ mergeable: false }, {}).mergeable, "CONFLICTING");
+  assert.equal(mergeFactsFromRest({ mergeable_state: "dirty" }, {}).mergeable, "CONFLICTING");
+  assert.equal(mergeFactsFromRest({ mergeable: null }, {}).mergeable, "UNKNOWN", "a null GitHub has not computed is never MERGEABLE");
+  assert.equal(mergeFactsFromRest(undefined, undefined).mergeable, "UNKNOWN");
+  assert.equal(mergeFactsFromRest({ mergeable: true }, { behind_by: "3" }).behindBy, undefined, "a non-number behind_by is unreadable, not zero");
+});
+
+test("W1-T1095: the REST reader composes two reads and fails soft to an empty reading", () => {
+  const seen: string[][] = [];
+  const facts = fixRebaseMergeFactsFromRest("o", "r", 7, (args) => {
+    seen.push(args);
+    return args[1].includes("/compare/")
+      ? { behind_by: 2 }
+      : { mergeable: true, base: { ref: "main" }, head: { sha: "abc123" } };
+  });
+  assert.deepEqual(facts, { mergeable: "MERGEABLE", behindBy: 2 });
+  assert.deepEqual(seen[0], ["api", "repos/o/r/pulls/7"]);
+  assert.deepEqual(seen[1], ["api", "repos/o/r/compare/main...abc123"]);
+
+  // A THROWING gateway yields NOTHING, which decideFixRebase then refuses on.
+  const soft = fixRebaseMergeFactsFromRest("o", "r", 7, () => {
+    throw new Error("rate limited");
+  });
+  assert.deepEqual(soft, {});
+  assert.equal(decideFixRebase({ ...REBASE_OK, mergeable: undefined, behindBy: undefined }).rebase, false);
+
+  // A payload with no base/head skips the compare entirely rather than building a broken ref.
+  const noCompare: string[][] = [];
+  const partial = fixRebaseMergeFactsFromRest("o", "r", 7, (args) => {
+    noCompare.push(args);
+    return { mergeable: true };
+  });
+  assert.equal(noCompare.length, 1, "no second read when the first payload names no base/head");
+  assert.equal(partial.behindBy, undefined);
+});
+
+test("W1-T1095: every rebase outcome writes a row naming its reason, including every refusal", async () => {
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const io = (over: Partial<Parameters<typeof runFixRebase>[1]> = {}) => ({
+    log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra }),
+    say: () => {},
+    ledgerLines: () => [] as Array<Record<string, unknown>>,
+    readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 2 }),
+    updateBranch: () => ({ ok: true }),
+    ...over,
+  });
+  const args = { prUrl: "https://github.com/o/r/pull/7", prerequisitePr: 2411, reviewPassed: false, strikes: 1 };
+
+  // 1. the happy path
+  const ok = await runFixRebase(args, io());
+  assert.equal(ok.rebased, true);
+  assert.equal(rows.at(-1)?.step, "fix.rebased");
+  assert.equal(rows.at(-1)?.extra?.behind_by, 2, "the row carries the field that justified it");
+
+  // 2. the write failed
+  rows.length = 0;
+  const failed = await runFixRebase(args, io({ updateBranch: () => ({ ok: false, error: "422 not mergeable" }) }));
+  assert.equal(failed.rebased, false);
+  assert.equal(rows.at(-1)?.step, "fix.rebase_failed");
+  assert.match(String(rows.at(-1)?.extra?.reason), /422 not mergeable/);
+
+  // 3. the decision refused
+  rows.length = 0;
+  const refused = await runFixRebase(args, io({ readMergeFacts: () => ({ mergeable: "CONFLICTING" }) }));
+  assert.equal(refused.rebased, false);
+  assert.equal(rows.at(-1)?.step, "fix.rebase_refused");
+  assert.match(String(rows.at(-1)?.extra?.reason), /conflicts with its base/);
+
+  // 4. no write dep wired — refused, never silently skipped
+  rows.length = 0;
+  const unwired = await runFixRebase(args, io({ updateBranch: undefined }));
+  assert.equal(unwired.rebased, false);
+  assert.equal(rows.at(-1)?.step, "fix.rebase_refused");
+  assert.match(String(rows.at(-1)?.extra?.reason), /no update-branch dep wired/);
+
+  // 5. an unparseable url — still a row, still a reason
+  rows.length = 0;
+  const badUrl = await runFixRebase({ ...args, prUrl: "not-a-url" }, io());
+  assert.equal(badUrl.rebased, false);
+  assert.equal(rows.at(-1)?.step, "fix.rebase_refused");
+  assert.match(String(rows.at(-1)?.extra?.reason), /does not parse/);
+
+  // 6. no read dep wired — the merge state is unreadable, so it refuses
+  rows.length = 0;
+  const noRead = await runFixRebase(args, io({ readMergeFacts: undefined }));
+  assert.equal(noRead.rebased, false);
+  assert.match(String(rows.at(-1)?.extra?.reason), /not a definite MERGEABLE/);
+
+  // 7. the bound, read through the real fold rather than a flag
+  rows.length = 0;
+  const bounded = await runFixRebase(args, io({ ledgerLines: () => [{ step: "fix.rebased", pr_number: 7 }] }));
+  assert.equal(bounded.rebased, false);
+  assert.match(String(rows.at(-1)?.extra?.reason), /already rebased once/);
+
+  // NO PATH RETURNED WITHOUT LEDGERING: every case above ended on a row.
+  assert.ok(rows.length > 0);
+});
+
+test("W1-T1095: the real update-branch write sits behind the live-write guard", () => {
+  // Under the node test runner the guard REFUSES before any subprocess is reached — the boundary
+  // is named for this write, not borrowed from the merge or push boundary beside it.
+  assert.throws(() => ghUpdateBranch("o", "r", 7), /gh-pr-update-branch/);
+
+  // With the guard explicitly lifted, the injected exec receives exactly the pure-API argv, and a
+  // throwing exec is reported rather than propagated.
+  withLiveWritesAllowed(() => {
+    const calls: Array<[string, string[]]> = [];
+    const ok = ghUpdateBranch("o", "r", 7, ((cmd: string, argv: string[]) => {
+      calls.push([cmd, argv]);
+      return Buffer.from("");
+    }) as never);
+    assert.deepEqual(ok, { ok: true });
+    assert.equal(calls[0][0], "gh");
+    assert.deepEqual(calls[0][1], ghUpdateBranchArgv("o", "r", 7));
+
+    const bad = ghUpdateBranch("o", "r", 7, (() => {
+      throw new Error("boom");
+    }) as never);
+    assert.equal(bad.ok, false);
+    assert.match(String(bad.error), /boom/);
+  });
+});
+
+test("W1-T1095: a successful rebase ENDS the rung without spending a strike, because the head has moved", () => {
+  const t = fixRungTerminationVerdict({
+    outcome: "rebased",
+    reason: "prerequisite #2411 merged and this head is 3 commit(s) behind its base",
+    blockedOnPr: 2411,
+  });
+  assert.equal(t.phrase, "rebased onto its base (prerequisite #2411)");
+  assert.deepEqual(t.extra, { blocked_on_pr: 2411 }, "the prerequisite rides on the row as a field");
+  assert.match(t.reason, /3 commit\(s\) behind its base/);
+  // DISCRIMINATION: rebased and parked are distinguishable terminations, not one shape twice.
+  const parked = fixRungTerminationVerdict({ outcome: "parked", reason: "r", blockedOnPr: 2411 });
+  assert.notEqual(parked.phrase, t.phrase);
+  // ...and neither is the stood-down shape.
+  const stood = fixRungTerminationVerdict({ outcome: "stood_down", reason: "r", standDownReason: "s" });
+  assert.notEqual(stood.phrase, t.phrase);
+  assert.notDeepEqual(stood.extra, t.extra);
+});
+
+test("W1-T1095: a resumed pull request behind its base rebases instead of spending the next strike", async () => {
+  const blockedReview = fixRungReview("failure", [
+    fixRungCriterion({ claim: "criterion A", met: false, reason: "blocked on #2363 — must land first" }),
+  ]);
+  const { lines, log } = fixRungTestLog();
+  let spawnCalls = 0;
+  let updated = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungTestOpts(),
+    strikeCap: 2,
+    initialReview: blockedReview,
+    deps: {
+      spawn: async () => {
+        spawnCalls++;
+        return fixRungWorkerResult({ sessionId: "should-not-run" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => fixRungReview("success", []),
+      push: () => {},
+      issues: fixRungTestIssues(),
+      ledgerPath: fixRungTestLedgerPath(),
+      log,
+      say: () => {},
+      account: (r) => r,
+      readPrerequisiteState: (): LiveStateResult => ({ ok: true, state: "MERGED" }),
+      ledgerLines: () => [],
+      readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 2 }),
+      updateBranch: () => {
+        updated++;
+        return { ok: true };
+      },
+    },
+  });
+
+  assert.equal(outcome.outcome, "rebased", "the head moved, so the rung ended here");
+  assert.equal(updated, 1, "update-branch was called exactly once");
+  assert.equal(spawnCalls, 0, "NO strike was spent — a stale worktree would have pushed nothing");
+  assert.equal(outcome.strikes, 0, "and the strike counter did not move");
+  const rebased = lines.find((l) => l.step === "fix.rebased");
+  assert.ok(rebased, `expected a fix.rebased row; got ${JSON.stringify(lines.map((l) => l.step))}`);
+  assert.equal(rebased!.behind_by, 2);
+  assert.ok(lines.some((l) => l.step === "fix.resumed"), "and it resumed before it rebased");
+
+  // PAIRED CONTROL: the SAME rung with the head already level with its base refuses to rebase and
+  // proceeds to a real strike — so the assertions above discriminate on `behindBy`, not on the
+  // deps merely being wired.
+  const { lines: lines2, log: log2 } = fixRungTestLog();
+  let spawn2 = 0;
+  let updated2 = 0;
+  const level = await runFixRung({
+    ...fixRungTestOpts(),
+    strikeCap: 2,
+    initialReview: blockedReview,
+    deps: {
+      spawn: async () => {
+        spawn2++;
+        return fixRungWorkerResult({ sessionId: "fix-session-resumed" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => fixRungReview("success", []),
+      push: () => {},
+      issues: fixRungTestIssues(),
+      ledgerPath: fixRungTestLedgerPath(),
+      log: log2,
+      say: () => {},
+      account: (r) => r,
+      readPrerequisiteState: (): LiveStateResult => ({ ok: true, state: "MERGED" }),
+      ledgerLines: () => [],
+      readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 0 }),
+      updateBranch: () => {
+        updated2++;
+        return { ok: true };
+      },
+    },
+  });
+  assert.equal(level.outcome, "fixed", "nothing to take, so the ordinary strike ran");
+  assert.equal(updated2, 0, "and update-branch was never called");
+  assert.equal(spawn2, 1);
+  assert.ok(lines2.some((l) => l.step === "fix.rebase_refused"), "the refusal is still ledgered");
 });
