@@ -51,11 +51,39 @@
     those spans is a window in which the repair arm stood down while nothing was spending, and the
     operator's measurement of ten-to-fifteen minutes of CI per PR today makes that window WIDER
     than this corpus shows, not narrower.
+
+    (7) AMENDED 2026-08-22 — THE `ci.polling` SEAM IS UNIMPLEMENTABLE, MEASURED BOTH WAYS.
+    `test/ledger-rotation.test.ts` scans `src/run-task.ts` for `.step === "…"` and demands every
+    step so read be present in `DECISION_RELEVANT_LEDGER_STEPS`. NOT RETAINED: the
+    derived-from-consumers test fails, naming `ci.polling, pr.polling`. RETAINED: rotation tests 7,
+    11, 12 and 13 fail on size — "decision-relevant step `ci.polling` was dropped by rotation" plus
+    three falsifiers that check the retained core still fits. VERIFIED AS SIZE AND NOT ORDERING by
+    moving both entries to the END of the set and getting identical failures.
+
+    AND RETAINING THEM WOULD BE WRONG EVEN IF IT PASSED. `src/lib/ledger.ts`'s own doc names these
+    two as "pure telemetry/polling noise … exactly the high-frequency, no-decision-consequence lines
+    that drove the measured growth", and the ledger union holds 5,411 `ci.polling` rows against
+    1,205 `fix.dispatch` — retaining them forever is the bloat the rotator exists to prevent.
+
+    THE REPLACEMENT IS DESIGN (i-a), AND IT FORCES ONE FILE. `src/lib/ledger.ts` must register
+    `run.awaiting_external` in `DECISION_RELEVANT_LEDGER_STEPS`, because the predicate reads that
+    step to decide and the derived-from-consumers scan will demand it — ONE entry for a
+    once-per-wait row, with none of the size problem `ci.polling` has. `files:` is NOT widened for
+    it: `postMergeAmendmentViolations` refuses a post-merge amendment, and #2432 resolved this exact
+    shape by DECLARING AND JUSTIFYING the extra file in the PR body instead. The build must do the
+    same.
   design: |
     (i) THE SEAM IS THE RUN'S PHASE, NOT A PROCESS PROBE. The run itself already writes what it is
-    doing: a `ci.polling` row means the worker is done and GitHub is the blocker. That is evidence
-    the ledger the sweep already reads carries, which is the same shape W1-T1110 established — read
-    what exists rather than inventing a new signal.
+    doing, and the sweep already loads the ledger it writes into — the same shape W1-T1110
+    established, reading what exists rather than inventing a new signal.
+
+    (i-a) AMENDED 2026-08-22 — THE SEAM IS A ONE-SHOT `run.awaiting_external` ROW, NOT `ci.polling`.
+    This note originally named `ci.polling`, and that row CANNOT be used; see rationale (7). The
+    replacement is a single `run.awaiting_external` row emitted ONCE on entry to each wait loop —
+    both writers already sit in this task's declared `src/run-task.ts` (the `ci.polling` site and
+    the `pr.polling` site) — with the predicate reading the task's latest RETAINED row. It is
+    low-frequency, retention-safe and decision-relevant, and it is still read from the ledger the
+    sweep already loads, so acceptance criterion 4 holds unchanged and no criterion moves.
 
     (ii) WHAT EACH SEAM MISSES, STATED BOTH WAYS. A PHASE read misses a run that died mid-phase —
     but a dead run has no worker either, so the conclusion is unchanged and the failure is safe. A
@@ -126,3 +154,19 @@
     (a merged id's branch is deleted and would read zero), and an id that genuinely appears in a
     main commit subject for the `git log` surface (W1-T1110 does NOT, and was rejected as a control
     for that surface for exactly that reason).
+
+    AMENDED 2026-08-22 — THE SEAM NAMED IN DESIGN (i) DID NOT SURVIVE IMPLEMENTATION, AND THE
+    RECORD SAYS SO RATHER THAN LEAVING THE NEXT LANE TO REDISCOVER IT. The deciders were written
+    and typechecking against the `ci.polling` seam before the rotation guard refused it in both
+    directions (rationale 7). `acceptance`, `files:`, `title` and `status:` are untouched by this
+    amendment and were proven field-by-field byte-identical against main's record;
+    `postMergeAmendmentViolations` was run on the real record and on a tampered control rather than
+    reasoned about.
+
+    WHAT THE BUILD STILL OWES, SO IT IS NOT NEGOTIATED LATER: `src/lib/ledger.ts` is FORCED by the
+    replacement seam and must be declared and justified in the PR body, first, because the risk
+    judge reads the description and the file list without reading the diff — undeclared scope with
+    no rationale is what refused #2432 and #2419. And it must be PROVEN forced by reverting that
+    file alone with `git show origin/main:<path>` — never `git checkout --`, which restores from the
+    index and produced a false pass today — running BOTH `tsc` and the declared tests, since `tsx`
+    strips types without checking them.

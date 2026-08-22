@@ -124,14 +124,19 @@ export interface OpenIssue {
  * while 79 needs-human issues sat open. REST's `/issues` endpoint answers the same question off
  * the deterministic list API, with no search connection involved.
  *
- * `--slurp` (NOT bare `--paginate`) is load-bearing: `--paginate` alone concatenates one JSON
- * array per page, which `JSON.parse` rejects outright — and the `state=all` read is genuinely
- * multi-page (223 rows over 3 pages when this landed). `--slurp` wraps the pages in one outer
- * array that parses cleanly; {@link parseLabelledIssuesRest} flattens it.
+ * NOT `--slurp` (W1-T1208): `--slurp` arrived in `gh` 2.51 and this fleet's operator host runs
+ * 2.45.0, so a `--slurp` argv fails every invocation there with `unknown flag: --slurp` — the
+ * `gh` call never even starts, so the reconciler reads a hard failure, correctly, but the
+ * mechanism is unusable on any pre-2.51 `gh` at all. `--paginate` alone (present since long
+ * before 2.45.0, and controlled present here) concatenates one bare JSON array PER PAGE with NO
+ * separator, which `JSON.parse` on the whole string rejects outright — and the `state=all` read
+ * is genuinely multi-page (223 rows over 3 pages when this landed). {@link
+ * parseLabelledIssuesRest} does the reassembly `--slurp` used to do, itself, over the raw
+ * concatenated pages, so this argv needs nothing newer than `--paginate`.
  */
 export function labelledIssuesRestArgs(repoArg: string, label: string, state: "open" | "all"): string[] {
   const q = `labels=${encodeURIComponent(label)}&state=${state}&per_page=100`;
-  return ["api", `repos/${repoArg}/issues?${q}`, "--paginate", "--slurp"];
+  return ["api", `repos/${repoArg}/issues?${q}`, "--paginate"];
 }
 
 /** An {@link OpenIssue} plus the `state` field the BATCHED board gateway's own consumer needs
@@ -160,9 +165,63 @@ interface RestIssueRow {
 }
 
 /**
- * Flatten `--slurp`'s pages, drop pull requests, and translate the wire shape to the one every
- * consumer reads. THROWS on malformed input (the callers treat a failed read as "do nothing this
- * cycle", never as a confirmed "zero open") — never returns [] to paper over a broken payload.
+ * W1-T1208: split RAW `gh api ... --paginate` output (no `--slurp`) into one string per top-level
+ * JSON value — the page-loop reassembly `--slurp` used to hand back pre-wrapped. Bare
+ * `--paginate` writes each page's JSON array back-to-back with NO separator (`[...][...]`), which
+ * `JSON.parse` rejects as a single value, so this walks the raw text with a string-aware
+ * bracket-depth scan (a `[`/`]`/`{`/`}` inside a quoted issue title or body is never mistaken for
+ * a page boundary) and slices out each balanced top-level chunk. A single-page read is exactly
+ * one chunk, so this subsumes that case too — nothing else needs to special-case it.
+ *
+ * THROWS on anything left unbalanced at end of input (a genuinely truncated/garbled read) —
+ * {@link parseLabelledIssuesRest}'s caller treats a throw as "do nothing this cycle", never a
+ * confirmed "zero open" (design i), so swallowing a malformed read here would defeat that
+ * contract rather than serve it.
+ */
+export function splitConcatenatedJsonPages(raw: string): string[] {
+  const chunks: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let start = -1;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (start === -1) {
+      if (/\s/.test(ch)) continue;
+      start = i;
+    }
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "[" || ch === "{") {
+      depth++;
+    } else if (ch === "]" || ch === "}") {
+      depth--;
+      if (depth < 0) throw new Error("splitConcatenatedJsonPages: unbalanced JSON in gh --paginate output");
+      if (depth === 0) {
+        chunks.push(raw.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  if (depth !== 0 || inString || start !== -1) {
+    throw new Error("splitConcatenatedJsonPages: truncated JSON in gh --paginate output");
+  }
+  return chunks;
+}
+
+/**
+ * Reassemble bare `--paginate` output (no `--slurp`, W1-T1208), drop pull requests, and translate
+ * the wire shape to the one every consumer reads. THROWS on malformed input (the callers treat a
+ * failed read as "do nothing this cycle", never as a confirmed "zero open") — never returns [] to
+ * paper over a broken payload.
  *
  * TWO translations are load-bearing:
  *  1. `url` is taken from REST's `html_url`, NOT its `url`. Consumers match against the web URLs
@@ -172,16 +231,14 @@ interface RestIssueRow {
  *     escalation is always an issue.
  */
 export function parseLabelledIssuesRest(raw: string): LabelledIssue[] {
-  const parsed = JSON.parse(raw) as unknown;
-  // `--slurp` yields pages-of-rows; tolerate a bare single page so a fixture (or a future gh
-  // that stops wrapping) is read correctly rather than silently as zero rows.
-  const pages: RestIssueRow[][] = Array.isArray(parsed)
-    ? (parsed as unknown[]).every((p) => Array.isArray(p))
-      ? (parsed as RestIssueRow[][])
-      : [parsed as RestIssueRow[]]
-    : [];
-  return pages
-    .flat()
+  const rows: RestIssueRow[] = splitConcatenatedJsonPages(raw).flatMap((chunk) => {
+    const page = JSON.parse(chunk) as unknown;
+    if (!Array.isArray(page)) {
+      throw new Error(`parseLabelledIssuesRest: expected a JSON array page from gh api, got ${typeof page}`);
+    }
+    return page as RestIssueRow[];
+  });
+  return rows
     .filter((i) => i?.pull_request === undefined)
     .map((i) => ({ number: i.number, url: i.html_url, state: i.state, title: i.title, body: i.body }));
 }

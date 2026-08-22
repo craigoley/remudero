@@ -527,6 +527,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // without landing a new head — see that function's own doc. Losing either across a rotation
   // reads a stalled dispatch as still in flight and re-strands the PR against a head nothing will
   // ever move again, the exact deadlock this task fixes.
+  // W1-T1211: run-task.ts's `runIsAwaitingExternal` reads this row to decide whether the light pass
+  // may let the fix rung act beside an in-flight run — a run that has written it has finished its
+  // worker turn and is waiting on GitHub. Written ONCE per wait, never per poll, which is why it
+  // belongs here and `ci.polling`/`pr.polling` (named as telemetry noise above) do not: losing this
+  // row across a rotation reads a WAITING run as WORKING and silently re-freezes the fix rung for
+  // that run's whole duration, which is the twenty-one-hour stall the task measured.
+  "run.awaiting_external",
   "fix.ci_not_green",
   "fix.resolved",
   // W1-T1095 (capability 3): run-task.ts's `fixRebaseAlreadySpent` reads this row to enforce the
@@ -648,6 +655,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // completion in run-task.ts (`attemptArm`) both consult it before ever registering an arm.
   "automerge.hold_engaged",
   "automerge.hold_released",
+  // W1-T1215: `armRunIdFromLedger` (run-task.ts) reads these rows to name WHICH lane armed a PR
+  // that merged behind a refused verdict. A rotation that dropped them would silently turn every
+  // such HARD_STOP's attribution into "unattributed" — the same quiet-reset failure this Set
+  // exists to prevent, so the read makes the step decision-relevant rather than cosmetic.
+  "automerge.armed",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: the mutation check in
   // test/ledger-rotation.test.ts anchors on those three lines followed by `]);` and asserts the
   // needle occurs EXACTLY once. A block appended after them silently breaks that anchor — this

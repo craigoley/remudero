@@ -384,7 +384,7 @@ import {
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
-import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask } from "./lib/ledger.js";
+import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask, DECISION_RELEVANT_LEDGER_STEPS } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
 import { gunzipSync } from "node:zlib";
 import { ledgerRotationEntries, resolveLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
@@ -614,6 +614,7 @@ import {
   type PostReviewStallVerdict,
   type RepairFilingCapture,
   type StrikeAttempt,
+  type Disposition,
   type SweepDeps,
   type SweepPolicy,
   type UpdateBranchOutcome,
@@ -2064,7 +2065,7 @@ export function armAutoMergeAtOpen(
  * require changing `postReviewStatusGuarded` (out of this task's scope), so
  * this is the minimal, best-effort, in-scope mitigation.
  */
-export type DisarmOutcome = "disarmed" | "not-armed" | "failed";
+export type DisarmOutcome = "disarmed" | "not-armed" | "lost-race" | "failed";
 
 /**
  * W1-T1056's NEIGHBOUR, CITED AND NOT RE-DERIVED. W1-T1052 IS A DIFFERENT FAILURE in the same
@@ -2092,8 +2093,18 @@ export type DisarmOutcome = "disarmed" | "not-armed" | "failed";
  * same fail-open shape that lets an absent reading masquerade as a negative one, and here it
  * would resurrect the very false record this task exists to remove.
  */
-export function classifyDisarmFailure(stderrText: string): "not-armed" | "failed" {
-  return /can't disable auto-merge|disablePullRequestAutoMerge/i.test(stderrText) ? "not-armed" : "failed";
+export function classifyDisarmFailure(
+  stderrText: string,
+  // W1-T1215: appended LAST and optional so no positional caller shifts and every existing
+  // fixture keeps its exact meaning — `undefined` is "not asked", which reads as before.
+  merged?: boolean,
+): "not-armed" | "lost-race" | "failed" {
+  // W1-T1215: the string alone CANNOT decide this. GitHub returns the SAME message for a PR
+  // that was never armed (#2234, benign) and for one that is ALREADY MERGED (#2506, the most
+  // severe outcome this system can produce). Unrecognised still fails towards `"failed"`,
+  // preserving the fail-closed polarity this function's own doc argues for.
+  if (!/can't disable auto-merge|disablePullRequestAutoMerge/i.test(stderrText)) return "failed";
+  return merged === true ? "lost-race" : "not-armed";
 }
 
 /**
@@ -2110,7 +2121,10 @@ export function disarmOutcomeWithdrawn(outcome: DisarmOutcome | void): boolean {
 
 export function disarmAutoMerge(
   prUrl: string,
-  deps: Pick<ArmDeps, "disableAuto" | "say"> = realArmDeps(),
+  // W1-T1215: `isMerged` widens the deps OPTIONALLY and is consulted ONLY from the catch below,
+  // so the ordinary (successful) withdrawal costs exactly the requests it costs today. This is
+  // the SAME seam and the same discipline W1-T1050 added for a thrown `mergeDirect`.
+  deps: Pick<ArmDeps, "disableAuto" | "say"> & Partial<Pick<ArmDeps, "isMerged">> = realArmDeps(),
 ): DisarmOutcome {
   try {
     deps.disableAuto(prUrl);
@@ -2119,9 +2133,176 @@ export function disarmAutoMerge(
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
-    return classifyDisarmFailure(msg);
+    return classifyDisarmFailure(msg, deps.isMerged?.(prUrl));
   }
 }
+
+/**
+ * W1-T1215 — the arm's OWN `run_id`, read off the ledger rows `logArmAttribution` already writes.
+ *
+ * PURE, and deliberately not a GitHub read: when a refused verdict merged anyway, the ruling needs
+ * to know WHICH lane armed it, and that fact is already on the `automerge.armed` row (this file's
+ * `logArmAttribution` puts `pr_url` on every one, and the ledger appender stamps `run_id`). Newest
+ * wins — a PR armed, disarmed and re-armed reports the arm that was standing when the merge landed.
+ * Returns `undefined` rather than guessing when no such row is present, which an escalation renders
+ * as "unattributed" instead of asserting a lane that did not arm.
+ */
+export function armRunIdFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  prUrl: string,
+): string | undefined {
+  let runId: string | undefined;
+  for (const line of lines) {
+    if (line.step !== "automerge.armed") continue;
+    if (line.pr_url !== prUrl) continue;
+    if (typeof line.run_id === "string") runId = line.run_id;
+  }
+  return runId;
+}
+
+/**
+ * W1-T1215 — the MERGE commit's sha, read only on the lost-race path.
+ *
+ * `isPrMergedNow` answers WHETHER; a ruling also needs WHICH COMMIT, because that is the thing an
+ * operator would have to reason about. Same shape as that function — `prUrlTarget`, one REST read,
+ * `fetch` appended LAST and defaulted so the sole production caller passes `prUrl` alone — and the
+ * same swallow-and-report-nothing posture: this runs while an escalation is already being built, so
+ * it must never throw and mask the escalation itself. `merge_commit_sha` is on the single-PR REST
+ * payload; `RestPullRow` does not declare it (it has no other consumer), so it is read off the raw
+ * row rather than by widening a type this task does not own.
+ */
+export function mergeShaNow(prUrl: string, fetch: GhApiFetcher = ghJson): string | undefined {
+  const target = prUrlTarget(prUrl);
+  if (!target) return undefined;
+  try {
+    const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as {
+      merge_commit_sha?: unknown;
+    };
+    return typeof row?.merge_commit_sha === "string" && row.merge_commit_sha.length > 0
+      ? row.merge_commit_sha
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * W1-T1215 — the escalation a LOST RACE produces: `HARD_STOP`, never `BLOCKED`.
+ *
+ * WHY HARD_STOP AND NOT BLOCKED. `BLOCKED` says "this cannot proceed until someone acts"; the whole
+ * point here is that it ALREADY proceeded. A verdict that REFUSED a change, on a change that MERGED
+ * anyway, is the strongest signal this system can emit, and `HARD_STOP` is the only class
+ * `escalate`'s own `notify()` gate pages an operator for (the other being `MANUAL`) — a lost race
+ * that lands as an unread `BLOCKED` row is the same silence this task exists to end.
+ *
+ * IT ACTS ON NOTHING, AND THAT IS THE DESIGN (shard clause iv). No revert, no reopen, no
+ * force-push, no branch restoration. Whether a merged commit is backed out is an OPERATOR RULING;
+ * an escalation that acted would be a second unattended write on top of the first one. Every option
+ * below is therefore something a PERSON does.
+ */
+export function lostRaceEscalation(input: {
+  prUrl: string;
+  taskId: string;
+  runId: string;
+  refusal: string;
+  mergeSha?: string;
+  confidence?: number;
+  reasons?: readonly string[];
+  armRunId?: string;
+}): {
+  class: "HARD_STOP";
+  taskId: string;
+  runId: string;
+  summary: string;
+  detail: string;
+  options: Array<{ label: string; detail: string }>;
+  recommendation: string;
+} {
+  const sha = input.mergeSha ?? "unresolved";
+  const confidence = typeof input.confidence === "number" ? input.confidence.toFixed(2) : "n/a";
+  const reasons = input.reasons && input.reasons.length > 0 ? input.reasons.join("\n  - ") : "none recorded";
+  return {
+    class: "HARD_STOP",
+    taskId: input.taskId,
+    runId: input.runId,
+    summary: `REFUSED VERDICT MERGED UNATTENDED — the withdrawal lost the race — ${input.prUrl}`,
+    detail:
+      `${input.refusal}\n\n` +
+      `The withdrawal was attempted and GitHub reported the pull request already MERGED, so the ` +
+      `arm this run refused was never withdrawn.\n\n` +
+      `merge sha:    ${sha}\n` +
+      `confidence:   ${confidence}\n` +
+      `armed by run: ${input.armRunId ?? "unattributed — no automerge.armed row for this pull request"}\n` +
+      `judge reasons:\n  - ${reasons}\n\n` +
+      `NOTHING WAS REVERTED, REOPENED OR FORCE-PUSHED. Whether this commit stands is your ruling.`,
+    options: [
+      {
+        label: "accept-the-merge",
+        detail: "read the merged diff and, if it is acceptable, record that and continue — no action on the commit.",
+      },
+      {
+        label: "back-it-out-by-hand",
+        detail: "revert the merge sha above yourself; the fleet deliberately does not revert on its own.",
+      },
+    ],
+    recommendation: "accept-the-merge",
+  };
+}
+
+/**
+ * W1-T1215 — the WHOLE disposition of one withdrawal attempt, as a pure decision.
+ *
+ * WHY THIS IS A FUNCTION AND NOT THREE LINES AT EACH CALL SITE. The interesting behaviour — which
+ * ledger step the row gets, and whether a lost race escalates — is identical at both sites, and
+ * inside `runTask` it is unreachable by any unit test: a test would have to drive a whole run to
+ * the capped branch AND make GitHub refuse the withdrawal AND report the PR merged. Extracting it
+ * leaves each call site with lines that execute whenever the branch executes at all, and puts every
+ * lost-race-only line somewhere a test can reach directly.
+ *
+ * THE READS ARE LAZY AND FAILURE-PATH ONLY. `mergeSha`/`ledgerLines` are consulted ONLY when the
+ * outcome is `"lost-race"`, so an ordinary refused-arm disposition costs no request and no ledger
+ * read — the same discipline `disarmAutoMerge` applies to `isMerged`.
+ */
+export function disposeDisarm(
+  outcome: DisarmOutcome | void,
+  ctx: {
+    prUrl: string;
+    taskId: string;
+    runId: string;
+    ledgerPath: string;
+    reason: string;
+    refusal: string;
+    confidence?: number;
+    reasons?: readonly string[];
+  },
+  deps: {
+    mergeSha?: (prUrl: string) => string | undefined;
+    ledgerLines?: () => Array<Record<string, unknown>>;
+  } = {},
+): {
+  step: "automerge.disarmed" | "automerge.disarm_skipped";
+  row: Record<string, unknown>;
+  escalation?: ReturnType<typeof lostRaceEscalation>;
+} {
+  const step = disarmOutcomeWithdrawn(outcome) ? "automerge.disarmed" : "automerge.disarm_skipped";
+  const row: Record<string, unknown> = { reason: ctx.reason, outcome: outcome ?? null };
+  if (outcome !== "lost-race") return { step, row };
+  return {
+    step,
+    row,
+    escalation: lostRaceEscalation({
+      prUrl: ctx.prUrl,
+      taskId: ctx.taskId,
+      runId: ctx.runId,
+      refusal: ctx.refusal,
+      mergeSha: (deps.mergeSha ?? mergeShaNow)(ctx.prUrl),
+      confidence: ctx.confidence,
+      reasons: ctx.reasons,
+      armRunId: armRunIdFromLedger((deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(), ctx.prUrl),
+    }),
+  };
+}
+
 
 /**
  * impl-BF — WITHDRAW an auto-merge arm when the verdict just computed refuses to arm.
@@ -2542,8 +2723,9 @@ export function sweepArmAttemptOutcome(
 }
 
 /**
- * W1-T528: PURE classifier for a failed `gh pr update-branch`, same shape as {@link
- * armFailureAction} directly above. Design clause (v): this shard does NOT pretend to have
+ * W1-T528: PURE classifier for a failed update-branch request (W1-T1208: the REST `gh api` PUT,
+ * not the `gh pr update-branch` subcommand), same shape as {@link armFailureAction} directly
+ * above. Design clause (v): this shard does NOT pretend to have
  * observed a real 422/diverged response — it was never called against a live PR (a call on a
  * real PR discards a real verdict). Anything that plausibly names a conflict or a divergence is
  * classified `"conflict"` — reported and never retried by {@link updateBranchViaGh}'s own caller;
@@ -2556,23 +2738,41 @@ export function classifyUpdateBranchFailure(stderrText: string): "conflict" | "e
 }
 
 /**
- * W1-T528's real gateway: `gh pr update-branch <url>`, GitHub's own REST-backed wrapper for the
- * update button nothing else presses (see W1-T520's `armedButStalled`, lib/sweep.ts). Called AT
- * MOST ONCE per sweep pass, on the ONE PR `selectUpdateBranchTarget` chose — never a retry loop
- * of its own (see `SweepDeps.updateBranch`'s own doc for why the caller never calls this twice
- * for the same target within one pass).
+ * W1-T1208: `pr.prUrl`'s `owner`/`repo`, for the REST argv below — `ArmedStalledPr` carries only
+ * the PR's own number and URL, never owner/repo separately, so this is the one place that splits
+ * them back out. `undefined` on a URL shape this repo never actually produces (defensive, not
+ * reachable from `selectUpdateBranchTarget`'s own PR views).
+ */
+function ownerRepoFromPrUrl(prUrl: string): { owner: string; repo: string } | undefined {
+  const m = prUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/);
+  return m ? { owner: m[1], repo: m[2] } : undefined;
+}
+
+/**
+ * W1-T528's real gateway, REST since W1-T1208 — NOT `gh pr update-branch <url>` (GitHub's own
+ * subcommand wrapper): that subcommand needs `gh` 2.53, the operator host runs 2.45.0, and a
+ * `gh pr update-branch` argv there fails every invocation with `unknown subcommand`. This calls
+ * the SAME REST endpoint that subcommand wraps, via {@link ghUpdateBranchArgv} (W1-T1095
+ * capability 3, `runFixRebase`'s own gateway) — the update-branch site now shares its one
+ * `gh api` mechanism with the issue-list read `labelledIssuesRestArgs` also moved onto (design
+ * iii: one mechanism for both version-sensitive sites, not a fix that repairs one and leaves the
+ * other for the first unlucky sweep pass). Called AT MOST ONCE per sweep pass, on the ONE PR
+ * `selectUpdateBranchTarget` chose — never a retry loop of its own (see `SweepDeps.updateBranch`'s
+ * own doc for why the caller never calls this twice for the same target within one pass).
  *
  * REUSES the `"gh-pr-merge"` live-write boundary rather than a dedicated `"gh-pr-update-branch"`
  * one: `lib/live-write-guard.ts`'s `LiveWriteBoundary` union lives outside this task's declared
  * `files:` (Rule 19) — see `updateBranch`'s follow-up note. Both boundaries guard the identical
- * hazard class (a mutating `gh pr` write against the live repo from an offline test), so this is
+ * hazard class (a mutating `gh` write against the live repo from an offline test), so this is
  * an honest reuse, not a bypass; a dedicated label is a one-line follow-up once that file is in
  * scope for some other task.
  */
 export async function updateBranchViaGh(pr: ArmedStalledPr): Promise<UpdateBranchOutcome> {
-  assertLiveWriteAllowed("gh-pr-merge", `requesting gh pr update-branch on ${pr.prUrl}`);
+  assertLiveWriteAllowed("gh-pr-merge", `requesting the update-branch REST endpoint on ${pr.prUrl}`);
+  const ownerRepo = ownerRepoFromPrUrl(pr.prUrl);
+  if (!ownerRepo) return "error";
   try {
-    execFileSync("gh", ["pr", "update-branch", pr.prUrl], { stdio: "pipe" });
+    execFileSync("gh", ghUpdateBranchArgv(ownerRepo.owner, ownerRepo.repo, pr.prNumber), { stdio: "pipe" });
     return "updated";
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
@@ -3064,6 +3264,11 @@ export async function pollToGate(
             : `no progress for ${STALL_WINDOW} consecutive polls`,
       };
     }
+      // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
+      // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
+      // WORKING one, and the polling row beside it cannot carry that decision because the rotator
+      // is right to shed it. See `runIsAwaitingExternal`.
+      if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state: v.state,
@@ -3262,6 +3467,11 @@ async function waitForCiGreen(
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
     const ci = (v.statusCheckRollup ?? []).find((c) => (c.name ?? c.context) === "ci");
+    // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
+    // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
+    // WORKING one, and the polling row beside it cannot carry that decision because the rotator
+    // is right to shed it. See `runIsAwaitingExternal`.
+    if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     if (stall.stalled) {
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
@@ -4707,11 +4917,13 @@ export function decideFixRebase(facts: FixRebaseFacts): FixRebaseDecision {
  * than a local rebase. The daemon is DETACHED on every boot, and a call that assumed otherwise
  * is exactly what broke `armAuto`'s `--delete-branch` (W1-T1111).
  *
- * NOT `gh pr update-branch`: that subcommand does not exist in the `gh` this fleet runs (2.45.0
- * ships no `update-branch` under `gh pr`), so naming it would ship a command that fails on every
- * invocation. This is the REST endpoint that subcommand wraps in newer builds, reached through
- * `gh api` — the same argv-builder shape `ghCreatePrArgs` (lib/plan-pr-emitter.ts) uses, exported
- * so the argv itself is a unit fixture rather than an inline string.
+ * NOT `gh pr update-branch`: that subcommand needs `gh` 2.53 and this fleet's operator host runs
+ * 2.45.0 (W1-T1208), so naming it would ship a command that fails on every invocation there. This
+ * is the REST endpoint that subcommand wraps in newer builds, reached through `gh api` — the same
+ * argv-builder shape `ghCreatePrArgs` (lib/plan-pr-emitter.ts) uses, exported so the argv itself
+ * is a unit fixture rather than an inline string. Since W1-T1208, {@link updateBranchViaGh} (the
+ * sweep-side gateway) is the SECOND caller alongside `runFixRebase` — one `gh api` mechanism for
+ * both version-sensitive update-branch call sites, not one fixed and one left on the subcommand.
  */
 export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number): string[] {
   return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`];
@@ -8461,16 +8673,22 @@ async function runTask(
       // to this same capped verdict's posted `success` status before this
       // decision lands) — if the sweep armed the PR in that window, this
       // withdraws it before escalating.
-      disarmAutoMerge(prUrl);
       // W1-T947: CAPPED and IRREVERSIBLE are different facts about the PR — the reason below,
       // and the escalation it feeds, must name the one that actually fired (design clause iii).
       const reason = irreversible
         ? "diff classified irreversible (W1-T919) — auto-merge refused unattended"
         : "capped verdict refused auto-merge";
-      log("automerge.disarmed", { reason });
+      // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged `automerge.disarmed`
+      // unconditionally, so a withdrawal GitHub refused read as a completed one. `disposeDisarm`
+      // holds the whole decision (and every lost-race-only read) where a test can reach it.
+      const disposition = disposeDisarm(disarmAutoMerge(prUrl), { prUrl, taskId, runId, ledgerPath, reason, refusal: armDecision.reason });
+      log(disposition.step, disposition.row);
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const issueUrl = escalate(
-        irreversible
+        // W1-T1215: the lost race outranks BOTH arms below — "auto-merge was NOT armed" is simply
+        // false once it armed and merged, so that must not be what an operator reads.
+        disposition.escalation ??
+        (irreversible
           ? {
               class: "BLOCKED",
               taskId,
@@ -8510,7 +8728,7 @@ async function runTask(
                 },
               ],
               recommendation: "add-proof",
-            },
+            }),
         { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
       );
       log("verdict", {
@@ -8574,10 +8792,23 @@ async function runTask(
         // defensive no-op against a sweep race as the capped-refusal branch
         // above, in case the sweep armed the PR in the window between the review
         // posting and this decision.
-        disarmAutoMerge(prUrl);
-        log("automerge.disarmed", { reason: "risk judge escalated — auto-merge refused" });
+        // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged
+        // `automerge.disarmed` unconditionally beside it, so the withdrawal #2506 attempted —
+        // which GitHub refused because the pull request had ALREADY MERGED — was recorded as a
+        // completed withdrawal. Same predicate and same vocabulary `withdrawArmIfVerdictRefuses`
+        // already established (W1-T1056); this only applies them at the site that fired.
+        const disposition = disposeDisarm(disarmAutoMerge(prUrl), {
+          prUrl, taskId, runId, ledgerPath,
+          reason: "risk judge escalated — auto-merge refused",
+          refusal: `risk judge ESCALATED (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${action.reason}`,
+          confidence: verdict.confidence,
+          reasons: verdict.reasons,
+        });
+        log(disposition.step, disposition.row);
+        // W1-T1215: a REFUSED verdict on a change that MERGED ANYWAY is not a BLOCKED row — the
+        // thing BLOCKED says cannot proceed has already proceeded, so it escalates HARD_STOP.
         return escalate(
-          {
+          disposition.escalation ?? {
             class: "BLOCKED",
             taskId,
             runId,
@@ -19143,9 +19374,9 @@ export function buildSweepEffects(
   // `buildAccountUsageRoute`/`ceilingPolicy` already use, not a new pattern.
   armSessionPrsOverride?: boolean,
   // W1-T528 — appended LAST, the same convention every dep above follows: without it, a
-  // successful `gh pr update-branch` request is unreachable from any offline test, because the
+  // successful update-branch request is unreachable from any offline test, because the
   // adapter always called the real `updateBranchViaGh` (a live, mutating `gh` call). Default is
-  // `updateBranchViaGh` itself, so production wiring is unchanged.
+  // `updateBranchViaGh` itself (REST since W1-T1208), so production wiring is unchanged.
   updateBranchImpl: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome> = updateBranchViaGh,
   // W1-T905 — appended LAST, the same convention every dep above follows. Wraps the real
   // `captureFeedback` with the SAME caller-side `existsSync` dedup `src/lib/issues-intake.ts`'s
@@ -20546,6 +20777,116 @@ export function buildSweepHook(
  * behind a slow one in the same pass — the SAME dedup/disposition/ledger path per PR, no second
  * lane, no new per-PR mutex (design (ii)/(iv): each PR is handed to exactly one call).
  */
+/**
+ * W1-T1211 — THE LEDGER STEP A RUN WRITES ONCE WHEN IT STARTS WAITING ON SOMETHING EXTERNAL.
+ *
+ * Emitted ONCE on entry to each wait loop, never per poll. That is the whole reason it exists
+ * rather than reading `ci.polling`: the polling rows fire every fifth iteration for the life of the
+ * wait (5,411 of them in the ledger union against 1,205 `fix.dispatch`), and `src/lib/ledger.ts`
+ * names them "pure telemetry/polling noise … exactly the high-frequency, no-decision-consequence
+ * lines that drove the measured growth". A decision cannot be built on a row the rotator is right
+ * to shed, so this task writes a low-frequency one instead — see this task's own design note (i-a).
+ */
+export const AWAITING_EXTERNAL_LEDGER_STEP = "run.awaiting_external";
+
+/**
+ * W1-T1211 — WHAT THE LIGHT PASS MAY ACT ON THIS TICK.
+ *
+ * `buildSweepLightHook` wires `actionable` while `runOne` is in flight, and every lane except
+ * `post-review` stands down as "deferred to full sweep (light pass)". The RESTRICTION's
+ * justification is spend-and-capacity — `src/lib/sweep.ts` records 3 dispatch lanes + 3 review
+ * lanes against a host measured to fit about four concurrent workers — and of those five lanes
+ * ONLY `dispatchFix` spawns a worker. `close`, `escalate`, `depReview` and `arm` are API calls.
+ *
+ * So the blanket is wider than its reason for exactly one case: a run that is WAITING rather than
+ * working. Measured (this task's shard): one lock held 41 minutes wrote 347 light passes and ZERO
+ * full sweeps while `fix.dispatch` read zero for twenty-one hours.
+ *
+ * The other four lanes are DELIBERATELY UNCHANGED (design note iii) — widening the blanket further
+ * is a separate argument this task does not make.
+ */
+export function lightPassActionable(disposition: Disposition, fixRungAllowed: boolean): boolean {
+  if (disposition === "post-review") return true;
+  // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker.
+  if (disposition === "blocked-fixable" || disposition === "conflicted") return fixRungAllowed;
+  return false;
+}
+
+/**
+ * W1-T1211 — IS THIS RUN DEMONSTRABLY WAITING RATHER THAN SPENDING A WORKER?
+ *
+ * TRUE only when the task's LATEST RETAINED row is {@link AWAITING_EXTERNAL_LEDGER_STEP}. Reading
+ * the latest retained row rather than the latest row of any kind is what makes this survive a
+ * rotation: the polling telemetry beside it is shed by design, and a predicate that depended on it
+ * would silently invert the moment the rotator ran.
+ *
+ * DELIBERATELY NOT `liveInflightRuns`: that pid-checks a lock, which is HOST-LOCAL (a pid on
+ * another host is unreadable), and it carries W1-T1109's consumer defect — the lock-vs-process arm
+ * compares a lock FILENAME's task id against a set of RUN ids, which can never match. Nothing here
+ * builds on it (design note ii).
+ *
+ * FAILS SAFE IN BOTH DIRECTIONS. No rows for the task, or a latest retained row that is any other
+ * step, reads FALSE — the fix rung stands down exactly as it does today. And a run that DIED while
+ * waiting has no worker either, so treating its stale row as "waiting" reaches the same conclusion
+ * by a different route rather than a wrong one.
+ *
+ * WRITTEN AS A DIRECT `.step ===` COMPARISON ON PURPOSE, like `reviewPostRefusedFor` above:
+ * `test/ledger-rotation.test.ts` derives `DECISION_RELEVANT_LEDGER_STEPS` membership by scanning
+ * consumer source for exactly that shape, so this makes the dependency VISIBLE to the check that
+ * exists to find it. The step is registered in that set by this same change.
+ */
+export function runIsAwaitingExternal(lines: ReadonlyArray<Record<string, unknown>>, taskId: string): boolean {
+  let latestTs = "";
+  let awaiting = false;
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    const rawStep: unknown = line.step;
+    const step = typeof rawStep === "string" ? rawStep : "";
+    if (!DECISION_RELEVANT_LEDGER_STEPS.has(step)) continue; // the retained core only — see this function's doc
+    const ts = typeof line.ts === "string" ? line.ts : "";
+    if (ts >= latestTs) {
+      latestTs = ts;
+      // THE STRING LITERAL, NOT THE CONSTANT, ON PURPOSE. `test/ledger-rotation.test.ts` scans
+      // consumer source for a step-equality comparison against a quoted name; comparing against the
+      // exported identifier instead would hide this dependency from the very guard that exists to
+      // find it, and the predicate would then rest on retention nobody had registered. (The comment
+      // itself must not spell that pattern out either — the scanner reads comments too.)
+      awaiting = line.step === "run.awaiting_external";
+    }
+  }
+  return awaiting;
+}
+
+/**
+ * W1-T1211 — MAY THE FIX RUNG ACT ALONGSIDE THE RUNS CURRENTLY IN FLIGHT?
+ *
+ * TRUE only when EVERY in-flight run is demonstrably waiting. One run still working is enough to
+ * stand the rung down, which is the property the restriction genuinely buys (design note iv: never
+ * run the fix rung beside a spending worker). An EMPTY in-flight set is vacuously true — there is
+ * nothing to be concurrent with.
+ */
+export function fixRungAllowedBesideInFlight(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  inFlightTaskIds: readonly string[],
+): boolean {
+  return inFlightTaskIds.every((taskId) => runIsAwaitingExternal(lines, taskId));
+}
+
+/**
+ * W1-T1211: the in-flight TASK ids, read from `state/inflight/*.lock` FILENAMES.
+ *
+ * A directory read, never a pid probe — see {@link runIsAwaitingExternal}'s doc for why
+ * `liveInflightRuns` is refused here. This reads no lock CONTENT, releases nothing, and ages
+ * nothing out: W1-T1067's stranded `drain.lock` is the precedent for what a clock-shaped release
+ * does when its signal never arrives, and this path has no clock at all.
+ */
+export function inFlightTaskIdsFrom(inflightDir: string): string[] {
+  if (!existsSync(inflightDir)) return [];
+  return readdirSync(inflightDir)
+    .filter((entry) => entry.endsWith(".lock"))
+    .map((entry) => entry.slice(0, -".lock".length));
+}
+
 export function buildSweepLightHook(
   owner: string,
   repo: string,
@@ -20559,6 +20900,12 @@ export function buildSweepLightHook(
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
+      // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
+      // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
+      const fixRungAllowed = fixRungAllowedBesideInFlight(
+        readLedgerLines(ledgerPath),
+        inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
+      );
       await runSweepLightPass(
         openPrs,
         {
@@ -20566,7 +20913,11 @@ export function buildSweepLightHook(
           ledgerPath,
           runId,
           log,
-          actionable: (d) => d === "post-review",
+          // W1-T1211: `post-review` always, and the fix rung TOO when every in-flight run is
+          // demonstrably waiting rather than working — see `lightPassActionable` and
+          // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
+          // sees one consistent answer.
+          actionable: (d) => lightPassActionable(d, fixRungAllowed),
           // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
           // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
           // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N

@@ -1,0 +1,139 @@
+- id: W1-T1222
+  title: "W1-T915 gave `resolveServeHosts` a container-network carve-out and the deploy recipe never uses it — `host-update.sh` prints a `remudero-serve` invocation with no published port and no bind-host passthrough, so the console still binds loopback inside its own namespace and seven merged features arrive on a surface with no address"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    RE-DERIVED AT origin/main 42e449f IN A SCRATCH WORKTREE ON HOST `vm` UNDER /usr/bin/bash. Every
+    zero below carries a control taken with the same tool against the same surface.
+
+    (1) W1-T915 SHIPPED AND MUST NOT BE RE-FILED. `src/lib/serve.ts` carries `resolveServeHosts`
+    with a container-network carve-out gated on `CONTAINER_NETWORK_ENV = "RMD_SERVE_NETWORK"` and
+    `CONTAINER_NETWORK_VALUE = "container"`; `test/serve-reachability.test.ts` carries all four of
+    that task's acceptance tests by exact title and runs 4/4 on main today. Falsified rather than
+    trusted: the anchor `const allowContainerWildcard = env[CONTAINER_NETWORK_ENV] === …` is unique
+    at one occurrence, disabling it moved the file's sha256 from 1bb673d3399a21f2 to
+    bdd84db1e91c9f43 and reddened criterion 1 ALONE, and the restore returned the original sha. It
+    merged as #1985 under `chore(serve): wip - add container-network bind carve-out to
+    resolveServeHosts`, with no `Remudero-Task:` trailer and no id in the subject, which is why
+    both credit paths read zero and the task still reads `status: queued`. THAT IS A CREDIT DEFECT,
+    NOT A MISSING IMPLEMENTATION, and this shard does not re-open it.
+
+    (2) THE DEPLOY RECIPE NEVER EXERCISES THE CARVE-OUT. `deploy/host-update.sh` prints a
+    `remudero-serve` invocation carrying `--restart=unless-stopped`, `--user 1000:1000`, the state
+    bind mount and `./bin/rmd serve` — and NO `--publish`, NO `RMD_SERVE_HOST` and NO
+    `RMD_SERVE_NETWORK`. Word-bounded counts at that head: `RMD_SERVE_HOST` reads 7 in
+    `src/lib/serve.ts` and 0 across `deploy/`; `RMD_SERVE_NETWORK` reads 2 and 0; `remudero-serve`
+    reads 1 in `deploy/host-update.sh` and 3 in `src/lib/serve.ts`; `STATE_MOUNT_DEST` reads 4 in
+    the recipe, so the file is being read. Control: `routeSpecialists` reads 0 in all four files,
+    so the zeros discriminate rather than reflecting a broken query. The bind is therefore
+    `DEFAULT_SERVE_HOST` = 127.0.0.1 inside a namespace nothing else joins.
+
+    (3) THE LIFECYCLE FORK IS ALREADY DECIDED, IN THIS REPO, AGAINST THE SUPERVISOR — SO THE HARD
+    QUESTION IS NOT OPEN. `host-update.sh`'s own comment above the block states it: serve "returns
+    0 on a clean shutdown and must come back from EVERY exit, so it takes unless-stopped, not
+    on-failure", and "launchd.ts records daemon-independence as a requirement: stopping the fleet
+    must never blind the operator, which is why this is not folded into the container above." The
+    daemon container runs `./bin/rmd daemon` under tini and treats `DAEMON_EXIT_STALE=75` as a
+    restart, so a serve process supervised inside it would inherit every freshness restart and be
+    down whenever the fleet is stopped — the precise coupling that comment refuses. A supervisor
+    would REVERSE a recorded decision; this shard proposes its own container, which is what the
+    recipe already prints, and changes only what that recipe omits.
+
+    (4) WHAT COULD NOT BE MEASURED HERE AND IS THEREFORE NOT ASSERTED. The container-side readings
+    — `docker port remudero-daemon`, `HostConfig.PortBindings`, `NetworkSettings.Ports`, whether
+    `rmd serve` appears in the container's process table, and the date on
+    `state/service-tokens.json` — all need docker. On this host `/var/run/docker.sock` does not
+    exist, `docker info` fails against it, `DOCKER_HOST` is unset, `ssh` is absent and
+    `/home/craigoleyagent` does not exist. Those five readings are NOT re-derived and NOT carried
+    as facts by this record. The defect above is established from the tracked recipe alone, which
+    is sufficient: a recipe that publishes no port cannot produce a published port.
+
+    (5) THE CONSEQUENCE IS THE ARGUMENT. W1-T507 (#1886), W1-T1006 (#2162) and W1-T283 (#1080) all
+    merged onto the console surface. Whatever they render, they render at an address that resolves
+    from nowhere, so the work is shipped and undelivered.
+  design: |
+    ONE CONCERN: the printed `remudero-serve` invocation must start a console that has an address.
+    Not the bind logic, not the queue, not the tunnel.
+
+    (i) THE CHANGE, STATED MECHANICALLY. The `remudero-serve` block in `deploy/host-update.sh`
+    gains a published port bound to the HOST's loopback and passthroughs for the two names
+    `src/lib/serve.ts` already reads, and `deploy/runtime-env-vars.sh` declares those names so the
+    passthrough has something to pass. Nothing else in the block moves.
+
+    (ii) DO NOT WIDEN THE BIND TO A WILDCARD. The refusal in `assertBindableHost` is deliberate
+    (R-5) and stays exactly as it is. The shape is a host-loopback-published port plus an explicit
+    bind host — the arrangement `src/lib/serve.ts`'s own doc already describes — never `0.0.0.0`.
+
+    (iii) `src/lib/serve.ts` IS NOT IN SCOPE AND NEEDS NO FURTHER CHANGE. W1-T915 owns it and has
+    shipped (rationale 1). A change there would be re-implementing a merged task.
+
+    (iv) THE SUPERVISOR OPTION IS OUT OF SCOPE BECAUSE IT IS ALREADY REFUSED, not because it is
+    hard — see rationale (3). An implementer who adds a process supervisor to the daemon container
+    has reversed a recorded decision and re-coupled the console to the daemon's restart loop.
+
+    (v) STILL OPERATOR ACTS, UNCHANGED FROM W1-T915's OWN DESIGN (vi): the Cloudflare tunnel, the
+    DNS record and the Access application. This task makes the origin reachable on the host; it
+    does not publish a hostname and must not try to.
+
+    (vi) THE FALSIFIER MUST BIND TO THE OMISSION, NOT THE PRESENCE. A test that only asserts the
+    recipe CONTAINS a publish flag passes just as well if the daemon block grew one by accident.
+    The assertions must be scoped to the serve block, and the daemon block must be pinned unchanged
+    in the same run, or the test cannot tell a fixed console from a leaked port.
+  acceptance:
+    - claim: "the printed serve recipe publishes its port bound to the host loopback"
+      proof: "unit test: W1-T1222: the printed serve recipe publishes a loopback-bound port"
+    - claim: "the printed serve recipe passes the bind host and network mode through"
+      proof: "unit test: W1-T1222: the printed serve recipe passes the bind host through"
+    - claim: "the daemon recipe is left byte-identical by the serve change"
+      proof: "unit test: W1-T1222: the daemon recipe is unchanged by the serve publish"
+    - claim: "serve keeps its own container and its own restart policy"
+      proof: "unit test: W1-T1222: serve keeps its own restart policy and its own container"
+  origin: "oper#serve-container-started-without-an-address-2026-08-22"
+  plan_refs: ["W1-T915", "W1-T531", "W1-T507", "W1-T1006", "W1-T283"]
+  files: [deploy/host-update.sh, deploy/runtime-env-vars.sh, test/host-update-reclaim.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk: high IS SET UP FRONT AND IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` names two deploy
+    stems and a test suite, which the sizing check reads as distinct concerns and refuses at
+    `risk: medium`. The blast radius is genuinely narrow: a printed invocation and two declared
+    variable names. Decomposing the recipe from the declaration that feeds it would file a task for
+    a passthrough with nothing to pass.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT AT 42e449f, NOT GUESSED. `remudero-serve`
+    reads 1 in `deploy/host-update.sh`; `STATE_MOUNT_DEST` reads 4 there, so the file is being read
+    rather than missed. `RMD_SERVE_HOST` reads 7 and `RMD_SERVE_NETWORK` reads 2 in
+    `src/lib/serve.ts` and 0 in both deploy files, which is the omission this task closes. Control:
+    `routeSpecialists` reads 0 in all four files.
+
+    `test/host-update-reclaim.test.ts` IS THE DECLARED TEST HOME DELIBERATELY. It already reads
+    `deploy/host-update.sh`'s text and carries docker-run assertions, so the recipe falsifier lands
+    beside the ones that exist rather than opening a second concern for the sizing check. A new file
+    would prove nothing this suite cannot.
+
+    `src/lib/serve.ts` IS DELIBERATELY NOT DECLARED. W1-T915 shipped it in #1985 and rationale (1)
+    falsifies that claim rather than asserting it. Declaring a path the implementation must not edit
+    is what `inverseScopeUntouchedFiles` refuses.
+
+    THE ID WAS PRE-MINTED AND READ BACK BEFORE ANYTHING WAS WRITTEN. `refs/rmd-id/W1-T1222`
+    resolves to 54680d222f80f29e270ca47a45dc9a6bc5f93fff; the negative control
+    `refs/rmd-id/W1-T999999` reads 0 and the namespace holds 252 refs. EIGHT ID SURFACES WERE SWEPT,
+    each against a control qualified for THAT surface: shard filenames 0 against W1-T915 at 1; plan
+    `- id:` lines 0 against W1-T915 at 1; the reservation 1, which is this pre-mint; open PR titles
+    0 against W1-T1218 and W1-T1219 at 1 each — the first control chosen there read 0 because the
+    board had turned over, and was re-qualified against the live listing rather than trusted; open
+    PR head branches 0 against `run-W1-T1211-` at 1; open PR file lists 0 with coverage at seven
+    captured of seven enumerated, against a `plan/tasks.d/` path at 1; merged trailers 0 against
+    W1-T1085 at 1; and merged subject credit 0 against W1-T915 at 1, with `run-W1-T1222-*` at 0
+    against a namespace of 85 `run-*` branches. A count-per-head subject sweep over all seven open
+    PRs scored 0 on every head for the console-deployment vocabulary, against the same regex
+    scoring 1 on a string written to match it.
+
+    MAX REAL IDS AT THIS HEAD, EXCLUDING THE 100000+ PROBE ARTEFACTS: 1218 on main, 1222 reserved.
+    The allocator runs ahead of the plan, which is why the reservation existing is not evidence a
+    shard does.

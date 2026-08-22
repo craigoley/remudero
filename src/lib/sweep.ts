@@ -3819,6 +3819,54 @@ const inFlightReviewKeys = new Set<string>();
  * pass with zero eligible reviews starts zero lanes. `summary.actions` still
  * comes back in `openPrs` order regardless of which phase finalized each PR.
  */
+/**
+ * W1-T1218 — THE REVIEW LANE'S ORDER, AS A PURE FUNCTION. Returns a NEW array ordered
+ * OLDEST-FIRST, so `slice(0, reviewLanes)` hands the lanes to the entries that have waited
+ * longest instead of to whichever ones the enumeration happened to list first.
+ *
+ * WHY THIS EXISTS. `runSweep` builds its pending set by `push` inside the per-PR walk, so
+ * insertion order is enumeration order, and `openPrsRestArgs` asks for
+ * `pulls?state=open&per_page=100` with no `sort` — GitHub answers `created:desc`. Cutting that by
+ * position alone means the entries below the cut are the OLDEST ones, and "re-derived next pass"
+ * re-derives the same set in the same order: while the queue is deeper than the budget, a PR
+ * below the cut is deferred every pass, indefinitely. Sorting first makes that impossible by
+ * construction — the oldest eligible review always takes a lane. The sibling enumeration in the
+ * same module, `boardPrsRestArgs`, already states its order and calls it "LOAD-BEARING, not
+ * cosmetic"; this was an omission on the other one, not a design.
+ *
+ * THE KEY IS `createdAt`, WITH `prNumber` AS BOTH TIEBREAK AND SUBSTITUTE. `createdAt` is already
+ * carried on {@link OpenPrView} (W1-T1201) and needs no new read. It is OPTIONAL, and its own doc
+ * forbids reading an absent value as "just created" — so an entry whose timestamp is missing or
+ * unparseable orders by `prNumber`, which is always present and exactly monotone with creation.
+ * That keeps the comparator TOTAL and the resulting order deterministic for every input.
+ *
+ * THE COST, NAMED RATHER THAN SOLD. Creation time is not the same as waiting time: a long-lived
+ * PR whose head was pushed ninety seconds ago can take a lane ahead of a younger PR whose head
+ * has waited hours, and both shapes exist on live data. Head PUSH time would be the better
+ * waiting key and {@link OpenPrView} does not carry it — only `headSha` — so sorting on it needs
+ * a new field and is a separate change. This is a fairness imperfection; it is not a starvation
+ * one, because no entry can sit below the cut on every pass once the set is ordered.
+ *
+ * INERT WHEN THE QUEUE IS SHALLOW (W1-T476's stability argument, applied here): when every
+ * pending entry gets a lane, ordering them changes no outcome at all.
+ */
+export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt" | "prNumber"> }>(
+  jobs: readonly T[],
+): T[] {
+  const createdMs = (job: T): number | undefined => {
+    const raw = job.pr.createdAt;
+    if (raw === undefined) return undefined;
+    const parsed = Date.parse(raw);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  };
+  return [...jobs].sort((a, b) => {
+    const ta = createdMs(a);
+    const tb = createdMs(b);
+    if (ta !== undefined && tb !== undefined && ta !== tb) return ta - tb;
+    return a.pr.prNumber - b.pr.prNumber;
+  });
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -4601,8 +4649,15 @@ export async function runSweep(
   // looking for work: a pass with zero eligible reviews runs `Promise.all([])`
   // and starts zero lanes (acceptance 3).
   const reviewLanes = Math.max(1, policy.reviewLanes);
-  const runNow = pendingReviews.slice(0, reviewLanes);
-  const deferredToNextPass = pendingReviews.slice(reviewLanes);
+  // W1-T1218: ORDER BEFORE THE CUT. `pendingReviews` is built by `push` inside the per-PR walk
+  // above, so its order IS the enumeration order, and `openPrsRestArgs` requests
+  // `pulls?state=open&per_page=100` with no `sort` — GitHub answers newest-first. Slicing that by
+  // position gave the lanes to the NEWEST entries and deferred the same oldest tail every pass,
+  // for as long as the queue stayed deeper than the budget. {@link orderPendingReviews} is the
+  // whole fix; nothing else in this lane changes.
+  const orderedReviews = orderPendingReviews(pendingReviews);
+  const runNow = orderedReviews.slice(0, reviewLanes);
+  const deferredToNextPass = orderedReviews.slice(reviewLanes);
 
   // SKIP, NOT QUEUE OR BLOCK (design (iii)): a review beyond budget stands
   // down THIS pass, `acted:false`, with no new persisted state — its ledger
