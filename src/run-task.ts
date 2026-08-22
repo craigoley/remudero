@@ -17485,7 +17485,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
   const live = (deps.liveInflightRuns ?? liveInflightRuns)(inflightDir);
   const lockRead = (deps.readLockFiles ?? readLockFilesFrom)(inflightDir);
   const lockFiles = lockRead.locks;
-  const liveIds = new Set(live.map((r) => r.runId));
+  const liveIds = new Set(live.map((r) => r.taskId));
   const dead = lockFiles.filter((f) => !liveIds.has(f));
 
   const report = buildDoctorReport({

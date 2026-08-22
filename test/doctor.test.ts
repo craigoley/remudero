@@ -323,6 +323,110 @@ test("doctor: the verb registration dispatches into the doctor module", async ()
   assert.equal(lines.join("\n").includes("gh "), false);
 });
 
+// ── W1-T1109 — lock-vs-process must key on the TASK id, never the RUN id ──────────────────────
+//
+// MEASURED: `doctorCommand` built `liveIds` from `live.map((r) => r.runId)` (a RUN id, shaped
+// `<taskId>-<epochMs>`) and then filtered lock FILE names (bare task ids) against it. A task id
+// can never equal a run id, so every lock read as dead unconditionally — a live run's lock
+// included. The fix keys `liveIds` on `r.taskId` instead, the one field `LiveInflightRun` already
+// carries beside `runId`.
+
+function doctorDoctorDeps(over: Record<string, unknown> = {}) {
+  return {
+    out: () => {},
+    err: () => {},
+    loadConfig: () => ({ root: "/nonexistent-doctor-root" }) as never,
+    nowMs: Date.parse("2026-08-20T12:00:00Z"),
+    readLedgerLines: () => [aliveRow("dispatch", "2026-08-20T11:59:00Z")],
+    readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
+    readDiskFreeBytes: () => 40 * 1024 ** 3,
+    readPauseAgeMs: () => undefined,
+    readGitLocks: () => [],
+    ...over,
+  };
+}
+
+test("W1-T1109: a live run's lock is not reported as stale", async () => {
+  const { doctorCommand } = await import("../src/run-task.js");
+  const lines: string[] = [];
+  const code = await doctorCommand(
+    [],
+    doctorDoctorDeps({
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      // the lock file is named for the TASK, and the live run reports that SAME task id — a
+      // live worker, correctly recognised.
+      liveInflightRuns: () => [{ taskId: "W1-T1100", runId: "W1-T1100-1755000000000", pid: 631772 }],
+      readLockFiles: () => ({ locks: ["W1-T1100"] }),
+    }),
+  );
+  assert.equal(code, 0, "a live run's lock must not fail the health check");
+  const text = lines.join("\n");
+  assert.match(text, /1 lock\(s\), 0 with no live pid/);
+  assert.equal(text.includes("W1-T1100"), false, "a live lock must not be NAMED as stale");
+});
+
+test("W1-T1109: a lock with no live run is still reported as stale", async () => {
+  const { doctorCommand } = await import("../src/run-task.js");
+  const lines: string[] = [];
+  const code = await doctorCommand(
+    [],
+    doctorDoctorDeps({
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      liveInflightRuns: () => [],
+      readLockFiles: () => ({ locks: ["W1-T1200"] }),
+    }),
+  );
+  assert.equal(code, 1, "a stale lock is a WARN, exit 1");
+  const text = lines.join("\n");
+  assert.match(text, /1 lock\(s\), 1 with no live pid/);
+  assert.match(text, /W1-T1200/, "the stale lock is named");
+});
+
+test("W1-T1109: the comparison keys on the task id", async () => {
+  // DISCRIMINATES ON THE KEY, NOT THE COUNT (design (ii)): one live run, one lock, SAME task id,
+  // DIFFERENT run id from anything the lock filename could equal. The pre-fix comparison
+  // (`liveIds` built from `runId`) would filter this lock as dead even though its run is live,
+  // because a bare task id can never equal a `<taskId>-<epochMs>` run id. Zero dead is the only
+  // outcome consistent with the run actually being live.
+  const { doctorCommand } = await import("../src/run-task.js");
+  const lines: string[] = [];
+  await doctorCommand(
+    [],
+    doctorDoctorDeps({
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      liveInflightRuns: () => [{ taskId: "W1-T1109", runId: "W1-T1109-1787342211470", pid: 999 }],
+      readLockFiles: () => ({ locks: ["W1-T1109"] }),
+    }),
+  );
+  assert.match(lines.join("\n"), /1 lock\(s\), 0 with no live pid/, "a task id must never be compared against a run id");
+});
+
+test("W1-T1109: the arm reports and reclaims nothing", async () => {
+  // design (iv): doctor stays WARN-and-name. Confirm the fixed comparison still only NAMES the
+  // stale lock in its output — no lock file is touched, no reclamation deps are consulted.
+  const { doctorCommand } = await import("../src/run-task.js");
+  const lines: string[] = [];
+  let readLockFilesCalls = 0;
+  const code = await doctorCommand(
+    [],
+    doctorDoctorDeps({
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      liveInflightRuns: () => [],
+      readLockFiles: () => {
+        readLockFilesCalls += 1;
+        return { locks: ["W1-T1300"] };
+      },
+    }),
+  );
+  assert.equal(code, 1, "reporting a stale lock never escalates past WARN's exit code");
+  assert.equal(readLockFilesCalls, 1, "the lock directory is read exactly once — no repair pass, no re-read to clear it");
+  assert.match(lines.join("\n"), /W1-T978 owns reclamation, doctor only reports/);
+});
+
 // ── the read-only refusal ─────────────────────────────────────────────────────────────────────
 
 test("doctor: --fix is refused by name and says who owns each repair", async () => {
