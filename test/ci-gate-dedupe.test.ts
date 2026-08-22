@@ -92,7 +92,7 @@ test("ci-gate-dedupe: a SHA carrying a failed then a later successful run of the
   ]);
   const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   assert.equal(result.status, 0, out);
-  assert.match(out, /ci-gate: all required checks terminal, no failures — merge may proceed\./);
+  assert.match(out, /ci-gate: every REQUIRED check is terminal and no check failed — merge may proceed\./);
   assert.doesNotMatch(out, /FAILED/);
 });
 
@@ -104,7 +104,7 @@ test("ci-gate-dedupe: a SHA whose LATEST attempt for a name is a failure still F
   ]);
   const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   assert.notEqual(result.status, 0, out);
-  assert.match(out, /::error::ci-gate: required check\(s\) FAILED — holding merge:/);
+  assert.match(out, /::error::ci-gate: check\(s\) FAILED — holding merge/);
   assert.match(out, /- refactor-campaign/);
 });
 
@@ -137,5 +137,5 @@ test("ci-gate-dedupe: a required check absent from the deduped list is still wai
   assert.match(out, /waiting for required check\(s\) to complete:/);
   assert.match(out, /- missing-check/);
   assert.doesNotMatch(out, /merge may proceed\./);
-  assert.doesNotMatch(out, /required check\(s\) FAILED/);
+  assert.doesNotMatch(out, /check\(s\) FAILED — holding merge/);
 });

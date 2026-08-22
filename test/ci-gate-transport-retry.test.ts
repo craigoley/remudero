@@ -125,7 +125,7 @@ test("ci-gate: a transport error on one poll is retried, and the gate reaches it
   // TWO consecutive failures — more than the one that killed #1569, still inside the budget.
   const { result, callCount } = await runScript(script, 2);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stdout, /all required checks terminal, no failures/);
+  assert.match(result.stdout, /every REQUIRED check is terminal and no check failed/);
   assert.match(result.stderr, /check-runs read FAILED \(attempt 1\/3\)/, "the retry must be visible, not silent");
   assert.equal(callCount, 3, "two failures then one success — the third call is the one that answered");
 });
@@ -170,7 +170,7 @@ test("ci-gate: an API unreachable for the WHOLE budget fails closed, and says UN
   const out = `${result.stdout}\n${result.stderr}`;
   assert.match(out, /could NOT READ the check-runs API after 3 attempt\(s\)/);
   assert.match(out, /this is NOT a check failure/, "the reader must not be sent hunting a red check that does not exist");
-  assert.doesNotMatch(out, /required check\(s\) FAILED/, "an unreadable poll must never be reported as a check failure");
+  assert.doesNotMatch(out, /check\(s\) FAILED — holding merge/, "an unreadable poll must never be reported as a check failure");
   assert.equal(callCount, 3, "the budget is bounded — it does not spin forever");
 });
 
@@ -184,5 +184,5 @@ test("ci-gate: a REAL failing check is still refused, so the retry bought no len
   ];
   const { result } = await runScript(script, 0, failing);
   assert.notEqual(result.status, 0);
-  assert.match(`${result.stdout}\n${result.stderr}`, /required check\(s\) FAILED/);
+  assert.match(`${result.stdout}\n${result.stderr}`, /check\(s\) FAILED — holding merge/);
 });
