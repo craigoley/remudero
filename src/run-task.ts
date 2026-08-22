@@ -18765,6 +18765,20 @@ export function buildSweepEffects(
 
     dispatchFix: async (pr, evidence) => {
       let worktreePath = "";
+      // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
+      // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
+      // (`prior.fixed`, sweep.ts) is keyed off THAT line's later effect (an `acted:true` row),
+      // never off this closure returning cleanly. Before this task, EVERY throw here — a
+      // `git checkout -B` racing `.git/config`'s lock included — was swallowed unconditionally,
+      // so `runSweep` always saw a clean return and recorded `acted:true`, seeding the dedup for
+      // a head that never received a single `fix.*` ledger row. `fixRungStalledWithoutNewHead`
+      // (sweep.ts, W1-T1110) can only re-arm that gate by reading rows THIS run wrote — with none
+      // written, it reads `false` forever, and the head is stuck (the plan record's rationale).
+      // A throw BEFORE `fix.dispatch` must therefore reach `runSweep`'s own `catch` (which already
+      // sets `acted = false` — untouched by this task) instead of being swallowed here. A throw
+      // AFTER `fix.dispatch` is unchanged: the strike is real, `runSweep` must keep recording
+      // `acted:true` exactly as it always has, so it is still swallowed below.
+      let dispatchStarted = false;
       try {
         // W1-T177 SITE (v): an INDEPENDENT fresh live-state read, via the
         // SAME `readLiveState`/`ghLiveState` fail-open contract every other
@@ -18886,7 +18900,12 @@ export function buildSweepEffects(
             // question's "what the fix worker tried" input). `extra`'s own
             // `task_id` wins over the outer default (spread order in `log`'s
             // body), so this is a pure override, not a second ledger writer.
-            log: (s, extra) => log(s, { task_id: task.id, ...extra }),
+            log: (s, extra) => {
+              // W1-T1127: the ONE line `fixRungStalledWithoutNewHead`/`priorActionsFromLedger`
+              // treat as "a real strike was spent" — see this closure's own doc, above.
+              if (s === "fix.dispatch") dispatchStarted = true;
+              log(s, { task_id: task.id, ...extra });
+            },
             say,
             account: (r) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
             // W1-T177: the SAME live-state reader every fix-rung call site
@@ -18910,6 +18929,13 @@ export function buildSweepEffects(
         });
       } catch (e) {
         log("sweep.fix.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+        // W1-T1127: still ledgered above (nothing is repaired by going quiet) — but a failure
+        // that struck BEFORE the worker ran must propagate, not return cleanly, so `runSweep`'s
+        // own `catch` (sweep.ts) records `acted: false` instead of seeding the dedup gate against
+        // a head that wrote no `fix.*` row. A failure AFTER the worker ran (`dispatchStarted`)
+        // stays swallowed here — that strike is real and must keep seeding the gate exactly as
+        // it does today.
+        if (!dispatchStarted) throw e;
       } finally {
         if (worktreePath) {
           try {
