@@ -29,6 +29,6 @@ raw: "THE CONSOLE EXHAUSTS THE SHARED GRAPHQL BUDGET THE FLEET NEEDS — measure
   since gh pr subcommands use GraphQL while gh api does not."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null
