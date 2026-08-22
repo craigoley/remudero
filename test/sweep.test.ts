@@ -49,7 +49,7 @@ import {
 } from "../src/lib/sweep.js";
 import { reviewLedgerReasons, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { appendLedger } from "../src/lib/ledger.js";
+import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
 import { escalate, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -1602,6 +1602,123 @@ test("an already-armed PR (observed autoMergeArmed=true) is not re-armed", async
   assert.equal(deps.armed.length, 0, "not re-armed");
   assert.equal(summary.byDisposition.mergeable, 1, "still derives the mergeable disposition (level-triggered)");
   assert.equal(summary.actionsTaken, 0);
+});
+
+// ── W1-T1116 — A SWEEP DISPOSITION NAMES THE REFUSAL THAT OVERRODE ITS INTENT, NEVER JUST THE
+//    INTENT ITSELF. The `mergeable` arm's `alreadyDone` switch previously set no
+//    `standDownReason` on any of its three disjuncts (`autoMergeArmed`, `prior.armed`,
+//    `refused`), so a correctly-held PR read identically to a broken one. Fixed the same way
+//    W1-T1110 already fixed the sibling "blocked-fixable"/"conflicted" dedup, one branch away:
+//    name it on `dedupStandDownReason`, the light-pass arm's own established shape. ───────────
+
+/** One `risk_judge.escalated` ledger line, exactly as risk-judge.ts (W1-T970) writes it. */
+function riskEscalatedLine(over: Record<string, unknown> = {}): LedgerLine {
+  return {
+    run_id: "RISK-JUDGE",
+    task_id: "W1-A",
+    step: "risk_judge.escalated",
+    issue_url: "https://github.com/o/r/issues/900",
+    pr_number: 10, // mergeablePr()'s own prNumber
+    head_sha: "aaaa111", // mergeablePr()'s own headSha
+    ...over,
+  };
+}
+
+test("W1-T1116: a risk-refused hold names the refusal on its own row", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, riskEscalatedLine());
+
+  const deps = fakeDeps({ ledgerPath: shared });
+  const summary = await runSweep([mergeablePr()], deps);
+  assert.equal(deps.armed.length, 0, "the risk judge already refused this exact head — never re-armed");
+  assert.equal(summary.actions[0].acted, false);
+
+  const disposed = readLedgerLines(shared).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1);
+  assert.match(
+    String(disposed[0].stand_down_reason),
+    /risk judge escalated/,
+    "the held row must name the refusal that overrode arming — never stay silent about it",
+  );
+});
+
+test("W1-T1116: the held row names the escalation issue", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, riskEscalatedLine({ issue_url: "https://github.com/o/r/issues/2433" }));
+
+  const deps = fakeDeps({ ledgerPath: shared });
+  await runSweep([mergeablePr()], deps);
+
+  const disposed = readLedgerLines(shared).filter((l) => l.step === "sweep.disposed");
+  assert.match(
+    String(disposed[0].stand_down_reason),
+    /https:\/\/github\.com\/o\/r\/issues\/2433/,
+    "the row must name the SAME escalation issue the sibling risk_judge.escalated row already points at — the pointer moved, not duplicated",
+  );
+});
+
+test("W1-T1116: an already-armed hold is distinguishable from a refusal", async () => {
+  const armedShared = ledgerPath();
+  const armedAlready = mergeablePr();
+  armedAlready.autoMergeArmed = true;
+  const armedDeps = fakeDeps({ ledgerPath: armedShared });
+  await runSweep([armedAlready], armedDeps);
+  const armedRow = readLedgerLines(armedShared).find((l) => l.step === "sweep.disposed");
+
+  const refusedShared = ledgerPath();
+  appendLedger(refusedShared, riskEscalatedLine());
+  const refusedDeps = fakeDeps({ ledgerPath: refusedShared });
+  await runSweep([mergeablePr()], refusedDeps);
+  const refusedRow = readLedgerLines(refusedShared).find((l) => l.step === "sweep.disposed");
+
+  assert.notEqual(
+    armedRow?.stand_down_reason,
+    refusedRow?.stand_down_reason,
+    "two DIFFERENT causes of acted:false must read as two different rows, never the same silence",
+  );
+  assert.match(String(armedRow?.stand_down_reason), /already armed/);
+  assert.match(String(refusedRow?.stand_down_reason), /risk judge escalated/);
+  assert.doesNotMatch(String(armedRow?.stand_down_reason), /risk judge/, "the armed row must not borrow the refusal's wording");
+  assert.doesNotMatch(String(refusedRow?.stand_down_reason), /already armed/, "the refusal row must not borrow the armed wording");
+});
+
+test("W1-T1116: an armed disposition still acts unchanged", async () => {
+  const deps = fakeDeps();
+  const summary = await runSweep([mergeablePr()], deps);
+  assert.deepEqual(deps.armed.map((p) => p.prNumber), [10], "an ordinary mergeable PR still arms exactly as before this task");
+  assert.equal(summary.actions[0].acted, true);
+
+  const disposed = readLedgerLines(deps.ledgerPath).find((l) => l.step === "sweep.disposed");
+  assert.equal(
+    disposed?.stand_down_reason,
+    undefined,
+    "an action that actually fired must never carry a stand-down reason — the field is exclusive to a non-action",
+  );
+});
+
+test("W1-T1116: no disjunct clears on a timer", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, riskEscalatedLine());
+
+  // The SAME head, read an enormous elapsed time later — design (iii) is explicit that no
+  // disjunct here expires on a clock; only a NEW head sha or an explicit operator override
+  // (already covered by test/sweep-arm-parity.test.ts's own W1-T970 cases) ever clears it.
+  // `lastActivityAt` is advanced right alongside the sweep clock so the ONLY variable under
+  // test is the ledger-held refusal's own age — otherwise this PR would independently go
+  // "stale" from mere inactivity, which is a different rule this test must not exercise.
+  const FAR_FUTURE = NOW + 1000 * 24 * 60 * 60 * 1000; // ~2.7 years later
+  const stillFreshPr = { ...mergeablePr(), lastActivityAt: new Date(FAR_FUTURE - 60 * 60 * 1000).toISOString() };
+  const deps = fakeDeps({ ledgerPath: shared, now: () => FAR_FUTURE });
+  const summary = await runSweep([stillFreshPr], deps);
+  assert.equal(deps.armed.length, 0, "still refused — no timer thawed it");
+  assert.equal(summary.actions[0].acted, false);
+
+  const disposed = readLedgerLines(shared).filter((l) => l.step === "sweep.disposed").at(-1);
+  assert.match(
+    String(disposed?.stand_down_reason),
+    /risk judge escalated/,
+    "the row still names the refusal after a huge elapsed time — the naming itself carries no expiry either",
+  );
 });
 
 test("renderSweepSummary is a single legible line", () => {

@@ -3260,8 +3260,13 @@ interface PriorActions {
    * A refusal expires on a NEW head sha (the key itself) or an explicit operator override
    * (`cappedOverrideFromLedger` — see the `mergeable` arm of `alreadyDone`'s switch below); it is
    * never cleared by time.
+   *
+   * W1-T1116: a MAP, not a Set, keyed identically — the VALUE is the escalation's own `issue_url`
+   * (or `undefined` when an older row predates that field), read back by the `mergeable` arm so a
+   * refused hold can name the SAME issue the sibling `risk_judge.escalated` row already points at,
+   * rather than a reader having to find that row itself.
    */
-  riskRefused: Set<string>;
+  riskRefused: Map<string, string | undefined>;
   /**
    * ABSENT-check-suite re-push history, read from this module's OWN `sweep.absent_repush`
    * ledger step. TWO keys because one is not enough: `shas` (`<pr>@<oldHead>`) gives
@@ -3344,7 +3349,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const escalated = new Set<string>();
   const depReviewed = new Set<string>();
   const postReviewed = new Set<string>();
-  const riskRefused = new Set<string>();
+  const riskRefused = new Map<string, string | undefined>();
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   for (const line of lines) {
     // W1-T254: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
@@ -3361,7 +3366,11 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     // (written before `runRiskJudge` emitted these fields) is never matched.
     if (line.step === "risk_judge.escalated") {
       if (typeof line.pr_number === "number" && typeof line.head_sha === "string") {
-        riskRefused.add(`${line.pr_number}@${line.head_sha}`);
+        // W1-T1116: carry `issue_url` along with the key — see PriorActions.riskRefused's own
+        // doc for why this is a Map now, not a Set. `undefined` (not a `??` fallback) when an
+        // older row predates the field, so the `mergeable` arm can tell "no issue to name" from
+        // "row missing" without a sentinel string.
+        riskRefused.set(`${line.pr_number}@${line.head_sha}`, typeof line.issue_url === "string" ? line.issue_url : undefined);
       }
       continue;
     }
@@ -3958,10 +3967,33 @@ export async function runSweep(
         // an explicit operator override — reusing `cappedOverrideFromLedger` VERBATIM (the SAME
         // verb, the SAME head-bound read-back the CAPPED-verdict override already uses; design
         // (v) is explicit that this is not a second override vocabulary).
+        const riskRefusedKey = `${pr.prNumber}@${pr.headSha}`;
         const refused =
-          prior.riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
+          prior.riskRefused.has(riskRefusedKey) &&
           !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) !== undefined);
-        alreadyDone = pr.autoMergeArmed === true || prior.armed.has(`${pr.prNumber}@${pr.headSha}`) || refused;
+        const armedByGitHub = pr.autoMergeArmed === true;
+        const armedByPriorPass = !armedByGitHub && prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
+        alreadyDone = armedByGitHub || armedByPriorPass || refused;
+        // W1-T1116: NAME WHICH DISJUNCT FIRED — this switch previously left every one of these
+        // three silent (rationale (3)/(4)), the exact gap the "blocked-fixable"/"conflicted" arm
+        // above (W1-T1110) already closed for its own dedup, and the ONLY reason two readers
+        // misdiagnosed a correctly-held #2432 as a never-clearing dedup in one night (rationale
+        // (5)). Order matches the `||` above: an operator reading the row learns the FIRST true
+        // disjunct, exactly the one that actually short-circuited `alreadyDone`.
+        if (armedByGitHub) {
+          dedupStandDownReason = "auto-merge already armed (observed on GitHub) — nothing to re-arm";
+        } else if (armedByPriorPass) {
+          dedupStandDownReason = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
+        } else if (refused) {
+          // Design (i): carry the SAME `issue_url` the sibling `risk_judge.escalated` row
+          // already holds (rationale (2)/(7)) — the pointer exists one row away; this only
+          // moves it to the row a reader reaches first. Never widens the override: naming the
+          // escape is not taking it (design (v)).
+          const issueUrl = prior.riskRefused.get(riskRefusedKey);
+          dedupStandDownReason = issueUrl
+            ? `risk judge escalated this head, no operator override recorded — see ${issueUrl}`
+            : "risk judge escalated this head, no operator override recorded";
+        }
         break;
       }
       case "blocked-fixable":
@@ -4012,6 +4044,13 @@ export async function runSweep(
         // `acted:false` — a wait is re-derived and re-ledgered every pass,
         // never counted as an action taken.
         alreadyDone = true;
+        // W1-T1116 (design iv) — the fourth silent guard: forcing `alreadyDone` true
+        // unconditionally is BY DESIGN here (unlike the other three disjuncts, there is no
+        // "refusal" to distinguish from), but the row still read `acted:false` with nothing
+        // saying why. `reason` (destructured above from `deriveDisposition`) already narrates
+        // exactly what is being waited on — reused verbatim rather than inventing a second
+        // sentence that could drift from it.
+        dedupStandDownReason = reason;
         break;
       default:
         alreadyDone = false;
