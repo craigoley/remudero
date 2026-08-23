@@ -3121,6 +3121,76 @@ export function parseGhRateLimitHeaders(headerBlock: string): GhRateLimitReading
 }
 
 /**
+ * W1-T1235 — sentinel recorded for a bucket or reset that could not be READ, never one that was
+ * merely inconvenient to look up: an unreadable reset must be recorded as unknown rather than
+ * given an invented wait (design (ii)/(iii) of this task — the exact discipline
+ * `defaultGhRetryAfterSeconds` (lib/open-prs-rest.ts) already applies to its own `undefined`
+ * return). Shared by every consumer of {@link GhRateLimitRefusal} — the auto-merge arm's own row
+ * and `rmd status`'s GitHub-buckets section both render "no reading" identically, rather than
+ * each inventing its own ad hoc placeholder string.
+ */
+export const GH_RATE_LIMIT_BUCKET_UNKNOWN = "unknown";
+
+/**
+ * W1-T1235 — one GitHub quota bucket's REFUSAL, ready to ledger. `bucket` and `resetsAt` are
+ * {@link GH_RATE_LIMIT_BUCKET_UNKNOWN} when there was no header to read them from — never a
+ * guess — see {@link ghRateLimitRefusalFromReading}/{@link ghRateLimitRefusalUnknown}.
+ */
+export interface GhRateLimitRefusal {
+  /** `X-Ratelimit-Resource` (e.g. `"core"`, `"graphql"`) — read off the response's OWN field,
+   *  never inferred from which `gh` subcommand or operation was refused. */
+  bucket: string;
+  /** ISO-8601, converted from the header's Unix-epoch-seconds `X-Ratelimit-Reset`. */
+  resetsAt: string;
+  /** What was refused — free text a caller supplies for the ledger row / console line. */
+  operation: string;
+}
+
+/**
+ * W1-T1235 — THE ONE PLACE a {@link GhRateLimitReading} becomes a refusal record.
+ *
+ * `remaining === 0` is the ONLY evidence this treats as an actual refusal: a reading with
+ * `remaining` merely low, or entirely absent (every non-`gh api` call {@link ghJson} issues —
+ * see that function's own doc), returns `undefined` rather than a manufactured refusal, so a
+ * call that was never rate limited produces no row (design (iv); this is what keeps ordinary
+ * traffic from ever seeding a false refusal).
+ *
+ * `bucket` is read off `reading.resource` ALONE, `resetsAt` off `reading.reset` ALONE — either
+ * missing renders {@link GH_RATE_LIMIT_BUCKET_UNKNOWN}, never inferred from `operation` and
+ * never invented. This is what makes the bucket this function names provably the response's
+ * OWN field rather than a guess keyed on which caller happened to be refused.
+ */
+export function ghRateLimitRefusalFromReading(
+  reading: GhRateLimitReading,
+  operation: string,
+): GhRateLimitRefusal | undefined {
+  if (reading.remaining !== 0) return undefined;
+  return {
+    bucket: reading.resource ?? GH_RATE_LIMIT_BUCKET_UNKNOWN,
+    resetsAt: reading.reset !== undefined ? new Date(reading.reset * 1000).toISOString() : GH_RATE_LIMIT_BUCKET_UNKNOWN,
+    operation,
+  };
+}
+
+/**
+ * W1-T1235 — the auto-merge arm's OWN shape: `gh pr merge --auto` is `execFileSync`'d directly
+ * (run-task.ts's `ArmDeps.armAuto`), never through {@link ghJson}, so no header block ever
+ * reaches this file for it — see {@link ghJson}'s own doc, above, "captures stderr TEXT, never
+ * headers". A refusal recognisably rate-limit-SHAPED by its stderr text (run-task.ts's own
+ * narrow `armFailureIsRateLimited` classifier) is still worth NAMING as one — design (ii)'s
+ * second acceptable option — rather than folding silently into the same undifferentiated
+ * `arm-error-ignored` bucket every other permanent refusal already falls into.
+ *
+ * Both fields are {@link GH_RATE_LIMIT_BUCKET_UNKNOWN}: this is called ONLY when there is no
+ * header to read, so hardcoding `"graphql"` here — however true structurally (the arm has no
+ * REST form at all) — would be exactly the by-caller inference {@link ghRateLimitRefusalFromReading}'s
+ * own doc forbids for a refusal record. Honest-unknown, not a guess.
+ */
+export function ghRateLimitRefusalUnknown(operation: string): GhRateLimitRefusal {
+  return { bucket: GH_RATE_LIMIT_BUCKET_UNKNOWN, resetsAt: GH_RATE_LIMIT_BUCKET_UNKNOWN, operation };
+}
+
+/**
  * Split `gh api -i`'s combined stdout into its HTTP header block and its JSON body — mirroring
  * curl's `-i`: a status line, the response headers (CRLF-terminated, per measurement), one blank
  * line, then the body. Anything that does not start with an HTTP status line (every `gh`

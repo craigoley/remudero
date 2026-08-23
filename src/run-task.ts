@@ -634,6 +634,9 @@ import {
   DEFAULT_PRUNE_GRACE_MS,
   appendQuestion,
   ghJson,
+  GH_RATE_LIMIT_BUCKET_UNKNOWN,
+  ghRateLimitRefusalUnknown,
+  type GhRateLimitRefusal,
   parseDecisionRequest,
   parseFollowups,
   parseQuestion,
@@ -1791,6 +1794,12 @@ export type ArmOutcome =
 export interface ArmAttemptResult {
   outcome: ArmOutcome;
   error?: string;
+  /** W1-T1235: set ONLY when the failure `error` carries was recognisably rate-limit-shaped
+   *  (see {@link armFailureIsRateLimited}) — the bucket/reset this refusal names, honestly
+   *  {@link GH_RATE_LIMIT_BUCKET_UNKNOWN} for both fields since the arm's `execFileSync` capture
+   *  carries no header to read (see worker.ts's {@link ghRateLimitRefusalUnknown} for why this
+   *  is the deliberately honest shape, never a guess). Absent on every other outcome. */
+  rateLimit?: GhRateLimitRefusal;
 }
 
 export function armAutoMerge(
@@ -1928,8 +1937,23 @@ function attemptArm(
     // back off `error` (see `buildSweepEffects`'s `arm` effect below) to decide whether the
     // failure seeds the head-keyed dedup — that decision lives there, not here, so this call
     // stays purely informational, exactly as design note iii requires.
-    deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
-    return { outcome: "arm-error-ignored", error: msg };
+    //
+    // W1-T1235: a rate-limit-SHAPED failure additionally names the exhausted budget rather than
+    // sitting anonymously inside `arm_error_ignored` prose — the defect the task's own rationale
+    // (3) describes: "the arm does not reach it [the reading] at all". `armFailureIsRateLimited`
+    // is a narrower test than `armFailureAction`'s bare `"transient"` bucket (which also matches
+    // an ordinary network blip), so a `rateLimit` is attached only when the message plausibly IS
+    // a quota refusal. Both fields are honestly `unknown` (never `"graphql"`, however true
+    // structurally) — see `ghRateLimitRefusalUnknown`'s own doc for why guessing here would
+    // undo the "read the response's own field" discipline the general reader observes.
+    const rateLimit = armFailureIsRateLimited(msg) ? ghRateLimitRefusalUnknown("gh pr merge --auto") : undefined;
+    deps.say(
+      rateLimit
+        ? `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
+            `${rateLimit.bucket}, resets: ${rateLimit.resetsAt}) — ${msg} — ${prUrl}`
+        : `automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`,
+    );
+    return { outcome: "arm-error-ignored", error: msg, ...(rateLimit ? { rateLimit } : {}) };
   }
 }
 
@@ -2466,10 +2490,18 @@ function logArmAttribution(
   taskId: string | undefined,
   lane: ArmLane,
   extra: Record<string, unknown> = {},
+  // W1-T1235: appended LAST and optional, exactly like `extra` above — no existing caller/
+  // fixture shifts. The bucket/reset `attemptArm`'s catch captured when the failure was
+  // rate-limit-shaped (see `ArmAttemptResult.rateLimit`'s own doc).
+  rateLimit?: GhRateLimitRefusal,
 ): void {
   const prNumber = prNumberFromRef(prUrl);
+  const ghFields = rateLimit
+    ? { gh_bucket: rateLimit.bucket, gh_bucket_resets_at: rateLimit.resetsAt, gh_bucket_operation: rateLimit.operation }
+    : {};
   log(armOutcomeArmed(outcome) ? "automerge.armed" : armSkipStepName(outcome), {
     ...extra,
+    ...ghFields,
     task_id: taskId,
     pr_number: prNumber,
     pr_url: prUrl,
@@ -2477,6 +2509,14 @@ function logArmAttribution(
   });
   if (outcome === "direct-merged") {
     log("automerge.clean_status_direct_merge", { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane });
+  }
+  // W1-T1235: a rate-limit-shaped refusal gets its OWN named step, beside the generic
+  // `automerge.arm_failed` row above — so a rate-limited arm is discoverable by grepping ONE
+  // step name instead of parsing `error` prose out of every arm-failure row (acceptance 5:
+  // "names that budget instead of failing silently"). `rmd status`'s GITHUB BUCKETS section
+  // (see `latestGhRateLimitRefusalsFromLedger`) reads exactly this step back.
+  if (rateLimit) {
+    log("automerge.rate_limit_refused", { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane, ...ghFields });
   }
 }
 
@@ -2524,6 +2564,8 @@ export function armIfVerdictPermits(
   // W1-T1079: `deps.arm` (test fixtures, and every default before this task) may still return a
   // bare ArmOutcome with no error text — that is fine, `error` is simply absent from the row.
   const error = typeof result === "string" ? undefined : result.error;
+  // W1-T1235: same rider as `armAndLogOutcome` — see that function's own comment.
+  const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
   // impl-BI: the STEP NAME must match the outcome. This used to log `automerge.armed`
   // unconditionally with the outcome merely carried in a field — so a `ledger-refused` here
   // still read as an arm to anyone counting steps.
@@ -2535,15 +2577,23 @@ export function armIfVerdictPermits(
   // `outcome` comes from the LEDGER gate inside `armAutoMerge` (which refused), whose real reason
   // reached only stdout via `deps.say`. The semantic verdict is kept under its own name so the
   // line still records why arming was PERMITTED as well as what actually happened.
-  logArmAttribution(ctx.log, outcome, ctx.prUrl, ctx.taskId, "review", {
+  logArmAttribution(
+    ctx.log,
     outcome,
-    reason: armOutcomeReason(outcome, decision.reason),
-    decision_reason: decision.reason,
-    head_sha: ctx.headSha,
-    // W1-T1079: the ONE field this task adds to this row — what `gh pr merge --auto` actually
-    // said, present only when the attempt actually threw (never on an armed/skipped outcome).
-    ...(error !== undefined ? { error } : {}),
-  });
+    ctx.prUrl,
+    ctx.taskId,
+    "review",
+    {
+      outcome,
+      reason: armOutcomeReason(outcome, decision.reason),
+      decision_reason: decision.reason,
+      head_sha: ctx.headSha,
+      // W1-T1079: the ONE field this task adds to this row — what `gh pr merge --auto` actually
+      // said, present only when the attempt actually threw (never on an armed/skipped outcome).
+      ...(error !== undefined ? { error } : {}),
+    },
+    rateLimit,
+  );
   return outcome;
 }
 
@@ -2629,7 +2679,11 @@ export function armAndLogOutcome(
   const result = arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
   const error = typeof result === "string" ? undefined : result.error;
-  logArmAttribution(log, outcome, prUrl, taskId, lane, error !== undefined ? { outcome, error } : { outcome });
+  // W1-T1235: `result.rateLimit`, when present, rides alongside `error` onto the SAME row this
+  // function already writes — see `logArmAttribution`'s own doc for the second, named step it
+  // additionally emits.
+  const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
+  logArmAttribution(log, outcome, prUrl, taskId, lane, error !== undefined ? { outcome, error } : { outcome }, rateLimit);
   return outcome;
 }
 
@@ -2692,6 +2746,20 @@ export function armFailureAction(stderrText: string): "direct-merge" | "transien
   // signature is a follow-up once actually observed, never guessed here (design vii/note above).
   if (/base branch was modified/i.test(stderrText)) return "retryable";
   return "unknown";
+}
+
+/**
+ * W1-T1235 — narrower than {@link armFailureAction}'s `"transient"` bucket: TRUE only for the
+ * rate-limit/abuse-detection signatures within it (the same allowlist that regex already
+ * carries), never a bare transport fault (`ETIMEDOUT`/`ECONNRESET`/a 5xx/etc) that merely shares
+ * its `"transient"` verdict. `attemptArm`'s catch consults this to decide whether a failure
+ * earns the distinct `automerge.rate_limit_refused` row — a quota refusal is worth naming as
+ * one; a network blip is not evidence of an exhausted bucket and must not be recorded as if it
+ * were (this is what keeps acceptance 6 — "a call that was never rate limited records no such
+ * row" — true of the arm's own path, not only of the general `GhRateLimitReading` reader).
+ */
+export function armFailureIsRateLimited(stderrText: string): boolean {
+  return /secondary rate limit|rate.limit|abuse detection|too many requests/i.test(stderrText);
 }
 
 /**
@@ -17798,6 +17866,9 @@ export interface StatusDeps {
   buildBatchedGithub?: typeof buildBatchedGithub;
   buildStatusBoard?: typeof buildStatusBoard;
   renderStatusBoardText?: typeof renderStatusBoardText;
+  /** W1-T1235: the GITHUB BUCKETS section's own ledger read — defaults to the real
+   *  `readLedgerLines`, injectable so a test drives it without touching a real file. */
+  readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
   out?: (line: string) => void;
   err?: (line: string) => void;
 }
@@ -17950,6 +18021,62 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
   return report.exitCode;
 }
 
+/**
+ * W1-T1235 — one GitHub quota bucket's most-recently-observed REFUSAL, for `rmd status`'s
+ * GITHUB BUCKETS section: the read half of "carry the reading to a status line" (design (i)).
+ * Folds `automerge.rate_limit_refused` rows (see `logArmAttribution`) — NEWEST `ts` per bucket
+ * wins. A bucket this host has never seen refused is simply absent from the result, so the
+ * render below states "no refusal recorded" rather than fabricating a healthy reading for a
+ * resource nothing has actually observed — this is a REFUSAL log, not a live quota probe (design
+ * (i): "not to poll rate_limit").
+ */
+export interface GhBucketRefusalStatus {
+  bucket: string;
+  resetsAt: string;
+  operation: string;
+  ts: string;
+  prUrl?: string;
+}
+
+export function latestGhRateLimitRefusalsFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+): GhBucketRefusalStatus[] {
+  const byBucket = new Map<string, GhBucketRefusalStatus>();
+  for (const line of lines) {
+    if (line.step !== "automerge.rate_limit_refused") continue;
+    if (typeof line.gh_bucket !== "string") continue;
+    const ts = typeof line.ts === "string" ? line.ts : "";
+    const prior = byBucket.get(line.gh_bucket);
+    if (prior && prior.ts >= ts) continue;
+    byBucket.set(line.gh_bucket, {
+      bucket: line.gh_bucket,
+      resetsAt: typeof line.gh_bucket_resets_at === "string" ? line.gh_bucket_resets_at : GH_RATE_LIMIT_BUCKET_UNKNOWN,
+      operation: typeof line.gh_bucket_operation === "string" ? line.gh_bucket_operation : "",
+      ts,
+      prUrl: typeof line.pr_url === "string" ? line.pr_url : undefined,
+    });
+  }
+  return [...byBucket.values()].sort((a, b) => a.bucket.localeCompare(b.bucket));
+}
+
+/**
+ * W1-T1235 — "GITHUB BUCKETS", rendered BESIDE HEADROOM, never folded into it (design (v): a
+ * GitHub bucket is a different resource with a different reset than the model's own weekly/
+ * session window, and folding them would make one figure mean two things). Pure text, exactly
+ * like `renderStatusBoardText`'s own section style — a reader grepping `rmd status`'s output
+ * finds this heading beside `── HEADROOM ──` rather than inside it.
+ */
+export function renderGhBucketsSection(refusals: ReadonlyArray<GhBucketRefusalStatus>): string {
+  const header = "── GITHUB BUCKETS ───────────────────────────────────────";
+  if (refusals.length === 0) {
+    return [header, "  no rate-limit refusal recorded (auto-merge arm) since this ledger began"].join("\n");
+  }
+  const rows = refusals.map(
+    (r) => `  ${r.bucket}: refused ${r.ts} during "${r.operation}" — resets ${r.resetsAt}${r.prUrl ? ` (${r.prUrl})` : ""}`,
+  );
+  return [header, ...rows].join("\n");
+}
+
 export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l));
   const err = deps.err ?? ((l: string) => console.error(l));
@@ -18009,7 +18136,17 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
     resolveHeadroomEnabled: () => resolveHeadroomEnabled(config),
     resolveSupervisorIntervalS,
   });
-  out(rest.includes("--json") ? JSON.stringify(model, null, 2) : render(model));
+  // W1-T1235: GITHUB BUCKETS, read BESIDE the board's own HEADROOM section rather than folded
+  // into it (design (v)) — a local ledger fold of `automerge.rate_limit_refused` rows, never a
+  // new `gh api rate_limit` call (design (i): "surface what is already read"), so this section
+  // costs `rmd status` no additional network request.
+  const readLedger = deps.readLedgerLines ?? ((pth: string) => readLedgerLines(pth) as Array<Record<string, unknown>>);
+  const ghBucketRefusals = latestGhRateLimitRefusalsFromLedger(readLedger(ledgerPath));
+  if (rest.includes("--json")) {
+    out(JSON.stringify({ ...model, ghBucketRefusals }, null, 2));
+  } else {
+    out(`${render(model)}\n\n${renderGhBucketsSection(ghBucketRefusals)}`);
+  }
   return 0;
 }
 

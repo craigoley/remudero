@@ -669,6 +669,23 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // spent for nothing, forever, the same unbounded-re-fire shape `sweep.absent_repush` exists to
   // prevent, applied to this lane's own dedup instead.
   "sweep.update_branch.updated",
+  // W1-T1235: run-task.ts's `latestGhRateLimitRefusalsFromLedger` reads the NEWEST
+  // `automerge.rate_limit_refused` line per bucket for `rmd status`'s GITHUB BUCKETS section
+  // (`line.step !== "automerge.rate_limit_refused"` guard) — a rate-limited auto-merge arm's
+  // own naming of the exhausted bucket (see `logArmAttribution`'s own doc). Placed here rather
+  // than the recency-bounded RENDER_RELEVANT_LEDGER_STEPS category deliberately: GitHub's own
+  // bucket resets are commonly an hour or more out, longer than RENDER_STEP_RETENTION_WINDOW_MS
+  // (30 minutes) would keep this line visible for, and an operator diagnosing a stuck merge
+  // needs to see the LAST refusal regardless of how long ago it fired — the same "GitHub quota
+  // event, worth permanent operator-visible history" reasoning `daemon.quota_exhausted.escalated`
+  // above already carries for its own sibling event. Sparse by construction (fires only on an
+  // actual rate-limit-shaped arm refusal, never on ordinary traffic — acceptance 6 of this
+  // task), so permanent retention costs nothing beyond the fixed MAX_RETAINED_LINES_PER_STEP
+  // ceiling every other member of this Set already accepts. Its siblings
+  // `automerge.arm_failed`/`automerge.arm_skipped` are deliberately NOT registered anywhere
+  // (matching their pre-existing, unprotected status quo) — only this ONE step, the one
+  // `rmd status` actually reads, needs the guard.
+  "automerge.rate_limit_refused",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: the mutation check in
   // test/ledger-rotation.test.ts anchors on those three lines followed by `]);` and asserts the
   // needle occurs EXACTLY once. A block appended after them silently breaks that anchor — this
