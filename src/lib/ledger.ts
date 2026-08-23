@@ -866,6 +866,28 @@ export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // (`line.step !== "console.ceiling_override_written"` guard, the same shape every other
   // render-relevant reader above already uses).
   "console.ceiling_override_written",
+  // W1-T1237 (THE SWEEP HEARTBEAT WOULD NOT SURVIVE BEING READ): `sweep.pass` and `sweep.summary`
+  // (src/lib/sweep.ts, "PER-PASS HEARTBEAT, WRITTEN BEFORE THE LOOP") were in NEITHER retention
+  // set before this task, so rotation archived them like any other diagnostic row — the same
+  // exposure this whole category exists to close (W1-T275's `daemon.headroom` precedent,
+  // verbatim). RENDER, NOT DECISION, on this category's own terms: nothing in this codebase's
+  // dispatch path re-reads either line to decide anything (sweep.ts's own predicates are
+  // re-evaluated fresh every tick), so widening the never-rotated `DECISION_RELEVANT_LEDGER_STEPS`
+  // core for a report-only read would trade a bounded-retention bug for unbounded growth, the same
+  // ruling this file already applies to every other entry here.
+  //
+  // BOTH steps, by exact name, because `isRenderRelevantStep` is a `Set.has`, never a prefix
+  // match. src/lib/doctor.ts's `judgeSweepLiveness` (W1-T1236) makes TWO faults out of these rows
+  // and needs both: (a) the newest `sweep.pass` older than a bound derived from this host's own
+  // observed cadence, and (b) the newest `sweep.pass` with no `sweep.summary` AT OR AFTER its own
+  // timestamp — the paired derivation is worthless if only one half of the pair survives rotation.
+  //
+  // src/lib/doctor.ts's `readSweepPassSummaryTimestamps` reads both steps through doctor.ts's own
+  // exported `SWEEP_LIVENESS_STEPS` boundary marker (`.has(step)`) — the single source
+  // `test/ledger-render-retention.test.ts`'s derived-from-consumers lock also scans, so this
+  // registration cannot silently rot the way an untested hardcoded pair could.
+  "sweep.pass",
+  "sweep.summary",
 ]);
 
 /** True for any step in {@link RENDER_RELEVANT_LEDGER_STEPS}. */
