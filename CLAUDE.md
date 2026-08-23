@@ -34,16 +34,9 @@ forensic detail, so the narrative does not need to live here.
   check this repo adds inherits this rule too. *(W1-T294, W1-T338)*
 - **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
   each follow-up commit.** `bodyContradictsDiff` (`src/lib/review.ts`, W1-T274) OPENS THE DIFF and
-  FAILS the PR — MEASURED 2026-08-12: #1685 refused with *"body contradicts its own diff: claimed
-  'exactly one file'"*, over the same three files #974 carried. #974 merged (PRE-W1-T274) claiming
-  *"exactly one file: MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md"* while carrying `MASTER-PLAN.md` + `docs/ORIENTATION.md` + `plan/plan-index.json`
-  — and what was load-bearing is that THE BODY NAMED THE VERY FILE THE DIFF TOUCHED. The detector's own
-  doc says it in terms: *"NOT because of plan scope"* — **#974 KEPT its `planOnly` carve-out.**
-  **NEVER ASSERT SCOPE MEMBERSHIP FROM MEMORY; RUN THE PREDICATE** —
-  `isInPlanScope("docs/ORIENTATION.md")` returns **TRUE** (run, not read), and any claim about it goes
-  stale the moment `plan-architect.ts` moves. This bullet asserted the opposite until 2026-08-12, and a
-  session repairing a false body claim FOLLOWED IT AND WROTE A FRESH ONE — the same defect the bullet
-  exists to prevent, caused by the bullet. **The detector also has a SHORTHAND arm**: scope-shorthand
+  FAILS the PR — **NEVER ASSERT SCOPE MEMBERSHIP FROM MEMORY; RUN THE PREDICATE** —
+  `isInPlanScope("docs/ORIENTATION.md")` returns **TRUE** (run, not read), and any claim about it
+  goes stale the moment `plan-architect.ts` moves. **The detector also has a SHORTHAND arm**: scope-shorthand
   phrases (the plan-only/data-only family) fire when ANCHORED — as a label with a colon, a copular
   claim ("this PR is …-only"), or attributive before a changeset noun — while bare mentions, quoted
   regions and file paths stay silent (`shorthandIsAboutChangeset`, W1-T413). If the diff carries any
@@ -361,11 +354,7 @@ forensic detail, so the narrative does not need to live here.
   union is three patterns, never two:**
   `zgrep -h '<pat>' state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson | sort -u`.
   `zgrep` reads plain input transparently (MEASURED: 223 hits on an uncompressed rotation), so the
-  fix is always THE GLOB, never the tool. MEASURED POPULATION at 2026-08-12: **666 `.gz`, 3 plain,
-  1 live** — and the `.gz` half STOPS at `2026-08-05T10-56-55Z`. `datedArchivePath`
-  (`src/lib/ledger.ts`) returns `<base>.<stamp>.ndjson` and **nothing in the repo runs `gzip`**, so
-  PLAIN IS WHAT THE CODE WRITES and the `.gz` corpus is out-of-band compression that has not run
-  since. Expect the plain half to grow; never assume either half is empty.
+  fix is always THE GLOB, never the tool. Never assume either half is empty.
 - **Both one-sided globs are live defects, in OPPOSITE directions**: the sanctioned-until-now
   `.gz`-only form hid **34,861 rows (8.3% of the corpus), every row rotated out since
   2026-08-05T10:56:55Z** — mostly `board_gateway.*` and `sweep.*`; and `ledger.*.ndjson` alone
@@ -505,9 +494,7 @@ forensic detail, so the narrative does not need to live here.
   drop the `\b`. Never `\s` under `awk`. *(2026-08-12)*
 - **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
-  absence.** A GATE NOW HOLDS THE TRACKED POPULATION AT ZERO (W1-T438/#1664; `test/no-raw-nul.test.ts`
-  walks `git ls-files` and fails naming path@offset), so this is no longer a flag-every-session
-  hazard for tracked sources. **WHAT SURVIVES: the tool is still blind**, so any UNTRACKED or
+  absence.** **WHAT SURVIVES: the tool is still blind**, so any UNTRACKED or
   newly-added file the gate has not seen reads as absent, and **BARE `rg` IS BLIND THE SAME WAY**
   (`rg -l` empty, `rg -la` fine) — "use grep -a or rg" is NOT the rule. `/usr/bin/grep` is
   unaffected, which is why it hid for months. Use `grep -ar`, `rg -la` or `git grep` for ANY sweep
@@ -515,13 +502,9 @@ forensic detail, so the narrative does not need to live here.
   `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'`. `git grep --cached -I -l ''`
   is NOT a substitute — git sniffs only the first 8000 bytes. *(2026-08-11; folded 2026-08-16)*
 
-- **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** The ledger
-  union's `.gz`-only glob returned **0 hits for a pattern with 3 real hits** while its positive
-  control read 257k lines — because the control proved the `.gz` half readable and said nothing
-  about the plain half it never globbed. Under `bash` a non-matching glob passes through literally
-  and `grep` fails it into `2>/dev/null`; under `zsh` it errors. Full population, the corrected
-  three-pattern idiom and the per-form control are under "Ledger and evidence discipline" above.
-  THE GENERAL FORM: control on COVERAGE (did every form get opened?), not on READABILITY (did
+- **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** Under `bash` a
+  non-matching glob passes through literally and `grep` fails it into `2>/dev/null`; under `zsh` it
+  errors. THE GENERAL FORM: control on COVERAGE (did every form get opened?), not on READABILITY (did
   something match?). *(2026-08-12)*
 - **(d) A QUERY CAN ANSWER THE WRONG QUESTION WITH A PERFECTLY GOOD ZERO, AND NO POSITIVE CONTROL
   SAVES YOU.** `git ls-remote --heads origin 'run-<id>-*'` reports live worker branches. GitHub
