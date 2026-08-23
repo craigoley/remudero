@@ -5,10 +5,19 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   ContainmentError,
+  EGRESS_ALLOWED_HOST_FALLBACK,
+  EGRESS_ALLOWED_MARKER,
+  EGRESS_BLOCKED_HOST,
+  EGRESS_BLOCKED_MARKER,
+  EGRESS_TIMEOUT_SECONDS,
+  allowedHostFromSettings,
   assessContainment,
+  assessEgressContainment,
   containmentProbePrompt,
   defaultExecutor,
+  egressProbeCommand,
   probeContainment,
+  type ContainmentEvidence,
   type ProbeExecResult,
 } from "../src/lib/containment.js";
 import type { Config } from "../src/lib/config.js";
@@ -422,4 +431,111 @@ test("ContainmentError: the static config gate (sandbox disabled) names its own 
       return true;
     },
   );
+});
+
+// ── W1-T1265: THE EGRESS ARM — all three verdicts falsified ────────────────────
+//
+// The third arm is the one that matters: without it an OFFLINE HOST reads as a
+// perfect sandbox, because "the blocked request failed" and "nothing can reach
+// anything" are the same observation.
+
+/** Evidence with the filesystem arm already holding, so only egress is under test. */
+function egressEvidence(over: Partial<ContainmentEvidence>): ContainmentEvidence {
+  return {
+    outsideWriteCreated: false,
+    osDenialSeen: true,
+    insideWriteCreated: true,
+    ...over,
+  };
+}
+
+test("W1-T1265: blocked refused plus the control succeeding verdicts egress PROVEN-HOLDING", () => {
+  const v = assessEgressContainment(
+    egressEvidence({ egressBlockedReached: false, egressAllowedReached: true, egressDenialSeen: true }),
+  );
+  assert.equal(v.contained, true);
+  assert.match(v.reason, /REFUSED/);
+  assert.match(v.reason, /control request succeeded/);
+});
+
+test("W1-T1265: the blocked host coming back verdicts egress PROVEN-BROKEN", () => {
+  const v = assessEgressContainment(
+    egressEvidence({ egressBlockedReached: true, egressAllowedReached: true, egressDenialSeen: false }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /PROVEN-BROKEN/);
+  assert.match(v.reason, new RegExp(EGRESS_BLOCKED_HOST.replace(".", "\\.")));
+});
+
+test("W1-T1265: the control failing too verdicts UNPROVEN and never proven-holding", () => {
+  const v = assessEgressContainment(
+    egressEvidence({ egressBlockedReached: false, egressAllowedReached: false, egressDenialSeen: true }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.match(v.reason, /offline host/);
+});
+
+test("W1-T1265: an unobserved egress attempt stays UNPROVEN rather than reading as blocked", () => {
+  const v = assessEgressContainment(egressEvidence({}));
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.match(v.reason, /no egress attempt was observed/);
+});
+
+test("W1-T1265: a blocked request with no observed refusal stays UNPROVEN", () => {
+  const v = assessEgressContainment(
+    egressEvidence({ egressBlockedReached: false, egressAllowedReached: true, egressDenialSeen: false }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+});
+
+test("W1-T1265: the control host is derived from the allowlist rather than duplicated", () => {
+  assert.equal(
+    allowedHostFromSettings({ sandbox: { network: { allowedDomains: ["github.com", "api.github.com"] } } }),
+    "github.com",
+  );
+  assert.equal(allowedHostFromSettings({}), EGRESS_ALLOWED_HOST_FALLBACK);
+  assert.equal(allowedHostFromSettings({ sandbox: { network: { allowedDomains: [] } } }), EGRESS_ALLOWED_HOST_FALLBACK);
+});
+
+test("W1-T1265: the egress command carries its own timeout and writes a marker per request", () => {
+  const cmd = egressProbeCommand("api.github.com");
+  assert.match(cmd, new RegExp(`-m ${EGRESS_TIMEOUT_SECONDS}\\b`));
+  assert.ok(cmd.includes(EGRESS_BLOCKED_HOST), "the blocked target must be the RFC 2606 host");
+  assert.ok(cmd.includes("api.github.com"), "the control target must be the allowlisted host");
+  assert.ok(cmd.includes(EGRESS_BLOCKED_MARKER) && cmd.includes(EGRESS_ALLOWED_MARKER));
+});
+
+test("W1-T1265: a reported egress attempt derives the denial from the transcript rather than from silence", async () => {
+  // Drives probeContainment's OWN egress wiring (not just the pure verdict): an executor
+  // that REPORTS an egress attempt must have `egressDenialSeen` computed from the
+  // transcript. The `undefined` arm is covered by the unobserved case above.
+  const res = await probeContainment({
+    settingsFile: settingsFile(ENABLED),
+    token: "tok1265",
+    exec: async (): Promise<ProbeExecResult> => ({
+      transcript: "tok1265 touch: ../tok1265.txt: Operation not permitted\negress: Connection refused",
+      outsideWriteCreated: false,
+      insideWriteCreated: true,
+      egressBlockedReached: false,
+      egressAllowedReached: true,
+    }),
+  });
+  // The filesystem verdict is unchanged by the egress arm — it still governs the throw.
+  assert.equal(res.contained, true);
+  assert.equal(res.evidence.egressBlockedReached, false);
+  assert.equal(res.evidence.egressAllowedReached, true);
+  assert.equal(res.evidence.egressDenialSeen, true);
+  // And the pure verdict over that same evidence reads PROVEN-HOLDING.
+  assert.equal(assessEgressContainment(res.evidence).contained, true);
+});
+
+test("W1-T1265: the probe prompt asks for the egress attempt and its outcome", () => {
+  const prompt = containmentProbePrompt("tok", "api.github.com");
+  assert.match(prompt, /THREE commands/, "the three containment steps are unchanged");
+  assert.match(prompt, /FOURTH command/, "the egress check is asked for as an explicit fourth step");
+  assert.ok(prompt.includes(EGRESS_BLOCKED_HOST));
+  assert.match(prompt, /^egress: /m);
 });
