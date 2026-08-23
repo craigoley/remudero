@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runTask, lintPlanCommand } from "../src/run-task.js";
@@ -467,6 +467,102 @@ test("W1-T497 ACCEPTANCE 2: whole-plan mode (no --base) stays UNWIRED on purpose
       combined,
       /proof-name-resolution/,
       `whole-plan mode must never fire proof-name-resolution (the resolver is never supplied there); saw:\n${combined}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T1225: `proofGrepUnmatchableViolations` (task-linter.ts) is WIRED at the SAME `--base`
+// changed-tasks call site as W1-T497's resolver above, via `opts.readGrepProofFile` — a real
+// filesystem reader bound to `repoRoot`, never a stub. Mirrors the W1-T497 wiring suite one
+// section up: (1) fires through the real --base path, (2) stays silent in whole-plan mode (the
+// reader is never supplied there either), and (3) the reader's own catch branch — reached when
+// `existsSync` is true but `readFileSync` still throws (a directory sits where a file was
+// expected) — is exercised directly, proving a real read failure degrades to the SAME "not on
+// disk yet" silence as an absent path, rather than crashing the whole lint-plan run.
+
+const GREP_PROBE_ID = "W1-T91225";
+const GREP_CASE_PATTERN = "widget registry becomes authoritative";
+const GREP_CASE_FILE_TEXT = "The Widget Registry becomes authoritative here.\n";
+
+/** `caseFileRel`/`dirAsFileRel` are repo-root-relative paths supplied by the caller — the first
+ *  names a real file carrying `GREP_CASE_FILE_TEXT` (case-only mismatch ⇒ WARN), the second
+ *  names a real DIRECTORY (existsSync true, readFileSync throws ⇒ the catch branch ⇒ silence). */
+function grepProbeShardYaml(caseFileRel: string, dirAsFileRel: string): string {
+  return [
+    `- id: ${GREP_PROBE_ID}`,
+    `  title: "W1-T1225 wiring probe (fixture only — never a real task)"`,
+    "  repo: remudero",
+    "  origin: architect",
+    "  depends_on: []",
+    "  type: implement",
+    "  verify: auto",
+    "  risk: low",
+    "  status: queued",
+    "  attempts: 0",
+    "  files: [test/task-linter-wiring.test.ts]",
+    "  acceptance:",
+    '    - claim: "the widget registry line is present, but only under different capitalisation"',
+    `      proof: "grep: ${GREP_CASE_PATTERN} in ${caseFileRel}"`,
+    '    - claim: "a path that is a DIRECTORY, not a file, must degrade to silence, never a crash"',
+    `      proof: "grep: anything at all in ${dirAsFileRel}"`,
+    "",
+  ].join("\n");
+}
+
+test("W1-T1225 ACCEPTANCE: the --base changed-tasks pass WARNS proof-grep-unmatchable on a case-only grep proof, AND a directory named where a file was expected degrades to silence rather than crashing", async () => {
+  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml");
+  const shardPath = join(
+    REPO_ROOT,
+    "test",
+    "fixtures",
+    "live-plan-writers",
+    "wiring",
+    "tasks.d",
+    "zzz-w1-t1225-wiring-probe.yaml",
+  );
+  const tmpDir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t1225-wiring-"));
+  const caseFileAbs = join(tmpDir, "case-fixture.md");
+  const dirAsFileAbs = join(tmpDir, "dir-as-file");
+  const caseFileRel = relative(REPO_ROOT, caseFileAbs);
+  const dirAsFileRel = relative(REPO_ROOT, dirAsFileAbs);
+  assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
+  mkdirSync(dirname(shardPath), { recursive: true });
+  mkdirSync(dirAsFileAbs, { recursive: true }); // a REAL directory: existsSync true, readFileSync throws EISDIR
+  writeFileSync(caseFileAbs, GREP_CASE_FILE_TEXT, "utf8");
+  writeFileSync(shardPath, grepProbeShardYaml(caseFileRel, dirAsFileRel), "utf8");
+  try {
+    const { exitCode, combined } = await runLintPlanCapturingEverything(["--plan", fixturePlan, "--base", "HEAD"]);
+    assert.match(
+      combined,
+      new RegExp(`⚠ ${GREP_PROBE_ID}: \\[proof-grep-unmatchable\\]`),
+      `the --base pass must WARN proof-grep-unmatchable for ${GREP_PROBE_ID}; saw:\n${combined}`,
+    );
+    assert.match(combined, /DIFFERENT CAPITALISATION/, "the warning carries the check's own case-only message");
+    assert.doesNotMatch(combined, new RegExp(`✗ ${GREP_PROBE_ID}`), "a grep-unmatchable-only violation must never BLOCK");
+    assert.equal(exitCode, 0, "a warn-only violation must not fail the lint-plan run");
+    // Exactly ONE proof-grep-unmatchable warning for this probe — the directory-path criterion
+    // stayed silent (the catch branch degraded it to "not on disk", not a second warning).
+    const warnCount = (combined.match(new RegExp(`⚠ ${GREP_PROBE_ID}: \\[proof-grep-unmatchable\\]`, "g")) ?? []).length;
+    assert.equal(warnCount, 1, "the directory-as-file criterion must stay silent, not add a second warning");
+  } finally {
+    rmSync(shardPath, { force: true });
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1225 ACCEPTANCE: whole-plan mode (no --base) stays UNWIRED on purpose — the IDENTICAL fixture is silent there, proving the warning above depends on the --base wiring, not the check's own logic", async () => {
+  const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t1225-wiring-wholeplan-"));
+  try {
+    mkdirSync(join(dir, "plan"), { recursive: true });
+    const tasksPath = join(dir, "plan", "tasks.yaml");
+    writeFileSync(tasksPath, grepProbeShardYaml("docs/does-not-matter.md", "docs/also-does-not-matter"), "utf8");
+    const { combined } = await runLintPlanCapturingEverything(["--plan", tasksPath]);
+    assert.doesNotMatch(
+      combined,
+      /proof-grep-unmatchable/,
+      `whole-plan mode must never fire proof-grep-unmatchable (the reader is never supplied there); saw:\n${combined}`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -426,6 +426,7 @@ import {
   isPathOutsideRoot,
   lintTask,
   planShardSlugCorpus,
+  proofGrepUnmatchableViolations,
   shardSlugFromPath,
   TaskLintError,
   type LintOpts,
@@ -12728,8 +12729,30 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // a proof's raw title resolves to.
     if (scope) {
       opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(repoRoot, rawName);
+      // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
+      // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
+      // for the identical reason: a changed task's own grep proofs name a handful of files, so
+      // this is bounded by the diff, never a whole-plan sweep (W1-T497 already ruled that out at
+      // 66.4s and this does not reopen it). Absent path (not written yet) ⇒ undefined, exactly
+      // the "no predicate ⇒ no opinion" contract `opts.moduleExists` above already uses.
+      opts.readGrepProofFile = (rel: string) => {
+        const abs = join(repoRoot, rel);
+        if (!existsSync(abs)) return undefined;
+        try {
+          return readFileSync(abs, "utf8");
+        } catch {
+          return undefined;
+        }
+      };
     }
-    const { violations } = lintTask(task, opts);
+    const { violations: lintViolations } = lintTask(task, opts);
+    // W1-T1225: proofGrepUnmatchableViolations( is called HERE, directly, rather than folded into
+    // `lintTask`'s own aggregate (see that check's module comment in task-linter.ts for why) — the
+    // call site IS the deliverable (rationale point 5): a check that merges without a caller ships
+    // dormant, exactly the recorded failure W1-T488/W1-T497/W1-T1053 already paid for once each.
+    // WARN-only (never blocks), so appending it here changes nothing about `assertLintClean` or
+    // the pre-dispatch gate — it only ever adds to `warned` below, on this one changed-tasks pass.
+    const violations = scope ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts)] : lintViolations;
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");
     if (blocking.length) {
