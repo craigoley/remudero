@@ -15,6 +15,7 @@ import {
   DEFAULT_SHINGLE_K,
   type DuplicateCorpusEntry,
 } from "./knowledge-dedup.js";
+import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 
 /**
  * Deterministic task linter (MASTER-PLAN §5C Layer A). NO LLM — a PURE function
@@ -77,6 +78,7 @@ export type LintCheck =
   | "proof-dialect"
   | "proof-resolvability"
   | "proof-grep-safety"
+  | "proof-grep-unmatchable"
   | "proof-scope"
   | "proof-name-resolution"
   | "post-merge-amendment"
@@ -849,6 +851,167 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
       });
     }
   }
+  return violations;
+}
+
+// ── PROOF-GREP-UNMATCHABLE (W1-T1225 — a grep: pattern that can NEVER match) ─
+//
+// Nothing at filing time ever opens the file a `grep:` proof names, so a pattern that cannot match
+// ANY single line of a file already on disk reads identically to a correct forward reference (the
+// "not written yet" case CLAUDE.md protects). That indistinguishability is real for a HIT-COUNT
+// check (zero is legitimately a forward reference — proof-name-resolution's own rule, below), but
+// two subclasses are POSITIVE detections, not zeros: the phrase is present in the file but a line
+// break falls inside it (grep is line-based and can never match, no matter how long the filer
+// waits), or the phrase is present only under different capitalisation (grep has no case-fold by
+// default). A genuine forward reference matches neither probe and stays silent.
+//
+// CONSUMES {@link classifyGrepZeroHit} (W1-T1224) — never a second implementation of the probes;
+// that module is the SAME matcher `checkProofCommand` (run-task.ts) uses to explain a real zero-hit
+// `grep:` run, so this filing-time check and that runtime diagnostic can never disagree about why a
+// pattern misses.
+//
+// THE LINTER STAYS PURE. Like {@link proofNameResolutionViolations}'s `opts.resolveNameFilteredCandidates`
+// and {@link callSiteViolations}'s `opts.moduleExists`, the file's own text arrives via an INJECTED
+// reader on {@link LintOpts.readGrepProofFile} — no fs, no exec, in this module. Absent reader ⇒
+// silent, exactly like every other injected-predicate check here.
+//
+// WARN, NEVER BLOCK, WITH NO SEVERITY OVERRIDE — the same posture {@link proofNameResolutionViolations}
+// takes for the same reason (zero/mismatch is a heuristic about intent an author may deliberately
+// want), plus one more: a warn that names the offending line is actionable; a block would refuse
+// authoring a pattern this check cannot fully adjudicate (a pattern carrying a BRE metacharacter the
+// display-only line locator below cannot always re-find, for instance).
+//
+// NOT folded into {@link lintTask}'s own aggregate, unlike every sibling injected-predicate check
+// nearby — DELIBERATELY. Design (vi) (W1-T1225) scopes this check to ONE call site, the
+// changed-tasks lint pass (`lintPlanCommand`'s `--base` branch, run-task.ts), and never a
+// pre-dispatch guard, a whole-plan sweep, or the retro's plan-health pass — reading a `grep:`
+// proof's named file is bounded by the diff there (a handful of files) and is NOT bounded anywhere
+// `lintTask` is called generically. Gating solely on "reader absent ⇒ silent" would still be
+// correct today (no other caller supplies one), but folding the push into `lintTask` would let any
+// FUTURE caller light this check up by accident just by wiring the option — the exact "shipped
+// dormant, wired later, by someone else" failure this task's own rationale (point 5) names.
+// `lintPlanCommand` calls {@link proofGrepUnmatchableViolations} directly instead.
+
+/** The (pattern, path) a {@link WhitelistedProof} of kind "grep" names, restricted to the DIALECT
+ *  shape (`grep: pattern in path` — parseDialectGrep, review.ts) that always inserts the `--` argv
+ *  separator ahead of `pattern`/`path` (`args: ["-arn", "--", pattern, path]`). Mirrors {@link
+ *  proofScopePath}'s own discriminator exactly, for the same reason: the legacy fenced ``
+ *  `grep -rn x y` `` shape carries no such separator and its pattern/path split is not reliably
+ *  recoverable from `args` alone — silently out of scope here too, rather than guessed at. */
+function proofGrepPatternAndPath(w: WhitelistedProof): { pattern: string; path: string } | undefined {
+  if (w.kind !== "grep" || w.args[1] !== "--") return undefined;
+  return { pattern: w.args[2], path: w.args[3] };
+}
+
+/** The 0-based RAW line index of the first line whose text contains `pattern` case-insensitively —
+ *  what a "case-only" cause's own message quotes as "the file's own casing". A plain (non-regex)
+ *  substring search: the WARN/SILENT decision already came from {@link classifyGrepZeroHit} (which
+ *  matches through the same BRE-emulating regex `checkProofCommand` runs); this only locates, for a
+ *  human, which physical line to show — and every pattern this repo's `grep:` proofs actually write
+ *  is plain prose with no regex metacharacter (measured — see {@link proofGrepSafetyViolations}'s
+ *  module comment above), so a literal search finds the identical line a regex search would. Returns
+ *  `undefined` on the rare pattern a literal search cannot re-locate; the caller degrades to a
+ *  message with no quoted line rather than guessing wrong. */
+function firstLineIndexCaseInsensitive(lines: readonly string[], pattern: string): number | undefined {
+  const needle = pattern.toLowerCase();
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].toLowerCase().includes(needle)) return i;
+  }
+  return undefined;
+}
+
+/** The 0-based RAW line span a "line-seam" cause's phrase straddles — located by walking `fileText`
+ *  once and replicating the EXACT collapse `classifyGrepZeroHit`'s own `whitespaceNormalised` helper
+ *  performs (a newline plus any run of the following indentation collapses to one space), so a
+ *  literal (never regex) search over the resulting text lands on the same seam the classifier's BRE
+ *  match already confirmed exists. Not a second implementation of the CAUSE decision — only of
+ *  where to point a human at it. Returns `undefined` when a literal search cannot re-find the span
+ *  (a pattern carrying a BRE metacharacter) or the match turns out to sit on one physical line
+ *  (nothing to report as a seam) — the caller degrades to a message with no quoted lines. */
+function wrappedLineSpan(fileText: string, pattern: string): { startLine: number; endLine: number } | undefined {
+  let normalized = "";
+  const lineOfChar: number[] = [];
+  let line = 0;
+  let i = 0;
+  while (i < fileText.length) {
+    const ch = fileText[i];
+    if (ch === "\n") {
+      normalized += " ";
+      lineOfChar.push(line);
+      line++;
+      i++;
+      while (i < fileText.length && (fileText[i] === " " || fileText[i] === "\t")) i++;
+      continue;
+    }
+    normalized += ch;
+    lineOfChar.push(line);
+    i++;
+  }
+  const idx = normalized.indexOf(pattern);
+  if (idx === -1) return undefined;
+  const startLine = lineOfChar[idx];
+  const endLine = lineOfChar[Math.min(idx + pattern.length - 1, lineOfChar.length - 1)];
+  if (startLine === undefined || endLine === undefined || startLine === endLine) return undefined;
+  return { startLine, endLine };
+}
+
+/** Every `grep:` proof whose named file ALREADY EXISTS on disk and whose pattern is a POSITIVE
+ *  detection of unmatchability (design iii): {@link classifyGrepZeroHit} returns "line-seam" (the
+ *  phrase IS in the file but a line break falls inside it) or "case-only" (the phrase is in the
+ *  file only under different capitalisation) for it. Silent on every other case: the path is not
+ *  on disk yet (`opts.readGrepProofFile` returns undefined — a legitimate forward reference), the
+ *  phrase is absent from the file in every probed form ("absent" — also a legitimate forward
+ *  reference), or the pattern already matches a real line today ("matched" — a proof that already
+ *  matches main is `executed_stale`'s business, W1-T273, not re-judged by this check). WARN-only;
+ *  see the module comment above for why there is no severity override. */
+export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const readGrepProofFile = opts.readGrepProofFile;
+  if (!readGrepProofFile) return [];
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
+    const target = proofGrepPatternAndPath(whitelisted);
+    if (!target) return; // not a dialect grep proof (see the helper's own doc comment)
+    const fileText = readGrepProofFile(target.path);
+    if (fileText === undefined) return; // not on disk yet — a legitimate forward reference
+    const cause = classifyGrepZeroHit(target.pattern, fileText);
+    if (cause !== "line-seam" && cause !== "case-only") return; // matched / absent: both silent
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const where = `criterion ${i + 1} ("${claimHead}")`;
+    const patternHead = target.pattern.slice(0, 70);
+    if (cause === "line-seam") {
+      const lines = fileText.split("\n");
+      const span = wrappedLineSpan(fileText, target.pattern);
+      const quoted = span
+        ? "\n" +
+          Array.from({ length: span.endLine - span.startLine + 1 }, (_, k) => `    ${lines[span.startLine + k]}`).join(
+            "\n",
+          )
+        : "";
+      violations.push({
+        check: "proof-grep-unmatchable",
+        severity: "warn",
+        message:
+          `${where} \`grep:\` pattern "${patternHead}" IS present in ${target.path}, but a line break ` +
+          "falls inside it — grep is line-based and this can NEVER match, no matter how long the work " +
+          `is waited on.${quoted}\nAnchor the pattern on a phrase that fits entirely on one line.`,
+      });
+    } else {
+      const lines = fileText.split("\n");
+      const lineIdx = firstLineIndexCaseInsensitive(lines, target.pattern);
+      const quoted = lineIdx !== undefined ? `\n    ${lines[lineIdx]}` : "";
+      violations.push({
+        check: "proof-grep-unmatchable",
+        severity: "warn",
+        message:
+          `${where} \`grep:\` pattern "${patternHead}" IS present in ${target.path} only under ` +
+          "DIFFERENT CAPITALISATION — grep has no case-fold by default and this can NEVER match as " +
+          `written.${quoted}\nCopy the file's own capitalisation into the proof verbatim.`,
+      });
+    }
+  });
   return violations;
 }
 
@@ -1981,6 +2144,11 @@ export interface LintOpts {
   /** W1-T1076: shingle width for {@link duplicateTitleViolations}. The live caller passes
    *  {@link DUPLICATE_SLUG_SHINGLE_K}; absent ⇒ {@link DEFAULT_SHINGLE_K}, W1-T420's original. */
   duplicateShingleK?: number;
+  /** W1-T1225: a `grep:` proof's named path -> that file's own text, or `undefined` when the path
+   *  is not on disk (the linter reads no disk itself) — for {@link proofGrepUnmatchableViolations}
+   *  to feed {@link classifyGrepZeroHit}. Same "no predicate ⇒ no opinion" contract {@link
+   *  callSiteViolations}'s `opts.moduleExists` already uses. Absent ⇒ the check is silent. */
+  readGrepProofFile?: (repoRelPath: string) => string | undefined;
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
