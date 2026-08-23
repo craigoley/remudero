@@ -1,0 +1,146 @@
+- id: W1-T1219
+  title: "one policy row bounds two unrelated populations — `sweepWallClockBoundMs` was derived from SWEEP-TICK durations (p90 111.8s) and is applied verbatim to a fix-rung CLAUDE WORKER SPAWN, so the rung now abandons implement-class work at 9m19s; and the ledger cannot even measure what the right bound would be, because both of the spawn's own rows are written after it returns"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree at origin/main. Neither the suite nor any
+    `runSweep` test was run. THE FLEET-SIDE OBSERVATIONS ARE THE OPERATOR'S; the source reading and
+    the ledger arithmetic below are this shard's, taken over the mini's corpus with a per-form
+    coverage control, and where that corpus cannot answer, this says so.
+
+    (1) THE DERIVATION IS SOUND AND IS NOT IN DISPUTE — FOR WHAT IT MEASURED. `plan/policy.yaml`'s
+    own row records healthy SWEEP TICKS at 61.8s median and 111.8s p90 against 21 confirmed hangs
+    over 20 minutes, the shortest 165.5 minutes; `value: 559000` is 5x that p90, "still 2.15x BELOW
+    the shortest confirmed hang". W1-T1044 did the work properly. THE POPULATION IS THE PROBLEM.
+
+    (2) THE SHARING IS STATED OUTRIGHT IN THE SCHEMA. `src/lib/policy.ts` documents the field as
+    "the WALL-CLOCK BOUND (ms) shared by (a) `await deps.sweep()` (daemon.ts's poll loop) and
+    (b) ONE fix-rung worker spawn inside `runFixRung`", and `spawnFixWorkerBounded`
+    (`src/run-task.ts`) resolves `deps.spawnWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`.
+    Nothing is hidden; the two ceilings were simply never separate.
+
+    (3) THE POPULATIONS ARE NOT COMPARABLE. A sweep tick classifies open PRs against a rollup it
+    already fetched. A fix-rung spawn is an implement-class Claude worker that reads a diff, edits
+    source and commits. `plan/policy.yaml` itself records dispatch runs at MEAN 27.6 minutes,
+    median 25.0, n=63 — and the brief is right that even that is the wrong yardstick, because a fix
+    worker is narrower than a fresh implement. Both are the wrong population; they differ in which
+    direction they are wrong.
+
+    (4) THE OBSERVED ABANDONMENTS ARE THE BOUND FIRING EXACTLY AT ITS VALUE ON HEALTHY WORK. Three
+    `fix.spawn_abandoned — spawn wall-clock bound exceeded` on 2026-08-22 (19:16:33 W1-T1132,
+    19:47:49 W1-T1214, 19:57:14 W1-T1104) with `spawnAbandonedElapsedMs` 559008 and 559060 — over
+    by 8ms and 60ms. Nothing hung; the workers were still working. This became visible only after
+    W1-T1129 (#2479) cleared the `.git/config` contention that had been killing fresh spawns in
+    their first seconds — CITED, NOT RE-FILED.
+
+    (5) AND THE LEDGER CANNOT MEASURE THE RIGHT BOUND TODAY — BY CONSTRUCTION, NOT BY GAP. Since
+    W1-T127 (#825, 2026-07-28) `fix.dispatch` is logged AFTER the spawn returns, under the comment
+    "A worker DEMONSTRABLY ran", with `fix.done` a few lines below it. So for EVERY completed spawn
+    both rows land in the same second and the pair encodes no duration at all. MEASURED over the
+    mini's union (per-form control: `run.start` reads 257438 / 1314 / 200 across the gzipped, plain
+    and live forms): of 137 `fix.dispatch`→`fix.done` pairs at or after 2026-07-28, 127 are under
+    one second. THE ONE ELAPSED FIGURE THE RUNG EMITS IS `spawnAbandonedElapsedMs`, WHICH EXISTS
+    ONLY FOR SPAWNS THAT HIT THE BOUND — a sample right-censored at exactly the quantity a
+    derivation would need. A p90 cannot be taken from it at any n.
+
+    (6) THE ONE REAL FIX-WORKER POPULATION THAT EXISTS IS HISTORICAL, AND IT SAYS THE BOUND IS OFF
+    BY AN ORDER OF MAGNITUDE. BEFORE the W1-T127 reorder, `fix.dispatch` genuinely preceded the
+    spawn, so those pairs ARE spawn spans: n=186, NONE under one second, median 404.4s, p90 1346.2s
+    (22.4 min), max 5914.7s. SIXTY-FIVE OF THE 186 — 35% — EXCEED 559000ms. This is offered as
+    EVIDENCE OF MAGNITUDE AND NOTHING MORE: it predates the current fix prompt, tooling and mount,
+    and this shard does NOT propose deriving the new value from it.
+  design: |
+    (i) ITS OWN ROW, AND THE PRECEDENT IS EXACT — W1-T1049, CITED AND NOT RE-DERIVED. That task
+    split `reviewLanes` out of `dispatchLanes` for this identical reason, and quotes W1-T473's own
+    advance warning of the cost: "Reading the dispatch field twice is smaller now and SILENTLY
+    COUPLES TWO UNRELATED CEILINGS FOREVER." The coupling has bound here the same way: an operator
+    retuning the sweep tick's bound silently retunes the fix worker's, and vice versa. A new row —
+    the fix spawn's own — with its own `min`/`max` and its own recorded derivation.
+
+    (ii) AND ITS OWN DERIVATION, WHICH IS A SECOND THING AND NOT THE SAME THING. A row without a
+    derivation only relocates an unmeasured number, which is what rationale (1)-(3) is about; a
+    derivation without a row leaves the coupling of (i). Both, or neither is fixed.
+
+    (iii) SO INSTRUMENT FIRST, THEN DERIVE — DO NOT PICK. Rationale (5) shows the measurement is
+    IMPOSSIBLE today, so the first deliverable is the instrument: carry the spawn's own elapsed
+    milliseconds on the SUCCESS path, the same field `fix.spawn_abandoned` already carries on the
+    failure path, so the completed population becomes measurable at all. The new row's committed
+    value is INTERIM by construction and its comment must say so, naming the date the derivation is
+    to be re-taken on the fleet's own corpus once the instrument has run. This shard deliberately
+    does NOT name the final number: a number measured on the wrong population is not a measurement,
+    and neither is a number picked to feel safe.
+
+    (iv) THE INTERIM MUST NOT BE UNBOUNDED. W1-T1044's whole point stands — a spawn with no ceiling
+    is the hang it was built to stop. The interim must simply be one the observed fix population
+    does not routinely exceed, and the row must record WHICH population justified it and that the
+    justification is provisional.
+
+    (v) `sweepWallClockBoundMs` IS NOT TOUCHED, AND THAT IS A REFUSAL, NOT AN OMISSION. Its
+    `max: 900000` is bounded "safely under the shortest confirmed hang (20 minutes)"; widening it to
+    fit a worker would destroy the exact property it was built for. The sweep tick's bound is
+    correct and stays, value and bounds unchanged.
+
+    (vi) NOT IN SCOPE, NAMED: `workerAbandon` and `workerStall`, which bound different things and
+    have their own derivations; the fix rung's strike accounting, which W1-T127 already settles;
+    the final value of the new row, which is a follow-up once (iii)'s instrument has data; and
+    anything about `.git/config` contention, which W1-T1129 fixed.
+  acceptance:
+    - claim: "the fix spawn resolves its bound from its own policy row rather than the sweep tick's"
+      proof: "unit test: test/fix-spawn-bound-split.test.ts"
+    - claim: "retuning the sweep tick's bound no longer moves the fix spawn's ceiling"
+      proof: "unit test: test/fix-spawn-bound-split.test.ts"
+    - claim: "the sweep tick keeps its own value and its own bounds unchanged"
+      proof: "unit test: test/fix-spawn-bound-split.test.ts"
+    - claim: "a completed spawn records its own elapsed milliseconds so the population becomes measurable"
+      proof: "unit test: test/fix-spawn-bound-split.test.ts"
+    - claim: "an absent row still resolves to a committed default rather than failing to load"
+      proof: "unit test: test/fix-spawn-bound-split.test.ts"
+    - claim: "the spawn is still bounded and can still be abandoned"
+      proof: "unit test: test/fix-spawn-bound-split.test.ts"
+  files: [plan/policy.yaml, src/lib/policy.ts, src/run-task.ts, test/fix-spawn-bound-split.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#fix-spawn-bound-measured-on-sweep-ticks-2026-08-22"
+  plan_refs: ["W1-T127", "W1-T1044", "W1-T1049", "W1-T1129", "W1-T473"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/fix-spawn-bound-split.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS RULE 19 SPAN AND BLAST RADIUS BOTH. The SPAN is that a policy row cannot be
+    added in one file: the committed row (`plan/policy.yaml`), its schema and default
+    (`src/lib/policy.ts`) and its one consumer (`src/run-task.ts`) are one indivisible change — a
+    row nothing reads is not a decomposition. The BLAST RADIUS is that this decides when the fleet
+    throws away implement-class work it has already paid for.
+
+    ONE PREMISE OF THE BRIEF IS CORRECTED HERE RATHER THAN CARRIED. The brief reads the four
+    same-second completions (W1-T1134, W1-T1100, W1-T1031, W1-T1088) as evidence they were RESUMES.
+    Since W1-T127 (#825) both rows are written after the spawn returns, so SAME-SECOND IS THE NORMAL
+    SHAPE FOR EVERY COMPLETED SPAWN, fresh or resumed — measured above at 127 of 137 post-reorder
+    pairs. Those four may well have been resumes, but the timestamps cannot be the evidence; a
+    `session_id` carried into the spawn can. The conclusion the brief draws — that the arm completes
+    the cheap half and abandons the expensive half — is UNAFFECTED, and rationale (4) rests on the
+    three abandonments and their elapsed values instead.
+
+    THE FLEET'S OWN NUMBERS WERE NOT READ FROM THIS HOST. The three abandonment timestamps and both
+    `spawnAbandonedElapsedMs` values are the operator's, taken on the container. The mini's reachable
+    corpus stops at 2026-08-12 (newest `fix.dispatch` 2026-08-12T22:32:55.941Z), which is why
+    rationale (6) is explicitly historical and explicitly not a basis for the new value.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1219` resolves to
+    f9613754e928f9a0b9886e2b52e1d0db4fa6d31f, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight
+    surfaces were swept with a control PRE-QUALIFIED FOR EACH — a declared `- id:` on main, a shard
+    FILENAME on main, any occurrence in main's tree, the reservation refs, a LIVE `run-W1-T*` head
+    (a merged id's branch is deleted and reads zero for the wrong reason), main's commit messages
+    (an id never written into one reads zero there whatever its state), open PR titles-plus-bodies,
+    and merged PR bodies including the `Remudero-Task:` trailer. The subject anchors were counted
+    PER OPEN HEAD against main's own baseline. THE FIRST RUN OF THAT SWEEP READ ZERO ON EVERY HEAD
+    AND WAS DISCARDED: the shell had not word-split the PR list, so no head ref existed and every
+    zero was the absence of a ref rather than the absence of a match — re-run against refs proven
+    present, main's baseline reproduced on all eight heads.

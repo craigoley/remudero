@@ -574,6 +574,7 @@ import {
   checkCostGovernor,
   checkMemoryGovernor,
   checkQueueGovernor,
+  cancelledRequiredCheckNames,
   checksStateFromRollup,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
@@ -597,6 +598,7 @@ import {
   toQuestionEntry,
   type ActionableGateFailure,
   type ArmedStalledPr,
+  type CancelledRequiredCheck,
   type CiFailure,
   type ClarificationQuestion,
   type CostGovernorResult,
@@ -17244,6 +17246,97 @@ export function liveInflightRuns(
 }
 
 /**
+ * W1-T1212 — the required-context → workflow-file map the stale-gate discriminator draws on.
+ * Branch protection names exactly two required contexts today (`ghRequiredStatusCheckContexts`,
+ * status.ts): `remudero-review` (never a member here — it is a commit status carrying the review
+ * verdict, not a check run defined by a workflow file at all, and `checksStateFromRollup`
+ * already excludes it from `ciFailures` for the same reason) and `ci-gate`, whose own workflow
+ * file is the ONE #2477 fixed (the recon this task cites verbatim). A failing check name this
+ * map does not carry produces NO stale-gate signal — fail toward "don't fire," never a guess at
+ * a file that may not exist. Widening this to a general check-name → workflow-file resolver is a
+ * separate, out-of-scope shard (design note (vi) names none of that in scope).
+ */
+const STALE_GATE_WORKFLOW_FILE: Readonly<Record<string, string>> = {
+  "ci-gate": ".github/workflows/ci-gate.yml",
+};
+
+/**
+ * W1-T1212 — one file's git blob sha at one ref (`gh api repos/<o>/<r>/contents/<path>?ref=<ref>`,
+ * the single-contents-read design note (i) calls for). `undefined` on ANY failure (missing file,
+ * bad ref, `gh` unreachable) — never thrown, so a read this lane cannot complete simply
+ * contributes no stale-gate evidence rather than aborting the whole sweep pass.
+ */
+function blobShaAtRef(owner: string, repo: string, path: string, ref: string): string | undefined {
+  try {
+    const out = execFileSync(
+      "gh",
+      ["api", `repos/${owner}/${repo}/contents/${path}`, "-f", `ref=${ref}`, "--jq", ".sha"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const sha = out.trim();
+    return sha.length > 0 ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * W1-T1212 — THE READ HALF OF THE DISCRIMINATOR (design note i): for one red PR, which of its
+ * OWN currently-failing checks (a subset of {@link OpenPrView.ciFailures}) are defined by a
+ * workflow file whose blob sha differs between this PR's OWN merge ref (`pull/<n>/merge` — the
+ * SAME ref `pull_request` itself evaluates, frozen at this PR's last `synchronize`, per the
+ * recon this task cites) and `main` RIGHT NOW. A name with no {@link STALE_GATE_WORKFLOW_FILE}
+ * entry, or whose blob read fails on either ref, contributes nothing — fail toward "not stale."
+ */
+function staleGateFailureNames(owner: string, repo: string, pr: OpenPrView): string[] {
+  const out: string[] = [];
+  for (const failure of pr.ciFailures ?? []) {
+    const path = STALE_GATE_WORKFLOW_FILE[failure.name];
+    if (!path) continue;
+    const prSha = blobShaAtRef(owner, repo, path, `pull/${pr.prNumber}/merge`);
+    const mainSha = blobShaAtRef(owner, repo, path, "main");
+    if (prSha !== undefined && mainSha !== undefined && prSha !== mainSha) out.push(failure.name);
+  }
+  return out;
+}
+
+/**
+ * W1-T1212 — {@link SweepDeps.staleGateWorkflowsByPr}'s real wiring. One map entry per
+ * checks-red PR that has at least one stale-gate name — every already-green/pending PR costs no
+ * `gh api` read at all, keeping this bounded to the population the mechanism actually concerns.
+ */
+export function buildStaleGateWorkflowsByPr(
+  owner: string,
+  repo: string,
+  openPrs: readonly OpenPrView[],
+): Map<number, string[]> {
+  const out = new Map<number, string[]>();
+  for (const pr of openPrs) {
+    if (pr.checksState !== "red") continue;
+    const names = staleGateFailureNames(owner, repo, pr);
+    if (names.length > 0) out.set(pr.prNumber, names);
+  }
+  return out;
+}
+
+/**
+ * W1-T1212 — {@link SweepDeps.updatedForWorkflow}'s real wiring: every `${prNumber}:${workflow}`
+ * pair a PRIOR `sweep.update_branch.updated` ledger row already fired for (that row's own
+ * `stale_workflow` field — see `runSweep`'s ledger write, lib/sweep.ts). Reads the SAME durable
+ * ledger every other dedup in this lane already consults — never a second store.
+ */
+export function updatedForWorkflowFromLedger(ledgerPath: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of readLedgerLines(ledgerPath)) {
+    if (line.step !== "sweep.update_branch.updated") continue;
+    const prNumber = line.pr_number;
+    const workflow = line.stale_workflow;
+    if (typeof prNumber === "number" && typeof workflow === "string") out.add(`${prNumber}:${workflow}`);
+  }
+  return out;
+}
+
+/**
  * has-PR vs pre-PR recoverability for ONE run id (W1-T169's own acceptance vocabulary) —
  * mirrors daemon.ts's `reconstructOrphan` resume/clean split, but read straight from the
  * ledger instead of a live GitHub call: `rmd down` needs an immediate, network-independent
@@ -18389,6 +18482,28 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
   });
 }
 
+/**
+ * W1-T1223 (design i) — the real gateway's producer for {@link OpenPrView.cancelledRequiredChecks},
+ * mirroring how {@link fetchCiFailures} is the real gateway's producer for `ciFailures`: both name
+ * their required checks off the SAME `cancelledRequiredCheckNames`/`REQUIRED_CHECK_FAIL` predicates
+ * lib/sweep.ts owns, so this producer and `checksStateFromRollup`'s red verdict can never drift into
+ * disagreeing about which check is cancelled. `jobId` is parsed from the SAME `detailsUrl` shape
+ * `fetchCiFailures` already reads (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined`
+ * when it cannot be read, so `requeueCheck`'s real wiring degrades to a named no-op rather than
+ * guessing a re-queue target.
+ */
+export function cancelledRequiredChecks(
+  rollup: RollupCheck[] | undefined,
+  requiredContexts: string[] | undefined,
+): CancelledRequiredCheck[] {
+  const names = new Set(cancelledRequiredCheckNames(rollup, requiredContexts));
+  if (names.size === 0) return [];
+  const deduped = dedupeRollupByLatestAttempt(rollup ?? []);
+  return deduped
+    .filter((c) => names.has(c.name ?? c.context ?? "unknown"))
+    .map((c) => ({ name: c.name ?? c.context ?? "unknown", jobId: c.detailsUrl?.match(/\/job\/(\d+)/)?.[1] }));
+}
+
 /** The `Remudero-Task: <id>` trailer in a PR body, if present (anchored line). */
 function taskIdFromBody(body: string): string | undefined {
   const m = body.match(/^Remudero-Task:\s*(\S+)\s*$/m);
@@ -18822,6 +18937,10 @@ export function buildOpenPrViews(
       // W1-T100: the ci-log fix mode's input — only worth fetching when checks
       // are actually red (a PR gate that already needs blocked_ci's rung).
       ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, pr.statusCheckRollup) : undefined,
+      // W1-T1223 — the "absence of a verdict" observable, populated alongside `ciFailures`
+      // above off the SAME rollup read (no extra request); see `cancelledRequiredChecks`'s own
+      // doc.
+      cancelledRequiredChecks: checksState === "red" ? cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts) : undefined,
       // W1-T176: only meaningful in the zero-runs shape post-review routes on;
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.
@@ -19435,6 +19554,8 @@ export function buildSweepEffects(
   | "updateBranch"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
+  | "requeueCheck"
+  | "escalateCancelledCheck"
 > {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
@@ -19630,6 +19751,61 @@ export function buildSweepEffects(
       } catch (e) {
         log("sweep.close.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
       }
+    },
+
+    // W1-T1223 (design iv) — THE JOB, NEVER THE RUN: `actions/jobs/{job_id}/rerun`, never
+    // `actions/runs/{run_id}/rerun-failed-jobs` — a whole-run re-run would re-spend an
+    // already-green sibling job sharing this workflow run (`ci` and `coverage-ratchet` share one
+    // here, the #2434/#2444 shape this task fixes). `ghRunImpl` is the SAME injection seam
+    // `close` above already uses (W1-T921) — no `gh` call this closure makes is unobservable
+    // offline. `check.jobId` absent (the rollup's `detailsUrl` carried none) degrades to a NAMED
+    // no-op — never a guessed target.
+    requeueCheck: (pr, check) => {
+      if (!check.jobId) {
+        log("sweep.check_requeue.no_job_id", { pr_number: pr.prNumber, check_name: check.name });
+        return;
+      }
+      try {
+        ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${check.jobId}/rerun`]);
+        log("sweep.check_requeue.dispatched", { pr_number: pr.prNumber, check_name: check.name, job_id: check.jobId });
+      } catch (e) {
+        log("sweep.check_requeue.error", { pr_number: pr.prNumber, check_name: check.name, error: String((e as Error)?.message ?? e) });
+      }
+    },
+
+    // W1-T1223 (design iii) — a SECOND cancellation of the SAME required check on the SAME head
+    // sha names the check and both cancellations to a human. `tryEscalate` (not the throwing
+    // `escalate`), because this runs inside the sweep's own per-PR loop alongside every other
+    // effect (W1-T254's throw containment) — a delivery failure here degrades to an
+    // `escalation.failed` ledger row rather than aborting the rest of the pass.
+    // `findDuplicateEscalation` (inside `escalate()`/`tryEscalate()`) already dedupes a repeated
+    // call for the SAME (taskId, headSha, cause) into one issue, so this is safe to call every
+    // pass the same pair keeps observing a re-cancellation, never opening a sibling issue.
+    escalateCancelledCheck: (pr, check, reason) => {
+      tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: escalationTaskIdFor(pr),
+          runId,
+          headSha: pr.headSha,
+          cause: "ci",
+          summary: `required check "${check.name}" cancelled twice on the same head — ${pr.prUrl}`,
+          detail:
+            `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
+            `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
+            `A concurrency group cancelling it, a capacity fault, or a workflow-level cancel are all beyond ` +
+            `what a second re-queue could fix; nothing in this PR's own diff caused this.`,
+          options: [
+            {
+              label: "investigate",
+              detail: "look at the workflow run's own cancellation cause (concurrency group, runner capacity, a manual cancel) directly on GitHub Actions.",
+            },
+            { label: "manual-rerun", detail: "re-run the job by hand once the underlying CI-side cause is understood." },
+          ],
+          recommendation: "investigate",
+        },
+        { issues, ledgerPath, runId },
+      );
     },
 
     // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
@@ -19952,9 +20128,23 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // else in the fleet (see `liveInflightRuns`'s own doc) — the SAME per-task lock directory the
   // drain/daemon dispatch path already reads, never a second, looser definition.
   const inflightDir = join(config.root, "state", "inflight");
+  // W1-T1212: the stale-gate discriminator's two data inputs — see `SweepDeps.staleGateWorkflowsByPr`/
+  // `.updatedForWorkflow`'s own docs (lib/sweep.ts) for why these are pure-data params rather than
+  // I/O `selectUpdateBranchTarget` performs itself.
+  const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
+  const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
   const summary = await runSweep(
     prsForFixRung,
-    { ...effects, ledgerPath, runId, log, dryRun, inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)) },
+    {
+      ...effects,
+      ledgerPath,
+      runId,
+      log,
+      dryRun,
+      inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)),
+      staleGateWorkflowsByPr,
+      updatedForWorkflow,
+    },
     DEFAULT_SWEEP_POLICY,
   );
 
@@ -20705,9 +20895,20 @@ export function buildSweepHook(
       // W1-T528: same in-flight lock directory every other dispatch-path reader consults —
       // see `sweepCommand`'s own comment on this exact line for the full rationale.
       const inflightDir = join(config.root, "state", "inflight");
+      // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
+      const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
+      const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
       await runSweep(
         prsForFixRung,
-        { ...effects, ledgerPath, runId, log, inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)) },
+        {
+          ...effects,
+          ledgerPath,
+          runId,
+          log,
+          inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)),
+          staleGateWorkflowsByPr,
+          updatedForWorkflow,
+        },
         DEFAULT_SWEEP_POLICY,
       );
       // fb-1784756088300-6a481e: the escalation-lifecycle reconciler rung — closes stale
