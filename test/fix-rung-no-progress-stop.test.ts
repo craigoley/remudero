@@ -230,3 +230,20 @@ test("W1-T1269 — a repeated actionableGateFailures-only block (no unmetCriteri
   assert.equal(r.disposition, "blocked-fixable", "gate failures keep dispatching — this task never widens scope to actionableGateFailures");
   assert.match(r.reason, /actionable gate failure/);
 });
+
+// ── ordering — a checks-red PR is claimed by the isBlockedCi row before this one ever sees it ──
+
+test("W1-T1269 — a checks-red (isBlockedCi) PR is still claimed by row 5's ci-log rung first, even with an identical unmetCriteria repeat sitting beside it (this row is ordered strictly after row 5)", () => {
+  const identical = [criterion({ claim: "still unmet" })];
+  const p = pr({
+    priorStrikes: 1,
+    checksState: "red",
+    ciFailures: [{ name: "ci-gate", logTail: "tsc: error TS2322" }],
+    unmetCriteria: identical,
+    priorUnmetCriteria: identical.map((c) => ({ ...c })),
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable", "checks-red wins — GitHub won't merge past it regardless of the (possibly stale) review verdict");
+  assert.match(r.reason, /ci-log fix/);
+  assert.doesNotMatch(r.reason, /no progress/i, "the no-progress row never gets a chance to fire here");
+});
