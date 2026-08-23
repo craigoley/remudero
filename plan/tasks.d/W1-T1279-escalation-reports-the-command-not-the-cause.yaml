@@ -1,0 +1,154 @@
+- id: W1-T1279
+  title: "THE EXHAUSTION ESCALATION REPORTS THE COMMAND THAT FAILED AND NOT THE FAILURE — `summarizeCiFailure` renders the FIRST non-empty line of a `--log-failed` extract, whose first line is structurally always the step's own `##[group]Run …` banner, while the diagnostic the rung already parsed into its fix prompt is dropped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/run-task.ts, test/escalation-names-the-cause.test.ts]
+  origin: oper#escalation-reports-command-not-cause-2026-08-23
+  plan_refs: ["W1-T487", "W1-T974", "W1-T1269", "W1-T138", "W1-T1219"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (1) HALF ONE, RE-DERIVED FROM THE LIVE ISSUE RATHER THAN CARRIED. `issues/2624`'s
+    "Failing check(s):" section renders, verbatim:
+      - ci — ci	Typecheck	2026-08-23T16:01:14.5196266Z ##[group]Run npx tsc -p tsconfig.json --noEmit
+      - ci-gate — ci-gate	Aggregate sibling check results …	2026-08-23T16:12:44.8447744Z --- gated check runs ---
+    Both entries are STRUCTURAL PREAMBLE: an invocation banner and a section header. The real
+    diagnostic -- `test/sandbox-subject-generator.test.ts(90,9): error TS2741: Property
+    'bySubsystem' is missing … but required in type 'LearningsIndex'` -- appears NOWHERE in the
+    body: grepping the fetched body for `TS2741` and for `bySubsystem` returns 0, against a control
+    that the body was fetched and readable at 21 lines. The operator read the escalation and
+    learned nothing; a separate lane had to fetch the log.
+
+    (2) AND IT IS DETERMINISTIC, NOT UNLUCKY -- WHICH IS THE PART THAT MAKES IT WORTH FIXING.
+    `fetchCiFailures` shells `gh run view --job <id> --log-failed`, which emits ONLY the failing
+    steps, each line prefixed `<job>\t<step>\t<timestamp> `. The first line of that extract is the
+    failing step's own `##[group]Run <cmd>` banner for every `run:` step GitHub Actions executes.
+    `summarizeCiFailure` then takes `.find((l) => l.length > 0)` -- the FIRST non-empty line. So it
+    returns the invocation BY CONSTRUCTION, for every check, not merely for this one. That both
+    rendered entries above are preamble is the observable consequence.
+
+    (3) HALF TWO, RE-DERIVED FROM THE BRANCH. `issues/2642` reads "strike 1 (resume): 0 unmet
+    criteria going in, checks did not go green; strike 2 (fresh): 0 unmet criteria going in, checks
+    did not go green", which reads as two wasted attempts. The branch behind it shows the opposite:
+    `0ac665e` at 2026-08-23T15:31:33Z "replace raw NUL bytes with a literal space in the shard-join
+    separator", then `24e6d3f` at 16:00:33Z "cover generateSandboxTask's isolating-path fallback
+    branch". Two DIFFERENT real defects, each repaired. And the third failure is a third class
+    again -- `ci — Typecheck`, per (1). SO THE ESCALATION IS LITERALLY ACCURATE AND SUBSTANTIVELY
+    MISLEADING: it reports an outcome and hides a trajectory.
+
+    (4) THE FREQUENCY IS NOT ASSERTED HERE, AND THE REASON IS RECORDED RATHER THAN GLOSSED. The
+    ledger union is not reachable from the container this was filed in: `rmd ledger-grep` reports
+    `archives: 0 matched` and REFUSES -- "refusing to answer from the live ledger alone … it is an
+    error, never a smaller result." THE MANDATED CONTROL REFUSES IDENTICALLY: `"step":
+    "risk_judge.decision"`, which reads ~150 on the daemon host, returns the same zero-archive
+    refusal here. A control that cannot pass DISQUALIFIES the surface, so no count is taken and
+    none is claimed. Two independently measured instances on one day are the evidence this shard
+    rests on.
+
+    (5) NOT ALREADY FILED, AND THE NEAR MISSES ARE NAMED SO THE BOUNDARY IS EXPLICIT. W1-T1269 is
+    the fix rung retrying with NO TEST FOR PROGRESS -- a dispatch-decision defect about whether to
+    spend another strike. This is the REPORTING defect: what the issue says once the strikes are
+    spent. W1-T974 is the same renderer's dedup KEY being forgeable by a CR inside a log line, not
+    what the line says. W1-T487 gave these three evidence blocks their empty-list wording and
+    deliberately did not touch what a non-empty entry renders.
+  design: |
+    ONE CONCERN: make the escalation name the cause and the trajectory, without making it longer.
+
+    (i) Q1 -- WHERE THE ERROR LINE IS DISCARDED, BY NAME. The diagnostic is in hand at escalation
+    time and is thrown away by ONE expression.
+      HAS IT      `fetchCiFailures` (`src/run-task.ts`) populates `CiFailure.logTail` with the last
+                  60 lines of the `--log-failed` extract (`tailLines = 60`).
+      USES IT     `renderFixPrompt` renders that field IN FULL into the fix worker's prompt --
+                  `log tail:\n${neutralizeFenceMarkers(f.logTail)}`. The rung has already read the
+                  diagnostic, which is why the fix worker could act on it at all.
+      DROPS IT    `summarizeCiFailure` reduces the SAME field to `.find((l) => l.length > 0)` and
+                  returns `${f.name} — ${firstLine}`.
+      RENDERS IT  `renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, …)`
+                  at the exhaustion escalation's "Failing check(s):" block.
+    WHAT IS LOST BETWEEN THEM: every line of `logTail` after the first non-empty one -- which is
+    where the diagnostic always is, because the first line is always the banner. The fix is a
+    SELECTION change inside `summarizeCiFailure`, not a new fetch, a new field, or a new call.
+
+    (ii) THE SELECTION MUST BE A CHOICE, NOT A BIGGER SLICE. Rendering more lines is the wrong
+    shape -- it trades a useless line for a wall. What the line should carry is the first line that
+    LOOKS LIKE A DIAGNOSTIC rather than a banner: strip the `<job>\t<step>\t<timestamp> ` prefix
+    the extract adds, skip `##[group]` / `##[endgroup]` / `---`-banner / bare-timestamp lines, and
+    prefer a line matching a compiler/test-runner diagnostic shape. WHEN NOTHING MATCHES, FALL BACK
+    TO TODAY'S FIRST LINE rather than to nothing: a banner is a poor summary but an empty one is
+    worse, and the W1-T487 empty-evidence wording must keep its meaning.
+
+    (iii) Q2 -- THE CASCADE IS ALMOST DERIVABLE, AND THE HONEST ANSWER IS "ONE SMALL FIELD", NOT
+    "ONLY A JOIN" AND NOT "A LARGER TASK". The step names in the brief are REAL, confirmed from
+    source: `fix.dispatch`, `fix.ci_not_green`, `fix.exhausted` all exist. Their FIELDS do not
+    carry check names: `fix.dispatch` logs `{strike, strike_cap, unmet_count, round, mode,
+    verdict_regime, elapsed_ms}`; `fix.ci_not_green` logs `{strike, ci}` where `ci` is
+    `waitForCiGreen`'s status word; `fix.exhausted` logs `{strikes, issue_url, reason}`. The names
+    DO exist on `pr.polling`, as `checks: ["<name>:<conclusion>", …]` -- but that row is emitted
+    only `if (i === 0 || i % 5 === 0)`, is keyed by poll rather than by strike, and is a
+    high-volume step subject to the 200-rows-per-step rotation. A time-join against strike windows
+    would therefore be SAMPLED and PRUNED, which is a fragile basis for a claim shown to an
+    operator. The robust form is one added field on `fix.ci_not_green`, which already carries
+    `strike`, naming the checks that were red for THAT strike. That is small rather than large
+    because `fetchCiFailures` runs immediately after that log call and the names are already in
+    hand -- but it IS new ledger data, and it is priced here rather than smuggled in as a join.
+
+    (iv) Q3 -- WHAT MUST NOT CHANGE. The escalation stays SHORT AND DECIDABLE. It keeps its
+    `## Options` and `## Recommendation` sections -- both verified present on the two measured
+    issues -- and stays ONE ISSUE PER BLOCK. This task adds THE CAUSE and THE TRAJECTORY, both as
+    single lines, and adds no log dump: pasting a 376-line job log would be a different and worse
+    defect than the one being fixed. The escalation TAXONOMY (blocked / manual / hard_stop) is not
+    touched, and neither is WHEN an escalation fires -- W1-T487's design note (iii) already rules
+    that the evidence block changes what the body says, never whether it is sent.
+
+    (v) BOTH DIRECTIONS. A change that simply printed a later line would satisfy the diagnostic
+    case while regressing a check whose output has no diagnostic shape at all, so every criterion
+    is paired with the behaviour it must leave untouched: the empty-evidence wording, the
+    one-line-per-check budget, and the fallback.
+  acceptance:
+    - claim: "a failing check whose log begins with a run banner is summarised by its diagnostic line rather than the invocation"
+      proof: "unit test: test/escalation-names-the-cause.test.ts"
+    - claim: "a check whose log carries no diagnostic-shaped line still renders a summary rather than an empty entry"
+      proof: "unit test: test/escalation-names-the-cause.test.ts"
+    - claim: "each failing check still occupies one line, so the escalation does not grow into a log dump"
+      proof: "unit test: test/escalation-names-the-cause.test.ts"
+    - claim: "the escalation states what earlier strikes repaired, so a trajectory is visible rather than only the outcome"
+      proof: "unit test: test/escalation-names-the-cause.test.ts"
+    - claim: "the empty-evidence wording keeps its two distinguishable forms when nothing was collected and when nothing was outstanding"
+      proof: "unit test: test/escalation-names-the-cause.test.ts"
+  note: |
+    RISK BAND -- BOTH READINGS RECORDED, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING
+    IT. `sizingViolation` (`src/lib/task-linter.ts`) opens with `if (task.risk === "high") return
+    undefined; // Rule 19 exemption`, so a `high` band means the span was never scored, NOT that it
+    was scored and found narrow. Measured at `risk: medium` this shard's `files:` scores as more
+    than one concern and BLOCKS; at `risk: high` the check returns `undefined` and the linter reads
+    clean. `high` is therefore Rule 19's SPAN, not this task's blast radius -- which is small: one
+    selection expression inside `summarizeCiFailure`, one added line in the escalation body, and a
+    new test file. Decomposing a renderer from its own test would not be a real decomposition.
+
+    NO PROOF GREPS THIS SHARD'S OWN PATH. All five criteria use the pure-path `unit test:` form
+    naming `test/escalation-names-the-cause.test.ts`, which is declared in `files:` and does not
+    exist yet -- a legitimate forward reference to a PATH, where a symbol name would be a guess.
+
+    THE ID WAS PRE-MINTED AND READ BACK BEFORE ANYTHING WAS WRITTEN. `refs/rmd-id/W1-T1279`
+    resolves on origin against a namespace of 309 such refs, held by `3739546@Remudero` at
+    2026-08-23T18:19:37Z. An advisory mint printed `W1-T1278` for this slot and lost it to
+    contention; `W1-T1278` is a DIFFERENT filing's id and its ref exists separately. Eight id
+    surfaces were swept, each against a control pre-qualified for that surface and reading
+    non-zero there: shard filenames 0 against W1-T1275 at 1; plan `- id:` lines 0 against W1-T1275
+    at 1; the reservation 1, which is the pre-mint; open PR titles 0 against 2 titles carrying a
+    `W1-T` id; open PR head branches 0 against 2 `run-W1-T` heads; open PR file lists 0 with
+    coverage at five captured of five enumerated, against `plan/tasks.d/` paths at 1; merged
+    trailers 0 under `^Remudero-Task:\s*W1-T1279\s*$` against 43 rows carrying any trailer; merged
+    subjects 0 against 54; merged `run-*` head credit 0 against 30 structured heads, with
+    `run-W1-T1279-*` at 0 against an 84-branch `run-*` namespace. No surface required
+    disqualification on the ID sweep.
+
+    THE SUBJECT WAS SWEPT AS WELL AS THE ID. 112 shards mention "escalation", so the sweep was
+    narrowed to the renderer and to the command-versus-cause shape; the four near misses were read
+    by title and are delimited in rationale (5). "trajectory" reads 0 across all shards, against a
+    control of 513 shards carrying "acceptance".
