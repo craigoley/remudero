@@ -32,6 +32,7 @@
  */
 
 import type { AutoTriageDecision } from "./auto-triage.js";
+import type { MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
@@ -1237,6 +1238,25 @@ export interface DaemonDeps {
    * Optional: omitted ⇒ the loop behaves exactly as before this check existed.
    */
   checkGithubPosture?: () => Promise<GithubPostureFinding[]> | GithubPostureFinding[];
+  /**
+   * W1-T1259: THE MEASUREMENT-CADENCE RUNG — decides whether `rule-efficacy`,
+   * `verdict-calibration` and `autonomy-rate` (lib/measurement-cadence.ts's `decideMeasurementCadence`)
+   * run THIS tick. Paced by its OWN policy-data bound (`minIntervalMinutes` + `maxPerDay`,
+   * `plan/policy.yaml`'s `measurementCadence` row), never the raw poll interval — the same
+   * marker-plus-interval-plus-cap shape `checkAutoTriage` uses. Optional: omitted ⇒ the loop
+   * behaves exactly as before this rung existed (the three verbs stay operator-run only).
+   */
+  checkMeasurementCadence?: () => MeasurementCadenceDecision;
+  /**
+   * W1-T1259: run all three measurement verbs once, returning a cadence-shaped summary this
+   * loop logs (never inside the producer itself — same split `runAutoTriage`'s own disposition
+   * logging uses). DEFAULT-OFF WRITE PATH: the summary's `ruleEfficacy.escalated` is true only
+   * when `policy.measurementCadence.escalate` was ALSO on — the default cadence runs every verb
+   * report-only, zero writes, and NEVER files a task or mints an id (Law 5) — see
+   * lib/measurement-cadence.ts's module doc. Best-effort like `sweep`/`checkAutoTriage` above: a
+   * throw costs one logged tick, never the daemon's life.
+   */
+  runMeasurementCadence?: () => Promise<MeasurementCadenceRunResult>;
   /**
    * W1-T160: evaluate the retro cadence trigger this tick — fires on
    * merges-since-marker >= N OR days-since-marker >= D (policy data),
@@ -2448,6 +2468,41 @@ export async function runDaemon(
         }
       } catch (e) {
         log("github_posture.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+    }
+
+    // MEASUREMENT CADENCE (W1-T1259): "is this system getting better" — `rule-efficacy`,
+    // `verdict-calibration`, `autonomy-rate` — runs alongside the sweeps/posture check above, on
+    // the SAME "once per iteration" cadence; `checkMeasurementCadence`'s own policy-data bound
+    // throttles the actual run to at most `maxPerDay` times, at least `minIntervalMinutes` apart,
+    // so most ticks decide `fire: false` at no cost. Best-effort by the SAME contract as
+    // `checkGithubPosture` above: a throw costs one logged tick, never the daemon's life, and a
+    // fired run NEVER gates dispatch, fails a check, or changes a verdict — it is a ledger row
+    // for the operator, nothing more. Optional: omitted ⇒ the loop behaves exactly as before this
+    // rung existed (the three verbs stay operator-run only).
+    if (deps.checkMeasurementCadence) {
+      let decision: MeasurementCadenceDecision | undefined;
+      try {
+        decision = deps.checkMeasurementCadence();
+      } catch (e) {
+        log("measurement_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (decision?.fire) {
+        log("measurement_cadence.fired", { reason: decision.reason });
+        if (deps.runMeasurementCadence) {
+          try {
+            const result = await deps.runMeasurementCadence();
+            log("measurement_cadence.ran", {
+              rule_efficacy: result.ruleEfficacy,
+              verdict_calibration: result.verdictCalibration,
+              autonomy_rate: result.autonomyRate,
+            });
+          } catch (e) {
+            log("measurement_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (decision) {
+        log("measurement_cadence.skipped", { reason: decision.reason });
       }
     }
 

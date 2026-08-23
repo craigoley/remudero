@@ -232,7 +232,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "workerAbandon",
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
-    "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
+    "sweep", "drain", "retro", "autoTriage", "measurementCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
 
@@ -534,6 +534,14 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // literal ever bounded this one on its own; see plan/policy.yaml's row for why its value is
     // interim.
     "fixSpawnWallClockBoundMs",
+    // W1-T1259: the four `measurementCadence.*` fields join them too — no prior literal ever
+    // paced rule-efficacy/verdict-calibration/autonomy-rate at all; they were reachable only by
+    // an operator typing the CLI command, never on any cadence, so there is no source constant
+    // to cite for any of these four fields' origin.
+    "measurementCadence.enabled",
+    "measurementCadence.minIntervalMinutes",
+    "measurementCadence.maxPerDay",
+    "measurementCadence.escalate",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

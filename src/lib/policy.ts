@@ -150,6 +150,21 @@ export interface PolicyValues {
     minIntervalMinutes: number;
     maxPerDay: number;
   };
+  /** W1-T1259: the daemon's measurement-cadence rung — `rule-efficacy`, `verdict-calibration`
+   *  and `autonomy-rate` were merged, host-side, and reachable only by an operator typing them.
+   *  OPTIONAL, absent-means-default like {@link PolicyValues.autoTriage}, but the DEFAULT here
+   *  is the SAFE mode already ON (`enabled: true`) — unlike autoTriage, which spends
+   *  unsupervised, the base cadence runs only read-only reports (`verdict-calibration`/
+   *  `autonomy-rate` carry no write symbol at all; `rule-efficacy` runs its `--no-escalate`
+   *  form). `escalate` is the SEPARATE, opted-in flag for `rule-efficacy`'s ONE write (a
+   *  promote-to-instrument proposal, never a filed task — Law 5) and ships OFF, mirroring
+   *  `autoTriage.enabled`'s own off-by-default posture for anything that writes. */
+  measurementCadence: {
+    enabled: boolean;
+    minIntervalMinutes: number;
+    maxPerDay: number;
+    escalate: boolean;
+  };
   headroom: {
     curve: PolicyHeadroomRung[];
     reservePct: number;
@@ -243,6 +258,10 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
   "autoTriage.maxPerDay": "net-new",
+  "measurementCadence.enabled": "net-new",
+  "measurementCadence.minIntervalMinutes": "net-new",
+  "measurementCadence.maxPerDay": "net-new",
+  "measurementCadence.escalate": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
@@ -484,6 +503,18 @@ export function validatePolicy(raw: unknown): Policy {
         maxPerDay: numberField("autoTriage.maxPerDay", autoTriageRaw.maxPerDay, origin),
       }
     : { enabled: false, minIntervalMinutes: 60, maxPerDay: 4 };
+  // MEASUREMENT CADENCE IS OPTIONAL TOO, same absent-means-default shape as autoTriage
+  // immediately above — but the default here is the SAFE mode already ON (see PolicyValues'
+  // own doc for why a read-only cadence's absent default differs from a spending rung's).
+  const measurementCadenceRaw = raw.measurementCadence as Record<string, unknown> | undefined;
+  const measurementCadence = measurementCadenceRaw
+    ? {
+        enabled: booleanField("measurementCadence.enabled", measurementCadenceRaw.enabled, origin),
+        minIntervalMinutes: numberField("measurementCadence.minIntervalMinutes", measurementCadenceRaw.minIntervalMinutes, origin),
+        maxPerDay: numberField("measurementCadence.maxPerDay", measurementCadenceRaw.maxPerDay, origin),
+        escalate: booleanField("measurementCadence.escalate", measurementCadenceRaw.escalate, origin),
+      }
+    : { enabled: true, minIntervalMinutes: 360, maxPerDay: 4, escalate: false };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 
@@ -535,6 +566,7 @@ export function validatePolicy(raw: unknown): Policy {
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
       autoTriage,
+      measurementCadence,
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },

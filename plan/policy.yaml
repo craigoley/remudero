@@ -736,6 +736,47 @@ autoTriage:
     min: 1
     max: 24
 
+# W1-T1259: `rule-efficacy`, `verdict-calibration` and `autonomy-rate` — the three verbs that
+# would answer "is this system getting better" — were merged, HOST-SIDE ONLY (their own ledger
+# lives on the daemon host; nothing in CI can read it), and reachable only by an operator typing
+# them on the right machine. No orchestrator (daemon.ts/retro.ts/sweep.ts) ever called them.
+#
+# THIS BLOCK IS SAFE ON BY DEFAULT, UNLIKE `autoTriage` ABOVE. That rung spends ~$1/fire
+# unsupervised, so it ships off until an operator opts in. This cadence spends nothing:
+# `verdict-calibration`/`autonomy-rate` carry no write symbol at all, and the default
+# `rule-efficacy` run is its own `--no-escalate` form — a report, zero writes. A cadence that
+# writes nothing cannot launder anything (Law 5), so it can run unattended from the start.
+#
+# `escalate` IS THE SEPARATE, OPT-IN FLAG for `rule-efficacy`'s one write (a promote-to-instrument
+# PROPOSAL into the inbox's ACTIVE-proposal registry, idempotent by rule id — never a filed task).
+# It mirrors `autoTriage.enabled`'s off-by-default posture for anything that writes, and ships
+# false: turning the escalating form on is a separate, reviewed policy edit, not a side effect of
+# giving the reports a cadence.
+#
+# minIntervalMinutes/maxPerDay ARE THE CADENCE'S OWN PACING BOUND, never the raw 60s poll
+# interval — a metric fired every poll would be pure noise. 360m/4-per-day means the daemon
+# checks in on the fleet's health a few times a day, comfortably above the ~16-minute CI-parity
+# suite (policy/workerStall's own comment) and far below a spend-shaped cadence's tuning.
+measurementCadence:
+  enabled:
+    value: true
+    origin: "net-new"   # safe (read-only default) — see the block comment above
+  minIntervalMinutes:
+    value: 360
+    origin: "net-new"
+    min: 15
+    max: 1440
+  maxPerDay:
+    value: 4
+    origin: "net-new"
+    min: 1
+    max: 24
+  escalate:
+    value: false
+    origin: "net-new"   # opt-in, off — see the block comment above
+    # rule-efficacy's ONE write (a promote-to-instrument proposal); verdict-calibration and
+    # autonomy-rate never consult this field at all.
+
 retro:
   mergesThreshold:
     value: 25
