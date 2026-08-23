@@ -1,0 +1,181 @@
+- id: W1-T1234
+  title: "DERIVE THE `CLAUDE.md` MEASUREMENT AT CHECK TIME AND STOP STORING IT — `measuredBytes` is a recorded number pinned to a file that legitimately changes, so every edit to `CLAUDE.md` reddens a required check whose only remedy is an instrument edit, and any two lanes that notice write the same repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 in a scratch worktree proved equal to `origin/main` at 644ec475 before any
+    reading. THE SUITE WAS NOT RUN — the ratchet CLI was driven directly, and every claim about its
+    behaviour below is an exit code and a printed line, not a reading of its source. Every zero
+    carries a control qualified for its own surface.
+
+    (1) THIS SUPERSEDES W1-T1231 (#2555), WHICH IS NOT WRONG. That shard's measurements hold and are
+    carried here. Its REMEDY — move the equality into `evaluateRatchet` — was withdrawn by operator
+    ruling because relocating the comparison relocates the collision rather than removing it: a
+    stored figure pinned to a file's byte length reddens on every edit to that file wherever the
+    comparison is evaluated. Its criteria were written for that remedy and cannot be re-pointed in
+    place (criteria 1, 3 and 5 each require a DECLARED measured figure, which this design removes;
+    2 and 4 go vacuous), and Standing rule 15 forbids editing them, which is why this is a new
+    record rather than an amendment.
+
+    (2) THE COLLISION ARRIVED WITH THE NEW INVARIANT, NOT BEFORE IT. Under the OLD invariant
+    (`capBytes === measuredBytes`) the nine commits sampled immediately before #2537 all read
+    62733/62733 — GREEN, 9 of 9. #2537 replaced that invariant with
+    `measuredBytes === length(CLAUDE.md)` and INTRODUCED IT ALREADY VIOLATED: at `fb6c5485` the
+    baseline records `measuredBytes: 62725` while `CLAUDE.md` AT THAT SAME COMMIT measures 62,732.
+    62725 is exactly the file's length at #2536's parent — so the capture was taken against a tree
+    #2536 had already superseded. The two merged 448 seconds apart (23:02:02Z and 23:09:30Z).
+
+    (3) THE COST OF THAT ONE STALE NUMBER, MEASURED END TO END. Main was red for 54.2 minutes
+    (23:09:29Z → 00:03:40Z). FOUR commits landed inside that window — #2540, #2541, #2523, and
+    #2544 which finally cleared it. Then a THIRD lane spent a fix-rung strike on the same repair
+    inside #2545 (`3d38a009`), 36.9 minutes AFTER main was already green; that repair had to touch
+    an instrument from inside a `src/` PR, so it tripped Standing rule 25, falsified that PR's body
+    file count, and escalated as #2548.
+
+    (4) THE SCRIPT ALREADY DERIVES. `main()` computes `actualBytes = measureBytes(values.file)`
+    (scripts/claude-md-budget-ratchet.mjs:88) — a fresh read of the file on every run — and passes
+    it to `evaluateRatchet`, whose single violation condition is `actualBytes > baseline.capBytes`.
+    Control on "single": `violations.push` appears exactly once in the whole file, at :72. So the
+    derived figure is already the one the gate compares; the stored figure is a second, redundant
+    copy of the same quantity that can and does drift.
+
+    (5) AND THE GATE PROVABLY IGNORES THE STORED FIGURE — DRIVEN, NOT READ. Given
+    `{"capBytes": 65536, "measuredBytes": 1}` against the committed 62,732-byte file the CLI prints
+    `OK` and exits 0. Both halves of the real gate still work on the same file: `{"capBytes":
+    62000}` exits 1 and prints "CLAUDE.md is 62732 bytes > cap 62000 bytes (732 bytes over)", while
+    `{"capBytes": 65536}` exits 0 — the passing half is what makes the failing half mean something.
+    And `{"_comment": "no capBytes"}` prints `cap unset` and exits 0, which is the capless contract
+    `test/claude-md-budget-ratchet.test.ts:52` pins and which this task must not disturb.
+
+    (6) THE READERS TO REMOVE ARE TWO FILES, ENUMERATED. Across `scripts/`, `src/`, `test/` and
+    `.github/`, `measuredBytes` occurs six times: twice in `scripts/claude-md-budget-baseline.json`
+    (the field at :4, and a prose mention inside `bumpRationale` at :6) and four times in
+    `test/claude-md-budget-ratchet.test.ts` (a comment at :74 and the assertions at :90, :92, :94).
+    `src/` and `.github/` read ZERO; controls on the same trees for a field that IS consulted,
+    `capBytes`, read 2 files in `scripts/`, 4 in `test/`, 1 in `.github/` and 0 in `src/` — so the
+    `src/` zero is a real absence and the `.github/` zero is too.
+
+    (7) `scripts/claude-md-budget-ratchet.mjs` NEEDS NO EDIT AND IS DELIBERATELY NOT DECLARED.
+    `measuredBytes` reads 0 in that file; control, `capBytes` reads 5 in the same file. The script
+    is already correct — it is the baseline that carries a figure nobody consults, and the test
+    that asserts on it. Declaring a path the implementation must not edit is what
+    `inverseScopeUntouchedFiles` refuses.
+
+    (8) STANDING RULE 25 IS SATISFIED BY CONSTRUCTION HERE, WHICH IS THE POINT.
+    `scripts/claude-md-budget-baseline.json` is an instrument, and W1-T297 refuses an instrument
+    change riding beside a `src/` product change in one PR. This task touches an instrument and its
+    own test and NOTHING under `src/` — the instrument rides alone, exactly as the rule requires.
+    That is only possible because the change is being made deliberately rather than as a repair
+    forced on a lane mid-PR, which is the shape W1-T1227 (#2550) files as a class. Neither W1-T297
+    nor W1-T1227 is re-filed.
+  design: |
+    ONE CONCERN: remove the stored measurement so nothing can go stale, and leave the ceiling
+    exactly as strong as it is today.
+
+    (i) DROP `measuredBytes` FROM THE BASELINE. The field goes from
+    `scripts/claude-md-budget-baseline.json`, and the `_comment` beside it stops describing the
+    baseline as a capture. Nothing needs to start deriving, because the gate already derives
+    (rationale 4): `actualBytes` is measured from the file on every run.
+
+    (ii) `capBytes` STAYS DECLARED AND STAYS FALSIFIABLE. It is compared against a FRESHLY MEASURED
+    file every run, which is the property #2537's own comment says the replacement exists to
+    protect — the cap stays a declared round boundary rather than drifting upward silently, and a
+    raise still has to change a constant deliberately and say why. Its value does not move here.
+
+    (iii) THE TEST STOPS ASSERTING ON A FIGURE THAT NO LONGER EXISTS AND ASSERTS THE GATE INSTEAD.
+    The three assertions at `test/claude-md-budget-ratchet.test.ts:90-94` go with the field they
+    guard. What replaces them is the gate proved BOTH WAYS through the CLI — a file over the
+    declared cap blocks and names the overage in bytes, and a file at or under it exits clean —
+    plus an assertion that the committed baseline declares NO measured figure, so the removal
+    cannot silently regress, and that a stray measured figure planted in a fixture changes no
+    verdict.
+
+    (iv) THE CAPLESS CONTRACT IS UNTOUCHED. `test/claude-md-budget-ratchet.test.ts:52` pins that a
+    baseline with no `capBytes` neither crashes nor false-blocks, and rationale (5) confirms the CLI
+    still behaves that way. An absent cap must NOT become fatal as a side effect of this change.
+
+    (v) WHAT IS GIVEN UP, STATED RATHER THAN GLOSSED. After this, nothing records the file's size at
+    the moment the cap was last moved. That figure has a real use — it is the evidence a later
+    reader needs to judge whether a proposed raise is proportionate. If it is wanted it belongs in
+    `bumpRationale` AS PROSE, beside the dated reason already recorded there, where no gate reads
+    it and therefore nothing can go stale.
+
+    (vi) NOT IN SCOPE, NAMED. `capBytes`' own string-guard fail-open — a real defect, its own shard,
+    deliberately untouched here. `src/lib/ci-parity.ts`, which `ci.yml:473` warns against editing by
+    name; this task adds no job and no step, so the question does not arise. The cap's VALUE, an
+    operator decision on the record. And W1-T1227's rung-side remedy, which is a different lane's
+    work.
+  acceptance:
+    - claim: "a file over the declared cap blocks and the failure names the overage in bytes"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "a file at or under the declared cap exits clean"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "the committed baseline declares no measured figure"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "a measured figure planted in a baseline changes no verdict"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "a baseline that declares no cap still neither crashes nor false-blocks"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "the cap is still pinned to its declared value and its raise still carries a dated written reason"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+  files: [scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#derive-the-claude-md-measurement-stop-storing-it-2026-08-23"
+  plan_refs: ["W1-T1231", "W1-T1227", "W1-T297", "W1-T503"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All six criteria use the pure-path `unit test:` form
+    naming `test/claude-md-budget-ratchet.test.ts`, which is declared in `files:` and already
+    exists, so each resolves against a real file rather than a forward reference.
+
+    THE GATE IS PROVED BOTH WAYS ON PURPOSE. Criterion 1 is the blocking half and criterion 2 is
+    the passing half, and the second is not decoration: a blocking assertion alone passes just as
+    well against a gate that refuses everything, which is how a ratchet dies without anyone
+    noticing. The two together are what make either mean anything, and rationale (5) already drove
+    both against the live CLI before this shard was written.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND IT WAS SET BY THE LINTER RATHER THAN BY
+    TASTE. Filed at `medium`, `rmd lint-plan` refused it: "[sizing] spans 2 distinct
+    subsystems/concerns (claude-md-budget-baseline, claude-md-budget-ratchet) at risk:medium —
+    Rule 19: raise to risk:high or decompose". Decomposing is the wrong answer here: removing the
+    field without re-pointing its test files a PR that is red by construction, and re-pointing the
+    test without removing the field asserts on a figure that is still there. So the band is raised
+    and the reason recorded. THE BLAST RADIUS IS GENUINELY NARROW: two files, no `src/` path, no
+    workflow, no required-check name. The change REMOVES a refusal rather than adding one, which is
+    the direction that deserves care — so criterion 3 pins the removal (the field is gone) and
+    criterion 4 pins that its ghost cannot come back (a planted figure changes no verdict), while
+    criteria 1, 2, 5 and 6 hold the ceiling itself exactly where it is.
+
+    W1-T1231 (#2555) IS SUPERSEDED, NOT WRONG, AND THE DISTINCTION IS LOAD-BEARING. Its rationale
+    established that the invariant is live, that the script never reads the field, and what it cost
+    on 2026-08-23; all of that is re-derived here rather than cited on faith. What changed is the
+    remedy, by operator ruling, and its criteria are the reason a new id was minted: they were
+    written for "move the equality into `evaluateRatchet`" and a worker may never edit acceptance
+    criteria to match a new design.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T1234` resolves on origin against a namespace of 264 such refs; a reservation
+    existing is not evidence a shard does. EIGHT ID SURFACES WERE SWEPT, and TWO CONTROLS WERE
+    RE-QUALIFIED RATHER THAN TRUSTED. First: W1-T1231 and W1-T1227 both sit in OPEN PRs (#2555,
+    #2550), so neither can control a main-tree surface — the shard-filename and `- id:` surfaces
+    were re-controlled on W1-T1222 and W1-T1213, which read 1 each. Second: the merged-trailer
+    surface's usual control, `Remudero-Task: W1-T1085`, reads 0 at this head and W1-T1085 appears
+    nowhere on main, so it was replaced by `Remudero-Task: RETRO-1787419805720`, which reads 1
+    against 27 trailer-carrying commits on main. The eight results: shard filenames 0; plan `- id:`
+    lines 0; the reservation 1, which is the pre-mint; open PR titles 0 against W1-T1231 at 1; open
+    PR head branches 0 against `run-W1-T` heads at 2; open PR file lists 0 with coverage at eight
+    captured of eight enumerated, against `plan/tasks.d/` paths at 5 across the same heads; merged
+    trailers 0; and merged subject credit 0 against W1-T1213 at 1, with `run-W1-T1234-*` at 0
+    against a namespace of 83 `run-*` branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, NOT A PRESENCE TEST. Four
+    markers were counted at every one of the eight open PR heads and at main: `measuredBytes` in
+    the baseline, in the ratchet script, and in the ratchet's test, plus `violations.push` in the
+    script. Main reads 2 / 0 / 4 / 1 and EVERY head reads exactly 2 / 0 / 4 / 1 — no head moves any
+    marker. The script's own `measuredBytes` count of 0 is the fact this task rests on, identically
+    absent everywhere, and the three non-zero markers are the control that the reader worked.
