@@ -1,0 +1,147 @@
+- id: W1-T1267
+  title: "the citation stamper decides which entries are eligible from a corpus snapshot and writes back with no check that the entry it planned against is still the entry on disk — and because the edit is line-disjoint from `lifecycle:`, git merges the stale decision in cleanly"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    (1) THIS IS LIVE, NOT PENDING. W1-T1248's build merged as #2599 at 2026-08-23T15:30:38Z;
+    `origin/main` at 8f2a9112 IS that merge commit, and `stampCitationInShardText` /
+    `stampCitationsAndCommit` / `citationStampPassFor` are on main now. `runCitationStampPass`
+    rides EVERY real retro (`src/run-task.ts`, in `retroCommand`'s post-worker block alongside
+    `regenerateOrientation` and `regeneratePlanIndexAndCommit`). Filed as a hazard that has
+    shipped, not one that is about to.
+
+    (2) THE NARROW WINDOW IS SMALL AND THAT IS SAID PLAINLY, BECAUSE IT IS NOT WHERE THE DEFECT
+    IS. Inside `stampCitationsAndCommit` the read and the write are adjacent — `readFileSync`,
+    surgical edit, `writeFileSync`, same loop iteration. `citationStampPassFor` is fully
+    synchronous end to end: zero `await` in its body and zero in `stampCitationsAndCommit`'s,
+    against a control of one in `retroCommand`'s own body, so the reader is not blind to the
+    keyword. MEASURED at 8f2a9112: the `git log --format=%x1e%aI%x1f%s%x1f%b` the pass shells out
+    to takes 53ms over 2.9MB against a 5-shard, 32,628-byte corpus. No model call sits between
+    the corpus load and the write. A byte-compare bracketing only those two statements would
+    therefore fire on nothing, and this task does NOT propose one.
+
+    (3) THE REAL WINDOW IS THE WORKTREE'S LIFETIME, AND A MODEL CALL DOES SIT INSIDE IT.
+    `retroCommand` cuts a fresh private worktree from `origin/main` (`worktreeAdd(repoDir,
+    worktreePath, branch, "origin/main")`), then `await spawn({…})` runs the Architect worker —
+    minutes — and only then does `runCitationStampPass` read `learnings/` out of that worktree.
+    The corpus the eligibility decision is made from is `origin/main`'s as of the cut, aged by the
+    whole worker span. The fleet runs three dispatch lanes and three review lanes, and a retro is
+    a lane like any other, so main moves underneath.
+
+    (4) THE COLLISION IS NOT BYTE-LEVEL, WHICH IS WHY GIT DOES NOT CATCH IT. `stampCitations`
+    gates on `if (e.lifecycle !== "active") return e;` — read from the entry AS LOADED.
+    `stampCitationInShardText` replaces only `^  cited:.*$` and the `cited_count` line beside it.
+    Those lines are DISJOINT from `lifecycle:`. So an entry loaded `active`, quarantined on main
+    by `scripts/learnings-assert-check.mjs`'s `quarantineEntryInText` during the worker span, and
+    stamped on the way out produces two edits that never overlap: git merges both, and the result
+    is a quarantined entry carrying a fresh citation stamp — precisely what #2599's own design
+    forbids in memory ("a superseded entry can never be resurrected onto disk by a stamp it was
+    never eligible for"). Each side is individually correct; only the pair is wrong, and nothing
+    on either side is looking at the pair.
+
+    (5) NOTHING GUARDS THE SHARD WRITE, AND THE CONTROL IS IN THE SAME MODULE. The learnings write
+    is a plain `fsMarker.writeFileSync`. Twelve hundred lines later in the SAME file, `saveMarker`
+    stages `state/last-retro.json` into a same-directory temp file, writes it with a single
+    `writeSync`, and swaps it in with `renameSync` — and its doc records the incident that earned
+    that care ("a torn read was misread as FIRST-EVER-RETRO, reprocessing the whole already-consumed
+    run window"). Same file, same discipline available, opposite treatment. The repo also has
+    `state/triage.lock` and `state/drain.lock`, a remote-ref CAS in `reserveTaskIdRemote`, and
+    `updateProposalRegistry`'s single-writer helper — so a zero on the learnings path means
+    absence, not a blind scan.
+
+    (6) THE EXTERNAL PRECEDENT IS THE SHAPE, CITED NOT COPIED. `PrimeIntellect-ai/prime-agent` at
+    `e319a66d`, `applyRefinementProposal` (`packages/coding-agent/src/core/refinement/refinement.ts`,
+    the `baselineState` branch) rejects an edit with "entry changed during refinement planning"
+    when the entry moved while the model was thinking. That is optimistic concurrency, not a lock:
+    it REFUSES rather than waiting, which suits a lane that gets re-dispatched on the next retro
+    cadence anyway. Only that shape is borrowed. Prime Agent's harness is built on a persistent
+    IPython kernel that most of its design depends on, and none of that is proposed here.
+  design: |
+    (i) RE-DERIVE THE WINDOW FIRST AND RE-SCOPE IF IT HAS MOVED. Rationale (2)'s await counts and
+    the 53ms figure, and rationale (3)'s ordering — worktree cut, `await spawn`, then the stamp —
+    are the scoping evidence. Run them at the implementing sha. If the pass has become async
+    between the corpus load and the write, the hazard is wider than this shard describes and the
+    baseline must be captured differently; say so rather than building to a shape that has moved.
+
+    (ii) CAPTURE THE BASELINE PER ENTRY, NOT PER FILE, AND COMPARE IMMEDIATELY BEFORE THE WRITE.
+    The eligibility decision is made per entry, so that is the unit that must be checked. At plan
+    time record, for each id in the `changed` map, the entry block the decision was made against.
+    Before `stampCitationInShardText` writes, re-read that block from disk and compare. Refuse
+    that entry when anything OUTSIDE the two stamped lines differs. A whole-file byte compare is
+    the wrong unit twice over: it would refuse a shard because a SIBLING entry moved, and it would
+    still miss nothing the per-entry form catches.
+
+    (iii) THE REFUSAL MUST NAME WHAT MOVED. "entry changed" is not enough to act on. Name the id,
+    the field, and both values — an operator reading the ledger row must be able to tell a
+    lifecycle flip from a hand-edited fact without opening the shard. The refusal is per entry:
+    the other stamps in the same pass still apply.
+
+    (iv) REFUSE, NEVER RETRY, AND NEVER WAIT. A refused stamp is dropped for this cycle and the
+    next retro re-derives it from evidence that is current by then — the same evidence, one
+    cadence later, costing nothing. Do not re-read and re-apply, do not loop, do not sleep, and
+    do not fall back to a full YAML re-serialize.
+
+    (v) NO NEW FILE OF ANY KIND. No lock file, no baseline store, no queue, no id-to-file index.
+    The baseline is an in-memory value that lives for the duration of one synchronous pass and is
+    discarded with it. If a design needs somewhere to put it, that design is wrong.
+
+    (vi) FALSIFY IN BOTH DIRECTIONS AND PROVE THE GUARD IS LOAD-BEARING. An entry whose block is
+    untouched between plan and write still stamps. An entry whose `lifecycle` flipped in between
+    is refused and left byte-identical. Delete the guard and the same test must go red — a fixture
+    that passes with and without it is testing the fixture. And the refusal path must be reachable
+    without a real fleet: drive it by mutating the shard on disk between the two halves.
+  acceptance:
+    - claim: "an entry whose block is unchanged between the eligibility decision and the write is still stamped"
+      proof: "unit test: test/citation-stamp-baseline.test.ts"
+    - claim: "an entry whose lifecycle flipped after the eligibility decision is refused and left byte-identical on disk"
+      proof: "unit test: test/citation-stamp-baseline.test.ts"
+    - claim: "the refusal names the id and the field that moved, not merely that something changed"
+      proof: "unit test: test/citation-stamp-baseline.test.ts"
+    - claim: "a refused entry drops for the cycle without retrying, waiting, or blocking the other stamps in the same pass"
+      proof: "unit test: test/citation-stamp-baseline.test.ts"
+    - claim: "the stamper's on-disk output format is unchanged for the entries that do stamp, and no entry is added, removed or relifecycled"
+      proof: "unit test: test/citation-stamp-baseline.test.ts"
+  origin: oper#2026-08-23-citation-stamp-has-no-baseline-check
+  plan_refs: ["W1-T1248", "#2599", "W1-T419", "W1-T240", "Law 5"]
+  files: [src/lib/retro.ts, src/run-task.ts, test/citation-stamp-baseline.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19's SPAN, NOT THE BLAST RADIUS, AND IT WAS SET FROM THE LINTER RATHER
+    THAN GUESSED. `sizingViolation` (`src/lib/task-linter.ts`) exempts `risk: high` outright and
+    otherwise blocks at two or more concerns; this `files:` list spans the retro library, the CLI
+    I/O layer and a new test. The verification is recorded with this filing: the same shard at
+    `risk: medium` draws the sizing block naming those concerns, and at `risk: high` it clears.
+    The real radius is one refusal branch on a path that today has none.
+
+    WHAT MUST NOT CHANGE, STATED SO A BUILDER CANNOT DRIFT INTO IT. The stamper's output format is
+    fixed: two lines, `cited:` and `cited_count:`, surgical, never a whole-document YAML
+    re-serialize — #2599's own doc gives the reason (a round-trip reflows every other entry's
+    `fact: >-` and `files: [...]` into a noisy whole-file diff every cycle). The Law-5-equivalent
+    holds: this pass proposes and stamps, it never files a task, mints an id, or promotes,
+    retires or adds an entry from a metric. And the operator gate is untouched — this adds a
+    refusal inside an existing pass, no new verb, no new arming path, no new merge authority.
+
+    THE ID WAS PRE-MINTED AND READ BACK BEFORE ANYTHING WAS WRITTEN. Eight surfaces were swept,
+    each against a control pre-qualified for THAT surface, under the rule that a surface whose own
+    control reads zero is DISQUALIFIED rather than used to license the target's zero. Reservation
+    ref present against a 297-ref namespace and an absent-id control at 0; shard filename 0, plan
+    `- id:` lines 0, any tracked mention 0 — those three against W1-T1248 at 1, 1 and 6; live
+    `run-W1-T1267-*` heads 0 against an 84-branch `run-*` namespace; merged trailers 0 and merged
+    subjects 0, both against W1-T1248 at 3 — a control that reads non-zero on those two surfaces
+    ONLY because #2599 merged during this session, and which would have had to be disqualified an
+    hour earlier. No surface was disqualified. Surface eight is a count-per-head sweep of 91 open
+    heads read through git objects, 0, with a positive control finding a known id on the densest
+    head.
+
+    THE HISTORY QUERIES REQUIRE AN UNSHALLOW AND `src/run-task.ts` CANNOT BE READ THROUGH THE
+    CONTENTS API. Both are recorded because each returns a clean, passing-looking wrong answer:
+    a shallow clone answers history queries from a horizon that may postdate the evidence, and
+    `src/run-task.ts` is over GitHub's 1 MB contents cap and comes back empty, greping to zero at
+    every ref including main. Everything above was read from a worktree with `HEAD == origin/main`
+    proven equal, through git objects and the local filesystem.
