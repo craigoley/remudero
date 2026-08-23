@@ -83,47 +83,44 @@
     reasons a repair must reach for an instrument at all. Neither W1-T1227 nor W1-T297 (Standing
     rule 25) is re-filed here.
   design: |
-    ONE CONCERN: make the stale-capture failure reachable from the ratchet itself, without
-    weakening what the suite guarantees today.
+    ONE CONCERN, RESTATED UNDER THE OPERATOR'S RULING OF 2026-08-23: STOP STORING A FIGURE THAT IS
+    PINNED TO A MOVING FILE. The remedy this shard was filed with — move the equality into
+    `evaluateRatchet` — is SUPERSEDED. It relocates the collision instead of removing it: wherever
+    the comparison lives, a stored figure pinned to a file's byte length reddens on every edit to
+    that file, so any two PRs touching `CLAUDE.md` collide by construction and any two lanes that
+    notice will both write the same repair.
 
-    (i) THE EQUALITY MOVES INTO `evaluateRatchet`. A baseline that DECLARES a measured figure which
-    does not equal the file's real byte length is a violation, and the message names BOTH figures —
-    the recorded one and the measured one — the way the cap violation already names size and cap.
-    It fails closed: a violation is a violation, no `continue-on-error`, same non-zero exit the cap
-    arm already produces.
+    (i) DERIVE AT CHECK TIME AND DROP THE STORED FIGURE. `evaluateRatchet` already receives the
+    real length as `actualBytes`, measured from the file on this run, so the honest comparison is
+    the one it already makes: `actualBytes > baseline.capBytes`. `measuredBytes` is REMOVED from
+    `scripts/claude-md-budget-baseline.json` and from every reader of it, so nothing pins a stored
+    number to a file that legitimately changes.
 
-    (ii) A DECLARED-BUT-MALFORMED FIGURE IS A VIOLATION, NEVER A SILENT SKIP. Rationale (5)
-    measured what the `typeof === "number"` guard does to `capBytes`: a string reads as a cap in
-    the log and enforces nothing. The measured-figure arm must not reproduce that — if the field is
-    present and is not a number, that is a broken instrument and the gate says so.
+    (ii) `capBytes` STAYS DECLARED AND STAYS FALSIFIABLE, AND THAT IS THE WHOLE POINT. It is
+    compared against a FRESHLY MEASURED file on every run, which is exactly the property #2537's
+    own comment says the replacement exists to protect: the cap stays "the DECLARED round boundary
+    rather than drifting upward silently", and a raise still has to change a constant deliberately
+    and say why. Nothing about the ceiling, its value, or its fail-closed behaviour moves.
 
-    (iii) ABSENCE STAYS TOLERATED BY THE SCRIPT, AND THE PRESENCE OBLIGATION STAYS IN THE SUITE.
-    Rationale (6): the CLI's fixtures declare no measured figure and one existing test pins that a
-    capless baseline does not false-block. So the script's arm is "declared and wrong", and the
-    REAL committed baseline's obligation to declare both figures stays where it is — an assertion
-    about this repository's own file, not about the script's behaviour. Deleting the field
-    therefore still cannot launder a stale capture, and the common case (the file drifted by a few
-    bytes) now surfaces in the script rather than only in CI.
+    (iii) WHAT IS GIVEN UP, SAID RATHER THAN GLOSSED. Nothing will record the file's size at the
+    moment the cap was last moved. That figure has a real use — it is the evidence a later reader
+    needs to judge whether a proposed raise is proportionate — and after this change it exists
+    nowhere a gate can read. If it is wanted, it belongs in `bumpRationale` AS PROSE, beside the
+    dated reason already recorded there, where it is a record and not an invariant and cannot
+    redden anything.
 
-    (iv) Q2 — THE TEST ASSERTS THAT THE SCRIPT ENFORCES IT, WITH A NEGATIVE CONTROL. The direct
-    equality assertion is replaced, not deleted: drive the real CLI against a baseline whose
-    measured figure disagrees with its file and assert a non-zero exit whose message names both
-    figures, then drive the SAME CLI against the corrected baseline and assert zero. That pair is
-    the prove-it-still-blocks shape this file already uses for the cap (`at-cap` accepts,
-    `over-cap` blocks and names the overage), and the second half is what stops the first from
-    passing for the wrong reason.
+    (iv) THE TEST ASSERTS THE CAP STILL BLOCKS AGAINST A FRESHLY MEASURED FILE, WITH ITS NEGATIVE
+    CONTROL. The prove-it-still-blocks shape is unchanged in kind, only in subject: a file over the
+    declared cap blocks and names the overage in bytes; the same file under it exits clean; and a
+    baseline carrying a stale or absent measured figure changes NO verdict, which is the assertion
+    that pins the field's removal rather than merely deleting a line. The direct
+    `measuredBytes === readFileSync(CLAUDE.md).length` assertion goes with the field it guards —
+    not because the invariant was wrong, but because there is no longer a stored value that could
+    drift out of agreement with anything.
 
-    (v) NO NEW TRACKED FIXTURE. The disagreeing baseline is minted at run time with `mkdtempSync`,
-    the convention 387 test files in this suite already use and which `test/setup/tmp-hygiene.ts`
-    sweeps automatically. That keeps `files:` at two paths and one concern; an implementer who adds
-    fixture files instead has widened the scope for nothing.
-
-    (vi) NOT IN SCOPE, NAMED. Deleting the invariant — refused, and rationale (1) says why. The
-    cap's VALUE, which is an operator decision on the record. `capBytes`' own absence semantics and
-    its string-guard fail-open (rationale 5) — a real defect, measured here, DELIBERATELY not fixed
-    by this task and named for the operator to mint separately, because widening this change into
-    the cap arm turns a reachability fix into a semantics change on a gate that is currently
-    correct for every baseline anyone has actually committed. `src/lib/ci-parity.ts` (rationale 7).
+    (v) NOT IN SCOPE, NAMED. The cap's VALUE, an operator decision on the record. `capBytes`' own
+    string-guard fail-open (rationale (5)) — a real defect, measured here, deliberately not fixed
+    by this task. `src/lib/ci-parity.ts` (rationale (7)): this still adds no job and no step.
     And W1-T1227's rung-side remedy, which is a different lane's work.
   acceptance:
     - claim: "a baseline whose declared measured figure disagrees with the file blocks, and the failure names both figures"
@@ -178,3 +175,47 @@
     reads 0 / 1 / 3 and 4; every head reads exactly 0 / 1 / 3 and 4. No head moves any marker, and
     the non-zero markers being equal is the control that the reader worked — the script's own
     `measuredBytes` count of 0 is the defect itself, identically absent everywhere.
+
+    ── OPERATOR RULING, 2026-08-23: THE Q1 REMEDY IS SUPERSEDED ─────────────────────────────────
+    THE FILED DESIGN MOVED THE EQUALITY INTO `evaluateRatchet`. THAT IS WITHDRAWN. Moving it
+    relocates the collision rather than removing it: a stored figure pinned to a file's byte length
+    reddens on every edit to that file, wherever the comparison is evaluated. `design:` above is
+    rewritten to the ruling — derive at check time, drop the stored field — and this note records
+    what changed and what it costs.
+
+    THE COLLISION IS MEASURED ON MAIN, AND SHARPER THAN THE RULING'S OWN SUMMARY. Re-measured
+    rather than carried: #2536 and #2537 merged 7 minutes 28 seconds apart (23:02:02Z and
+    23:09:30Z), not ninety seconds; and main was red for 54.2 minutes, not ~3 hours
+    (23:09:29Z → 00:03:40Z). The mechanism is worse than a race. Under the OLD invariant
+    (`capBytes === measuredBytes`) main was green on every commit sampled before #2537 — nine of
+    them, all reading 62733/62733. #2537, THE COMMIT THAT INTRODUCED THE NEW INVARIANT, INTRODUCED
+    IT ALREADY VIOLATED: it recorded `measuredBytes: 62725` while `CLAUDE.md` at that same commit
+    measured 62,732, because 62725 is the length the file had BEFORE #2536 grew it seven minutes
+    earlier. A capture taken against a tree another PR had already superseded.
+
+    AND THE RED WINDOW WAS NOT IDLE. Four commits landed inside it — #2540, #2541, #2523 and
+    finally #2544, which cleared it. Then a THIRD lane spent a strike on the same repair inside
+    #2545 (`3d38a009`, 00:40:34Z) — 37 minutes after main was already green — and that repair
+    tripped Standing rule 25 and falsified #2545's body file count, escalating as #2548. The
+    operator also reports an unpushed `0c57910` racing #2544 on the same fix; that object is not
+    present in this repository's store, so it is recorded here as the operator's observation and
+    NOT as something this shard verified.
+
+    THE Q1 MEASUREMENTS ARE CARRIED FORWARD BECAUSE THEY REMAIN TRUE AND USEFUL, EVEN THOUGH THE
+    REMEDY THEY SUPPORTED IS WITHDRAWN. `baseline.measuredBytes` is already in scope at the exact
+    line a comparison would occupy, so the relocation was mechanically free — which is precisely
+    why "it is easy" was not a sufficient argument for doing it. `violations.push` appears exactly
+    once, at `scripts/claude-md-budget-ratchet.mjs:72`. And the CLI accepts `{"measuredBytes": 1}`
+    against the committed 62,732-byte file, which is the behavioural proof that the script never
+    reads the field — now the reason the field can simply go, rather than the gap to be closed.
+
+    ⚠ THE ACCEPTANCE CRITERIA AS FILED ENCODE THE SUPERSEDED REMEDY, AND ARE LEFT BYTE-IDENTICAL BY
+    THIS RULING. This is recorded rather than repaired because a worker may never edit a task's
+    acceptance criteria (Standing rule 15), and the ruling holds `acceptance:` fixed. Under the
+    amended design, criteria 1 and 3 cannot be satisfied — both require a DECLARED measured figure
+    to be judged, and there is no longer one to declare — and criterion 5, which requires the
+    committed baseline to "declare both figures", contradicts the change outright. Criteria 2 and 4
+    survive but become vacuous. AN IMPLEMENTER MUST NOT PROCEED ON THESE CRITERIA: the reviewer
+    fails closed on unmet criteria, so a build against this record earns a refusal no matter how
+    correct the work is. The Architect needs to re-issue `acceptance:` under this design, or this
+    task needs re-filing under a fresh id with the ruling's criteria written in from the start.
