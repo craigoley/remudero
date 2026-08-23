@@ -1,6 +1,11 @@
-import { loadLayeredLearningsForTaskFiles, renderMatchedLearnings, selectLearnings } from "./learnings.js";
+import {
+  candidateShardFiles,
+  loadLayeredLearningsForTaskFiles,
+  renderMatchedLearnings,
+  selectLearnings,
+} from "./learnings.js";
 import { appendLedger } from "./ledger.js";
-import type { LayeredLearningsHomes } from "./learnings.js";
+import type { LayeredLearningsHomes, LearningsIndex } from "./learnings.js";
 import type { RunResult } from "./run-result.js";
 import type { ProofExecOutcome } from "./review.js";
 
@@ -35,6 +40,18 @@ import type { ProofExecOutcome } from "./review.js";
  * the sandbox, reading the aggregate) is an operator action (Rule 18) — see `rmd
  * wipe-test`'s CLI wiring in run-task.ts.
  *
+ * SUBJECT SUPPLY (W1-T1253): "many seeded pairs" needs SUBJECTS to seed pairs with, and
+ * a hand-written list (the sandbox's original three tasks) runs out — worse, once its
+ * work has already merged, re-running it is not a subject at all, just a repeat.
+ * {@link generateSandboxTask} is that supply: given the shard filenames
+ * (`learnings/index.json`'s keys) a subject should select and an ever-incrementing `seq`,
+ * it builds a FRESH `files:` list from the real project-layer corpus, never from a fixed
+ * roster. A subject is defined by the shards its `files:` select, not by its prose
+ * (injection is task-matched — {@link loadLayeredLearningsForTaskFiles} delegates to
+ * `learnings.ts`'s `candidateShardFiles`), and that mapping is many-to-many (one path can
+ * select two shards at once), so {@link generateSandboxTask} always reports the shards a
+ * subject REALLY selects by re-running the same lookup injection itself uses, never by
+ * reasoning about which path was picked.
  * NEVER LEDGER A PAIR NEITHER ARM MEASURED (W1-T1252). Every sandbox subject can end up
  * already-merged, in which case `runTask`'s own W1-T319 guard refuses BOTH arms at zero
  * cost (`task_already_merged`) — a pair of two refusals, not a comparison. Two guards
@@ -267,6 +284,173 @@ export function aggregateWipeTestPairs(pairs: WipeTestPair[]): WipeTestAggregate
     verdictChangedCount,
     verdictChangedRate: round(verdictChangedCount / n),
   };
+}
+
+// ── SANDBOX SUBJECT GENERATION (W1-T1253) ────────────────────────────────────
+
+/** One synthetic wipe-test subject for the SANDBOX target: a `files:` list a generated task
+ *  record would carry, plus the shard filenames those files ACTUALLY select. */
+export interface SandboxSubject {
+  /** Ever-distinct id — see {@link generateSandboxTask}'s `seq` param; never drawn from a
+   *  fixed roster, so it never runs out the way the sandbox's original three tasks did. */
+  id: string;
+  /** The `files:` a task record built from this subject would carry. */
+  files: string[];
+  /** The shard filenames `files` ACTUALLY select, per {@link candidateShardFiles} run
+   *  against the real `index` — design (ii): the mapping is many-to-many (one path can
+   *  select two shards at once), so this is always the real lookup's output, never a
+   *  count of the paths that were picked. */
+  selectedShards: string[];
+}
+
+/** The literal (glob-free) entries of `index.files[shard].globs` — a glob containing `*` can
+ *  match paths this generator never names, so only literal globs are usable AS a path. */
+function literalGlobsFor(index: LearningsIndex, shard: string): string[] {
+  return (index.files[shard]?.globs ?? []).filter((glob) => !glob.includes("*"));
+}
+
+/** One literal path per shard in `index` that selects THAT shard and no other — found by
+ *  actually RUNNING {@link candidateShardFiles} over every literal glob the corpus carries
+ *  (design ii: never reason about paths, always ask the real lookup), so it stays correct
+ *  as the corpus grows or its many-to-many overlaps shift. A shard with no isolating
+ *  literal path in the current corpus is simply absent from the returned map. */
+function isolatingPathsByShard(index: LearningsIndex): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const shard of Object.keys(index.files)) {
+    for (const path of literalGlobsFor(index, shard)) {
+      const selected = candidateShardFiles(index, [path]);
+      if (selected.length === 1 && selected[0] === shard) {
+        out.set(shard, path);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** A single literal path in `index` whose real selection equals `shards` EXACTLY (sorted) —
+ *  e.g. `src/lib/review.ts` alone selects exactly `["ci.yaml","failures.yaml"]`. `undefined`
+ *  if no single literal path reaches that exact combination in one hop. */
+function exactMultiShardPath(index: LearningsIndex, shards: string[]): string | undefined {
+  const want = shards.join(" ");
+  for (const shard of shards) {
+    for (const path of literalGlobsFor(index, shard)) {
+      if (candidateShardFiles(index, [path]).join(" ") === want) return path;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Generate ONE fresh sandbox subject that selects EXACTLY `shards` (design i/ii/iii): a new
+ * `files:` list synthesized from the real project-layer corpus (`index`, i.e. a loaded
+ * `learnings/index.json`), never a hand-written subject list that runs out. PURE — no I/O
+ * beyond the already-loaded `index` — so `seq` (an ever-incrementing counter) is the
+ * caller's job; nothing here reads a clock or randomness, so it stays unit-testable against
+ * hand-seeded fixtures exactly like this module's other pure functions.
+ *
+ * Prefers a SINGLE literal path that reaches `shards` exactly in one hop (the corpus's
+ * many-to-many globs make this possible — e.g. one path for both `ci.yaml` and
+ * `failures.yaml`); falls back to the union of one per-shard ISOLATING path (a path
+ * selecting that shard and no other), which the real project-layer corpus provides for
+ * every shard today (architecture/ci/failures/platform/testing each have at least one).
+ *
+ * Throws (never silently returns a wrong subject) if `shards` is empty, names a shard
+ * `index` does not carry, or some requested shard has neither an exact multi-shard path
+ * nor an isolating one in the current corpus.
+ */
+export function generateSandboxTask(index: LearningsIndex, shards: string[], seq: number): SandboxSubject {
+  if (shards.length === 0) {
+    throw new Error("generateSandboxTask: 'shards' must name at least one shard.");
+  }
+  const known = new Set(Object.keys(index.files));
+  for (const shard of shards) {
+    if (!known.has(shard)) {
+      throw new Error(
+        `generateSandboxTask: unknown shard '${shard}' (index carries: ${[...known].sort().join(", ")}).`,
+      );
+    }
+  }
+  const sortedShards = [...new Set(shards)].sort();
+  const exact = exactMultiShardPath(index, sortedShards);
+  let files: string[];
+  if (exact) {
+    files = [exact];
+  } else {
+    const isolating = isolatingPathsByShard(index);
+    files = sortedShards.map((shard) => {
+      const path = isolating.get(shard);
+      if (!path) {
+        throw new Error(`generateSandboxTask: shard '${shard}' has no isolating literal path in this corpus.`);
+      }
+      return path;
+    });
+  }
+  return {
+    id: `wt-sbx-${seq}`,
+    files,
+    selectedShards: candidateShardFiles(index, files),
+  };
+}
+
+// ── NO-MERGE BOUNDARY (design note (iv), (vi), (ix) of W1-T1256) ────────────
+
+/**
+ * OPERATOR RULING 2026-08-23 (W1-T1256, design note (iv)): NEITHER WIPE-TEST ARM MAY ARM OR
+ * MERGE ITS OWN PR. The chain this closes: arm A succeeds -> arm A's PR merges -> `origin/main`
+ * moves -> `projectPlan` reports the subject merged -> arm B's own already-merged read
+ * (`runTask`'s W1-T319 guard) refuses arm B at zero cost. A SUCCESSFUL ARM A DESTROYS ITS OWN
+ * CONTROL, and no LOCAL reset reaches this: arm A's pushed run branch and open PR are REMOTE
+ * objects, `task_already_merged` reads them through `projectPlan`/the ledger, and
+ * `worktreeAdd(…, "origin/main")` means a merged arm A moves the very ref arm B's worktree is
+ * cut from — a fresh clone or `reset --hard origin/main` both clone/reset TO the contaminated
+ * state (design note (iii)). The ruling instead measures the pair AT THE VERDICT: every
+ * quantity `wipetest.pair` records — turns, cost, verdict, strikes, proof_exec — is already
+ * determined before any merge, so refusing to arm loses no signal.
+ *
+ * PURE (design note (ix), DECISIONS SPLIT FROM I/O): the ONE bit `run-task.ts`'s deferred
+ * arm-at-verdict call site already knows — its own `opts.noMerge` — decides. `run-task.ts`
+ * never re-derives this decision or duplicates its wording; it calls this function immediately
+ * before it would otherwise call `armAutoMergeAtOpen` and skips that call outright when this
+ * refuses. That split is what lets the falsifier (test/wipe-test-arm-isolation.test.ts) drive
+ * both directions without a network: boundary present → arm B still dispatches and never
+ * observes a merged verdict; boundary REMOVED (the test's own control, `noMerge: false`) →
+ * arm B demonstrably refuses, reproducing the exact contamination this task fixes.
+ */
+export interface WipeTestArmDecision {
+  armed: boolean;
+  reason?: string;
+}
+
+export function resolveWipeTestArmPermission(noMerge: boolean): WipeTestArmDecision {
+  if (!noMerge) return { armed: true };
+  return {
+    armed: false,
+    reason:
+      "wipe-test no-merge boundary (W1-T1256): neither arm may arm or merge its own PR — the pair " +
+      "is measured at the verdict, not at the merge, because a merged arm A moves origin/main and " +
+      "flips arm B's own already-merged read, a remote channel no local reset can reach.",
+  };
+}
+
+// ── ARM ORDER ALTERNATION (design note (vii) of W1-T1256) ───────────────────
+
+/**
+ * NOT A FIX (design note (vii) says so explicitly, and it survives the no-merge-boundary
+ * ruling) — a GUARD against a residual or unknown leak the boundary above does not name. Arm A
+ * (learnings ON) dispatching first on every pair, unconditionally, would make any such leak
+ * SYSTEMATIC and one-directional; alternating converts a fixed bias into random error — still
+ * not clean, but strictly better than a fixed order, and it makes a leak visible as scatter
+ * instead of drift.
+ *
+ * PURE: `pairIndex` is the caller's own count of pairs already ledgered for this task (parity,
+ * not identity, decides which arm dispatches first) — this never reads the ledger itself, so a
+ * test drives both orders without I/O. The returned tuple is DISPATCH order only; it never
+ * changes which arm is semantically "A" (learnings-on) vs "B" (masked) — `wipeTestCommand`
+ * still assembles the pair's `armA`/`armB` fields by arm identity, not by call order.
+ */
+export function resolveWipeTestArmOrder(pairIndex: number): [WipeTestArm, WipeTestArm] {
+  return pairIndex % 2 === 0 ? ["A", "B"] : ["B", "A"];
 }
 
 // ── SANDBOX-ONLY GUARD ───────────────────────────────────────────────────────

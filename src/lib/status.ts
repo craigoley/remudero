@@ -1179,6 +1179,7 @@ export function readMergeCreditedTaskIds(
   };
   const done = (): boolean => wanted.size > 0 && outstanding <= 0;
 
+  // ledger-read-intent: live — this function's own seed, extended with rotations below.
   const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, opts.ledgerFs ?? realLedgerFs);
   for (const l of live) take(l);
   let filesRead = 1;
@@ -1253,6 +1254,7 @@ export function readLedgerUnionBounded(
   } = {},
 ): LedgerLines {
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
+  // ledger-read-intent: live — this function's own seed, extended with rotations below.
   const live = readLedgerLines(path, ledgerFs);
   const satisfied = opts.satisfied;
   // O(1) per line, accumulated ONCE. An earlier revision handed the whole growing array to the
@@ -1304,6 +1306,22 @@ export function readLedgerUnionBounded(
   return withReadMeta(out, torn, live.present);
 }
 
+/**
+ * THE LIVE FILE ALONE — one path, opened, parsed, returned. Nothing else. `readLedgerLines`
+ * never resolves rotations and never assembles the archive∪live union; a caller that wants that
+ * calls {@link readLedgerUnionBounded} (or hand-rolls it, as {@link readMergeCreditedTaskIds}
+ * does) — this function is just the primitive both of those extend.
+ *
+ * THAT MAKES A BARE CALL AMBIGUOUS AT THE CALL SITE (W1-T1262): a live-file read and "the first
+ * step of a union read" are the SAME call, so nothing here tells a reviewer which one a given
+ * caller meant. This function's signature is deliberately left unchanged — narrowing it would
+ * either break every one of its real callers in one PR or reintroduce the same unmarked choice
+ * one level up through a shared façade (W1-T1262's design note, options (b)/(c) and their
+ * costs). Instead, every call to {@link readLedgerLines} — checked by
+ * {@link ledgerReadIntentViolations} — must carry a `ledger-read-intent: live` or
+ * `ledger-read-intent: union` comment on the same line or the line directly above, so the choice
+ * is greppable at the call site instead of only inferable from behaviour.
+ */
 export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): LedgerLines {
   const out: Array<Record<string, unknown>> = [];
   // `present: false` is the whole point of this early return carrying metadata at all — see
@@ -1321,6 +1339,72 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
     }
   }
   return withReadMeta(out, torn, true);
+}
+
+/**
+ * The two ways a `readLedgerLines` call can be answered — and the only two a caller may declare.
+ * `"live"` is exactly what {@link readLedgerLines} always returns: the newest rows, nothing
+ * else — the right (and only) answer for something like `rmd doctor`, which wants "what just
+ * happened", never twenty archives of it. `"union"` names a call that is itself the seed of an
+ * archive∪live assembly, the way {@link readLedgerUnionBounded} and
+ * {@link readMergeCreditedTaskIds} both extend one with rotations. Neither value ever changes
+ * what {@link readLedgerLines} returns — declaring `"union"` on a bare call does not make it
+ * read rotations, the call site must actually do that too — this type only makes the caller's
+ * CHOICE a visible fact instead of an inferred one (W1-T1262).
+ */
+export type LedgerReadIntent = "live" | "union";
+
+/**
+ * One undeclared {@link readLedgerLines} call site, named — file and line — never folded into a
+ * bare count (W1-T1262's fourth acceptance claim: "the check names the offending reader").
+ */
+export interface LedgerReadIntentViolation {
+  file: string;
+  line: number;
+  text: string;
+}
+
+const LEDGER_READ_INTENT_CALL_RE = /\breadLedgerLines\s*\(/;
+const LEDGER_READ_INTENT_DEFINITION_RE = /\bfunction\s+readLedgerLines\s*\(/;
+const LEDGER_READ_INTENT_MARKER_RE = /ledger-read-intent:\s*(live|union)\b/;
+
+/**
+ * THE CALLER-SIDE HALF of the structural fix W1-T444 already gave the resolver side
+ * (`resolveLedgerUnion`'s coverage refusal, `ledgerRotationEntries` as the one definition of the
+ * corpus) — see W1-T1262's rationale for why that task closed only the resolver hole. This is
+ * design option (a) from that task: a lint-style source scan, the same house pattern
+ * `test/no-raw-nul.test.ts` and `test/no-hand-rolled-fetch-check.test.ts` already use — cheapest,
+ * and it needs no call-site ARGUMENT edits, only a declaring comment next to each call.
+ *
+ * Every call to {@link readLedgerLines} in a given file — other than the function's own
+ * definition — is a VIOLATION unless the same line, or the line immediately above it, matches
+ * `ledger-read-intent: live` or `ledger-read-intent: union`. Both markers PASS equally: this
+ * function polices only whether a choice was DECLARED, never which choice was correct for that
+ * call site — auditing the ~50 pre-existing callers for which one they SHOULD declare is exactly
+ * the reclassification work W1-T1262's design note (iv) leaves out of scope.
+ *
+ * Takes `{ path, text }` pairs rather than reading disk itself, so a caller controls IO: the
+ * real repo via `git ls-files` + `readFileSync` (mirroring `rawNulViolations` in
+ * `test/no-raw-nul.test.ts`), or a planted fixture in a unit test.
+ */
+export function ledgerReadIntentViolations(
+  files: ReadonlyArray<{ path: string; text: string }>,
+): LedgerReadIntentViolation[] {
+  const violations: LedgerReadIntentViolation[] = [];
+  for (const { path, text } of files) {
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!LEDGER_READ_INTENT_CALL_RE.test(line)) continue;
+      if (LEDGER_READ_INTENT_DEFINITION_RE.test(line)) continue; // the definition, not a call
+      const declaredHere = LEDGER_READ_INTENT_MARKER_RE.test(line);
+      const declaredAbove = i > 0 && LEDGER_READ_INTENT_MARKER_RE.test(lines[i - 1]);
+      if (!declaredHere && !declaredAbove) {
+        violations.push({ file: path, line: i + 1, text: line.trim() });
+      }
+    }
+  }
+  return violations;
 }
 
 /**
@@ -1840,6 +1924,7 @@ export function evaluateDispatchBreakerDetailed(
 ): DispatchBreakerDetail {
   const maxDispatches = opts.maxDispatches ?? DEFAULT_MAX_TASK_DISPATCHES;
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
+  // ledger-read-intent: live — the dispatch breaker wants the newest rows only.
   const lines = readLedgerLines(ledgerPath, ledgerFs);
   const freshCount = dispatchesWithoutNewOwnedPr(lines, taskId);
   const priorCount = cache.lastCounts.get(taskId);
