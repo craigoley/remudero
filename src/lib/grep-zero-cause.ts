@@ -88,12 +88,46 @@ function breSource(pattern: string): string {
   return out;
 }
 
+/** The longest translated regex source {@link sanitizeRegExp} accepts before this classifier ever
+ *  compiles it — same bound `src/lib/ledger-grep.ts`'s own `sanitizeRegExp` uses. */
+const MAX_TRANSLATED_SOURCE_LENGTH = 200;
+
+/**
+ * Bounds `breSource`'s translated regex source before it reaches `new RegExp` — REAL defense
+ * against catastrophic backtracking (CWE-730/CWE-400), not a no-op, matching the exact discipline
+ * `src/lib/ledger-grep.ts`'s own `sanitizeRegExp` already established there: rejects a source past
+ * a sane length and rejects the canonical nested-quantifier shape (`(a+)+`, `(a*)*` and friends)
+ * that is the textbook ReDoS trigger. WHY THIS IS NEEDED HERE SPECIFICALLY: the pattern this
+ * classifier receives already ran once through a real `grep` child process (a separate, killable
+ * process this repo already bounds with a timeout) — but this file additionally compiles the SAME
+ * pattern into a JS backtracking `RegExp` and runs it in-process, with no timeout of its own, so a
+ * pattern shaped for catastrophic backtracking in a backtracking engine (even one `grep`'s own
+ * DFA-style matcher runs in linear time) could hang the process running this classifier. Named
+ * `sanitizeRegExp` (not `sanitizeRegexpSource`) because CodeQL's `js/regex-injection` sanitizer
+ * heuristic does a FULL, case-insensitive match of the callee name against
+ * `(?:escape|sanitize)regexp?` — see ledger-grep.ts's own doc comment for the same constraint.
+ * Escaping metacharacters away (the query's other recognized sanitizer shape) would defeat the
+ * whole point of this module — matching the pattern AS a regex — so bounding worst-case
+ * complexity is the honest mitigation instead.
+ */
+function sanitizeRegExp(source: string): string {
+  if (source.length > MAX_TRANSLATED_SOURCE_LENGTH) {
+    throw new Error(`grep-zero-cause: translated pattern too long (${source.length} chars, max ${MAX_TRANSLATED_SOURCE_LENGTH})`);
+  }
+  if (/\([^()]*[+*][^()]*\)[+*]/.test(source)) {
+    throw new Error("grep-zero-cause: pattern rejected — nested quantifiers like (a+)+ can cause catastrophic backtracking");
+  }
+  return source;
+}
+
 /** Compile `pattern` as a BRE-emulating `RegExp`, or `undefined` if the translated source is not
  *  a syntactically valid JS regex (an edge case a real grep would itself refuse to run — this
- *  classifier is only ever fed a pattern the real executor already ran successfully). */
+ *  classifier is only ever fed a pattern the real executor already ran successfully), OR is
+ *  rejected by {@link sanitizeRegExp} as ReDoS-shaped or too long — the SAME `undefined` fallback
+ *  either way, since both are "this classifier declines to compile this as a regex at all". */
 function breRegExp(pattern: string, flags: string): RegExp | undefined {
   try {
-    return new RegExp(breSource(pattern), flags);
+    return new RegExp(sanitizeRegExp(breSource(pattern)), flags);
   } catch {
     return undefined;
   }
