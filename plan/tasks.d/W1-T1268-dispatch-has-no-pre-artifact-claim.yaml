@@ -105,6 +105,46 @@
     namespace it lacks. The release operation is named RELEASE or DROP and never "reconcile".
     MEASURED: `dispatchClaimRef` and `refs/rmd-dispatch` appear nowhere in `src/` or `test/` (the
     only textual hits are `/tmp/rmd-dispatch-*` fixture paths in one test), so the namespace is free.
+
+    A LIVE INSTANCE, MEASURED 2026-08-23, AND THE ELAPSED FIGURE IS RECORDED AS MEASURED RATHER THAN
+    AS REMEMBERED — MINUTES, NOT HOURS. Two lanes built W1-T1265 concurrently.
+    `run-W1-T1265-1787503038601` opened #2625 and `run-W1-T1265-1787503092377` opened #2626; the
+    branch timestamps decode to 2026-08-23T16:37:18.601Z and 2026-08-23T16:38:12.377Z, exactly
+    53.776 SECONDS APART. This shard's own filing PR (#2620) was created at 16:09:59Z and merged at
+    16:34:15Z, so the first lane branched 3m03s AFTER THE MERGE and 27m19s after the filing — not
+    hours, and the smaller number is the damaging one, because it is well inside the window a
+    published-artifact probe cannot see.
+
+    BOTH LANES SWEPT CORRECTLY AND BOTH CORRECTLY FOUND NOTHING. Each checked `state/inflight/`,
+    every open PR TITLE and every open PR BRANCH before dispatching, and at the moment each looked,
+    neither had published a PR — #2625 was created at 16:43:38Z and #2626 at 16:45:03Z, both
+    MINUTES after the branches were cut. THIS IS THE SHARD'S OWN THESIS REPRODUCING ITSELF, NOT A
+    LANE ERROR: every probe in the enumeration above is a read of a published artifact, and work
+    that has begun but published nothing is invisible to all ten of them. A sweep cannot be
+    performed more carefully into existence; the artifact it reads does not yet exist.
+
+    THE COST, STATED WITHOUT ROUNDING IT DOWN: ONE FULL IMPLEMENT RUN WASTED. #2625 reached the
+    DECISION HALF and stopped, concluding that wiring the egress attempt would first require adding
+    the probe prompt's path to `files:` — a scope question it declined to answer by widening a
+    merged record. #2626 answered the same question BY MEASUREMENT, found `containmentProbePrompt`
+    already inside the declared span, and wired the attempt. Both produced a two-file diff; the
+    operator closed #2625 at 16:54:34Z as superseded. The two lanes independently invented
+    near-identical field names for the same evidence (`blockedEgressReached`/`allowedEgressSucceeded`
+    against `egressBlockedReached`/`egressAllowedReached`), which is what duplicated work looks like
+    when both halves are competent.
+
+    THE PROXIMATE CAUSE, NAMED WITHOUT SOFTENING: THE OPERATOR RE-ISSUED THE BUILD BRIEF WITHOUT
+    CHECKING WHETHER A LANE HAD ALREADY TAKEN IT. That is not an argument against this shard — it is
+    the strongest argument for it. An artifact-derived guard cannot see an OPERATOR dispatching
+    beside the fleet any more than it can see a second lane, because the operator publishes no
+    artifact either until the branch is pushed. A claim taken BEFORE work begins is the only
+    mechanism that covers both, and the human dispatcher is a participant the current design does
+    not model at all.
+
+    PROVENANCE OF THIS ROW, STATED BECAUSE IT BEARS ON HOW THE EVIDENCE WAS OBTAINED: the session
+    writing this amendment WAS the second lane, `run-W1-T1265-1787503092377`/#2626. The figures
+    above are re-derived from the branch names and the PR record rather than from that session's
+    recollection, and the closing comment on #2625 is the operator's own.
   note: |
     RULE 19 BAND: `risk: high` is set for the SPAN — a pure decision module plus its one I/O seam —
     not for blast radius. The split is not invented here: it mirrors `auto-triage.ts` exactly, which
