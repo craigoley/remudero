@@ -363,7 +363,7 @@ row that appears and vanishes at n≤4** — still *under-sampled, not unmeasura
 `(pr, task)` pairs** (+2 this cycle — W1-T1095's #2411 and #2483; the three STRADDLERS are NOT added,
 because their credit is recoverable by TASK L rather than permanently poisoned, and the plan-only
 filing #2388 is not added because its refusal is correct); the remaining fleet tasks are **W1-T28 and
-W2-T2's dry-run**; **the organs shipped DARK by their own admission** — `learningDuplicateViolation` has no
+W2-T2's dry-run, which has not shipped**; **the organs shipped DARK by their own admission** — `learningDuplicateViolation` has no
 live intake gate (T420/#1610), `mutation.ratchet_verdict` is unwired (D-10/W1-T393/#1521, lifetime
 N=0), the read-sensitivity axis has no consumer (T495/#1835), **`OpenPrView.isDraft` has no real
 producer and `mergeState: "behind"` may have none either, which would make T520+T528 unreachable in
