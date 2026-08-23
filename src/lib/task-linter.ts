@@ -865,10 +865,10 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
 // waits), or the phrase is present only under different capitalisation (grep has no case-fold by
 // default). A genuine forward reference matches neither probe and stays silent.
 //
-// CONSUMES {@link classifyGrepZeroHit} (W1-T1224) — never a second implementation of the probes;
-// that module is the SAME matcher `checkProofCommand` (run-task.ts) uses to explain a real zero-hit
-// `grep:` run, so this filing-time check and that runtime diagnostic can never disagree about why a
-// pattern misses.
+// CONSUMES {@link classifyGrepZeroHit} (W1-T1224) instead of re-deriving line-seam / case-only
+// detection here; that module is the SAME matcher `checkProofCommand` (run-task.ts) uses to
+// explain a real zero-hit `grep:` run, so this filing-time check and that runtime diagnostic can
+// never disagree about why a pattern misses.
 //
 // THE LINTER STAYS PURE. Like {@link proofNameResolutionViolations}'s `opts.resolveNameFilteredCandidates`
 // and {@link callSiteViolations}'s `opts.moduleExists`, the file's own text arrives via an INJECTED
