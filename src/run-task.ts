@@ -7686,6 +7686,29 @@ async function runTask(
      * every non-wipe-test dispatch.
      */
     noMerge?: boolean;
+    /**
+     * W1-T1268 (CROSS-HOST DISPATCH CLAIM): overrides the reserver the claim taken right
+     * after the clone is confirmed (below) attempts against, releases on every refusal, and
+     * releases again in the holder-arm `finally`. Default: the real
+     * {@link dispatchClaimReserverFor} bound to `repoDir` — every production caller omits
+     * this and gets the genuine `refs/rmd-dispatch/` git-ref-CAS. The seam mirrors every
+     * other injectable above (`spawn`, `github`, `containmentExec`): a test drives the
+     * `taken`/`unreachable` refusal, the release it triggers, and a release that itself
+     * throws (best-effort, caught in the `finally`) deterministically, without a genuine
+     * two-writer race against a real git remote.
+     */
+    claimReserver?: DispatchClaimReserver;
+    /**
+     * W1-T1268 coverage seam: overrides the independent remote-head read `worktreeAdd`'s own
+     * `assertWorktreeBaseCurrent` performs right after this run's ONE worktree is cut. Default:
+     * `worktreeAdd`'s own default (a real, fresh `git ls-remote`). The genuine mechanism that
+     * lets a base go stale despite the fetch immediately before it is, per `worktreeAdd`'s own
+     * doc, UNMEASURED — an in-process race no test can script against a real remote — so this
+     * is the same injection {@link WorktreeBaseStaleError}'s own direct tests
+     * (`test/worktree-base-currency.test.ts`) already use, threaded here so a test can drive
+     * the REAL `runTask()` catch branch that drops this run's dispatch claim on that refusal.
+     */
+    worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -8128,7 +8151,7 @@ async function runTask(
   // both read a PUBLISHED artifact, and neither exists at the moment a second host — or an
   // operator dispatching by hand beside the fleet — starts the SAME task. `repoDir`, not
   // `repoRoot`: see {@link dispatchClaimReserverFor}'s own doc for why.
-  const claimReserver = dispatchClaimReserverFor(repoDir);
+  const claimReserver = opts.claimReserver ?? dispatchClaimReserverFor(repoDir);
   const claimAnchor = claimReserver.mintAnchor();
   const claimOutcome = claimReserver.attempt(task.id, claimAnchor);
   const claimHolder = claimOutcome === "taken" ? claimReserver.holder(task.id) : undefined;
@@ -8206,7 +8229,7 @@ async function runTask(
   // branch below); this task moves WHEN that refusal fires and WHAT it says, not what verdict
   // it carries, so drain.ts's existing halt/continue classification needs no new case.
   try {
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main", opts.worktreeBaseDeps);
   } catch (e) {
     if (e instanceof WorktreeBaseStaleError) {
       log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref });

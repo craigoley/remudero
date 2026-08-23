@@ -14,10 +14,16 @@ import {
   type DispatchClaimOutcome,
   type DispatchClaimReserver,
 } from "../src/lib/dispatch-claim.js";
-import { dispatchClaimReserverFor } from "../src/run-task.js";
+import { dispatchClaimReserverFor, runTask } from "../src/run-task.js";
 import { nextRunnable, runnableCandidates, type NextRunnableOpts } from "../src/lib/drain.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from "../src/lib/inflight-lock.js";
+import type { Config } from "../src/lib/config.js";
+import type { ProbeExecResult } from "../src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import type { GitHub } from "../src/lib/status.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 
 // ── WHAT THIS FILE PROVES (W1-T1268) ─────────────────────────────────────────────────────────
 // `isDispatchEligible`'s ten probes (src/lib/drain.ts) all read a PUBLISHED artifact — an open
@@ -434,5 +440,375 @@ test("W1-T1268 UNCHANGED: the same-host inflight lock still refuses a live holde
     assert.ok(swept.reaped.some((r) => r.includes("W1-T1268-DEAD")), "the dead-pid sweep still reclaims a stale lock");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── BEHAVIORAL: a REAL runTask() drives the actual run-task.ts call sites ────────────────────
+// Everything above proves the DECISIONS pure and the I/O seam real; this drives the WIRING
+// itself — the log/release/return glue at each of the three call sites run-task.ts's own diff
+// added (the refusal, the worktree-stale release, and the holder-arm release in the terminal
+// `finally`) — through a REAL `runTask()`, mirroring `test/already-satisfied-exit.test.ts`'s own
+// technique: a real, throwaway bare "origin" + a real clone stand in for the repo, the worker
+// spawn is faked, and the GitHub board gateway is injected. The claim reserver itself is
+// SCRIPTED (via `runTask`'s own `opts.claimReserver` seam, mirroring `opts.spawn`/`opts.github`)
+// rather than raced against a real remote — a genuine two-writer race is already proven by the
+// "REAL GIT" tests above; this proves what run-task.ts DOES with each outcome.
+
+/** Build a minimal WorkerResult; only the fields each test reads matter (mirrors
+ *  `test/already-satisfied-exit.test.ts`'s own `result` helper — duplicated here so this file
+ *  stays self-contained, per the OUTPUT CONTRACT's own file scope). */
+function workerResult(over: Partial<WorkerResult>): WorkerResult {
+  return {
+    sessionId: "s",
+    costUsd: 0,
+    numTurns: 0,
+    text: "",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+    ...over,
+  };
+}
+
+/** A real, throwaway BARE "origin" + a real clone at `repoDir` (mirrors
+ *  `already-satisfied-exit.test.ts`'s own `gitFixture`) — `runTask`'s own `git worktree add` /
+ *  `git worktree remove` all run for real, entirely offline. */
+function claimGitFixture(root: string): { repoDir: string } {
+  const originGit = mkdtempSync(join(tmpdir(), "dispatch-claim-behavioral-origin-"));
+  execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
+  const seed = mkdtempSync(join(tmpdir(), "dispatch-claim-behavioral-seed-"));
+  execFileSync("git", ["clone", "-q", originGit, seed]);
+  execFileSync("git", ["-C", seed, "config", "user.email", "dispatch-claim-test@example.invalid"]);
+  execFileSync("git", ["-C", seed, "config", "user.name", "dispatch-claim-test"]);
+  writeFileSync(join(seed, "README.md"), "seed\n");
+  execFileSync("git", ["-C", seed, "add", "-A"]);
+  execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
+
+  const repoDir = join(root, "repos", "remudero");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "-q", originGit, repoDir]);
+  execFileSync("git", ["-C", repoDir, "config", "user.email", "dispatch-claim-test@example.invalid"]);
+  execFileSync("git", ["-C", repoDir, "config", "user.name", "dispatch-claim-test"]);
+  return { repoDir };
+}
+
+/** Containment PASSES (mirrors `already-satisfied-exit.test.ts`'s `holdingContainmentExec`). */
+const behavioralHoldingContainmentExec = (token: string): Promise<ProbeExecResult> =>
+  Promise.resolve({
+    transcript: `touch ../${token}.txt: Operation not permitted`,
+    outsideWriteCreated: false,
+    insideWriteCreated: true,
+    costUsd: 0,
+  });
+
+/** Isolation PASSES (mirrors `already-satisfied-exit.test.ts`'s `cleanIsolationExec`). */
+const behavioralCleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
+  Promise.resolve({
+    transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -",
+    aliasCount: 0,
+    functionCount: 0,
+    functionNames: "-",
+    costUsd: 0,
+  });
+
+/** A board gateway that credits NOTHING — the SAME shape `isMerged(task)` reads at the real
+ *  refusal call site (`releaseDispatchClaim`'s `evidenceObserved`), so a "taken" refusal below
+ *  falls to the OPERATOR arm rather than the evidence one. */
+function noCreditGithub(): GitHub {
+  return {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+}
+
+const CLAIM_BEHAVIORAL_PLAN = (id: string) =>
+  [
+    `- id: ${id}`,
+    "  title: dispatch-claim wiring probe",
+    "  repo: remudero",
+    "  type: implement",
+    "  verify: auto",
+    "  risk: medium",
+    "  files: [src/lib/daemon.ts]",
+    "  origin: architect",
+    "  status: queued",
+    "",
+  ].join("\n");
+
+/** A `DispatchClaimReserver` whose every method is scripted and every call recorded, so a
+ *  behavioral test drives one exact outcome deterministically — no real remote, no race. */
+function scriptedClaimReserver(over: Partial<DispatchClaimReserver> = {}): DispatchClaimReserver & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    mintAnchor: () => {
+      calls.push("mintAnchor");
+      return over.mintAnchor ? over.mintAnchor() : "scripted-anchor";
+    },
+    attempt: (taskId, anchor) => {
+      calls.push(`attempt:${taskId}`);
+      return over.attempt ? over.attempt(taskId, anchor) : "created";
+    },
+    holder: (taskId) => {
+      calls.push(`holder:${taskId}`);
+      return over.holder ? over.holder(taskId) : undefined;
+    },
+    drop: (taskId, dropOpts) => {
+      calls.push(`drop:${taskId}:${dropOpts?.expect ?? "-"}`);
+      if (over.drop) return over.drop(taskId, dropOpts);
+      return true;
+    },
+  };
+}
+
+function readLedger(root: string): Array<Record<string, unknown>> {
+  return readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+}
+
+test("W1-T1268 BEHAVIORAL: a REAL runTask() refuses via blocked_inflight when the claim is TAKEN, before any spawn — and the operator arm leaves it (no landed-work evidence)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-taken-root-"));
+  const TASK_ID = "T-DISPATCH-CLAIM-TAKEN";
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
+  const config: Config = { claudeBin: "/bin/true", root };
+  claimGitFixture(root);
+
+  const reserver = scriptedClaimReserver({ attempt: () => "taken", holder: () => "some-other-anchor" });
+  const spawn: typeof spawnWorker = async () => {
+    throw new Error("must never spawn a worker — a TAKEN claim refuses before any spend");
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask(TASK_ID, {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: noCreditGithub(),
+        spawn,
+        containmentExec: behavioralHoldingContainmentExec,
+        isolationExec: behavioralCleanIsolationExec,
+        claimReserver: reserver,
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked_inflight");
+    assert.equal(res.merged, false);
+    assert.equal(res.costUsd, 0);
+
+    const ledger = readLedger(root);
+    const claimLine = ledger.find((l) => l.step === "dispatch.claim");
+    assert.equal(claimLine?.outcome, "taken");
+    assert.equal(claimLine?.proceed, false);
+    const releasedLine = ledger.find((l) => l.step === "dispatch.claim_released");
+    assert.equal(releasedLine?.arm, "operator", "no landed-work evidence — the honest arm leaves it for an operator");
+    assert.equal(releasedLine?.release, false);
+    assert.equal(releasedLine?.dropped, false);
+    assert.ok(reserver.calls.includes(`holder:${TASK_ID}`), "a TAKEN outcome reads the named holder for the refusal's wording");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1268 BEHAVIORAL: a REAL runTask() refuses via blocked_git_fetch when the claim attempt is UNREACHABLE, and never even asks for a release", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-unreachable-root-"));
+  const TASK_ID = "T-DISPATCH-CLAIM-UNREACHABLE";
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
+  const config: Config = { claudeBin: "/bin/true", root };
+  claimGitFixture(root);
+
+  const reserver = scriptedClaimReserver({ attempt: () => "unreachable" });
+  const spawn: typeof spawnWorker = async () => {
+    throw new Error("must never spawn a worker — an UNREACHABLE claim refuses before any spend");
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask(TASK_ID, {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: noCreditGithub(),
+        spawn,
+        containmentExec: behavioralHoldingContainmentExec,
+        isolationExec: behavioralCleanIsolationExec,
+        claimReserver: reserver,
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked_git_fetch");
+    assert.equal(res.merged, false);
+    assert.equal(res.costUsd, 0);
+
+    const ledger = readLedger(root);
+    const claimLine = ledger.find((l) => l.step === "dispatch.claim");
+    assert.equal(claimLine?.outcome, "unreachable");
+    assert.equal(claimLine?.proceed, false);
+    assert.equal(
+      ledger.find((l) => l.step === "dispatch.claim_released"),
+      undefined,
+      "unreachable is a failed READ, not contention — there is nothing this run ever took to release",
+    );
+    assert.ok(!reserver.calls.some((c) => c.startsWith("drop:")), "drop is never called on the unreachable arm");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1268 BEHAVIORAL: a REAL runTask() drops its own dispatch claim when the worktree base turns up STALE, before any worker runs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-stale-root-"));
+  const TASK_ID = "T-DISPATCH-CLAIM-STALE";
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
+  const config: Config = { claudeBin: "/bin/true", root };
+  claimGitFixture(root);
+
+  const reserver = scriptedClaimReserver(); // attempt() -> "created": this run wins the claim
+  const spawn: typeof spawnWorker = async () => {
+    throw new Error("must never spawn a worker — a stale base refuses before recon/implement/commit spend anything");
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask(TASK_ID, {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: noCreditGithub(),
+        spawn,
+        containmentExec: behavioralHoldingContainmentExec,
+        isolationExec: behavioralCleanIsolationExec,
+        claimReserver: reserver,
+        // Forces `assertWorktreeBaseCurrent` (lib/worker.ts) to disagree with the base the
+        // worktree it JUST cut actually landed on — the same injection
+        // `test/worktree-base-currency.test.ts` uses directly on `worktreeAdd`, threaded here
+        // through `runTask`'s own seam so the REAL `WorktreeBaseStaleError` catch branch (and
+        // this task's new claim-release call inside it) runs inside a genuine `runTask()`.
+        worktreeBaseDeps: { readRemoteHead: () => "0".repeat(40) },
+      }),
+    );
+
+    assert.equal(res.verdict, "failed");
+    assert.equal(res.merged, false);
+    assert.equal(res.costUsd, 0);
+    // The catch branch calls `releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor })`
+    // directly (no separate ledger line at that call site) — assert the I/O it authorises instead:
+    // this run holds the claim (an anchor was minted and attempted), so the release is the HOLDER
+    // arm, a conditional delete keyed to the exact anchor this run took.
+    assert.ok(reserver.calls.includes("mintAnchor"), "this run minted its own anchor before attempting");
+    assert.ok(reserver.calls.includes(`drop:${TASK_ID}:scripted-anchor`), "the holder arm drops THIS run's own anchor, CAS'd");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1268 BEHAVIORAL: a REAL runTask() ledgers dispatch.claim_release_error rather than replacing the verdict when the terminal holder-arm release itself throws", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-release-error-root-"));
+  const TASK_ID = "T-DISPATCH-CLAIM-RELEASE-ERROR";
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
+  const config: Config = { claudeBin: "/bin/true", root };
+  claimGitFixture(root);
+
+  const reserver = scriptedClaimReserver({
+    drop: () => {
+      throw new Error("simulated: origin unreachable at the exact moment this run tried to release its claim");
+    },
+  });
+  // The RECON spawn returns a worker-error envelope — the cheapest REAL terminal verdict this
+  // run can reach past a successful worktreeAdd, so the outer try's `finally` (where the
+  // holder-arm release lives) actually executes.
+  const spawn: typeof spawnWorker = async () => workerResult({ subtype: "error_max_turns", isError: true });
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask(TASK_ID, {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: noCreditGithub(),
+        spawn,
+        containmentExec: behavioralHoldingContainmentExec,
+        isolationExec: behavioralCleanIsolationExec,
+        claimReserver: reserver,
+      }),
+    );
+
+    assert.equal(res.verdict, "failed", "the worker-error verdict is the one this run actually reached");
+
+    const ledger = readLedger(root);
+    const errorLine = ledger.find((l) => l.step === "dispatch.claim_release_error");
+    assert.ok(errorLine, "the throwing release is caught and ledgered, never left to crash the run");
+    assert.match(String(errorLine?.error), /simulated: origin unreachable/);
+    assert.equal(
+      ledger.find((l) => l.step === "dispatch.claim_released"),
+      undefined,
+      "the throw happens INSIDE the release call — no success line is ever written for it",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1268 BEHAVIORAL: a REAL runTask() drops its own claim (holder arm) in the terminal finally, on a normal worker-error verdict", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dispatch-claim-holder-release-root-"));
+  const TASK_ID = "T-DISPATCH-CLAIM-HOLDER-RELEASE";
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
+  const config: Config = { claudeBin: "/bin/true", root };
+  claimGitFixture(root);
+
+  // No overrides: attempt() -> "created" (this run wins), drop() -> true (the release
+  // genuinely succeeds) — the ordinary, non-throwing case the previous test's `catch` branch
+  // does NOT exercise.
+  const reserver = scriptedClaimReserver();
+  const spawn: typeof spawnWorker = async () => workerResult({ subtype: "error_max_turns", isError: true });
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask(TASK_ID, {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: noCreditGithub(),
+        spawn,
+        containmentExec: behavioralHoldingContainmentExec,
+        isolationExec: behavioralCleanIsolationExec,
+        claimReserver: reserver,
+      }),
+    );
+
+    assert.equal(res.verdict, "failed");
+
+    const ledger = readLedger(root);
+    const releasedLine = ledger.find((l) => l.step === "dispatch.claim_released");
+    assert.equal(releasedLine?.arm, "holder", "this run held the claim it just took, so it drops it itself on exit");
+    assert.equal(releasedLine?.release, true);
+    assert.equal(releasedLine?.dropped, true);
+    assert.equal(
+      ledger.find((l) => l.step === "dispatch.claim_release_error"),
+      undefined,
+      "a release that does not throw never ledgers the error line",
+    );
+    assert.ok(reserver.calls.includes(`drop:${TASK_ID}:scripted-anchor`), "the release is CAS'd on this run's own minted anchor");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
