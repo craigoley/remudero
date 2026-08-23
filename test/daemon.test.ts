@@ -2939,9 +2939,28 @@ test("W1-T513: a third startInFlightTicker call site now exists (retro, dispatch
   // W1-T1082: every call site now threads the SAME shared `diskHeadroomLatch` reference (never
   // a fresh latch per call — see that variable's own doc in daemon.ts) as a trailing 5th
   // argument, alongside the pre-existing 4 positional args these regexes already pinned.
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "retro", diskHeadroomLatch\)/, "the retro call site is unchanged");
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch\)\.stop/, "the dispatch call site is unchanged");
-  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch\)\.stop/, "W1-T513's new sweep call site exists");
+  //
+  // W1-T1272: "retro" and "dispatch" now ALSO thread the shared `sweepRetrigger` config as a
+  // trailing 6th argument — this is the RE-TRIGGER half of design (ii): either phase can hold
+  // the loop for as long as a fired retro or a long dispatch runs, so either is eligible to
+  // re-fire the full sweep on its own cadence while it does. "sweep" deliberately does NOT
+  // receive it: that ticker exists to keep `sweepLight` running WHILE a full sweep is already in
+  // flight, and threading a retrigger there would let a full sweep re-enter itself.
+  assert.match(
+    daemonSrc,
+    /startInFlightTicker\(deps, pollIntervalMs, log, "retro", diskHeadroomLatch, sweepRetrigger\)/,
+    "the retro call site threads sweepRetrigger",
+  );
+  assert.match(
+    daemonSrc,
+    /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger\)\.stop/,
+    "the dispatch call site threads sweepRetrigger",
+  );
+  assert.match(
+    daemonSrc,
+    /startInFlightTicker\(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch\)\.stop/,
+    "the sweep-phase call site NEVER threads sweepRetrigger — it must not re-enter itself",
+  );
 });
 
 test("W1-T463: DaemonOpts still carries exactly ONE lane-sizing knob (laneCount, dispatch-only) — no second, per-kind budget was introduced", () => {
