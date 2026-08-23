@@ -1,0 +1,140 @@
+- id: W1-T1240
+  title: "THE IN-FLIGHT DECORATION — phase, startedAt, elapsedMs, workerState — IS ATTACHED ON `hasOpenPr` ALONE, so a run whose PROCESS HAS DIED keeps a growing elapsed clock for as long as its PR stays open (the W1-T314 `running, 10h25m, $27.75` shape); mark the row PROCESS-UNEVIDENCED rather than reordering the disjunction, which is a semantic no-op"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    FILED FROM A RECON (state/recon-now-ci-polling.md, reported 2026-08-05) WHOSE HEADLINE FINDING
+    DOES NOT SURVIVE READING THE SOURCE, AND WHOSE RESIDUE DOES. Both halves are stated, because the
+    half that fails is the reason two readers have now reached for the wrong fix.
+
+    (1) THE ORDERING FINDING IS FALSE, AND NOTHING IN THIS TASK MAY ACT ON IT. The report is that
+    `hasOpenPr` sitting FIRST in the `||` makes the pid probe UNREACHABLE for an open-PR run. Read at
+    `src/lib/status.ts` (the in-flight block, `hasOpenPr` / `recentActivity` / `hasLiveLock` and the
+    `if` beneath them): all three operands are computed EAGERLY, on their own statements, BEFORE the
+    condition is evaluated. `deps.inflightHolder(task.id)` and `isHolderStale(...)` — and therefore
+    `isPidAlive` — ALREADY RUN for every in-flight row, open PR or not. The `||` short-circuits only
+    the reading of three plain booleans with no side effects and no cost, so reordering them
+    `hasLiveLock || recentActivity || hasOpenPr` changes NO rendered output for ANY input. It is a
+    semantic no-op. There is nothing to make safe and nothing to reorder.
+
+    (2) OPEN-PR SUFFICIENCY FOR THE STATUS WORD IS ALREADY DECIDED AND IS NOT REOPENED HERE. W1-T179's
+    second acceptance criterion — carried VERBATIM from W1-T155, added by PR #374 on 2026-07-20 —
+    reads: "'running' requires recent ledger activity (a heartbeat within N minutes, N a data
+    threshold) OR an open PR". Independently, `fromPrState` maps OPEN -> `{ status: "running" }` as
+    the taxonomy itself. So the recon's own falsifying check resolves in the "ordering is correct"
+    direction: an open PR IS authoritative for the WORD.
+
+    (3) THE RESIDUE NOTHING DECIDES, WHICH IS THIS TASK. For an open-PR row, `base.status` is ALREADY
+    "running" from the precedence rungs before the in-flight block runs. What that disjunction
+    actually gates is therefore NOT the status word but the DECORATION: `phase`, `startedAt`,
+    `elapsedMs` and `workerState`. Attaching those on `hasOpenPr` alone means the elapsed clock is
+    computed from the ledger's `run.start` and grows without bound while the local process is dead,
+    and `workerState` keeps whatever word the dead run last wrote (the ledger is append-only, so the
+    last row wins forever). That is a claim about a LOCAL PROCESS backed only by a REMOTE FACT —
+    exactly the split MASTER-PLAN rule 22 forbids collapsing, and the shape that once rendered
+    W1-T314 as "running, 10h25m, $27.75" ten hours after its run was refused.
+
+    (4) THE REPORTER'S MEASUREMENTS, QUOTED AS THEIRS AND NOT RE-DERIVED HERE: 2,188 poll rows across
+    431 runs (control 688 `run.start`, 0 fabricated); poll span median 2.2m, p90 11.8m, max 335.7m;
+    12 of 431 runs exceed the 30-minute liveness bound. 427 runs reach `pr.opened`; 75 have no
+    verdict and 74 of those reached `ci.polling` — i.e. the affected population is precisely the
+    open-PR one. TODAY'S EXPOSURE IS SMALL AND IS STATED AS SUCH: `deriveStatus` returns early on
+    `base.merged`, and only 2 PRs were open when the recon ran. This is worth closing because it is
+    cheap and because the console is the operator's only honest surface, NOT because it is on fire.
+
+    (5) COVERED-BY: NO. Checked plan/tasks.yaml and every plan/tasks.d shard. W1-T368 strengthens the
+    LOCK PREDICATE (a recycled pid must not read live) and is orthogonal — it makes `hasLiveLock`
+    trustworthy, not consulted. W1-T381 rules that a dead pid outranks an mtime in the REAPER, a
+    different file and a different decision. W1-T1207 and W1-T377 are about DISPATCH eligibility, not
+    rendering. W1-T944 added `workerState` and deliberately rode this same gate, which is how the
+    lingering-word arm got here. W1-T179 owns the status word (2) and is satisfied. No task says what
+    an open-PR row with no process evidence should RENDER.
+
+    (6) A NAMING TRAP, RECORDED HERE BECAUSE IT HAS ALREADY MISLED TWO SESSIONS INTO CONCLUDING THE
+    LOCK DISJUNCT DOES NOT EXIST. Every `W1-T341` reference in `src/` is in `src/lib/deployer.ts` and
+    is the DEPLOY-DEFERRAL CEILING. The lock-liveness disjunct arrived as PR #1341 — a PR NUMBER that
+    collides with an unrelated TASK ID. Both are real; they are different work in different files.
+    The disjunct's plan-side owner is NOT recoverable by id from the current tree, so the reliable
+    handles are the SYMBOLS (`inflightHolder`, `isHolderStale`, `hasLiveLock`) and W1-T368, which
+    cites the disjunct in its own rationale. Grep the symbol, never the number.
+  design: |
+    ONE CONCERN: AN IN-FLIGHT ROW MUST SAY WHETHER ITS DECORATION IS BACKED BY EVIDENCE THAT A LOCAL
+    PROCESS IS ALIVE. Nothing about WHICH rows are running, and nothing about the lock predicate.
+
+    (i) DO NOT REORDER THE DISJUNCTION, DO NOT DROP `hasOpenPr` FROM IT, DO NOT CHANGE THE STATUS
+    WORD. Rationale (1) shows the reorder is a no-op and rationale (2) shows the word is decided by a
+    merged criterion. A PR that flips an open-PR row to `orphaned` is REFUSED — that would contradict
+    W1-T179 and is the outcome the falsifier below exists to catch.
+
+    (ii) THE DISTINCTION TO COMPUTE IS `recentActivity || hasLiveLock` — process evidence — held
+    SEPARATELY from the disjunction's own result. When the in-flight branch is entered with
+    `hasOpenPr` true and BOTH of the other two false, the projection carries a sparse marker saying
+    the decoration is unevidenced by any local process. Name it as the implementer sees fit; it is
+    SPARSE and additive, exactly like `orphaned` / `needsHuman` / `supersededBy`, so no existing
+    consumer changes and no `StatusSource` member is added.
+
+    (iii) IT MARKS "NOT EVIDENCED", NEVER "DEAD" — THE CANNOT-OBSERVE POLARITY (W1-T119/W1-T130).
+    `inflightHolder` is optional by contract and absent callers skip the lock read entirely, in which
+    case process evidence degrades to `recentActivity` alone. A marker that asserted death would turn
+    a SKIPPED READ into a corpse, which is the W1-T181 defect in a new place. The wording must be
+    survivable when the evidence is merely missing.
+
+    (iv) ONE READER, SO IT DOES NOT SHIP UNWIRED (the W1-T1019/W1-T284 class). Carry the marker onto
+    the board row exactly as W1-T944 carried `workerState` through `src/lib/board.ts` — straight
+    through, zero new business logic in that file. That is the established seam and it is the whole
+    of the surface work here.
+
+    (v) KEEP `phase`, `startedAt` AND `elapsedMs` ON THE ROW. Removing them would delete the fields a
+    reader uses to FIND the run, and would trade a misleading row for a blind one. The honesty fix is
+    the marker beside them, not their deletion.
+
+    (vi) NOT IN SCOPE, NAMED: reordering or restructuring the disjunction (i); the lock staleness
+    predicate itself (W1-T368); the reaper's ranking (W1-T381); dispatch eligibility (W1-T1207,
+    W1-T377); the value of `livenessBoundMs`; and the console's pixels and wording beyond carrying
+    the field onto the row.
+  acceptance:
+    - claim: "an in-flight row whose only liveness evidence is an open PR is marked process-unevidenced and still renders the running status word"
+      proof: "unit test: test/open-pr-liveness-decoration.test.ts"
+    - claim: "a row with recent ledger activity, and a row with a live lock holder, carry no such mark, so the marker discriminates rather than firing on every open PR"
+      proof: "unit test: test/open-pr-liveness-decoration.test.ts"
+    - claim: "the disjunction is unchanged: exactly the same rows render running before and after, and no open-PR row flips to orphaned"
+      proof: "unit test: test/open-pr-liveness-decoration.test.ts"
+    - claim: "an absent inflight holder reports unevidenced rather than dead, so a skipped lock read is never read as a corpse"
+      proof: "unit test: test/open-pr-liveness-decoration.test.ts"
+    - claim: "the marker reaches the board row rather than stopping at the projection"
+      proof: "unit test: test/open-pr-liveness-decoration.test.ts"
+  files: [src/lib/status.ts, src/lib/board.ts, test/open-pr-liveness-decoration.test.ts]
+  status: queued
+  attempts: 0
+  origin: feedback#fb-1785958099820-862db0
+  plan_refs: ["W1-T179", "W1-T155", "W1-T368", "W1-T381", "W1-T944", "W1-T1207", "§7"]
+  note: |
+    EVERY PROOF USES THE PURE-PATH `unit test:` FORM naming a file this task declares in `files:` and
+    which does not exist yet, so on the FILING PR each resolves to `not_yet_built` rather than
+    executing. No `grep:` proof is used: the marker's field name is the implementer's call under
+    design (ii), and a grep naming a symbol nobody has chosen yet would either mis-execute now or
+    pin a name the design deliberately leaves open.
+
+    `risk: high` IS RULE 19's SPAN, NOT BLAST RADIUS, and the distinction is recorded so a reader does
+    not over-read it. The linter scores `files:` as two subsystems (status, board) and offers
+    raise-or-decompose; decomposing is WRONG here — a projection field with no reader is the exact
+    unwired-ship defect design (iv) exists to prevent, so the field and its one carry-through must
+    land together. The actual blast radius is narrow: the change is ADDITIVE and sparse, it moves no
+    row between statuses, and falsifier 3 is what proves that.
+
+    budget_usd 40 — the edit is a few lines plus a carry-through; the cost is the five-direction
+    fixture, all of which is decidable against `DeriveDeps` injection (`inflightHolder`, `isPidAlive`,
+    `now`, `livenessBoundMs` are all already injectable), which is why `verify: auto`.
+
+    NO depends_on. W1-T368 makes `hasLiveLock` TRUSTWORTHY and this task makes its ABSENCE VISIBLE;
+    either can land first and neither changes the other's seam. Stalling this behind an unmerged
+    shard would buy nothing.
+
+    THE RECON THAT PRODUCED THIS ASKED FOR A REORDER. It does not get one, and rationale (1) is
+    written at length precisely so the next reader does not re-derive the same wrong fix from the
+    same `||`.
