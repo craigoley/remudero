@@ -275,6 +275,137 @@ export function judgeDispatchStarvation(phases: readonly string[]): Check {
 }
 
 /**
+ * W1-T1236 — SWEEP LIVENESS. `sweep.pass` (`src/lib/sweep.ts`, "PER-PASS HEARTBEAT, WRITTEN
+ * BEFORE THE LOOP") is written before `runSweep`'s per-PR loop runs, exactly so a pass that throws
+ * mid-loop still leaves a row — and nothing read it. `sweep.pass` appeared nowhere in this file,
+ * `ledger.ts`, `status.ts`, `status-board.ts` or `ops.ts` before this arm; every plan reference to
+ * it is a human reading the ledger by hand, which is precisely the discovery latency this closes.
+ * The measured incident is `sweep.ts`'s own doc comment: a 23.5-minute gap in `sweep.summary` on
+ * 2026-08-05 that CONTAINS four `sweep.disposed` rows — passes were starting and dying mid-loop,
+ * and PR #1348 opened and closed entirely inside the blind window.
+ *
+ * TWO FAULTS, ONE ARM, BOTH DERIVED OFF ROWS THAT ALREADY EXIST — never a new emit, a pass id, or
+ * a correlation between rows (that would drag in `sweep.ts`, which is W1-T1238's file):
+ *  (a) PASSES NOT STARTING — the newest `sweep.pass` is older than a bound DERIVED from this
+ *      host's own observed `sweep.pass` cadence, exactly like {@link judgeDispatchStall}'s
+ *      `boundDerivation`: never a guessed round figure.
+ *  (b) PASSES STARTING AND NOT FINISHING, the case the row was positioned for — the newest
+ *      `sweep.pass` has no `sweep.summary` AT OR AFTER its own timestamp, paired BY TIME ORDER.
+ *
+ * ZERO ROWS IS WARN, NEVER OK AND NEVER FAIL — {@link judgeDispatchStarvation}'s own precedent
+ * verbatim: a fleet that has never swept, a freshly-rotated ledger, and a sweep blind for longer
+ * than the retention window all present as zero `sweep.pass` rows, and a false-green OK here
+ * reproduces the exact 2026-08-05 window nobody noticed. THE STALE-BOUND AND NO-SUMMARY FAULTS ARE
+ * ALSO WARN, NEVER FAIL, on W1-T1209's own reasoning: doctor OBSERVES, and any automatic
+ * remediation of a blind sweep is a separate decision this arm does not make.
+ *
+ * THE BOUNDARY MARKER IS WHAT MAKES W1-T1237 POSSIBLE. {@link SWEEP_LIVENESS_STEPS} names every
+ * ledger step this arm reads in ONE exported Set, read through `.has(step)` in {@link
+ * readSweepPassSummaryTimestamps} rather than two loose string comparisons — mirroring `board.ts`'s
+ * `OPERATOR_ACTION_STEPS` for the identical reason `test/ledger-render-retention.test.ts` records:
+ * a blanket `.step ===` scan of this file would sweep up every unrelated step it already compares
+ * (`daemon.alive`, `fix.dispatch`, ...) and demand retention for all of them.
+ */
+export const SWEEP_LIVENESS_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "sweep.summary"]);
+
+/** How much this arm multiplies the longest OBSERVED gap between `sweep.pass` rows by to derive
+ *  its staleness bound — the identical multiplier and reasoning `status-board.ts`'s
+ *  `QUEUE_HEAD_STALL_MULTIPLIER` already applies to `run.start` dispatch cadence. Re-derived here
+ *  rather than imported: that constant keys on a different step, and this task's design confines
+ *  every new input to a fold over `doctor.ts`'s own already-injected `ledgerLines`. */
+export const SWEEP_STALL_MULTIPLIER = 3;
+
+/**
+ * `sweep.pass`/`sweep.summary` timestamps (parsed ms, oldest-order not required), read through
+ * {@link SWEEP_LIVENESS_STEPS} — the ONLY place in this file either string literal appears. A line
+ * with no parseable `ts` is skipped rather than corrupting the derived cadence, the same
+ * discipline `status-board.ts`'s `deriveDispatchCadence` already applies to `run.start`.
+ */
+export function readSweepPassSummaryTimestamps(lines: ReadonlyArray<Record<string, unknown>>): { passesMs: number[]; summariesMs: number[] } {
+  const passesMs: number[] = [];
+  const summariesMs: number[] = [];
+  for (const line of lines) {
+    const step = typeof line.step === "string" ? line.step : undefined;
+    if (!step || !SWEEP_LIVENESS_STEPS.has(step)) continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts !== undefined ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed)) continue;
+    (step === "sweep.pass" ? passesMs : summariesMs).push(parsed);
+  }
+  return { passesMs, summariesMs };
+}
+
+/**
+ * REPORT ONLY, exactly like every sibling arm above: this function returns a {@link Check} and
+ * nothing else — no dispatch, no gate clear, no restart. Calling it twice with the same inputs
+ * yields a byte-identical result, the same purity-as-proof-of-no-action shape {@link
+ * judgeRepairStall}'s own test relies on.
+ */
+export function judgeSweepLiveness(passesMs: readonly number[], summariesMs: readonly number[], nowMs: number): Check {
+  const name = "sweep-liveness";
+  if (passesMs.length === 0) {
+    return {
+      name,
+      verdict: "WARN",
+      measured: "0 sweep.pass row(s) in window — liveness UNKNOWN",
+      threshold: "a recent sweep.pass, followed by its own sweep.summary",
+      detail:
+        "no sweep.pass row exists yet — a fleet that has never swept, a freshly-rotated ledger and a sweep blind " +
+        "longer than retention all look identical here; this is not evidence of health, check the daemon process directly",
+    };
+  }
+
+  const sorted = [...passesMs].sort((a, b) => a - b);
+  const newestPass = sorted[sorted.length - 1]!;
+  const ageMs = Math.max(0, nowMs - newestPass);
+
+  let boundMs: number | undefined;
+  let boundDerivation: string | undefined;
+  if (sorted.length >= 2) {
+    let maxGapMs = 0;
+    for (let i = 1; i < sorted.length; i++) maxGapMs = Math.max(maxGapMs, sorted[i]! - sorted[i - 1]!);
+    // every sweep.pass at the same instant leaves no gap to learn a cadence from — fall through
+    // with boundMs left undefined rather than fabricate a zero bound.
+    if (maxGapMs > 0) {
+      boundMs = maxGapMs * SWEEP_STALL_MULTIPLIER;
+      boundDerivation = `${SWEEP_STALL_MULTIPLIER}x the longest observed gap between sweep.pass rows on this host (${humanMs(maxGapMs)} over ${sorted.length} rows)`;
+    }
+  }
+  const threshold = `${boundMs === undefined ? "no observed cadence yet" : `<= ${humanMs(boundMs)}${boundDerivation ? ` (${boundDerivation})` : ""}`}, followed by its own sweep.summary`;
+
+  if (boundMs !== undefined && ageMs > boundMs) {
+    return {
+      name,
+      verdict: "WARN",
+      measured: `newest sweep.pass ${humanMs(ageMs)} ago`,
+      threshold,
+      detail: "passes have stopped starting on this host's own observed cadence — doctor only reports",
+    };
+  }
+
+  // PAIRED BY TIME ORDER, NOT A CORRELATION ID (design note (2b)): the newest pass is "finished"
+  // once ANY sweep.summary lands at or after it — adding a pass id would change sweep.ts's own
+  // emit, which is W1-T1238's file and a different concern.
+  const finishedByOwnSummary = summariesMs.some((s) => s >= newestPass);
+  if (!finishedByOwnSummary) {
+    return {
+      name,
+      verdict: "WARN",
+      measured: `newest sweep.pass has no sweep.summary at or after it (${humanMs(ageMs)} ago) — the pass may have died mid-loop`,
+      threshold,
+      detail: "sweep.pass is written BEFORE the loop for exactly this: a pass that dies mid-way still leaves this row",
+    };
+  }
+
+  return {
+    name,
+    verdict: "OK",
+    measured: `newest sweep.pass ${humanMs(ageMs)} ago, finished by its own sweep.summary`,
+    threshold,
+  };
+}
+
+/**
  * LOCK VERSUS PROCESS DIVERGENCE. An inflight lock whose pid is gone is a run that died without
  * releasing. WARN and report only — W1-T978 owns `drain.lock` reclamation and #2251 owns the
  * recycle; doctor names the divergence and stops.
@@ -552,11 +683,13 @@ export interface DoctorInputs {
 export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
   const ledger = readLedgerAgeMs(inputs.ledgerLines, inputs.nowMs);
   const lastDispatchAgeMs = inputs.dispatchSinceMs;
+  const sweepRows = readSweepPassSummaryTimestamps(inputs.ledgerLines);
   const checks: Check[] = [
     judgeLedgerFreshness(ledger.ageMs, ledger.boundMs),
     judgeDispatchStall(inputs.candidateCount, inputs.dispatchSinceMs, inputs.dispatchBoundMs, inputs.dispatchBoundDerivation),
     judgeRepairStall(inputs.repairDisposedCount ?? 0, inputs.repairDispatchSinceMs, inputs.repairDispatchBoundMs, inputs.repairDispatchBoundDerivation),
     judgeDispatchStarvation(readCurrentRunAlivePhases(inputs.ledgerLines)),
+    judgeSweepLiveness(sweepRows.passesMs, sweepRows.summariesMs, inputs.nowMs),
     judgePauseHonoured(inputs.pauseAgeMs, lastDispatchAgeMs),
     judgeLockDivergence(inputs.totalLocks, inputs.deadLocks, inputs.locksUnreadableReason),
     judgeLaneLessWorkers(inputs.oldestWorkerEtimeS, inputs.workerCount),
