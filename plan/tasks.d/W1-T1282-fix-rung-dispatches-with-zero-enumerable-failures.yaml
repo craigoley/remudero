@@ -1,0 +1,134 @@
+- id: W1-T1282
+  title: "THE FIX RUNG DISPATCHES A WORKER WHEN IT HAS ZERO ENUMERABLE FAILURES TO HAND IT — dispatch reads `checksState` from the rollup while the worker's evidence comes from the `ciFailures` miner, and when the second returns nothing the rung spends its strikes anyway and escalates an issue whose own failing-check section prints that it is empty"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    **THIS IS THE THIRD CONDITION SPLIT OUT OF A DUPLICATE FILING, NOT A NEW DEFECT CLASS.**
+    `W1-T1278` was filed twice on the same subject by two lanes within twenty-seven minutes. The
+    surviving filing is #2647 (`dc3a6a77`, merged 2026-08-23T18:46:01Z), which owns conditions A
+    and B IN SUBSTANCE and not merely by id: re-read on `origin/main` before this shard was cut, it
+    names `#2605` twice, `mergeable_state` six times, `merge-tree` and `wipe-test.ts` once each, and
+    states the same conclusion in the same words — a repair and a non-repair "produce the identical
+    observation". Those conditions are ITS work and are NOT re-argued here.
+
+    **WHAT #2647 DOES NOT COVER, RE-MEASURED AGAINST THE MERGED FILE RATHER THAN CARRIED FORWARD.**
+    Marker counts read on `origin/main`'s copy of
+    `plan/tasks.d/W1-T1278-the-fix-rung-dispatches-without-re-reading-the-state.yaml`:
+    `ZERO ENUMERABLE` 0, `issues/2653` 0, `no evidence` 0, `checksStateFromRollup` 0,
+    `REVIEW_CONTEXT` 0, `detailsUrl` 0, `test theater` 0, `2641` 0. CONTROL, on the same file with
+    the same reader: `runFixRung` reads 3 and `strike` reads 18, so the zeros are absence and not a
+    reader that failed to open the file.
+
+    **THE OBSERVATION. MEASURED ON #2641 (`docs/repoint-recovered-research`) AT HEAD `cd4b110b`.**
+    The `blocked_ci` fix rung dispatched TWO bounded ci-log workers and then escalated as
+    `issues/2653`, whose own **"Failing check(s)"** section reads, verbatim:
+    **"(no evidence — this was checked and is empty)"**. A rung that prints its own emptiness had
+    nothing to hand the worker it had already paid for, and it spent two strikes before saying so.
+
+    **THE TWO-READER SPLIT, NAMED PRECISELY — AND THIS CORRECTS THE PARENT's FRAMING.** Dispatch
+    reads `checksState`, composed by `rollupFromRest(checkRuns, statuses)`. The worker's evidence is
+    `ciFailures`, produced by a SEPARATE miner that pulls an Actions job id out of `detailsUrl`. At
+    `cd4b110b` the first returned RED off **three genuinely failed checks** — `ci` completed
+    18:33:10Z, `coverage-ratchet` 18:38:26Z, `ci-gate` 18:48:48Z, all before the escalation opened at
+    18:57:54Z — and the second returned NOTHING.
+    **THE RUNG IS DISPATCHED BY ONE READER AND WORKS FROM ANOTHER.**
+    The split is NOT between checks and statuses: `checksStateFromRollup` filters
+    `REVIEW_CONTEXT` out entirely, so `isBlockedCi` (`pr.checksState === "red"`) CANNOT be reading
+    the review, and any account that explains this dispatch by an invisible commit status is wrong.
+
+    **THE ESCALATION's SECOND EVIDENCE LINE WAS ALSO FALSE WHEN PRINTED.** It states "no review has
+    run yet" while the combined-status endpoint records `remudero-review` **FAIL** on that exact head
+    at 18:28:27Z — twenty-nine minutes earlier. Both of its evidence lines were false at the moment
+    it wrote them. **THE REPORTING HALF OF THAT IS `W1-T1279`'s AND IS CITED, NOT RE-FILED**: this
+    shard is about the rung DISPATCHING with nothing in hand, not about how the escalation renders
+    what it has.
+
+    **WHAT IS TRUE ABOUT THE BLIND READER, KEPT.** `/check-runs` IS structurally blind to
+    `remudero-review` — verified at that head, where 27 check runs carry no entry of that name while
+    combined-status carries exactly one. And #2641's actual problem was unreachable by the dispatched
+    mode regardless: the verdict reads **"test theater: added tests assert nothing"**, a judgement
+    about the PR's body and diff that no ci-log worker addresses.
+
+    **THIS CONDITION NEEDS NO NEW LEDGER FIELD, WHICH IS WHY IT IS THE CHEAPEST OF THE THREE.**
+    Unlike a strike-attempt history or a re-read of `mergeable_state`, the failing-check count is
+    ALREADY IN HAND at dispatch time.
+    **A RUNG WITH ZERO ENUMERABLE FAILURES MUST STAND DOWN WITH A NAMED REASON RATHER THAN DISPATCH.**
+    The shape already exists in the same function:
+    `fixRungStandDownReason` occurs 4 times in `src/run-task.ts` and the cancelled-check arm already
+    sets a reason and leaves `acted` false rather than falling through to `dispatchFix`.
+
+    **NOT PROPOSED, BY NAME: merging the two readers, or treating a failed review as a CI failure.**
+    `strikeCap` stays and the escalation at the ceiling stays; what changes is that a rung with
+    nothing to enumerate refuses BEFORE it spends, and says why.
+  acceptance:
+    - claim: "a fix rung with zero enumerable failures stands down instead of dispatching a worker"
+      proof: "unit test: test/fix-rung-empty-failures-stand-down.test.ts"
+    - claim: "the stand-down records a named reason rather than refusing silently"
+      proof: "unit test: test/fix-rung-empty-failures-stand-down.test.ts"
+    - claim: "a rung that does have enumerable failures still dispatches exactly as before"
+      proof: "unit test: test/fix-rung-empty-failures-stand-down.test.ts"
+    - claim: "no strike is consumed by a pass that refused to dispatch"
+      proof: "unit test: test/fix-rung-empty-failures-stand-down.test.ts"
+    - claim: "the refused pass does not mark itself acted, so the disposition is not deduped away next pass"
+      proof: "unit test: test/fix-rung-empty-failures-stand-down.test.ts"
+  files: [src/run-task.ts, test/fix-rung-empty-failures-stand-down.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#renumber-and-narrow-2648-2026-08-23"
+  plan_refs: ["W1-T1278", "W1-T1279", "W1-T984", "W1-T1269"]
+  note: |
+    **WHY NO PROOF IN THIS SHARD GREPS ITS OWN PATH.** All five criteria use the pure-path
+    `unit test:` form naming `test/fix-rung-empty-failures-stand-down.test.ts`, which is declared in
+    `files:`, so `judgeCriterion`'s `not_yet_built` carve-out applies at filing time. A `grep:` proof
+    naming this shard would be OUT OF SCOPE by construction — `rule15-filing` refuses a `verify: auto`
+    task that declares its own plan record in `files:`, and `lint-plan` warns that
+    `scopeGuardOutOfScopeFiles` would then refuse the branch AFTER the work is done. The `grep:`
+    proofs that pin this shard's recorded findings live in the PR body, where they execute against a
+    real path and cap nothing.
+
+    **PARENT AND PROVENANCE.** `W1-T1278` (#2647, `dc3a6a77`) is the parent and was confirmed an
+    ancestor of `origin/main` before this shard was cut. This filing REPLACES the duplicate
+    `W1-T1278` shard that PR #2648 carried; that file is DELETED in the same commit rather than
+    renamed alongside it, so the duplicate id is gone from the tree and `lint-plan` resolves one
+    `W1-T1278` again. No second PR was opened — #2648 is retitled in place.
+
+    **WHY THE DUPLICATE HAPPENED, RECORDED SO IT IS NOT RE-LEARNED.** The two lanes swept the same
+    eight id surfaces and both read zero, because neither sweep could see the other's unpushed work:
+    the reservation for `W1-T1278` was taken at 18:19:35Z, #2648 opened at 18:30:43Z, and #2647
+    merged at 18:46:01Z. NO SWEEP SEES UNPUSHED WORK — that half is operator discipline and never a
+    check, which is exactly the failure mode already recorded at #2471.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T1282` was reserved 2026-08-23T19:28:24Z and confirmed still
+    held and unused. Eight surfaces swept, each with a control qualified for that surface, one
+    control disqualified and re-taken rather than reported: shard filenames on main 0 (control
+    `W1-T1279` = 1); `- id:` lines in `plan/` 0 (control `W1-T1279` = 1); the reservation namespace
+    312 refs; open-PR titles 0 (control `W1-T1278` = 1); open-PR head branches 0 (control `run-*`
+    heads = 83); open-PR file lists 0 across 3 of 3 heads enumerated and captured, control 12 total
+    file entries; anchored merged-PR trailers `^Remudero-Task:\s*<id>\s*$` 0 — **its `W1-T1278`
+    control was DISQUALIFIED at 0, because plan filings carry no trailer, and re-taken on
+    `W1-T1262` = 1**; merged commit subjects on main 0 (control `W1-T1278` = 1 across 2054 subjects,
+    with 515 `Remudero-Task:` lines in the same corpus).
+
+    **RISK BAND IS RULE 19 SPAN, NOT BLAST RADIUS.** `files:` crosses `src/` and `test/`, so the SPAN
+    reading is `high`. `high` EXEMPTS `sizingViolation` rather than clearing it — it returns
+    `undefined` outright at that band — so a clean lint is NOT evidence the span was vetted. The
+    blast radius is narrower: one refusal inside one function, mirroring a stand-down that already
+    exists in it. The danger is entirely the CONDITION'S WIDTH, which is why criterion 3 pins the
+    has-failures case explicitly; a change passing criterion 1 and failing 3 has built "never fix a
+    red PR".
+
+    **THE FALSIFIER, STATED SO IT CAN BE RUN.** This task is falsified if a fix rung that DID have
+    enumerable failures stops dispatching, observable as a red required name with a non-empty
+    `ciFailures` set that receives no strike. It is also falsified if rung spend does not fall on
+    the empty-evidence path — measurable as `escalation.issue_opened` rows whose failing-check
+    section is still empty after the change.
+
+    **MEASUREMENT PROVENANCE.** `src/run-task.ts` is over the GitHub Contents API's 1 MB cap, where
+    it returns `encoding: "none"` and greps to a clean zero, so every source figure here was read
+    through git objects in a checkout fetched from `origin`. No ledger figure is quoted: `ledger-grep`
+    refused on zero archives rather than answering from the live file, and a refusal is not a count.
