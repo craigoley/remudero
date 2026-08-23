@@ -400,6 +400,14 @@ import { injectCoverageImprovementTask } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
+  measurementCadenceCheck,
+  measurementCadenceMarkerPath,
+  recordMeasurementCadenceFire,
+  runMeasurementCadenceReport,
+  type MeasurementCadenceDecision,
+  type MeasurementCadenceRunResult,
+} from "./lib/measurement-cadence.js";
+import {
   assertRunnable,
   loadPlan,
   selectTask,
@@ -13607,6 +13615,58 @@ export function buildGithubPostureDaemonHooks(deps: {
 }
 
 /**
+ * W1-T1259: the measurement-cadence rung's PRODUCER, mirroring {@link buildAutoTriageDaemonHooks}
+ * exactly — the CONSUMER (`daemon.ts` reads `deps.checkMeasurementCadence`/
+ * `deps.runMeasurementCadence` in its poll loop) is dead code without a line at the
+ * `daemonCommand` call site actually constructing this and wiring it in (PR #1066's own lesson,
+ * restated at that call site below).
+ *
+ * SELF-TARGET ONLY (wired at the call site below, same as retro/auto-triage/github-posture): the
+ * ledger/state this cadence reads and the git history it joins against both live under THIS
+ * process's own `config.root`/`repoRoot`, never a drained target's.
+ */
+export function buildMeasurementCadenceDaemonHooks(deps: {
+  check?: () => MeasurementCadenceDecision;
+  run?: () => Promise<MeasurementCadenceRunResult>;
+  config?: Config;
+  now?: () => Date;
+  /** Injected policy, forwarded to {@link measurementCadenceCheck} — see `autoTriageCheck`'s own
+   *  doc for why this seam exists. Production passes none and the checked-in `plan/policy.yaml`
+   *  governs, exactly as before. */
+  policy?: Policy;
+} = {}): {
+  checkMeasurementCadence: () => MeasurementCadenceDecision;
+  runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const check =
+    deps.check ??
+    (() =>
+      measurementCadenceCheck({
+        root: configFor().root,
+        policy: policyFor().values.measurementCadence,
+        now: deps.now?.(),
+      }));
+  const run =
+    deps.run ??
+    (async () => {
+      const root = configFor().root;
+      // RECORD THE FIRE FIRST, deliberately — the SAME crash-safety discipline
+      // `buildAutoTriageDaemonHooks`'s `runAutoTriage` uses: if the report run throws or the
+      // process dies mid-run, the marker has already advanced and the interval/cap bounds still
+      // hold, so a failure costs one skipped period rather than an unbounded immediate retry.
+      recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), deps.now?.() ?? new Date(), 24 * 60 * 60 * 1000);
+      return runMeasurementCadenceReport({
+        stateDir: join(root, "state"),
+        cwd: repoRoot,
+        escalate: policyFor().values.measurementCadence.escalate,
+      });
+    });
+  return { checkMeasurementCadence: check, runMeasurementCadence: run };
+}
+
+/**
  * W1-T322 (design (iii)): the RETRO-TIME consumer of the SAME reachability scan the review path
  * uses — MASTER-PLAN's own NET STATE section, re-checked against the CURRENT mainline checkout
  * (`repoRoot`, never a PR diff). Returns the report section to concatenate, or `""`.
@@ -17211,6 +17271,13 @@ export async function daemonCommand(
   // a drained target's, so wiring it for a non-self target would either read the wrong repo's
   // posture into the wrong repo's baseline or silently do nothing useful.
   const githubPostureHooks = target.isSelf ? buildGithubPostureDaemonHooks({ config }) : undefined;
+  // W1-T1259: the measurement-cadence rung ("is this system getting better" —
+  // rule-efficacy/verdict-calibration/autonomy-rate). SELF-TARGET ONLY, same reason
+  // retro/auto-triage/github-posture are — the ledger/state this reads and the git history it
+  // joins against both live under THIS process's own config.root/repoRoot, never a drained
+  // target's. Without this line `deps.checkMeasurementCadence` is undefined and the whole rung
+  // is dead code, exactly how #1066 merged auto-triage's consumer with no producer.
+  const measurementCadenceHooks = target.isSelf ? buildMeasurementCadenceDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -17434,6 +17501,12 @@ export async function daemonCommand(
         // changed. Best-effort like sweep/sweepOrphans above — `lib/daemon.ts`'s loop logs each
         // finding and never gates dispatch on it (see that call site's own comment).
         checkGithubPosture: githubPostureHooks?.checkGithubPosture,
+        // MEASUREMENT CADENCE RUNG (W1-T1259's design, wired here). Same shape as the auto-triage/
+        // github-posture hooks above and gated the same way — SAFE ON in policy data (see
+        // plan/policy.yaml's `measurementCadence` row for why this rung, unlike auto-triage,
+        // defaults to running: it writes nothing unless `escalate` is separately opted in).
+        checkMeasurementCadence: measurementCadenceHooks?.checkMeasurementCadence,
+        runMeasurementCadence: measurementCadenceHooks?.runMeasurementCadence,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
