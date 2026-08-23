@@ -27,6 +27,41 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
+/**
+ * DISABLE GIT'S AUTOMATIC BACKGROUND GC FOR EVERY GIT THIS SUITE SPAWNS (W1-T1217).
+ *
+ * INCIDENT: `realRepoFixture` (test/fix-dedup-seed.test.ts) pushes `main`, pushes a second
+ * branch, and — six lines later — runs a plain local `git clone <bare> <dir>`. A local clone
+ * HARDLINKS loose objects (measured: a cloned loose object reads a link count of 2, against a
+ * link-count-1 control), so the clone depends on the source repo's loose objects still existing
+ * on disk while it links them. `receive.autogc` and `gc.auto` are unset repo-wide, so git's own
+ * defaults govern, and the earlier `push` can spawn a background `git gc --auto` that repacks —
+ * and removes — those loose objects while the clone is still linking them: `fatal: failed to
+ * copy file … No such file or directory`, in fixture SETUP, before any code under test runs, in
+ * a file the failing PR never touched (one confirmed CI occurrence: run 32582765791 attempt 1,
+ * job 97054511830).
+ *
+ * Fix: disable both halves of the race through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/
+ * `GIT_CONFIG_VALUE_n` (git >= 2.31) on `process.env`, set HERE rather than in a new setup
+ * module a future invocation could forget to load, or a written config file a fresh clone
+ * target has no `.git/config` of its own to hold yet. `gc.auto=0` stops the clone side from
+ * ever running one; `receive.autogc=false` stops the earlier push from spawning one at all.
+ * This module is already `--import`ed at every invocation site (see the module comment above),
+ * so every git process this suite spawns that inherits `process.env` — either by spreading it
+ * explicitly into its own env, or (Node's default) by receiving no `env` override at all —
+ * picks these up with no per-fixture change and no new import anywhere.
+ *
+ * Reach: this reaches only a git process whose env derives from `process.env` — a fixture that
+ * builds a REPLACEMENT env object which does not spread `...process.env` is outside it.
+ * test/git-fixture-gc-hygiene.test.ts guards that residue so a future fixture regressing into
+ * that shape fails a named test instead of silently reintroducing the race.
+ */
+process.env.GIT_CONFIG_COUNT = "2";
+process.env.GIT_CONFIG_KEY_0 = "gc.auto";
+process.env.GIT_CONFIG_VALUE_0 = "0";
+process.env.GIT_CONFIG_KEY_1 = "receive.autogc";
+process.env.GIT_CONFIG_VALUE_1 = "false";
+
 const created: Array<string | Buffer> = [];
 const originalMkdtempSync = fs.mkdtempSync;
 

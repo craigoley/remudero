@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7536,6 +7536,17 @@ test("daemonCommand: builds the real daemon deps (sweep + sweepLight wiring) the
   mkdirSync(join(root, "state"), { recursive: true });
   const planPath = join(home, "tasks.yaml");
   writeFileSync(planPath, "[]\n"); // an empty plan; STOP returns before it is ever scheduled
+  // `home` starts with RMD_TMP_PREFIX ("rmd-"), the exact prefix daemonCommand's OWN real
+  // boot-time `sweepStaleTempDirs` (lib/tmp.ts) reaps anything under os.tmpdir() matching, by
+  // AGE (`now() - mtimeMs > maxAgeMs`, default 24h). Every mkdirSync/writeFileSync above this
+  // line updates `home`'s own mtime to the REAL OS clock (mtimes are not shiftable, same
+  // mechanism CLOCK_ARTIFACTS' prune-liveness/serve.glance entries cite) — under clock-sweep's
+  // future shift that real mtime reads as ancient, so the daemon's own real housekeeping sweep
+  // deletes this fixture (the STOP file requestStop is about to write, included) before
+  // daemonCommand ever consults it. Stamping `home`'s mtime from the (possibly shifted)
+  // injected clock keeps this fixture's own age reading consistent with `Date.now()` regardless
+  // of shift, the same "stamp from the injected clock" remedy #2250 established for ledger `ts`.
+  utimesSync(home, new Date(), new Date());
   process.env.HOME = home;
   try {
     requestStop(root, "unit test");

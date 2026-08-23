@@ -137,3 +137,71 @@
     MAX REAL IDS AT THIS HEAD, EXCLUDING THE 100000+ PROBE ARTEFACTS: 1218 on main, 1222 reserved.
     The allocator runs ahead of the plan, which is why the reservation existing is not evidence a
     shard does.
+
+    ── MEASURED AFTER FILING, 2026-08-22, ON THE HOST RATIONALE (4) COULD NOT REACH ──────────────
+    THE DEPLOYMENT NOW EXISTS AND CANNOT STAY AUTHENTICATED. The five container-side readings
+    rationale (4) declined to assert are available now — `remudero-serve` is running — and they
+    close a hole that is NOT the address hole this shard was filed for. The console starts with a
+    SNAPSHOT of `GH_TOKEN` and has no way to renew it.
+
+    THE MINTER IS NOT IN THE CONTAINER'S BOOT PATH. `deploy/entrypoint.sh:114` is
+    `if [ -n "${GH_TOKEN:-}" ]; then` — it READS the variable to build a credential helper and
+    never mints one. Word-bounded, `GH_APP` reads 0 in that whole file; controls on its own
+    siblings read 2 in `deploy/runtime-env-vars.sh`, 3 in `deploy/host-update.sh` and 1 in
+    `deploy/recycle-container.sh`, so the zero discriminates rather than reflecting a broken query.
+
+    THE ONLY MINTER RUNS IN THE DAEMON'S OWN PROCESS. `refreshInstallationToken`
+    (`src/lib/github-app.ts:149`) writes `env.GH_TOKEN` at its one seam, and the loop that drives
+    it is started by `startInstallationTokenRefresh`, which has exactly ONE call site in all of
+    `src/`: `src/run-task.ts:15906`, inside `daemonCommand` (declared at 15769). `serveCommand` is
+    declared at 17619 — after it — and never calls it. `GH_APP` reads 0 in `src/lib/serve.ts` and
+    0 in `src/lib/status.ts`; control, the same query reads 11 in `src/lib/github-app.ts`.
+
+    SO THE CONSOLE GOES BLIND AT THE ONE-HOUR EDGE, AND THE RESTART POLICY DOES NOT SAVE IT.
+    `INSTALLATION_TOKEN_LIFETIME_MS` is `60 * 60 * 1000` (`github-app.ts:60`, "GitHub's own
+    contract"). `--restart=unless-stopped` re-execs the same image with the same container
+    environment, so a restart RE-READS the identical stale value — the policy that protects the
+    console against every other failure is inert against this one. This is the same shape
+    `github-app.ts`'s own header already records as the WORKER GAP (design iii): a process holding
+    a `GH_TOKEN` copy captured at spawn cannot be reached by a refresh in another process. A
+    console is a worker that never exits.
+
+    THE OBSERVED SYMPTOM, AND WHERE IT IS PRODUCED. `board gateway: batched PR fetch failed (auth)`
+    — `src/lib/status.ts:4151`, where `auth` is one of the five `GhFailureReason` values
+    `classifyGhFailure` returns — and a board whose every row carries
+    `· issue state unverified (showing to be safe)` (`src/lib/serve.ts:2413`). Both strings are in
+    source at this head. NOT claimed from the running container's log: the `remudero-serve`
+    instance measured here was started 21:42:31Z and is younger than the one-hour life, so its log
+    reads 0 for that string — a zero that means "too early", not "absent". Control on the same log
+    and the same tool: the boot banner reads 1.
+
+    A BOOT-TIME MINT IN THE ENTRYPOINT WOULD NOT CLOSE THIS. The token expires WHILE THE PROCESS
+    RUNS, so minting once at boot converts "blind after an hour of uptime" into "blind after an
+    hour of uptime, with a fresher start" — the console's whole value is that it is up when nothing
+    else is. The refresh must live IN THE SERVE PROCESS, the way it already lives in the daemon's:
+    a loop that reschedules itself off the minted `expires_at` (`nextRefreshDelayMs`, strictly
+    inside the life via `REFRESH_MARGIN_MS`), and that degrades rather than refuses when a mint
+    fails.
+
+    AND NOT A LONG-LIVED PAT. Reaching for a personal token would make this symptom go away and
+    would change WHO the fleet is: the App identity is what attributes fleet writes, and
+    `startInstallationTokenRefresh`'s own gate treats an unconfigured host as byte-identical to one
+    that never had the feature, so a fall back to the shared pool leaves nothing anywhere recording
+    that it happened — the exact silence `deploy/runtime-env-vars.sh`'s header was written about.
+
+    WHAT IS ALREADY IN PLACE, SO THE REMEDY IS THE CALL AND NOT THE PLUMBING. As of 21:42:31Z the
+    `remudero-serve` container already carries `GH_APP_ID`, `GH_APP_INSTALLATION_ID` and
+    `GH_APP_PRIVATE_KEY_PATH` in its environment and mounts `/home/craigoleyagent/.claude` at
+    `/home/node/.claude`, which is where `GH_APP_PRIVATE_KEY_PATH` points. The credentials and the
+    key are already reachable from the serve process; what is missing is the code that uses them.
+
+    ONE SHAPE CORRECTION AGAINST DESIGN (ii), RECORDED SO AN IMPLEMENTER DOES NOT UNDO A WORKING
+    CONSOLE. Design (ii) prescribes a host-loopback-published port plus an explicit bind host and
+    forbids `0.0.0.0`. The console that is actually reachable today does the opposite and is
+    correct to: it binds `0.0.0.0` under `RMD_SERVE_NETWORK=container` — W1-T915's carve-out, which
+    rationale (1) proves shipped — publishes NO port, and is resolved by the tunnel BY NAME over
+    the `rmd-net` docker network. A published loopback port would not have helped, because the
+    thing that reaches it is a sibling container, not the host. That shape is now recorded in
+    `deploy/serve-container.sh`. This note does not amend `design:`; it records that the address
+    half of this shard was closed by a deployment rather than by the recipe edit design (i)
+    describes, and leaves the reconciliation to the operator.
