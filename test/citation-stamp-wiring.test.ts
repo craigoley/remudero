@@ -283,7 +283,11 @@ test("changedCitationStamps neither adds nor removes entries, and only reports i
 // is a regression guard proving a stamped corpus still respects both.
 
 test("a stamped, oversized corpus still hits the hard budget cap and still reports the overflow as dropped entries", () => {
-  const big = "x".repeat(400);
+  // Sized off DEFAULT_KNOWLEDGE_BUDGET_CHARS itself (never a hardcoded byte count) — ten entries
+  // each already ~one whole budget wide guarantee overflow at ANY cap the constant is later
+  // retuned to (W1-T941's own drift test moves it; this corpus must not silently stop overflowing
+  // just because that pinned number changed out from under a magic literal here).
+  const big = "x".repeat(DEFAULT_KNOWLEDGE_BUDGET_CHARS);
   const entries: LearningEntry[] = Array.from({ length: 10 }, (_, i) => entry(`e${i}`, { fact: big }));
   const evidence = new Map<string, CitationStamp>(entries.map((e, i) => [e.id, { cited: `2026-08-${10 + i}`, citedCount: 1 }]));
   const stamped = stampCitations(entries, evidence);
