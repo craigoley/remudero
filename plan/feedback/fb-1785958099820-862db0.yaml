@@ -35,5 +35,22 @@ raw: "NOW'S LIVENESS DISJUNCT IS ORDERED SO THE PID PROBE NEVER RUNS FOR AN
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2582
+summary:
+  headline: Dead processes appear 'running' while PR is open
+  what_happened: hasOpenPr check runs first and returns before reaching
+    hasLiveLock, the process-liveness probe. Dead processes with open PRs show
+    as 'running' indefinitely—a pattern seen in W1-T314 and affecting 74
+    potential false-positives.
+  decision: Establish whether open PR status should override dead-process
+    detection; if not, reorder checks to evaluate hasLiveLock first
+  options:
+    - label: Open PR is authoritative (process status doesn't matter)
+      consequence: Keep current order; change rendered label to 'awaiting-merge' or
+        'stalled-process' to reflect reality
+    - label: "Reorder: hasLiveLock before hasOpenPr"
+      consequence: "Dead processes flag as orphaned immediately; aligns with PR #1341
+        purpose; may close some PRs earlier"
+    - label: Use AND logic (both must be true)
+      consequence: Requires both live process AND open PR to be 'running'; strongest
+        guarantee; may incorrectly orphan long-wait runs
