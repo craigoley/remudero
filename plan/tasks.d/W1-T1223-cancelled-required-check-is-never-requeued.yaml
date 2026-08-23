@@ -1,0 +1,117 @@
+- id: W1-T1223
+  title: "A CANCELLED REQUIRED CHECK IS INDISTINGUISHABLE FROM A FAILURE AND NOTHING RE-QUEUES IT — `REQUIRED_CHECK_FAIL` contains `CANCELLED`, so `checksStateFromRollup` returns `red` for an ABSENT verdict exactly as for a bad one, and the sweep has no re-queue action at all; measured 2026-08-22 on #2434 and #2444, where `coverage-ratchet` alone was cancelled while every sibling was success and a human re-queued it 47 minutes and 5h40m later"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 90.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/cancelled-required-check-requeue.test.ts]
+  origin: oper#cancelled-required-check-2026-08-22
+  plan_refs: ["W1-T1212", "W1-T457"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE SIGNAL IS AN ABSENCE OF A VERDICT, AND THE SWEEP READS IT AS A VERDICT.
+    `REQUIRED_CHECK_FAIL` (src/lib/sweep.ts) is
+    `["FAILURE","ERROR","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE"]`, and
+    `checksStateFromRollup` returns `"red"` on the first member it matches. A cancelled required
+    check and a failing one therefore produce the IDENTICAL `checksState`, which is the
+    one-value-for-two-outcomes class this repo has hit before — the same doc block records the
+    #1728 incident where `checksState` read red off a CANCELLED entry while `fetchCiFailures`
+    filtered to FAILURE|ERROR and reported nothing, giving "a red predicate with an empty evidence
+    list". W1-T457 aligned the two sets so the evidence list is no longer empty; it did not make
+    the two outcomes distinguishable, and distinguishing them is what this task is for.
+
+    MEASURED, BOTH PRs, FROM THE CHECK-RUN ATTEMPT HISTORY (`?filter=all`), NOT FROM A
+    DISPOSITION:
+      #2434 head 202d302 — `coverage-ratchet` cancelled 2026-08-22T20:15:54Z, then success
+        2026-08-22T21:02:14Z. Every sibling required check reported success at 20:15:5x.
+      #2444 head e08014d — `coverage-ratchet` cancelled 2026-08-22T01:26:04Z, then success
+        2026-08-22T07:06:25Z; `ci-gate` failure 01:26:02Z, then success 07:24:35Z.
+    The gap between the cancellation and the success is a human or an agent noticing. Nothing in
+    the fleet re-queues a cancelled required job, so the PR sits red with no defect in its diff.
+
+    `coverage-ratchet` IS REQUIRED: it is named in `.github/workflows/ci-gate.yml`'s `REQUIRED`
+    list, so ci-gate correctly refuses to pass while it is non-success. ci-gate is not wrong here
+    and is not in scope.
+
+    THERE IS NO RE-QUEUE CAPABILITY TO EXTEND. The sweep has no rerun/requeue action today; its
+    action vocabulary is arm/close/dispatchFix/escalate. This task adds one, bounded as design
+    note (ii) states.
+  design: |
+    (i) DISTINGUISH THE ABSENCE FROM THE VERDICT, WITHOUT WIDENING `checksState`.
+    `checksStateFromRollup`'s own doc REFUSES a fifth union member in terms — "NOT WIDENED TO A NEW
+    `unknown` checksState, deliberately", because `OpenPrView["checksState"]` is read at many
+    comparison sites and a member every existing row fails to match is the
+    false-predicate-falls-through shape. So `checksState` stays `red` for a cancelled required
+    check, and the distinction rides on a SEPARATE observable naming which required checks are
+    cancelled with no later attempt on the same head — the shape `ciFailures` already uses. A
+    cancelled check must NOT become `green`.
+
+    (ii) THE RE-QUEUE IS BOUNDED BY RECORD, NOT BY A CLOCK. At most ONE re-queue per (head sha,
+    check name), and the attempt is LEDGERED BEFORE it can be repeated, so the bound is read back
+    from the ledger rather than held in memory — the idempotence shape `alreadyLedgeredCostAnomalyRunIds`
+    already uses. NO TIMER AND NO RETRY BUDGET: both are ways of saying "try again later", and the
+    claim here is that exactly one re-queue is either sufficient or diagnostic.
+
+    (iii) A SECOND CANCELLATION ON THE SAME HEAD IS A DIFFERENT FINDING, AND IT ESCALATES.
+    If the re-queued attempt is cancelled again on the same head sha, the fleet does NOT re-queue
+    again. One cancellation is plausibly a preempted runner; two on the same sha is evidence of
+    something that re-queueing cannot reach — a concurrency group cancelling it, a capacity fault,
+    or a workflow-level cancel — and it goes to a human naming the check and both cancellations.
+
+    (iv) RE-QUEUE THE JOB, NEVER THE RUN. The target is the single job
+    (`POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun`), never
+    `.../runs/{run_id}/rerun-failed-jobs`, because `ci` and `coverage-ratchet` share a workflow run
+    here and a whole-run re-run re-spends an already-green `ci` — the full suite.
+
+    (v) NOT THE FIX RUNG'S JOB, AND THE NEAREST SIBLING IS NOT ABSORBED. The PR has no defect, no
+    unmet criterion and nothing for a code worker to change; a `ci-log` worker pointed at a
+    cancelled job has no failing assertion to read. This is gate reconciliation, which is the
+    sweep's own lane. W1-T1212 (`plan/tasks.d/W1-T1212-red-pr-runs-a-frozen-copy-of-its-own-gate.yaml`,
+    status queued) is the nearest sibling — it reconciles a STALE gate by updating the branch, a
+    different cause with a different remedy. This task does not extend, re-scope or absorb it, and
+    the two overlap on `files:` so dispatch will serialise them.
+
+    (vi) OUT OF SCOPE, EACH REFUSED FOR A STATED REASON. Making `coverage-ratchet` non-required is
+    refused: it is a real gate and the incident is not its fault. Treating `CANCELLED` as success
+    is refused: it would pass a PR on a verdict nobody ever reached. Retuning ci-gate is refused:
+    ci-gate behaved correctly throughout.
+
+    (vii) THE FALSIFIER RUNS BOTH WAYS. A cancelled required check must be named and re-queued
+    ONCE; a genuinely FAILING required check must be named as failing and re-queued NEVER. A
+    change that re-queued everything would satisfy the first and fail the second.
+  acceptance:
+    - claim: "a required check whose latest attempt is cancelled is named apart from one that genuinely failed"
+      proof: "unit test: test/cancelled-required-check-requeue.test.ts"
+    - claim: "the sweep re-queues that check at most once for a given head sha, bounded by a ledgered record"
+      proof: "unit test: test/cancelled-required-check-requeue.test.ts"
+    - claim: "a second cancellation on the same head re-queues nothing and raises a human-facing escalation"
+      proof: "unit test: test/cancelled-required-check-requeue.test.ts"
+    - claim: "the re-queue targets the single job, never the workflow run that carries an already-green ci"
+      proof: "unit test: test/cancelled-required-check-requeue.test.ts"
+  note: |
+    risk: high IS SET UP FRONT. Rule 19 SPAN: the files cross the sweep's predicate, the CLI wiring
+    that supplies its deps, and a new suite. The blast radius is genuinely high as well — this adds
+    an action that mutates CI state unattended, so the bound in design (ii) is the load-bearing part
+    of the shard rather than a detail.
+
+    `src/run-task.ts` IS DECLARED because `runSweep` is invoked with real deps there and nowhere
+    else; the re-queue dep has no other wiring site. Per DECISIONS.md's 2026-08-18 ruling
+    (W1-T471, OPERATOR-RULED), a new shard declaring this file simply declares it — that entry
+    states the ritual acceptance sentence is no longer required.
+
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT: `checksStateFromRollup` reads sweep.ts=7,
+    run-task.ts=7; `REQUIRED_CHECK_FAIL` reads sweep.ts=3, run-task.ts=4; `runSweep`'s only
+    real-deps call sites are in run-task.ts. No other src file is named.
+
+    PROOF NOTES: all four proofs are the PURE-PATH `unit test:` form naming
+    `test/cancelled-required-check-requeue.test.ts`, which this shard's own `files:` declares. That
+    is the ONLY form a forward reference can take: `judgeCriterion` (src/lib/review.ts) gates its
+    forward-reference carve-out on `!whitelisted.nameFiltered`, and its own comment says a bare
+    test-NAME proof "has no single target path to look up in `files:`, so it is untouched". A
+    name-filtered title therefore resolves to zero tests on the head and is graded `no-match`
+    rather than `not_yet_built` — measured on this PR's first head, which the reviewer failed. The
+    path form is also what every merged `chore(plan)` filing in the corpus uses.

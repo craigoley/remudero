@@ -278,12 +278,21 @@ jobs:
         # once -- zero behavior change from before this task.
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
+          # W1-T1217: `--import ./test/setup/tmp-hygiene.ts` is NOT optional here and its absence
+          # was a real divergence, not a saving. The `ci` job runs this same
+          # `test/**/*.test.ts` glob through `npm run test:ci`, whose script DOES carry that
+          # flag; this step spelled the invocation out inline and omitted it — so the two
+          # required jobs ran the same suite under different module sets. Everything the harness
+          # provides (the tmp-dir reaper AND, since W1-T1217, the `GIT_CONFIG_*` pair that
+          # disables git's background gc for every spawned git) was simply absent from the
+          # coverage run. Any test asserting on that environment passes in `ci` and fails here,
+          # which is exactly how this was found.
           mkdir -p coverage
           node scripts/test-with-retry.mjs \
             node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
-            --test --import tsx "test/**/*.test.ts"
+            --test --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
       # ORDER IS LOAD-BEARING (2026-08-13): diff-coverage runs BEFORE the aggregate ratchet.
       # No step in this job carries an `if:`, so a failing step skips every step after it —
       # MEASURED: in five of six recent failing CI runs the ratchet step concluded `failure` and
@@ -466,11 +475,15 @@ jobs:
       # cost of leaving it out is that `rmd preflight --ci-parity` does not mirror this step
       # locally — a fidelity gap, not a gate failure.
       #
-      # The cap carries ZERO HEADROOM: CLAUDE.md's own charter says every addition must be paid for
+      # The cap is a size CEILING: CLAUDE.md's own charter says every addition should be paid for
       # by a fold ("compression is a deliverable, not just accretion"), so
-      # scripts/claude-md-budget-baseline.json's capBytes is the measured size at capture, not a
-      # figure with room to grow into. It only ever ratchets UP, by a reviewed bump that says why
-      # growth is right — never down to make a red PR pass.
+      # scripts/claude-md-budget-baseline.json's capBytes was originally the measured size at
+      # capture, with no room to grow into. THE OPERATOR RETIRED THAT ZERO-HEADROOM SHAPE ON
+      # 2026-08-22 and raised the cap to a round 64 KiB, after CLAUDE.md hit it with one byte of
+      # room twice the same day and both lanes spent more effort folding prose than writing the
+      # rule they came to write — see that baseline's bumpRationale. The gate is unchanged and
+      # still fails closed; only the number moved. It only ever ratchets UP, by a reviewed bump
+      # that says why growth is right — never down to make a red PR pass.
       - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap)
         run: npm run --silent claude-md-budget-ratchet
 

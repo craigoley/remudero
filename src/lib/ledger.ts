@@ -393,6 +393,22 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              one it credited, permanently — a credit-based
  *                                              `depends_on` a hand-completed task can otherwise
  *                                              never satisfy.
+ *   - "automerge.hold_engaged" /             → review.ts's automergeHoldFromLedger — an
+ *     "automerge.hold_released"                operator's merge hold, consulted by sweep.ts's
+ *                                              `alreadyDone` for `disposition: "mergeable"`
+ *                                              (W1-T1000002) exactly where "automerge.
+ *                                              capped_override_granted" and "risk_judge.escalated"
+ *                                              are consulted immediately above. UNLIKE those two,
+ *                                              this pair is deliberately NEVER sha-keyed — a hold
+ *                                              must survive a push, so losing either line across a
+ *                                              rotation either lifts a hold the operator believes
+ *                                              still stands (dropping "hold_engaged") or re-freezes
+ *                                              a PR the operator already released (dropping
+ *                                              "hold_released", the "last one wins" read finding
+ *                                              only the stale engage). Both directions are exactly
+ *                                              the "the line IS the bound" failure this Set exists
+ *                                              to prevent, applied to a hold instead of a cap/risk
+ *                                              refusal.
  *
  * Deliberately EXCLUDES pure telemetry/polling noise (`ci.polling`, `pr.polling`,
  * `ops.alerts_polled`, `issues.polled`, `inbox.polled`, ...) — exactly the high-frequency,
@@ -511,6 +527,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // without landing a new head — see that function's own doc. Losing either across a rotation
   // reads a stalled dispatch as still in flight and re-strands the PR against a head nothing will
   // ever move again, the exact deadlock this task fixes.
+  // W1-T1211: run-task.ts's `runIsAwaitingExternal` reads this row to decide whether the light pass
+  // may let the fix rung act beside an in-flight run — a run that has written it has finished its
+  // worker turn and is waiting on GitHub. Written ONCE per wait, never per poll, which is why it
+  // belongs here and `ci.polling`/`pr.polling` (named as telemetry noise above) do not: losing this
+  // row across a rotation reads a WAITING run as WORKING and silently re-freezes the fix rung for
+  // that run's whole duration, which is the twenty-one-hour stall the task measured.
+  "run.awaiting_external",
   "fix.ci_not_green",
   "fix.resolved",
   // W1-T1095 (capability 3): run-task.ts's `fixRebaseAlreadySpent` reads this row to enforce the
@@ -626,6 +649,17 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // "sweep.absent_repush" shape this Set exists to prevent, applied to a dependency edge
   // instead of a re-push cap.
   "manual.completed",
+  // W1-T1000002: review.ts's automergeHoldFromLedger reads both back, "last one wins" over the
+  // whole ledger with NO head-sha binding (see this Set's own doc comment above for why a hold
+  // must outlive a push) — sweep.ts's `alreadyDone` for `disposition: "mergeable"` and the arm
+  // completion in run-task.ts (`attemptArm`) both consult it before ever registering an arm.
+  "automerge.hold_engaged",
+  "automerge.hold_released",
+  // W1-T1215: `armRunIdFromLedger` (run-task.ts) reads these rows to name WHICH lane armed a PR
+  // that merged behind a refused verdict. A rotation that dropped them would silently turn every
+  // such HARD_STOP's attribution into "unattributed" — the same quiet-reset failure this Set
+  // exists to prevent, so the read makes the step decision-relevant rather than cosmetic.
+  "automerge.armed",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: the mutation check in
   // test/ledger-rotation.test.ts anchors on those three lines followed by `]);` and asserts the
   // needle occurs EXACTLY once. A block appended after them silently breaks that anchor — this

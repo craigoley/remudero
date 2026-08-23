@@ -1188,18 +1188,17 @@ test("ghIssueGateway.listOpen: lists OPEN labeled issues with body over REST's /
   const gateway = ghIssueGateway("craigoley", "remudero", {
     exec: (args) => {
       calls.push(args);
-      // `--slurp` shape: one outer array wrapping one array per page.
+      // W1-T1208: bare `--paginate` (no `--slurp` — the operator host's gh 2.45.0 has no
+      // `--slurp`) shape: one JSON array per page, no outer wrapping array.
       return JSON.stringify([
-        [
-          {
-            number: 44,
-            url: "https://api.github.com/repos/craigoley/remudero/issues/44",
-            html_url: "https://github.com/craigoley/remudero/issues/44",
-            state: "open",
-            title: "[BLOCKED] W1-T189",
-            body: "**Task:** W1-T189\n",
-          },
-        ],
+        {
+          number: 44,
+          url: "https://api.github.com/repos/craigoley/remudero/issues/44",
+          html_url: "https://github.com/craigoley/remudero/issues/44",
+          state: "open",
+          title: "[BLOCKED] W1-T189",
+          body: "**Task:** W1-T189\n",
+        },
       ]);
     },
   });
@@ -1209,7 +1208,7 @@ test("ghIssueGateway.listOpen: lists OPEN labeled issues with body over REST's /
   assert.equal(open?.[0].body, "**Task:** W1-T189\n");
   assert.equal(open?.[0].url, "https://github.com/craigoley/remudero/issues/44", "the WEB url, never api.github.com");
   assert.deepEqual(calls, [
-    ["api", `repos/craigoley/remudero/issues?labels=${NEEDS_HUMAN_LABEL}&state=open&per_page=100`, "--paginate", "--slurp"],
+    ["api", `repos/craigoley/remudero/issues?labels=${NEEDS_HUMAN_LABEL}&state=open&per_page=100`, "--paginate"],
   ]);
 });
 
