@@ -509,6 +509,7 @@ import {
   REVIEW_CONTEXT,
   applyVerdictStability,
   bodyContradictsDiff,
+  recognizeChangesetClaims,
   buildReviewPrompt,
   cappedAnnotation,
   automergeHoldFromLedger,
@@ -4086,6 +4087,17 @@ async function runReview(args: {
     // N (`N` with no `review.unwired_advisory` line below), and a diff that added no exported
     // function at all (`0`).
     reachability_scanned: verdict.reachabilityScanned ?? null,
+    // W1-T1264 (design (i)/(iii)): the changeset-claims-recognised count, riding this
+    // ALREADY-EMITTED row rather than a new ledger line — see
+    // ReviewVerdict.changesetClaimsRecognised's doc for why a bare `changesetContradictions: []`
+    // above cannot tell "never read a claim" apart from "checked, and it agrees", and
+    // CHANGESET_CLAIM_FALSIFIER_NOTE (lib/review.ts) for how an author reads this number.
+    // `null` (never `0`) mirrors `changesetContradictions`'s own substitute-withholding above.
+    changeset_claims_recognised: verdict.changesetClaimsRecognised ?? null,
+    // W1-T1264 design (iv): true when the quote-stripping pass reached end-of-body still inside an
+    // open fence, silently starving the count above — named rather than left to read as a mundane
+    // zero.
+    changeset_fence_unbalanced_at_eof: verdict.changesetFenceUnbalancedAtEof ?? null,
   });
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
@@ -6334,6 +6346,20 @@ export async function runFixRung(opts: {
       try {
         const fetchDiffFiles = deps.fetchPrDiffFiles ?? fetchPrDiffFilesViaGh;
         const diffFiles = await fetchDiffFiles(opts.prUrl);
+        // W1-T1264 (design (iii) — "BOTH CONSUMERS CARRY IT"): `deriveChangesetClaimUpdate` below
+        // reuses `bodyContradictsDiff`'s own parse but returns only a repaired body/`undefined` —
+        // never the recognition count `judgeReview`'s own verdict now carries
+        // ({@link ReviewVerdict.changesetClaimsRecognised}). Logged here, at the FIX RUNG's own
+        // call site, so an author debugging why the auto-repair rung did or did not touch a body
+        // sees the identical "how many claims did the detector even read" number, not only the
+        // verdict object judgeReview returns later this same strike.
+        const recognition = recognizeChangesetClaims(reviewReport, diffFiles);
+        deps.log("fix.body_claim_recognition", {
+          strike: strikes,
+          recognised: recognition.recognisedCount,
+          contradictions: recognition.contradictions.length,
+          fence_unbalanced_at_eof: recognition.fenceUnbalancedAtEof,
+        });
         const updatedBody = deriveChangesetClaimUpdate(reviewReport, diffFiles);
         if (updatedBody !== undefined) {
           const writeBody = deps.updatePrBody ?? updatePrBodyViaGh;

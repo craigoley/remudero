@@ -532,6 +532,30 @@ export interface ReviewVerdict {
    */
   changesetContradictions?: ChangesetClaimContradiction[];
   /**
+   * W1-T1264 (design (i)/(ii)/(iii)): how many changeset claims {@link recognizeChangesetClaims}
+   * RECOGNISED in this body — see its own doc for the exact definition. THE FIELD THAT MAKES A
+   * SILENT `changesetContradictions: []` LEGIBLE: today that array reads identically whether the
+   * body never made a changeset claim at all or made one that agreed with the diff. `0` here means
+   * the former; `> 0` alongside an empty `changesetContradictions` means the latter — "checked, and
+   * it agrees" — the one fact that array alone cannot express. Mirrors `changesetContradictions`'s
+   * own withholding: `undefined` (never `0`) when {@link ReviewEvidence.reportIsSubstitute}
+   * withholds the whole check, so a genuine zero is never confused with "not computed". Purely a
+   * LEGIBILITY signal like `unwiredAdvisories`/`reachabilityScanned` — never folds into `state` or
+   * `floorState` itself; only `changesetContradictions` (unchanged) does that. Optional for the
+   * same reason every sibling field here is: every OTHER `ReviewVerdict` literal in the codebase
+   * needs no update; only {@link judgeReview} populates it.
+   */
+  changesetClaimsRecognised?: number;
+  /**
+   * W1-T1264 design (iv): true when {@link recognizeChangesetClaims}'s quote-stripping pass
+   * reached end-of-body still inside an open fence — see {@link
+   * ChangesetClaimRecognition.fenceUnbalancedAtEof}'s doc for why that silently starves
+   * `changesetClaimsRecognised`. Legibility only, like the field above; never forces `state`.
+   * Mirrors `changesetClaimsRecognised`'s own substitute-withholding (`undefined`, not `false`,
+   * when the check is withheld).
+   */
+  changesetFenceUnbalancedAtEof?: boolean;
+  /**
    * W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE): true when the
    * diff changes at least one measurement-instrument path ({@link
    * INSTRUMENT_SURFACE} — a CI workflow's measurement wiring, a ratchet/
@@ -2954,10 +2978,16 @@ function fileUnderClaimedPath(file: string, path: string): boolean {
  * DELIBERATELY NARROW: only blockquote lines and fences. Widening the exclusion (e.g. inline
  * `code spans`, which the enumeration cleanup already unwraps) would let a real contradiction hide
  * behind a single backtick — strictly worse than today's over-firing.
+ *
+ * ALSO REPORTS `fenceUnbalancedAtEof` (W1-T1264 design (iv)): whether `inFence` is STILL true once
+ * every line has been walked — i.e. the body opened a fence and never closed it. An unbalanced
+ * fence blanks the ENTIRE REMAINDER OF THE BODY, from the stray delimiter to EOF, so every later
+ * claim goes unread the same way a genuinely-quoted one does. That is silent and indistinguishable
+ * from "no more claims" today; {@link recognizeChangesetClaims} names it instead of swallowing it.
  */
-function stripQuotedRegions(report: string): string {
+function stripQuotedRegions(report: string): { scan: string; fenceUnbalancedAtEof: boolean } {
   let inFence = false;
-  return report
+  const scan = report
     .split("\n")
     .map((line) => {
       if (/^\s*```/.test(line)) {
@@ -2968,6 +2998,7 @@ function stripQuotedRegions(report: string): string {
       return line;
     })
     .join("\n");
+  return { scan, fenceUnbalancedAtEof: inFence };
 }
 
 /**
@@ -3002,12 +3033,21 @@ function stripQuotedRegions(report: string): string {
  * guesses at natural language would be a worse tripwire than the gap it
  * closes.
  */
-export function bodyContradictsDiff(report: string, diffFiles: string[]): ChangesetClaimContradiction[] {
+export function recognizeChangesetClaims(report: string, diffFiles: string[]): ChangesetClaimRecognition {
   const out: ChangesetClaimContradiction[] = [];
+  // W1-T1264: how many claim-shaped tokens, across every arm below, RECOGNISED as being about the
+  // changeset — regardless of whether they went on to agree or disagree with `diffFiles`. See
+  // {@link ChangesetClaimRecognition.recognisedCount}'s own doc for why this is the fix: a
+  // recognised-and-consistent claim increments this WITHOUT ever reaching `out` below, which is
+  // the one fact `bodyContradictsDiff`'s `[]` alone could never distinguish from "never read a
+  // claim at all". Incremented at the SAME point each arm below decides a match is a genuine claim
+  // (past its own subject anchor) — never at the point it decides that claim is FALSE.
+  let recognisedCount = 0;
   // W1-T308: scan the QUOTED-STRIPPED text throughout, never the raw `report` — see
   // {@link stripQuotedRegions}. Length- and newline-preserving, so every index below still lines up
-  // with the original body.
-  const scan = stripQuotedRegions(report);
+  // with the original body. `fenceUnbalancedAtEof` (W1-T1264) rides along unused until the return
+  // below — the arms never branch on it, only the caller reports it.
+  const { scan, fenceUnbalancedAtEof } = stripQuotedRegions(report);
 
   // (a) / (c): "exactly N files[: a, b, c]" — the count itself, and (when a
   // count is right but a named file is missing) the enumerated list.
@@ -3035,6 +3075,7 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
     const claimed = parseClaimedCount(m[1]);
     if (claimed === undefined) continue;
     if (!m[2] && !claimsChangesetContext(scan, m.index ?? 0)) continue;
+    recognisedCount++; // past both the parse and the subject anchor — a genuine claim, true or not
     let contradicted = claimed !== diffFiles.length;
     if (!contradicted && m[2]) {
       // MARKDOWN QUOTING IS STRIPPED BEFORE THE COMPARISON. A body writes a path the way this
@@ -3091,6 +3132,7 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
     } else {
       continue; // "no bugs", "no issues" — not a changeset claim; stay silent
     }
+    recognisedCount++; // past the anchor AND the path-shaped guard — a genuine claim, true or not
     if (violators.length > 0) out.push({ claim: m[0].trim(), files: violators });
   }
   // THE HOUSE SHORTHANDS NEED THE SAME SUBJECT ANCHOR THE COUNT CLAIM GOT, and for the same
@@ -3112,17 +3154,85 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
   for (const m of scan.matchAll(/\bplan-only\b/gi)) {
     if (!shorthandIsAboutChangeset(scan, m.index ?? 0, m[0].length)) continue;
     const violators = diffFiles.filter((f) => !isInPlanScope(f));
+    recognisedCount++; // one recognised claim per kind, matching the one-contradiction-per-kind break
     if (violators.length > 0) out.push({ claim: "plan-only", files: violators });
     break; // one contradiction per claim kind, exactly as the unanchored test produced
   }
   for (const m of scan.matchAll(/\bdata-only\b/gi)) {
     if (!shorthandIsAboutChangeset(scan, m.index ?? 0, m[0].length)) continue;
+    recognisedCount++;
     const violators = diffFiles.filter((f) => f.startsWith("src/") || isTestPath(f));
     if (violators.length > 0) out.push({ claim: "data-only", files: violators });
     break;
   }
 
-  return out;
+  return { recognisedCount, contradictions: out, fenceUnbalancedAtEof };
+}
+
+/**
+ * Everything {@link bodyContradictsDiff} decides, PLUS the two facts (W1-T1264) that make its
+ * silence legible: how many claim-shaped tokens were RECOGNISED at all, and whether the
+ * quote-stripping pass reached end-of-body still inside an open fence. See {@link
+ * recognizeChangesetClaims}'s own doc for how these are produced — nothing here changes WHEN a
+ * claim is recognised or WHEN it disagrees with the diff, only what is counted alongside it.
+ */
+export interface ChangesetClaimRecognition {
+  /**
+   * How many claim-shaped tokens, across every arm {@link bodyContradictsDiff}'s own doc
+   * enumerates, were RECOGNISED — matched an arm's shape AND passed that arm's own subject
+   * anchor ({@link claimsChangesetContext} / {@link noClaimIsAboutChangeset} / {@link
+   * shorthandIsAboutChangeset}) — regardless of whether the claim went on to AGREE or DISAGREE
+   * with `diffFiles`. `contradictions.length` is always <= this number: a recognised claim that
+   * AGREES with the diff is counted here and never appears in `contradictions` at all — design
+   * (ii)'s "checked, and it agrees", the one fact no other field can express. A `0` here paired
+   * with an empty `contradictions` means the body made no claim any arm recognises; see {@link
+   * CHANGESET_CLAIM_FALSIFIER_NOTE} for how an author tells that apart from "checked, and it
+   * agrees" — both currently render `changesetContradictions: []` on the posted verdict.
+   */
+  recognisedCount: number;
+  /** Identical to {@link bodyContradictsDiff}'s own return value — the FALSE-claim subset. */
+  contradictions: ChangesetClaimContradiction[];
+  /**
+   * W1-T1264 design (iv): true when {@link stripQuotedRegions}'s fence-toggle state was still
+   * OPEN once every line of the body had been walked — an unbalanced ``` delimiter blanks the
+   * remainder of the body to EOF (rationale (5)), so every later claim silently goes unread and
+   * `recognisedCount` under-counts without saying why. NAMED here, never auto-repaired: guessing
+   * the author's intent by closing the fence or re-scanning the blanked region is exactly what
+   * design (iv) forbids — {@link stripQuotedRegions}'s own strip pass is otherwise correct.
+   */
+  fenceUnbalancedAtEof: boolean;
+}
+
+/**
+ * THE FALSIFIER TECHNIQUE (rationale (6), W1-T1264) — stated beside the gate it describes, not
+ * passed on by word of mouth. A `recognisedCount` of `0` does NOT mean a claim was true; it means
+ * this detector never read one, and prints identically to a claim it read and found correct.
+ * Telling the two apart: reword the SAME claim into a deliberately FALSE variant of the identical
+ * shape (bump an "exactly N files" count, or negate a "no <path>" claim) and re-run. If the false
+ * variant ALSO recognises as `0`, the gate is blind to that WORDING — reach for one of the
+ * recognised shapes {@link bodyContradictsDiff}'s own doc enumerates instead. If the false variant
+ * fires a contradiction, the original claim was read, and it was true.
+ */
+export const CHANGESET_CLAIM_FALSIFIER_NOTE =
+  "A changeset-claims-recognised count of 0 does not mean your claim was true — it means this " +
+  "check never read it, and that prints identically to a claim it read and found correct. To tell " +
+  "the two apart, reword the SAME claim into a deliberately FALSE variant of the identical shape " +
+  "(bump an \"exactly N files\" count, or negate a \"no <path>\" claim) and re-run: if the false " +
+  "variant also recognises as 0, the gate is blind to that wording; if it fires a contradiction, " +
+  "your original claim was read, and it was true.";
+
+/**
+ * THE NARROW, FALSIFIABLE CHECK's own return value — the FALSE-claim subset of {@link
+ * recognizeChangesetClaims}'s fuller computation, unchanged in shape and behaviour from before
+ * W1-T1264 (every existing caller/fixture keeps working byte-for-byte). Prefer {@link
+ * recognizeChangesetClaims} at any NEW call site that can use `recognisedCount` — `judgeReview`
+ * (this file) and `deriveChangesetClaimUpdate` (run-task.ts) both do, so the SAME count reaches
+ * both surfaces an author reads (design (iii)) — this wrapper exists only so every caller that
+ * wants just the contradictions (most of this file's own doc comments, every existing test) never
+ * has to unwrap an object it does not need.
+ */
+export function bodyContradictsDiff(report: string, diffFiles: string[]): ChangesetClaimContradiction[] {
+  return recognizeChangesetClaims(report, diffFiles).contradictions;
 }
 
 /**
@@ -3485,7 +3595,13 @@ export function judgeReview(
   // body, so this withholds the check entirely rather than manufacturing a contradiction from
   // prose that was never a claim about the changeset (measured live on #2395: "No code." fired
   // against a one-file diff whose real, unreadable-that-day body never said it).
-  const changesetContradictions = evidence.reportIsSubstitute ? [] : bodyContradictsDiff(evidence.report, diffFiles);
+  // W1-T1264: ONE call now produces both `changesetContradictions` AND the recognition count that
+  // makes an empty `changesetContradictions` legible — see {@link
+  // ReviewVerdict.changesetClaimsRecognised}'s doc. Withheld together with `changesetContradictions`
+  // on a substitute report, for the identical reason: `undefined`/`undefined`, never `0`/`false`,
+  // so "not computed" is never confused with "computed and found nothing".
+  const changesetRecognition = evidence.reportIsSubstitute ? undefined : recognizeChangesetClaims(evidence.report, diffFiles);
+  const changesetContradictions = changesetRecognition?.contradictions ?? [];
 
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s
   // doc. Reuses the SAME `diffFiles` every other structural check above
@@ -3657,6 +3773,8 @@ export function judgeReview(
     planOnly,
     criteriaTampered,
     changesetContradictions,
+    changesetClaimsRecognised: changesetRecognition?.recognisedCount,
+    changesetFenceUnbalancedAtEof: changesetRecognition?.fenceUnbalancedAtEof,
     instrumentEntangled,
     instrumentEntanglementPaths: instrumentEntangled
       ? { instrumentPaths: instrumentEntanglement.instrumentPaths, srcPaths: instrumentEntanglement.srcPaths }
