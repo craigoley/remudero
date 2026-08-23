@@ -58,5 +58,21 @@ raw: "CORRECTS THE MECHANISM IN fb-1785898381737-50b031 — that entry's
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2552
+summary:
+  headline: PR fetch cadence, not issue fetch, drains GraphQL budget
+  what_happened: Previous entry correctly identified budget drain but blamed wrong
+    mechanism (issue fetch is already REST). Real culprit is PR fetches via
+    gatePrewarmOnClients running every ~28 seconds through GraphQL, at ~107
+    nodes per minute.
+  decision: File one corrected task merging this with fb-1785898381737-50b031,
+    with PR fetch as root cause and three fixes prioritized as listed.
+  options:
+    - label: Incremental PR fetch by merge-date
+      consequence: Only re-read PRs merged since last fetch; cuts nodes from 960 to
+        ~10 per cycle (~100x reduction).
+    - label: Switch PR list queries to REST API
+      consequence: Moves off GraphQL; REST quota still available at 4,800/hour.
+    - label: Extend poll cadence from 15s to 60s
+      consequence: Data changes on minute timescale; straight 4x reduction in API
+        calls, no accuracy loss.
