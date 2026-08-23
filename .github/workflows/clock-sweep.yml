@@ -46,6 +46,17 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # W1-T1104: test/serve.test.ts's "W1-T188 criterion 3" shells `git log --oneline` over
+          # the WHOLE history to map `(W\d+-T(\w+)) (#(\d+))` ship subjects to PR numbers — under
+          # this action's default shallow fetch (depth 1) that returns exactly ONE commit, so the
+          # mechanical sweep finds zero pre-#414 measured-property criteria and the test's own
+          # "found zero" refusal fires. Measured: fails identically at +0 (no clock shift at all)
+          # in a depth-1 clone, so this was never a wall-clock defect — `ci.yml`'s checkout already
+          # documents and fixes the identical shallow-fetch failure mode (its own comment, on this
+          # same action) and five sibling jobs already carry this fix; clock-sweep's checkout was
+          # simply never given it.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc

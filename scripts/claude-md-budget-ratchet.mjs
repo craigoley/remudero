@@ -7,12 +7,26 @@
 // "a context tax paid per session" -- and until this ratchet it was the fleet's largest per-session
 // injectable with no budget at all, while the learnings corpus at a fifth its weight already had a
 // CI ceiling (scripts/learnings-budget-ratchet.mjs). Same ratchet shape as that sibling and as the
-// coverage ratchet (scripts/coverage-ratchet.mjs) -- except this one is a byte-size CEILING with
-// ZERO HEADROOM: CLAUDE.md's own charter says every addition is supposed to be paid for by a fold
-// ("compression is a deliverable, not just accretion"), so the cap is set to the measured size at
-// capture, not a figure with room to grow into. A PR that grows the file goes RED and names the
-// overage in bytes; a healthy PR (at or under cap) exits clean. Raising the cap is a deliberate,
-// reviewed change (like the coverage floor and the learnings cap) -- never lower it to make a red
+// coverage ratchet (scripts/coverage-ratchet.mjs): a byte-size CEILING. A PR that grows the file
+// past the cap goes RED and names the overage in bytes; a healthy PR (at or under cap) exits clean.
+//
+// WHAT THE CAP IS FOR. This file is the WORKER PROMPT. It is injected in full on every run, so
+// every byte in it is paid for in tokens by every lane, every time -- the cost is per-session and
+// recurring, not one-off. The ratchet exists to make that growth DELIBERATE: a rule that earns its
+// place gets added and the cap is raised on the record, while an unreviewed dump goes red. It is a
+// forcing function for deliberation, never a prohibition on growth.
+//
+// THE CEILING CARRIED ZERO HEADROOM UNTIL 2026-08-22, AND NO LONGER DOES. It was originally set to
+// the measured size at capture, on the charter's reasoning that every addition should be paid for
+// by a fold ("compression is a deliverable, not just accretion"). THE OPERATOR RAISED IT ONCE, on
+// 2026-08-22, to 65536 (64 KiB), after the file hit the cap with ONE BYTE of room TWICE THE SAME
+// DAY and both lanes spent more effort folding prose than writing the rule they came to write. At
+// that point the cheap folds were spent and the next one would have cost meaning rather than
+// duplication. scripts/claude-md-budget-baseline.json's bumpRationale carries the full record.
+//
+// A LATER READER PROPOSING ANOTHER RAISE: this is the SECOND conversation about this number, not
+// the first. "The folds are expensive now" is the argument that carried on 2026-08-22 and cannot
+// carry a second time without new evidence -- say what changed. Never lower the cap to make a red
 // PR pass, and never raise it just to silence this gate without folding, sharpening, or deleting
 // something first.
 //

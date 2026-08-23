@@ -39,3 +39,15 @@ RMD_DAEMON_RUNTIME_ENV_VARS=(
   GH_APP_INSTALLATION_ID
   GH_APP_PRIVATE_KEY_PATH
 )
+
+# W1-T1222: the console's own runtime names, read by `resolveServeHosts` in src/lib/serve.ts, NOT
+# by the daemon — a separate list rather than folded into the one above because
+# `deploy/recycle-container.sh` only ever recycles `remudero-daemon`, and `RMD_DAEMON_RUNTIME_ENV_VARS`
+# is what that script's "did the running container carry a name this list does not?" refusal
+# checks. `deploy/host-update.sh --print-daemon-run` reads these names so its printed
+# `remudero-serve` invocation has something declared to pass through, rather than inventing the
+# two spellings inline where they could drift from what src/lib/serve.ts actually reads.
+RMD_SERVE_RUNTIME_ENV_VARS=(
+  RMD_SERVE_HOST
+  RMD_SERVE_NETWORK
+)

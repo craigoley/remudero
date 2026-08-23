@@ -96,16 +96,16 @@ forensic detail, so the narrative does not need to live here.
   verdict lands CAPPED at `proof_exec: 0/N`, which will not arm auto-merge. #1194 posted 0/3 that
   way, and **#1189 MERGED at 2/4** — only its two `grep:` proofs ever ran, and nothing said so.
   Write `unit test: <exact-title substring>`: the prefix is required, and what follows it must be a
-  bare title, NOT the `test/foo.test.ts::title` form — that form satisfies `rmd lint-plan` but the
-  executor feeds the whole string to `--test-name-pattern` and matches zero tests. In a **plan
-  shard**, use the pure-path form `unit test: test/foo.test.ts`: it lint-passes and executes the
-  whole file. `rmd check-proof '<proof>'` — the second of the two verbs the bullet above requires —
-  is the reviewer's own parser AND executor (W1-T387: it judges the run through
+  bare title, NOT the `test/foo.test.ts::title` form — that lint-passes but feeds the whole string
+  to `--test-name-pattern`. In a **plan shard** use ONLY the pure-path form
+  `unit test: test/foo.test.ts`: `judgeCriterion`'s `not_yet_built` carve-out needs `!nameFiltered`
+  AND that path in the shard's `files:` (`shardDeclaredFilesInDiff`), so a TITLE silently grades
+  `no-match` = TEST THEATRE. A plan-only PR hides it (W1-T205 runs 0 of N): it bites a filing
+  declaring a `src/` file. `rmd check-proof '<proof>'` — the second of the two verbs the bullet
+  above requires — is the reviewer's own parser AND executor (W1-T387: it judges the run through
   `execWhitelistedProof` itself, not a second hand-rolled exit-code check). Read its `verdict:`
-  line, never the raw `exit:` line — a name-filtered proof that resolves to a file but names no real
-  test title exits 0 and looks green (`exit: 0`, `hits: 17` is a MEASURED real example) while its
-  `verdict:` correctly reads `no-match`; `rmd check-proof --help` states the full verdict→exit-code
-  mapping. *(#766, #773, #777, #1189, #1194)*
+  line, never the raw `exit:` — that same zero-match case exits 0 with `hits: 17` (MEASURED) while
+  `verdict:` reads `no-match`; `--help` states the full mapping. *(#766, #773, #777, #1189, #1194)*
 - **A `unit test:` title is matched as a LITERAL substring after escaping — the OPPOSITE of a
   `grep:` pattern, which is a BASIC REGEX.** `parseTestTarget` (`src/lib/review.ts`) compiles a
   bare title to `--test-name-pattern escapeRegExp(trimmed)`, so `.` `(` `)` `[` `]` and every other
@@ -135,9 +135,8 @@ forensic detail, so the narrative does not need to live here.
   and base is downgraded to `executed_stale` (W1-T273) because it discriminates nothing — **and
   W1-T362 extended `executed_stale` to `unit test:` proofs too, so DISCRIMINATION, not mere
   execution, is the bar for every dialect**: a proof reading 1/1 across head and base substantiates
-  nothing. Run a control
-  pattern that must NOT match, because `grep -r` with no file operand searches the cwd instead of stdin
-  and will fake a match for every pattern you test. *(#1120 — a `-F`-verified proof failed the review)*
+  nothing. Run a control pattern that must NOT match: `grep -r` with no file operand searches the
+  cwd, not stdin, and fakes a match for anything. *(#1120 — a `-F`-verified proof failed the review)*
 - **A plan-only PR is not automatically CAPPED — prefer certification over the W1-T205 carve-out.**
   `planOnly` (`src/lib/review.ts`) exempts a plan-only diff from the proof-execution FLOOR; it does
   not stop real proofs from executing. `grep: <pattern> in <path>` proofs with an EXPLICIT path do

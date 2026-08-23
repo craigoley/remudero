@@ -272,6 +272,13 @@ Rotate whenever a token has been exposed. Treat *exposed* broadly: a token that 
 file, a terminal transcript, a screenshot, or a chat window is compromised and must be rotated
 rather than merely un-shared.
 
+**On this fleet the console does not run under launchd at all — it runs in a container.**
+`remudero-serve`, launched by `deploy/serve-container.sh`, is what `console.remudero.com` reaches;
+the launchd unit above is the shape for a machine that runs `rmd serve` directly. The container
+binds `0.0.0.0` inside its own network namespace rather than the tailnet address, which takes two
+declarations rather than one — see [Bringing up the console
+container](#bringing-up-the-console-container-remudero-serve) in the crisis runbook.
+
 ## Shipping a new CI gate: three PRs, in this order
 
 A new gate — a workflow job plus the script it runs — cannot land as one PR, and merging the
@@ -518,6 +525,81 @@ Like its siblings, this is a plain bash-and-docker script, on purpose: it must k
 with no node, no `rmd` and no checkout, which rules out an `rmd` verb outright — every verb runs
 `checkCliFreshness` first, which would fast-forward the very checkout the container being recycled
 is bind-mounting.
+
+### Bringing up the console container (`remudero-serve`)
+
+The console the fleet is actually read from — `console.remudero.com` — is a **separate container**,
+`remudero-serve`, and `deploy/serve-container.sh` is its launch config. Until that script existed
+the container had been launched by hand and its shape survived only in `docker inspect`, one
+`docker rm` away from being lost; the only written trace was a doc comment in `resolveServeHosts`
+that names the container as a thing that exists.
+
+```sh
+./deploy/serve-container.sh                 # create it (refuses if one already exists)
+./deploy/serve-container.sh --replace       # stop + rm the existing one first
+./deploy/serve-container.sh --dry-run       # print the docker run, change nothing
+TAG=<sha> ./deploy/serve-container.sh       # pin a build instead of :latest
+```
+
+**Two parts of the shape are not discoverable from the flags, and each one produces a console that
+starts cleanly and answers nobody.**
+
+*The wildcard bind takes two things typed together: the env var permits it, the flag selects it.*
+`assertBindableHost` (`src/lib/serve.ts`, W1-T915) refuses `0.0.0.0` outright unless
+`RMD_SERVE_NETWORK=container` is set — and setting that variable does not itself choose the
+wildcard. With it set and no `--host`, `resolveServeHosts` still returns loopback, because the
+default is unchanged containerised or not ("exposure must be typed, never inherited"). So the
+container carries **both** `-e RMD_SERVE_NETWORK=container` **and** `--host 0.0.0.0`, and a launch
+with only one of the two either refuses at boot or binds loopback and is unreachable. Loopback is
+the wrong bind here for a reason that has nothing to do with trust: a sibling container reaches
+this one over its address *inside* the container network namespace, never over its loopback.
+
+*The container must sit on `rmd-net`, because the tunnel resolves it by name.* cloudflared's
+ingress rule for the public hostname points at `http://remudero-serve:4317` — a **name**, answered
+by Docker's embedded DNS, which only resolves for containers sharing a user-defined network. A
+console on the default bridge has an address and no name: the tunnel fails to resolve it and the
+public hostname 502s while the container looks healthy from the host. That is also why nothing
+publishes a port — `-p` is not how the console is reached, and adding one would put a
+bearer-token-guarded write surface on every network the *host* joins, which is exactly what
+W1-T915's refusal exists to prevent.
+
+**Why it is a separate container and not a second process in the daemon.** The daemon container
+restarts itself constantly by design: `deploy/entrypoint.sh` relaunches on exit code 75 (freshness)
+in-container so docker's restart budget is not spent. Measured from the live container's log on
+2026-08-22: **25 freshness restarts that day and 25 the day before**, median gap ~39 minutes and
+the shortest 3. A serve process sharing that container would die on every one of them — the console
+down several dozen times a day, and down permanently whenever a restart wedges, which is precisely
+when the board is the thing you need. The two containers also carry different restart policies on
+purpose: `unless-stopped` for the console, `on-failure:5` for the daemon.
+
+**What the script refuses, and why each refusal is there.** It will not run from inside the image;
+it will not create `rmd-net` for you (a silently-created network gets the right name and leaves the
+tunnel on the old one — a console that resolves nothing, reported as success); it refuses a state
+mount that disagrees with the running daemon's, because a console pointed at a different tree
+renders a different fleet and reports no error at all; it refuses when no `GH_TOKEN` is available
+in the shell or capturable from the daemon container, because a console without one starts and then
+fails every read, which reads as "GitHub is down"; and it never replaces an existing console
+without `--replace`, since re-running a script to check something should not take down the surface
+you are checking from.
+
+`GH_TOKEN` is passed to `docker run` **by name** (`-e GH_TOKEN`, not `-e GH_TOKEN=<value>`), so the
+value never lands in the process table where any user on the host can read it with `ps`. The script
+matches the startup banner to prove the bind and never echoes it, because that banner carries the
+read token in the URL — the rotation rule above applies to a terminal transcript exactly as it
+applies to a log file.
+
+**Afterwards, check the three things that decide reachability**, all of which the script checks
+itself and prints: the container is running, it is attached to `rmd-net`, and the log carries
+`listening on http://0.0.0.0:4317`. If cloudflared is not on `rmd-net` the script warns rather than
+fixing it — `docker network connect rmd-net cloudflared` is the repair.
+
+**A cold console can take minutes to answer its first request, and that is not the container being
+broken.** Measured 2026-08-22 against a freshly started `remudero-serve`: the process was executing
+`gh api repos/<owner>/<repo>/commits/<branch>/status` serially across the repo's 85 `run-*`
+branches, and while it did, even a trivial route did not answer and further requests simply queued
+behind it. TCP connects succeed throughout, so the container looks up and the page looks hung. Read
+`docker exec remudero-serve ps -eo etime,args` before concluding the console is down: if it is
+walking branch statuses, it is working, slowly.
 
 ### Attaching a data disk to the container host
 
