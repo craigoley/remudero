@@ -1,0 +1,123 @@
+- id: W1-T1255
+  title: "the arm's direct-merge fallback runs on the SAME exhausted transport it is falling back FROM — `mergeDirect` is `gh pr merge --squash`, which is GraphQL, so an exhausted GraphQL bucket stops arming AND its fallback while `PUT /repos/{owner}/{repo}/pulls/{n}/merge` sits unused and core sits untouched"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    (1) **THE OPERATOR MEASUREMENT, 2026-08-23T12:14Z:** `graphql 0/5000` against `core 4999/5000`,
+    with seven open PRs none of which could arm; the board was cleared BY HAND over
+    `PUT /repos/{owner}/{repo}/pulls/{n}/merge`. **That hand-clear IS the measurement — the
+    capability existed the whole time and the fleet did not reach for it.**
+    **NOT RE-DERIVED HERE, AND SAID PLAINLY:** this container has no `gh` CLI and a 14-character
+    `GH_TOKEN`, so `gh api rate_limit` is unavailable and an unauthenticated probe answers for the
+    anonymous bucket. That probe DID reproduce the SHAPE — `graphql remaining=0` beside
+    `core remaining=14996` — but it is not the fleet account and the operator's figures stand on
+    their own provenance, not on mine.
+
+    (2) **THE FINDING IS NOT "THERE IS NO FALLBACK" — IT IS THAT THE FALLBACK SHARES THE
+    TRANSPORT.** `ArmDeps.mergeDirect` ALREADY EXISTS and is already wired: `run-task.ts`'s real
+    deps define it as `execFileSync("gh", ["pr", "merge", prUrl, "--squash"])`. `gh pr merge` is
+    GraphQL whether or not `--auto` is passed, so when the bucket is spent the arm fails AND the
+    thing it falls back to fails, for the identical reason. The fleet has the fallback SHAPE and
+    not the fallback PROPERTY.
+
+    (3) **THE REST ENDPOINT IS UNUSED, MEASURED.** `git grep -nE 'pulls/[^ ]*/merge|--method PUT'`
+    over `src/` and `scripts/` returns NOTHING. **POSITIVE CONTROL on the same tree:** the
+    update-branch REST call IS reached — `ghUpdateBranchArgv` (W1-T1095 capability 3) invoked by
+    `updateBranchViaGh`, whose own doc reads *"REST since W1-T1208"*. So the query can see a REST
+    endpoint this repo reaches for; the merge endpoint's zero is absence, not a blind sweep.
+
+    (4) **THE TRIGGER ALREADY EXISTS AND SHIPPED HOURS AGO.** W1-T1235 added
+    `armFailureIsRateLimited` — documented as *"narrower than `armFailureAction`'s `transient`
+    bucket: TRUE only for the rate-limit/abuse-detection signatures within it, never a bare
+    transport fault"* — and `attemptArm`'s catch already consults it to record
+    `automerge.rate_limit_refused`. **THIS TASK CONSUMES THAT PREDICATE; IT DOES NOT BUILD A SECOND
+    ONE.** That is the standing rule this repo just adopted: carry a value that already exists.
+  design: |
+    (i) **Q1 — WHAT ARMING BUYS, AND WHAT THE FALLBACK GIVES UP.** Arming registers INTENT: GitHub
+    holds the merge and applies its own required-status contract later, so checks still running at
+    arm time are still honoured. A direct merge cannot do that — it merges NOW or refuses. **The
+    fallback therefore must not widen the condition, and today it already does not:**
+    `armFailureAction` routes to `"direct-merge"` ONLY on `/clean status/i`, and `sweep.ts` states
+    the outcome in terms — *"GitHub refused `--auto` on an already-clean PR and the fallback merged
+    it outright"*. **GitHub itself certifies the PR is clean; the fleet never evaluates required
+    contexts on its own.** Swapping the transport keeps that certification exactly where it is.
+    **WHAT IS GIVEN UP IS WAITING**: a REST merge cannot hold intent for a PR whose checks have not
+    finished, so it is a fallback for the already-green case ONLY and never a replacement for the
+    arm. A PR that is not yet green must still fail to arm and be retried, not merged.
+
+    (ii) **Q2 — THE TRIGGER IS THE NARROW PREDICATE, NOT "ANY GraphQL ERROR".** Falling back on
+    every GraphQL failure would merge PRs that GitHub refused ON A FACT. The classification already
+    exists in three layers: `armFailureAction` (W1-T1079/W1-T1119) sorts stderr into
+    `direct-merge`/`transient`/`retryable`/`unknown`, and W1-T1235's `armFailureIsRateLimited`
+    narrows `transient` to the quota signatures alone. **THE FALLBACK FIRES ONLY WHERE BOTH AGREE:
+    the refusal is rate-limited AND the PR is already clean.** `armFailureAction`'s own doc warns
+    that `gh pr merge` *"collapses GitHub's structured GraphQL error into stderr PROSE"*, which is
+    exactly why the trigger must stay an allowlist rather than a catch-all — and is a second reason
+    to prefer REST, whose refusal is structured. **`parseGhRateLimitHeaders` reads
+    `X-Ratelimit-Resource` and `X-Ratelimit-Reset` and W1-T1235 wired its first consumer; a REST
+    fallback is the natural second, because `gh api -i` can capture those headers where
+    `gh pr merge` never could.**
+
+    (iii) **Q3 — WHAT MUST NOT CHANGE, AND WHY THIS SHAPE IS THE SAFE ONE.** The risk judge still
+    gates. The operator still gates every merge that is not armed. **A REFUSED VERDICT MUST NEVER
+    MERGE BY EITHER PATH** — W1-T1215 shipped the hard stop for a refused verdict merging
+    unattended, and a second merge path must not reopen it. **THE STRONGEST GUARANTEE HERE IS
+    STRUCTURAL: THIS IS NOT A SECOND MERGE PATH.** It replaces the body of the EXISTING
+    `ArmDeps.mergeDirect` dep, reached through the existing `attemptArm` decision, behind every
+    gate that already guards it — `assertLiveWriteAllowed`, the verdict gate, the ledger hold. No
+    new call site, no new reachability, so nothing upstream of `mergeDirect` changes and W1-T1215's
+    stop keeps covering exactly what it covered before.
+
+    (iv) **PRECEDENT, CITED AND NOT RE-FILED.** W1-T1095 capability 3 built `ghUpdateBranchArgv`,
+    the `gh api --method PUT` form; W1-T1208 moved the sweep's update-branch site onto it because
+    the CLI subcommand needed a `gh` version the host did not have. Same manoeuvre, different
+    endpoint, and the argv-builder + classifier shape is already established to copy.
+  acceptance:
+    - claim: "the direct-merge fallback reaches the REST merge endpoint rather than the GraphQL CLI"
+      proof: "unit test: test/rest-merge-fallback.test.ts"
+    - claim: "the fallback fires only when the refusal is a rate-limit refusal and not on any other arm failure"
+      proof: "unit test: test/rest-merge-fallback.test.ts"
+    - claim: "a PR whose required contexts are not already green is not merged by the fallback"
+      proof: "unit test: test/rest-merge-fallback.test.ts"
+    - claim: "a refused verdict still cannot merge by the fallback path any more than by the arm"
+      proof: "unit test: test/rest-merge-fallback.test.ts"
+    - claim: "the live-write guard still refuses the fallback in a context that may not mutate a real PR"
+      proof: "unit test: test/rest-merge-fallback.test.ts"
+    - claim: "a rate-limited fallback refusal records the bucket and reset the response names"
+      proof: "unit test: test/rest-merge-fallback.test.ts"
+    - claim: "arming is still attempted first and the fallback never replaces it for a PR that can arm"
+      proof: "unit test: test/rest-merge-fallback.test.ts"
+  files: [src/run-task.ts, test/rest-merge-fallback.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#arm-fallback-shares-the-exhausted-transport-2026-08-23"
+  plan_refs: ["W1-T1235", "W1-T1095", "W1-T1208", "W1-T1079", "W1-T1119", "W1-T1215", "W1-T1050", "W1-T203"]
+  note: |
+    **`risk: high` UP FRONT** — Rule 19 span across `src/` and `test/`, and the blast radius is a
+    live merge path: a fallback that fires too widely merges a PR GitHub refused on a fact.
+
+    **RELATIONSHIP TO W1-T1235, AND A REFINEMENT OF ITS OWN WORDING.** W1-T1235 (shipped; trailer
+    present on main) is the OBSERVABILITY task — its subject terms score `bucket` 21, `rmd status`
+    4, `HEADROOM` 3 — and it says the arm *"CANNOT be substituted away"* because GitHub exposes
+    auto-merge through `enablePullRequestAutoMerge`/`disablePullRequestAutoMerge` mutations only.
+    **THAT REMAINS TRUE OF ARMING AND IS NOT CONTRADICTED HERE.** What that sentence did not
+    separate is that ARMING and MERGING are different operations: there is no REST way to register
+    deferred intent, and there has always been a REST way to merge a PR that is already clean.
+    This task substitutes the second, never the first. Read together, the two shards say: the arm
+    itself is stuck on GraphQL, and its fallback need not be.
+
+    **DECLARED OVERLAP.** `src/run-task.ts` is contended; `overlappingPaths` will serialise this
+    against anything else declaring it, including W1-T1235's own build if it is still in flight.
+
+    **NOT PROPOSED, BY NAME:** abandoning auto-merge, raising a quota, rotating credentials. One
+    operator, one account, and W1-T203's provenance gate.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T1255` reserved 2026-08-23T12:20:53Z (frontier: 1253/1254
+    reserved, 1256 free). Eight id surfaces swept clear, each with a control qualified for that
+    surface, including a count-per-head sweep over 134 live heads where this id read 0 while
+    control W1-T1219 read 10.
