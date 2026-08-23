@@ -25,13 +25,16 @@ import {
   judgePauseHonoured,
   judgeRepairStall,
   judgeStaleGitLocks,
+  judgeSweepLiveness,
   parseMemInfo,
   readAlivePhases,
   readCurrentRunAlivePhases,
   readGitLocks,
   readPauseAgeMs,
+  readSweepPassSummaryTimestamps,
   refuseUnsupportedArgs,
   renderDoctor,
+  SWEEP_LIVENESS_STEPS,
   worstVerdict,
   type Check,
 } from "../src/lib/doctor.js";
@@ -42,11 +45,23 @@ function aliveRow(phase: string, ts: string): Record<string, unknown> {
   return { step: "daemon.alive", phase, ts, poll_interval_ms: 300_000 };
 }
 
+// A HEALTHY sweep.pass/sweep.summary pair, so every PRE-EXISTING test below (none of which is
+// about sweep-liveness) keeps testing what it always tested, rather than incidentally tripping
+// the new arm's zero-rows WARN (design note (3): zero sweep.pass rows is WARN, never OK).
+function healthySweepRows(): Record<string, unknown>[] {
+  return [
+    { step: "sweep.pass", ts: "2026-08-20T11:50:00Z", enumerated: 3 },
+    { step: "sweep.summary", ts: "2026-08-20T11:50:05Z" },
+    { step: "sweep.pass", ts: "2026-08-20T11:55:00Z", enumerated: 2 },
+    { step: "sweep.summary", ts: "2026-08-20T11:55:05Z" },
+  ];
+}
+
 function baseInputs(over: Partial<Parameters<typeof buildDoctorReport>[0]> = {}): Parameters<typeof buildDoctorReport>[0] {
   const now = Date.parse("2026-08-20T12:00:00Z");
   return {
     nowMs: now,
-    ledgerLines: [aliveRow("dispatch", "2026-08-20T11:59:00Z")],
+    ledgerLines: [aliveRow("dispatch", "2026-08-20T11:59:00Z"), ...healthySweepRows()],
     candidateCount: 0,
     mem: { availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 },
     diskFreeBytes: 40 * 1024 ** 3,
@@ -162,6 +177,153 @@ test("W1-T1209: the existing doctor arms are unchanged", () => {
     const check = report.checks.find((c) => c.name === name);
     assert.ok(check, `${name} is still present in the composed report`);
     assert.equal(check!.verdict, "OK", `${name}'s verdict is unaffected by the new repair-stall arm`);
+  }
+  assert.equal(report.worst, "OK");
+  assert.equal(report.exitCode, 0);
+  // +2, not +1: W1-T1236 lands a SECOND new arm (sweep-liveness) after this test's own baseline —
+  // this file's own baseInputs() carries a healthy sweep.pass/sweep.summary pair, so it reads OK.
+  assert.equal(report.checks.length, preExisting.length + 2, "repair-stall and sweep-liveness both joined the report");
+});
+
+// ── W1-T1236 — sweep liveness: a reader for `sweep.pass`, the per-pass heartbeat nothing read ──
+//
+// `sweep.pass` is written BEFORE `runSweep`'s per-PR loop runs, exactly so a pass that throws
+// mid-loop still leaves a row — and until this arm, nothing consumed it. Each test below is one of
+// the shard's eight named acceptance claims.
+
+test("W1-T1236: a stale sweep.pass reads non-OK with its measured age", () => {
+  const t0 = Date.parse("2026-08-20T11:00:00Z");
+  const t1 = Date.parse("2026-08-20T11:10:00Z"); // a 10-minute observed gap ⇒ a 30-minute bound
+  const nowMs = t1 + 40 * MIN; // 40 minutes past the newest pass — past the derived bound
+
+  const stale = judgeSweepLiveness([t0, t1], [t1 + 1000], nowMs);
+  assert.equal(stale.verdict, "WARN");
+  assert.match(stale.measured, /40m/, "the measured age is named, never a bare non-OK verdict");
+  assert.match(stale.threshold, /longest observed gap between sweep\.pass rows/, "the bound explains its own derivation, never a round figure");
+
+  // POSITIVE CONTROL: the identical cadence, well inside the bound, is OK — non-OK comes from the
+  // age and not merely from sweep.pass rows existing at all.
+  const fresh = judgeSweepLiveness([t0, t1], [t1 + 1000], t1 + 5 * MIN);
+  assert.equal(fresh.verdict, "OK");
+});
+
+test("W1-T1236: a pass with no summary after it reads non-OK", () => {
+  const passTs = Date.parse("2026-08-20T11:55:00Z");
+  const summaryBeforeTs = Date.parse("2026-08-20T11:50:00Z"); // BEFORE the pass — does not cover it
+  const nowMs = passTs + MIN;
+
+  const unfinished = judgeSweepLiveness([passTs], [summaryBeforeTs], nowMs);
+  assert.equal(unfinished.verdict, "WARN");
+  assert.match(unfinished.measured, /no sweep\.summary at or after it/);
+  assert.match(unfinished.detail!, /written BEFORE the loop/);
+
+  // POSITIVE CONTROL: a summary at the SAME instant as the pass already counts as covering it —
+  // pairing is BY TIME ORDER, never a correlation id (design note (2b)).
+  const finished = judgeSweepLiveness([passTs], [passTs], nowMs);
+  assert.equal(finished.verdict, "OK");
+});
+
+test("W1-T1236: a pass followed by its own summary reads OK", () => {
+  const t0 = Date.parse("2026-08-20T11:50:00Z");
+  const t1 = Date.parse("2026-08-20T11:55:00Z");
+  const summary0 = t0 + 5_000;
+  const summary1 = t1 + 5_000;
+  const nowMs = t1 + MIN;
+
+  const healthy = judgeSweepLiveness([t0, t1], [summary0, summary1], nowMs);
+  assert.equal(healthy.verdict, "OK");
+  assert.match(healthy.measured, /finished by its own sweep\.summary/);
+
+  // wired end to end through the reader, on real ledger-line shapes
+  const lines = [
+    { step: "sweep.pass", ts: new Date(t0).toISOString(), enumerated: 5 },
+    { step: "sweep.summary", ts: new Date(summary0).toISOString() },
+    { step: "sweep.pass", ts: new Date(t1).toISOString(), enumerated: 4 },
+    { step: "sweep.summary", ts: new Date(summary1).toISOString() },
+  ];
+  const rows = readSweepPassSummaryTimestamps(lines);
+  assert.equal(rows.passesMs.length, 2);
+  assert.equal(rows.summariesMs.length, 2);
+  assert.equal(judgeSweepLiveness(rows.passesMs, rows.summariesMs, nowMs).verdict, "OK");
+});
+
+test("W1-T1236: zero sweep.pass rows read WARN and never OK", () => {
+  const unknown = judgeSweepLiveness([], [], Date.parse("2026-08-20T12:00:00Z"));
+  assert.equal(unknown.verdict, "WARN");
+  assert.match(unknown.measured, /UNKNOWN/);
+  assert.notEqual(unknown.verdict, "OK");
+
+  // a sweep.summary with no sweep.pass at all is the identical shape — sweep.summary alone proves
+  // nothing about sweep.pass's own liveness (design note (3)).
+  const onlySummary = judgeSweepLiveness([], [Date.parse("2026-08-20T11:59:00Z")], Date.parse("2026-08-20T12:00:00Z"));
+  assert.equal(onlySummary.verdict, "WARN");
+
+  // and wired through the reader on an empty ledger
+  assert.deepEqual(readSweepPassSummaryTimestamps([]), { passesMs: [], summariesMs: [] });
+});
+
+test("W1-T1236: the sweep-liveness arm performs no action of its own", () => {
+  const t0 = Date.parse("2026-08-20T11:50:00Z");
+  const t1 = Date.parse("2026-08-20T11:55:00Z");
+  const nowMs = t1 + 90 * MIN; // comfortably past the derived 15-minute bound
+
+  const stale = judgeSweepLiveness([t0, t1], [], nowMs);
+  assert.equal(stale.verdict, "WARN");
+  assert.match(stale.detail!, /doctor only reports/);
+
+  // PURITY AS THE PROOF OF "NO ACTION" (mirrors W1-T1209's own test): a function with a side
+  // effect is not idempotent on identical inputs in a test process free of that state — it would
+  // either throw on a second call or leave visible residue. Calling it twice with the same inputs
+  // yields a byte-identical Check both times.
+  assert.deepEqual(judgeSweepLiveness([t0, t1], [], nowMs), stale);
+  assert.deepEqual(judgeSweepLiveness([t0, t1], [], nowMs), stale);
+});
+
+test("W1-T1236: buildDoctorReport wires the sweep-liveness arm into the composed report", () => {
+  const report = buildDoctorReport(baseInputs());
+  const check = report.checks.find((c) => c.name === "sweep-liveness");
+  assert.ok(check, "sweep-liveness must actually appear in the composed report, not merely be defined and unreached");
+  assert.equal(check!.verdict, "OK", "the healthy fixture pair in baseInputs() reads OK");
+
+  // CONTROL: strip the sweep rows back out and the SAME composed report reads the arm as WARN,
+  // proving buildDoctorReport really threads ledgerLines through to the new arm rather than a stub.
+  const blind = buildDoctorReport(baseInputs({ ledgerLines: [aliveRow("dispatch", "2026-08-20T11:59:00Z")] }));
+  assert.equal(blind.checks.find((c) => c.name === "sweep-liveness")!.verdict, "WARN");
+});
+
+test("W1-T1236: the arm reads the ledger through its exported boundary marker", () => {
+  assert.deepEqual([...SWEEP_LIVENESS_STEPS].sort(), ["sweep.pass", "sweep.summary"]);
+
+  // a step NOT named in the marker must never contribute, even one that superficially resembles a
+  // sweep step — the marker is the ONLY place either string literal is compared against.
+  const rows = readSweepPassSummaryTimestamps([
+    { step: "sweep.disposed", ts: "2026-08-20T11:55:00Z" },
+    { step: "sweep.pass", ts: "2026-08-20T11:56:00Z" },
+  ]);
+  assert.equal(rows.passesMs.length, 1);
+  assert.equal(rows.summariesMs.length, 0);
+});
+
+test("W1-T1236: the existing doctor arms are unchanged", () => {
+  const report = buildDoctorReport(baseInputs());
+  assert.ok(report.checks.some((c) => c.name === "sweep-liveness"), "the new arm is wired into the composed report");
+
+  const preExisting = [
+    "ledger-freshness",
+    "dispatch-stall",
+    "repair-stall",
+    "dispatch-liveness",
+    "pause-honoured",
+    "lock-vs-process",
+    "lane-less-workers",
+    "git-locks",
+    "disk-headroom",
+    "memory",
+  ];
+  for (const name of preExisting) {
+    const check = report.checks.find((c) => c.name === name);
+    assert.ok(check, `${name} is still present in the composed report`);
+    assert.equal(check!.verdict, "OK", `${name}'s verdict is unaffected by the new sweep-liveness arm`);
   }
   assert.equal(report.worst, "OK");
   assert.equal(report.exitCode, 0);
@@ -307,7 +469,7 @@ test("doctor: the verb registration dispatches into the doctor module", async ()
     err: (l) => lines.push(l),
     loadConfig: () => ({ root: "/nonexistent-doctor-root" }) as never,
     nowMs: Date.parse("2026-08-20T12:00:00Z"),
-    readLedgerLines: () => [aliveRow("dispatch", "2026-08-20T11:59:00Z")],
+    readLedgerLines: () => [aliveRow("dispatch", "2026-08-20T11:59:00Z"), ...healthySweepRows()],
     liveInflightRuns: () => [],
     readLockFiles: () => ({ locks: [] }),
     readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
@@ -337,7 +499,7 @@ function doctorDoctorDeps(over: Record<string, unknown> = {}) {
     err: () => {},
     loadConfig: () => ({ root: "/nonexistent-doctor-root" }) as never,
     nowMs: Date.parse("2026-08-20T12:00:00Z"),
-    readLedgerLines: () => [aliveRow("dispatch", "2026-08-20T11:59:00Z")],
+    readLedgerLines: () => [aliveRow("dispatch", "2026-08-20T11:59:00Z"), ...healthySweepRows()],
     readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
     readDiskFreeBytes: () => 40 * 1024 ** 3,
     readPauseAgeMs: () => undefined,
