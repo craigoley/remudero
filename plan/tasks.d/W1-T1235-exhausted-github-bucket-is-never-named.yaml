@@ -1,0 +1,140 @@
+- id: W1-T1235
+  title: "an exhausted GitHub quota bucket is never named — the auto-merge arm is GraphQL-ONLY and cannot be traded to REST the way `update-branch` was, its refusals discard the reset timestamp the response already carries, and `rmd status` reports the MODEL headroom window while saying nothing about GitHub's buckets, so green PRs sit unmerged for a reason no instrument states"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    OPERATOR MEASUREMENT, 2026-08-23T02:55Z, on the Azure host: `gh api rate_limit` read
+    **graphql 0/5000 (reset 03:26:08Z) against core 4855/5000 (reset 03:04:29Z)**; `gh pr edit`
+    exited 1 and changed nothing (stored bytes byte-identical before and after) because it goes
+    through GraphQL, while the SAME edit succeeded through `PATCH /pulls/<n>`, which uses core.
+
+    **THAT PAIR IS NOT RE-DERIVED HERE AND MUST NOT BE READ AS IF IT WERE.** This filing was
+    prepared from a container with no `gh` CLI and a 14-character `GH_TOKEN`, so an unauthenticated
+    `https://api.github.com/rate_limit` answered for the ANONYMOUS bucket, not the fleet account —
+    and answered incoherently at that (`graphql used=7 remaining=5000`). The operator reading stands
+    on its own provenance; every claim below that this shard DOES rest on was re-derived from the
+    tree at `1b3d2722` and is stated with the query that produced it.
+
+    (1) **THE ARM IS ON THE EXHAUSTED BUCKET AND HAS NO REST FORM.** The three arm/disarm writes are
+    raw `execFileSync` argv, all GraphQL-backed: `["pr", "merge", prUrl, "--auto", "--squash"]`
+    (`src/run-task.ts`, the `attemptArm` site), `["pr", "merge", prUrl, "--disable-auto"]` (the
+    disarm), and `gh(["pr", "merge", prUrl, "--auto", "--squash"])` in `src/lib/feedback-landing.ts`.
+    `run-task.ts` already matches the GraphQL error text verbatim —
+    `/can't disable auto-merge|disablePullRequestAutoMerge/i` — which is the disarm half failing on
+    the same budget. GitHub exposes auto-merge through `enablePullRequestAutoMerge` /
+    `disablePullRequestAutoMerge` MUTATIONS ONLY; there is no REST auto-merge endpoint, so unlike
+    every other GraphQL caller in this repo the arm CANNOT be substituted away.
+
+    (2) **THE PRECEDENT THAT A GraphQL DEPENDENCY CAN SOMETIMES BE TRADED — AND THE BRIEF'S
+    ATTRIBUTION CORRECTED.** `updateBranchViaGh` (`src/run-task.ts`) is REST today, and its own
+    doc says so: *"W1-T528's real gateway, REST since W1-T1208 — NOT `gh pr update-branch <url>`"*,
+    calling the same endpoint through `ghUpdateBranchArgv`, which the doc attributes to
+    **W1-T1095 capability 3** as `runFixRebase`'s gateway. So capability three BUILT the REST argv
+    and **W1-T1208 moved the sweep's update-branch site onto it**; citing W1-T1095 alone for the
+    move is off by one task. The trade was available there because the subcommand merely wrapped a
+    REST endpoint. It is not available for the arm, because no such endpoint exists.
+
+    (3) **THE RESET TIMESTAMP IS ALREADY PARSED — AND THROWN AWAY BEFORE ANY OPERATOR SURFACE.**
+    This is the finding that a flat "nothing reads it" would have missed. `parseGhRateLimitHeaders`
+    (`src/lib/worker.ts`) reads `X-Ratelimit-Remaining`/`-Used`/`-Limit`/`-Reset` **and
+    `X-Ratelimit-Resource` — the field that NAMES THE BUCKET**. Its only production reach is
+    `ghJson`'s optional `onRateLimit` hook, which needs `gh api -i`; a `git grep` for
+    `parseGhRateLimitHeaders|GhRateLimitReading` returns `src/lib/worker.ts` and
+    `test/open-prs-rest.test.ts` and NOTHING ELSE, so no production consumer carries the reading
+    anywhere. The arm does not reach it at all: `execFileSync("gh", ["pr","merge",...])` captures
+    stderr TEXT, never headers.
+
+    (4) **AND THE TEXT FALLBACK IS HONEST ABOUT RETURNING NOTHING.** `defaultGhRetryAfterSeconds`
+    (`src/lib/open-prs-rest.ts`) parses `retry-after` out of stderr, and its own doc states the
+    limitation: *"the failing path here carries stderr TEXT, never a captured header — `gh api -i`
+    reads 0 in this module — so this is a text parse ... and returns `undefined`, never a
+    manufactured wait, for the overwhelming majority of refusals"*. Refusing to invent a wait is
+    correct; the consequence is that today a rate-limited arm knows neither which bucket refused it
+    nor when that bucket returns.
+
+    (5) **`rmd status` REPORTS THE MODEL WINDOW, NOT GITHUB'S — CONTROLLED.** `src/lib/headroom.ts`
+    exists and is the HEADROOM section's source. Term counts in that file: `weekly` 32, `model` 22,
+    `session` 22 — against **`graphql` 0 and `core` 0**. The section is real and it is about the
+    model budget; the positive counts are what make the two zeros a measurement rather than a
+    missing file.
+  design: |
+    (i) **SURFACE WHAT IS ALREADY READ, RATHER THAN ADDING A PROBE.** The bucket name and reset are
+    already in `GhRateLimitReading`. The work is to carry that reading to two places it never
+    reaches — a ledger row and a status line — not to poll `rate_limit`. **NO NEW POLLING RUNG:**
+    a cadence that asks GitHub how much GitHub quota is left spends the quota it is reporting on,
+    and CLAUDE.md's own "Operating this host" rule already records a ninety-minute lockout caused
+    by cadence rather than volume.
+
+    (ii) **THE REFUSAL PATH NEEDS THE HEADERS IT CURRENTLY CANNOT SEE.** The arm's `execFileSync`
+    gets stderr only. Either the arm's failure handler gains a header-capturing read, or the row
+    records `bucket: unknown` explicitly. **BOTH ARE ACCEPTABLE; INVENTING A WAIT IS NOT** — an
+    unknown reset must be recorded as unknown, exactly as `defaultGhRetryAfterSeconds` already
+    refuses to manufacture one.
+
+    (iii) **STAND DOWN UNTIL THE OBSERVED RESET, NEVER A CONSTANT.** GitHub returns the reset on the
+    refusal itself. A lane that waits until that timestamp costs at most the remainder of the
+    current window and is bounded BY OBSERVED DATA; retrying blind costs a further refusal per
+    attempt against the same exhausted bucket and, because refused attempts still count as
+    requests, extends the exhaustion it is reacting to. A FIXED BACKOFF OR GUESSED INTERVAL IS
+    REFUSED BY NAME: that is the defect class this repo met three times on 2026-08-22 (a wait cap
+    under the real check wall-clock, a deploy ceiling consumed by a dry run, a check-wait bound
+    where 21 of 21 booked PRs later merged), and a guessed constant here would be the fourth.
+
+    (iv) **WHAT THE ROW MUST CARRY.** The bucket (from `X-Ratelimit-Resource`, not inferred from
+    which subcommand failed), its reset, and the operation refused. CLAUDE.md's ledger rule applies
+    directly: a line must carry the reason from the decision that produced its outcome, so a row
+    naming `graphql` must have READ `graphql` rather than assumed it from the caller's shape.
+
+    (v) **THE STATUS LINE SITS BESIDE HEADROOM, NOT INSIDE IT.** HEADROOM is the model window; a
+    GitHub bucket is a different resource with a different reset. Folding them into one section
+    would make a single figure mean two things.
+
+    (vi) **ACCOUNT ROTATION IS REFUSED BY NAME.** One operator, one account; swapping credentials
+    mid-flight fights W1-T203's provenance gate. Not proposed, not a fallback.
+  acceptance:
+    - claim: "a rate-limited refusal is recorded with the bucket that refused it and the time that bucket resets"
+      proof: "unit test: test/rate-limit-bucket-surface.test.ts"
+    - claim: "the bucket is taken from the response's own resource field rather than inferred from which command failed"
+      proof: "unit test: test/rate-limit-bucket-surface.test.ts"
+    - claim: "a refusal carrying no readable reset is recorded as unknown rather than given an invented wait"
+      proof: "unit test: test/rate-limit-bucket-surface.test.ts"
+    - claim: "rmd status reports the GitHub buckets alongside the model headroom section rather than only the model window"
+      proof: "unit test: test/rate-limit-bucket-surface.test.ts"
+    - claim: "an auto-merge arm refused on the exhausted budget names that budget instead of failing silently"
+      proof: "unit test: test/rate-limit-bucket-surface.test.ts"
+    - claim: "a call that was never rate limited records no such row, so the row marks real refusals only"
+      proof: "unit test: test/rate-limit-bucket-surface.test.ts"
+  files: [src/lib/worker.ts, src/lib/ledger.ts, src/run-task.ts, test/rate-limit-bucket-surface.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#exhausted-github-bucket-is-never-named-2026-08-23"
+  plan_refs: ["W1-T511", "W1-T1095", "W1-T1208", "W1-T528", "W1-T203"]
+  note: |
+    **`risk: high` IS SET UP FRONT** — Rule 19 SPAN across `src/` and `test/`, and the blast radius
+    is real: `src/lib/worker.ts`'s `ghJson` is the shared read path, so a wrong change there
+    misreads every rate-limit response at once.
+
+    **NOT W1-T511, AND THE CHECK IS RECORDED.** W1-T511
+    (`rate-limit-discards-review-attempts`, `status: queued`, **a live `run-W1-T511-*` branch exists
+    as of this filing**) substitutes ONE GraphQL caller — `ghLiveState`'s `gh pr view --json state`
+    — with a REST form. Measured against its shard: `ghLiveState` 4, `readLiveState` 2, `pr view` 5,
+    `liveStateFromRest` 1 (its subject, positive control) against `automerge` 0, `arm` 0, `--auto`
+    0, `disablePullRequestAutoMerge` 0, `rmd status` 0, `HEADROOM` 0. It removes a caller from the
+    exhausted bucket; it does not name the bucket, does not touch the arm, and cannot help the arm,
+    which has no REST form to move to. Different remedy, disjoint surface, so this is filed rather
+    than folded.
+
+    **DECLARED OVERLAP, DISCLOSED NOT HIDDEN.** `src/run-task.ts` is in W1-T511's `files:` too, so
+    `overlappingPaths` will serialise these two behind one another. That is correct — both edit the
+    same file — and is stated here so the ordering is a known cost rather than a surprise at
+    dispatch. The status line cannot avoid `run-task.ts`.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T1235` was reserved at 2026-08-23T03:22:30Z (frontier: 1233
+    and 1234 reserved, 1236 free), and eight id surfaces were swept clear before filing, each with a
+    control qualified for that surface — including a count-per-head sweep over 130 live heads where
+    this id read 0 while the control W1-T1219 read 4.
