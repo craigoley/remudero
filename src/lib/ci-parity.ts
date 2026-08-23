@@ -570,6 +570,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   // W1-T1048: the task-id existence gate is exactly the shared npm-script shape — deterministic,
   // unconditional on every PR, and measured at ~1.1s, so it is mirrored rather than excluded.
   npmScriptEntry("task-id-existence", "task-id-existence:check"),
+  // W1-T1263: the state-citation gate is the same shared npm-script shape — deterministic,
+  // unconditional on every PR, and measured well under a second against this repo's own tree —
+  // so it is mirrored rather than excluded, same as task-id-existence directly above.
+  npmScriptEntry("state-citation", "state-citation:check"),
 ];
 
 export interface CiParityDeps {

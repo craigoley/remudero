@@ -1,0 +1,130 @@
+[
+  {
+    "path": "state/daemon-watch-2026-08-06T0035Z.md",
+    "reason": "A daemon-watch session log written to gitignored state/ and cited by plan/tasks.d/W1-T381-dead-pid-outranks-activity.yaml's rationale. Predates this gate (W1-T1263); grandfathered rather than reddening on day one."
+  },
+  {
+    "path": "state/impl-BQ-close-t201.md",
+    "reason": "An implementation-session note cited from DECISIONS.md. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/morning-note-2026-07-21.md",
+    "reason": "A session hand-off note cited from plan/tasks.d/W1-T195-escalation-dedup-across-rungs.yaml and plan/tasks.d/W1-T196-unattributable-pr-stand-down.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-BV-console-visibility.md",
+    "reason": "A recon report cited from src/lib/open-prs-rest.ts, src/lib/status.ts and test/board-prs-rest.test.ts as a real, dated pointer (source-code comments citing the shape rationale (4) calls the control -- prose citations, not writes). Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-EJ-test-config-coupling.md",
+    "reason": "A recon report cited from test/config-reader-seams.test.ts. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-GY-no-dialect-caps.md",
+    "reason": "A recon report cited from src/lib/triage.ts and test/triage-proof-dialect.test.ts. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-blackout-and-hosted-console.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T398-identity-trust-rests-on-an-unverified-proxy.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-codebase-debt.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T386-retire-the-refactor-campaign.yaml and plan/tasks.d/W1-T387-collapse-the-two-proof-executors.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-console-access.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T371-tailnet-identity-scope.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-container-build.md",
+    "reason": "A recon report cited from deploy/Dockerfile. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-container-supervision.md",
+    "reason": "A recon report cited from deploy/Dockerfile. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-empty-diff-success.md",
+    "reason": "A recon report cited from plan/feedback/fb-1786274365208-a7d8bc.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-frontier-decline-reasons.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T414-breaker-reset-is-local-though-github-knows.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-guard-complements.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T427-enforcement-data-loses-the-carveout.yaml and plan/tasks.d/W1-T428-changed-tasks-gate-blind-to-dropped-fields.yaml and plan/tasks.d/W1-T438-raw-nul-bytes-make-sweeps-silently-blind.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-guard-reach.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T401-declared-files-unenforced-on-the-live-path.yaml, plan/tasks.d/W1-T402-instrument-surface-was-incomplete-at-filing.yaml and plan/tasks.d/W1-T434-scope-guard-refusal-becomes-flagged-push.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-hosted-console-auth.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T404-write-scope-is-one-undifferentiated-grant.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-implement-acts-as-recon.md",
+    "reason": "A recon report cited from src/lib/compaction.ts and test/implement-role-sentence.test.ts. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-lanes-override.md",
+    "reason": "A recon report cited from plan/feedback/fb-1785950676514-c5cdcc.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-mini-assumptions.md",
+    "reason": "A recon report cited from plan/feedback/fb-1786274365208-a7d8bc.yaml and plan/tasks.d/W1-T411-one-shot-disk-reclaim-rung.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-now-ci-polling.md",
+    "reason": "A recon report cited from plan/feedback/fb-1785958099820-862db0.yaml and plan/tasks.d/W1-T1240-in-flight-decoration-rides-an-open-pr-alone.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-open-failing-composition.md",
+    "reason": "A recon report cited from src/run-task.ts (twice) and test/lint-plan-merge-evidence.test.ts. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-portability-and-upstream.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T396-stale-lock-host-guard-is-unreachable.yaml and plan/tasks.d/W1-T397-upstream-feedback-home-repo.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-production-path-proofs.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T365-rule13-wiring-not-proved-by-a-test.yaml and plan/tasks.d/W1-T366-recovery-path-exercise-cadence.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-remudero-root-and-owner.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T1062-same-owner-constraint-blocks-multi-repo.yaml and plan/tasks.d/W1-T403-same-owner-constraint-blocks-multi-repo.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-retro-test-github-calls.md",
+    "reason": "The recon report CLAUDE.md's own state/-scratch-convention paragraph cites as its motivating example (\"from scratch after [it] turned out not to exist\"). Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-rule15-class.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T384-criteria-repair-refused-at-filing.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-state-retention.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T379-ledger-grep-verb.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/recon-unbuildable-exit.md",
+    "reason": "A recon report cited from plan/tasks.d/W1-T412-no-pr-discards-implement-followups.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/remudero-decision-authority-audit-2026-08-04.md",
+    "reason": "An audit report cited from plan/feedback/fb-1785882211812-bafd8f.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/remudero-quality-audit-2026-08-04.md",
+    "reason": "An audit report cited from plan/feedback/fb-1785841572179-445104.yaml. Predates this gate (W1-T1263); grandfathered."
+  },
+  {
+    "path": "state/research-laws-and-gaps-2026-08-05.md",
+    "reason": "This task's own motivating example (W1-T1263 rationale (2)/(3), design note (iv)): the P48 census/five-Laws document, cited from MASTER-PLAN.md (twice -- once as ground-truth evidence, once recording the path as unrecoverable, which the gate's marked-escape hatch handles independently of this baseline entry), plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml, plan/tasks.d/W1-T1263-durable-records-written-to-swept-scratch.yaml, plan/tasks.d/W1-T383-generated-capability-snapshot.yaml and plan/tasks.d/W1-T398-identity-trust-rests-on-an-unverified-proxy.yaml. Predates this gate; grandfathered -- 710b18b5 (#1587) already established none of its content is recoverable."
+  },
+  {
+    "path": "state/whatever.md",
+    "reason": "Not a real citation of a real document -- this exact path is the illustrative example this task's own filing (plan/tasks.d/W1-T1263-durable-records-written-to-swept-scratch.yaml, design note v) uses for \"a fresh state/*.md a fixture must FAIL on\". Grandfathered because the filing predates this gate and its prose is not itself a claim of authority."
+  }
+]

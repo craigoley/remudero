@@ -811,3 +811,48 @@ jobs:
         run: npm ci
       - name: Task-id existence check (every id cited under src/deploy must resolve)
         run: npm run --silent task-id-existence:check
+
+  state-citation:
+    # STATE-CITATION gate (W1-T1263). `state/` is gitignored runtime exhaust, swept by design
+    # (sweepStaleTempDirs, scratchReap, reapStaleWorktrees, container recreation) -- but nothing
+    # stopped a DURABLE document (a census, a research report, a numbered set of governing
+    # constraints) from being written there and then cited BY PATH from a tracked file as the
+    # source of record. CLAUDE.md already states the convention ("a report written to state/ is
+    # SCRATCH, not a record"), and that sentence being unenforced prose is exactly why this job
+    # exists: the class was repaired twice, twelve days apart (#1587 / 710b18b5, then the Law 4/5
+    # loss), with the writing path untouched both times, and citations kept accruing between
+    # repairs. scripts/state-citation-check.mjs walks every git-tracked file for a literal
+    # `state/*.md`-shaped citation (the extension is the whole predicate -- nothing in the
+    # codebase WRITES one, so every hit is a citation, never a write, against a control of well
+    # over a hundred legitimate runtime `state/` path references this never touches because they
+    # don't end in `.md`) and fails on any such citation that is NEITHER carried in a small
+    # written-reason baseline (scripts/state-citation-baseline.json, seeded with the citations
+    # that already existed when this gate landed) NOR marked, in the citing line or the few lines
+    # around it, as recording that the path is unrecoverable -- the escape hatch a naive
+    # path/file allowlist could not give MASTER-PLAN.md's own hardest case (it cites the same
+    # tombstoned path twice, once as live evidence and once recording the loss, and the two must
+    # land on opposite sides). See test/state-citation-check.test.ts for the falsifier proof this
+    # is ACTIVE (a planted unbaselined citation is REJECTED, ordinary runtime state/ paths are
+    # never flagged, the same path lands on both sides of the unrecoverability marker depending on
+    # the citing text, a baselined citation at a NEW path still fails, and a scan that reads zero
+    # files refuses rather than reporting success).
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:`) -- same fail-closed shape as
+    # `claims`/`no-hand-rolled-fetch`/`task-id-existence` above: a path-filtered REQUIRED check
+    # that can go silently absent is the synthwatch #102 deadlock class ci-gate.yml exists to
+    # avoid.
+    name: state-citation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' # W1-T1033: PR-only — only `ci` runs on the new push trigger; see the `on:` block comment above.
+    # W1-T1009: LIGHT band, prophylactic -- see the `commitlint` job's comment above for the
+    # derivation.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: State-citation check (a tracked file may not cite a durable state/*.md as authority)
+        run: npm run --silent state-citation:check
