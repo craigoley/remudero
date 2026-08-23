@@ -1,0 +1,153 @@
+- id: W1-T1256
+  title: "THE WIPE-TEST'S TWO ARMS ARE NOT INDEPENDENT — the clone-or-fetch-and-reset runs ONCE, before arm A, inside `if (!isSelf)`, and the two arms then run on consecutive lines with nothing between them, so arm B dispatches against whatever arm A left; arm A is always the learnings-ON arm and always first, which makes the inheritance systematic and one-directional rather than noisy"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    RE-DERIVED FROM SOURCE AT origin/main 479e7fb, NOT CARRIED. `wipeTestCommand` (`src/run-task.ts`)
+    performs its clone-if-absent / fetch+reset-if-present exactly once, inside `if (!isSelf)`, under
+    a comment describing it as "the same clone-if-absent / fetch+reset-if-present pattern `rmd
+    daemon`'s non-self target uses". That block closes, `runId` is minted, and the two arms then run
+    on CONSECUTIVE LINES with nothing between them:
+
+      const rawArmA = await runTaskFn(taskId, { planPath, config, skipGitSync: true });
+      const rawArmB = await runTaskFn(taskId, { planPath, config, skipGitSync: true, maskLearnings: true });
+
+    ARM A IS ALWAYS THE LEARNINGS-ON ARM AND ALWAYS RUNS FIRST. `maskLearnings` is absent on the
+    first call and `true` on the second, and the order is a literal, not a parameter. So whatever
+    arm A leaves is inherited by arm B in the SAME DIRECTION on every pair the harness will ever
+    run. THIS IS BIAS, NOT NOISE: noise would cancel across pairs, and a fixed-order inheritance
+    does not. A harness whose entire output is a DIFFERENCE between two arms cannot have one arm
+    conditioned on the other arm's output and still be measuring what it claims.
+
+    THE RESET IS REAL BUT IT IS IN THE WRONG PLACE. It is not missing — it runs — it simply runs
+    before arm A rather than between the arms, so it conditions the PAIR's starting state and never
+    the SECOND arm's. And it is inside `if (!isSelf)`, so on a self-target run there is no reset at
+    all.
+  design: |
+    (i) Q1 — WHAT ARM A LEAVES, AND WHICH OF IT ARM B ACTUALLY READS. Enumerated, then classified,
+    because a leftover nobody reads is not contamination:
+      - THE CLONE (`<config.root>/repos/<repo>`): reset only before arm A. Arm B's worktree is cut
+        by `worktreeAdd(repoDir, worktreePath, branch, "origin/main")`, i.e. from the clone's
+        origin/main ref — so what matters is not the working tree but where that ref points.
+      - THE RUN BRANCH arm A pushed (`run-<taskId>-<digits>`): read by `hasPushedRunBranch`
+        (`src/lib/drain.ts`), which is consumed by `nextRunnable`/`isDispatchEligible`. THE
+        WIPE-TEST PATH NEVER CALLS THE SELECTOR — `wipeTestCommand` calls `runTaskFn(taskId, …)`
+        directly, and a grep of the whole command body for `nextRunnable(`/`isDispatchEligible(`
+        returns ZERO against a control of 11 such calls elsewhere in the file. SO THIS LEFTOVER IS
+        NOT READ ON THIS PATH and is not contamination here — it becomes contamination the moment
+        anything routes the wipe-test through drain.
+      - ARM A's OPEN PR, THE LEDGER ROWS ARM A APPENDED, AND THE STATUS-CACHE PROJECTION: all three
+        feed ONE reader. `runTask` builds `projection = projectPlan(plan, { ledgerPath, github },
+        statusPath)` and `isMerged = (t) => projection.get(t.id)?.merged ?? false` FRESH ON EVERY
+        CALL, so arm B constructs its own projection from a ledger arm A has already written to, a
+        GitHub gateway that can now see arm A's PR, and `<config.root>/state/status.json`, which
+        `projectPlan` reads back as its `previousProjection` fallback.
+      - THE INFLIGHT LOCK (`<config.root>/state/inflight`, keyed by task id): taken and released per
+        run; an arm A that dies without releasing blocks arm B outright.
+    (ii) AND THE ONE THAT ACTUALLY BITES IS THE ALREADY-MERGED REFUSAL. `runTask` gates on
+    `if (isMerged(task))` and returns verdict `task_already_merged` at ZERO COST unless `--rerun` is
+    passed, which `wipeTestCommand` does not pass. Auto-merge is armed at PR-OPEN, so arm A's own PR
+    can merge while arm A is still finishing. Arm B then refuses before spawning, and the pair is
+    ledgered anyway — the same zero-cost-refusal shape W1-T1252 files. WORSE, AND DEEPER: once arm
+    A's PR merges, the sandbox's origin/main CONTAINS ARM A'S DIFF, and arm B's worktree is cut from
+    that ref, so even a non-refusing arm B starts from a tree where the work is already done.
+    (iii) Q2 — THE RIGHT RESET, WITH BOTH OPTIONS WEIGHED AND WHAT EACH LEAVES UNRESET NAMED.
+    RE-FETCH-AND-RESET BETWEEN ARMS reuses the clone and is cheap: one fetch plus one
+    `reset --hard origin/main`. A FRESH CLONE PER ARM is cleaner and costs a clone.
+    THEY LEAVE THE SAME THINGS UNRESET, WHICH IS THE POINT: arm A's pushed run branch and arm A's
+    PR are REMOTE objects, and `task_already_merged` reads remote/ledger state through
+    `projectPlan` while `hasPushedRunBranch` reads the remote ref list — NEITHER IS REACHABLE BY ANY
+    LOCAL RESET. Worse, if arm A merged, `reset --hard origin/main` resets TO the contaminated
+    state, and a fresh clone CLONES the contaminated state; the two options are equally powerless
+    against exactly the channel that bites. Also unreset by both: the ledger rows and
+    `state/status.json`.
+    SO THE RESET THIS TASK NEEDS IS NOT PRIMARILY LOCAL. The candidates that actually reach the
+    biting channel are: close arm A's PR and delete its run branch between arms; give each arm its
+    own subject so `isMerged` cannot be true for arm B's task; or make the arms non-mutating. The
+    builder picks one and records why — but a local-only reset must NOT be shipped as if it closed
+    this, because it does not.
+    (iv) Q3 — ARM ORDER, STATED PLAINLY RATHER THAN RECOMMENDED AS A FIX. Alternating which arm runs
+    first CONVERTS A SYSTEMATIC BIAS INTO RANDOM ERROR. That is strictly better than a fixed order
+    and IT IS STILL NOT CLEAN: every individual pair remains contaminated, the second arm still
+    inherits, and randomising the direction raises variance while lowering bias. IT IS NOT A FIX AND
+    MUST NOT BE SHIPPED AS ONE. It is worth doing ALONGSIDE a real reset — it costs one line, it
+    removes the always-A-first confound that would otherwise survive an imperfect reset, and it
+    makes a residual leak visible as scatter instead of drift.
+    (v) THE FALSIFIER IS ITS OWN AND MUST RUN IN BOTH DIRECTIONS. Direction one: a pair where arm A
+    leaves a DETECTABLE artifact and arm B must NOT see it. Direction two, the control: the same
+    fixture with the reset DISABLED, where arm B DEMONSTRABLY DOES see it. Direction one alone is
+    vacuous — a test that cannot detect contamination when contamination is present proves nothing
+    when it reports none.
+    (vi) DECISIONS SPLIT FROM I/O. The reset POLICY (what must be reset between arms, and what a
+    local reset provably cannot reach) belongs in `src/lib/wipe-test.ts` as a pure function over
+    injected state; the fetch/reset/close/delete calls stay in `src/run-task.ts`. That split is what
+    lets the falsifier drive both directions without a network.
+  acceptance:
+    - claim: "arm B does not inherit the already-merged verdict arm A produced for the same subject"
+      proof: "unit test: test/wipe-test-arm-isolation.test.ts"
+    - claim: "with the between-arms reset disabled arm B demonstrably observes arm A's artifact"
+      proof: "unit test: test/wipe-test-arm-isolation.test.ts"
+    - claim: "the remote state a local reset cannot reach is named rather than silently assumed clean"
+      proof: "unit test: test/wipe-test-arm-isolation.test.ts"
+    - claim: "the learnings-on arm is not always the arm that runs first"
+      proof: "unit test: test/wipe-test-arm-isolation.test.ts"
+  files: [src/lib/wipe-test.ts, src/run-task.ts, test/wipe-test-arm-isolation.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#wipe-test-arms-are-not-independent-2026-08-23"
+  plan_refs: ["W1-T1252", "W1-T1253", "W1-T534", "W1-T319"]
+  note: |
+    THESE THREE STACK, SO P12 IS A SEQUENCE AND NOT A COMMAND. W1-T1252 (#2593) files the null-pair
+    refusal — the harness ledgers pairs it never measured. W1-T1253 (#2595) files the missing subject
+    generator — there is nothing to seed a pair with. THIS task files the arm dependence. NO VALID
+    PAIR EXISTS UNTIL ALL THREE LAND: a subject generator with no arm isolation produces a biased
+    pair, arm isolation with no generator produces no pair at all, and either without the null-pair
+    refusal writes a `wipetest.pair` row regardless. NEITHER SIBLING IS RE-FILED HERE and neither is
+    a dependency edge, because they are independently landable in any order — only their CONJUNCTION
+    is the precondition for signal.
+
+    THE SUPPLY PROBLEM IS CONTEXT, NOT SCOPE. SBX-T1/T2/T3 all read `status: queued` while their work
+    is already on the sandbox's main, so a pair run today re-runs an already-landed diff and both
+    arms refuse. That is a fourth, separate condition on getting signal; it is recorded here so the
+    sequence above is not mistaken for complete, and it is deliberately NOT scoped into this task.
+
+    risk: high IS SET UP FRONT, AND BOTH READINGS ARE RECORDED AS REQUIRED. RULE 19's SPAN is the
+    band's cause: `files:` spans three concerns — the pure wipe-test module, the command layer in
+    `src/run-task.ts`, and a new suite — and `subsystemsOf` also derives subsystems from the
+    acceptance text, which here names arm isolation, a disabled-reset control, remote state and arm
+    ordering. BLAST RADIUS ARGUES LOWER AND IS RECORDED SO THE BAND IS NOT MISREAD AS DANGER: the
+    verb is sandbox-only by default (`resolveWipeTestTarget`), it is operator-invoked rather than
+    daemon-driven, no gate, disposition or policy value moves, and the only production surface it
+    touches is a command nothing else calls. THE BAND IS THE SPAN, NOT THE DANGER — four lanes hit
+    that trap today, each raising only after `sizingViolation` refused, so it is set correctly here
+    the first time rather than after a refusal.
+
+    ID PROVENANCE — EIGHT SURFACES, EVERY CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, PLUS A
+    COUNT-PER-HEAD SUBJECT SWEEP. Swept at 479e7fb. (1) `refs/rmd-id/*`: target reads 1 — SEE THE
+    RESERVATION NOTE BELOW — control W1-T1255 = 1, negative control W1-T444444 = 0. (2) shard
+    FILENAMES on origin/main: target 0, controls W1-T1255 = 1 and W1-T1248 = 1. (3) `- id:`
+    declarations inside plan/ on origin/main: target 0, control W1-T1255 = 1. (4) open-PR TITLES:
+    target 0, control the literal `chore(triage)` = 1. (5) open-PR HEAD refs: target 0, control
+    `run-W1-T1248` = 1. (6) open-PR FILE LISTS: target 0, control `src/run-task.ts` = 1. (7)
+    merged-PR `Remudero-Task:` trailers over the newest closed page (97 merged): target 0, control
+    41 rows matched by the same anchored regex. (8) remote branches `run-W1-T1256-*`: target 0,
+    control `run-W1-T1248-*` = 1. COUNT-PER-HEAD SUBJECT SWEEP: 0 subject hits per open head across
+    both open PRs, against a regex control scoring 3 on a known-subject string.
+    EVERY CONTROL WAS RE-QUALIFIED AGAINST THE OPEN-PR SET FIRST, because a control whose shard
+    lived only inside an open PR would read 0 exactly like the target and prove nothing. Neither open
+    PR adds a `plan/tasks.d/` path (#2600 modifies a feedback file, #2599 modifies two src files and
+    adds a test), and W1-T1248's shard was confirmed present on origin/main rather than pending in
+    #2599, so it qualifies as a filename-surface control.
+
+    THE RESERVATION ALREADY EXISTED AND WAS NOT MINTED HERE. `refs/rmd-id/W1-T1256` resolves to
+    7bff3ea, an EMPTY-TREE commit (4b825dc…) whose message is `rmd-id reservation 2470618@Remudero
+    2026-08-23T13:01:04.104Z`, authored by the Azure daemon host's agent identity. It is a
+    RESERVED-BUT-UNFILED id: present on the refs surface and absent from all seven content surfaces.
+    This session pushed NO ref and minted nothing. Recorded because a reservation minted by an
+    unattended lane minutes before a filing is the exact shape that produces a double-mint, and the
+    next reader deserves to know the ref predates this shard rather than being written by it.
