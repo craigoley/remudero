@@ -1,0 +1,105 @@
+- id: W1-T1269
+  title: "THE FIX RUNG RETRIES WITH NO TEST FOR PROGRESS AND THE EVIDENCE IS ALREADY IN HAND — the only quantity moving across strikes is `strikes` and it ASCENDS, while `unmetCriteria` is a `CriterionVerdict[]` carrying each `claim`, so a strike that fails IDENTICALLY is indistinguishable from one that fixed half; add an earlier stop on a repeated identical failure, never a longer leash"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 60.00
+  files: [src/lib/sweep.ts, test/fix-rung-no-progress-stop.test.ts]
+  origin: oper#fix-rung-progress-2026-08-23
+  plan_refs: ["W1-T1266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    NOTHING DESCENDS. Across strikes the only moving quantity is `strikes`, and it ASCENDS:
+    `{ ...state, strikes: state.strikes + 1 }` (`src/lib/classify.ts`) and `pr.priorStrikes + 1` in
+    every sweep reason string. The stop is a comparison against the cap —
+    `pr.priorStrikes >= policy.strikeCap` in the escalate row. So `fixStrikeCap = 2` is not a
+    backstop behind something else; it IS the stopping condition. W1-T1266 (#2618) argues that
+    separation as a general property; this task supplies the missing primary control for ONE rung.
+    Cited, not re-filed.
+
+    THE EVIDENCE IS ALREADY COMPUTED AND ALREADY PRINTED. `unmetCriteria.length` is rendered into
+    the strike reason ("N unmet criteria — strike X/Y") and nothing requires it to shrink, so a
+    strike leaving the same count is indistinguishable from one that halved it.
+
+    AND THE SET IS AVAILABLE, NOT JUST ITS SIZE. `unmetCriteria` is typed `CriterionVerdict[]`
+    (`src/lib/sweep.ts`), and `CriterionVerdict` (`src/lib/review.ts`) carries `claim`, `proof`,
+    `met`, `reason` and `proof_exec` — so each unmet criterion has a stable identity. Per-element
+    inspection is ALREADY done at one site: `pr.unmetCriteria.some((criterion) =>
+    UNSATISFIABLE_GATE_MARKER.test(criterion.reason))`. Every other consumer reads `.length`. The
+    measure is therefore only the AVAILABLE one, never the right one — and the right one needs no
+    new plumbing.
+  design: |
+    (i) THE SIZE IS THE WRONG MEASURE AND THE SET IS THE RIGHT ONE. A strike that fixes criterion A
+    while B remains unmet moves the count 2 -> 1 and reads as progress. A strike that fixes A and
+    breaks C leaves the count at 2 and reads as NO progress though the failure is entirely
+    different. A strike that fails IDENTICALLY — same claims unmet, same reasons — also leaves the
+    count at 2. THE SIZE CANNOT SEPARATE THE LAST TWO, AND THEY ARE NOT THE SAME EVENT. Compare the
+    unmet SET, keyed by `claim`.
+
+    (ii) STOP ONLY ON AN IDENTICAL FAILURE, WHICH IS THE CONSERVATIVE READING AND DELIBERATELY SO.
+    Two candidate rules were considered and the stronger one is REFUSED:
+      INCLUSION-DESCENT — require the new unmet set to be a strict subset of the previous, stop
+      otherwise. Well-founded and provably terminating, but it stops CHURN too: a strike that swaps
+      which criteria are unmet is not a subset, so a worker making real but lateral progress would
+      be cut off. Too eager for a first move.
+      IDENTICAL-FAILURE — stop when the unmet set is UNCHANGED. Provably no progress: the same
+      claims failed for the same reasons, so the next strike has no more information than the last.
+      Anything else continues to the EXISTING cap.
+    This task takes the second. It is strictly weaker than a descent argument and it is honest about
+    that: it does not prove progress, it detects its provable absence.
+
+    (iii) THE PRECEDENT IS VERIFIED, NOT ASSUMED, AND ITS LIMITS ARE CARRIED.
+    `ComposioHQ/agent-orchestrator` at `ebd56bd` bounds its CI nudges by CONTENT SIGNATURE:
+    `ciFailureSignature(checks)` (`backend/internal/lifecycle/reactions.go`) joins each check's
+    `{Name, CommitHash, Status, URL, LogTail}` and `if m.react.seen[key] == sig { return }` — the
+    same failure never re-nudges, a different one does. Immediately after it ALSO keeps
+    `if maxAttempts > 0 && attempts >= maxAttempts { return }`, which is exactly the separation
+    W1-T1266 describes: signature is the primary control, the count is the backstop.
+    ITS LIMITS, MEASURED IN THAT TREE, NOT REPEATED FROM A DESCRIPTION: the attempts counter is
+    keyed per entry (`m.react.attempts[key]`), and at the ceiling it simply RETURNS — `escalat`
+    appears ZERO times in `reactions.go`, against a control of eight `maxAttempts` hits in the same
+    file. IT GOES QUIET AT THE CEILING. Remudero must not.
+
+    (iv) WHAT MUST NOT CHANGE, EACH STATED AS A REFUSAL. The cap STAYS at its current value — this
+    task changes no number. Escalation at the ceiling STAYS: an exhausted rung must still reach a
+    human, which is precisely where the cited precedent is weaker and must not be copied.
+    `verify: human` STAYS non-negotiable. AND THE DESCENT TEST MUST NEVER BE USED TO ARGUE FOR
+    RAISING THE CAP — this adds an EARLIER stop, not a longer leash; an implementation that spent
+    the new signal on more strikes would invert the entire argument.
+
+    (v) OUT OF SCOPE. No compiled IR, no graph compiler, no schema layer. No change to what counts
+    as an unmet criterion, to `judgeCriterion`, or to the review verdict itself — this reads a list
+    the sweep already holds.
+
+    (vi) THE FALSIFIER RUNS BOTH WAYS. A repeated IDENTICAL unmet set must stop before the cap; a
+    CHANGED unmet set — including one of the same size — must still be allowed its remaining
+    strikes. A rule that stopped on any non-shrinking set would satisfy the first and fail the
+    second.
+  acceptance:
+    - claim: "a strike whose unmet criteria are unchanged stops the rung before the cap is reached"
+      proof: "unit test: test/fix-rung-no-progress-stop.test.ts"
+    - claim: "a strike whose unmet criteria differ at the same size still gets its remaining strikes"
+      proof: "unit test: test/fix-rung-no-progress-stop.test.ts"
+    - claim: "the comparison keys on each criterion's identity rather than on how many there are"
+      proof: "unit test: test/fix-rung-no-progress-stop.test.ts"
+    - claim: "an early stop still escalates to a human rather than going quiet"
+      proof: "unit test: test/fix-rung-no-progress-stop.test.ts"
+  note: |
+    risk: high IS SET UP FRONT, AND BOTH READINGS ARE RECORDED. RULE 19's SPAN is the band's cause:
+    `files:` crosses two stems as `sizingViolation` counts them (`sweep` and
+    `fix-rung-no-progress-stop`). THE BLAST RADIUS is genuinely high as well, and separately: this
+    changes when the fleet stops spending a paid fix worker, which is a dispatch-money decision.
+    Both readings recorded so the band is not mistaken for either one alone.
+
+    `src/lib/sweep.ts` IS DECLARED because the strike accounting and `DISPOSITION_RULES` both live
+    there. `src/lib/review.ts` is NOT declared: `CriterionVerdict` already carries `claim` and needs
+    no change — the identity this task keys on exists today.
+
+    PROOF NOTES: all four proofs are the PURE-PATH `unit test:` form naming
+    `test/fix-rung-no-progress-stop.test.ts`, which this shard's own `files:` declares — the only
+    form a forward reference resolves in, because `judgeCriterion` gates its carve-out on
+    `!whitelisted.nameFiltered`.

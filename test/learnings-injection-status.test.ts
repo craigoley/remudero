@@ -122,13 +122,22 @@ test("buildStatusBoard/renderStatusBoardText: LEARNINGS INJECTION names matched,
   assert.equal(model.learningsInjection.found, true);
   assert.equal(model.learningsInjection.totals?.matched, 13);
   assert.equal(model.learningsInjection.totals?.dropped, 15);
+  // Acceptance: "every injection row still carries its global refusal reason verbatim" —
+  // aggregateLearningsInjection (digest.ts) is untouched by W1-T1251; the raw reason string
+  // keyed here is byte-identical to what run-task.ts logged, regardless of how the board
+  // later classifies/renders it.
   assert.deepEqual(model.learningsInjection.totals?.globalRefusedReasons, { "global artifact not found": 1 });
 
   const text = renderStatusBoardText(model);
   assert.match(text, /── LEARNINGS INJECTION/);
   assert.match(text, /matched: 13 {2}dropped: 15 {2}rows: 2/);
   assert.match(text, /budget_chars: 4000, 5000/);
-  assert.match(text, /global artifact refused: global artifact not found \(1\)/);
+  // W1-T1251: "global artifact not found" is the ONE designed, §6-deferred-transport absence —
+  // it must NOT print behind the word "refused" (that word is reserved for a genuine problem
+  // with an artifact that exists), and its own line still carries the reason verbatim.
+  assert.doesNotMatch(text, /global artifact refused: global artifact not found/);
+  assert.match(text, /global artifact refused: none/);
+  assert.match(text, /global artifact deferred \(§6 transport not yet provisioned\): global artifact not found \(1\)/);
 });
 
 test("buildStatusBoard: an empty ledger reports learningsInjection.found=false, and the text block says so rather than printing a placeholder zero", () => {
@@ -142,11 +151,49 @@ test("buildStatusBoard: an empty ledger reports learningsInjection.found=false, 
   assert.doesNotMatch(text, /dropped: 0/);
 });
 
-test("buildStatusBoard: a window with injection rows but no refusal renders 'global artifact refused: none', never a stray reason", () => {
+test("buildStatusBoard: a window with injection rows but no refusal renders 'global artifact refused: none' AND 'deferred: none', never a stray reason", () => {
   const ledgerPath = ledgerFile([CLEAN_ROW]);
   const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
 
   assert.deepEqual(model.learningsInjection.totals?.globalRefusedReasons, {});
   const text = renderStatusBoardText(model);
   assert.match(text, /global artifact refused: none/);
+  assert.match(text, /global artifact deferred \(§6 transport not yet provisioned\): none/);
+});
+
+// ── W1-T1251: THE DESIGNED ABSENCE IS REPORTED APART FROM A GENUINE REFUSAL ─────────────────
+//
+// `loadGlobalArtifact` (learnings.ts) returns seven distinct failure reasons, of which exactly
+// one ("global artifact not found") is the ruled-on deferred state and six are real problems
+// (including the hash-mismatch tamper signal). Before this task every one of them rendered
+// behind the single word "refused:" on this board. This block proves the board now reports the
+// designed absence in its own words while a genuine refusal (tamper/malformation) keeps the
+// word "refused" and stays on the FIRST, prominent line.
+
+const TAMPER_ROW = injectedRow({
+  run_id: "R3",
+  global_refused_reason: "global artifact hash mismatch (/path/to/artifact.yaml): pinned abc, computed def — refused, not trusted",
+});
+
+test("buildStatusBoard/renderStatusBoardText: a designed absence and a genuine (tamper) refusal in the SAME window render on separate, differently-worded lines", () => {
+  const ledgerPath = ledgerFile([REFUSAL_ROW, TAMPER_ROW]);
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+
+  // Both raw reasons are still in the aggregate, verbatim, untouched by the classification.
+  assert.deepEqual(model.learningsInjection.totals?.globalRefusedReasons, {
+    "global artifact not found": 1,
+    "global artifact hash mismatch (/path/to/artifact.yaml): pinned abc, computed def — refused, not trusted": 1,
+  });
+
+  const text = renderStatusBoardText(model);
+  const refusedLine = text.split("\n").find((l) => l.startsWith("global artifact refused:"));
+  const deferredLine = text.split("\n").find((l) => l.startsWith("global artifact deferred"));
+  assert.ok(refusedLine, "the refused line must still be present");
+  assert.ok(deferredLine, "the deferred line must still be present");
+  // The tamper reason is a genuine refusal: named on the "refused:" line, never the deferred one.
+  assert.match(refusedLine ?? "", /hash mismatch/);
+  assert.doesNotMatch(deferredLine ?? "", /hash mismatch/);
+  // The designed absence is named on the deferred line, never the "refused:" line.
+  assert.match(deferredLine ?? "", /global artifact not found/);
+  assert.doesNotMatch(refusedLine ?? "", /global artifact not found/);
 });

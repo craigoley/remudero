@@ -5755,7 +5755,13 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
     // never the live repo. Each is exempted individually because the guard checks the CALL,
     // not the destination, and running the real dep body IS the assertion.
     assert.doesNotThrow(() => withLiveWritesAllowed(() => d.armAuto("url/x")), "armAuto reaches gh pr merge --auto");
-    assert.doesNotThrow(() => withLiveWritesAllowed(() => d.mergeDirect("url/x")), "mergeDirect reaches gh pr merge --squash");
+    // W1-T1255: `mergeDirect` is the REST merge endpoint now, so it PARSES its PR URL to build
+    // `repos/{o}/{r}/pulls/{n}/merge` and refuses a placeholder rather than shelling out blind.
+    // A real URL keeps this probe's point intact — the dep body still runs against the stub.
+    assert.doesNotThrow(
+      () => withLiveWritesAllowed(() => d.mergeDirect("https://github.com/craigoley/remudero/pull/1")),
+      "mergeDirect reaches the REST merge endpoint",
+    );
     assert.doesNotThrow(() => withLiveWritesAllowed(() => d.disableAuto("url/x")), "disableAuto (W1-T125) reaches gh pr merge --disable-auto");
     assert.doesNotThrow(() => d.say("realArmDeps coverage probe"));
     try {

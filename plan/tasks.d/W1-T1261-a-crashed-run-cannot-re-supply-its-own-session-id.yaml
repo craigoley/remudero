@@ -1,0 +1,198 @@
+- id: W1-T1261
+  title: "A CRASHED RUN CANNOT RE-SUPPLY ITS OWN SESSION ID — the resume PRIMITIVE exists and is wired in-process, and `session_id` is already written to the ledger at every spawn, but `initialSessionId` has no durable supplier and nothing ever reads `session_id` back out, so a run that dies mid-worker falls into the cold-PR degrade and starts from zero"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 95.00
+  files: [src/run-task.ts, test/run-task-resume-after-crash.test.ts]
+  origin: oper#crashed-run-loses-its-budget-2026-08-23
+  plan_refs: ["W1-T299", "W1-T1213"]
+  status: blocked
+  attempts: 0
+  rationale: |
+    ★ FILED `status: blocked` ON PURPOSE. The population that would justify building this HAS NOT
+    BEEN MEASURED, and the operator's own brief says a count of one or two makes it low priority.
+    The unblocking condition is stated under design (iv) as a runnable query. DO NOT DISPATCH
+    until that query has been run and its answer recorded here.
+
+    TWO PREMISES IN THE ORIGINATING BRIEF ARE WRONG, AND CORRECTING THEM SHRINKS THE TASK.
+
+    (a) "`resume` READS ZERO ACROSS THE PLAN -- THERE IS NO RESUMPTION CONCEPT." It does not read
+    zero. Measured on main: `resume` matches 59 times across `plan/tasks.yaml` + `plan/tasks.d/`
+    and 120 times in `src/`, against a control of 1757 for `dispatch` -- so the corpus was
+    readable and the term is genuinely present. `resumeSessionId` alone appears 12 times.
+
+    (b) THE PRIMITIVE EXISTS AND IS ALREADY WIRED, IN-PROCESS. `src/lib/worker.ts` declares
+    `resumeSessionId?: string` and applies it -- `if (args.resumeSessionId) options.resume =
+    args.resumeSessionId` -- and reads the id back off the SDK result (`sessionId = r.session_id`).
+    Three call sites use it today: the FIX RUNG resumes across rounds (`resumeSessionId: round ===
+    "resume" ? sessionToResume : undefined`, with `sessionToResume = fixResult.sessionId` carried
+    forward), the implement lane at `resumeSessionId: impl.sessionId`, and `src/spike.ts`.
+
+    SO THE GAP IS NOT A MECHANISM. IT IS A SUPPLIER AND A READER.
+    `initialSessionId` has exactly FOUR references in `src/`: its type field, the local
+    `let sessionToResume = opts.initialSessionId`, an IN-PROCESS handoff
+    (`initialSessionId: impl.sessionId`), and an explicit EMPTY STRING whose own comment reads
+    *"cold PR: no session -- strike 1 degrades to fresh (adapter below)"*. Nothing supplies it
+    from durable storage.
+    And `session_id` is WRITE-ONLY with respect to resumption: it is logged at 11+ ledger sites
+    (recon, implement, fix, reviewer, inbox), and the only non-writing occurrences anywhere in
+    `src/lib/` are `worker.ts`'s SDK result TYPE and the SDK read itself. No consumer reads it back.
+
+    THE CRASH THEREFORE FALLS INTO A DEGRADE BUILT FOR A DIFFERENT CASE. The cold-PR site already
+    means "there is no session, start fresh". A run whose process died also presents as "no
+    session", so it takes the same branch -- correctly, by the code's own lights, and silently.
+    This is the same shape as two defects filed the same day: a fact that is computed and then
+    discarded (W1-T1232), and a value that is read but not checked (W1-T1233). Here the value is
+    written and never read.
+    ── AMENDED 2026-08-23: THREE EXTERNAL SOURCES READ, AND THE TASK SHRINKS AGAIN ──────────────
+
+    (c) NONE OF THE THREE SOURCES PASSES THE TREE TEST. That is the finding, not a gap in the
+    search. The tree test is (ii)'s refusal restated as a question to ask of somebody else's
+    design: what does it preserve BESIDES the conversation?
+
+    `NousResearch/hermes-agent` @ `f293e72` PRESERVES THE CARD AND DISCARDS THE RUN, COHERENTLY.
+    `detect_crashed_workers` checks pid liveness and, in its own words, "Appends a `crashed` event
+    and restores the task's source phase"; `reconcile_orphaned_running` catches the rows no other
+    path touches (`status='running'` with a null claim). What survives is the task card, an audit
+    event in `task_events`, and a carefully-classed failure accounting -- a stale reclaim
+    deliberately does NOT count a failure, so two legitimately long-running tasks cannot trip the
+    circuit breaker. The run itself is thrown away: `_default_spawn` builds
+    `prompt = f"work kanban task {task.id}"`, a fresh prompt carrying only the id. `--resume`
+    exists, but every occurrence is a HUMAN CLI affordance ("Resume the live session with: hermes
+    --resume <id>"); the dispatcher's crash path never passes it. THIS IS A COHERENT ANSWER, NOT
+    AN OVERSIGHT: its recovery unit is the queue card, not the run.
+
+    `kirodotdev/kirocrew` @ `fd4bd31` FAILS DIFFERENTLY AND WORSE, BY ASSUMPTION RATHER THAN BY
+    DESIGN. Its "Checkpoint Resume" is `load_checkpoint`, which parses `TASK_PROGRESS.md` with a
+    regex and returns a set of completed task TITLES; `build_resume_context` re-narrates those
+    into a fresh prompt ending "Their changes are already on disk. Continue from the next task."
+    That premise is never verified. `snapshot.py` does carry a `workspace` component, but it is
+    reached only from operator backup/migration entry points, never from resume -- and `agent.py`
+    in the SAME repository states "A worktree is ephemeral by construction: `git worktree remove`
+    deletes its `.venv` along with the tree." Dropped into this repo, that sentence would be handed
+    to a worker as fact at exactly the moment `reapStaleWorktrees` had made it false. DO NOT
+    CONFLATE THIS WITH KIRO THE IDE, a different product whose checkpoint docs describe file
+    snapshots plus conversation rewind; only the Crew orchestrator was read here, in source.
+
+    META'S RANKING ENGINEER AGENT IS UNESTABLISHED, NOT FAILING -- AND THE DIFFERENCE MATTERS.
+    Its hibernate-and-wake mechanism could not be read: `engineering.fb.com` and `arxiv.org` both
+    return 000 through this environment's egress proxy while `github.com` returns 400, so the
+    boundary is code-hosts-only rather than a dead network. What exists here is a search summary,
+    not the write-up. Recording it as a third failure would be a fabricated confirmation of the
+    finding the other two already support.
+  design: |
+    (i) Q1 -- WHAT A RE-DISPATCH ACTUALLY REDOES, PHASE BY PHASE.
+      RECON      cheap BY DESIGN and deliberately so. `spawnRecon` is capped at `RECON_MAX_TURNS`
+                 and run-task.ts records the operator's ruling that the mount ROW moves rather
+                 than this bound, "so recon stays cheap on every dispatch". Repeating it is the
+                 intended cost, not a loss.
+      PROMPT     free. Render plus provenance-lint is pure computation over the plan and the
+                 recon output -- no spawn, no budget.
+      IMPLEMENT  THE EXPENSIVE PHASE, and the only one worth recovering. It is also precisely the
+                 phase whose `session_id` is already in the ledger.
+      VERIFY     deliberately NOT resumable and must repeat. The reviewer is documented as "A
+                 FRESH read-only reviewer worker (NEVER resumeSessionId, NEVER forkSession)".
+                 That is a design choice this task does not touch.
+    DOES THE LEDGER ALREADY RECORD ENOUGH TO SKIP A COMPLETED PHASE? For the implement phase it
+    records the session id, which is enough to RESUME a conversation -- but resuming is not the
+    same as skipping, and the honest answer is NOT YET, for the reason in (ii).
+
+    (ii) THE SECOND PRECONDITION, REFRAMED 2026-08-23 -- AND THE REFRAME SHRINKS THE TASK.
+    A SESSION IS STILL NOT A CHECKPOINT WITHOUT ITS TREE. What changed is the answer to "is the
+    tree gone?" THE DURABLE ARTIFACT IS THE BRANCH, NOT THE WORKTREE. Each run is
+    `run-<taskId>-<epochMs>` with its commits in the parent clone's refs, and often a pushed PR.
+    `reapStaleWorktrees` destroys the CHECKOUT; it does not destroy the COMMITS. So the reaped
+    worktree, which the original framing treated as terminal, is the ordinary RECOVERABLE case.
+
+    THREE OF THE FOUR PARTS ALREADY EXIST, WHICH IS WHY THIS IS SMALLER THAN FILED:
+      parse       `parseOrphanedBranch` (`src/lib/daemon.ts:3353`) already parses the orphan.
+      re-cut      `materializeReviewWorktree` (`src/run-task.ts:9513`) already cuts a fresh
+                  worktree at a head sha for the review path. Resume needs the same call against
+                  the orphan branch head -- not a new mechanism.
+      doctrine    already correct and already written down: crash recovery reconstructs state
+                  "from git ... + GitHub + the ledger ... never from the dead process's local
+                  state."
+      SUPPLIER    MISSING, and it is the whole remaining gap. `InflightLockInfo` is
+                  `{pid, run_id, host, startedAt}` -- there is NO `session_id`, so at reclaim time
+                  the lock names which RUN died but not which CONVERSATION it was.
+
+    THE REFUSAL, RESTATED AGAINST THE REFRAME: a resume must VERIFY THE BRANCH HEAD IS REACHABLE
+    AND RE-MATERIALIZE A WORKTREE AT IT BEFORE RESUMING, and REFUSE to a clean re-dispatch when it
+    cannot. The failure the refusal exists to prevent is unchanged -- restoring a conversation
+    whose file state is gone, so the worker believes it made edits that no longer exist -- but the
+    trigger moves from "the worktree is absent" to "the branch head is unreachable."
+
+    ⚠ AND THAT MOVES THE TRIGGER OUT FROM UNDER CRITERION 3, WHICH IS LEFT BYTE-IDENTICAL BY THIS
+    AMENDMENT. Criterion 3 reads "a resume is refused when the recorded WORKTREE no longer exists."
+    Under the reframe that is the case a resume should RECOVER, by re-materializing from the
+    branch -- so an implementation satisfying criterion 3 as written would refuse the common
+    recoverable case and deliver almost none of this task's value. The refusal was already an
+    acceptance criterion rather than a caveat, which is right; its TRIGGER is now wrong. This is
+    RECORDED AND NOT REPAIRED because a worker may not edit a task's acceptance criteria and this
+    amendment was scoped to `rationale` and `design`. THE ARCHITECT MUST REISSUE CRITERION 3
+    AGAINST THE BRANCH-REACHABILITY TRIGGER BEFORE THIS TASK IS DISPATCHED.
+
+    (iii) Q3 -- NO NEW STORE, AND THE EXTERNAL PRECEDENT IS CITED RATHER THAN COPIED.
+    `gastownhall/gastown`'s `internal/checkpoint/checkpoint.go` frames the goal exactly -- "when a
+    polecat session dies (context limit, crash, timeout), checkpoints allow the next session to
+    recover state and resume work" -- and that project then DELETED its own purpose-built
+    side-channel (commit `58207a00`, roughly 830 lines) and collapsed it back into its primary
+    store. This task takes the conclusion and not the code: THE CHECKPOINT ALREADY EXISTS IN THE
+    LEDGER. `session_id` is written there today. The work is a READER plus a supplier, not a
+    store, and no new file, directory or format is introduced.
+
+    (iv) Q2 -- UNMEASURED, AND THIS IS THE BLOCKING CONDITION. The ledger corpus is NOT reachable
+    from the cloud container this was filed in: all three union forms returned ZERO FILES and
+    `run.start` returned 0, with the per-form file count as the control, so no figure could be
+    derived and none is asserted here. The count is the whole priority argument, so it must be
+    taken on the daemon host, over the UNION (three patterns, never two):
+      zgrep -h '"step":"run.start"' state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson
+    then the same union for terminal verdicts, and the difference is the population. Record the
+    number and the date in this shard before unblocking it.
+    IF THE ANSWER IS ONE OR TWO, CLOSE THIS TASK UNBUILT AND SAY SO -- one observed instance
+    (W1-T1213 on 2026-08-22) is an anecdote, and this repo has a named history of bounds that
+    fire on a healthy condition.
+
+    AND A SECOND UNBLOCKING QUESTION, SHARPER THAN THE FIRST BECAUSE IT CAN CLOSE THE TASK ON ITS
+    OWN: NOBODY HAS MEASURED WHETHER RESUMING IS CHEAPER THAN A CLEAN RE-DISPATCH. The population
+    count above says how OFTEN this happens; this says whether fixing it is worth anything. A
+    resumed run still repeats recon (capped, cheap by design) and still repeats verify (a fresh
+    reviewer by deliberate design, per (i)), so the only recovered work is the implement phase
+    MINUS the cost of re-materializing a worktree and re-establishing context. If that difference
+    is small, the task closes unbuilt no matter what the count says. Both figures need the ledger
+    union ON THE DAEMON HOST -- the corpus is not reachable from a cloud container, which is the
+    same reason (iv)'s first query could not be run here.
+
+    (v) BOTH DIRECTIONS ARE PROVEN. A change that resumed whenever a session id was found would
+    satisfy the recovery case while reviving the tree-mismatch case in (ii), so each criterion is
+    paired with the fresh-dispatch behaviour it must leave untouched.
+  note: |
+    THE ONE OBSERVED INSTANCE, RECORDED AS AN ANECDOTE AND NOT AS A POPULATION: W1-T1213's run
+    wrote its last row at 20:01:11Z on 2026-08-22, held `state/inflight/W1-T1213.lock` with a dead
+    pid until the 22:34 boot reclaimed it, and the task was re-dispatched from scratch. That
+    lock-versus-process divergence is ALREADY detected and named elsewhere -- `src/lib/doctor.ts`
+    carries the threshold "every inflight lock has a live pid" and `sweepStaleInflightLocks`
+    reclaims them -- so DETECTION is not the gap and is not re-filed here. What no rung does is
+    carry anything forward across that reclaim.
+
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: the reviewer's deliberate freshness, the
+    recon bound, `reapStaleWorktrees`' own policy, and the inflight-lock reclaim itself. None is
+    changed by this task.
+
+    NOT PROPOSED: a new checkpoint store, a new state directory, a new file format, or any change
+    to the three-phase spawn structure. Per (iii) the ledger already holds the only field needed.
+  acceptance:
+    - claim: "a re-dispatch after a crash supplies the prior session id from the ledger"
+      proof: "unit test: test/run-task-resume-after-crash.test.ts"
+    - claim: "a task with no prior session still dispatches fresh exactly as today"
+      proof: "unit test: test/run-task-resume-after-crash.test.ts"
+    - claim: "a resume is refused when the recorded worktree no longer exists"
+      proof: "unit test: test/run-task-resume-after-crash.test.ts"
+    - claim: "the cold-PR path keeps its empty session and its fresh degrade"
+      proof: "unit test: test/run-task-resume-after-crash.test.ts"
+    - claim: "the session id is read from the ledger union rather than the live file"
+      proof: "unit test: test/run-task-resume-after-crash.test.ts"

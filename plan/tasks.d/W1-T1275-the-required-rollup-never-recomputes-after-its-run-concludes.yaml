@@ -1,0 +1,187 @@
+- id: W1-T1275
+  title: "THE REQUIRED ROLLUP NEVER RECOMPUTES ONCE ITS OWN RUN CONCLUDES — `ci-gate` resolves the latest attempt per name and re-reads inside a 600-second grace window, then stops forever, so a sibling that goes green two hours later leaves a green suite held by a verdict about a state that no longer exists"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 in a scratch worktree proved equal to `origin/main` at ffcddf0b before any
+    reading. The clone was checked rather than assumed and was already full (2,040 commits). Files
+    over the contents-API cap were read as git objects. Ledger figures come from
+    `resolveLedgerUnion` on `"step":"<name>"` anchors over 21 archives, `ok:true`, `unread:0`, with
+    step names taken from source; the control `"step":"risk_judge.decision"` read 152 at the time
+    of this pass (it reads live and grows).
+
+    (1) THE INSTANCE, RE-DERIVED AT #2612's HEAD `e97690b0` WITH `filter=all`. `ci-gate` ran
+    14:27:16Z → 15:12:54Z, conclusion `failure`. `coverage-ratchet` has two attempts: `cancelled`
+    at 14:27:16Z (completed 15:02:32Z) and `success` at 17:03:13Z (completed 17:17:36Z). `ci` reads
+    `success`, completed 14:41:30Z. So the gate was CORRECT WHEN IT RAN — a cancelled required
+    check is a terminal non-success — and wrong about the world from 17:17:36Z onward.
+
+    (2) AND IT DID EVENTUALLY RECOMPUTE, WHICH IS THE PROOF THAT NOTHING AUTOMATIC DID.
+    `ci-gate` has a SECOND attempt at 17:48:20Z → 17:48:24Z, `success`, and the workflow run
+    (32645473001) reads `run_attempt: 2`. The `CI` run (32645472930) is likewise `run_attempt: 2`.
+    Both were re-run through the Actions API; nothing in the gate re-evaluated itself. The rollup
+    asserted `failure` for 155.4 minutes after writing its verdict, and for 30.7 minutes after the
+    last sibling had gone green. #2612 is merged now, at that same head.
+
+    (3) THE BRIEF'S FRAMING IS CORRECTED HERE RATHER THAN REPEATED, BECAUSE THE FILE CONTRADICTS
+    IT. The gate reasons carefully about WHICH attempt — `.github/workflows/ci-gate.yml:186-192`:
+    "a SHA accumulates one check-run PER ATTEMPT, so a re-run of a required check leaves its
+    earlier failed attempt in the list forever unless we narrow to one row per name. Group by
+    `name` and keep only the attempt with the latest `started_at`". BUT IT ALSO ALREADY REASONS
+    ABOUT WHEN. W1-T261 shipped a bounded re-read: `GRACE_WINDOW_SECONDS: "600"` with
+    `GRACE_POLL_INTERVAL_SECONDS: "20"` (:137-138), entered only when a required name is failing,
+    and its comment names the identical 2026-07-24 incident (#729) — "coverage-ratchet was FAILURE
+    at ci-gate's 17:11 read, SUCCESS at 17:18, and only a manual ci-gate re-run or a fresh sha
+    cleared the stale hold". SO THE OMISSION IS NOT "WHEN TO READ" IN GENERAL. It is that every
+    re-read lives INSIDE the run, and once the run concludes there is no path back.
+
+    (4) Q1 — WHAT COULD RE-TRIGGER IT, AND ONE CANDIDATE IS ALREADY REFUTED IN THE FILE. `ci-gate`
+    is triggered by `on: pull_request` and nothing else. The obvious fix, a `check_run` completion
+    webhook on a sibling, was investigated by W1-T261 and REFUSED with a reason recorded at
+    :276-282: GitHub's documented recursion guard suppresses `check_run` events for any check run
+    whose check suite was created by GitHub Actions, "and every REQUIRED name here IS a GitHub
+    Actions check suite, so that trigger would never fire for the checks this gate actually
+    aggregates". That leaves: (a) a fresh head sha, which is what the fix rung reaches for and
+    which costs a worker run and a new CI cycle; (b) a sweep-side re-run through the Actions API,
+    which is what actually cleared #2612 by hand; (c) widening the grace window, which converts a
+    stale verdict into a held runner and is bounded by `WAIT_CAP_SECONDS: "2400"` anyway; or
+    (d) nothing, which is today.
+
+    (5) Q2 — THE PERMISSION WALL, CONFIRMED IN BOTH DIRECTIONS WITH THE FLEET'S OWN TOKEN.
+    `POST repos/craigoley/remudero/check-runs/97208963168/rerequest` returns HTTP 403, message
+    verbatim: "Resource not accessible by personal access token" — reproduced here against the
+    completed `ci-gate` attempt from (1). The token is a `github_pat_`-prefixed fine-grained PAT.
+    The Actions route is confirmed the other way, from shipped code and observed effect rather
+    than by triggering one: `src/run-task.ts:20586` posts
+    `repos/{owner}/{repo}/actions/jobs/{jobId}/rerun`, and (2)'s `run_attempt: 2` is that route's
+    signature. NO RE-RUN WAS TRIGGERED BY THIS RECON.
+
+    (6) AND THE BRIEF'S ENDPOINT IS THE WRONG ONE, WHICH MATTERS FOR THE REMEDY'S SHAPE. W1-T1223
+    chose the JOB endpoint over the run endpoint deliberately and says so at `run-task.ts:20573`:
+    "THE JOB, NEVER THE RUN: `actions/jobs/{job_id}/rerun`, never `actions/runs/{run_id}/
+    rerun-failed-jobs` — a whole-run re-run would re-spend an…". `src/lib/sweep.ts:3368` repeats
+    the same refusal. So a sweep-side remedy must go through the per-JOB Actions route, not the
+    run-level one the brief names.
+
+    (7) THE COST IS MEASURED AND IT IS NOT ONLY DELAY. The `blocked_ci` fix rung spent BOTH its
+    strikes on this PR's task, W1-T1249: `fix.dispatch` strike 1/2 mode `ci-log` at 17:04:51.701Z
+    followed by `fix.ci_not_green` at 17:04:52.390Z, then `fix.dispatch` strike 2/2 at
+    17:07:04.338Z with `fix.ci_not_green` at 17:07:05.066Z, then `fix.exhausted` reason
+    `ci_never_green` and `escalation.issue_opened` → `issues/2632` (labels `needs-human`,
+    `escalation-blocked`, `needs-action`) at 17:07:08.599Z. TWO BOUNDED WORKER RUNS AND AN OPERATOR
+    PAGE. State at that moment, stated precisely rather than as "fully green": `ci` had been
+    `success` since 14:41:30Z, `coverage-ratchet`'s re-run was IN FLIGHT (started 17:03:13Z,
+    concluded `success` 17:17:36Z), and the ONLY failing required check was the stale rollup.
+
+    (8) AND THE SAME PR BURNED FIVE MORE SWEEP ACTIONS ON A SECOND, UNRELATED FAULT. Five
+    `sweep.fix.error` rows paired with five `sweep.action_failed` rows, all disposition
+    `blocked-fixable`, each reading `Command failed: gh pr view … GraphQL: API rate limit already
+    exceeded`. That is not this defect and is not filed here; it is recorded because it is part of
+    what this one PR cost.
+
+    (9) THE NEAREST RELATIVE IS W1-T1223 (#2533) AND IT IS NOT RE-FILED. That task owns REQUEUING
+    the cancelled required check — the thing that made `coverage-ratchet` terminal-but-wrong. This
+    task owns the ROLLUP THAT READ IT: even with the requeue working, the sibling's success lands
+    after `ci-gate` has concluded, and nothing recomputes the aggregate.
+  design: |
+    ONE CONCERN: a concluded rollup must be able to be recomputed when the state it summarised
+    changes. Not which attempt it reads, not whether it is required, not what it decides.
+
+    (i) THE DEFECT IS A MISSING RECOMPUTE, NOT A WRONG ANSWER, AND THE REMEDY MUST PRESERVE THAT.
+    `ci-gate` stays REQUIRED. Its latest-`started_at` per-name resolution (rationale 3) stays
+    exactly as it is. Nothing may mark a gate green without re-evaluating it — a remedy that
+    overrides, ignores, or ages-out a `failure` conclusion is refused; the only acceptable way to
+    turn this gate green is to RUN IT AGAIN.
+
+    (ii) THE TRIGGER MUST BE THE ACTIONS PER-JOB ROUTE. Rationale (5) shows the checks route is
+    closed to this token by permission, and rationale (6) shows the run-level Actions route is
+    closed by an existing ruling. That leaves `actions/jobs/{job_id}/rerun` — the endpoint W1-T1223
+    already uses, so this needs no new credential, no new permission, and no new client.
+
+    (iii) THE CONDITION MUST BE NARROW, OR IT BECOMES A RE-RUN LOOP. The recompute is for exactly
+    one shape: the rollup concluded non-success, and a required sibling has since reached a LATER
+    terminal success on the SAME head. Not "the gate is red", not "time has passed" — a criterion
+    pins that a genuinely red suite is never re-run on this path.
+
+    (iv) AND IT MUST BE BOUNDED AND OBSERVABLE. One recompute per (head, sibling-transition), never
+    an unbounded retry, and a ledger row naming which sibling's transition triggered it — so a
+    re-run storm is impossible by construction and a human reading the ledger can tell this apart
+    from a hand re-run.
+
+    (v) THE GRACE WINDOW IS NOT WIDENED. Rationale (4)(c): `GRACE_WINDOW_SECONDS` stays 600 and
+    `WAIT_CAP_SECONDS` stays 2400. Widening converts a stale verdict into a held runner, and it
+    could not have covered this instance anyway — the sibling's success landed 125 minutes after
+    the gate concluded.
+
+    (vi) NOT IN SCOPE, NAMED: W1-T1223's requeue of the cancelled check (rationale 9); the
+    rate-limit failures of rationale (8); the `check_run` trigger, refuted in the file itself; and
+    any change to what `ci-gate` considers required or how it dedupes.
+  acceptance:
+    - claim: "a rollup that concluded non-success is recomputed when a required sibling later reaches a terminal success on the same head"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+    - claim: "a suite that is genuinely still failing is never re-run by this path"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+    - claim: "the recompute happens at most once per head and sibling transition"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+    - claim: "the gate's latest-attempt-per-name resolution is unchanged"
+      proof: "unit test: test/ci-gate-dedupe.test.ts"
+    - claim: "no path marks the gate green without re-evaluating it"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+  files: [src/lib/sweep.ts, test/ci-gate-reaggregate.test.ts, test/ci-gate-dedupe.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#required-rollup-never-recomputes-2026-08-23"
+  plan_refs: ["W1-T1223", "W1-T261", "W1-T123", "W1-T1249"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/ci-gate-reaggregate.test.ts` (11 tests today) or `test/ci-gate-dedupe.test.ts`
+    (4 tests), both declared in `files:` and both already existing, so each resolves against a real
+    file rather than a forward reference.
+
+    `risk: high` IS RULE 19'S SPAN, SET UP FRONT. `files:` names three stems and the sizing check
+    reads them as distinct concerns below `high`. The blast radius is narrow — a sweep-side
+    re-trigger and its two test homes — but the band is honest for a second reason: this arm posts
+    to the Actions API, and a condition drawn one notch too wide is a re-run loop against a shared
+    CI budget, which is why design (iii) and (iv) each carry their own criterion.
+
+    THE WORKFLOW ITSELF IS DELIBERATELY NOT DECLARED. `.github/workflows/ci-gate.yml` is correct as
+    written: rationale (3) and (4) show it already resolves the right attempt and already re-reads
+    within its run, and rationale (4) shows the webhook trigger that would let it recompute itself
+    is refused by GitHub's own recursion guard. The recompute therefore belongs to the sweep, which
+    already holds the Actions client and already re-runs jobs for W1-T1223. Declaring the workflow
+    would invite an implementer to widen the grace window, which design (v) refuses.
+
+    TWO CORRECTIONS TO THE BRIEF ARE RECORDED RATHER THAN CARRIED SILENTLY, BECAUSE THE SHARD IS
+    THE RECORD. FIRST: the gate does NOT reason "not at all about when to read" — W1-T261's grace
+    window is exactly that reasoning, and citing the file as evidence of an oversight would have
+    misread it; the real gap is that every re-read is inside the run. SECOND: the working Actions
+    endpoint for a sweep-side remedy is the PER-JOB one; `actions/runs/{run_id}/rerun-failed-jobs`
+    is refused by name in two places in this repo (rationale 6).
+
+    ONE MEASUREMENT MOVED UNDER THE BRIEF AND IS RECORDED AS FOUND. At filing time `ci-gate` had a
+    SECOND attempt — 17:48:20Z, `success`, `run_attempt: 2` — and #2612 is merged. The brief's "one
+    attempt" was true when written; the stale interval is therefore bounded and measurable rather
+    than open-ended: 155.4 minutes from the gate's own verdict, 30.7 minutes from the last sibling
+    going green.
+
+    THE ID WAS PRE-MINTED AND READ BACK BEFORE ANYTHING WAS WRITTEN. `refs/rmd-id/W1-T1275`
+    resolves on origin against a namespace of 305 such refs. EIGHT SURFACES WERE SWEPT, each
+    control qualified on its own surface first: shard filenames 0 against W1-T1223 at 1; plan
+    `- id:` lines 0 against W1-T1223 at 1; the reservation 1, which is the pre-mint, against
+    W1-T1274's own at 1; open PR titles 0 against W1-T1271 at 1; open PR head branches 0 against
+    `run-W1-T` heads at 2; open PR file lists 0 with coverage at four captured of four enumerated,
+    against `plan/tasks.d/` paths at 2 across the same heads; merged trailers 0 against
+    `Remudero-Task: W1-T1252` at 1, with 459 trailer-carrying commits on main; and merged subject
+    credit 0 against W1-T1223 at 1, with `run-W1-T1275-*` at 0 against a namespace of 84 `run-*`
+    branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE. Three markers at every open PR
+    head and at main: `GRACE_WINDOW_SECONDS` and the `on:` `pull_request:` line in
+    `.github/workflows/ci-gate.yml`, and `actions/jobs/` in `src/run-task.ts`. Main reads 5 / 1 / 2
+    and every head reads exactly 5 / 1 / 2 — no head moves any marker. `src/run-task.ts` exceeds
+    the contents-API cap, so every head was read through git objects.

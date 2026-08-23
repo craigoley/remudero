@@ -1,0 +1,129 @@
+- id: W1-T1270
+  title: "THE RATIFICATION INBOX CANNOT SAY WHY IT IS EMPTY — `parseProposalRegistry` collapses an ABSENT registry file, a TORN one, a WRONG-SHAPED one and a genuinely EMPTY one into the same `[]`, so a fully-built path that has never fired is indistinguishable from one that fired and was drained, and from the silent-empty corruption the sibling writer's own doc warns about"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 55.00
+  files: [src/lib/inbox.ts, test/inbox-registry-absence.test.ts]
+  origin: oper#ratification-inbox-never-fired-2026-08-23
+  plan_refs: ["W1-T110", "W1-T111", "W1-T240"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE LEDGER SURFACE IS DISQUALIFIED IN THE ENVIRONMENT THIS WAS FILED FROM, AND NO LEDGER FIGURE
+    IS ASSERTED HERE. All three union forms returned ZERO FILES and the control
+    `"step":"risk_judge.decision"` returned 0 in the identical query form, so by the operator's own
+    rule the surface is disqualified rather than read. The `ratify.*` counts belong to the daemon
+    host and are cited as the operator's measurement, not re-derived as this shard's own.
+
+    WHAT WAS RE-DERIVED FROM SOURCE, WHICH IS READABLE HERE:
+    every step the operator counted has a real emitter — `ratify.approved` at 4 sites,
+    `ratify.approve_refused` at 2, `ratify.reframed` at 5, against `risk_judge.decision` at ONE.
+    So the silent side of that comparison has ELEVEN emitters and the loud side has one. Nothing is
+    unbuilt; the emitters simply never reach their preconditions.
+
+    Q1 — THE TWO VOCABULARIES ARE THE SAME THING, SO THE INBOX IS DARK RATHER THAN MIS-PURPOSED.
+    The `Proposal` interface (src/lib/inbox.ts) documents its own `id` field as *"e.g. \"P25\""*.
+    `ProposalTrigger` is *"MASTER-PLAN's HELD/TRIGGER proposal shape, e.g. P28's 'ratify after
+    W1-T110/W1-T111 ship'"*. `ReframeRecord` is *"One round of `rmd reframe` feedback (P25 iii,
+    W1-T111)"*. And `DraftedCandidate.stampLine` is *"The MASTER-PLAN.md proposal-list stamp line
+    the approve rung (W1-T111) will use"* — a field whose entire purpose is writing back into the
+    P-numbered list. These are one concept under two storage media, not two concepts sharing a
+    letter. The escape hatch the brief offered is closed by the type's own doc comments.
+
+    ONE THING THE REGISTRY DOES NOT MODEL, AND IT IS THE ONE THE HAND PROCESS PRODUCES EVERY CYCLE.
+    `rank` and `priority` each occur ZERO times in src/lib/inbox.ts, against a control of 33 for
+    `trigger` — a field that IS modelled. MASTER-PLAN's header carries a live ratification ORDER
+    (`P47 → P40 → P48 → P43 → P50 → P38 → P49 → P33`), and the research corpus calls that line "the
+    ONE place open proposals are ordered". The registry can hold a proposal's identity, evidence,
+    trigger, conflicts and reframe history, and has nowhere to put its position in the queue.
+    RECORDED AS AN OBSERVATION, NOT A PROPOSAL: this shard does not add a rank field, does not
+    migrate the P## vocabulary into the registry, and does not hand-seed anything.
+  design: |
+    (i) Q2 — THE SIX WRITERS ARE NOT SIX EQUIVALENT WRITERS. TWO CREATE, FOUR MUTATE.
+      CREATORS (can put a proposal into an empty registry):
+        run-task.ts:21238  `runFeedbackDocketRung`   — builds `const proposal: Proposal = {…}`
+        rule-efficacy.ts:299 `escalateRepeatingRules` — escalates REPEATING rules into proposals
+      MUTATORS (structurally no-ops on an empty registry):
+        run-task.ts:23799  `inboxCommand`    — `current.filter(...)` prune
+        run-task.ts:24112  `approveCommand`  — remove-on-ratify filter
+        run-task.ts:24246  `reframeCommand`  — `if (!freshProposal) return null`
+        panel-graph.ts:1194                  — prune
+      Four of six cannot seed the registry BY CONSTRUCTION, so "six writers, none has written" is
+      really "two creators, neither has created, and four mutators correctly did nothing".
+
+    (ii) WHICH COULD FIRE TODAY WITHOUT NEW WORK — EACH NAMED.
+      `runFeedbackDocketRung`: YES, ALREADY REACHABLE. Its caller is `buildSweepHook`
+        (run-task.ts:21507), i.e. the live sweep, and its cadence gate `feedbackDocketDue` opens
+        with `if (!marker) return true` — it fires on the FIRST pass with no marker, then every
+        seven days. It needs no new work at all. Its remaining gates are evidentiary, not
+        structural: a docket with items, and a synthesis that is not `kind === "empty"`. Both
+        already log `feedback_docket.empty` when they decline, so its silence IS recorded — on the
+        ledger this environment cannot read.
+      `escalateRepeatingRules`: NO, needs an invocation. Its only caller is `ruleEfficacyCommand`
+        (run-task.ts:11470), a CLI verb that escalates by default unless `--no-escalate`. Nothing
+        schedules it. That is exactly the gap W1-T1259 ("measurement verbs have no cadence") files,
+        and that shard is `status: queued` — the operator's reading of this one is confirmed.
+      THE BRIEF'S `panel-graph` READING NEEDS CORRECTING: that site is a PRUNE, not a creator, so
+        the console's write tier is irrelevant to whether the registry is ever seeded. Granting it
+        would let the daemon prune an empty list slightly more often.
+
+    (iii) WHAT THIS TASK ACTUALLY FIXES — THE ONE THING IN SCOPE. `parseProposalRegistry` returns
+    `[]` for FOUR different inputs: a missing/unreadable file, a `JSON.parse` throw, a blob whose
+    `proposals` key is absent or not an array, and a real empty list. Its doc justifies this as
+    *"an inbox with no registry yet is the normal pre-population state, not an error"* — true of
+    the first case and silently absorbing of the other three. The sibling writer's own doc names
+    the cost precisely: a torn read becomes *"a SILENT empty registry (every active proposal
+    vanishes from `rmd inbox`), not a visible error"*. So the module documents the hazard and this
+    function realises it.
+    THE CONSEQUENCE FOR THIS INVESTIGATION IS DIRECT: nobody looking at `rmd inbox` can tell "this
+    path has never fired" from "it fired and was drained" from "the file was torn on the last
+    concurrent write". Distinguishing them is what makes the silence legible, and it is the whole
+    of this task.
+
+    (iv) Q3 — WHAT MUST NOT CHANGE, REFUSED BY NAME RATHER THAN OMITTED.
+      NO AUTO-FILING. Ratification stays operator-initiated; nothing here files, mints or ratifies.
+      THE OPERATOR GATE STANDS. `rmd approve` mints real ids only *"when the operator approves"*.
+      APPROVE-ONLY-WHEN-READY STANDS. Readiness is *"COMPUTED not asserted"*, and the approve rung
+        refuses *"anything not READY with zero side effects"*. Untouched.
+      AND EXPLICITLY NOT PROPOSED: deleting the inbox, migrating the P## vocabulary into it, or
+        hand-seeding the registry. This task asks why a built path is unused; it does not automate
+        the decision the path exists to serve.
+
+    (v) BOTH DIRECTIONS ARE PROVEN. A change that reported every empty read as a fault would make
+    the normal pre-population state look broken and would be worse than today, so each new
+    distinction is paired with the case it must leave alone.
+
+    (vi) COST. No new dependency, no I/O, no new file or format. The added state is a discriminated
+    return over inputs the function already receives.
+  note: |
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS. `lint-plan` reads `src/lib/inbox.ts` and
+    `test/inbox-registry-absence.test.ts` as two distinct concerns and refuses that pair at
+    `risk: medium`. The change itself is a discriminated return inside one function with no I/O and
+    no new dependency; the band records the linter's span rule, not a judgement that this is
+    dangerous.
+
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: W1-T1259 owns the cadence that would let
+    `rmd rule-efficacy` run unattended, and is filed and queued — it is cited here, not re-filed.
+    The console write tier that would let `panel-graph`'s prune run more often is likewise not
+    pursued, because pruning cannot seed.
+
+    RECORDED, NOT ACTED ON: the registry models no rank while MASTER-PLAN's header maintains one by
+    hand every cycle. Whether that ordering should live anywhere but prose is an operator question,
+    and deciding it is not this task's business.
+  acceptance:
+    - claim: "an absent registry file is reported apart from a genuinely empty one"
+      proof: "unit test: test/inbox-registry-absence.test.ts"
+    - claim: "a torn or malformed registry is reported as a fault rather than as empty"
+      proof: "unit test: test/inbox-registry-absence.test.ts"
+    - claim: "a registry whose proposals key is missing is reported as a fault"
+      proof: "unit test: test/inbox-registry-absence.test.ts"
+    - claim: "a populated registry still parses to its proposals unchanged"
+      proof: "unit test: test/inbox-registry-absence.test.ts"
+    - claim: "an empty proposals array is still a legitimate empty result"
+      proof: "unit test: test/inbox-registry-absence.test.ts"
+    - claim: "no caller is made to fail on a registry that has never been created"
+      proof: "unit test: test/inbox-registry-absence.test.ts"

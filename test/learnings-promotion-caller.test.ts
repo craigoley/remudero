@@ -259,7 +259,12 @@ test("W1-T1059: the stage writes no file anywhere while it runs", async () => {
   assert.match(text, /e1 -> user-overall/);
 });
 
-test("W1-T1059: a failing corpus read degrades to no section rather than aborting the retro", async () => {
+// W1-T1249 design (iv): the FAILED path used to erase its own section (return ""). That was the
+// genuinely silent path — worse than the absent-judge branch, which at least renders "did NOT
+// run" — so it now renders a FAILED section (and, separately, leaves a ledger row: see
+// test/promotion-judge-supplied.test.ts). Updated here rather than re-filed as a new test
+// because it is the SAME assertion this task's design (iv) deliberately flips.
+test("W1-T1059: a failing corpus read renders a FAILED section rather than erasing it or aborting the retro", async () => {
   const text = await promotionProposalSectionFor({
     corpusDir: "/ignored",
     loadCorpus: () => {
@@ -267,8 +272,11 @@ test("W1-T1059: a failing corpus read degrades to no section rather than abortin
     },
     judge: async () => verdict(),
   });
-  assert.equal(text, "");
-  // CONTROL — the same call with a working read returns a real section.
+  assert.notEqual(text, "");
+  assert.match(text, /Learnings promotion/);
+  assert.match(text, /FAILED/);
+  assert.match(text, /EACCES/);
+  // CONTROL — the same call with a working read returns the REAL (non-failed) section.
   const ok = await promotionProposalSectionFor({
     corpusDir: "/ignored",
     loadCorpus: () => [entry()],
@@ -276,6 +284,7 @@ test("W1-T1059: a failing corpus read degrades to no section rather than abortin
   });
   assert.notEqual(ok, "");
   assert.match(ok, /Learnings promotion/);
+  assert.doesNotMatch(ok, /FAILED/);
 });
 
 

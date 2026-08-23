@@ -1,0 +1,136 @@
+- id: W1-T1257
+  title: "the feedback inbox has no discharge path — every status it can express names a decision about the PROPOSAL and none names the work SHIPPING, so an entry whose filed tasks have all merged renders as a live decision forever and inbox depth reads as backlog when part of it is archaeology"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 60.00
+  files: [src/lib/trace.ts, src/lib/panel-graph.ts, test/feedback-discharge.test.ts]
+  origin: oper#feedback-inbox-no-retirement-path-2026-08-23
+  plan_refs: ["W1-T43", "W1-T257", "W1-T285", "W1-T415", "W1-T1103", "W1-T1251"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Q1 — DOES ANY CODE PATH WRITE A TERMINAL STATUS MEANING "THE WORK THIS PRODUCED HAS SHIPPED"?
+    NO, AND THE SCAN IS CONTROLLED. `FEEDBACK_STATUSES` (src/lib/feedback.ts) is a CLOSED enum of
+    five: new, grilling, proposed, accepted, rejected — and MASTER-PLAN §7B fixes the identical
+    five in the schema it governs, so the enum is a spec commitment, not an implementation detail.
+    The control is that EVERY ONE of the five is demonstrably written by code, so a zero here is
+    not a blind scan over a corpus the query cannot see:
+      `new`       — captureFeedback (src/lib/feedback.ts)
+      `grilling`  — the triage rung's `setFeedbackStatus(worktreePath, feedbackId, decision.status)`
+      `proposed`  — proposeFeedbackWithSummary (src/lib/feedback.ts)
+      `rejected`  — ops.ts's alert path, and panel-graph.ts's decision route
+      `accepted`  — panel-graph.ts, TWICE (the decision route, and reconcileFeedbackEntries)
+    There is no sixth member for a scan to find, and no writer of one.
+
+    AND THE NEAREST CANDIDATE IS ABOUT THE PROPOSAL, NOT THE WORK. `accepted` is written when the
+    entry's `proposal_pr` resolves MERGED — reconcileFeedbackEntries' own header says it in terms:
+    "MERGING THE PROPOSAL PR IS THE DECISION". A proposal PR merges when the tasks are FILED,
+    which is BEFORE any of them is built. So the state "the work this entry produced has shipped"
+    is not merely never written — IT IS INEXPRESSIBLE IN THE SCHEMA. Entries enter by machine and
+    the only exits the vocabulary offers are decisions about a proposal.
+
+    THE COST IS OBSERVABLE AND MEASURED END TO END ON ONE ENTRY, RE-DERIVABLE FROM THIS TREE.
+    `plan/feedback/fb-1784814429463-9652bd.yaml` reads `status: proposed` on origin/main. Its
+    `proposal_pr` is #1683, MERGED 2026-08-12T23:14:38Z. The task that PR filed, W1-T449, merged
+    as #1690 carrying the anchored `Remudero-Task: W1-T449` trailer. Every piece of work the entry
+    produced has shipped, and the entry still reads as an undecided proposal eleven days later.
+    While it does, serve.ts's renderNeedsMe pushes it into the decision queue on every render
+    (`e.status === "proposed"` -> needsMeProposedHtml), which is the same keying panel-graph.ts's
+    W1-T257 header already names. THE FIGURES FOR THE WHOLE CORPUS ARE A QUERY, NOT A NUMBER TO
+    CARRY: count by status with
+      `grep -rhoE '^status: *[a-z]+' plan/feedback/*.yaml | sort | uniq -c`
+    and re-derive the discharged subset with the predicate below, never from a figure quoted here.
+
+    THIS IS NOT A FIRST SIGHTING. W1-T1251's own `note`, merged 2026-08-23, reports the identical
+    shape against a DIFFERENT entry: "`plan/feedback/fb-1785237596465-45d06d.yaml` still reads
+    `status: proposed` although its proposal PR #2029 merged on 2026-08-17 and both filed tasks
+    shipped. Whether a discharged entry should advance is the intake lane's call." Two independent
+    observations of one missing mechanism is the signal that the mechanism is missing, not that
+    two entries are stale. W1-T1103 is the same defect class in the neighbouring queue — an
+    escalation the system opens and cannot retire.
+
+    Q2 — CAN RETIREMENT BE DERIVED RATHER THAN STORED? YES, WITH NO NEW FIELD AND NO WRITE, AND
+    THE FACT IS ALREADY COMPUTED AND DISCARDED. Triage stamps `origin: feedback#<id>` on every
+    task it files, and trace.ts already owns that string as `feedbackOriginTag`. `traceForward`
+    already walks entry -> proposal PR -> every task carrying that origin -> each task's runs ->
+    PR -> merge sha, and then RENDERS IT TO TEXT AND DROPS IT. Nothing folds that walk into an
+    answer, and no caller outside `rmd trace` asks for one. Re-derive the linkage corpus with
+      `grep -rhoE 'feedback#fb-[0-9a-z-]+' plan/tasks.yaml plan/tasks.d/ | sort -u`
+    — the join key is already in the plan, on both sides.
+
+    DO NOT SOURCE MERGED-NESS FROM TRACE'S LEDGER WALK. `runsForTask` derives a task's PR from
+    `pr.opened` ledger lines, and the dominant merge path here is GATE-SIDE — the PR merges after
+    the run already ended blocked, so a shipped task can have no usable run row and would read as
+    unmerged. The authority is the projection's own credit: `findMergedByTrailer` (anchored
+    `^Remudero-Task: <id>$`) UNIONED with `findMergedByHeadBranch` (`run-<taskId>-<digits>` on the
+    STRUCTURED head ref), both already served off the ONE batched fetch panel-graph.ts's three
+    existing projectPlan call sites share. A trailer-only set under-credits; a branch-only set
+    under-credits differently; the union is the predicate's input.
+
+    THE PREDICATE IS THREE-VALUED, NOT TWO, AND EACH ARM HAS A FALSIFIER.
+      DISCHARGED — the task set for `feedback#<id>` is NON-EMPTY and EVERY member is credited
+        merged by the union above.
+      NOT DISCHARGED — at least one filed task is uncredited, OR the task set is EMPTY. An empty
+        set is the load-bearing falsifier: an entry that filed nothing is a refuted investigation
+        or a standing ruling, not archaeology, and it must keep its row. A predicate that
+        discharged the empty case would sweep every un-triaged entry off the board at once.
+      UNDECIDABLE — the merged-set read FAILED or was TRUNCATED. Today reconcileFeedbackEntries
+        consults `readFailed()` alone; `readTruncated()` EXISTS (W1-T415) and is consulted at two
+        sites in status.ts, and this path is not one of them, so a partial read is indistinguishable
+        from a live decision. STATED HONESTLY: at the board's current bounds (BOARD_MAX_PAGES ×
+        BOARD_FULL_PAGE_SIZE in src/lib/open-prs-rest.ts) truncation is NOT what is holding the
+        entries above at `proposed` — the arm is specified so this predicate does not inherit the
+        gap, not because it explains today's rows.
+
+    AND THE DECORATIVE-STATUS TRAP IS EXACTLY WHY IT MUST BE DERIVED. A stored `discharged` costs
+    a sixth enum member, a §7B schema amendment, and a NEW WRITE that can disagree with the
+    projection the moment either side moves — the failure mode where a stored `status:` and the
+    live projection say different things. A read-time decoration cannot drift, because there is
+    nothing to drift from. The shape already exists in this file: ReconciledFeedbackEntry's
+    `unverified?: true`, computed on the read path and never persisted. `discharged` is its twin.
+
+    Q3 — WHAT MUST NOT CHANGE, HONOURED BY CONSTRUCTION AND BY NAME. (1) NO AUTO-FILING: this view
+    files nothing, mints no task id, and opens no branch — it reads a plan and an already-batched
+    PR set and returns a decoration. (2) THE RATIFICATION INBOX STAYS THE ONLY PROPOSAL CHANNEL:
+    nothing here proposes work; §7B's boundary that the intake lane can PROPOSE anything and MERGE
+    nothing is untouched, and this task adds no second channel beside it. (3) APPEND-ONLY POSTURE:
+    no `plan/feedback/*.yaml` byte is written by this path. An entry's `status:` stays exactly what
+    a human or the existing merge-to-`accepted` reconcile last wrote, and a discharged entry is
+    LABELLED, never retired. Nothing is closed on a human's behalf.
+  note: |
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED, AND NOT MERELY OMITTED:
+      A SIXTH STATUS is refused above with its reason (the drift a stored status buys). Adding one
+        would also require a MASTER-PLAN §7B amendment, which is the Architect's call and not this
+        task's.
+      AUTO-ADVANCING A DISCHARGED ENTRY — writing it to `accepted`, or hiding it outright — is NOT
+        proposed. The decoration is evidence for a human, and whether a discharged entry should
+        advance stays the intake lane's call, in the same words W1-T1251's note used.
+      THE EXISTING RECONCILE'S MERGE-TO-`accepted` RULE IS UNCHANGED. This task adds a second,
+        independent reading; it does not re-litigate the first.
+    REPORTED, NOT FIXED, AND DELIBERATELY A SEPARATE QUESTION: something is stopping the existing
+    reconcile from durably landing at all. fb-1784814429463-9652bd's proposal PR merged eleven days
+    before this filing and the entry on origin/main still reads `proposed`, which the merge-to-
+    `accepted` rule alone does not explain. That is a liveness question about the read path and its
+    landing bridge, not about vocabulary, and welding it to this task would span two concerns.
+    RULE 19 BAND: `risk: high` is set for the SPAN — the derivation seam and its wiring sit in two
+    files — not for blast radius. The wiring is a deliverable, not a seam (Rule 14): a predicate
+    with no caller is the dead-code shape this repo has shipped before.
+  acceptance:
+    - claim: "an entry whose every filed task is credited merged is derived as discharged"
+      proof: "unit test: test/feedback-discharge.test.ts"
+    - claim: "an entry that filed no task is never discharged"
+      proof: "unit test: test/feedback-discharge.test.ts"
+    - claim: "an entry with one uncredited filed task is not discharged"
+      proof: "unit test: test/feedback-discharge.test.ts"
+    - claim: "a failed or truncated merged-set read yields undecidable rather than not-discharged"
+      proof: "unit test: test/feedback-discharge.test.ts"
+    - claim: "a task credited only by its head branch counts as merged for the predicate"
+      proof: "unit test: test/feedback-discharge.test.ts"
+    - claim: "the derived view leaves every stored status byte unchanged"
+      proof: "unit test: test/feedback-discharge.test.ts"
+    - claim: "the inbox read decorates a discharged entry instead of dropping it"
+      proof: "unit test: test/feedback-discharge.test.ts"

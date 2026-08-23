@@ -1,0 +1,193 @@
+- id: W1-T1274
+  title: "`rmd doctor` REPORTS A HEALTHY FLEET AS FAILED BECAUSE ITS LIVENESS CORPUS RESTS ON A FALSE STATED ASSUMPTION — `daemon.`-prefixed rows DO stop while the daemon lives, and today they stopped for 102.5 minutes against a two-minute bound while the same run kept dispatching, polling and fixing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 ON THE DAEMON HOST, in a scratch worktree proved equal to `origin/main` at
+    0d561b82 before any reading. The clone was checked rather than assumed and was already full
+    (2,032 commits). Every ledger figure is from `resolveLedgerUnion` on a `"step":"<name>"` anchor
+    over 21 archives, `ok:true`, `unread:0`; the control `"step":"risk_judge.decision"` reads 150.
+    STEP NAMES WERE TAKEN FROM SOURCE, NEVER GUESSED — each of `pr.polling`, `pr.checks`,
+    `verdict`, `dispatch.settled_set`, `github_app.token_refreshed` and `fix.dispatch` was
+    confirmed present as a literal in `src/` before it was counted.
+
+    (1) THE ASSUMPTION IS STATED AND IS FALSE. `src/lib/doctor.ts:100` says it verbatim:
+    "`daemon.`-prefixed rows do not stop while the daemon lives. FAIL past the bound rather than
+    WARN, because a stale ledger is the daemon being gone." The absent-row detail at :111 repeats
+    it: "no `daemon.`-prefixed ledger row at all — the daemon has not run, or the ledger path is
+    wrong". The filter itself is `step.startsWith("daemon.")` in `deriveLastPoll`
+    (`src/lib/daemon-health.ts:67`) and again in `newestDaemonRunId` (`src/lib/doctor.ts:568`).
+    The brief's :539/:558 no longer resolve at this head, which is why the symbols are cited here
+    and the line numbers are re-derived rather than carried.
+
+    (2) THE BOUND IS TWO MINUTES, DERIVED NOT PICKED. `readLedgerAgeMs` sets
+    `boundMs = poll.pollIntervalMs * 2` (`doctor.ts:544`), and the live rows carry
+    `poll_interval_ms: 60000` — so the check FAILs at 120 seconds of prefix silence.
+
+    (3) AND THE PREFIX WENT SILENT FOR 102.5 MINUTES WHILE THE DAEMON WAS ALIVE. The largest gap
+    between consecutive `daemon.`-prefixed rows today is 102.5 minutes,
+    2026-08-23T14:44:35.453Z → 16:27:04.869Z. Restricting the corpus to `daemon.alive` alone makes
+    it 106.3 minutes (…→ 16:30:51.744Z). Normal cadence is nothing like that: p50 1.05 min, p90
+    1.22 min, p99 13.39 min, with only 2 gaps over 30 minutes and 1 over 60 in the whole day. So
+    the check is right almost always and wrong in the tail — and the tail is where it is consulted.
+
+    (4) THE DAEMON WAS DEMONSTRABLY ALIVE AND PRODUCTIVE ACROSS THAT GAP. 365 ledger rows fall
+    inside it, including `pr.polling` ×33, `fix.dispatch` ×4, `fix.done` ×4, `review.posted` ×4,
+    `review.pending_posted` ×4, `automerge.armed` ×4, `sweep.disposed` ×20. Seventy of them carry
+    `run_id: DAEMON-1787493725647` — and the row that ENDS the gap,
+    `daemon.block.independent_failure` at 16:27:04.869Z, carries that SAME run id, so this is one
+    continuous run and not a restart boundary.
+
+    (5) Q1 — WHY THE PREFIX STOPS: THE ONLY RECURRING `daemon.` EMITTER IS A TICKER, AND THE TICKER
+    ONLY RUNS INSIDE THREE WINDOWS. Every other `daemon.`-prefixed step is BOOT-TIME AND ONE-SHOT:
+    `daemon.boot`, `daemon.start`, `daemon.target`, `daemon.paths`, `daemon.crashloop_check`,
+    `daemon.claude_bin`, `daemon.lock_sweep`, `daemon.tmp_sweep`, `daemon.orphan_sweep`,
+    `daemon.feedback_landing_sweep`, `daemon.plan_changed`/`daemon.plan_unchanged`,
+    `daemon.image_drift`, `daemon.headroom`, `daemon.quota`, `daemon.summary` and the
+    `daemon.block.*` classification rows — all emitted from the boot preamble or from a specific
+    branch, none on a cadence. The ONE per-interval row is `daemon.alive`, and it has exactly ONE
+    emit site: `src/lib/daemon.ts:1490`, inside `startInFlightTicker`. That ticker is started at
+    exactly three call sites — retro (`:1394`), the full sweep (`:2354`) and dispatch settling
+    (`:3198`) — and stopped in a `finally` at each. SO THE PATH THAT EMITS NONE OF THEM IS ANY
+    STRETCH OF THE LOOP OUTSIDE THOSE THREE WINDOWS: the inter-iteration `await deps.sleep(...)`,
+    the orphan/feedback/posture/usage steps, and — since W1-T1272 — every iteration that returns at
+    the freshness check before the sweep ticker is ever started.
+
+    (6) AND THE TICKER CAN DIE WITHOUT SAYING SO. Its body guards only two calls:
+    `onDiskHeadroomBreach` and `sweepLight()` are each wrapped in try/catch (`daemon.ts:1501`,
+    `:1511`). `deps.sleep`, `deps.checkPause?.()`, `deps.readDiskHeadroom?.()` and the
+    `log("daemon.alive", …)` call itself are NOT. A throw from any of those rejects the async IIFE,
+    and the rejection is not observed until `stop()` awaits it — so the only recurring liveness
+    emitter can stop for the rest of a phase while the phase keeps running. This is NOT asserted as
+    the cause of (3); it is a second, independent way the stated assumption fails, and it is
+    recorded because a corpus fix that assumes the ticker is reliable inherits it.
+
+    (7) Q2 — WHAT EACH CANDIDATE CORPUS WOULD HAVE READ, MEASURED OVER THE SAME DAY. Rows today,
+    and the largest gap between consecutive rows in each corpus, against the two-minute bound:
+      A  `daemon.`-prefixed (today's corpus)   1041 rows   largest gap 102.5 min   FAILS
+      A' `daemon.alive` only                    514 rows   largest gap 106.3 min   FAILS
+      B  any row carrying a `DAEMON-` run_id  12487 rows   largest gap  28.4 min   FAILS
+      D  any ledger row at all                15372 rows   largest gap  21.8 min   FAILS
+    NONE of the corpora available today stays inside `pollIntervalMs * 2`. B is not a free win: it
+    is fourteen times better than A and still fourteen times outside the bound.
+
+    (8) AND WHAT EACH WOULD MISS, WHICH IS THE HALF THAT MATTERS. B keys on the daemon's own
+    `run_id`, so it cannot distinguish "the daemon is working" from "a lane the daemon spawned is
+    still writing after the daemon died" — every worker row carries a run id derived from the run
+    that admitted it. D is worse: any row from any actor, including a hand-run CLI verb, would keep
+    the check green with no daemon at all. A CHECK THAT NEVER FAILS IS WORSE THAN ONE THAT FAILS
+    WRONGLY, and both B and D trade the false FAIL for a false OK on precisely the condition
+    `doctor` exists to report.
+
+    (9) THE COST IS SPECIFIC. `doctor`'s own contract is that exit 2 "always means a check failed
+    and never a typo", and its stated purpose (`doctor.ts`'s header) is to answer from a cold SSH
+    session while `remudero-serve` is down and the API budget is exhausted — CLI-side, no network,
+    no healthy daemon required. A false FAIL is therefore most likely to be read at exactly the
+    moment the operator has no second opinion available.
+
+    (10) NOTHING PINS THIS TODAY. `test/doctor.test.ts` carries 36 tests and references
+    `judgeLedgerFreshness` 4 times, all against synthetic ages — none against a corpus in which the
+    daemon is alive and the prefix is silent.
+  design: |
+    ONE CONCERN: the liveness check must read a corpus that is actually written whenever the daemon
+    is alive. Not the bound, not the verdict, not the exit code.
+
+    (i) THE CHECK IS CORRECT ABOUT WHAT IT MEASURES AND MUST NOT BE WEAKENED. The bound stays
+    derived from the observed poll interval (`doctor.ts:544`), the verdict stays FAIL rather than
+    WARN, and the check stays. Widening the bound to cover a 102-minute gap would make it blind to
+    a daemon that has been gone for an hour and a half — the exact failure it exists to catch.
+
+    (ii) THE CORPUS MUST BE A ROW THE LOOP WRITES UNCONDITIONALLY PER ITERATION. Rationale (7)
+    shows no existing corpus qualifies, so this needs an emitter, not only a reader change: one row
+    per loop iteration, written on every path — idle, dispatching, sweeping, or returning early for
+    freshness — so "the loop is turning" is observable without depending on which of the three
+    ticker windows happens to be open.
+
+    (iii) AND IT MUST STAY DISTINGUISHABLE FROM A WORKER'S OWN ROWS. Rationale (8) is why the
+    corpus cannot simply widen to the run id: the reader must key on something only the daemon's
+    own loop writes, so a lane still writing after the daemon died reads as what it is.
+
+    (iv) THE ABSENT-CORPUS MESSAGE MUST NAME WHAT IT ACTUALLY READ. `doctor.ts:111` currently tells
+    an operator the daemon "has not run, or the ledger path is wrong" — a sentence that was
+    misleading for 102 minutes today. Whatever corpus this lands on, the detail names it, so the
+    next operator debugging a FAIL is told which rows were looked for.
+
+    (v) `newestDaemonRunId` (`doctor.ts:568`) SHARES THE SAME PREDICATE and must be considered in
+    the same change — it re-applies `startsWith("daemon.")` to pick the run whose `daemon.alive`
+    phases are reported. Leaving it on the old corpus while the freshness reader moves would make
+    two checks disagree about which run is current.
+
+    (vi) NOT IN SCOPE, NAMED: the ticker's unguarded body (rationale 6) — a real second defect,
+    recorded here and deliberately not fixed, because a corpus that no longer depends on the ticker
+    does not need it fixed to be correct; W1-T1272's full-sweep reachability, which is the reason
+    one of the three ticker windows stopped opening; and every other `doctor` check.
+
+    (vii) WHAT MUST NOT CHANGE, PINNED BY A CRITERION: `doctor` stays READ-ONLY and NETWORK-FREE —
+    no `gh`, no write, no lock — `--fix` stays REFUSED BY NAME at `doctor.ts:710` rather than
+    silently unrecognised, and the exit-code contract (0 OK / 1 WARN / 2 FAIL / 64 bad args,
+    `DOCTOR_USAGE_EXIT` at `:68`) is untouched.
+  acceptance:
+    - claim: "a daemon that is alive but outside every ticker window is not reported as failed"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "a daemon that is genuinely gone is still reported as failed at the same bound"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "rows written by a worker after the daemon is gone do not keep the check green"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "the absent-corpus detail names the rows the check actually looks for"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "doctor stays read-only and network-free, --fix stays refused by name, and the exit codes are unchanged"
+      proof: "unit test: test/doctor.test.ts"
+  files: [src/lib/daemon.ts, src/lib/daemon-health.ts, src/lib/doctor.ts, test/doctor.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#doctor-liveness-corpus-false-assumption-2026-08-23"
+  plan_refs: ["W1-T1047", "W1-T1099", "W1-T1272", "W1-T513"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/doctor.test.ts`, which is declared in `files:` and already exists with 36
+    tests, so each resolves against a real file rather than a forward reference.
+
+    `risk: high` IS RULE 19'S SPAN AND IS SET UP FRONT. `files:` names four stems, which the sizing
+    check reads as distinct concerns and refuses below `high`. Decomposing is wrong here and
+    rationale (7) is why: the corpus this check needs does not exist yet, so a reader-only change
+    has nothing correct to read and an emitter-only change leaves the false FAIL standing. The
+    blast radius is one read-only diagnostic and one ledger row per iteration.
+
+    THE BRIEF'S FIGURE WAS RE-DERIVED AND MOVED, AND THE MOVED VERSION IS RECORDED. The measured
+    silence is 102.5 minutes on the `daemon.` PREFIX (14:44:35.453Z → 16:27:04.869Z) and 106.3
+    minutes on `daemon.alive` ALONE (→ 16:30:51.744Z). The brief's 106 minutes is the second of
+    those. Both are read against a two-minute bound, so the conclusion is unchanged; the number is
+    corrected because the shard is the record.
+
+    ONE SECOND DEFECT IS CARRIED, NOT FOLDED IN. Rationale (6): the ticker's body guards only
+    `onDiskHeadroomBreach` and `sweepLight()`, leaving `sleep`, `checkPause`, `readDiskHeadroom`
+    and the `daemon.alive` log call itself unguarded, so a throw there silently ends the only
+    recurring liveness emitter for that phase. This shard does NOT claim that is what happened in
+    the measured window — it is a separate way the same assumption fails, named so the operator can
+    mint it rather than have it disappear into this one.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T1274` resolves on origin against a namespace of 304 such refs. EIGHT SURFACES
+    WERE SWEPT AND ONE CONTROL WAS DISQUALIFIED RATHER THAN REPORTED: W1-T1272 was the obvious
+    control for the three main-tree surfaces and reads ZERO on all three, because its own filing PR
+    is still open — so those surfaces were re-controlled on W1-T1252, which reads 1 on each. Shard
+    filenames 0 against W1-T1252 at 1; plan `- id:` lines 0 against W1-T1252 at 1; the reservation
+    1, which is the pre-mint, against W1-T1252's own at 1; open PR titles 0 against W1-T1273 at 1
+    (live in an open title); open PR head branches 0 against `run-W1-T` heads at 3; open PR file
+    lists 0 with coverage at eight captured of eight enumerated, against `plan/tasks.d/` paths at 5
+    across the same heads; merged trailers 0 against `Remudero-Task: RETRO-1787502627029` at 1,
+    with 456 trailer-carrying commits on main; and merged subject credit 0 against W1-T1252 at 1,
+    with `run-W1-T1274-*` at 0 against a namespace of 85 `run-*` branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, READ THROUGH GIT OBJECTS BECAUSE
+    THE FILES INVOLVED EXCEED THE CONTENTS API'S CAP. Three markers at every open PR head and at
+    main: `startsWith("daemon.")` in `src/lib/doctor.ts` and in `src/lib/daemon-health.ts`, and
+    `judgeLedgerFreshness` in `src/lib/doctor.ts`. Main reads 1 / 1 / 2 and every head reads
+    exactly 1 / 1 / 2 — no head moves any marker. THE BOARD TURNED OVER MID-SWEEP: the file-list
+    surface enumerated eight open PRs and the per-head marker sweep, run minutes later, enumerated
+    seven. Both are recorded as measured rather than reconciled to one number.

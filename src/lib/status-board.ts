@@ -75,6 +75,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { IDLE_REASON_ID_CAP, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import { drainNowFilePath, pauseFilePath, pendingKicks, quietHoursFilePath, stopFilePath } from "./fleet-control.js";
 import { readInflightLock } from "./inflight-lock.js";
+import { classifyGlobalArtifactRefusal } from "./learnings.js";
 import { DEFAULT_SUPERVISOR_INTERVAL_S } from "./launchd.js";
 import {
   classifyProposal,
@@ -2232,6 +2233,19 @@ function renderCacheHitBlock(c: CacheHitSection): string[] {
  * their own line, deduped with a count — never folded into `dropped` (design note (iii): a
  * refusal is a layer contributing ZERO entries, a drop is a ranked entry losing a tie). `found:
  * false` renders explicit absence rather than a fabricated `dropped: 0` (design note (iv)).
+ *
+ * W1-T1251 — `loadGlobalArtifact` (learnings.ts) returns SEVEN distinct failure reasons, of
+ * which exactly ONE ("global artifact not found") is the ruled-on §6-DEFERRED-TRANSPORT state —
+ * a designed, non-fatal absence nothing has provisioned yet — and six are REAL problems with an
+ * artifact that DOES exist, including the hash-mismatch tamper signal. Printing every one of
+ * them behind the single word `refused:` reports an expected absence and a hand-edited artifact
+ * in the same vocabulary. `classifyGlobalArtifactRefusal` (learnings.ts, the ONE producer of
+ * this discriminant) splits `globalRefusedReasons`' keys into the two lines below — the reason
+ * TEXT itself is unchanged/verbatim either way, only which line it renders on differs, so this
+ * reads apart from a genuine refusal without touching run-task.ts's per-row logging at all (no
+ * new ledger field, no new I/O — see the task record's design note (iv)/(iii)). A tampered or
+ * malformed artifact keeps the word `refused` and stays on the FIRST, prominent line exactly as
+ * before; the designed absence moves to its own line, named as what it is.
  */
 function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
   const out = ["── LEARNINGS INJECTION ──────────────────────────────────"];
@@ -2243,11 +2257,11 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
   out.push(`matched: ${t.matched}  dropped: ${t.dropped}  rows: ${t.rows}`);
   out.push(`budget_chars: ${t.budgetChars.length ? t.budgetChars.join(", ") : "unknown"}`);
   const reasons = Object.keys(t.globalRefusedReasons).sort();
-  out.push(
-    `global artifact refused: ${
-      reasons.length ? reasons.map((r) => `${r} (${t.globalRefusedReasons[r]})`).join(", ") : "none"
-    }`,
-  );
+  const genuineRefusals = reasons.filter((r) => classifyGlobalArtifactRefusal(r) === "refused");
+  const designedAbsences = reasons.filter((r) => classifyGlobalArtifactRefusal(r) === "absent");
+  const renderReasons = (rs: string[]) => (rs.length ? rs.map((r) => `${r} (${t.globalRefusedReasons[r]})`).join(", ") : "none");
+  out.push(`global artifact refused: ${renderReasons(genuineRefusals)}`);
+  out.push(`global artifact deferred (§6 transport not yet provisioned): ${renderReasons(designedAbsences)}`);
   return out;
 }
 

@@ -346,14 +346,18 @@ import {
 } from "./lib/feedback-docket.js";
 import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
+  aggregateCitationEvidence,
   assertArchitectAboveWorker,
   buildGather,
   calibrationTable,
+  changedCitationStamps,
   checkRetroIntegrity,
   codeFilesInDiff,
   evaluateRetroTrigger,
   gatherRuns,
   loadMastMapping,
+  mineGitLogCitations,
+  mineLedgerCitations,
   netStateCapabilityAdvisories,
   parseLedger,
   planHealthSweep,
@@ -368,6 +372,8 @@ import {
   resolveMarkerForGather,
   saveMarker,
   shippedSince,
+  stampCitationsAndCommit,
+  type GitLogCommit,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
@@ -470,8 +476,10 @@ import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/co
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
   buildExportBundle,
+  buildPromotionJudgePrompt,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   loadLearningsCorpus,
+  parsePromotionJudgeVerdict,
   projectLearningsHome,
   renderDoctrinePreamble,
   renderExportBundle,
@@ -485,8 +493,10 @@ import {
   computeMatchedLearningsForArm,
   deriveWipeTestRunResult,
   ledgerWipeTestPair,
+  resolveWipeTestPreflight,
   resolveWipeTestTarget,
   WIPE_TEST_SANDBOX_DEFAULT,
+  type WipeTestMergedState,
   type WipeTestPair,
 } from "./lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
@@ -1744,10 +1754,7 @@ export function realArmDeps(
     mergeDirect: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
       // W1-T1050: NO `--delete-branch` — see the doc on `ArmDeps.mergeDirect` above for why.
-      execFileSync("gh", ["pr", "merge", prUrl, "--squash"], {
-        encoding: "utf8",
-        stdio: "pipe",
-      });
+      mergeDirectViaRest(prUrl);
     },
     // `--disable-auto` WITHDRAWS an arm rather than creating one, but it is still a live
     // mutation of a real PR, and under the guard there is never an arm to withdraw — the
@@ -1875,7 +1882,7 @@ export function armAutoMergeDetailed(
  * unconditionally and only a caller that deliberately narrows the deps object (as those tests do,
  * to prove the narrower shape still arms) sees the pre-W1-T1000002 behaviour.
  */
-function attemptArm(
+export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines">>,
 ): ArmAttemptResult {
@@ -1931,6 +1938,54 @@ function attemptArm(
         return { outcome: "direct-merge-failed" };
       }
     }
+    // W1-T1255: THE QUOTA FALLBACK. The `/clean status/i` branch above is untouched — it is
+    // GitHub's own "this PR is already mergeable, just merge it" refusal, and it stays the
+    // certification this fleet relies on. What that branch cannot reach is the case this task
+    // exists for: when the GraphQL budget is spent, `armAuto` fails with a QUOTA message, so
+    // `armFailureAction` returns `"transient"`, the branch above never fires, and the fallback is
+    // never attempted at all. `armFailureIsRateLimited` (W1-T1235, already live and already
+    // consulted below) is the ONLY trigger for this second attempt — never `armFailureAction`'s
+    // wider `"transient"`, which also matches an ordinary network blip.
+    //
+    // THE PRECONDITION IS NOT WIDENED, IT IS RELOCATED TO THE SAME AUTHORITY. `mergeDirect` is now
+    // the REST endpoint, and GitHub refuses it (405) on a pull request it does not consider
+    // mergeable — so a PR that is not already green is REFUSED BY GITHUB here exactly as it would
+    // have been refused by the arm. The fleet still evaluates no required context of its own.
+    //
+    // AND IT IS A FALLBACK, NEVER AN ARM REPLACEMENT: a REST merge cannot hold intent for checks
+    // that have not finished, so it can only ever land a PR that is ALREADY green. Arming is still
+    // attempted first, every time; this runs only after that attempt has already failed.
+    const quota = armFailureIsRateLimited(msg) ? ghRateLimitRefusalUnknown("gh pr merge --auto") : undefined;
+    if (quota) {
+      // W1-T1235's OBSERVABILITY IS NOT LOST WHEN W1-T1255's FALLBACK RESCUES THE MERGE. The arm
+      // WAS refused on quota — that is true whatever happens next — so the exhausted budget is
+      // said HERE, before the fallback, and `quota` rides EVERY result this branch can return.
+      // `armAndLogOutcome` writes its `automerge.rate_limit_refused` row off exactly that field
+      // (see `logArmAttribution`), so the distinct, greppable row and the bucket fields survive a
+      // successful fallback. Without this, a rate-limited arm that merged over REST would leave no
+      // trace that the budget was spent at all — silently undoing the one thing W1-T1235 shipped.
+      deps.say(
+        `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
+          `${quota.bucket}, resets: ${quota.resetsAt}) — ${msg} — ${prUrl}`,
+      );
+      try {
+        deps.mergeDirect(prUrl);
+        deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
+        return { outcome: "direct-merged", error: msg, rateLimit: quota };
+      } catch (e3) {
+        const msg3 = String((e3 as { stderr?: unknown })?.stderr ?? (e3 as Error)?.message ?? e3);
+        // W1-T1050's discipline, applied to this path too: a merge that LANDED must never be
+        // reported as a failure just because something after it threw.
+        if (deps.isMerged?.(prUrl)) {
+          deps.say(`automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`);
+          return { outcome: "direct-merged", error: msg, rateLimit: quota };
+        }
+        // GitHub refused the REST merge — the PR was not mergeable, which is the correct answer
+        // for a PR that is not already green. NOTHING MERGED.
+        deps.say(`automerge.rate_limited_rest_merge_refused (W1-T1255): ${msg3} — ${prUrl}`);
+      }
+      return { outcome: "arm-error-ignored", error: msg, rateLimit: quota };
+    }
     // W1-T1079: this used to be pure prose on `say` (stdout only) — the ledger row itself
     // carried nothing, which is the defect this task closes. `msg` is now returned alongside
     // the outcome so every caller that logs it can put it on the row (see `armAndLogOutcome`/
@@ -1949,14 +2004,11 @@ function attemptArm(
     // a quota refusal. Both fields are honestly `unknown` (never `"graphql"`, however true
     // structurally) — see `ghRateLimitRefusalUnknown`'s own doc for why guessing here would
     // undo the "read the response's own field" discipline the general reader observes.
-    const rateLimit = armFailureIsRateLimited(msg) ? ghRateLimitRefusalUnknown("gh pr merge --auto") : undefined;
-    deps.say(
-      rateLimit
-        ? `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
-            `${rateLimit.bucket}, resets: ${rateLimit.resetsAt}) — ${msg} — ${prUrl}`
-        : `automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`,
-    );
-    return { outcome: "arm-error-ignored", error: msg, ...(rateLimit ? { rateLimit } : {}) };
+    // W1-T1255: the rate-limited branch above returns on every path it can take, so a failure
+    // reaching HERE is by construction NOT rate-limit-shaped — the ternary this line used to carry
+    // had exactly one reachable arm left, and a condition that can only be false is not a guard.
+    deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
+    return { outcome: "arm-error-ignored", error: msg };
   }
 }
 
@@ -5083,6 +5135,73 @@ export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number
 }
 
 /**
+ * W1-T1255: the argv for GitHub's own MERGE endpoint — the REST/core-budget twin of
+ * `gh pr merge --squash`, which is GraphQL. PURE, so the argv is a unit fixture rather than an
+ * inline string, exactly like {@link ghUpdateBranchArgv} (W1-T1095 capability 3) whose shape this
+ * copies deliberately: same `gh api --method PUT` mechanism, different endpoint.
+ *
+ * WHY THIS EXISTS AT ALL. `ArmDeps.mergeDirect` is the arm's FALLBACK, and until this task it ran
+ * `gh pr merge --squash` — GraphQL, the very budget the arm had just been refused on. An exhausted
+ * GraphQL bucket therefore took out the arm AND the thing it falls back to, for one reason, while
+ * core sat untouched. This is a TRANSPORT swap on that existing dep, NOT a second merge path: the
+ * call site, its guard and every gate above it are unchanged.
+ *
+ * `merge_method=squash` MIRRORS the `--squash` it replaces — the merge SHAPE does not change, only
+ * the wire it travels on. No `--delete-branch` equivalent is sent, matching `mergeDirect`'s own
+ * W1-T1050 note for why the branch is left alone.
+ *
+ * THE ENDPOINT IS ITS OWN MERGEABILITY GATE. GitHub refuses this call (405) on a pull request it
+ * does not consider mergeable, so the fleet still never evaluates required contexts itself — the
+ * certification stays exactly where {@link attemptArm}'s `/clean status/i` branch already put it,
+ * with GitHub.
+ */
+export function ghMergePrArgv(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/merge`, "-f", "merge_method=squash"];
+}
+
+/**
+ * W1-T1255: resolve the three REST path components out of a PR URL, or `undefined` when the URL is
+ * not one this parser understands. PURE and exported so the refusal path is reachable by a unit
+ * fixture — the alternative is an inline guard inside `realArmDeps().mergeDirect`, which no test
+ * can reach without first defeating the live-write guard that (correctly) fires above it.
+ *
+ * `undefined` is the caller's cue to THROW, never to skip: `mergeDirect`'s contract is that it
+ * either merges or raises, because a merge that did not happen must never be reported as one that
+ * did (the same discipline W1-T1050 established for its failure path).
+ */
+/**
+ * W1-T1255: the direct-merge WRITE itself — `gh api --method PUT .../merge`, NOT
+ * `gh pr merge --squash`. The old form was GraphQL, so the arm's fallback shared a budget with the
+ * arm it exists to rescue: one exhausted bucket took out both at once while core sat untouched.
+ * Same call site and same guard above it; only the transport moves.
+ *
+ * `exec` is injected LAST with a real default so no positional caller shifts, and so the argv and
+ * the refusal are unit-testable without a live pull request or a `gh` binary. A URL this parser
+ * cannot read THROWS rather than silently doing nothing — `mergeDirect`'s contract is that it
+ * either merges or raises, because a merge that did not happen must never be reported as one that
+ * did (W1-T1050's discipline on its failure path).
+ */
+export function mergeDirectViaRest(
+  prUrl: string,
+  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe" }) => unknown = execFileSync,
+): void {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) {
+    throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
+  }
+  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8", stdio: "pipe" });
+}
+
+export function mergeTargetFromPrUrl(prUrl: string): { owner: string; repo: string; prNumber: number } | undefined {
+  // ONE match, not `ownerRepoFromPrUrl` + `prNumberFromRef` composed: that pair reads as a belt-
+  // and-braces guard and is not one. `ownerRepoFromPrUrl`'s own regex already requires `/pull/\d+`,
+  // so a separate "and the number parsed" clause can never be false when the owner/repo half
+  // succeeded — dead code that a falsifier proved unreachable (mutating it reddened nothing).
+  const m = prUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  return m ? { owner: m[1], repo: m[2], prNumber: Number(m[3]) } : undefined;
+}
+
+/**
  * W1-T1095 (capability 3): the real update-branch WRITE. `execFileSync` is injectable so the
  * argv and the failure mapping are unit-testable without a live pull request; the live-write
  * guard fires FIRST, so a test that reaches this by accident is refused loudly rather than
@@ -6178,10 +6297,24 @@ export async function runFixRung(opts: {
     // a live one; re-check the CURRENT body/criteria coverage directly before assuming
     // the reported reason still holds.
     let reviewReport = [fixResult.text, fixResult.blocks.join("\n")].join("\n");
+    // W1-T1254: `reviewReport` above is the WORKER'S OWN NARRATIVE, and the body is fetched only
+    // in `body-coverage` below — so `reviewer-unmet`, `ci-log` and `merge-conflict` hand the
+    // reviewer prose that was never a claim about the changeset. `judgeReview` skips
+    // `bodyContradictsDiff` ONLY when it is told the report is a substitute, so leaving this
+    // unset made a worker fail its own PR on a claim the body never made (#2569, measured), and
+    // the author could not clear it: the verdict is write-once per head sha and the document
+    // being corrected was not the one being read. Defaulting TRUE covers the three
+    // never-fetch modes by the initialiser rather than a per-mode branch, and leaves a THROWING
+    // fetch correct for free. W1-T1100 (#2415) added this flag and guarded both consumers; none
+    // of its hunks reached this call site, whose `report:` line still blames to #762.
+    let reviewReportIsSubstitute = true;
     if (fixMode === "body-coverage") {
       const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
       try {
         reviewReport = await fetchBody(opts.prUrl);
+        // Only HERE is `reviewReport` the real PR body. A throw leaves the assignment undone and
+        // the flag true, which is the honest reading: the catch below logs and falls through.
+        reviewReportIsSubstitute = false;
       } catch (e) {
         deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
@@ -6207,6 +6340,12 @@ export async function runFixRung(opts: {
               `changeset claim to match before re-review`,
           );
           reviewReport = updatedBody;
+          // W1-T1254 design (ii): this arm just WROTE `updatedBody` to the PR, so the report IS
+          // the body and must be scored as one. Leaving the flag true here would disable the
+          // changeset check on the exact strike that repaired a stale claim — the fix becoming a
+          // new blind spot. Set explicitly rather than relying on the fetch above having
+          // succeeded: a throwing fetch still reaches this block.
+          reviewReportIsSubstitute = false;
         }
       } catch (e) {
         deps.log("fix.body_claim_update_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
@@ -6218,6 +6357,7 @@ export async function runFixRung(opts: {
       prUrl: opts.prUrl,
       task: opts.task,
       report: reviewReport,
+      reportIsSubstitute: reviewReportIsSubstitute,
       settingsFile: opts.settingsFile,
       config: opts.config,
       budgetUsd: opts.budgetUsd,
@@ -13480,6 +13620,28 @@ export function promotionLedgerSink(opts: {
 }
 
 /**
+ * W1-T1249 design (ii): CEILING on how many corpus entries one retro cycle hands to the pass.
+ * `runPromotionPass` has no bound of its own — rationale (7): it iterates whatever it is given,
+ * skipping only non-`active` lifecycle entries, with no N, no slice and no early exit — so
+ * bounding the unattended per-cycle spawn cost is the CALLER's job. A CEILING, not a target: a
+ * cycle with fewer eligible entries judges fewer, and a cycle with none judges none.
+ */
+export const DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE = 5;
+
+/**
+ * W1-T1249 design (ii): the deterministic selection behind the ceiling above — sorted by `id`
+ * so two runs over the SAME corpus pick the IDENTICAL subset, never `readdirSync`'s
+ * filesystem-dependent listing order. Filters NOTHING by lifecycle or layer here:
+ * `runPromotionPass`'s own `lifecycle !== "active"` skip, and `promoteEntry`'s scrub/top-layer
+ * arms, already decide which of these actually reach the judge — this only bounds how many are
+ * OFFERED to that decision, so `corpusSize` in the rendered section still names exactly what
+ * was handed to the pass (see {@link promotionProposalSectionFor}).
+ */
+export function selectPromotionCycleEntries(entries: LearningEntry[], max: number): LearningEntry[] {
+  return [...entries].sort((a, b) => a.id.localeCompare(b.id)).slice(0, Math.max(0, max));
+}
+
+/**
  * W1-T1059: THE PRODUCTION CALLER for `runPromotionPass` (lib/learnings.ts), which shipped
  * under P32/W1-T146 with none — leaving `promotion.scrub`, `promotion.verdict` and
  * `promotion.promoted` declared and unreachable. This is the I/O half only: it reads the
@@ -13493,13 +13655,11 @@ export function promotionLedgerSink(opts: {
  * function loads, judges and renders; it never persists a promoted entry, never touches
  * `learnings/`, and never touches the shared home. `promotedEntries` is rendered and dropped.
  *
- * THE JUDGE IS INJECTED AND HAS NO PRODUCTION DEFAULT, DELIBERATELY. Absent one the pass does
- * NOT run, and the rendered section says so in as many words — rather than fabricating a
- * fail-closed verdict, which would write `promotion.verdict` rows for a judge that never ran
- * and record "the judge said project-specific" as a fact. That is the same
- * one-value-for-several-outcomes shape this task's classifier exists to avoid, and inventing a
- * judge spawner here (one spawn per active entry, per retro, unattended) is the overreach the
- * shard's design (iii) forbids for the writer. Supplying `opts.judge` makes all three steps fire.
+ * THE JUDGE IS INJECTED AND HAS NO DEFAULT HERE (W1-T1249 supplies one at the CALL SITE,
+ * `retroCommand`, not in this pure-ish stage — see `resolvePromotionJudge`/`realPromotionJudge`
+ * below). Absent one, the pass does NOT run, and the rendered section says so in as many
+ * words — rather than fabricating a fail-closed verdict, which would write `promotion.verdict`
+ * rows for a judge that never ran and record "the judge said project-specific" as a fact.
  */
 export async function promotionProposalSectionFor(opts: {
   corpusDir: string;
@@ -13508,13 +13668,20 @@ export async function promotionProposalSectionFor(opts: {
   confidenceThreshold?: number;
   /** Injectable corpus read so a test drives the stage without a real `learnings/` tree. */
   loadCorpus?: (dir: string) => LearningEntry[];
+  /** W1-T1249 design (ii): overrides {@link DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE} for this call. */
+  maxEntriesPerCycle?: number;
 }): Promise<string> {
   try {
     if (!opts.judge) {
+      // W1-T1249 design (iv): the rendered section below is unchanged and already correct
+      // ("did NOT run") — what used to be missing is a LEDGER row. Without one, a skipped pass
+      // and a retro that never had the stage at all were indistinguishable from the ledger.
+      opts.log?.("promotion.skipped", { reason: "no promotion judge configured for this retro" });
       return `\n\n${renderPromotionProposals({ corpusSize: 0, ranPass: false, results: [] })}`;
     }
     const load = opts.loadCorpus ?? loadLearningsCorpus;
-    const entries = load(opts.corpusDir);
+    const loaded = load(opts.corpusDir);
+    const entries = selectPromotionCycleEntries(loaded, opts.maxEntriesPerCycle ?? DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE);
     const pass = await runPromotionPass(entries, {
       judge: opts.judge,
       log: opts.log,
@@ -13527,11 +13694,92 @@ export async function promotionProposalSectionFor(opts: {
       confidenceThreshold: opts.confidenceThreshold,
     })}`;
   } catch (e) {
-    console.error(
-      `### [retro] learnings_promotion — pass failed, degrading to none: ${String((e as Error)?.message ?? e)}`,
-    );
-    return "";
+    // W1-T1249 design (iv): THIS was the genuinely silent path — `console.error` plus an empty
+    // string erased the section entirely, so a FAILED pass and a retro that never had the stage
+    // were indistinguishable in the rendered report too (worse than the absent-judge branch
+    // above, which at least renders "did NOT run"). Now: one ledger row naming the error, AND a
+    // rendered section saying the pass failed — the section is never erased again.
+    const message = String((e as Error)?.message ?? e);
+    console.error(`### [retro] learnings_promotion — pass failed, degrading to a FAILED section: ${message}`);
+    opts.log?.("promotion.failed", { error: message });
+    return [
+      "\n\n## Learnings promotion (P32/W1-T146) — proposals for the Architect to ratify",
+      "",
+      `The pass FAILED and could not complete: ${message}`,
+      "",
+      "Nothing was scrubbed, judged, promoted or written on this path either — recorded here (and",
+      "in the retro's ledger, when one is attached) so a failed pass is countable rather than",
+      "silently missing from the report.",
+    ].join("\n");
   }
+}
+
+/** W1-T1249 design (i): the promotion judge's SDK tool allowlist — EMPTY by construction, same
+ *  rationale as risk-judge.ts's `RISK_JUDGE_TOOLS`/flight-judge.ts's `JUDGE_TOOLS`: the prompt
+ *  already carries everything the judge needs (one entry's own fields), so it has no need — and
+ *  no ability — to read the worktree it happens to be spawned into. */
+export const PROMOTION_JUDGE_TOOLS: string[] = [];
+
+/** W1-T1249 design (i): build the {@link SpawnWorkerArgs} for a real promotion-judge spawn — a
+ *  pure function so the "no write tool, cheapest mount" contract is unit-testable without a
+ *  spawn, mirroring risk-judge.ts's `buildRiskJudgeSpawnArgs`. */
+export function buildPromotionJudgeSpawnArgs(opts: {
+  entry: LearningEntry;
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+}): SpawnWorkerArgs {
+  return {
+    cwd: opts.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: opts.settingsFile,
+    prompt: buildPromotionJudgePrompt(opts.entry),
+    model: opts.mount.model,
+    effort: opts.mount.effort,
+    maxTurns: opts.mount.maxTurns,
+    tools: PROMOTION_JUDGE_TOOLS,
+  };
+}
+
+/**
+ * W1-T1249 design (i): spawn the real promotion judge and parse its verdict — the production
+ * shape of `PromotionJudgeDeps["judge"]`, mirroring risk-judge.ts's `realRiskJudge`. `spawn` is
+ * injectable so a caller threads its own already-resolved worker-spawn dependency through — the
+ * SAME `opts.spawn ?? spawnWorker` idiom `retroCommand` already uses for the Architect itself,
+ * so this needs no new spawn idiom of its own.
+ */
+export function realPromotionJudge(opts: {
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): PromotionJudgeDeps["judge"] {
+  const spawn = opts.spawn ?? spawnWorker;
+  return async (entry) => {
+    const result = await spawn(
+      buildPromotionJudgeSpawnArgs({ entry, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
+    );
+    return parsePromotionJudgeVerdict(result.text);
+  };
+}
+
+/**
+ * W1-T1249 design (i): resolve THIS retro's promotion judge. `opts.injected` — `retroCommand`'s
+ * own `opts.promotionJudge` — ALWAYS wins when supplied, exactly as `opts.spawn ?? spawnWorker`
+ * wins beside it (rationale (2)'s sibling deps); absent, falls back to {@link realPromotionJudge}
+ * on the cheapest mount `resolveRiskJudgeMount` resolves (rationale (5)). Split out so the
+ * override precedence is provable without driving a whole `retroCommand`.
+ */
+export function resolvePromotionJudge(opts: {
+  injected?: PromotionJudgeDeps["judge"];
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): PromotionJudgeDeps["judge"] {
+  return (
+    opts.injected ?? realPromotionJudge({ mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile, spawn: opts.spawn })
+  );
 }
 
 export function planHealthSweepSectionFor(repoRoot: string, isMerged?: (task: Task) => boolean): string {
@@ -13574,6 +13822,106 @@ export function planStateTruthSectionFor(repoRoot: string, resolve?: PlanStateTr
   } catch (e) {
     console.error(`### [retro] plan_state_truth_rung — scan failed, degrading to none: ${String((e as Error)?.message ?? e)}`);
     return "";
+  }
+}
+
+/**
+ * Split ONE `git log --format=%x1e%aI%x1f%s%x1f%b` record (the format `citationStampPassFor`
+ * below shells out with) into the {@link GitLogCommit} shape `mineGitLogCitations` (lib/retro.ts)
+ * reduces — that module stays a PURE reducer over already-read text by design (its own doc:
+ * "a caller resolves these from git log ... however its own environment shells out"), so the
+ * actual `git log` invocation and this split live here, the I/O-adjacent layer, not there.
+ * `\x1e` (record separator) can't appear in a commit subject/body; `\x1f` (unit separator)
+ * splits date from subject from body — a body containing a literal `\x1f` is not a real risk
+ * (git strips control bytes other than `\n`/`\t` from `%b` in practice), and even if one slipped
+ * through it would only widen the `message` this feeds `mineGitLogCitations`, never crash the
+ * split (subject/body are joined back into one string before that call anyway).
+ */
+export function parseGitLogCitationCommits(raw: string): GitLogCommit[] {
+  return raw
+    .split("\x1e")
+    .map((rec) => rec.replace(/^\n/, ""))
+    .filter((rec) => rec.length > 0)
+    .map((rec) => {
+      const firstSep = rec.indexOf("\x1f");
+      const secondSep = rec.indexOf("\x1f", firstSep + 1);
+      const date = firstSep === -1 ? "" : rec.slice(0, firstSep);
+      const subject = firstSep === -1 ? "" : rec.slice(firstSep + 1, secondSep === -1 ? undefined : secondSep);
+      const body = secondSep === -1 ? "" : rec.slice(secondSep + 1);
+      return { date, message: body.length > 0 ? `${subject}\n${body}` : subject };
+    });
+}
+
+/**
+ * W1-T1248: THE PRODUCTION CALLER for the four citation miners (lib/retro.ts, W1-T419), which
+ * shipped with none — leaving 37/38 `learnings/*.yaml` entries' `cited` date frozen at the
+ * hand-stamped 2026-07 batch forever, even though `selectLearnings`' ranking tiebreak and the
+ * budget ratchet's compression order both already read that field. Mirrors
+ * `promotionProposalSectionFor`/`planHealthSweepSectionFor`'s split: this function decides
+ * nothing new — it feeds real evidence to `mineLedgerCitations`/`mineGitLogCitations`/
+ * `aggregateCitationEvidence`/`changedCitationStamps` (retro.ts) and hands the result to
+ * `stampCitationsAndCommit` (also retro.ts), which owns the write/commit decision.
+ *
+ * FULL HISTORY, NEVER MARKER-SCOPED, on BOTH evidence sources — same reasoning
+ * `mutationGateLifetime`/`followupLedgerNdjson` above already use: `citedCount` is a measured
+ * LIFETIME total, not a per-cycle delta, so re-deriving it from a `--since`-bounded slice every
+ * cycle would silently reset it to "citations since the last retro" and lose everything mined
+ * before. `followupLedgerNdjson` is already the archive∪live union (W1-T1013) the caller passes
+ * in; `git log` here reads the SAME worktree's full history with no `--since` bound for the
+ * identical reason.
+ *
+ * Best-effort: a read/mine/write hiccup degrades to "nothing stamped this cycle" (the corpus
+ * keeps whatever `cited` values it already had — never cleared, per `stampCitations`' own
+ * contract) rather than aborting the whole retro, the same non-fatal discipline
+ * orientation/plan-index regeneration immediately around this call already follow.
+ */
+export function citationStampPassFor(opts: {
+  worktreePath: string;
+  followupLedgerNdjson: string;
+  loadCorpus?: (dir: string) => LearningEntry[];
+  /** Injectable so a test drives the write/commit half without a real `git log`. */
+  readGitLog?: (worktreePath: string) => string;
+}): ReturnType<typeof stampCitationsAndCommit> {
+  const learningsDir = join(opts.worktreePath, "learnings");
+  const load = opts.loadCorpus ?? loadLearningsCorpus;
+  const corpus = load(learningsDir);
+  const readGitLog =
+    opts.readGitLog ??
+    ((wt: string) =>
+      execFileSync("git", ["-C", wt, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
+        encoding: "utf8",
+        maxBuffer: 1 << 26,
+      }));
+  const gitLogCommits = parseGitLogCitationCommits(readGitLog(opts.worktreePath));
+  const evidence = [...mineLedgerCitations(parseLedger(opts.followupLedgerNdjson)), ...mineGitLogCitations(gitLogCommits)];
+  const changed = changedCitationStamps(corpus, aggregateCitationEvidence(evidence));
+  return stampCitationsAndCommit({ worktreePath: opts.worktreePath, learningsDir, changed });
+}
+
+/**
+ * W1-T1248: the try/catch retroCommand wraps {@link citationStampPassFor} in, pulled out to its
+ * own directly-testable function. `citationStampPassFor` itself is BEST-EFFORT by contract (its
+ * own doc: "a read/mine/write hiccup degrades to 'nothing stamped this cycle' ... rather than
+ * aborting the whole retro") — but retroCommand's body carries no branch a test could aim a
+ * failing corpus/git-log read at without standing up the full fake-worker/fake-gh retro fixture
+ * test/retro-marker-atomic.test.ts already pays that cost for. This wrapper is that branch, on
+ * its own, so test/citation-stamp-wiring.test.ts can exercise the catch path directly — a
+ * malformed learnings/ shard alone is enough (loadLearningsCorpus's LearningsError throws before
+ * citationStampPassFor ever shells to git), no fake git repo required. Returns whether a commit
+ * landed (retroCommand's push-if-anything-changed check reads this), never throws.
+ */
+export function runCitationStampPass(opts: {
+  worktreePath: string;
+  followupLedgerNdjson: string;
+  log: (step: string, extra?: Record<string, unknown>) => unknown;
+}): boolean {
+  try {
+    const result = citationStampPassFor({ worktreePath: opts.worktreePath, followupLedgerNdjson: opts.followupLedgerNdjson });
+    if (result.committed) opts.log("citations.stamped", { ids: result.stampedIds, diff_bytes: result.diff?.length ?? 0 });
+    return result.committed;
+  } catch (e) {
+    opts.log("citations.stamp.error", { error: String((e as Error)?.message ?? e) });
+    return false;
   }
 }
 
@@ -13788,24 +14136,28 @@ async function retroCommand(
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
   const planHealthSection = planHealthSweepSectionFor(repoRoot, isTaskMerged);
-  // W1-T1059: the promotion pass's production caller. Rides EVERY retro report, dry-run and real
-  // alike, exactly like the two advisory sections above — it is pure, so a `--dry-run` preview
-  // stays a pure read.
+  // W1-T1249: the promotion pass's judge. DRY-RUN keeps its PRE-EXISTING shape here —
+  // `opts.promotionJudge` only, no default — a preview must not start an unattended spawn
+  // before an operator has seen the report, the same reason the real Architect spawn below is
+  // itself skipped under `dryRun`'s early return. The REAL run's DEFAULT judge is resolved
+  // further down instead, once THAT run's own `spawn`, rendered `settingsFile` and worktree
+  // `cwd` (design (i)) all exist — see `resolvePromotionJudge` there. Both branches share this
+  // one runId so a real run's ledger rows and a preview's (still, deliberately, none-by-default)
+  // rows are never split across two ids.
   const promotionLedgerRunId = `RETRO-${Date.now()}`;
-  const promotionSection = await promotionProposalSectionFor({
-    corpusDir: projectLearningsHome(repoRoot),
-    judge: opts.promotionJudge,
-    log: promotionLedgerSink({ dryRun, ledgerPath, runId: promotionLedgerRunId }),
-  });
-  const report =
+  const promotionCorpusDir = projectLearningsHome(repoRoot);
+  const reportWithoutPromotion =
     [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") +
     planStateTruthSection +
-    planHealthSection +
-    promotionSection +
-    netStateAdvisorySection;
+    planHealthSection;
 
   if (dryRun) {
-    console.log(report);
+    const promotionSection = await promotionProposalSectionFor({
+      corpusDir: promotionCorpusDir,
+      judge: opts.promotionJudge,
+      log: promotionLedgerSink({ dryRun, ledgerPath, runId: promotionLedgerRunId }),
+    });
+    console.log(reportWithoutPromotion + promotionSection + netStateAdvisorySection);
     return 0;
   }
 
@@ -13903,6 +14255,26 @@ async function retroCommand(
     log("orientation.next_task.error", { error: String((e as Error)?.message ?? e) });
   }
 
+  // W1-T1249 design (i): the promotion judge's PRODUCTION DEFAULT, resolved now that THIS
+  // Architect stage's `spawn`, `settingsFile` and `worktreePath` all exist above (rationale
+  // (5)/(6): the cheapest configured mount, no new spawn idiom, no new resolution path).
+  // `opts.promotionJudge` still wins when injected. `report` is assembled here — not at
+  // `reportWithoutPromotion`'s declaration above — so the Architect's own prompt (below) carries
+  // this run's REAL proposals rather than the dry-run branch's judge-less shape.
+  const promotionJudge = resolvePromotionJudge({
+    injected: opts.promotionJudge,
+    mount: resolveRiskJudgeMount(mountsTable),
+    cwd: worktreePath,
+    settingsFile,
+    spawn,
+  });
+  const promotionSection = await promotionProposalSectionFor({
+    corpusDir: promotionCorpusDir,
+    judge: promotionJudge,
+    log: promotionLedgerSink({ dryRun, ledgerPath, runId: promotionLedgerRunId }),
+  });
+  const report = reportWithoutPromotion + promotionSection + netStateAdvisorySection;
+
   const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
   try {
     const worker = await spawn({
@@ -13958,10 +14330,18 @@ async function retroCommand(
       log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
     }
 
+    // W1-T1248: the citation miners' production caller (see citationStampPassFor's own doc) —
+    // rides EVERY real retro, mirroring orientation/plan-index's own regenerate-and-commit-if-
+    // changed discipline just above. Runs AFTER both: neither reads `learnings/`, so ordering
+    // doesn't matter for correctness, but grouping every HARNESS-OWNED post-worker write together
+    // keeps this block's shape legible top-to-bottom. The try/catch itself lives in
+    // runCitationStampPass (its own doc explains why it's split out).
+    const citationStampCommitted = runCitationStampPass({ worktreePath, followupLedgerNdjson, log });
+
     // Ensure the branch reached origin (worker pushes without -u). Also push when
-    // ORIENTATION.md/plan-index.json were regenerated AFTER the worker's own push, so
-    // those commits aren't silently left local (never reaching the PR the worker already
-    // opened).
+    // ORIENTATION.md/plan-index.json/learnings citation stamps were regenerated AFTER the
+    // worker's own push, so those commits aren't silently left local (never reaching the PR the
+    // worker already opened).
     let onOrigin = false;
     try {
       execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], { stdio: "ignore" });
@@ -13969,7 +14349,7 @@ async function retroCommand(
     } catch {
       onOrigin = false;
     }
-    if (!onOrigin || orientationCommitted || planIndexCommitted) {
+    if (!onOrigin || orientationCommitted || planIndexCommitted || citationStampCommitted) {
       gitPushRunBranch(worktreePath);
     }
 
@@ -21772,6 +22152,25 @@ export async function fixCommand(
 }
 
 /**
+ * The REAL (default) derivation `wipeTestCommand`'s pre-flight consults (W1-T1252): loads
+ * the plan already synced onto `planPath`, selects `taskId` (throws `PlanError` on an
+ * unknown id — BEFORE any GitHub read, same ordering `runTaskBody` itself relies on), then
+ * projects the plan against a FRESH {@link buildBatchedGithub} gateway scoped to the
+ * task's own repo — byte-identical to the construction `runTaskBody`'s own W1-T319
+ * already-merged guard uses (`buildBatchedGithub(owner, task.repo)` feeding `projectPlan`).
+ * A separate, fresh projection from that guard's own (never shared, never reused): the
+ * point of asking here is to decide BEFORE dispatching anything, not to save a GitHub read.
+ */
+function defaultWipeTestMergedState(taskId: string, planPath: string, config: Config, owner: string): WipeTestMergedState {
+  const plan = loadPlan(planPath);
+  const task = selectTask(plan, taskId);
+  const github = buildBatchedGithub(owner, task.repo);
+  const statusPath = join(config.root, "state", "status.json");
+  const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
+  return { merged: projection.get(taskId)?.merged ?? false, prUrl: projection.get(taskId)?.prUrl };
+}
+
+/**
  * `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` — the P12
  * learning-utility A/B harness (W1-T86; see src/lib/wipe-test.ts's module doc for the
  * full design). Runs `<task-id>` TWICE through `runTask`: arm A with normal learnings
@@ -21784,6 +22183,12 @@ export async function fixCommand(
  * ledgered pairs (`aggregateWipeTestPairs`, read back from the ledger) is what the
  * operator treats as signal; this command runs and ledgers exactly one pair per
  * invocation, by design (repeat it to accumulate pairs).
+ *
+ * NEVER LEDGERS A PAIR NEITHER ARM MEASURED (W1-T1252). A subject the projection already
+ * reports merged is refused HERE, up front, naming the reason (`resolveWipeTestPreflight`)
+ * — neither arm spawns and no `wipetest.pair` line is written. `ledgerWipeTestPair` itself
+ * is the backstop for every OTHER zero-work cause: a pair whose two arms both report zero
+ * turns and zero cost is never written, whatever produced it.
  */
 export async function wipeTestCommand(
   rest: string[],
@@ -21797,6 +22202,16 @@ export async function wipeTestCommand(
      *  `drainCommand`'s `githubFactory` provides for its own network calls. Default: the
      *  real {@link execFileSync}. */
     execFileSyncFn?: typeof execFileSync;
+    /**
+     * W1-T1252: resolves whether `taskId` is a subject `runTask`'s own W1-T319
+     * already-merged guard would refuse — consulted ONCE, BEFORE either arm is
+     * dispatched (design note (i)). Default: {@link defaultWipeTestMergedState}, which
+     * mirrors `runTaskBody`'s own guard construction exactly (loadPlan + selectTask +
+     * projectPlan over a fresh batched GitHub gateway). Injectable (mirrors `runTaskFn`/
+     * `execFileSyncFn` above) so a test can drive the merged / not-merged branch without a
+     * real plan file on disk or a live GitHub read.
+     */
+    resolveMergedState?: (taskId: string, planPath: string, config: Config) => WipeTestMergedState;
   } = {},
 ): Promise<number> {
   const taskId = rest[0];
@@ -21835,6 +22250,19 @@ export async function wipeTestCommand(
       execFileSyncFn("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
       execFileSyncFn("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
     }
+  }
+
+  // ── PRE-FLIGHT (W1-T1252 design note (i)): refuse a subject `runTask`'s own W1-T319
+  // already-merged guard would refuse, BEFORE either arm is dispatched — against the
+  // JUST-SYNCED plan above, so "merged" here means exactly what it means there, never a
+  // re-invented definition. `resolveMergedState`'s default (`selectTask`) throws on an
+  // unknown task id before ever touching GitHub, same as runTaskFn's own pre-network
+  // ordering (proved by the "deps omitted" test below).
+  const resolveMergedState = deps.resolveMergedState ?? ((tid, pp, cfg) => defaultWipeTestMergedState(tid, pp, cfg, self.owner));
+  const preflight = resolveWipeTestPreflight(taskId, resolveMergedState(taskId, planPath, config));
+  if ("error" in preflight) {
+    console.error(preflight.error);
+    return 2;
   }
 
   const runId = `WIPETEST-${Date.now()}`;

@@ -1,0 +1,156 @@
+- id: W1-T1264
+  title: "each arm of `bodyContradictsDiff` fires only on one LITERAL token — `exactly … file(s)`, a bare `no <path>`, an anchored shorthand — so a claim's TRUTH and its RECOGNITION are independent, and the gate reports the same silent zero for \"checked and consistent\" as for \"never read a claim at all\", with nothing on the author's side able to tell them apart"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 by RUNNING `bodyContradictsDiff` against #2527's real stored body and its
+    real one-file changeset, from a scratch worktree at origin/main. Source was read through git
+    objects, never the Contents API — `src/run-task.ts` is 1,467,705 bytes, over that API's 1 MB
+    cap, where it returns `encoding: "none"` and greps to a clean zero. Neither the suite nor any
+    `runSweep` test was run. Every zero below is paired with a positive control.
+
+    (1) THE BRIEF'S FIRST PREMISE IS REFUTED, AND THE REAL MECHANISM IS SIMPLER AND WORSE.
+    `stripQuotedRegions` cannot have silenced anything on #2527: that body contains ZERO fenced
+    blocks and ZERO blockquote lines, so the pass is a no-op over it. MEASURED: inserting
+    `This PR touches exactly seven files.` at EVERY ONE of the 51 insertion points in that body
+    fires at all 51. The silence was never contextual.
+
+    (2) WHAT ACTUALLY DECIDES IT IS ONE LITERAL ADVERB. The count arm is
+    `/\bexactly\s+(\w+)\s+files?\b…/gi` — nothing else in the body can trigger it. Against the same
+    real one-file diff: `exactly seven files` fires, `exactly 7 files` fires, `EXACTLY SEVEN FILES`
+    fires, `exactly  seven  files` fires, `exactly seven file` fires. And every one of these,
+    equally false, scores ZERO: `seven files`, `7 files`, `all seven files`, `a single file:
+    src/run-task.ts`, `three source files`, `changes 7 files`. TRUTH IS NOT CONSULTED — a TRUE
+    `exactly one file` also scores zero, because the arm only reports disagreement.
+
+    (3) THE ABSENCE ARM HAS THE SAME DEFECT, WHICH GENERALISES IT FROM A COUNT BUG TO A CLASS.
+    Against a diff whose only file is a plan shard: `no plan/` fires, and `No src/, no test/, no
+    plan/.` fires — while `No plan/ files are touched.` and `This PR touches no plan/ files.` both
+    score ZERO. Same claim, same falsity, same diff; only the surrounding words differ.
+
+    (4) AND THE AUTO-REPAIR RUNG INHERITS IT. `deriveChangesetClaimUpdate` (`src/run-task.ts`)
+    filters the detector's own output with `/^exactly\s+\w+\s+files?\b/i`, so the one rung that can
+    fix a wrong count can only ever fix a count phrased with that adverb. A body that states its
+    count any other way is neither caught nor repairable.
+
+    (5) WHAT THE STRIP PASS DOES SWALLOW — THE BRIEF'S REAL QUESTION, ANSWERED SEPARATELY.
+    `stripQuotedRegions` blanks exactly two things, length- and newline-preserving: blockquote
+    lines (`^\s*>`) and fenced regions, toggled by any line matching `^\s*```. Correct and
+    deliberate. THREE MEASURED CONSEQUENCES BEYOND THAT INTENT: an UNBALANCED fence — one stray
+    delimiter — blanks the ENTIRE REMAINDER OF THE BODY TO EOF, so every later claim goes unread;
+    an INDENTED (four-space) fence line toggles the same state, so a code sample inside a list can
+    swallow everything after it; and a claim written ON a fence-delimiter line is blanked with it.
+    Confirmed correct in the same run: a fence opened inside a BLOCKQUOTE does not toggle, a
+    language-tagged fence works, and `~~~` is not treated as a fence — which fails OPEN (reading
+    more than CommonMark would), the safe direction.
+
+    (6) SO THE AUTHOR-SIDE CONSEQUENCE, WHICH IS THE POINT. A zero from this gate is indistinguishable
+    from a pass, and the ONLY way to learn which one you have is to reword a claim into a
+    deliberately false variant and watch it fire. That technique is real, it works, and it is
+    currently FOLKLORE — written down nowhere the gate's own users can find it.
+  design: |
+    (i) THE REMEDY IS TO MAKE THE SILENCE LEGIBLE, NOT TO WIDEN THE MATCHER. The detector should
+    report HOW MANY claim-shaped tokens it RECOGNISED alongside how many it found contradictory —
+    a `changeset claims recognised: 0` line is the whole fix, because it turns an invisible
+    non-check into a visible one. An author reading "recognised: 0" on a body they believe states
+    a count knows immediately that the gate never read it; today that body and a clean one print
+    the same nothing.
+
+    (ii) RECOGNITION IS COUNTED PER ARM, AND A RECOGNISED-BUT-CONSISTENT CLAIM IS THE POINT.
+    `exactly one file` against a one-file diff must count as RECOGNISED and NOT contradictory —
+    that is the only combination that says "checked, and it agrees", which is the fact no surface
+    can currently express.
+
+    (iii) BOTH CONSUMERS CARRY IT, OR IT IS NOT AN AUTHOR-SIDE FIX. `judgeReview` (`src/lib/review.ts`)
+    and `deriveChangesetClaimUpdate` (`src/run-task.ts`) both call the detector; the count must
+    reach the surface an author actually reads, not only the verdict body.
+
+    (iv) THE UNBALANCED FENCE IS A SEPARATE, SMALLER FIX AND IS IN SCOPE ONLY AS A REPORT. When the
+    fence state is still open at EOF the body was almost certainly malformed, and blanking the
+    remainder silently is the worst available outcome. NAME IT — the same recognition line should
+    say the strip pass reached EOF inside a fence. Do NOT auto-close the fence or re-scan the
+    blanked region: that is a guess about intent, and rationale (5) shows the pass is otherwise
+    correct.
+
+    (v) REFUSED BY NAME. The detector is CORRECT WHEN IT FIRES — W1-T1254 (#2602) established that
+    on #2569, where the failure was the INPUT and not the check, by unfencing a quotation and
+    watching it register. So: do NOT weaken any arm, do NOT exempt narrative text, do NOT add a
+    tolerance to the count comparison, and do NOT relax the blockquote or fence stripping. Nothing
+    here changes WHEN the gate fails a PR; it changes only what it says when it does not.
+
+    (vi) AND STOP THE FOLKLORE — THE FALSIFIER BELONGS BESIDE THE GATE. Rationale (6)'s technique
+    (a zero is evidence only once a deliberately false variant scores one) must be written where an
+    author meets it, not passed on by word of mouth.
+
+    (vii) NOT IN SCOPE, NAMED: widening any arm's vocabulary — see (v), and note that a matcher that
+    guesses at natural language is what this detector's own doc refuses; the shorthand arm's
+    anchoring rules (W1-T413), which were not measured here; and the separate detector rationale (8)
+    of the brief asks about, filed as its own concern below.
+  acceptance:
+    - claim: "the gate reports how many changeset claims it recognised, not only how many contradicted"
+      proof: "unit test: test/body-claim-recognition.test.ts"
+    - claim: "a recognised claim that agrees with the diff is distinguishable from no claim at all"
+      proof: "unit test: test/body-claim-recognition.test.ts"
+    - claim: "a count claim phrased without the literal adverb is reported as unrecognised"
+      proof: "unit test: test/body-claim-recognition.test.ts"
+    - claim: "an absence claim phrased as a sentence is reported as unrecognised"
+      proof: "unit test: test/body-claim-recognition.test.ts"
+    - claim: "a body whose fence never closes is named rather than silently blanked to the end"
+      proof: "unit test: test/body-claim-recognition.test.ts"
+    - claim: "every arm still fails a PR exactly when it fails one today"
+      proof: "unit test: test/body-claim-recognition.test.ts"
+    - claim: "the falsifier technique is stated where an author meets the gate"
+      proof: "unit test: test/body-claim-recognition.test.ts"
+  files: [src/lib/review.ts, src/run-task.ts, test/body-claim-recognition.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#zero-from-changeset-detector-is-not-a-check-2026-08-23"
+  plan_refs: ["W1-T274", "W1-T308", "W1-T413", "W1-T1254"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/body-claim-recognition.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS RULE 19 SPAN AND BLAST RADIUS BOTH. The SPAN is that the detector lives in
+    `src/lib/review.ts` while the second consumer that must carry the same count
+    (`deriveChangesetClaimUpdate`) lives in `src/run-task.ts`; a recognition count that reaches only
+    one of them is not an author-side fix. The BLAST RADIUS is that this touches a REQUIRED gate's
+    reporting path, where a mistake is a false verdict on live PRs.
+
+    THE BRIEF'S FIRST PREMISE IS CORRECTED, NOT CARRIED. It attributes the #2527 silence to
+    `stripQuotedRegions` context. That body has no fences and no blockquotes, the strip pass is a
+    no-op over it, and a false count fires at all 51 insertion points — so the attribution cannot
+    hold. The real trigger is the literal `exactly` in `countRe`, which is a WORDING dependency, the
+    opposite of a context dependency. The brief's CONCLUSION — that the detector was not reading the
+    claim at all — is exactly right and is what this shard is about; only the mechanism moved, and
+    the corrected mechanism is broader, because rationale (3) shows the absence arm behaves the same
+    way.
+
+    THE SECOND OBSERVATION IS RULED OUT OF SCOPE ON PURPOSE, WITH ITS SUCCESSOR NAMED. Present-tense
+    prose about a file absent from the diff scores 0, and that is CORRECT: this detector's own doc
+    says it is "DELIBERATELY NOT general claim-verification" and that "anything this cannot decide is
+    SILENCE, NOT A VERDICT". A contradiction checker keyed on changeset CLAIMS is not a staleness
+    checker for narrative, and folding one into the other would forfeit the property that makes it a
+    tripwire. MEASURED: the present-but-absent direction IS already reachable, but only through arm
+    (c) — an `exactly N files: a, b` ENUMERATION naming a file the diff lacks fires. Anything catching
+    the prose form must be a SEPARATE check (for every path-shaped token in a body, require it to be
+    in the diff, inside a quoted region, or marked a citation), with its own false-positive argument
+    against every legitimate mention of a path the diff does not touch — which this shard does not
+    make and does not file.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1264` resolves to
+    4cc77833b5cf8442209afd1b9086fa23512808c9, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. The clone was
+    `--unshallow`ed BEFORE any history query — it was genuinely shallow, and every `git log` answer
+    taken before that would have been truncated. Eight surfaces were swept with a control
+    PRE-QUALIFIED FOR EACH and none disqualified: a declared `- id:` on main, a shard FILENAME on
+    main, any occurrence in main's tree, the reservation refs (control fires at 1 and a non-reserved
+    id reads 0, so the surface discriminates), a LIVE `run-W1-T*` head, main's commit messages, open
+    PR titles-plus-bodies (controlled with an id CURRENTLY open, since a merged id has left that
+    surface), and merged PR bodies including the `Remudero-Task:` trailer. Subject anchors were
+    counted PER OPEN HEAD against main's own baseline.

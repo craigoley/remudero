@@ -1,0 +1,203 @@
+- id: W1-T1258
+  title: "five governing constraints were written to gitignored scratch and are unrecoverable, but their citations outlived them — Law 4 survives only as three drifting paraphrases, Law 5's text survives nowhere while nine citations reason from it, and one citation now quotes the module Law 5 governs as the authority for Law 5"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  rationale: |
+    RE-DERIVED AT `7310a03b` ON AN UNSHALLOWED CLONE (2459 commits reachable).
+    **EVERY FIGURE HERE IS A QUERY AND NOT A NUMBER TO CARRY** — a later reader should re-run them,
+    not quote them, and the query is given beside each one.
+
+    THE SOURCE. `state/research-laws-and-gaps-2026-08-05.md`, cited by PATH in exactly four places:
+    `plan/tasks.d/W1-T398-…yaml`, `MASTER-PLAN.md` (twice), and `plan/tasks.d/W1-T383-…yaml` — the
+    last citing **"Part 2a"**, so the document had numbered PARTS as well as numbered LAWS.
+
+    THE CENSUS (`git grep -icE 'law <n>\b'` per law, over the tracked tree): **15 occurrences across
+    10 distinct files — Law 1: 0, Law 2: 1, Law 3: 0, Law 4: 5, Law 5: 9.** **LAWS 1 AND 3 ARE CITED
+    NOWHERE AT ALL**, not even as bare numbers. An EXACT-CASE grep for `Law <n>` finds 10 and misses
+    5 uppercase `LAW <n>` citations, so a case-sensitive census undercounts by exactly a third.
+
+    **LAW 4 — TEXT SURVIVES, AND IS DRIFTING.** Four quotations, three wordings, measured on
+    whitespace-normalised text because the clause WRAPS A LINE and a fixed-string grep returns a
+    clean zero on it (this cost one query on this very filing):
+      `plan/feedback/fb-1785982194342-bb9d81.yaml` — "a convention binds only where compliance is
+        verifiable **at the moment of invocation, and you cannot revert a promise**". THE ONLY
+        SURVIVING COPY OF THE SECOND CLAUSE, anywhere in the tree.
+      `W1-T398` — "conventions bind where compliance is verifiable at the moment of invocation"
+        (plural, no "only", no second clause).
+      `W1-T438` and `W1-T439` — "a convention binds only where compliance is verifiable
+        **at invocation**" — the full phrase shortened, the second clause gone.
+
+    **LAW 5 — TEXT SURVIVES NOWHERE.** All nine citations gloss the same forbidden shape
+    ("the laundering shape Law 5 forbids", "LAW 5 IS NOT TOUCHED") and NONE states the rule. A
+    predicate for "states it" (`law 5 (says|is|states|:) <lowercase>`) returns nothing across all
+    five carrying files.
+
+    **AND THE PROVENANCE HAS ALREADY GONE CIRCULAR — THIS IS THE FINDING.**
+    `plan/tasks.d/W1-T1259-…yaml` heads a section **"LAW 5, IN THE VERB'S OWN WORDS"** and quotes
+    `escalateRepeatingRules`'s doc comment in `src/lib/rule-efficacy.ts`. That doc says
+    "auto-filing tasks from a metric is exactly the laundering shape Law 5 forbids" — which **CITES**
+    Law 5; it does not **STATE** it.
+    **RULE-EFFICACY IS NOW THE AUTHORITY FOR THE RULE THAT GOVERNS IT.**
+    The module's own compliance is being justified by the module's own comment.
+
+    **LAW 2 — ONE EPIGRAM, WHICH IS A CONCLUSION.** `MASTER-PLAN.md` carries "**Law 2 eats Proposal
+    1**" inside a falsifier argument. That is the law being APPLIED to a particular proposal, not
+    the law.
+
+    THE RECOVERY IS EXHAUSTED, NOT MERELY UNSUCCESSFUL — FOUR PATHS, AND THE PROVENANCE OF EACH IS
+    STATED RATHER THAN BLURRED:
+      (1) `state/` on the FLEET HOST, and the daemon container's view of the same mount — ABSENT.
+        **OPERATOR-MEASURED; not re-derivable from this container**, which is an agent container and
+        not that host.
+      (2) `state/` on the MINI, where it was written — ABSENT, filesystem-wide `find` returning
+        nothing. **OPERATOR-MEASURED; the mini is unreachable from here.**
+      (3) GIT HISTORY — **RE-DERIVED HERE, AT FULL DEPTH.** `git log --all -- 'state/*'` returns
+        **0 commits and 0 paths** over 2459 reachable commits; the control `plan/*` returns 1020
+        commits, so the query is not blind. **Nothing under `state/` has ever entered a tree, so
+        there is no deleted version to restore.**
+      (4) DANGLING OBJECTS ON THE MINI — seven blobs, none matching. **OPERATOR-MEASURED, AND
+        STRUCTURALLY UNVERIFIABLE FROM ANY CLONE:** only REACHABLE objects cross the wire, so a
+        clone's own dangling set (90 here) is unrelated to the mini's and can neither confirm nor
+        refute it.
+
+    **A SHALLOW CLONE WOULD HAVE MADE PATH (3) A FALSE NEGATIVE WITH A PASSING CONTROL** — a lane hit
+    exactly that on this subject today. This clone was confirmed unshallow before any history query.
+
+    **CORRECTION, 2026-08-23 — THIS SHARD'S CENTRAL FACTUAL CLAIM WAS WRONG AND IS CORRECTED HERE
+    RATHER THAN DEFENDED. THE DOCUMENT SURVIVES.** A FIFTH PATH WAS NEVER CHECKED AND HAS IT: THE
+    ORIGINAL AUTHORING WORKING TREE, persisted in a sandbox container at `/home/user/remudero`.
+    OPERATOR-MEASURED 2026-08-23: `state/research-laws-and-gaps-2026-08-05.md`, **21,665 bytes, 264
+    lines, sha256 `91eadd510897f655f7ece805a3054fb7648c2f76f3546d55bbd0e55fe146f673`, mtime
+    2026-08-06T01:11:37Z**, with three siblings from the same directory —
+    `recon-guard-complements.md` (14,152, `ba67deb3…`), `recon-open-failing-composition.md` (10,088,
+    `a77d9876…`) and `recon-proof-survey.md` (9,077, `c575cf41…`), the last cited by nothing.
+
+    **NONE OF THAT IS RE-DERIVED HERE, AND THE PROVENANCE IS THE POINT.** The lane writing this
+    correction searched its own container and then the whole filesystem (`find / -xdev`) for those
+    names and for any `*/state/*.md`, with a positive control proving the search could see a file it
+    knew existed. Both returned nothing. The recovering container is not the one this ran in and
+    cannot be inspected from it, so these figures carry the operator's provenance exactly as paths
+    (1), (2) and (4) above already do.
+
+    **WHY THE FOUR PATHS WERE INSUFFICIENT RATHER THAN WRONG.** Each was correctly measured and none
+    is withdrawn. All four shared ONE ASSUMPTION: that a surviving copy would be found on a host or
+    in git. **AN IGNORED, UNTRACKED FILE CANNOT ARRIVE BY CLONE**, so the only place it could survive
+    was a working tree that had existed CONTINUOUSLY since the file was written — a category no
+    clone, no host inspection and no object walk can reach. The mtimes are what prove that lineage:
+    the state file at 2026-08-06 against tracked files at 2026-08-16, in one tree.
+
+    **AND WHAT DOES NOT CHANGE.** Re-derived on this branch: **31 distinct `state/*.md` paths are
+    cited across the tracked tree, and 0 of them resolve in a fresh clone.** Three of the four
+    recovered files are cited (`research-laws-and-gaps`, `recon-guard-complements`,
+    `recon-open-failing-composition`); `recon-proof-survey.md` is cited by NOTHING, measured at 0.
+    So **3 of 31 now resolve and 28 do not.** The placement defect and its cost are unaltered.
+    **RECOVERY BY ACCIDENT IS NOT A REMEDY** — the document survived by luck, in an environment the
+    operator does not control and cannot inspect, and W1-T1263 still owns the prevention. This shard
+    is not withdrawn and its finding is not softened.
+
+    **AND THE VOCABULARY CLAIM IS CORRECTED WHERE THE RECOVERED TEXT CONTRADICTS IT.** This shard
+    records Law 5's text as surviving nowhere. **IT SURVIVES IN THE RECOVERED FILE, WHICH STATES
+    IT:** "RECORDS LAUNDER AUTHORITY UNLESS THE AUTHOR CLASS RIDES THE RECORD." Quoted exactly, from
+    the operator's reading, and not paraphrased. **THE CIRCULARITY FINDING IS UNAFFECTED AND GETS
+    SHARPER:** `W1-T1259` still quotes `rule-efficacy.ts` as "LAW 5, IN THE VERB'S OWN WORDS" when a
+    real statement of the law existed the whole time in a file nothing in the tree could open.
+  design: |
+    (i) **Q1 — THE REMEDY IS NOT "WRITE THE LAWS DOCUMENT", AND THE EVIDENCE DECIDES BETWEEN THE TWO
+    THAT REMAIN.**
+    **THE TEXT OF FOUR OF THE FIVE NO LONGER EXISTS**, so supplying it would launder a guess into a
+    constitution. **A GLOSS IS EVIDENCE OF WHAT THE LAW DID, NOT OF WHAT IT SAID.**
+
+    Option (b), promoting the survivors into a version-controlled record marked
+    RECONSTRUCTED-FROM-CITATIONS: the record would carry ONE law with real text (4), ONE epigram that
+    is a conclusion (2), and THREE empty articles (1, 3, 5). A constitution with three blank articles
+    invites exactly the completion it forbids, and it leaves the circularity intact — with Law 5
+    still blank, `rule-efficacy.ts` remains its de facto source.
+
+    Option (a), **RETIRE THE VOCABULARY AND KEEP THE REASONING**: replace each citation with the
+    argument it stands for. The population is small and enumerable — 15 citations, 10 files — and
+    the work is already done in most of them: every Law 4 carrier restates the rule inline before
+    applying it, and every Law 5 carrier states the forbidden shape even though none names the rule.
+    Retiring the label costs nothing that is not already written down beside it.
+
+    **RECOMMENDED: (a).** The evidence decides it, and the deciding fact is not preference: option
+    (b) cannot be executed for Laws 1, 3 and 5 without inventing text, and a record that marks three
+    of five as lost is not a governing document — it is this shard, with extra ceremony.
+
+    (ii) **Q2 — WHICH RATIONALES SURVIVE THE LOSS, AND WHICH ONLY APPEAR TO.**
+    **THE LAW 4 CARRIERS ARE SELF-CARRYING AND THE LAW 5 CARRIERS ONLY APPEAR TO BE.** Measured with
+    a predicate over normalised text: all four Law 4 carriers (`fb-…bb9d81`, `W1-T398`, `W1-T438`,
+    `W1-T439`) restate the binds-where-verifiable clause inline, so their arguments stand whole with
+    the label removed. None of the five Law 5 carriers (`W1-T1248`, `W1-T1249`, `W1-T1259`,
+    `W1-T418`, `src/lib/rule-efficacy.ts`) states the rule; each reasons correctly FROM it and
+    inherits its authority by reference. Their conclusions are not thereby wrong — the forbidden
+    shape is described consistently in all nine citations — but nothing in the tree licenses the
+    step from "this is forbidden" to "Law 5 forbids it".
+
+    **DISCLOSURE:** `W1-T1248` is one of those five and was filed by this same lane earlier today.
+    It asserts "LAW 5 IS NOT TOUCHED" without stating what Law 5 says. The defect this shard records
+    is one this lane has itself committed, which is part of why it is worth a ruling rather than a
+    reminder.
+
+    (iii) **Q3 — THE COLLATERAL, CITED AND NOT RE-FILED.** `MASTER-PLAN.md` already records that
+    P48's "21 of 23" census is unreproducible and that the first tranche's qualifying criterion is
+    therefore inoperable; `W1-T383` cites a "Part 2a" nobody can open. **`710b18b5` (#1587,
+    2026-08-11) reached this same verdict on three of the four paths and moved P48's surviving
+    evidence into `MASTER-PLAN.md` precisely so it would not rest on a `state/` path** — the
+    precedent for the remedy shape, and it is cited, never re-filed.
+
+    (iv) **THE PREVENTION IS NOT THIS SHARD'S CONCERN.** Stopping the next governing document from
+    being written to ignored scratch belongs to `W1-T1263`; filing both here would break
+    one-concern-per-PR. This shard rules on what is already lost.
+  acceptance:
+    - claim: "the shard records that four of the five laws no longer have surviving text and refuses to supply it"
+      proof: "grep: THE TEXT OF FOUR OF THE FIVE NO LONGER EXISTS in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
+    - claim: "the shard states the evidentiary limit that forbids reconstructing a law from its glosses"
+      proof: "grep: A GLOSS IS EVIDENCE OF WHAT THE LAW DID, NOT OF WHAT IT SAID in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
+    - claim: "the shard names the circular provenance in which the governed module became the rule's authority"
+      proof: "grep: RULE-EFFICACY IS NOW THE AUTHORITY FOR THE RULE THAT GOVERNS IT in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
+    - claim: "the counts are recorded as re-derivable queries rather than numbers carried into a later read"
+      proof: "grep: EVERY FIGURE HERE IS A QUERY AND NOT A NUMBER TO CARRY in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
+    - claim: "the shard recommends retiring the numbered vocabulary rather than reconstructing a document"
+      proof: "grep: RETIRE THE VOCABULARY AND KEEP THE REASONING in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
+    - claim: "the shard separates the arguments that survive the loss intact from those that only appear to"
+      proof: "grep: THE LAW 4 CARRIERS ARE SELF-CARRYING AND THE LAW 5 CARRIERS ONLY APPEAR TO BE in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
+    - claim: "the collateral and the earlier verdict are attributed to their existing owners instead of re-filed"
+      proof: "grep: CITED AND NOT RE-FILED in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
+    - claim: "the prevention half is parked with its own owner rather than folded into this ruling"
+      proof: "grep: THE PREVENTION IS NOT THIS SHARD'S CONCERN in plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml"
+  files: [plan/tasks.d/W1-T1258-five-governing-laws-lost-to-gitignored-scratch.yaml]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#five-governing-laws-lost-to-gitignored-scratch-2026-08-23"
+  plan_refs: ["W1-T398", "W1-T383", "W1-T438", "W1-T439", "W1-T418", "W1-T1248", "W1-T1249", "W1-T1259", "W1-T1120", "W1-T1263", "P48"]
+  note: |
+    **RULE 19 SPAN, AND THE OTHER READING RECORDED BESIDE IT.** `risk: medium` is set from the SPAN:
+    `files:` is a single file under `plan/`, one directory, no `src/`—`test/` crossing — the same
+    shape `W1-T1120` carries at `medium` for the same reason, and that shard is the sanctioned
+    precedent for a ruling whose proofs grep its own text. **THE BLAST-RADIUS READING WOULD ARGUE
+    HIGHER**, since the ruling governs 15 citations across 10 files including `src/lib/`, and a
+    retirement executed carelessly would strip reasoning along with labels. Rule 19 keys on span, so
+    span decides; the other reading is recorded here so a later reader sees it was weighed and not
+    missed.
+
+    **`verify: human`.** The deliverable is a ruling, not a behaviour: there is no test path to
+    forward-reference, and its criteria are grep anchors against its own text — the W1-T1120 /
+    PR #1344 shape. That also makes declaring its own plan record in `files:` legitimate, which
+    `rule15-filing` refuses only for a `verify: auto` task.
+
+    **WHAT THIS SHARD MUST NOT BE READ AS DOING.** It does not restore, reconstruct, renumber or
+    supply the text of any law. It records what survives, what does not, and what the citations can
+    and cannot license — and it recommends one remedy on the evidence rather than settling the
+    vocabulary question by fiat.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T1258` was reserved at 2026-08-23T13:29:44Z and confirmed
+    still held and UNUSED before filing: no shard under that id on main and no `- id: W1-T1258` in
+    any plan file, against a control that reads 1 on both surfaces. Eight id surfaces were swept
+    clear, each with a control qualified for that surface and none disqualified, including a
+    count-per-head sweep over 128 live heads where this id read 0 while the control read 2. The
+    clone was confirmed unshallow first, so the history surfaces are not pre-horizon false negatives.

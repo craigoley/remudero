@@ -92,6 +92,7 @@ test("generateSandboxTask: refuses a shard with no isolating literal path in the
       "literal-only.yaml": { entries: ["e1"], globs: ["src/lib/only-here.ts"] },
       "wildcard-only.yaml": { entries: ["e2"], globs: ["*.md"] },
     },
+    bySubsystem: {},
   };
   assert.throws(
     () => generateSandboxTask(fixture, ["literal-only.yaml", "wildcard-only.yaml"], 0),
