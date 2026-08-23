@@ -65,6 +65,44 @@
     **NOT PROPOSED, BY NAME: merging the two readers, or treating a failed review as a CI failure.**
     `strikeCap` stays and the escalation at the ceiling stays; what changes is that a rung with
     nothing to enumerate refuses BEFORE it spends, and says why.
+
+    ── ADDED 2026-08-23: THE MINER IS BUILDING A HALF-POPULATED TYPE ────────────────────────────
+
+    (8) `CiFailure` DECLARES FOUR FIELDS AND ITS SOLE PRODUCER ASSIGNS TWO. Re-derived on
+    `origin/main`: the interface declares `name` and `logTail` as required, then `sha?:` at
+    `src/lib/sweep.ts:246` and `outsidePrRange?:` at `:253`. The only thing that builds one is
+    `src/run-task.ts:19440`, which returns `{ name, logTail }`. So HALF the declared shape is
+    never populated by anything.
+
+    (9) AND THE UNPOPULATED HALF IS READ ANYWAY. `outsidePrRange` is consumed at
+    `src/lib/sweep.ts:1789` (`const rangeNote = f.outsidePrRange`), so a narration branch exists
+    for a value that is always `undefined`. The file CONCEDES THIS IN ITS OWN COMMENT at `:1591`:
+    "`CiFailure.outsidePrRange` is narrated by `describeCiFailures` and never acted on". The
+    condition is documented; what is not is that the field it turns on has no producer at all.
+
+    (10) THIS IS EVIDENCE FOR THIS SHARD, NOT A SEPARATE DEFECT. The miner that returned nothing
+    on `#2641` is building a type two of whose four fields are never populated -- the same
+    producer, the same call, the same silence. It sharpens the diagnosis rather than widening it:
+    the rung's evidence path is not merely EMPTY on some runs, it is STRUCTURALLY PARTIAL on every
+    run. ANY REMEDY THAT ADDS ATTEMPT INFORMATION TO `CiFailure` MUST DECIDE WHAT HAPPENS TO THOSE
+    TWO: wire them, or move them to `KNOWN_UNWIRED` with a stated reason. Adding a fifth field
+    beside two dead ones would leave the shape less honest than it is now.
+
+    (11) AND THE CHECK THAT WOULD HAVE CAUGHT IT IS TWO LINES, NOT A GENERALISATION.
+    `auditProducerCompleteness({srcRoot, interfaceFile, interfaceName, allowlist})`
+    (`src/lib/producer-completeness.ts`) is ALREADY GENERIC -- nothing in it is `OpenPrView`-
+    specific. Pointed at `CiFailure` it returns `unwired: ["sha", "outsidePrRange"]` with
+    `producers: ["src/run-task.ts:19440"]`, against a control run on `OpenPrView` that returns its
+    five known-unwired fields and two producers, so the reader is not blind. That is a two-line
+    addition to `test/producer-completeness.test.ts`.
+
+    (12) AND IT IS NOT AN ARGUMENT FOR A TEST PER INTERFACE -- A SURVEY OF SIX CANDIDATES FOUND
+    `CiFailure` THE ONLY OTHER ONE THAT YIELDS ANYTHING. Measured on this tree:
+    `LiveStateResult` anchors on `ok` and matches 165 FALSE PRODUCERS, which makes it unusable;
+    `LearningsIndex` declares 0 optional fields and 7 of 8 `src/lib/ledger.ts` interfaces do too,
+    so there is nothing for the audit to report; `DisarmOutcome` is a STRING UNION
+    (`export type DisarmOutcome = "disarmed" | ...`), not an interface; and `ContainmentEvidence`
+    audits clean at 0 unwired across 6 optional fields. One more call, not a policy.
   acceptance:
     - claim: "a fix rung with zero enumerable failures stands down instead of dispatching a worker"
       proof: "unit test: test/fix-rung-empty-failures-stand-down.test.ts"
