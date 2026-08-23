@@ -1,0 +1,120 @@
+- id: W1-T1225
+  title: "nothing at filing time ever opens the file a `grep:` proof names, so a pattern that CANNOT MATCH ANY SINGLE LINE of a file already on disk is indistinguishable from a correct forward reference — warn on the two POSITIVELY DETECTABLE classes (the phrase wraps a line, the phrase differs only in case) and stay silent on every zero that is merely 'not written yet'"
+  repo: remudero
+  depends_on: ["W1-T1224"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    THE FEASIBILITY QUESTION fb-1785931037801-843083 ASKED IS ANSWERABLE YES, FOR A NARROWER CLASS
+    THAN THE ENTRY NAMED, AND THE NARROWING IS WHAT MAKES IT SAFE.
+
+    (1) THE CONSTRAINT THE ENTRY SET IS THE BINDING ONE: "a legitimate forward reference must stay
+    legitimate, so the check cannot simply fail on zero." That rules out every check keyed on the
+    hit count. This repo has already ruled the same way once, in code:
+    `proofNameResolutionViolations` (src/lib/task-linter.ts, W1-T488) carries "no severity override,
+    ever: zero is legitimately a forward reference to an unwritten test … so this can never BLOCK
+    without refusing correct authoring at scale."
+
+    (2) BUT TWO SUBCLASSES ARE POSITIVE DETECTIONS, NOT ZEROS. They are established by finding
+    something, not by failing to:
+      - the pattern matches the named file's text with newlines and indentation collapsed, while
+        matching NO single line ⇒ the phrase IS present and WRAPS ⇒ line-based grep can never match
+        it, before or after any implementing diff;
+      - the pattern matches case-insensitively while matching nothing case-sensitively ⇒ the text is
+        present under a different capitalisation ⇒ as written it can never match.
+    A genuine forward reference — text the task is meant to ADD — matches under NEITHER probe and is
+    therefore silent. The discriminator the entry said did not exist does exist; it just is not the
+    hit count.
+
+    (3) NOTHING TODAY READS THE FILE. `proofGrepSafetyViolations` (W1-T287) is purely lexical over
+    the pattern text and refuses `[ * ^ $`; `proofResolvabilityViolations` checks shape;
+    `proofScopeViolations` compares the proof's path against `files:`; `proofNameResolutionViolations`
+    resolves `unit test:` titles. Not one of them opens the path a `grep:` proof names. So the
+    #1336 filer had no instrument that could have spoken, and both failures cost hand-debugging.
+
+    (4) THIS IS NOT W1-T1053. That task is a WHOLE-QUEUE report, exits 0 always, and its cause split
+    is name-filtered-zero-match, grep-path-ABSENT and parse-refusal. A path that EXISTS while the
+    pattern can never match any of its lines is outside its enumerated set by construction. This
+    task is a per-task check at the lint call site; neither blocks the other and neither subsumes it.
+
+    (5) AND A CHECK THAT MERGES WITHOUT A CALLER IS THIS MECHANISM'S OWN RECORDED FAILURE — W1-T488
+    shipped dormant, W1-T497 exists only to wire it, and W1-T1053 design (vi) names three such
+    checks. The call site is therefore part of the deliverable, not a follow-up.
+  design: |
+    A WARN, AT THE CHANGED-TASKS LINT PASS, ON POSITIVE EVIDENCE ONLY.
+
+    (i) CONSUME W1-T1224's CLASSIFIER — never a second implementation of the probes. The whole
+    defect family is a checker that disagrees with what actually runs; two probe implementations
+    would reintroduce it one layer up. That is why this task depends on W1-T1224.
+
+    (ii) THE LINTER STAYS PURE. `src/lib/task-linter.ts` is documented no-fs / no-exec and three
+    checks depend on that. Follow the convention `proofNameResolutionViolations` already
+    established: an INJECTED reader on `LintOpts` (path -> file text or undefined), and NO OPINION
+    when the caller supplies none. Absent reader ⇒ empty violation list, exactly as today's
+    resolver-less call sites behave.
+
+    (iii) SILENT ON EVERY LEGITIMATE SHAPE, AND EACH ONE ASSERTED:
+      - the named path does not exist yet ⇒ SILENT (the reader returns undefined);
+      - the path exists and the pattern's text is absent in every probed form ⇒ SILENT (forward
+        reference — the task is meant to ADD it);
+      - the pattern matches a line today ⇒ SILENT here (a proof that already matches main is
+        `executed_stale`'s business, W1-T273, and is not re-judged by this check).
+    Only `line-seam` and `case-only` are reported.
+
+    (iv) WARN, NEVER BLOCK, AND SAY WHY IN THE CODE. Severity is `warn` with no override, for
+    W1-T488's stated reason and for one more: the probes are heuristics about INTENT — an author
+    may deliberately want a pattern that differs in case from nearby text. A warn that names the
+    matching line and the probe that fired is actionable; a block would refuse authoring the
+    checker cannot actually adjudicate.
+
+    (v) THE REMEDY TEXT IS THE DELIVERABLE'S SHARP END. Say what to do, not that something is
+    wrong: for `line-seam`, anchor on a phrase that fits on one line; for `case-only`, copy the
+    capitalisation out of the file verbatim. Print the offending line so the fix is a copy-paste.
+
+    (vi) THE CALL SITE IS IN THIS CHANGESET (rationale 5). Wire it where the reader is cheap: the
+    changed-tasks lint pass, whose grep proofs name a handful of files, never a whole-plan sweep —
+    W1-T497 already ruled whole-plan resolution out at 66.4 s and that ruling is not reopened.
+    Reading the few files a changed task's grep proofs name is bounded by the diff; state the
+    observed cost in the PR body.
+
+    NOT IN SCOPE, NAMED: W1-T1224's classifier and `check-proof` output; W1-T1053's queue audit;
+    promoting this or any sibling check above `warn`; the standing 598-warning stream; and any
+    rewrite of an existing task's proofs.
+  acceptance:
+    - claim: "a grep proof whose phrase is present in the named file only across a line break is warned at filing time with the wrapped line quoted"
+      proof: "unit test: test/lint-grep-unmatchable.test.ts"
+    - claim: "a grep proof whose phrase is present only under a different capitalisation is warned with the file's own casing quoted"
+      proof: "unit test: test/lint-grep-unmatchable.test.ts"
+    - claim: "a proof naming a path not on disk and a proof whose text is absent in every form are both silent, so a forward reference stays legitimate"
+      proof: "unit test: test/lint-grep-unmatchable.test.ts"
+    - claim: "the check emits nothing when the caller supplies no file reader, so the linter stays pure"
+      proof: "unit test: test/lint-grep-unmatchable.test.ts"
+    - claim: "a task whose only violation is this one does not fail the lint run"
+      proof: "unit test: test/lint-grep-unmatchable.test.ts"
+    - claim: "the lint command supplies the reader, so the check ships with a caller instead of dormant"
+      proof: "grep: proofGrepUnmatchableViolations( in src/run-task.ts"
+  origin: "feedback#fb-1785931037801-843083"
+  plan_refs: ["W1-T488", "W1-T497", "W1-T287", "W1-T1053", "W1-T1224", "§5C"]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/lint-grep-unmatchable.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high IS SET UP FRONT — `files:` spans src/ and test/ and `sizingViolation` blocks below
+    that band, the same grade W1-T310, W1-T497 and W1-T1053 carry for the same reason. The blast
+    radius argues lower: one warn-only check that no exit code reads.
+
+    depends_on: [W1-T1224] IS A REAL DEPENDENCY, not sequencing taste — this task's probes ARE that
+    task's classifier, and duplicating them is the failure it exists to prevent.
+
+    DECLARING src/run-task.ts IS THE COST OF LANDING WITH A CALLER. It serialises this against
+    W1-T497, W1-T912 and W1-T1053 through `partitionByFileOverlap`. Accepted: a check wired in a
+    later PR is a check that ships dormant, which this repo has now recorded three times.
+
+    PROOFS: five whole-file `unit test:` path forms against the suite this task creates, plus one
+    `grep:` naming the wiring symbol at its call site — the one claim a unit test over a pure check
+    cannot make. Both greped paths are inside `files:`, so `proof-scope` is silent, and the grep
+    names a file the implementing diff changes so it discriminates rather than going
+    `executed_stale`.
