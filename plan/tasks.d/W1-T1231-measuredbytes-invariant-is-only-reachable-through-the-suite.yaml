@@ -1,0 +1,180 @@
+- id: W1-T1231
+  title: "THE `measuredBytes` INVARIANT IS ENFORCED ONLY IN THE SUITE, SO A STALE CAPTURE SURFACES AS A RED REQUIRED CHECK WHOSE ONLY REMEDY IS AN INSTRUMENT EDIT — and an instrument edit from inside a `src/` PR trips Standing rule 25 by construction; `evaluateRatchet` already holds both figures and never compares them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  rationale: |
+    MEASURED 2026-08-23 in a scratch worktree proved equal to `origin/main` at 50353ccd before any
+    reading. The suite was NOT run; the ONE declared test file and the ratchet CLI were driven
+    directly. Every zero carries a control qualified for its own surface.
+
+    (1) THE INVARIANT IS LIVE AND CORRECT AND THIS TASK DOES NOT PROPOSE REMOVING IT.
+    `test/claude-md-budget-ratchet.test.ts:88-93` asserts
+    `baseline.measuredBytes === readFileSync(join(REPO_ROOT, "CLAUDE.md")).length` with the message
+    "measuredBytes must be the real byte length of the committed CLAUDE.md, not a stale capture".
+    `git log -S` on that message returns exactly one commit: `fb6c5485` (#2537), which retired the
+    zero-headroom `capBytes === measuredBytes` invariant and REPLACED it. That test runs under the
+    `test/**/*.test.ts` glob both `test` and `test:ci` use (package.json), so it runs inside the
+    `ci` job, which `ci-gate` lists as required.
+
+    (2) THE SCRIPT NEVER READS THE FIELD, RE-DERIVED FROM BEHAVIOUR RATHER THAN FROM READING THE
+    CODE. Driving the real CLI with a baseline of `{"capBytes": 65536, "measuredBytes": 1}` against
+    the committed 62,732-byte CLAUDE.md prints `OK` and exits 0. In source, `evaluateRatchet`
+    (scripts/claude-md-budget-ratchet.mjs:68-75) carries one condition,
+    `actualBytes > baseline.capBytes`; control on that claim: `violations.push` appears exactly
+    ONCE in the whole file, at :72, and the file's only other non-zero exits are the unreadable-file
+    path (:91) and the print-the-violations path (:109).
+
+    (3) THE COST IS MEASURED, NOT HYPOTHESISED. At `69e04eb1` — a live branch on 2026-08-22 —
+    `CLAUDE.md` measured 62,732 bytes while that tree's `measuredBytes` read 62,725, so the test at
+    (1) was RED. The only file that could clear it is `scripts/claude-md-budget-baseline.json`, an
+    instrument, so the fix-rung repair `3d38a009` had to edit an instrument from inside a `src/` PR:
+    it tripped Standing rule 25, falsified #2545's body file count, and escalated as #2548. THE
+    REPAIR WAS NECESSARY AND MISPLACED, NOT STALE. That distinction is recorded because an earlier
+    reading of this same ground concluded "stale" — it exercised the ratchet SCRIPT three ways and
+    never ran the ratchet's TEST, and the script is precisely the half that stopped reading the
+    field.
+
+    (4) Q1, THE MECHANICAL HALF: THE EQUALITY CAN MOVE WITH NO NEW INPUT AND NO NEW I/O.
+    `evaluateRatchet(actualBytes, baseline)` already receives the measured length of the real file
+    AND the whole baseline object, so `baseline.measuredBytes` is already in scope at the exact
+    line the comparison would live on. The function is exported and pure — its own header says the
+    pure functions are exported "so the falsifier fixture test can exercise the CLI process directly
+    ... as well as the measurement/comparison logic in isolation".
+
+    (5) Q1, THE HALF THAT DECIDES WHETHER IT WEAKENS: THE EXISTING GUARD SHAPE MUST NOT BE COPIED.
+    `capBytes` is read behind `typeof baseline.capBytes === "number" &&`, and that guard is a
+    fail-open. MEASURED, three ways against the real 62,732-byte file: a baseline with NO
+    `capBytes` prints `cap unset` and exits 0; a baseline whose `capBytes` is the STRING `"1000"`
+    prints `cap 1000 bytes` — a log line ASSERTING a cap — and still exits 0; and the control, a
+    numeric `capBytes` of 1000, prints BLOCKED and exits 1 naming the 61,732-byte overage. So the
+    two zeros are real fail-opens and not a broken probe. A `measuredBytes` comparison written in
+    that same shape would be laundered by a typo.
+
+    (6) AND ABSENCE CANNOT SIMPLY BE MADE FATAL, BECAUSE THE CLI'S OWN FIXTURES DECLARE NO MEASURED
+    FIGURE. All three fixture baselines under `test/fixtures/claude-md-budget-ratchet/` carry
+    `capBytes` and nothing else — `at-cap-baseline.json` is `{"capBytes": 172}`,
+    `over-cap-baseline.json` is `{"capBytes": 165}`, and `no-cap-baseline.json` declares neither.
+    A fail-closed-on-absence rule inside `evaluateRatchet` would redden the three CLI tests that
+    drive them, one of which (`:52`) exists precisely to pin that a baseline with no `capBytes`
+    produces "no crash, no false block". Absence and staleness are therefore different states and
+    the remedy must treat them differently.
+
+    (7) Q3, ANSWERED AND FAVOURABLE: THE MOVE CANNOT REQUIRE TOUCHING `src/lib/ci-parity.ts`.
+    Word-bounded, `claude-md` reads 0 in that file; controls on the same file, `learnings-budget`
+    reads 4, `coverage` reads 70, and it holds 21 `runStep` entries — so the file does name scripts
+    and the zero discriminates. `ci.yml`'s own comment states why: `CI_PARITY_TABLE` is asserted
+    against `ci.yml` BY JOB NAME in both directions (`test/preflight-ci-parity.test.ts`, via
+    `parseCiJobNames`) and NOTHING asserts a job's step list, which is why the ratchet rides as a
+    step of `learnings-budget-ratchet` (`ci.yml:425`, step at :488) rather than as a job. This task
+    adds no job and no step and changes no workflow — it changes a script's internals and its test
+    — so the pairing that comment guards against cannot arise. The fidelity gap it accepts
+    (`rmd preflight --ci-parity` does not mirror the step) is left exactly as it is.
+
+    (8) THE ARGUMENT IS REACHABILITY. In the script, a stale capture is the ratchet's own named
+    verdict, visible to any lane that runs `npm run claude-md-budget-ratchet` before a PR exists.
+    In the suite, it is a red required check discovered after a PR is open, whose only remedy is an
+    instrument edit — the exact trap W1-T1227 (#2550) files as a class. W1-T1227 owns the rung-side
+    half (the rung is never told the PR's declared scope); this task removes one of the standing
+    reasons a repair must reach for an instrument at all. Neither W1-T1227 nor W1-T297 (Standing
+    rule 25) is re-filed here.
+  design: |
+    ONE CONCERN: make the stale-capture failure reachable from the ratchet itself, without
+    weakening what the suite guarantees today.
+
+    (i) THE EQUALITY MOVES INTO `evaluateRatchet`. A baseline that DECLARES a measured figure which
+    does not equal the file's real byte length is a violation, and the message names BOTH figures —
+    the recorded one and the measured one — the way the cap violation already names size and cap.
+    It fails closed: a violation is a violation, no `continue-on-error`, same non-zero exit the cap
+    arm already produces.
+
+    (ii) A DECLARED-BUT-MALFORMED FIGURE IS A VIOLATION, NEVER A SILENT SKIP. Rationale (5)
+    measured what the `typeof === "number"` guard does to `capBytes`: a string reads as a cap in
+    the log and enforces nothing. The measured-figure arm must not reproduce that — if the field is
+    present and is not a number, that is a broken instrument and the gate says so.
+
+    (iii) ABSENCE STAYS TOLERATED BY THE SCRIPT, AND THE PRESENCE OBLIGATION STAYS IN THE SUITE.
+    Rationale (6): the CLI's fixtures declare no measured figure and one existing test pins that a
+    capless baseline does not false-block. So the script's arm is "declared and wrong", and the
+    REAL committed baseline's obligation to declare both figures stays where it is — an assertion
+    about this repository's own file, not about the script's behaviour. Deleting the field
+    therefore still cannot launder a stale capture, and the common case (the file drifted by a few
+    bytes) now surfaces in the script rather than only in CI.
+
+    (iv) Q2 — THE TEST ASSERTS THAT THE SCRIPT ENFORCES IT, WITH A NEGATIVE CONTROL. The direct
+    equality assertion is replaced, not deleted: drive the real CLI against a baseline whose
+    measured figure disagrees with its file and assert a non-zero exit whose message names both
+    figures, then drive the SAME CLI against the corrected baseline and assert zero. That pair is
+    the prove-it-still-blocks shape this file already uses for the cap (`at-cap` accepts,
+    `over-cap` blocks and names the overage), and the second half is what stops the first from
+    passing for the wrong reason.
+
+    (v) NO NEW TRACKED FIXTURE. The disagreeing baseline is minted at run time with `mkdtempSync`,
+    the convention 387 test files in this suite already use and which `test/setup/tmp-hygiene.ts`
+    sweeps automatically. That keeps `files:` at two paths and one concern; an implementer who adds
+    fixture files instead has widened the scope for nothing.
+
+    (vi) NOT IN SCOPE, NAMED. Deleting the invariant — refused, and rationale (1) says why. The
+    cap's VALUE, which is an operator decision on the record. `capBytes`' own absence semantics and
+    its string-guard fail-open (rationale 5) — a real defect, measured here, DELIBERATELY not fixed
+    by this task and named for the operator to mint separately, because widening this change into
+    the cap arm turns a reachability fix into a semantics change on a gate that is currently
+    correct for every baseline anyone has actually committed. `src/lib/ci-parity.ts` (rationale 7).
+    And W1-T1227's rung-side remedy, which is a different lane's work.
+  acceptance:
+    - claim: "a baseline whose declared measured figure disagrees with the file blocks, and the failure names both figures"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "the same baseline corrected to the file's real length exits clean"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "a declared measured figure that is not a number blocks rather than being silently skipped"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "a baseline that declares no measured figure still neither crashes nor false-blocks"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "the committed baseline is still required to declare both figures and a dated written reason"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+  files: [scripts/claude-md-budget-ratchet.mjs, test/claude-md-budget-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#measuredbytes-invariant-only-reachable-through-the-suite-2026-08-23"
+  plan_refs: ["W1-T1227", "W1-T297", "W1-T503"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/claude-md-budget-ratchet.test.ts`, which is declared in `files:` and already
+    exists, so they resolve against a real file rather than a forward reference.
+
+    `risk: medium` IS HONEST IN BOTH DIRECTIONS. Two files, one concern, and the blast radius is a
+    gate that currently passes on every baseline in the repository — the change adds a refusal
+    where there is none, so a mistake reddens CI loudly rather than passing something bad silently,
+    which is the direction a ratchet should fail in. It is not `high` because nothing here touches
+    a workflow, a job, a required-check name, or any `src/` path.
+
+    THE TASK IS SMALLER THAN THE DEFECT IT SERVES, DELIBERATELY. W1-T1227 (#2550) owns the general
+    case: the fix rung is never told the PR's declared scope, so it cannot know that the only
+    repair available to it is out of scope. This task does not fix that. It removes ONE standing
+    reason a repair must reach for an instrument — the most frequent one, since CLAUDE.md drifts by
+    a few bytes whenever anyone edits it — and leaves the class where it was filed.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T1231` resolves on origin against a namespace of 262 such refs; the reservation
+    existing is not evidence a shard does. EIGHT ID SURFACES WERE SWEPT, each against a control
+    pre-qualified for THAT surface — and ONE CONTROL WAS RE-QUALIFIED MID-SWEEP RATHER THAN
+    TRUSTED: W1-T1227 was the obvious control for the main-tree surfaces and reads 0 on both,
+    because its own shard is still in an open PR, so the shard-filename and `- id:` surfaces were
+    re-controlled on W1-T1222 and W1-T1213, which read 1 each. Shard filenames 0; plan `- id:`
+    lines 0; the reservation 1, which is the pre-mint; open PR titles 0 against W1-T1227 at 1; open
+    PR head branches 0 against `run-W1-T` heads at 2; open PR file lists 0 with coverage at five
+    captured of five enumerated, against `plan/tasks.d/` paths at 2 across the same heads; merged
+    trailers 0 against `Remudero-Task: W1-T1085` at 1; merged subject credit 0 against W1-T1213
+    at 1, with `run-W1-T1231-*` at 0 against a namespace of 83 `run-*` branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, NOT A PRESENCE TEST. Three
+    markers were counted in `scripts/claude-md-budget-ratchet.mjs` and one in
+    `test/claude-md-budget-ratchet.test.ts` at every one of the five open PR heads and at main:
+    `measuredBytes`, `violations.push`, `evaluateRatchet`, and `measuredBytes` in the test. Main
+    reads 0 / 1 / 3 and 4; every head reads exactly 0 / 1 / 3 and 4. No head moves any marker, and
+    the non-zero markers being equal is the control that the reader worked — the script's own
+    `measuredBytes` count of 0 is the defect itself, identically absent everywhere.
