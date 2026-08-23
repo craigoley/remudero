@@ -1,6 +1,11 @@
-import { loadLayeredLearningsForTaskFiles, renderMatchedLearnings, selectLearnings } from "./learnings.js";
+import {
+  candidateShardFiles,
+  loadLayeredLearningsForTaskFiles,
+  renderMatchedLearnings,
+  selectLearnings,
+} from "./learnings.js";
 import { appendLedger } from "./ledger.js";
-import type { LayeredLearningsHomes } from "./learnings.js";
+import type { LayeredLearningsHomes, LearningsIndex } from "./learnings.js";
 import type { RunResult } from "./run-result.js";
 import type { ProofExecOutcome } from "./review.js";
 
@@ -34,6 +39,19 @@ import type { ProofExecOutcome } from "./review.js";
  * This module is the HARNESS. Running the experiment (scheduling real pairs against
  * the sandbox, reading the aggregate) is an operator action (Rule 18) — see `rmd
  * wipe-test`'s CLI wiring in run-task.ts.
+ *
+ * SUBJECT SUPPLY (W1-T1253): "many seeded pairs" needs SUBJECTS to seed pairs with, and
+ * a hand-written list (the sandbox's original three tasks) runs out — worse, once its
+ * work has already merged, re-running it is not a subject at all, just a repeat.
+ * {@link generateSandboxTask} is that supply: given the shard filenames
+ * (`learnings/index.json`'s keys) a subject should select and an ever-incrementing `seq`,
+ * it builds a FRESH `files:` list from the real project-layer corpus, never from a fixed
+ * roster. A subject is defined by the shards its `files:` select, not by its prose
+ * (injection is task-matched — {@link loadLayeredLearningsForTaskFiles} delegates to
+ * `learnings.ts`'s `candidateShardFiles`), and that mapping is many-to-many (one path can
+ * select two shards at once), so {@link generateSandboxTask} always reports the shards a
+ * subject REALLY selects by re-running the same lookup injection itself uses, never by
+ * reasoning about which path was picked.
  */
 
 // ── ARM A/B PROMPT ASSEMBLY ─────────────────────────────────────────────────
@@ -228,6 +246,113 @@ export function aggregateWipeTestPairs(pairs: WipeTestPair[]): WipeTestAggregate
     avgStrikesDelta: round(sum((d) => d.strikesDelta) / n),
     verdictChangedCount,
     verdictChangedRate: round(verdictChangedCount / n),
+  };
+}
+
+// ── SANDBOX SUBJECT GENERATION (W1-T1253) ────────────────────────────────────
+
+/** One synthetic wipe-test subject for the SANDBOX target: a `files:` list a generated task
+ *  record would carry, plus the shard filenames those files ACTUALLY select. */
+export interface SandboxSubject {
+  /** Ever-distinct id — see {@link generateSandboxTask}'s `seq` param; never drawn from a
+   *  fixed roster, so it never runs out the way the sandbox's original three tasks did. */
+  id: string;
+  /** The `files:` a task record built from this subject would carry. */
+  files: string[];
+  /** The shard filenames `files` ACTUALLY select, per {@link candidateShardFiles} run
+   *  against the real `index` — design (ii): the mapping is many-to-many (one path can
+   *  select two shards at once), so this is always the real lookup's output, never a
+   *  count of the paths that were picked. */
+  selectedShards: string[];
+}
+
+/** The literal (glob-free) entries of `index.files[shard].globs` — a glob containing `*` can
+ *  match paths this generator never names, so only literal globs are usable AS a path. */
+function literalGlobsFor(index: LearningsIndex, shard: string): string[] {
+  return (index.files[shard]?.globs ?? []).filter((glob) => !glob.includes("*"));
+}
+
+/** One literal path per shard in `index` that selects THAT shard and no other — found by
+ *  actually RUNNING {@link candidateShardFiles} over every literal glob the corpus carries
+ *  (design ii: never reason about paths, always ask the real lookup), so it stays correct
+ *  as the corpus grows or its many-to-many overlaps shift. A shard with no isolating
+ *  literal path in the current corpus is simply absent from the returned map. */
+function isolatingPathsByShard(index: LearningsIndex): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const shard of Object.keys(index.files)) {
+    for (const path of literalGlobsFor(index, shard)) {
+      const selected = candidateShardFiles(index, [path]);
+      if (selected.length === 1 && selected[0] === shard) {
+        out.set(shard, path);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** A single literal path in `index` whose real selection equals `shards` EXACTLY (sorted) —
+ *  e.g. `src/lib/review.ts` alone selects exactly `["ci.yaml","failures.yaml"]`. `undefined`
+ *  if no single literal path reaches that exact combination in one hop. */
+function exactMultiShardPath(index: LearningsIndex, shards: string[]): string | undefined {
+  const want = shards.join(" ");
+  for (const shard of shards) {
+    for (const path of literalGlobsFor(index, shard)) {
+      if (candidateShardFiles(index, [path]).join(" ") === want) return path;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Generate ONE fresh sandbox subject that selects EXACTLY `shards` (design i/ii/iii): a new
+ * `files:` list synthesized from the real project-layer corpus (`index`, i.e. a loaded
+ * `learnings/index.json`), never a hand-written subject list that runs out. PURE — no I/O
+ * beyond the already-loaded `index` — so `seq` (an ever-incrementing counter) is the
+ * caller's job; nothing here reads a clock or randomness, so it stays unit-testable against
+ * hand-seeded fixtures exactly like this module's other pure functions.
+ *
+ * Prefers a SINGLE literal path that reaches `shards` exactly in one hop (the corpus's
+ * many-to-many globs make this possible — e.g. one path for both `ci.yaml` and
+ * `failures.yaml`); falls back to the union of one per-shard ISOLATING path (a path
+ * selecting that shard and no other), which the real project-layer corpus provides for
+ * every shard today (architecture/ci/failures/platform/testing each have at least one).
+ *
+ * Throws (never silently returns a wrong subject) if `shards` is empty, names a shard
+ * `index` does not carry, or some requested shard has neither an exact multi-shard path
+ * nor an isolating one in the current corpus.
+ */
+export function generateSandboxTask(index: LearningsIndex, shards: string[], seq: number): SandboxSubject {
+  if (shards.length === 0) {
+    throw new Error("generateSandboxTask: 'shards' must name at least one shard.");
+  }
+  const known = new Set(Object.keys(index.files));
+  for (const shard of shards) {
+    if (!known.has(shard)) {
+      throw new Error(
+        `generateSandboxTask: unknown shard '${shard}' (index carries: ${[...known].sort().join(", ")}).`,
+      );
+    }
+  }
+  const sortedShards = [...new Set(shards)].sort();
+  const exact = exactMultiShardPath(index, sortedShards);
+  let files: string[];
+  if (exact) {
+    files = [exact];
+  } else {
+    const isolating = isolatingPathsByShard(index);
+    files = sortedShards.map((shard) => {
+      const path = isolating.get(shard);
+      if (!path) {
+        throw new Error(`generateSandboxTask: shard '${shard}' has no isolating literal path in this corpus.`);
+      }
+      return path;
+    });
+  }
+  return {
+    id: `wt-sbx-${seq}`,
+    files,
+    selectedShards: candidateShardFiles(index, files),
   };
 }
 
