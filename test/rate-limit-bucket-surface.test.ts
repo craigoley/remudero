@@ -129,6 +129,15 @@ test("armAndLogOutcome: a rate-limit-shaped arm refusal ledgers automerge.rate_l
   const said: string[] = [];
   const deps = passingArmDeps({
     armAuto: throwingArmAuto("secondary rate limit exceeded for the authenticated account"),
+    // W1-T1255: a rate-limited arm now attempts the REST fallback. THIS test is the path where
+    // that fallback is REFUSED, which is the one that still ends in `arm_failed`; the sibling
+    // test below covers the path where it merges. Both still assert W1-T1235's own guarantee —
+    // the exhausted budget is named — because `rateLimit` rides every result the quota branch
+    // can return.
+    mergeDirect: () => {
+      throw new Error("HTTP 405: Pull Request is not mergeable");
+    },
+    isMerged: () => false,
     say: (m) => said.push(m),
   });
   const outcome = armAndLogOutcome("https://github.com/craigoley/remudero/pull/1235", "W1-RL", r.log, (u, t) =>
@@ -156,6 +165,32 @@ test("armAndLogOutcome: a rate-limit-shaped arm refusal ledgers automerge.rate_l
   assert.ok(
     said.some((m) => /rate-limit budget exhausted/.test(m)),
     `expected the say() line to name the exhausted budget, got: ${said.join("\n")}`,
+  );
+});
+
+test("armAndLogOutcome: a rate-limited arm whose REST fallback MERGES still names the exhausted bucket (W1-T1255)", () => {
+  const r = recorder();
+  const said: string[] = [];
+  const deps = passingArmDeps({
+    armAuto: throwingArmAuto("secondary rate limit exceeded for the authenticated account"),
+    say: (m) => said.push(m),
+  });
+  const outcome = armAndLogOutcome("https://github.com/craigoley/remudero/pull/1255", "W1-RL", r.log, (u, t) =>
+    armAutoMergeDetailed(u, t, deps),
+  );
+  // The fallback landed the merge — but the arm WAS refused on quota, and that must not vanish.
+  assert.equal(outcome, "direct-merged");
+  const steps = r.steps.map((s) => s.step);
+  assert.ok(
+    steps.includes("automerge.rate_limit_refused"),
+    `the distinct bucket row must survive a successful fallback, got: ${steps.join(", ")}`,
+  );
+  const namedRow = r.steps.find((s) => s.step === "automerge.rate_limit_refused");
+  assert.equal(namedRow?.extra?.gh_bucket, GH_RATE_LIMIT_BUCKET_UNKNOWN);
+  assert.equal(namedRow?.extra?.gh_bucket_operation, "gh pr merge --auto");
+  assert.ok(
+    said.some((m) => /rate-limit budget exhausted/.test(m)),
+    "the say() line must still name the budget",
   );
 });
 

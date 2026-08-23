@@ -1945,24 +1945,36 @@ export function attemptArm(
     // AND IT IS A FALLBACK, NEVER AN ARM REPLACEMENT: a REST merge cannot hold intent for checks
     // that have not finished, so it can only ever land a PR that is ALREADY green. Arming is still
     // attempted first, every time; this runs only after that attempt has already failed.
-    if (armFailureIsRateLimited(msg)) {
+    const quota = armFailureIsRateLimited(msg) ? ghRateLimitRefusalUnknown("gh pr merge --auto") : undefined;
+    if (quota) {
+      // W1-T1235's OBSERVABILITY IS NOT LOST WHEN W1-T1255's FALLBACK RESCUES THE MERGE. The arm
+      // WAS refused on quota — that is true whatever happens next — so the exhausted budget is
+      // said HERE, before the fallback, and `quota` rides EVERY result this branch can return.
+      // `armAndLogOutcome` writes its `automerge.rate_limit_refused` row off exactly that field
+      // (see `logArmAttribution`), so the distinct, greppable row and the bucket fields survive a
+      // successful fallback. Without this, a rate-limited arm that merged over REST would leave no
+      // trace that the budget was spent at all — silently undoing the one thing W1-T1235 shipped.
+      deps.say(
+        `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
+          `${quota.bucket}, resets: ${quota.resetsAt}) — ${msg} — ${prUrl}`,
+      );
       try {
         deps.mergeDirect(prUrl);
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
-        return { outcome: "direct-merged" };
+        return { outcome: "direct-merged", error: msg, rateLimit: quota };
       } catch (e3) {
         const msg3 = String((e3 as { stderr?: unknown })?.stderr ?? (e3 as Error)?.message ?? e3);
         // W1-T1050's discipline, applied to this path too: a merge that LANDED must never be
         // reported as a failure just because something after it threw.
         if (deps.isMerged?.(prUrl)) {
           deps.say(`automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`);
-          return { outcome: "direct-merged" };
+          return { outcome: "direct-merged", error: msg, rateLimit: quota };
         }
         // GitHub refused the REST merge — the PR was not mergeable, which is the correct answer
-        // for a PR that is not already green. NOTHING MERGED: fall through to the rate-limit row
-        // below so the arm's own failure is still named, rather than returning a merge outcome.
+        // for a PR that is not already green. NOTHING MERGED.
         deps.say(`automerge.rate_limited_rest_merge_refused (W1-T1255): ${msg3} — ${prUrl}`);
       }
+      return { outcome: "arm-error-ignored", error: msg, rateLimit: quota };
     }
     // W1-T1079: this used to be pure prose on `say` (stdout only) — the ledger row itself
     // carried nothing, which is the defect this task closes. `msg` is now returned alongside
@@ -1982,14 +1994,11 @@ export function attemptArm(
     // a quota refusal. Both fields are honestly `unknown` (never `"graphql"`, however true
     // structurally) — see `ghRateLimitRefusalUnknown`'s own doc for why guessing here would
     // undo the "read the response's own field" discipline the general reader observes.
-    const rateLimit = armFailureIsRateLimited(msg) ? ghRateLimitRefusalUnknown("gh pr merge --auto") : undefined;
-    deps.say(
-      rateLimit
-        ? `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
-            `${rateLimit.bucket}, resets: ${rateLimit.resetsAt}) — ${msg} — ${prUrl}`
-        : `automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`,
-    );
-    return { outcome: "arm-error-ignored", error: msg, ...(rateLimit ? { rateLimit } : {}) };
+    // W1-T1255: the rate-limited branch above returns on every path it can take, so a failure
+    // reaching HERE is by construction NOT rate-limit-shaped — the ternary this line used to carry
+    // had exactly one reachable arm left, and a condition that can only be false is not a guard.
+    deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
+    return { outcome: "arm-error-ignored", error: msg };
   }
 }
 
