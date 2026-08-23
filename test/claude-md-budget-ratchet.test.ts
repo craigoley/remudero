@@ -61,6 +61,31 @@ test("claude-md-budget-ratchet CLI: a missing target file is rejected, not silen
   assert.match(result.stderr, /claude-md-budget-ratchet:/);
 });
 
+// ── W1-T1233: a malformed (present but non-number) capBytes must REFUSE, not silently disarm ────
+//
+// The pre-fix guard was `typeof baseline.capBytes === "number" && actualBytes > baseline.capBytes`
+// -- any non-number short-circuited the `&&`, so no violation was ever pushed and the run reported
+// OK while still printing "cap 172 bytes" as its first log line, byte-identical to a run that is
+// actually enforcing 172. malformed-cap-baseline.json carries the SAME value as at-cap-baseline.json
+// (172) but quoted as a string, isolating the type defect from the value.
+
+test("claude-md-budget-ratchet CLI: a capBytes present but not a number refuses instead of passing (acceptance criterion 1)", () => {
+  const result = run(SAMPLE, "malformed-cap-baseline.json");
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /claude-md-budget-ratchet:/);
+});
+
+test("claude-md-budget-ratchet CLI: the refusal names the field and the value it received (acceptance criterion 2)", () => {
+  const result = run(SAMPLE, "malformed-cap-baseline.json");
+  assert.match(result.stderr, /'capBytes' must be a number, got "172"/);
+});
+
+test("claude-md-budget-ratchet CLI: a malformed capBytes never prints a cap figure it is not enforcing (acceptance criterion 6)", () => {
+  const result = run(SAMPLE, "malformed-cap-baseline.json");
+  assert.doesNotMatch(result.stdout, /cap \d+ bytes/, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /OK --/, result.stdout + result.stderr);
+});
+
 // ── The real committed CLAUDE.md + its committed baseline: currently within budget (what CI checks) ─
 
 test("the REAL committed CLAUDE.md is currently within the recorded size budget cap", () => {

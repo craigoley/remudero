@@ -1,0 +1,4 @@
+{
+  "_comment": "capBytes is a quoted string, not a number -- the same value as at-cap-baseline.json's 172, but the wrong type. This must REFUSE, not silently disarm the gate and report OK.",
+  "capBytes": "172"
+}
