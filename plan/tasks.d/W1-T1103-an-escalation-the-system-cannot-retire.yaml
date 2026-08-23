@@ -59,6 +59,60 @@
     retired; its premise has since failed outright, with hundreds of merges to main since it
     opened. W1-T298 owns queue-starvation escalation and W1-T186 owns naming the observed blocker —
     that pair is where the fix belongs, not here.
+
+    ── AMENDED 2026-08-23, PURELY ADDITIVE: A THIRD REFERENT KIND IS NEEDED ─────────────────────
+
+    (8) THE TASK TRAILER IS NEEDED ONLY TO FIND A REFERENT, NEVER FOR THE CLOSE DECISION -- SO A
+    NON-TASK ESCALATION IS NOT INHERENTLY UNRETIRABLE. `buildEscalationReconcileCandidates`
+    (`src/run-task.ts`) gates on exactly two things: `no_task_trailer`, when
+    `/^\*\*Task:\*\*\s*(\S+)\s*$/m` finds no line in the body; and `no_referent`, when a line exists
+    but `plan.byId` misses it, it is not `PR-<n>`, and `prReferentFromIssueText` returns undefined
+    on BOTH body and title. The close itself never consults a task: `sweepEscalationReconcile`
+    branches on `if (!c.derived.merged && !c.derived.closed)`, and on the PR path `derived` is
+    built straight from `deps.github.prByRef(n).state` with `source: "pr-referent"`. A NON-TASK
+    ESCALATION THAT NAMES A PR ALREADY CLOSES ITSELF TODAY.
+
+    (9) AND THE TWO GATES ARE ORDERED, WHICH IS SHARPER THAN THE PAIR SUGGESTS: `no_task_trailer`
+    SHORT-CIRCUITS BEFORE THE PR FALLBACK IS REACHABLE. The `if (!taskId)` arm `continue`s
+    immediately; the `prReferentFromIssueText` fallback lives inside the LATER `if (!task)` arm,
+    which is only reached when a `**Task:**` line was found and merely failed to resolve. So an
+    issue carrying resolvable PR URLs and no `**Task:**` line is dropped WITHOUT the fallback that
+    would have resolved it ever being consulted. MEASURED: `#2032`'s body carries nine `/pull/<n>`
+    references and no `**Task:**` line, so it drops as `no_task_trailer` with its referent in hand.
+
+    (10) WHAT GENUINELY CANNOT CLOSE IS AN ESCALATION NAMING NEITHER, AND THE MEASURED THREE SPLIT
+    ACROSS BOTH COUNTERS RATHER THAN ONE. Re-derived 2026-08-23 against the live issues: `#2438`
+    (dispatch queue starved) carries a `**Task:**` line and no PR anywhere -> `no_referent`;
+    `#2360` (mutation-nightly failing) and `#2032` (clock-sweep fixture drift) carry no `**Task:**`
+    line -> `no_task_trailer`. That is 1 and 2, which is exactly the `dropped:
+    {"no_task_trailer":2,"no_referent":1}` the summary row reported. Their referents are a QUEUE
+    STATE, a WORKFLOW CONCLUSION and a SWEEP FIXTURE -- none of which is a task or a PR.
+
+    (11) A CORRECTION TO THE RECORD THIS AMENDMENT WAS WRITTEN FROM: `#2032` IS STILL OPEN. `#2438`
+    and `#2360` were closed by hand on 2026-08-23; `#2032` was not, and read `state: open` when
+    this was written. So the class is not merely historical -- one member is on the board now.
+
+    (12) "DO NOT OPEN" IS THE WRONG REMEDY FOR THIS CLASS, WHICH IS WHY DESIGN (iii) DOES NOT
+    COVER IT. A nightly that genuinely starts failing SHOULD be reported; refusing to open the
+    issue would trade an un-retirable true positive for a silent real failure, which is strictly
+    worse. The answer is a THIRD REFERENT KIND -- a check or workflow whose conclusion the
+    reconciler can re-read, exactly as it already re-reads a PR's state -- so the escalation opens
+    when the condition holds and retires itself when it stops holding. Design (iii)'s two kinds, a
+    plan task id and a PR number, cannot express `mutation-nightly`.
+
+    (13) THE VISIBILITY HALF IS ALREADY SHIPPED; IT IS DURABILITY THAT IS ABSENT.
+    `renderEscalationReconcileSummary` (W1-T1101, `src/run-task.ts`) already renders
+    "N open needs-human issue(s) checked · N closed · N became candidate(s), N dropped
+    (N no-task-trailer, N no-referent)". It has exactly ONE call site, inside `rmd sweep`'s own
+    `console.log`, so the line exists and reaches nobody who is not running a sweep by hand. The
+    drop is counted and named; it is not durable. Nothing here re-files W1-T1101, and W1-T347
+    remains the owner of the moot-question guard on issues already open.
+
+    (14) AND THE EXISTING GUARDRAILS STAND UNCHANGED. Design (v) forbids bulk-closing the open
+    board and this amendment proposes no closure of any current issue. Nothing closes an
+    escalation whose condition still holds, and no issue is closed without RE-DERIVING that
+    condition -- a timer or an age rule would be the wrong fix, because it would retire a true
+    positive on the clock rather than on the evidence.
   design: |
     (i) DO NOT ESCALATE ON A CHECK THAT HAS NOT STARTED. The rung needs a third reading of zero
     beside W1-T186's CONFLICTED and ABSENT: NOT-YET-SCHEDULED, decided on how long the head has
