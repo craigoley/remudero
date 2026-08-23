@@ -1,0 +1,106 @@
+- id: W1-T1253
+  title: "THE WIPE-TEST HARNESS HAS NO SUBJECT GENERATOR, SO THE AGGREGATE ITS OWN DESIGN REQUIRES CANNOT EXIST — `src/lib/wipe-test.ts` says signal comes only from an AGGREGATE over many SEEDED pairs, `generateSandboxTask` and `seedSandbox` resolve to nothing anywhere in the tree, and the sandbox holds exactly three subjects whose work already merged; injection is task-matched by the subject's own `files:`, so a generator that varies nothing would measure one slice of a five-shard corpus repeatedly"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 90.00
+  files: [src/lib/wipe-test.ts, test/sandbox-subject-generator.test.ts]
+  origin: oper#wipe-test-subject-generator-2026-08-23
+  plan_refs: ["W1-T1252"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DESIGN REQUIRES AN AGGREGATE AND NAMES ITS INPUT "SEEDED". `src/lib/wipe-test.ts`'s own
+    header states the pairing discipline in terms: "a single pair is an anecdote. Only the AGGREGATE
+    over many seeded pairs ({@link aggregateWipeTestPairs}) is treated as signal". The word "seeded"
+    reads four times in that file, including on `aggregateWipeTestPairs` itself and on the REQUIRED
+    unit tests, which are described as working "off hand-seeded fixtures". The generator was
+    intended and never built.
+
+    NOTHING SEEDS. `generateSandboxTask` and `seedSandbox` each resolve to ZERO files across
+    `src/`, `test/` and `scripts/`. The scan demonstrably reaches: the control term `sandbox`
+    returns a large set over the same paths and `src/lib/wipe-test.ts` is among them, so the two
+    zeros are absences rather than a search that could not see.
+
+    THE EXISTING SUPPLY IS THREE, AND IT IS SPENT. Re-derived from a clone of
+    `craigoley/remudero-sandbox`: its plan holds exactly `SBX-T1`, `SBX-T2` and `SBX-T3`, and all
+    three merged on 2026-07-15 as #6, #7 and #8. Their head branches no longer exist on the remote,
+    so their naming is not verifiable from the clone and is not asserted here. The three still read
+    `status: queued` in the sandbox plan while their work is already on that repo's `main` — so a
+    pair run today re-runs a task whose diff has already landed, which is not a subject.
+
+    W1-T1252 IS CITED, NOT RE-FILED, AND THE ORDER IS DELIBERATE. That task files the refusal that
+    stops the harness emitting null pairs. Once it lands, the harness REFUSES rather than producing
+    a meaningless pair — which leaves it unusable until a subject supply exists. That is the correct
+    order and not an accident: a harness that refuses loudly is strictly better than one that emits
+    a null pair, and this task is what makes it usable again.
+  design: |
+    (i) A SUBJECT IS DEFINED BY THE SHARDS ITS `files:` SELECT, NOT BY ITS PROSE. Injection is
+    task-matched: `loadLayeredLearningsForTaskFiles` (src/lib/learnings.ts) delegates to
+    `loadLearningsForTaskFiles`, which reads `learnings/index.json` and calls
+    `candidateShardFiles(index, taskFiles)` — so the subject's own `files:` decides which shards
+    load at all. A generator that varies nothing measures one slice repeatedly.
+
+    (ii) THE SPREAD MUST REACH ALL FIVE STEMS, AND THE CORPUS IS LOPSIDED. The project layer holds
+    38 entries across five shards — architecture 9, ci 2, failures 6, platform 18, testing 3. A
+    spread that only ever selects `platform` exercises under half the corpus and never touches `ci`
+    or `testing` at all. THE SPREAD MUST BE STATED IN SHARDS SELECTED, NEVER IN PATHS NAMED, because
+    the mapping is many-to-many: `src/lib/containment.ts` selects BOTH platform and testing, and
+    `src/lib/review.ts` selects BOTH ci and failures. A generator that reasoned about paths would
+    believe it had isolated a stem while selecting two.
+
+    (iii) THE DELIVERABLE IS A SUPPLY, NOT A SAMPLE SIZE. The design says "many" and names no
+    threshold, and choosing N before any effect size has been measured is the guessed-constant class
+    this repo refuses. So this task does NOT pick a number of pairs to run. What it owes is that
+    supply stops being the binding constraint: the generator must emit a FRESH, DISTINCT subject on
+    demand for any requested shard-selection profile, without drawing from a hand-written list that
+    runs out. Whoever later measures an effect size picks N against that supply; if the answer needs
+    more subjects than exist, that is a supply failure this task is meant to have already removed.
+
+    (iv) SANDBOX-ONLY, AND THE TYPED EXCEPTION STAYS TYPED. Subjects are generated for the sandbox
+    target and the harness continues to refuse a non-sandbox target unless `--allow-non-sandbox` is
+    passed. Generating subjects in the primary repo, or running the harness there, is NOT proposed:
+    the default is deliberate and the flag exists so the exception is declared rather than assumed.
+
+    (v) NO `--rerun` PASSTHROUGH. W1-T1252 establishes that an asymmetric `--rerun` fabricates a
+    delta ("masking learnings made the run free") and that repeats of one task are not independent.
+    A subject supply is the answer to "we need many pairs"; re-running one task is not, and this
+    task must not reintroduce it by another name.
+
+    (vi) OUT OF SCOPE AND NAMED RATHER THAN ABSORBED — THE RESET BETWEEN ARMS. `wipeTestCommand`
+    (src/run-task.ts) does its clone-if-absent / fetch-and-`reset --hard origin/main` ONCE, inside
+    `if (!isSelf)`, BEFORE arm A; arm A and arm B are then invoked on consecutive lines with nothing
+    between them. So arm B runs against arm A's leavings and the two arms are not independent. THAT
+    IS A HARNESS DEFECT, NOT A GENERATOR DEFECT, and it belongs to NEITHER this task nor W1-T1252 —
+    W1-T1252 owns the null-pair refusal, and this task owns the subject supply. It needs its own
+    shard. It is recorded here so it is not lost, and deliberately not fixed here: a generator that
+    produces perfect subjects for a harness that contaminates arm B produces perfect nonsense, so
+    the two are worth nothing separately and must not be silently merged into one.
+  acceptance:
+    - claim: "a generated subject selects the learnings shards its files were asked to select"
+      proof: "unit test: test/sandbox-subject-generator.test.ts"
+    - claim: "successive generated subjects are distinct rather than drawn from a fixed list that runs out"
+      proof: "unit test: test/sandbox-subject-generator.test.ts"
+    - claim: "the generator can reach every shard in the project layer, including the smallest"
+      proof: "unit test: test/sandbox-subject-generator.test.ts"
+    - claim: "a subject whose paths select two shards is reported as selecting both rather than one"
+      proof: "unit test: test/sandbox-subject-generator.test.ts"
+  note: |
+    risk: high IS SET UP FRONT, AND BOTH READINGS ARE RECORDED. RULE 19's SPAN is the band's cause:
+    `files:` crosses two stems as `sizingViolation` counts them (`wipe-test` and
+    `sandbox-subject-generator`), and that pairing is refused at `risk:medium` — three lanes hit
+    that trap today and each had to raise after the fact. THE BLAST RADIUS is separately moderate:
+    the generator writes into the SANDBOX target only, the harness already refuses a non-sandbox
+    target without `--allow-non-sandbox`, and no primary-repo dispatch path changes. The band is the
+    span reading; it is not a claim that this change is dangerous.
+
+    THE RESET DEFECT IS NAMED IN DESIGN (vi) AND NOT FILED HERE. One concern per shard: this shard
+    is the subject supply. The arm-independence defect needs its own id and its own falsifier.
+
+    PROOF NOTES: all four proofs are the PURE-PATH `unit test:` form naming
+    `test/sandbox-subject-generator.test.ts`, which this shard's own `files:` declares —
+    `judgeCriterion` gates its forward-reference carve-out on `!whitelisted.nameFiltered`, so a
+    name-filtered title would be graded `no-match` rather than `not_yet_built`.
