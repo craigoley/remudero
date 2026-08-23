@@ -24,6 +24,6 @@ raw: "THE SWEEP STARVES NEWER PRs WHILE RE-ATTEMPTING OLDER ONES — distinct fr
   mergeable state), the gap is in that filter and not in ordering."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null
