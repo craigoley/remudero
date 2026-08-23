@@ -295,10 +295,10 @@ function isolatingPathsByShard(index: LearningsIndex): Map<string, string> {
  *  e.g. `src/lib/review.ts` alone selects exactly `["ci.yaml","failures.yaml"]`. `undefined`
  *  if no single literal path reaches that exact combination in one hop. */
 function exactMultiShardPath(index: LearningsIndex, shards: string[]): string | undefined {
-  const want = shards.join(" ");
+  const want = shards.join(" ");
   for (const shard of shards) {
     for (const path of literalGlobsFor(index, shard)) {
-      if (candidateShardFiles(index, [path]).join(" ") === want) return path;
+      if (candidateShardFiles(index, [path]).join(" ") === want) return path;
     }
   }
   return undefined;
