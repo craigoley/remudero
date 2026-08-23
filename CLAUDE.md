@@ -450,6 +450,12 @@ forensic detail, so the narrative does not need to live here.
   governs live behavior: the `.remudero/mounts.yaml` `architect:` row looked authoritative, but
   spawns resolved from `architectModel(config)`'s `?? "opus"` default, so a row-only edit would have
   shipped green and changed nothing observable. *(#781 — required wiring `architectModel(config, mounts)`)*
+  **MIRROR — before filing a NEW signal, `git grep` the producer's own type for consumers: the fact
+  is usually ALREADY COMPUTED AND DISCARDED.** 2026-08-22/23: `parseGhRateLimitHeaders` reads
+  `X-Ratelimit-Reset` and `X-Ratelimit-Resource`, consumers `worker.ts` plus one test; the plan-state
+  scanner destructures only `ids` off a result carrying `examinedLines` and `proposalOnlyLines`;
+  `disarmAutoMerge`'s `DisarmOutcome` is dropped at two of three call sites. Carrying a value that
+  already exists is the cheapest fix class here; measuring a new one is not.
 - **When a gate reads the ledger for a record the SAME function writes, check the WRITE ORDER before
   believing the gate's stated reason.** `armIfVerdictPermits` once ran before the `log("review.posted")`
   its own gate required, so it fail-closed to `ledger-refused` on every first pass with nothing
