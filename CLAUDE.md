@@ -74,7 +74,13 @@ forensic detail, so the narrative does not need to live here.
   claim WRAPPED onto a second line silently truncates everything below it.
   **TWO SHAPES PARSE — measured 2026-08-13:** the house form `renderAcceptanceBlock`
   (`src/lib/plan-pr-emitter.ts`) itself emits, `- <claim> | <proof>`; and `- claim: …` with an
-  INDENTED `  proof: …` continuation. **"two-line `claim:`/`proof:` form" READS AS UNBULLETED AND
+  INDENTED `  proof: …` continuation. **ONLY THOSE TWO.** Any other separator — above all an EM
+  DASH — reads as part of the CLAIM, so the bullet parses as one claim with NO proof and
+  `acceptanceAuthorTimeCheck` (`src/lib/review.ts`) refuses `empty-proofs`, reddening
+  `acceptance-author-gate`. IT IS SILENT: the body reads correctly to a human and `check-proof`
+  never sees a proof to check. #2534, #2535 and #2555 each shipped a whole block that way;
+  converting every ` — proof: ` to ` | ` clears it. *(2026-08-23)*
+  **"two-line `claim:`/`proof:` form" READS AS UNBULLETED AND
   THAT IS THE TRAP** — it is two lines, but the first is still a `-` bullet. The DIFFERENT hazard
   that phrase warns of is writing `| proof:`: the pipe already delimits, so the label doubles, the
   proof becomes `proof: grep: …`, and `check-proof` refuses it (`parse: REFUSED`, exit 2) — that
