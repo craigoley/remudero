@@ -48,18 +48,6 @@ const COVERAGE_INSTRUMENTED = process.execArgv.some(
   (arg) => arg.startsWith("--test-coverage") || arg === "--experimental-test-coverage",
 );
 
-// W1-T1219 (PR #2527, observed 2026-08-22 on the plain uninstrumented `ci` job -- the exact
-// job the comment above names as where "this criterion's falsifier proof lives"): two
-// back-to-back CI runs measured `cold` at 507.8ms and 512.7ms, a few percent over the 500ms
-// ceiling, against an isolated single-file run of this exact test measuring ~265ms total (cold
-// + warm together) on identical source. Neither run touched status.ts, projectPlan, or this
-// fixture -- the gap is sibling test-file scheduler contention on the shared CI runner during
-// the full ~8,500-test suite, not a code regression. MAX_TIMING_ATTEMPTS gives transient
-// contention up to two extra fresh measured passes before failing; the 500ms ceiling itself is
-// UNCHANGED and stays absolute -- a genuine regression (the pre-fix scale was 5,000-8,000ms)
-// fails every attempt, not just the first.
-const MAX_TIMING_ATTEMPTS = 3;
-
 test("W1-T187 criterion 3: projectPlan over the production-scale corpus completes UNDER 500ms (absolute ceiling, not a relative speedup claim)", (t) => {
   const plan = loadCorpusPlan();
   const github = loadCorpusGithub();
@@ -72,55 +60,36 @@ test("W1-T187 criterion 3: projectPlan over the production-scale corpus complete
   // Two measured calls -- "cold" (first read of this fixture in this process) and "warm"
   // (module/JIT/OS-file-cache already primed) -- BOTH must clear the 500ms ceiling; the
   // ceiling is not allowed to depend on which one a caller happens to hit.
-  const measureOnce = () => {
-    const coldStart = performance.now();
-    const coldById = projectPlan(plan, deps);
-    const coldMs = performance.now() - coldStart;
+  const coldStart = performance.now();
+  const coldById = projectPlan(plan, deps);
+  const coldMs = performance.now() - coldStart;
 
-    const warmStart = performance.now();
-    const warmById = projectPlan(plan, deps);
-    const warmMs = performance.now() - warmStart;
+  const warmStart = performance.now();
+  const warmById = projectPlan(plan, deps);
+  const warmMs = performance.now() - warmStart;
 
-    assert.equal(coldById.size, plan.tasks.length);
-    assert.equal(warmById.size, plan.tasks.length);
+  assert.equal(coldById.size, plan.tasks.length);
+  assert.equal(warmById.size, plan.tasks.length);
 
-    return { coldMs, warmMs };
-  };
-
-  let coldMs = 0;
-  let warmMs = 0;
-  for (let attempt = 1; attempt <= MAX_TIMING_ATTEMPTS; attempt++) {
-    ({ coldMs, warmMs } = measureOnce());
-
-    if (attempt === 1 && COVERAGE_INSTRUMENTED) {
-      // Functional assertions above (sizes match the corpus) already ran unconditionally --
-      // only the timing ceiling, which coverage instrumentation itself distorts under CI's
-      // concurrent test-file contention, is skipped here.
-      t.diagnostic(
-        `coverage-instrumented run: cold=${coldMs.toFixed(1)}ms warm=${warmMs.toFixed(1)}ms -- ` +
-          `500ms ceiling enforced by the uninstrumented \`ci\` job's npm test instead (see comment above)`,
-      );
-      return;
-    }
-
-    if (coldMs < 500 && warmMs < 500) break;
-
-    if (attempt < MAX_TIMING_ATTEMPTS) {
-      t.diagnostic(
-        `attempt ${attempt}/${MAX_TIMING_ATTEMPTS}: cold=${coldMs.toFixed(1)}ms warm=${warmMs.toFixed(1)}ms -- ` +
-          `over the 500ms ceiling, retrying a fresh measured pass in case of transient CI contention`,
-      );
-    }
+  if (COVERAGE_INSTRUMENTED) {
+    // Functional assertions above (sizes match the corpus) already ran unconditionally -- only
+    // the timing ceiling, which coverage instrumentation itself distorts under CI's concurrent
+    // test-file contention, is skipped here.
+    t.diagnostic(
+      `coverage-instrumented run: cold=${coldMs.toFixed(1)}ms warm=${warmMs.toFixed(1)}ms -- ` +
+        `500ms ceiling enforced by the uninstrumented \`ci\` job's npm test instead (see comment above)`,
+    );
+    return;
   }
 
   assert.ok(
     coldMs < 500,
     `projectPlan (cold) took ${coldMs.toFixed(1)}ms over ${plan.tasks.length} tasks / ${ledgerLineCount} ledger lines -- ` +
-      `must be < 500ms across ${MAX_TIMING_ATTEMPTS} attempts (pre-fix measured 8,207ms cold; post-hoist control measured 113ms)`,
+      `must be < 500ms (pre-fix measured 8,207ms cold; post-hoist control measured 113ms)`,
   );
   assert.ok(
     warmMs < 500,
     `projectPlan (warm) took ${warmMs.toFixed(1)}ms over ${plan.tasks.length} tasks / ${ledgerLineCount} ledger lines -- ` +
-      `must be < 500ms across ${MAX_TIMING_ATTEMPTS} attempts (pre-fix measured 5,229ms warm; post-hoist control measured 113ms)`,
+      `must be < 500ms (pre-fix measured 5,229ms warm; post-hoist control measured 113ms)`,
   );
 });
