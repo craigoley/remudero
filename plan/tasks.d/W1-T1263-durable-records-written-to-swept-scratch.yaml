@@ -1,0 +1,170 @@
+- id: W1-T1263
+  title: "a durable record can be written to gitignored `state/` and then cited as authority from a tracked file, and nothing refuses it — the instance has been repaired twice, twelve days apart, and the class is still accruing citers"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    (1) THE DEFECT IS PLACEMENT, NOT SCRATCH. `state/` is gitignored runtime state and is SUPPOSED
+    to be swept. The failure is that a document intended to be durable — a census, a research
+    report, a numbered set of governing constraints — gets written there, and is then cited BY
+    PATH from a version-controlled file as the source of record. The tracked file survives; the
+    thing it points at does not. CLAUDE.md already states the convention ("A report written to
+    `state/` is SCRATCH, not a record"), which is exactly why this task exists: that sentence is
+    UNENFORCED PROSE, and the citations kept accruing after it was written.
+
+    (2) IT HAS COST TWICE, TWELVE DAYS APART, AND THE INSTANCE WAS REPAIRED BOTH TIMES WHILE THE
+    CLASS STAYED OPEN. First: `710b18b5` (#1587, 2026-08-11) records P48's 21-instance census in
+    `state/research-laws-and-gaps-2026-08-05.md` as unrecoverable and moves the surviving evidence
+    into `MASTER-PLAN.md` — its own commit message says "never committed on any ref … Three
+    recovery paths, all dead", and the entry it wrote says the 21 "is NOT re-derivable" and that
+    FIRST TRANCHE's qualifying criterion is therefore inoperable. Second: the SAME file is the
+    source of five numbered Laws, of which Law 4's text survives only because three shards and one
+    feedback entry happened to restate it inline; Law 5 survives as a gloss whose only carrier is
+    now a source comment in `src/lib/rule-efficacy.ts`, which `W1-T1259`'s rationale already cites
+    as "LAW 5, IN THE VERB'S OWN WORDS"; and Laws 1 and 3 are cited nowhere and are simply gone.
+    Repairing an instance leaves the writing path untouched.
+
+    (3) THE POPULATION AT RISK, AS A QUERY RATHER THAN A CARRIED NUMBER. The durable class
+    separates from the runtime class on FILE EXTENSION, and that predicate was tested rather than
+    assumed: `git grep -hoIE 'state/[A-Za-z0-9._@/-]+\.md' -- .` sorted unique gives the durable
+    citations, and `git grep -lIE 'state/[A-Za-z0-9._@/-]+\.md' -- .` gives the tracked files
+    doing the citing. At 7310a03 that reads 31 distinct paths across 46 files, spread over
+    `plan/tasks.d/`, `plan/feedback/`, `test/`, `src/`, `deploy/Dockerfile`, `MASTER-PLAN.md`,
+    `DECISIONS.md` and CLAUDE.md itself. NONE of the 31 resolves in a fresh checkout — the `-e`
+    test that returns zero for all of them returns true for `MASTER-PLAN.md`, so the reader is not
+    blind. The same query at `d968c50` (2026-08-11, the day the first loss was recorded) reads 30
+    paths across 43 files, so the class GREW while a repair for one of its instances was landing.
+
+    (4) THE EXTENSION PREDICATE IS CLEAN, WITH A CONTROL THAT SEPARATES THE TWO CLASSES. Nothing
+    in the codebase WRITES a `state/*.md`: `git grep -nIE 'state/[A-Za-z0-9._@/-]*\.md' -- src/
+    scripts/` returns six hits and every one is a prose comment CITING a recon document, against a
+    control of 166 real runtime `state/` path references in `src/` alone (`state/ledger.ndjson`,
+    `state/PAUSE`, `state/inbox-proposals.json`, `state/service-tokens.json`, `state/drain.lock`,
+    `state/logs/…`). So `.md` under `state/` is a human-authored document by construction, and the
+    ordinary runtime paths a check must never touch are separable mechanically rather than by
+    judgement.
+
+    (5) `state/` IS SWEPT BY DESIGN, BY FOUR INDEPENDENT MECHANISMS, RE-DERIVED HERE RATHER THAN
+    CARRIED. `sweepStaleTempDirs` (`src/lib/tmp.ts`) is a boot-time sweep that reaps stale temp
+    dirs under a single shared prefix. `scratchReap` (`src/lib/policy.ts`) is a policy-gated
+    reaper with its own `maxAgeHours`. `reapStaleWorktrees` (`src/lib/worker.ts`) `rm -rf`s
+    entries it judges terminal without running `git worktree prune` — `src/lib/clone-reaper.ts`'s
+    own header records that it "destroyed an agent's working tree". And container recreation
+    re-provisions the whole state mount: `deploy/host-update.sh` documents that the live bind
+    mount MOVED from `~/rmd-state` to `~/rmd-state2`, stranding a ledger that "STOPS ON AUG 8"
+    in the old one. Four mechanisms, all correct, all doing their job. The document did not go
+    missing; it was collected, as designed.
+
+    (6) BY LAW 4's OWN TEST THE REMEDY MUST BE A CHECK. Three shards and one feedback entry
+    restate the rule in nearly the same words — `plan/feedback/fb-1785982194342-bb9d81.yaml`
+    carries the fullest form, "a convention binds only where compliance is verifiable at the
+    moment of invocation, and you cannot revert a promise", and `W1-T438` applies it to this exact
+    shape: "`did you pass -a` is invisible in a diff — so the CLAUDE.md rule shipped in #1598
+    cannot bind. THIS CAN." Where a file is written is likewise invisible in a diff. A stronger
+    convention is the one remedy already known not to work here, because it is the remedy already
+    in place.
+  design: |
+    (i) RE-DERIVE THE POPULATION FIRST, WITH ITS CONTROL, AND RE-SCOPE IF IT HAS MOVED. The two
+    queries in rationale (3) and the six-versus-166 split in rationale (4) are the scoping
+    evidence; run them at the implementing sha rather than trusting the readings above. If the
+    extension predicate no longer separates the classes — if anything has begun WRITING a
+    `state/*.md` — say so and re-scope rather than guarding a shape that has moved.
+
+    (ii) THE CHECK IS THE NARROW ONE, AND THE BROAD ONE IS REJECTED FOR A STATED REASON. Guard the
+    DURABLE class only: a tracked file may not cite a `state/*.md` path. Do NOT guard `state/`
+    generally — the broad form would have to adjudicate 166 legitimate runtime references in
+    `src/` alone, every one of which is a real path the daemon really reads, and a check that must
+    classify those by intent is a check nobody can keep correct. The narrow form needs no intent
+    model: the extension carries it.
+
+    (iii) THE BASELINE IS THE EXISTING IDIOM, NOT A NEW ONE. The 46 files citing a `state/*.md`
+    today must not all redden on day one, and the repo already has the shape for this:
+    `scripts/task-id-existence-check.mjs` pairs with `scripts/task-id-existence-baseline.json`,
+    described in `ci.yml` as "a small written-reason baseline for the handful of" pre-existing
+    cases. Mirror it: seed the baseline with what exists, and let the check refuse only NEW
+    citations. The value is forward-looking — this cannot recover what is already lost, and must
+    not pretend to.
+
+    (iv) THE TOMBSTONE MUST NOT BE REFUSED, AND IT IS THE DESIGN'S HARDEST CASE.
+    `MASTER-PLAN.md` cites `state/research-laws-and-gaps-2026-08-05.md` TWICE — once at the P48
+    ground-truth claim and once in the sentence recording that the path is unrecoverable. The
+    second is the correct behaviour this whole task is arguing for, and a naive check refuses it.
+    So the check needs an explicit escape keyed on CONTENT SHAPE, never a path allowlist and never
+    a file allowlist (both rot): a citation is permitted when the citing line or its block also
+    carries an unrecoverability marker. Whatever marker is chosen, its falsifier is that
+    `MASTER-PLAN.md`'s loss-recording sentence PASSES and its ground-truth sentence at the P48
+    census FAILS — two citations of the SAME path in the SAME file, which must land on opposite
+    sides. A check that cannot separate those two is not ready to ship.
+
+    (v) FALSIFY IN BOTH DIRECTIONS, AND PROVE THE ZERO IS NOT VACUOUS. A fixture tracked file
+    citing a fresh `state/whatever.md` must FAIL; the same file citing `state/ledger.ndjson`,
+    `state/PAUSE` or `state/logs/daemon.out.log` must PASS; a baselined citation must PASS and the
+    same citation at a NEW path must FAIL. And the check must fail loudly when it reads nothing —
+    a run that scans zero files must refuse rather than report success, since a silent zero is the
+    same defect class the guard exists to prevent.
+  acceptance:
+    - claim: "a tracked file citing a state/*.md path that is not baselined fails the check"
+      proof: "unit test: test/state-citation-check.test.ts"
+    - claim: "ordinary runtime state/ paths — the ledger, locks, sentinels and logs — are never flagged"
+      proof: "unit test: test/state-citation-check.test.ts"
+    - claim: "a citation that records the cited path as unrecoverable passes, while a citation of the same path asserting it as evidence fails"
+      proof: "unit test: test/state-citation-check.test.ts"
+    - claim: "the pre-existing citers are carried in a written-reason baseline rather than reddening, and a citation at a path absent from that baseline still fails"
+      proof: "unit test: test/state-citation-check.test.ts"
+    - claim: "the check refuses rather than reporting success when it scans no files"
+      proof: "unit test: test/state-citation-check.test.ts"
+  origin: oper#2026-08-23-durable-records-written-to-swept-scratch
+  plan_refs: ["#1587", "P48", "Law 4", "W1-T383", "W1-T398", "W1-T438", "W1-T439", "W1-T1259"]
+  files: [scripts/state-citation-check.mjs, scripts/state-citation-baseline.json, .github/workflows/ci.yml, test/state-citation-check.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19's SPAN, NOT THE BLAST RADIUS, AND IT WAS SET FROM THE LINTER RATHER
+    THAN GUESSED. `sizingViolation` (`src/lib/task-linter.ts`) exempts `risk: high` outright and
+    otherwise blocks at two or more subsystems; this `files:` list spans a new script, its data
+    baseline, CI wiring and a test, which scores above that line. The verification is recorded
+    with this filing: the same shard at `risk: medium` draws the sizing block naming those
+    concerns, and at `risk: high` it does not. The real radius is small — the deliverable is a
+    read-only checker plus its baseline, and it changes no runtime path.
+
+    THE ID WAS PRE-MINTED AND READ BACK BEFORE ANYTHING WAS WRITTEN. Eight surfaces were swept,
+    each against a control pre-qualified for THAT surface, under the rule that a surface whose own
+    control reads zero is DISQUALIFIED rather than used to license the target's zero. Reservation
+    ref present (the pre-mint, `efd08077`, minted 2026-08-23T13:49:10Z) against a namespace of 293
+    refs and an absent-id control at 0; shard filename 0; plan `- id:` lines 0; any tracked
+    mention 0 — the first three against W1-T1248 at 1, 1 and 3; live `run-W1-T1263-*` heads 0
+    against an 84-branch `run-*` namespace; merged trailers 0; merged subjects 0; and a
+    count-per-head sweep of 91 open heads read through git objects, 0.
+
+    ONE CONTROL FAILED AND WAS REPLACED RATHER THAN LEANED ON. The merged-trailer surface was
+    first controlled on W1-T1248, which reads 0 — because its PR has not merged, so it has no
+    trailer on main. A zero control licenses nothing. It was re-qualified empirically on an id
+    drawn from the trailers actually present on main, against 280 distinct ids carrying one.
+
+    THE HISTORY QUERIES REQUIRED AN UNSHALLOW FIRST, AND THIS IS RECORDED BECAUSE IT SILENTLY
+    INVALIDATES A SWEEP. The session container's clone arrived shallow at 108 commits with a
+    horizon of 2026-08-17 — later than the 2026-08-05 document — so every history query returned
+    a clean zero with a passing readability control. Unshallowed to 2223 commits back to the
+    initial commit before anything below was measured. `src/run-task.ts` is 1,460,084 bytes, over
+    GitHub's 1 MB contents cap, and was read through git objects for the same reason.
+
+    THE CLAIM THAT W1-T1258 RECORDS THE FOUR CHECKED RECOVERY PATHS DID NOT HOLD AND IS NOT CITED
+    HERE. W1-T1258 was swept on the same eight surfaces as this id and exists ONLY as a
+    reservation ref (`2e807ccc`, minted 2026-08-23T13:29:44Z, twenty minutes before this one) —
+    no shard, no mention on main, no open head, no trailer, no subject. Citing it would have shipped
+    a pointer to a record that does not exist, which is this task's own defect in miniature. The
+    recovery paths are cited from their real carriers instead: `710b18b5`'s commit message and the
+    P48 entry in `MASTER-PLAN.md`.
+
+    WHAT MUST NOT CHANGE, STATED SO A BUILDER CANNOT DRIFT INTO IT. `state/` stays gitignored and
+    stays sweepable. Do not propose committing it, do not add carve-outs to `.gitignore`, and do
+    not weaken, delay or exempt `sweepStaleTempDirs`, `scratchReap`, `reapStaleWorktrees` or the
+    container's state mount. The `state/` gitignore entry is load-bearing for a reason recorded in
+    W1-T256 — runtime exhaust the daemon writes into its own tree every run, which un-ignored reads
+    as dirt in `git status --porcelain` and crash-looped the daemon before W1-T255 — and
+    `state/service-tokens.json` lives there. The defect is not that scratch is scratch. It is that
+    a durable record was written into scratch and then cited as authority.
