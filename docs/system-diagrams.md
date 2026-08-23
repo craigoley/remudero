@@ -41,7 +41,7 @@ flowchart LR
         AE["rmd-entrypoint — deploy/entrypoint.sh, baked into the image; clones/syncs the work tree in the volume"]
         AD["rmd daemon — runDaemon, src/lib/daemon.ts"]
         AL[("state/ledger.ndjson + dated rotations — rotateLedger keeps MAX_RETAINED_LINES_PER_STEP = 200 newest per step, src/lib/ledger.ts")]
-        AC["rmd serve console — binds 127.0.0.1:4317 (DEFAULT_SERVE_HOST, src/lib/serve.ts); wildcard binds refused"]
+        AC["rmd serve console — binds 127.0.0.1:4317 (DEFAULT_SERVE_HOST, src/lib/serve.ts); a BARE wildcard is still refused, and 0.0.0.0 is accepted only alongside RMD_SERVE_NETWORK=container (CONTAINER_NETWORK_ENV, W1-T915)"]
         ACRON["host cron, every 5 min"]
         AE --> AD
         AD --> AL
@@ -71,15 +71,25 @@ flowchart LR
     ACRON --> HB
     MCRON --> HB
     HB --> WATCH
-    PHONE -. "DEAD END: loopback bind, no published port" .-x AC
+    PHONE -. "no route to THIS console: loopback bind, no published port" .-x AC
+    PHONE -. "console.remudero.com, via cloudflared on rmd-net" .-> SERVE
+    SERVE["remudero-serve container — a SEPARATE container on rmd-net; --host 0.0.0.0 with RMD_SERVE_NETWORK=container, no published port; deploy/serve-container.sh"]
 ```
 
-**The console is a dead end, and that fact is load-bearing.** `rmd serve` binds
-`127.0.0.1:4317` by default and refuses wildcard hosts (`DEFAULT_SERVE_HOST` in
-`src/lib/serve.ts`; the refusal is documented in the `rmd serve` entry of the `COMMANDS`
-registry, `src/run-task.ts`). On the Azure host no port is published, so console-only
-escalations are unreachable from off-host — W1-T915
-(`plan/tasks.d/W1-T915-the-escalation-surface-has-no-address.yaml`) files exactly this.
+**The DAEMON's own console is still a dead end; the fleet's console no longer is.** `rmd serve`
+binds `127.0.0.1:4317` by default (`DEFAULT_SERVE_HOST` in `src/lib/serve.ts`) and a BARE wildcard
+is still refused — `assertBindableHost` throws for `::`, `*` and `""` unconditionally, and for
+`0.0.0.0` too unless the caller ALSO declares `RMD_SERVE_NETWORK=container`
+(`CONTAINER_NETWORK_ENV`, W1-T915). That pairing is the one carve-out, and it is deliberately two
+independent things typed together so a fat-fingered `--host 0.0.0.0` on a bare host still fails as
+loudly as before. Since 2026-08-22 a separate `remudero-serve` container takes it: on `rmd-net`,
+`--host 0.0.0.0` with that env var set, no published port, reached at `console.remudero.com`
+because cloudflared resolves `http://remudero-serve:4317` BY NAME over Docker's embedded DNS
+(`deploy/serve-container.sh`, recorded in #2534). **So "console-only escalations are unreachable
+from off-host" is no longer true** — W1-T915
+(`plan/tasks.d/W1-T915-the-escalation-surface-has-no-address.yaml`) filed that gap and this is what
+closed it. The daemon container itself still publishes nothing, which is why the edge above is
+drawn to the serve container and not to it.
 
 **Per-host notes, dated.** Each beat carries three shas so mount-vs-image drift is visible
 off-host: `daemon_boot_head_sha` and `install_head_sha` read the mounted checkout,
