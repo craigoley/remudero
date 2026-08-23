@@ -1,0 +1,145 @@
+- id: W1-T1268
+  title: "dispatch decides in-flight from artifacts that do not exist until work is underway or finished — ten probes, every one a read of a published PR, branch or merge, so two hosts starting inside the same window both read nothing and both spend a run; the atomic claim that closes it already ships on the triage rung and needs pointing at a second one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 70.00
+  files: [src/lib/dispatch-claim.ts, src/run-task.ts, test/dispatch-claim.test.ts]
+  origin: oper#dispatch-claim-second-rung-2026-08-23
+  plan_refs: ["W1-T534", "W1-T916", "W1-T1035", "W1-T1207", "W1-T1240", "W1-T1019", "W1-T1132", "W1-T978", "W1-T396", "W1-T509"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED FROM SOURCE, NOT CITED FROM A BRIEF. `isDispatchEligible` (src/lib/drain.ts) decides
+    from `isMerged`, `excludeIds`, `t.verify`, `t.status`, `unmetDependencies`, `isIndeterminate`,
+    `isCircuitTripped`, `isLifetimeCapExceeded`, `isOpenPr` (+ `readLiveState` +
+    `isLiveMergeCredited`), and `hasPushedRunBranch`. THE CONCURRENCY-BEARING ONES ARE THE LAST TWO,
+    AND BOTH READ A PUBLISHED ARTIFACT: an OPEN PR, or a PUSHED `run-<id>-<epoch>` branch. Neither
+    exists at the moment a lane decides to start. W1-T1132's title states the same defect one rung
+    over, in the same words the dispatch rung needs: "its only shared signal is a PUBLISHED triage
+    PR, which does not exist until the work is finished."
+
+    THE COST IS DIAGNOSED FIVE TIMES OVER AND NONE OF THOSE SHARDS IS RE-FILED HERE. W1-T534 (STILL
+    QUEUED, uncredited) measured "the same id runs twice; measured five times" and named the cache
+    window. W1-T916 supplied the argument W1-T534 declared and nothing passed — MERGED, so
+    `hasPushedRunBranch` IS live today at daemon.ts's and drain.ts's binding sites, and this shard
+    must not repeat W1-T916's now-stale "never supplied" reading. W1-T1035 (merged) fixed a fresh
+    MERGED read still being admitted. W1-T1207 (merged) bounded a dead run branch that read as work
+    in flight forever. W1-T1240 (merged) stopped a dead process keeping a growing elapsed clock.
+    W1-T1019 (merged) found the triage in-flight guard shipped unwired. EACH CLOSED ONE SEAM IN AN
+    ARTIFACT READ; NONE MADE AN ARTIFACT EXIST EARLIER, WHICH IS THE ONLY THING THAT CLOSES THE
+    WINDOW.
+
+    THE SAME-HOST HALF IS ALREADY SOLVED AND MUST NOT BE REBUILT. `acquireInflightLock`
+    (src/lib/inflight-lock.ts) is a per-TASK lock keyed on the task id carrying
+    `{pid, run_id, host, startedAt}`; it refuses a second run of one task whatever launched it, and
+    `sweepStaleInflightLocks` reaps a dead holder at daemon boot. THE GAP IS STRICTLY CROSS-HOST AND
+    STRICTLY PRE-ARTIFACT, and it cannot be closed by widening that lock: `isHolderStale`
+    (src/lib/fs-race-safe.ts) puts HOST FIRST at rung 1 (W1-T396) and refuses to reason about a
+    foreign process table, because "asking any of them about a foreign pid answers a question nobody
+    posed". `auto-triage.ts` says the same thing in its own header — a second host cannot ask whether
+    a pid on the first is alive, "which is exactly why the file lock could never have been widened
+    into this".
+
+    THE MECHANISM ALREADY EXISTS, IS PROVEN, AND IS THE ONE THIS TASK POINTS AT A SECOND RUNG.
+    `triageClaimRef` -> `refs/rmd-triage/<id>`, an orphan `commit-tree` over the empty tree pushed
+    with a PLAIN refspec so a second writer is structurally a non-fast-forward;
+    `TriageClaimOutcome = "created" | "taken" | "unreachable"`; `decideTriageClaim` fail-closes on
+    `unreachable` because "proceeding optimistically is precisely today's behaviour, and today's
+    behaviour spent two Architect calls on unmergeable mirror-image verdicts". Shipped as #2494
+    closing W1-T1132. The same git-ref CAS family already backs `refs/rmd-id/` (W1-T509) and
+    `refs/rmd-pause/`. NO NEW STORE, NO DATABASE, NO IN-MEMORY SET IS PROPOSED OR PERMITTED HERE.
+
+    EXTERNAL CORROBORATION, CITED AND NOT COPIED, AND REMUDERO'S DESIGN IS THE STRONGER ONE.
+    `openai/symphony`'s SPEC.md (Draft v1, RFC 2119; sha256 c6638056…) §7.1 defines an internal
+    claim state machine explicitly distinct from the tracker's own state, and §7.4 makes "`claimed`
+    and `running` checks REQUIRED before launching any worker" — set at dispatch, before any work
+    exists. That is corroboration that the concept is load-bearing, not a design to adopt. The
+    spec's `claimed` is an IN-MEMORY SET: it has two answers where remudero's reserver has three, so
+    it cannot distinguish FREE from COULD-NOT-CHECK, and §14.3 discards it entirely on restart.
+    Remudero's fail-closed `unreachable` arm is the better primitive and stays.
+
+    Q1 — WHAT A DISPATCH CLAIM MUST RELEASE ON, AND WHEN. NEITHER PID-KEYED NOR TTL-KEYED. The
+    answer is already written and tested one rung over: `decideTriageClaimRelease` is a THREE-ARM
+    release whose own doc says "There is no fourth, and deliberately no timer."
+      ARM 1 — HOLDER. The run that took the claim drops it when done, through the CAS delete
+        (`--force-with-lease=<ref>:<anchor>`), so a lane can only ever delete the claim it still
+        holds and never one that has since become someone else's.
+      ARM 2 — EVIDENCE. A claim whose work has demonstrably landed is stale and ANY host may drop
+        it. This is where the ten probes are re-used rather than replaced: the dispatch rung's
+        evidence is exactly what `isMerged`, `readLiveState`/`isLiveMergeCredited` and
+        `closedUnmergedRunBranches` already read. The rung supplies its own evidence predicate; the
+        arm's shape is unchanged.
+      ARM 3 — OPERATOR. Held by another lane with no evidence yet: LEAVE IT, name the ref and the
+        holder, and print the one command that clears it. Cross-host liveness is not decidable, so
+        clearing it is an operator call — never a timer, and never a restart-shaped release, which
+        fires wrongly precisely when the releasing signal never arrives.
+      AND A FOURTH PATH COMPOSES WITHOUT BEING AN ARM: `sweepStaleInflightLocks` keeps reaping
+        SAME-HOST dead pids exactly as today, and W1-T978's container-id carve-out keeps covering a
+        replaced container of one bind-mounted cell. Neither is widened, and neither is asked a
+        cross-host question. THE FALSIFIER THIS TASK OWES: a claim whose holder crashed on another
+        host, with no evidence, must be LEFT AND NAMED — a stall an operator can see and clear beats
+        a timer that silently hands one task to two hosts.
+
+    Q2 — DOES IT REPLACE ANY EXISTING PROBE? NO. NONE. Not one of the ten is removed, and the
+    answer is none rather than a shortened list. `isMerged` is terminality, not concurrency.
+    `excludeIds` is a within-pass in-process guard that costs no read and cannot be omitted.
+    `t.verify`, `t.status` and `unmetDependencies` are eligibility. `isIndeterminate`,
+    `isCircuitTripped` and `isLifetimeCapExceeded` are health and policy. `isOpenPr` +
+    `readLiveState` + `isLiveMergeCredited` keep their terminality and stale-credit duty
+    (W1-T1035), and `hasPushedRunBranch` keeps its closed-unmerged discrimination (W1-T1207). What
+    changes is not the SET but one DUTY: the last two stop being the only thing standing between
+    two hosts, a job neither was designed for. The claim PRECEDES them and is checked before any
+    spend, the same position `decideTriageClaim` occupies ahead of the Architect call.
+
+    Q3 — THE TWO VOCABULARY COLLISIONS, NAMED BEFORE ANY WORD IS ADOPTED. "claim" is already taken
+    by `plan/claims.yaml` — falsifiable assertions about the system, run by the `claims` CI job,
+    where a red claim means the plan is lying. "reconcile" is already taken by the escalation-issue
+    lifecycle (W1-T347's reconciler, W1-T1101's summary line). THE RESOLUTION IS NOT A NEW NOUN: it
+    is the repo's OWN existing disambiguator, the rung-qualified compound. `triageClaimRef` is never
+    a bare "claim", and neither is this: `dispatchClaimRef` -> `refs/rmd-dispatch/<taskId>`,
+    extending the `refs/rmd-id/` / `refs/rmd-triage/` / `refs/rmd-pause/` family with the one
+    namespace it lacks. The release operation is named RELEASE or DROP and never "reconcile".
+    MEASURED: `dispatchClaimRef` and `refs/rmd-dispatch` appear nowhere in `src/` or `test/` (the
+    only textual hits are `/tmp/rmd-dispatch-*` fixture paths in one test), so the namespace is free.
+  note: |
+    RULE 19 BAND: `risk: high` is set for the SPAN — a pure decision module plus its one I/O seam —
+    not for blast radius. The split is not invented here: it mirrors `auto-triage.ts` exactly, which
+    keeps every DECISION pure and testable with no git round trip and puts the argv behind one
+    injected `run`. The seam belongs in `src/run-task.ts` for the reason W1-T916's own comment gives
+    at the `hasPushedRunBranch` supplier: `drain.ts` is pure and has no `child_process` import at
+    all, while `git ls-remote` already runs in run-task.ts.
+
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: no in-memory claim set, no new store, no
+    database, and no adoption of the Symphony spec — it is cited as corroboration and refused as a
+    design. `inflight-lock.ts` is NOT widened, `isHolderStale`'s rung-1 host-first refusal is NOT
+    relaxed, and no existing probe is deleted. No time-based expiry of any kind.
+
+    RE-FILED: NOTHING. W1-T534 stays the cache-window shard and stays queued; this task does not
+    subsume it, because a fresh `ls-remote` narrows the window and a pre-work claim removes it, and
+    the two are worth having together. W1-T916, W1-T1035, W1-T1207, W1-T1240, W1-T1019 and W1-T1132
+    are cited as the diagnosis trail and are all merged.
+
+    REPORTED, NOT FIXED: `plan/tasks.d/W1-T916-*.yaml` reads `status: queued` although its work
+    merged, and W1-T534's own credit is absent. Whether a credited shard's stored status should
+    advance is W1-T1260's question, not this one.
+  acceptance:
+    - claim: "a lane that takes the dispatch claim proceeds and a second lane on another host is refused before it spends"
+      proof: "unit test: test/dispatch-claim.test.ts"
+    - claim: "an unreachable origin refuses rather than dispatching optimistically"
+      proof: "unit test: test/dispatch-claim.test.ts"
+    - claim: "the holder arm drops only the claim it still holds and never one that became another lane's"
+      proof: "unit test: test/dispatch-claim.test.ts"
+    - claim: "a claim whose work has landed is released by the evidence arm from any host"
+      proof: "unit test: test/dispatch-claim.test.ts"
+    - claim: "a claim held by another host with no evidence is left in place and named, never expired"
+      proof: "unit test: test/dispatch-claim.test.ts"
+    - claim: "every existing dispatch probe still fires in its existing order after the claim is added"
+      proof: "unit test: test/dispatch-claim.test.ts"
+    - claim: "the same-host inflight lock and its dead-pid sweep are unchanged"
+      proof: "unit test: test/dispatch-claim.test.ts"
+    - claim: "the dispatch seam actually calls the claim decision rather than shipping it unreached"
+      proof: "grep: decideDispatchClaim( in src/run-task.ts"
