@@ -1,0 +1,151 @@
+- id: W1-T1284
+  title: "THE FIX RUNG RE-SPENDS A STRIKE ON A TREE ITS OWN LAST STRIKE DID NOT CHANGE — the pre-strike gate reads WHO moved the head and WHETHER the PR went terminal, both fresh, but head-sha EQUALITY returns no-stand-down, so a strike that pushed nothing is followed by another strike against a byte-identical worktree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    **Q1 — IT IS THE FIX RUNG'S STRIKES, NOT THE SWEEP'S RE-DISPOSITION, AND THE SCAN IS CONTROLLED
+    AGAINST PATHS THAT DEMONSTRABLY DO COMPARE STATE.** `runFixRung` (`src/run-task.ts`) loops on
+    `while (review.state !== "success" && strikes < opts.strikeCap)` and opens each round with
+    `fixRungStandDownReason(..., "rung.strike", ...)`, whose own comment calls it "the ONLY point
+    that stops a strike being SPENT". That gate reads TWO things, both fresh every round: terminal
+    state (merged/closed), and W1-T296's authorship — a live head this invocation did not itself
+    push. It never reads whether the tree CHANGED.
+
+    **THE ONE LINE THAT SETTLES IT, AND IT IS AN EXACT INVERSION.**
+    `branchAuthorshipStandDownReason` returns early at
+    `if (liveHead.headSha === rungOwnHeadSha) return undefined; // still the rung's own head`.
+    EQUALITY RETURNS NO STAND-DOWN. The check exists to catch a FOREIGN head, so the case where
+    nothing moved at all is precisely the case that proceeds to spend the next strike. `rungOwnHeadSha`
+    is assigned `review.headSha` after each round, so a strike whose worker pushed nothing leaves it
+    equal on the next pass and the gate reads healthy.
+
+    **THE CONTROLS, PRE-QUALIFIED, SO THE ZEROS ARE ABSENCE AND NOT A BLIND READER.** The same
+    function IS a state comparison and fires: the terminal-state read is taken fresh rather than from
+    the caller's snapshot, and the authorship arm escalates a foreign head with an operator-decidable
+    yield/confirm-takeover choice. On the sweep side two more paths compare state before acting —
+    W1-T195 keys escalation dedup on the FOREIGN HEAD SHA so repeated passes over one head collapse
+    to a single issue, and W1-T225's loop falsifier counts PRIOR HEADS for the task and escalates at
+    `policy.reviewOrphanCap` rather than re-dispatching unboundedly. So state comparison is not
+    missing from this codebase; the TREE-IDENTITY dimension is missing from the one gate that spends
+    strikes.
+
+    **THE SUBJECT SWEEP CONFIRMS NO OPEN HEAD IS ADDING IT.** Three markers counted per head across
+    `src/run-task.ts` + `src/lib/sweep.ts`, read through git objects: `fixRungStandDownReason` (the
+    control), `gateFailureSnapshot`, `unchangedSinceFailure`. Main reads 4 / 0 / 0 and every one of
+    the four open PR heads reads exactly 4 / 0 / 0. The non-zero marker proves the reader worked; the
+    two zeros are the defect.
+
+    **EXTERNAL PRECEDENT, CITED AND RE-DERIVED FROM SOURCE, NOT COPIED.**
+    `PrimeIntellect-ai/prime-agent` at `e319a66d`,
+    `packages/coding-agent/src/core/autonomous.ts`: `runAutonomousQualityGates` captures
+    `captureGitWorktreeSnapshot(cwd, signal)` per command and, when the stored failure is for the SAME
+    command and `gitWorktreeSnapshotsEqual(current, lastGateFailureSnapshot)` holds, it does NOT re-run
+    the gate. Four properties matter and each was read at that sha rather than assumed. (i) IT DOES NOT
+    SKIP SILENTLY: it still increments the attempt counter and writes an explicit
+    `exitText: "not rerun: workspace unchanged since previous failed gate"` plus operator-facing text
+    naming what must change. (ii) IT NEVER PRODUCES A PASS: the arm returns
+    `attempt > maxRetries ? "retry_exhausted" : "failed"`. (iii) THE SNAPSHOT IS CONTENT, NOT A
+    POINTER: `{ status, diff, untrackedHash }` — `git status --porcelain=v1 -z -uall --no-renames`,
+    `git diff --no-ext-diff --binary HEAD`, and a hash of untracked file CONTENTS, under a pathspec
+    that EXCLUDES the gate's own artifact directories. (iv) IT FAILS TOWARD RUNNING:
+    `gitWorktreeSnapshotsEqual` is `!!a && !!b && ...`, so an unreadable snapshot is never equal and
+    the gate runs. **NOT PROPOSED, BY NAME: prime-agent's IPython-kernel substrate, which most of its
+    surrounding design depends on and which this repo has no equivalent of.**
+
+    **Q2 — WHAT "UNCHANGED" MUST MEAN HERE, AND A TREE HASH IS NOT ENOUGH.** The snapshot must cover
+    the WORKING CONTENT the strike is supposed to have altered: tracked modifications, the diff
+    against the branch head, and untracked file contents — the three the precedent uses, because a
+    worker can add an untracked file, or change a byte without changing a path list, and either is
+    real progress. IT MUST BE KEYED PER FAILING GATE, not per PR, so a rung that fixed check A and
+    still fails check B is not told nothing changed. AND IT MUST NOT COVER THE BASE. A branch's
+    verdict legitimately moves when MAIN moves under it, and a required check can flip on an
+    unchanged head for reasons that are not the diff — CLAUDE.md states this in terms for `ci-gate`:
+    *"a required check flipping FAILURE→SUCCESS on the SAME head sha needs no new commit and no
+    manual re-run (W1-T261)"*, with W1-T312's `WAIT_CAP_SECONDS` sized so a green-in-progress sibling
+    is waited out. A snapshot that folded the base sha, or the check conclusions, into its identity
+    would refuse exactly the re-run that discipline requires. So: WORKTREE CONTENT plus GATE IDENTITY,
+    never the base, never the rollup, and an unreadable snapshot is NOT a match.
+
+    **Q3 — WHAT MUST NOT CHANGE.** NOTHING SKIPS A GATE: the refusal is to spend a STRIKE on an
+    unchanged tree, never to declare a gate satisfied without running it. `strikeCap` STAYS, and so
+    does the escalation at the ceiling. A SNAPSHOT MATCH PRODUCES A STAND-DOWN WITH A NAMED REASON,
+    NEVER A PASS — the shape already exists three lines away in the same function, where the
+    terminal-state arm records a reason and the authorship arm escalates with an operator-decidable
+    choice; this is a third reason source composed into the SAME gate, never a parallel early return.
+
+    **SIBLINGS, SAME FAMILY AND DIFFERENT TRIGGER, NEITHER RE-FILED.** `W1-T1278` is the PRE-DISPATCH
+    RE-READ — the rung holds a verdict whose state has since moved. `W1-T1282` is ZERO ENUMERABLE
+    FAILURES — the rung has nothing to hand the worker it is about to pay for. This one is the third
+    trigger: the rung has evidence and a live blocker, and spends anyway on a tree its own previous
+    strike left untouched. All three refuse BEFORE the spend; none of them makes a gate optional.
+
+    **WHAT IS NOT CLAIMED, AND ONE THING THE BRIEF ASKED FOR THAT IS NOT IN THIS REPO.** No ledger
+    figure appears here. `resolveLedgerUnion` was run FIRST and returned
+    `archiveCount=0, ok=false, unread=0` against this container's only `state/` directory, whose live
+    `ledger.ndjson` is 126 lines carrying exactly ONE distinct step (`cli.invoked`) — this container's
+    own CLI exhaust, not the daemon's corpus. The reader worked; the corpus is elsewhere. So the
+    expected `"step":"risk_judge.decision"` control could not be taken here and NO count is quoted
+    rather than a number being carried. Separately, the sentence *"a silent re-check is enough only
+    while a blocker you already established still holds"* IS NOT PRESENT IN THIS REPO at `b1fa1ddf` —
+    searched by that phrase and by its distinctive fragments, against live controls (`still holds` 47
+    files, `blocker` 86 files, `a silent` 12 hits). The nearest text that DOES exist states the same
+    principle as a DEFECT rather than a rule, in `docs/research/recon-guard-complements.md`: *"the
+    gate that promises 'changed tasks get re-checked' checks nothing, because as far as it can tell
+    nothing changed."* That is what is cited, because it is what is there.
+  acceptance:
+    - claim: "a strike is refused when the worktree content is identical to the snapshot taken at the previous failed gate for the same check"
+      proof: "unit test: test/fix-rung-unchanged-tree-stand-down.test.ts"
+    - claim: "a strike whose worker changed tracked content, or added an untracked file, still spends exactly as before"
+      proof: "unit test: test/fix-rung-unchanged-tree-stand-down.test.ts"
+    - claim: "an unreadable or absent snapshot is never treated as a match, so the rung runs rather than standing down"
+      proof: "unit test: test/fix-rung-unchanged-tree-stand-down.test.ts"
+    - claim: "the refusal records a named reason and never reports the gate as satisfied"
+      proof: "unit test: test/fix-rung-unchanged-tree-stand-down.test.ts"
+    - claim: "the strike cap and the escalation at the ceiling are unchanged, and a base that moved under the branch does not trigger the refusal"
+      proof: "unit test: test/fix-rung-unchanged-tree-stand-down.test.ts"
+  files: [src/run-task.ts, test/fix-rung-unchanged-tree-stand-down.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#fix-rung-rerun-against-unchanged-tree-2026-08-23"
+  plan_refs: ["W1-T1278", "W1-T1282", "W1-T296", "W1-T225", "W1-T195"]
+  note: |
+    **NO PROOF IN THIS SHARD GREPS ITS OWN PATH.** All five criteria use the pure-path `unit test:`
+    form naming `test/fix-rung-unchanged-tree-stand-down.test.ts`, which is declared in `files:`, so
+    `judgeCriterion`'s `not_yet_built` carve-out applies at filing time. A `grep:` proof naming this
+    shard would be out of scope by construction — a `verify: auto` task cannot declare its own plan
+    record in `files:` — and would draw `lint-plan`'s `proof-scope` warning about
+    `scopeGuardOutOfScopeFiles` refusing the branch after the work is done.
+
+    **RISK BAND IS RULE 19 SPAN, NOT BLAST RADIUS.** `files:` crosses `src/` and `test/`, so the SPAN
+    reading is `high`. `high` EXEMPTS `sizingViolation` rather than clearing it — it returns
+    `undefined` outright at that band — so a clean lint is NOT evidence the span was vetted. The blast
+    radius is narrower: a third reason source composed into one existing gate. The danger is the
+    CONDITION'S WIDTH, which is why criteria 2, 3 and 5 all exist to hold it narrow; a change passing
+    criterion 1 and failing any of those has built "stop fixing PRs".
+
+    **THE FALSIFIER, STATED SO IT CAN BE RUN.** Falsified if a strike that WOULD have made progress is
+    refused — observable as a rung standing down while the previous strike's push actually changed
+    tracked or untracked content. Also falsified if rung spend does not fall on the repeat path, or if
+    any gate's verdict is ever reported without the gate having run.
+
+    **MEASUREMENT PROVENANCE.** Clone checked NOT shallow (`--is-shallow-repository` false, 2059
+    commits) BEFORE any history query. `src/run-task.ts` is 1,490,268 bytes — over the Contents API's
+    1 MB cap, where it returns `encoding: "none"` and greps to a clean zero — so every source figure
+    was read through git objects in a worktree proven equal to `origin/main` by sha. Step names and
+    symbol names were taken from source, never guessed. The external precedent was re-derived by
+    cloning `PrimeIntellect-ai/prime-agent` and reading `e319a66d`'s blob, not from memory of it.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T1284` reserved 2026-08-23T20:24:38Z and confirmed still held
+    and unused. Eight surfaces swept, each with a control qualified for that surface and none
+    disqualified: the reservation ref (1, against a namespace of 316); shard filenames on main 0
+    (control `W1-T1282` = 1); `- id:` lines in `plan/` 0 (control `W1-T1282` = 1); open-PR titles 0
+    (control `W1-T` = 2 across 4 open PRs); open-PR head branches 0 (control `run-*` remote heads =
+    86); open-PR file lists 0 across 4 of 4 heads enumerated and captured (control 15 total file
+    entries); anchored merged-PR trailers `^Remudero-Task:\s*<id>\s*$` 0 (control `W1-T1264` = 1
+    across 98 merged); merged commit subjects on main 0 (control `(W1-T1282)` = 1 across 2059
+    subjects). The SUBJECT sweep is the count-per-head table in the rationale above.
