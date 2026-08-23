@@ -1,0 +1,110 @@
+- id: W1-T1271
+  title: "THE PROBE PROMPT'S STEP COUNT IS PINNED AS A LITERAL IN A FILE NO PROMPT-CHANGING SHARD DECLARES — `test/deny-floor-probe.test.ts` asserts `/THREE commands/`, so every future step added to `containmentProbePrompt` breaks a suite OUTSIDE the changing task's `files:`; assert the contract the count stands in for instead of the number"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 40.00
+  files: [test/deny-floor-probe.test.ts]
+  origin: oper#probe-prompt-step-count-2026-08-23
+  plan_refs: ["W1-T1265"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE BRIEFING'S PREMISE WAS OVERTAKEN WHILE THIS WAS BEING FILED, AND THE CORRECTION IS THE
+    FINDING. The brief describes the egress WIRING as blocked and unfiled, with W1-T1265 having
+    shipped only the decision half. Re-derived at origin/main: `assessEgressContainment` reads ZERO
+    in `src/lib/containment.ts`, so the decision half has not landed either — it is still an open
+    PR. AND THE WIRING IS ALREADY BUILT: a count-per-head subject sweep over open PRs found #2626
+    ("feat(containment): prove network containment per run with an egress arm (W1-T1265)") on
+    `run-W1-T1265-1787503092377`, a SECOND lane on the same id, which changes
+    `containmentProbePrompt(token)` to `containmentProbePrompt(token, allowedHost)` and rewrites the
+    prompt. So "the wiring is unfiled" is not true and this task is NOT that.
+
+    WHAT IS TRUE, AND IS UNFILED, IS THE OBSTACLE THE WIRING RAN INTO.
+    `test/deny-floor-probe.test.ts` asserts `assert.match(prompt, /THREE commands/, "the prompt must
+    ask for all three steps")`. #2626 replaces that prompt line with "run these FOUR commands IN"
+    and does NOT touch the test file — its diff is exactly `src/lib/containment.ts` and
+    `test/containment.test.ts`. SO #2626 BREAKS A SUITE OUTSIDE ITS OWN `files:`, and its `ci` job
+    was still running when this was filed, which makes the claim checkable rather than rhetorical:
+    if `ci` on `50d2856` goes red on that assertion, this shard's premise is demonstrated; if it
+    goes green, this shard is wrong and should be closed.
+
+    THE COUNT IS NOT THE HAZARD THE ASSERTION WAS WRITTEN FOR. It arrived in `05f980f`
+    ("feat(containment): probe the deny floor per run, inside cwd where only the hook can refuse",
+    #1575) — the commit that made the deny floor the THIRD step — under the block heading "The probe
+    REACHES the worker". Its own message says "the prompt must ask for all three steps". THE
+    CONTRACT IT PROTECTS IS THAT THE PROMPT'S NARRATED COUNT AGREES WITH THE STEPS ACTUALLY LISTED,
+    which is real and worth keeping: the worker acts on the prose, so a prompt that says THREE while
+    listing four will plausibly run three and silently skip one. The literal `THREE` is a proxy for
+    that agreement, and the proxy breaks on every future step while the property it stands for does
+    not.
+  design: |
+    (i) Q1 — WHAT THE ASSERTION PROTECTS, AND THE THREE WAYS TO KEEP IT. The property is
+    NARRATION/LIST AGREEMENT, not the number three. Options, with costs:
+      (a) BUMP THE LITERAL each time a step is added (THREE -> FOUR -> ...). Cheapest edit. Cost: it
+          stays count-shaped, so it breaks again on the next step, and it breaks in a file the
+          changing shard will again not declare — this exact failure, deferred.
+      (b) ASSERT THE CONTRACT: derive the number of listed steps from the prompt itself and require
+          the narrated count to match it, so the test passes for ANY count and fails only on genuine
+          drift. Cost: slightly more test code, and the derivation must key on the prompt's own
+          numbering rather than on a hand-maintained list, or it reintroduces the same coupling one
+          level down. THIS IS THE PROPOSED FIX.
+      (c) DELETE IT. REFUSED, and the reason is stated rather than assumed: it catches a worker being
+          told the wrong number of steps, which is a real and silent failure — the probe would report
+          on steps it never ran. Deleting it would trade a brittle guard for no guard.
+    (ii) Q2 — ORDER AND SHARING, ANSWERED AGAINST WHAT #2626 ACTUALLY DID. That lane chose FOUR
+    commands rather than five, so it combined the blocked attempt and the allowlisted control into
+    one command or folded one into an existing step. THIS TASK TAKES NO POSITION ON THAT CHOICE and
+    must not relitigate it — it is W1-T1265's to make. What this task fixes is only that whichever
+    count is chosen, the assertion should not have to be edited to accommodate it. FOR THE RECORD,
+    because the brief asks: separate commands with separate report slots make a PARTIAL RESULT
+    legible (one slot missing is distinguishable from one slot failing), and a partial result must
+    map to UNPROVEN — which the three-state verdict already does, since the control's absence leaves
+    `allowedEgressSucceeded` falsy.
+    (iii) Q3 — WHAT MUST NOT CHANGE. The allowlist's four domains, `failIfUnavailable`,
+    `settingSources: []`, and the pinned key-set guard in `src/lib/settings.ts` all stay exactly as
+    they are; this task touches a test assertion and nothing else. The three-state verdict stays
+    three-state — no fourth state — and the probe continues to OBSERVE rather than enforce.
+    (iv) THIS IS A SUCCESSOR, NOT AN AMENDMENT, AND THE DISTINCTION IS STANDING RULE 21's.
+    `test/deny-floor-probe.test.ts` is not in W1-T1265's `files:`, and `files:` is protected
+    post-merge, so the path cannot be added to that task once it lands. A separate id carrying the
+    separate concern is the sanctioned route, which is what this is.
+    (v) THE FALSIFIER RUNS BOTH WAYS. A prompt whose narrated count DISAGREES with its listed steps
+    must fail; a prompt whose count agrees must pass AT ANY COUNT, three or four or more. A test that
+    only accepted one specific number would satisfy the second only by accident and would be the
+    defect restated.
+  acceptance:
+    - claim: "a prompt whose narrated count disagrees with its listed steps fails the assertion"
+      proof: "unit test: test/deny-floor-probe.test.ts"
+    - claim: "a prompt whose narrated count agrees passes regardless of how many steps there are"
+      proof: "unit test: test/deny-floor-probe.test.ts"
+    - claim: "the tripwire command and its report slot are still asserted by content, not by position"
+      proof: "unit test: test/deny-floor-probe.test.ts"
+  note: |
+    risk: medium IS SET UP FRONT. RULE 19's SPAN is one stem — a single test file — and the BLAST
+    RADIUS is likewise small: no source path changes, no runtime behaviour moves, and the guard
+    being replaced is strengthened rather than removed. Both readings agree here, which is why the
+    band is not `high`.
+
+    `src/lib/containment.ts` IS DELIBERATELY NOT DECLARED. The prompt itself is W1-T1265's to change
+    and a second lane is changing it now; this task must not race that edit. Declaring the source
+    file would also make this task overlap both open W1-T1265 PRs and serialise behind them for no
+    benefit — the assertion can be made count-agnostic against the CURRENT prompt and stays correct
+    after either lane lands.
+
+    THE CORRECTION W1-T1265's OWN SHARD NOW CARRIES, RESTATED SO IT IS NOT LOST AGAIN:
+    `ContainmentEvidence` carries SIX fields, not four — `credentialExpired` (W1-T292) and
+    `denyFloorProbeCreated` postdate the count in that shard's rationale. The two the design calls
+    load-bearing, `osDenialSeen` and `insideWriteCreated`, are unchanged.
+
+    THIS SHARD IS FALSIFIABLE BEFORE IT IS BUILT, WHICH IS UNUSUAL AND WORTH SAYING: if #2626's `ci`
+    on `50d2856` passes with the prompt reading "FOUR commands" while
+    `test/deny-floor-probe.test.ts` still asserts `/THREE commands/`, then the coupling this task
+    describes does not exist and the task should be closed unbuilt rather than implemented.
+
+    PROOF NOTES: all three proofs are the PURE-PATH `unit test:` form naming
+    `test/deny-floor-probe.test.ts`, which this shard's own `files:` declares. That file EXISTS on
+    origin/main, so these proofs execute rather than forward-referencing.
