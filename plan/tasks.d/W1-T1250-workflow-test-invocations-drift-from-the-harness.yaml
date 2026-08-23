@@ -1,0 +1,103 @@
+- id: W1-T1250
+  title: "A REQUIRED JOB STILL RUNS A TEST FILE WITHOUT THE FIXTURE HARNESS, AND ONLY THE LOCAL MIRROR IS CORRECT — `containment-probe` runs `node --test --import tsx test/containment.test.ts` while `src/lib/ci-parity.ts` runs that same file WITH `--import ./test/setup/tmp-hygiene.ts`, so preflight is richer than CI and a harness-dependent test passes locally and fails on the required check; the same class was just fixed one site over in #2523 and nothing prevents the third"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 60.00
+  files: [.github/workflows/ci.yml, test/workflow-harness-import-parity.test.ts]
+  origin: oper#workflow-harness-import-2026-08-23
+  plan_refs: ["W1-T1217"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ORIGINALLY-REPORTED SITE IS ALREADY FIXED, AND THIS SHARD IS NOT IT. `coverage-ratchet`'s
+    inline invocation in `.github/workflows/ci.yml` DID omit the harness import; commit `b958fc4`
+    ("fix(test): disable git auto-gc in fixtures, close the push-clone race", #2523, W1-T1217,
+    2026-08-22T23:47:37Z) added it, and the step now reads
+    `--test --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"` with a comment
+    above it recording the divergence in the past tense. That fix is on `origin/main`. Re-deriving
+    it is not the work here.
+
+    WHAT IS STILL LIVE IS THE SAME CLASS AT A THIRD SITE. Scanning every workflow step that runs
+    `node --test`, controlled against `--import tsx` — a flag every real invocation shares:
+      .github/workflows/ci.yml       coverage-ratchet   HAS the harness import
+      .github/workflows/ci.yml       containment-probe  DOES NOT
+      .github/workflows/clock-sweep.yml (two steps)     HAVE it
+      .github/workflows/recovery-drill.yml              HAS it
+      package.json `test` and `test:ci`                 HAVE it
+    `containment-probe` is in `.github/workflows/ci-gate.yml`'s REQUIRED list, so this is a
+    required check.
+
+    AND THE LOCAL MIRROR IS THE CORRECT ONE, WHICH INVERTS THE USUAL DIRECTION.
+    `src/lib/ci-parity.ts`'s `containment-probe:test` step shells
+    `node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts`,
+    built from its own `TMP_HYGIENE_IMPORT` constant. So `rmd preflight --ci-parity` runs that file
+    WITH the harness and CI runs it WITHOUT: a harness-dependent assertion passes locally and fails
+    on the required check, and preflight cannot reproduce the failure it is meant to predict.
+
+    THE FIX DOES NOT TOUCH `src/lib/ci-parity.ts`, AND THAT IS LOAD-BEARING. `.github/workflows/ci.yml`
+    carries an explicit warning against "completing" parity by editing that file, because the edit
+    re-creates a Rule 25 instrument/product pairing. Here no such edit is needed in either
+    direction: ci-parity ALREADY has the correct invocation, so bringing the workflow into line is
+    what makes the two agree. The warning is respected by construction rather than by exception.
+  design: |
+    (i) ADD THE IMPORT TO THE WORKFLOW; DO NOT ROUTE THE STEP THROUGH AN npm SCRIPT. The inline form
+    exists for a reason at both sites and the reason differs. `coverage-ratchet` spells its
+    invocation out because it must pass coverage-only node flags
+    (`--experimental-test-coverage`, `--test-coverage-exclude`, two reporter pairs) that
+    `npm run test:ci` does not accept and could not without editing a protected package.json script
+    shared by every other caller. `containment-probe` spells its own out because it runs ONE FILE,
+    not the glob, so neither `npm test` nor `npm run test:ci` expresses it at all. In both cases the
+    correct remedy is the one #2523 already applied: ADD the flag. Calling the script instead would
+    either drop the coverage flags or widen a single-file probe into the whole suite.
+
+    (ii) THE FALSIFIER IS A PARITY ASSERTION OVER THE WORKFLOWS THEMSELVES, NOT A FIXTURE. A test
+    that only checked `test/containment.test.ts` would pass the moment that one line is fixed and
+    would not stop a fourth site appearing. The check reads every workflow step that invokes
+    `node --test` and requires each to carry the harness import, so the class is closed rather than
+    the instance.
+
+    (iii) THE CHECK MUST NOT PASS VACUOUSLY. A scan that matched no steps would report clean, which
+    is the shape this repo keeps re-learning. The assertion must first establish that it SAW the
+    known invocations — `--import tsx` is present on every real one and is the control the scan is
+    verified against.
+
+    (iv) OUT OF SCOPE, EACH FOR A STATED REASON. `src/lib/ci-parity.ts` is not edited: it is already
+    correct, and editing it is what ci.yml's own warning forbids. The `coverage-ratchet` invocation
+    is not re-fixed: #2523 fixed it and Rule 21 governs amending merged work. The harness's CONTENTS
+    are W1-T1217's subject and are untouched here.
+  acceptance:
+    - claim: "every workflow step that runs the node test runner carries the fixture harness import"
+      proof: "unit test: test/workflow-harness-import-parity.test.ts"
+    - claim: "the containment probe's required-check invocation matches the one ci-parity mirrors locally"
+      proof: "unit test: test/workflow-harness-import-parity.test.ts"
+    - claim: "the scan proves it saw the real invocations rather than reporting clean over an empty set"
+      proof: "unit test: test/workflow-harness-import-parity.test.ts"
+  note: |
+    risk: high IS SET UP FRONT, AND THE BAND IS RULE 19's SPAN RATHER THAN BLAST RADIUS. The
+    `files:` list crosses two concerns as the linter counts them — the workflow itself and the new
+    parity suite — and `sizingViolation` refuses that pairing at `risk:medium`. The BLAST RADIUS is
+    genuinely small: one workflow line moves, nothing in `src/` changes, and no runtime behaviour
+    moves. Recording both readings here so the band is not mistaken for a claim about danger.
+
+    `src/lib/ci-parity.ts` IS DELIBERATELY ABSENT FROM `files:`. The stop-condition this filing was
+    given — whether the fix can avoid that file — resolves YES: the parity table already carries the
+    correct invocation, so only the workflow moves.
+
+    SIZING THE COST WAS ATTEMPTED AND IS NOT CLAIMED. The question was how many `coverage-ratchet`
+    failures in the last week are attributable to a missing harness rather than to coverage. A
+    discriminator EXISTS and was found: when the harness loads, `test/setup/tmp-hygiene.ts` appears
+    as a row in that run's own coverage table, and a coverage-caused failure ends in
+    `diff-coverage: BLOCKED` or the aggregate ratchet with the tests green. One failure was read in
+    full (`src/run-task.ts` lines, `diff-coverage: BLOCKED`, harness row present) and is a genuine
+    coverage block. A WEEK-LEVEL FIGURE IS NOT TAKEN AND NOT ESTIMATED: the window holds 1196
+    `ci.yml` runs and one page of 100 spans about eleven hours, so attribution needs a per-failure
+    log read across many pages. The number is a query, not a claim.
+
+    PROOF NOTES: all three proofs are the PURE-PATH `unit test:` form naming
+    `test/workflow-harness-import-parity.test.ts`, which this shard's own `files:` declares —
+    `judgeCriterion` gates its forward-reference carve-out on `!whitelisted.nameFiltered`, so a
+    name-filtered title would be graded `no-match` rather than `not_yet_built`.
