@@ -344,14 +344,18 @@ import {
 } from "./lib/feedback-docket.js";
 import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
+  aggregateCitationEvidence,
   assertArchitectAboveWorker,
   buildGather,
   calibrationTable,
+  changedCitationStamps,
   checkRetroIntegrity,
   codeFilesInDiff,
   evaluateRetroTrigger,
   gatherRuns,
   loadMastMapping,
+  mineGitLogCitations,
+  mineLedgerCitations,
   netStateCapabilityAdvisories,
   parseLedger,
   planHealthSweep,
@@ -366,6 +370,8 @@ import {
   resolveMarkerForGather,
   saveMarker,
   shippedSince,
+  stampCitationsAndCommit,
+  type GitLogCommit,
   type MastMapping,
   type PlanStateTruthResolver,
   type RetroTriggerDecision,
@@ -13413,6 +13419,79 @@ export function planStateTruthSectionFor(repoRoot: string, resolve?: PlanStateTr
   }
 }
 
+/**
+ * Split ONE `git log --format=%x1e%aI%x1f%s%x1f%b` record (the format `citationStampPassFor`
+ * below shells out with) into the {@link GitLogCommit} shape `mineGitLogCitations` (lib/retro.ts)
+ * reduces — that module stays a PURE reducer over already-read text by design (its own doc:
+ * "a caller resolves these from git log ... however its own environment shells out"), so the
+ * actual `git log` invocation and this split live here, the I/O-adjacent layer, not there.
+ * `\x1e` (record separator) can't appear in a commit subject/body; `\x1f` (unit separator)
+ * splits date from subject from body — a body containing a literal `\x1f` is not a real risk
+ * (git strips control bytes other than `\n`/`\t` from `%b` in practice), and even if one slipped
+ * through it would only widen the `message` this feeds `mineGitLogCitations`, never crash the
+ * split (subject/body are joined back into one string before that call anyway).
+ */
+export function parseGitLogCitationCommits(raw: string): GitLogCommit[] {
+  return raw
+    .split("\x1e")
+    .map((rec) => rec.replace(/^\n/, ""))
+    .filter((rec) => rec.length > 0)
+    .map((rec) => {
+      const firstSep = rec.indexOf("\x1f");
+      const secondSep = rec.indexOf("\x1f", firstSep + 1);
+      const date = firstSep === -1 ? "" : rec.slice(0, firstSep);
+      const subject = firstSep === -1 ? "" : rec.slice(firstSep + 1, secondSep === -1 ? undefined : secondSep);
+      const body = secondSep === -1 ? "" : rec.slice(secondSep + 1);
+      return { date, message: body.length > 0 ? `${subject}\n${body}` : subject };
+    });
+}
+
+/**
+ * W1-T1248: THE PRODUCTION CALLER for the four citation miners (lib/retro.ts, W1-T419), which
+ * shipped with none — leaving 37/38 `learnings/*.yaml` entries' `cited` date frozen at the
+ * hand-stamped 2026-07 batch forever, even though `selectLearnings`' ranking tiebreak and the
+ * budget ratchet's compression order both already read that field. Mirrors
+ * `promotionProposalSectionFor`/`planHealthSweepSectionFor`'s split: this function decides
+ * nothing new — it feeds real evidence to `mineLedgerCitations`/`mineGitLogCitations`/
+ * `aggregateCitationEvidence`/`changedCitationStamps` (retro.ts) and hands the result to
+ * `stampCitationsAndCommit` (also retro.ts), which owns the write/commit decision.
+ *
+ * FULL HISTORY, NEVER MARKER-SCOPED, on BOTH evidence sources — same reasoning
+ * `mutationGateLifetime`/`followupLedgerNdjson` above already use: `citedCount` is a measured
+ * LIFETIME total, not a per-cycle delta, so re-deriving it from a `--since`-bounded slice every
+ * cycle would silently reset it to "citations since the last retro" and lose everything mined
+ * before. `followupLedgerNdjson` is already the archive∪live union (W1-T1013) the caller passes
+ * in; `git log` here reads the SAME worktree's full history with no `--since` bound for the
+ * identical reason.
+ *
+ * Best-effort: a read/mine/write hiccup degrades to "nothing stamped this cycle" (the corpus
+ * keeps whatever `cited` values it already had — never cleared, per `stampCitations`' own
+ * contract) rather than aborting the whole retro, the same non-fatal discipline
+ * orientation/plan-index regeneration immediately around this call already follow.
+ */
+export function citationStampPassFor(opts: {
+  worktreePath: string;
+  followupLedgerNdjson: string;
+  loadCorpus?: (dir: string) => LearningEntry[];
+  /** Injectable so a test drives the write/commit half without a real `git log`. */
+  readGitLog?: (worktreePath: string) => string;
+}): ReturnType<typeof stampCitationsAndCommit> {
+  const learningsDir = join(opts.worktreePath, "learnings");
+  const load = opts.loadCorpus ?? loadLearningsCorpus;
+  const corpus = load(learningsDir);
+  const readGitLog =
+    opts.readGitLog ??
+    ((wt: string) =>
+      execFileSync("git", ["-C", wt, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
+        encoding: "utf8",
+        maxBuffer: 1 << 26,
+      }));
+  const gitLogCommits = parseGitLogCitationCommits(readGitLog(opts.worktreePath));
+  const evidence = [...mineLedgerCitations(parseLedger(opts.followupLedgerNdjson)), ...mineGitLogCitations(gitLogCommits)];
+  const changed = changedCitationStamps(corpus, aggregateCitationEvidence(evidence));
+  return stampCitationsAndCommit({ worktreePath: opts.worktreePath, learningsDir, changed });
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -13794,10 +13873,24 @@ async function retroCommand(
       log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
     }
 
+    // W1-T1248: the citation miners' production caller (see citationStampPassFor's own doc) —
+    // rides EVERY real retro, mirroring orientation/plan-index's own regenerate-and-commit-if-
+    // changed discipline just above. Runs AFTER both: neither reads `learnings/`, so ordering
+    // doesn't matter for correctness, but grouping every HARNESS-OWNED post-worker write together
+    // keeps this block's shape legible top-to-bottom.
+    let citationStampCommitted = false;
+    try {
+      const result = citationStampPassFor({ worktreePath, followupLedgerNdjson });
+      citationStampCommitted = result.committed;
+      if (result.committed) log("citations.stamped", { ids: result.stampedIds, diff_bytes: result.diff?.length ?? 0 });
+    } catch (e) {
+      log("citations.stamp.error", { error: String((e as Error)?.message ?? e) });
+    }
+
     // Ensure the branch reached origin (worker pushes without -u). Also push when
-    // ORIENTATION.md/plan-index.json were regenerated AFTER the worker's own push, so
-    // those commits aren't silently left local (never reaching the PR the worker already
-    // opened).
+    // ORIENTATION.md/plan-index.json/learnings citation stamps were regenerated AFTER the
+    // worker's own push, so those commits aren't silently left local (never reaching the PR the
+    // worker already opened).
     let onOrigin = false;
     try {
       execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], { stdio: "ignore" });
@@ -13805,7 +13898,7 @@ async function retroCommand(
     } catch {
       onOrigin = false;
     }
-    if (!onOrigin || orientationCommitted || planIndexCommitted) {
+    if (!onOrigin || orientationCommitted || planIndexCommitted || citationStampCommitted) {
       gitPushRunBranch(worktreePath);
     }
 

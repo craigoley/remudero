@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 // src/lib/status.ts (W1-T207) -- saveMarker/loadMarker below call `fsMarker.*` as live
 // property lookups at call time for exactly this reason (test/retro-marker-atomic.test.ts).
 import fsMarker from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD } from "./learnings.js";
@@ -2865,6 +2865,156 @@ export function stampCitations(entries: LearningEntry[], evidence: Map<string, C
     if (!stamp) return e;
     return { ...e, cited: stamp.cited, citedCount: stamp.citedCount };
   });
+}
+
+/**
+ * W1-T1248: THE PRODUCTION CALLER for the four citation miners above shipped under W1-T419 with
+ * none — this is the write half. Which ids' `cited`/`citedCount` actually MOVED between `entries`
+ * and what {@link stampCitations} would write given `evidence` — an entry with no evidence this
+ * cycle, or a non-active (superseded/quarantined/contested) entry, is UNCHANGED (byte-identical)
+ * in `stampCitations`' own return, so it never appears here. This is deliberately the exact set
+ * {@link stampCitationsAndCommit} is scoped to write to disk: a mining pass that finds nothing new
+ * must produce a NO-OP diff, never a touched-but-unchanged shard file, and a superseded entry can
+ * never be resurrected onto disk by a stamp it was never eligible for in memory either.
+ */
+export function changedCitationStamps(
+  entries: LearningEntry[],
+  evidence: Map<string, CitationStamp>,
+): Map<string, CitationStamp> {
+  const stamped = stampCitations(entries, evidence);
+  const out = new Map<string, CitationStamp>();
+  for (let i = 0; i < entries.length; i++) {
+    const before = entries[i];
+    const after = stamped[i];
+    if (after.cited !== before.cited || after.citedCount !== before.citedCount) {
+      out.set(after.id, { cited: after.cited as string, citedCount: after.citedCount as number });
+    }
+  }
+  return out;
+}
+
+/**
+ * Text-surgery stamp of ONE learning entry's `cited`/`cited_count` fields within a shard's raw
+ * YAML text — mirrors scripts/learnings-assert-check.mjs's `quarantineEntryInText` discipline
+ * (that script's own header names the reason): touches only the lines that change, never
+ * round-trips the whole document through the `yaml` stringifier, which would reflow EVERY other
+ * entry's block scalars (`fact: >-`) and flow sequences (`files: [...]`) into a noisy whole-file
+ * diff on every retro cycle. A no-op (returns `text` unchanged, referentially) when `id`'s block
+ * is not present in this shard's text — callers loop every stamp over every shard file without
+ * needing to know up front which file owns which id (mirrors `loadLearningsCorpus`'s own
+ * "current directory of the whole corpus" discovery, never a maintained id->file index for this).
+ *
+ * Adds a `cited_count` line immediately after `cited` when the entry doesn't carry one yet (true
+ * of all 38 entries at this task's filing — every one was hand-stamped with `cited` alone); once
+ * present, a later stamp updates it in place like `cited` itself.
+ */
+export function stampCitationInShardText(text: string, id: string, stamp: CitationStamp): string {
+  const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const startRe = new RegExp(`^- id: ${escapedId}\\s*$`, "m");
+  const startMatch = startRe.exec(text);
+  if (!startMatch) return text; // id not in this shard — no-op
+  const start = startMatch.index;
+  const afterHeader = start + startMatch[0].length;
+  const rest = text.slice(afterHeader);
+  const nextMatch = /^- id: /m.exec(rest);
+  const end = nextMatch ? afterHeader + nextMatch.index : text.length;
+  let block = text.slice(start, end);
+  const citedLine = `  cited: "${stamp.cited}"`;
+  const countLine = `  cited_count: ${stamp.citedCount}`;
+  if (/^  cited:.*$/m.test(block)) {
+    block = block.replace(/^  cited:.*$/m, citedLine);
+  } else {
+    // No prior `cited:` line (a freshly-added entry, never yet hand-stamped or mined) — append
+    // right before the block's trailing whitespace, the same "no anchor to replace" fallback
+    // learnings-assert-check.mjs's own quarantineEntryInText uses.
+    const trailingWs = /\s*$/.exec(block)?.[0] ?? "";
+    block = `${block.slice(0, block.length - trailingWs.length)}\n${citedLine}${trailingWs}`;
+  }
+  if (/^  cited_count:.*$/m.test(block)) {
+    block = block.replace(/^  cited_count:.*$/m, countLine);
+  } else {
+    block = block.replace(citedLine, `${citedLine}\n${countLine}`);
+  }
+  return text.slice(0, start) + block + text.slice(end);
+}
+
+const CITATION_STAMP_COMMIT_MESSAGE = "chore(learnings): stamp measured citation evidence (W1-T1248)";
+
+export interface StampCitationsAndCommitResult {
+  committed: boolean;
+  /** Ids actually written to a shard file this pass (subset of `changed`'s keys — an id absent
+   *  from every shard, e.g. a stale/renamed one, is silently skipped rather than throwing: the
+   *  corpus on disk is the truth, not the evidence map). */
+  stampedIds: string[];
+  /** `git show` of the new commit (patch + stat) — omitted when `committed` is false. */
+  diff?: string;
+}
+
+/**
+ * Apply every {@link changedCitationStamps} entry onto its shard's raw text via {@link
+ * stampCitationInShardText}, `git add` the touched shards, and commit ONLY if something actually
+ * staged — mirrors {@link "./plan-pr-emitter.js".regeneratePlanIndexAndCommit}'s
+ * write/add/diff-cached-quiet/commit-if-changed discipline (design (iv): "commit the stamped
+ * corpus the way generated docs are already committed"). That helper is not imported here to
+ * avoid a retro.ts -> plan-pr-emitter.ts dependency neither module otherwise needs; this repeats
+ * the same three `git` calls rather than sharing them, the same way `probeGithubThrottle` above
+ * repeats its own `gh` call instead of threading a shared gateway through for one line of reuse.
+ *
+ * PASS ONE, STAMP ONLY (design ii): this never adds an entry, drops one, or touches `lifecycle` —
+ * `stampCitationInShardText` is a two-line surgical edit, nothing else in a shard moves, and an
+ * empty `changed` map (nothing newly evidenced) short-circuits before touching disk or git at
+ * all, so a quiet retro cycle produces a genuinely empty diff, not an empty commit.
+ */
+export function stampCitationsAndCommit(opts: {
+  worktreePath: string;
+  /** Absolute path, typically `join(worktreePath, "learnings")`. */
+  learningsDir: string;
+  changed: Map<string, CitationStamp>;
+  commitMessage?: string;
+}): StampCitationsAndCommitResult {
+  if (opts.changed.size === 0) return { committed: false, stampedIds: [] };
+  let filenames: string[];
+  try {
+    filenames = fsMarker
+      .readdirSync(opts.learningsDir)
+      .filter((f) => f.endsWith(".yaml"))
+      .sort();
+  } catch {
+    return { committed: false, stampedIds: [] }; // no corpus directory — nothing to stamp
+  }
+  const stampedIds = new Set<string>();
+  const touchedRelPaths: string[] = [];
+  for (const filename of filenames) {
+    const path = join(opts.learningsDir, filename);
+    const before = fsMarker.readFileSync(path, "utf8");
+    let after = before;
+    for (const [id, stamp] of opts.changed) {
+      const next = stampCitationInShardText(after, id, stamp);
+      if (next !== after) {
+        after = next;
+        stampedIds.add(id);
+      }
+    }
+    if (after !== before) {
+      fsMarker.writeFileSync(path, after, "utf8");
+      touchedRelPaths.push(join("learnings", filename));
+    }
+  }
+  if (touchedRelPaths.length === 0) return { committed: false, stampedIds: [] };
+  execFileSync("git", ["-C", opts.worktreePath, "add", ...touchedRelPaths]);
+  try {
+    execFileSync("git", ["-C", opts.worktreePath, "diff", "--cached", "--quiet"]);
+    // exit 0 ⇒ nothing staged ⇒ content is unchanged from HEAD; nothing to commit.
+    return { committed: false, stampedIds: [...stampedIds] };
+  } catch {
+    // non-zero ⇒ staged changes exist ⇒ commit them as their own, clearly-labeled commit.
+    execFileSync("git", ["-C", opts.worktreePath, "commit", "-m", opts.commitMessage ?? CITATION_STAMP_COMMIT_MESSAGE]);
+    const diff = execFileSync("git", ["-C", opts.worktreePath, "show", "--stat=200", "-p", "HEAD"], {
+      encoding: "utf8",
+      maxBuffer: 1 << 24,
+    });
+    return { committed: true, stampedIds: [...stampedIds], diff };
+  }
 }
 
 // ── The retro marker (state/last-retro.json) ──────────────────────────────
