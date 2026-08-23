@@ -70,3 +70,31 @@ test("generateSandboxTask: refuses a shard name the index does not carry", () =>
   const index = realIndex();
   assert.throws(() => generateSandboxTask(index, ["not-a-real-shard.yaml"], 0), /unknown shard/);
 });
+
+test("generateSandboxTask: falls back to the per-shard isolating union when no single path reaches the combo", () => {
+  const index = realIndex();
+  // architecture.yaml + ci.yaml has no single literal path that selects that exact pair in
+  // one hop (unlike ci.yaml + failures.yaml above, which does via src/lib/review.ts) — this
+  // combo forces the fallback branch design (iii) describes: one isolating path PER shard,
+  // unioned, rather than the single-path shortcut.
+  const subject = generateSandboxTask(index, ["architecture.yaml", "ci.yaml"], 0);
+  assert.deepEqual(subject.selectedShards, ["architecture.yaml", "ci.yaml"]);
+  assert.ok(subject.files.length >= 2, "the fallback must union one path per shard, not reuse a single hop");
+});
+
+test("generateSandboxTask: refuses a shard with no isolating literal path in the fallback branch", () => {
+  // A hand-seeded minimal fixture (not the real corpus) is the only way to prove this refusal:
+  // the real project-layer corpus provides an isolating path for every shard it carries today
+  // (design iii's own note), so this edge only exists for a corpus shaped like this one, where
+  // 'wildcard-only' carries nothing but a `*`-glob and so can never isolate itself.
+  const fixture: LearningsIndex = {
+    files: {
+      "literal-only.yaml": { entries: ["e1"], globs: ["src/lib/only-here.ts"] },
+      "wildcard-only.yaml": { entries: ["e2"], globs: ["*.md"] },
+    },
+  };
+  assert.throws(
+    () => generateSandboxTask(fixture, ["literal-only.yaml", "wildcard-only.yaml"], 0),
+    /no isolating literal path/,
+  );
+});
