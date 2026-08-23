@@ -804,6 +804,20 @@ export interface OpenPrView {
    * does not carry this list (design note iii).
    */
   actionableGateFailures?: ActionableGateFailure[];
+  /**
+   * W1-T1269 -- the immediately-prior fix-rung strike's {@link unmetCriteria}, ledger ground
+   * truth ONLY, for the SAME PR/task -- never this PR's OWN current `unmetCriteria` restated.
+   * Compared against the current list by {@link unmetCriteriaSignature} (keyed by each
+   * criterion's `claim` + `reason`, never `.length` -- design note i: size cannot tell a lateral
+   * swap of WHICH criteria are unmet from a genuine repeat) so a strike that changed NOTHING can
+   * stop the rung before `policy.strikeCap` is reached, while a strike that changed which claims
+   * are unmet -- even leaving the same COUNT -- still gets its remaining strikes (design note vi,
+   * the falsifier that must run both ways). `undefined` when there is no prior strike to compare
+   * (the first strike) or the producer has not wired this read yet -- the no-progress row below
+   * never matches without it, so an unset field is the safe default: keep dispatching, exactly
+   * today's pre-W1-T1269 behaviour, never a false early stop.
+   */
+  priorUnmetCriteria?: CriterionVerdict[];
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
   /** A NEWER open PR crediting the same task supersedes this one. */
@@ -2029,8 +2043,19 @@ export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, 
  *      the check goes green a fresh review runs and rows 6/7 take over from
  *      there if IT still fails. FIX FIRST: this PR reaches the question rung
  *      (row 11) only by exhausting the ladder through row 4, never straight here.
+ *   5.5. NO-PROGRESS STOP (W1-T1269): a review-failing PR whose CURRENT unmetCriteria is the
+ *      byte-identical SET (keyed by each criterion's claim + reason -- never .length, which
+ *      cannot tell a lateral swap from a genuine repeat) as {@link OpenPrView.priorUnmetCriteria}
+ *      -- the immediately-prior strike's unmet set -- -> blocked-ambiguous (escalate), BEFORE the
+ *      cap in row 4 is reached. priorUnmetCriteria undefined (no prior strike recorded, or the
+ *      producer has not wired this read yet) never matches -- the safe default is to keep
+ *      dispatching, byte-identical to pre-W1-T1269 behaviour. An EARLIER stop, never a longer
+ *      leash: policy.strikeCap is unchanged and row 4's exhaustion route still fires exactly as it
+ *      always did once the cap is actually reached; this row only shortens the wait when a strike
+ *      demonstrably changed nothing.
  *   6. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
- *      Only reached with checks NOT red (row 5 above already claimed that case). W1-T923:
+ *      Only reached with checks NOT red (row 5 above already claimed that case) AND the unmet set
+ *      actually changed since the last strike (row 5.5 above already claimed the repeat). W1-T923:
  *      ALSO matches a GATE failure (empty unmetCriteria) that named its own single-form
  *      remedy via {@link OpenPrView.actionableGateFailures} — a third disjunct, never a
  *      separate row (see that field's own doc for the #1991 motivating case).
@@ -2109,6 +2134,30 @@ export function reviewOrphanBackoffElapsed(pr: OpenPrView, policy: SweepPolicy, 
  * never left to the catch-all's generic reason once W1-T114's ceiling can
  * speak to it directly.
  */
+
+/**
+ * W1-T1269 -- a canonical, order-independent signature of an unmet-criteria SET, keyed by each
+ * criterion's own claim + reason (design note ii: "the same claims failed for the same
+ * reasons"). Two calls return the SAME string iff the two lists carry the same (claim, reason)
+ * pairs, independent of array order or how many entries there are -- NEVER keyed on .length
+ * (design note i: size alone cannot separate a strike that swapped WHICH criteria are unmet from
+ * one that failed identically; two failing criteria that became two DIFFERENT failing criteria
+ * read as no change under a length comparison, and this function exists so they don't).
+ *
+ * Each pair is rendered via JSON.stringify (a proper quoted, escaped string) rather than plain
+ * concatenation with an ad-hoc separator: a claim/reason is free-form prose and could contain any
+ * character, so an ad-hoc delimiter risks two DIFFERENT (claim, reason) pairs colliding on the
+ * same rendered string. JSON.stringify output is unambiguous -- the closing quote of the first
+ * field is always the first unescaped quote after the opening one -- so no such collision is
+ * possible.
+ */
+export function unmetCriteriaSignature(criteria: readonly CriterionVerdict[]): string {
+  return criteria
+    .map((c) => JSON.stringify(c.claim) + ":" + JSON.stringify(c.reason))
+    .sort()
+    .join(",");
+}
+
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T920 (DECISIONS.md #1987, the 2026-08-16 ruling) — ROUTED THROUGH THE EXISTING "stale"
@@ -2222,6 +2271,36 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "blocked-fixable",
     when: (pr) => isBlockedCi(pr),
     reason: (pr, policy) => `required checks red — ci-log fix, strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
+  },
+  {
+    // W1-T1269 — AN EARLIER STOP, NEVER A LONGER LEASH (design note iv). The exhaustion row
+    // above (row 4) watches only `priorStrikes`, which ONLY EVER ASCENDS — a strike that fails
+    // IDENTICALLY (same unmet claims, same reasons) is indistinguishable from one that made real
+    // progress until the cap is finally reached. This row reads the SET `unmetCriteria` already
+    // carries (keyed by `claim` + `reason` via {@link unmetCriteriaSignature}, design note i —
+    // never `.length`, which cannot separate a lateral swap from a genuine repeat) against
+    // {@link OpenPrView.priorUnmetCriteria} — the immediately-prior strike's own unmet set — and
+    // stops the rung the moment a strike changed NOTHING, before the cap, never instead of it.
+    //
+    // `priorUnmetCriteria === undefined` (no prior strike recorded, or the producer has not wired
+    // this read yet) never matches: the safe default is to keep dispatching, byte-identical to
+    // pre-W1-T1269 behaviour (design note vi's OTHER half — a fixture/producer that never sets
+    // this field must see no change at all). Ordered strictly BEFORE the review-unmet row below
+    // so an identical repeat is caught before it re-dispatches a THIRD, fourth, ... identical
+    // strike; ordered strictly AFTER the exhaustion row above so a PR that has already reached the
+    // cap keeps its existing "fix strikes exhausted" wording rather than this row's.
+    //
+    // Scoped to `unmetCriteria` ONLY (never `actionableGateFailures`, design note v/OUT OF
+    // SCOPE): a gate failure's `reason` string is not a stable per-criterion identity the way a
+    // `CriterionVerdict.claim` is, so extending this comparison there is left to a future task.
+    disposition: "blocked-ambiguous",
+    when: (pr) =>
+      pr.reviewState === "failure" &&
+      pr.unmetCriteria.length > 0 &&
+      pr.priorUnmetCriteria !== undefined &&
+      unmetCriteriaSignature(pr.unmetCriteria) === unmetCriteriaSignature(pr.priorUnmetCriteria),
+    reason: (pr, policy) =>
+      `fix strike made no progress — same ${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} as the prior strike (${pr.priorStrikes}/${policy.strikeCap}) — escalating`,
   },
   {
     // Reached only when checks are NOT red (row 5 above already claimed that
