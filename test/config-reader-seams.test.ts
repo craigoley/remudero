@@ -214,7 +214,17 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // site — the two placements that task requires (daemon-side + worker-spawn-side), one policy
   // row read at two seamed sites. W1-T1045 and W1-T1044 landed independently, so the count is
   // the sum of both, not either branch's own figure.
-  assert.equal(readers.length, 18, `expected 18 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  //
+  // NINETEEN since `policyFor` (run-task.ts, W1-T1259) landed — a SIXTEENTH consumer, also SEAMED
+  // (`deps.policy ?? loadPolicy(policyPath(repoRoot))`), resolving the measurement cadence rows that
+  // give rule-efficacy, verdict-calibration and autonomy-rate their own schedule. It is a THUNK
+  // rather than a `const`, so the read happens per call instead of once at command entry — the
+  // detector counts it the same way, because it counts every unredirectable READ and the seam
+  // question is test 2's job. IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this
+  // comment requires: the calibration failed at 19-vs-18 while test 2 stayed green, so the reader
+  // arrived already seamed and is NOT allowlisted — adding it to ALLOWED would fail test 3's
+  // STALE-ENTRY LOCK and test 5, both of which refuse a seamed reader an allowlist entry.
+  assert.equal(readers.length, 19, `expected 19 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
