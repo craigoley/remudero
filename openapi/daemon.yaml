@@ -451,6 +451,22 @@ components:
             GET /v1/feedback only (W1-T257): true when this `proposed` entry's proposal_pr merge
             state could not be read (GitHub outage) -- the row is kept, never dropped. Never
             written to plan/feedback/<id>.yaml; a read-time decoration only.
+        discharged:
+          type: boolean
+          description: >
+            GET /v1/feedback only (W1-T1257): true when every task this entry filed
+            (`origin: feedback#<id>`) is credited MERGED -- the work the proposal produced has
+            shipped, even though `status` still names a decision about the proposal itself.
+            Derived fresh on every read, like `unverified` above; never written to
+            plan/feedback/<id>.yaml and never auto-advances `status` -- whether a discharged
+            entry should advance stays a human call.
+        dischargeUndecidable:
+          type: boolean
+          description: >
+            GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined
+            because the merged-set read failed or was truncated -- a partial read, never
+            mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time
+            decoration only, exactly like `unverified`.
 
     FeedbackInboxResult:
       type: object

@@ -255,6 +255,90 @@ function renderFeedback(feedback: TraceFeedbackNode, indent: string): string[] {
   return lines;
 }
 
+// ── Discharge (read-time decoration, W1-T1257) ──────────────────────────────────
+
+/**
+ * The merged-set credit sources a discharge check needs — a narrowed structural subset of
+ * lib/status.ts's `GitHub` (its `findMergedByTrailer`/`findMergedByHeadBranch`/`readFailed`/
+ * `readTruncated`), the SAME batched gateway panel-graph.ts's three existing `projectPlan` call
+ * sites already share — declared here rather than importing `GitHub` outright so this module's
+ * own test fixtures need not implement every unrelated method that interface carries. A real
+ * `GitHub` instance satisfies this structurally; no adapter is needed at the call site.
+ */
+export interface DischargeGithub {
+  /** Find a MERGED PR whose body contains the anchored `Remudero-Task: <taskId>` trailer. */
+  findMergedByTrailer(taskId: string): { state: string } | null;
+  /** CORROBORATION: MERGED PRs whose head branch is `run-<taskId>-<digits>` (W1-T256's shape). */
+  findMergedByHeadBranch?(taskId: string): Array<{ state: string; headRefName?: string }> | null;
+  /** True if a read this gateway attempted actually FAILED (W1-T119). */
+  readFailed?(): boolean;
+  /** True if the most recent read succeeded but only PARTIALLY (W1-T415). */
+  readTruncated?(): boolean;
+}
+
+export type DischargeState = "discharged" | "not_discharged" | "undecidable";
+
+export interface FeedbackDischarge {
+  state: DischargeState;
+  /** Every task id `plan.tasks` carries `origin: feedback#<id>` for — the predicate's own input. */
+  taskIds: string[];
+}
+
+/** `run-<taskId>-<digits>` — the SAME structured head-ref shape status.ts's own `ownsBranch` matches. */
+function ownsRunBranch(head: string | undefined, taskId: string): boolean {
+  if (!head) return false;
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^run-${escaped}-\\d+$`).test(head);
+}
+
+/** Is `taskId` credited MERGED — anchored trailer OR structured head-branch, unioned (W1-T1257). */
+function taskCreditedMerged(taskId: string, github: DischargeGithub): boolean {
+  const trailerHit = github.findMergedByTrailer(taskId);
+  if (trailerHit && trailerHit.state.toUpperCase() === "MERGED") return true;
+  const branchHits = github.findMergedByHeadBranch?.(taskId);
+  if (!branchHits) return false; // null (read failed/method absent) or [] (no such branch) — no credit here
+  return branchHits.some((pr) => pr.state.toUpperCase() === "MERGED" && ownsRunBranch(pr.headRefName, taskId));
+}
+
+/**
+ * W1-T1257: THE FEEDBACK INBOX HAS NO DISCHARGE PATH. `FEEDBACK_STATUSES` (lib/feedback.ts) is a
+ * closed five-member enum and every member names a decision about the PROPOSAL (new/grilling/
+ * proposed/accepted/rejected) — none names the WORK the proposal's filed tasks eventually ship.
+ * An entry whose every filed task has long since merged still reads `proposed` forever, and
+ * `renderNeedsMe` (serve.ts) keeps pushing it into the live decision queue on every render.
+ *
+ * DERIVED, NEVER STORED (Q2/Q3 of this task's own rationale): no sixth enum member, no
+ * `plan/feedback/*.yaml` write, nothing auto-advanced or hidden — the SAME read-time-decoration
+ * shape as `ReconciledFeedbackEntry.unverified` (panel-graph.ts), computed fresh on every read
+ * and never persisted, so there is nothing for it to drift from.
+ *
+ * REUSES `feedbackOriginTag` — the exact `origin: feedback#<id>` string `rmd triage`
+ * (lib/triage.ts) stamps on every task it files, already walked by `traceForward` above — but
+ * sources merged-ness from the projection's own credit (`findMergedByTrailer` ∪
+ * `findMergedByHeadBranch`, status.ts's rungs (c)/(c2)), NEVER `runsForTask`'s ledger walk: the
+ * dominant merge path is gate-side (a PR merges after its run already ended blocked), so a
+ * shipped task can have no usable `pr.opened` ledger row and would read as unmerged if sourced
+ * from the ledger instead.
+ *
+ * THREE-VALUED, never boolean:
+ *   - `"discharged"` — the filed task set is NON-EMPTY and every member is credited merged.
+ *   - `"not_discharged"` — the filed task set is EMPTY (the load-bearing falsifier: an entry
+ *     that filed nothing is a refuted investigation or a standing ruling, not archaeology, and
+ *     must keep its row), OR at least one filed task is uncredited.
+ *   - `"undecidable"` — the merged-set read FAILED (`readFailed()`) or was TRUNCATED
+ *     (`readTruncated()`): a partial read must not be mistaken for a live decision.
+ * The empty-task-set check runs BEFORE the read-health check: an entry that filed nothing has a
+ * definite answer regardless of whether GitHub is reachable right now.
+ */
+export function feedbackDischargeState(entry: FeedbackEntry, plan: Plan, github: DischargeGithub): FeedbackDischarge {
+  const tag = feedbackOriginTag(entry.id);
+  const taskIds = plan.tasks.filter((t) => t.origin === tag).map((t) => t.id);
+  if (taskIds.length === 0) return { state: "not_discharged", taskIds };
+  if (github.readFailed?.() || github.readTruncated?.()) return { state: "undecidable", taskIds };
+  const discharged = taskIds.every((id) => taskCreditedMerged(id, github));
+  return { state: discharged ? "discharged" : "not_discharged", taskIds };
+}
+
 /** Render a {@link TraceChain} to the plain-text tree `rmd trace` prints. Pure — no I/O. */
 export function renderTraceChain(chain: TraceChain): string {
   const lines: string[] = [];
