@@ -1,0 +1,121 @@
+- id: W1-T1233
+  title: "A MALFORMED `capBytes` DISARMS THE SIZE GATE WHILE ITS LOG REPORTS THAT IT IS ENFORCING ONE — `evaluateRatchet` guards on `typeof baseline.capBytes === \"number\"` and SKIPS the comparison on any other type, so a quoted number in the baseline JSON turns a required check off and the run still prints `cap <n> bytes` and exits 0, byte-identical in its first line to the run that blocks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 55.00
+  files: [scripts/claude-md-budget-ratchet.mjs, test/claude-md-budget-ratchet.test.ts]
+  origin: oper#capbytes-type-disarm-2026-08-23
+  plan_refs: ["W1-T503", "W1-T1231"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE DEFECT IS NOT THAT A MISSING CAP PASSES. IT IS THAT A DECLARED-BUT-UNUSABLE CAP PASSES AND
+    SAYS IT DID NOT.
+
+    `evaluateRatchet` (scripts/claude-md-budget-ratchet.mjs) is four lines, and `violations.push`
+    appears EXACTLY ONCE in the whole file, at line 72, behind this guard at line 70:
+      if (typeof baseline.capBytes === "number" && actualBytes > baseline.capBytes) {
+    Any non-number short-circuits the `&&`, no violation is ever pushed, and `main` reports OK.
+
+    MEASURED 2026-08-23 by driving the CLI directly against the committed 62,732-byte CLAUDE.md
+    (`node scripts/claude-md-budget-ratchet.mjs --baseline <fixture>`), four baselines:
+      {"capBytes": 1000}        exit 1  "is 62732 bytes (cap 1000 bytes)"   BLOCKED, 61732 over
+      {"capBytes": "1000"}      exit 0  "is 62732 bytes (cap 1000 bytes)"   OK -- at or under cap
+      {"measuredBytes": 62732}  exit 0  "is 62732 bytes (cap unset bytes)"  OK
+      {"capBytes": 62732}       exit 0  "is 62732 bytes (cap 62732 bytes)"  OK
+
+    READ ROWS 1 AND 2 TOGETHER: the first log line is BYTE-IDENTICAL and the outcomes are
+    opposite. Then read rows 2 AND 4: both claim a cap and both say OK, and only row 4 is
+    actually enforcing anything. A reader of either log cannot tell an armed gate from a
+    disarmed one. That is the one-value-for-two-outcomes class, with the log actively
+    corroborating the wrong reading.
+
+    ABSENCE IS ALREADY HONEST AND IS NOT THE BUG: row 3 renders `cap unset bytes` via
+    `baseline.capBytes ?? "unset"`. `??` catches null and undefined only, so a STRING prints
+    itself and reads as a real cap. Absence tells the truth; malformation lies.
+
+    A JSON EDIT THAT QUOTES A NUMBER IS THE ENTIRE ATTACK SURFACE, AND IT IS A TYPO, NOT AN
+    ATTACK. The baseline is hand-edited on every reviewed cap bump -- three bumps are recorded in
+    its own `bumpRationale` (61046 -> 62644 -> 62733 -> 65536) -- and each one retypes the value.
+  design: |
+    (i) Q3 FIRST, BECAUSE IT SIZES EVERYTHING ELSE: THIS IS LATENT, AND THE SHARD SAYS SO.
+    Every committed revision of scripts/claude-md-budget-baseline.json carries `capBytes` as a
+    `number` -- 5 of 5 revisions, checked by parsing each blob out of `git log` rather than by
+    reading the diffs. NO MALFORMED BASELINE HAS EVER BEEN COMMITTED and no incident is claimed.
+    The argument is that a required gate which silently disarms on a typo cannot be relied upon,
+    NOT that it has already failed. A latent defect in a REQUIRED check is worth closing precisely
+    because its failure mode is invisible: nothing would go red to tell anyone it had happened.
+
+    (ii) Q1 -- THE POPULATION IS FIVE SITES ACROSS FOUR REQUIRED-CHECK RATCHETS, NOT ONE.
+    The same guard-and-skip idiom governs every ratchet baseline in scripts/:
+      claude-md-budget-ratchet.mjs:70   typeof baseline.capBytes    === "number" && ...
+      learnings-budget-ratchet.mjs:142  typeof baseline.capChars    === "number" && ...
+      coverage-ratchet.mjs:78           typeof baseline.linesPct    === 'number' && ...
+      coverage-ratchet.mjs:86           typeof baseline.branchesPct === 'number' && ...
+      mutation-ratchet.mjs:619          typeof baseline.scorePct    === 'number' && ...
+    learnings-budget-ratchet.mjs:229 repeats the `?? "unset"` log idiom verbatim, so it carries
+    the reporting half of the defect too. THE SCAN DISCRIMINATES, because the opposite convention
+    exists in this repo and was used as its control: `validatePolicy` (src/lib/policy.ts) REFUSES
+    a wrong-kind value by name -- `throw new PolicyError("policy.yaml: '<path>.origin' must be a
+    non-empty string, got " + JSON.stringify(raw))`. So a zero here would have meant "this repo
+    does not validate config", and instead the answer is "this repo validates config in src/ and
+    does not in scripts/".
+
+    (iii) Q2 -- REFUSE, DO NOT TREAT AS ABSENT. Both were weighed:
+      TREAT AS ABSENT is quieter and keeps the capless contract literally intact. It is REJECTED
+        because it maps an error onto a legitimate declared state. Absence means "this ratchet has
+        no cap yet" and is a real, tested contract; malformation means "someone tried to declare a
+        cap and it did not take". Collapsing the second into the first fixes a
+        one-value-for-two-outcomes defect by adding a THIRD input to the same output.
+      REFUSE fails closed, which is the only correct posture for a REQUIRED check: a gate that
+        cannot determine its own threshold must not report OK. It matches `PolicyError`'s shape
+        (name the field, the expectation, and the received value), the message names its own fix,
+        and it is unreachable except by committing a malformed baseline.
+    THE REPORTING HALF IS UNARGUABLE AND IS SEPARATE FROM THE CHOICE: whichever arm is taken, the
+    first log line must not print `cap 1000 bytes` on a run that is not enforcing 1000.
+
+    (iv) ABSENCE MUST NOT BECOME FATAL, AND THE REFUSAL ARM IS NARROWED SO IT CANNOT.
+    It fires only when the key is PRESENT and not a number. `capBytes` absent keeps today's
+    `?? "unset"` path and exit 0. test/claude-md-budget-ratchet.test.ts:52 pins this -- "baseline
+    with no capBytes at all -> no crash, no false block", asserting status 0 and /cap unset/ --
+    and that test must survive unchanged. Three CLI fixtures exist: at-cap-baseline.json (172) and
+    over-cap-baseline.json (165) declare only `capBytes`, no-cap-baseline.json declares neither
+    field. The real committed baseline, read by a fourth test, declares both.
+
+    (v) BOTH DIRECTIONS ARE PROVEN, BECAUSE THE PASSING HALF IS WHAT STOPS THE FAILING HALF
+    PASSING FOR THE WRONG REASON. A refusal arm that rejected every baseline would satisfy "a
+    malformed cap fails" while breaking the gate entirely, so the acceptance pairs each refusal
+    with the valid case it must leave alone: a numeric cap under the size still passes, a numeric
+    cap over it still blocks naming its overage, and an absent cap still exits 0.
+
+    (vi) COST. No new dependency and no I/O. The added work is a type test on a value the function
+    already reads, on a path that runs once per invocation.
+  note: |
+    CITED, NOT RE-FILED: W1-T1231 (#2555) owns `measuredBytes` and its reachability, and its design
+    is under amendment. This task does not read, write, assert on, or widen into `measuredBytes` --
+    the two touch the same script and will serialize on `overlappingPaths`, which is correct.
+
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: the four sibling sites in (ii) are the same
+    defect in three other required checks. They are not fixed here and no second shard is filed for
+    them. A follow-up should decide between lifting one shared validator and repeating the arm per
+    script; that is a four-script, eight-file span that would breach rule 19 if folded in here.
+
+    src/lib/ci-parity.ts is NOT touched -- .github/workflows/ci.yml:473 warns against editing it by
+    name.
+  acceptance:
+    - claim: "a capBytes that is present but not a number refuses instead of passing"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "the refusal names the field and the value it received"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "a valid numeric cap at or over the measured size still passes"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "a numeric cap below the measured size still blocks and names its overage"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "an absent capBytes still exits zero and is never made fatal"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
+    - claim: "no run prints a cap figure it is not enforcing"
+      proof: "unit test: test/claude-md-budget-ratchet.test.ts"
