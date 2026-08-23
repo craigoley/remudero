@@ -1,0 +1,111 @@
+- id: W1-T1281
+  title: "THE CONTAINMENT FAILURE PATH DISCARDS THE EVIDENCE THAT WOULD NAME ITS CAUSE — every non-outside-write failure collapses to the literal string `unproven`, the `ContainmentEvidence` object is returned ONLY on success, and no consumer outside `containment.ts` reads `osDenialSeen` or `insideWriteCreated`; so an intermittent preflight failure cannot be diagnosed from any ledger row, by construction rather than by access"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 60.00
+  files: [src/lib/containment.ts, test/containment.test.ts]
+  origin: oper#containment-unproven-evidence-2026-08-23
+  plan_refs: ["W1-T91", "W1-T237", "W1-T1265"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE BRIEFING'S RATE FIGURES COULD NOT BE RE-DERIVED HERE, AND THAT IS STATED RATHER THAN
+    PAPERED OVER. The ledger precondition was run first, through `resolveLedgerUnion`
+    (`src/lib/ledger-grep.ts`) as instructed: ARCHIVE COUNT IS ZERO at both candidate state roots,
+    `ledgerRotationEntries` returns an empty set in each, and `resolveLedgerUnion` itself throws on
+    the empty corpus. The single live `ledger.ndjson` reachable from this host holds 99 deduped rows
+    that are entirely `cli.invoked` (92) and `deploy.skip` (7) — this container's own CLI scratch,
+    not the fleet ledger. Both figures the brief asks to re-derive read ZERO
+    (`"verdict":"blocked_containment"`, `"step":"risk_judge.decision"`) against a POSITIVE CONTROL
+    of 92 on `cli.invoked` proving the query reads its corpus. SO THE RATE, THE CLUSTERING AND THE
+    FAILED-THEN-PASSED PAIRS ARE UNMEASURED HERE AND ARE NOT CLAIMED.
+
+    BUT THE SOURCE SETTLES SOMETHING STRONGER THAN THE RATE, AND IT IS WHY THIS SHARD EXISTS RATHER
+    THAN A MEASUREMENT TASK. `probeContainment` (`src/lib/containment.ts`) builds its failure this
+    way:
+      const observed = evidence.outsideWriteCreated
+        ? "outside-cwd write succeeded (sandbox did not engage)"
+        : "unproven";
+      throw new ContainmentError(..., "outside-cwd-denial", observed, r.childEnvKeys ?? [], r.accountLabel);
+    `ContainmentError` carries `guard`, `check`, `observed`, `childEnvKeys` and `accountLabel` — and
+    NOT the evidence. The `ContainmentEvidence` object is returned on the SUCCESS path only
+    (`return { contained: true, reason, evidence, costUsd }`). So on every failure that is not an
+    outside-write landing, the entire diagnosis collapses to the eight characters `unproven`.
+
+    THAT MAKES THE BRIEF'S Q2 UNANSWERABLE FROM ANY LEDGER ROW, EVER — NOT MERELY FROM THIS HOST.
+    The question "which of the two states is occurring" cannot be asked of the data, because the
+    field that would answer it was never written. AND THE CONFLATION IS WIDER THAN TWO: with
+    `outsideWriteCreated` false, the surviving cases are (a) no OS-denial observed though the write
+    was attempted, (b) the write never attempted, and (c) `insideWriteCreated` false — THE PROBE
+    NEVER RAN AT ALL, which is a third state and a different fault entirely. All three record the
+    same string.
+
+    AND NOTHING ELSE READS THE FIELDS. `osDenialSeen` and `insideWriteCreated` are referenced by
+    exactly one file, `src/lib/containment.ts` — so the evidence has no second consumer that might
+    already be preserving it somewhere else.
+  design: |
+    (i) CARRY THE EVIDENCE INTO THE FAILURE, CHANGING NO DECISION. The verdict logic is correct and
+    is not touched: the same inputs produce the same `contained: false`, the same throw, and the
+    same fail-closed outcome. What changes is only WHAT IS RECORDED alongside it, so the
+    `blocked_containment` row can name which of the three states occurred.
+    (ii) THE THREE STATES MUST BE DISTINGUISHABLE IN THE RECORD, NOT MERELY PRESENT IN A BLOB. A row
+    that carried the raw evidence object would technically satisfy (i) while leaving every future
+    reader to re-derive the classification — the `executed_stale` mistake in another costume. The
+    record must name the state: no-denial-observed, write-never-attempted, or probe-never-ran.
+    (iii) `insideWriteCreated: false` IS THE ONE THAT MATTERS MOST AND IS CURRENTLY INVISIBLE. It
+    means the probe mechanism itself did not run — the sandbox verdict is not merely unproven, the
+    instrument is dead. Today that is reported identically to a healthy probe that saw no denial,
+    which is precisely the credential-failure collapse W1-T237 already had to fix once for a
+    different field. This task is that fix for the remaining two.
+    (iv) Q3 — WHAT MUST NOT CHANGE, EACH AS A REFUSAL. THE VERDICT STAYS FAIL-CLOSED: an unproven
+    probe still refuses the run, and no state named by this task downgrades to a warning. STANDING
+    RULE 11's proven-per-run requirement stays exactly as written. AND NO RETRY IS PROPOSED HERE —
+    but because "retry until it passes" is the obvious wrong fix, the constraint is recorded now
+    rather than left to be inferred: A RETRY THAT RE-PROBES IS ACCEPTABLE ONLY IF A SECOND UNPROVEN
+    STILL REFUSES. A retry loop that continues until the probe happens to pass would convert a
+    fail-closed guard into a fail-open one with extra steps, and would be refused.
+    (v) THE MEASUREMENT THIS UNBLOCKS IS THE BRIEF'S Q1, AND IT IS EXPLICITLY NOT IN SCOPE HERE.
+    Once the row names the state, the rate/clustering questions — by hour, by host, by concurrent
+    lane count against `plan/policy.yaml`'s ~4-worker memory note — become answerable by anyone with
+    ledger access. They are not answerable now, from any host, and this task does not pretend to
+    answer them.
+    (vi) THE FALSIFIER RUNS IN THREE DIRECTIONS, ONE PER STATE. Evidence with a denial seen and the
+    inside write landed must record a different state from evidence with no denial seen, which must
+    record a different state again from evidence whose inside write never landed. A change that
+    recorded one string for all three would pass a single-direction test and would be the defect
+    restated.
+  acceptance:
+    - claim: "a failure where no OS-denial was observed records a state distinct from the other two"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "a failure where the probe never ran at all is named as such rather than as unproven"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the recorded state is derived rather than leaving a reader to re-classify raw evidence"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the verdict still refuses the run in every one of those states"
+      proof: "unit test: test/containment.test.ts"
+  note: |
+    risk: high IS SET UP FRONT, AND BOTH READINGS ARE RECORDED. RULE 19's SPAN is the band's cause:
+    `files:` crosses two stems (`containment` and its suite). THE BLAST RADIUS is also real: this
+    touches the preflight that gates every dispatch, and a mistake there stops the fleet. It is
+    mitigated by (i) — no decision changes, only the record — but the band is not argued down.
+
+    `src/lib/ledger.ts` AND `src/run-task.ts` ARE DELIBERATELY NOT DECLARED. The evidence has to
+    reach the error object before anything downstream can record it, and that is entirely inside
+    `containment.ts`. Whether the verdict row then needs a new field is a SEPARATE question that
+    should be answered against a row that actually carries the state — declaring `run-task.ts` now
+    would pay W1-T471's serialisation cost for a file this task need not touch.
+
+    WHAT THIS SHARD DOES NOT ESTABLISH, LISTED SO IT IS NOT MISREAD AS SETTLED: the failure RATE,
+    whether failures cluster by hour or host or concurrency, and whether any specific task failed and
+    later passed. The brief cites 41 rows against a control of 154 and a W1-T1263 pair at ~18:5xZ;
+    NONE of that was re-derivable here and none of it is repeated as though it were. The access that
+    would settle it is a state root whose `ledgerRotationEntries` returns a non-empty set — every
+    reachable root on this host returns zero.
+
+    PROOF NOTES: all four proofs are the PURE-PATH `unit test:` form naming `test/containment.test.ts`,
+    which this shard's own `files:` declares and which exists on origin/main, so they execute rather
+    than forward-referencing.
