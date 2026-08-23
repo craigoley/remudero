@@ -1,0 +1,173 @@
+- id: W1-T1252
+  title: "THE WIPE-TEST HARNESS LEDGERS PAIRS IT NEVER MEASURED, AND CANNOT REACH THE AGGREGATE ITS OWN DESIGN CALLS SIGNAL — every sandbox subject is already merged, so both arms refuse at zero cost and the pair is written anyway; the one `wipetest.pair` row in the ledger is that null pair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 in a scratch worktree proved equal to `origin/main` at 2d544dd4 before any
+    reading. THE SUITE WAS NOT RUN. Every zero carries a control qualified for its own surface.
+
+    (1) THE HARNESS HAS NO SUBJECTS LEFT, AND THIS IS STRUCTURAL RATHER THAN A CONFIGURATION SLIP.
+    `remudero-sandbox`'s `plan/tasks.yaml` declares exactly three tasks — SBX-T1, SBX-T2, SBX-T3 —
+    and all three are merged: PRs #6, #7 and #8, merged 2026-07-15, on head branches
+    `run-SBX-T1-1784130439331`, `run-SBX-T2-1784130552643` and `run-SBX-T3-1784130683365`, which is
+    the shape `findMergedByHeadBranch` credits. The sandbox has no open PRs at all (control: the
+    same query against `state=all` returns eight). So every subject the harness can be pointed at
+    reads merged.
+
+    (2) AND `runTask` REFUSES A MERGED TASK AT ZERO COST, BY DESIGN. `if (isMerged(task))` returns
+    `{ merged: false, costUsd: 0, verdict: "task_already_merged" }` (src/run-task.ts:7483) after
+    ledgering `dispatch.refused_already_merged` — W1-T319's guard, which its own comment describes
+    as "zero cost beyond the map lookup". `--rerun` is the ledgered escape hatch (`opts.rerun`,
+    :7262/:7475), and `run-task`'s CLI wires it: `unknownArgError("run-task", …, ["--allow-stale",
+    "--rerun"])` at :25985, `rerun: rest.includes("--rerun")` at :25992.
+
+    (3) `wipe-test` CANNOT PASS IT. `wipeTestCommand` validates its tail as
+    `unknownArgError("wipe-test", rest.slice(1), ["--repo"], ["--allow-non-sandbox"])` —
+    `--rerun` is not in either list, so the CLI rejects it with usage and exit 2. Both arms are
+    dispatched with no rerun flag at all: `runTaskFn(taskId, { planPath, config, skipGitSync: true })`
+    and the same plus `maskLearnings: true`.
+
+    (4) SO THE HARNESS PRODUCES, AND RECORDS, A NON-MEASUREMENT. MEASURED by running it:
+    `rmd wipe-test SBX-T1 --repo remudero-sandbox` wrote exactly one `wipetest.pair` line at
+    2026-08-23T11:56:42.199Z reading `verdict_a: "task_already_merged"`,
+    `verdict_b: "task_already_merged"`, `verdict_changed: false`, `turns_delta: 0`,
+    `cost_delta: 0`, `strikes_delta: 0`, `proof_exec_pass_a: 0`, `proof_exec_pass_b: 0`. Neither
+    arm ran a worker. The pair is a record of two refusals.
+
+    (5) AND THAT ROW IS THE ENTIRE CORPUS. `wipetest.*` rows in the whole ledger: ONE — the row in
+    (4). `aggregateWipeTestPairs` read over the ledger today therefore returns n=1, and its single
+    data point is the null pair. The design's own words, twice in `src/lib/wipe-test.ts`'s header:
+    "a single pair is an anecdote. Only the AGGREGATE over many seeded pairs … is treated as
+    signal". The instrument cannot reach its own stated threshold, and the one number it has is
+    noise it manufactured.
+
+    (6) Q1 — THE PASSTHROUGH IS MECHANICALLY TRIVIAL AND IS NOT SUFFICIENT. `runTask` already
+    accepts `rerun`, so the change is one entry in the accepted-flag list plus one field on each
+    dispatch. IT MUST GO TO BOTH ARMS OR NEITHER: with it on arm A alone, arm A does real work and
+    arm B refuses at zero cost, and the pair then reads as a large negative turns/cost delta —
+    "masking learnings made the run free". A one-armed passthrough does not fail to measure; it
+    FABRICATES A RESULT, which is strictly worse than the symmetric null this shard is filed about.
+
+    (7) AND THE ARMS ARE NOT ISOLATED FROM EACH OTHER, WHICH IS THE PART WORTH GUARDING. The
+    clone-or-fetch-and-reset happens ONCE, before arm A; nothing resets between the arms. Arm B
+    therefore runs against whatever arm A left behind in the target repo. In the sandbox a real
+    dispatch pushes a branch and opens a PR, so a rerun pair is confounded by construction — not by
+    the sandbox being touched, which is exactly what the sandbox is for (`WIPE_TEST_SANDBOX_DEFAULT`,
+    with `--allow-non-sandbox` typing the exception), but by arm B's world differing from arm A's.
+
+    (8) Q3 — REPEATED RUNS OF ONE TASK CANNOT ANSWER THE QUESTION. Learnings injection is
+    TASK-MATCHED: `loadLayeredLearningsForTaskFiles` selects by the task's own files, so one task
+    exercises one slice of the corpus and repeating it measures the variance of that slice, not
+    whether memory helps. Rationale (7) adds that repeats are not independent either, since each
+    starts from the previous pair's leavings. The design already says "seeded" pairs, twice. A
+    generator of distinct disposable sandbox subjects is therefore the thing that unblocks the
+    aggregate; searching `src/` for one, `generateSandboxTask` and `seedSandbox` return zero files
+    each (control: the same scan for `sandbox` returns `src/lib/wipe-test.ts`, so the search
+    reaches). THAT GENERATOR IS NOT BUILT HERE and is named for the operator to mint.
+
+    (9) HOW MANY PAIRS IS NOT ANSWERED, DELIBERATELY. The design says "many" and names no number;
+    `aggregateWipeTestPairs` is well-defined at any n and returns a non-throwing empty aggregate at
+    zero. Choosing N needs an effect size nobody has measured, and this shard does not invent one.
+  design: |
+    ONE CONCERN: the harness must never record a pair it did not measure. Not the passthrough, not
+    the generator, not the aggregate's arithmetic.
+
+    (i) A PRE-FLIGHT REFUSAL, BEFORE THE FIRST ARM SPAWNS. When the subject is one the dispatch
+    guard will refuse — the projection reports it merged and no override was typed — `wipe-test`
+    refuses up front, names that reason, and exits non-zero. No arm is dispatched and no
+    `wipetest.pair` line is written. This is cheap and specific: it is the case rationale (1) shows
+    is now the ONLY case in the sandbox.
+
+    (ii) AND A LEDGER-TIME BACKSTOP, BECAUSE (i) CANNOT SEE EVERY CAUSE. A pair whose two arms both
+    report zero turns AND zero cost is not a measurement, whatever produced it —
+    `blocked_transient`, a linter refusal, a spawn that never happened. `ledgerWipeTestPair`
+    refuses to write that pair. This is the `an empty scan is not a clean result` law
+    (`plan-state-claims`' own words) applied to the one instrument in this repo built to answer
+    whether memory helps: an aggregate that averages in fabricated zeroes is worse than an
+    aggregate with fewer points.
+
+    (iii) BOTH, NOT EITHER — THEY ANSWER DIFFERENT QUESTIONS. The pre-flight alone leaves every
+    other zero-work refusal recordable. The backstop alone spends two dispatches to discover what
+    the projection already knew, and (in the merged case) writes nothing after paying for both.
+    A criterion pins each.
+
+    (iv) `--rerun` PASSTHROUGH IS DELIBERATELY NOT BUILT HERE. Rationale (6) establishes it is
+    necessary and not sufficient, and rationale (7) that it is confounded by the arms' shared
+    world. If it is added later it must reach BOTH arms; a one-armed passthrough manufactures a
+    positive result. Adding it in the same change as this refusal would also let a lane satisfy the
+    refusal by turning the guard off, which is the opposite of what this task is for.
+
+    (v) THE SANDBOX DEFAULT IS UNTOUCHED. `resolveWipeTestTarget`'s refusal and the
+    `--allow-non-sandbox` typed exception stay exactly as they are; a criterion pins that the new
+    refusal changes neither. This task never proposes pointing the harness at the primary repo.
+
+    (vi) NOT IN SCOPE, NAMED: the task generator rationale (8) says the aggregate actually needs;
+    the number of pairs rationale (9) declines to invent; `aggregateWipeTestPairs`' arithmetic,
+    which is correct and already returns a well-defined empty aggregate; and W1-T319's guard
+    itself, which is doing exactly what it was built to do.
+  acceptance:
+    - claim: "a subject the dispatch guard would refuse is refused before either arm spawns, naming that reason"
+      proof: "unit test: test/wipe-test.test.ts"
+    - claim: "a pair in which neither arm did any work writes no wipetest.pair line"
+      proof: "unit test: test/wipe-test.test.ts"
+    - claim: "a refused pair leaves the ledger byte-unchanged"
+      proof: "unit test: test/wipe-test.test.ts"
+    - claim: "a pair in which either arm did work is still ledgered exactly as before"
+      proof: "unit test: test/wipe-test.test.ts"
+    - claim: "the sandbox default and its typed non-sandbox exception are unchanged by the refusal"
+      proof: "unit test: test/wipe-test.test.ts"
+  files: [src/run-task.ts, src/lib/wipe-test.ts, test/wipe-test.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#wipe-test-harness-records-pairs-it-never-measured-2026-08-23"
+  plan_refs: ["W1-T86", "W1-T319", "W1-T19"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/wipe-test.test.ts`, which is declared in `files:` and already exists — it
+    carries 26 tests today — so each resolves against a real file rather than a forward reference.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND IS SET UP FRONT RATHER THAN AFTER A
+    REFUSAL. `files:` names three stems (`run-task`, `wipe-test`, and the suite), which the sizing
+    check reads as distinct concerns and refuses at `medium` — the same refusal W1-T1234 took at
+    filing time. Decomposing is wrong here: the pre-flight and the ledger-time backstop are one
+    rule ("never record a pair you did not measure") applied at the only two points that can see
+    it, and either alone leaves the other's cause recordable. The blast radius is narrow: one verb
+    that no automated lane invokes, one writer, and no change to any dispatch path.
+
+    THE REFUSAL MAKES THE HARNESS UNUSABLE TODAY, AND THAT IS THE POINT. With every sandbox subject
+    merged (rationale 1), the pre-flight will refuse every invocation until the generator of
+    rationale (8) exists or `--rerun` is wired. That is the correct outcome: an instrument with no
+    subjects should say so, not emit zeroes. The alternative — leaving it writing null pairs — lets
+    `aggregateWipeTestPairs` report a growing `pairs` count made entirely of refusals, which is the
+    exact shape that makes a number look like evidence.
+
+    ONE FIGURE THIS SHARD DECLINES TO INVENT. Rationale (9): the design says "many" and names no
+    threshold, and choosing N needs an effect size nobody has measured. A later reader wanting a
+    number should say what effect size they are powering for.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T1252` resolves on origin against a namespace of 282 such refs; a reservation
+    existing is not evidence a shard does. EIGHT ID SURFACES WERE SWEPT, each against a control
+    PRE-QUALIFIED ON THAT SURFACE — and the qualification was done first rather than assumed:
+    W1-T1231 reads 0 on the main-tree surfaces because its shard is not on main, so W1-T1234 and
+    W1-T1227 (both on main) were used there instead. Shard filenames 0 against W1-T1234 at 1; plan
+    `- id:` lines 0 against W1-T1234 at 1; the reservation 1, which is the pre-mint, against
+    W1-T1234's own reservation at 1; open PR titles 0 against W1-T1251 at 1 (live in an open
+    title); open PR head branches 0 against a `run-W1-T` head at 1; open PR file lists 0 with
+    coverage at seven captured of seven enumerated, against `plan/tasks.d/` paths at 4 across the
+    same heads; merged trailers 0 against `Remudero-Task: TRIAGE-fb-1785958099820-862db0` at 2,
+    with 48 trailer-carrying commits on main; and merged subject credit 0 against W1-T1234 at 1,
+    with `run-W1-T1252-*` at 0 against a namespace of 82 `run-*` branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, NOT A PRESENCE TEST. Four
+    markers were counted at every one of the seven open PR heads and at main: `allow-non-sandbox`
+    and `wipeTestCommand` in `src/run-task.ts`, and `ledgerWipeTestPair` and `rerun` in
+    `src/lib/wipe-test.ts`. Main reads 3 / 3 / 2 / 0 and EVERY head reads exactly 3 / 3 / 2 / 0 —
+    no head moves any marker. The `rerun` count of 0 in `wipe-test.ts` is the fact rationale (3)
+    rests on, identically absent everywhere, and the three non-zero markers are the control that
+    the reader worked.
