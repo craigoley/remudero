@@ -574,6 +574,7 @@ import {
   checkCostGovernor,
   checkMemoryGovernor,
   checkQueueGovernor,
+  cancelledRequiredCheckNames,
   checksStateFromRollup,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
@@ -597,6 +598,7 @@ import {
   toQuestionEntry,
   type ActionableGateFailure,
   type ArmedStalledPr,
+  type CancelledRequiredCheck,
   type CiFailure,
   type ClarificationQuestion,
   type CostGovernorResult,
@@ -18380,6 +18382,28 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
   });
 }
 
+/**
+ * W1-T1223 (design i) — the real gateway's producer for {@link OpenPrView.cancelledRequiredChecks},
+ * mirroring how {@link fetchCiFailures} is the real gateway's producer for `ciFailures`: both name
+ * their required checks off the SAME `cancelledRequiredCheckNames`/`REQUIRED_CHECK_FAIL` predicates
+ * lib/sweep.ts owns, so this producer and `checksStateFromRollup`'s red verdict can never drift into
+ * disagreeing about which check is cancelled. `jobId` is parsed from the SAME `detailsUrl` shape
+ * `fetchCiFailures` already reads (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined`
+ * when it cannot be read, so `requeueCheck`'s real wiring degrades to a named no-op rather than
+ * guessing a re-queue target.
+ */
+export function cancelledRequiredChecks(
+  rollup: RollupCheck[] | undefined,
+  requiredContexts: string[] | undefined,
+): CancelledRequiredCheck[] {
+  const names = new Set(cancelledRequiredCheckNames(rollup, requiredContexts));
+  if (names.size === 0) return [];
+  const deduped = dedupeRollupByLatestAttempt(rollup ?? []);
+  return deduped
+    .filter((c) => names.has(c.name ?? c.context ?? "unknown"))
+    .map((c) => ({ name: c.name ?? c.context ?? "unknown", jobId: c.detailsUrl?.match(/\/job\/(\d+)/)?.[1] }));
+}
+
 /** The `Remudero-Task: <id>` trailer in a PR body, if present (anchored line). */
 function taskIdFromBody(body: string): string | undefined {
   const m = body.match(/^Remudero-Task:\s*(\S+)\s*$/m);
@@ -18813,6 +18837,10 @@ export function buildOpenPrViews(
       // W1-T100: the ci-log fix mode's input — only worth fetching when checks
       // are actually red (a PR gate that already needs blocked_ci's rung).
       ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, pr.statusCheckRollup) : undefined,
+      // W1-T1223 — the "absence of a verdict" observable, populated alongside `ciFailures`
+      // above off the SAME rollup read (no extra request); see `cancelledRequiredChecks`'s own
+      // doc.
+      cancelledRequiredChecks: checksState === "red" ? cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts) : undefined,
       // W1-T176: only meaningful in the zero-runs shape post-review routes on;
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.
@@ -19426,6 +19454,8 @@ export function buildSweepEffects(
   | "updateBranch"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
+  | "requeueCheck"
+  | "escalateCancelledCheck"
 > {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
@@ -19621,6 +19651,61 @@ export function buildSweepEffects(
       } catch (e) {
         log("sweep.close.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
       }
+    },
+
+    // W1-T1223 (design iv) — THE JOB, NEVER THE RUN: `actions/jobs/{job_id}/rerun`, never
+    // `actions/runs/{run_id}/rerun-failed-jobs` — a whole-run re-run would re-spend an
+    // already-green sibling job sharing this workflow run (`ci` and `coverage-ratchet` share one
+    // here, the #2434/#2444 shape this task fixes). `ghRunImpl` is the SAME injection seam
+    // `close` above already uses (W1-T921) — no `gh` call this closure makes is unobservable
+    // offline. `check.jobId` absent (the rollup's `detailsUrl` carried none) degrades to a NAMED
+    // no-op — never a guessed target.
+    requeueCheck: (pr, check) => {
+      if (!check.jobId) {
+        log("sweep.check_requeue.no_job_id", { pr_number: pr.prNumber, check_name: check.name });
+        return;
+      }
+      try {
+        ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${check.jobId}/rerun`]);
+        log("sweep.check_requeue.dispatched", { pr_number: pr.prNumber, check_name: check.name, job_id: check.jobId });
+      } catch (e) {
+        log("sweep.check_requeue.error", { pr_number: pr.prNumber, check_name: check.name, error: String((e as Error)?.message ?? e) });
+      }
+    },
+
+    // W1-T1223 (design iii) — a SECOND cancellation of the SAME required check on the SAME head
+    // sha names the check and both cancellations to a human. `tryEscalate` (not the throwing
+    // `escalate`), because this runs inside the sweep's own per-PR loop alongside every other
+    // effect (W1-T254's throw containment) — a delivery failure here degrades to an
+    // `escalation.failed` ledger row rather than aborting the rest of the pass.
+    // `findDuplicateEscalation` (inside `escalate()`/`tryEscalate()`) already dedupes a repeated
+    // call for the SAME (taskId, headSha, cause) into one issue, so this is safe to call every
+    // pass the same pair keeps observing a re-cancellation, never opening a sibling issue.
+    escalateCancelledCheck: (pr, check, reason) => {
+      tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: escalationTaskIdFor(pr),
+          runId,
+          headSha: pr.headSha,
+          cause: "ci",
+          summary: `required check "${check.name}" cancelled twice on the same head — ${pr.prUrl}`,
+          detail:
+            `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
+            `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
+            `A concurrency group cancelling it, a capacity fault, or a workflow-level cancel are all beyond ` +
+            `what a second re-queue could fix; nothing in this PR's own diff caused this.`,
+          options: [
+            {
+              label: "investigate",
+              detail: "look at the workflow run's own cancellation cause (concurrency group, runner capacity, a manual cancel) directly on GitHub Actions.",
+            },
+            { label: "manual-rerun", detail: "re-run the job by hand once the underlying CI-side cause is understood." },
+          ],
+          recommendation: "investigate",
+        },
+        { issues, ledgerPath, runId },
+      );
     },
 
     // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
