@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -449,4 +449,41 @@ test("W1-T1263: a cwd git cannot list refuses through the CLI, naming the failur
   // which is a different defect and a different message.
   assert.doesNotMatch(r.stderr, /scanned ZERO files/);
   cleanup(outside);
+});
+
+// ── scanCitations' READ-FAILURE arms, driven directly ────────────────────────────────────────
+//
+// `git ls-files` lists the INDEX; the scan reads the WORKING TREE. The two can disagree, and the
+// catch around readFileSync splits on that: ENOENT means "tracked but absent on disk" and is
+// skipped, anything else is rethrown rather than silently swallowed. Both were confirmed
+// reachable before these were written.
+
+test("W1-T1263: a path tracked in the index but absent on disk is skipped, not counted and not fatal", () => {
+  const root = mkFixtureRepo();
+  writeFileSync(join(root, "present.md"), "nothing citable here\n");
+  writeFileSync(join(root, "vanishes.md"), "nothing citable here either\n");
+  gitAdd(root);
+  rmSync(join(root, "vanishes.md"));
+
+  const { occurrences, filesScanned } = mod.scanCitations(["."], root, undefined);
+  // The deleted path is still in `git ls-files`, so the scan HAS to reach it and skip it.
+  assert.equal(filesScanned, 1, "only the file that still exists on disk is read");
+  assert.deepEqual(occurrences, []);
+  cleanup(root);
+});
+
+test("W1-T1263: a read failure that is NOT a missing file is rethrown rather than skipped", () => {
+  const root = mkFixtureRepo();
+  writeFileSync(join(root, "becomes-a-dir.md"), "placeholder\n");
+  gitAdd(root);
+  // Same tracked path, now a DIRECTORY on disk: readFileSync raises EISDIR, not ENOENT.
+  rmSync(join(root, "becomes-a-dir.md"));
+  mkdirSync(join(root, "becomes-a-dir.md"));
+
+  assert.throws(
+    () => mod.scanCitations(["."], root, undefined),
+    (e: NodeJS.ErrnoException) => e.code !== "ENOENT",
+    "a non-ENOENT read failure must surface, never be swallowed as a skip",
+  );
+  cleanup(root);
 });
