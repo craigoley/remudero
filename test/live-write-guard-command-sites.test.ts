@@ -1136,7 +1136,14 @@ test("arm merge: both immediate call sites drop the local branch delete", () => 
     const lines = readFileSync(logPath, "utf8").trim().split("\n");
     assert.equal(lines.length, 2, `expected exactly two gh invocations, got ${JSON.stringify(lines)}`);
     for (const line of lines) {
-      assert.ok(line.includes("pr merge") && line.includes("--squash"), `not a squash merge: ${line}`);
+      // W1-T1255: `mergeDirect` is now the REST endpoint, so a squash merge is expressed as
+      // `--method PUT .../merge -f merge_method=squash` rather than `pr merge --squash`. The
+      // INVARIANT this test protects is unchanged — both immediate-merge sites squash, and neither
+      // asks gh to delete the local branch (W1-T1050).
+      const isSquashMerge =
+        (line.includes("pr merge") && line.includes("--squash")) ||
+        (line.includes("--method PUT") && line.includes("/merge") && line.includes("merge_method=squash"));
+      assert.ok(isSquashMerge, `not a squash merge: ${line}`);
       assert.ok(
         !line.includes("--delete-branch"),
         `an immediate-merge call site still asks gh to delete locally: ${line}`,

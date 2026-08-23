@@ -1744,10 +1744,7 @@ export function realArmDeps(
     mergeDirect: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
       // W1-T1050: NO `--delete-branch` — see the doc on `ArmDeps.mergeDirect` above for why.
-      execFileSync("gh", ["pr", "merge", prUrl, "--squash"], {
-        encoding: "utf8",
-        stdio: "pipe",
-      });
+      mergeDirectViaRest(prUrl);
     },
     // `--disable-auto` WITHDRAWS an arm rather than creating one, but it is still a live
     // mutation of a real PR, and under the guard there is never an arm to withdraw — the
@@ -1875,7 +1872,7 @@ export function armAutoMergeDetailed(
  * unconditionally and only a caller that deliberately narrows the deps object (as those tests do,
  * to prove the narrower shape still arms) sees the pre-W1-T1000002 behaviour.
  */
-function attemptArm(
+export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines">>,
 ): ArmAttemptResult {
@@ -1931,6 +1928,54 @@ function attemptArm(
         return { outcome: "direct-merge-failed" };
       }
     }
+    // W1-T1255: THE QUOTA FALLBACK. The `/clean status/i` branch above is untouched — it is
+    // GitHub's own "this PR is already mergeable, just merge it" refusal, and it stays the
+    // certification this fleet relies on. What that branch cannot reach is the case this task
+    // exists for: when the GraphQL budget is spent, `armAuto` fails with a QUOTA message, so
+    // `armFailureAction` returns `"transient"`, the branch above never fires, and the fallback is
+    // never attempted at all. `armFailureIsRateLimited` (W1-T1235, already live and already
+    // consulted below) is the ONLY trigger for this second attempt — never `armFailureAction`'s
+    // wider `"transient"`, which also matches an ordinary network blip.
+    //
+    // THE PRECONDITION IS NOT WIDENED, IT IS RELOCATED TO THE SAME AUTHORITY. `mergeDirect` is now
+    // the REST endpoint, and GitHub refuses it (405) on a pull request it does not consider
+    // mergeable — so a PR that is not already green is REFUSED BY GITHUB here exactly as it would
+    // have been refused by the arm. The fleet still evaluates no required context of its own.
+    //
+    // AND IT IS A FALLBACK, NEVER AN ARM REPLACEMENT: a REST merge cannot hold intent for checks
+    // that have not finished, so it can only ever land a PR that is ALREADY green. Arming is still
+    // attempted first, every time; this runs only after that attempt has already failed.
+    const quota = armFailureIsRateLimited(msg) ? ghRateLimitRefusalUnknown("gh pr merge --auto") : undefined;
+    if (quota) {
+      // W1-T1235's OBSERVABILITY IS NOT LOST WHEN W1-T1255's FALLBACK RESCUES THE MERGE. The arm
+      // WAS refused on quota — that is true whatever happens next — so the exhausted budget is
+      // said HERE, before the fallback, and `quota` rides EVERY result this branch can return.
+      // `armAndLogOutcome` writes its `automerge.rate_limit_refused` row off exactly that field
+      // (see `logArmAttribution`), so the distinct, greppable row and the bucket fields survive a
+      // successful fallback. Without this, a rate-limited arm that merged over REST would leave no
+      // trace that the budget was spent at all — silently undoing the one thing W1-T1235 shipped.
+      deps.say(
+        `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
+          `${quota.bucket}, resets: ${quota.resetsAt}) — ${msg} — ${prUrl}`,
+      );
+      try {
+        deps.mergeDirect(prUrl);
+        deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
+        return { outcome: "direct-merged", error: msg, rateLimit: quota };
+      } catch (e3) {
+        const msg3 = String((e3 as { stderr?: unknown })?.stderr ?? (e3 as Error)?.message ?? e3);
+        // W1-T1050's discipline, applied to this path too: a merge that LANDED must never be
+        // reported as a failure just because something after it threw.
+        if (deps.isMerged?.(prUrl)) {
+          deps.say(`automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`);
+          return { outcome: "direct-merged", error: msg, rateLimit: quota };
+        }
+        // GitHub refused the REST merge — the PR was not mergeable, which is the correct answer
+        // for a PR that is not already green. NOTHING MERGED.
+        deps.say(`automerge.rate_limited_rest_merge_refused (W1-T1255): ${msg3} — ${prUrl}`);
+      }
+      return { outcome: "arm-error-ignored", error: msg, rateLimit: quota };
+    }
     // W1-T1079: this used to be pure prose on `say` (stdout only) — the ledger row itself
     // carried nothing, which is the defect this task closes. `msg` is now returned alongside
     // the outcome so every caller that logs it can put it on the row (see `armAndLogOutcome`/
@@ -1949,14 +1994,11 @@ function attemptArm(
     // a quota refusal. Both fields are honestly `unknown` (never `"graphql"`, however true
     // structurally) — see `ghRateLimitRefusalUnknown`'s own doc for why guessing here would
     // undo the "read the response's own field" discipline the general reader observes.
-    const rateLimit = armFailureIsRateLimited(msg) ? ghRateLimitRefusalUnknown("gh pr merge --auto") : undefined;
-    deps.say(
-      rateLimit
-        ? `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
-            `${rateLimit.bucket}, resets: ${rateLimit.resetsAt}) — ${msg} — ${prUrl}`
-        : `automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`,
-    );
-    return { outcome: "arm-error-ignored", error: msg, ...(rateLimit ? { rateLimit } : {}) };
+    // W1-T1255: the rate-limited branch above returns on every path it can take, so a failure
+    // reaching HERE is by construction NOT rate-limit-shaped — the ternary this line used to carry
+    // had exactly one reachable arm left, and a condition that can only be false is not a guard.
+    deps.say(`automerge.arm_error_ignored (W1-T1079, ${armFailureAction(msg)}): ${msg} — ${prUrl}`);
+    return { outcome: "arm-error-ignored", error: msg };
   }
 }
 
@@ -5080,6 +5122,73 @@ export function decideFixRebase(facts: FixRebaseFacts): FixRebaseDecision {
  */
 export function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number): string[] {
   return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`];
+}
+
+/**
+ * W1-T1255: the argv for GitHub's own MERGE endpoint — the REST/core-budget twin of
+ * `gh pr merge --squash`, which is GraphQL. PURE, so the argv is a unit fixture rather than an
+ * inline string, exactly like {@link ghUpdateBranchArgv} (W1-T1095 capability 3) whose shape this
+ * copies deliberately: same `gh api --method PUT` mechanism, different endpoint.
+ *
+ * WHY THIS EXISTS AT ALL. `ArmDeps.mergeDirect` is the arm's FALLBACK, and until this task it ran
+ * `gh pr merge --squash` — GraphQL, the very budget the arm had just been refused on. An exhausted
+ * GraphQL bucket therefore took out the arm AND the thing it falls back to, for one reason, while
+ * core sat untouched. This is a TRANSPORT swap on that existing dep, NOT a second merge path: the
+ * call site, its guard and every gate above it are unchanged.
+ *
+ * `merge_method=squash` MIRRORS the `--squash` it replaces — the merge SHAPE does not change, only
+ * the wire it travels on. No `--delete-branch` equivalent is sent, matching `mergeDirect`'s own
+ * W1-T1050 note for why the branch is left alone.
+ *
+ * THE ENDPOINT IS ITS OWN MERGEABILITY GATE. GitHub refuses this call (405) on a pull request it
+ * does not consider mergeable, so the fleet still never evaluates required contexts itself — the
+ * certification stays exactly where {@link attemptArm}'s `/clean status/i` branch already put it,
+ * with GitHub.
+ */
+export function ghMergePrArgv(owner: string, repo: string, prNumber: number): string[] {
+  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/merge`, "-f", "merge_method=squash"];
+}
+
+/**
+ * W1-T1255: resolve the three REST path components out of a PR URL, or `undefined` when the URL is
+ * not one this parser understands. PURE and exported so the refusal path is reachable by a unit
+ * fixture — the alternative is an inline guard inside `realArmDeps().mergeDirect`, which no test
+ * can reach without first defeating the live-write guard that (correctly) fires above it.
+ *
+ * `undefined` is the caller's cue to THROW, never to skip: `mergeDirect`'s contract is that it
+ * either merges or raises, because a merge that did not happen must never be reported as one that
+ * did (the same discipline W1-T1050 established for its failure path).
+ */
+/**
+ * W1-T1255: the direct-merge WRITE itself — `gh api --method PUT .../merge`, NOT
+ * `gh pr merge --squash`. The old form was GraphQL, so the arm's fallback shared a budget with the
+ * arm it exists to rescue: one exhausted bucket took out both at once while core sat untouched.
+ * Same call site and same guard above it; only the transport moves.
+ *
+ * `exec` is injected LAST with a real default so no positional caller shifts, and so the argv and
+ * the refusal are unit-testable without a live pull request or a `gh` binary. A URL this parser
+ * cannot read THROWS rather than silently doing nothing — `mergeDirect`'s contract is that it
+ * either merges or raises, because a merge that did not happen must never be reported as one that
+ * did (W1-T1050's discipline on its failure path).
+ */
+export function mergeDirectViaRest(
+  prUrl: string,
+  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe" }) => unknown = execFileSync,
+): void {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) {
+    throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
+  }
+  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8", stdio: "pipe" });
+}
+
+export function mergeTargetFromPrUrl(prUrl: string): { owner: string; repo: string; prNumber: number } | undefined {
+  // ONE match, not `ownerRepoFromPrUrl` + `prNumberFromRef` composed: that pair reads as a belt-
+  // and-braces guard and is not one. `ownerRepoFromPrUrl`'s own regex already requires `/pull/\d+`,
+  // so a separate "and the number parsed" clause can never be false when the owner/repo half
+  // succeeded — dead code that a falsifier proved unreachable (mutating it reddened nothing).
+  const m = prUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  return m ? { owner: m[1], repo: m[2], prNumber: Number(m[3]) } : undefined;
 }
 
 /**
