@@ -127,6 +127,22 @@
     `readFailed()` already surfaces it — rationale (5). Eleven measured mechanisms have merged green
     with no reader, `cloudflareAccessIdentityProvider` the most recent at 0 src calls against controls
     of 2, and a "pacer engaged" row nobody reads would be the twelfth.
+
+    (viii) CORRECT THE DOC THAT MANUFACTURED TWO WRONG MECHANISMS — `gatePrewarmOnClients`' TRANSPORT
+    CLAIM IS STALE AND MUST NAME THE REST DELTA. `src/lib/serve.ts`'s `gatePrewarmOnClients` doc still
+    states, in the PRESENT tense, that `warm()` resolves to a `gh pr list --state all --limit 1000` —
+    a GraphQL call. THAT HAS NOT BEEN TRUE SINCE THE BOARD FETCH MOVED TO REST. `warm()` calls
+    `index()` and `issueIndex()` in status.ts; `index()`'s default `fetchAll` is `fetchBoardPrsRest`
+    (`src/lib/open-prs-rest.ts`) — a paginated REST delta that early-stops on the first already-known
+    closed row and whose steady state is TWO core-budget requests — and `issueIndex()`'s default is
+    the REST `labelledIssuesRestArgs` form. `src/lib/open-prs-rest.ts` already tells the SAME history
+    correctly in the PAST tense (its call "was still `gh pr list --state all --limit 1000 --json …` —
+    GraphQL"), so this is a tense-and-attribution fix, NOT new measurement and NOT a transport change:
+    keep the 2026-07-28 zero-viewer incident as history, then say what the warm path issues TODAY and
+    which budget it bills. THE DOC IS BEING QUOTED AS EVIDENCE RATHER THAN READ AS HISTORY and has now
+    produced a wrong mechanism TWICE — see the triage paragraph in the note. THE GATE ITSELF IS
+    CORRECT AND MUST NOT BE RE-BUILT OR RE-FILED: the refcount contract "zero clients -> no timer, and
+    `warm()` is never called at all" holds, and `buildServeServer` wires it.
   acceptance:
     - claim: "the serve construction receives the shared pacer rather than omitting it"
       proof: "unit test: W1-T999: the serve board gateway is constructed with the shared call pacer"
@@ -138,13 +154,51 @@
       proof: "unit test: W1-T999: the daemon sweep hook keeps its own pacer instance unchanged"
     - claim: "the mechanism already exists and the serve process bypasses it"
       proof: "grep: the mechanism already exists and the serve process bypasses it in plan/tasks.d/W1-T999-serve-board-poll-unpaced.yaml"
+    - claim: "the prewarm gate's doc names the REST board delta the warm path actually issues"
+      proof: "grep: fetchBoardPrsRest in src/lib/serve.ts"
   risk: high
-  origin: "oper#serve-board-poll-unpaced-2026-08-18"
-  plan_refs: ["W1-T468", "W1-T529", "W1-T415"]
+  origin: "feedback#fb-1785931542108-07f5d8"
+  plan_refs: ["W1-T468", "W1-T529", "W1-T415", "W1-T522", "W1-T523"]
   files: [src/run-task.ts, src/lib/serve.ts, test/serve-board-pacer-wiring.test.ts]
   status: queued
   attempts: 0
   note: |
+    REWIRED 2026-08-23 BY THE fb-1785931542108-07f5d8 TRIAGE, AND THE ORIGINAL ORIGIN IS PRESERVED
+    HERE RATHER THAN LOST: this shard was filed as `oper#serve-board-poll-unpaced-2026-08-18`; the
+    `origin:` field now names the feedback entry that rewired it, per the triage convention that every
+    rewired task carry its filing provenance. NOTHING ALREADY IN THIS SHARD WAS RETRACTED — design
+    (viii) and this paragraph are additive.
+
+    WHAT THE TRIAGE ADDED AND WHY IT IS ONLY A DOC CLAUSE. fb-1785931542108-07f5d8 asks for three
+    fixes to the console's board cost and TWO OF THE THREE ARE ALREADY IN THE TREE, verified at this
+    triage rather than assumed: (ii) "REST instead of `gh pr list`" is SHIPPED — `buildBatchedGithub`'s
+    default `fetchAll` (src/lib/status.ts) carries the comment "REST, NOT `gh pr list --state all
+    --json …`. That flag is implemented over GraphQL, and MEASURED on 2026-07-31 it cost 12 GraphQL
+    points and 2,888,862 bytes per call"; and (i) "incremental, only PRs merged since a high-water
+    mark" is SHIPPED as `fetchBoardPrsRest`'s DELTA — `sort=updated&direction=desc` is load-bearing,
+    the closed half stops at the first already-known row, `mode` is reported as full/delta, and the
+    documented steady state is TWO REST requests. Only (iii), the CADENCE, was still open, and it is
+    what this shard already owns via design (iii). So the residue of that entry is the STALE DOC in
+    design (viii) — the artifact that produced its wrong mechanism — and nothing else was filed.
+
+    THE ENTRY'S GRAPHQL CONSUMER IS OWNED ELSEWHERE, NOT HERE. The board gateway bills CORE, not
+    GraphQL, on both reads; the console's real GraphQL spend is `ghGateway`'s per-projection
+    `pr view`/`pr list` volume — 788 invocations for ONE `projectPlan` pass over the real plan — which
+    is W1-T523's subject, with W1-T522 owning the review-lifecycle reads. An implementer who reads
+    this shard as the GraphQL fix has the wrong shard: this one makes the CORE-budget board poll cheap
+    and its criteria say so.
+
+    CORROBORATING CADENCE MEASUREMENT CARRIED IN FROM THAT ENTRY (2026-08-05, `board_gateway.fetch_ok`
+    attributed by run_id prefix, streamed and deduped across ~665 rotations, NOT read from the live
+    file alone): SERVE 35,458 lifetime against DAEMON 7,921 and SWEEP 3; hourly over 02:00-11:00Z
+    SERVE 104/128/124/128/128/135/129/127/134/118 against DAEMON 8/4/2/2/4/7/5/5/4/6 — 96% serve-side
+    and continuous overnight, with `prCount` 959-963 per fetch. That is the same ~15s poll design (iii)
+    re-derives, measured on a DIFFERENT day from the incident in rationale (1), so the cadence cost is
+    chronic rather than a one-off. The entry also corrects two figures it inherited: the observed "30
+    seconds" is `ttlMs = 15_000` and `DEFAULT_BOARD_PREWARM_MS = 15_000` interacting (the ~28s is the
+    timer meeting the TTL check, not a 30s constant), and a "301 occurrences" count was a live-file-only
+    reading that unions to 28,874 across rotations.
+
     src/run-task.ts MUST BE DECLARED AND THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING. Both
     board-gateway constructions live there — `serveCommand`'s unpaced one and `buildSweepHook`'s paced
     one — and `createGhCallPacer` is invoked there and nowhere else in src/. Measured counts:

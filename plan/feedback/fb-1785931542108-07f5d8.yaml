@@ -1,56 +1,62 @@
 id: fb-1785931542108-07f5d8
 ts: 2026-08-05T12:05:42.108Z
-raw: "CORRECTS THE MECHANISM IN fb-1785898381737-50b031 — that entry's CONCLUSION
-  is right (the console drains the shared GraphQL budget the fleet needs) but its
-  STATED CAUSE is wrong, and its own falsifying check is what proves it. It
-  named board_gateway.issue_fetch_ok. That fetch is ALREADY REST — fetchAllIssues
-  calls labelledIssuesRestArgs, building `gh api repos/<slug>/issues?labels=needs-human
-  &state=all&per_page=100 --paginate --slurp` — so it bills NOTHING against GraphQL.
-  Its own source comment records the move: `gh issue list --label` routes label
-  filtering through GitHub's GraphQL search() connection and failed 100% of the time
-  (505 failures, zero successes), which is why it is REST today.
-  THE REAL CONSUMER IS THE PR FETCH, SAME SURFACE, DIFFERENT CALL. gatePrewarmOnClients'
-  own doc states warm() resolves to `gh pr list --state all --limit 1000` — a GraphQL
-  call — and the sibling call sites in status.ts use `pr list --state merged --json
-  number,url,state,headRefName --limit 1000`. Measured prCount per fetch: 959-963.
-  GraphQL bills by node, so this is the ~107 nodes/minute, not the issue fetch.
-  MEASURED 2026-08-05, board_gateway.fetch_ok attributed by run_id prefix, streamed and
-  deduped across all ~665 rotations: SERVE 35,458 lifetime, DAEMON 7,921, SWEEP 3.
-  Hourly for the ten hours 02:00-11:00Z: SERVE 104,128,124,128,128,135,129,127,134,118
-  against DAEMON 8,4,2,2,4,7,5,5,4,6. So 96% serve-side, continuous, overnight.
-  THE ENTRY'S FALSIFYING CHECK IS TRIPPED, VERBATIM: 'if the board fetch is already REST
-  and something else consumed the GraphQL budget, the cadence is not the cause and the
-  real consumer needs finding — check the sweep's PR queries first'. The sweep contributes
-  THREE fetches in the entire recorded history. A recon inheriting the original mechanism
-  would spend its run there and find nothing.
-  TWO MEASUREMENT CORRECTIONS. (1) '301 occurrences in the live ledger file alone' is the
-  live-file-only reading CLAUDE.md warns against; unioned across rotations it is 28,874.
-  (2) 'every 30 SECONDS' — the constants are ttlMs = 15_000 and DEFAULT_BOARD_PREWARM_MS
-  = 15_000; the ~28s the operator observed is the timer and the TTL check interacting. The
-  observation was right, the constant is not 30s.
-  THE ZERO-VIEWER BURN IS ALREADY FIXED AND MUST NOT BE RE-FILED. gatePrewarmOnClients
-  refcounts SSE subscribe/unsubscribe, contracts 'zero clients -> no timer, and warm() is
-  never called at all', and IS wired — buildServeServer calls it. Verified without opening
-  the console: lsof on the serve port showed exactly ONE established connection over the
-  tailnet, so a tab was genuinely open and the gate was behaving correctly. What remains is
-  the CONNECTED-viewer cost, which is the real defect.
-  WHAT TO ACTUALLY FIX, in leverage order. (i) INCREMENTAL, the big one: `--state merged`
-  data is IMMUTABLE, so re-reading all ~960 PRs every ~28s re-reads facts that cannot have
-  changed; fetching only PRs merged since a high-water mark cuts node count by roughly two
-  orders of magnitude at steady state. (ii) REST instead of `gh pr list` — CLAUDE.md already
-  prescribes the REST form for deriving the merged set, and the issue fetch already made this
-  exact move; GraphQL sits at 0 remaining while core sits near 4,800. (iii) CADENCE — 15s for
-  data that changes on the order of minutes; 60s is a straight 4x cut.
-  TRIAGE NOTE: this entry and fb-1785898381737-50b031 are ONE concern, not two. File a single
-  task. The original's compounding point stands and should be carried into it: an audit
-  measured 297 of 369 needs-human issues (80%) as machine-resolved and never retracted, so the
-  REST issue fetch is re-reading a set that is 80% dead, and W1-T345-T350 shrink that
-  denominator without touching cadence or protocol.
-  WHY A NEW ENTRY RATHER THAN AN EDIT: raw is byte-immutable here by convention and by
-  contract. Across all 45 feedback modification commits in this repo's history, only status
-  (72), proposal_pr (20) and summary (6) were ever changed; raw was touched ZERO times, which
-  matches FeedbackEntry.summary's own doc that 'the raw raw text above stays byte-identical'."
+raw: "CORRECTS THE MECHANISM IN fb-1785898381737-50b031 — that entry's
+  CONCLUSION is right (the console drains the shared GraphQL budget the fleet
+  needs) but its STATED CAUSE is wrong, and its own falsifying check is what
+  proves it. It named board_gateway.issue_fetch_ok. That fetch is ALREADY REST —
+  fetchAllIssues calls labelledIssuesRestArgs, building `gh api
+  repos/<slug>/issues?labels=needs-human &state=all&per_page=100 --paginate
+  --slurp` — so it bills NOTHING against GraphQL. Its own source comment records
+  the move: `gh issue list --label` routes label filtering through GitHub's
+  GraphQL search() connection and failed 100% of the time (505 failures, zero
+  successes), which is why it is REST today. THE REAL CONSUMER IS THE PR FETCH,
+  SAME SURFACE, DIFFERENT CALL. gatePrewarmOnClients' own doc states warm()
+  resolves to `gh pr list --state all --limit 1000` — a GraphQL call — and the
+  sibling call sites in status.ts use `pr list --state merged --json
+  number,url,state,headRefName --limit 1000`. Measured prCount per fetch:
+  959-963. GraphQL bills by node, so this is the ~107 nodes/minute, not the
+  issue fetch. MEASURED 2026-08-05, board_gateway.fetch_ok attributed by run_id
+  prefix, streamed and deduped across all ~665 rotations: SERVE 35,458 lifetime,
+  DAEMON 7,921, SWEEP 3. Hourly for the ten hours 02:00-11:00Z: SERVE
+  104,128,124,128,128,135,129,127,134,118 against DAEMON 8,4,2,2,4,7,5,5,4,6. So
+  96% serve-side, continuous, overnight. THE ENTRY'S FALSIFYING CHECK IS
+  TRIPPED, VERBATIM: 'if the board fetch is already REST and something else
+  consumed the GraphQL budget, the cadence is not the cause and the real
+  consumer needs finding — check the sweep's PR queries first'. The sweep
+  contributes THREE fetches in the entire recorded history. A recon inheriting
+  the original mechanism would spend its run there and find nothing. TWO
+  MEASUREMENT CORRECTIONS. (1) '301 occurrences in the live ledger file alone'
+  is the live-file-only reading CLAUDE.md warns against; unioned across
+  rotations it is 28,874. (2) 'every 30 SECONDS' — the constants are ttlMs =
+  15_000 and DEFAULT_BOARD_PREWARM_MS = 15_000; the ~28s the operator observed
+  is the timer and the TTL check interacting. The observation was right, the
+  constant is not 30s. THE ZERO-VIEWER BURN IS ALREADY FIXED AND MUST NOT BE
+  RE-FILED. gatePrewarmOnClients refcounts SSE subscribe/unsubscribe, contracts
+  'zero clients -> no timer, and warm() is never called at all', and IS wired —
+  buildServeServer calls it. Verified without opening the console: lsof on the
+  serve port showed exactly ONE established connection over the tailnet, so a
+  tab was genuinely open and the gate was behaving correctly. What remains is
+  the CONNECTED-viewer cost, which is the real defect. WHAT TO ACTUALLY FIX, in
+  leverage order. (i) INCREMENTAL, the big one: `--state merged` data is
+  IMMUTABLE, so re-reading all ~960 PRs every ~28s re-reads facts that cannot
+  have changed; fetching only PRs merged since a high-water mark cuts node count
+  by roughly two orders of magnitude at steady state. (ii) REST instead of `gh
+  pr list` — CLAUDE.md already prescribes the REST form for deriving the merged
+  set, and the issue fetch already made this exact move; GraphQL sits at 0
+  remaining while core sits near 4,800. (iii) CADENCE — 15s for data that
+  changes on the order of minutes; 60s is a straight 4x cut. TRIAGE NOTE: this
+  entry and fb-1785898381737-50b031 are ONE concern, not two. File a single
+  task. The original's compounding point stands and should be carried into it:
+  an audit measured 297 of 369 needs-human issues (80%) as machine-resolved and
+  never retracted, so the REST issue fetch is re-reading a set that is 80% dead,
+  and W1-T345-T350 shrink that denominator without touching cadence or protocol.
+  WHY A NEW ENTRY RATHER THAN AN EDIT: raw is byte-immutable here by convention
+  and by contract. Across all 45 feedback modification commits in this repo's
+  history, only status (72), proposal_pr (20) and summary (6) were ever changed;
+  raw was touched ZERO times, which matches FeedbackEntry.summary's own doc that
+  'the raw raw text above stays byte-identical'."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null
