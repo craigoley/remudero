@@ -1,0 +1,134 @@
+- id: W1-T1224
+  title: "`rmd check-proof` answers a zero-hit `grep:` proof with `hits: 0` and a static metacharacter note — it runs the pattern EXACTLY ONCE, so a phrase that wraps across a line in the named file and a phrase whose capitalisation differs both read identically to a legitimate forward reference, and the filer cannot tell 'not written yet' from 'can never match'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    READ OUT OF THE TREE 2026-08-23, and the feedback's own falsifier is what this answers.
+    fb-1785931037801-843083 said: "if check-proof already distinguishes these cases and the filer
+    only read the hit count, the fix is in how the result is reported to the caller, not in the
+    checker." IT DISTINGUISHES TWO OF THE FOUR, AND CANNOT DISTINGUISH THE OTHER TWO AT ALL.
+
+    (1) WHAT IS ALREADY SEPARATED. `execWhitelistedProof` (src/lib/review.ts) rethrows on grep
+    exit 2 — "could not even LOOK (a since-renamed/missing target, a permission/read error)",
+    W1-T219's own wording — so an ABSENT PATH surfaces as `verdict: exec_error` and
+    `CHECK_PROOF_EXIT.execError` (4), while a clean exit 1 returns `"fail"`. So "no such file" and
+    "the file was read and nothing matched" are genuinely two different answers today.
+
+    (2) WHAT IS NOT, AND WHY IT CANNOT BE. Past that split there is ONE spawn. `checkProofCommand`
+    (src/run-task.ts) prints `exit: 1`, a `hits:` line derived from counting non-blank stdout lines,
+    `verdict: fail`, and then ONE STATIC STRING — the same BRE-metacharacter note on every non-pass
+    grep, printed whether or not the pattern contains a metacharacter. A pattern whose text exists
+    in the file but WRAPS ACROSS A LINE, a pattern whose text exists with different capitalisation,
+    and a pattern whose text is genuinely absent because the work is not done yet produce
+    BYTE-IDENTICAL output. No second probe is ever run, so this is not a reporting omission alone:
+    the information does not exist in the process. The feedback's falsifier therefore resolves
+    AGAINST the pure-reporting reading, and the fix is a cause probe plus the report of it.
+
+    (3) THE TWO SILENT CLASSES ARE BOTH LIVE AND BOTH WERE HIT IN ONE FILING (#1336). grep is
+    line-based; YAML folding breaks a long design phrase across two lines, so a proof quoting that
+    phrase verbatim matches nothing forever. And grep is case-sensitive, so a lowercase pattern
+    against a capitalised shard phrase reads zero the same way. Both were repaired by hand, by a
+    filer who happened to suspect the seam.
+
+    (4) THE SEAM TRAP IS ALREADY RECORDED — FOR THE OTHER DIALECT ONLY. CLAUDE.md's "Require a
+    verbatim `grep -rlF` hit" bullet records the concatenation seam for TEST TITLES assembled from
+    `" + "`-joined literals. Nothing there or anywhere else says the same line-boundary rule
+    governs a `grep:` pattern quoted out of prose, and the prose case is the one that wraps for a
+    reason the author never typed (a YAML folder, a wrapped markdown paragraph).
+
+    (5) ZERO IS OVERLOADED, WHICH IS WHY NO EXISTING INSTRUMENT COVERS IT.
+    `proofGrepSafetyViolations` (src/lib/task-linter.ts, W1-T287) is purely LEXICAL over the pattern
+    text — it refuses `[ * ^ $` and never opens the file. `proofNameResolutionViolations` (W1-T488)
+    resolves `unit test:` TITLES through the reviewer's resolver and is warn-only precisely because
+    "zero is legitimately a forward reference to an unwritten test". `proofResolvabilityViolations`
+    checks SHAPE. Nothing in the repo has ever read the file a `grep:` proof names and asked why the
+    pattern missed. W1-T1053's queue audit splits causes at the QUEUE level and its cause list is
+    name-filtered-zero-match, grep-path-ABSENT and parse-refusal — a path that EXISTS while the
+    pattern can never match is outside it by construction.
+  design: |
+    ONE CLASSIFIER, CALLED BY `check-proof`. The deliverable is that a zero-hit `grep:` proof says
+    WHY it read zero, and that the answer is derived rather than guessed.
+
+    (i) A PURE CLASSIFIER IN ITS OWN MODULE, over (pattern, file text) — never over a hidden fs
+    read, so it is testable against fixtures and reusable by a second caller later. It returns ONE
+    cause from a closed set:
+      - `matched`              — at least one line matches; no cause to report.
+      - `line-seam`            — no single line matches, but the pattern matches the file's
+                                 whitespace-normalised text (newline + run of indentation collapsed
+                                 to a single space). THE PHRASE IS THERE AND WRAPS. Can never match.
+      - `case-only`            — no single line matches case-sensitively, but a case-insensitive
+                                 pass does. Can never match as written.
+      - `absent`               — no probe matches in any form. THIS IS THE LEGITIMATE FORWARD
+                                 REFERENCE and must be named as such, not as a defect.
+    Evaluate `line-seam` and `case-only` in a stated order and say in the doc comment which wins
+    when both hold; do not leave it to argument order.
+
+    (ii) SAME MATCHER, NOT A SECOND ONE. Every probe must use the pattern with the SAME semantics
+    the executor uses — a BASIC regular expression, no `-F`. The whole defect family in this repo is
+    a local check that disagrees with the thing that actually runs (#1071, and this verb's own
+    reason for existing). If a probe cannot be run through the same matcher, do not add that probe.
+
+    (iii) REPORT, DO NOT RE-RANK. `verdict:`, every `CHECK_PROOF_EXIT` code and the `--base` block
+    are UNCHANGED. What changes is that a grep `fail`/`exec_error` prints a `cause:` line naming one
+    of the above, and that the existing STATIC metacharacter note is printed only when it applies
+    (the pattern actually carries an unescaped `[ * ^ $`) rather than on every non-pass. An `absent`
+    cause must read as "the text is in the file in NO form — this is a forward reference if the task
+    is meant to ADD it", so the filer sees the legitimate case affirmed rather than merely unflagged.
+
+    (iv) THE ABSENT-PATH ARM KEEPS ITS EXIT CODE. A path that does not exist still reports
+    `exec_error` / exit 4; it simply gains a `cause:` line that says the file was not there. No
+    caller shifts.
+
+    (v) COST. The probes are string operations over one already-read file; no extra spawn is
+    required if the classifier is fed the file text, and reading one named file is bounded by the
+    proof itself. State the observed cost in the PR body.
+
+    NOT IN SCOPE, NAMED: the filing-time lint warning (W1-T1225, which consumes this classifier);
+    W1-T1053's queue audit and its cause split; any change to `execWhitelistedProof`, to
+    `executed_stale`, to the keyword floor, or to any exit code; and any CLAUDE.md bullet — a
+    mechanised cause that the required verb prints is a better answer than a rule a filer must
+    remember, and CLAUDE.md is at zero headroom with its next fold already nominated by W1-T1081.
+  acceptance:
+    - claim: "a zero-hit grep proof whose phrase is present in the named file but wraps across a line break is reported with a line-seam cause"
+      proof: "unit test: test/grep-zero-cause.test.ts"
+    - claim: "a zero-hit grep proof whose phrase is present only with different capitalisation is reported with a case-only cause"
+      proof: "unit test: test/grep-zero-cause.test.ts"
+    - claim: "a pattern absent from the file in every probed form is reported as a forward reference and never as an unmatchable pattern"
+      proof: "unit test: test/grep-zero-cause.test.ts"
+    - claim: "an absent path keeps today's exec_error verdict and exit code and gains only a cause line"
+      proof: "unit test: test/grep-zero-cause.test.ts"
+    - claim: "every probe runs the pattern through the same basic-regex matcher the executor uses, never a fixed-string one"
+      proof: "unit test: test/grep-zero-cause.test.ts"
+    - claim: "check-proof calls the classifier rather than deriving a cause of its own"
+      proof: "grep: classifyGrepZeroHit( in src/run-task.ts"
+  origin: "feedback#fb-1785931037801-843083"
+  plan_refs: ["W1-T219", "W1-T287", "W1-T387", "W1-T488", "W1-T912", "W1-T1053", "§5C"]
+  files: [src/lib/grep-zero-cause.ts, src/run-task.ts, test/grep-zero-cause.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high IS SET UP FRONT. `files:` spans src/ and test/ and `sizingViolation`
+    (src/lib/task-linter.ts) blocks below that band — the same reason W1-T497 and W1-T1053 carry it.
+    The blast radius argues lower: a diagnostic verb that no dispatch, CI or arm path reads.
+
+    DECLARING src/run-task.ts IS THE COST OF LANDING WITH A CALLER, and it is accepted on purpose.
+    It serialises this task against W1-T912 (which adds `--base` to the same command), W1-T497 and
+    W1-T1053 via `partitionByFileOverlap`. NO depends_on is taken on any of them: the print sites
+    are additive and disjoint, and a hard dep would stall this behind three unrelated tasks. If
+    W1-T912 lands first, the new `cause:` line sits above its `base ref:` block and nothing about
+    `--base` changes.
+
+    THE CLASSIFIER IS ITS OWN MODULE, NOT AN APPEND TO task-linter.ts: that module is documented
+    PURE with no fs and no exec, and W1-T1225 will consume this classifier through the same
+    injected-reader convention rather than by making the linter read files itself.
+
+    PROOFS: five whole-file `unit test:` path forms against the suite this task creates — the path
+    parses now and executes once the file exists, and a title invented here would resolve to zero,
+    which is the very defect being filed. The single `grep:` proof names the wiring, the one claim a
+    unit test over a pure classifier cannot make; it names src/run-task.ts, which the implementing
+    diff actually changes, so it discriminates rather than going `executed_stale`.

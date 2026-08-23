@@ -27,6 +27,6 @@ raw: "TWO grep: PROOF TRAPS, both silent, both hit while filing #1336. (1) A
   reported to the caller, not in the checker."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2547
 summary: null
