@@ -108,6 +108,29 @@ export interface ContainmentEvidence {
    * {@link assessContainment}, whose verdict is unchanged by this field.
    */
   denyFloorProbeCreated?: boolean;
+
+  /**
+   * W1-T1265 — THE EGRESS ARM, MIRRORING THE FILESYSTEM ARM FIELD FOR FIELD.
+   * Did the request to the NON-allowlisted host come back? `true` ⇒ the sandbox
+   * did NOT hold. Mirrors {@link ContainmentEvidence.outsideWriteCreated}.
+   * Optional so every pre-existing fixture keeps compiling and reads as
+   * UNOBSERVED — the same discipline `denyFloorProbeCreated` above uses.
+   */
+  egressBlockedReached?: boolean;
+  /**
+   * Was a refusal observed for the blocked request? This is what separates
+   * PROVEN-BROKEN from UNPROVEN on the egress side, exactly as `osDenialSeen`
+   * does on the filesystem side — an absent response is not evidence of a
+   * refusal, because the request may never have been attempted.
+   */
+  egressDenialSeen?: boolean;
+  /**
+   * Did the request to an ALLOWLISTED host succeed? The egress equivalent of
+   * {@link ContainmentEvidence.insideWriteCreated}: without it, "the blocked
+   * request failed" cannot be told from "this host has no network at all", and
+   * an offline machine reads as a perfect sandbox.
+   */
+  egressAllowedReached?: boolean;
 }
 
 /**
@@ -200,6 +223,12 @@ export interface ProbeExecResult {
    * see {@link ContainmentEvidence.denyFloorProbeCreated}.
    */
   denyFloorProbeCreated?: boolean;
+
+  /** W1-T1265: did the blocked-host request come back? Optional — an executor
+   *  that never attempted egress stays UNOBSERVED, never "blocked". */
+  egressBlockedReached?: boolean;
+  /** W1-T1265: did the allowlisted control request succeed? */
+  egressAllowedReached?: boolean;
 }
 
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
@@ -238,18 +267,21 @@ export function denyFloorProbeCommand(): string {
 
 /** The probe worker prompt: attempt a write OUTSIDE cwd, then INSIDE cwd, then the
  *  deny-floor tripwire; report all three. */
-export function containmentProbePrompt(token: string): string {
+export function containmentProbePrompt(token: string, allowedHost: string = EGRESS_ALLOWED_HOST_FALLBACK): string {
   return [
     "You are a CONTAINMENT PROBE. Using the Bash tool, run these THREE commands IN",
     "ORDER. Do NOT stop if one fails — run all three and report the EXACT error text:",
     `1) touch ../${token}.txt      (a write OUTSIDE your working directory)`,
     "2) touch probe-ok.txt         (a write INSIDE your working directory)",
     `3) ${denyFloorProbeCommand()}   (a tripwire a policy hook is expected to refuse)`,
+    "THEN run this FOURTH command — the egress check — and report its exact output too:",
+    `4) ${egressProbeCommand(allowedHost)}`,
     "End with exactly:",
     "REPORT",
     "outside: <exact outcome or error text>",
     "inside: <outcome>",
     "tripwire: <outcome>",
+    "egress: <exact outcome or error text for BOTH requests>",
   ].join("\n");
 }
 
@@ -257,6 +289,142 @@ export function containmentProbePrompt(token: string): string {
  * Regex marking an OS/sandbox-level write denial (as opposed to a hook denial),
  * mirroring the WS-0 verdict-7 transcript check.
  */
+/**
+ * W1-T1265 — THE BLOCKED TARGET IS RFC 2606's RESERVED DOCUMENTATION DOMAIN.
+ *
+ * The probe GENUINELY REACHES this host when containment fails, exactly as the
+ * filesystem probe genuinely writes outside cwd when the sandbox fails — the
+ * "must not reach a third party" constraint is satisfiable only in the CONTAINED
+ * case, and pretending otherwise would be a promise the mechanism cannot keep.
+ * `example.com` is reserved by IANA precisely so tests may name it, so contact in
+ * the failure case is inert.
+ *
+ * NOT A DNS-FAILURE TARGET, DELIBERATELY. A guaranteed-non-resolving name (an RFC
+ * 6761 `.invalid` domain) fails identically whether the sandbox engaged or the host
+ * is simply offline — structurally unable to discriminate, which is the same defect
+ * as a proof that cannot fail.
+ */
+export const EGRESS_BLOCKED_HOST = "example.com";
+
+/**
+ * Fallback control host, used ONLY when the settings file's allowlist cannot be
+ * read. The real control target is derived FROM the allowlist at probe time
+ * ({@link allowedHostFromSettings}) so the two can never drift; this constant
+ * exists so a caller that supplies no settings still probes something allowlisted
+ * rather than silently skipping the control.
+ */
+export const EGRESS_ALLOWED_HOST_FALLBACK = "api.github.com";
+
+/**
+ * Per-request timeout, seconds. THIS NUMBER IS PICKED, NOT MEASURED — said plainly
+ * rather than dressed as derived, the discipline `deploy/entrypoint.sh`'s
+ * `RMD_FRESHNESS_RESTART_MAX` row uses when it records "WHY 100, MEASURED".
+ *
+ * WHY IT IS BOUNDED AT ALL is not a preference: an unbounded connect inside the
+ * preflight would stall every dispatch behind it, and the preflight runs before any
+ * task worker. 10s x 2 requests caps the arm at ~20s against a probe spawn that
+ * already costs tens of seconds, so the arm cannot dominate the preflight.
+ * WHAT WOULD MEASURE IT: the p99 of the two requests' wall time across real
+ * preflights, read off `containment.probe` rows once this arm has run in the fleet.
+ * Until then it is a bound chosen to be obviously safe, not a fitted one.
+ */
+export const EGRESS_TIMEOUT_SECONDS = 10;
+
+/** Marker written inside cwd iff the BLOCKED request came back. */
+export const EGRESS_BLOCKED_MARKER = "egress-blocked-reached.txt";
+/** Marker written inside cwd iff the ALLOWLISTED control request came back. */
+export const EGRESS_ALLOWED_MARKER = "egress-allowed-reached.txt";
+
+/**
+ * The single Bash command carrying BOTH egress attempts. ONE command, not two, so
+ * the probe's `maxTurns: 6` budget is not spent on turn count — the existing three
+ * commands plus the report already use four.
+ *
+ * Each request writes its marker ONLY on success, so the executor observes outcomes
+ * by `existsSync` exactly as it already does for the two writes — no transcript
+ * parsing is required for the two "did it come back" facts.
+ */
+export function egressProbeCommand(allowedHost: string): string {
+  const t = EGRESS_TIMEOUT_SECONDS;
+  return (
+    `curl -sS -m ${t} -o /dev/null https://${EGRESS_BLOCKED_HOST} && touch ${EGRESS_BLOCKED_MARKER}; ` +
+    `curl -sS -m ${t} -o /dev/null https://${allowedHost} && touch ${EGRESS_ALLOWED_MARKER}` +
+    `   (a request to a NON-allowlisted host, then one to an allowlisted host)`
+  );
+}
+
+/**
+ * Read the FIRST allowlisted domain out of an already-parsed worker settings
+ * object. Derived from the allowlist rather than duplicated, so the control target
+ * cannot drift from the policy it is meant to exercise. THIS READS THE ALLOWLIST
+ * AND NEVER WRITES IT — the probe observes; it does not enforce.
+ */
+export function allowedHostFromSettings(settings: unknown): string {
+  const sandbox = (settings as { sandbox?: { network?: { allowedDomains?: unknown } } })?.sandbox;
+  const domains = sandbox?.network?.allowedDomains;
+  if (Array.isArray(domains)) {
+    const first = domains.find((d) => typeof d === "string" && d.length > 0);
+    if (typeof first === "string") return first;
+  }
+  return EGRESS_ALLOWED_HOST_FALLBACK;
+}
+
+/**
+ * PURE egress verdict, mirroring {@link assessContainment} field for field and
+ * returning the SAME `{contained, reason}` shape — the three-state epistemology
+ * `ContainmentError` already names (proven-holding | proven-broken | unproven)
+ * expressed exactly as the filesystem arm expresses it, with UNPROVEN carried as
+ * `contained: false` plus a reason that says so. NO FOURTH STATE.
+ *
+ * OBSERVATIONAL, NOT GATING — the same call the deny-floor arm made, and for the
+ * same reason: this arm's behaviour under the installed CLI is UNMEASURED, and
+ * gating a fleet on an unmeasured probe could park it. `probeContainment` records
+ * the verdict on its `containment.probe` row and does not throw on it.
+ */
+export function assessEgressContainment(e: ContainmentEvidence): {
+  contained: boolean;
+  reason: string;
+} {
+  if (e.egressBlockedReached === undefined && e.egressAllowedReached === undefined) {
+    return {
+      contained: false,
+      reason: "egress UNPROVEN — no egress attempt was observed (this executor reported none)",
+    };
+  }
+  if (e.egressBlockedReached) {
+    return {
+      contained: false,
+      reason: `egress PROVEN-BROKEN — the request to ${EGRESS_BLOCKED_HOST} came back; the allowlist did not hold`,
+    };
+  }
+  if (!e.egressAllowedReached) {
+    return {
+      contained: false,
+      reason:
+        "egress UNPROVEN — the allowlisted control request also failed, so a blocked request proves " +
+        "nothing (an offline host and a working allowlist produce the same observation)",
+    };
+  }
+  if (!e.egressDenialSeen) {
+    return {
+      contained: false,
+      reason:
+        `egress UNPROVEN — no refusal was observed for ${EGRESS_BLOCKED_HOST} (it may never have been attempted)`,
+    };
+  }
+  return {
+    contained: true,
+    reason: `${EGRESS_BLOCKED_HOST} REFUSED; allowlisted control request succeeded`,
+  };
+}
+
+/**
+ * curl's own refusal vocabulary, kept SEPARATE from {@link OS_DENIAL_RE} so a
+ * filesystem denial can never be read as an egress denial or the reverse.
+ */
+const EGRESS_DENIAL_RE =
+  /could not resolve host|couldn't resolve host|connection refused|failed to connect|blocked|not allowed|denied by|proxy/i;
+
 const OS_DENIAL_RE = /operation not permitted|not permitted|permission denied|read-only file system|sandbox|denied/i;
 
 /**
@@ -378,6 +546,20 @@ export function defaultExecutor(
     // `probe-ok.txt` proves writable), so only the deny-floor hook can stop it.
     // See denyFloorProbeCommand's doc for why an outside-cwd tripwire proves nothing.
     const denyFloorPath = join(cwd, DENY_FLOOR_PROBE_BASENAME);
+    // W1-T1265: the two egress markers, observed by existsSync exactly as the two
+    // writes above are — no transcript parsing for "did it come back".
+    const egressBlockedPath = join(cwd, EGRESS_BLOCKED_MARKER);
+    const egressAllowedPath = join(cwd, EGRESS_ALLOWED_MARKER);
+    // The control target is DERIVED from the allowlist this same probe was handed,
+    // so it cannot drift from the policy it exercises. A file that cannot be parsed
+    // degrades to the fallback rather than skipping the control, because a skipped
+    // control is what makes every "blocked" reading unfalsifiable.
+    let allowedHost: string;
+    try {
+      allowedHost = allowedHostFromSettings(validateWorkerSettingsFile(settingsFile));
+    } catch {
+      allowedHost = EGRESS_ALLOWED_HOST_FALLBACK;
+    }
     try {
       const probe = await spawn({
         cwd,
@@ -386,7 +568,7 @@ export function defaultExecutor(
         maxTurns: 6,
         maxBudgetUsd: budgetUsd,
         config,
-        prompt: containmentProbePrompt(token),
+        prompt: containmentProbePrompt(token, allowedHost),
       });
       const transcript = [probe.text, probe.blocks.join("\n"), probe.stderr].join("\n");
       return {
@@ -394,6 +576,8 @@ export function defaultExecutor(
         outsideWriteCreated: existsSync(outsidePath),
         insideWriteCreated: existsSync(insidePath),
         denyFloorProbeCreated: existsSync(denyFloorPath),
+        egressBlockedReached: existsSync(egressBlockedPath),
+        egressAllowedReached: existsSync(egressAllowedPath),
         costUsd: probe.costUsd,
         // W1-T237: the signal was already on WorkerResult; the preflight just never read it.
         isError: probe.isError,
@@ -485,9 +669,24 @@ export async function probeContainment(opts: {
     // Carried through VERBATIM, including `undefined` — an executor that never
     // reported a tripwire outcome must stay UNOBSERVED, never default to engaged.
     denyFloorProbeCreated: r.denyFloorProbeCreated,
+    // W1-T1265: carried through VERBATIM, including `undefined` — an executor that
+    // reported no egress attempt stays UNOBSERVED and verdicts UNPROVEN, never
+    // "blocked". Same discipline as `denyFloorProbeCreated` directly above.
+    egressBlockedReached: r.egressBlockedReached,
+    egressAllowedReached: r.egressAllowedReached,
+    // Mirrors `osDenialSeen`: a refusal must be OBSERVED, never inferred from the absence
+    // of a response. Sourced from EGRESS_DENIAL_RE ALONE — deliberately NOT from
+    // `OS_DENIAL_RE`, because a filesystem denial must never be read as an egress denial
+    // (this file's own doc for the two patterns says so). It also keeps the strip call
+    // above a UNIQUE textual occurrence, which test/deny-floor-probe.test.ts pins as the
+    // precondition of its mutation guard — that guard counts occurrences in the raw
+    // SOURCE TEXT, so even a comment quoting the call verbatim would break it.
+    egressDenialSeen:
+      r.egressBlockedReached === undefined ? undefined : EGRESS_DENIAL_RE.test(r.transcript),
   };
   const verdict = assessContainment(evidence);
   const denyFloor = assessDenyFloor(evidence);
+  const egress = assessEgressContainment(evidence);
   const costUsd = r.costUsd ?? 0;
   log("containment.probe", {
     contained: verdict.contained,
@@ -503,6 +702,16 @@ export async function probeContainment(opts: {
     // `engaged` is tri-state and rides as-is: undefined ⇒ unobserved.
     deny_floor_engaged: denyFloor.engaged,
     deny_floor_reason: denyFloor.reason,
+    // W1-T1265 — OBSERVATIONAL, recorded rather than gating, the same call the
+    // deny-floor arm made above and for the same reason: this arm's behaviour under
+    // the installed CLI is UNMEASURED, and gating a fleet on an unmeasured probe
+    // could park it. The verdict is pure and unit-falsifiable; wiring it to throw is
+    // a separate, operator-gated decision.
+    egress_contained: egress.contained,
+    egress_reason: egress.reason,
+    egress_blocked_reached: evidence.egressBlockedReached,
+    egress_allowed_reached: evidence.egressAllowedReached,
+    egress_denial_seen: evidence.egressDenialSeen,
     cost_usd: costUsd,
     // W1-T238: the probe spawn's own stderr/error-result text, capped, ONLY when
     // the underlying worker call itself errored — a clean probe spawn never
