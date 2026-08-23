@@ -66,6 +66,104 @@ test("assessDenyFloor: NO tripwire observation ⇒ UNOBSERVED, never 'engaged' �
 });
 
 // ── The probe REACHES the worker, and targets the one path that discriminates ──
+//
+// W1-T1271: the step count is a PROXY for a real contract — the prompt's narrated
+// count must agree with the steps it actually lists, or a worker acting on the
+// prose can silently skip a step it was never told about. A literal `/THREE
+// commands/` pins today's number and breaks on the next step added to the prompt,
+// in a file the step-adding task never declares. `parseProbeStepNarration` derives
+// both sides — the listed steps and the narrated counts — FROM THE PROMPT ITSELF,
+// so the check below holds at any count and fails only on genuine drift between
+// the two.
+
+const CARDINAL_WORDS: Record<string, number> = {
+  ONE: 1,
+  TWO: 2,
+  THREE: 3,
+  FOUR: 4,
+  FIVE: 5,
+  SIX: 6,
+  SEVEN: 7,
+  EIGHT: 8,
+  NINE: 9,
+  TEN: 10,
+};
+
+const ORDINAL_WORDS: Record<string, number> = {
+  FIRST: 1,
+  SECOND: 2,
+  THIRD: 3,
+  FOURTH: 4,
+  FIFTH: 5,
+  SIXTH: 6,
+  SEVENTH: 7,
+  EIGHTH: 8,
+  NINTH: 9,
+  TENTH: 10,
+};
+
+/**
+ * Derive, FROM THE PROMPT TEXT ALONE, the steps it actually lists and the counts
+ * it narrates for them — never a hand-maintained number, or the coupling this
+ * task removes reappears one level down.
+ *
+ * The prompt narrates counts in two shapes, matching how `containmentProbePrompt`
+ * is written: an opening CARDINAL ("run these THREE commands") covering the first
+ * block of numbered steps, and zero or more later ORDINAL follow-ons ("run this
+ * FOURTH command") each introducing exactly one more numbered step — the shape
+ * W1-T1265 used to add the egress check without renumbering the first three.
+ */
+function parseProbeStepNarration(prompt: string): {
+  listed: number[];
+  cardinal: number | undefined;
+  ordinals: number[];
+} {
+  const listed = [...prompt.matchAll(/^(\d+)\)/gm)].map((m) => Number(m[1]));
+  const cardinalMatch = prompt.match(/run these (\w+) commands/i);
+  const cardinal = cardinalMatch ? CARDINAL_WORDS[cardinalMatch[1].toUpperCase()] : undefined;
+  const ordinals = [...prompt.matchAll(/run this (\w+) command/gi)].map(
+    (m) => ORDINAL_WORDS[m[1].toUpperCase()],
+  );
+  return { listed, cardinal, ordinals };
+}
+
+/**
+ * THE CONTRACT ITSELF: the prompt's narrated counts must agree with the steps it
+ * actually lists. Throws (via node:assert) on disagreement; passes silently — at
+ * ANY total step count — when the narration is consistent. This is what the
+ * literal `THREE` stood in for; asserting this instead means the next step added
+ * to the prompt cannot break this file unless the narration itself goes wrong.
+ */
+function assertStepNarrationAgrees(prompt: string): void {
+  const { listed, cardinal, ordinals } = parseProbeStepNarration(prompt);
+  assert.ok(listed.length > 0, "the prompt must list at least one numbered step");
+  assert.deepEqual(
+    listed,
+    listed.map((_, i) => i + 1),
+    "the listed steps must be numbered sequentially starting at 1, with no gaps",
+  );
+  assert.ok(
+    ordinals.every((n) => typeof n === "number" && !Number.isNaN(n)),
+    "every 'run this Nth command' must use a recognized ordinal word",
+  );
+  assert.ok(
+    typeof cardinal === "number" && !Number.isNaN(cardinal),
+    "the prompt must open with a recognized 'run these N commands' cardinal count",
+  );
+  const total = listed.length;
+  assert.equal(
+    cardinal,
+    total - ordinals.length,
+    "the narrated cardinal count must equal the steps NOT introduced by a later ordinal",
+  );
+  ordinals.forEach((n, i) => {
+    assert.equal(
+      n,
+      (cardinal as number) + i + 1,
+      "each 'run this Nth command' ordinal must match that step's actual position in the list",
+    );
+  });
+}
 
 test("the probe prompt carries the tripwire command, so a spawned worker actually attempts it", () => {
   const prompt = containmentProbePrompt("tok123");
@@ -73,8 +171,79 @@ test("the probe prompt carries the tripwire command, so a spawned worker actuall
     prompt.includes(denyFloorProbeCommand()),
     "the prompt must carry the tripwire command verbatim or no worker ever attempts it",
   );
-  assert.match(prompt, /THREE commands/, "the prompt must ask for all three steps");
+  assertStepNarrationAgrees(prompt);
   assert.match(prompt, /tripwire:/, "the report shape must have a slot for the tripwire outcome");
+});
+
+test("the prompt's narrated step count agrees with its listed steps, AT ANY COUNT — not just today's four", () => {
+  // A plain block of N steps, no ordinal follow-on — covers "three or four or more"
+  // (design note v) without hard-coding which count the real prompt uses today.
+  const CARDINAL_LIST = ["ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN"];
+  const plainBlock = (n: number): string =>
+    [`run these ${CARDINAL_LIST[n]} commands IN ORDER.`, ...Array.from({ length: n }, (_, i) => `${i + 1}) step`)].join(
+      "\n",
+    );
+  for (const n of [3, 4, 5, 7]) {
+    assert.doesNotThrow(() => assertStepNarrationAgrees(plainBlock(n)), `a well-formed ${n}-step prompt must pass`);
+  }
+
+  // The shape W1-T1265 actually used: a cardinal block plus a later ordinal
+  // addition — must also pass, at whatever total it produces.
+  const staged = [
+    "run these THREE commands IN ORDER.",
+    "1) step",
+    "2) step",
+    "3) step",
+    "THEN run this FOURTH command — an addition:",
+    "4) step",
+  ].join("\n");
+  assert.doesNotThrow(() => assertStepNarrationAgrees(staged), "a cardinal block plus one ordinal addition must pass");
+
+  // The real prompt itself, at whatever count it currently narrates.
+  assert.doesNotThrow(
+    () => assertStepNarrationAgrees(containmentProbePrompt("tok123")),
+    "the actual containmentProbePrompt output must satisfy the contract",
+  );
+});
+
+test("a prompt whose narrated count DISAGREES with its listed steps fails the assertion", () => {
+  // Says THREE but lists four steps with no ordinal introducing the fourth.
+  const undercounted = [
+    "run these THREE commands IN ORDER.",
+    "1) step",
+    "2) step",
+    "3) step",
+    "4) step",
+  ].join("\n");
+  assert.throws(
+    () => assertStepNarrationAgrees(undercounted),
+    "an undercounted cardinal (THREE said, four listed) must fail",
+  );
+
+  // Says FOUR but only lists three.
+  const overcounted = ["run these FOUR commands IN ORDER.", "1) step", "2) step", "3) step"].join("\n");
+  assert.throws(
+    () => assertStepNarrationAgrees(overcounted),
+    "an overcounted cardinal (FOUR said, three listed) must fail",
+  );
+
+  // The ordinal addition names the wrong position — FIFTH where the list is only at 4.
+  const wrongOrdinal = [
+    "run these THREE commands IN ORDER.",
+    "1) step",
+    "2) step",
+    "3) step",
+    "THEN run this FIFTH command — an addition:",
+    "4) step",
+  ].join("\n");
+  assert.throws(
+    () => assertStepNarrationAgrees(wrongOrdinal),
+    "an ordinal that names the wrong position (FIFTH for step 4) must fail",
+  );
+
+  // A gap in the listed numbering itself (1, 2, 4 — no 3).
+  const gappedList = ["run these THREE commands IN ORDER.", "1) step", "2) step", "4) step"].join("\n");
+  assert.throws(() => assertStepNarrationAgrees(gappedList), "a gap in the listed step numbers must fail");
 });
 
 test("the tripwire targets a path INSIDE cwd — an outside-cwd target would prove the sandbox, not the hook", () => {
