@@ -99,10 +99,31 @@
     is under amendment. This task does not read, write, assert on, or widen into `measuredBytes` --
     the two touch the same script and will serialize on `overlappingPaths`, which is correct.
 
-    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: the four sibling sites in (ii) are the same
-    defect in three other required checks. They are not fixed here and no second shard is filed for
-    them. A follow-up should decide between lifting one shared validator and repeating the arm per
-    script; that is a four-script, eight-file span that would breach rule 19 if folded in here.
+    THE POPULATION, MEASURED AND OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED. The same
+    guard-and-skip shape appears at FIVE SITES ACROSS FOUR REQUIRED RATCHETS -- every one reads a
+    baseline threshold behind `typeof <field> === "number" &&`, so a wrong-typed value skips the
+    comparison, pushes no violation, and the check reports OK:
+      scripts/claude-md-budget-ratchet.mjs:70   capBytes      <- THIS TASK
+      scripts/learnings-budget-ratchet.mjs:142  capChars
+      scripts/coverage-ratchet.mjs:78           linesPct
+      scripts/coverage-ratchet.mjs:86           branchesPct
+      scripts/mutation-ratchet.mjs:619          scorePct
+    scripts/learnings-budget-ratchet.mjs:229 additionally REPEATS the `?? "unset"` log idiom
+    verbatim, so it carries the reporting half of the defect as well as the enforcement half.
+
+    THIS TASK FIXES `capBytes` ONLY AND SETS THE PRECEDENT. The other four are NOT fixed here, no
+    second shard is filed for them, and they are THE OPERATOR'S TO MINT. A follow-up should decide
+    between lifting one shared validator and repeating the arm per script; that is a four-script,
+    eight-file span that would breach rule 19 if folded in here.
+
+    AND THE ASYMMETRY IS WHAT MAKES THIS WORTH FIXING AT ALL: the convention already exists in this
+    repo and simply does not reach `scripts/`. `validatePolicy` (src/lib/policy.ts) REFUSES BY NAME
+    on both wrong KIND and out-of-BOUND values -- e.g. `throw new PolicyError("policy.yaml:
+    '<path>.origin' must be a non-empty string, got " + JSON.stringify(raw))` -- naming the field,
+    the expectation and the value it received. So this is not a missing idea that has to be
+    invented; it is an existing house convention that stops at the src/ boundary, and the ratchets
+    on the other side of that boundary are precisely the REQUIRED checks whose silent disarm nobody
+    would see.
 
     src/lib/ci-parity.ts is NOT touched -- .github/workflows/ci.yml:473 warns against editing it by
     name.
