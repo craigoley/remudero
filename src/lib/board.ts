@@ -107,6 +107,15 @@ export interface BoardRow extends StatusProjection {
    */
   workerStateSince?: string;
   /**
+   * W1-T1240: process-unevidenced, carried straight through from
+   * {@link StatusProjection.processUnevidenced} (deriveStatus's own `recentActivity ||
+   * hasLiveLock` check, held separately from the running disjunction — see that field's own
+   * doc). Re-declared here for the same reason `workerState` immediately above is: the shape a
+   * NOW row actually renders should be visible on ONE interface, not only on the base
+   * projection it happens to inherit. Present only alongside `phase`, same sparse convention.
+   */
+  processUnevidenced?: StatusProjection["processUnevidenced"];
+  /**
    * W1-T914 (feedback fb-1784901239119-1be356 clause c / fb-1784919225707-0fab8b): the row's
    * OWN `remudero-review` three-state, so a PR whose review has not run stops rendering
    * identically to one that passed. Present only alongside {@link StatusProjection.prUrl} — a
