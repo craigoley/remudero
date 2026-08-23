@@ -405,6 +405,33 @@ not see, in the same tone it uses when it can. Each was reproduced on `Craigs-Ma
   you actually received** — `gh api "repos/{owner}/{repo}/commits/{sha}/check-runs?per_page=100"`
   — and if `total_count` is still larger than what came back, page.
 
+- **The Contents API caps at 1 MB, and past the cap the call still succeeds with an empty body.**
+  Measured 2026-08-23: `repos/{owner}/{repo}/contents/src/run-task.ts` answers HTTP 200 with
+  `size: 1467705`, `encoding: "none"`, and a content field of length zero — so anything that
+  decodes and greps that body reads **a clean zero for 1.4 MB of source**, with no error to notice.
+  The control on the same call is the same file this guide lives in, 76,670 bytes: it returns
+  `encoding: "base64"` and decodes to its real first line. **Read large files through git objects.**
+  `git cat-file -p <sha>` locally; over REST, the blob endpoint is not capped the same way —
+  `repos/{owner}/{repo}/git/blobs/{sha}` returned that same file base64-encoded and decoded to
+  exactly its 1,467,705 bytes.
+
+- **A shallow clone makes pre-horizon absence indistinguishable from real absence, and the obvious
+  control passes.** Measured 2026-08-23: a 120-commit clone whose oldest reachable commit is dated
+  2026-08-16 answers **zero deletions** for a file deleted on 2026-08-07 — and zero deletions for
+  *any* path — while that same clone reports 1,495 additions and 182 modifications, so a "does this
+  query return rows" control passes loudly while every deletion answer is a false zero.
+  `git fetch --unshallow` took the clone from 120 commits to 1,578 and the deletion appeared at
+  once, dated as expected. **Unshallow before asking anything about history, and report
+  `git rev-list --count HEAD` alongside the answer** so a reader can see which horizon it came from.
+
+- **`grep -c <pat> <file> || echo 0` emits two values when nothing matches, and `grep -c` counts
+  lines rather than occurrences.** `grep -c` prints `0` and exits **1** on no match, so the `||`
+  fires and the capture becomes two lines; on a match it is one line, which is why the defect
+  survives a spot check. Separately, over a line holding the pattern twice, `grep -c` answers **1**
+  where `grep -o … | wc -l` answers **2** — both measured here 2026-08-23 on a two-line fixture.
+  Together they undercount a table without ever failing. **Count occurrences with
+  `grep -o … | wc -l`, and let a zero be a zero** rather than substituting one after the fact.
+
 
 ## Crisis runbook: the procedures you need at 3am
 
