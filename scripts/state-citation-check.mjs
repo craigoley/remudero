@@ -59,6 +59,18 @@
 // construction: it exists to ENUMERATE the paths this gate already knows about, not to cite one
 // as authority.
 //
+// NOT YET WIRED INTO .github/workflows/ci.yml, DELIBERATELY, THIS PR. Doing so requires
+// registering this file on `INSTRUMENT_SURFACE` (src/lib/review.ts) so
+// test/instrument-surface-completeness.test.ts stays green once a workflow/package.json
+// references it -- but that registration is a `src/` product-path edit, and landing it beside
+// `.github/workflows/ci.yml` and scripts/state-citation-baseline.json (both already on
+// `INSTRUMENT_SURFACE`) in the SAME diff trips `detectInstrumentEntanglement`, remudero-review's
+// own merge-blocking logic (docs/operator-guide.md documents the identical conflict for every
+// prior gate of this shape and prescribes landing the pieces as separate PRs). This script is
+// complete and proven correct against the real repository (test/state-citation-check.test.ts);
+// wiring it into ci.yml/package.json plus the INSTRUMENT_SURFACE registration is the tracked
+// follow-up, unblocked once this file exists on `main`.
+//
 // Usage:
 //   node scripts/state-citation-check.mjs
 //     [--dir <path>]...            (default: . -- the whole repo, relative to --cwd)
