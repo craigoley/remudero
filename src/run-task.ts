@@ -493,9 +493,13 @@ import {
   computeMatchedLearningsForArm,
   deriveWipeTestRunResult,
   ledgerWipeTestPair,
+  resolveWipeTestArmOrder,
+  resolveWipeTestArmPermission,
   resolveWipeTestPreflight,
   resolveWipeTestTarget,
+  WIPE_TEST_PAIR_STEP,
   WIPE_TEST_SANDBOX_DEFAULT,
+  type WipeTestArm,
   type WipeTestMergedState,
   type WipeTestPair,
 } from "./lib/wipe-test.js";
@@ -7632,6 +7636,20 @@ async function runTask(
      * today's honest self-owner-only behaviour.
      */
     owner?: string;
+    /**
+     * W1-T1256 (THE NO-MERGE BOUNDARY, operator ruling 2026-08-23): this run's PR may open,
+     * but the deferred arm-at-verdict call site (right before `pollToGate`, below) must never
+     * call {@link armAutoMergeAtOpen} for it — set ONLY by `wipeTestCommand`, for BOTH arms of
+     * a wipe-test pair. Why: a merged arm A moves `origin/main` and flips `projectPlan`'s
+     * `isMerged` for arm B, a REMOTE channel no local reset/reclone can reach (design note
+     * (iii)/(iv) of the task record) — so a successful arm A would otherwise destroy its own
+     * control by making arm B refuse at zero cost (W1-T319's already-merged guard). The
+     * decision itself is a pure policy function ({@link resolveWipeTestArmPermission},
+     * src/lib/wipe-test.ts) this call site consults rather than re-deriving; every OTHER
+     * caller of `runTask` omits this, so today's arm-at-verdict behavior is unchanged for
+     * every non-wipe-test dispatch.
+     */
+    noMerge?: boolean;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -9278,8 +9296,21 @@ async function runTask(
     // by the time this line runs the review HAS been posted and the risk judge
     // HAS passed, so that exit is unaffected: it polls an already-armed PR,
     // exactly as before this task.
-    const armOutcome = armAutoMergeAtOpen(prUrl, undefined, irreversible);
-    log("automerge.armed", { at: "verdict", outcome: armOutcome, irreversible });
+    // W1-T1256: the no-merge boundary. `opts.noMerge` is set ONLY by `wipeTestCommand`, for
+    // BOTH arms of a wipe-test pair — the policy decision itself is pure and lives in
+    // wipe-test.ts (`resolveWipeTestArmPermission`); this call site only consults it and skips
+    // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
+    // never merge out from under the pair it belongs to.
+    const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
+    const armOutcome: ArmOutcome | "no-merge-boundary-refused" = wipeTestArmDecision.armed
+      ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
+      : "no-merge-boundary-refused";
+    log("automerge.armed", {
+      at: "verdict",
+      outcome: armOutcome,
+      irreversible,
+      ...(wipeTestArmDecision.reason ? { reason: wipeTestArmDecision.reason } : {}),
+    });
 
     // ── POLL to the gate (W1-T1B).
     // Auto-merge was armed immediately above, now that this run has a verdict it
@@ -22266,10 +22297,38 @@ export async function wipeTestCommand(
   }
 
   const runId = `WIPETEST-${Date.now()}`;
-  console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm A (learnings ON)`);
-  const rawArmA = await runTaskFn(taskId, { planPath, config, skipGitSync: true });
-  console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm B (learnings MASKED)`);
-  const rawArmB = await runTaskFn(taskId, { planPath, config, skipGitSync: true, maskLearnings: true });
+
+  // W1-T1256 (design note (vii)): ARM ORDER ALTERNATION. `pairIndex` — the count of pairs
+  // already ledgered for this task — decides DISPATCH order via `resolveWipeTestArmOrder`, so
+  // arm A (learnings ON) is not always the arm that runs first. This is a GUARD, not the fix
+  // (the no-merge boundary below is): it converts any RESIDUAL leak the boundary misses from a
+  // fixed, one-directional bias into scatter. Read BEFORE either arm dispatches — the read
+  // AFTER (below) additionally carries whatever these two arms themselves write.
+  const priorLedgerLines = readLedgerLines(ledgerPath);
+  const pairIndex = priorLedgerLines.filter((l) => l.task_id === taskId && l.step === WIPE_TEST_PAIR_STEP).length;
+  const dispatchOrder = resolveWipeTestArmOrder(pairIndex);
+
+  // W1-T1256 (design note (iv)/(ix)): THE NO-MERGE BOUNDARY. `noMerge: true` on BOTH arms —
+  // neither may arm or merge its own PR, so a successful arm A can never move `origin/main`
+  // and flip arm B's already-merged read out from under it (the remote channel no local
+  // reset/reclone can reach). The pair is measured at the verdict, before either arm's PR
+  // could ever merge.
+  const rawResults: Partial<Record<WipeTestArm, RunResult>> = {};
+  for (const arm of dispatchOrder) {
+    const label = arm === "A" ? "learnings ON" : "learnings MASKED";
+    console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm ${arm} (${label})`);
+    rawResults[arm] = await runTaskFn(taskId, {
+      planPath,
+      config,
+      skipGitSync: true,
+      // Omitted (not `false`) for arm A — byte-identical to the pre-W1-T1256 call shape, which
+      // left `maskLearnings` unset for arm A rather than passing it explicitly false.
+      ...(arm === "B" ? { maskLearnings: true } : {}),
+      noMerge: true,
+    });
+  }
+  const rawArmA = rawResults.A!;
+  const rawArmB = rawResults.B!;
 
   const ledgerLines = readLedgerLines(ledgerPath);
   const pair: WipeTestPair = {

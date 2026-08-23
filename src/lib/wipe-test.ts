@@ -269,6 +269,66 @@ export function aggregateWipeTestPairs(pairs: WipeTestPair[]): WipeTestAggregate
   };
 }
 
+// ── NO-MERGE BOUNDARY (design note (iv), (vi), (ix) of W1-T1256) ────────────
+
+/**
+ * OPERATOR RULING 2026-08-23 (W1-T1256, design note (iv)): NEITHER WIPE-TEST ARM MAY ARM OR
+ * MERGE ITS OWN PR. The chain this closes: arm A succeeds -> arm A's PR merges -> `origin/main`
+ * moves -> `projectPlan` reports the subject merged -> arm B's own already-merged read
+ * (`runTask`'s W1-T319 guard) refuses arm B at zero cost. A SUCCESSFUL ARM A DESTROYS ITS OWN
+ * CONTROL, and no LOCAL reset reaches this: arm A's pushed run branch and open PR are REMOTE
+ * objects, `task_already_merged` reads them through `projectPlan`/the ledger, and
+ * `worktreeAdd(…, "origin/main")` means a merged arm A moves the very ref arm B's worktree is
+ * cut from — a fresh clone or `reset --hard origin/main` both clone/reset TO the contaminated
+ * state (design note (iii)). The ruling instead measures the pair AT THE VERDICT: every
+ * quantity `wipetest.pair` records — turns, cost, verdict, strikes, proof_exec — is already
+ * determined before any merge, so refusing to arm loses no signal.
+ *
+ * PURE (design note (ix), DECISIONS SPLIT FROM I/O): the ONE bit `run-task.ts`'s deferred
+ * arm-at-verdict call site already knows — its own `opts.noMerge` — decides. `run-task.ts`
+ * never re-derives this decision or duplicates its wording; it calls this function immediately
+ * before it would otherwise call `armAutoMergeAtOpen` and skips that call outright when this
+ * refuses. That split is what lets the falsifier (test/wipe-test-arm-isolation.test.ts) drive
+ * both directions without a network: boundary present → arm B still dispatches and never
+ * observes a merged verdict; boundary REMOVED (the test's own control, `noMerge: false`) →
+ * arm B demonstrably refuses, reproducing the exact contamination this task fixes.
+ */
+export interface WipeTestArmDecision {
+  armed: boolean;
+  reason?: string;
+}
+
+export function resolveWipeTestArmPermission(noMerge: boolean): WipeTestArmDecision {
+  if (!noMerge) return { armed: true };
+  return {
+    armed: false,
+    reason:
+      "wipe-test no-merge boundary (W1-T1256): neither arm may arm or merge its own PR — the pair " +
+      "is measured at the verdict, not at the merge, because a merged arm A moves origin/main and " +
+      "flips arm B's own already-merged read, a remote channel no local reset can reach.",
+  };
+}
+
+// ── ARM ORDER ALTERNATION (design note (vii) of W1-T1256) ───────────────────
+
+/**
+ * NOT A FIX (design note (vii) says so explicitly, and it survives the no-merge-boundary
+ * ruling) — a GUARD against a residual or unknown leak the boundary above does not name. Arm A
+ * (learnings ON) dispatching first on every pair, unconditionally, would make any such leak
+ * SYSTEMATIC and one-directional; alternating converts a fixed bias into random error — still
+ * not clean, but strictly better than a fixed order, and it makes a leak visible as scatter
+ * instead of drift.
+ *
+ * PURE: `pairIndex` is the caller's own count of pairs already ledgered for this task (parity,
+ * not identity, decides which arm dispatches first) — this never reads the ledger itself, so a
+ * test drives both orders without I/O. The returned tuple is DISPATCH order only; it never
+ * changes which arm is semantically "A" (learnings-on) vs "B" (masked) — `wipeTestCommand`
+ * still assembles the pair's `armA`/`armB` fields by arm identity, not by call order.
+ */
+export function resolveWipeTestArmOrder(pairIndex: number): [WipeTestArm, WipeTestArm] {
+  return pairIndex % 2 === 0 ? ["A", "B"] : ["B", "A"];
+}
+
 // ── SANDBOX-ONLY GUARD ───────────────────────────────────────────────────────
 
 /** The default (and, without an explicit override, ONLY) repo `rmd wipe-test` targets.
