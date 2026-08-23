@@ -12644,7 +12644,7 @@ export function duplicateCorpusOpts(
 /** Filing-family subjects are citations ABOUT a task (minting it, triaging it, renumbering it),
  *  never evidence its implementation merged. This one boundary is the failing-split classifier's
  *  whole judgment surface — moving it swung the recon's count 47 → 156 → 167
- *  (state/recon-open-failing-composition.md) — which is why the printed summary names the rule
+ *  (docs/research/recon-open-failing-composition.md) — which is why the printed summary names the rule
  *  and not just the counts. Includes both the current conventional-commit filing subjects
  *  (`chore(plan)`/`chore(triage)`/`chore(feedback)`/`docs(plan)`) AND the older bare `plan:`/
  *  `docs:`/`chore:` convention this repo used before them (W1-T1078) — without the bare forms,
@@ -13099,7 +13099,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // wording, with the same count named so a reader who passed --all can see how much of what
   // they're looking at is retired/landed.
   let summary: string;
-  // The failing-split (state/recon-open-failing-composition.md): the bare failing count is a
+  // The failing-split (docs/research/recon-open-failing-composition.md): the bare failing count is a
   // technically-true aggregate that misleads — measured 2026-08-06, 167 of 176 failing tasks had
   // merged implementations and could never re-dispatch, yet the headline priced them all as open
   // work. So the DEFAULT mode's headline carries the split, and the classifier's rule prints
