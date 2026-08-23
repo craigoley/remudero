@@ -1,0 +1,164 @@
+- id: W1-T1260
+  title: "the whole-plan lint signal is almost entirely archaeology and the residue it offers as real work is mostly wrong — the operator rules between annotate-on-credit, archive-on-credit and scoping the open set to credit, and this shard recommends NONE of the three because the split that would decide it reads only two of the four credit paths"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 30.00
+  files: [DECISIONS.md]
+  origin: oper#lint-open-failing-ruling-2026-08-23
+  plan_refs: ["W1-T370", "W1-T367", "W1-T369", "W1-T1053", "W1-T1078", "W1-T456", "W1-T409", "W1-T410"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE RULING ON THE SPEND IS ALREADY FILED AND UNRUN — W1-T370, `verify: human`, `status: queued`,
+    uncredited by every path. THIS SHARD DOES NOT RE-FILE IT and does not reopen either ruling it
+    names. What is new since W1-T370 was written at cdf885a is the MEASUREMENT below, and one finding
+    W1-T370's three options do not cover: the instrument that separates real work from archaeology is
+    itself unreliable, in a direction nobody has measured.
+
+    RE-DERIVED 2026-08-23 AT origin/main 47a4d90, AND THE FAILING SET IS STABLE. `rmd lint-plan`
+    (whole-plan default) reported the identical summary and a BYTE-IDENTICAL failing-id set across
+    four consecutive runs — two on a shallow clone, two after `git fetch --unshallow`. Only the
+    split CLAUSE moved: on a shallow clone `defaultMergeEvidenceLog` refuses by name and the line
+    reads `merge-evidence unavailable`, which is the correct fail-closed posture and not a defect.
+    Re-derive with `RMD_SELF_SYNC_DONE=1 ./bin/rmd lint-plan`, twice, and diff the `^✗ ` ids; the
+    counts in that line are a QUERY, not a figure to carry forward.
+
+    Q1 — DOES THE NOISE HIDE REAL FAILURES? YES, AND THE HONEST ANSWER IS WORSE THAN THE QUESTION.
+    (a) THE ROWS DO NOT DISTINGUISH THEMSELVES. Every failing task prints the same `✗ <id>: N
+        violation(s)` shape. The merged/unmerged split appears ONCE, as a bare count, in the summary
+        — and the summary goes to STDOUT while every violation row goes to STDERR, so the count and
+        the rows land in different streams (`cmd 2>&1 > f` separates them, the capture trap CLAUDE.md
+        already records).
+    (b) THE CHECK NAME IS NOT A LOCATOR EITHER, AND THIS WAS THE OBVIOUS ESCAPE. The residue's rows
+        are `[declared-scope]` and `[ruling-verify]`, not the `[proof-dialect]`/`[proof-resolvability]`
+        that dominate — but 57 tasks carry a blocking `[declared-scope]`, and only two of those 57
+        are in the residue. Filtering on the most discriminating-looking check returns 55 rows of
+        archaeology for two of signal.
+    (c) THE IDS EXIST IN PROCESS AND ARE THROWN AWAY. `classifyFailingMergeEvidence` returns
+        `{withImpl, without}`; `lintPlanCommand` uses `.length` on both and discards the arrays. Its
+        own comment sanctions this — "Display only: the exit code and every pre-existing summary
+        substring are unchanged, and the split can only qualify the count, never alter it." Naming
+        the residue would stay inside that register; nothing about it alters a count or an exit code.
+    (d) SO LOCATING THEM COSTS A RE-IMPLEMENTATION. Reproducing the verb's own split — the documented
+        rule, over `git log --format=%s%x00%b%x01 origin/main` — was the only way to name them.
+
+    AND THE RESIDUE IS MOSTLY FALSE, WHICH IS THE FINDING THAT DECIDES THE RECOMMENDATION.
+    Each residue id was then checked against the projection's FOUR credit paths, not the split's two:
+      W1-T2   — CREDITED. PR #18 is merged, carries the anchored `Remudero-Task: W1-T2` line, and its
+                head is `run-W1-T2-1784044786127`. The split misses it because the SUBJECT ("WS-1:
+                enforce validate-before-spawn guard inside spawnWorker (FF10a)") never cites the id
+                and the squash COMMIT body carries no trailer.
+      W1-T326 — CREDITED. PR #1302 is merged, carries the anchored `Remudero-Task: W1-T326` line, and
+                its head is `run-W1-T326-1785871128282`. The split misses it for a STRUCTURAL reason:
+                its subject is `chore(plan): rule daemon parallelism stays at N=1 (W1-T326)`, and
+                `LINT_FILING_SUBJECT_RE` excludes `chore(plan)` on the rule "a filing cites a task; it
+                does not implement it". That rule is right for an implement task and WRONG for a
+                RULING task, whose entire deliverable ships as a plan/DECISIONS edit under exactly
+                that subject. A ruling-shaped task can therefore never be credited by this split.
+      W1-T49  — GENUINELY UNCREDITED. No anchored trailer on any merged PR. DECISIONS.md's own
+                2026-08-2x entry already names why: "W12-T1 blocks W1-T49 the same way" — a
+                `type: manual` dependency that can never be credited, so the task is parked on a
+                paperwork gap rather than on work.
+    So the one instrument offered as "the real work" is wrong on two of its three rows, and the single
+    true row is blocked on a condition already recorded elsewhere. THE COST IS NOT MERELY TIME.
+
+    Q2 — IS THE LINTER'S OPEN SET DERIVABLE FROM CREDIT RATHER THAN `status:`? YES, AND THE ANSWER
+    STILL DOES NOT AUTHORISE THE CHANGE. `isOpenLintTask` reads the stored `status:` through
+    `NON_OPEN_LINT_STATUSES`, and that field is decorative by charter: `plan/tasks.yaml`'s own STATUS
+    MODEL header says it is initial-state only and never written back, DECISIONS.md records
+    "`status:` IS 100% DECORATIVE, NOT MOSTLY — all 583 credited tasks read `status:` other than
+    `done`", and W1-T367 MEASURED the cost of trusting it (248 of 359 already-shipped tasks re-linted
+    every run). The credit-derived alternative is not hypothetical: `planHealthSweep` ALREADY takes an
+    injected `isMerged` derived from `projectPlan`, and `proofQueueAuditCommand` ALREADY intersects
+    `isOpenLintTask` with `classifyFailingMergeEvidence(...).without`. The magnitude is the same one
+    W1-T367 predicted: `rmd proof-queue-audit` scopes to a credit-derived open set an order of
+    magnitude smaller than the stored-status one the linter checks.
+    BUT W1-T367 DESIGN (iii) ALREADY RULED "LEAVE IT", VERBATIM: "`rmd lint-plan` is an OFFLINE,
+    DETERMINISTIC linter; the projection needs a GitHub read. Converting it would make a pure linter
+    network-dependent and non-deterministic ... with no gate strengthened." The tempting counter is
+    that `defaultMergeEvidenceLog` shipped AFTER that ruling and IS offline — local object store, no
+    network, refusing a shallow clone by name. THAT COUNTER FAILS ON THIS SHARD'S OWN EVIDENCE: the
+    offline source reads TWO of the four credit paths (a commit-subject citation and a commit-body
+    trailer) and misses the two that DECISIONS.md measured as load-bearing (the PR-body trailer and
+    the `run-<id>-<epoch>` head ref — "NO SINGLE CREDIT PATH SUFFICES"). Its false-positive rate on
+    the residue above is two in three. So the measurement CONFIRMS W1-T367 design (iii) rather than
+    undermining it, and this shard reopens nothing.
+
+    Q3 — THE THREE CITATIONS, NONE RE-FILED. W1-T456 already ratified the exact distinction one level
+    down: an exact-path proof naming a file the diff's own shard declares is `not_yet_built`, a
+    FORWARD REFERENCE, not a failure — the reviewer learned to tell unbuilt from broken, and the
+    linter's whole-plan pass has not. W1-T409 and W1-T410 are the same defect at the claims layer —
+    the plan asserting unbuilt what has already merged, split into an offline assertion and a
+    retro-gather rung that re-derives against the merge resolver the gather already holds. All three
+    merged. Nothing here re-files any of them, and nothing here re-files W1-T370 or W1-T369.
+  design: |
+    THE DELIVERABLE IS A RECORDED RULING. NO CODE IS PROPOSED, AND NONE MAY BE WRITTEN BEFORE THE
+    RULING EXISTS — an agent may RECOMMEND a spend answer but may never RECORD one
+    (feedback fb-1785882211812-bafd8f, the decision-authority ruling).
+
+    (i) THE OPERATOR RULES BETWEEN THE THREE CANDIDATES, EACH STATED WITH WHAT IT COSTS AND WHAT IT
+    LEAVES. This shard's recommendation, recorded AS a recommendation, is NONE OF THE THREE — with
+    reasons, not as a refusal to engage.
+      (a) ANNOTATE-ON-CREDIT — write a marker onto each credited task's record so the linter can skip
+          it. COST: a new STORED field, at the scale of the credited corpus, that can disagree with
+          the projection the moment either side moves — the decorative-status trap this repo has now
+          measured twice (W1-T367's 248/359; DECISIONS.md's 583-of-643). STATED ACCURATELY AND NOT
+          OVER-CLAIMED: Rule 21's own gate would NOT block it — `postMergeAmendmentViolations` fires
+          only on ADDED OR CHANGED ACCEPTANCE CRITERIA, not on any field edit — so the objection is
+          the charter, not the gate. AGAINST.
+      (b) ARCHIVE-ON-CREDIT — move credited shards out of the loaded plan. This is the one candidate
+          W1-T370's three options do NOT contain, so it is genuinely unowned. COST: the widest blast
+          radius of the three — every `plan_refs`/`satisfied_by` pointer, `loadPlan`'s corpus, and the
+          id-mint sweep read the current tree, and only the git-history half of the mint (W1-T278)
+          already survives a fold. NOT DECIDED BY THIS EVIDENCE, in either direction; it needs a
+          measurement this shard did not take.
+      (c) SCOPE THE OPEN SET TO CREDIT — already ruled LEAVE IT by W1-T367 design (iii), and the
+          rationale above shows the only offline credit source available is two-of-four and wrong two
+          times in three on the residue. AGAINST, and the ruling stands unreopened.
+
+    (ii) WHAT THE EVIDENCE DOES DECIDE IS NOT ON THAT LIST, AND IS RECORDED AS A QUESTION, NOT A
+    DESIGN. The measured defect is in the SPLIT, not the linter's scope: a ruling-shaped task ships
+    its deliverable under `chore(plan):` and can therefore never be credited by
+    `LINT_FILING_SUBJECT_RE`'s exclusion, and the residue's ids are computed and discarded. Whether
+    to widen the split's evidence, exempt ruling-shaped tasks from the filing exclusion, or simply
+    NAME the residue in the output is a separate call. NOTE THE DIRECTION: W1-T1078 widened that same
+    regex to the older bare `plan:`/`docs:`/`chore:` subjects and merged — correctly, for implement
+    tasks — which makes the ruling-task blind spot strictly larger. This shard files no follow-up for
+    it; the operator decides whether one is warranted.
+
+    (iii) RECORD THE RULING WHERE THE NEXT READER FINDS IT — this task's own record and DECISIONS.md,
+    never only a PR body. W1-T367's rationale already documents three sessions independently
+    re-deriving facts about the `status:` field because earlier findings lived only in PR bodies, and
+    this shard is the fourth.
+
+    (iv) IF THE RULING IS "NONE", THIS TASK CLOSES AS A RECORDED DECISION with the measurement
+    preserved verbatim — the W1-T229/W1-T202 withdrawal shape — and no code is written at all.
+
+    NOT IN SCOPE: reopening the 2026-08-05 `status:` ruling or W1-T367 design (iii); re-filing W1-T370
+    or W1-T369; rewriting any proof on any task; and changing what the linter CHECKS.
+  note: |
+    `verify: human` IS LOAD-BEARING, NOT A FORMALITY, AND IT IS ALSO FORCED: `ruling-verify` refuses a
+    task declaring DECISIONS.md at `verify: auto` — the exact violation W1-T326 carries today — and
+    `isDispatchEligible` returns false at `t.verify !== "auto"` BEFORE the linter is consulted, so
+    this task can never auto-dispatch and its own proofs can never stall the queue.
+    The `demonstration:` proofs are legal ONLY on `verify: human` (W1-T277's intended use — an
+    operator action on the record) and are deliberately NOT rewritten into `unit test:` form, which
+    would produce proofs that parse, match zero tests, and cap the review. W1-T370 and W1-T323 carry
+    the same shape and lint clean.
+    risk:low — nothing ships. The failure mode is that no ruling is recorded and the task sits, which
+    is the status quo W1-T370 has been sitting in since it was filed.
+    budget_usd 30 — the adjudication and the record only. Any work a ruling authorises is sized then,
+    not pre-budgeted here for an outcome that may not be chosen.
+    NO depends_on. It is rulable today. W1-T370 owns the SPEND question on retiring proofs; this owns
+    the SIGNAL question on the whole-plan pass. Ruling either does not require ruling the other.
+  acceptance:
+    - claim: "the operator's ruling among annotate-on-credit, archive-on-credit, scope-on-credit and none is recorded with its reasoning"
+      proof: "demonstration: operator records the ruling and its reasoning in this task's record and in DECISIONS.md"
+    - claim: "the measured residue and its credit check are recorded alongside the ruling so the next reader does not re-derive them"
+      proof: "demonstration: operator confirms the recorded entry carries the residue ids and the credit paths each was checked against"
+    - claim: "if the ruling authorises no change, this task closes as a recorded decision rather than staying queued as work nobody intends to do"
+      proof: "demonstration: operator confirms the task's terminal state matches the ruling"
