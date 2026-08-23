@@ -719,3 +719,24 @@ forensic detail, so the narrative does not need to live here.
   invisible because the gate is honest about what it read and silent about which tree that was.
   `git rev-list --count HEAD..origin/main` costs nothing; print it beside any gate verdict taken
   outside a fresh worktree. *(2026-08-23, this retro's own first measurement)*
+
+## Lessons from 2026-08-23 (second retro)
+
+- **A POSITIVE CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS COVERS THE
+  WINDOW.** The (a)-(g) family above all catch a query that cannot read. This one reads perfectly and
+  still answers about the wrong period: `"step":"risk_judge.decision"` read 87 rows across the union
+  (gz 64 / plain 23 / live 0) — control fires — while `rate_limited_rest_merge` read 0 because the
+  corpus's newest row is 2026-08-12 and the feature merged 2026-08-23. Before acting on a ledger
+  zero, print the corpus's NEWEST ts beside the event's own date; a control says nothing about that
+  gap. *(W1-T1280/#2651)*
+- **A `grep:` proof must match text on ONE PHYSICAL LINE — a YAML block scalar wraps, and the
+  pattern then reads 0 at head with no error.** Distinct from the acceptance-parser wrap hazard
+  above: that one truncates a BLOCK, this one silently fails to match at all, so the criterion
+  degrades on a body that looks right. Verify every proof at head AND base before pushing; the
+  head-side zero is what catches it. *(#2645 — "GRANT A STRIKE BACK WHEN THE SIGNATURE CHANGES" read
+  0, repointed to a phrase that did not wrap)*
+- **A CENSUS TEST NAMES NONE OF YOUR SYMBOLS, SO THE CALLER SWEEP ABOVE CANNOT FIND IT** — `git grep
+  -l <symbol>` is blind to a suite that WALKS a population (`src/**`) and asserts its size. #2639
+  added one seamed policy read and reddened `test/config-reader-seams.test.ts`, a file outside its
+  `files:` that references nothing it touched. Also run any suite that enumerates a population your
+  file joins, found by what it walks rather than by name. *(#2639, #2605)*
