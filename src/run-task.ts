@@ -6178,10 +6178,24 @@ export async function runFixRung(opts: {
     // a live one; re-check the CURRENT body/criteria coverage directly before assuming
     // the reported reason still holds.
     let reviewReport = [fixResult.text, fixResult.blocks.join("\n")].join("\n");
+    // W1-T1254: `reviewReport` above is the WORKER'S OWN NARRATIVE, and the body is fetched only
+    // in `body-coverage` below — so `reviewer-unmet`, `ci-log` and `merge-conflict` hand the
+    // reviewer prose that was never a claim about the changeset. `judgeReview` skips
+    // `bodyContradictsDiff` ONLY when it is told the report is a substitute, so leaving this
+    // unset made a worker fail its own PR on a claim the body never made (#2569, measured), and
+    // the author could not clear it: the verdict is write-once per head sha and the document
+    // being corrected was not the one being read. Defaulting TRUE covers the three
+    // never-fetch modes by the initialiser rather than a per-mode branch, and leaves a THROWING
+    // fetch correct for free. W1-T1100 (#2415) added this flag and guarded both consumers; none
+    // of its hunks reached this call site, whose `report:` line still blames to #762.
+    let reviewReportIsSubstitute = true;
     if (fixMode === "body-coverage") {
       const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
       try {
         reviewReport = await fetchBody(opts.prUrl);
+        // Only HERE is `reviewReport` the real PR body. A throw leaves the assignment undone and
+        // the flag true, which is the honest reading: the catch below logs and falls through.
+        reviewReportIsSubstitute = false;
       } catch (e) {
         deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
@@ -6207,6 +6221,12 @@ export async function runFixRung(opts: {
               `changeset claim to match before re-review`,
           );
           reviewReport = updatedBody;
+          // W1-T1254 design (ii): this arm just WROTE `updatedBody` to the PR, so the report IS
+          // the body and must be scored as one. Leaving the flag true here would disable the
+          // changeset check on the exact strike that repaired a stale claim — the fix becoming a
+          // new blind spot. Set explicitly rather than relying on the fetch above having
+          // succeeded: a throwing fetch still reaches this block.
+          reviewReportIsSubstitute = false;
         }
       } catch (e) {
         deps.log("fix.body_claim_update_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
@@ -6218,6 +6238,7 @@ export async function runFixRung(opts: {
       prUrl: opts.prUrl,
       task: opts.task,
       report: reviewReport,
+      reportIsSubstitute: reviewReportIsSubstitute,
       settingsFile: opts.settingsFile,
       config: opts.config,
       budgetUsd: opts.budgetUsd,
