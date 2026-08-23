@@ -565,6 +565,7 @@ import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-aud
 import { buildReceipt } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
   readGithubPosture,
@@ -8118,6 +8119,58 @@ async function runTask(
     mkdirSync(dirname(repoDir), { recursive: true });
     execFileSync("gh", ["repo", "clone", `${owner}/${task.repo}`, repoDir], { stdio: "inherit" });
   }
+
+  // ── CROSS-HOST DISPATCH CLAIM (W1-T1268), TAKEN BEFORE ANY SPEND ────────────────────────────
+  // HERE, right after the clone is guaranteed to exist and before pruneStaleRuns/worktreeAdd —
+  // no worktree, no branch, no run lock and no worker have been touched yet, so a refusal below
+  // costs nothing to unwind. This closes the STRICTLY CROSS-HOST, STRICTLY PRE-ARTIFACT gap the
+  // ten `isDispatchEligible` probes (src/lib/drain.ts) cannot: `isOpenPr`/`hasPushedRunBranch`
+  // both read a PUBLISHED artifact, and neither exists at the moment a second host — or an
+  // operator dispatching by hand beside the fleet — starts the SAME task. `repoDir`, not
+  // `repoRoot`: see {@link dispatchClaimReserverFor}'s own doc for why.
+  const claimReserver = dispatchClaimReserverFor(repoDir);
+  const claimAnchor = claimReserver.mintAnchor();
+  const claimOutcome = claimReserver.attempt(task.id, claimAnchor);
+  const claimHolder = claimOutcome === "taken" ? claimReserver.holder(task.id) : undefined;
+  const claimDecision = decideDispatchClaim(claimOutcome, { taskId: task.id, holder: claimHolder });
+  log("dispatch.claim", {
+    ref: dispatchClaimRef(task.id),
+    outcome: claimOutcome,
+    proceed: claimDecision.proceed,
+    reason: claimDecision.reason,
+  });
+  if (!claimDecision.proceed) {
+    // CONTENTION CARRIES ITS OWN EVIDENCE: `isMerged(task)` is the SAME projection this run
+    // already computed above (the W1-T319 already-merged guard) — exactly one of the three
+    // signals (`isMerged`, `readLiveState`/`isLiveMergeCredited`, `closedUnmergedRunBranches`)
+    // the dispatch rung's own probes already read, re-used rather than re-derived. A claim
+    // whose task is demonstrably merged is stale and this run (the loser) is exactly the run
+    // holding fresh proof of it, so it drops the stale ref rather than leaving it for a THIRD
+    // lane to find blocked by a dead claim. The refusal below stands either way.
+    if (claimOutcome === "taken") {
+      const released = releaseDispatchClaim(task.id, claimReserver, { evidenceObserved: isMerged(task) });
+      log("dispatch.claim_released", {
+        ref: dispatchClaimRef(task.id),
+        arm: released.arm,
+        release: released.release,
+        dropped: released.dropped,
+        reason: released.reason,
+      });
+    }
+    say(`REFUSED: ${claimDecision.reason}`);
+    // `unreachable` mirrors `blocked_git_fetch`'s own "cannot reach origin" refusal (this IS a
+    // git-connectivity failure, not a new failure mode); `taken` mirrors `blocked_inflight`'s
+    // own "another holder owns this run right now" (this IS that condition, cross-host instead
+    // of same-host) — no new RunResult verdict is introduced for either arm.
+    return {
+      taskId,
+      runId,
+      merged: false,
+      costUsd: 0,
+      verdict: claimOutcome === "unreachable" ? "blocked_git_fetch" : "blocked_inflight",
+    };
+  }
+
   // ── Reclaim debris from crashed prior runs (WS-1: a max-turns death left its
   // run-* worktree + branch behind). Do this BEFORE adding ours so leftovers can
   // never block the new worktree/branch. Best-effort; ledger what was reclaimed.
@@ -8161,6 +8214,10 @@ async function runTask(
         `REFUSED: worktree base ${e.base} is behind origin/${e.ref}'s remote head ${e.remoteHead} — ` +
           "refusing before recon/implement/commit spend anything",
       );
+      // W1-T1268: this run already holds the dispatch claim taken above — drop it (holder arm)
+      // before returning, or a stale base on THIS host would strand the claim for an operator
+      // to clear even though nothing is actually in flight.
+      releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
       return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
     }
     throw e;
@@ -9434,6 +9491,22 @@ async function runTask(
     // liveness token so a later prune may reclaim the worktree. Idempotent; the
     // sibling file also vanishes with the worktree on the paths that remove it.
     removeRunLock(worktreePath);
+    // W1-T1268: HOLDER ARM — drop the dispatch claim this run took, CAS'd on `claimAnchor` so
+    // this can only ever delete the claim it still holds, never one that has since become
+    // another lane's. Best-effort, matching `removeRunLock` immediately above: a throw here
+    // must never replace whatever verdict this run actually reached.
+    try {
+      const released = releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+      log("dispatch.claim_released", {
+        ref: dispatchClaimRef(task.id),
+        arm: released.arm,
+        release: released.release,
+        dropped: released.dropped,
+        reason: released.reason,
+      });
+    } catch (e) {
+      log("dispatch.claim_release_error", { error: String((e as Error)?.message ?? e) });
+    }
   }
   } // ── end runTaskBody
 }
@@ -12455,6 +12528,25 @@ export function triageClaimReserverFor(worktreePath: string): TriageClaimReserve
     // throwing runner would make it indistinguishable from an unreachable remote — the exact
     // conflation `classifyPushFailure` exists to prevent.
     run: gitRunAdapter((args) => spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" })),
+  });
+}
+
+/**
+ * The real cross-host DISPATCH claim reserver (W1-T1268), bound to ONE task's clone dir.
+ *
+ * `repoDir`, NOT `repoRoot`: the claim must be taken on the SAME `origin` this run would push
+ * its own branch/PR to — the identical reason {@link triageClaimReserverFor} binds to a
+ * worktree of that same clone rather than the daemon's own install root. `--repo owner/name`
+ * dispatch (W1-T1062) can target a FOREIGN repo whose clone lives at a different path than this
+ * checkout's own `repoRoot`, so `repoRoot` would silently claim against the wrong remote.
+ *
+ * EXTRACTED RATHER THAN INLINED for the reason {@link gitRunAdapter}'s own doc gives: an inline
+ * closure runs only on the real path, so a test asserting the real reserver's git argv shape
+ * needs this as a named seam.
+ */
+export function dispatchClaimReserverFor(repoDir: string): DispatchClaimReserver {
+  return gitDispatchClaimReserver({
+    run: gitRunAdapter((args) => spawnSync("git", ["-C", repoDir, ...args], { encoding: "utf8" })),
   });
 }
 
