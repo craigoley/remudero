@@ -211,6 +211,32 @@ test("main(): `rmd deploy-run --dry-run` with no deploy marker present is a clea
   }
 });
 
+// ── rmd deploy — writes state/DEPLOY_REQUESTED and prints the operator confirmation
+// (W1-T1239 round 1): only a write + a console.log, no network, no launchctl call. ──
+
+test("main(): `rmd deploy` writes state/DEPLOY_REQUESTED and names the already-current case in its confirmation", async (t) => {
+  const { home, root } = instance("rmd-t143-deploy-");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const code = await callMain(t, ["node", "run-task.js", "deploy", "--reason", "w1-t143"]);
+    assert.equal(code, 0);
+    const marker = readFileSync(join(root, "state", "DEPLOY_REQUESTED"), "utf8");
+    assert.match(marker, /"reason":\s*"w1-t143"/, "the CLI's own --reason flag reaches the marker file");
+    const printed = (console.log as unknown as { mock: { calls: Array<{ arguments: unknown[] }> } }).mock.calls
+      .map((c) => String(c.arguments[0]))
+      .join("\n");
+    assert.match(
+      printed,
+      /already on origin\/main.*consumes the request without a deploy/s,
+      "the confirmation must tell the operator an already-current fleet still consumes their request",
+    );
+  } finally {
+    process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 // ── rmd ops / rmd issues --dry-run — real (read-only, fail-soft) gh reads against
 // THIS repo; --dry-run guarantees neither ever files a real GitHub issue. issues'
 // managed-repo list is THIS checkout's real (empty) .remudero/managed-repos.json, so
