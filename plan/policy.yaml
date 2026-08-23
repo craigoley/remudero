@@ -433,6 +433,14 @@ sweep:
   # starvation. BUT NINE MINUTES CANNOT CLEAR AN 1,800,000 ms CEILING. Record it as unobserved.
   # AND NO CONCURRENCY COST APPEARED: `rejected: 0` on every settled set, and no lane has ever failed
   # for a concurrency reason. THE ROW STAYS AT 3 ON THAT EVIDENCE, not on optimism.
+  # NO `state/` OVERRIDE MAY EVER LOWER THIS ROW — MASTER-PLAN §12 standing rule 26 (operator
+  # ruling, fb-1785950676514-c5cdcc). No lanes override exists and none is filed; if one is ever
+  # built, this committed value is its FLOOR and an override may only RAISE it. A wiped `state/`
+  # silently reverts an override to this row, so an override holding the fleet DOWN would vanish
+  # into MORE concurrency with no signal at all. To run FEWER lanes: `rmd pause` for the emergency
+  # (no PR, no restart, in-flight work finishes), then move this value in a plan PR and restart —
+  # restart is 1.2s median, so an override would save the PR, not the restart. Rule 26 carries the
+  # full argument, the measurements and the store facts; do not re-derive them here.
   dispatchLanes:
     value: 3
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
@@ -497,6 +505,14 @@ sweep:
   # min/max to the value the way autoTriage.maxPerDay deliberately does — this ceiling gates
   # SPEND, so an editor still has room to raise it well past today's figure without the bound
   # itself becoming a second incident, while staying finite rather than effectively unbounded.
+  # THIS ROW IS THE ONE ROW WITH A LIVE `state/` OVERRIDE (W1-T332's store, W1-T364/#1417's console
+  # write control), so MASTER-PLAN §12 standing rule 26 lands here FIRST: a wiped `state/` silently
+  # reverts the override to this committed 500. RAISING the ceiling by override is the direction the
+  # rule permits (a wipe then reverts DOWN to 500 — less spend, safe); a LOWERING override is the
+  # wipe-unsafe direction, and today `writeDailyCostCeilingOverride` validates BOUNDS ONLY and will
+  # accept one. Rule 26 names that gap OPEN rather than closing it (refusing the write collides with
+  # fb-1785858048118-50fab8's dashboard ruling); W1-T333 is the queued SIGNAL half. Read rule 26
+  # before adding a second overridable row — `policy.bounds` is populated for THIS key alone.
   dailyCostCeilingUsd:
     value: 500
     origin: "lifted:src/lib/sweep.ts:365 (DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd)"

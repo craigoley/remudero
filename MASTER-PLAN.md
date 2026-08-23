@@ -4231,6 +4231,57 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    enforcement it was always meant to accompany, and completed 2026-08-12 with the three enforcement facts
    that first pass omitted — the verbatim `blocked_review` refusal, the never-suppressible property, and the
    re-measured citation counts]
+26. **A `state/` OVERRIDE MAY ONLY MOVE A VALUE TOWARD *GREATER* EXPOSURE — THE COMMITTED ROW IS THE
+   FLOOR.** OPERATOR RULING, recorded verbatim in substance from feedback `fb-1785950676514-c5cdcc`
+   (2026-08-05, cli): *"A LANES OVERRIDE MUST NEVER LOWER … the committed row is the floor and an
+   override may only RAISE it."* Recorded here, not built: no lanes override exists and none is filed
+   (see below for why), so this is a CONDITION ON ONE IF IT IS EVER BUILT — and, per the ruling's own
+   falsifier, on whatever generalisation of the override store lands first.
+   THE ASYMMETRY THAT MAKES IT A RULE: a wiped `state/` silently reverts every override to its
+   committed default, and that fails safe in ONE DIRECTION ONLY. If the committed row is the
+   lower-exposure end, a wipe costs concurrency/spend the operator wanted anyway; if an override is
+   the thing holding the value DOWN, the wipe silently restores the HIGHER exposure with no signal at
+   all. So: to REDUCE exposure, edit the committed row (a reviewed plan-data PR) — a reduction must
+   be durable, never state-resident. Stated by EXPOSURE, not by sign, because the safe direction is a
+   property of the row; for `sweep.dispatchLanes` and `sweep.dailyCostCeilingUsd` exposure rises with
+   the number, so for both of them "toward greater exposure" reads literally as "may only RAISE".
+   THE RULING'S OWN NUMBER IS ALREADY STALE, AND THE STALENESS STRENGTHENS IT. At capture the
+   committed `dispatchLanes` row was `value: 1` (min 1, max 4) and the author noted a wipe would
+   therefore revert *down* — safe. Today (`plan/policy.yaml`) it is **`value: 3`**, min 1, max 4,
+   beside a net-new `reviewLanes: 3`, and W1-T1049's own measurement says the host fits **about four
+   concurrent workers of any kind** against a configured worst case of six. The plausible near-term
+   operator move is therefore to run FEWER lanes — i.e. exactly the lowering override this rule
+   forbids. That is not an accident of the rule; it is the rule working.
+   WHAT TO DO INSTEAD, because the rule must leave the emergency reachable: `rmd pause` already halts
+   new dispatch without a PR, a restart or a deploy — `runDaemon` checks it in the tick body and
+   RE-CHECKS it immediately before admission (W1-T1065), in-flight work is never interrupted, and the
+   marker survives the deploy's `pull --ff-only`. Then move the committed row and restart. The
+   measurement the ruling carries: restart is **1.2s median** (148 kickstart-to-boot pairs, control
+   794 boots) against a PR-to-merge median of **12.2m** / p90 **64.9m** — so an override saves the
+   PR, not the restart, and its only unique saving is idle minutes during a flip-back, in a scenario
+   with zero observed instances (`dispatch.concurrent_set` 0 rows, `drain.pause`/`daemon.paused` 0
+   rows, control `run.start` 682). A LIVE RELOADER for lane width is separately refused: it would buy
+   1.2 seconds against `src/lib/daemon.ts`'s explicit W1-T343 design — *"resolved ONCE, for this
+   process's whole lifetime"* — and reintroduce the mid-run reconfiguration question that frozen
+   design exists to avoid.
+   FOR WHOEVER GENERALISES THE STORE — IT IS NOT PARAMETERISED, verified at this sha:
+   `dailyCostCeilingOverridePath` returns the literal `state/DAILY_COST_CEILING_OVERRIDE`; both the
+   writer and `resolveDailyCostCeiling` read `policy.bounds["sweep.dailyCostCeilingUsd"]` as a
+   LITERAL key; and `validatePolicy` populates `bounds` for that ONE field only (its own comment says
+   so). Generalising therefore means row key **plus** filename **plus** a `bounds` entry for the new
+   row, **plus** row-specific semantics — for lanes: integers, not floats, and the floor-at-1-never-0
+   that `laneDispatchBudget` and `runDaemon` both already apply (`Math.max(1, opts.laneCount ?? 1)`),
+   so a bad override can never mean "dispatch nothing" silently. Roughly 4–6 files.
+   OPEN, AND DELIBERATELY NOT DECIDED BY THIS RECORD: the SHIPPED ceiling store is the live instance
+   of the same asymmetry. W1-T364/#1417 gave the console an arm-then-confirm write over
+   `writeDailyCostCeilingOverride`, which validates BOUNDS ONLY — so a *lowering* ceiling override is
+   writable today and its silent loss raises the ceiling by up to the committed $500. Refusing such a
+   write in code would collide with the operator's other standing ruling (`fb-1785858048118-50fab8`:
+   runtime config belongs in a store with a dashboard, not behind a PR), so this entry names the gap
+   rather than closing it; the SIGNAL half is already queued as W1-T333 (render overridden-vs-default
+   provenance, so a vanished override is visible). The next filing that touches the store owns the
+   question. [operator feedback fb-1785950676514-c5cdcc; W1-T332/#1312, W1-T343/#1363, W1-T344,
+   W1-T364/#1417, W1-T1049; recorded 2026-08-23]
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream

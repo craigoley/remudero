@@ -33,6 +33,23 @@ raw: "A LANES OVERRIDE MUST NEVER LOWER — standing constraint recorded from
   lanes-specific half is moot."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2574
+summary:
+  headline: "Lanes Override: Enforce Constraint or Reject Feature"
+  what_happened: "Lanes override recommended against: saves 1.2s restart, not
+    12.2m PR-to-merge bottleneck. If implemented, safety constraint required:
+    override can only raise lanes, never lower, to prevent dangerous
+    state-wipes."
+  decision: Confirm constraint binding on any implementation, or reject the
+    feature entirely.
+  options:
+    - label: Confirm constraint binding
+      consequence: Protects against silent dangerous state-wipes; requires 4-6 files
+        for parameterization.
+    - label: Reject feature
+      consequence: Rely on existing emergency pause system; simpler; addresses actual
+        bottleneck.
+    - label: Build without constraint
+      consequence: "Faster but risks: wipe could silently increase concurrency and
+        spending."
