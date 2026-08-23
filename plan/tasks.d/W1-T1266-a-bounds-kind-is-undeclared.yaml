@@ -34,6 +34,32 @@
     — `export const SOMETHING_MAX = <number>` — so a backstop mis-sized under its healthy population
     becomes the primary control silently, and the only signal is that it starts firing on healthy
     runs. That is exactly the shape of all four cited instances.
+
+    A SECOND EXTERNAL SOURCE SUPPLIES THE DESCENT ARGUMENT `covibes/zeroshot` ONLY SPECIFIES, AND IT
+    IS A WORKING ONE. `Untrivial-ai/agent-orchestrator` at ~2377 commits (read 2026-08-23, PR
+    lifecycle only): `lifecycle/reactions.go`'s `ApplyPRObservation` queues its CI-failure and
+    merge-conflict nudges with `maxAttempts: 0`, and `sendOnce` gates on
+    `if maxAttempts > 0 && attempts >= maxAttempts` — so ZERO MEANS UNBOUNDED BY COUNT. What bounds
+    them instead is CONTENT-KEYED IDEMPOTENCE: `if m.react.seen[key] == sig` skips, where `sig` is
+    `ciFailureSignature(checks)`. The same failing checks never re-nudge; a DIFFERENT failure does.
+    **SO THE DESCENT IS OVER DISTINCT FAILURE SIGNATURES, WHICH ARE FINITE** — a repair loop that
+    stops making progress stops, and no counter decided it. That is the concrete answer to design
+    (ii)'s question of what descends across strikes, against which this repo's answer today is
+    NOTHING: `strikeCap: 2` is the only thing stopping it.
+
+    AND THE TWO PLACES THAT SOURCE GETS IT WRONG, RECORDED SO NEITHER IS IMPORTED WITH THE IDEA.
+    `reviewMaxNudge = 3` is a BARE CONSTANT with no comment and no derivation beside it — the very
+    shape this task exists to make undeclarable. And its capped path is keyed
+    `review:<prURL>:<reviewID>`, so EVERY NEW REVIEW ID GETS A FRESH BUDGET OF THREE and there is no
+    global repair budget per PR; that cap bounds one review's nudges, never the repair.
+
+    AND WHAT THIS REPO ALREADY DOES BETTER, WHICH THE DESCENT ARGUMENT MUST NOT BE TRADED FOR. AT
+    THE CEILING THAT SOURCE DOES NOTHING: `sendOnce` returns `sendOnceAccounted` and stops, and
+    `escalat*` across its `internal/` means session-state transitions (`waiting_input` -> `blocked`)
+    and process-signal escalation — there is no operator-escalation path anywhere in it. A PR whose
+    CI keeps failing with an UNCHANGING signature simply goes quiet, and nobody is told. This repo
+    escalates instead. **TAKE BOTH: a measurable descent AND the escalation at its end** — a loop
+    that stops silently and a loop that stops loudly are not the same repair.
   design: |
     (i) CLASSIFY BY THE OTHER-STOPPING-CONDITION TEST, AND CONTROL THE CLASSIFIER. The test: on the
     HEALTHY path, does the loop have a stopping condition other than this bound? If yes it is a
