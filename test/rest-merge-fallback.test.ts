@@ -10,12 +10,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+
 import {
   attemptArm,
   ghMergePrArgv,
   ghUpdateBranchArgv,
   armFailureIsRateLimited,
   mergeTargetFromPrUrl,
+  mergeDirectViaRest,
+  realArmDeps,
 } from "../src/run-task.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/2598";
@@ -174,12 +178,12 @@ test("the real mergeDirect is guarded by the live-write boundary before it can t
   );
   const i = src.indexOf("mergeDirect: (prUrl) => {");
   assert.ok(i > 0, "the real dep is still defined");
-  const body = src.slice(i, i + 1400);
+  const body = src.slice(i, i + 600);
   assert.ok(
-    body.indexOf('assertLiveWriteAllowed("gh-pr-merge"') < body.indexOf("execFileSync"),
+    body.indexOf('assertLiveWriteAllowed("gh-pr-merge"') < body.indexOf("mergeDirectViaRest(prUrl)"),
     "the guard must fire BEFORE the write, not after it",
   );
-  assert.ok(body.includes("ghMergePrArgv"), "the real dep uses the REST argv");
+  assert.ok(body.includes("mergeDirectViaRest(prUrl)"), "the real dep delegates to the REST write");
   assert.equal(body.includes('["pr", "merge", prUrl, "--squash"]'), false, "the GraphQL form is gone");
 });
 
@@ -207,4 +211,54 @@ test("a rate-limited fallback whose post-merge step throws still reports the mer
     said.some((s) => s.includes("merge landed; a post-merge step failed")),
     `expected the landed-merge row, got ${JSON.stringify(said)}`,
   );
+});
+
+// ── the WRITE itself: argv, refusal, and the real default binding ───────────────────────────────
+test("mergeDirectViaRest issues the REST merge through the injected exec, with the argv it builds", () => {
+  const seen: Array<{ file: string; args: string[]; opts: unknown }> = [];
+  mergeDirectViaRest(PR, (file, args, opts) => {
+    seen.push({ file, args, opts });
+    return "";
+  });
+  assert.equal(seen.length, 1, "exactly one write");
+  assert.equal(seen[0].file, "gh");
+  assert.deepEqual(seen[0].args, ghMergePrArgv("craigoley", "remudero", 2598));
+  assert.deepEqual(seen[0].opts, { encoding: "utf8", stdio: "pipe" });
+});
+
+test("mergeDirectViaRest THROWS on a URL it cannot resolve, and never reaches the write", () => {
+  let called = 0;
+  assert.throws(
+    () =>
+      mergeDirectViaRest("https://example.com/not/a/pull/1", () => {
+        called++;
+        return "";
+      }),
+    /refusing to merge blind/,
+  );
+  assert.equal(called, 0, "a merge that cannot be addressed must not be attempted");
+});
+
+test("mergeDirectViaRest's DEFAULT exec is the real one — reached when no fake is supplied", () => {
+  // The refusal path runs BEFORE the exec, so this exercises the default binding without ever
+  // shelling out: CLAUDE.md's rule is that an all-fakes suite leaves the default arm dead, and
+  // this is the one call in the file that omits the injected seam entirely.
+  assert.throws(() => mergeDirectViaRest("not-a-url"), /refusing to merge blind/);
+});
+
+// ── the real dep delegates: guard first, then the REST write ────────────────────────────────────
+test("the real mergeDirect dep delegates to the REST write once the live-write guard permits it", () => {
+  // The guard fires FIRST and is what makes this dep unreachable from an ordinary test; opening it
+  // deliberately (the sanctioned affordance) is the only way to prove what it delegates to. An
+  // unresolvable URL makes the delegate throw BEFORE any `gh` is spawned, so this reaches the
+  // delegation without ever performing a live write.
+  const d = realArmDeps();
+  withLiveWritesAllowed(() => {
+    assert.throws(() => d.mergeDirect("not-a-resolvable-pr-url"), /refusing to merge blind/);
+  });
+});
+
+test("the real mergeDirect dep is still REFUSED outright when live writes are not permitted", () => {
+  const d = realArmDeps();
+  assert.throws(() => d.mergeDirect(PR), /live write|LiveWriteBlocked|gh-pr-merge/i);
 });

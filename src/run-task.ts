@@ -1744,20 +1744,7 @@ export function realArmDeps(
     mergeDirect: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
       // W1-T1050: NO `--delete-branch` — see the doc on `ArmDeps.mergeDirect` above for why.
-      // W1-T1255: REST (`gh api --method PUT .../merge`), NOT `gh pr merge --squash`. The old form
-      // was GraphQL, so the fallback shared a budget with the arm it exists to rescue — an
-      // exhausted GraphQL bucket took out both at once while core sat untouched. Same call site,
-      // same guard above, same squash shape; only the transport moves. A URL this parser cannot
-      // read THROWS rather than silently doing nothing: a merge that did not happen must never
-      // read as one that did.
-      const target = mergeTargetFromPrUrl(prUrl);
-      if (!target) {
-        throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
-      }
-      execFileSync("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), {
-        encoding: "utf8",
-        stdio: "pipe",
-      });
+      mergeDirectViaRest(prUrl);
     },
     // `--disable-auto` WITHDRAWS an arm rather than creating one, but it is still a live
     // mutation of a real PR, and under the guard there is never an arm to withdraw — the
@@ -5163,6 +5150,29 @@ export function ghMergePrArgv(owner: string, repo: string, prNumber: number): st
  * either merges or raises, because a merge that did not happen must never be reported as one that
  * did (the same discipline W1-T1050 established for its failure path).
  */
+/**
+ * W1-T1255: the direct-merge WRITE itself — `gh api --method PUT .../merge`, NOT
+ * `gh pr merge --squash`. The old form was GraphQL, so the arm's fallback shared a budget with the
+ * arm it exists to rescue: one exhausted bucket took out both at once while core sat untouched.
+ * Same call site and same guard above it; only the transport moves.
+ *
+ * `exec` is injected LAST with a real default so no positional caller shifts, and so the argv and
+ * the refusal are unit-testable without a live pull request or a `gh` binary. A URL this parser
+ * cannot read THROWS rather than silently doing nothing — `mergeDirect`'s contract is that it
+ * either merges or raises, because a merge that did not happen must never be reported as one that
+ * did (W1-T1050's discipline on its failure path).
+ */
+export function mergeDirectViaRest(
+  prUrl: string,
+  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe" }) => unknown = execFileSync,
+): void {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) {
+    throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
+  }
+  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8", stdio: "pipe" });
+}
+
 export function mergeTargetFromPrUrl(prUrl: string): { owner: string; repo: string; prNumber: number } | undefined {
   // ONE match, not `ownerRepoFromPrUrl` + `prNumberFromRef` composed: that pair reads as a belt-
   // and-braces guard and is not one. `ownerRepoFromPrUrl`'s own regex already requires `/pull/\d+`,
