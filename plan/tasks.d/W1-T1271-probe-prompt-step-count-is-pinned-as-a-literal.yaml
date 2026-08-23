@@ -41,6 +41,48 @@
     listing four will plausibly run three and silently skip one. The literal `THREE` is a proxy for
     that agreement, and the proxy breaks on every future step while the property it stands for does
     not.
+
+    THE FALSIFIER HAS FIRED, AND IT CONFIRMS THIS SHARD RATHER THAN RETIRING IT. Measured on
+    #2626 (W1-T1265, head 50d28568): the `ci` job reported `# tests 8823 / # pass 8820 / # fail 2`,
+    and the retry line named both failures — "the probe prompt carries the tripwire command, so a
+    spawned worker actually attempts it" and "MUTANT: the strip guards the OS-denial test, and the
+    tripwire is observed inside cwd". BOTH LIVE IN `test/deny-floor-probe.test.ts`. The
+    `coverage-ratchet` job (97226518545) failed on the SAME TWO TESTS at its own full-suite step, so
+    the coupling cost two red required checks rather than one.
+
+    SO THE COUPLING IS OBSERVED, NOT INFERRED: a two-file diff entirely inside its own declared
+    `files:` — `[src/lib/containment.ts, test/containment.test.ts]` — broke a suite OUTSIDE it. The
+    task that tripped it did nothing wrong procedurally: it swept before dispatch, stayed in span,
+    and ran its declared test file, which passed. The declared-span discipline and the
+    run-only-what-you-declare discipline are individually correct and together leave exactly this
+    gap, which only the full suite closes.
+
+    AND THERE IS A SECOND PIN THE SHARD DID NOT ANTICIPATE, SHARPER THAN THE FIRST. The same file
+    carries a mutation-anchor uniqueness guard: it asserts
+    `containmentSrc.split("stripDenyFloorLines(r.transcript)").length - 1 === 1`, with the stated
+    reason "the substitution target must be UNIQUE or the mutant proves nothing". W1-T1265's first
+    attempt added a second call and the count read 2. THE GUARD COUNTS OCCURRENCES IN RAW SOURCE
+    TEXT, NOT PARSED CALL SITES — so after the duplicate call was removed and the code was correct,
+    the count STILL read 2, because the explanatory comment written to record the fix quoted the
+    literal verbatim. A comment broke a mutation guard. That is the same class as the step count and
+    a harder one to see: the step count at least fails on a change to the thing it describes, while
+    this fails on a change to the PROSE ABOUT that thing.
+
+    AND THE REPAIR WAS NOT A TEST EDIT, WHICH IS THE PART THAT MATTERS FOR SCOPING THIS TASK. The
+    prompt kept THREE containment commands and added the egress check as an explicit FOURTH step, so
+    `/THREE commands/` still matches and the assertion's own intent — the narrated count agrees with
+    the containment steps listed — is preserved rather than worked around. The duplicate call was
+    dropped ON THE MERITS: `egressDenialSeen` now derives from `EGRESS_DENIAL_RE` alone, so a
+    filesystem denial can no longer read as an egress denial, which that file's own doc already
+    said the two patterns must never do. Both repairs landed inside the changing task's declared
+    span and `test/deny-floor-probe.test.ts` was never edited.
+
+    THAT A REPAIR EXISTED INSIDE THE SPAN IS NOT AN ARGUMENT THAT THE PIN IS FINE. It cost a full
+    red CI cycle across two required checks to discover, the fix was available only because the
+    egress step could be phrased as an addition rather than a renumbering, and the NEXT step added
+    to that prompt may have no such phrasing available. The question this shard asks — assert the
+    CONTRACT rather than the COUNT — is unchanged by the repair and is now better evidenced than
+    when it was filed.
   design: |
     (i) Q1 — WHAT THE ASSERTION PROTECTS, AND THE THREE WAYS TO KEEP IT. The property is
     NARRATION/LIST AGREEMENT, not the number three. Options, with costs:
