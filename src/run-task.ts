@@ -417,6 +417,7 @@ import {
 import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
   assertLintClean,
+  breMetacharsIn,
   changedTaskIds,
   rawChangedTaskIds,
   criteriaAdded,
@@ -430,6 +431,7 @@ import {
   TaskLintError,
   type LintOpts,
 } from "./lib/task-linter.js";
+import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import {
   loadDefaultPolicy,
@@ -11528,6 +11530,73 @@ export function checkProofCommand(
   }
   console.log(`argv:       ${w.command} ${args.join(" ")}`);
 
+  // W1-T1224: resolve the grep TARGET PATH and PATTERN once, up front — {@link grepZeroHitCauseLine}
+  // below and the exec_error branch's path-absent check both need them, and the --base block
+  // further down already relied on this same "argv's last element is the path" assumption (see its
+  // own comment, unchanged) before this task; pattern is the element right before it, matching how
+  // parseDialectGrep (review.ts) always compiles a `grep:` proof's args as `[..flags, "--", pattern,
+  // path]`.
+  const grepTargetPath = w.kind === "grep" && w.args.length >= 1 ? w.args[w.args.length - 1] : undefined;
+  const grepPattern = w.kind === "grep" && w.args.length >= 2 ? w.args[w.args.length - 2] : undefined;
+
+  // W1-T1224: the static BRE-metacharacter note used to print unconditionally on every non-pass
+  // grep verdict, whether or not the pattern actually carried one — now gated (below) behind
+  // breMetacharsIn actually finding one of `[ * ^ $` in the pattern, the SAME check
+  // proofGrepSafetyViolations (task-linter.ts) already uses to decide whether a pattern is
+  // BLOCKING-unsafe.
+  const GREP_METACHAR_NOTE =
+    "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
+    "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.";
+  const grepPatternHasBlockingMetachar = grepPattern !== undefined && breMetacharsIn(grepPattern).blocking.length > 0;
+
+  /**
+   * W1-T1224 — WHY a zero-hit `grep:` proof read zero, as a `cause:` line alongside the unchanged
+   * `verdict:`/exit code (design (iii): report, do not re-rank). Calls {@link classifyGrepZeroHit}
+   * (src/lib/grep-zero-cause.ts) — this file derives NO cause of its own, only reads the file and
+   * formats what the classifier returns. `undefined` when there is nothing to say: a non-grep
+   * proof, or a target path/pattern argv could not resolve.
+   */
+  function grepZeroHitCauseLine(): string | undefined {
+    // grepTargetPath/grepPattern are only ever set (above) when w.kind === "grep" — reading them
+    // rather than w.kind again keeps this closure from needing TS to re-narrow `w` (a `const` from
+    // an outer scope; type guards on it do not apply inside a nested function declaration).
+    if (grepTargetPath === undefined || grepPattern === undefined) return undefined;
+    let fileText: string;
+    try {
+      fileText = readFileSync(join(process.cwd(), grepTargetPath), "utf8");
+    } catch {
+      return undefined; // the file the executor just read a moment ago is now unreadable — say nothing rather than guess
+    }
+    switch (classifyGrepZeroHit(grepPattern, fileText)) {
+      case "line-seam":
+        return (
+          "cause:      line-seam — the pattern's text IS in the file, but a line break falls inside\n" +
+          "            it (a YAML fold or a wrapped paragraph). grep is line-based and this can NEVER\n" +
+          "            match as written — rejoin the phrase onto one physical line, or rewrite the\n" +
+          "            pattern to match text that already lives on one line."
+        );
+      case "case-only":
+        return (
+          "cause:      case-only — the pattern's text IS in the file with different capitalisation.\n" +
+          "            grep here is case-sensitive and this can NEVER match as written — match the\n" +
+          "            file's actual case, or write a separate case-insensitive proof if that is truly\n" +
+          "            the intent."
+        );
+      case "absent":
+        return (
+          "cause:      absent — the pattern's text is not in the file in any form (line-wrap and case\n" +
+          "            both probed). This reads as a legitimate FORWARD REFERENCE to work not yet\n" +
+          "            written, not as a broken proof."
+        );
+      case "matched":
+        return (
+          "cause:      matched — this classifier's own probe found a line match despite the real grep\n" +
+          "            reading zero hits; that is a matcher disagreement, not a fact about the file —\n" +
+          "            treat it as a bug report against the classifier, never as evidence either way."
+        );
+    }
+  }
+
   // W1-T387: THE COLLAPSE. Everything above this line is UNCHANGED diagnostics (parse kind,
   // candidate resolution, the exact argv) — the whole point is that they survive. From here down,
   // the VERDICT is decided by execWhitelistedProof itself, the SAME function judgeCriterion calls
@@ -11573,11 +11642,16 @@ export function checkProofCommand(
       if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
     }
     console.log(`verdict:    exec_error — ${String((e as Error)?.message ?? e)}`);
-    if (w.kind === "grep")
+    // W1-T1224 (design (iv)): an ABSENT path is the one exec_error cause this task names — it
+    // still reports exec_error and exit 4 exactly as before (no caller shifts), it simply gains
+    // this line. Checked with existsSync rather than the classifier: there is no file text to
+    // read at all, so classifyGrepZeroHit has nothing to classify.
+    if (w.kind === "grep" && grepTargetPath !== undefined && !existsSync(join(process.cwd(), grepTargetPath)))
       console.log(
-        "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
-          "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.",
+        `cause:      path-absent — ${grepTargetPath} does not exist; grep could not even look (a\n` +
+          "            renamed/missing target, or a permission error).",
       );
+    if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
     return CHECK_PROOF_EXIT.execError;
   }
 
@@ -11588,11 +11662,13 @@ export function checkProofCommand(
     if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
   }
   console.log(`verdict:    ${outcome}`);
-  if (w.kind === "grep" && outcome !== "pass")
-    console.log(
-      "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
-        "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.",
-    );
+  if (w.kind === "grep" && outcome !== "pass") {
+    // W1-T1224: check-proof calls the classifier rather than deriving a cause of its own —
+    // classifyGrepZeroHit( in src/run-task.ts, above, is the wiring this line exercises.
+    const causeLine = grepZeroHitCauseLine();
+    if (causeLine) console.log(causeLine);
+    if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
+  }
   const headExit =
     outcome === "pass" ? CHECK_PROOF_EXIT.pass : outcome === "fail" ? CHECK_PROOF_EXIT.fail : CHECK_PROOF_EXIT.noMatch;
 
@@ -11610,10 +11686,8 @@ export function checkProofCommand(
     mergeBase: () => baseRef,
     ...deps.baseBlobDeps,
   });
-  // Mirrors grepProofTargetPath (review.ts, unexported): the compiled argv's LAST element for a
-  // `grep:` proof is its target path; `undefined` for every other kind, since only a `grep:`
-  // proof ever gets a base blob materialized (materialiseBaseProofBlobs's own scope).
-  const grepTargetPath = w.kind === "grep" ? w.args[w.args.length - 1] : undefined;
+  // grepTargetPath (mirrors grepProofTargetPath, review.ts, unexported) was already resolved
+  // above, before the W1-T387 collapse — reused here rather than re-derived a second time.
 
   if (baseCheckoutDir === undefined) {
     if (grepTargetPath !== undefined && baseUnreadablePaths.has(grepTargetPath)) {
