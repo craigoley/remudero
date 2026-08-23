@@ -1,0 +1,129 @@
+- id: W1-T1286
+  title: "THE UNION RESOLVER'S COVERAGE GUARD WATCHES ONLY WHAT ITS OWN ENUMERATOR ALREADY MATCHED — `unread` is built by iterating `ledgerRotationEntries`' OUTPUT, so a rotation name whose suffix the enumerator does not recognise is filtered out before the guard ever sees it, and the union reports complete coverage over a corpus it never fully enumerated"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 65.00
+  files: [src/lib/ledger-grep.ts, test/ledger-grep-unclassified.test.ts]
+  origin: oper#enumerator-blind-to-unmatched-2026-08-23
+  plan_refs: ["W1-T444", "W1-T1262"]
+  status: queued
+  attempts: 0
+  rationale: |
+    NO LEDGER FIGURE IS CLAIMED HERE. The archive count in the filing environment reads ZERO in all
+    three forms, so the union reader refuses by design and every claim below is derived from SOURCE
+    at `origin/main`, never from a corpus read.
+
+    THE FOUNDING SHAPE, FROM `70d52c2`'s OWN PROSE (#1657, 2026-08-12), re-derived rather than
+    recited: *"Two shipped readers each saw half the rotations, in opposite directions.
+    `resolveLedgerUnion` filtered `.endsWith(\".ndjson.gz\")` and missed every uncompressed
+    rotation; `ledgerCorpusFiles` filtered `.endsWith(\".ndjson\")`"* — and the fix's own framing:
+    *"The guard changes from readability to COVERAGE ... `archiveCount === 0` cannot see partial
+    coverage ... `unread` now names every rotation found and not opened, and `ok` refuses on it."*
+
+    THAT FIX HELD, AND THIS TASK IS NOT A RE-FILING OF IT. The two-enumerator shape is GONE:
+    `ledgerRotationEntries` (src/lib/ledger-grep.ts) is now the single definition, and every
+    consumer delegates to it — `ledgerCorpusFiles` (run-task.ts), `analytics-route.ts`,
+    `status.ts` at two sites, and `resolveLedgerUnion` itself. A fifth `readdirSync` exists in
+    `ledger.ts` (`listStateFiles`) and is NOT a counter-example: it is a recursive
+    whole-directory walker for snapshot/restore that applies NO suffix filter at all, so it makes
+    no suffix claim and cannot drift from the enumerator.
+
+    WHAT THE GUARD ACTUALLY COVERS, READ FROM THE LOOP RATHER THAN FROM ITS NAME:
+      const unread: string[] = [];
+      for (const entry of rotations) { try { ...read... } catch { unread.push(entry.path); } }
+    `rotations` IS `ledgerRotationEntries`' return value. So `unread` can only ever name a file the
+    enumerator ALREADY CLASSIFIED and then failed to open. A name the enumerator returned
+    `undefined` for is filtered out one step earlier and is invisible to the guard, to `ok`, and to
+    every consumer.
+
+    SO THE PAIR THAT CAN STILL DISAGREE WITHOUT EITHER NOTICING IS NOT TWO READERS. IT IS THE
+    ENUMERATOR'S SUFFIX SET AND WHAT ACTUALLY LANDS ON DISK. `ledgerRotationEntries` recognises
+    exactly `.ndjson.gz` and `.ndjson`. `datedArchivePath` (ledger.ts) writes only
+    `${base}.${stamp}.ndjson`, so the `.gz` half is produced OUT OF BAND by tooling this repo does
+    not contain — which is precisely a producer the enumerator cannot see change. If that tooling
+    ever emits a third form, the enumerator returns fewer entries, `unread` stays EMPTY, `ok` stays
+    TRUE, and the count is short. That is the founding defect one level up: not two readers
+    disagreeing, but one reader and the disk.
+  design: |
+    (i) Q1 — HOW MANY ENUMERATORS, AND DO THEY AGREE. ONE, and yes.
+      ledgerRotationEntries (lib/ledger-grep.ts)      <- THE definition
+        <- ledgerCorpusFiles (run-task.ts)
+        <- analytics-route.ts
+        <- status.ts (two call sites)
+        <- resolveLedgerUnion (lib/ledger-grep.ts)
+      NOT an enumerator: listStateFiles (lib/ledger.ts) — recursive, unfiltered, snapshot/restore.
+    They agree BY CONSTRUCTION because there is only one of them. The founding pair is closed.
+
+    (ii) THE ONE PLACE TWO STATEMENTS STILL DISAGREE IS A MESSAGE, NOT A READ. `run-task.ts`'s
+    zero-archive refusal for `rmd ledger-grep` names ONE glob — `ledger.*.ndjson.gz` — while the
+    sibling refusal a few hundred lines above names BOTH. The reader is correct in each case; the
+    text is not. A reader who acts on the narrower message would "fix" a corpus by adding plain
+    rotations that were already being searched. Recorded because it is the same
+    reader-versus-its-own-description gap this family keeps producing; whether to reword it is a
+    judgement for the implementer, and it is NOT what this task exists to fix.
+
+    (iii) Q2 — A RESOLVER CAN CHECK ITSELF, AND THE CHECK IS ALMOST FREE. `resolveLedgerUnion`
+    ALREADY holds `names` from its own `readdirSync`. The comparison is:
+      candidates = names.filter(n => n.startsWith("ledger.") && n !== NEVER_ROTATE_FILENAME)
+      unclassified = candidates.length - rotations.length
+    COST: one filter and one subtraction over an array already in memory. ZERO additional I/O, no
+    new dependency, no second directory walk. It is strictly cheaper than the read it guards.
+
+    (iv) WHAT IT WOULD FALSELY REFUSE, STATED PLAINLY BECAUSE IT DECIDES THE SHAPE. Any `ledger.*`
+    file that is legitimately not a rotation: a `.bak`, a partial `.tmp` or a half-finished
+    download left by the SAME out-of-band compression that produces the `.gz` half, or an operator
+    scratch file. A sweep of this repo finds no rotation-path temp or lock artefact — the only
+    named exclusion is `NEVER_ROTATE_FILENAME` — but the out-of-band producer is by definition
+    outside that sweep, so the risk is real rather than theoretical.
+    THEREFORE THE SAFE SHAPE IS TO NAME, NOT TO REFUSE OUTRIGHT: surface the unclassified set as
+    its own field beside `unread`, the way `unread` already names what it found and could not
+    read. Flipping `ok` to false on a stray `.bak` would be a bound firing on a healthy condition,
+    and this repo has a documented history of exactly that. The implementer decides whether `ok`
+    should also refuse; the acceptance below requires only that the set is NAMED and that a
+    non-corpus artefact does not silently take the whole union down.
+
+    (v) Q3 — WHAT MUST NOT CHANGE, REFUSED BY NAME RATHER THAN OMITTED.
+      THE ZERO-ARCHIVE REFUSAL STANDS. `archiveCount: 0` still returns `ok: false` and still never
+        falls back to the live file. Untouched.
+      LIVE-FILE-ALONE READS STAY LEGITIMATE. A caller that wants the newest rows only is right to
+        want them, and W1-T1262 SHIPPED the mechanism that makes that choice explicit — a
+        `ledger-read-intent: live | union` declaration enforced by `ledgerReadIntentViolations`
+        (lib/status.ts). Nothing here narrows or re-litigates it.
+      THE SINGLE-ENUMERATOR RULE STANDS. No second suffix matcher is introduced anywhere.
+
+    (vi) BOTH DIRECTIONS ARE PROVEN. A change that named every unmatched file would refuse on
+    ordinary state-dir litter and be worse than today, so each criterion is paired with the case it
+    must leave alone.
+  note: |
+    CITED, NOT RE-FILED: W1-T1262 owns the CALLER side and has SHIPPED — `378b82df` filed it
+    (#2608) and `63f038b8` built it (#2650, "require a declared intent on every readLedgerLines
+    call"). Its three structural options all police whether a CALLER resolves the union, and by its
+    own account NONE would have caught W1-T444's founding instance; what caught that was the
+    coverage refusal `70d52c2` added in the same commit. This task is the other side of that line:
+    not which corpus a caller asks for, but whether the resolver can tell it enumerated the whole
+    of the one it chose.
+
+    REPORTED, NOT FIXED: W1-T1262's shard still reads `status: queued` on main although both its
+    filing and its implementation merged. That is a stale decorative status, the zombie class this
+    plan already carries; correcting it is the retro's call, not this task's.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS — the linter reads the source file and its
+    test as two concerns. The change itself is one filter and one field on a value the function
+    already computes.
+  acceptance:
+    - claim: "a ledger file matching no known form is named rather than silently skipped"
+      proof: "unit test: test/ledger-grep-unclassified.test.ts"
+    - claim: "a state dir whose every ledger file classifies reports nothing unclassified"
+      proof: "unit test: test/ledger-grep-unclassified.test.ts"
+    - claim: "a non-corpus ledger artefact does not silently take the whole union down"
+      proof: "unit test: test/ledger-grep-unclassified.test.ts"
+    - claim: "a matched but unreadable rotation still refuses exactly as it does today"
+      proof: "unit test: test/ledger-grep-unclassified.test.ts"
+    - claim: "the zero-archive refusal still refuses and still never falls back to the live file"
+      proof: "unit test: test/ledger-grep-unclassified.test.ts"
+    - claim: "both rotation forms still classify from the name before any read"
+      proof: "unit test: test/ledger-grep-unclassified.test.ts"
