@@ -27,6 +27,21 @@ raw: "ADDENDUM to fb-1785954227448-7b2bb0 — THE FALSIFYING CHECK IS ANSWERED A
   the gap is exactly the skip path and nothing else needs changing."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2580
+summary:
+  headline: Implement auto-clearing for stuck deployment markers
+  what_happened: Deployment markers got stuck twice today and required manual
+    clearing when HEAD already matched origin/main. The skip path runs every ~2
+    minutes but doesn't auto-clear these markers when conditions are met.
+  decision: Authorize implementation of marker auto-clearing in the skip path
+  options:
+    - label: Approve
+      consequence: Markers auto-clear automatically when daemon is current; eliminates
+        manual clearing incidents; requires code change
+    - label: Defer for review
+      consequence: Allows time for technical review and validation; manual clearing
+        continues during review period
+    - label: Reject
+      consequence: No code change; operators continue manual clearing; current
+        incident pattern will likely recur
