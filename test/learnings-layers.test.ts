@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  classifyGlobalArtifactRefusal,
   computeArtifactHash,
   entryBudgetWeight,
   entryLayer,
@@ -182,6 +183,97 @@ test("W1-T145: a tampered/mismatched global artifact is REFUSED, never silently 
   assert.equal(result.ok, false, "hash mismatch must refuse the artifact");
   if (result.ok) return;
   assert.match(result.reason, /hash mismatch/);
+});
+
+// ── W1-T1251: THE DISCRIMINANT — one designed absence, six genuine refusals ─────────────────
+//
+// `loadGlobalArtifact` returns seven distinct failure reasons. Exactly one (a missing file) is
+// the ruled-on §6-deferred-transport state and carries `kind: "absent"`; every other failure —
+// including the hash-mismatch tamper signal and a malformed artifact — carries `kind: "refused"`
+// and must never be read as an expected absence.
+
+test("W1-T1251: a tampered/mismatched global artifact is reported as 'refused' (a real problem), never 'absent' — the tamper signal stays prominent", () => {
+  const dir = tmpDir("learnings-global-tamper-kind-");
+  const entries = [entry()];
+  const correctHash = computeArtifactHash(entries);
+  const tampered = [{ ...entries[0], fact: "This fact was tampered with after hashing." }];
+  const path = join(dir, "artifact.yaml");
+  writeFileSync(path, JSON.stringify({ version: "v1", hash: correctHash, entries: tampered }));
+
+  const result = loadGlobalArtifact(path);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.kind, "refused", "a hash mismatch is a genuine refusal, not a designed absence");
+  assert.equal(classifyGlobalArtifactRefusal(result.reason), "refused", "the shared classifier must agree with the producer's own kind");
+});
+
+test("W1-T1251: a malformed global artifact (not valid YAML) is reported as 'refused' rather than 'absent'", () => {
+  const dir = tmpDir("learnings-global-badyaml-kind-");
+  const path = join(dir, "artifact.yaml");
+  writeFileSync(path, "not: valid: yaml: [this is broken");
+
+  const result = loadGlobalArtifact(path);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /not valid YAML/);
+  assert.equal(result.kind, "refused", "malformed YAML is a genuine refusal, not the designed absence");
+});
+
+test("W1-T1251: a global artifact missing 'version'/'hash', or carrying a malformed entry, is 'refused' rather than 'absent'", () => {
+  const dir = tmpDir("learnings-global-shape-kind-");
+
+  const noVersion = join(dir, "no-version.yaml");
+  writeFileSync(noVersion, JSON.stringify({ hash: "x", entries: [] }));
+  const r1 = loadGlobalArtifact(noVersion);
+  assert.equal(r1.ok, false);
+  if (!r1.ok) assert.equal(r1.kind, "refused");
+
+  const noHash = join(dir, "no-hash.yaml");
+  writeFileSync(noHash, JSON.stringify({ version: "v1", entries: [] }));
+  const r2 = loadGlobalArtifact(noHash);
+  assert.equal(r2.ok, false);
+  if (!r2.ok) assert.equal(r2.kind, "refused");
+
+  const badEntry = join(dir, "bad-entry.yaml");
+  writeFileSync(badEntry, JSON.stringify({ version: "v1", hash: "x", entries: [{ id: "broken" }] }));
+  const r3 = loadGlobalArtifact(badEntry);
+  assert.equal(r3.ok, false);
+  if (!r3.ok) assert.equal(r3.kind, "refused");
+});
+
+test("W1-T1251: a MISSING global artifact file is reported as 'absent' — the ONE designed, non-fatal, §6-deferred state", () => {
+  const dir = tmpDir("learnings-global-absent-kind-");
+  const path = join(dir, "does-not-exist.yaml");
+
+  const result = loadGlobalArtifact(path);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /not found/);
+  assert.equal(result.kind, "absent");
+  assert.equal(classifyGlobalArtifactRefusal(result.reason), "absent", "the shared classifier must agree with the producer's own kind");
+});
+
+test("W1-T1251: the absent case still contributes ZERO entries and never becomes fatal, and precedence order is unchanged", () => {
+  const projectDir = tmpDir("layered-project-absent-global-");
+  const userDir = tmpDir("layered-user-absent-global-");
+  writeShard(projectDir, "shard.yaml", [entry({ id: "p1", layer: "project" })]);
+  writeShard(userDir, "shard.yaml", [entry({ id: "u1", layer: "user-overall" })]);
+  // A globalArtifactPath IS given, but nothing was ever written there — the designed absence.
+  const missingGlobalPath = join(tmpDir("layered-global-absent-"), "never-provisioned.yaml");
+
+  const result = loadLayeredLearnings({
+    projectDir,
+    userOverallDir: userDir,
+    globalArtifactPath: missingGlobalPath,
+  });
+
+  assert.deepEqual(
+    result.entries.map((e) => e.id),
+    ["p1", "u1"],
+    "the absent global layer contributes zero entries; project/user precedence order is unaffected",
+  );
+  assert.match(result.globalRefusedReason ?? "", /not found/);
+  assert.equal(classifyGlobalArtifactRefusal(result.globalRefusedReason ?? ""), "absent");
 });
 
 test("W1-T145: a hash-matching global artifact is trusted and its entries load", () => {
