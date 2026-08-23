@@ -1,0 +1,142 @@
+- id: W1-T1266
+  title: "NOTHING DISTINGUISHES A BACKSTOP FROM A PRIMARY CONTROL AT THE DECLARATION SITE, SO A MIS-SIZED BACKSTOP SILENTLY BECOMES THE THING THAT STOPS THE LOOP — CLAUDE.md already calls that this repo's recurring defect and cites three instances, W1-T1219 was a fourth, and the fix rung's `strikeCap: 2` is a PRIMARY control with nothing measurably descending across strikes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 60.00
+  files: [scripts/bound-kind-baseline.json, test/bound-kind-declared.test.ts]
+  origin: oper#bound-kind-undeclared-2026-08-23
+  plan_refs: ["W1-T1219", "W1-T312", "W1-T438"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE REPO ALREADY NAMES THE DEFECT AND HAS NOT NAMED ITS MECHANISM. CLAUDE.md states "A bound
+    that fires on a HEALTHY condition is this repo's recurring defect — before tuning the number,
+    check the population it is meant to separate has ever been observed", citing three instances
+    (W1-T312, W1-T380/#1392, W1-T382/#1401). W1-T1219 was a fourth: a fix-spawn bound of 559,000 ms
+    derived from sweep-tick durations rather than fix-worker durations, which abandoned six spawns
+    on 2026-08-22. THAT ONE IS ALREADY REMEDIATED — #2564 ("fix(policy): split the fix-rung spawn
+    bound off the sweep-tick bound", merged 2026-08-23T04:15:28Z) separated them, and
+    `DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS = 3_600_000` now sits beside
+    `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000`. Four instances, four separate repairs, no change
+    to what makes the fifth possible.
+
+    THE POPULATION IS NOT FIVE. Sweeping `src/` for bound-shaped exported constants
+    (`MAX|CAP|LIMIT|CEIL|BOUND|TIMEOUT|THRESHOLD`) returns seventy declarations, plus four declared
+    as policy data in `plan/policy.yaml` (`proofTimeoutMs`, `fixStrikeCap`, `sweepWallClockBoundMs`,
+    `fixSpawnWallClockBoundMs`). The five the brief names are a sample, not the corpus.
+
+    THE MECHANISM IS THAT A BOUND'S KIND IS UNWRITTEN. A BACKSTOP fires only when something else has
+    already failed; a PRIMARY CONTROL is what normally stops the loop. Both are spelled the same way
+    — `export const SOMETHING_MAX = <number>` — so a backstop mis-sized under its healthy population
+    becomes the primary control silently, and the only signal is that it starts firing on healthy
+    runs. That is exactly the shape of all four cited instances.
+
+    A SECOND EXTERNAL SOURCE SUPPLIES THE DESCENT ARGUMENT `covibes/zeroshot` ONLY SPECIFIES, AND IT
+    IS A WORKING ONE. `Untrivial-ai/agent-orchestrator` at ~2377 commits (read 2026-08-23, PR
+    lifecycle only): `lifecycle/reactions.go`'s `ApplyPRObservation` queues its CI-failure and
+    merge-conflict nudges with `maxAttempts: 0`, and `sendOnce` gates on
+    `if maxAttempts > 0 && attempts >= maxAttempts` — so ZERO MEANS UNBOUNDED BY COUNT. What bounds
+    them instead is CONTENT-KEYED IDEMPOTENCE: `if m.react.seen[key] == sig` skips, where `sig` is
+    `ciFailureSignature(checks)`. The same failing checks never re-nudge; a DIFFERENT failure does.
+    **SO THE DESCENT IS OVER DISTINCT FAILURE SIGNATURES, WHICH ARE FINITE** — a repair loop that
+    stops making progress stops, and no counter decided it. That is the concrete answer to design
+    (ii)'s question of what descends across strikes, against which this repo's answer today is
+    NOTHING: `strikeCap: 2` is the only thing stopping it.
+
+    AND THE TWO PLACES THAT SOURCE GETS IT WRONG, RECORDED SO NEITHER IS IMPORTED WITH THE IDEA.
+    `reviewMaxNudge = 3` is a BARE CONSTANT with no comment and no derivation beside it — the very
+    shape this task exists to make undeclarable. And its capped path is keyed
+    `review:<prURL>:<reviewID>`, so EVERY NEW REVIEW ID GETS A FRESH BUDGET OF THREE and there is no
+    global repair budget per PR; that cap bounds one review's nudges, never the repair.
+
+    AND WHAT THIS REPO ALREADY DOES BETTER, WHICH THE DESCENT ARGUMENT MUST NOT BE TRADED FOR. AT
+    THE CEILING THAT SOURCE DOES NOTHING: `sendOnce` returns `sendOnceAccounted` and stops, and
+    `escalat*` across its `internal/` means session-state transitions (`waiting_input` -> `blocked`)
+    and process-signal escalation — there is no operator-escalation path anywhere in it. A PR whose
+    CI keeps failing with an UNCHANGING signature simply goes quiet, and nobody is told. This repo
+    escalates instead. **TAKE BOTH: a measurable descent AND the escalation at its end** — a loop
+    that stops silently and a loop that stops loudly are not the same repair.
+  design: |
+    (i) CLASSIFY BY THE OTHER-STOPPING-CONDITION TEST, AND CONTROL THE CLASSIFIER. The test: on the
+    HEALTHY path, does the loop have a stopping condition other than this bound? If yes it is a
+    BACKSTOP; if no it is a PRIMARY CONTROL. Two controls, both demonstrable from source, and the
+    classifier must return each correctly:
+      RECON_MAX_TURNS = 20 → BACKSTOP. Its own doc says "20 clears the highest observed completion
+      (17) with margin", so healthy recons end below it and the model's own completion is the
+      stopping condition. A classifier that called this a primary control is wrong.
+      fixStrikeCap = 2 → PRIMARY CONTROL. Once a PR keeps failing there is no other stopping
+      condition: `DISPOSITION_RULES` escalates at `pr.priorStrikes >= policy.strikeCap` and nothing
+      else ends the rung.
+    Applying it: most bounds here are backstops BY INTENT — `GH_CALL_TIMEOUT_MS`,
+    `DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS`, `DEFAULT_MAX_TASK_DISPATCHES`, `WAIT_CAP_SECONDS`,
+    `sweepWallClockBoundMs` all fire only after something else failed or overran. A few are primary
+    by design and correctly so: `DEFAULT_CLAUDE_CONFIG_BACKUP_MAX_KEEP` and
+    `MAX_RETAINED_LINES_PER_STEP` are RETENTION policies where the number IS the rule, not a loop
+    bound at all. The defect is not that backstops exist; it is that nothing at the site says which
+    kind a number is, so the two are indistinguishable to a reader and to a reviewer.
+
+    (ii) THE FIX RUNG HAS NO DESCENT ARGUMENT, AND THAT IS THE FINDING RATHER THAN A MECHANISM.
+    Across strikes the only quantity that moves is `strikes` itself, and it ASCENDS —
+    `{ ...state, strikes: state.strikes + 1 }` (`src/lib/classify.ts`), `pr.priorStrikes + 1` in
+    every sweep reason string. The stop is a comparison against the cap. NOTHING MEASURABLY
+    DESCENDS: `pr.unmetCriteria.length` is computed and printed in the strike reason, but nothing
+    requires it to shrink, so a strike that leaves the same number of unmet criteria — or more — is
+    indistinguishable from one that halved them. THE RUNG THEREFORE RETRIES WITHOUT ANY GUARANTEE OF
+    PROGRESS, AND `strikeCap: 2` IS THE ONLY THING STOPPING IT. A descent argument here would be
+    concrete and uses a quantity that already exists: unmet criteria strictly decrease across
+    strikes, or the rung stops. This task does NOT implement that; it records that the quantity is
+    already computed and already surfaced and is simply never checked.
+
+    (iii) THE SMALLEST FORM IS A CONVENTION FOR NEW BOUNDS, AND IT MUST PASS LAW 4's OWN TEST.
+    Law 4 says a convention binds only where compliance is verifiable at invocation — W1-T438's
+    shard states it and gives the counter-example: "`did you pass -a` is invisible in a diff — so
+    the CLAUDE.md rule shipped in #1598 cannot bind." A PROSE RULE ASKING AUTHORS TO SAY WHICH KIND
+    A BOUND IS FAILS THAT TEST EXACTLY, and must not be filed as if it would work. What CAN be
+    checked is the declaration itself, because it is IN the diff and greppable: a newly added
+    bound-shaped constant either carries its kind or it does not, and that is decidable by a source
+    scan of the same shape `test/no-raw-nul.test.ts` already uses over `git ls-files`. The existing
+    seventy are grandfathered by a baseline so the check bites only on what is added.
+
+    (iv) OUT OF SCOPE, EACH REFUSED FOR A STATED REASON. NO compiled IR, NO graph compiler, NO new
+    schema layer, and NO retrofitting a witness across the codebase — the external precedent that
+    prompted this is cited for the SEPARATION IDEA only (a picked number is acceptable as a backstop
+    behind something else that normally stops the loop), not as a design to copy. NO renumbering of
+    any existing bound: this task changes no number. The fix rung's descent argument is described in
+    (ii) and NOT implemented here.
+
+    (v) THE FALSIFIER RUNS BOTH WAYS. A newly added bound with no declared kind must FAIL; an
+    existing grandfathered bound and a correctly declared new one must PASS. A check that failed
+    every bound would satisfy the first and make the repo unbuildable.
+  acceptance:
+    - claim: "a newly added bound-shaped constant with no declared kind is refused"
+      proof: "unit test: test/bound-kind-declared.test.ts"
+    - claim: "a newly added bound that declares its kind passes unchanged"
+      proof: "unit test: test/bound-kind-declared.test.ts"
+    - claim: "the bounds already in the tree are grandfathered rather than failing the build"
+      proof: "unit test: test/bound-kind-declared.test.ts"
+    - claim: "the check names the offending constant rather than reporting a bare count"
+      proof: "unit test: test/bound-kind-declared.test.ts"
+  note: |
+    risk: high IS SET UP FRONT, AND BOTH READINGS ARE RECORDED. RULE 19's SPAN is the band's cause:
+    `files:` crosses two stems as `sizingViolation` counts them (`bound-kind-baseline` and
+    `bound-kind-declared`). THE BLAST RADIUS is small: no existing bound's value changes, no runtime
+    path moves, and the check is a source scan plus a grandfathering baseline — the same shape
+    `no-raw-nul` and the budget ratchets already use.
+
+    THE EXTERNAL PRECEDENT IS CITED, NOT COPIED, AND ITS LIMIT IS CARRIED. `covibes/zeroshot` at
+    `2b0b35b` requires a termination witness in its compiled IR, and its own
+    `DEFAULT_MAX_ITERATIONS = 100` is picked with no justification at the site — the transferable
+    idea is that the picked number sits BEHIND something else, not that this repo should grow a
+    schema layer. That reading is a design observation from ONE repo at ONE commit. That repo's
+    "reproducible failure" contract is claimed in its README and NOT cashed out in code:
+    `reproduc*` appears in ten files with no schema field, no emitted reproduction command and no
+    rejection artifact format. It is not cited here as a model of anything it only claims.
+
+    PROOF NOTES: all four proofs are the PURE-PATH `unit test:` form naming
+    `test/bound-kind-declared.test.ts`, which this shard's own `files:` declares — that is the only
+    form a forward reference resolves in, because `judgeCriterion` gates its carve-out on
+    `!whitelisted.nameFiltered`.
