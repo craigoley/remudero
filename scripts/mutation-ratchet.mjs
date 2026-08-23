@@ -612,10 +612,25 @@ export function mergeReports(reports) {
 
 /**
  * Compare an actual mutation score against a recorded baseline.
+ *
+ * `scorePct` ABSENT (undefined/null) is a legitimate, honest "no baseline yet" contract and is
+ * left alone. `scorePct` PRESENT but not a number (e.g. a hand-edit that quotes the value) is a
+ * DIFFERENT thing: a declared baseline that cannot be compared against. That must REFUSE, not
+ * silently no-op -- same distinction scripts/claude-md-budget-ratchet.mjs's `evaluateRatchet`
+ * draws for `capBytes`, and the one this file's OWN nightly arm (see `--nightly-ratchet` above,
+ * `typeof nightlyBaseline.scorePct !== 'number'`) already enforces for the identical field. This
+ * throws rather than returning a violation because it is a config defect, not a score-floor
+ * breach; the caller is expected to catch it and fail the run before it prints anything claiming
+ * to enforce a baseline.
+ *
  * @returns {string[]} human-readable violations; empty means the ratchet is satisfied.
+ * @throws {Error} if `scorePct` is present and not a number.
  */
 export function evaluateRatchet(actual, baseline, epsilon = 1e-9) {
   const violations = [];
+  if (baseline.scorePct !== undefined && baseline.scorePct !== null && typeof baseline.scorePct !== 'number') {
+    throw new Error(`'scorePct' must be a number, got ${JSON.stringify(baseline.scorePct)}`);
+  }
   if (typeof baseline.scorePct === 'number' && actual.scorePct < baseline.scorePct - epsilon) {
     violations.push(
       `mutation score ${actual.scorePct.toFixed(2)}% < baseline ${baseline.scorePct.toFixed(2)}%`,
@@ -993,7 +1008,17 @@ function main(argv) {
   const report = JSON.parse(readFileSync(values.report, 'utf8'));
   const baseline = JSON.parse(readFileSync(values.baseline, 'utf8'));
   const actual = parseMutationTotals(report);
-  const violations = evaluateRatchet(actual, baseline);
+
+  let violations;
+  try {
+    violations = evaluateRatchet(actual, baseline);
+  } catch (err) {
+    // Refuse before printing anything about a baseline -- a run that cannot determine its
+    // threshold must never print "baseline <n>%" as if it were enforcing one.
+    console.error(`mutation-ratchet: ${values.baseline}: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(
     `mutation-ratchet: score ${actual.scorePct.toFixed(2)}% (baseline ${(baseline.scorePct ?? 0).toFixed(2)}%) -- ` +

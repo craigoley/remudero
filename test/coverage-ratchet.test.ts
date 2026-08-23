@@ -86,6 +86,43 @@ test("coverage-ratchet CLI: lcov record with NO branch data -> branchesPct falls
   assert.match(result.stdout.toString(), /branches 100\.00%/);
 });
 
+// ── W1-T1277: a malformed (present but non-number) linesPct/branchesPct must REFUSE, not silently
+// disarm ──
+//
+// The pre-fix guard was `typeof baseline.linesPct === 'number' && actual.linesPct < baseline...`
+// -- any non-number short-circuited the `&&`, so no violation was ever pushed and the run reported
+// OK. below-baseline.lcov (lines 70%, branches 80%) is below BOTH baseline.json's numeric floors
+// (90/85), so a numeric control on either field would BLOCK -- proving the refusal is not just
+// "any malformed value happens to pass anyway".
+
+function runRatchetWithBaseline(lcovFixture: string, baselineFixture: string) {
+  return spawnSync(process.execPath, [
+    SCRIPT,
+    "--lcov",
+    join(FIXTURES, lcovFixture),
+    "--baseline",
+    join(FIXTURES, baselineFixture),
+  ]);
+}
+
+test("coverage-ratchet CLI: a linesPct present but not a number refuses instead of passing (acceptance criterion 1)", () => {
+  const result = runRatchetWithBaseline("below-baseline.lcov", "malformed-lines-baseline.json");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /'linesPct' must be a number, got "90"/);
+});
+
+test("coverage-ratchet CLI: a branchesPct present but not a number refuses instead of passing (acceptance criterion 1)", () => {
+  const result = runRatchetWithBaseline("below-baseline.lcov", "malformed-branches-baseline.json");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /'branchesPct' must be a number, got "85"/);
+});
+
+test("coverage-ratchet CLI: a malformed linesPct never prints a baseline figure it is not enforcing", () => {
+  const result = runRatchetWithBaseline("below-baseline.lcov", "malformed-lines-baseline.json");
+  assert.doesNotMatch(result.stdout.toString(), /lines \d/, result.stdout?.toString() + result.stderr?.toString());
+  assert.doesNotMatch(result.stdout.toString(), /OK --/, result.stdout?.toString() + result.stderr?.toString());
+});
+
 // ── W1-T220 defect 1: the CI log used to name nothing when this gate failed ──
 //
 // The "Test with coverage" step ran node --test with ONLY --test-reporter=lcov, whose

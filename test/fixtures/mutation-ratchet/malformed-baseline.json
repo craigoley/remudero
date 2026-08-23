@@ -1,0 +1,4 @@
+{
+  "_comment": "scorePct is a quoted string, not a number -- same value baseline.json uses (80), but the wrong type. This must REFUSE, not silently disarm the gate and report OK.",
+  "scorePct": "80"
+}
