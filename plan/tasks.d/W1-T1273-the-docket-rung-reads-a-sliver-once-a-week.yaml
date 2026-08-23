@@ -1,5 +1,5 @@
 - id: W1-T1273
-  title: "THE FEEDBACK-DOCKET RUNG READS A SLIVER ONCE A WEEK, AND ONLY TWO OF ITS FIVE SOURCES ARE AFFECTED — `runFeedbackDocketRung` takes its ledger input from `readLedgerLines` (the live file) while three of its five capture surfaces read their own stores at full fidelity, and the marker it writes BEFORE the empty check spends a whole seven-day interval on each starved look"
+  title: "CLOSED UNBUILT (measured 2026-08-23 — all five docket surfaces read 0 across two consecutive windows) — THE FEEDBACK-DOCKET RUNG READS A SLIVER ONCE A WEEK, AND ONLY TWO OF ITS FIVE SOURCES ARE AFFECTED — `runFeedbackDocketRung` takes its ledger input from `readLedgerLines` (the live file) while three of its five capture surfaces read their own stores at full fidelity, and the marker it writes BEFORE the empty check spends a whole seven-day interval on each starved look"
   repo: remudero
   depends_on: []
   type: implement
@@ -13,10 +13,41 @@
   status: blocked
   attempts: 0
   rationale: |
-    ★ FILED `status: blocked` ON PURPOSE. The operator's own Q2 says that if the window would still
-    have contained nothing, that closes this task. The measurement that decides it ALREADY EXISTS
-    and has already been taken — see design (v) — but could not be read from the environment this
-    was filed in. DO NOT DISPATCH until it has been read and recorded here.
+    ★ CLOSED UNBUILT. THE UNBLOCKING MEASUREMENT WAS TAKEN AND IT CLOSED THE TASK RATHER THAN
+    OPENING IT. `status: blocked` is retained deliberately: it is this plan's established way to
+    retire a task unbuilt (W3-T3 carries the same pairing of a RETIRED title with `status:
+    blocked`, and six RETIRED-marked shards sit at that value). `closed` is NOT a member of
+    `TASK_STATUSES`, and `done` is a member of `MERGED_STATUSES` — setting it would credit this id
+    as SHIPPED in every merged-set derivation for work that was never built, which is the zombie
+    class this repo already carries ~136 of. So `blocked` is the honest terminal value here.
+
+    THE MEASUREMENT, ATTRIBUTED TO THE OPERATOR BECAUSE THIS CHECKOUT COULD NOT RE-DERIVE IT.
+    `resolveLedgerUnion` REFUSED on this tree again ("Cannot read properties of undefined"), so the
+    figures below are the operator's, taken 2026-08-23 over the ledger union on the daemon host,
+    and are NOT restated as this shard's own derivation. Both `feedback_docket.empty` rows carry
+    their per-surface answer:
+      2026-08-12T23:20:46.774Z, window since 2026-08-05T23:20:46.710Z
+        {"reframe":0,"operator_feedback":0,"rejected_feedback":0,"question_answer":0,"operator_note":0}
+      2026-08-20T00:48:15.333Z, window since 2026-08-13T00:48:15.274Z
+        the same five zeros.
+    The condition this shard set for itself — `operator_feedback` reading 0 — is met, and more than
+    met: ALL FIVE surfaces are 0 across TWO CONSECUTIVE WEEKS. The rung is behaving exactly as
+    specified: empty windows file nothing.
+
+    THE CAVEAT, CARRIED RATHER THAN SMOOTHED. FOUR of the five zeros are certain and one is not.
+    `rejected_feedback`, `question_answer` and `operator_note` are not ledger-fed at all, so their
+    zeros are unaffected by the live-file read. `reframe` is corroborated independently:
+    `"step":"ratify.reframed"` reads 0 across the union against a control of 150 on
+    `"step":"risk_judge.decision"`, so its zero holds at full corpus fidelity.
+    `operator_feedback` IS THE ONE SURFACE WHERE THE LIVE-FILE READ COULD STILL HIDE SOMETHING.
+    What makes that residual risk small rather than zero: the window is SEVEN DAYS, and a seven-day
+    lookback is precisely the case a live ledger file most plausibly covers in full. Small is not
+    none, and this shard does not claim otherwise — which is why the reopening condition below is
+    stated in observable terms rather than left to judgement.
+
+    THE REOPENING CONDITION, EXACTLY: any `feedback_docket.empty` row showing a NON-ZERO surface, or
+    a `feedback_docket.published` row appearing at all. Either observation falsifies the basis of
+    this close and this shard should be re-opened rather than re-filed.
 
     THE LEDGER SURFACE IS DISQUALIFIED IN THE FILING ENVIRONMENT AND NO LEDGER FIGURE IS CLAIMED
     HERE. `resolveLedgerUnion` — the sanctioned reader — THREW on this checkout ("Cannot read
@@ -80,11 +111,10 @@
     in this window — named, not silently omitted (design i)". And the rung already emits
     `log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource })`. So the TWO
     `feedback_docket.empty` rows the operator counted ALREADY CONTAIN the per-surface answer.
-    THE UNBLOCKING CONDITION, EXACTLY: read those two rows' `counts_by_source` over the union.
-      IF `operator_feedback` is 0 there, the union read changes nothing that can be observed and
-        THIS TASK SHOULD BE CLOSED UNBUILT with that figure recorded — the operator's Q2 outcome.
-      IF it is non-zero, the live-file read was hiding real items and the fix in (iv) is justified.
-    Record the number and the date in this shard before unblocking it.
+    THAT CONDITION HAS NOW BEEN READ AND IT RESOLVED TO CLOSE — see the rationale for both rows'
+    `counts_by_source` verbatim. `operator_feedback` is 0 in each, so the union read in (iv) would
+    change nothing observable, and (iv) is therefore NOT to be built. It is left in place as the
+    record of what was scoped and why it was not needed, not as pending work.
 
     (vi) Q3 — WHAT MUST NOT CHANGE, REFUSED BY NAME RATHER THAN OMITTED.
       NO AUTO-FILING WITHOUT THE OPERATOR. The rung proposes; it never ratifies.
