@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 // src/lib/status.ts (W1-T207) -- saveMarker/loadMarker below call `fsMarker.*` as live
 // property lookups at call time for exactly this reason (test/retro-marker-atomic.test.ts).
 import fsMarker from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD } from "./learnings.js";
@@ -2908,17 +2908,44 @@ export function changedCitationStamps(
  * of all 38 entries at this task's filing — every one was hand-stamped with `cited` alone); once
  * present, a later stamp updates it in place like `cited` itself.
  */
-export function stampCitationInShardText(text: string, id: string, stamp: CitationStamp): string {
+interface EntryBlockLocation {
+  start: number;
+  end: number;
+  block: string;
+}
+
+/** Locate ONE learning entry's block (from its `- id: <id>` header up to, but excluding, the
+ *  next entry's header or end-of-text) within a shard's raw YAML text. Shared by {@link
+ *  stampCitationInShardText} (the write) and {@link extractEntryBlock}/{@link
+ *  captureCitationBaselines} (the W1-T1267 baseline capture/compare) so both agree, byte for
+ *  byte, on where one entry ends and the next begins. */
+function locateEntryBlock(text: string, id: string): EntryBlockLocation | undefined {
   const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const startRe = new RegExp(`^- id: ${escapedId}\\s*$`, "m");
   const startMatch = startRe.exec(text);
-  if (!startMatch) return text; // id not in this shard — no-op
+  if (!startMatch) return undefined; // id not in this shard
   const start = startMatch.index;
   const afterHeader = start + startMatch[0].length;
   const rest = text.slice(afterHeader);
   const nextMatch = /^- id: /m.exec(rest);
   const end = nextMatch ? afterHeader + nextMatch.index : text.length;
-  let block = text.slice(start, end);
+  return { start, end, block: text.slice(start, end) };
+}
+
+/** W1-T1267: read-only counterpart to {@link locateEntryBlock} — the raw text of one entry's
+ *  block, or `undefined` when `id` has no block in `text` at all (a different shard, a stale id,
+ *  or an id genuinely absent from this ref). Used both to CAPTURE a baseline (design ii, "the
+ *  entry block the decision was made against") and to read the FRESH block a baseline is later
+ *  compared to — never to write; {@link stampCitationInShardText} owns every actual edit. */
+export function extractEntryBlock(text: string, id: string): string | undefined {
+  return locateEntryBlock(text, id)?.block;
+}
+
+export function stampCitationInShardText(text: string, id: string, stamp: CitationStamp): string {
+  const loc = locateEntryBlock(text, id);
+  if (!loc) return text; // id not in this shard — no-op
+  const { start, end } = loc;
+  let block = loc.block;
   const citedLine = `  cited: "${stamp.cited}"`;
   const countLine = `  cited_count: ${stamp.citedCount}`;
   if (/^  cited:.*$/m.test(block)) {
@@ -2940,12 +2967,139 @@ export function stampCitationInShardText(text: string, id: string, stamp: Citati
 
 const CITATION_STAMP_COMMIT_MESSAGE = "chore(learnings): stamp measured citation evidence (W1-T1248)";
 
+/**
+ * W1-T1267: read, for each id in `ids`, the RAW block text as it stands in `learningsDir` RIGHT
+ * NOW — "the entry block the decision was made against" (design ii). Callers invoke this
+ * immediately after computing `changed` (the same corpus read {@link changedCitationStamps}'
+ * eligibility decision came from), so the returned map is the "plan time" baseline the write
+ * phase later compares a FRESH read against. An id absent from every shard here is simply
+ * absent from the returned map — {@link stampCitationsAndCommit}'s own no-op-when-absent
+ * behavior stays the single source of truth for "this id isn't in this corpus".
+ */
+export function captureCitationBaselines(learningsDir: string, ids: Iterable<string>): Map<string, string> {
+  const remaining = new Set(ids);
+  const out = new Map<string, string>();
+  if (remaining.size === 0) return out;
+  let filenames: string[];
+  try {
+    filenames = fsMarker
+      .readdirSync(learningsDir)
+      .filter((f) => f.endsWith(".yaml"))
+      .sort();
+  } catch {
+    return out; // no corpus directory — no baselines to capture
+  }
+  for (const filename of filenames) {
+    if (remaining.size === 0) break;
+    let text: string;
+    try {
+      text = fsMarker.readFileSync(join(learningsDir, filename), "utf8");
+    } catch {
+      continue;
+    }
+    for (const id of remaining) {
+      const block = extractEntryBlock(text, id);
+      if (block !== undefined) {
+        out.set(id, block);
+        remaining.delete(id);
+      }
+    }
+  }
+  return out;
+}
+
+/** One entry's baseline-vs-fresh mismatch (design iii): named so an operator reading the ledger
+ *  row can tell a lifecycle flip from a hand-edited fact without opening the shard. */
+export interface CitationBaselineRefusal {
+  id: string;
+  /** The YAML key of the first line that differs (e.g. `"lifecycle"`), or `"block"` when the
+   *  block's line count itself changed rather than any one line's content. */
+  field: string;
+  before: string;
+  after: string;
+}
+
+const CITATION_STAMP_LINE_RE = /^ {2}(cited|cited_count):.*$/;
+
+/** Strip the two lines {@link stampCitationInShardText} itself owns — a baseline-vs-fresh
+ *  compare must judge everything ELSE about the entry (design ii: "anything OUTSIDE the two
+ *  stamped lines"), never the fields this very pass is about to write. */
+function withoutCitationStampLines(block: string): string[] {
+  return block.split("\n").filter((line) => !CITATION_STAMP_LINE_RE.test(line));
+}
+
+/**
+ * W1-T1267: compare the entry block the eligibility decision was made against (`baseline`,
+ * design ii) with a FRESH read of the same id's CURRENT block (`fresh`). Returns `undefined`
+ * when nothing outside `cited`/`cited_count` moved — the write may proceed. Otherwise names the
+ * id, the first differing field, and both of its values (design iii) — never merely "entry
+ * changed". `fresh === undefined` means the id's block is genuinely gone from the fresh read
+ * (not "we couldn't get a fresh read at all" — callers only invoke this once they HAVE one).
+ */
+export function compareCitationBaseline(id: string, baseline: string, fresh: string | undefined): CitationBaselineRefusal | undefined {
+  const beforeLines = withoutCitationStampLines(baseline);
+  const afterLines = fresh === undefined ? [] : withoutCitationStampLines(fresh);
+  if (beforeLines.join("\n") === afterLines.join("\n")) return undefined;
+  const max = Math.max(beforeLines.length, afterLines.length);
+  for (let i = 0; i < max; i++) {
+    const b = beforeLines[i] ?? "";
+    const a = afterLines[i] ?? "";
+    if (b !== a) {
+      const field = (b.match(/^\s*([\w-]+):/) ?? a.match(/^\s*([\w-]+):/))?.[1] ?? "block";
+      return { id, field, before: b.trim() || "(absent)", after: a.trim() || "(absent)" };
+    }
+  }
+  // Every compared line matched but the loop above would have already returned on the first
+  // divergence in length (one side has `""` where the other has a real line) — kept as a
+  // defined fallback rather than silently treating a real mismatch as "no change".
+  return { id, field: "block", before: "(present)", after: "(missing)" };
+}
+
+/**
+ * W1-T1267: default `readFreshShardText` for {@link stampCitationsAndCommit} — one `git fetch`
+ * (memoized across every shard this call checks, only paid when a baseline actually needs
+ * checking) then `git show origin/main:<relPath>`, the SAME "read the blob, never the working
+ * tree" idiom `syncPlanFromOrigin` (run-task.ts) already uses for the plan. This is what closes
+ * the window the task's rationale names: the worktree's OWN `learnings/` copy is origin/main AS
+ * OF THE CUT and is never refreshed for the rest of the retro — re-reading it would see nothing
+ * a concurrent lane merged since. Only a fresh read of origin/main's CURRENT ref can.
+ *
+ * Best-effort like the rest of this pass: no `origin` remote, no network, or the path not (yet)
+ * existing at `origin/main` all resolve to `undefined` — "no signal available" — rather than a
+ * false refusal. {@link stampCitationsAndCommit} treats that as "skip the guard for this id",
+ * the same as if no baseline had been supplied at all.
+ */
+function defaultFreshShardTextReader(worktreePath: string): (relPath: string) => string | undefined {
+  let fetchAttempted = false;
+  let fetchOk = false;
+  return (relPath: string): string | undefined => {
+    if (!fetchAttempted) {
+      fetchAttempted = true;
+      try {
+        execFileSync("git", ["-C", worktreePath, "fetch", "--quiet", "origin", "main"], { stdio: "pipe" });
+        fetchOk = true;
+      } catch {
+        fetchOk = false;
+      }
+    }
+    if (!fetchOk) return undefined;
+    try {
+      return execFileSync("git", ["-C", worktreePath, "show", `origin/main:${relPath}`], { encoding: "utf8" });
+    } catch {
+      return undefined; // e.g. a brand-new shard not yet on origin/main
+    }
+  };
+}
+
 export interface StampCitationsAndCommitResult {
   committed: boolean;
   /** Ids actually written to a shard file this pass (subset of `changed`'s keys — an id absent
    *  from every shard, e.g. a stale/renamed one, is silently skipped rather than throwing: the
    *  corpus on disk is the truth, not the evidence map). */
   stampedIds: string[];
+  /** W1-T1267: ids whose baseline (design ii) no longer matches a fresh read of `origin/main` —
+   *  refused this pass, never retried (design iv). Always present, empty when nothing refused. */
+  refused: CitationBaselineRefusal[];
   /** `git show` of the new commit (patch + stat) — omitted when `committed` is false. */
   diff?: string;
 }
@@ -2964,6 +3118,14 @@ export interface StampCitationsAndCommitResult {
  * `stampCitationInShardText` is a two-line surgical edit, nothing else in a shard moves, and an
  * empty `changed` map (nothing newly evidenced) short-circuits before touching disk or git at
  * all, so a quiet retro cycle produces a genuinely empty diff, not an empty commit.
+ *
+ * W1-T1267: `baselines` (see {@link captureCitationBaselines}) carries, per id, the entry block
+ * the eligibility decision was made against. When present for an id, this function re-reads that
+ * id's CURRENT block via `readFreshShardText` (default: a real `origin/main` — see {@link
+ * defaultFreshShardTextReader}) immediately before writing, and REFUSES (design iv: drops for
+ * this cycle, never retries, never blocks any other id) when anything outside the two stamped
+ * lines moved. An id with no baseline entry — including every call site that predates this task
+ * and passes no `baselines` at all — gets no guard, unchanged from before this task.
  */
 export function stampCitationsAndCommit(opts: {
   worktreePath: string;
@@ -2971,8 +3133,14 @@ export function stampCitationsAndCommit(opts: {
   learningsDir: string;
   changed: Map<string, CitationStamp>;
   commitMessage?: string;
+  /** Per-id baseline block (design ii), from {@link captureCitationBaselines}. */
+  baselines?: Map<string, string>;
+  /** Injectable so a test can simulate a mid-pass mutation without a real `origin` remote
+   *  (design vi: "drive it by mutating the shard on disk between the two halves"). Default:
+   *  {@link defaultFreshShardTextReader}. */
+  readFreshShardText?: (relPath: string) => string | undefined;
 }): StampCitationsAndCommitResult {
-  if (opts.changed.size === 0) return { committed: false, stampedIds: [] };
+  if (opts.changed.size === 0) return { committed: false, stampedIds: [], refused: [] };
   let filenames: string[];
   try {
     filenames = fsMarker
@@ -2980,15 +3148,38 @@ export function stampCitationsAndCommit(opts: {
       .filter((f) => f.endsWith(".yaml"))
       .sort();
   } catch {
-    return { committed: false, stampedIds: [] }; // no corpus directory — nothing to stamp
+    return { committed: false, stampedIds: [], refused: [] }; // no corpus directory — nothing to stamp
   }
+  const readFresh = opts.readFreshShardText ?? defaultFreshShardTextReader(opts.worktreePath);
   const stampedIds = new Set<string>();
+  const refused: CitationBaselineRefusal[] = [];
   const touchedRelPaths: string[] = [];
   for (const filename of filenames) {
     const path = join(opts.learningsDir, filename);
+    const relPath = relative(opts.worktreePath, path);
     const before = fsMarker.readFileSync(path, "utf8");
     let after = before;
+    let fresh: string | undefined;
+    let freshLoaded = false;
     for (const [id, stamp] of opts.changed) {
+      if (extractEntryBlock(before, id) === undefined) continue; // id not in this shard
+      const baseline = opts.baselines?.get(id);
+      if (baseline !== undefined) {
+        if (!freshLoaded) {
+          fresh = readFresh(relPath);
+          freshLoaded = true;
+        }
+        if (fresh !== undefined) {
+          // A real fresh read — a genuine signal either way (design ii/iv). `fresh === undefined`
+          // (no origin remote, offline, shard not yet on origin/main) means no signal at all —
+          // fall through and stamp exactly as if no baseline had been supplied.
+          const mismatch = compareCitationBaseline(id, baseline, extractEntryBlock(fresh, id));
+          if (mismatch) {
+            refused.push(mismatch);
+            continue;
+          }
+        }
+      }
       const next = stampCitationInShardText(after, id, stamp);
       if (next !== after) {
         after = next;
@@ -2997,15 +3188,15 @@ export function stampCitationsAndCommit(opts: {
     }
     if (after !== before) {
       fsMarker.writeFileSync(path, after, "utf8");
-      touchedRelPaths.push(join("learnings", filename));
+      touchedRelPaths.push(relPath);
     }
   }
-  if (touchedRelPaths.length === 0) return { committed: false, stampedIds: [] };
+  if (touchedRelPaths.length === 0) return { committed: false, stampedIds: [...stampedIds], refused };
   execFileSync("git", ["-C", opts.worktreePath, "add", ...touchedRelPaths]);
   try {
     execFileSync("git", ["-C", opts.worktreePath, "diff", "--cached", "--quiet"]);
     // exit 0 ⇒ nothing staged ⇒ content is unchanged from HEAD; nothing to commit.
-    return { committed: false, stampedIds: [...stampedIds] };
+    return { committed: false, stampedIds: [...stampedIds], refused };
   } catch {
     // non-zero ⇒ staged changes exist ⇒ commit them as their own, clearly-labeled commit.
     execFileSync("git", ["-C", opts.worktreePath, "commit", "-m", opts.commitMessage ?? CITATION_STAMP_COMMIT_MESSAGE]);
@@ -3013,7 +3204,7 @@ export function stampCitationsAndCommit(opts: {
       encoding: "utf8",
       maxBuffer: 1 << 24,
     });
-    return { committed: true, stampedIds: [...stampedIds], diff };
+    return { committed: true, stampedIds: [...stampedIds], refused, diff };
   }
 }
 

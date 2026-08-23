@@ -350,6 +350,7 @@ import {
   assertArchitectAboveWorker,
   buildGather,
   calibrationTable,
+  captureCitationBaselines,
   changedCitationStamps,
   checkRetroIntegrity,
   codeFilesInDiff,
@@ -13991,6 +13992,16 @@ export function parseGitLogCitationCommits(raw: string): GitLogCommit[] {
  * keeps whatever `cited` values it already had — never cleared, per `stampCitations`' own
  * contract) rather than aborting the whole retro, the same non-fatal discipline
  * orientation/plan-index regeneration immediately around this call already follow.
+ *
+ * W1-T1267: `corpus` above IS the eligibility decision's evidence — and it's read from THIS
+ * worktree's `learnings/`, which was branched from `origin/main` at worktree-cut time and never
+ * refreshed since (`retroCommand` runs the Architect worker, potentially minutes, BEFORE this
+ * function is ever called). A concurrent lane can quarantine one of these entries on the REAL
+ * `origin/main` during that span; because the write below only ever touches `cited`/
+ * `cited_count` (never `lifecycle`), git merges the stale stamp in cleanly alongside the
+ * quarantine. `captureCitationBaselines` snapshots each changed id's block from this same stale
+ * read immediately after `changed` is decided, and `stampCitationsAndCommit` compares it to a
+ * FRESH `origin/main` read right before writing, refusing (never retrying) any id that moved.
  */
 export function citationStampPassFor(opts: {
   worktreePath: string;
@@ -14012,7 +14023,8 @@ export function citationStampPassFor(opts: {
   const gitLogCommits = parseGitLogCitationCommits(readGitLog(opts.worktreePath));
   const evidence = [...mineLedgerCitations(parseLedger(opts.followupLedgerNdjson)), ...mineGitLogCitations(gitLogCommits)];
   const changed = changedCitationStamps(corpus, aggregateCitationEvidence(evidence));
-  return stampCitationsAndCommit({ worktreePath: opts.worktreePath, learningsDir, changed });
+  const baselines = captureCitationBaselines(learningsDir, changed.keys());
+  return stampCitationsAndCommit({ worktreePath: opts.worktreePath, learningsDir, changed, baselines });
 }
 
 /**
@@ -14035,6 +14047,10 @@ export function runCitationStampPass(opts: {
   try {
     const result = citationStampPassFor({ worktreePath: opts.worktreePath, followupLedgerNdjson: opts.followupLedgerNdjson });
     if (result.committed) opts.log("citations.stamped", { ids: result.stampedIds, diff_bytes: result.diff?.length ?? 0 });
+    // W1-T1267 design (iii): a refusal must be readable from the ledger without opening the
+    // shard — named id/field/before/after, one row per refused entry, logged regardless of
+    // whether anything else committed this cycle.
+    if (result.refused.length > 0) opts.log("citations.baseline_refused", { refused: result.refused });
     return result.committed;
   } catch (e) {
     opts.log("citations.stamp.error", { error: String((e as Error)?.message ?? e) });
