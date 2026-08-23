@@ -1,5 +1,5 @@
 /**
- * The lint-plan failing-split (docs/research/recon-open-failing-composition.md, 2026-08-06).
+ * The lint-plan failing-split (state/recon-open-failing-composition.md, 2026-08-06).
  *
  * The defect: the default headline's bare failing count is a technically-true aggregate that
  * misleads — 167 of 176 failing tasks had merged implementations and could never re-dispatch,
