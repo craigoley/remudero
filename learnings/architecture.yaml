@@ -149,7 +149,7 @@
 - id: step-names-come-from-source
   subsystem: ledger
   lifecycle: active
-  files: [src/lib/sweep.ts, src/lib/ledger.ts, src/run-task.ts]
+  files: [src/lib/ledger.ts, src/lib/ledger-grep.ts, src/run-task.ts]
   fact: >-
     A guessed ledger step name is indistinguishable from an absent event. sweep.escalation_reconcile
     exists nowhere as a step — the real names carry suffixes, sweep.escalation_reconcile.summary and
@@ -161,7 +161,7 @@
 - id: task-credit-needs-an-anchored-trailer
   subsystem: plan
   lifecycle: active
-  files: [src/lib/status.ts, plan/tasks.yaml, plan/tasks.d]
+  files: [plan/tasks.yaml, plan/tasks.d, src/run-task.ts]
   fact: >-
     git log --grep <id> is a SUBSTRING match and credits commits that merely MENTION an id. Measured:
     --grep W1-T1282 returned 2 commits — one of them a different task's filing citing it as a sibling

@@ -32,7 +32,7 @@
 - id: rollup-dedupe-by-latest-attempt
   subsystem: sweep
   lifecycle: active
-  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, src/lib/status.ts]
+  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts]
   fact: >-
     A check-runs listing with ?filter=all returns SUPERSEDED attempts forever, so a check that was
     re-run and went green still shows its old failure and a triage pass reports a false red. Dedupe by

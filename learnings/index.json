@@ -26,8 +26,6 @@
         "src/lib/ledger-grep.ts",
         "src/lib/ledger.ts",
         "src/lib/retro.ts",
-        "src/lib/status.ts",
-        "src/lib/sweep.ts",
         "src/lib/task-linter.ts",
         "src/run-task.ts"
       ]
