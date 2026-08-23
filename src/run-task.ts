@@ -694,14 +694,17 @@ import {
 import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "./lib/risk-score.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
 import {
+  checkSharedPause,
   clearKick,
   consumeDrainNow,
   consumeStop,
   pauseDetail,
   pendingKicks,
+  realSharedPauseGitDeps,
   requestPause,
   requestStop,
   resumeFleet,
+  sharedPauseRef,
   stopDetail,
 } from "./lib/fleet-control.js";
 import {
@@ -15573,7 +15576,10 @@ async function drainCommand(
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
         readUsage: deps.readUsage ?? (() => readUsageSnapshotPreferSdk(config)),
         checkStop: () => stopDetail(config.root),
-        checkPause: () => pauseDetail(config.root),
+        // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
+        // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
+        // own doc for why UNREACHABLE reads as held, never as clear.
+        checkPause: () => checkSharedPause(config.root, realSharedPauseGitDeps(repoRoot)),
         openPrCount, // W1-T172: the governor's WIP-ceiling input on the multi-lane path.
         log,
       },
@@ -16514,7 +16520,10 @@ export async function daemonCommand(
         // this fires.
         onStarvation: (census) => escalateStarvation(census, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop: () => stopDetail(config.root),
-        checkPause: () => pauseDetail(config.root),
+        // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
+        // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
+        // own doc for why UNREACHABLE reads as held, never as clear.
+        checkPause: () => checkSharedPause(config.root, realSharedPauseGitDeps(repoRoot)),
         // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
         // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
         // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
@@ -21281,11 +21290,16 @@ async function stopCommand(rest: string[]): Promise<number> {
  * file. No new task spawns after the current tick, but an in-flight task ALWAYS
  * runs to full completion (verdict + merge) — the drain loop only checks between
  * iterations, never mid-task.
+ *
+ * W1-T1216: ALSO pushes the shared cross-host hold (`refs/rmd-pause/hold`) so a daemon on
+ * another host — one that would otherwise never see this host's `state/PAUSE` file — refuses to
+ * dispatch too. BEST-EFFORT: `requestPause`'s local write always lands first regardless of
+ * whether this push does, so an operator on a disconnected host still pauses THEIR OWN daemon.
  */
 async function pauseCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const reason = flagValue(rest, "--reason");
-  const info = requestPause(config.root, reason);
+  const info = requestPause(config.root, reason, realSharedPauseGitDeps(repoRoot));
   const ledgerPath = ledgerPathFor(config);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
@@ -21295,16 +21309,23 @@ async function pauseCommand(rest: string[]): Promise<number> {
     requested_by_pid: info.pid,
   });
   console.log(
-    `### rmd pause — PAUSE flag written (drain-and-hold). Any in-flight task still ` +
-      `reaches merge; no new task spawns until \`rmd resume\`.`,
+    `### rmd pause — PAUSE flag written (drain-and-hold) and pushed to ${sharedPauseRef()} for ` +
+      `every host to see. Any in-flight task still reaches merge; no new task spawns until \`rmd resume\`.`,
   );
   return 0;
 }
 
-/** `rmd resume` — clears BOTH the STOP and PAUSE flags (W1-T11). Idempotent. */
+/**
+ * `rmd resume` — clears BOTH the STOP and PAUSE flags (W1-T11). Idempotent.
+ *
+ * W1-T1216: ALSO clears the shared cross-host hold (`refs/rmd-pause/hold`) — design (iv): `rmd
+ * resume` remains the ONLY thing that clears a pause, local or shared alike. BEST-EFFORT for the
+ * same reason `pauseCommand`'s push is: the local clears always land first regardless of origin
+ * reachability, so an operator resuming a disconnected host still gets it moving again.
+ */
 async function resumeFleetCommand(): Promise<number> {
   const config = loadConfig();
-  const result = resumeFleet(config.root);
+  const result = resumeFleet(config.root, realSharedPauseGitDeps(repoRoot));
   const ledgerPath = ledgerPathFor(config);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
@@ -21312,10 +21333,11 @@ async function resumeFleetCommand(): Promise<number> {
     step: "fleet.resume",
     cleared_stop: result.clearedStop,
     cleared_pause: result.clearedPause,
+    cleared_shared_pause: result.clearedSharedPause ?? null,
   });
   console.log(
-    `### rmd resume — cleared: stop=${result.clearedStop} pause=${result.clearedPause}. ` +
-      `The fleet is clear to spawn again.`,
+    `### rmd resume — cleared: stop=${result.clearedStop} pause=${result.clearedPause} ` +
+      `shared=${result.clearedSharedPause}. The fleet is clear to spawn again.`,
   );
   return 0;
 }

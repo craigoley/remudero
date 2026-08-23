@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -88,9 +89,17 @@ export function requestStop(root: string, reason?: string): FleetControlInfo {
   return writeFlag(stopFilePath(root), reason);
 }
 
-/** `rmd pause [--reason <text>]` — write the PAUSE flag. */
-export function requestPause(root: string, reason?: string): FleetControlInfo {
-  return writeFlag(pauseFilePath(root), reason);
+/**
+ * `rmd pause [--reason <text>]` — write the PAUSE flag. `deps`, when supplied (the real CLI path
+ * — see the SHARED CROSS-HOST PAUSE section below), also pushes the shared hold to `origin` so a
+ * daemon on another host sees it. BEST-EFFORT: the local write above ALWAYS lands first and
+ * ALWAYS succeeds on its own — design (i) — so a host that cannot reach origin still pauses
+ * itself; the shared push merely widens who else notices.
+ */
+export function requestPause(root: string, reason?: string, deps?: SharedPauseGitDeps): FleetControlInfo {
+  const info = writeFlag(pauseFilePath(root), reason);
+  if (deps) writeSharedPause(deps);
+  return info;
 }
 
 /** Gate predicate: existence alone, independent of whether the JSON parses (fail CLOSED). */
@@ -151,14 +160,168 @@ export function consumeStop(root: string): boolean {
 export interface ResumeResult {
   clearedStop: boolean;
   clearedPause: boolean;
+  /** Only present when `resumeFleet` was called with `deps` — whether the shared-hold ref push
+   *  landed. Omitted (not `false`) when `deps` was not supplied, so every existing caller that
+   *  never passed one keeps getting back exactly `{clearedStop, clearedPause}`. */
+  clearedSharedPause?: boolean;
 }
 
-/** `rmd resume` — clear BOTH flags. Idempotent; a resume with nothing to clear is not an error. */
-export function resumeFleet(root: string): ResumeResult {
-  return {
-    clearedStop: clearFlag(stopFilePath(root)),
-    clearedPause: clearFlag(pauseFilePath(root)),
+/**
+ * `rmd resume` — clear BOTH flags. Idempotent; a resume with nothing to clear is not an error.
+ * `deps`, when supplied (the real CLI path), also clears the shared cross-host hold — design (iv):
+ * `rmd resume` remains the ONLY thing that clears a pause, local or shared alike. BEST-EFFORT for
+ * the same reason `requestPause`'s push is: the local clears above always run first and always
+ * land regardless of whether origin is reachable, so an operator resuming a disconnected host
+ * still gets THEIR OWN host moving again.
+ */
+export function resumeFleet(root: string, deps?: SharedPauseGitDeps): ResumeResult {
+  const clearedStop = clearFlag(stopFilePath(root));
+  const clearedPause = clearFlag(pauseFilePath(root));
+  if (!deps) return { clearedStop, clearedPause };
+  return { clearedStop, clearedPause, clearedSharedPause: clearSharedPause(deps) };
+}
+
+// ── SHARED CROSS-HOST PAUSE (W1-T1216) ────────────────────────────────────────────────────────
+//
+// THE GAP THIS CLOSES. `pauseFilePath`/`pauseDetail` above are keyed to `root`, and `root` (via
+// `config.root`) resolves DIFFERENTLY per host — `join(homedir(), "Remudero")` on a mini is not
+// the same directory an Azure container resolves from identical code — and `state/` is
+// gitignored, so the file can never travel by the one channel every host already shares. A PAUSE
+// written on one host is therefore invisible to a daemon checking `pauseDetail` on another.
+//
+// AN ADDITION, NEVER A REPLACEMENT (design (i)). `pauseDetail`/`isPaused`/`pauseFilePath` above
+// are UNCHANGED — a disconnected host must still be able to pause itself with zero network
+// dependency, and `checkSharedPause` below always consults the local file FIRST, only falling
+// through to a remote read when the local file is silent.
+//
+// A GIT REF IS THE SHARED SUBSTRATE (rationale (9)/(10)), mirroring `triageClaimRef`
+// (lib/auto-triage.ts) and `refs/rmd-id/` (task-id-reservation.ts) — the same namespace family,
+// same "`git ls-remote`, never `git clone`/`git fetch`" cost profile. Unlike a triage claim this
+// is fleet-WIDE, not per-entry, so there is exactly one ref, and there is no contention to referee
+// — two operators pausing at once both want the same outcome (held), so whichever push lands
+// first is fine.
+//
+// UNREACHABLE MEANS HELD (design (ii)). `readSharedPause` discriminates ABSENT (status 0, no
+// stdout) from HELD (status 0, some stdout) from UNREACHABLE (nonzero status) — measured
+// (rationale (10)): an absent ref exits 0 with zero lines, an unreachable remote exits 128, a
+// present ref exits 0 with one line. `checkSharedPause` below folds UNREACHABLE into "paused",
+// never into "clear" — a failed read is never scored free, the same principle
+// `reserveTaskIdRemote` applies in the opposite direction (there: refuses to MINT; here: refuses
+// to DISPATCH).
+//
+// STOP IS UNTOUCHED (design (iii)). Nothing below adds a shared ref for STOP: it exists only to
+// halt the drain that observes it, auto-clears as that drain exits (`consumeStop`, above), and has
+// no cross-host question to answer — giving it a shared marker would turn a one-shot into
+// something that can outlive its own drain.
+
+/** The single ref the shared cross-host PAUSE hold lives at — fleet-WIDE, unlike
+ *  `triageClaimRef`'s per-entry `refs/rmd-triage/<id>`, because there is exactly one hold to ask
+ *  about. Under `refs/rmd-pause/`, matching the `refs/rmd-id/`/`refs/rmd-triage/` convention: a
+ *  namespace `git clone`/`git fetch` does not replicate by default and `git ls-remote --heads`
+ *  (which `reapBranchesCommand` enumerates) does not see, so it costs nothing on every branch
+ *  sweep already walking the remote. */
+export function sharedPauseRef(): string {
+  return "refs/rmd-pause/hold";
+}
+
+/** What a read of the shared hold found. `"unreachable"` is a FAILED READ of the world and must
+ *  never be treated as `"absent"` — see the module header's UNREACHABLE MEANS HELD note. */
+export type SharedPauseRead = "absent" | "held" | "unreachable";
+
+/** The one I/O seam {@link readSharedPause}/{@link writeSharedPause}/{@link clearSharedPause}
+ *  share. Mirrors {@link TriageClaimReserver} (lib/auto-triage.ts) in shape and in its own
+ *  contract: `run` must NEVER throw — an unreachable remote is an OUTCOME (a non-zero status),
+ *  because a throw at this seam is indistinguishable from a programmer error to the caller. */
+export interface SharedPauseGitDeps {
+  /** Runs a git argv against `origin`; returns its exit status and stdout, verbatim. */
+  run(args: string[]): { status: number; stdout: string };
+  /** A payload usable as the ref's target commit. Mirrors {@link TriageClaimReserver.mintAnchor}:
+   *  the real implementation mints an orphan commit over the empty tree; a test may return any
+   *  fixed string, since a fake remote need not validate real git object shape. */
+  mintAnchor(): string;
+}
+
+/**
+ * The real (non-test) {@link SharedPauseGitDeps} — a live `git`, scoped to `repoRoot` exactly
+ * like `gitTriageClaimReserver`'s own calls (lib/auto-triage.ts). `mintAnchor` reuses that
+ * function's own recipe (`hash-object` the empty tree, `commit-tree` an orphan commit over it)
+ * rather than inventing a second one, so a stuck hold is inspectable with the same `git show` an
+ * operator already knows to reach for on a stuck triage claim.
+ */
+export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
+  const run = (args: string[]): { status: number; stdout: string } => {
+    try {
+      const stdout = execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8" });
+      return { status: 0, stdout };
+    } catch (e) {
+      const status = typeof (e as { status?: number })?.status === "number" ? (e as { status: number }).status : 1;
+      return { status, stdout: "" };
+    }
   };
+  return {
+    run,
+    mintAnchor() {
+      const tree = run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
+      const msg = `rmd-pause hold ${process.pid}@${hostname()} ${new Date().toISOString()}`;
+      return run(["commit-tree", tree, "-m", msg]).stdout.trim();
+    },
+  };
+}
+
+/**
+ * `git ls-remote origin <ref>`, classified into the three outcomes rationale (10) measured.
+ * PURE given `deps` — the network round trip is `deps.run`'s problem, not this function's.
+ */
+export function readSharedPause(deps: SharedPauseGitDeps): SharedPauseRead {
+  const res = deps.run(["ls-remote", "origin", sharedPauseRef()]);
+  if (res.status !== 0) return "unreachable";
+  return res.stdout.trim() ? "held" : "absent";
+}
+
+/** Create-or-update {@link sharedPauseRef}. Who "wins" a race between two operators pausing at
+ *  once does not matter — the outcome either way is "held" — so unlike a triage claim this never
+ *  needs create-if-absent semantics. Returns whether the push landed; callers treat a failure as
+ *  BEST-EFFORT (see {@link requestPause}'s doc). */
+export function writeSharedPause(deps: SharedPauseGitDeps): boolean {
+  const anchor = deps.mintAnchor();
+  return deps.run(["push", "origin", `${anchor}:${sharedPauseRef()}`]).status === 0;
+}
+
+/** Delete {@link sharedPauseRef}. Returns whether the delete landed; callers treat a failure as
+ *  BEST-EFFORT (see {@link resumeFleet}'s doc) — design (iv) still holds because the LOCAL clear
+ *  `resumeFleet` performs always runs first and always lands. */
+export function clearSharedPause(deps: SharedPauseGitDeps): boolean {
+  return deps.run(["push", "origin", `:${sharedPauseRef()}`]).status === 0;
+}
+
+/**
+ * THE DAEMON'S PER-TICK SUPPLIER — wired at BOTH `checkPause` call sites in `src/run-task.ts`
+ * (the task shard's own note on why the flag and its only reader are declared apart: the flag
+ * lives here, its only reader lives there).
+ *
+ * LOCAL FIRST, NEVER REPLACED (design (i), rationale (3)): `pauseDetail`'s existing host-local
+ * read wins outright the moment it finds a flag — no network call, no behaviour change for a host
+ * that already knows. Only when the local file is silent does this fall through to the shared
+ * ref, so a disconnected host that has paused ITSELF is unaffected by this function existing.
+ *
+ * UNREACHABLE READS AS HELD (design (ii)): `readSharedPause` returning `"unreachable"` produces a
+ * truthy detail string, exactly like a real hold — never `undefined`. A failed read is never
+ * scored free.
+ */
+export function checkSharedPause(root: string, deps: SharedPauseGitDeps): string | undefined {
+  const local = pauseDetail(root);
+  if (local) return local;
+  const shared = readSharedPause(deps);
+  if (shared === "held") {
+    return `PAUSE held on ${sharedPauseRef()} (set from another host) — run \`rmd resume\` to clear`;
+  }
+  if (shared === "unreachable") {
+    return (
+      `cannot reach origin to read ${sharedPauseRef()} — holding rather than dispatching ` +
+      `optimistically (an unreachable remote is never read as clear)`
+    );
+  }
+  return undefined;
 }
 
 // ── CONSOLE WRITE-ACTION MARKERS (fb-1784988460437-9daa9b) ──────────────────────
