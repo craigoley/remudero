@@ -60,6 +60,32 @@
     CI keeps failing with an UNCHANGING signature simply goes quiet, and nobody is told. This repo
     escalates instead. **TAKE BOTH: a measurable descent AND the escalation at its end** — a loop
     that stops silently and a loop that stops loudly are not the same repair.
+
+    THE PROPOSED DECLARATION IS NOT A NEW FORM TO INVENT — ONE SITE IN THIS TREE ALREADY WRITES IT.
+    `deploy/entrypoint.sh` declares `FRESHNESS_RESTART_MAX="${RMD_FRESHNESS_RESTART_MAX:-100}"` under
+    a heading that carries the whole obligation in one line:
+
+      # -- WHY 100, MEASURED 2026-08-18 (was 20, sized against a merge rate the fleet has outgrown) --
+
+    Everything this task asks a bound to declare is there: A MEASUREMENT ("MEASURED over the eight
+    complete UTC days ending 2026-08-18, via the REST pulls API: 29, 41, 54, 58, 63, 71, 73, 86
+    merges per day -- median 63"), A DATE, THE SUPERSEDED VALUE ("was 20"), and WHY THE OLD ONE
+    STOPPED FITTING (that 20 was sized from "ONCE PER MERGE (14 rows in 24 hours)", a rate the same
+    comment measures at 4.5x higher, with even the quietest day 2.1x it). It goes further than this
+    task requires and states the WORST CASE the number creates ("100 x 5s = 500s (8m20s)") and its
+    PRICE ("100 restarts is 100 fetches against the origin ... recorded here so the next person
+    raising this number knows what they are buying").
+
+    AND IT IS A BACKSTOP BY THIS SHARD'S OWN TEST, which is why it is the right exemplar rather than
+    merely a well-commented number. Freshness churn normally ends when main stops moving; the
+    ceiling fires only when it does not. So the site that already writes the declaration is a site
+    whose bound sits behind another stopping condition -- the separation design (i) classifies for.
+
+    THAT CHANGES WHAT IS BEING PROPOSED. A convention with a working in-tree exemplar is a different
+    proposal from one without: the form does not have to be designed, argued or trialled, only
+    generalised. One site follows it and the rest do not, so the deliverable is to make an existing
+    practice checkable rather than to invent a practice and hope it takes.
+
   design: |
     (i) CLASSIFY BY THE OTHER-STOPPING-CONDITION TEST, AND CONTROL THE CLASSIFIER. The test: on the
     HEALTHY path, does the loop have a stopping condition other than this bound? If yes it is a
