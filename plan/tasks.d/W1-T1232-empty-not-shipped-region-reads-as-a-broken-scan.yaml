@@ -1,0 +1,106 @@
+- id: W1-T1232
+  title: "AN EMPTY NOT-SHIPPED REGION READS AS A BROKEN SCAN AND TWO GATES NOW REQUIRE OPPOSITE THINGS OF THE SAME PARAGRAPH — R25's rule 9 tells an author to DELETE an id from the scanned region rather than annotate it, `plan-state-claims` refuses that region when it holds no ids at all, and the fact that separates an empty scan from a broken one is computed by the extractor and discarded by the caller one line before the decision that needs it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 60.00
+  files: [scripts/plan-state-claims.mjs, test/plan-state-claims.test.ts]
+  origin: oper#plan-state-claims-unexamined-2026-08-23
+  plan_refs: ["W1-T409", "W1-T410"]
+  status: queued
+  attempts: 0
+  rationale: |
+    FULL COMPLIANCE WITH EITHER GATE FAILS THE OTHER, AND BOTH GATES ARE CORRECT.
+
+    R25's rule 9 (MASTER-PLAN.md, added by #2518): "A CORRECTION WRITTEN INSIDE THE SECTION THE
+    SCANNER READS IS NOT A CORRECTION — DELETE THE ID, DO NOT ANNOTATE IT." It was earned: R24
+    answered a BLOCKING plan-state-truth row about W1-T25 by annotating it inside the
+    `Still PLANNED, not shipped` paragraph, the id stayed on a phrase-bearing line, and the rung
+    blocked again identically a third cycle. The rule is right.
+
+    `renderReport` (scripts/plan-state-claims.mjs) refuses `notShippedExamined === 0` as
+    UNEXAMINED -- "an empty scan is not a clean result." That is right too, and it was an ACCEPTED
+    criterion of W1-T409 (#1597, criterion 3), not an accident.
+
+    Follow rule 9 to completion and the region empties, so UNEXAMINED is reached BY CONSTRUCTION.
+
+    MEASURED 2026-08-23 ON #2518, with `extractAssertedUnbuiltTaskIds` run directly against both
+    trees rather than grepped:
+      origin/main   examinedLines 37  proposalOnlyLines 11  ids 1  -> [W1-T25]   scanner OK
+      #2518 head    examinedLines 35  proposalOnlyLines  8  ids 0  -> []         scanner UNEXAMINED
+    A correct edit under a correct rule zeroed the gate. The phrase count moved 37 -> 35 while the
+    bound ids went 1 -> 0, so nothing in a diff review reads as load-bearing, and `claims` went red
+    on the NEXT PR to touch the file rather than on the edit that caused it.
+
+    THE CORPUS IS ALSO UNMARKED. Nothing in MASTER-PLAN.md distinguishes the sentence holding the
+    gate up from ordinary prose -- no comment, no anchor, no convention. Binding is an accident of
+    where an em-dash falls relative to a phrase, because `CLAUSE_SPLIT_RE` is `/[—;]/` and a comma
+    is deliberately NOT a boundary. On main the entire corpus was ONE clause of ONE line.
+  design: |
+    (i) IS "NO IDS BOUND" A FAILURE AT ALL -- NO, AND THE GATE'S OWN DOC SAYS WHAT IT IS GUARDING.
+    The module doc names the hazard exactly: "the runner's natural failure mode is matching
+    nothing, which must never render as a clean result." UNEXAMINED protects against a BROKEN
+    SCAN -- a changed vocabulary, a renamed file, an encoding fault -- not against an honest
+    absence. The gate's purpose is to catch a FALSE unbuilt assertion; a region with no assertions
+    has none to catch, so refusing it protects nothing.
+
+    (ii) THE TWO STATES ARE DISTINGUISHABLE ON A FACT THAT ALREADY EXISTS.
+    `extractAssertedUnbuiltTaskIds` returns `{ids, examinedLines, proposalOnlyLines}`.
+    `examinedLines` counts lines carrying a not-shipped PHRASE, whether or not an id bound:
+      examinedLines === 0                    -> the phrase extractor matched nothing anywhere;
+                                                the scan is suspect. UNEXAMINED, unchanged.
+      examinedLines > 0 && ids.length === 0  -> the extractor RAN over N phrase-bearing lines and
+                                                bound no task id, because every bound clause named
+                                                a proposal or nothing. Honestly empty, not broken.
+    #2518's head is unambiguously the second case at 35/8/0.
+
+    THE CALLER ALREADY HAS THE FACT AND DROPS IT. `checkPlanStateConsistency` destructures
+    `const { ids: notShippedIds } = extractAssertedUnbuiltTaskIds(masterPlanMd)` -- `examinedLines`
+    and `proposalOnlyLines` are computed, returned on the same object, and discarded one line
+    before the decision that needs them. This task carries them onto the result and splits the
+    refusal; it does not widen the extractor, which already returns everything required.
+
+    (iii) THE SHIPPED-LOG SIDE IS UNTOUCHED, BY NAME. `shippedExamined === 0` keeps refusing: that
+    side has no equivalent "read but bound nothing" state, and a SHIPPED log that extracts zero
+    ids across 543 really is a broken read.
+
+    (iv) DO NOT MARK THE CORPUS -- A BINDABLE ANCHOR RE-CREATES RULE 9's PROBLEM AND TRIPS THE
+    SIBLING RUNG. An anchor is only load-bearing if the extractor binds it, and to bind it must
+    carry a task id beside a not-shipped phrase, which IS an assertion:
+      a REAL id -> a live claim that goes stale exactly as W1-T25 did, and as
+                   "the remaining fleet tasks are W1-T28" already has (see note);
+      a PLACEHOLDER id -> `planStateTruthRung`'s SECOND arm fires, because the resolver has no
+                   opinion on it, `idsChecked === 0`, and the rung returns `unexamined` anyway.
+    An INERT marker (no id, no phrase) is safe -- the extractor skips it at its first `if` -- but
+    it is unenforced prose that a later editor may delete, which is the class of rule this repo
+    already knows does not hold. So: no anchor. Once (ii) lands, an empty region is no longer a
+    failure and there is no load-bearing sentence left to mark.
+
+    (v) COST. No new dependency, no I/O, no network. The added state is a branch over two integers
+    the caller already receives.
+  note: |
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: `planStateTruthRung` (src/lib/retro.ts)
+    conflates the SAME two states -- `if (ids.length === 0)` returns `unexamined` -- though it at
+    least renders the count in its reason string. It is a retro-time rung, not a CI gate, so it
+    blocks no PR. Fixing it means src/lib/retro.ts plus test/plan-state-truth-rung.test.ts, a
+    second concern that would push this shard over rule 19's span. File separately if wanted.
+
+    REPORTED, NOT FIXED (the retro's call, per rule 15): MASTER-PLAN.md claims "the remaining fleet
+    tasks are W1-T28 and W2-T2's dry-run". W1-T28 MERGED as #177 on 2026-07-18 carrying
+    `Remudero-Task: W1-T28`, verified by reading the merged PR body. It causes no failure today
+    only because no not-shipped phrase shares its clause -- the same one-clause accident that this
+    task exists to stop relying on. Correcting the sentence is a plan edit, not a code change.
+  acceptance:
+    - claim: "a not-shipped region the extractor read but bound no id in is not reported UNEXAMINED"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "a region with no phrase-bearing lines at all is still reported UNEXAMINED"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "the report names how many phrase-bearing lines were read on both outcomes"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "a contradiction is still refused with both citation lines unchanged"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "the shipped-log side keeps its own empty-set refusal"
+      proof: "unit test: test/plan-state-claims.test.ts"
