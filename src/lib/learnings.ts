@@ -597,10 +597,50 @@ export function computeArtifactHash(entries: LearningEntry[]): string {
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
+/**
+ * The exact reason-string PREFIX {@link loadGlobalArtifact} emits for a missing artifact — the
+ * ONE `catch` around `readFileSync`, and the ONLY designed/deferred-§6-transport absence among
+ * its seven possible failure reasons (W1-T1251). Exported so a reason string can be classified
+ * ({@link classifyGlobalArtifactRefusal}) by the SAME literal this module itself returns, rather
+ * than a second, driftable regex a caller (e.g. status-board.ts) would otherwise have to guess
+ * at. `startsWith`, not exact-equal, so a short test fixture (`"global artifact not found"`) and
+ * the real, path-suffixed message (`"global artifact not found: <path>"`) both classify alike.
+ */
+export const GLOBAL_ARTIFACT_ABSENT_REASON_PREFIX = "global artifact not found";
+
+/**
+ * `"absent"` — the artifact simply doesn't exist yet (nothing pulled/provisioned), the ONE
+ * designed, non-fatal, §6-deferred-transport state. `"refused"` — every other
+ * {@link loadGlobalArtifact} failure: not valid YAML, not a mapping, missing `version`/`hash`, a
+ * malformed entry, or a hash mismatch (the tamper signal) — a REAL problem with an artifact that
+ * DOES exist, never to be read as an expected absence (W1-T1251).
+ */
+export type GlobalArtifactRefusalKind = "absent" | "refused";
+
+/**
+ * Classify a `loadGlobalArtifact` refusal `reason` string into its {@link
+ * GlobalArtifactRefusalKind} — the ONE discriminant every consumer (today: {@link
+ * loadGlobalArtifact} itself, and status-board.ts's LEARNINGS INJECTION block) reads instead of
+ * each re-deriving its own string match. `"absent"` iff `reason` starts with {@link
+ * GLOBAL_ARTIFACT_ABSENT_REASON_PREFIX}; every other reason (including one this module has never
+ * seen before) classifies `"refused"` — fail toward PROMINENT, never toward silently-designed,
+ * so an unrecognized future failure reason still reads as a problem rather than vanishing into
+ * the deferred-transport line.
+ */
+export function classifyGlobalArtifactRefusal(reason: string): GlobalArtifactRefusalKind {
+  return reason.startsWith(GLOBAL_ARTIFACT_ABSENT_REASON_PREFIX) ? "absent" : "refused";
+}
+
 /** The result of loading + verifying a {@link GlobalArtifact}. */
 export type GlobalArtifactResult =
   | { ok: true; artifact: GlobalArtifact; entries: LearningEntry[] }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; kind: GlobalArtifactRefusalKind };
+
+/** Build a `{ ok: false }` {@link GlobalArtifactResult}, deriving `kind` from `reason` via {@link
+ *  classifyGlobalArtifactRefusal} — ONE call site computes both, so they can never disagree. */
+function refused(reason: string): GlobalArtifactResult {
+  return { ok: false, reason, kind: classifyGlobalArtifactRefusal(reason) };
+}
 
 /**
  * Load and VERIFY the RMD-GLOBAL artifact at `path` (P32/W1-T145).
@@ -615,43 +655,44 @@ export type GlobalArtifactResult =
  * `{ ok: false }`, contributing zero entries — never silently trusted. A
  * missing file is refused the same way (nothing pulled yet reads identically
  * to "refuse silently", which is the correct default for an opt-in layer
- * nothing has to populate).
+ * nothing has to populate) — BUT is the only one of the seven possible
+ * failure reasons carrying `kind: "absent"` rather than `kind: "refused"`
+ * (W1-T1251): a designed, non-fatal, §6-deferred-transport state is not the
+ * same claim as a tampered or malformed artifact, even though both stop the
+ * global layer contributing entries identically.
  */
 export function loadGlobalArtifact(path: string): GlobalArtifactResult {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch {
-    return { ok: false, reason: `global artifact not found: ${path}` };
+    return refused(`${GLOBAL_ARTIFACT_ABSENT_REASON_PREFIX}: ${path}`);
   }
   let raw: unknown;
   try {
     raw = parseYaml(text);
   } catch (err) {
-    return { ok: false, reason: `global artifact is not valid YAML (${path}): ${String(err)}` };
+    return refused(`global artifact is not valid YAML (${path}): ${String(err)}`);
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return { ok: false, reason: `global artifact must be a mapping with 'version', 'hash', 'entries' (${path})` };
+    return refused(`global artifact must be a mapping with 'version', 'hash', 'entries' (${path})`);
   }
   const r = raw as Record<string, unknown>;
   if (typeof r.version !== "string" || r.version.length === 0) {
-    return { ok: false, reason: `global artifact missing string 'version' (${path})` };
+    return refused(`global artifact missing string 'version' (${path})`);
   }
   if (typeof r.hash !== "string" || r.hash.length === 0) {
-    return { ok: false, reason: `global artifact missing string 'hash' (${path})` };
+    return refused(`global artifact missing string 'hash' (${path})`);
   }
   let entries: LearningEntry[];
   try {
     entries = parseLearningsDoc(r.entries, path, new Set());
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    return refused(err instanceof Error ? err.message : String(err));
   }
   const actualHash = computeArtifactHash(entries);
   if (actualHash !== r.hash) {
-    return {
-      ok: false,
-      reason: `global artifact hash mismatch (${path}): pinned ${r.hash}, computed ${actualHash} — refused, not trusted`,
-    };
+    return refused(`global artifact hash mismatch (${path}): pinned ${r.hash}, computed ${actualHash} — refused, not trusted`);
   }
   return { ok: true, artifact: { version: r.version, hash: r.hash, entries }, entries };
 }
