@@ -131,9 +131,17 @@
 
     THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN. Eight id
     surfaces were swept, each against a control pre-qualified for THAT surface, and ONE CONTROL WAS
-    RE-QUALIFIED MID-SWEEP RATHER THAN TRUSTED: W1-T1227 was the obvious control for open PR
-    titles and reads 0 there because its own PR has since closed, so that surface was re-controlled
-    on the `W1-T` title population, which reads 4. Shard filenames 0 against W1-T1227 at 1; plan
+    RE-QUALIFIED MID-SWEEP RATHER THAN TRUSTED: W1-T1227 was the obvious control for open PR titles
+    and reads 0 there, so that surface was re-controlled on the `W1-T` title population, which
+    reads 4. THE REASON IS STRUCTURAL AND WORTH KEEPING. W1-T1227's PR is OPEN — it is #2569,
+    the very PR this task was measured on — and its title carries no id at all, because an
+    IMPLEMENT PR's title never does; the id rides in the `Remudero-Task:` trailer instead, which is
+    where W1-T1227 is credited (on #2550, its FILING PR). Of the seven open PRs, the four whose
+    titles carry an id are all `chore(plan):` filings. So ANY control drawn from an implement task
+    is guaranteed to read 0 on the title surface no matter how live that task is, and a zero there
+    is evidence of nothing until the control comes from a filing. This note said the control read
+    0 "because its own PR has since closed"; that was wrong, checked against the PR, and the
+    correct mechanism replaces it. Shard filenames 0 against W1-T1227 at 1; plan
     `- id:` lines 0 against W1-T1227 at 1; the reservation 1, which is the pre-mint, against a
     namespace of 284 such refs; open PR titles 0 against `W1-T` titles at 4; open PR head branches
     0 against `run-W1-T` heads at 1; open PR file lists 0 with coverage at seven captured of seven
