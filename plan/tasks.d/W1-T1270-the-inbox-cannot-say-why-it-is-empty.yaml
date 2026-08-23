@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium
+  risk: high
   budget_usd: 55.00
   files: [src/lib/inbox.ts, test/inbox-registry-absence.test.ts]
   origin: oper#ratification-inbox-never-fired-2026-08-23
@@ -100,6 +100,12 @@
     (vi) COST. No new dependency, no I/O, no new file or format. The added state is a discriminated
     return over inputs the function already receives.
   note: |
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS. `lint-plan` reads `src/lib/inbox.ts` and
+    `test/inbox-registry-absence.test.ts` as two distinct concerns and refuses that pair at
+    `risk: medium`. The change itself is a discriminated return inside one function with no I/O and
+    no new dependency; the band records the linter's span rule, not a judgement that this is
+    dangerous.
+
     OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: W1-T1259 owns the cadence that would let
     `rmd rule-efficacy` run unattended, and is filed and queued — it is cited here, not re-filed.
     The console write tier that would let `panel-graph`'s prune run more often is likewise not
