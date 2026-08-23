@@ -1,0 +1,175 @@
+- id: W1-T1249
+  title: "PROMOTION HAS A CALLER AND NO JUDGE, SO THE PASS HAS NEVER RUN — W1-T1059 wired `runPromotionPass` into the retro as `judge: opts.promotionJudge`, the only assignment to that field anywhere is in a test, and the sibling optional deps on the same options object all carry production defaults; supply a judge at the smallest setting, bounded, proposal-only, and leave a row on the two paths that today leave none"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 from a scratch worktree whose HEAD was proved equal to `origin/main` before
+    any reading, against LOCAL SOURCE and the LEDGER UNION (per-form file counts 1 / 6 / 666, every
+    form read). The suite was NOT run. Every zero carries a control, and the one zero that looks
+    like corroboration and is not is labelled as such.
+
+    (1) BOTH CITATIONS RE-DERIVED, WITH THEIR DRIFT RECORDED. The wiring is `judge:
+    opts.promotionJudge` inside `retroCommand`'s call to `promotionProposalSectionFor`
+    (`src/run-task.ts`) — at line 13633 today, not the 13435 the brief carried; the optional dep is
+    declared just above it. MASTER-PLAN's record reads *"The pass did NOT run: no promotion judge
+    was supplied"* at line 1368, not 1367, and the same finding appears at two more places in that
+    file. SYMBOLS, NOT LINE NUMBERS, are what this shard anchors on for exactly this reason.
+
+    (2) NOTHING SUPPLIES IT, AND THE CONTROL IS THE SIBLING DEPS. Across `src/`, `test/` and
+    `scripts/`, the only assignment to `promotionJudge` is in `test/learnings-promotion-caller.test.ts`.
+    The control that the query shape does find suppliers: the two deps declared beside it on the
+    SAME options object both have production defaults in the same function — `opts.spawn ??
+    spawnWorker` and `opts.github ?? buildBatchedGithub(...)`. So the field is not merely unset in
+    one caller; it has no production supplier at all, and `promotionProposalSectionFor`'s
+    `if (!opts.judge)` branch is the only branch production has ever taken.
+
+    (3) THE REFUSAL IS DELIBERATE AND IS CITED RATHER THAN TREATED AS AN OVERSIGHT.
+    `promotionProposalSectionFor`'s own doc says the judge "is injected and has no production
+    default, DELIBERATELY", that absent one the pass does not run "rather than fabricating a
+    fail-closed verdict, which would write `promotion.verdict` rows for a judge that never ran",
+    and that "inventing a judge spawner here (one spawn per active entry, per retro, unattended) is
+    the overreach the shard's design (iii) forbids for the writer" — reasoning by analogy from
+    W1-T1059's design (iii), "DO NOT INVENT THE WRITER — NAME IT AS THE FOLLOW-UP IT IS". THE
+    OPERATOR HAS RULED THAT A JUDGE SHOULD NOW BE SUPPLIED AT THE SMALLEST SETTING. This task is
+    that ruling taking the writer's reserved decision, not a correction of a mistake.
+
+    (4) THE LEDGER ZERO IS A COVERAGE ZERO AND IS REPORTED AS ONE, BECAUSE IT READS LIKE PROOF.
+    Across the union, `promotion.scrub`, `promotion.verdict` and `promotion.promoted` each read
+    ZERO. The scan is sound — positive controls: `run.start` at 258,952 rows and
+    `risk_judge.decision` at 87, so a low-volume step is plainly visible to it. BUT THE CORPUS
+    CANNOT SEE THE WIRED PERIOD, TWICE OVER. It holds 18 distinct `RETRO-` run ids and ZERO of them
+    start after the wiring merged (2026-08-21T03:28:56Z). And this host's corpus stopped receiving
+    fleet rows well before that: newest `run.start` 2026-08-12T23:50Z, newest `sweep.disposed`
+    2026-08-13T00:30Z, newest `retro.start` 2026-08-12T12:30Z, while its newest row of any kind is
+    today — all `cli.invoked`, this session's own. THE FINDING RESTS ON (1) AND (2), which are
+    source, and on MASTER-PLAN's own record. The ledger neither confirms nor refutes it.
+
+    (5) Q1 — THE RISK JUDGE RESOLVES NO MOUNT ROW OF ITS OWN; IT SCANS FOR THE CHEAPEST, AND THREE
+    CALLERS ALREADY SHARE THAT SCAN. `resolveRiskJudgeMount` walks every `routes.<type>.<risk>.<class>`
+    cell in deterministic sorted order and keeps the mount with the lowest `tiers` rank, ties broken
+    by lowest `efforts` rank — no hardcoded model name. MEASURED against this repo's real table it
+    resolves `{model: haiku, effort: low, maxTurns: 400, contextBudget: 60000}` (the table's tiers
+    are haiku 1, sonnet 2, opus 3, claude-opus-5 4). It is ALREADY reused rather than re-derived by
+    `resolveDecisionSummaryMount` and a second site in `feedback.ts`, and by `escalate.ts`, each
+    saying so in its own doc. And the mounts table carries NO judge row for any of them. So the
+    house pattern is unambiguous: promotion SHARES the scan and declares nothing.
+
+    (6) AND THE PER-CALL COST IS NOT RECORDED, WHICH IS SAID PLAINLY RATHER THAN ESTIMATED. A
+    `risk_judge.decision` row carries verdict, reasons, confidence, action and reason — and no
+    `cost_usd`. So the honest sizing is the MOUNT (the cheapest configured tier, `haiku`/`low`) and
+    the CALL COUNT, not a dollar figure. Design (ii)'s bound is what makes the call count knowable
+    in advance; a figure quoted here would be invented.
+
+    (7) Q2 — THE PASS HAS NO BOUND TODAY, SO THE CAP IS NEW AND BELONGS TO THE CALLER.
+    `runPromotionPass` iterates the entries it is handed, skipping only non-`active` lifecycle
+    entries; there is no N, no slice and no early exit. `promoteEntry` calls the judge at most once
+    per entry and NEVER for an entry the scrub blocks or one already at the top layer — so the
+    judge-call count is at most the number of active, non-top-layer, scrub-passing entries handed
+    in. Bounding the pass therefore means bounding what the caller hands it.
+
+    (8) LAW 5 IS UNTOUCHED BY CONSTRUCTION, AND THE CODE ALREADY SAYS SO IN TERMS.
+    `promotionProposalSectionFor`'s doc: "IT WRITES NOTHING, AND THAT IS A CONSTRAINT, NOT AN
+    IMPLEMENTATION DETAIL … never persists a promoted entry, never touches `learnings/`, and never
+    touches the shared home. `promotedEntries` is rendered and dropped." And
+    `renderPromotionProposals` renders proposals under "PROPOSED — ratify by landing each entry at
+    the named layer in a reviewed PR". Supplying a judge changes which branch runs; it changes
+    nothing about what is written, because nothing is written on either branch.
+
+    (9) Q3 — THE BRIEF'S PREMISE IS HALF RIGHT, AND THE CORRECTION MATTERS BECAUSE THE TWO PATHS
+    DIFFER. The ABSENT-judge path is NOT silent in the report: `renderPromotionProposals` keeps
+    three zero-looking states apart on purpose — pass did not run, ran over an empty corpus, ran and
+    proposed nothing — and renders "The pass did NOT run: no promotion judge was supplied to this
+    retro." What it leaves is no LEDGER row, because the `!opts.judge` branch returns BEFORE
+    `runPromotionPass`, and `promotionLedgerSink` is only ever consulted as the pass's own `log`.
+    THE FAILED path is the genuinely silent one and is strictly worse: the `catch` writes to
+    `console.error` and returns the EMPTY STRING, so the section disappears from the report
+    entirely AND no row is written. A reader of that report cannot tell a failed pass from a retro
+    that never had the stage.
+
+    (10) THE FAMILY, NAMED SO TWO ADJACENT FILINGS ARE NOT READ AS ONE. W1-T1248 (open at filing
+    time) files the citation miners, which have NO production caller at all. This is the neighbouring
+    case and not the same one: promotion HAS its caller — W1-T1059 built it — and lacks the one
+    injected dependency that makes the caller do anything. Different subject, different remedy,
+    cited and not re-filed. W1-T1019, W1-T1053, W1-T1076, W1-T316, W1-T317 and W1-T1118 are the
+    rest of the built-but-unreached family and are likewise cited, not reopened.
+  design: |
+    (i) SUPPLY THE JUDGE AT THE SMALLEST SETTING, THROUGH THE SCAN THREE CALLERS ALREADY SHARE.
+    The mount comes from `resolveRiskJudgeMount` — rationale (5) — so no `mounts.yaml` row is added
+    and no model name is hardcoded. It is wired at the retro's existing Architect stage, which
+    already resolves a `spawn`, a rendered settings file and a worktree cwd, so the judge needs no
+    new spawn idiom and no new resolution path. `opts.promotionJudge` REMAINS INJECTABLE and keeps
+    winning over the default, exactly as `opts.spawn` does beside it.
+
+    (ii) BOUNDED AT THE CALLER: AT MOST FIVE ENTRIES PER RETRO CYCLE. Rationale (7) shows the pass
+    has no cap of its own, so the caller selects at most five and hands only those in. The number
+    is a CEILING, not a target: a cycle with fewer eligible entries judges fewer, and a cycle with
+    none judges none and spawns nothing. Selection must be deterministic so two runs over one
+    corpus judge the same entries.
+
+    (iii) PROPOSAL STAGE ONLY — LAW 5 IS UNTOUCHED BY CONSTRUCTION, AND THIS IS WRITTEN SO NO
+    IMPLEMENTER WIDENS IT. The stage loads, judges and renders. IT MUST NOT: write a promoted entry
+    to `learnings/`, write to the user-overall or global home, mutate the corpus, open a PR of its
+    own, or mark anything ratified. Every output is a PROPOSAL in the retro report, ratified by a
+    human landing it in a reviewed PR — the property rationale (8) shows the code already holds on
+    both of today's branches. An implementer who adds a write has changed the task, not completed
+    it.
+
+    (iv) THE ABSENT AND FAILED PATHS EACH LEAVE A ROW. Rationale (9): today the absent path renders
+    a correct section and ledgers nothing, and the failed path renders NOTHING and ledgers nothing.
+    Both must write one row naming which of the two occurred, so a skipped or broken pass is
+    countable rather than inferred from a missing section. The rendered text for the absent path is
+    already correct and is not being rewritten; the failed path must additionally stop erasing its
+    own section.
+
+    (v) NOT IN SCOPE, NAMED: the `learnings-user` WRITER, which W1-T1059's design (iii) banks as a
+    follow-up and sizes as "give the existing import verb a layer argument"; layer (iii)'s global
+    transport, banked by that shard's design (v); the citation miners (W1-T1248); and the
+    confidence threshold, the scrub gate and `redactProvenance`, all ratified under P32 and
+    byte-identical here. `src/lib/learnings.ts` is deliberately NOT declared — `runPromotionPass`
+    is already exported and already pure, so supplying a judge needs no edit there, and declaring an
+    unchanged file fails `inverseScopeUntouchedFiles`.
+  acceptance:
+    - claim: "a retro with no judge configured still runs and leaves a row saying the pass was skipped"
+      proof: "unit test: test/promotion-judge-supplied.test.ts"
+    - claim: "a judge that throws leaves a row and does not erase the report section"
+      proof: "unit test: test/promotion-judge-supplied.test.ts"
+    - claim: "the pass judges no more entries per cycle than the declared ceiling"
+      proof: "unit test: test/promotion-judge-supplied.test.ts"
+    - claim: "the stage writes no learnings entry to any home on any path"
+      proof: "unit test: test/promotion-judge-supplied.test.ts"
+    - claim: "an injected judge still overrides the supplied default"
+      proof: "unit test: test/promotion-judge-supplied.test.ts"
+  files: [src/run-task.ts, test/promotion-judge-supplied.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#promotion-has-a-caller-and-no-judge-2026-08-23"
+  plan_refs: ["W1-T1059", "W1-T146", "W1-T1248", "W1-T1019", "W1-T1053", "W1-T1118"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/promotion-judge-supplied.test.ts`, declared in `files:`, so on this filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19'S SPAN — two files, one concern, and the linter
+    accepts the band either way. The change starts UNATTENDED model spawns inside the retro, on a
+    cadence nobody watches; a mistake in the bound spends per active corpus entry per cycle, which
+    is the exact cost the writer refused to take on itself.
+
+    THE RULING IS RECORDED AS A RULING. Rationale (3) quotes the refusal verbatim and says the
+    operator's decision takes it. A later reader must not find this shard and conclude the writer
+    was careless — the writer reserved the decision correctly and named it as a follow-up, which is
+    what this is.
+
+    ONE ZERO IS LABELLED AS COVERAGE RATHER THAN LET STAND AS EVIDENCE. The three `promotion.*`
+    ledger steps read zero, and that would corroborate the finding beautifully if the corpus could
+    see the wired period. It cannot: no retro in it starts after the wiring merged, and this host's
+    ledger stopped taking fleet rows nine days before. Rationale (4) states both, with the controls
+    that establish the scan itself is sound.
+
+    THE COST QUESTION IS ANSWERED WITH A MOUNT, NOT A DOLLAR FIGURE, BECAUSE THE LEDGER DOES NOT
+    CARRY ONE. Rationale (6). An estimate here would be the flattering kind of invention this
+    repo's briefs keep having to correct.
