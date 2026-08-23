@@ -1,0 +1,136 @@
+- id: W1-T1278
+  title: "the fix rung spends a strike on a conflicted head, where the outcome is unobservable by construction — three `blocked-fixable` rows read `mergeState` zero times and sit AHEAD of the dirty row, so a dirty PR with red checks dispatches a worker whose repair no check run can ever validate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    RE-DERIVED AT `8e8b331e` ON AN UNSHALLOWED CLONE (2498 commits; `--is-shallow-repository` read
+    false BEFORE any history query). EVERY FIGURE BELOW IS A QUERY, NOT A NUMBER TO CARRY.
+
+    (1) **THE OBSERVATION IS REAL AND STILL LIVE.** PR #2605 (`feat(wipe-test): add sandbox subject
+    generator`) reads `mergeable: false`, `mergeable_state: dirty` at head `24e6d3f7`, and
+    `git merge-tree --write-tree origin/main <head>` returns **rc=1** with
+    `CONFLICT (content): Merge conflict in src/lib/wipe-test.ts`. CONTROL: the same command with
+    `origin/main` on both sides returns rc=0, so rc=1 is a real signal and not the command always
+    failing.
+
+    (2) **A CONFLICTED PR REGISTERS NO NEW CHECK RUNS, SO THE REPAIR IS UNOBSERVABLE BY
+    CONSTRUCTION.** A fix worker dispatched against such a head can push a correct repair or a wrong
+    one and BOTH produce the identical observation — no new checks. The strike is spent, and its
+    result is indistinguishable from a failed repair. This is not a tuning problem; no value of
+    `strikeCap` makes an unobservable outcome observable.
+
+    (3) **THE SWEEP HAS A `"conflicted"` DISPOSITION AND IT IS DEAD BY DEFAULT.** `Disposition`
+    (`src/lib/sweep.ts`) lists `"conflicted"`, and the `conflicted` case DOES reach the rung —
+    `await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict })`. But its
+    `DISPOSITION_RULES` row is gated `policy.mergeConflictAdmissionEnabled === true`, and the source
+    default reads **`mergeConflictAdmissionEnabled: false`**. The row's own comment says the
+    consequence in terms: *"With the flag off, this row never matches no matter what evidence flows,
+    and a dirty PR falls to the very next row exactly as it always has."*
+
+    (4) **BUT IT DOES NOT FALL TO THE NEXT ROW WHEN IT IS ALSO RED — AND THAT IS THE DEFECT.**
+    `DISPOSITION_RULES` is FIRST-MATCH-WINS. The dirty-to-`blocked-ambiguous` row sits at rule index
+    11 (source line 2309); the three `blocked-fixable` rows sit at 2181, 2222 and 2240 — ALL AHEAD
+    OF IT. Row 2222 is `when: (pr) => isBlockedCi(pr)`, red required checks alone. **MEASURED: those
+    three rows mention `mergeState` ZERO times. CONTROL: the two dirty rows mention it 4 times in a
+    35-line window**, so the zero is an absence and not a blind grep. A PR that is BOTH dirty AND
+    red therefore matches `blocked-fixable` and dispatches the rung, never reaching the escalation
+    that W1-T984's comment believes every dirty PR reaches.
+
+    (5) **AND `isBlockedCi` IS READING STALE CHECKS WHEN IT FIRES.** The reds it matches on are the
+    ones that ran BEFORE the branch went dirty, because a conflicted PR registers no new ones. So
+    the rung is dispatched against evidence the head can no longer reproduce, to repair failures
+    whose fix cannot be confirmed.
+
+    **NO LEDGER FIGURE IS QUOTED HERE, DELIBERATELY.** `rmd ledger-grep` was run for
+    `"step":"risk_judge.decision"` — the known-good shape control — and REFUSED with exit 1: *"ZERO
+    archive files matched … refusing to answer from the live ledger alone."* This container has no
+    `state/` directory, so a count of `fix.dispatch` rows against dirty heads is NOT derivable here
+    and is not estimated. The step names above (`fix.dispatch`, `fix.done`, `fix.exhausted`,
+    `sweep.disposed`) were taken from source, never guessed.
+  design: |
+    (i) **Q1 — WHAT THE SWEEP ALREADY KNOWS.** The disposition is named `"conflicted"`. The fix rung
+    DOES consult it — the `conflicted` case calls `dispatchFix` directly — so the rung is not blind
+    to conflicts in principle. What it lacks is a conflict check on the path a conflicted PR
+    ACTUALLY TAKES. The scan is controlled: `mergeState` reads 0 across the three `blocked-fixable`
+    rows against 4 in the dirty rows, so "the rung does not consult mergeability there" is a
+    measured absence.
+
+    (ii) **Q2 — WHAT SHOULD HAPPEN INSTEAD, AND THE CODE ALREADY SHOWS WHICH IS CHEAPER.**
+    **DEFER TO THE CONFLICTED DISPOSITION** means making a dirty head reach the dirty row — an
+    ordering or predicate change in `DISPOSITION_RULES`. It costs a change to a first-match-wins
+    table whose order is load-bearing for rows that have nothing to do with conflicts, and it routes
+    through `blocked-ambiguous`, which already escalates and already names the conflicting files.
+    **ESCALATE DIRECTLY AS OPERATOR WORK** means a new refusal inside the `blocked-fixable` case. It
+    costs one predicate and touches no rule ordering.
+
+    **THE SECOND IS CHEAPER AND THE FILE ALREADY CONTAINS ITS EXACT SHAPE.** The cancelled-check
+    stand-down in the same `blocked-fixable` case sets `acted = false` with a `standDownReason`
+    rather than falling through — its own comment: *"stand down here instead of falling through to
+    `dispatchFix`, which would otherwise burn a fix-rung strike on nothing"*, and it documents why
+    `acted` must stay FALSE (a true `acted` would seed `prior.fixed` and dedupe the whole
+    disposition away next pass). A conflicted head is the same category as a cancelled check: no
+    diff defect to repair, and no observation available either way. **THIS IS A REFUSAL BEFORE A
+    SPEND, NOT A RETRY AND NOT A STRIKE HELD OPEN INDEFINITELY.**
+
+    (iii) **Q3 — WHAT MUST NOT CHANGE.** `strikeCap` stays exactly as it is. The escalation at the
+    ceiling stays. **NOTHING AUTO-RESOLVES A MERGE CONFLICT** — no merging main into a conflicted
+    branch, no worker resolving conflicts, no raising `strikeCap`. This task adds a REFUSAL BEFORE A
+    SPEND, never a new capability, and a PR it refuses to spend on must remain visible to the
+    operator rather than going quiet.
+
+    (iv) **CITED AND NOT RE-FILED.** `W1-T984` owns the conflicted row's producer and its default-off
+    gate; this task does not touch that flag or that predicate. `W1-T1269` owns the cascade — that
+    #2605 had already spent both strikes productively (`0ac665e8` on raw NUL bytes, `24e6d3f7` on a
+    coverage gap) before meeting a third failure class. **THIS SHARD MUST NOT ABSORB EITHER.**
+  acceptance:
+    - claim: "a dirty head is refused before the fix rung is dispatched rather than after a strike is spent"
+      proof: "unit test: test/conflicted-head-strike-refusal.test.ts"
+    - claim: "the refusal fires on the path a red and dirty PR actually takes, not only on the conflicted disposition"
+      proof: "unit test: test/conflicted-head-strike-refusal.test.ts"
+    - claim: "a PR that is red but not dirty still dispatches the fix rung exactly as before"
+      proof: "unit test: test/conflicted-head-strike-refusal.test.ts"
+    - claim: "the refusal records a reason naming the conflict rather than standing down silently"
+      proof: "unit test: test/conflicted-head-strike-refusal.test.ts"
+    - claim: "the refused pass does not mark itself acted, so the disposition is not deduped away next pass"
+      proof: "unit test: test/conflicted-head-strike-refusal.test.ts"
+    - claim: "no strike is consumed by a pass that refused to dispatch"
+      proof: "unit test: test/conflicted-head-strike-refusal.test.ts"
+    - claim: "nothing in the change resolves a merge conflict or updates a branch"
+      proof: "unit test: test/conflicted-head-strike-refusal.test.ts"
+  files: [src/lib/sweep.ts, test/conflicted-head-strike-refusal.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#fix-rung-spends-a-strike-on-a-conflicted-head-2026-08-23"
+  plan_refs: ["W1-T984", "W1-T1269", "W1-T106", "W1-T100", "W1-T177"]
+  note: |
+    **RISK BAND SET FROM RULE 19 SPAN, AND WHAT THE BAND DOES.** `files:` crosses `src/` and `test/`,
+    so the SPAN reading is `high`. **`high` EXEMPTS THE SIZING CHECK RATHER THAN CLEARING IT** —
+    `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` outright at `risk: high` under
+    the comment "Rule 19 exemption — high already assumes wide scope". So this band is A DECLARATION
+    OF SPAN AND NOT EVIDENCE THE SPAN WAS VETTED, and a later reader must not read a clean lint as
+    the sizing having been checked.
+
+    **THE BLAST-RADIUS READING, RECORDED SEPARATELY.** It is narrower than the band suggests: the
+    change is one refusal inside one `case` arm of one function, mirroring a stand-down that already
+    exists three lines away. What makes it genuinely risky is the FIRST-MATCH-WINS table — a
+    predicate written slightly wide would silence `blocked-fixable` for PRs that are not conflicted
+    at all, which is why criterion 3 pins the not-dirty case explicitly.
+
+    **MEASUREMENT PROVENANCE.** `src/run-task.ts` reads 1,484,997 bytes — over the GitHub Contents
+    API's 1 MB cap, where it returns `encoding: "none"` and greps to a clean zero — so every source
+    figure here was read through git objects in a worktree proven equal to `origin/main` by SHA
+    equality. `rmd ledger-grep` refused on zero archives rather than answering from the live file,
+    so no ledger count is quoted.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T1278` was reserved 2026-08-23T18:19:35Z and confirmed still
+    held and unused. Eight id surfaces were swept with a control pre-qualified for each and none
+    disqualified: reservation ref, shard filenames on main, `- id:` lines in `plan/`, open-PR titles,
+    open-PR head branches, open-PR file lists, anchored merged-commit trailers
+    (`^Remudero-Task:\s*<id>\s*$`, never a bare substring), and merged subjects. The SUBJECT was
+    swept as well as the id: ten shards name both a conflicted head and the fix rung, and each was
+    read — `W1-T984` is the producer side and `W1-T1269` the progress side, neither is this.
