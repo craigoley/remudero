@@ -423,3 +423,30 @@ test("W1-T1263: loadBaseline refuses the same path listed twice, and loads a wel
   assert.deepEqual([...mod.loadBaseline(p).keys()].sort(), [a, b].sort());
   cleanup(dir);
 });
+
+// ── main()'s two REFUSAL ARMS, driven through the CLI ────────────────────────────────────────
+//
+// `main` is not exported and is entry-guarded (`import.meta.url === pathToFileURL(process.argv[1])`),
+// so its two catch arms are reachable ONLY by spawning the script — which is why the direct-export
+// tests above cannot touch them. Both were confirmed reachable before these tests were written:
+// each fires, exits 1, and prints its own distinct message. Neither is dead code.
+
+test("W1-T1263: an unreadable baseline refuses through the CLI rather than scanning with no baseline", () => {
+  const r = runCli(["--baseline", join(mkTmp("absent"), "does-not-exist.json")]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /cannot read baseline file/);
+  // The refusal must happen BEFORE any scan: a run that fell through would report a file count.
+  assert.doesNotMatch(r.stdout + r.stderr, /files scanned/i);
+});
+
+test("W1-T1263: a cwd git cannot list refuses through the CLI, naming the failure rather than reporting an empty scan", () => {
+  const outside = mkTmp("not-a-repo");
+  const r = runCli(["--cwd", outside]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /`git ls-files` failed/);
+  assert.match(r.stderr, /not a git repository/);
+  // NOT the zero-files refusal below it — that arm would mean the scan ran and read nothing,
+  // which is a different defect and a different message.
+  assert.doesNotMatch(r.stderr, /scanned ZERO files/);
+  cleanup(outside);
+});
