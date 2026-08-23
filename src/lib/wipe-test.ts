@@ -34,6 +34,21 @@ import type { ProofExecOutcome } from "./review.js";
  * This module is the HARNESS. Running the experiment (scheduling real pairs against
  * the sandbox, reading the aggregate) is an operator action (Rule 18) — see `rmd
  * wipe-test`'s CLI wiring in run-task.ts.
+ *
+ * NEVER LEDGER A PAIR NEITHER ARM MEASURED (W1-T1252). Every sandbox subject can end up
+ * already-merged, in which case `runTask`'s own W1-T319 guard refuses BOTH arms at zero
+ * cost (`task_already_merged`) — a pair of two refusals, not a comparison. Two guards
+ * exist because neither alone sees every cause (design note (iii)):
+ *   (i) A PRE-FLIGHT, before either arm spawns — {@link resolveWipeTestPreflight}, PURE,
+ *       consulted by `wipeTestCommand` once it knows whether the projection already
+ *       reports the subject merged. Refuses up front, naming the reason; neither arm is
+ *       dispatched and no `wipetest.pair` line is written.
+ *   (ii) A LEDGER-TIME BACKSTOP for every OTHER zero-work cause (`blocked_transient`, a
+ *        linter refusal, a spawn that never happened) — {@link ledgerWipeTestPair} itself
+ *        refuses to write a pair whose two arms both report zero turns AND zero cost.
+ * `--rerun` passthrough is deliberately NOT built here (design note (iv)): it would have
+ * to reach both arms atomically or it manufactures a result, and this task is scoped to
+ * refusing non-measurements, not to un-blocking the harness.
  */
 
 // ── ARM A/B PROMPT ASSEMBLY ─────────────────────────────────────────────────
@@ -165,12 +180,35 @@ export function computeWipeTestDelta(pair: WipeTestPair): WipeTestDelta {
  *  pairs held in one process's memory. */
 export const WIPE_TEST_PAIR_STEP = "wipetest.pair";
 
+/** Did this one arm do any measurable work at all? Zero turns AND zero cost means no
+ *  worker ever ran — whatever the verdict says caused it (`task_already_merged`,
+ *  `blocked_transient`, a linter refusal, a spawn that never happened). */
+function armDidNoWork(arm: WipeTestRunResult): boolean {
+  return arm.numTurns === 0 && arm.costUsd === 0;
+}
+
+/** THE LEDGER-TIME BACKSTOP (design note (ii)): a pair is a non-measurement, whatever
+ *  produced it, when NEITHER arm did any work — the pre-flight ({@link
+ *  resolveWipeTestPreflight}) catches the one cause it can see (merged-by-id) BEFORE
+ *  either arm spawns; this catches every other cause, AFTER both arms have already
+ *  returned, so it must run regardless of which guard the pre-flight itself missed. */
+export function isWipeTestNullPair(pair: WipeTestPair): boolean {
+  return armDidNoWork(pair.armA) && armDidNoWork(pair.armB);
+}
+
 /** Compute + LEDGER one pair's deltas (one `wipetest.pair` NDJSON line), returning the
  *  same delta the ledger line carries. Pairing discipline (the design's own words):
  *  this is ONE data point — an anecdote — never itself a verdict on whether learnings
- *  help; only {@link aggregateWipeTestPairs} over many ledgered pairs is signal. */
+ *  help; only {@link aggregateWipeTestPairs} over many ledgered pairs is signal.
+ *
+ *  NEVER WRITES A NULL PAIR (W1-T1252 design note (ii)): when {@link isWipeTestNullPair}
+ *  holds — both arms report zero turns and zero cost — this returns the (still pure,
+ *  still computed) delta for the caller's own reporting, but performs NO ledger I/O at
+ *  all: the ledger is left byte-for-byte as it was. An aggregate that averaged in
+ *  fabricated zeroes would be worse than an aggregate with fewer points (rationale (5)). */
 export function ledgerWipeTestPair(ledgerPath: string, runId: string, pair: WipeTestPair): WipeTestDelta {
   const delta = computeWipeTestDelta(pair);
+  if (isWipeTestNullPair(pair)) return delta;
   appendLedger(ledgerPath, {
     run_id: runId,
     task_id: pair.taskId,
@@ -274,6 +312,42 @@ export function resolveWipeTestTarget(
     };
   }
   return { target: { repo } };
+}
+
+// ── PRE-FLIGHT REFUSAL (design note (i)) ─────────────────────────────────────
+
+/** What the caller already knows about `taskId` from the SAME projection `runTask`'s own
+ *  W1-T319 already-merged guard consults — `wipeTestCommand` derives this via `projectPlan`
+ *  over a batched GitHub gateway (mirroring `runTaskBody` exactly) BEFORE dispatching either
+ *  arm, so this module never re-derives it (and never imports the CLI-only pieces that
+ *  derivation needs — `src/lib` may not import the CLI entrypoint). */
+export interface WipeTestMergedState {
+  merged: boolean;
+  prUrl?: string;
+}
+
+/**
+ * PRE-FLIGHT for `rmd wipe-test` (design note (i)): when the projection already reports
+ * `taskId` merged, refuse BEFORE either arm is dispatched, naming the reason — instead of
+ * paying for two arms that `runTask`'s own W1-T319 guard would refuse anyway at zero cost,
+ * and instead of ledgering the resulting non-measurement as a `wipetest.pair` line.
+ *
+ * PURE (no I/O): takes the already-derived {@link WipeTestMergedState} rather than deriving
+ * it itself, so this refusal — and its exact wording — is unit-testable without a live
+ * GitHub read or a real plan on disk. `--rerun` passthrough is deliberately NOT built here
+ * (design note (iv)): there is no override to consult, so a merged subject is refused
+ * unconditionally until the CLI wires one (which must reach BOTH arms atomically, or not
+ * at all).
+ */
+export function resolveWipeTestPreflight(taskId: string, state: WipeTestMergedState): { ok: true } | { error: string } {
+  if (!state.merged) return { ok: true };
+  return {
+    error:
+      `rmd wipe-test: refusing ${taskId} — it is already merged${state.prUrl ? ` (${state.prUrl})` : ""}, so ` +
+      `runTask's own already-merged guard (W1-T319) would refuse BOTH arms at zero cost and the pair ` +
+      `would ledger two refusals, not a measurement. Neither arm was dispatched and no wipetest.pair ` +
+      `line was written.`,
+  };
 }
 
 // ── REAL-RUN DERIVATION (CLI glue) ───────────────────────────────────────────

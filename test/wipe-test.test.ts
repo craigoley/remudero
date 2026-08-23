@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,7 +14,9 @@ import {
   computeMatchedLearningsForArm,
   computeWipeTestDelta,
   deriveWipeTestRunResult,
+  isWipeTestNullPair,
   ledgerWipeTestPair,
+  resolveWipeTestPreflight,
   resolveWipeTestTarget,
   WIPE_TEST_PAIR_STEP,
   WIPE_TEST_SANDBOX_DEFAULT,
@@ -160,6 +162,88 @@ test("ledgerWipeTestPair: writes exactly one wipetest.pair ledger line carrying 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── acceptance criteria 2/3/4: the LEDGER-TIME BACKSTOP (design note (ii)) — a pair whose
+// two arms BOTH did zero work is never written, whatever produced it; a pair where either
+// arm did real work is ledgered exactly as before. ──
+
+test("isWipeTestNullPair: true only when BOTH arms report zero turns AND zero cost", () => {
+  const zero = runResult({ numTurns: 0, costUsd: 0 });
+  const worked = runResult({ numTurns: 5, costUsd: 1 });
+  assert.equal(isWipeTestNullPair({ taskId: "T", armA: zero, armB: zero }), true);
+  assert.equal(isWipeTestNullPair({ taskId: "T", armA: worked, armB: zero }), false, "arm A did work");
+  assert.equal(isWipeTestNullPair({ taskId: "T", armA: zero, armB: worked }), false, "arm B did work");
+  assert.equal(isWipeTestNullPair({ taskId: "T", armA: worked, armB: worked }), false);
+});
+
+test("ledgerWipeTestPair: a pair where NEITHER arm did any work (e.g. both refused task_already_merged) writes NO wipetest.pair line, and the ledger is left BYTE-UNCHANGED", () => {
+  const dir = tmpLedgerDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    // Seed the ledger with unrelated content first, so "byte-unchanged" is a real assertion,
+    // not just "the file happens to still be empty".
+    writeFileSync(ledgerPath, '{"step":"unrelated.line"}\n', "utf8");
+    const before = readFileSync(ledgerPath, "utf8");
+
+    const nullPair: WipeTestPair = {
+      taskId: "W1-T999",
+      armA: runResult({ runId: "A1", numTurns: 0, costUsd: 0, verdict: "task_already_merged" }),
+      armB: runResult({ runId: "B1", numTurns: 0, costUsd: 0, verdict: "task_already_merged" }),
+    };
+    // Still returns the (pure, computed) delta for the caller's own reporting.
+    const delta = ledgerWipeTestPair(ledgerPath, "WIPETEST-NULL", nullPair);
+    assert.equal(delta.turnsDelta, 0);
+
+    const after = readFileSync(ledgerPath, "utf8");
+    assert.equal(after, before, "a null pair must perform NO ledger write at all");
+
+    const pairLines = readLedgerLines(ledgerPath).filter((l) => l.step === WIPE_TEST_PAIR_STEP);
+    assert.equal(pairLines.length, 0, "no wipetest.pair line for a pair neither arm measured");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ledgerWipeTestPair: a pair where arm A did work (nonzero turns) but arm B reports zero is STILL ledgered exactly as before", () => {
+  const dir = tmpLedgerDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const pair: WipeTestPair = {
+      taskId: "W1-T999",
+      armA: runResult({ runId: "A1", numTurns: 10, costUsd: 2, verdict: "merged" }),
+      armB: runResult({ runId: "B1", numTurns: 0, costUsd: 0, verdict: "blocked_review" }),
+    };
+    ledgerWipeTestPair(ledgerPath, "WIPETEST-PARTIAL", pair);
+    const pairLines = readLedgerLines(ledgerPath).filter((l) => l.step === WIPE_TEST_PAIR_STEP);
+    assert.equal(pairLines.length, 1, "either arm doing work is a real measurement, ledgered normally");
+    assert.equal(pairLines[0].turns_delta, -10);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── acceptance criterion 1: the PRE-FLIGHT REFUSAL (design note (i)) — a subject the
+// dispatch guard would refuse is refused BEFORE either arm spawns, naming that reason. ──
+
+test("resolveWipeTestPreflight: not merged is ok, no refusal", () => {
+  const result = resolveWipeTestPreflight("W1-T86", { merged: false });
+  assert.deepEqual(result, { ok: true });
+});
+
+test("resolveWipeTestPreflight: merged is refused, naming the task id and the merged PR url", () => {
+  const result = resolveWipeTestPreflight("W1-T86", { merged: true, prUrl: "https://github.com/acme/remudero-sandbox/pull/9" });
+  assert.ok("error" in result);
+  const err = (result as { error: string }).error;
+  assert.match(err, /W1-T86/, "the refusal names the subject");
+  assert.match(err, /already merged/);
+  assert.match(err, /https:\/\/github\.com\/acme\/remudero-sandbox\/pull\/9/, "the refusal names the merged PR");
+});
+
+test("resolveWipeTestPreflight: merged with no known PR url still refuses, naming the task id", () => {
+  const result = resolveWipeTestPreflight("W1-T86", { merged: true });
+  assert.ok("error" in result);
+  assert.match((result as { error: string }).error, /W1-T86/);
 });
 
 test("aggregateWipeTestPairs: aggregates two seeded pairs correctly (avg deltas + verdict-changed count/rate)", () => {
@@ -326,6 +410,60 @@ test("wipeTestCommand: a non-sandbox --repo without --allow-non-sandbox is refus
   assert.equal(dispatched, 0, "a refused target must never reach either arm's dispatch");
 });
 
+// ── acceptance criteria 1/2/3: wipeTestCommand's own PRE-FLIGHT wiring — a subject the
+// dispatch guard would refuse (merged, per `resolveMergedState`) is refused BEFORE either
+// arm is dispatched, naming the reason, and no wipetest.pair line is written at all. ──
+
+test("wipeTestCommand: a task the projection reports MERGED is refused up front (exit 2), naming the reason -- NEITHER arm is dispatched and no wipetest.pair line is written", async (t) => {
+  const config = wipeTestFixtureConfig();
+  let dispatched = 0;
+  const runTaskFn = (async () => {
+    dispatched++;
+    return realRunResult({});
+  }) as unknown as typeof import("../src/run-task.js").runTask;
+  // Default (sandbox) target is a non-self repo, so the clone/fetch step runs first --
+  // fake it out the SAME way every other non-self test does, so this test never shells
+  // out to a real `gh`/`git`.
+  const execFileSyncFn = (() => Buffer.from("")) as unknown as typeof import("node:child_process").execFileSync;
+  const mergedPrUrl = "https://github.com/acme/remudero-sandbox/pull/9";
+
+  const errs: string[] = [];
+  t.mock.method(console, "error", (...a: unknown[]) => {
+    errs.push(a.map(String).join(" "));
+  });
+  const code = await wipeTestCommand(["W1-T86"], {
+    config,
+    runTaskFn,
+    execFileSyncFn,
+    resolveMergedState: () => ({ merged: true, prUrl: mergedPrUrl }),
+  });
+
+  assert.equal(code, 2, "a merged subject exits non-zero, never 0");
+  assert.equal(dispatched, 0, "neither arm A nor arm B is ever called");
+  assert.ok(
+    errs.some((e) => e.includes("W1-T86") && e.includes(mergedPrUrl)),
+    "the printed refusal names the task and the merged PR",
+  );
+
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const pairLines = existsSync(ledgerPath) ? readLedgerLines(ledgerPath).filter((l) => l.step === WIPE_TEST_PAIR_STEP) : [];
+  assert.equal(pairLines.length, 0, "a pre-flight refusal writes no wipetest.pair line at all");
+});
+
+test("wipeTestCommand: a non-sandbox target without --allow-non-sandbox refuses BEFORE the merged pre-flight even runs -- the sandbox guard is untouched by this task (design note (v))", async () => {
+  const config = wipeTestFixtureConfig();
+  let mergeCheckCalls = 0;
+  const code = await wipeTestCommand(["W1-T86", "--repo", "remudero"], {
+    config,
+    resolveMergedState: () => {
+      mergeCheckCalls++;
+      return { merged: false };
+    },
+  });
+  assert.equal(code, 2);
+  assert.equal(mergeCheckCalls, 0, "the sandbox-target guard refuses before the merged pre-flight is ever consulted");
+});
+
 test("wipeTestCommand: self-target (--repo remudero) runs BOTH arms via runTaskFn and ledgers one wipetest.pair line", async () => {
   const config = wipeTestFixtureConfig();
   const armA = realRunResult({ taskId: "W1-T86", runId: "RUN-A", costUsd: 2, verdict: "merged" });
@@ -339,6 +477,7 @@ test("wipeTestCommand: self-target (--repo remudero) runs BOTH arms via runTaskF
   const code = await wipeTestCommand(["W1-T86", "--repo", "remudero", "--allow-non-sandbox"], {
     config,
     runTaskFn,
+    resolveMergedState: () => ({ merged: false }),
   });
 
   assert.equal(code, 0);
@@ -364,6 +503,7 @@ test("wipeTestCommand: a non-self target CLONES via execFileSyncFn when the repo
     config,
     runTaskFn,
     execFileSyncFn,
+    resolveMergedState: () => ({ merged: false }),
   });
 
   assert.equal(code, 0);
@@ -388,6 +528,7 @@ test("wipeTestCommand: a non-self target FETCH+RESETs via execFileSyncFn when th
     config,
     runTaskFn,
     execFileSyncFn,
+    resolveMergedState: () => ({ merged: false }),
   });
 
   assert.equal(code, 0);
