@@ -1,0 +1,94 @@
+- id: W1-T1238
+  title: "THE PRODUCER'S NOTE WILL BE A LIE THE MOMENT ITS READER LANDS — sweep.ts:4364-4369 states `sweep.pass` is unregistered because \"nothing reads it yet\" and promises the consumer's own PR registers it; W1-T1236 builds that consumer and W1-T1237 registers the step, leaving a comment that actively misdirects the next reader into re-deferring work already done"
+  repo: remudero
+  depends_on: ["W1-T1237"]
+  type: implement
+  verify: auto
+  budget_usd: 8.00
+  risk: low
+  rationale: |
+    THE NOTE IS LOAD-BEARING PROSE, NOT DECORATION. sweep.ts:4364-4369, verbatim: "NOT REGISTERED
+    in DECISION_RELEVANT_LEDGER_STEPS or RENDER_RELEVANT_LEDGER_STEPS, deliberately: nothing reads
+    it yet (the consumer is out of scope here, one concern), and the decision set is the
+    NEVER-ROTATED core, so registering an unread step there would keep it forever for no reader. It
+    rotates like any other diagnostic row until a consumer exists; the change that builds that
+    consumer registers it then, in the same PR."
+
+    EVERY CLAUSE OF IT BECOMES FALSE ACROSS W1-T1236 AND W1-T1237. Something reads it
+    (`judgeSweepLiveness`, the `sweep-liveness` arm in doctor.ts); it no longer rotates like any
+    other diagnostic row (it is in `RENDER_RELEVANT_LEDGER_STEPS`, recency-bounded); and the
+    "in the same PR" promise is discharged by the spine rather than literally. A reader who trusts
+    it will believe the consumer is still unbuilt — which is exactly how this defect survived: the
+    deferral was recorded in a comment, was never filed as a task, and sat unread until a feedback
+    round found it. THE SAME COMMENT SHAPE CAUSED THE ORIGINAL GAP; leaving it stale re-arms it.
+
+    WHY IT IS ITS OWN RECORD. `src/lib/sweep.ts` is a THIRD concern under Rule 19 — bundling this
+    one-block comment edit with the doctor arm or the ledger registration is what made the original
+    filing a five-concern monolith the linter refused. It is small, it is last, and it is honest
+    about being a documentation correction rather than a behaviour change.
+  design: |
+    ONE CONCERN, ONE FILE, ONE COMMENT BLOCK — src/lib/sweep.ts:4364-4369.
+
+    (1) REWRITE THE DEFERRAL PARAGRAPH TO STATE WHAT IS NOW TRUE: `sweep.pass` (and
+        `sweep.summary`) are registered in `RENDER_RELEVANT_LEDGER_STEPS` — the recency-bounded
+        category, NOT the never-rotated decision core — and the reader is `judgeSweepLiveness`, the
+        `sweep-liveness` arm in `src/lib/doctor.ts`, which pairs this row with the summary that
+        should follow it. Name W1-T1236 and W1-T1237 so the next reader can walk to the decisions
+        instead of re-deriving them.
+
+    (2) KEEP THE PARTS THAT ARE STILL TRUE AND STILL VALUABLE: why the row sits BEFORE the loop,
+        why `sweep.summary` alone cannot be this signal, and why the decision core was the wrong
+        home for it. Those are the reasoning that survives; only the "nothing reads it yet"
+        deferral is retired.
+
+    (3) DO NOT TOUCH THE EMIT. `log("sweep.pass", ...)` at sweep.ts:4371 keeps its exact position,
+        payload and wording. `test/sweep-pass-heartbeat.test.ts` owns that behaviour and must stay
+        green completely untouched — it is not in `files:` and no criterion here asks it to change.
+
+    (4) NOTHING ELSE IN sweep.ts. Not the loop, not the disposition path, not the light-pass doc at
+        sweep.ts:5288 (its `sweep.pass`/`sweep.summary` mention is still accurate). One block.
+
+    EXPLICITLY NOT IN SCOPE: any behaviour change anywhere; a pass correlation id (the arm pairs by
+    time order deliberately — W1-T1236 design 2b); any edit to doctor.ts or ledger.ts.
+  acceptance:
+    - claim: "the producer's note names the reader that now consults the row, in place of the retired \"nothing reads it yet\" deferral"
+      proof: "grep: judgeSweepLiveness in src/lib/sweep.ts"
+    - claim: "the note names the arm by the name the report prints, so an operator seeing the check can find the emit"
+      proof: "grep: sweep-liveness in src/lib/sweep.ts"
+    - claim: "the note points at the registration that discharged its own in-the-same-PR promise"
+      proof: "grep: W1-T1237 in src/lib/sweep.ts"
+  origin: feedback#fb-1785937739950-070a87
+  plan_refs: ["W1-T1236", "W1-T1237", "W1-T468"]
+  files: [src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+  note: |
+    THIRD AND LAST OF THE RULE 19 DECOMPOSITION of the original five-concern filing
+    (doctor / ledger / ledger-render-retention / sweep / sweep-pass-liveness), with
+    `origin: feedback#fb-1785937739950-070a87` preserved verbatim across all three. It does NOT
+    merit risk:high under the #588 test: it asserts no cross-file invariant at all — one comment
+    block in one file.
+
+    depends_on W1-T1237 (and transitively W1-T1236): the corrected note asserts a registration and
+    a reader that must already exist, or it swaps one false comment for another.
+
+    ALL THREE PROOFS DISCRIMINATE — VERIFIED AT FILING TIME. `judgeSweepLiveness`, `sweep-liveness`
+    and `W1-T1237` each return ZERO matches in src/lib/sweep.ts today, so none can pass before the
+    work is done. No pattern carries an unescaped BRE metacharacter.
+
+    A GREP ON A COMMENT IS THE RIGHT PROOF HERE AND ONLY HERE. The call-site rule's warning — that
+    `grep: foo in x.ts` passes on a comment merely mentioning foo — is about proving CODE is
+    reached; this task's entire deliverable IS the comment, so the mention is the artifact, and no
+    src/ module is created for that rule to police in the first place.
+
+    NO PRE-PASSING REGRESSION CRITERION. The obvious "the emit is unchanged" proof would name a
+    test that is green today and would therefore discriminate nothing (W1-T1209's own note records
+    this trap). `test/sweep-pass-heartbeat.test.ts` runs on every PR regardless and will fail this
+    one if the emit is disturbed.
+
+    principles: OMITTED DELIBERATELY. Every sibling carries `{tdd: strict}`; a red-first test for a
+    comment correction would be a source-text assertion pinning prose, which rots on the next honest
+    rewording. The three greps ARE the executable check.
+
+    risk:low and budget_usd 8.00 — no behaviour changes, the blast radius is one comment block, and
+    the whole cost is reading the two merged siblings closely enough to describe them accurately.

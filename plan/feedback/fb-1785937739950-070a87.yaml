@@ -29,6 +29,21 @@ raw: "CLOSING fb-1785936728348-a9efd3 — STARVATION IS REFUTED, AND THE ERROR I
   nothing reads it."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2567
+summary:
+  headline: Close false alarm; add visibility to sweep outages
+  what_happened: The reported starvation was false—the real issue is the sweep
+    went blind for 22 minutes with zero activity for any PR. Currently, a down
+    sweep looks identical to normal idle time, making outages undetectable.
+  decision: Close this ticket and add a startup log entry for every sweep pass
+    before it processes any PRs
+  options:
+    - label: Implement before next release
+      consequence: Sweep outages become visible in logs; will be spotted immediately
+        if they recur
+    - label: Add to backlog, monitor externally
+      consequence: Lowers urgency but external tools may not catch internal sweep failures
+    - label: Close with no changes
+      consequence: The same 22-minute blindness will happen again and look like normal
+        system quiet time
