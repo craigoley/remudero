@@ -1,0 +1,134 @@
+- id: W1-T1237
+  title: "THE SWEEP HEARTBEAT WOULD NOT SURVIVE BEING READ — `sweep.pass`/`sweep.summary` are in NEITHER retention set, so rotation archives them like any diagnostic row and W1-T1236's new sweep-liveness arm answers off a truncated corpus; register them in RENDER_RELEVANT_LEDGER_STEPS and widen the derived-from-consumers lock onto the arm's own boundary marker so the registration can never rot"
+  repo: remudero
+  depends_on: ["W1-T1236"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  rationale: |
+    THE PRECEDENT IS EXACT AND IT ALREADY COST US A LIVE SURFACE. W1-T275: the ACCOUNT strip read
+    "unknown" on a healthy fleet because `daemon.headroom` was absent from the retained sets and
+    rotation had taken every line — 1,243 headroom lines survived only in the archives, ZERO in the
+    live file account-usage.ts actually reads. A reader shipped against an unretained step is a
+    reader that answers off whatever rotation happened to leave behind.
+
+    `isRenderRelevantStep` IS AN EXACT `Set.has`, NOT A PREFIX MATCH, and this codebase has already
+    been bitten by assuming otherwise: ledger.ts:510-512 records that `daemon.headroom.degraded`
+    "was emitted 52 times and rotated away entirely because a dotted child does not inherit its
+    parent's membership". `sweep.pass` and `sweep.summary` must each be registered BY NAME.
+
+    THE PRODUCER SAID SO IN WRITING. sweep.ts:4364-4369: the heartbeat is "NOT REGISTERED in
+    DECISION_RELEVANT_LEDGER_STEPS or RENDER_RELEVANT_LEDGER_STEPS, deliberately: nothing reads it
+    yet ... the change that builds that consumer registers it then, in the same PR, which is the
+    discipline `test/ledger-rotation.test.ts` enforces." W1-T1236 builds that consumer; this task
+    is the registration half it promised, split out only because the Rule 19 linter counts
+    `src/lib/doctor.ts` and `src/lib/ledger.ts` as two concerns.
+
+    WHY THIS ONE IS risk:high AND NOT DECOMPOSED FURTHER (the #588 MERITS TEST, answered YES).
+    Its acceptance asserts ONE cross-file invariant that is unsatisfiable piecewise: the
+    derived-from-consumers lock in test/ledger-render-retention.test.ts must derive the required
+    render set from W1-T1236's `SWEEP_LIVENESS_STEPS` marker AND find it present in ledger.ts's
+    `RENDER_RELEVANT_LEDGER_STEPS`. Widening the derivation without the registration fails that
+    single test outright; registering without widening the derivation leaves the membership
+    underived — exactly the "hardcoded second list" the test exists to refuse. One test, both
+    files, no piecewise split that leaves either side honest.
+  design: |
+    ONE CONCERN: RETENTION FOR THE STEPS THE NEW ARM READS. NO doctor.ts EDIT, NO sweep.ts EDIT.
+
+    (1) RENDER, NOT DECISION. Register `sweep.pass` and `sweep.summary` in
+        `RENDER_RELEVANT_LEDGER_STEPS`, NOT in `DECISION_RELEVANT_LEDGER_STEPS`. The decision set is
+        the never-rotated core (ledger.ts's own words) and would retain both FOREVER for a
+        report-only read; the render set is recency-bounded by `RENDER_STEP_RETENTION_WINDOW_MS`.
+        This is W1-T275's recorded ruling applied unchanged: widening the never-rotated core for a
+        render/health read "would trade a bounded-retention bug for unbounded growth". BOTH steps
+        are needed because the arm's second derivation (a pass with no summary at or after it)
+        reads both.
+
+    (2) DERIVE THE MEMBERSHIP FROM THE CONSUMER — the doctrine
+        test/ledger-render-retention.test.ts already enforces for account-usage.ts and board.ts.
+        Its lock scans account-usage.ts's `.step ===` equality reads and board.ts's
+        `OPERATOR_ACTION_STEPS` Set literal ONLY, so a doctor-side consumer is invisible to it and
+        this registration could silently rot. Widen the derivation to ALSO read doctor.ts's
+        `SWEEP_LIVENESS_STEPS` Set literal (W1-T1236 ships it precisely so this task has a boundary
+        marker to key off) and assert every discovered step is present in
+        `RENDER_RELEVANT_LEDGER_STEPS`.
+
+    (3) KEY OFF THE MARKER, NEVER A BLANKET SCAN OF doctor.ts. The existing test states the reason
+        for board.ts verbatim: a blanket `switch(line.step)` scan "also renders plain
+        decision-relevant steps ... that already have their own permanent retention and
+        cosmetic-only steps ... that are out of this task's one concern". doctor.ts compares many
+        unrelated steps (`daemon.alive`, `fix.dispatch`, ...); a blanket scan would demand render
+        retention for all of them. `SWEEP_LIVENESS_STEPS` is doctor.ts's own explicit boundary for
+        "the steps this arm needs to survive rotation", the exact role `OPERATOR_ACTION_STEPS`
+        plays for board.ts. Keep the existing sanity assertions (a non-empty discovery set) so a
+        broken pattern reads as a failure, not as a vacuous pass.
+
+    (4) RECONCILE THE TWO NUMBERS, DO NOT CHOOSE THEM INDEPENDENTLY. `RENDER_STEP_RETENTION_WINDOW_MS`
+        is 30 minutes; a sweep-liveness bound LONGER than the retention window can only ever see
+        zero rows, which would make W1-T1236's arm permanently UNKNOWN and useless. Add the sibling
+        of the assertion that file already carries for the ACCOUNT strip
+        ("RENDER_STEP_RETENTION_WINDOW_MS is at least account-usage.ts's own USAGE_CACHE_MAX_AGE_MS
+        staleness bound"): the render window must be at least the sweep-liveness bound, importing
+        that bound from doctor.ts rather than re-typing the number. Importing doctor.ts is a READ —
+        this task edits neither it nor its suite, and neither appears in `files:`.
+
+    (5) ROTATION PROOF, THE REAL FUNCTION AND NOT A STRING CHECK. Follow the file's existing
+        `rotateLedger` fixture: a FRESH `sweep.pass` line survives rotation past the ceiling, and an
+        OLD one is still archived — retention is recency-BOUNDED, not permanent. Assert the same for
+        `sweep.summary`, since the paired derivation is worthless if only one half survives.
+
+    (6) THE DECISION SET IS UNTOUCHED and a test says so by name, so a later well-meaning edit that
+        "fixes" retention by dropping either step into the never-rotated core is caught here rather
+        than discovered as unbounded ledger growth.
+
+    EXPLICITLY NOT IN SCOPE: any change to src/lib/doctor.ts or test/doctor.test.ts (W1-T1236 owns
+    the arm and its bound); src/lib/sweep.ts's stale note (W1-T1238); any change to the emit itself;
+    any new retention CATEGORY or window constant — this task registers into the existing
+    recency-bounded set and changes no window value.
+  acceptance:
+    - claim: "the render set's membership is re-derived from the sweep-liveness boundary marker, not from a second hardcoded list"
+      proof: "unit test: W1-T1237: the render set is derived from the sweep-liveness marker too"
+    - claim: "both heartbeat steps are registered by exact name for render retention"
+      proof: 'grep: "sweep\.pass" in src/lib/ledger.ts'
+    - claim: "a fresh sweep.pass line survives rotation while an old one is still archived"
+      proof: "unit test: W1-T1237: a fresh sweep.pass survives rotation and an old one does not"
+    - claim: "sweep.summary is retained on the same terms, so the paired derivation can read both halves"
+      proof: "unit test: W1-T1237: sweep.summary is retained beside sweep.pass"
+    - claim: "the render retention window is at least the sweep-liveness bound it must feed"
+      proof: "unit test: W1-T1237: the render window is at least the sweep-liveness bound"
+    - claim: "neither step is added to the never-rotated decision core"
+      proof: "unit test: W1-T1237: the decision core is unchanged by this registration"
+  origin: feedback#fb-1785937739950-070a87
+  plan_refs: ["W1-T1236", "W1-T1238", "W1-T275", "W1-T468"]
+  files: [src/lib/ledger.ts, test/ledger-render-retention.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    RULE 19 / #588 MERITS TEST — ANSWERED YES, RATIONALE IN ONE LINE: the derived-from-consumers
+    lock is a SINGLE cross-file invariant over src/lib/ledger.ts and
+    test/ledger-render-retention.test.ts that is unsatisfiable piecewise (widen the derivation
+    without registering => that one test fails; register without widening => the membership is
+    underived, the hardcoded-second-list failure the lock exists to refuse), so this piece is raised
+    to risk:high rather than split further.
+
+    IT IS THE MIDDLE OF THE SPINE. W1-T1236 (the reader, and the `SWEEP_LIVENESS_STEPS` marker this
+    derivation keys off) must merge first — the lock retains what a consumer demonstrably reads, so
+    the registration is underivable before the reader exists. W1-T1238 (the producer's stale note)
+    follows this one because the note must name a registration that has actually landed. Same
+    `origin: feedback#fb-1785937739950-070a87` as both siblings.
+
+    files: TWO PATHS, and doctor.ts is deliberately NOT among them. The widened derivation and the
+    window assertion both READ doctor.ts (source scan and one imported constant) and modify nothing
+    in it, so the scope guard stays satisfied and the arm's own suite is not disturbed.
+
+    THE GREP PROOF IS QUOTED AND ESCAPED ON PURPOSE: `"sweep\.pass"` demands the STRING LITERAL, so
+    a mere prose mention in one of ledger.ts's long comment blocks (there are several) cannot
+    satisfy it, and the `\.` keeps the executor's regex from widening the dot.
+
+    verify:auto — rotation is exercised through the real `rotateLedger` against a tmpdir fixture the
+    file already builds, and the derivation lock is a source scan. No live fleet, no network.
+
+    budget_usd 20.00 — two Set entries, one widened derivation, three fixtures. The cost is the
+    reconciliation in design (4), not the edit.

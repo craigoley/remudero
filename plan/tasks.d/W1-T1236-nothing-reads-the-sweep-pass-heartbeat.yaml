@@ -1,0 +1,162 @@
+- id: W1-T1236
+  title: "NOTHING READS THE PER-PASS SWEEP HEARTBEAT — `sweep.pass` is written before the loop exactly so a pass that dies mid-loop still leaves a row, and `rmd doctor` has `dispatch-stall`, `dispatch-liveness` and `repair-stall` arms with no sweep-liveness sibling; a blind sweep is still discovered by a human reading the board. THIS TASK BUILDS THE READER ONLY — retention (W1-T1237) and the producer's stale note (W1-T1238) are its own successors"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: medium
+  rationale: |
+    THE PRODUCING HALF IS ALREADY BUILT AND THIS TASK DOES NOT RE-DECIDE IT. `src/lib/sweep.ts`
+    carries a `PER-PASS HEARTBEAT, WRITTEN BEFORE THE LOOP` block and emits
+    `log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true })` at
+    sweep.ts:4371, with `test/sweep-pass-heartbeat.test.ts` covering its POSITION (the mid-loop
+    throw). Its own doc records the incident: the 13:06:57 -> 13:30:28 window on 2026-08-05 is a
+    23.5-minute gap in `sweep.summary` that CONTAINS four `sweep.disposed` rows — passes were
+    starting and not finishing, and PR #1348 opened and closed entirely inside it. W1-T468's shard
+    records the same shape at the same magnitude ("22 consecutive minutes of a totally blind
+    sweep"), and `src/lib/dispatch-overlap.ts` cites it a third time: "the same shape as the blind
+    sweep, where a missing `sweep.summary` took two undetected 22-minute" windows.
+
+    THE CONSUMER WAS DEFERRED IN WRITING AND NEVER FILED. sweep.ts:4364-4369, verbatim: "NOT
+    REGISTERED in DECISION_RELEVANT_LEDGER_STEPS or RENDER_RELEVANT_LEDGER_STEPS, deliberately:
+    nothing reads it yet (the consumer is out of scope here, one concern) ... the change that
+    builds that consumer registers it then, in the same PR". That change was never filed. Queried
+    over the tree: `sweep.pass` appears in `src/` exactly TWICE — the emit at sweep.ts:4371 and a
+    prose mention at sweep.ts:5288 — and ZERO times in `src/lib/ledger.ts`, `src/lib/doctor.ts`,
+    `src/lib/status.ts`, `src/lib/status-board.ts` or `src/lib/ops.ts`. Positive control on the
+    same query: `sweep.disposed` returns readers in board.ts, status-board.ts and sweep.ts itself.
+    Every plan mention of `sweep.pass` (W1-T449, W1-T469, W1-T471, W1-T482, W1-T486, W1-T498,
+    W1-T522, W1-T1209) uses it as a HAND-RUN coverage control in a shard's evidence section — a
+    human at a terminal, which is precisely the discovery latency this closes.
+
+    WHY THE EXISTING ARMS DO NOT COVER IT. `judgeDispatchStarvation` (doctor.ts:252) reads
+    `daemon.alive` PHASES for the current run — it answers "is the fleet entering a dispatch
+    rung", not "did a sweep pass enumerate and finish". `judgeDispatchStall` reads candidate
+    counts and dispatch age; `judgeRepairStall` (W1-T1209) reads `fix.dispatch` against
+    `blocked-fixable` disposals. A pass that enumerates 12 PRs and throws inside `deriveDisposition`
+    leaves all three OK: the fleet is alive, candidates exist, and disposals were written right up
+    to the throw. That is the 2026-08-05 window exactly.
+
+    SCOPE, AFTER THE RULE-19 SPLIT. The original filing bundled the reader, the retention
+    registration, the retention test's derivation lock and a producer comment into one record and
+    was refused by `rmd lint-plan` at five concerns. It failed the #588 MERITS TEST: no single
+    acceptance criterion here needed doctor.ts, ledger.ts and sweep.ts together — the arm is a PURE
+    fold over injected ledger lines and is fully provable against doctor.ts alone. So it is
+    decomposed on the concern boundary, not raised: THIS task builds the reader, W1-T1237 registers
+    the step for retention and widens the derived-from-consumers lock onto this arm's boundary
+    marker, W1-T1238 corrects the producer's stale note. The spine is strictly ordered
+    (1236 -> 1237 -> 1238) and the reason is the lock's own doctrine: it retains what a consumer
+    DEMONSTRABLY reads, so the reader must exist before the registration can be derived from it.
+  design: |
+    ONE CONCERN: GIVE `sweep.pass` A READER IN doctor.ts. NO LEDGER, NO SWEEP, NO SCHEMA CHANGE.
+
+    (1) A `sweep-liveness` ARM, IN THE ESTABLISHED SHAPE. A pure `judgeSweepLiveness(...)` beside
+        `judgeDispatchStarvation`/`judgeRepairStall`, returning the same `Check` record
+        (name/verdict/measured/threshold/detail), added to `buildDoctorReport`'s `checks` array and
+        fed from `DoctorInputs.ledgerLines` via a fold in the same file — the same seam
+        `judgeDispatchStarvation(readCurrentRunAlivePhases(inputs.ledgerLines))` already uses. The
+        assembler is PURE and must stay so: every new input is a measured value or a fold over
+        lines already supplied.
+
+    (2) TWO DERIVATIONS OFF ROWS THAT ALREADY EXIST.
+      (a) PASSES NOT STARTING: age of the NEWEST `sweep.pass` row against a derived bound. State
+          the measured tick cadence and the bound's derivation in the PR body and carry it in the
+          `threshold` string, exactly as `dispatchBoundDerivation` already does for its arm.
+      (b) PASSES STARTING AND NOT FINISHING — the case the row was positioned for: a newest
+          `sweep.pass` with NO `sweep.summary` at or after its timestamp. Pair them BY TIME ORDER,
+          not by a correlation id: adding a pass id would change the emit and drag this into the
+          producer, which is W1-T1238's file and a different concern.
+
+    (3) ZERO ROWS IS NOT OK, AND IT IS NOT FAIL EITHER. A fleet that has never swept, a
+        freshly-rotated ledger and a sweep blind for longer than the retention window all present
+        as zero `sweep.pass` rows. Follow `judgeDispatchStarvation`'s own precedent verbatim
+        (doctor.ts:254-261): empty window => verdict WARN, `measured` naming liveness UNKNOWN, and
+        a `detail` saying what to check. Never a false-green OK, never an invented FAIL.
+
+    (4) WARN, NOT FAIL, FOR THE STALE CASE TOO, on the same reasoning W1-T1209 recorded: doctor
+        OBSERVES. It dispatches nothing, clears nothing, restarts nothing. Any automatic
+        remediation of a blind sweep is a SEPARATE decision, explicitly out of scope.
+
+    (5) THE BOUNDARY MARKER, AND IT IS WHAT MAKES W1-T1237 POSSIBLE. Name the steps this arm needs
+        in ONE exported Set literal in doctor.ts — `SWEEP_LIVENESS_STEPS = new Set(["sweep.pass",
+        "sweep.summary"])` — and read the ledger through it (`SWEEP_LIVENESS_STEPS.has(step)`),
+        never through two loose string comparisons. This mirrors board.ts's `OPERATOR_ACTION_STEPS`
+        precisely, and for the same recorded reason: `test/ledger-render-retention.test.ts`
+        deliberately derives from a consumer's explicit boundary marker rather than a blanket
+        `.step ===` scan, because a blanket scan of doctor.ts would sweep up every unrelated step
+        it compares (`daemon.alive`, `fix.dispatch`, ...) and demand retention for all of them.
+        W1-T1237 derives its registration from this Set; without it that task has nothing to key
+        off and would have to hardcode a second list.
+
+    (6) THE INTERIM IS HONEST BY CONSTRUCTION, which is why shipping the reader before the
+        retention is safe. Between this merge and W1-T1237's, rotation may still archive
+        `sweep.pass`, so the arm can see zero rows on a healthy fleet — and (3) makes that WARN
+        with liveness UNKNOWN, not a false green and not a false FAIL. The arm cannot silently
+        mislead in the window before its rows are retained.
+
+    EXPLICITLY NOT IN SCOPE: registering either step for retention or touching
+    `RENDER_RELEVANT_LEDGER_STEPS` (W1-T1237); any edit to src/lib/sweep.ts, including its stale
+    note (W1-T1238); any change to what the sweep DOES when a pass dies; a per-tick budget or cap
+    on the loop (the feedback itself withdraws the ordering framing — the loop iterates every open
+    PR unbounded BY DESIGN); an escalation or alert path; and the `sweep.post_review` / starvation
+    reading, which fb-1785936728348-a9efd3 raised and its own successor REFUTED.
+  acceptance:
+    - claim: "a window whose newest sweep.pass is older than the derived bound reports non-OK and names the measured age"
+      proof: "unit test: W1-T1236: a stale sweep.pass reads non-OK with its measured age"
+    - claim: "a sweep.pass with no sweep.summary at or after it reports non-OK — the pass-started-and-never-finished case"
+      proof: "unit test: W1-T1236: a pass with no summary after it reads non-OK"
+    - claim: "a pass followed by its own summary inside the bound reports OK"
+      proof: "unit test: W1-T1236: a pass followed by its own summary reads OK"
+    - claim: "a window with zero sweep.pass rows reports liveness UNKNOWN rather than OK or FAIL"
+      proof: "unit test: W1-T1236: zero sweep.pass rows read WARN and never OK"
+    - claim: "the arm reports and never dispatches, clears or restarts anything"
+      proof: "unit test: W1-T1236: the sweep-liveness arm performs no action of its own"
+    - claim: "buildDoctorReport CALLS the new arm, so the report actually carries it — not a defined-but-unreached judge"
+      proof: "grep: judgeSweepLiveness( in src/lib/doctor.ts"
+    - claim: "the arm reads the ledger THROUGH its exported boundary marker, which W1-T1237 derives retention from"
+      proof: 'grep: SWEEP_LIVENESS_STEPS\.has( in src/lib/doctor.ts'
+    - claim: "every existing doctor arm's verdict is unchanged by this addition"
+      proof: "unit test: W1-T1236: the existing doctor arms are unchanged"
+  origin: feedback#fb-1785937739950-070a87
+  plan_refs: ["W1-T468", "W1-T1209", "W1-T275", "W1-T1237", "W1-T1238"]
+  files: [src/lib/doctor.ts, test/doctor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    RULE 19 / #588 MERITS TEST, RECORDED. The one-record filing spanned five concerns (doctor,
+    ledger, ledger-render-retention, sweep, sweep-pass-liveness). It does NOT merit risk:high: no
+    criterion asserts a cross-file invariant unsatisfiable piecewise — every proof below runs
+    against doctor.ts and its own suite alone. So it is DECOMPOSED, one task per concern, with an
+    explicit depends_on spine (W1-T1236 -> W1-T1237 -> W1-T1238), budgets resized per piece, and
+    `origin: feedback#fb-1785937739950-070a87` preserved verbatim on all three.
+
+    ORDER IS FORCED, NOT PREFERRED. The reader must land FIRST because W1-T1237's derived-from-
+    consumers lock retains what a consumer demonstrably reads — registering `sweep.pass` before any
+    reader exists is precisely the "hardcoded second list" that test exists to refuse.
+
+    FILES ARE TWO AND MATCH W1-T1209 EXACTLY (`[src/lib/doctor.ts, test/doctor.test.ts]`), the
+    repair-stall arm this one is modelled on. The new tests go in the existing doctor suite beside
+    its siblings, not in a new file.
+
+    CALL-SITE. `src/lib/doctor.ts` already exists, so the linter's call-site check does not fire
+    here (it polices modules a task CREATES). The `grep: judgeSweepLiveness( in src/lib/doctor.ts`
+    criterion is carried anyway, with the open paren, because the failure it guards against is real
+    for an arm too: a judge function fully tested and never added to `buildDoctorReport`'s `checks`
+    array ships green and unreached. `SWEEP_LIVENESS_STEPS\.has(` is escaped for BRE — the executor
+    runs a regex, and an unescaped `.` is a widening metacharacter.
+
+    verify:auto — every derivation is a pure fold over injected ledger lines against an injected
+    now, the seam test/doctor.test.ts already uses for every sibling arm: no daemon process, no
+    filesystem, no network.
+
+    risk:medium, and the grade is blast radius rather than size: a false OK reproduces a
+    23.5-minute blind window nobody notices, and a false non-OK on a healthy quiet fleet trains the
+    operator to ignore the one instrument that would catch it — the same argument W1-T1209 made for
+    the repair arm. It argues DOWN from high because doctor is READ-ONLY (`--fix` is refused by
+    name) and this arm dispatches nothing.
+
+    budget_usd 35.00 of the original 60.00 — one pure judge function, one fold, one Set literal and
+    the doctor-suite tests. The remaining 25.00 goes to W1-T1237 (20.00) and W1-T1238 (8.00); the
+    small overshoot is the per-task fixed cost of three PRs instead of one.
