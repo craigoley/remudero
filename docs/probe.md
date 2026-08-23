@@ -43,6 +43,15 @@ A docs-class `implement × medium` task:
 - Context budget is **90k tokens** (vs. 160k for src)
 - **Result:** ~80% cost reduction on labor while maintaining sufficient reasoning for prose tasks
 
+> **The payoff figures on this page are FROZEN, not current.** `MASTER-PLAN.md` holds the mount
+> table frozen at its present values until TASK G ships — "NO mount may be re-based on it — the
+> table is FROZEN until TASK G ships" — and the whole `implement` row publishes **`UNMEASURED`**
+> across every column (runs, ships, cost/run, turns, total). So the routing MECHANICS below are
+> live and accurate, and the `.remudero/mounts.yaml` excerpt above matches the committed table;
+> what cannot be re-derived from the ledger today is the ~80%. Treat it as the figure that
+> justified the row when it was written, not as a measurement you can quote. Re-check with
+> `grep -n 'UNMEASURED' MASTER-PLAN.md`.
+
 ### When docs-class routing applies
 
 - Documentation edits: ORIENTATION.md, architecture.md, troubleshooting.md

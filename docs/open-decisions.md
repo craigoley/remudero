@@ -20,7 +20,7 @@ a stale "PENDING" is worse than no status because it looks checked. Run the quer
 |---|---|---|
 | **D-11** — instance topology (cells) | `MASTER-PLAN.md` §11, entry "D-11 Instance topology" | `grep -n 'D-11 Instance topology' -A2 MASTER-PLAN.md` — the entry's own first line carries its disposition |
 | **P48** — no naked zero | `MASTER-PLAN.md` §8, entry "★ P48" | `grep -n '★ P48' -A3 MASTER-PLAN.md`, plus `DECISIONS.md` for a ratification entry |
-| **W1-T404** — console write tiers | `plan/tasks.d/W1-T404-write-scope-is-one-undifferentiated-grant.yaml` | `rmd lint-plan` / the shard's `verify:` field; it is `verify: human` by design |
+| **W1-T404** — console write tiers | `plan/tasks.d/W1-T404-write-scope-is-one-undifferentiated-grant.yaml` | `grep -n 'verify:' plan/tasks.d/W1-T404-*.yaml` for how it is judged, then `git log --oneline --grep=W1-T404 origin/main` for whether it has already shipped — a merged id is not an open decision, and this row asserted the wrong `verify:` for weeks |
 
 ---
 

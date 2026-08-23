@@ -3,7 +3,9 @@
 This is the day-to-day view: what you actually type, what to watch, and what
 to do when something needs a human. For the *why* behind these pieces, see
 [architecture.md](architecture.md); for what happens inside one task, see
-[task-lifecycle.md](task-lifecycle.md).
+[task-lifecycle.md](task-lifecycle.md). For the questions that are still the
+operator's to answer — and, for each, the query that tells you where it stands
+rather than a status that goes stale — see [open-decisions.md](open-decisions.md).
 
 Remudero is built to run **unattended** (Standing rule 8: the loop never waits
 on you unless the plan says so), so most of this guide is about reading state,
