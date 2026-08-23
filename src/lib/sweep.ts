@@ -930,6 +930,15 @@ export interface OpenPrView {
    */
   ciFailures?: CiFailure[];
   /**
+   * W1-T1223 (design i) — required checks whose LATEST attempt is CANCELLED with no later
+   * attempt on this head, distinct from a genuine failure ({@link ciFailures} names both; this
+   * names only the cancellations). Populated ALONGSIDE `ciFailures`, when `checksState ===
+   * "red"`; `[]`/undefined when checks aren't red or nothing cancelled contributed to the red
+   * verdict. Never makes `checksState` anything but "red" — see {@link CancelledRequiredCheck}'s
+   * own doc.
+   */
+  cancelledRequiredChecks?: CancelledRequiredCheck[];
+  /**
    * GitHub's own merge-conflict state, simplified (W1-T106, the #170 DIRTY
    * strand) — see {@link MergeState}'s own doc. `undefined`/`"unknown"` never
    * disposition CONFLICTED (fail-closed): only an OBSERVED `"dirty"` does.
@@ -1276,6 +1285,104 @@ export function checksStateFromRollup(
     if (!ok.has(s)) anyPending = true;
   }
   return anyPending ? "pending" : "green";
+}
+
+/**
+ * W1-T1223 — one required check whose LATEST (deduped) attempt is CANCELLED, never superseded by
+ * a later attempt on the same head. `checksState` stays "red" for this exactly as it does for a
+ * genuine failure (design note i refuses a fifth `checksState` member for the SAME reason
+ * {@link checksStateFromRollup}'s own doc already gives — a member every existing comparison site
+ * silently fails to match is the false-predicate-falls-through shape). This is the SEPARATE
+ * observable that names WHICH red required check is an ABSENT verdict rather than a bad one, so
+ * the sweep can re-queue its job instead of dispatching a fix-rung worker against a diff that
+ * carries no defect.
+ */
+export interface CancelledRequiredCheck {
+  name: string;
+  /**
+   * GitHub Actions job id, parsed by the real gateway (run-task.ts) from the rollup's own
+   * `detailsUrl` — the re-queue target is the JOB (design iv), never the workflow run.
+   * `undefined` when no job id could be read; the real `requeueCheck` wiring then degrades to a
+   * named no-op rather than guessing a target.
+   */
+  jobId?: string;
+}
+
+/**
+ * W1-T1223 (design i) — which of `requiredContexts`' checks have a LATEST (deduped) attempt that
+ * is CANCELLED, on the exact SAME gate {@link checksStateFromRollup} reads red from: same
+ * required-contexts filter, same {@link dedupeRollupByLatestAttempt} rule, so this can never name
+ * a check `checksStateFromRollup` itself would disagree is even in the gate. A check genuinely
+ * FAILING (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE) is never named here — only the
+ * literal CANCELLED conclusion is, which is what distinguishes "nobody reached a verdict" from
+ * "a verdict came back bad" (the falsifier design note vii states explicitly). `requiredContexts`
+ * empty/undefined names nothing, the same fail-toward-"no positive claim" direction
+ * `checksStateFromRollup` takes when it cannot confirm what is actually required.
+ */
+export function cancelledRequiredCheckNames(
+  rollup: RollupCheckEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined,
+): string[] {
+  const required = new Set(requiredContexts ?? []);
+  if (required.size === 0) return [];
+  const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
+  const gate = dedupeRollupByLatestAttempt(all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")));
+  return gate
+    .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
+    .map((c) => c.name ?? c.context ?? "unknown");
+}
+
+/** One re-queue/escalate decision for one cancelled required check. */
+export interface CancelledCheckRequeueDecision {
+  requeue: boolean;
+  escalate: boolean;
+  reason: string;
+}
+
+/**
+ * W1-T1223 (design ii/iii) — BOUNDED BY A LEDGERED RECORD, NEVER A CLOCK OR AN IN-MEMORY COUNTER.
+ * `alreadyRequeued` is read back fresh from the ledger by the caller ({@link
+ * requeuedCheckKeysFromLedger}) for this EXACT `${headSha}@${checkName}` pair — the same
+ * idempotence shape {@link import("./cost-anomaly.js").alreadyLedgeredCostAnomalyRunIds} already
+ * uses. Zero prior re-queues for this pair re-queues the job once; a SECOND observation of the
+ * SAME pair (the check was cancelled again on the SAME head, after the one re-queue this lane
+ * already ran) escalates instead of repeating — no timer, no retry budget: exactly one re-queue
+ * is either sufficient (a preempted runner) or diagnostic (a concurrency group, a capacity fault,
+ * or a workflow-level cancel — something re-queueing cannot reach).
+ */
+export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): CancelledCheckRequeueDecision {
+  if (alreadyRequeued) {
+    return {
+      requeue: false,
+      escalate: true,
+      reason: "already re-queued once on this head sha and cancelled again — a second cancellation is beyond what re-queueing can reach",
+    };
+  }
+  return {
+    requeue: true,
+    escalate: false,
+    reason: "latest attempt was cancelled with no later attempt on this head — re-queueing the job once",
+  };
+}
+
+/** The ledger step {@link requeuedCheckKeysFromLedger} reads back — one row per re-queue attempt. */
+export const CHECK_REQUEUE_STEP = "sweep.check_requeued";
+
+/**
+ * W1-T1223 (design ii) — every `${headSha}@${checkName}` pair the ledger already records a
+ * {@link CHECK_REQUEUE_STEP} row for. `runSweep` writes this row BEFORE calling `deps.requeueCheck`
+ * (ledgered before it can be repeated), so a pass that crashes between the write and the real
+ * GitHub call still bounds the NEXT pass toward escalating rather than re-queueing a second time —
+ * the safer failure direction for an action that mutates CI state unattended.
+ */
+export function requeuedCheckKeysFromLedger(lines: Array<Record<string, unknown>>): Set<string> {
+  const out = new Set<string>();
+  for (const l of lines) {
+    if (l.step === CHECK_REQUEUE_STEP && typeof l.head_sha === "string" && typeof l.check_name === "string") {
+      out.add(`${l.head_sha}@${l.check_name}`);
+    }
+  }
+  return out;
 }
 
 const MS_PER_DAY = 86_400_000;
@@ -3257,6 +3364,25 @@ export interface SweepDeps {
    */
   escalate: (pr: OpenPrView, reason: string, question: ClarificationQuestion) => void | Promise<void>;
   /**
+   * W1-T1223 (design ii/iv) — re-queue ONE cancelled required check's JOB, never the workflow
+   * run (`POST .../actions/jobs/{job_id}/rerun`, never `.../runs/{run_id}/rerun-failed-jobs` — a
+   * whole-run re-run would re-spend an already-green sibling job sharing the same workflow run).
+   * `runSweep` calls this AT MOST ONCE per `${headSha}@${checkName}` pair — see {@link
+   * cancelledCheckRequeueDecision} and {@link requeuedCheckKeysFromLedger} for the bound. Optional:
+   * omitted, the sweep still names the cancelled check on its disposed line but takes no re-queue
+   * action — never a silent no-op, the stand-down is legible on the ledger.
+   */
+  requeueCheck?: (pr: OpenPrView, check: CancelledRequiredCheck) => void | Promise<void>;
+  /**
+   * W1-T1223 (design iii) — a SECOND cancellation of the SAME required check on the SAME head
+   * sha, observed after this lane already spent its one re-queue on that pair. Distinct from
+   * `escalate` above (which carries a rendered {@link ClarificationQuestion} asking an operator
+   * to pick between two candidate diffs) — this names the check and both cancellations to a
+   * human; there is no diff to choose between, only a CI-side fault re-queueing cannot reach.
+   * Optional: omitted, the sweep still names the second cancellation on its disposed line.
+   */
+  escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => void | Promise<void>;
+  /**
    * W1-T177: an OPTIONAL fresh re-read of ONE PR's live GitHub state,
    * consulted immediately before a blocked-fixable disposition actually
    * spends a fix-rung strike — never the `openPrs` snapshot this whole sweep
@@ -4031,6 +4157,9 @@ export async function runSweep(
   // recovery, so arming parity costs this pass no extra ledger read.
   const ledgerLines = readLedger(deps.ledgerPath);
   const prior = priorActionsFromLedger(ledgerLines);
+  // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
+  // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
+  const requeuedCheckKeys = requeuedCheckKeysFromLedger(ledgerLines);
 
   // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
   // Hung off THIS pass, not a new src/run-task.ts verdict call site (design note vi): `runSweep`
@@ -4540,6 +4669,60 @@ export async function runSweep(
                 acted = false;
                 standDownReason = describeRedCause(redCause, pr, openPrs);
                 break;
+              }
+              // W1-T1223 (design i/ii/iii/iv/v) — A CANCELLED REQUIRED CHECK HAS NO DEFECT IN
+              // THE DIFF FOR A FIX-RUNG WORKER TO READ. Fires BEFORE `dispatchFix` so a PR whose
+              // ENTIRE red verdict is one or more cancellations never spends a fix-rung strike on
+              // nothing (the #2434/#2444 incident this task fixes). Gate reconciliation, the
+              // sweep's own lane — never the fix rung's (design v).
+              const cancelledChecks = isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [];
+              if (cancelledChecks.length > 0) {
+                let requeuedAny = false;
+                const outcomes: string[] = [];
+                for (const check of cancelledChecks) {
+                  const key = `${pr.headSha}@${check.name}`;
+                  const decision = cancelledCheckRequeueDecision(requeuedCheckKeys.has(key));
+                  if (decision.requeue) {
+                    // LEDGERED BEFORE THE CALL (design ii: "the attempt is LEDGERED BEFORE it
+                    // can be repeated") — a crash between this write and the real GitHub call
+                    // still bounds the NEXT pass toward escalating rather than re-queueing the
+                    // same pair a second time. Not `deps.dryRun`-guarded: reaching this line
+                    // already proves `acted` was true, which `deps.dryRun` forces false above.
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: CHECK_REQUEUE_STEP,
+                      pr_number: pr.prNumber,
+                      pr_url: pr.prUrl,
+                      head_sha: pr.headSha,
+                      check_name: check.name,
+                    });
+                    requeuedCheckKeys.add(key);
+                    if (deps.requeueCheck) {
+                      await deps.requeueCheck(pr, check);
+                      requeuedAny = true;
+                    }
+                    outcomes.push(`re-queued "${check.name}"`);
+                  } else {
+                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason);
+                    outcomes.push(`escalated "${check.name}" (${decision.reason})`);
+                  }
+                }
+                // A cancelled check carries no diff defect (design v) — when EVERY red required
+                // check this pass named is a cancellation, stand down here instead of falling
+                // through to `dispatchFix`, which would otherwise burn a fix-rung strike on
+                // nothing. `acted` stays FALSE regardless of outcome — the SAME load-bearing
+                // choice `sweep.absent_repush` makes just above (see its own comment): claiming
+                // `acted:true` on this disposed line would seed `prior.fixed` for this head,
+                // which would then dedupe the WHOLE blocked-fixable disposition away next pass
+                // and this re-queue/escalate logic would never run again to observe the second
+                // cancellation design (iii) requires escalating.
+                const genuineFailures = (pr.ciFailures ?? []).filter((f) => !cancelledChecks.some((c) => c.name === f.name));
+                if (genuineFailures.length === 0) {
+                  acted = false;
+                  standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
+                  break;
+                }
               }
               // W1-T100: the evidence shape follows the SAME `isBlockedCi`
               // predicate DISPOSITION_RULES routed on (never a second,
