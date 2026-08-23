@@ -1,0 +1,176 @@
+- id: W1-T1277
+  title: "FOUR REQUIRED RATCHETS STILL DISARM ON A MALFORMED THRESHOLD — `capChars`, `linesPct`, `branchesPct` and `scorePct` each skip their comparison behind a `typeof … === 'number'` guard, so a quoted baseline value reports OK instead of refusing, and W1-T1233 fixed only the fifth site"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 in a scratch worktree proved equal to `origin/main` at 941ea568 before any
+    reading; the clone was already full (2,043 commits) and over-cap files were read as git
+    objects. Every site below was CONFIRMED IN SOURCE and then DRIVEN, not taken from the name.
+
+    (1) W1-T1233's PRECEDENT IS LANDED AND ITS NOTE IS THE STARTING POINT. Its shard is on main and
+    names FIVE sites across four required ratchets, each reading a baseline threshold behind
+    `typeof <field> === "number" &&` so that a wrong-typed value "skips the comparison, pushes no
+    violation, and the check reports OK": `claude-md-budget-ratchet.mjs:70` capBytes (its own),
+    `learnings-budget-ratchet.mjs:142` capChars, `coverage-ratchet.mjs:78` linesPct,
+    `coverage-ratchet.mjs:86` branchesPct, `mutation-ratchet.mjs:619` scorePct. It says the other
+    four are "THE OPERATOR'S TO MINT".
+
+    (2) THE FIFTH SITE IS FIXED AND IS THE SHAPE TO COPY. `claude-md-budget-ratchet.mjs` now throws
+    at :80-82 — `'capBytes' must be a number, got "10"` — BEFORE the numeric comparison at :83, and
+    its doc draws the distinction the remedy turns on: ABSENT is "a legitimate, honest 'no cap yet'
+    contract and is left alone", PRESENT-but-not-a-number is "a declared cap that cannot be
+    compared against. That must REFUSE, not silently no-op". Driven: a `"10"` cap THREW; the
+    numeric control produced the violation.
+
+    (3) ALL FOUR SIBLINGS STILL HAVE THE SHAPE, AT THE EXACT LINES THE NOTE GAVE, AND NONE HAS BEEN
+    FIXED. `learnings-budget-ratchet.mjs:142`, `coverage-ratchet.mjs:78`, `coverage-ratchet.mjs:86`
+    and `mutation-ratchet.mjs:619` each still guard with `typeof … === number`. Control on "none
+    fixed": the string `must be a number` occurs 0 times in all three of those files and 1 time in
+    the repaired `claude-md-budget-ratchet.mjs`.
+
+    (4) AND NOT TRUSTING THE NAMES PAID: THE IDIOM IS NOT UNIFORM. `claude-md` and `learnings` use
+    DOUBLE quotes (`=== "number"`); `coverage` and `mutation` use SINGLE (`=== 'number'`). A first
+    scan keyed on the double-quoted form found ZERO in `coverage-ratchet.mjs` and
+    `mutation-ratchet.mjs` and would have reported two of the four sites as already repaired. Any
+    implementation that sweeps for this shape by literal must account for both quotings.
+
+    (5) EACH SITE WAS FALSIFIED BY DRIVING ITS OWN EXPORTED PURE FUNCTION, EACH WITH A CONTROL THAT
+    FIRES. Against a quoted baseline value, every one returned an EMPTY violations array — the
+    gate's own definition of "satisfied":
+      coverage `linesPct`    actual 50 vs `"90"` -> []   (control, vs 90 -> "lines coverage 50.00% < baseline 90.00%")
+      coverage `branchesPct` actual 50 vs `"90"` -> []   (control, vs 90 -> "branches coverage 50.00% < baseline 90.00%")
+      mutation `scorePct`    actual 50 vs `"90"` -> []   (control, vs 90 -> "mutation score 50.00% < baseline 90.00%")
+      learnings `capChars`   actual 999 vs `"10"` -> []  (control, vs 10 -> "active learnings corpus 999 chars > cap 10 chars")
+
+    (6) Q2 — THE BLAST RADIUS PER SITE, AND EVERY ONE OF THEM FAILS OPEN. `ci-gate`'s REQUIRED list
+    names `coverage-ratchet`, `mutation-ratchet` and `learnings-budget-ratchet` explicitly, and
+    branch protection on main requires `ci-gate`. So: `linesPct` and `branchesPct` disarm the
+    coverage floor (`coverage-ratchet`); `scorePct` disarms the mutation floor at PR time
+    (`mutation-ratchet`); `capChars` disarms the learnings corpus ceiling
+    (`learnings-budget-ratchet`), the same job that also runs the already-repaired CLAUDE.md step.
+    In every case a disarmed gate returns no violations and the job exits 0 — FAIL OPEN, the
+    direction a ratchet must never fail in.
+
+    (7) AND MUTATION-RATCHET ALREADY DISAGREES WITH ITSELF, WHICH IS THE SHARPEST EVIDENCE THAT
+    THIS IS AN OVERSIGHT AND NOT A RULING. Its NIGHTLY arm at :826 refuses exactly this shape —
+    `if (!nightlyBaseline || typeof nightlyBaseline.scorePct !== 'number')` exits 1 with "bootstrap
+    it explicitly -- a missing section must never silently pass" — while its PR-time arm at :619
+    silently skips. One file, one field, two opposite answers.
+
+    (8) Q1 — THEY ARE FOUR INDEPENDENT PARSES, NOT ONE SHARED HELPER. Each of the four scripts
+    exports its OWN `evaluateRatchet` (one apiece) and imports NOTHING from `src/lib`; the control
+    is that seven other files under `scripts/` do import from `../src`, so the zero discriminates
+    and is a deliberate property rather than an accident. `claude-md-budget-ratchet.mjs`'s own
+    header states why: "deliberately self-contained (no import from src/lib/*, which is TypeScript
+    and outside plain `node scripts/*.mjs` execution)". Confirmed at the call sites: `package.json`
+    invokes both budget ratchets as `node scripts/<name>.mjs`, and `mutation-nightly.yml` invokes
+    `node scripts/mutation-ratchet.mjs`. SO A SHARED VALIDATOR CANNOT SIMPLY BE LIFTED INTO
+    `src/lib` — it would have to be a new plain-JS module under `scripts/` that all four import.
+
+    (9) AND RULE 19 DOES NOT DECIDE THIS FOR US EITHER WAY. `sizingViolation`
+    (`src/lib/task-linter.ts:197`) returns undefined outright when `risk === "high"` — "Rule 19
+    exemption — high already assumes wide scope" — so a four-site filing is not mechanically
+    refused at `high`; it is simply not policed. The span is real regardless: three scripts plus
+    three test homes.
+  design: |
+    ONE RULE, APPLIED AT FOUR INDEPENDENT SITES: a declared threshold that cannot be compared must
+    REFUSE, never disarm. Not the values, not the thresholds, not the absent-value contract.
+
+    (i) COPY W1-T1233's DISTINCTION EXACTLY, PER SITE. ABSENT (undefined/null) stays a legitimate
+    "not configured yet" contract and is left alone — every one of these ratchets has a real
+    bootstrap state. PRESENT-BUT-NOT-A-NUMBER throws, naming the field, the expectation and the
+    value received, in the shape `validatePolicy` already uses on the `src/` side of the boundary
+    and `claude-md-budget-ratchet.mjs` now uses on this side.
+
+    (ii) THE THROW IS A CONFIG DEFECT, NOT A BUDGET BREACH — so it must not be pushed as a
+    violation string. The caller catches it and fails the run before printing anything that claims
+    to have enforced a threshold, which is precisely why the repaired precedent throws rather than
+    returning.
+
+    (iii) SHARED VALIDATOR OR FOUR ARMS IS AN OPEN CHOICE, AND RATIONALE (8) BOUNDS IT. A shared
+    helper may NOT live in `src/lib` — these scripts run under plain `node` and their
+    self-containment is stated, not incidental. It would have to be a new plain-JS module under
+    `scripts/` imported by all four. Repeating the arm keeps each script self-contained at the cost
+    of four near-identical guards. This task does not pre-decide; whichever is chosen, the four
+    behaviours below are what must hold.
+
+    (iv) AND THE SWEEP MUST NOT BE KEYED ON ONE QUOTING. Rationale (4): two sites use `'number'`
+    and two use `"number"`. An implementation that greps for one form will silently leave half the
+    population in place and report success.
+
+    (v) MUTATION-RATCHET'S TWO ARMS MUST AGREE. Rationale (7): the nightly arm already refuses a
+    non-numeric `scorePct`. After this, the PR-time arm refuses the same shape the same way —
+    a criterion pins that the nightly arm's existing refusal is unchanged, not replaced.
+
+    (vi) WHAT MUST NOT CHANGE, PINNED BY A CRITERION: NO RATCHET VALUE MOVES — not `capChars`, not
+    `linesPct`, not `branchesPct`, not `scorePct`, not any baseline file's recorded figure. NO
+    THRESHOLD IS RELAXED and no epsilon widens. A well-formed baseline that passes today still
+    passes, and one that fails today still fails with the same message.
+
+    (vii) NOT IN SCOPE, NAMED: `capBytes`, already repaired by W1-T1233 and cited not re-filed;
+    `measuredBytes`, which W1-T1234 owns; `learnings-budget-ratchet.mjs:229`'s `?? "unset"`
+    reporting idiom, which is the REPORTING half W1-T1233's note also named and which this task
+    does not fold in; and `src/lib/ci-parity.ts`, which `.github/workflows/ci.yml` warns against
+    editing by name.
+  acceptance:
+    - claim: "a learnings corpus cap that is present but not a number refuses instead of reporting satisfied"
+      proof: "unit test: test/learnings-budget-ratchet.test.ts"
+    - claim: "a coverage lines or branches baseline that is present but not a number refuses instead of reporting satisfied"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "a mutation score baseline that is present but not a number refuses at PR time, as the nightly arm already does"
+      proof: "unit test: test/mutation-ratchet.test.ts"
+    - claim: "an absent threshold is still the honest not-configured contract and still does not block"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "a well-formed baseline evaluates exactly as it does today, with no value or threshold moved"
+      proof: "unit test: test/mutation-ratchet.test.ts"
+  files: [scripts/learnings-budget-ratchet.mjs, scripts/coverage-ratchet.mjs, scripts/mutation-ratchet.mjs, test/learnings-budget-ratchet.test.ts, test/coverage-ratchet.test.ts, test/mutation-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#four-ratchets-still-disarm-on-a-malformed-threshold-2026-08-23"
+  plan_refs: ["W1-T1233", "W1-T1234"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/learnings-budget-ratchet.test.ts` (18 tests), `test/coverage-ratchet.test.ts`
+    (20) or `test/mutation-ratchet.test.ts` (34) — all three declared in `files:` and all three
+    already existing, so each resolves against a real file rather than a forward reference.
+
+    `risk: high` IS SET FROM RULE 19's SPAN AND NOT FROM BLAST RADIUS, AS INSTRUCTED. The span is
+    six files across three scripts and three suites. The blast radius alone would argue lower: each
+    change is a few lines that add a refusal, none moves a number, and the failure mode of a
+    mistake is a loud red gate rather than a silent pass. Rationale (9) records that `high` does
+    not merely satisfy the sizing check but EXEMPTS it (`task-linter.ts:197`), so the band is a
+    declaration of span rather than a bar this filing cleared.
+
+    Q1 IS ANSWERED "FOUR, NOT ONE", AND THE SPLIT REMAINS THE OPERATOR'S CALL. Rationale (8)
+    establishes there is no shared helper and that one cannot simply be lifted into `src/lib`. This
+    is filed as ONE task because the RULE is one and the four behaviours are only meaningful
+    together — a fix that repairs three ratchets and leaves the fourth reporting OK on a quoted
+    threshold has closed nothing an operator can rely on. If the operator prefers three filings,
+    one per script, the natural cut is by script and each carries its own test home; that cut is
+    named here rather than taken.
+
+    THE ID WAS PRE-MINTED AND READ BACK BEFORE ANYTHING WAS WRITTEN. `refs/rmd-id/W1-T1277`
+    resolves on origin against a namespace of 307 such refs. EIGHT SURFACES WERE SWEPT, and ONE
+    SURFACE'S CONTROL WAS RE-QUALIFIED RATHER THAN ITS ZERO REPORTED: the open-PR file-list surface
+    read 0 for `plan/tasks.d/`, which would have disqualified it, because neither open PR touches
+    that directory — so it was re-controlled on "any file entry at all", which reads 9 across the
+    same two heads, proving the reader works and making the W1-T1277 zero a real one. The rest:
+    shard filenames 0 against W1-T1233 at 1; plan `- id:` lines 0 against W1-T1233 at 1; the
+    reservation 1, which is the pre-mint, against W1-T1275's own at 1; open PR titles 0 against
+    W1-T1253 at 1; open PR head branches 0 against `run-W1-T` heads at 2; open PR file lists 0 with
+    coverage at two captured of two enumerated; merged trailers 0 against
+    `Remudero-Task: W1-T1252` at 1, with 459 trailer-carrying commits on main; and merged subject
+    credit 0 against W1-T1233 at 1, with `run-W1-T1277-*` at 0 against a namespace of 84 `run-*`
+    branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, AND IT DELIBERATELY COUNTS BOTH
+    QUOTINGS. Five markers at every open PR head and at main: the `capChars`, `linesPct`,
+    `branchesPct` and `scorePct` guards in their own files, plus `must be a number` in the repaired
+    `claude-md-budget-ratchet.mjs` as the fixed-precedent control. Main reads 1 / 1 / 1 / 1 with
+    the precedent at 1, and every head reads exactly the same — no head is repairing any of these
+    four.

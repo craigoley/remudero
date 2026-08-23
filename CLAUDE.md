@@ -716,3 +716,23 @@ forensic detail, so the narrative does not need to live here.
   widening is recorded in the source comment and PR body, not the shard** — `rule15-filing` refuses
   it, and the reviewer's `scope_violation` is ADVISORY, naming "review-ratified widenings"
   legitimate. *(#2255)*
+
+## Lessons from 2026-08-23
+
+- **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
+  shipped.** THREE THIS SESSION: W1-T1127 read `queued` on main while its build had merged as
+  #2476 (both credit paths — trailer AND a `run-W1-T1127-<digits>` head); W1-T1065's
+  admission-time re-check is in `daemon.ts` under its own name; W1-T1059's caller is wired in
+  `run-task.ts`. Read alone it cost a full rebuild that was discarded. The credit projection above
+  is the ONLY completion signal; `status:` is what the FILING wrote and nothing updates it on
+  merge. Pair it with the `ls-remote` hazard already under "Investigation discipline": a deleted
+  head and a stale `status:` agree on "not done" and are both wrong. *(#2476 — a whole build
+  discarded on two signals that agreed)*
+- **A gate run from a checkout that is BEHIND answers about a file and a threshold that both
+  moved — run it against `origin/main`'s blobs and report the behind-count.** MEASURED: the
+  operator checkout sat 465 commits behind, and `node scripts/claude-md-budget-ratchet.mjs` there
+  printed `60965 bytes (cap 61046) OK` while `git show origin/main:CLAUDE.md` is 63798 against a
+  cap of 65536 raised 2026-08-22 — BOTH operands stale, exit 0, no warning. The failure is
+  invisible because the gate is honest about what it read and silent about which tree that was.
+  `git rev-list --count HEAD..origin/main` costs nothing; print it beside any gate verdict taken
+  outside a fresh worktree. *(2026-08-23, this retro's own first measurement)*

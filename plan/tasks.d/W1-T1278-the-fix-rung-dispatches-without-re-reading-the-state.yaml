@@ -1,0 +1,172 @@
+- id: W1-T1278
+  title: "THE FIX RUNG SPENDS A STRIKE WITHOUT RE-READING THE STATE THAT WOULD TELL IT NOT TO — it holds failing check NAMES and the PR's lifecycle state, and neither the attempt set that shows a red already being superseded nor the `mergeable_state` that shows the outcome cannot be observed at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-23 ON THE DAEMON HOST, in a scratch worktree proved equal to `origin/main` at
+    8e8b331e before any reading; the clone was checked and already full (2,044 commits), and
+    `src/run-task.ts` is over the contents-API cap so every per-head read used git objects. Ledger
+    figures come from `resolveLedgerUnion` over 21 archives, `ok:true`, `unread:0`, with the
+    control `"step":"risk_judge.decision"` reading 152. NOTHING BELOW IS CARRIED — every figure
+    was re-derived in this pass, and where it differs from the brief the measured value is used.
+
+    (1) CONDITION A, RE-DERIVED OVER 2026-08-22T18:16Z → 2026-08-23T18:16Z (27,007 rows). Sixteen
+    `blocked_ci` verdicts totalling $102.06. Their reason strings split 9 "ci red before review",
+    6 "required check red: coverage-ratchet", 1 "ci timeout before review" — so CI REALLY WAS RED
+    AT THE READ in fifteen of sixteen, and this is not a bound firing on a healthy condition.
+
+    (2) AND THIRTEEN OF THOSE SIXTEEN MERGED AFTERWARDS — $73.02 of the $102.06 — at a MEDIAN 104
+    MINUTES after the run declared them blocked. The full gap set, in minutes: 33, 35, 46, 60, 69,
+    102, 104, 148, 150, 165, 175, 182, 198. The verdict was terminal; the state it described was
+    not.
+
+    (3) WHAT THAT VERDICT DISPATCHES IS THE RUNG, AND THE RUNG'S BILL IS THE RECOVERABLE PART. In
+    the same window: 14 runs entered the rung, spending 32 strikes and $70.09 — 7 converged, 3
+    exhausted, 3 mixed, 1 neither — alongside 13 `escalation.issue_opened` rows, every one class
+    `BLOCKED`. The PRs those strikes were spent on are the same PRs that merged in (2).
+
+    (4) CONDITION B, RE-DERIVED ON #2605. `mergeable=false`, `mergeable_state=dirty`, and
+    `git merge-tree --write-tree origin/main <head>` returns rc=1 listing a real three-way content
+    conflict — stages 1, 2 and 3 all on `src/lib/wipe-test.ts`. A conflicted PR registers no new
+    check runs, so a correct repair and a wrong one produce the identical observation and the
+    strike buys no information. #2605 is also one of the three blocked_ci PRs from (2) that did
+    NOT merge — condition A's exception is condition B's instance.
+
+    (5) Q1 — THE INSERTION POINT ALREADY EXISTS AND IS ALREADY THE RIGHT SHAPE. `runFixRung`
+    (`src/run-task.ts:5533`, spanning to :6589) opens every round with
+    `const preStrikeStandDown = await fixRungStandDownReason(...)` at :5790 — BEFORE `strikes` is
+    incremented and before `fix.dispatch` is logged — and already returns
+    `{ outcome: "stood_down", reason, standDownReason }`, already choosing between escalating a
+    decidable question and ledgering a settled one (`fix.stood_down`, site `rung.strike`). There
+    is no new seam to invent.
+
+    (6) AND WHAT IT HAS IN HAND THERE IS NEITHER OF THE TWO THINGS IT NEEDS, MEASURED WITH A
+    CONTROL SO THE ZERO MEANS ABSENCE. `mergeable_state` occurs ZERO times inside the rung's span;
+    the controls on that same span are `readLiveState` 6, `ciFailures` 7 and `mergeConflict` 3 —
+    all dispositions the rung demonstrably does consult — so the scan reaches and the absence is
+    real. `LiveStateResult` is `{ ok, state? }` (`src/lib/sweep.ts:3203`), which carries the PR's
+    OPEN/CLOSED/MERGED lifecycle and not its mergeability. And `CiFailure`
+    (`src/lib/sweep.ts:234`) carries exactly `name`, `logTail`, `sha?`, `outsidePrRange?` — no
+    `started_at`, no attempt id, nothing that could distinguish a red with a later attempt running
+    from a red that is final.
+
+    (7) THE REPO ALREADY OWNS THE PREDICATE — IT JUST DOES NOT REACH THE RUNG. `mergeFactsFromRest`
+    (`src/run-task.ts:5340`, W1-T1095 capability 3) reads exactly the right thing:
+    `mergeable === false || mergeable_state === "dirty"` is the DEFINITE conflict reading, and
+    everything GitHub has not computed stays `UNKNOWN` rather than resolving toward action. It sits
+    193 lines ABOVE `runFixRung` and is not called from inside it.
+
+    (8) THE FOUR NEAREST RELATIVES ARE CITED AND NONE OF THEM STOPS THE RUNG DISPATCHING, WHICH IS
+    THIS TASK'S WHOLE SUBJECT. W1-T1219 owns the fix-spawn BOUND — how long a strike may run, not
+    whether it should start. W1-T1275 owns the required ROLLUP that never recomputes — it would
+    clear the gate sooner, and the rung would still have dispatched first. W1-T1223 owns REQUEUING
+    the cancelled check — it explains why 6 of the 16 read `coverage-ratchet`, and again the rung
+    still dispatches. W1-T1269 owns the missing PROGRESS test. Every one of them is on main and
+    none is re-filed here.
+  design: |
+    ONE CONCERN: a strike must not be spent on a state that already contradicts the reason for
+    spending it. Not the bound, not the cap, not the escalation.
+
+    (i) BOTH CHECKS GO AT THE EXISTING GATE. `fixRungStandDownReason` / `preStrikeStandDown`
+    (rationale 5) is the one insertion point: it already runs before `strikes` is incremented, it
+    already has the vocabulary for a named stand-down, and it already distinguishes escalate-worthy
+    from ledger-only. Nothing new is introduced anywhere else in the rung.
+
+    (ii) CONDITION A'S STAND-DOWN IS DELIBERATELY NARROW: THE ONLY RED REQUIRED NAME HAS A LATER
+    ATTEMPT ALREADY IN FLIGHT. Both halves matter. "The ONLY red" — if any other required name is
+    red with nothing pending, the rung proceeds, because there is real work to do. "ALREADY IN
+    FLIGHT" — an attempt that EXISTS on this same head with a later `started_at` and a
+    non-terminal status. That is an OBSERVED fact about a run that is executing right now, and it
+    is what separates this from "will probably be re-run", which is a prediction and must never
+    stand a strike down. One notch wider — "a red that might clear", "a check that has failed
+    before" — becomes "never fix a red PR", the exact opposite of the rung's purpose.
+
+    (iii) THE INPUT FOR (ii) DOES NOT EXIST YET AND MUST BE ADDED HONESTLY. Rationale (6):
+    `CiFailure` carries no attempt information, so the check-run set the sweep already reads must
+    carry enough of it — a per-name latest-attempt status — for the gate to answer the question.
+    An implementation that infers "in flight" from a name, a timestamp on the failure, or a retry
+    count is inferring, and design (ii) forbids exactly that.
+
+    (iv) CONDITION B'S STAND-DOWN DEFERS TO THE CONFLICTED DISPOSITION; IT DOES NOT RETRY AND DOES
+    NOT HOLD. A PR whose `mergeable_state` is `dirty` cannot be observed making progress, so the
+    rung declines the strike and hands the PR back to the sweep's own `conflicted` disposition,
+    which owns merge-conflict mode already (`mergeConflict` evidence, rationale 6's control). If
+    that disposition is unavailable to the caller, the stand-down escalates rather than looping —
+    an open-ended hold on a conflicted PR is the shape that produces a silent stall, and a retry is
+    the shape that produced this task.
+
+    (v) NOTHING AUTO-RESOLVES A CONFLICT. The rung declines; it never rebases, never merges main
+    in, never edits the branch to make the conflict go away.
+
+    (vi) WHAT MUST NOT CHANGE, PINNED BY CRITERIA: `strikeCap` keeps its value and its meaning; the
+    escalation at the ceiling still fires with the same class; and A GENUINELY-RED PR WITH NO
+    PENDING ATTEMPT STILL GETS ITS RUNG, which is the criterion that stops this task from becoming
+    the wider condition (ii) refuses.
+
+    (vii) NOT IN SCOPE, NAMED: the spawn bound (W1-T1219), the rollup recompute (W1-T1275), the
+    cancelled-check requeue (W1-T1223) and the progress test (W1-T1269) — all cited in rationale
+    (8), none re-filed, and none of them prevents the dispatch this task is about.
+  acceptance:
+    - claim: "a strike is declined when the only red required name has a later attempt already in flight on the same head"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "a red required name with no later attempt still gets its strike, and the cap is unchanged"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "a second red required name with nothing pending keeps the rung dispatching"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "a PR whose merge state is dirty declines the strike and defers rather than retrying or holding"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "the declined strike is named in the ledger and no conflict is resolved by the rung"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+  files: [src/run-task.ts, src/lib/sweep.ts, test/fix-rung-authorship-stand-down.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#fix-rung-dispatches-without-re-reading-2026-08-23"
+  plan_refs: ["W1-T1219", "W1-T1275", "W1-T1223", "W1-T1269", "W1-T1095"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/fix-rung-authorship-stand-down.test.ts`, which is declared in `files:`,
+    already exists with 10 tests, and already drives this exact gate — `fixRungStandDownReason` /
+    site `rung.strike` occur 4 times in it — so the criteria land beside the fixtures that already
+    exercise the insertion point rather than opening a new home.
+
+    THE FALSIFIER, STATED SO IT CAN BE RUN. This task is falsified if, over a subsequent 24-hour
+    window measured the same way, FIX-RUNG SPEND DOES NOT FALL from the $70.09 / 32 strikes / 14
+    runs baseline in rationale (3) — or if A PR THAT GENUINELY NEEDED A FIX STALLS INSTEAD,
+    observable as a red required name with no pending attempt that receives no strike. Either
+    outcome means the condition was drawn at the wrong width, and design (ii)'s narrowness is what
+    is on trial.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` names three stems. The blast radius
+    is one gate that already exists and already returns a stand-down; the danger is entirely in the
+    CONDITION'S WIDTH, which is why criteria 2 and 3 both exist to hold it narrow — a fix that
+    passes criterion 1 and fails either of those has built "never fix a red PR".
+
+    TWO FIGURES MOVED UNDER RE-DERIVATION AND THE MEASURED ONES ARE USED: $73.02 rather than
+    $72.83 for the thirteen that merged, and a median gap of 104 rather than 105 minutes. The
+    reason split is 9 / 6 / 1 across "ci red before review", "required check red: coverage-ratchet"
+    and "ci timeout before review", which is the same fifteen-of-sixteen the brief names.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND CONFIRMED UNUSED BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T1278` resolves to `24bff7df94f5976bdb4a48b6775180af57986f43` against a
+    namespace of 309 such refs. EIGHT SURFACES WERE SWEPT, AND ONE CONTROL WAS DISQUALIFIED RATHER
+    THAN REPORTED: W1-T1277 reads 0 on the main-tree surfaces because its own filing PR is still
+    open, so those were re-controlled on W1-T1275, which reads 1 on each. Shard filenames 0; plan
+    `- id:` lines 0; the reservation 1, against W1-T1277's own reservation at 1; open PR titles 0
+    against W1-T1256 at 1; open PR head branches 0 against `run-W1-T` heads at 3; open PR file
+    lists 0 with coverage at seven captured of seven enumerated, controlled on total file entries
+    across the same heads reading 18 rather than on a `plan/tasks.d/` path, which reads zero on
+    this board; merged trailers 0 against `Remudero-Task: W1-T1252` at 1, with 459
+    trailer-carrying commits on main; and merged subject credit 0 against W1-T1275 at 1, with
+    `run-W1-T1278-*` at 0 against a namespace of 85 `run-*` branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, READ THROUGH GIT OBJECTS.
+    Three markers at every one of the seven open PR heads and at main: `mergeable_state` WITHIN
+    `runFixRung`'s own span, `fixRungStandDownReason` across `src/run-task.ts`, and `started_at`
+    within the `CiFailure` interface. Main reads 0 / 4 / 0 and every head reads exactly 0 / 4 / 0 —
+    no head is adding either missing input. The two zeros are the defect itself and the non-zero
+    marker is the control that the reader worked.
