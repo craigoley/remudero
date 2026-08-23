@@ -7,6 +7,10 @@ import {
   ContainmentError,
   assessContainment,
   containmentProbePrompt,
+  assessEgressContainment,
+  EGRESS_PROBE_BLOCKED_TARGET,
+  EGRESS_PROBE_ALLOWED_TARGET,
+  EGRESS_PROBE_TIMEOUT_MS,
   defaultExecutor,
   probeContainment,
   type ProbeExecResult,
@@ -422,4 +426,91 @@ test("ContainmentError: the static config gate (sandbox disabled) names its own 
       return true;
     },
   );
+});
+
+// ── W1-T1265: THE EGRESS ARM ────────────────────────────────────────────────
+//
+// All three verdicts are falsified, and the THIRD is the one that matters: it is
+// what stops a host with no network reading as a perfect sandbox. Direction one
+// alone (holding) is vacuous — a verdict that cannot say broken proves nothing by
+// saying held.
+
+test("W1-T1265: an attempt to a domain outside the allowlist that connects is proven-broken", () => {
+  const v = assessEgressContainment({
+    outsideWriteCreated: false,
+    osDenialSeen: true,
+    insideWriteCreated: true,
+    blockedEgressReached: true,
+    egressDenialSeen: false,
+    allowedEgressSucceeded: true,
+  });
+  assert.equal(v.verdict, "proven-broken");
+  assert.match(v.reason, new RegExp(EGRESS_PROBE_BLOCKED_TARGET.replace(".", "\\.")));
+  assert.match(v.reason, /did not engage/);
+});
+
+test("W1-T1265: a refused outside attempt alongside a successful allowlisted control is proven-holding", () => {
+  const v = assessEgressContainment({
+    outsideWriteCreated: false,
+    osDenialSeen: true,
+    insideWriteCreated: true,
+    blockedEgressReached: false,
+    egressDenialSeen: true,
+    allowedEgressSucceeded: true,
+  });
+  assert.equal(v.verdict, "proven-holding");
+  assert.match(v.reason, new RegExp(EGRESS_PROBE_ALLOWED_TARGET.replace(".", "\\.")));
+});
+
+test("W1-T1265: a refused outside attempt whose allowlisted control ALSO failed is unproven, never holding", () => {
+  // THE OFFLINE-HOST CASE. Every field is identical to the holding fixture above
+  // except the control, so this pair isolates the gate rather than merely asserting
+  // an outcome: if the verdict ignored the control these two would be equal.
+  const v = assessEgressContainment({
+    outsideWriteCreated: false,
+    osDenialSeen: true,
+    insideWriteCreated: true,
+    blockedEgressReached: false,
+    egressDenialSeen: true,
+    allowedEgressSucceeded: false,
+  });
+  assert.equal(v.verdict, "unproven");
+  assert.notEqual(v.verdict, "proven-holding");
+  assert.match(v.reason, /no network/);
+});
+
+test("W1-T1265: evidence that predates the egress arm reads unproven rather than holding", () => {
+  // Fail-closed: an evidence literal with none of the three fields set must never
+  // report containment it never observed.
+  const v = assessEgressContainment({ outsideWriteCreated: false, osDenialSeen: true, insideWriteCreated: true });
+  assert.equal(v.verdict, "unproven");
+  // THE REASON, NOT ONLY THE VERDICT. Both unproven branches return the same
+  // verdict string, so asserting the verdict alone cannot tell them apart — a
+  // surviving mutant proved exactly that. This pins the no-denial branch.
+  assert.match(v.reason, /no denial was observed/);
+  assert.doesNotMatch(v.reason, /no network/, "must be the no-denial branch, not the failed-control one");
+});
+
+test("W1-T1265: the egress verdict reuses the existing three-state vocabulary and adds no fourth", () => {
+  const states = new Set(
+    [
+      { blockedEgressReached: true },
+      { egressDenialSeen: true, allowedEgressSucceeded: true },
+      { egressDenialSeen: true, allowedEgressSucceeded: false },
+      {},
+    ].map((extra) =>
+      assessEgressContainment({ outsideWriteCreated: false, osDenialSeen: true, insideWriteCreated: true, ...extra }).verdict,
+    ),
+  );
+  for (const s of states) assert.ok(["proven-holding", "proven-broken", "unproven"].includes(s), `unexpected state ${s}`);
+  assert.equal(states.size, 3, "all three states must be reachable, and only three");
+});
+
+test("W1-T1265: the blocked target is RFC 2606 reserved and the control is a distinct allowlisted host", () => {
+  // A `.invalid`/non-resolving target could not discriminate a working sandbox from
+  // an offline host, and a live third-party target would make the broken case harmful.
+  assert.equal(EGRESS_PROBE_BLOCKED_TARGET, "example.com");
+  assert.ok(!EGRESS_PROBE_BLOCKED_TARGET.endsWith(".invalid"), "a non-resolving target cannot discriminate");
+  assert.notEqual(EGRESS_PROBE_ALLOWED_TARGET, EGRESS_PROBE_BLOCKED_TARGET);
+  assert.ok(EGRESS_PROBE_TIMEOUT_MS > 0, "each attempt must be bounded so a hanging connect cannot stall a dispatch");
 });

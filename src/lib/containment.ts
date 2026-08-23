@@ -108,6 +108,34 @@ export interface ContainmentEvidence {
    * {@link assessContainment}, whose verdict is unchanged by this field.
    */
   denyFloorProbeCreated?: boolean;
+  /**
+   * W1-T1265 — THE EGRESS ARM. Three fields, mirroring the filesystem arm's
+   * `outsideWriteCreated` / `osDenialSeen` / `insideWriteCreated` one-for-one.
+   * All three are OPTIONAL and default falsy-or-absent, so every evidence
+   * literal that predates this arm keeps its current verdict unchanged.
+   *
+   * Did the attempt to a NON-allowlisted domain reach its target (connect or a
+   * response)? `true` => the sandbox did NOT hold. Mirrors
+   * {@link ContainmentEvidence.outsideWriteCreated}.
+   */
+  blockedEgressReached?: boolean;
+  /**
+   * Was a DENIAL actually observed for that attempt, as opposed to its merely
+   * having failed? Mirrors {@link ContainmentEvidence.osDenialSeen}, and carries
+   * the same load: absence of success is not proof, because an offline host
+   * fails identically to a contained one.
+   */
+  egressDenialSeen?: boolean;
+  /**
+   * Did the control attempt to an ALLOWLISTED domain SUCCEED? Mirrors
+   * {@link ContainmentEvidence.insideWriteCreated} — but note the asymmetry,
+   * which is deliberate: the filesystem arm REPORTS `insideWriteCreated` in its
+   * reason string without gating on it, whereas the egress verdict GATES on
+   * this. A host with no network refuses the blocked target for a reason that
+   * has nothing to do with the sandbox, so without a succeeding control the
+   * blocked attempt's failure proves nothing at all.
+   */
+  allowedEgressSucceeded?: boolean;
 }
 
 /**
@@ -200,6 +228,12 @@ export interface ProbeExecResult {
    * see {@link ContainmentEvidence.denyFloorProbeCreated}.
    */
   denyFloorProbeCreated?: boolean;
+  /** W1-T1265: the egress arm's three observations, carried from the executor to
+   *  the verdict exactly as the filesystem arm's are. See
+   *  {@link ContainmentEvidence.blockedEgressReached} for what each means. */
+  blockedEgressReached?: boolean;
+  egressDenialSeen?: boolean;
+  allowedEgressSucceeded?: boolean;
 }
 
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
@@ -324,6 +358,103 @@ export function assessDenyFloor(e: ContainmentEvidence): {
   return {
     engaged: true,
     reason: `deny-floor engaged — the ${DENY_FLOOR_PROBE_BASENAME} tripwire was refused before it could be created`,
+  };
+}
+
+/**
+ * W1-T1265 — the domain the egress probe attempts and the sandbox must REFUSE.
+ *
+ * `example.com` is reserved by IANA under RFC 2606 precisely so documentation and
+ * tests may name it, so the failure case is inert: when containment is BROKEN the
+ * attempt really does reach this host, exactly as the filesystem arm's outside-cwd
+ * write really does land — that contact IS the proven-broken evidence, and the
+ * mitigation is to make the contacted party a reserved one rather than to pretend
+ * no contact occurs. NOT a `.invalid`/non-resolving name: a DNS failure is
+ * indistinguishable from an offline host, so it could never discriminate a working
+ * sandbox from no network at all.
+ */
+export const EGRESS_PROBE_BLOCKED_TARGET = "example.com";
+
+/**
+ * W1-T1265 — the control target. MUST be a member of `settings/worker.json`'s
+ * `sandbox.network.allowedDomains`; this constant does not define the allowlist and
+ * this task adds nothing to it. Its attempt SUCCEEDING is the egress equivalent of
+ * `insideWriteCreated` landing, and it is what stops an offline host reading as a
+ * perfect sandbox.
+ */
+export const EGRESS_PROBE_ALLOWED_TARGET = "github.com";
+
+/**
+ * ── WHY 5000, PICKED NOT MEASURED (2026-08-23, no prior egress-probe population exists) ──
+ * A bound on each individual attempt, so a hanging connect cannot stall a dispatch.
+ * IT IS A PICKED NUMBER AND THIS ROW SAYS SO rather than implying a derivation: no
+ * egress probe has ever run in this fleet, so there is no observed distribution to
+ * size against — the honest thing available today is a value plus a stated absence of
+ * evidence. It is a BACKSTOP, not the primary control: the attempt normally ends when
+ * the sandbox refuses it or the control returns, and this ceiling fires only when
+ * neither happens. The in-tree exemplar for what this row should become once a
+ * population exists is `deploy/entrypoint.sh`'s
+ * "WHY 100, MEASURED 2026-08-18 (was 20, sized against a merge rate the fleet has outgrown)":
+ * a measurement, a date, the superseded value, and why the old one stopped fitting.
+ * WHEN THE FIRST PROBES HAVE RUN, REPLACE THIS PARAGRAPH WITH THAT SHAPE.
+ */
+export const EGRESS_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * PURE verdict over the egress observations — the decision half, with no I/O, so the
+ * three-state mapping is a unit fixture (design vii). THREE STATES, REUSING THE
+ * EXISTING VOCABULARY {@link ContainmentError}'s `observed` field already names:
+ * `proven-holding | proven-broken | unproven`. There is deliberately NO fourth state.
+ *
+ * ORDER MIRRORS {@link assessContainment}: the data-bearing failure is checked first,
+ * then the un-evidenced case falls through to UNPROVEN, which FAILS CLOSED.
+ *
+ * THE CONTROL IS A GATE HERE, WHICH IS THE ONE PLACE THIS ARM IS STRICTER THAN THE
+ * FILESYSTEM ARM. `assessContainment` reports `insideWriteCreated` in its reason and
+ * does not branch on it; this verdict branches on `allowedEgressSucceeded`, because a
+ * host with no network refuses the blocked target for a reason that is nothing to do
+ * with the sandbox. Without that gate an OFFLINE HOST WOULD READ AS A PERFECT SANDBOX.
+ *
+ * OBSERVATIONAL, NOT A GATE ON THE RUN — the same first step {@link assessDenyFloor}
+ * took, and for the same reason: nothing in {@link probeContainment} throws on this
+ * verdict yet, because the empirical behaviour of the allowlist under the installed
+ * CLI is UNMEASURED and this repo has already paid for bounds that fire on healthy
+ * conditions. Wiring the observation first is what produces the measurement a
+ * severity flip would need.
+ */
+export function assessEgressContainment(e: ContainmentEvidence): {
+  verdict: "proven-holding" | "proven-broken" | "unproven";
+  reason: string;
+} {
+  if (e.blockedEgressReached) {
+    return {
+      verdict: "proven-broken",
+      reason:
+        `egress to ${EGRESS_PROBE_BLOCKED_TARGET} (NOT allowlisted) SUCCEEDED — the sandbox did not engage`,
+    };
+  }
+  if (!e.egressDenialSeen) {
+    return {
+      verdict: "unproven",
+      reason:
+        `no denial was observed for the ${EGRESS_PROBE_BLOCKED_TARGET} attempt — egress containment UNPROVEN ` +
+        "(the request may never have been attempted)",
+    };
+  }
+  if (!e.allowedEgressSucceeded) {
+    return {
+      verdict: "unproven",
+      reason:
+        `the ${EGRESS_PROBE_BLOCKED_TARGET} attempt was denied, but the allowlisted control to ` +
+        `${EGRESS_PROBE_ALLOWED_TARGET} ALSO failed — this host may simply have no network, so the denial ` +
+        "proves nothing about the sandbox",
+    };
+  }
+  return {
+    verdict: "proven-holding",
+    reason:
+      `egress to ${EGRESS_PROBE_BLOCKED_TARGET} DENIED while the allowlisted control to ` +
+      `${EGRESS_PROBE_ALLOWED_TARGET} succeeded`,
   };
 }
 
