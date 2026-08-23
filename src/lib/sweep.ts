@@ -939,6 +939,19 @@ export interface OpenPrView {
    */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
   /**
+   * W1-T1275 (design iii/iv) — the ONE stale-gate transition (if any) this PR's rollup currently
+   * shows: `ci-gate`'s own latest attempt concluded non-success, and a required sibling's own
+   * latest attempt is a LATER terminal success on the same head — proof the sibling flipped green
+   * on this head after the gate had already read and concluded (see {@link
+   * staleCiGateTransition}'s own doc for the derivation this field is expected to hold). Populated
+   * ALONGSIDE `ciFailures`/`cancelledRequiredChecks`, when `checksState === "red"`; `undefined`
+   * when checks aren't red or nothing has flipped since the gate's own verdict — including every
+   * caller that hasn't wired a producer for it yet, the pre-existing behaviour byte for byte.
+   * Never makes `checksState` anything but "red" on its own — a stale verdict is cleared only by
+   * GitHub re-running the gate's job and a LATER sweep pass observing the fresh result.
+   */
+  staleCiGateTransition?: StaleCiGateTransition;
+  /**
    * GitHub's own merge-conflict state, simplified (W1-T106, the #170 DIRTY
    * strand) — see {@link MergeState}'s own doc. `undefined`/`"unknown"` never
    * disposition CONFLICTED (fail-closed): only an OBSERVED `"dirty"` does.
@@ -1380,6 +1393,143 @@ export function requeuedCheckKeysFromLedger(lines: Array<Record<string, unknown>
   for (const l of lines) {
     if (l.step === CHECK_REQUEUE_STEP && typeof l.head_sha === "string" && typeof l.check_name === "string") {
       out.add(`${l.head_sha}@${l.check_name}`);
+    }
+  }
+  return out;
+}
+
+// ── W1-T1275 — THE REQUIRED ROLLUP NEVER RECOMPUTES ONCE ITS OWN RUN CONCLUDES ───────────────
+//
+// `.github/workflows/ci-gate.yml` already dedupes by name and already re-reads inside a bounded
+// grace window (W1-T261, test/ci-gate-reaggregate.test.ts's bash-script suite above) — but every
+// re-read lives INSIDE that one run. Once it posts a terminal conclusion, nothing brings it back:
+// the #2612 incident (this task's rationale) held a green suite behind a stale `failure` verdict
+// for 155.4 minutes after ci-gate itself concluded, 30.7 of them after the last required sibling
+// had gone green. Design note (ii) requires the SAME per-job Actions route W1-T1223's
+// `requeueCheck` already uses (`actions/jobs/{job_id}/rerun`) — this section supplies the pure
+// detection and the ledgered bound; the real Actions call is `deps.reaggregateCiGate`'s wiring
+// (out of this task's declared files — see the task record's own note).
+//
+// The check named "ci-gate" IS the one branch protection actually requires (this file's own
+// `checksStateFromRollup` doc: "the mini's token returns [\"remudero-review\",\"ci-gate\"]") — the
+// individual siblings (`ci`, `coverage-ratchet`, …) are what CI-GATE ITSELF treats as required,
+// never a second GitHub-side requirement this sweep must separately track.
+export const CI_GATE_CHECK_NAME = "ci-gate";
+
+/**
+ * W1-T1275 (design iii/iv) — the ONE (head, sibling-transition) shape that makes `ci-gate`'s own
+ * concluded verdict stale: its own latest (deduped) attempt concluded a NON-SUCCESS terminal
+ * state, and a required sibling's own latest (deduped) attempt is a terminal SUCCESS that started
+ * AFTER ci-gate's own latest attempt started — proof the sibling's outcome flipped on this SAME
+ * head after the gate had already read and concluded. `jobId` mirrors {@link
+ * CancelledRequiredCheck.jobId}: parsed by a future real-gateway producer from ci-gate's OWN
+ * check-run `detailsUrl`, never the sibling's — design (ii) re-drives the AGGREGATOR's job, not
+ * the sibling's (the sibling already succeeded; there is nothing left to re-run there).
+ */
+export interface StaleCiGateTransition {
+  jobId?: string;
+  /** The required sibling whose later terminal success makes ci-gate's own verdict stale. */
+  siblingName: string;
+  /** That sibling's latest-attempt `startedAt` (ISO) — names WHICH transition (design iv), and
+   *  is what {@link ciGateReaggregateKey} bounds the recompute to firing once for. */
+  siblingStartedAt: string;
+}
+
+/**
+ * W1-T1275 (design iii) — detect the ONE shape design note iii pins, and NOTHING wider. `ci-gate`
+ * itself must have a concluded (deduped) attempt in {@link REQUIRED_CHECK_FAIL} — the SAME
+ * terminal-fail set {@link checksStateFromRollup} vetoes on, never a separately-invented one — or
+ * this returns `undefined`: a gate that is still pending/in-progress has no concluded verdict yet
+ * to be stale (criterion 2's other half — "time passed" or "the gate is red" alone is never
+ * enough). Then, among every OTHER (deduped) entry, only a literal `SUCCESS` whose `startedAt` is
+ * STRICTLY LATER than ci-gate's own qualifies — a sibling that is still failing, still pending, or
+ * whose success predates ci-gate's own read proves nothing changed, and this returns `undefined`
+ * too (criterion 2: "a suite that is genuinely still failing is never re-run by this path"). When
+ * more than one sibling qualifies, the one with the latest `startedAt` is named — the most recent
+ * transition is what actually makes the verdict stale.
+ *
+ * Reuses {@link dedupeRollupByLatestAttempt} — the SAME rule ci-gate.yml's own script and {@link
+ * checksStateFromRollup} already apply (rationale 3) — read-only: this function never changes
+ * which attempt the gate's own dedupe picks, only observes its result (acceptance: "the gate's
+ * latest-attempt-per-name resolution is unchanged").
+ */
+export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): StaleCiGateTransition | undefined {
+  const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
+  if (all.length === 0) return undefined;
+  const deduped = dedupeRollupByLatestAttempt(all);
+  const gate = deduped.find((c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME);
+  if (!gate || !gate.startedAt) return undefined;
+  const gateState = (gate.state ?? gate.conclusion ?? gate.status ?? "").toUpperCase();
+  if (!REQUIRED_CHECK_FAIL.has(gateState)) return undefined;
+
+  let latest: RollupCheckEntry | undefined;
+  for (const c of deduped) {
+    if ((c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME) continue;
+    const state = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+    if (state !== "SUCCESS") continue;
+    if (!c.startedAt || c.startedAt <= gate.startedAt) continue;
+    if (!latest || c.startedAt > (latest.startedAt ?? "")) latest = c;
+  }
+  if (!latest) return undefined;
+  return { siblingName: latest.name ?? latest.context ?? "unknown", siblingStartedAt: latest.startedAt! };
+}
+
+/** `${headSha}@${siblingName}@${siblingStartedAt}` — the (head, sibling-transition) identity
+ *  {@link CI_GATE_REAGGREGATE_STEP}'s ledger rows are keyed on (design iv). Two DIFFERENT
+ *  transitions on the same head (a second sibling flipping later, or the same sibling re-flipping
+ *  at a new `startedAt`) are two DIFFERENT keys, each earning its own bounded recompute. */
+export function ciGateReaggregateKey(headSha: string, transition: StaleCiGateTransition): string {
+  return `${headSha}@${transition.siblingName}@${transition.siblingStartedAt}`;
+}
+
+/** One recompute decision for one observed stale transition. */
+export interface CiGateReaggregateDecision {
+  reaggregate: boolean;
+  reason: string;
+}
+
+/**
+ * W1-T1275 (design iv) — BOUNDED BY A LEDGERED RECORD, never a clock or an in-memory counter,
+ * mirroring {@link cancelledCheckRequeueDecision}'s exact shape. Zero prior recomputes for this
+ * EXACT (head, sibling-transition) pair re-drives the gate's job once; a repeat observation of
+ * the SAME pair (this pass reading the identical stale transition again, before GitHub's own
+ * re-run has settled) never repeats the Actions call — "at most once per head and sibling
+ * transition" (criterion 3), which is what makes a re-run storm impossible by construction.
+ */
+export function ciGateReaggregateDecision(alreadyReaggregated: boolean): CiGateReaggregateDecision {
+  if (alreadyReaggregated) {
+    return {
+      reaggregate: false,
+      reason: "already re-driven once for this exact sibling transition on this head — never repeated",
+    };
+  }
+  return {
+    reaggregate: true,
+    reason: "ci-gate concluded non-success and a required sibling later reached a terminal success on the same head",
+  };
+}
+
+/** The ledger step {@link reaggregatedCiGateKeysFromLedger} reads back — one row per recompute. */
+export const CI_GATE_REAGGREGATE_STEP = "sweep.ci_gate_reaggregated";
+
+/**
+ * W1-T1275 (design iv) — every `${headSha}@${siblingName}@${siblingStartedAt}` pair the ledger
+ * already records a {@link CI_GATE_REAGGREGATE_STEP} row for. `runSweep` writes this row BEFORE
+ * calling `deps.reaggregateCiGate` (ledgered before it can be repeated — the SAME ordering {@link
+ * requeuedCheckKeysFromLedger}'s own doc gives for the identical reason), so a pass that crashes
+ * between the write and the real GitHub call still bounds the NEXT pass toward standing down
+ * rather than re-driving the SAME transition a second time.
+ */
+export function reaggregatedCiGateKeysFromLedger(lines: Array<Record<string, unknown>>): Set<string> {
+  const out = new Set<string>();
+  for (const l of lines) {
+    if (
+      l.step === CI_GATE_REAGGREGATE_STEP &&
+      typeof l.head_sha === "string" &&
+      typeof l.sibling_name === "string" &&
+      typeof l.sibling_started_at === "string"
+    ) {
+      out.add(`${l.head_sha}@${l.sibling_name}@${l.sibling_started_at}`);
     }
   }
   return out;
@@ -3383,6 +3533,17 @@ export interface SweepDeps {
    */
   escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => void | Promise<void>;
   /**
+   * W1-T1275 (design ii/iv) — re-drive `ci-gate`'s OWN check-run job (the per-job Actions route,
+   * the SAME endpoint {@link requeueCheck} above already uses — no new credential, no new client)
+   * when {@link OpenPrView.staleCiGateTransition} names a required sibling that reached a terminal
+   * success LATER than the gate's own concluded verdict. `runSweep` calls this AT MOST ONCE per
+   * (head, sibling-transition) — see {@link ciGateReaggregateDecision} and {@link
+   * reaggregatedCiGateKeysFromLedger} for the bound. Optional: omitted, the sweep still ledgers
+   * which transition it observed and stands down, taking no re-drive action — never a silent
+   * no-op, exactly like {@link requeueCheck}'s own contract.
+   */
+  reaggregateCiGate?: (pr: OpenPrView, transition: StaleCiGateTransition) => void | Promise<void>;
+  /**
    * W1-T177: an OPTIONAL fresh re-read of ONE PR's live GitHub state,
    * consulted immediately before a blocked-fixable disposition actually
    * spends a fix-rung strike — never the `openPrs` snapshot this whole sweep
@@ -4160,6 +4321,9 @@ export async function runSweep(
   // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
   // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
   const requeuedCheckKeys = requeuedCheckKeysFromLedger(ledgerLines);
+  // W1-T1275 (design iv) — the SAME fresh-every-pass, ledger-only bound as `requeuedCheckKeys`
+  // immediately above. See `reaggregatedCiGateKeysFromLedger`'s own doc.
+  const reaggregatedCiGateKeys = reaggregatedCiGateKeysFromLedger(ledgerLines);
 
   // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
   // Hung off THIS pass, not a new src/run-task.ts verdict call site (design note vi): `runSweep`
@@ -4669,6 +4833,45 @@ export async function runSweep(
               if (redCauseStandsDown(redCause)) {
                 acted = false;
                 standDownReason = describeRedCause(redCause, pr, openPrs);
+                break;
+              }
+              // W1-T1275 (design i/ii/iii/iv/v) — CI-GATE'S OWN CONCLUDED VERDICT CAN GO STALE: a
+              // required sibling's success can land AFTER the gate's own run has already
+              // concluded and posted a terminal FAILURE (the #2612 incident this task fixes).
+              // Fires BEFORE `dispatchFix` so a stale verdict never spends a fix-rung strike on a
+              // diff that carries no defect — the same "gate reconciliation, the sweep's own
+              // lane, never the fix rung's" reasoning the cancelled-check lane immediately below
+              // already applies (design v). Bounded to firing the real re-drive AT MOST ONCE per
+              // (head, sibling-transition) via the ledger (design iv); this pass never marks the
+              // gate green itself either way (design i) — it only asks GitHub to re-evaluate, and
+              // stands down so no fix-rung strike is spent while that settles.
+              const staleTransition = isBlockedCi(pr) ? pr.staleCiGateTransition : undefined;
+              if (staleTransition) {
+                const key = ciGateReaggregateKey(pr.headSha, staleTransition);
+                const decision = ciGateReaggregateDecision(reaggregatedCiGateKeys.has(key));
+                if (decision.reaggregate) {
+                  // LEDGERED BEFORE THE CALL (design iv), the same ordering `sweep.check_requeued`
+                  // uses just below for the identical reason: a crash between this write and the
+                  // real GitHub call still bounds the NEXT pass toward standing down rather than
+                  // re-driving the SAME transition a second time.
+                  appendLine(deps.ledgerPath, {
+                    run_id: deps.runId,
+                    task_id: pr.taskId ?? "SWEEP",
+                    step: CI_GATE_REAGGREGATE_STEP,
+                    pr_number: pr.prNumber,
+                    pr_url: pr.prUrl,
+                    head_sha: pr.headSha,
+                    sibling_name: staleTransition.siblingName,
+                    sibling_started_at: staleTransition.siblingStartedAt,
+                  });
+                  reaggregatedCiGateKeys.add(key);
+                  if (deps.reaggregateCiGate) await deps.reaggregateCiGate(pr, staleTransition);
+                }
+                acted = false;
+                standDownReason = decision.reaggregate
+                  ? `stale ci-gate verdict — re-driving its job (required sibling "${staleTransition.siblingName}" ` +
+                    `reached success at ${staleTransition.siblingStartedAt}, after the gate concluded)`
+                  : `stale ci-gate verdict already re-driven for this transition — awaiting the fresh result`;
                 break;
               }
               // W1-T1223 (design i/ii/iii/iv/v) — A CANCELLED REQUIRED CHECK HAS NO DEFECT IN

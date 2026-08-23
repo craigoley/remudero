@@ -2,10 +2,25 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile, mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import {
+  DEFAULT_SWEEP_POLICY,
+  CI_GATE_REAGGREGATE_STEP,
+  ciGateReaggregateDecision,
+  ciGateReaggregateKey,
+  reaggregatedCiGateKeysFromLedger,
+  runSweep,
+  staleCiGateTransition,
+  type OpenPrView,
+  type RollupCheckEntry,
+  type StaleCiGateTransition,
+  type SweepDeps,
+} from "../src/lib/sweep.js";
+import { readLedgerLines } from "../src/lib/status.js";
 
 // ── W1-T261: ci-gate RE-AGGREGATES on member-check completion ───────────────────────────────
 //
@@ -368,4 +383,231 @@ test("ci-gate-reaggregate (W1-T312): CLAUDE.md no longer states that W1-T261 is 
   // The corrected bullet should still exist and now name the merged PR + this task.
   assert.match(raw, /W1-T261.*#885/s);
   assert.match(raw, /W1-T312/);
+});
+
+// ── W1-T1275: THE REQUIRED ROLLUP NEVER RECOMPUTES ONCE ITS OWN RUN CONCLUDES ────────────────
+//
+// A SEPARATE gap from W1-T261 above, filed and measured 2026-08-23 on #2612. W1-T261 re-reads
+// INSIDE ci-gate's own run, bounded by GRACE_WINDOW_SECONDS; this defect is what happens once
+// that run has already CONCLUDED and posted a terminal verdict — nothing brings it back. `ci-gate`
+// held `failure` for 155.4 minutes after its own verdict and 30.7 minutes after `coverage-ratchet`
+// (the last required sibling) reached `success`, burning the `blocked_ci` fix rung's both strikes
+// and an operator escalation (issues/2632) against a PR whose only red required check was the
+// stale rollup itself.
+//
+// Design (ii) requires the recompute to go through the SAME per-job Actions route W1-T1223's
+// `requeueCheck` already uses, never a new client; design (iii) requires the trigger condition to
+// be exactly ONE shape (ci-gate concluded non-success, a required sibling later reached a LATER
+// terminal success on the same head) and NOTHING wider; design (iv) requires the recompute bounded
+// to at most once per (head, sibling-transition), ledgered so a human can tell it apart from a
+// hand re-run. This suite drives `staleCiGateTransition`/`ciGateReaggregateDecision` (the pure
+// detection and the bound) directly, and `runSweep` end to end against `deps.reaggregateCiGate`
+// (the sweep's own gate-reconciliation lane — see the block immediately preceding the cancelled-
+// check lane in lib/sweep.ts's `runSweep`).
+
+// ── staleCiGateTransition — the pure detection (criteria 1 & 2) ─────────────────────────────────
+
+test("staleCiGateTransition: the #2612 fixture — ci-gate FAILURE, coverage-ratchet cancelled then a LATER success on the same head — names coverage-ratchet's later attempt", () => {
+  const rollup: RollupCheckEntry[] = [
+    { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-14T14:27:16Z" },
+    { name: "ci", conclusion: "SUCCESS", startedAt: "2026-08-14T14:27:00Z" },
+    { name: "coverage-ratchet", conclusion: "CANCELLED", startedAt: "2026-08-14T14:27:16Z" },
+    { name: "coverage-ratchet", conclusion: "SUCCESS", startedAt: "2026-08-14T17:03:13Z" },
+  ];
+  const transition = staleCiGateTransition(rollup);
+  assert.ok(transition, "expected a stale transition to be detected");
+  assert.equal(transition!.siblingName, "coverage-ratchet");
+  assert.equal(transition!.siblingStartedAt, "2026-08-14T17:03:13Z");
+});
+
+test("staleCiGateTransition: a suite that is GENUINELY still failing — no sibling has reached a later success — is never named (criterion 2)", () => {
+  const rollup: RollupCheckEntry[] = [
+    { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-14T14:27:16Z" },
+    { name: "coverage-ratchet", conclusion: "FAILURE", startedAt: "2026-08-14T14:27:16Z" },
+    { name: "ci", conclusion: "SUCCESS", startedAt: "2026-08-14T14:27:00Z" },
+  ];
+  assert.equal(staleCiGateTransition(rollup), undefined, "still-red with no later sibling success must never trigger a recompute");
+});
+
+test("staleCiGateTransition: a sibling success that PREDATES ci-gate's own read never counts as a later transition", () => {
+  // ci ran and succeeded BEFORE ci-gate even started — ci-gate already had this in view when it
+  // concluded FAILURE (on some OTHER, still-red required check); nothing has changed since.
+  const rollup: RollupCheckEntry[] = [
+    { name: "ci", conclusion: "SUCCESS", startedAt: "2026-08-14T14:20:00Z" },
+    { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-14T14:27:16Z" },
+    { name: "coverage-ratchet", conclusion: "FAILURE", startedAt: "2026-08-14T14:27:16Z" },
+  ];
+  assert.equal(staleCiGateTransition(rollup), undefined, "an older success proves nothing changed after the gate's own read");
+});
+
+test("staleCiGateTransition: ci-gate itself still PENDING/IN-PROGRESS has no concluded verdict to be stale", () => {
+  const rollup: RollupCheckEntry[] = [
+    { name: "ci-gate", status: "in_progress", startedAt: "2026-08-14T14:27:16Z" },
+    { name: "coverage-ratchet", conclusion: "SUCCESS", startedAt: "2026-08-14T17:03:13Z" },
+  ];
+  assert.equal(staleCiGateTransition(rollup), undefined, "nothing concluded yet — never a positive claim from 'the gate is red' alone");
+});
+
+test("staleCiGateTransition: ci-gate already SUCCESS is already green — nothing to recompute", () => {
+  const rollup: RollupCheckEntry[] = [
+    { name: "ci-gate", conclusion: "SUCCESS", startedAt: "2026-08-14T14:27:16Z" },
+    { name: "coverage-ratchet", conclusion: "SUCCESS", startedAt: "2026-08-14T17:03:13Z" },
+  ];
+  assert.equal(staleCiGateTransition(rollup), undefined);
+});
+
+test("staleCiGateTransition: absent rollup / no ci-gate entry at all returns undefined, never throws", () => {
+  assert.equal(staleCiGateTransition(undefined), undefined);
+  assert.equal(staleCiGateTransition([{ name: "coverage-ratchet", conclusion: "SUCCESS", startedAt: "2026-08-14T17:03:13Z" }]), undefined);
+});
+
+test("staleCiGateTransition: TWO qualifying siblings — the LATEST startedAt is named, the most recent transition is what makes the verdict stale", () => {
+  const rollup: RollupCheckEntry[] = [
+    { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-14T14:27:16Z" },
+    { name: "coverage-ratchet", conclusion: "SUCCESS", startedAt: "2026-08-14T17:03:13Z" },
+    { name: "ci", conclusion: "SUCCESS", startedAt: "2026-08-14T18:00:00Z" },
+  ];
+  const transition = staleCiGateTransition(rollup);
+  assert.equal(transition?.siblingName, "ci");
+  assert.equal(transition?.siblingStartedAt, "2026-08-14T18:00:00Z");
+});
+
+// ── ciGateReaggregateDecision / ciGateReaggregateKey / ledger read-back — the bound (criterion 3) ─
+
+test("ciGateReaggregateDecision: no prior ledger record recomputes; a prior record for the SAME transition never repeats", () => {
+  const first = ciGateReaggregateDecision(false);
+  assert.equal(first.reaggregate, true);
+  const second = ciGateReaggregateDecision(true);
+  assert.equal(second.reaggregate, false);
+  assert.match(second.reason, /already re-driven once/);
+});
+
+test("ciGateReaggregateKey / reaggregatedCiGateKeysFromLedger: the key names the head sha, the sibling, AND the sibling's own attempt timestamp", () => {
+  const transition: StaleCiGateTransition = { siblingName: "coverage-ratchet", siblingStartedAt: "2026-08-14T17:03:13Z" };
+  const key = ciGateReaggregateKey("202d302", transition);
+  assert.equal(key, "202d302@coverage-ratchet@2026-08-14T17:03:13Z");
+  const keys = reaggregatedCiGateKeysFromLedger([
+    { step: CI_GATE_REAGGREGATE_STEP, head_sha: "202d302", sibling_name: "coverage-ratchet", sibling_started_at: "2026-08-14T17:03:13Z" },
+    { step: "some.other.step", head_sha: "202d302", sibling_name: "coverage-ratchet", sibling_started_at: "2026-08-14T17:03:13Z" },
+  ]);
+  assert.ok(keys.has(key));
+  assert.equal(keys.size, 1, "only the matching step contributes a key");
+});
+
+// ── runSweep end to end — the sweep's own gate-reconciliation lane ───────────────────────────────
+
+const NOW = Date.parse("2026-08-14T18:15:00Z");
+
+function ledgerPath(): string {
+  return join(mkdtempSync(join(tmpdir(), "rmd-ci-gate-reaggregate-")), "ledger.ndjson");
+}
+
+function pr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 2612,
+    prUrl: "https://github.com/craigoley/remudero/pull/2612",
+    taskId: "W1-TX",
+    reviewState: "none",
+    checksState: "red",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: new Date(NOW).toISOString(),
+    headSha: "e97690b0",
+    headRefName: "run-W1-TX-1785378652634",
+    autoMergeArmed: false,
+    ...over,
+  };
+}
+
+function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
+  fixed: Array<{ pr: OpenPrView }>;
+  armed: Array<{ pr: OpenPrView }>;
+  reaggregated: Array<{ pr: OpenPrView; transition: StaleCiGateTransition }>;
+} {
+  const fixed: Array<{ pr: OpenPrView }> = [];
+  const armed: Array<{ pr: OpenPrView }> = [];
+  const reaggregated: Array<{ pr: OpenPrView; transition: StaleCiGateTransition }> = [];
+  return {
+    fixed,
+    armed,
+    reaggregated,
+    arm: (p) => {
+      armed.push({ pr: p });
+    },
+    close: () => {},
+    dispatchFix: (p) => {
+      fixed.push({ pr: p });
+    },
+    escalate: () => {},
+    reaggregateCiGate: async (p, transition) => {
+      reaggregated.push({ pr: p, transition });
+    },
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-CIGATEREAGG-1",
+    now: () => NOW,
+    ...overrides,
+  };
+}
+
+test("runSweep: a PR red only because ci-gate's own verdict went stale re-drives its job exactly once, ledgered, and never spends a fix-rung strike", async () => {
+  const deps = fakeDeps();
+  const transition: StaleCiGateTransition = { siblingName: "coverage-ratchet", siblingStartedAt: "2026-08-14T17:03:13Z" };
+  const subject = pr({ staleCiGateTransition: transition });
+  const summary = await runSweep([subject], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(deps.reaggregated.length, 1, "the re-drive fired exactly once");
+  assert.equal(deps.reaggregated[0].transition.siblingName, "coverage-ratchet");
+  assert.equal(deps.fixed.length, 0, "a stale rollup carries no diff defect — the fix rung never spends a strike on it");
+  assert.equal(deps.armed.length, 0, "criterion 5 — this pass never arms/merges; it only asks GitHub to re-evaluate");
+  assert.equal(summary.actions[0].disposition, "blocked-fixable", "the disposition itself is untouched — never silently marked mergeable");
+  assert.equal(summary.actions[0].acted, false, "standing down, not a completed gated action");
+
+  const line = readLedgerLines(deps.ledgerPath).find((l) => l.step === CI_GATE_REAGGREGATE_STEP);
+  assert.ok(line, "the re-drive must be ledgered before it can be repeated (design iv)");
+  assert.equal(line!.head_sha, "e97690b0");
+  assert.equal(line!.sibling_name, "coverage-ratchet");
+  assert.equal(line!.sibling_started_at, "2026-08-14T17:03:13Z");
+  assert.equal(line!.pr_number, 2612);
+
+  const keys = reaggregatedCiGateKeysFromLedger(readLedgerLines(deps.ledgerPath));
+  assert.ok(keys.has(ciGateReaggregateKey("e97690b0", transition)), "reaggregatedCiGateKeysFromLedger reads the SAME row back");
+});
+
+test("runSweep: a SECOND pass over the SAME head sha and the SAME sibling transition does NOT re-drive again (criterion 3)", async () => {
+  const transition: StaleCiGateTransition = { siblingName: "coverage-ratchet", siblingStartedAt: "2026-08-14T17:03:13Z" };
+  const first = fakeDeps();
+  const subject = pr({ staleCiGateTransition: transition });
+  await runSweep([subject], first, DEFAULT_SWEEP_POLICY);
+  assert.equal(first.reaggregated.length, 1);
+
+  // Same ledger (so the prior re-drive is visible), same head sha, same transition — exactly
+  // what the NEXT pass would observe while GitHub's own re-run is still settling.
+  const second = fakeDeps({ ledgerPath: first.ledgerPath });
+  await runSweep([subject], second, DEFAULT_SWEEP_POLICY);
+  assert.equal(second.reaggregated.length, 0, "bounded — no second re-drive for the same (head, transition) pair");
+  assert.equal(second.fixed.length, 0, "still never the fix rung's job while the recompute settles");
+});
+
+test("runSweep: a DIFFERENT sibling transition on the SAME head earns its own bounded re-drive — the bound is per-transition, not per-head", async () => {
+  const first = fakeDeps();
+  const firstTransition: StaleCiGateTransition = { siblingName: "coverage-ratchet", siblingStartedAt: "2026-08-14T17:03:13Z" };
+  await runSweep([pr({ staleCiGateTransition: firstTransition })], first, DEFAULT_SWEEP_POLICY);
+  assert.equal(first.reaggregated.length, 1);
+
+  // A LATER pass observes ci-gate concluded (stale) AGAIN on the SAME head, this time because a
+  // DIFFERENT required sibling flipped after that later verdict — a genuinely new transition, not
+  // a repeat of the one already re-driven.
+  const second = fakeDeps({ ledgerPath: first.ledgerPath });
+  const secondTransition: StaleCiGateTransition = { siblingName: "ci", siblingStartedAt: "2026-08-14T19:00:00Z" };
+  await runSweep([pr({ staleCiGateTransition: secondTransition })], second, DEFAULT_SWEEP_POLICY);
+  assert.equal(second.reaggregated.length, 1, "a genuinely new transition still earns its own recompute");
+  assert.equal(second.reaggregated[0].transition.siblingName, "ci");
+});
+
+test("runSweep: a genuinely red PR with NO stale transition observed is untouched by this remedy — it still dispatches the fix rung, never re-drives ci-gate", async () => {
+  const deps = fakeDeps();
+  const subject = pr({ ciFailures: [{ name: "coverage-ratchet", logTail: "mutation survivor at line 12\n" }] });
+  await runSweep([subject], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(deps.reaggregated.length, 0, "nothing flipped — nothing to re-drive");
+  assert.equal(deps.fixed.length, 1, "a genuine failure still routes to the fix rung, unchanged");
 });
