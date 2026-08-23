@@ -219,6 +219,18 @@ test("W1-T1251: a malformed global artifact (not valid YAML) is reported as 'ref
   assert.equal(result.kind, "refused", "malformed YAML is a genuine refusal, not the designed absence");
 });
 
+test("W1-T1251: a global artifact that parses to valid YAML but isn't a mapping (e.g. a list) is 'refused' rather than 'absent'", () => {
+  const dir = tmpDir("learnings-global-notmapping-kind-");
+  const path = join(dir, "artifact.yaml");
+  writeFileSync(path, "- just\n- a\n- list\n");
+
+  const result = loadGlobalArtifact(path);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /must be a mapping/);
+  assert.equal(result.kind, "refused", "a non-mapping document is a genuine refusal, not the designed absence");
+});
+
 test("W1-T1251: a global artifact missing 'version'/'hash', or carrying a malformed entry, is 'refused' rather than 'absent'", () => {
   const dir = tmpDir("learnings-global-shape-kind-");
 
