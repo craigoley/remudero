@@ -307,6 +307,22 @@ export interface StatusProjection {
    */
   workerStateSince?: string;
   /**
+   * PROCESS-UNEVIDENCED (W1-T1240): true when this row's `phase`/`startedAt`/`elapsedMs`/
+   * `workerState` above are backed ONLY by an open PR — `recentActivity` (a ledger heartbeat
+   * within the liveness bound) and `hasLiveLock` (an inflight-holder pid judged alive by
+   * `isHolderStale`) are BOTH false, so nothing here has actually observed a LIVE LOCAL
+   * PROCESS. The elapsed clock and `workerState` word are still computed from the ledger's
+   * `run.start` as usual (design note v: they stay on the row, never deleted), but that is a
+   * claim about a local process backed only by a remote fact — the split that once rendered
+   * W1-T314 as `running, 10h25m, $27.75` ten hours after its run was refused. Marks "NOT
+   * EVIDENCED", never "dead" (design note iii, the W1-T119/W1-T130 cannot-observe polarity):
+   * `inflightHolder` is optional by contract, and an absent probe degrades process evidence to
+   * `recentActivity` alone rather than asserting the run is a corpse. Present ONLY alongside
+   * `phase` (this row is genuinely rendering `running`) — a row with a fresh heartbeat or a
+   * live lock omits it, same sparse convention as `orphaned`/`needsHuman`.
+   */
+  processUnevidenced?: true;
+  /**
    * True when the task has an OPEN escalation (escalate.ts's `escalation.issue_opened`)
    * that no LATER `run.start` has superseded — a human has not yet acted, or the task
    * was never redispatched since. Omitted (not `false`) once superseded by a newer run
@@ -3057,6 +3073,14 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
       if (hasOpenPr || recentActivity || hasLiveLock) {
         projection.status = "running";
         projection.phase = runState.phase;
+        // PROCESS-UNEVIDENCED (design note ii): held SEPARATELY from the disjunction just
+        // evaluated — `recentActivity || hasLiveLock` is process evidence, and when an open PR
+        // is the ONLY reason this row entered the branch, the decoration below is honest about
+        // being backed by a remote fact rather than an observed local process. Never flips the
+        // status word (note i) and never turns a merely-skipped lock read into "dead" (note iii).
+        if (hasOpenPr && !recentActivity && !hasLiveLock) {
+          projection.processUnevidenced = true;
+        }
         if (runState.startedAt) {
           projection.startedAt = runState.startedAt;
           projection.elapsedMs = Math.max(0, now() - Date.parse(runState.startedAt));
