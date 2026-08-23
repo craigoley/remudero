@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CEILING_OVERRIDE_WRITTEN_STEP,
+  DECISION_RELEVANT_LEDGER_STEPS,
   RENDER_RELEVANT_LEDGER_STEPS,
   RENDER_STEP_RETENTION_WINDOW_MS,
   appendDailyCostCeilingOverrideAudit,
@@ -14,6 +15,7 @@ import {
 } from "../src/lib/ledger.js";
 import { deriveAccountUsage, USAGE_CACHE_MAX_AGE_MS, type AccountUsageInput } from "../src/lib/account-usage.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { SWEEP_STALL_MULTIPLIER, judgeSweepLiveness, readSweepPassSummaryTimestamps } from "../src/lib/doctor.js";
 
 // ── W1-T275 (OBSERVED LIVE 2026-07-31, feedback recon): the ACCOUNT strip rendered "unknown" on
 // a healthy fleet because the live ledger had just rotated and `daemon.headroom` was absent from
@@ -87,6 +89,64 @@ test("RENDER_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — ev
     [],
     `RENDER_RELEVANT_LEDGER_STEPS is missing step(s) a real console consumer reads to render ` +
       `operator-visible history (derived from source, not from the hardcoded list itself): ${missing.join(", ")}`,
+  );
+});
+
+// ── W1-T1237 (THE SWEEP HEARTBEAT WOULD NOT SURVIVE BEING READ): the derived-from-consumers lock
+// above only ever scanned account-usage.ts's `.step ===` equality reads and board.ts's
+// `OPERATOR_ACTION_STEPS` Set literal — a doctor.ts-side consumer (src/lib/doctor.ts's
+// `judgeSweepLiveness`, W1-T1236) was invisible to it, so `sweep.pass`/`sweep.summary` could have
+// been registered here and then silently rotted with no test noticing a future edit dropping
+// them. Widened to ALSO scan doctor.ts's own `SWEEP_LIVENESS_STEPS` boundary marker — the exact
+// role `OPERATOR_ACTION_STEPS` already plays for board.ts — rather than a blanket
+// `switch(line.step)` scan of doctor.ts: that file compares many unrelated steps
+// (`daemon.alive`, `fix.dispatch`, `daemon.boot`, ...) that already have their own retention or
+// are out of this task's one concern. ─────────────────────────────────────────────────────────
+test("W1-T1237: the render set is derived from the sweep-liveness marker too", () => {
+  const doctorSrc = readFileSync(fileURLToPath(new URL("../src/lib/doctor.ts", import.meta.url)), "utf8");
+
+  const sweepLivenessSetMatch = doctorSrc.match(/SWEEP_LIVENESS_STEPS:\s*ReadonlySet<string>\s*=\s*new Set\(\[([^\]]*)\]\)/);
+  assert.ok(sweepLivenessSetMatch, "sanity: doctor.ts's SWEEP_LIVENESS_STEPS boundary marker was found");
+
+  const stringLiteral = /["']([^"']+)["']/g;
+  const discovered = new Set<string>();
+  for (const m of (sweepLivenessSetMatch as RegExpMatchArray)[1].matchAll(stringLiteral)) discovered.add(m[1]);
+
+  assert.ok(discovered.size >= 2, "sanity: the scan found real steps, not an empty/broken pattern");
+  assert.ok(discovered.has("sweep.pass"), "sanity: doctor.ts's own sweep.pass read was found");
+  assert.ok(discovered.has("sweep.summary"), "sanity: doctor.ts's own sweep.summary read was found");
+
+  const missing = [...discovered].filter((step) => !RENDER_RELEVANT_LEDGER_STEPS.has(step));
+  assert.deepEqual(
+    missing,
+    [],
+    `RENDER_RELEVANT_LEDGER_STEPS is missing step(s) the sweep-liveness arm reads (derived from ` +
+      `doctor.ts's own SWEEP_LIVENESS_STEPS marker, not from a second hardcoded list): ${missing.join(", ")}`,
+  );
+});
+
+// ── W1-T1237 design note (4): RECONCILE THE TWO NUMBERS, DO NOT CHOOSE THEM INDEPENDENTLY.
+// judgeSweepLiveness (doctor.ts) derives its stale-cadence WARN bound as SWEEP_STALL_MULTIPLIER
+// times the longest OBSERVED gap between sweep.pass rows — and a bound LONGER than the render
+// window can only ever see zero rows (the row itself has already rotated out of the live ledger
+// before its own staleness could ever be judged against that bound), which would make W1-T1236's
+// arm permanently WARN/UNKNOWN and useless. This is the sibling of the assertion this file already
+// carries for the ACCOUNT strip (RENDER_STEP_RETENTION_WINDOW_MS >= USAGE_CACHE_MAX_AGE_MS,
+// above): the window must be able to absorb SWEEP_STALL_MULTIPLIER (imported from doctor.ts,
+// never re-typed as a bare "3") applied to the fastest realistic cadence a healthy sweep pass ever
+// runs on — daemon.ts's real `rmd daemon` entry's own production default poll interval is 60
+// seconds (`DEFAULT_POLL_INTERVAL_MS`), restated here rather than imported: doctor.ts is already
+// this task's one authorized new read, and pulling daemon.ts in for a single constant would be a
+// new, unrelated coupling this task's design does not ask for. ─────────────────────────────────
+test("W1-T1237: the render window is at least the sweep-liveness bound", () => {
+  const fastestRealisticSweepPassGapMs = 60_000; // daemon.ts's DEFAULT_POLL_INTERVAL_MS, restated
+  const sweepLivenessBoundMs = SWEEP_STALL_MULTIPLIER * fastestRealisticSweepPassGapMs;
+  assert.ok(
+    RENDER_STEP_RETENTION_WINDOW_MS >= sweepLivenessBoundMs,
+    `a render retention window shorter than SWEEP_STALL_MULTIPLIER x the fastest realistic ` +
+      `sweep.pass cadence (${sweepLivenessBoundMs}ms) guarantees the sweep-liveness arm's ` +
+      `stale-cadence WARN can never fire before the row itself rotates away, reading 0 rows / ` +
+      `UNKNOWN instead`,
   );
 });
 
@@ -396,6 +456,127 @@ test("RENDER RETENTION — a fresh console.kick_dispatched line survives rotatio
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── W1-T1237 (THE SWEEP HEARTBEAT WOULD NOT SURVIVE BEING READ): src/lib/doctor.ts's
+// sweep-liveness arm (W1-T1236) reads `sweep.pass`/`sweep.summary` through its own
+// `SWEEP_LIVENESS_STEPS` boundary marker — both were in NEITHER retention set before this task,
+// so rotation archived them like any other diagnostic row and the arm would answer off a
+// truncated corpus the moment a real rotation ran. Retention is RECENCY-BOUNDED, not permanent —
+// the same "fresh survives, old is archived" proof this file already runs for every other entry
+// in RENDER_RELEVANT_LEDGER_STEPS. ─────────────────────────────────────────────────────────────
+
+test("W1-T1237: a fresh sweep.pass survives rotation and an old one does not", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const freshPassMs = nowMs - 60_000; // a minute ago — comfortably inside any real window
+    const stalePassMs = nowMs - (RENDER_STEP_RETENTION_WINDOW_MS + 60_000); // long expired
+
+    const lines: string[] = [
+      rawLine("sweep.pass", "DAEMON", stalePassMs, { enumerated: 4 }),
+      rawLine("sweep.pass", "DAEMON", freshPassMs, { enumerated: 7 }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshPassMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(
+      liveContent.includes(new Date(freshPassMs).toISOString()),
+      "the fresh sweep.pass line survives rotation",
+    );
+    assert.ok(
+      !liveContent.includes(new Date(stalePassMs).toISOString()),
+      "a sweep.pass line long outside the render window is archived — bounded by recency, not kept forever, exactly like every other render-relevant step",
+    );
+
+    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    assert.ok(
+      archiveContent.includes(new Date(stalePassMs).toISOString()),
+      "the archived (never deleted) roll still holds the stale sweep.pass line verbatim",
+    );
+
+    // The REAL consumer, not a string check: doctor.ts's own readSweepPassSummaryTimestamps
+    // reading the post-rotation live ledger must still find the fresh row.
+    const postRotationLines = readLedgerLines(ledgerPath);
+    const { passesMs } = readSweepPassSummaryTimestamps(postRotationLines);
+    assert.deepEqual(passesMs, [freshPassMs], "the sweep-liveness arm's own reader finds exactly the surviving fresh row");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1237: sweep.summary is retained beside sweep.pass", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const freshPassMs = nowMs - 120_000;
+    const freshSummaryMs = nowMs - 60_000;
+    const staleSummaryMs = nowMs - (RENDER_STEP_RETENTION_WINDOW_MS + 60_000);
+
+    const lines: string[] = [
+      rawLine("sweep.summary", "DAEMON", staleSummaryMs, { total: 3 }),
+      rawLine("sweep.pass", "DAEMON", freshPassMs, { enumerated: 5 }),
+      rawLine("sweep.summary", "DAEMON", freshSummaryMs, { total: 5 }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshSummaryMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(
+      liveContent.includes(new Date(freshSummaryMs).toISOString()),
+      "the fresh sweep.summary line survives rotation beside sweep.pass",
+    );
+    assert.ok(
+      !liveContent.includes(new Date(staleSummaryMs).toISOString()),
+      "a sweep.summary line long outside the render window is archived — bounded by recency, not kept forever",
+    );
+
+    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    assert.ok(
+      archiveContent.includes(new Date(staleSummaryMs).toISOString()),
+      "the archived (never deleted) roll still holds the stale sweep.summary line verbatim",
+    );
+
+    // The REAL consumer, not a string check: the paired derivation (a pass with no summary at or
+    // after it) needs BOTH halves surviving, or it is worthless — doctor.ts's own reader must find
+    // both the surviving pass and its surviving summary.
+    const postRotationLines = readLedgerLines(ledgerPath);
+    const { passesMs, summariesMs } = readSweepPassSummaryTimestamps(postRotationLines);
+    assert.deepEqual(passesMs, [freshPassMs]);
+    assert.deepEqual(summariesMs, [freshSummaryMs]);
+    const verdict = judgeSweepLiveness(passesMs, summariesMs, nowMs);
+    assert.equal(verdict.verdict, "OK", "post-rotation, the arm reads a real pass finished by its own surviving summary, not UNKNOWN");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T1237: the decision core is unchanged by this registration", () => {
+  assert.ok(
+    !DECISION_RELEVANT_LEDGER_STEPS.has("sweep.pass"),
+    "sweep.pass belongs in the recency-bounded render set, never the never-rotated decision core (W1-T275's ruling, applied unchanged)",
+  );
+  assert.ok(
+    !DECISION_RELEVANT_LEDGER_STEPS.has("sweep.summary"),
+    "sweep.summary belongs in the recency-bounded render set, never the never-rotated decision core (W1-T275's ruling, applied unchanged)",
+  );
+  assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("sweep.pass"));
+  assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("sweep.summary"));
 });
 
 // ── W1-T333 (THE OPERATOR'S AUDIT REQUIREMENT, verbatim in substance): every console write to
