@@ -1,0 +1,131 @@
+- id: W1-T1251
+  title: "A DESIGNED ABSENCE IS REPORTED IN THE VOCABULARY OF REFUSAL — `loadGlobalArtifact` returns SEVEN distinct failure reasons of which exactly ONE (`not found`) is the ruled-on deferred state and six are real problems including the tamper signal, and `status-board.ts` renders all of them under the single word `refused:`, so the operator's own board reports an expected absence and a hand-edited artifact in the same words"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 75.00
+  files: [src/lib/learnings.ts, src/lib/status-board.ts, test/learnings-layers.test.ts, test/learnings-injection-status.test.ts]
+  origin: oper#global-artifact-absence-vocabulary-2026-08-23
+  plan_refs: ["W1-T145", "W1-T425", "W1-T940"]
+  status: queued
+  attempts: 0
+  rationale: |
+    FIRST, AND BEFORE ANY OTHER CLAIM: THE MISSING GLOBAL ARTIFACT IS A DESIGNED SOFT-FAIL, NOT
+    BREAKAGE, AND NOTHING IN THIS TASK PROPOSES OTHERWISE. Three independent records say so:
+      `loadGlobalArtifact`'s own doc (src/lib/learnings.ts) -- "A missing file is refused the same
+        way (nothing pulled yet reads identically to 'refuse silently', which is the correct
+        default for an OPT-IN LAYER NOTHING HAS TO POPULATE)."
+      the injection block in src/run-task.ts -- "On a fresh instance the user-overall directory and
+        global artifact don't exist yet (§6 transport is deferred) -- both layers are NON-FATAL
+        ABSENCES, so this is a pure superset of the project-only injection that shipped before."
+      #2029, MERGED, the operator's own triage of the very feedback entry this task cites --
+        "feedback item (1) filed nothing because the missing global artifact is W1-T425's DEFERRED
+        TRANSPORT WITH A PATH CORRECT BY CONSTRUCTION."
+    A reader who takes the board's word `refused` as breakage is reading a correct system wrongly,
+    and that is precisely the defect below.
+
+    THE TWO COSTS ARE DIFFERENT MECHANISMS AND THE FEEDBACK ENTRY WELDS THEM.
+    `fb-1785237596465-45d06d` (status: proposed) is headlined *"Global learnings artifact
+    missing -- 81% of knowledge dropped"*. Its RAW text is accurate and separates them correctly:
+    the spawn logs `global_refused_reason` AND "drops 13 of 16 matched learnings AGAINST THE
+    1800-CHAR BUDGET". It is the generated SUMMARY HEADLINE that joins the two with an em-dash and
+    implies causation. 13/16 = 81.25%, and that figure is entirely the budget's.
+
+    THE ABSENT LAYER CANNOT CONTRIBUTE TO `dropped` AT ALL, BY CONSTRUCTION. `mergeLayers` pushes
+    global entries ONLY on `result.ok`; on refusal it records the reason and appends nothing. So a
+    refused global layer contributes ZERO candidates -- it can be neither matched nor dropped. The
+    16 matched entries came from the project layer, and the 13 dropped were dropped by
+    `selectLearnings` against `DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800`. The 81% would read 81% with
+    the artifact present or absent.
+
+    THE REPO ALREADY SEPARATES THEM AND SAYS SO. `LearningsInjectionTotals` (src/lib/digest.ts,
+    W1-T940) documents `globalRefusedReasons` as "deduped, and DELIBERATELY KEPT OFF `dropped`
+    (design note (iii))". The instrument is correct; the conflation is in the reading.
+
+    WHAT REMAINS UNOWNED IS THE WORD. `loadGlobalArtifact` returns seven distinct failure reasons:
+    `not found` (the designed state), not-valid-YAML, not-a-mapping, missing `version`, missing
+    `hash`, a `parseLearningsDoc` passthrough, and `hash mismatch (...) -- refused, not trusted`.
+    `status-board.ts` prints every one of them behind `global artifact refused:`. An expected
+    absence and a TAMPERED artifact are the same word on the board.
+  design: |
+    (i) Q1 -- ONE OPERATOR ROUND-TRIP DOES PROVISION IT, AND THE TRANSPORT IS COMPLETE.
+    `rmd learnings export <out>` (W1-T425) reads the project corpus and emits a bundle carrying
+    `sourceRepo`/`sourceSha` provenance and a content hash. `rmd learnings import <file> --pin
+    <hash>` verifies the pin, `mkdirSync(globalLearningsHome(config))`, then writes
+    `globalArtifactPath(config)` -- which is byte-for-byte the path `run-task.ts` hands
+    `loadGlobalArtifact` as `homes.globalArtifactPath`. So the refusal stops on the NEXT spawn.
+    Nothing is missing from the transport, and this task builds none of it.
+
+    (ii) BUT WHAT IT WOULD CONTAIN IS THE POINT, AND IT IS NOT NEW KNOWLEDGE. `export` reads
+    `loadLearningsCorpus(projectLearningsHome(repoRoot))` -- THIS repo's project layer. On a
+    single-repo fleet a round-trip therefore re-imports the project corpus as the global layer.
+    AND THERE IS NO CROSS-LAYER DEDUPE: `loadGlobalArtifact` calls `parseLearningsDoc(r.entries,
+    path, new Set())` with a FRESH set, so global ids are checked only against the artifact
+    itself, and `mergeLayers` then does a plain `entries.push(...result.entries)`.
+    `selectLearnings` ranks that combined array with no id-dedupe. Every project entry would enter
+    the ranking TWICE and compete for the same 1800 chars. The layer tiebreak orders the project
+    copy first, so the duplicate is injected again or lands in `dropped` -- either way the budget
+    pressure the feedback entry complained about gets WORSE, not better. THE ROUND-TRIP IS CHEAP
+    AND AVAILABLE; IT IS ALSO NOT A REMEDY FOR THE 81%, AND THIS SHARD REFUSES TO IMPLY IT IS.
+    The global layer's value is CROSS-REPO, which is what §6 defers.
+
+    (iii) Q2 -- THERE IS NO PER-SPAWN REFUSAL ROW TO REMOVE, SO THE PREMISE NEEDS CORRECTING.
+    `global_refused_reason` is a FIELD on `log("learnings.injected", ...)`, a row that is written
+    once per spawn REGARDLESS because it also carries `matched`, `matched_ids`, `dropped`,
+    `budget_chars` and `masked`. The 274 is a count of SPAWNS, not of dedicated log lines, and
+    `rmd status` already aggregates it to ONE board line. Reducing to once-per-boot would not
+    delete 273 rows; it would blank a ~50-byte field on rows that exist anyway.
+    WHAT THE PER-ROW FIELD BUYS, CONCRETELY: `aggregateLearningsInjection` keys the VERBATIM
+    reason to a row count per window, and the sibling `budgetChars` field's own doc states the
+    shared intent -- "a mid-window constant change is visible instead of averaged away". A reason
+    that changes mid-window (`not found` -> `hash mismatch`, i.e. someone provisioned it and it
+    was then tampered with) is exactly what per-row capture preserves and once-per-boot destroys.
+    SO: KEEP THE PER-ROW FIELD. This task does not touch the logging.
+
+    (iv) THE FIX IS THE DISCRIMINANT, NOT THE SEMANTICS. `GlobalArtifactResult`'s failure arm
+    carries only `{ ok: false, reason }`, so every consumer must string-match to tell an expected
+    absence from a real one -- which is why the board does not try. Add a discriminant to the
+    result (the absent path is the ONE `catch` around `readFileSync`; every other return is a
+    genuine refusal) and let `status-board.ts` render the designed state in its own words, naming
+    it as the deferred §6 transport rather than a refusal, while a tamper or malformation keeps
+    the word `refused` and stays prominent. ONE producer, one consumer, no new I/O.
+
+    (v) BOTH DIRECTIONS ARE PROVEN, because a change that renamed EVERY refusal to "expected"
+    would satisfy the absent case while destroying the tamper signal -- the more dangerous
+    failure. The acceptance pairs each with its opposite.
+
+    (vi) Q3 IS HONOURED BY CONSTRUCTION AND BY NAME. The absence stays NON-FATAL, contributing
+    zero entries exactly as today. The three-layer precedence is untouched, and the global layer
+    is NOT merged into the project corpus. This task changes what the board SAYS, never what the
+    loader DOES.
+  note: |
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: the 1800-char budget itself is W1-T941's
+    ("the knowledge budget is a derived cap, not a picked number"), which shipped -- and the
+    drop-count surfacing the same feedback entry asked for is W1-T940's, which also shipped
+    (`aggregateLearningsInjection` + the LEARNINGS INJECTION board block). Feedback items (2) and
+    (3) are therefore DISCHARGED, and item (1) was ruled non-actionable by #2029. This task is not
+    a re-file of any of them.
+
+    REPORTED, NOT FIXED: `plan/feedback/fb-1785237596465-45d06d.yaml` still reads `status:
+    proposed` although its proposal PR #2029 merged on 2026-08-17 and both filed tasks shipped.
+    Whether a discharged entry should advance is the intake lane's call, not this task's.
+
+    NOT PROPOSED, PER THE RULING: making the absence fatal, merging the global layer into the
+    project corpus, changing the three-layer precedence, or reducing the per-spawn field to
+    once-per-boot. Each is refused above with its reason rather than merely omitted.
+  acceptance:
+    - claim: "the designed absence is reported apart from a genuine refusal"
+      proof: "unit test: test/learnings-injection-status.test.ts"
+    - claim: "a tampered artifact is still reported as refused and stays prominent"
+      proof: "unit test: test/learnings-layers.test.ts"
+    - claim: "a malformed artifact is reported as a refusal rather than an absence"
+      proof: "unit test: test/learnings-layers.test.ts"
+    - claim: "the absent case still contributes zero entries and never becomes fatal"
+      proof: "unit test: test/learnings-layers.test.ts"
+    - claim: "the three-layer precedence order is unchanged"
+      proof: "unit test: test/learnings-layers.test.ts"
+    - claim: "every injection row still carries its global refusal reason verbatim"
+      proof: "unit test: test/learnings-injection-status.test.ts"
