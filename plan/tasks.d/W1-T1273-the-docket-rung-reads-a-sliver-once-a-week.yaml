@@ -1,0 +1,127 @@
+- id: W1-T1273
+  title: "THE FEEDBACK-DOCKET RUNG READS A SLIVER ONCE A WEEK, AND ONLY TWO OF ITS FIVE SOURCES ARE AFFECTED — `runFeedbackDocketRung` takes its ledger input from `readLedgerLines` (the live file) while three of its five capture surfaces read their own stores at full fidelity, and the marker it writes BEFORE the empty check spends a whole seven-day interval on each starved look"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 70.00
+  files: [src/run-task.ts, test/feedback-docket-union-corpus.test.ts]
+  origin: oper#feedback-docket-starved-and-locked-2026-08-23
+  plan_refs: ["W1-T1262", "W1-T110"]
+  status: blocked
+  attempts: 0
+  rationale: |
+    ★ FILED `status: blocked` ON PURPOSE. The operator's own Q2 says that if the window would still
+    have contained nothing, that closes this task. The measurement that decides it ALREADY EXISTS
+    and has already been taken — see design (v) — but could not be read from the environment this
+    was filed in. DO NOT DISPATCH until it has been read and recorded here.
+
+    THE LEDGER SURFACE IS DISQUALIFIED IN THE FILING ENVIRONMENT AND NO LEDGER FIGURE IS CLAIMED
+    HERE. `resolveLedgerUnion` — the sanctioned reader — THREW on this checkout ("Cannot read
+    properties of undefined"), and `state/` carries no ledger file at all. The `feedback_docket.*`,
+    `sweep.disposed` and `risk_judge.decision` counts are the operator's measurement on the daemon
+    host, cited as theirs.
+
+    STEP NAMES WERE TAKEN FROM SOURCE, NOT MEMORY. All four the operator named exist as literals:
+    `feedback_docket.empty` (2 emitters), `.error` (1), `.duplicate` (1), `.published` (1).
+
+    THE MARKER IS NOT A LOCK DEFECT, AND THE MODULE DOC UNDERSTATES IT. `feedbackDocketDue` returns
+    `now.getTime() - last >= SEVEN_DAYS_MS`. The comparison is SEVEN DAYS, not the 300-second
+    poll-debounce the doc describes. A marker dated 2026-08-20T00:48 makes the rung due again on
+    2026-08-27, so a three-day silence across 25 sweep passes is EXACTLY what the code specifies.
+    The doc's "so a 300s poll cadence does not re-fire the gather" is a true statement of WHY the
+    marker exists and a wildly incomplete statement of WHAT it does; that gap is what made a
+    correct cadence look like a stuck one.
+
+    AND THE EMPTY PATH DOES WRITE THE MARKER — DELIBERATELY. The write sits BEFORE the empty check,
+    under its own comment: "Recorded BEFORE the file check below, deliberately — mirrors
+    auto-triage's 'record the fire first' discipline: a crash mid-file still costs one skipped
+    week, never a re-gather storm on the next poll." So every attempt costs a full week whether it
+    finds anything or not. That is the intended trade, not an oversight.
+  design: |
+    (i) Q1 — NEITHER CAUSE "DOMINATES", AND THE BRIEF'S TWO-CAUSE FRAME NEEDS ONE CORRECTION EACH.
+    THE MARKER IS NOT A DEFECT: seven days is the designed cadence and "record the fire first" is a
+    deliberate anti-storm discipline. Nothing here changes it, and no fix to it is indicated.
+    THE CORPUS STARVATION IS REAL BUT PARTIAL. The docket has FIVE capture surfaces, and only TWO
+    of them come from the ledger:
+      reframe            <- inputs.ledgerLines      STARVED (live file only)
+      operator_feedback  <- inputs.ledgerLines      STARVED
+      rejected_feedback  <- listFeedback(plan/feedback/)   full fidelity
+      question_answer    <- readQuestionsNdjson             full fidelity
+      operator_note      <- readOperatorNotesNdjson          full fidelity
+    Three of five surfaces were never starved and still yielded nothing, so the corpus cannot by
+    itself explain an empty docket.
+
+    (ii) THE BLAST RADIUS OF THE CORPUS FIX IS AT MOST ONE SURFACE, AND THIS IS THE SHARPEST FACT
+    IN THE TASK. Of the two starved surfaces, `reframe` is built from `ratify.reframed` rows — and
+    the operator's OWN prior measurement over the union put `ratify.reframed` at ZERO across the
+    whole corpus. So `reframe` contributes nothing whether it reads the live file or all 21
+    archives. That leaves `operator_feedback` as the ONLY surface a union read could change.
+    THE ORDER THE BRIEF ASKS ABOUT THEREFORE RESOLVES: fixing the marker alone would mean finding
+    nothing more often, exactly as the operator predicted; fixing the corpus alone can widen one
+    surface out of five; and if that surface is empty over the union too, neither fix produces
+    anything and this task should close.
+
+    (iii) Q2 — WHAT THE RUNG IS SUPPOSED TO PRODUCE, AND WHY A LOW RATE IS CORRECT. Its own doctrine
+    is that "empty windows file nothing — a loop that files something every cycle is a loop that
+    files noise". A weekly cadence that has produced nothing in three days is not evidence of a
+    fault. This task does not treat zero output as a defect; it treats ONE READ SHAPE as a defect
+    and leaves the rate alone.
+
+    (iv) THE FIX, SCOPED TO ITS PROVEN EXTENT. `runFeedbackDocketRung`'s ledger input moves to the
+    union so that `reframe` and `operator_feedback` see the same corpus every other union reader
+    sees. The three non-ledger surfaces are untouched. No new instrumentation is added, because —
+    see (v) — it already exists.
+
+    (v) THE CLOSING MEASUREMENT ALREADY EXISTS AND NOBODY READ IT. `buildFeedbackDocket` already
+    computes `countsBySource` AND `emptySources`, the latter documented as "Sources with ZERO items
+    in this window — named, not silently omitted (design i)". And the rung already emits
+    `log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource })`. So the TWO
+    `feedback_docket.empty` rows the operator counted ALREADY CONTAIN the per-surface answer.
+    THE UNBLOCKING CONDITION, EXACTLY: read those two rows' `counts_by_source` over the union.
+      IF `operator_feedback` is 0 there, the union read changes nothing that can be observed and
+        THIS TASK SHOULD BE CLOSED UNBUILT with that figure recorded — the operator's Q2 outcome.
+      IF it is non-zero, the live-file read was hiding real items and the fix in (iv) is justified.
+    Record the number and the date in this shard before unblocking it.
+
+    (vi) Q3 — WHAT MUST NOT CHANGE, REFUSED BY NAME RATHER THAN OMITTED.
+      NO AUTO-FILING WITHOUT THE OPERATOR. The rung proposes; it never ratifies.
+      THE EMPTY-WINDOW REFUSAL STANDS. An empty docket still files nothing.
+      THE MARKER'S PURPOSE STANDS. It still prevents a 300-second re-fire, and its seven-day
+        interval and its write-before-the-check ordering are both left exactly as they are.
+      AND EXPLICITLY NOT PROPOSED: deleting the marker, lowering the cadence, or seeding the
+        registry by hand.
+
+    (vii) THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS. `lint-plan` reads `src/run-task.ts` and
+    the new test file as two concerns. The change itself is one call site's input.
+  note: |
+    CITED, NOT RE-FILED: W1-T1262 owns the general defect — an unmarked live-file-versus-union
+    choice across 50 `readLedgerLines` call sites — and is `status: queued`. Its `files:` are
+    `[src/lib/status.ts, test/ledger-read-intent.test.ts]`, it does not name `runFeedbackDocketRung`
+    anywhere, and its stated remedy is to make the choice DECLARED while explicitly NOT
+    discouraging live-file reads. So it would force THIS call site to say which corpus it wants; it
+    would not decide that the union is the right answer here. That decision is this task's, and the
+    two do not overlap in files.
+
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: the other 49 `readLedgerLines` call sites,
+    the marker's cadence, the docket's synthesis step, and the ratification inbox the rung feeds
+    (W1-T1270). None is changed here.
+
+    REPORTED, NOT FIXED: `feedback-docket.ts`'s module doc explains the marker as a 300-second
+    poll-debounce while the code enforces seven days. The prose is not wrong, only far weaker than
+    the behaviour, and correcting a doc comment is not this task's business.
+  acceptance:
+    - claim: "the reframe and operator feedback surfaces read the ledger union"
+      proof: "unit test: test/feedback-docket-union-corpus.test.ts"
+    - claim: "the three non-ledger surfaces read exactly what they read today"
+      proof: "unit test: test/feedback-docket-union-corpus.test.ts"
+    - claim: "the marker still enforces its seven-day interval"
+      proof: "unit test: test/feedback-docket-union-corpus.test.ts"
+    - claim: "the marker is still written before the empty check"
+      proof: "unit test: test/feedback-docket-union-corpus.test.ts"
+    - claim: "an empty window still files nothing"
+      proof: "unit test: test/feedback-docket-union-corpus.test.ts"
+    - claim: "the empty row still names which surfaces were empty"
+      proof: "unit test: test/feedback-docket-union-corpus.test.ts"
