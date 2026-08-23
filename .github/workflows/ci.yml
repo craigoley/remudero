@@ -278,12 +278,21 @@ jobs:
         # once -- zero behavior change from before this task.
         run: |
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033: coverage-ratchet is PR-only; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
+          # W1-T1217: `--import ./test/setup/tmp-hygiene.ts` is NOT optional here and its absence
+          # was a real divergence, not a saving. The `ci` job runs this same
+          # `test/**/*.test.ts` glob through `npm run test:ci`, whose script DOES carry that
+          # flag; this step spelled the invocation out inline and omitted it — so the two
+          # required jobs ran the same suite under different module sets. Everything the harness
+          # provides (the tmp-dir reaper AND, since W1-T1217, the `GIT_CONFIG_*` pair that
+          # disables git's background gc for every spawned git) was simply absent from the
+          # coverage run. Any test asserting on that environment passes in `ci` and fails here,
+          # which is exactly how this was found.
           mkdir -p coverage
           node scripts/test-with-retry.mjs \
             node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
-            --test --import tsx "test/**/*.test.ts"
+            --test --import tsx --import ./test/setup/tmp-hygiene.ts "test/**/*.test.ts"
       # ORDER IS LOAD-BEARING (2026-08-13): diff-coverage runs BEFORE the aggregate ratchet.
       # No step in this job carries an `if:`, so a failing step skips every step after it —
       # MEASURED: in five of six recent failing CI runs the ratchet step concluded `failure` and

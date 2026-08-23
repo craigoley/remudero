@@ -962,3 +962,73 @@ test("LAST CLOSED CYCLE: a superseded BLOCKED cycle is suppressed too — both r
   assert.equal(model.lastCycle.nextAction, undefined, "a blocked cycle the daemon worked past is history too");
   assert.doesNotMatch(renderStatusBoardText(model), /resolve the blocking task/);
 });
+
+// ── W1-T1000003: A HELD PULL REQUEST IS VISIBLE ON THE BOARD ───────────────────────────────────
+//
+// Before this task `deriveBlockers`/`deriveNeedsMe` read no `automerge.hold_*` ledger state at
+// all, so an operator's merge hold (W1-T1000002's ledgered `automerge.hold_engaged` /
+// `automerge.hold_released` rows, read back by review.ts's `automergeHoldFromLedger`) landed in
+// no blocker class and no NEEDS ME row — a request deliberately not merging looked exactly like
+// one still waiting on checks. `mergeHeld` renders it as its OWN row, keyed on that ledgered
+// state alone, never a re-derivation of a reason from check or review fields (grep proof: this
+// file consumes `automergeHoldFromLedger`, never reimplements its precedence).
+
+test("buildStatusBoard/renderStatusBoardText: with a hold engaged the board renders exactly one row naming the held request, its author and its reason", () => {
+  const ledgerPath = writeLedger([
+    ledgerLine({
+      step: "automerge.hold_engaged",
+      task_id: "W1-T800",
+      pr_number: 800,
+      by: "craig",
+      reason: "freezing this PR pending a manual read",
+    }),
+  ]);
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+
+  assert.equal(model.needsMe.mergeHeld.length, 1, "exactly one row");
+  const row = model.needsMe.mergeHeld[0];
+  assert.equal(row.prNumber, 800, "names the held request");
+  assert.equal(row.taskId, "W1-T800");
+  assert.equal(row.by, "craig", "its author");
+  assert.equal(row.reason, "freezing this PR pending a manual read", "its reason");
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /── NEEDS ME/);
+  assert.match(text, /merge held.*#800/);
+  assert.match(text, /craig/);
+  assert.match(text, /freezing this PR pending a manual read/);
+
+  // --json projects the SAME model, never a second derivation.
+  const json = JSON.parse(JSON.stringify(model));
+  assert.equal(json.needsMe.mergeHeld[0].prNumber, 800);
+});
+
+test("buildStatusBoard: with no hold engaged the board renders no hold row at all, so the quiet case stays quiet", () => {
+  const model = buildStatusBoard(tmpRoot(), join(tmpdir(), "does-not-exist-merge-hold.ndjson"), baseDeps());
+  assert.deepEqual(model.needsMe.mergeHeld, []);
+  assert.doesNotMatch(renderStatusBoardText(model), /merge held/);
+  assert.match(renderStatusBoardText(model), /nothing needs you/);
+});
+
+test("buildStatusBoard: a released hold disappears from the next render with no acknowledgement step", () => {
+  const ledgerPath = writeLedger([
+    ledgerLine({ step: "automerge.hold_engaged", task_id: "W1-T800", pr_number: 800, by: "craig", reason: "freezing pending a manual read" }),
+    ledgerLine({ step: "automerge.hold_released", task_id: "W1-T800", pr_number: 800, by: "craig", reason: "read done, releasing" }),
+  ]);
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+
+  assert.deepEqual(model.needsMe.mergeHeld, [], "the release clears it with nothing else to do");
+  assert.doesNotMatch(renderStatusBoardText(model), /merge held/);
+});
+
+test("buildStatusBoard: a FLEET-scoped hold (no pr_number) with no PR-scoped row ever recorded renders as one row naming no PR", () => {
+  const ledgerPath = writeLedger([
+    ledgerLine({ step: "automerge.hold_engaged", by: "craig", reason: "fleet freeze pending an incident review" }),
+  ]);
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+
+  assert.equal(model.needsMe.mergeHeld.length, 1);
+  assert.equal(model.needsMe.mergeHeld[0].prNumber, undefined, "fleet-scoped: no single PR to name");
+  assert.equal(model.needsMe.mergeHeld[0].by, "craig");
+  assert.match(renderStatusBoardText(model), /merge held.*the whole fleet/);
+});
