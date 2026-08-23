@@ -968,19 +968,54 @@ export interface DraftCache {
   [proposalId: string]: DraftedCandidate;
 }
 
+/** W1-T1270: the discriminated outcome {@link parseProposalRegistryResult} reports —
+ *  the same four input classes {@link parseProposalRegistry} collapses to `[]` kept
+ *  apart, so a caller that cares WHY a read came back with no proposals can tell "this
+ *  path has never fired" from "it fired and was drained" from "the file was torn on the
+ *  last concurrent write" (the exact hazard {@link updateProposalRegistry}'s own header
+ *  doc names: "a torn read becomes a SILENT empty registry").
+ *   - `"absent"`  — no text at all: the file was never created. The normal
+ *     pre-population state for a path that has never fired, NOT a fault.
+ *   - `"fault"`   — text was present but unusable: a `JSON.parse` throw (`reason:
+ *     "malformed"`, e.g. a reader observing a torn concurrent write) or a parsed value
+ *     whose `proposals` key is missing/not-an-array (`reason: "wrong-shape"`, a
+ *     foreign or corrupted blob).
+ *   - `"ok"`      — a well-shaped registry. `proposals` may legitimately be `[]` (a
+ *     fired-and-drained registry, or one freshly initialised empty) — that emptiness is
+ *     never a fault. */
+export type ProposalRegistryParseResult =
+  | { kind: "absent" }
+  | { kind: "fault"; reason: "malformed" | "wrong-shape" }
+  | { kind: "ok"; proposals: Proposal[] };
+
+/** Discriminated parse of a {@link ProposalRegistry} JSON blob — see
+ *  {@link ProposalRegistryParseResult} for what each outcome means. Never throws.
+ *  {@link parseProposalRegistry} is the fail-soft-to-`[]` projection of this for
+ *  callers that don't need to distinguish absent/fault/empty. */
+export function parseProposalRegistryResult(text: string | undefined): ProposalRegistryParseResult {
+  if (!text) return { kind: "absent" };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { kind: "fault", reason: "malformed" };
+  }
+  const r = raw as { proposals?: unknown };
+  if (typeof r !== "object" || r === null || !Array.isArray(r.proposals)) {
+    return { kind: "fault", reason: "wrong-shape" };
+  }
+  return { kind: "ok", proposals: r.proposals as Proposal[] };
+}
+
 /** Parse a {@link ProposalRegistry} JSON blob; `[]` (never a throw) on missing/malformed
  *  input — an inbox with no registry yet is the normal pre-population state, not an error
- *  (mirrors lib/plan-index.ts's `loadPlanIndex` fail-soft-to-empty discipline). */
+ *  (mirrors lib/plan-index.ts's `loadPlanIndex` fail-soft-to-empty discipline). Every
+ *  existing caller keeps this exact fail-soft shape unchanged; a caller that needs to
+ *  know WHY a read came back with no proposals should call
+ *  {@link parseProposalRegistryResult} instead (W1-T1270). */
 export function parseProposalRegistry(text: string | undefined): Proposal[] {
-  if (!text) return [];
-  try {
-    const raw = JSON.parse(text) as unknown;
-    const r = raw as { proposals?: unknown };
-    if (typeof r !== "object" || r === null || !Array.isArray(r.proposals)) return [];
-    return r.proposals as Proposal[];
-  } catch {
-    return [];
-  }
+  const result = parseProposalRegistryResult(text);
+  return result.kind === "ok" ? result.proposals : [];
 }
 
 // ── W1-T240: the ONE registry-write helper every writer of state/inbox-proposals.json
