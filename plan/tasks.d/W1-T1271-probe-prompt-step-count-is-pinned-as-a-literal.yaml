@@ -83,6 +83,49 @@
     to that prompt may have no such phrasing available. The question this shard asks — assert the
     CONTRACT rather than the COUNT — is unchanged by the repair and is now better evidenced than
     when it was filed.
+
+    AND A THIRD LAYER FIRED ON THE SAME PR, WHICH MAKES THIS A CLASS RATHER THAN A PAIR. After both
+    repairs above landed and every check run went green on #2626, the REQUIRED COMMIT STATUS failed:
+    `remudero-review: FAIL — body contradicts its own diff: claimed "No test/", actual changed
+    files: test/containment.test.ts` (re-derived from the combined status on ddd9df5d, which reads
+    `failure` with that one context). THE CLAIM IT FOUND WAS A QUOTATION. The PR body reported that
+    `bodyContradictsDiff` had scored the commit message at 0 against a DELIBERATELY FALSE control,
+    and quoted that control inline in italics as the evidence — so the detector read the quoted
+    false claim as the body's own assertion about the diff.
+
+    THE DETECTOR WAS RIGHT AND ITS NARROWNESS IS DELIBERATE — RECORDED HERE SO NOBODY PROPOSES
+    WIDENING IT. `stripQuotedRegions` (`src/lib/review.ts`) blanks ONLY blockquote lines and fenced
+    code blocks, and its own doc gives the reason: widening the exclusion to inline code spans
+    "would let a real contradiction hide behind a single backtick — strictly worse than today's
+    over-firing". The same doc names this exact failure mode with two live fixtures (#1194, #1206),
+    and warns that the usual escape is worse than the problem: paraphrasing the quotation
+    "silently destroys the most useful record of what went wrong". THE REPAIR WAS THEREFORE TO
+    FENCE THE QUOTATION, NOT TO PARAPHRASE IT — the record stays verbatim, inside the one construct
+    the function is built to ignore. Verified three ways: the stored body reproduced the failure,
+    the fenced body scored zero, and an unfenced copy of the same sentence appended as a control
+    still fired — so the fence does the work rather than a weakened check.
+
+    AND A BODY FIX ALONE CLEARS NOTHING, WHICH IS PART OF THE COST. A posted verdict is never
+    re-reviewed on the same sha, so the repair also required a NEW HEAD: the commit was amended to a
+    fresh sha over a BYTE-IDENTICAL TREE, body first and sha second, so the sweep could not
+    re-review the new head against the old body.
+
+    SO THE CLASS, STATED ONCE FOR ALL THREE: A CHECK KEYED TO TEXT RATHER THAN TO THE CONTRACT FIRES
+    ON SOMETHING SUBSTANTIVELY CORRECT. Three layers on one PR, and they fail on progressively more
+    distant things: (1) the prompt's step count fails on a change to THE THING IT DESCRIBES;
+    (2) the mutation-anchor uniqueness guard fails on a change to THE PROSE ABOUT that thing, since
+    it counts occurrences in raw source text and a comment quoting the literal keeps the count wrong
+    after the code is right; (3) the changeset-claim detector fails on A QUOTATION OF A FALSE CLAIM
+    the body is reporting rather than making. ALL THREE WERE RIGHT TO FIRE GIVEN WHAT THEY MEASURE.
+    NONE OF THEM MEASURED WHAT IT WAS PROTECTING. That is the whole of this shard's question, and
+    with the filing observation it now rests on four data points rather than one.
+
+    NOTHING HERE PROPOSES WEAKENING ANY OF THE THREE. Not a wider `stripQuotedRegions`, not a
+    relaxed uniqueness guard, not an exemption for prompt-changing tasks. The ask is unchanged:
+    assert the CONTRACT the text stands in for. And the honest limit already recorded above still
+    binds — the repair stayed inside the declared span only because the egress step could be phrased
+    as an addition rather than a renumbering, and the next step added to that prompt may have no
+    such option.
   design: |
     (i) Q1 — WHAT THE ASSERTION PROTECTS, AND THE THREE WAYS TO KEEP IT. The property is
     NARRATION/LIST AGREEMENT, not the number three. Options, with costs:
