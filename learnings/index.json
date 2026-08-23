@@ -10,27 +10,46 @@
         "daemon-split-logic-from-live-commissioning",
         "docs-are-a-gated-artifact",
         "harness-assumptions-stale",
+        "ledger-corpus-needs-the-resolver",
+        "ledger-query-anchors-on-the-step-field",
+        "step-names-come-from-source",
+        "task-credit-needs-an-anchored-trailer",
         "task-quality-gates-before-dispatch"
       ],
       "globs": [
         "docs",
+        "plan/tasks.d",
+        "plan/tasks.yaml",
         "src/lib/daemon.ts",
         "src/lib/launchd.ts",
         "src/lib/learnings.ts",
+        "src/lib/ledger-grep.ts",
+        "src/lib/ledger.ts",
         "src/lib/retro.ts",
+        "src/lib/status.ts",
+        "src/lib/sweep.ts",
         "src/lib/task-linter.ts",
         "src/run-task.ts"
       ]
     },
     "ci.yaml": {
       "entries": [
+        "body-fetch-guards-on-http-not-size",
+        "diff-coverage-needs-cis-own-flags",
+        "diff-coverage-ok-can-be-vacuous",
         "required-check-poster",
+        "rollup-dedupe-by-latest-attempt",
         "skipped-check-deadlock"
       ],
       "globs": [
         ".github/**",
+        ".github/workflows/ci.yml",
+        "scripts/diff-coverage.mjs",
+        "src/lib/open-prs-rest.ts",
         "src/lib/review.ts",
-        "src/lib/status.ts"
+        "src/lib/status.ts",
+        "src/lib/sweep.ts",
+        "src/run-task.ts"
       ]
     },
     "failures.yaml": {
@@ -93,16 +112,26 @@
     },
     "testing.yaml": {
       "entries": [
+        "control-proves-reach-not-window",
+        "grep-anchor-must-fit-one-line",
         "lazy-config-in-ci",
         "live-proof-runs-the-checked-out-code",
+        "scan-both-quote-styles",
         "task-linting-is-mostly-deterministic"
       ],
       "globs": [
         "bin/rmd",
+        "learnings",
+        "plan/tasks.d",
+        "plan/tasks.yaml",
+        "scripts",
         "src/lib/config.ts",
         "src/lib/containment.ts",
+        "src/lib/ledger-grep.ts",
+        "src/lib/review.ts",
         "src/lib/self-sync.ts",
-        "src/lib/task-linter.ts"
+        "src/lib/task-linter.ts",
+        "test"
       ]
     }
   },
@@ -133,11 +162,17 @@
     "context": [
       "architecture.yaml"
     ],
+    "coverage": [
+      "ci.yaml"
+    ],
     "design-review": [
       "platform.yaml"
     ],
     "docs": [
       "architecture.yaml"
+    ],
+    "evidence": [
+      "testing.yaml"
     ],
     "feedback": [
       "platform.yaml"
@@ -146,7 +181,11 @@
       "architecture.yaml"
     ],
     "ledger": [
+      "architecture.yaml",
       "platform.yaml"
+    ],
+    "plan": [
+      "architecture.yaml"
     ],
     "platform": [
       "platform.yaml"
@@ -157,6 +196,9 @@
     "retro": [
       "architecture.yaml"
     ],
+    "review": [
+      "ci.yaml"
+    ],
     "reviewer": [
       "failures.yaml"
     ],
@@ -165,6 +207,9 @@
     ],
     "settings": [
       "platform.yaml"
+    ],
+    "sweep": [
+      "ci.yaml"
     ],
     "testing": [
       "testing.yaml"

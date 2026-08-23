@@ -121,3 +121,52 @@
     PLAN SOURCE + gateway were pinned.)
   src: fix/daemon-repo-targeting (W1-T12d)
   cited: "2026-07-15"
+
+# ── Measurement traps observed 2026-08-23 (re-derived at 682c5d5a) ──
+- id: ledger-corpus-needs-the-resolver
+  subsystem: ledger
+  lifecycle: active
+  files: [src/lib/ledger-grep.ts, src/lib/ledger.ts, src/run-task.ts]
+  fact: >-
+    A shell glob over state/ledger.*.ndjson.gz names ONE of two rotation forms and answers from the
+    other in silence — it read 0 against 21 archives resolveLedgerUnion found. ledgerRotationEntries
+    (ledger-grep.ts) is the one definition of the corpus and run-task.ts's ledgerCorpusFiles delegates
+    to it; resolveLedgerUnion refuses on partial coverage. Read through the resolver, never a glob.
+  assertion: 'grep -q "ledgerRotationEntries" src/lib/ledger-grep.ts && grep -q "ledgerRotationEntries" src/run-task.ts'
+  src: operator-report 2026-08-23; resolver delegation re-derived at 682c5d5a
+  cited: "2026-08-23"
+- id: ledger-query-anchors-on-the-step-field
+  subsystem: ledger
+  lifecycle: active
+  files: [src/lib/ledger-grep.ts, src/lib/ledger.ts]
+  fact: >-
+    resolveLedgerUnion takes a raw pattern and matches ANYWHERE in a row, so a bare step name like
+    'ratify.' also hits prose — three unrelated rows matched that way. Anchor every step query on the
+    field itself, "step":"<name>", never the bare name, or the count silently includes narrative text.
+  assertion: 'grep -q "pattern: string | RegExp" src/lib/ledger-grep.ts'
+  src: operator-report 2026-08-23; raw-pattern signature re-derived at 682c5d5a
+  cited: "2026-08-23"
+- id: step-names-come-from-source
+  subsystem: ledger
+  lifecycle: active
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, src/run-task.ts]
+  fact: >-
+    A guessed ledger step name is indistinguishable from an absent event. sweep.escalation_reconcile
+    exists nowhere as a step — the real names carry suffixes, sweep.escalation_reconcile.summary and
+    .list_failed — and four guessed names read false zeros. Enumerate from source first
+    (grep -oh '"sweep\.[a-z_.]+"' src/) and query only names that appear there.
+  assertion: 'grep -q "\"sweep.escalation_reconcile.summary\"" src/lib/sweep.ts'
+  src: re-derived at 682c5d5a — bare name 0 hits, suffixed names 2
+  cited: "2026-08-23"
+- id: task-credit-needs-an-anchored-trailer
+  subsystem: plan
+  lifecycle: active
+  files: [src/lib/status.ts, plan/tasks.yaml, plan/tasks.d]
+  fact: >-
+    git log --grep <id> is a SUBSTRING match and credits commits that merely MENTION an id. Measured:
+    --grep W1-T1282 returned 2 commits — one of them a different task's filing citing it as a sibling
+    — and ZERO carried the trailer. Credit from ^Remudero-Task:\s*<id>\s*$ (findMergedByTrailer),
+    unioned with the run-<id>-<digits> head-ref path, since plan filings often carry no trailer at all.
+  assertion: 'grep -q "findMergedByTrailer" src/lib/status.ts'
+  src: re-derived at 682c5d5a — 2 substring hits, 0 anchored
+  cited: "2026-08-23"

@@ -27,3 +27,53 @@
     green) — gate on ONE always-runs aggregator job that needs: every sub-job, and require only that.
   src: operator-fleet
   cited: "2026-07-14"
+
+# ── Measurement traps observed 2026-08-23 (re-derived at 682c5d5a) ──
+- id: rollup-dedupe-by-latest-attempt
+  subsystem: sweep
+  lifecycle: active
+  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, src/lib/status.ts]
+  fact: >-
+    A check-runs listing with ?filter=all returns SUPERSEDED attempts forever, so a check that was
+    re-run and went green still shows its old failure and a triage pass reports a false red. Dedupe by
+    the latest startedAt per check name before judging — the repo's own dedupeRollupByLatestAttempt
+    (sweep.ts), keyed on name ?? context.
+  assertion: 'grep -q "dedupeRollupByLatestAttempt" src/lib/sweep.ts'
+  src: operator-report 2026-08-23; dedupe rule re-derived at 682c5d5a
+  cited: "2026-08-23"
+- id: diff-coverage-needs-cis-own-flags
+  subsystem: coverage
+  lifecycle: active
+  files: [.github/workflows/ci.yml, scripts/diff-coverage.mjs]
+  fact: >-
+    Run locally without --enable-source-maps and --test-coverage-exclude="test/**", and diffed against
+    origin/main rather than the PR's own BASE_SHA, diff-coverage gives a TRUE answer to the WRONG
+    question — it read OK while CI blocked on a different line pair. Reproduce with ci.yml's exact
+    invocation and the PR's base sha, and build the lcov and the diff from the same committed tree.
+  assertion: 'grep -q "test-coverage-exclude" .github/workflows/ci.yml && grep -q "enable-source-maps" .github/workflows/ci.yml'
+  src: operator-report 2026-08-23; ci.yml flags re-derived at 682c5d5a
+  cited: "2026-08-23"
+- id: diff-coverage-ok-can-be-vacuous
+  subsystem: coverage
+  lifecycle: active
+  files: [scripts/diff-coverage.mjs, .github/workflows/ci.yml]
+  fact: >-
+    diff-coverage --lcov /dev/null prints an OK BYTE-IDENTICAL to a real pass, because "every added
+    source line lcov instruments is covered" is vacuously true over an empty instrumentation set. An
+    OK is only meaningful with a non-zero SF: record for every changed source file; to prove the gate
+    is live, flip one added line to DA:<n>,0 and watch it BLOCK naming that line.
+  assertion: 'grep -q "every added source line lcov instruments is covered" scripts/diff-coverage.mjs'
+  src: measured 2026-08-23 — /dev/null OK, mutated lcov BLOCKED at exit 1
+  cited: "2026-08-23"
+- id: body-fetch-guards-on-http-not-size
+  subsystem: review
+  lifecycle: active
+  files: [src/run-task.ts, src/lib/review.ts]
+  fact: >-
+    A failed body fetch parses as a DEFECT rather than an error: gh exiting 127 left a 0-byte file and
+    check-acceptance reported "DEFECTIVE: no Acceptance header" for a body that was fine. Guard the
+    fetch on the HTTP status code and a present, non-null .body key before judging the file — a size
+    floor cannot tell a short body from an error payload.
+  assertion: 'grep -q "no Acceptance header" src/run-task.ts'
+  src: measured 2026-08-23 — gh absent in the container, rc=127
+  cited: "2026-08-23"
