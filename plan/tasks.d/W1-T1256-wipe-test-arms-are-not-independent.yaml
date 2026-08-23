@@ -35,12 +35,11 @@
         by `worktreeAdd(repoDir, worktreePath, branch, "origin/main")`, i.e. from the clone's
         origin/main ref — so what matters is not the working tree but where that ref points.
       - THE RUN BRANCH arm A pushed (`run-<taskId>-<digits>`): read by `hasPushedRunBranch`
-        (`src/lib/drain.ts`), which is consumed by `nextRunnable`/`isDispatchEligible`. THE
-        WIPE-TEST PATH NEVER CALLS THE SELECTOR — `wipeTestCommand` calls `runTaskFn(taskId, …)`
-        directly, and a grep of the whole command body for `nextRunnable(`/`isDispatchEligible(`
-        returns ZERO against a control of 11 such calls elsewhere in the file. SO THIS LEFTOVER IS
-        NOT READ ON THIS PATH and is not contamination here — it becomes contamination the moment
-        anything routes the wipe-test through drain.
+        (`src/lib/drain.ts`), consumed by `nextRunnable`/`isDispatchEligible`. THE WIPE-TEST PATH
+        NEVER CALLS THE SELECTOR — a grep of the whole command body for
+        `nextRunnable(`/`isDispatchEligible(` returns ZERO against a control of 11 such calls
+        elsewhere in the file. SO THIS LEFTOVER IS NOT READ ON THIS PATH and is not contamination
+        here; it becomes contamination the moment anything routes the wipe-test through drain.
       - ARM A's OPEN PR, THE LEDGER ROWS ARM A APPENDED, AND THE STATUS-CACHE PROJECTION: all three
         feed ONE reader. `runTask` builds `projection = projectPlan(plan, { ledgerPath, github },
         statusPath)` and `isMerged = (t) => projection.get(t.id)?.merged ?? false` FRESH ON EVERY
@@ -49,44 +48,66 @@
         `projectPlan` reads back as its `previousProjection` fallback.
       - THE INFLIGHT LOCK (`<config.root>/state/inflight`, keyed by task id): taken and released per
         run; an arm A that dies without releasing blocks arm B outright.
-    (ii) AND THE ONE THAT ACTUALLY BITES IS THE ALREADY-MERGED REFUSAL. `runTask` gates on
-    `if (isMerged(task))` and returns verdict `task_already_merged` at ZERO COST unless `--rerun` is
-    passed, which `wipeTestCommand` does not pass. Auto-merge is armed at PR-OPEN, so arm A's own PR
-    can merge while arm A is still finishing. Arm B then refuses before spawning, and the pair is
-    ledgered anyway — the same zero-cost-refusal shape W1-T1252 files. WORSE, AND DEEPER: once arm
-    A's PR merges, the sandbox's origin/main CONTAINS ARM A'S DIFF, and arm B's worktree is cut from
-    that ref, so even a non-refusing arm B starts from a tree where the work is already done.
-    (iii) Q2 — THE RIGHT RESET, WITH BOTH OPTIONS WEIGHED AND WHAT EACH LEAVES UNRESET NAMED.
-    RE-FETCH-AND-RESET BETWEEN ARMS reuses the clone and is cheap: one fetch plus one
-    `reset --hard origin/main`. A FRESH CLONE PER ARM is cleaner and costs a clone.
-    THEY LEAVE THE SAME THINGS UNRESET, WHICH IS THE POINT: arm A's pushed run branch and arm A's
-    PR are REMOTE objects, and `task_already_merged` reads remote/ledger state through
-    `projectPlan` while `hasPushedRunBranch` reads the remote ref list — NEITHER IS REACHABLE BY ANY
-    LOCAL RESET. Worse, if arm A merged, `reset --hard origin/main` resets TO the contaminated
-    state, and a fresh clone CLONES the contaminated state; the two options are equally powerless
-    against exactly the channel that bites. Also unreset by both: the ledger rows and
-    `state/status.json`.
-    SO THE RESET THIS TASK NEEDS IS NOT PRIMARILY LOCAL. The candidates that actually reach the
-    biting channel are: close arm A's PR and delete its run branch between arms; give each arm its
-    own subject so `isMerged` cannot be true for arm B's task; or make the arms non-mutating. The
-    builder picks one and records why — but a local-only reset must NOT be shipped as if it closed
-    this, because it does not.
-    (iv) Q3 — ARM ORDER, STATED PLAINLY RATHER THAN RECOMMENDED AS A FIX. Alternating which arm runs
-    first CONVERTS A SYSTEMATIC BIAS INTO RANDOM ERROR. That is strictly better than a fixed order
-    and IT IS STILL NOT CLEAN: every individual pair remains contaminated, the second arm still
-    inherits, and randomising the direction raises variance while lowering bias. IT IS NOT A FIX AND
-    MUST NOT BE SHIPPED AS ONE. It is worth doing ALONGSIDE a real reset — it costs one line, it
-    removes the always-A-first confound that would otherwise survive an imperfect reset, and it
-    makes a residual leak visible as scatter instead of drift.
-    (v) THE FALSIFIER IS ITS OWN AND MUST RUN IN BOTH DIRECTIONS. Direction one: a pair where arm A
-    leaves a DETECTABLE artifact and arm B must NOT see it. Direction two, the control: the same
-    fixture with the reset DISABLED, where arm B DEMONSTRABLY DOES see it. Direction one alone is
-    vacuous — a test that cannot detect contamination when contamination is present proves nothing
-    when it reports none.
-    (vi) DECISIONS SPLIT FROM I/O. The reset POLICY (what must be reset between arms, and what a
-    local reset provably cannot reach) belongs in `src/lib/wipe-test.ts` as a pure function over
-    injected state; the fetch/reset/close/delete calls stay in `src/run-task.ts`. That split is what
-    lets the falsifier drive both directions without a network.
+    (ii) THE CHAIN, STATED AS A CHAIN: ARM A SUCCEEDS -> ARM A MERGES -> `projectPlan` REPORTS
+    MERGED -> ARM B REFUSES AT ZERO COST. `runTask` gates on `if (isMerged(task))` and returns
+    verdict `task_already_merged` without spawning unless `--rerun` is passed, which
+    `wipeTestCommand` does not pass. Auto-merge is armed at PR-OPEN, so arm A's own PR can merge
+    while arm A is still finishing. A SUCCESSFUL ARM A DESTROYS ITS OWN CONTROL: the better arm A
+    does, the more certainly arm B measures nothing. And once arm A's PR merges, the sandbox's
+    origin/main CONTAINS ARM A'S DIFF, so even a non-refusing arm B is cut from a ref where the work
+    is already done.
+    (iii) WHY NO RESET REACHES IT, WHICH IS WHY THE SCOPE MOVED. Re-fetch-and-reset between arms is
+    cheap; a fresh clone per arm is cleaner and costs a clone. THEY LEAVE THE SAME THINGS UNRESET:
+    arm A's pushed run branch and arm A's PR are REMOTE objects, and `task_already_merged` reads
+    remote/ledger state through `projectPlan` while `hasPushedRunBranch` reads the remote ref list —
+    NEITHER IS REACHABLE BY ANY LOCAL RESET. Worse, if arm A merged, `reset --hard origin/main`
+    resets TO the contaminated state and a fresh clone CLONES it. The two options are equally
+    powerless against exactly the channel that bites.
+    (iv) OPERATOR RULING, 2026-08-23: NEITHER ARM MERGES. THE PAIR IS MEASURED AT THE VERDICT, NOT
+    AT THE MERGE. Every quantity `wipetest.pair` records — turns, cost, verdict, strikes,
+    `proof_exec` — is determined BEFORE any merge, so stopping short of the merge loses NO signal
+    and removes the contamination at its SOURCE rather than trying to undo it afterwards. This is
+    the fix; the reset question is downstream of it.
+    (v) THE TWO REJECTED ALTERNATIVES, RECORDED SO THEY ARE NOT RE-PROPOSED. SEPARATE SUBJECTS PER
+    ARM destroys the pairing the instrument rests on: the whole construct is a DIFFERENCE between
+    two arms over the SAME task, and two different subjects make the difference a comparison of
+    tasks rather than of learnings. A STRUCTURALLY UNMERGEABLE SUBJECT (one that cannot pass its own
+    gate) removes the merge by removing success, so the harness would only ever measure tasks that
+    CANNOT SUCCEED — an unrepresentative sample, and the one population where a learnings effect is
+    least likely to show.
+    (vi) SO WHAT THIS TASK NOW IS, AND IT IS SMALLER THAN IT WAS. NOT a reset mechanism: the
+    NO-MERGE BOUNDARY, plus whatever local reset is still required once the remote cause is gone.
+    AND THE HONEST ANSWER IS THAT NO LOCAL RESET IS NEEDED FOR THIS CHANNEL. Trace it with neither
+    arm merging: `isMerged` is false for arm B, so the zero-cost refusal cannot fire; the clone's
+    origin/main never moves, so arm B's worktree is cut from the same ref arm A was; the run branch
+    and open PR are read only by drain's selector, which this path never calls; the status cache and
+    the ledger rows matter to arm B ONLY through `merged`, which is now false. The remaining local
+    state is a per-run worktree at a unique `run-<taskId>-<epochMs>` path and an inflight lock taken
+    and released within each awaited arm — neither is shared between arms in steady state.
+    TWO RESIDUALS ARE NAMED RATHER THAN FOLDED IN: a crashed arm A can strand its inflight lock,
+    which is a pre-existing failure mode with an existing stale-lock reap and not this task's
+    contamination; and arm A's PR and branch still ACCUMULATE across pairs, which is hygiene, not
+    contamination, and should be scoped explicitly if the builder wants it rather than smuggled in
+    under "reset".
+    (vii) ARM ORDER, STATED PLAINLY RATHER THAN RECOMMENDED AS A FIX, AND IT SURVIVES THE RULING.
+    Arm A is always the learnings-ON arm and always first — the order is a literal, not a parameter —
+    so any residual inheritance runs in ONE direction on every pair. Alternating which arm runs first
+    CONVERTS A SYSTEMATIC BIAS INTO RANDOM ERROR: strictly better than a fixed order, and STILL NOT
+    CLEAN, because it lowers bias by raising variance rather than removing the leak. IT IS NOT A FIX
+    AND MUST NOT BE SHIPPED AS ONE. It is worth doing ALONGSIDE the no-merge boundary: it costs one
+    line, it removes the always-A-first confound that would otherwise survive any residual leak, and
+    it makes such a leak visible as scatter instead of drift. This is what acceptance criterion four
+    pins, and the ruling does not retire it — the no-merge boundary removes the KNOWN channel, and
+    alternation is the cheap guard against an unknown one.
+    (viii) THE FALSIFIER IS ITS OWN AND MUST RUN IN BOTH DIRECTIONS. Direction one: a pair where arm
+    A reaches a verdict and arm B must still dispatch — no `task_already_merged`, no zero-cost
+    refusal. Direction two, the control: the same fixture with the no-merge boundary REMOVED, where
+    arm B demonstrably DOES refuse. Direction one alone is vacuous — a test that cannot detect the
+    refusal when it is present proves nothing when it reports none.
+    (ix) DECISIONS SPLIT FROM I/O. The no-merge boundary is a POLICY decision — whether this
+    dispatch may arm/merge — and belongs in `src/lib/wipe-test.ts` as a pure function over injected
+    state; the arming and teardown calls stay in `src/run-task.ts`. That split is what lets the
+    falsifier drive both directions without a network.
   acceptance:
     - claim: "arm B does not inherit the already-merged verdict arm A produced for the same subject"
       proof: "unit test: test/wipe-test-arm-isolation.test.ts"
@@ -102,14 +123,36 @@
   origin: "operator-brief#wipe-test-arms-are-not-independent-2026-08-23"
   plan_refs: ["W1-T1252", "W1-T1253", "W1-T534", "W1-T319"]
   note: |
-    THESE THREE STACK, SO P12 IS A SEQUENCE AND NOT A COMMAND. W1-T1252 (#2593) files the null-pair
-    refusal — the harness ledgers pairs it never measured. W1-T1253 (#2595) files the missing subject
-    generator — there is nothing to seed a pair with. THIS task files the arm dependence. NO VALID
-    PAIR EXISTS UNTIL ALL THREE LAND: a subject generator with no arm isolation produces a biased
-    pair, arm isolation with no generator produces no pair at all, and either without the null-pair
-    refusal writes a `wipetest.pair` row regardless. NEITHER SIBLING IS RE-FILED HERE and neither is
-    a dependency edge, because they are independently landable in any order — only their CONJUNCTION
-    is the precondition for signal.
+    AMENDED 2026-08-23 BY OPERATOR RULING, AND THE AMENDMENT IS SCOPED TO `design` AND `note` ONLY.
+    `title`, `acceptance`, `files:` and `status:` are BYTE-IDENTICAL to the filing, proven
+    field-by-field rather than asserted. THE RECORD HAD NOT MERGED WHEN IT WAS AMENDED — its PR was
+    still open and the shard was absent from origin/main — so Standing rule 21 was never engaged;
+    `postMergeAmendmentViolations` was nonetheless run in BOTH directions, and its result is recorded
+    below rather than assumed.
+
+    WHAT THE RULING CHANGED. The filing framed the defect as a misplaced reset. The finding stands and
+    its consequence is larger: no reset reaches the contamination, because arm A's branch and PR are
+    REMOTE and `task_already_merged` reads state a local reset cannot touch, while
+    `worktreeAdd(…, "origin/main")` means a merged arm A moves the very ref arm B is cut from. The
+    chain is arm A succeeds -> arm A merges -> `projectPlan` reports merged -> arm B refuses at zero
+    cost, so A SUCCESSFUL ARM A DESTROYS ITS OWN CONTROL. The ruling is that NEITHER ARM MERGES and
+    the pair is measured AT THE VERDICT. Design (iv)-(vi) carry it, with the two rejected
+    alternatives and their reasons.
+
+    AND THE TASK GOT SMALLER, WHICH IS RECORDED BECAUSE IT WOULD BE EASY TO MISS. Once neither arm
+    merges, NO LOCAL RESET IS NEEDED FOR THIS CHANNEL — design (vi) traces why, reader by reader.
+    Two residuals are named and deliberately NOT folded in: a stranded inflight lock from a crashed
+    arm A (pre-existing, with an existing reap), and the accumulation of arm A's PRs and branches
+    across pairs (hygiene, not contamination).
+
+    THESE THREE STACK, SO P12 IS A SEQUENCE AND NOT A COMMAND, AND THE SEQUENCE IS UNCHANGED BY THIS
+    RULING. W1-T1252 (#2593) files the null-pair refusal — the harness ledgers pairs it never
+    measured. W1-T1253 (#2595) files the missing subject generator — there is nothing to seed a pair
+    with. THIS task files the arm dependence. NO VALID PAIR EXISTS UNTIL ALL THREE LAND: a subject
+    generator with no arm isolation produces a biased pair, arm isolation with no generator produces
+    no pair at all, and either without the null-pair refusal writes a `wipetest.pair` row regardless.
+    NEITHER SIBLING IS RE-FILED HERE and neither is a dependency edge, because they are independently
+    landable in any order — only their CONJUNCTION is the precondition for signal.
 
     THE SUPPLY PROBLEM IS CONTEXT, NOT SCOPE. SBX-T1/T2/T3 all read `status: queued` while their work
     is already on the sandbox's main, so a pair run today re-runs an already-landed diff and both
@@ -119,13 +162,13 @@
     risk: high IS SET UP FRONT, AND BOTH READINGS ARE RECORDED AS REQUIRED. RULE 19's SPAN is the
     band's cause: `files:` spans three concerns — the pure wipe-test module, the command layer in
     `src/run-task.ts`, and a new suite — and `subsystemsOf` also derives subsystems from the
-    acceptance text, which here names arm isolation, a disabled-reset control, remote state and arm
-    ordering. BLAST RADIUS ARGUES LOWER AND IS RECORDED SO THE BAND IS NOT MISREAD AS DANGER: the
+    acceptance text, which here names arm isolation, a disabled-boundary control, remote state and
+    arm ordering. BLAST RADIUS ARGUES LOWER AND IS RECORDED SO THE BAND IS NOT MISREAD AS DANGER: the
     verb is sandbox-only by default (`resolveWipeTestTarget`), it is operator-invoked rather than
     daemon-driven, no gate, disposition or policy value moves, and the only production surface it
-    touches is a command nothing else calls. THE BAND IS THE SPAN, NOT THE DANGER — four lanes hit
-    that trap today, each raising only after `sizingViolation` refused, so it is set correctly here
-    the first time rather than after a refusal.
+    touches is a command nothing else calls. THE BAND IS THE SPAN, NOT THE DANGER. The ruling does
+    not lower it: the no-merge boundary is a smaller change than a reset mechanism, but it still
+    spans the same three files.
 
     ID PROVENANCE — EIGHT SURFACES, EVERY CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, PLUS A
     COUNT-PER-HEAD SUBJECT SWEEP. Swept at 479e7fb. (1) `refs/rmd-id/*`: target reads 1 — SEE THE
