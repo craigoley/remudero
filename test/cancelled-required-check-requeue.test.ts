@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,8 +17,9 @@ import {
   type RollupCheckEntry,
   type SweepDeps,
 } from "../src/lib/sweep.js";
-import { buildSweepEffects, cancelledRequiredChecks, fetchCiFailures } from "../src/run-task.js";
+import { buildOpenPrViews, buildSweepEffects, cancelledRequiredChecks, fetchCiFailures } from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import type { IssueGateway } from "../src/lib/escalate.js";
 
 /**
  * W1-T1223 — a cancelled required check is indistinguishable from a genuine failure
@@ -253,6 +254,121 @@ test("GUARDED SITE sweep check re-queue: buildSweepEffects().requeueCheck calls 
   assert.match(argv, /actions\/jobs\/123456\/rerun/, `must target the single job — argv was ${argv}`);
   assert.doesNotMatch(argv, /rerun-failed-jobs/, `must NEVER target the whole-run rerun-failed-jobs endpoint — argv was ${argv}`);
   assert.doesNotMatch(argv, /actions\/runs\/[^/]+\/rerun(?!-)/, `must never re-run the whole workflow run — argv was ${argv}`);
+});
+
+test("GUARDED SITE sweep check re-queue: buildSweepEffects().escalateCancelledCheck opens a real needs-human issue naming the check, via tryEscalate", async () => {
+  const created: Array<{ title: string; body: string; labels: string[] }> = [];
+  const fakeIssues: IssueGateway = {
+    create: (title, body, labels) => {
+      created.push({ title, body, labels });
+      return "https://github.com/craigoley/remudero/issues/999";
+    },
+  };
+  const effects = buildSweepEffects(
+    "craigoley",
+    "remudero",
+    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-escalate-root-")) } as never,
+    ledgerPath(),
+    "SWEEP-REQUEUE-3",
+    { tasks: [] } as never,
+    () => {},
+    undefined, undefined, undefined, undefined, fakeIssues,
+    undefined, undefined, undefined, undefined, undefined,
+  );
+
+  await effects.escalateCancelledCheck?.(
+    { prNumber: 2434, prUrl: "https://github.com/craigoley/remudero/pull/2434", headSha: "202d302" } as never,
+    { name: "coverage-ratchet", jobId: "123456" },
+    "already re-queued once on this head sha",
+  );
+
+  assert.equal(created.length, 1, "escalateCancelledCheck must reach the real issue gateway via tryEscalate");
+  assert.match(created[0].title, /coverage-ratchet/, "the check name is named in the escalation");
+  assert.match(created[0].body, /coverage-ratchet/);
+  assert.match(created[0].body, /already re-queued once/, "the caller-supplied reason rides along");
+  assert.equal(created[0].body.includes("undefined"), false, "every interpolated field resolved — nothing stringified as undefined");
+});
+
+test("GUARDED SITE sweep check re-queue: buildSweepEffects().requeueCheck logs and swallows a throwing gh call, rather than crashing the sweep pass", async () => {
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const effects = buildSweepEffects(
+    "craigoley",
+    "remudero",
+    { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "w1t1223-requeue-throw-")) } as never,
+    ledgerPath(),
+    "SWEEP-REQUEUE-4",
+    { tasks: [] } as never,
+    (step, extra) => {
+      logged.push({ step, extra });
+    },
+    undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined,
+    () => {
+      throw new Error("gh: rate limited");
+    },
+  );
+
+  await effects.requeueCheck?.(
+    { prNumber: 2434, prUrl: "https://github.com/craigoley/remudero/pull/2434", headSha: "202d302" } as never,
+    { name: "coverage-ratchet", jobId: "123456" },
+  );
+
+  const errorLine = logged.find((l) => l.step === "sweep.check_requeue.error");
+  assert.ok(errorLine, "a throwing gh call is caught and logged, never left to crash the sweep pass");
+  assert.equal(errorLine!.extra?.check_name, "coverage-ratchet");
+  assert.match(String(errorLine!.extra?.error), /rate limited/);
+});
+
+test("GUARDED SITE gateway wiring: buildOpenPrViews populates OpenPrView.cancelledRequiredChecks off the SAME rollup that reads checksState red, naming ONLY the cancelled required check", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-openprviews-cancelled-"));
+  const ledgerFile = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerFile, "");
+
+  const fetch = (args: string[]): unknown => {
+    const path = args[args.length - 1] ?? "";
+    if (/\/pulls\?/.test(path) || /state=open/.test(path)) {
+      return [
+        {
+          number: 2434,
+          html_url: "https://github.com/craigoley/remudero/pull/2434",
+          head: { ref: "run-W1-TX-1785378652634", sha: "202d302" },
+          updated_at: "2026-08-22T20:15:54Z",
+          body: "Remudero-Task: W1-TX",
+          auto_merge: null,
+          state: "open",
+        },
+      ];
+    }
+    if (/check-runs/.test(path)) {
+      return {
+        check_runs: [
+          { name: "ci-gate", status: "completed", conclusion: "success" },
+          {
+            name: "coverage-ratchet",
+            status: "completed",
+            conclusion: "cancelled",
+            details_url: "https://github.com/craigoley/remudero/actions/runs/987654/job/123456",
+          },
+        ],
+      };
+    }
+    if (/\/status/.test(path)) return { statuses: [] };
+    return []; // merge-state / conflict follow-ups
+  };
+
+  const views = buildOpenPrViews("craigoley", "remudero", ledgerFile, {
+    fetch,
+    requiredContexts: () => ["ci-gate", "coverage-ratchet"],
+  });
+
+  assert.equal(views.length, 1);
+  assert.equal(views[0].checksState, "red", "checksState stays red — this producer never widens it");
+  assert.deepEqual(
+    (views[0].cancelledRequiredChecks ?? []).map((c) => c.name),
+    ["coverage-ratchet"],
+    "the real gateway wires cancelledRequiredChecks off the SAME rollup, naming only the absent verdict",
+  );
+  assert.equal(views[0].cancelledRequiredChecks?.[0]?.jobId, "123456", "the job id parsed off detailsUrl rides along");
 });
 
 test("buildSweepEffects().requeueCheck is a NAMED no-op when the rollup carried no job id — never a guessed target", async () => {
