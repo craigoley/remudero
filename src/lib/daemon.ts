@@ -151,6 +151,25 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
 
 /**
+ * W1-T1272 (THE FULL SWEEP IS UNREACHABLE AFTER A BOOT'S FIRST ITERATION): the DEFAULT minimum
+ * gap, in ms, between two full-sweep runs triggered by the RETRIGGER below (never the
+ * once-per-iteration call at the top of the loop, which this bound does not throttle). Without
+ * a re-trigger, `deps.sweep()` only ran once at the top of an iteration and the loop's own
+ * freshness exit — the ONLY other thing that starts a full sweep (task rationale (2)) — fires
+ * only when origin/main has already moved past this process's boot sha, so a boot whose
+ * dispatch/retro holds the loop for its own measured mean of 38.5 minutes got exactly one full
+ * sweep for that whole span. 20 minutes gives ~3 passes an hour, which task design (i) prices at
+ * a p90-cost of about 67 seconds an hour (under 4%) — cheap enough that FREQUENCY, not
+ * concurrency, is the right lever; this constant raises how often the gate is reached, never how
+ * many run at once (see `sweep still runs one at a time`, the same mutex-serialized
+ * `deps.sweep()` every other call site already awaits sequentially). Same fs-free-safety-net
+ * reasoning as {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS} immediately above: this pure module
+ * cannot load `plan/policy.yaml` itself, so this literal is the default for a direct/test caller
+ * that supplies no `DaemonOpts.sweepRetriggerIntervalMs`.
+ */
+export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
+
+/**
  * The exit code a FRESHNESS self-restart uses, distinct from a crash's 1 (W1-T490).
  *
  * 75 is `EX_TEMPFAIL` from sysexits(3) — "temporary failure, the user is invited to
@@ -689,6 +708,18 @@ export interface DaemonOpts {
    * worker's `until` shell loop with no exit condition parked the daemon up to 165 minutes).
    */
   sweepWallClockBoundMs?: number;
+  /**
+   * W1-T1272 — the MINIMUM GAP (ms, default {@link DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS}) between
+   * two full-sweep RETRIGGERS fired while a "dispatch"/"retro" in-flight ticker holds the loop
+   * (see {@link startInFlightTicker}'s own doc). Distinct from `sweepWallClockBoundMs` above,
+   * which bounds how long any ONE sweep call is allowed to run — this bounds how OFTEN a new one
+   * is allowed to start. Never consulted by the once-per-iteration call at the top of the loop,
+   * which is unconditional whenever `deps.sweep` is supplied, exactly as before this field
+   * existed. POLICY DATA (rule 2) in intent, though not yet threaded from `plan/policy.yaml` —
+   * a direct/test caller (and the real `rmd daemon` entry, until a follow-up wires the policy
+   * row) gets the default.
+   */
+  sweepRetriggerIntervalMs?: number;
 }
 
 /**
@@ -1403,6 +1434,13 @@ function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolc
  * spend into two. A `sweepLight` throw is caught and ledgered
  * (`daemon.sweep_light.failed`), never propagated — a ticker hiccup costs
  * one logged tick, never the retro's own outcome.
+ *
+ * W1-T1272: `sweepRetrigger`, when supplied, is forwarded straight to `startInFlightTicker` —
+ * this wrapper is used for BOTH the retro trigger and auto-triage call sites, and either can
+ * hold the loop for the same order of minutes a long dispatch does (rationale: 22.0/21.0-minute
+ * retro firings, measured), so the same re-trigger eligibility applies. Only `sweepLight` is
+ * still ticked unconditionally on every poll — the retrigger fires strictly less often, on its
+ * own longer interval.
  */
 async function sweepLightDuringRetro(
   deps: DaemonDeps,
@@ -1410,8 +1448,9 @@ async function sweepLightDuringRetro(
   log: (step: string, extra?: Record<string, unknown>) => void,
   run: () => Promise<void>,
   diskHeadroomLatch: { escalated: boolean },
+  sweepRetrigger?: SweepRetrigger,
 ): Promise<void> {
-  const ticker = startInFlightTicker(deps, pollIntervalMs, log, "retro", diskHeadroomLatch);
+  const ticker = startInFlightTicker(deps, pollIntervalMs, log, "retro", diskHeadroomLatch, sweepRetrigger);
   try {
     await run();
   } finally {
@@ -1474,6 +1513,12 @@ async function sweepLightDuringRetro(
  * `runDaemon` run (see that variable's own doc) — never a fresh latch per call, which would
  * re-escalate every time a NEW phase's ticker happened to start while the SAME breach was still
  * open.
+ *
+ * W1-T1272 (THE RE-TRIGGER): `sweepRetrigger`, when supplied, lets THIS SAME ticker also
+ * re-fire the FULL sweep (`deps.sweep`, never `sweepLight`) on its own cadence — see that
+ * param's own doc below. Only the "dispatch"/"retro" call sites pass it; the "sweep" phase's
+ * own ticker (started BY a full-sweep call, below) never does, so a retrigger can never
+ * re-enter the sweep it exists to keep light while it runs.
  */
 function startInFlightTicker(
   deps: DaemonDeps,
@@ -1481,6 +1526,7 @@ function startInFlightTicker(
   log: (step: string, extra?: Record<string, unknown>) => void,
   phase: "dispatch" | "retro" | "sweep",
   diskHeadroomLatch: { escalated: boolean },
+  sweepRetrigger?: SweepRetrigger,
 ): { stop: () => Promise<void> } {
   let active = true;
   const ticker = deps.sweepLight
@@ -1528,6 +1574,32 @@ function startInFlightTicker(
               log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
             }
           }
+          // W1-T1272 (RE-TRIGGER, design part (ii)): fires the FULL sweep — never `sweepLight`
+          // above — when `sweepRetriggerIntervalMs` has elapsed since it last actually ran,
+          // ANYWHERE (the top-of-iteration call or a prior retrigger), regardless of how long
+          // this "dispatch"/"retro" phase has held the loop. Without this, a boot whose
+          // dispatch/retro holds the loop for its measured mean of 38.5 minutes got exactly one
+          // full sweep (the one at the top of the iteration that started it) for that whole
+          // span — the freshness exit cannot help here, it is only consulted BETWEEN
+          // iterations, and this phase never returns to the top until the in-flight work
+          // settles. Awaited before this loop continues to its NEXT `sweepLight` tick, so the
+          // full sweep this fires still runs strictly one at a time against every other call
+          // site (the top-of-iteration call cannot run again until this ticker is stopped, and
+          // `runSweep`'s own cross-call mutex, cited at the top-of-iteration call site's
+          // comment, serializes any theoretical overlap besides).
+          if (sweepRetrigger && deps.sweep) {
+            const nowMs = (deps.now ?? (() => new Date()))().getTime();
+            const last = sweepRetrigger.state.lastRunAtMs;
+            if (last === undefined || nowMs - last >= sweepRetrigger.intervalMs) {
+              sweepRetrigger.state.lastRunAtMs = nowMs;
+              log("daemon.sweep.retriggered", {
+                phase,
+                poll_interval_ms: pollIntervalMs,
+                interval_ms: sweepRetrigger.intervalMs,
+              });
+              await runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch);
+            }
+          }
           try {
             await deps.sweepLight!();
           } catch (e) {
@@ -1544,6 +1616,73 @@ function startInFlightTicker(
       if (ticker) await ticker;
     },
   };
+}
+
+/**
+ * W1-T1272 — the shared config `startInFlightTicker`'s "dispatch"/"retro" call sites pass so
+ * they can ALSO re-fire the full sweep on a cadence, not only `sweepLight` (see that param's
+ * own doc). `state` is ONE mutable ref, threaded from `runDaemon` into every call site (the
+ * top-of-iteration sweep call and every ticker that accepts this config) — never a fresh object
+ * per call, which would make each phase re-derive "elapsed since last sweep" from its own
+ * private zero instead of the sweep's actual last run.
+ */
+interface SweepRetrigger {
+  /** Mirrors `DaemonOpts.sweepWallClockBoundMs` — the SAME bound the top-of-iteration call uses. */
+  sweepWallClockBoundMs: number;
+  /** `DaemonOpts.sweepRetriggerIntervalMs` (resolved), the minimum gap between two retriggers. */
+  intervalMs: number;
+  /** SHARED across every call site — see this interface's own doc. */
+  state: { lastRunAtMs: number | undefined };
+}
+
+/**
+ * W1-T1272 — THE GATE ITSELF, extracted so the bound (`DaemonOpts.sweepWallClockBoundMs`) and
+ * the light-sweep ticker it runs under apply IDENTICALLY at every call site: the
+ * once-per-iteration call, the stale-freshness "reach the gate before returning" call, and a
+ * mid-flight retrigger (`SweepRetrigger`, above). A second, inlined copy at any of those sites
+ * is exactly how the bound or the ticker shape could silently drift between them. Behaviour is
+ * byte-identical to the single inline block this replaces: the SAME `Promise.race` against a
+ * real `setTimeout` (never `deps.sleep` — see the original comment this carries forward), the
+ * SAME `daemon.sweep.abandoned`/`daemon.sweep.failed` log shapes, and the SAME in-flight-ticker
+ * wrapping (phase "sweep") so `sweepLight` keeps ticking while a full sweep runs. Callers are
+ * responsible for checking `deps.sweep` is defined before calling this
+ * (mirrors the original `if (deps.sweep)` guard) — this function assumes it is.
+ */
+async function runGatedSweep(
+  deps: DaemonDeps,
+  pollIntervalMs: number,
+  sweepWallClockBoundMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  diskHeadroomLatch: { escalated: boolean },
+): Promise<void> {
+  const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch).stop;
+  try {
+    const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!());
+    const startedAtMs = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<"abandoned">((resolve) => {
+      timer = setTimeout(() => resolve("abandoned"), sweepWallClockBoundMs);
+    });
+    try {
+      const winner = await Promise.race([sweepPromise, bound]);
+      if (winner === "abandoned") {
+        const elapsedMs = Date.now() - startedAtMs;
+        log("daemon.sweep.abandoned", { elapsed_ms: elapsedMs, bound_ms: sweepWallClockBoundMs });
+        // Never leave the real sweep's eventual outcome unhandled — it may still resolve or
+        // throw well after this call has moved on (the mutex `runSweep` shares across concurrent
+        // calls, cited at the call sites, is what makes that safe).
+        sweepPromise.catch((e) => {
+          log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e), after_abandon: true });
+        });
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  } catch (e) {
+    log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e) });
+  } finally {
+    await stopSweepTicker();
+  }
 }
 
 /**
@@ -1923,6 +2062,18 @@ export async function runDaemon(
   // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
   const sweepWallClockBoundMs = opts.sweepWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
+  // W1-T1272: ONE mutable ref for "when did a full sweep last actually run", shared by every
+  // call site below (the once-per-iteration call, the stale-freshness call, and every
+  // "dispatch"/"retro" ticker's retrigger) — see `SweepRetrigger`'s own doc for why a shared
+  // reference, not a fresh object per call site, is load-bearing here. `lastRunAtMs` starts
+  // `undefined`: the first sweep of this process's life runs unconditionally (unchanged from
+  // before this task), never gated on an elapsed-time check against a run that never happened.
+  const sweepRetriggerState: { lastRunAtMs: number | undefined } = { lastRunAtMs: undefined };
+  const sweepRetrigger: SweepRetrigger = {
+    sweepWallClockBoundMs,
+    intervalMs: opts.sweepRetriggerIntervalMs ?? DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS,
+    state: sweepRetriggerState,
+  };
   const log = deps.log ?? (() => {});
   // W1-T342: shared by BOTH `checkDispatchGovernors` call sites below (the tick-top one and the
   // per-dispatch one immediately before `runOne`) — same three log shapes either call site can
@@ -2320,6 +2471,20 @@ export async function runDaemon(
       if (freshness.installNeeded) {
         deps.runInstall?.();
       }
+      // W1-T1272 (THE FULL SWEEP IS UNREACHABLE AFTER A BOOT'S FIRST ITERATION, design part
+      // (ii), "the ordering"): REACH THE GATE BEFORE RETURNING. Before this, a stale verdict
+      // returned from `runDaemon` sixty-four lines above the loop's only `deps.sweep!()` call
+      // (below), so origin/main advancing past this process's boot sha — which the fleet's own
+      // throughput causes routinely — closed the ONE thing that starts a full sweep before it
+      // could ever fire again this boot. Never widens what the sweep may decide (design (v)):
+      // this is the SAME `deps.sweep` call, under the SAME wall-clock bound and light-sweep
+      // ticker, that the non-stale path below already runs — just also reached from here. The
+      // stale verdict is never suppressed by running it: `return summary("stale", ...)` below
+      // still fires unconditionally afterward (design (iii): the restart stays).
+      if (deps.sweep) {
+        sweepRetriggerState.lastRunAtMs = now().getTime();
+        await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch);
+      }
       const detail =
         `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
         `past this process's boot sha`;
@@ -2370,50 +2535,14 @@ export async function runDaemon(
     // exit path via `finally`, a `sweepLight()` already in flight is allowed to finish rather
     // than aborted, and a ticker hiccup is ledgered (`daemon.sweep_light.failed`) but never
     // propagated.
+    // W1-T1272: the bound/ticker logic formerly inlined here now lives in `runGatedSweep`,
+    // shared with the "reach the gate before returning" call in the stale-freshness branch
+    // above and with every ticker's retrigger (`SweepRetrigger`) — see that function's own doc.
+    // `sweepRetriggerState.lastRunAtMs` is updated here too, so a retrigger's own elapsed-time
+    // check (below, in `startInFlightTicker`) measures from whichever call actually ran last.
     if (deps.sweep) {
-      const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep", diskHeadroomLatch).stop;
-      try {
-        // W1-T1044: the WALL-CLOCK BOUND on `deps.sweep()` — see DaemonOpts.sweepWallClockBoundMs's
-        // own doc for the measured incident this closes (a fix-rung worker's `until` shell loop
-        // with no exit condition parked this exact await for up to 165 minutes, and neither the
-        // worker's `--max-turns` nor its `--max-budget-usd` cap can fire on a shell command that
-        // never returns — both burn neither a turn nor a dollar). A REAL `setTimeout`, never
-        // `deps.sleep`: the ticker started above already owns that injected clock for its own
-        // `daemon.alive`/`sweepLight` cadence, and racing a SECOND consumer against it would
-        // double the sleep-call count every other daemon.ts suite counts as its idle proxy (see
-        // `startInFlightTicker`'s own doc) — a test drives this bound with a small REAL `ms`
-        // value via `DaemonOpts.sweepWallClockBoundMs` instead (matches
-        // `spawnFixWorkerBounded`'s identical real-timer choice, run-task.ts).
-        //
-        // Wrapped in `Promise.resolve().then(...)` so a `deps.sweep` that throws SYNCHRONOUSLY
-        // (never awaits at all) still produces a rejected promise this can race the timer
-        // against, exactly like an eventually-rejecting one would.
-        const sweepPromise: Promise<void | undefined> = Promise.resolve().then(() => deps.sweep!());
-        const startedAtMs = Date.now();
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const bound = new Promise<"abandoned">((resolve) => {
-          timer = setTimeout(() => resolve("abandoned"), sweepWallClockBoundMs);
-        });
-        try {
-          const winner = await Promise.race([sweepPromise, bound]);
-          if (winner === "abandoned") {
-            const elapsedMs = Date.now() - startedAtMs;
-            log("daemon.sweep.abandoned", { elapsed_ms: elapsedMs, bound_ms: sweepWallClockBoundMs });
-            // Never leave the real sweep's eventual outcome unhandled — it may still resolve or
-            // throw well after this tick has moved on to dispatch (the mutex `runSweep` shares
-            // across concurrent calls, cited in the doc above, is what makes that safe).
-            sweepPromise.catch((e) => {
-              log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e), after_abandon: true });
-            });
-          }
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
-      } catch (e) {
-        log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e) });
-      } finally {
-        await stopSweepTicker();
-      }
+      sweepRetriggerState.lastRunAtMs = now().getTime();
+      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch);
     }
 
     // ORPHAN SWEEP (W1-T117 design part ii): runs alongside the PR-pipeline
@@ -2807,7 +2936,14 @@ export async function runDaemon(
             // below — wrap it in the SAME light-sweep ticker so the loop's
             // sweep keeps dispositioning PRs while the retro runs, instead
             // of going dark for the retro's whole duration.
-            await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runRetroTrigger!(decision), diskHeadroomLatch);
+            await sweepLightDuringRetro(
+              deps,
+              pollIntervalMs,
+              log,
+              () => deps.runRetroTrigger!(decision),
+              diskHeadroomLatch,
+              sweepRetrigger,
+            );
           } catch (e) {
             log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
           }
@@ -3077,7 +3213,14 @@ export async function runDaemon(
               // (a CI-polling tail) and this loop is single-threaded, so an unwrapped await would
               // black out every sweep for that whole duration — the exact defect W1-T276 fixed for
               // the retro. The ticker keeps dispositioning PRs while triage runs.
-              await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runAutoTriage!(fired.feedbackId), diskHeadroomLatch);
+              await sweepLightDuringRetro(
+                deps,
+                pollIntervalMs,
+                log,
+                () => deps.runAutoTriage!(fired.feedbackId),
+                diskHeadroomLatch,
+                sweepRetrigger,
+              );
             } catch (e) {
               log("auto_triage.run_failed", {
                 feedback: fired.feedbackId,
@@ -3250,7 +3393,7 @@ export async function runDaemon(
     // aborted mid-call (a sweepLight() already in flight is allowed to finish before
     // the ticker stops). It also emits this dispatch's `daemon.alive` liveness rows —
     // see {@link startInFlightTicker} for why that row exists and why it is prefixed.
-    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch).stop;
+    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger).stop;
 
     // CONCURRENT DISPATCH (W1-T343, mirrors `runDrainLanes` exactly): `allSettled`, never
     // `all` — a sibling lane's rejection must never abort another lane already in flight;
