@@ -32,6 +32,31 @@
     UNSATISFIABLE_GATE_MARKER.test(criterion.reason))`. Every other consumer reads `.length`. The
     measure is therefore only the AVAILABLE one, never the right one — and the right one needs no
     new plumbing.
+
+    THE MEASURED INSTANCE SAYS THE PROPOSED QUANTITY IS THE WEAKER OF TWO. Re-derived 2026-08-23
+    from #2605's own branch (`run-W1-T1253-1787490921342` — three commits, committer times UTC):
+    `4374713f` 13:36 the build; `0ac665e8` 15:31 STRIKE 1, "replace raw NUL bytes with a literal
+    space in the shard-join separator"; `24e6d3f7` 16:00 STRIKE 2, "cover generateSandboxTask's
+    isolating-path fallback branch". The PR is STILL RED at that head, now on a TYPECHECK
+    (`error TS2741: Property 'bySubsystem' is missing ... but required in type 'LearningsIndex'`).
+    SO THE RUNG FIXED TWO DISTINCT FAILURE CLASSES AND HIT A THIRD, and `strikeCap: 2` spent itself
+    as A FIXED BUDGET AGAINST AN UNKNOWN-LENGTH QUEUE — the escalation then reported that checks
+    did not go green across two strikes that had each removed a real blocker.
+
+    AND `unmetCriteria` CANNOT SEE THIS, WHICH IS WHY THE MEASURE THIS TASK PROPOSES IS THE WEAKER
+    OF TWO. NOTHING REQUIRES THE COUNT — OR THE SET — TO SHRINK WHEN A CASCADE ADVANCES: a strike
+    that clears one blocker and uncovers the next can leave the same criteria unmet at the same
+    size, so an identity comparison reads a cascade as a repeat and stops a rung that is working.
+    A FAILURE SIGNATURE CAN SEE IT: NUL -> COVERAGE -> TYPECHECK are three DISTINCT values across
+    the same three heads. The AO precedent ALREADY CITED in W1-T1266 bounds its unbounded nudges in
+    exactly this shape — `m.react.seen[key] == sig` over `ciFailureSignature(checks)`, where the
+    same failing checks never re-nudge and a DIFFERENT failure does. CITED, NOT RE-DERIVED.
+
+    SO THE DESCENT SHOULD BE OVER DISTINCT FAILURE SIGNATURES, NOT OVER A COUNT: GRANT A STRIKE
+    BACK WHEN THE SIGNATURE CHANGES, KEEP THE CAP HARD WHEN IT DOES NOT. DO NOT RAISE `strikeCap` —
+    the point is that A CASCADE AND A STUCK RUNG ARE DIFFERENT EVENTS, not that two is too few. The
+    earlier-stop half of this task is UNAFFECTED and still correct: a signature that repeats is
+    exactly the case that should stop sooner than the cap.
   design: |
     (i) THE SIZE IS THE WRONG MEASURE AND THE SET IS THE RIGHT ONE. A strike that fixes criterion A
     while B remains unmet moves the count 2 -> 1 and reads as progress. A strike that fixes A and
