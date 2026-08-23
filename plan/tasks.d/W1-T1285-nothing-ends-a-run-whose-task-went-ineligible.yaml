@@ -1,0 +1,150 @@
+- id: W1-T1285
+  title: "NOTHING ENDS A LIVE RUN BECAUSE ITS TASK BECAME INELIGIBLE MID-FLIGHT — every kill path this repo has fires on the PROCESS (orphaned, stalled, deploy-drained) and not one reads task state, so a sibling merging the same task or a task going `blocked` leaves its worker spending to completion against work that no longer needs doing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/daemon.ts, src/lib/worker-containment.ts, test/run-cancel-on-ineligible.test.ts]
+  origin: oper#nothing-cancels-an-ineligible-run-2026-08-23
+  plan_refs: ["W1-T1045", "W1-T117", "W1-T1261", "W1-T1268", "#2332"]
+  status: blocked
+  attempts: 0
+  rationale: |
+    ★ FILED `status: blocked` ON PURPOSE, AND THE REASON IS THE MEASUREMENT AND NOT THE MECHANISM.
+    The mechanism is real and re-derived below. What is NOT established is how often a task
+    becomes ineligible while a run holds it, and this repo has a named recurring defect of bounds
+    that fire on a healthy condition. W1-T1261 was closed unbuilt on exactly this argument on
+    2026-08-23 and that was the right outcome. DO NOT DISPATCH until the query in design (v) has
+    been run on the daemon host and its answer recorded here.
+
+    (1) EVERY KILL PATH FIRES ON THE PROCESS, NEVER ON THE TASK -- ENUMERATED FROM SOURCE WITH A
+    CONTROL. Three paths terminate a worker:
+      ORPHAN SWEEP    `sweepOrphanWorkers` (`src/lib/worker-containment.ts`, W1-T117) walks
+                      candidate pids and kills only what it cannot attribute to a LIVE run.
+      STREAM STALL    W1-T1045's clock bound raises `WorkerAbandonedError` -- "no observed stream
+                      activity for <elapsed>ms, past the <bound>ms clock bound".
+      DEPLOY/TEARDOWN `teardownProcessGroup` / `killProcessGroup` SIGKILL a process group.
+    NONE consults task state: `isDispatchEligible`, `runnableCandidates` and `deriveStatus` read
+    ZERO hits across `worker-containment.ts`, `worker.ts` and `deployer.ts`, against a control of
+    five `src/lib/` files that DO reference them (`auto-triage`, `daemon`, `dispatch-overlap`,
+    `drain`, `escalate`) -- so the zero is absence and not a blind query.
+
+    (2) AND THE ORPHAN SWEEP IS NOT MERELY SILENT ON THIS CASE, IT IS STRUCTURALLY INCAPABLE OF IT.
+    Its loop reads: no markers -> `leftAlone: "unattributable"`; `deps.isRunActive(markers.runId)`
+    -> `leftAlone: "run_active"`; only otherwise `deps.kill(candidate.pid)`. A run that is STILL
+    ACTIVE is explicitly protected, which is correct for the orphan concern and is exactly why it
+    can never serve the ineligibility one. The two are opposite predicates on the same pid.
+
+    (3) THE STALL BOUND IS A CLOCK, NOT A RELEVANCE TEST. W1-T1045 measures SILENCE. A worker
+    steadily producing output against a task that merged ten minutes ago is maximally healthy by
+    that bound and will never trip it. `#2332` is the only `worker.abandoned` the operator's union
+    reports -- 7,209,637 ms against a 7,200,000 ms ceiling -- and it is a stalled worker correctly
+    terminated, not an irrelevant one.
+
+    (4) EXTERNAL PRECEDENT, CITED AND NOT COPIED. `openai/symphony` SPEC.md (draft v1, RFC 2119)
+    §8.5 part B requires the behaviour this repo lacks: a TERMINAL task's run is terminated AND
+    cleaned; an ACTIVE-BUT-UNROUTABLE one is terminated WITHOUT cleanup. §7.2 gives the outcome a
+    terminal name, `CanceledByReconciliation`. The distinction is the useful part -- cancellation
+    is not one behaviour but two, split on whether the work can still be routed -- and this task
+    takes that split, not their implementation. W1-T1268 cites the same spec for the MIRROR
+    concern (dispatch ADMISSION deciding in-flight from artifacts that do not yet exist); this one
+    is about ENDING a run already admitted, and the two must not be merged.
+
+    (5) THE POPULATION IS UNMEASURED FROM HERE AND THE SURFACE IS DISQUALIFIED RATHER THAN
+    ANSWERED. `rmd ledger-grep` reports `archives: 0 matched` on this container and refuses --
+    "refusing to answer from the live ledger alone ... an error, never a smaller result". THE
+    MANDATED CONTROL REFUSES IDENTICALLY: `"step":"risk_judge.decision"`, which reads roughly 150
+    on the daemon host, returns the same zero-archive refusal here, as do `run.start`,
+    `worker.abandoned` and `daemon.orphan_sweep`. A control that cannot pass disqualifies the
+    surface, so NO frequency is claimed by this shard.
+  design: |
+    ONE CONCERN: end a run whose task stopped needing it, without ending one whose task still does.
+
+    (i) THE PREDICATE IS RE-DERIVED AT CANCEL TIME, NEVER READ FROM A CACHE. Eligibility is a
+    function of merged state, task status and sibling PRs, all of which move while a run is in
+    flight -- that movement IS the trigger. A cached read taken at dispatch is precisely the value
+    that has gone stale by the moment it would be consulted, so the check must re-derive through
+    the same `deriveStatus`/`isDispatchEligible` path every other rung trusts.
+
+    (ii) TWO OUTCOMES, NOT ONE -- THE SPLIT THIS BORROWS FROM THE PRECEDENT. A task that reached a
+    TERMINAL state (a sibling merged it) is done: terminate and clean up. A task that is merely
+    UNROUTABLE right now (it went `blocked`, a dependency regressed) is not done: terminate, but
+    leave the work in place, because the branch may still be the starting point when it unblocks.
+    Collapsing these into one behaviour loses the distinction that makes cancellation safe.
+
+    (iii) Q2 -- THE BRANCH SURVIVES, AND THAT IS WHY CANCELLATION IS AFFORDABLE. W1-T1261's
+    reframe holds here: the durable artefact is the BRANCH, not the worktree. The run pushes
+    `run-<taskId>-<epochMs>` before any of this fires, NOTHING in `src/` deletes a branch (a scan
+    for `push --delete` / `branch -D` / `deleteBranch` returns empty), and `reapStaleWorktrees` is
+    fail-closed by its own doc -- "a live pid is NEVER reaped; a branch still live upstream is
+    NEVER reaped, however old". So a cancelled run leaves its commits intact.
+    WHO OWNS IT AFTERWARDS IS THE PART THAT NEEDS DECIDING, NOT ASSUMING: today a branch with no
+    live process and no eligible task is what `parseOrphanedBranch` calls an orphan, and no rung
+    adopts it. A cancellation that creates orphans faster than anything retires them would trade
+    one leak for another, so the terminal-vs-unroutable split of (ii) must say, per arm, whether
+    the branch is abandoned, kept for resumption, or handed back.
+
+    (iv) Q3 -- WHAT MUST NOT CHANGE. NOTHING CANCELS A RUN WHOSE TASK IS STILL ELIGIBLE. That is
+    the whole safety property and it is worth stating as a falsifiable invariant rather than a
+    caveat: for every kill this adds, the eligibility predicate was re-derived immediately before
+    it and returned false. The three existing kill paths keep their own triggers unchanged --
+    W1-T117's orphan sweep still protects `run_active` (which is what makes it useless here and
+    correct there), W1-T1045's clock bound still measures silence, and deploy teardown still
+    drains on its own schedule.
+
+    (v) THE UNBLOCKING QUERY, AND THE OUTCOME THAT SHOULD CLOSE THIS. Take on the daemon host,
+    over the union (three patterns, never two):
+      zgrep -h '"step":"run.start"' state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson
+    then join each run id against the merge/status transitions of its own task, and count the runs
+    whose task reached a terminal or blocked state BEFORE the run ended. IF THE ANSWER IS ONE OR
+    TWO, CLOSE THIS TASK UNBUILT AND SAY SO. A cancellation rung is a new way for the fleet to
+    kill its own work; it must be paid for by a population, not by a plausible story.
+
+    (vi) NOT IN SCOPE. The three existing kill paths' own triggers; W1-T1268's admission-side
+    concern; branch retirement policy for orphans that already exist; and any change to what
+    `reapStaleWorktrees` destroys.
+  acceptance:
+    - claim: "a run whose task reached a terminal state while it was in flight is ended rather than left to spend to completion"
+      proof: "unit test: test/run-cancel-on-ineligible.test.ts"
+    - claim: "a run whose task is still eligible is never ended, however long it has been running"
+      proof: "unit test: test/run-cancel-on-ineligible.test.ts"
+    - claim: "eligibility is re-derived at cancel time rather than read from a value cached at dispatch"
+      proof: "unit test: test/run-cancel-on-ineligible.test.ts"
+    - claim: "a terminal task and a merely unroutable one are ended differently, and the difference is observable"
+      proof: "unit test: test/run-cancel-on-ineligible.test.ts"
+    - claim: "a cancelled run leaves its pushed branch intact, so the commits survive the cancellation"
+      proof: "unit test: test/run-cancel-on-ineligible.test.ts"
+  note: |
+    RISK BAND -- BOTH READINGS, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
+    `sizingViolation` (`src/lib/task-linter.ts`) opens with `if (task.risk === "high") return
+    undefined; // Rule 19 exemption`, so `high` means the span was NEVER SCORED, not that it was
+    scored and found narrow. Measured at `risk: medium` this `files:` list scores as more than one
+    concern and BLOCKS; at `high` the check returns `undefined`. The band is Rule 19's SPAN. The
+    real blast radius is nonetheless genuinely high and not merely wide: this adds a NEW WAY FOR
+    THE FLEET TO KILL ITS OWN WORK, which is the strongest argument for the `blocked` status above.
+
+    NO PROOF GREPS THIS SHARD'S OWN PATH. All five criteria use the pure-path `unit test:` form
+    naming `test/run-cancel-on-ineligible.test.ts`, declared in `files:` and not yet existing -- a
+    legitimate forward reference to a PATH, where a symbol name would be a guess.
+
+    THE ID WAS PRE-MINTED AND READ BACK BEFORE ANYTHING WAS WRITTEN. `refs/rmd-id/W1-T1285`
+    resolves against a namespace of 316 refs. Eight surfaces were swept and TWO CONTROLS FAILED
+    AND WERE RE-QUALIFIED RATHER THAN TRUSTED. First: W1-T1283 was the obvious shard-filename
+    control and reads 0, because that id was never filed -- the session that swept it stopped and
+    reported an overlap instead of filing; re-controlled on W1-T1279, which reads 1. Second: the
+    open-PR file-list control `plan/tasks.d/` reads 0, because no open PR touches the plan right
+    now; re-controlled on `test/`, which 4 of 4 open PRs touch. With those replacements: shard
+    filenames 0; plan `- id:` lines 0 against W1-T1279 at 1; the reservation 1, the pre-mint; open
+    PR titles 0 against 2 carrying a `W1-T` id; open head branches 0 against 4 `run-W1-T` heads;
+    open PR file lists 0 with coverage at four of four, against `test/` at 4; merged trailers 0
+    under `^Remudero-Task:\s*W1-T1285\s*$` against 43 carrying any trailer; merged subjects 0
+    against 59; merged `run-*` credit 0 against 29 structured heads, with `run-W1-T1285-*` at 0
+    against an 86-branch namespace.
+
+    THE SUBJECT WAS SWEPT AS WELL AS THE ID. `CanceledByReconciliation` reads 0 across all shards.
+    `symphony` reads 1 -- W1-T1268, which cites the same spec for the ADMISSION side and is
+    delimited in rationale (4). `ineligible` reads 3 and `mid-flight` 5; those were read and none
+    is this defect. Control: 519 shards carry `acceptance`.
