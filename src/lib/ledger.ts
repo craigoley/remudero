@@ -660,6 +660,15 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // such HARD_STOP's attribution into "unattributed" — the same quiet-reset failure this Set
   // exists to prevent, so the read makes the step decision-relevant rather than cosmetic.
   "automerge.armed",
+  // W1-T1212: `redPrWithStaleGate`'s caller (run-task.ts) derives `updatedForWorkflow` from a
+  // ledger scan over this row's own `stale_workflow` field to decide whether a given
+  // `${prNumber}:${workflowName}` pair has already been spent — see `SweepDeps.updatedForWorkflow`
+  // and `redPrWithStaleGate`'s own "ALREADY UPDATED FOR THIS WORKFLOW" design note (sweep.ts). A
+  // rotation dropping this row would forget the pair was already fired, re-selecting the same
+  // stale-gate PR for the same workflow on every subsequent pass — the update-branch head is
+  // spent for nothing, forever, the same unbounded-re-fire shape `sweep.absent_repush` exists to
+  // prevent, applied to this lane's own dedup instead.
+  "sweep.update_branch.updated",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: the mutation check in
   // test/ledger-rotation.test.ts anchors on those three lines followed by `]);` and asserts the
   // needle occurs EXACTLY once. A block appended after them silently breaks that anchor — this

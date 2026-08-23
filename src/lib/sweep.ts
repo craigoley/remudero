@@ -930,6 +930,15 @@ export interface OpenPrView {
    */
   ciFailures?: CiFailure[];
   /**
+   * W1-T1223 (design i) — required checks whose LATEST attempt is CANCELLED with no later
+   * attempt on this head, distinct from a genuine failure ({@link ciFailures} names both; this
+   * names only the cancellations). Populated ALONGSIDE `ciFailures`, when `checksState ===
+   * "red"`; `[]`/undefined when checks aren't red or nothing cancelled contributed to the red
+   * verdict. Never makes `checksState` anything but "red" — see {@link CancelledRequiredCheck}'s
+   * own doc.
+   */
+  cancelledRequiredChecks?: CancelledRequiredCheck[];
+  /**
    * GitHub's own merge-conflict state, simplified (W1-T106, the #170 DIRTY
    * strand) — see {@link MergeState}'s own doc. `undefined`/`"unknown"` never
    * disposition CONFLICTED (fail-closed): only an OBSERVED `"dirty"` does.
@@ -1276,6 +1285,104 @@ export function checksStateFromRollup(
     if (!ok.has(s)) anyPending = true;
   }
   return anyPending ? "pending" : "green";
+}
+
+/**
+ * W1-T1223 — one required check whose LATEST (deduped) attempt is CANCELLED, never superseded by
+ * a later attempt on the same head. `checksState` stays "red" for this exactly as it does for a
+ * genuine failure (design note i refuses a fifth `checksState` member for the SAME reason
+ * {@link checksStateFromRollup}'s own doc already gives — a member every existing comparison site
+ * silently fails to match is the false-predicate-falls-through shape). This is the SEPARATE
+ * observable that names WHICH red required check is an ABSENT verdict rather than a bad one, so
+ * the sweep can re-queue its job instead of dispatching a fix-rung worker against a diff that
+ * carries no defect.
+ */
+export interface CancelledRequiredCheck {
+  name: string;
+  /**
+   * GitHub Actions job id, parsed by the real gateway (run-task.ts) from the rollup's own
+   * `detailsUrl` — the re-queue target is the JOB (design iv), never the workflow run.
+   * `undefined` when no job id could be read; the real `requeueCheck` wiring then degrades to a
+   * named no-op rather than guessing a target.
+   */
+  jobId?: string;
+}
+
+/**
+ * W1-T1223 (design i) — which of `requiredContexts`' checks have a LATEST (deduped) attempt that
+ * is CANCELLED, on the exact SAME gate {@link checksStateFromRollup} reads red from: same
+ * required-contexts filter, same {@link dedupeRollupByLatestAttempt} rule, so this can never name
+ * a check `checksStateFromRollup` itself would disagree is even in the gate. A check genuinely
+ * FAILING (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE) is never named here — only the
+ * literal CANCELLED conclusion is, which is what distinguishes "nobody reached a verdict" from
+ * "a verdict came back bad" (the falsifier design note vii states explicitly). `requiredContexts`
+ * empty/undefined names nothing, the same fail-toward-"no positive claim" direction
+ * `checksStateFromRollup` takes when it cannot confirm what is actually required.
+ */
+export function cancelledRequiredCheckNames(
+  rollup: RollupCheckEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined,
+): string[] {
+  const required = new Set(requiredContexts ?? []);
+  if (required.size === 0) return [];
+  const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
+  const gate = dedupeRollupByLatestAttempt(all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")));
+  return gate
+    .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
+    .map((c) => c.name ?? c.context ?? "unknown");
+}
+
+/** One re-queue/escalate decision for one cancelled required check. */
+export interface CancelledCheckRequeueDecision {
+  requeue: boolean;
+  escalate: boolean;
+  reason: string;
+}
+
+/**
+ * W1-T1223 (design ii/iii) — BOUNDED BY A LEDGERED RECORD, NEVER A CLOCK OR AN IN-MEMORY COUNTER.
+ * `alreadyRequeued` is read back fresh from the ledger by the caller ({@link
+ * requeuedCheckKeysFromLedger}) for this EXACT `${headSha}@${checkName}` pair — the same
+ * idempotence shape {@link import("./cost-anomaly.js").alreadyLedgeredCostAnomalyRunIds} already
+ * uses. Zero prior re-queues for this pair re-queues the job once; a SECOND observation of the
+ * SAME pair (the check was cancelled again on the SAME head, after the one re-queue this lane
+ * already ran) escalates instead of repeating — no timer, no retry budget: exactly one re-queue
+ * is either sufficient (a preempted runner) or diagnostic (a concurrency group, a capacity fault,
+ * or a workflow-level cancel — something re-queueing cannot reach).
+ */
+export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): CancelledCheckRequeueDecision {
+  if (alreadyRequeued) {
+    return {
+      requeue: false,
+      escalate: true,
+      reason: "already re-queued once on this head sha and cancelled again — a second cancellation is beyond what re-queueing can reach",
+    };
+  }
+  return {
+    requeue: true,
+    escalate: false,
+    reason: "latest attempt was cancelled with no later attempt on this head — re-queueing the job once",
+  };
+}
+
+/** The ledger step {@link requeuedCheckKeysFromLedger} reads back — one row per re-queue attempt. */
+export const CHECK_REQUEUE_STEP = "sweep.check_requeued";
+
+/**
+ * W1-T1223 (design ii) — every `${headSha}@${checkName}` pair the ledger already records a
+ * {@link CHECK_REQUEUE_STEP} row for. `runSweep` writes this row BEFORE calling `deps.requeueCheck`
+ * (ledgered before it can be repeated), so a pass that crashes between the write and the real
+ * GitHub call still bounds the NEXT pass toward escalating rather than re-queueing a second time —
+ * the safer failure direction for an action that mutates CI state unattended.
+ */
+export function requeuedCheckKeysFromLedger(lines: Array<Record<string, unknown>>): Set<string> {
+  const out = new Set<string>();
+  for (const l of lines) {
+    if (l.step === CHECK_REQUEUE_STEP && typeof l.head_sha === "string" && typeof l.check_name === "string") {
+      out.add(`${l.head_sha}@${l.check_name}`);
+    }
+  }
+  return out;
 }
 
 const MS_PER_DAY = 86_400_000;
@@ -2710,13 +2817,23 @@ export function selectUpdateBranchTarget(
   prs: readonly OpenPrView[],
   now: number,
   inFlightTaskIds: ReadonlySet<string> = new Set(),
+  staleGateWorkflowsByPr: ReadonlyMap<number, readonly string[]> = new Map(),
+  updatedForWorkflow: ReadonlySet<string> = new Set(),
 ): ArmedStalledPr | undefined {
-  const stalled = armedButStalled(prs);
-  if (stalled.length === 0) return undefined;
+  // W1-T1212 (design ii): the UNION of two disjoint-by-construction predicates, never a widening
+  // of either — `armedButStalled` still answers "armed and behind" and nothing here re-derives
+  // it. A PR named by both (should the two facts ever coincide) contributes ONE candidate: the
+  // first writer wins, and which shape wins carries no meaning `oldestActivityFirst` reads below.
+  const combined = new Map<number, ArmedStalledPr>();
+  for (const c of [...armedButStalled(prs), ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow)]) {
+    if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
+  }
+  const candidates = [...combined.values()];
+  if (candidates.length === 0) return undefined;
   const byNumber = new Map<number, OpenPrView>(prs.map((pr) => [pr.prNumber, pr]));
-  const eligible = stalled.filter((s) => {
+  const eligible = candidates.filter((s) => {
     const view = byNumber.get(s.prNumber);
-    if (!view) return false; // cannot happen — armedButStalled only derives from `prs` itself
+    if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
     if (view.isDraft === true) return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
@@ -2726,6 +2843,78 @@ export function selectUpdateBranchTarget(
   const eligibleViews = eligible.map((s) => byNumber.get(s.prNumber)!);
   const winnerView = oldestActivityFirst(eligibleViews, now);
   return eligible.find((s) => s.prNumber === winnerView?.prNumber);
+}
+
+/**
+ * One PR {@link redPrWithStaleGate} selected — sibling to {@link ArmedStalledPr}, carrying the
+ * ONE extra fact the caller needs: which failing check's workflow definition moved on main,
+ * so the pair can be remembered (design note iv) and never re-selected for the same workflow.
+ */
+export interface StaleGatePr extends ArmedStalledPr {
+  /** The currently-failing check whose workflow blob differs between this PR's merge ref and main. */
+  staleWorkflow: string;
+}
+
+/**
+ * W1-T1212 — A RED PR RUNS A FROZEN COPY OF THE VERY GATE THAT BLOCKS IT. `pull_request`
+ * evaluates `refs/pull/<n>/merge`, whose base parent is pinned at the PR's last `synchronize` —
+ * so a gate fixed on main (the #2477 shape: a filter added to `.github/workflows/ci-gate.yml`)
+ * never reaches a PR sitting on an older merge ref, and the PR fails a check main would now pass.
+ * `armedButStalled` cannot reach this population at all: a red PR is never armed (GitHub does not
+ * merge-eligibility-arm a checks-red head), so it can never enter `armedButStalled`'s own
+ * `autoMergeArmed === true` gate, and the loop this closes has no exit that does not involve a
+ * human (rationale (2)).
+ *
+ * SIBLING TO `armedButStalled`, NEVER A WIDENING OF IT (design note ii): this predicate asks a
+ * DIFFERENT question — "is this red PR's OWN failing gate stale" — over a population
+ * `armedButStalled` structurally excludes. `selectUpdateBranchTarget` selects across the union of
+ * both, one PR per pass, oldest head first, exactly as it already does for the armed-and-behind
+ * set.
+ *
+ * THE DISCRIMINATOR IS EXACT (design note i), never "behind main" alone (rationale (4): with
+ * `required_status_checks.strict` false, behind-ness alone would fire on essentially every open
+ * PR and pay a rebase storm for nothing). `staleGateWorkflowsByPr` is the caller's own answer,
+ * per PR, to "which of THIS head's currently-failing checks (a subset of {@link
+ * OpenPrView.ciFailures}) are defined by a workflow file whose blob sha differs between the
+ * merge ref and main right now" — a single contents read per file (run-task.ts wires the real
+ * `gh api` read; this predicate stays pure and takes the answer as data, the same shape
+ * `inFlightTaskIds` already takes for a fact only run-task.ts can fetch).
+ *
+ * REFUSED BY NAME (design note iv):
+ *  - CONFLICTED (`mergeState === "dirty"` or `mergeable === false`) — resolving a conflict is
+ *    judgement, and GitHub refuses an update-branch request against one anyway
+ *    ({@link UpdateBranchOutcome} already carries `"conflict"` for exactly that). Never attempted
+ *    here, however stale the PR's own gate copy is.
+ *  - ALREADY UPDATED FOR THIS WORKFLOW — `updatedForWorkflow` carries every `${prNumber}:${name}`
+ *    pair this lane has already requested an update for; a second request for the SAME pair is a
+ *    no-op that still spends a head, so a PR whose only stale name(s) are all already-spent is
+ *    skipped, never re-selected. A PR with an UNSPENT stale name is still eligible even if it
+ *    also carries an already-spent one — `.find` below picks the first fresh name.
+ *
+ * The draft veto and the in-flight-head veto (design note v) are NOT re-checked here — they are
+ * `selectUpdateBranchTarget`'s own job, applied to the union exactly once.
+ */
+export function redPrWithStaleGate(
+  prs: readonly OpenPrView[],
+  staleGateWorkflowsByPr: ReadonlyMap<number, readonly string[]>,
+  updatedForWorkflow: ReadonlySet<string> = new Set(),
+): StaleGatePr[] {
+  const out: StaleGatePr[] = [];
+  for (const pr of prs) {
+    if (pr.checksState !== "red") continue;
+    if (pr.mergeState === "dirty" || pr.mergeable === false) continue;
+    const staleNames = staleGateWorkflowsByPr.get(pr.prNumber) ?? [];
+    const fresh = staleNames.find((name) => !updatedForWorkflow.has(`${pr.prNumber}:${name}`));
+    if (fresh === undefined) continue;
+    out.push({
+      prNumber: pr.prNumber,
+      prUrl: pr.prUrl,
+      ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
+      headSha: pr.headSha,
+      staleWorkflow: fresh,
+    });
+  }
+  return out;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -3175,6 +3364,25 @@ export interface SweepDeps {
    */
   escalate: (pr: OpenPrView, reason: string, question: ClarificationQuestion) => void | Promise<void>;
   /**
+   * W1-T1223 (design ii/iv) — re-queue ONE cancelled required check's JOB, never the workflow
+   * run (`POST .../actions/jobs/{job_id}/rerun`, never `.../runs/{run_id}/rerun-failed-jobs` — a
+   * whole-run re-run would re-spend an already-green sibling job sharing the same workflow run).
+   * `runSweep` calls this AT MOST ONCE per `${headSha}@${checkName}` pair — see {@link
+   * cancelledCheckRequeueDecision} and {@link requeuedCheckKeysFromLedger} for the bound. Optional:
+   * omitted, the sweep still names the cancelled check on its disposed line but takes no re-queue
+   * action — never a silent no-op, the stand-down is legible on the ledger.
+   */
+  requeueCheck?: (pr: OpenPrView, check: CancelledRequiredCheck) => void | Promise<void>;
+  /**
+   * W1-T1223 (design iii) — a SECOND cancellation of the SAME required check on the SAME head
+   * sha, observed after this lane already spent its one re-queue on that pair. Distinct from
+   * `escalate` above (which carries a rendered {@link ClarificationQuestion} asking an operator
+   * to pick between two candidate diffs) — this names the check and both cancellations to a
+   * human; there is no diff to choose between, only a CI-side fault re-queueing cannot reach.
+   * Optional: omitted, the sweep still names the second cancellation on its disposed line.
+   */
+  escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => void | Promise<void>;
+  /**
    * W1-T177: an OPTIONAL fresh re-read of ONE PR's live GitHub state,
    * consulted immediately before a blocked-fixable disposition actually
    * spends a fix-rung strike — never the `openPrs` snapshot this whole sweep
@@ -3230,6 +3438,27 @@ export interface SweepDeps {
    * this axis, exactly as if every PR's worker had already finished.
    */
   inFlightTaskIds?: ReadonlySet<string>;
+  /**
+   * W1-T1212 — per red PR, the failing check names (a subset of that PR's own
+   * {@link OpenPrView.ciFailures}) whose defining workflow file's blob sha differs between this
+   * PR's OWN merge ref and main RIGHT NOW — the ONLY population {@link redPrWithStaleGate} draws
+   * from. Intended as a per-pass `gh api` contents read (run-task.ts) — cheap and exact (that
+   * predicate's own design note i), never re-derived from `checksState` alone, which is what let
+   * a red PR spin forever behind a gate that had already moved on main (the #2434/#2477
+   * incident this task closes). Omitted ⇒ empty map ⇒ no red PR is ever selected on this axis,
+   * exactly as before this field existed.
+   */
+  staleGateWorkflowsByPr?: ReadonlyMap<number, readonly string[]>;
+  /**
+   * W1-T1212 (design note iv, "never fire twice on the same PR for the same workflow"): every
+   * `${prNumber}:${workflowName}` pair this lane has ALREADY requested an update-branch for — an
+   * update mints a new head, and a second request for the same stale pair is a no-op that still
+   * spends one, so once fired the pair must be remembered and skipped. Intended as a ledger scan
+   * over prior `sweep.update_branch.updated` rows' own `stale_workflow` field (run-task.ts) — the
+   * SAME durable sink every other dedup in this module already reads, never a second store.
+   * Omitted ⇒ empty set ⇒ every stale pair stays eligible, exactly as before this field existed.
+   */
+  updatedForWorkflow?: ReadonlySet<string>;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -3928,6 +4157,9 @@ export async function runSweep(
   // recovery, so arming parity costs this pass no extra ledger read.
   const ledgerLines = readLedger(deps.ledgerPath);
   const prior = priorActionsFromLedger(ledgerLines);
+  // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
+  // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
+  const requeuedCheckKeys = requeuedCheckKeysFromLedger(ledgerLines);
 
   // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
   // Hung off THIS pass, not a new src/run-task.ts verdict call site (design note vi): `runSweep`
@@ -4438,6 +4670,60 @@ export async function runSweep(
                 standDownReason = describeRedCause(redCause, pr, openPrs);
                 break;
               }
+              // W1-T1223 (design i/ii/iii/iv/v) — A CANCELLED REQUIRED CHECK HAS NO DEFECT IN
+              // THE DIFF FOR A FIX-RUNG WORKER TO READ. Fires BEFORE `dispatchFix` so a PR whose
+              // ENTIRE red verdict is one or more cancellations never spends a fix-rung strike on
+              // nothing (the #2434/#2444 incident this task fixes). Gate reconciliation, the
+              // sweep's own lane — never the fix rung's (design v).
+              const cancelledChecks = isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [];
+              if (cancelledChecks.length > 0) {
+                let requeuedAny = false;
+                const outcomes: string[] = [];
+                for (const check of cancelledChecks) {
+                  const key = `${pr.headSha}@${check.name}`;
+                  const decision = cancelledCheckRequeueDecision(requeuedCheckKeys.has(key));
+                  if (decision.requeue) {
+                    // LEDGERED BEFORE THE CALL (design ii: "the attempt is LEDGERED BEFORE it
+                    // can be repeated") — a crash between this write and the real GitHub call
+                    // still bounds the NEXT pass toward escalating rather than re-queueing the
+                    // same pair a second time. Not `deps.dryRun`-guarded: reaching this line
+                    // already proves `acted` was true, which `deps.dryRun` forces false above.
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: CHECK_REQUEUE_STEP,
+                      pr_number: pr.prNumber,
+                      pr_url: pr.prUrl,
+                      head_sha: pr.headSha,
+                      check_name: check.name,
+                    });
+                    requeuedCheckKeys.add(key);
+                    if (deps.requeueCheck) {
+                      await deps.requeueCheck(pr, check);
+                      requeuedAny = true;
+                    }
+                    outcomes.push(`re-queued "${check.name}"`);
+                  } else {
+                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason);
+                    outcomes.push(`escalated "${check.name}" (${decision.reason})`);
+                  }
+                }
+                // A cancelled check carries no diff defect (design v) — when EVERY red required
+                // check this pass named is a cancellation, stand down here instead of falling
+                // through to `dispatchFix`, which would otherwise burn a fix-rung strike on
+                // nothing. `acted` stays FALSE regardless of outcome — the SAME load-bearing
+                // choice `sweep.absent_repush` makes just above (see its own comment): claiming
+                // `acted:true` on this disposed line would seed `prior.fixed` for this head,
+                // which would then dedupe the WHOLE blocked-fixable disposition away next pass
+                // and this re-queue/escalate logic would never run again to observe the second
+                // cancellation design (iii) requires escalating.
+                const genuineFailures = (pr.ciFailures ?? []).filter((f) => !cancelledChecks.some((c) => c.name === f.name));
+                if (genuineFailures.length === 0) {
+                  acted = false;
+                  standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
+                  break;
+                }
+              }
               // W1-T100: the evidence shape follows the SAME `isBlockedCi`
               // predicate DISPOSITION_RULES routed on (never a second,
               // independently-hardcoded check) — a failing review carries the
@@ -4900,8 +5186,18 @@ export async function runSweep(
   // call, whatever the outcome — a conflict is REPORTED and skipped, never retried by this same
   // pass (design v). `dryRun` leaves no trace, mirroring every other action in this module.
   if (!deps.dryRun && deps.updateBranch) {
-    const target = selectUpdateBranchTarget(openPrs, now, deps.inFlightTaskIds ?? new Set());
+    const target = selectUpdateBranchTarget(
+      openPrs,
+      now,
+      deps.inFlightTaskIds ?? new Set(),
+      deps.staleGateWorkflowsByPr ?? new Map(),
+      deps.updatedForWorkflow ?? new Set(),
+    );
     if (target) {
+      // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
+      // fact `deps.updatedForWorkflow`'s next read needs to remember this exact pair.
+      const staleWorkflow = "staleWorkflow" in target ? (target as StaleGatePr).staleWorkflow : undefined;
+      const staleWorkflowFields = staleWorkflow === undefined ? {} : { stale_workflow: staleWorkflow };
       appendLine(deps.ledgerPath, {
         run_id: deps.runId,
         task_id: target.taskId ?? "SWEEP",
@@ -4909,6 +5205,7 @@ export async function runSweep(
         pr_number: target.prNumber,
         pr_url: target.prUrl,
         head_sha: target.headSha,
+        ...staleWorkflowFields,
       });
       try {
         const outcome = await deps.updateBranch(target);
@@ -4919,6 +5216,7 @@ export async function runSweep(
           pr_number: target.prNumber,
           pr_url: target.prUrl,
           head_sha: target.headSha,
+          ...staleWorkflowFields,
         });
       } catch (e) {
         appendLine(deps.ledgerPath, {
@@ -4929,6 +5227,7 @@ export async function runSweep(
           pr_url: target.prUrl,
           head_sha: target.headSha,
           error: String((e as Error)?.message ?? e),
+          ...staleWorkflowFields,
         });
       }
     }
