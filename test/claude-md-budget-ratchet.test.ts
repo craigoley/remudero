@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 
 // ── W1-T503: CLAUDE.md SIZE AS A CI RATCHET (MASTER-PLAN §8A) ────────────────────────────────────
 //
@@ -103,25 +104,50 @@ test("the REAL committed CLAUDE.md is currently within the recorded size budget 
 // they came to write. The operator raised the cap to a round 64 KiB and granted deliberate
 // headroom; scripts/claude-md-budget-baseline.json's bumpRationale carries that record.
 //
-// What replaces it must still have teeth, or the baseline becomes unfalsifiable paperwork: the cap
-// stays the DECLARED round boundary rather than drifting upward silently, the measured figure stays
-// honest against the file on disk, and the raise stays on the record in prose. A future raise
-// therefore has to change this constant deliberately and say why — which is the whole point of the
-// gate — instead of a lane nudging capBytes by whatever a red run happened to need.
-test("the real baseline pins the DECLARED cap, a measured figure that matches the file, and a written reason", () => {
+// W1-T1234: `measuredBytes` itself is RETIRED, not just its zero-headroom equality. It was a
+// recorded byte count pinned to a file that legitimately changes, so it went stale on every
+// CLAUDE.md edit and reddened this gate for a reason no PR caused. The gate already derives the
+// real figure fresh on every run (`main()` calls `measureBytes` and compares it to `capBytes` --
+// scripts/claude-md-budget-ratchet.mjs never reads a stored measured field), so what replaces the
+// old assertion proves the gate itself rather than a stored number: a file over the declared cap
+// blocks and names the overage, a file at or under it exits clean, the committed baseline declares
+// no measured figure at all, and a measured figure planted back into a baseline changes no
+// verdict. The cap stays the DECLARED round boundary rather than drifting upward silently, and a
+// future raise still has to change this constant deliberately and say why in prose.
+test("the real baseline pins the DECLARED cap, declares no measured figure, and carries a written reason", () => {
   const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "claude-md-budget-baseline.json"), "utf8"));
   assert.equal(baseline.capBytes, 65536, `the cap must stay the declared 64 KiB boundary: ${JSON.stringify(baseline)}`);
   assert.equal(
-    baseline.measuredBytes,
-    readFileSync(join(REPO_ROOT, "CLAUDE.md")).length,
-    "measuredBytes must be the real byte length of the committed CLAUDE.md, not a stale capture",
+    Object.hasOwn(baseline, "measuredBytes"),
+    false,
+    `the committed baseline must declare no measured figure -- it goes stale on every CLAUDE.md edit and the gate never reads it: ${JSON.stringify(baseline)}`,
   );
-  assert.ok(baseline.measuredBytes <= baseline.capBytes, JSON.stringify(baseline));
   assert.match(
     String(baseline.bumpRationale ?? ""),
     /2026-08-22/,
     "a cap raise must stay on the record in prose — an unexplained number is what this gate exists to prevent",
   );
+});
+
+test("claude-md-budget-ratchet CLI: a measured figure planted back into a baseline changes no verdict (acceptance criterion 4)", () => {
+  // Same capBytes as at-cap-baseline.json (172, the fixture's real size), plus a planted
+  // measuredBytes that is wildly wrong (1). If anything still read a stored measured field this
+  // would either crash or flip the verdict; the gate must derive the byte count fresh from the
+  // file and ignore the planted field entirely, so this must behave byte-identically to the plain
+  // at-cap fixture above.
+  const tmpDir = mkdtempSync(join(tmpdir(), "claude-md-budget-ratchet-planted-"));
+  const plantedBaseline = join(tmpDir, "baseline.json");
+  writeFileSync(plantedBaseline, JSON.stringify({ capBytes: 172, measuredBytes: 1 }));
+  try {
+    const result = spawnSync(process.execPath, [SCRIPT, "--file", SAMPLE, "--baseline", plantedBaseline], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /is 172 bytes \(cap 172 bytes\)/);
+    assert.match(result.stdout, /OK -- .* is at or under the size budget cap/);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test("claude-md-budget-ratchet module: importing (not spawning as the entry script) does not re-invoke main() -- process.argv[1] is undefined when eval'd", () => {
