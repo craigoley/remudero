@@ -90,7 +90,14 @@ import {
   type FeedbackStatus,
 } from "./feedback.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
-import { renderTraceChain, traceForward, traceReverse, type TraceChain, type TraceGithub } from "./trace.js";
+import {
+  feedbackDischargeState,
+  renderTraceChain,
+  traceForward,
+  traceReverse,
+  type TraceChain,
+  type TraceGithub,
+} from "./trace.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
@@ -193,9 +200,17 @@ export interface PanelGraphDeps {
 /**
  * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it — `unverified` is a READ-TIME
  * decoration only (never written to `plan/feedback/<id>.yaml`), so the on-disk schema stays exactly
- * the §7B shape.
+ * the §7B shape. `discharged`/`dischargeUndecidable` (W1-T1257) are `unverified`'s twin: sparse,
+ * read-time-only flags — present only when true, absent (never `false`) otherwise — layered by
+ * {@link decorateFeedbackDischarge} AFTER this reconcile, never in place of it. Both `unverified`
+ * and a discharge flag can be true on the SAME entry at once (an unreadable proposal-merge state
+ * says nothing about whether its filed tasks separately merged); neither ever changes `status`.
  */
-export type ReconciledFeedbackEntry = FeedbackEntry & { unverified?: true };
+export type ReconciledFeedbackEntry = FeedbackEntry & {
+  unverified?: true;
+  discharged?: true;
+  dischargeUndecidable?: true;
+};
 
 /**
  * W1-T257: MERGING THE PROPOSAL PR IS THE DECISION. A `proposed` entry whose `proposal_pr` has
@@ -245,6 +260,29 @@ export function reconcileFeedbackEntries(
   });
 }
 
+/**
+ * W1-T1257: layer `discharged`/`dischargeUndecidable` onto every ALREADY-{@link
+ * reconcileFeedbackEntries}'d entry — see lib/trace.ts's `feedbackDischargeState` for the
+ * three-valued predicate this reads off (its own `not_discharged` arm needs no flag: absence
+ * IS "not discharged", the same sparse-boolean shape `unverified` already uses). Reloads no PRs
+ * of its own: `plan` is the SAME fresh-loaded snapshot this route already reads, and `statusGithub`
+ * is the SAME batched gateway `reconcileFeedbackEntries`/`GET /v1/drain/preview` already share —
+ * `findMergedByTrailer`/`findMergedByHeadBranch` resolve off that one fetch, never a second one.
+ * A discharged entry's `status:` byte is untouched — this never calls `setFeedbackStatus`.
+ */
+export function decorateFeedbackDischarge(
+  entries: ReconciledFeedbackEntry[],
+  plan: Plan,
+  statusGithub: GitHub,
+): ReconciledFeedbackEntry[] {
+  return entries.map((entry) => {
+    const { state } = feedbackDischargeState(entry, plan, statusGithub);
+    if (state === "discharged") return { ...entry, discharged: true };
+    if (state === "undecidable") return { ...entry, dischargeUndecidable: true };
+    return entry;
+  });
+}
+
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */
 export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
   return {
@@ -259,7 +297,18 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
         return;
       }
       const reconciled = reconcileFeedbackEntries(deps.root, listFeedback(deps.root, {}), deps.statusGithub, deps.feedbackLand);
-      const entries = statusParam ? reconciled.filter((e) => e.status === statusParam) : reconciled;
+      // "never stale" (buildTraceRoute's own discipline): a task a proposal PR just filed must be
+      // visible to the VERY NEXT read, so the plan is reloaded fresh on every request, never cached.
+      // FAIL-SOFT, deliberately (buildShellRoute's own rule: "a read failure degrades to UNKNOWN,
+      // never to zero"): an unreadable plan.tasks.yaml must not 500 the whole inbox read over a
+      // decoration -- it just means no entry gets a discharge flag on this particular read.
+      let decorated: ReconciledFeedbackEntry[] = reconciled;
+      try {
+        decorated = decorateFeedbackDischarge(reconciled, loadPlan(deps.planPath), deps.statusGithub);
+      } catch {
+        // plan unreadable this tick -- serve the reconciled list undecorated rather than fail the read.
+      }
+      const entries = statusParam ? decorated.filter((e) => e.status === statusParam) : decorated;
       sendJson(res, 200, { entries });
     },
   };
