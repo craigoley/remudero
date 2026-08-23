@@ -1,0 +1,166 @@
+- id: W1-T1287
+  title: "A RETIREMENT IS RECORDED IN A TITLE PREFIX NOTHING READS — `status: blocked` is the only field a retired task and a dependency-stalled one both carry, so 43 blocked records collapse into one bucket and the operator re-reads the shards to tell them apart; the corpus that solved this is in-repo (`learnings/*.yaml`'s `lifecycle:`) and should be copied rather than invented"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/plan.ts, src/lib/status-board.ts, test/task-retirement-reason.test.ts]
+  origin: oper#retirement-reason-is-a-title-prefix-2026-08-23
+  plan_refs: ["W1-T229", "W1-T280", "W1-T324", "W1-T1257", "W1-T1261", "W1-T1273"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL COUNTS BELOW RE-DERIVED AT origin/main b49d951b IN A SCRATCH WORKTREE PROVEN EQUAL TO IT.
+    THE LEDGER WAS NOT READ: `resolveLedgerUnion` returns `archiveCount: 0` at both candidate
+    state roots here, and that field's own doc says it "IS the positive control", so every ledger
+    claim was REFUSED rather than estimated. Nothing below rests on one.
+
+    (1) EXCLUSION WORKS; ATTRIBUTION DOES NOT. `status: blocked` is read at three enforcement
+    points, each re-derived at this sha: `isDispatchEligible` (`src/lib/drain.ts:510`, reporting
+    the filter reason `"blocked"`), `assertRunnable` (`src/lib/plan.ts:448`, throwing `PlanError`),
+    and `NON_OPEN_LINT_STATUSES`/`isOpenLintTask` (`src/run-task.ts:10578-10582`, scoping
+    `lint-plan`'s open set). A blocked task is excluded correctly and completely. What no reader
+    can recover is WHY, because the field carries one value for two populations.
+
+    (2) THE FIELD THAT WOULD SEPARATE THEM IS A TITLE PREFIX AND NOTHING READS IT. `TASK_STATUSES`
+    (`src/lib/plan.ts:14`) is exactly `queued recon prompted running review fixing diagnosing
+    blocked merged done` -- `"retired"`, `"closed"` and `"withdrawn"` each read 0 in `plan.ts`
+    against a control of 2 for `"blocked"` in the same file. The convention that fills the gap is a
+    `RETIRED (…)` / `CLOSED UNBUILT (…)` title prefix, carried by 2 of 790 tasks (W3-T3,
+    W1-T1273). It is FOLKLORE, not a mechanism: `CLOSED UNBUILT` reads 0 in `src/` AND 0 in
+    `test/`, and the 2 `RETIRED` hits in `src/` are both doc-comment prose in `run-task.ts`
+    (lines 10542 and 10558, the second naming "a RETIRED withdrawal record (`blocked`, the
+    W1-T229 convention)") -- against a control of 667 for `blocked` in `src/`, so the zero is
+    absence and not a blind query. 43 tasks are blocked; 2 carry the prefix.
+
+    (3) THE CONCRETE INSTANCE IS ONE DAY OLD AND IT CUTS BOTH WAYS. W1-T1261 and W1-T1273 were
+    both closed by operator ruling on 2026-08-23 -- both `status: blocked`, both
+    `origin: oper#…-2026-08-23`. W1-T1273 carries the prefix. W1-T1261 does NOT: its retirement
+    survives only in prose. Two rulings, one day, one legible to a reader and one not, and no
+    field distinguishes either from the 41 records that are merely waiting.
+
+    (4) THE WORKING MODEL IS IN THIS REPO. `learnings/*.yaml` carries
+    `lifecycle: active | superseded | quarantined | contested` with, re-derived from
+    `src/lib/learnings.ts`: a parser that throws `LearningsError` on any other value;
+    `selectLearnings` filtering every non-active entry out BEFORE ranking;
+    `scripts/learnings-assert-check.mjs` auto-flipping a failing entry to `quarantined` and
+    recording `quarantined_reason`; contradiction detection flipping BOTH sides of an opposing
+    pair to `contested`; `superseded_by` naming the replacement; and `learnings-budget-ratchet`
+    listed as a REQUIRED context in `.github/workflows/ci-gate.yml`. Population 36 active /
+    2 superseded of 38. It is the only corpus here where a retired record is FILTERED BY A READER
+    and COSTED BY A GATE, and it is the shape to copy.
+
+    (5) WHAT THIS TASK IS NOT. It does not touch organs, rules or feedback entries. `rmd
+    emissions` is report-only by stated decision in its own module header, `rule-efficacy` has an
+    escalate arm and no demote arm, and feedback discharge is already W1-T1257. Rule 19's span
+    would refuse the combination; each is its own concern.
+  note: |
+    ── Q1. THE SMALLEST FORM: A SIBLING FIELD, AND NOT BECAUSE IT IS CHEAPER ──────────────────
+
+    (i) WHAT A NEW `TASK_STATUSES` MEMBER COSTS, ENUMERATED FROM SOURCE. Eight sites read or
+    re-declare the status vocabulary: `plan.ts:14` (the tuple), `plan.ts:205`
+    (`TASK_STATUSES.includes` validation), `plan.ts:35` (`MERGED_STATUSES`), `board.ts:1050`
+    (`TASK_STATUSES.indexOf` ordering), `serve.ts:2908`, `retro.ts:1642`
+    (`CLOSED_TASK_STATUSES`), `task-linter.ts:1559` (`NON_OPEN_FILING_STATUSES`),
+    `run-task.ts:10578` (`NON_OPEN_LINT_STATUSES`), plus a fourth copy in
+    `test/plan-proof-debt.test.ts:62`.
+
+    (ii) THREE OF THOSE ARE INVISIBLE TO TYPESCRIPT, WHICH IS THE PART THAT MATTERS.
+    `serve.ts:2908` is a HAND-COPIED string array -- `const TASK_STATUSES = ["queued", …,
+    "done"]` -- sitting inside the client `<script type="module">` block (opened at
+    `serve.ts:1172`, inside the template literal returned at `serve.ts:436`), with no import of
+    the real tuple anywhere in the file's first 60 lines. `retro.ts:1642` is a bare
+    `new Set([...])`, NOT `Set<TaskStatus>`. Neither can fail a compile. A new member would sort
+    as `indexOf === -1` in the web board -- silently ahead of everything -- until a human
+    remembered to edit a string literal. This is the second-registry drift `emissions.ts`'s own
+    header names as the failure that hid the unmounted route.
+
+    (iii) AND FOUR INDEPENDENT HAND-MAINTAINED "NON-OPEN" SETS WOULD EACH HAVE TO RE-DECIDE
+    MEMBERSHIP: `NON_OPEN_LINT_STATUSES`, `NON_OPEN_FILING_STATUSES`, `CLOSED_TASK_STATUSES`, and
+    the test copy. A set that FORGOT the new member would treat a retired task as live queue
+    debt, reversing W1-T324's whole point -- the audit that filed it measured ~92% of the
+    whole-plan failure count sitting on exactly such records.
+
+    (iv) WHAT A SIBLING FIELD COSTS. `parseTasksFromYaml` (`src/lib/plan.ts:185`, its `const task: Task = {` literal at :208) builds `Task` from
+    an EXPLICIT KEY ALLOWLIST and performs no unknown-key rejection, so the cost is the `Task`
+    interface plus one line in that object literal -- adjacent, same file -- plus the reader in
+    (vi). ITS ONE FAILURE MODE, NAMED SO THE BUILD DOES NOT HIT IT: a field added to the YAML but
+    NOT to the literal is SILENTLY DROPPED and reads `undefined` with no error. Criterion 1
+    exists to make that failure loud.
+
+    (v) THE DECIDING ARGUMENT IS NOT THE SITE COUNT. It is that a new status member forces
+    exclusion semantics to be re-litigated in four places, and Q3 requires `blocked`'s exclusion
+    to be exactly what it is today. A sibling field leaves all three enforcement points untouched
+    BY CONSTRUCTION -- it adds an attribute to a record that is already, correctly, excluded.
+    The build must not read this as "the cheap option won"; the cheap option happens to be the
+    one that cannot perturb the invariant.
+
+    ── Q2. THE READER THAT MUST CONSUME IT ────────────────────────────────────────────────────
+
+    (vi) `status-board.ts`'s BLOCKERS BY CLASS (W1-T280), and the reason is its own design fence,
+    quoted from `src/lib/status-board.ts:262`: "each class in its OWN vocabulary, never a generic
+    'blocked' bucket (design fence: the board mints no blocker taxonomy that named-reason/breaker
+    signals don't already carry)". Every class it has -- `CircuitBrokenBlocker`,
+    `IndeterminateBlocker`, `BlockedPrBlocker` -- derives from a ledger or GitHub signal that
+    ALREADY carries a named reason. A plan-declared `status: blocked` task carries no such
+    signal, which is precisely why the 43 have no class; `board.ts`'s own doc for `isBlockedRow`
+    says it -- `blocked` "additionally holds plan-declared `status: "blocked"` tasks that have no
+    issue to click."
+
+    (vii) SO THE FENCE IS AN ARGUMENT FOR THIS FIELD RATHER THAN AGAINST IT. The fence forbids
+    the BOARD from inventing the vocabulary; it does not forbid the board from rendering one the
+    plan record supplies. The sibling field is the fence's own supply route. A build that instead
+    taught the board to infer retirement from the title prefix would be minting the taxonomy the
+    fence prohibits, and would be reading a string 2 of 790 tasks carry.
+
+    (viii) `lint-plan`'s open set was CONSIDERED AND REJECTED as the reader. `blocked` is already
+    in `NON_OPEN_LINT_STATUSES`, so a retirement reason would change no membership and therefore
+    no behaviour -- the field would be read and discarded, which is the defect repeated with an
+    extra step.
+
+    ── Q3. WHAT MUST NOT CHANGE ───────────────────────────────────────────────────────────────
+
+    (ix) `blocked` KEEPS ITS EXCLUSION SEMANTICS at all three points in (1). Criterion 3 pins
+    this in both directions: a blocked task with the field and one without must filter
+    identically.
+
+    (x) NOTHING RETIRES AUTOMATICALLY. A retirement is an operator ruling with evidence, as
+    W1-T1261 and W1-T1273 both were. Criterion 6 pins the absence of any writer. Note the
+    contrast with the model in (4) -- `learnings-assert-check.mjs` DOES auto-flip to
+    `quarantined` -- and do not copy that arm: an assertion can re-verify a fact, and nothing can
+    re-verify an operator's judgement that a task should not be built.
+
+    (xi) NO NEW MEMBER OF `MERGED_STATUSES`. `done` already credits an unbuilt id as shipped;
+    a retirement that landed there would join that zombie class rather than being legible against
+    it. Criterion 5 pins `MERGED_STATUSES` unchanged.
+
+    (xii) ★ A PREMISE IN THE FILING BRIEF IS NOT THE CASE, AND THE BUILD MUST NOT INHERIT IT.
+    The brief states rule 21 still protects `status:` post-merge. IT DOES NOT.
+    `postMergeAmendmentViolations` (`src/lib/task-linter.ts:1329`) compares `ctx.baseAcceptance`
+    against `task.acceptance` and reads no other field; a grep for a status-tamper guard in
+    `task-linter.ts` returns 0 against a control of 2 for `criterionFieldTampered` in the same
+    file. So `status:` -- and any sibling field beside it -- is UNGUARDED against a post-merge
+    edit. That is a consequence to state plainly, not a reason to widen this task: adding such a
+    guard is its own concern with its own blast radius and NEEDS ITS OWN ID. What this task owes
+    is honesty about the gap, not a fix for it.
+
+    (xiii) RULE 19 BAND. `risk: high` is set UP FRONT because `files:` spans two source stems
+    (`plan.ts`, `status-board.ts`) and Rule 19 sizes on SPAN. The band is the span reading, NOT a
+    blast-radius judgement -- the change is additive at both sites and perturbs no existing
+    predicate.
+  acceptance:
+    - claim: "a task carrying the retirement field parses with it preserved, and one omitting it parses with it undefined — the parser's explicit key allowlist no longer silently drops it"
+      proof: "unit test: test/task-retirement-reason.test.ts"
+    - claim: "an unrecognised retirement value is REFUSED at load with a PlanError naming the field and the permitted values, the same fail-closed shape TASK_STATUSES and TASK_RISKS already use"
+      proof: "unit test: test/task-retirement-reason.test.ts"
+    - claim: "blocked's exclusion is unchanged — a blocked task carrying the field and one without it are filtered identically by isDispatchEligible, assertRunnable and isOpenLintTask"
+      proof: "unit test: test/task-retirement-reason.test.ts"
+    - claim: "a retired task renders as its own blocker class naming the recorded reason, while a blocked task without the field renders exactly as it does today"
+      proof: "unit test: test/task-retirement-reason.test.ts"
+    - claim: "TASK_STATUSES gains no member and MERGED_STATUSES is unchanged, so no retirement can be credited as shipped"
+      proof: "unit test: test/task-retirement-reason.test.ts"
+    - claim: "no code path sets the field — a retirement is written only in the plan record by an operator, never derived"
+      proof: "unit test: test/task-retirement-reason.test.ts"
