@@ -1,0 +1,121 @@
+- id: W1-T1248
+  title: "the citation miners are built, test-pinned and have NO production caller, so the corpus's own usage meter has never ticked — 37 of 38 `learnings/*.yaml` entries carry a `cited:` date frozen at 2026-07, and both `selectLearnings`' ranking and the budget ratchet's compression order run on that July data, so W1-T419's \"retention rides measured use\" has never once been true"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    RE-DERIVED at `873544e9` (this shard's own base), every figure with the query that produced it.
+
+    (1) **FOUR MINERS, ZERO PRODUCTION CALLERS — AND IT IS FOUR, NOT THREE.** A word-bound sweep
+    (`git grep -nE '\bSYMBOL\b' -- src/ test/ scripts/`) over each:
+      `stampCitations`            — definition (`src/lib/retro.ts`), three DOC comments
+                                    (`scripts/learnings-budget-ratchet.mjs`, `src/lib/learnings.ts`,
+                                    `src/lib/retro.ts`), and `test/learnings-citation-loop.test.ts`.
+      `mineLedgerCitations`       — definition, one doc comment, the same test.
+      `aggregateCitationEvidence` — definition, the same test.
+      `mineGitLogCitations`       — definition, two doc comments, the same test. **The brief named
+                                    three; the sweep found a fourth with the identical shape.**
+    **POSITIVE CONTROL, same sweep, same tree:** `regenerateOrientation` returns FIVE `src/` sites
+    excluding its own definition — a real `import` in `src/run-task.ts` and a real call in
+    `retroCommand`. So the sweep CAN see a production caller; the four zeros are absence, not a
+    blind query.
+
+    (2) **THE CONSEQUENCE, MEASURED ON THE CORPUS.** Parsing all five `learnings/*.yaml` shards:
+    **38 entries, 37 stamped `cited: 2026-07`, 1 stamped `2026-08`, and ZERO missing the field.**
+    The uniformity is the tell — a hand-stamped batch, not a decaying distribution.
+
+    (3) **BOTH CONSUMERS READ THAT FROZEN FIELD.** `src/lib/learnings.ts` documents `cited` as
+    *"recent entries win a budget tie"*, and states that `selectLearnings`' ranking *"does NOT read
+    this field [`cited_count`] (still keyed on `cited` alone)"* — so ranking turns on the frozen
+    date. `scripts/learnings-budget-ratchet.mjs` reads BOTH `cited` and `cited_count` to order its
+    compression candidates and renders an unstamped entry as `never-cited`, never as zero.
+
+    (4) **WHY NOBODY NOTICED — THE TWO STORES, LOCATED PRECISELY.** `retroCommand`
+    (`src/run-task.ts`) reads `join(repoRoot, "LEARNINGS.md")` into `learningsMd` and feeds it to
+    `buildGather`; that is the counter behind R23-4's *"LEARNINGS reads 79 with 0 added since
+    marker"*. The INJECTOR reads the `learnings/` directory instead. **`LEARNINGS.md` scores 79
+    hand-stamped bullets; the injector's corpus is 38 entries.** `src/lib/learnings.ts` says the
+    quiet part outright: *"LEARNINGS.md is written by diagnosing workers and never read back"*, and
+    calls the prose file *"the human/Architect-owned narrative"*. So the stagnation rule has been
+    watching a file no worker loads. **NOT A MERGE PROPOSAL — that is a separate ruling and is not
+    made here.**
+
+    **CORRECTION TO THE BRIEF, RECORDED RATHER THAN QUIETLY DROPPED:** `src/lib/retro.ts` itself
+    contains ZERO `LEARNINGS.md` references. The scoring lives in `retroCommand`, not in `retro.ts`.
+    Every `LEARNINGS.md` hit under `src/` other than that one is a doc comment citing it as a lesson
+    source.
+  design: |
+    (i) **Q1 — THE MINERS READ NOTHING, SO THE UNION QUESTION IS THE WIRING'S, NOT THEIRS.**
+    `mineLedgerCitations(records: LedgerRecord[])` iterates a supplied array and opens no file; the
+    same is true of its siblings. They therefore CANNOT carry W1-T1013's defect — but the wiring
+    would inherit it by default, and the code says so at the exact seam. At the intended call site
+    `buildGather` already has TWO corpora: `ledgerNdjson`, read from the LIVE FILE ONLY, and
+    `followupLedgerNdjson`, resolved through `followupLedgerUnionNdjson(...)` — added by
+    **W1-T1013**, whose own comment states the union is kept *"a second, explicit input"* precisely
+    so *"every OTHER miner buildGather runs keeps reading the single-file corpus it always has"*.
+    **A NAIVE WIRING WOULD PICK `ledgerNdjson` AND MINE ~0.3% OF HISTORY.** The citation miners must
+    take the UNION. **W1-T1013 IS CITED, NOT RE-FILED** — it already owns the harvest instance and
+    the union helper this task reuses. (Its 0.3% figure is carried as W1-T1013's measurement: this
+    container has no `state/` directory and zero ledger files, so it is not re-derived here.)
+
+    (ii) **Q2 — STAMP-ONLY FIRST. THE TWO MOVES MUST NOT LAND TOGETHER.** Stamping changes `cited`
+    on 38 entries at once, and BOTH consumers key on it, so ranking order and compression-candidate
+    order would move in the same commit that first produces real data — with no baseline to compare
+    against and no way to attribute a surprise to the stamp or to the ranking. **Pass one writes the
+    stamps and leaves selection behaviour observably unchanged**; the ranking shift is a separate,
+    reviewable step once a stamped corpus exists to reason about. This is the same discipline the
+    repo applied when it split a measurement from the bound derived off it.
+
+    (iii) **Q3 — WHAT MUST NOT CHANGE, BY NAME.** `DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800`
+    (`src/lib/learnings.ts`) stays a HARD cap with its drops logged — a stamped corpus may reorder
+    what wins the budget, never widen it. The `lifecycle` filter keeps running BEFORE ranking:
+    `superseded`, `quarantined` and `contested` entries are filtered by `selectLearnings` first, so
+    a stamp can never resurrect one. And **LAW 5 IS NOT TOUCHED**: this writes a `cited:` field onto
+    an entry that is ALREADY ratified — it adds nothing, promotes nothing, retires nothing.
+
+    (iv) **COMMIT THE STAMPED CORPUS THE WAY GENERATED DOCS ARE ALREADY COMMITTED.**
+    `regenerateOrientation` is the shape to mirror — regenerate, then commit in a labelled commit —
+    and it is also this task's positive control in rationale (1), which is why it is named twice.
+  acceptance:
+    - claim: "the retro's consolidation step calls the citation miners instead of leaving them unreferenced"
+      proof: "unit test: test/citation-stamp-wiring.test.ts"
+    - claim: "the miners are fed the archive-and-live union rather than the live ledger file alone"
+      proof: "unit test: test/citation-stamp-wiring.test.ts"
+    - claim: "an entry cited since its last stamp has its cited date advanced from the frozen value"
+      proof: "unit test: test/citation-stamp-wiring.test.ts"
+    - claim: "an entry with no citation evidence keeps the stamp it already had rather than being cleared"
+      proof: "unit test: test/citation-stamp-wiring.test.ts"
+    - claim: "the injected budget stays a hard cap and the entries it drops are still logged"
+      proof: "unit test: test/citation-stamp-wiring.test.ts"
+    - claim: "a superseded entry is still filtered before ranking and no stamp can reintroduce it"
+      proof: "unit test: test/citation-stamp-wiring.test.ts"
+    - claim: "stamping writes only the cited field and neither adds, promotes nor retires an entry"
+      proof: "unit test: test/citation-stamp-wiring.test.ts"
+  files: [src/run-task.ts, src/lib/retro.ts, test/citation-stamp-wiring.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#citation-miners-have-no-production-caller-2026-08-23"
+  plan_refs: ["W1-T419", "W1-T1013", "W1-T38", "W1-T1059"]
+  note: |
+    **`risk: high` IS SET UP FRONT** — Rule 19 SPAN across `src/` and `test/`, and the blast radius
+    is real: the wiring lands in `retroCommand`, which every retro runs, and a stamp written wrong
+    reorders what 38 entries' worth of context injection selects.
+
+    **THE TWO-STORE FINDING IS CARRIED HERE BECAUSE IT EXPLAINS THE SILENCE, NOT BECAUSE THIS TASK
+    FIXES IT.** The retro's stagnation counter reads `LEARNINGS.md` (79 bullets); the injector reads
+    `learnings/` (38 entries). A meter that never ticked was invisible because the thing being
+    watched was a different file. **MERGING THE TWO STORES IS EXPLICITLY NOT PROPOSED** — that is a
+    separate operator ruling, and this shard neither makes it nor depends on it.
+
+    **DECLARED OVERLAP.** `src/run-task.ts` is a heavily contended path; `overlappingPaths` will
+    serialise this against any other task declaring it. Stated so the ordering is a known cost
+    rather than a dispatch-time surprise.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T1248` was reserved at 2026-08-23T11:44:02Z (frontier: 1246
+    and 1247 reserved, 1249 free). Eight id surfaces were swept clear before filing, each with a
+    control qualified for that surface, including a count-per-head sweep over 127 live heads where
+    this id read 0 while the control W1-T1219 read 3.
