@@ -493,8 +493,10 @@ import {
   computeMatchedLearningsForArm,
   deriveWipeTestRunResult,
   ledgerWipeTestPair,
+  resolveWipeTestPreflight,
   resolveWipeTestTarget,
   WIPE_TEST_SANDBOX_DEFAULT,
+  type WipeTestMergedState,
   type WipeTestPair,
 } from "./lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
@@ -22150,6 +22152,25 @@ export async function fixCommand(
 }
 
 /**
+ * The REAL (default) derivation `wipeTestCommand`'s pre-flight consults (W1-T1252): loads
+ * the plan already synced onto `planPath`, selects `taskId` (throws `PlanError` on an
+ * unknown id — BEFORE any GitHub read, same ordering `runTaskBody` itself relies on), then
+ * projects the plan against a FRESH {@link buildBatchedGithub} gateway scoped to the
+ * task's own repo — byte-identical to the construction `runTaskBody`'s own W1-T319
+ * already-merged guard uses (`buildBatchedGithub(owner, task.repo)` feeding `projectPlan`).
+ * A separate, fresh projection from that guard's own (never shared, never reused): the
+ * point of asking here is to decide BEFORE dispatching anything, not to save a GitHub read.
+ */
+function defaultWipeTestMergedState(taskId: string, planPath: string, config: Config, owner: string): WipeTestMergedState {
+  const plan = loadPlan(planPath);
+  const task = selectTask(plan, taskId);
+  const github = buildBatchedGithub(owner, task.repo);
+  const statusPath = join(config.root, "state", "status.json");
+  const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
+  return { merged: projection.get(taskId)?.merged ?? false, prUrl: projection.get(taskId)?.prUrl };
+}
+
+/**
  * `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` — the P12
  * learning-utility A/B harness (W1-T86; see src/lib/wipe-test.ts's module doc for the
  * full design). Runs `<task-id>` TWICE through `runTask`: arm A with normal learnings
@@ -22162,6 +22183,12 @@ export async function fixCommand(
  * ledgered pairs (`aggregateWipeTestPairs`, read back from the ledger) is what the
  * operator treats as signal; this command runs and ledgers exactly one pair per
  * invocation, by design (repeat it to accumulate pairs).
+ *
+ * NEVER LEDGERS A PAIR NEITHER ARM MEASURED (W1-T1252). A subject the projection already
+ * reports merged is refused HERE, up front, naming the reason (`resolveWipeTestPreflight`)
+ * — neither arm spawns and no `wipetest.pair` line is written. `ledgerWipeTestPair` itself
+ * is the backstop for every OTHER zero-work cause: a pair whose two arms both report zero
+ * turns and zero cost is never written, whatever produced it.
  */
 export async function wipeTestCommand(
   rest: string[],
@@ -22175,6 +22202,16 @@ export async function wipeTestCommand(
      *  `drainCommand`'s `githubFactory` provides for its own network calls. Default: the
      *  real {@link execFileSync}. */
     execFileSyncFn?: typeof execFileSync;
+    /**
+     * W1-T1252: resolves whether `taskId` is a subject `runTask`'s own W1-T319
+     * already-merged guard would refuse — consulted ONCE, BEFORE either arm is
+     * dispatched (design note (i)). Default: {@link defaultWipeTestMergedState}, which
+     * mirrors `runTaskBody`'s own guard construction exactly (loadPlan + selectTask +
+     * projectPlan over a fresh batched GitHub gateway). Injectable (mirrors `runTaskFn`/
+     * `execFileSyncFn` above) so a test can drive the merged / not-merged branch without a
+     * real plan file on disk or a live GitHub read.
+     */
+    resolveMergedState?: (taskId: string, planPath: string, config: Config) => WipeTestMergedState;
   } = {},
 ): Promise<number> {
   const taskId = rest[0];
@@ -22213,6 +22250,19 @@ export async function wipeTestCommand(
       execFileSyncFn("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
       execFileSyncFn("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
     }
+  }
+
+  // ── PRE-FLIGHT (W1-T1252 design note (i)): refuse a subject `runTask`'s own W1-T319
+  // already-merged guard would refuse, BEFORE either arm is dispatched — against the
+  // JUST-SYNCED plan above, so "merged" here means exactly what it means there, never a
+  // re-invented definition. `resolveMergedState`'s default (`selectTask`) throws on an
+  // unknown task id before ever touching GitHub, same as runTaskFn's own pre-network
+  // ordering (proved by the "deps omitted" test below).
+  const resolveMergedState = deps.resolveMergedState ?? ((tid, pp, cfg) => defaultWipeTestMergedState(tid, pp, cfg, self.owner));
+  const preflight = resolveWipeTestPreflight(taskId, resolveMergedState(taskId, planPath, config));
+  if ("error" in preflight) {
+    console.error(preflight.error);
+    return 2;
   }
 
   const runId = `WIPETEST-${Date.now()}`;
