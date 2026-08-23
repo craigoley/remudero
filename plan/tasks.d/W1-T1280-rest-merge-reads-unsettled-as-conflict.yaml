@@ -1,0 +1,138 @@
+- id: W1-T1280
+  title: "the quota fallback reads GitHub's 405 as a DEFINITE conflict and gives up, when the same payload's `mergeable: null` means only \"recomputing, ask again\" — and the predicate that already draws that distinction, `mergeFactsFromRest`, is never consulted on this path, so a reviewed, green, unconflicted PR is left unmerged by a transient"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree at origin/main. `src/run-task.ts` is 1,488,334
+    bytes — over the Contents API's 1 MB cap, where it returns `encoding: "none"` and greps to a
+    clean zero — so it was read through git objects. The clone was checked for shallowness first.
+    No suite, no spawning verb. Step names are taken from source, not from memory.
+
+    (1) THE ARM TREATS A 405 AS TERMINAL, AND SAYS SO IN THE COMMENT BESIDE IT. In `attemptArm`
+    (`src/run-task.ts`) the quota fallback calls `deps.mergeDirect(prUrl)`; its `catch` checks
+    `deps.isMerged` (W1-T1050's discipline), then says
+    `automerge.rate_limited_rest_merge_refused (W1-T1255)` and falls to
+    `return { outcome: "arm-error-ignored", error: msg, rateLimit: quota }`. There is NO re-read, NO
+    classification of the refusal message, and NO second attempt. The comment states the false
+    inference outright: "GitHub refused the REST merge — the PR was not mergeable, which is the
+    correct answer for a PR that is not already green. NOTHING MERGED."
+
+    (2) THE ZERO IS CONTROLLED AGAINST A CLASS THIS SAME FUNCTION DEMONSTRABLY DOES RE-ATTEMPT. Two
+    other error classes each earn a SECOND action in this exact function: `armFailureAction(msg) ===
+    "direct-merge"` takes the clean-status branch, and `armFailureIsRateLimited(msg)` is what
+    triggers the `mergeDirect` fallback at all — the fallback IS a second attempt after `armAuto`
+    failed. So second-attempt machinery exists here and fires elsewhere; the absence of one for the
+    405 class is a real absence, not a function that never retries anything.
+
+    (3) THE PREDICATE ALREADY EXISTS AND ITS OWN DOC FORBIDS WHAT THIS PATH DOES.
+    `mergeFactsFromRest` (`src/run-task.ts`, W1-T1095 capability 3) resolves `CONFLICTING` only on
+    `mergeable === false || mergeable_state === "dirty"`, `MERGEABLE` only on `mergeable === true`,
+    and everything else — "a `null` GitHub has not computed yet, an absent field, a payload that is
+    not an object" — to `UNKNOWN`. Its doc names the rule this path breaks: "never resolve toward
+    acting on state the API has not actually asserted." The arm never calls it.
+
+    (4) THE MEASURED INSTANCE, WITH ITS LIMITS STATED. The operator's reading at 2026-08-23T18:45Z
+    on #2605 was `mergeable=true`, `mergeable_state=blocked` at head `a6da30e5`, with
+    `automerge.rate_limited_rest_merge_refused … Pull Request has merge conflicts (HTTP 405)`
+    logged seconds later against the SAME head, on a branch pushed about ninety seconds earlier.
+    WHAT THIS SHARD CAN RE-DERIVE AND WHAT IT CANNOT: `remudero-review=success` is recorded on
+    `a6da30e5` at 2026-08-23T18:45:09Z, which corroborates the moment and the "reviewed and green"
+    half. The mergeability reading itself CANNOT be re-taken — that PR now reads `mergeable=false`,
+    `mergeable_state=dirty` at the same head, main having moved under it. So the 18:45 reading is
+    the operator's and is cited as such; what is verified here is the timestamp, the head, and the
+    code path.
+
+    (5) AND THE LEDGER CANNOT CORROBORATE IT FROM THIS HOST — A CONTROLLED ZERO THAT IS STILL
+    OUT-OF-WINDOW. `"step":"risk_judge.decision"` reads 87 distinct rows across the union (gz 64,
+    plain 23, live 0), so the query and the corpus are both live. But no `rate_limited_rest_merge`
+    row is reachable: the newest row in that corpus is 2026-08-12T23:47:53Z and W1-T1255 (#2604)
+    merged 2026-08-23T14:06:49Z, so the feature postdates the archive by eleven days. THE POSITIVE
+    CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS COVERS THE WINDOW, and
+    that distinction is why this zero is reported rather than argued from.
+  design: |
+    (i) THE TRIGGER IS THE PREDICATE, NEVER THE MESSAGE. Retry only when the refusal is a 405 AND
+    `mergeFactsFromRest` reads `UNKNOWN` for that head. A 405 whose message names a conflict is not
+    evidence of a conflict when the API has asserted nothing — but a 405 on a head the predicate
+    calls `CONFLICTING` MUST STILL REFUSE, unchanged and immediately: #2605 was genuinely dirty an
+    hour before the incident and reads dirty again now, so that arm is load-bearing, not vestigial.
+
+    (ii) RE-READ BETWEEN ATTEMPTS; NEVER MERELY SLEEP. GitHub's contract is that `mergeable: null`
+    means recomputing and to ASK AGAIN, so the retry's whole content is a fresh
+    `mergeFactsFromRest` read. If it settles to `CONFLICTING`, stop and refuse exactly as today. If
+    it settles to `MERGEABLE`, one more `mergeDirect`. If it is still `UNKNOWN` at the bound, refuse.
+
+    (iii) BOUNDED THREE WAYS, AND THE REASON AN UNBOUNDED RETRY WOULD BE WORSE THAN TODAY IS
+    SPECIFIC TO THIS PATH. A small attempt cap, a short interval between reads, and a hard stop that
+    returns the SAME `arm-error-ignored` outcome — no new failure mode. Unbounded is worse HERE
+    because this path runs ONLY when the GraphQL budget is already spent (`armFailureIsRateLimited`
+    is its sole trigger): every extra attempt spends more of an exhausted quota, and the loop would
+    hold the arm while doing it. W1-T148's cost governor exists because a spin loop burned about
+    $206 over roughly sixty runs; a retry with no ceiling on the quota-exhausted path is that shape
+    again, and today's give-up at least terminates.
+
+    (iv) REFUSED BY NAME. NOTHING MERGES WITHOUT A `success` VERDICT — the fallback is reached only
+    after the verdict gate has already permitted the arm, and it must not become a route around it.
+    NOTHING AUTO-RESOLVES A CONFLICT: a settled `CONFLICTING` is a stop, never a rebase, never a
+    force-push. AND REST STAYS THE QUOTA FALLBACK, NOT THE PRIMARY — arming is still attempted
+    first, every time, exactly as W1-T1255 shipped it.
+
+    (v) THE SIBLINGS ARE CITED, NOT RE-FILED. W1-T1255 (#2604) swapped the transport and is what put
+    a REST merge on this path at all; W1-T1278 records the fix rung dispatching without re-reading
+    the state it is acting on. SAME CLASS, DIFFERENT RUNG: acting on a state that has not settled.
+    Neither is re-derived here and neither is re-filed.
+
+    (vi) NOT IN SCOPE, NAMED: `armFailureAction`'s classification of the ARM failure, which is a
+    different message on a different call; the GraphQL arm itself; the sweep's own `mergeable`
+    disposition and its `alreadyDone` dedup; and any change to what the quota fallback is allowed
+    to merge.
+  acceptance:
+    - claim: "a refusal on a head whose mergeability has not settled is re-read rather than treated as final"
+      proof: "unit test: test/rest-merge-unsettled-retry.test.ts"
+    - claim: "a refusal on a head the predicate calls definitely conflicting still refuses at once"
+      proof: "unit test: test/rest-merge-unsettled-retry.test.ts"
+    - claim: "the decision reads the merge facts rather than the wording of the error"
+      proof: "unit test: test/rest-merge-unsettled-retry.test.ts"
+    - claim: "the retry stops at its bound and returns the same outcome it returns today"
+      proof: "unit test: test/rest-merge-unsettled-retry.test.ts"
+    - claim: "a state that settles to mergeable is merged and one that settles to conflicting is not"
+      proof: "unit test: test/rest-merge-unsettled-retry.test.ts"
+    - claim: "the fallback still runs only after arming has been attempted and refused on quota"
+      proof: "unit test: test/rest-merge-unsettled-retry.test.ts"
+    - claim: "no conflict is resolved and no merge happens without a passing verdict"
+      proof: "unit test: test/rest-merge-unsettled-retry.test.ts"
+  files: [src/run-task.ts, test/rest-merge-unsettled-retry.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#rest-merge-unsettled-as-conflict-2026-08-23"
+  plan_refs: ["W1-T148", "W1-T1050", "W1-T1095", "W1-T1235", "W1-T1255", "W1-T1278"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/rest-merge-unsettled-retry.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS, NOT RULE 19 SPAN — the `files:` list is one module and its test.
+    The change decides whether the fleet merges a PR after GitHub has refused once, on the path that
+    runs when the quota is already exhausted; too loose and it spins a spent budget, too tight and
+    this defect survives.
+
+    WHAT WAS RE-DERIVED AND WHAT WAS NOT. Rationale (1)-(3) are read directly from
+    `src/run-task.ts` at origin/main and are checkable without the fleet. Rationale (4) states
+    plainly that the 18:45 mergeability reading is the OPERATOR's and cannot be re-taken from here,
+    because the same head now reads `dirty`; what this shard verified is the review status and its
+    timestamp on `a6da30e5`, and the code path. Rationale (5) reports a zero WITH its control and
+    WITH the reason the control does not license it.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T1280` resolves to
+    521b7d5d3b292f5bf47e7bcdaade7ec74f6723ff, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight surfaces
+    were swept with a control PRE-QUALIFIED FOR EACH and NONE DISQUALIFIED: a declared `- id:` on
+    main, a shard FILENAME on main, any occurrence in main's tree, the reservation refs (a reserved
+    id reads 1 and a non-reserved id reads 0, so the surface discriminates), a LIVE `run-W1-T*`
+    head, main's commit messages, open PR titles-plus-bodies (controlled with an id CURRENTLY open,
+    since a merged id has left that surface), and merged PR bodies including the `Remudero-Task:`
+    trailer. Subject anchors were counted PER OPEN HEAD against main's own baseline.
