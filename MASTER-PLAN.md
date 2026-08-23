@@ -1920,7 +1920,7 @@ Mined ZERO new numbers; proposed **TASK B**.
   PENDING RATIFICATION: an agent may RECOMMEND a direction but may never RECORD one — the operator
   ratifies) — ZERO IS OVERLOADED: A BOUNDARY READ'S EMPTY ANSWER MUST SAY WHICH EMPTY IT IS, AND NO
   NAKED ZERO ENTERS A DECISION WITHOUT A POSITIVE CONTROL.** GROUND TRUTH (mechanical, from the
-  2026-08-05 census in state/research-laws-and-gaps-2026-08-05.md, re-derived at 0332dd0): **21
+  2026-08-05 census in docs/research/research-laws-and-gaps-2026-08-05.md, re-derived at 0332dd0): **21
   recorded instances** across six mechanism classes of one defect shape — a reader whose only
   vocabulary for trouble is the count itself, so "empty because absent", "empty because my query was
   malformed", and "empty because the source moved or died" are indistinguishable. Four instances
@@ -1976,14 +1976,19 @@ Mined ZERO new numbers; proposed **TASK B**.
   not assigned: above P43 because these instances blinded production paths, not only retro readings;
   below P38, whose TASK A is the narrowest standing fix. *(R19: the live ranking line is the ONE place
   order is recorded; the stale `P29 > …` string once quoted here is DELETED.)*
-  **THE CENSUS IS GONE AND THE ENTRY WAS RE-FOUNDED WITHOUT IT** (loss established 2026-08-11,
-  re-verified at d767c16; re-founded 2026-08-12 at `4c25957` by operator ruling — *re-found, do not
-  restore the 21*; a session may not ratify, so the PROPOSAL still AWAITS RATIFICATION and what is
-  settled is the METHOD, not the adoption). `state/research-laws-and-gaps-2026-08-05.md` is
-  unrecoverable — **never committed on any ref** (`git log --all -- state/` returns 0 commits, 0
-  objects by that name), no tracked copy or backup — so this entry is its only carrier and it carries
-  the CONCLUSION without the METHOD: the six mechanism classes were never enumerated, no selecting
-  predicate was stated, and the 23-row denominator behind "21 of 23" is unexplained. **The 21 is NOT
+  **THE ENTRY WAS RE-FOUNDED WITHOUT THE CENSUS, AND THE CENSUS HAS SINCE BEEN RECOVERED** (loss
+  established 2026-08-11, re-verified at d767c16; re-founded 2026-08-12 at `4c25957` by operator
+  ruling — *re-found, do not restore the 21*; a session may not ratify, so the PROPOSAL still AWAITS
+  RATIFICATION and what is settled is the METHOD, not the adoption). **THE RE-FOUNDING RULING STANDS
+  AND IS NOT REOPENED HERE**; what changed is only the availability of the evidence. The report was
+  recovered VERBATIM into the tree at `f7201d4d` (#2623) and now lives at
+  `docs/research/research-laws-and-gaps-2026-08-05.md` — its Part 1, LAW 1, carries the census, and
+  the six mechanism classes ARE enumerated there (line-oriented parses, substring/anchoring, demoted
+  errors, optional-field gates, truthiness-on-count, representation drift under a fixed query). So
+  this entry is no longer the only carrier, and the earlier claim that the file was unrecoverable and
+  never committed on any ref described the `state/` path, not the content. What remains TRUE and is
+  left standing: no selecting predicate was stated, and the 23-row denominator behind "21 of 23" is
+  unexplained — it appears exactly once in the recovered report, unexplained there too. **The 21 is NOT
   reconstructed, membership no longer cites the census**, and two of the four tranche members were
   fixed while the proposal stayed unratified — its substance is being adopted while its old membership
   rule remains inoperable. What IS checkable is the re-derived faces below and the tranche list's own
