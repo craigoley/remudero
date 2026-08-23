@@ -476,8 +476,10 @@ import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/co
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import {
   buildExportBundle,
+  buildPromotionJudgePrompt,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   loadLearningsCorpus,
+  parsePromotionJudgeVerdict,
   projectLearningsHome,
   renderDoctrinePreamble,
   renderExportBundle,
@@ -13616,6 +13618,28 @@ export function promotionLedgerSink(opts: {
 }
 
 /**
+ * W1-T1249 design (ii): CEILING on how many corpus entries one retro cycle hands to the pass.
+ * `runPromotionPass` has no bound of its own — rationale (7): it iterates whatever it is given,
+ * skipping only non-`active` lifecycle entries, with no N, no slice and no early exit — so
+ * bounding the unattended per-cycle spawn cost is the CALLER's job. A CEILING, not a target: a
+ * cycle with fewer eligible entries judges fewer, and a cycle with none judges none.
+ */
+export const DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE = 5;
+
+/**
+ * W1-T1249 design (ii): the deterministic selection behind the ceiling above — sorted by `id`
+ * so two runs over the SAME corpus pick the IDENTICAL subset, never `readdirSync`'s
+ * filesystem-dependent listing order. Filters NOTHING by lifecycle or layer here:
+ * `runPromotionPass`'s own `lifecycle !== "active"` skip, and `promoteEntry`'s scrub/top-layer
+ * arms, already decide which of these actually reach the judge — this only bounds how many are
+ * OFFERED to that decision, so `corpusSize` in the rendered section still names exactly what
+ * was handed to the pass (see {@link promotionProposalSectionFor}).
+ */
+export function selectPromotionCycleEntries(entries: LearningEntry[], max: number): LearningEntry[] {
+  return [...entries].sort((a, b) => a.id.localeCompare(b.id)).slice(0, Math.max(0, max));
+}
+
+/**
  * W1-T1059: THE PRODUCTION CALLER for `runPromotionPass` (lib/learnings.ts), which shipped
  * under P32/W1-T146 with none — leaving `promotion.scrub`, `promotion.verdict` and
  * `promotion.promoted` declared and unreachable. This is the I/O half only: it reads the
@@ -13629,13 +13653,11 @@ export function promotionLedgerSink(opts: {
  * function loads, judges and renders; it never persists a promoted entry, never touches
  * `learnings/`, and never touches the shared home. `promotedEntries` is rendered and dropped.
  *
- * THE JUDGE IS INJECTED AND HAS NO PRODUCTION DEFAULT, DELIBERATELY. Absent one the pass does
- * NOT run, and the rendered section says so in as many words — rather than fabricating a
- * fail-closed verdict, which would write `promotion.verdict` rows for a judge that never ran
- * and record "the judge said project-specific" as a fact. That is the same
- * one-value-for-several-outcomes shape this task's classifier exists to avoid, and inventing a
- * judge spawner here (one spawn per active entry, per retro, unattended) is the overreach the
- * shard's design (iii) forbids for the writer. Supplying `opts.judge` makes all three steps fire.
+ * THE JUDGE IS INJECTED AND HAS NO DEFAULT HERE (W1-T1249 supplies one at the CALL SITE,
+ * `retroCommand`, not in this pure-ish stage — see `resolvePromotionJudge`/`realPromotionJudge`
+ * below). Absent one, the pass does NOT run, and the rendered section says so in as many
+ * words — rather than fabricating a fail-closed verdict, which would write `promotion.verdict`
+ * rows for a judge that never ran and record "the judge said project-specific" as a fact.
  */
 export async function promotionProposalSectionFor(opts: {
   corpusDir: string;
@@ -13644,13 +13666,20 @@ export async function promotionProposalSectionFor(opts: {
   confidenceThreshold?: number;
   /** Injectable corpus read so a test drives the stage without a real `learnings/` tree. */
   loadCorpus?: (dir: string) => LearningEntry[];
+  /** W1-T1249 design (ii): overrides {@link DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE} for this call. */
+  maxEntriesPerCycle?: number;
 }): Promise<string> {
   try {
     if (!opts.judge) {
+      // W1-T1249 design (iv): the rendered section below is unchanged and already correct
+      // ("did NOT run") — what used to be missing is a LEDGER row. Without one, a skipped pass
+      // and a retro that never had the stage at all were indistinguishable from the ledger.
+      opts.log?.("promotion.skipped", { reason: "no promotion judge configured for this retro" });
       return `\n\n${renderPromotionProposals({ corpusSize: 0, ranPass: false, results: [] })}`;
     }
     const load = opts.loadCorpus ?? loadLearningsCorpus;
-    const entries = load(opts.corpusDir);
+    const loaded = load(opts.corpusDir);
+    const entries = selectPromotionCycleEntries(loaded, opts.maxEntriesPerCycle ?? DEFAULT_PROMOTION_MAX_ENTRIES_PER_CYCLE);
     const pass = await runPromotionPass(entries, {
       judge: opts.judge,
       log: opts.log,
@@ -13663,11 +13692,92 @@ export async function promotionProposalSectionFor(opts: {
       confidenceThreshold: opts.confidenceThreshold,
     })}`;
   } catch (e) {
-    console.error(
-      `### [retro] learnings_promotion — pass failed, degrading to none: ${String((e as Error)?.message ?? e)}`,
-    );
-    return "";
+    // W1-T1249 design (iv): THIS was the genuinely silent path — `console.error` plus an empty
+    // string erased the section entirely, so a FAILED pass and a retro that never had the stage
+    // were indistinguishable in the rendered report too (worse than the absent-judge branch
+    // above, which at least renders "did NOT run"). Now: one ledger row naming the error, AND a
+    // rendered section saying the pass failed — the section is never erased again.
+    const message = String((e as Error)?.message ?? e);
+    console.error(`### [retro] learnings_promotion — pass failed, degrading to a FAILED section: ${message}`);
+    opts.log?.("promotion.failed", { error: message });
+    return [
+      "\n\n## Learnings promotion (P32/W1-T146) — proposals for the Architect to ratify",
+      "",
+      `The pass FAILED and could not complete: ${message}`,
+      "",
+      "Nothing was scrubbed, judged, promoted or written on this path either — recorded here (and",
+      "in the retro's ledger, when one is attached) so a failed pass is countable rather than",
+      "silently missing from the report.",
+    ].join("\n");
   }
+}
+
+/** W1-T1249 design (i): the promotion judge's SDK tool allowlist — EMPTY by construction, same
+ *  rationale as risk-judge.ts's `RISK_JUDGE_TOOLS`/flight-judge.ts's `JUDGE_TOOLS`: the prompt
+ *  already carries everything the judge needs (one entry's own fields), so it has no need — and
+ *  no ability — to read the worktree it happens to be spawned into. */
+export const PROMOTION_JUDGE_TOOLS: string[] = [];
+
+/** W1-T1249 design (i): build the {@link SpawnWorkerArgs} for a real promotion-judge spawn — a
+ *  pure function so the "no write tool, cheapest mount" contract is unit-testable without a
+ *  spawn, mirroring risk-judge.ts's `buildRiskJudgeSpawnArgs`. */
+export function buildPromotionJudgeSpawnArgs(opts: {
+  entry: LearningEntry;
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+}): SpawnWorkerArgs {
+  return {
+    cwd: opts.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: opts.settingsFile,
+    prompt: buildPromotionJudgePrompt(opts.entry),
+    model: opts.mount.model,
+    effort: opts.mount.effort,
+    maxTurns: opts.mount.maxTurns,
+    tools: PROMOTION_JUDGE_TOOLS,
+  };
+}
+
+/**
+ * W1-T1249 design (i): spawn the real promotion judge and parse its verdict — the production
+ * shape of `PromotionJudgeDeps["judge"]`, mirroring risk-judge.ts's `realRiskJudge`. `spawn` is
+ * injectable so a caller threads its own already-resolved worker-spawn dependency through — the
+ * SAME `opts.spawn ?? spawnWorker` idiom `retroCommand` already uses for the Architect itself,
+ * so this needs no new spawn idiom of its own.
+ */
+export function realPromotionJudge(opts: {
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): PromotionJudgeDeps["judge"] {
+  const spawn = opts.spawn ?? spawnWorker;
+  return async (entry) => {
+    const result = await spawn(
+      buildPromotionJudgeSpawnArgs({ entry, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
+    );
+    return parsePromotionJudgeVerdict(result.text);
+  };
+}
+
+/**
+ * W1-T1249 design (i): resolve THIS retro's promotion judge. `opts.injected` — `retroCommand`'s
+ * own `opts.promotionJudge` — ALWAYS wins when supplied, exactly as `opts.spawn ?? spawnWorker`
+ * wins beside it (rationale (2)'s sibling deps); absent, falls back to {@link realPromotionJudge}
+ * on the cheapest mount `resolveRiskJudgeMount` resolves (rationale (5)). Split out so the
+ * override precedence is provable without driving a whole `retroCommand`.
+ */
+export function resolvePromotionJudge(opts: {
+  injected?: PromotionJudgeDeps["judge"];
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): PromotionJudgeDeps["judge"] {
+  return (
+    opts.injected ?? realPromotionJudge({ mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile, spawn: opts.spawn })
+  );
 }
 
 export function planHealthSweepSectionFor(repoRoot: string, isMerged?: (task: Task) => boolean): string {
@@ -14024,24 +14134,28 @@ async function retroCommand(
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
   const planHealthSection = planHealthSweepSectionFor(repoRoot, isTaskMerged);
-  // W1-T1059: the promotion pass's production caller. Rides EVERY retro report, dry-run and real
-  // alike, exactly like the two advisory sections above — it is pure, so a `--dry-run` preview
-  // stays a pure read.
+  // W1-T1249: the promotion pass's judge. DRY-RUN keeps its PRE-EXISTING shape here —
+  // `opts.promotionJudge` only, no default — a preview must not start an unattended spawn
+  // before an operator has seen the report, the same reason the real Architect spawn below is
+  // itself skipped under `dryRun`'s early return. The REAL run's DEFAULT judge is resolved
+  // further down instead, once THAT run's own `spawn`, rendered `settingsFile` and worktree
+  // `cwd` (design (i)) all exist — see `resolvePromotionJudge` there. Both branches share this
+  // one runId so a real run's ledger rows and a preview's (still, deliberately, none-by-default)
+  // rows are never split across two ids.
   const promotionLedgerRunId = `RETRO-${Date.now()}`;
-  const promotionSection = await promotionProposalSectionFor({
-    corpusDir: projectLearningsHome(repoRoot),
-    judge: opts.promotionJudge,
-    log: promotionLedgerSink({ dryRun, ledgerPath, runId: promotionLedgerRunId }),
-  });
-  const report =
+  const promotionCorpusDir = projectLearningsHome(repoRoot);
+  const reportWithoutPromotion =
     [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") +
     planStateTruthSection +
-    planHealthSection +
-    promotionSection +
-    netStateAdvisorySection;
+    planHealthSection;
 
   if (dryRun) {
-    console.log(report);
+    const promotionSection = await promotionProposalSectionFor({
+      corpusDir: promotionCorpusDir,
+      judge: opts.promotionJudge,
+      log: promotionLedgerSink({ dryRun, ledgerPath, runId: promotionLedgerRunId }),
+    });
+    console.log(reportWithoutPromotion + promotionSection + netStateAdvisorySection);
     return 0;
   }
 
@@ -14138,6 +14252,26 @@ async function retroCommand(
     // rather than aborting the whole retro over a plan/GitHub read hiccup.
     log("orientation.next_task.error", { error: String((e as Error)?.message ?? e) });
   }
+
+  // W1-T1249 design (i): the promotion judge's PRODUCTION DEFAULT, resolved now that THIS
+  // Architect stage's `spawn`, `settingsFile` and `worktreePath` all exist above (rationale
+  // (5)/(6): the cheapest configured mount, no new spawn idiom, no new resolution path).
+  // `opts.promotionJudge` still wins when injected. `report` is assembled here — not at
+  // `reportWithoutPromotion`'s declaration above — so the Architect's own prompt (below) carries
+  // this run's REAL proposals rather than the dry-run branch's judge-less shape.
+  const promotionJudge = resolvePromotionJudge({
+    injected: opts.promotionJudge,
+    mount: resolveRiskJudgeMount(mountsTable),
+    cwd: worktreePath,
+    settingsFile,
+    spawn,
+  });
+  const promotionSection = await promotionProposalSectionFor({
+    corpusDir: promotionCorpusDir,
+    judge: promotionJudge,
+    log: promotionLedgerSink({ dryRun, ledgerPath, runId: promotionLedgerRunId }),
+  });
+  const report = reportWithoutPromotion + promotionSection + netStateAdvisorySection;
 
   const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
   try {
