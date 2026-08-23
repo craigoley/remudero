@@ -13492,6 +13492,33 @@ export function citationStampPassFor(opts: {
   return stampCitationsAndCommit({ worktreePath: opts.worktreePath, learningsDir, changed });
 }
 
+/**
+ * W1-T1248: the try/catch retroCommand wraps {@link citationStampPassFor} in, pulled out to its
+ * own directly-testable function. `citationStampPassFor` itself is BEST-EFFORT by contract (its
+ * own doc: "a read/mine/write hiccup degrades to 'nothing stamped this cycle' ... rather than
+ * aborting the whole retro") — but retroCommand's body carries no branch a test could aim a
+ * failing corpus/git-log read at without standing up the full fake-worker/fake-gh retro fixture
+ * test/retro-marker-atomic.test.ts already pays that cost for. This wrapper is that branch, on
+ * its own, so test/citation-stamp-wiring.test.ts can exercise the catch path directly — a
+ * malformed learnings/ shard alone is enough (loadLearningsCorpus's LearningsError throws before
+ * citationStampPassFor ever shells to git), no fake git repo required. Returns whether a commit
+ * landed (retroCommand's push-if-anything-changed check reads this), never throws.
+ */
+export function runCitationStampPass(opts: {
+  worktreePath: string;
+  followupLedgerNdjson: string;
+  log: (step: string, extra?: Record<string, unknown>) => unknown;
+}): boolean {
+  try {
+    const result = citationStampPassFor({ worktreePath: opts.worktreePath, followupLedgerNdjson: opts.followupLedgerNdjson });
+    if (result.committed) opts.log("citations.stamped", { ids: result.stampedIds, diff_bytes: result.diff?.length ?? 0 });
+    return result.committed;
+  } catch (e) {
+    opts.log("citations.stamp.error", { error: String((e as Error)?.message ?? e) });
+    return false;
+  }
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -13877,15 +13904,9 @@ async function retroCommand(
     // rides EVERY real retro, mirroring orientation/plan-index's own regenerate-and-commit-if-
     // changed discipline just above. Runs AFTER both: neither reads `learnings/`, so ordering
     // doesn't matter for correctness, but grouping every HARNESS-OWNED post-worker write together
-    // keeps this block's shape legible top-to-bottom.
-    let citationStampCommitted = false;
-    try {
-      const result = citationStampPassFor({ worktreePath, followupLedgerNdjson });
-      citationStampCommitted = result.committed;
-      if (result.committed) log("citations.stamped", { ids: result.stampedIds, diff_bytes: result.diff?.length ?? 0 });
-    } catch (e) {
-      log("citations.stamp.error", { error: String((e as Error)?.message ?? e) });
-    }
+    // keeps this block's shape legible top-to-bottom. The try/catch itself lives in
+    // runCitationStampPass (its own doc explains why it's split out).
+    const citationStampCommitted = runCitationStampPass({ worktreePath, followupLedgerNdjson, log });
 
     // Ensure the branch reached origin (worker pushes without -u). Also push when
     // ORIENTATION.md/plan-index.json/learnings citation stamps were regenerated AFTER the

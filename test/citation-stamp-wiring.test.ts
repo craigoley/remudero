@@ -32,7 +32,7 @@ import {
 } from "../src/lib/retro.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
 import { findExportDefinition, isExportReachable } from "../src/lib/reachability.js";
-import { citationStampPassFor, parseGitLogCitationCommits } from "../src/run-task.js";
+import { citationStampPassFor, parseGitLogCitationCommits, runCitationStampPass } from "../src/run-task.js";
 
 function entry(id: string, overrides: Partial<LearningEntry> = {}): LearningEntry {
   return {
@@ -337,4 +337,50 @@ test("stampCitationsAndCommit is a pure no-op — no disk write, no git call —
   assert.deepEqual(result.stampedIds, []);
   const after = execFileSync("git", ["-C", dir, "log", "--oneline"], { encoding: "utf8" }).trim();
   assert.equal(after, before, "no commit must be created for an empty change set");
+});
+
+// ── runCitationStampPass (run-task.ts) — retroCommand's try/catch around citationStampPassFor,
+//    pulled into its own function so its FAILURE branch is directly testable without standing up
+//    the full fake-worker/fake-gh retro fixture test/retro-marker-atomic.test.ts already pays for
+//    the surrounding orchestration ────────────────────────────────────────────────────────────
+
+test("runCitationStampPass: a real citationStampPassFor commit logs citations.stamped and returns true", () => {
+  const dir = makeCorpusWorktree();
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const committed = runCitationStampPass({
+    worktreePath: dir,
+    followupLedgerNdjson: FOLLOWUP_LEDGER_WITH_EVIDENCE,
+    log: (step, extra) => logged.push({ step, extra }),
+  });
+  assert.equal(committed, true);
+  const stampedLog = logged.find((l) => l.step === "citations.stamped");
+  assert.ok(stampedLog, "a real commit must be logged as citations.stamped");
+  assert.deepEqual(stampedLog!.extra!.ids, ["cited-me"]);
+});
+
+test("runCitationStampPass: a malformed learnings/ shard (citationStampPassFor throws before ever shelling to git) is caught, logged as citations.stamp.error, and returns false — never throws", () => {
+  // No git repo at all here — loadLearningsCorpus's LearningsError fires before
+  // citationStampPassFor's default git-log reader is ever invoked (the same ordering
+  // citationStampPassFor's own doc/tests rely on), so a plain temp dir is enough.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rmd-citation-stamp-bad-yaml-")));
+  mkdirSync(join(dir, "learnings"), { recursive: true });
+  writeFileSync(join(dir, "learnings", "bad.yaml"), "- id: a\n  bad: [unclosed\n");
+
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let committed: boolean | undefined;
+  assert.doesNotThrow(() => {
+    committed = runCitationStampPass({
+      worktreePath: dir,
+      followupLedgerNdjson: "",
+      log: (step, extra) => logged.push({ step, extra }),
+    });
+  });
+  assert.equal(committed, false, "a caught corpus-read failure degrades to 'nothing stamped this cycle', never a thrown error");
+  const errorLog = logged.find((l) => l.step === "citations.stamp.error");
+  assert.ok(errorLog, "the read failure must be ledgered as citations.stamp.error, not silently swallowed");
+  assert.match(String(errorLog!.extra!.error), /not valid YAML/);
+  assert.ok(
+    logged.every((l) => l.step !== "citations.stamped"),
+    "no citations.stamped log on the failure path",
+  );
 });
