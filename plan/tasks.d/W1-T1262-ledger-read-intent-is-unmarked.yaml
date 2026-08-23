@@ -1,0 +1,113 @@
+- id: W1-T1262
+  title: "THE LEDGER-UNION INVARIANT IS ENFORCED PER MODULE BY CONVENTION, SO A FORGETFUL READER UNDERCOUNTS BY ~350x AND NOTHING CATCHES IT — `readLedgerLines` takes a BARE PATH with no way to say whether the caller wants the newest rows or all of history, most reading modules take the live file alone, and both readings look identical at the call site; the resolver side was made structural by W1-T444 and the CALLER side never was"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 90.00
+  files: [src/lib/status.ts, test/ledger-read-intent.test.ts]
+  origin: oper#ledger-read-intent-2026-08-23
+  plan_refs: ["W1-T444", "W1-T1013"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE RATIO IS STATED INDEPENDENTLY IN TWO MODULE DOCS. `src/lib/rule-efficacy.ts` reads the
+    UNION "never the live file alone, which is ~0.28% of history and would undercount by the same
+    ~350x lib/ledger-grep.ts's own module doc measured"; `src/lib/verdict-calibration.ts` states
+    the same fact in its own words, "~0.3% of history, the same undercount lib/rule-efficacy.ts's
+    own module doc measured". Two modules, arrived at separately, agreeing — which is what a
+    convention looks like just before it is forgotten.
+
+    IT IS FORGOTTEN ROUTINELY, AND RECENTLY. W1-T1013 filed the follow-up harvest reading the live
+    file alone (#2164) and it shipped as #2262 ("fix(retro): give the follow-up harvest the
+    archive-union ledger corpus"). That is one instance, fixed. The operator then made the same
+    mistake twice in one session — once on `learnings.injected`, once on
+    `sweep.escalation_reconcile` — ten minutes after reading W1-T1013's shard. A rule that is
+    re-read and then immediately violated is not being under-documented.
+
+    THE CALL SITE CANNOT EXPRESS THE CHOICE. `readLedgerLines(path, ledgerFs)` (src/lib/status.ts)
+    takes a bare path. Nothing at the call site records whether the caller wanted the newest rows
+    or all of history, so a live-file read and a union read are indistinguishable by inspection —
+    both are just a path. There is no signal for a reviewer, a linter, or the next author to catch.
+
+    ENUMERATED, CONTROLLED. Of the modules that call `readLedgerLines`, five resolve the union
+    (via `resolveLedgerUnion`/`ledgerRotationEntries`/`ledgerCorpusFiles`/`readLedgerUnionBounded`)
+    and the rest read the live file alone. The classifier was controlled both ways: it reports
+    `src/lib/rule-efficacy.ts` — a module whose doc says it reads the union — as UNION, and a module
+    with no ledger use at all as not-union, so a live-file-only verdict means absence rather than a
+    scan that could not see. Union-resolving modules that do NOT go through `readLedgerLines` exist
+    too (`rule-efficacy.ts`, `verdict-calibration.ts` among them), so the population is the two
+    reading primitives together, not one.
+
+    THE RESOLVER SIDE IS ALREADY STRUCTURAL; THE CALLER SIDE IS NOT. W1-T444 (commit `70d52c2`,
+    #1657) made `ledgerRotationEntries` the one definition of the corpus AND made
+    `resolveLedgerUnion` refuse on partial coverage. That closed the resolver-side hole. Nothing
+    closed the caller-side one.
+  design: |
+    (i) THE DEFECT IS AN UNMARKED CHOICE, NOT THE CHOICE ITSELF. A live-file read is legitimate:
+    `rmd doctor` and others want the newest rows and nothing else, and reading twenty archives to
+    answer "what just happened" would be wrong. This task must NOT delete or discourage the
+    live-file read. What it must do is make the choice DECLARED, so that reading the live file is
+    something a caller says rather than something a caller defaults into.
+
+    (ii) THREE STRUCTURAL OPTIONS, THEIR COSTS, AND — STATED PLAINLY — NONE OF THEM WOULD HAVE
+    CAUGHT W1-T444's ORIGINAL INSTANCE.
+      (a) A LINT-STYLE SOURCE SCAN, the house pattern (`test/no-raw-nul.test.ts` walks
+          `git ls-files` and fails naming the offender; `no-hand-rolled-fetch-check.test.ts` and the
+          `*-parity` suites are the same shape). CHEAPEST and needs no call-site edits. COST: it is
+          a text scan, so a helper that wraps the reader hides the call from it, and every
+          legitimate live-file reader needs an allowlist entry that will itself go stale.
+      (b) A NARROWED EXPORT — stop exporting the bare-path reader and route callers through a
+          union-aware façade. COST: it breaks the legitimate newest-rows callers unless a sanctioned
+          tail reader is provided at the same time, so it is really two changes; and a façade that
+          both kinds of caller import is back to an unmarked choice one level up.
+      (c) A READER THAT REFUSES A BARE PATH — an explicit intent argument, so the two readings are
+          different expressions rather than the same one. COST: a mechanical edit at every call
+          site, once. BENEFIT the other two lack: the choice becomes greppable and type-checked
+          forever, and a new caller cannot default into either reading.
+      WOULD ANY HAVE CAUGHT W1-T444's ORIGINAL INSTANCE? NO — and this is worth stating because it
+      is the obvious assumption and it is wrong. That instance was not a caller forgetting the
+      union. `70d52c2`'s own added prose says the resolver "matched only `.endsWith(".ndjson.gz")`
+      and `run-task.ts`'s `ledgerCorpusFiles` matched only `.endsWith(".ndjson")`, so each read a
+      different half and neither said so". BOTH SIDES BELIEVED THEY WERE RESOLVING THE UNION; each
+      resolved half of it. All three options above police whether a caller resolves the union, and
+      would have passed that code unchanged. What caught it was the coverage refusal `70d52c2`
+      itself added. The resolver hole and the caller hole are different holes with different fixes,
+      and this task owns only the second.
+
+    (iii) THE FALSIFIER RUNS BOTH WAYS. A reader that takes the live file WITHOUT declaring it must
+    fail; a reader that declares the live file must PASS unchanged. A check that failed every
+    live-file read would satisfy the first and destroy `rmd doctor`, which clause (i) forbids.
+
+    (iv) OUT OF SCOPE. The resolver side (W1-T444's coverage refusal) is already structural and is
+    not reopened. W1-T1013's harvest instance is already fixed and is cited, not re-fixed. Which of
+    (a)/(b)/(c) is adopted is left to the implementer against the costs recorded above; the
+    acceptance criteria are written to the PROPERTY, not to a mechanism, so any of the three can
+    satisfy them.
+  acceptance:
+    - claim: "a ledger read that takes the live file alone without declaring that intent is refused"
+      proof: "unit test: test/ledger-read-intent.test.ts"
+    - claim: "a ledger read that declares the newest-rows intent still passes, so the live-file read survives"
+      proof: "unit test: test/ledger-read-intent.test.ts"
+    - claim: "a union read is distinguishable from a live-file read at the call site rather than by inspection"
+      proof: "unit test: test/ledger-read-intent.test.ts"
+    - claim: "the check names the offending reader rather than reporting a bare count"
+      proof: "unit test: test/ledger-read-intent.test.ts"
+  note: |
+    risk: high IS SET UP FRONT, AND BOTH READINGS ARE RECORDED. RULE 19's SPAN is the band's cause:
+    `files:` crosses two stems as `sizingViolation` counts them (`status` and `ledger-read-intent`),
+    and that pairing is refused at `risk:medium`. THE BLAST RADIUS is separately real but bounded:
+    `readLedgerLines` is called from many modules, so option (c) would touch each of them once
+    mechanically, while options (a) and (b) touch fewer. No runtime ledger CONTENT changes under any
+    option — only how a caller asks for it.
+
+    `src/lib/status.ts` IS DECLARED because `readLedgerLines` is defined there and that is the
+    narrowing/refusal point for every option. `src/lib/ledger-grep.ts` is NOT declared: the union
+    resolver is already correct and W1-T444's coverage refusal already guards it — see design (ii).
+
+    PROOF NOTES: all four proofs are the PURE-PATH `unit test:` form naming
+    `test/ledger-read-intent.test.ts`, which this shard's own `files:` declares —
+    `judgeCriterion` gates its forward-reference carve-out on `!whitelisted.nameFiltered`, so a
+    name-filtered title would be graded `no-match` rather than `not_yet_built`.
