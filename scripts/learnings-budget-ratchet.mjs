@@ -135,10 +135,24 @@ export function computeActiveChars(entries) {
 
 /**
  * Compare the measured active-corpus size against a recorded cap.
+ *
+ * `capChars` ABSENT (undefined/null) is a legitimate, honest "no cap yet" contract and is left
+ * alone -- the caller reports it as "cap unset" and exits 0. `capChars` PRESENT but not a number
+ * (e.g. a hand-edit that quotes the value, `"1000"` instead of `1000`) is a DIFFERENT thing: a
+ * declared cap that cannot be compared against. That must REFUSE, not silently no-op -- same
+ * distinction scripts/claude-md-budget-ratchet.mjs's `evaluateRatchet` draws for `capBytes`. This
+ * throws rather than returning a violation because it is a config defect, not a size-budget
+ * breach; the caller is expected to catch it and fail the run before it prints anything claiming
+ * to enforce a cap.
+ *
  * @returns {string[]} human-readable violations; empty means the ratchet is satisfied.
+ * @throws {Error} if `capChars` is present and not a number.
  */
 export function evaluateRatchet(actualChars, baseline) {
   const violations = [];
+  if (baseline.capChars !== undefined && baseline.capChars !== null && typeof baseline.capChars !== "number") {
+    throw new Error(`'capChars' must be a number, got ${JSON.stringify(baseline.capChars)}`);
+  }
   if (typeof baseline.capChars === "number" && actualChars > baseline.capChars) {
     violations.push(`active learnings corpus ${actualChars} chars > cap ${baseline.capChars} chars`);
   }
@@ -223,7 +237,17 @@ function main(argv) {
   }
   const baseline = JSON.parse(readFileSync(values.baseline, "utf8"));
   const { chars, activeCount, totalCount } = computeActiveChars(entries);
-  const violations = evaluateRatchet(chars, baseline);
+
+  let violations;
+  try {
+    violations = evaluateRatchet(chars, baseline);
+  } catch (err) {
+    // Refuse before printing anything about a cap -- a run that cannot determine its threshold
+    // must never print "cap <n> chars" as if it were enforcing one.
+    console.error(`learnings-budget-ratchet: ${values.baseline}: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(
     `learnings-budget-ratchet: active corpus ${chars} chars (cap ${baseline.capChars ?? "unset"} chars) -- ` +

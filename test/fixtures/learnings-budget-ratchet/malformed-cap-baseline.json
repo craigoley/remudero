@@ -1,0 +1,4 @@
+{
+  "_comment": "capChars is a quoted string, not a number. This must REFUSE, not silently disarm the gate and report OK -- same shape as claude-md-budget-ratchet's malformed-cap-baseline.json fixture (W1-T1233).",
+  "capChars": "10"
+}

@@ -85,6 +85,44 @@ test("mutation-ratchet CLI: baseline record missing scorePct -> no crash, no fal
   assert.match(result.stdout.toString(), /OK -- at or above baseline/);
 });
 
+// ── W1-T1277: a malformed (present but non-number) scorePct must REFUSE at PR time, not silently
+// disarm ──
+//
+// The pre-fix guard was `typeof baseline.scorePct === 'number' && actual.scorePct < baseline...`
+// -- any non-number short-circuited the `&&`, so no violation was ever pushed and the run reported
+// OK. below-baseline.json's actual score (20%) is below malformed-baseline.json's quoted value
+// (80), so a numeric control would BLOCK -- proving the refusal is not just "any malformed value
+// happens to pass anyway". The NIGHTLY arm already refuses this shape (see the --nightly-ratchet
+// non-numeric scorePct test below); this is the PR-time arm agreeing with it (acceptance
+// criterion 3).
+
+test("mutation-ratchet CLI: a scorePct present but not a number refuses instead of passing at PR time, agreeing with the nightly arm (acceptance criterion 3)", () => {
+  const result = runRatchet("below-baseline.json", join(FIXTURES, "malformed-baseline.json"));
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /'scorePct' must be a number, got "80"/);
+});
+
+test("mutation-ratchet CLI: a malformed scorePct never prints a baseline figure it is not enforcing", () => {
+  const result = runRatchet("below-baseline.json", join(FIXTURES, "malformed-baseline.json"));
+  assert.doesNotMatch(result.stdout.toString(), /score \d/, result.stdout?.toString() + result.stderr?.toString());
+  assert.doesNotMatch(result.stdout.toString(), /OK --/, result.stdout?.toString() + result.stderr?.toString());
+});
+
+// ── A well-formed baseline evaluates exactly as it does today (acceptance criterion 5, no value or
+// threshold moved) -- BELOW/AT/ABOVE-baseline fixtures above all still exercise the SAME
+// evaluateRatchet path and produce byte-identical messages; this test pins that pinning explicitly
+// against the production baseline value used elsewhere in this suite (80).
+
+test("mutation-ratchet CLI: a well-formed numeric scorePct baseline still evaluates exactly as before -- no value or threshold moved by the malformed-input fix", () => {
+  const result = runRatchet("below-baseline.json");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /mutation score 20\.00% < baseline 80\.00%/);
+
+  const passing = runRatchet("above-baseline.json");
+  assert.equal(passing.status, 0, passing.stdout?.toString() + passing.stderr?.toString());
+  assert.match(passing.stdout.toString(), /OK -- at or above baseline/);
+});
+
 test("mutation-ratchet module: importing (not spawning as the entry script) does not re-invoke main() -- process.argv[1] is undefined when eval'd", () => {
   // Drives the `import.meta.url === pathToFileURL(process.argv[1] ?? '').href` direct-execution
   // guard down its OTHER path: when this module is loaded via `node --input-type=module -e`

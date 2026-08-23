@@ -1,0 +1,5 @@
+{
+  "_comment": "branchesPct is a quoted string, not a number -- same value baseline.json uses (85), but the wrong type. This must REFUSE, not silently disarm the gate and report OK.",
+  "linesPct": 90,
+  "branchesPct": "85"
+}

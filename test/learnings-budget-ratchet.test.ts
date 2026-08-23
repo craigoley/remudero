@@ -51,6 +51,26 @@ test("learnings-budget-ratchet CLI: baseline with no capChars at all -> no crash
   assert.match(result.stdout, /cap unset/);
 });
 
+// ── W1-T1277: a malformed (present but non-number) capChars must REFUSE, not silently disarm ────
+//
+// The pre-fix guard was `typeof baseline.capChars === "number" && actualChars > baseline.capChars`
+// -- any non-number short-circuited the `&&`, so no violation was ever pushed and the run reported
+// OK. malformed-cap-baseline.json quotes capChars as `"10"`, well under the fixture corpus's real
+// 41 chars, so a numeric 10 would BLOCK -- proving the refusal is not just "any malformed value
+// happens to pass anyway".
+
+test("learnings-budget-ratchet CLI: a capChars present but not a number refuses instead of passing (acceptance criterion 1)", () => {
+  const result = run("basic", "malformed-cap-baseline.json");
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /'capChars' must be a number, got "10"/);
+});
+
+test("learnings-budget-ratchet CLI: a malformed capChars never prints a cap figure it is not enforcing", () => {
+  const result = run("basic", "malformed-cap-baseline.json");
+  assert.doesNotMatch(result.stdout, /active corpus \d+ chars/, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /OK --/, result.stdout + result.stderr);
+});
+
 // ── SUPERSEDED / QUARANTINED entries do NOT count (acceptance criterion 2) ───────────────────────
 //
 // Same beta bytes in every fixture below -- only its `lifecycle` differs. Marking it

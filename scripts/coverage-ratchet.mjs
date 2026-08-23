@@ -71,16 +71,42 @@ export function parseLcovTotals(lcovText) {
 
 /**
  * Compare actual coverage totals against a recorded baseline.
+ *
+ * `linesPct`/`branchesPct` ABSENT (undefined/null) is a legitimate, honest "no floor recorded"
+ * contract and is left alone -- `branchesPct` in particular is no longer carried by the shipped
+ * baseline at all now that branches gate on the absolute tiers in `classifyCoverageTier` instead.
+ * Either field PRESENT but not a number (e.g. a hand-edit that quotes the value) is a DIFFERENT
+ * thing: a declared floor that cannot be compared against. That must REFUSE, not silently no-op
+ * -- same distinction scripts/claude-md-budget-ratchet.mjs's `evaluateRatchet` draws for
+ * `capBytes`. This throws rather than returning a violation because it is a config defect, not a
+ * coverage-floor breach; the caller is expected to catch it and fail the run before it prints
+ * anything claiming to enforce a baseline.
+ *
  * @returns {string[]} human-readable violations; empty means the ratchet is satisfied.
+ * @throws {Error} if `linesPct` or `branchesPct` is present and not a number.
  */
 export function evaluateRatchet(actual, baseline, epsilon = 1e-9) {
   const violations = [];
+  if (
+    baseline.linesPct !== undefined &&
+    baseline.linesPct !== null &&
+    typeof baseline.linesPct !== 'number'
+  ) {
+    throw new Error(`'linesPct' must be a number, got ${JSON.stringify(baseline.linesPct)}`);
+  }
   if (typeof baseline.linesPct === 'number' && actual.linesPct < baseline.linesPct - epsilon) {
     const delta = actual.linesPct - baseline.linesPct;
     violations.push(
       `lines coverage ${actual.linesPct.toFixed(2)}% < baseline ${baseline.linesPct.toFixed(2)}% ` +
         `(delta ${delta.toFixed(2)}pts)`,
     );
+  }
+  if (
+    baseline.branchesPct !== undefined &&
+    baseline.branchesPct !== null &&
+    typeof baseline.branchesPct !== 'number'
+  ) {
+    throw new Error(`'branchesPct' must be a number, got ${JSON.stringify(baseline.branchesPct)}`);
   }
   if (
     typeof baseline.branchesPct === 'number' &&
@@ -165,7 +191,17 @@ function main(argv) {
   const lcovText = readFileSync(values.lcov, 'utf8');
   const baseline = JSON.parse(readFileSync(values.baseline, 'utf8'));
   const actual = parseLcovTotals(lcovText);
-  const violations = evaluateRatchet(actual, baseline);
+
+  let violations;
+  try {
+    violations = evaluateRatchet(actual, baseline);
+  } catch (err) {
+    // Refuse before printing anything about a baseline -- a run that cannot determine its
+    // threshold must never print "baseline <n>%" as if it were enforcing one.
+    console.error(`coverage-ratchet: ${values.baseline}: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(
     // BRANCHES REPORT THEIR TIER CUTS, NEVER A "baseline". `branchesPct` is GONE from the real
