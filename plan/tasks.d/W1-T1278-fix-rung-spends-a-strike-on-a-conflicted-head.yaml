@@ -52,6 +52,47 @@
     `state/` directory, so a count of `fix.dispatch` rows against dirty heads is NOT derivable here
     and is not estimated. The step names above (`fix.dispatch`, `fix.done`, `fix.exhausted`,
     `sweep.disposed`) were taken from source, never guessed.
+
+    **A THIRD CONDITION, MEASURED — AND THE CHEAPEST OF THE THREE TO CHECK, BECAUSE THE COUNT IS
+    ALREADY IN HAND AT DISPATCH TIME.** On PR #2641 (`docs/repoint-recovered-research`) at head
+    `cd4b110b`, the blocked_ci fix rung dispatched TWO bounded ci-log workers and then escalated as
+    `issues/2653`, whose own **"Failing check(s)"** section reads, verbatim:
+    **"(no evidence — this was checked and is empty)"**. A rung that prints its own emptiness had
+    nothing for its worker to act on, and it spent two strikes before saying so.
+
+    **THE BRIEFING FRAME FOR THIS ONE WAS WRONG ON THE FACTS, AND IS CORRECTED HERE RATHER THAN
+    REPEATED.** It held that #2641's check runs were all green and that the only red was
+    `remudero-review`, a legacy commit status the ci reader cannot see. **RE-DERIVED AT
+    `cd4b110b`: THREE CHECK RUNS HAD ALREADY FAILED** — `ci` completed 18:33:10Z,
+    `coverage-ratchet` 18:38:26Z, `ci-gate` 18:48:48Z — and the escalation was opened at 18:57:54Z,
+    nine to twenty-five minutes AFTER all three. So the dispatch was not triggered by an invisible
+    status; it was triggered by genuinely red checks, and `checksStateFromRollup` excludes
+    `REVIEW_CONTEXT` outright, so `isBlockedCi` (`pr.checksState === "red"`) could not have been
+    reading the review in the first place.
+
+    **THE TWO-READER SPLIT IS REAL, BUT IT IS A DIFFERENT PAIR THAN THE ONE NAMED.** Dispatch reads
+    `checksState`, composed by `rollupFromRest(checkRuns, statuses)`. The worker's evidence is
+    `ciFailures`, produced separately by the miner that reads an Actions job id out of `detailsUrl`.
+    At `cd4b110b` the first returned RED off three real failures and the second returned NOTHING.
+    **THE RUNG IS DISPATCHED BY ONE READER AND WORKS FROM ANOTHER**, and the escalation is where the
+    disagreement finally becomes visible.
+
+    **AND THE ESCALATION'S SECOND CLAIM IS STALE TOO.** It states "no review has run yet" while the
+    combined-status endpoint records `remudero-review` **FAIL** on that exact head at 18:28:27Z —
+    twenty-nine minutes before the issue was written. Both of its evidence lines were false at the
+    moment it printed them.
+
+    **WHAT THE BRIEFING GOT RIGHT AND THIS SHARD KEEPS.** `/check-runs` IS structurally blind to
+    `remudero-review` — verified at that head, where 27 check runs carry no entry of that name while
+    the combined-status endpoint carries exactly one. And the PR's actual problem was unreachable by
+    the dispatched mode regardless: the verdict reads **"test theater: added tests assert nothing"**,
+    which is a judgement about the PR's body and diff that no ci-log worker addresses.
+
+    **THIS CONDITION NEEDS NO NEW LEDGER FIELD.** Unlike a strike-attempt history, the failing-check
+    count is available at dispatch time, and the escalation proves it by printing its own emptiness.
+    **A RUNG WITH ZERO ENUMERABLE FAILURES MUST STAND DOWN WITH A NAMED REASON RATHER THAN DISPATCH**
+    — the same refusal-before-a-spend this task already argues for a conflicted head. **NOT PROPOSED,
+    BY NAME: merging the two readers, or treating a failed review as a CI failure.**
   design: |
     (i) **Q1 — WHAT THE SWEEP ALREADY KNOWS.** The disposition is named `"conflicted"`. The fix rung
     DOES consult it — the `conflicted` case calls `dispatchFix` directly — so the rung is not blind
