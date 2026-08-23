@@ -1,0 +1,163 @@
+- id: W1-T1254
+  title: "the fix rung hands `bodyContradictsDiff` the worker's own narrative as if it were the PR body, with `reportIsSubstitute` unset — so a worker that describes its change in changeset shorthand fails its own PR on a claim the body never made, and the author cannot clear it by fixing the body"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    (1) MEASURED 2026-08-23 ON #2569, BOTH DIRECTIONS. The stored PR body scores ZERO
+    contradictions from `bodyContradictsDiff` against that PR's real changeset
+    (`src/run-task.ts`, `test/fix-rung-scope-standdown.test.ts`), and the zero is real rather than
+    a blind query: two deliberately false variants of the SAME text — a false file count and a
+    false absence claim — both fire, and a third control that merely unfences an already-quoted
+    verdict fires too, proving the detector is live against those exact bytes and that
+    `stripQuotedRegions` context, not clause wording, is what silences a quotation. The branch's
+    own worker narrative, scored with the same predicate and the same file list, returns TWO
+    contradictions and reproduces the posted verdict's `claimed "no code"` VERBATIM.
+
+    (2) THE DETECTOR IS CORRECT AND THE INPUT IS WRONG. `judgeReview` (`src/lib/review.ts`) reads
+    `evidence.reportIsSubstitute ? [] : bodyContradictsDiff(evidence.report, diffFiles)`, so a
+    report correctly MARKED a substitute is never scored for changeset claims at all. The failure
+    therefore requires a caller that supplies worker text as `report` and leaves the flag unset.
+    `src/run-task.ts` already documents this exact shape for #1156 in its own words — a narrative
+    naturally contains phrases like "plan-only" or "exactly one file" while DESCRIBING the job, so
+    "the checker is right, it was handed the wrong document."
+
+    (3) THE CALLER IS `runFixRung`, AND THE SCAN THAT FINDS IT IS CONTROLLED. Three call sites
+    supply `report:` into the review. The manual `reviewCommand` path passes the real body read
+    from `gh pr view`. The `runTask` path assigns the worker text FIRST, sets its own
+    `reviewReportIsSubstitute = true`, flips it to false only on a successful body fetch, and
+    PASSES the flag — that site is the pre-qualified control, so a zero elsewhere means absence
+    rather than a query that cannot see its corpus. `runFixRung`'s own `deps.runReview({…})` call
+    passes `report: reviewReport` and NO flag at all.
+
+    (4) AND `reviewReport` THERE IS THE WORKER'S NARRATIVE BY DEFAULT, NOT THE BODY. It is
+    initialised from this invocation's own worker output, and the body is fetched ONLY under
+    `if (fixMode === "body-coverage")`. `FixMode` has four values — `reviewer-unmet`,
+    `body-coverage`, `ci-log`, `merge-conflict` — so in THREE of the four the reviewer is handed
+    the narrative every time, and even inside `body-coverage` a throwing fetch logs
+    `fix.body_fetch_error` and leaves the narrative in place. A `reviewer-unmet` strike — the mode
+    that fires precisely when a review is already failing — is the worst case: the rung dispatched
+    to clear a verdict is the one guaranteed to be judged on its own prose.
+
+    (5) THIS IS A SECOND PATH W1-T1100 NEVER COVERED, NOT A REGRESSION ON THE ONE IT DID —
+    ESTABLISHED BY BLAME, NOT BY READING. W1-T1100 (#2415, merged 2026-08-21) added
+    `reportIsSubstitute` and guarded both consumers; that is cited here and is NOT re-filed. Its
+    `run-task.ts` hunks land at four line ranges, none of them inside `runFixRung`, and the flag
+    line at the control site blames to `0afde64` (#2415) while the fix rung's `report:` line blames
+    to `144c388` (#762, W1-T256, 2026-07-24) — untouched since. W1-T1100 fixed the site it could
+    see and this one was never in its diff.
+
+    (6) THE NARRATIVE IS PER-STRIKE, NOT THE BRANCH LOG — WHICH IS THE DIFFERENCE BETWEEN A COST
+    AND A DEADLOCK. `reviewReport` is built from THIS invocation's worker output alone, so a later
+    clean strike is not poisoned by an earlier commit's wording and NO AUTHOR EVER HAS TO REWRITE
+    ANOTHER LANE'S HISTORY to clear a verdict. What remains is worse than it sounds, though: which
+    prose a worker happens to write is not controlled by anything, so the failure is
+    non-deterministic and recurs whenever a worker reaches for ordinary shorthand to describe its
+    own change.
+
+    (7) THE COST IS ALREADY PAID AND MEASURABLE. The verdict is write-once per head sha, so the
+    FAIL recorded against a sha can never be recomputed there; only a fresh head re-derives one.
+    On #2569 two heads corrected the PR body and a third was pushed to force re-derivation, and
+    the verdict did not move — because the body was never the document being scored. An author
+    correcting a document the reviewer did not read is the observable cost of this defect, and on
+    this one PR it was paid three times.
+
+  design: |
+    ONE CONCERN: tell the review what document it was handed, at the one call site that does not.
+
+    (i) THREAD THE FLAG AT `runFixRung`'s `deps.runReview` CALL. Mirror the control site's shape
+    exactly rather than inventing a second one: a local that starts TRUE alongside the worker-text
+    initialiser, flips to FALSE only where the body fetch actually succeeds, and is passed as
+    `reportIsSubstitute` in the same object literal that already passes `report`. Because the
+    default is true, every mode that never fetches a body — `reviewer-unmet`, `ci-log`,
+    `merge-conflict` — is covered by the initialiser rather than by a per-mode branch, and a
+    throwing fetch inside `body-coverage` leaves it true for free.
+
+    (ii) THE `deriveChangesetClaimUpdate` ARM MUST FLIP IT BACK TO FALSE. That block can REPLACE
+    `reviewReport` with a body it has just written to the PR. When it does, the report IS the body
+    and must be scored as one; leaving the flag true there would silently disable the changeset
+    check on the exact strike that repaired a stale claim, converting this fix into a new blind
+    spot. This is the arm most likely to be missed, so it gets its own criterion.
+
+    (iii) NO BEHAVIOUR CHANGE WHERE THE REPORT REALLY IS THE BODY. A successful `body-coverage`
+    fetch must still be judged exactly as it is today — the flag reaching `judgeReview` as false —
+    so this task cannot be satisfied by marking everything a substitute and calling the
+    contradiction check quiet.
+
+    (iv) WHAT THIS DELIBERATELY DOES NOT DO. It does not touch `bodyContradictsDiff`, whose
+    behaviour is correct on the input it is given; it does not exempt narrative text from the
+    detector, which would lose the check wherever a narrative IS the body; it does not rewrite or
+    rebase any branch history; and it does not change the write-once-per-sha property of the
+    review verdict. It also does not widen the body fetch to the other three fix modes — making
+    the reviewer read the right document in every mode is a larger change with its own dispatch
+    and failure semantics, and this task's claim is only that the review must know what it was
+    handed.
+
+  acceptance:
+    - claim: "a fix-rung re-review in a mode that never fetches the PR body marks its report a substitute, so the changeset-claim check is skipped rather than scored against worker prose"
+      proof: "unit test: test/fix-rung-report-provenance.test.ts"
+    - claim: "a successful body-coverage fetch marks the report NOT a substitute, so a real body is still scored for changeset claims exactly as it is today"
+      proof: "unit test: test/fix-rung-report-provenance.test.ts"
+    - claim: "a body fetch that throws leaves the report marked a substitute rather than falling through as though a body had been read"
+      proof: "unit test: test/fix-rung-report-provenance.test.ts"
+    - claim: "when the changeset-claim update replaces the report with a body it just wrote, the report is marked NOT a substitute so that strike is still scored"
+      proof: "unit test: test/fix-rung-report-provenance.test.ts"
+    - claim: "worker narrative carrying changeset shorthand no longer produces a contradiction verdict through the fix rung, while the same shorthand in a real body still does"
+      proof: "unit test: test/fix-rung-report-provenance.test.ts"
+  origin: oper#2026-08-23-fix-rung-report-provenance
+  plan_refs: ["W1-T1100", "W1-T256", "W1-T307", "#2415", "#2569", "#1156"]
+  files: [src/run-task.ts, test/fix-rung-report-provenance.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    EVERY PROOF IS A PURE PATH AND NONE GREPS THIS SHARD'S OWN PATH. The named test file does not
+    exist yet, which is a legitimate forward reference: a PATH is safe to forward-reference where a
+    SYMBOL NAME would be a guess, and the criteria say what must hold rather than naming internals
+    that may move. `test/fix-rung-report-provenance.test.ts` is declared in `files:`.
+
+    `risk: high` IS RULE 19's SPAN, NOT THIS TASK'S BLAST RADIUS, AND IT WAS SET FROM THE
+    LINTER'S OWN VERDICT RATHER THAN GUESSED. `sizingViolation` reads the `files:` list and scores
+    it as two distinct concerns — `fix-rung-report-provenance` and `run-task` — which blocks at
+    `medium`; it was measured at `medium` first and raised, and the pairing is a source file with
+    its own new test, which is not a decomposition anyone should perform. The actual blast radius
+    is small and additive: a flag the consumer already reads gains a second correct producer, and
+    nothing here touches a workflow, a required-check name, a gate's verdict semantics, or
+    `src/lib/review.ts`. The one genuine hazard is design (ii) — the arm that can invert the fix if
+    missed — which is why it carries its own criterion.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN. Eight id
+    surfaces were swept, each against a control pre-qualified for THAT surface, and ONE CONTROL WAS
+    RE-QUALIFIED MID-SWEEP RATHER THAN TRUSTED: W1-T1227 was the obvious control for open PR titles
+    and reads 0 there, so that surface was re-controlled on the `W1-T` title population, which
+    reads 4. THE REASON IS STRUCTURAL AND WORTH KEEPING. W1-T1227's PR is OPEN — it is #2569,
+    the very PR this task was measured on — and its title carries no id at all, because an
+    IMPLEMENT PR's title never does; the id rides in the `Remudero-Task:` trailer instead, which is
+    where W1-T1227 is credited (on #2550, its FILING PR). Of the seven open PRs, the four whose
+    titles carry an id are all `chore(plan):` filings. So ANY control drawn from an implement task
+    is guaranteed to read 0 on the title surface no matter how live that task is, and a zero there
+    is evidence of nothing until the control comes from a filing. This note said the control read
+    0 "because its own PR has since closed"; that was wrong, checked against the PR, and the
+    correct mechanism replaces it. Shard filenames 0 against W1-T1227 at 1; plan
+    `- id:` lines 0 against W1-T1227 at 1; the reservation 1, which is the pre-mint, against a
+    namespace of 284 such refs; open PR titles 0 against `W1-T` titles at 4; open PR head branches
+    0 against `run-W1-T` heads at 1; open PR file lists 0 with coverage at seven captured of seven
+    enumerated, against `plan/tasks.d/` paths at 4 across the same heads; merged trailers 0 against
+    `Remudero-Task: W1-T1227` at 1 and any trailer at 53; merged subject credit 0 against `W1-T`
+    subjects at 48, with `run-W1-T1254-*` heads at 0 against 38 structured merged heads and an
+    82-branch `run-*` remote namespace.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, AND ITS FIRST READING WAS A
+    SILENT ZERO THAT HAD TO BE THROWN AWAY. Counting markers through GitHub's contents API returned
+    0 for both `src/run-task.ts` markers at every head INCLUDING main, while the `src/lib/review.ts`
+    column read a steady 4 — a control that proved the reader worked and said nothing about the
+    column it never covered. The cause is that `src/run-task.ts` is 1,447,834 bytes and the contents
+    API caps at 1 MB, returning `encoding: "none"` with empty content, which base64-decodes to
+    nothing and greps to a clean 0. Re-taken through git objects at each fetched head, main reads
+    `reportIsSubstitute` 4 / `report: reviewReport` 2 / `review.ts reportIsSubstitute` 4, and every
+    one of the seven open heads reads exactly 4 / 2 / 4. No head moves any marker, and the markers
+    being equal and NON-ZERO is the control that this reading, unlike the first, could see its
+    corpus.
