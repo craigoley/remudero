@@ -132,16 +132,23 @@ workerAbandon:
   origin: "net-new"
   min: 1200000
   max: 7200000
-# W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND). The bound on (a) `await deps.sweep()`
-# (src/lib/daemon.ts's poll loop) and (b) ONE fix-rung worker spawn inside `runFixRung`
-# (src/run-task.ts) — the SAME field feeds both placements (see that task's own `note:` for
-# why two placements are required and neither alone is sufficient). MEASURED, not a round
-# figure: this task's own rationale re-derived healthy sweep ticks at 61.8s median / 111.8s
-# p90, against 21 confirmed hangs longer than 20 minutes (1200000ms), the shortest one 165.5
-# minutes. value: 559000 is 5x the measured p90 (111800ms) — comfortably past the whole
-# healthy population's own tail, and still 2.15x BELOW the shortest confirmed hang, so the
-# bound cannot fire on a merely-slow-but-healthy tick and cannot wait as long as even the
-# shortest observed one.
+# W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND). The bound on `await deps.sweep()`
+# (src/lib/daemon.ts's poll loop). MEASURED, not a round figure: this task's own rationale
+# re-derived healthy sweep ticks at 61.8s median / 111.8s p90, against 21 confirmed hangs
+# longer than 20 minutes (1200000ms), the shortest one 165.5 minutes. value: 559000 is 5x
+# the measured p90 (111800ms) — comfortably past the whole healthy population's own tail,
+# and still 2.15x BELOW the shortest confirmed hang, so the bound cannot fire on a
+# merely-slow-but-healthy tick and cannot wait as long as even the shortest observed one.
+#
+# W1-T1219 (ONE POLICY ROW BOUNDS TWO UNRELATED POPULATIONS): until this task, this SAME
+# field also bounded ONE fix-rung worker spawn inside `runFixRung` (src/run-task.ts) — a
+# sweep tick classifies open PRs against a rollup it already fetched; a fix-rung spawn is an
+# implement-class Claude worker that reads a diff, edits source and commits. Applying a bound
+# derived from sweep-tick durations to that spawn made the rung abandon healthy implement-class
+# work at 9m19s (three `fix.spawn_abandoned` rows on 2026-08-22, `spawnAbandonedElapsedMs`
+# 559008/559060 — over by 8-60ms, nothing hung). The fix-rung spawn now reads its OWN row,
+# `fixSpawnWallClockBoundMs` below — this row is UNCHANGED, value and bounds both, and now
+# bounds ONLY the sweep tick.
 #
 # OPTIONAL IN THE SCHEMA (src/lib/policy.ts): this row is read like `autoTriage`'s own
 # optional block — ABSENT means "use the committed default" (mirrored in policy.ts as
@@ -158,6 +165,43 @@ sweepWallClockBoundMs:
   origin: "net-new"
   min: 180000
   max: 900000
+
+# W1-T1219 (the split half of the row above). The WALL-CLOCK BOUND (ms) on ONE fix-rung
+# worker spawn inside `runFixRung` (src/run-task.ts) — see `sweepWallClockBoundMs`'s own
+# comment above for why one row could no longer bound both a sweep tick and this spawn.
+#
+# THIS VALUE IS INTERIM BY CONSTRUCTION, NOT A MEASUREMENT. The ledger could not measure the
+# right bound when this task was filed: `fix.dispatch` is logged AFTER the spawn returns
+# (W1-T127), so every completed pair lands in the same second and encodes no duration at
+# all (127 of 137 post-2026-07-28 pairs measured under one second). This task's own fix
+# makes a completed spawn record its own elapsed milliseconds (the `fix.dispatch` row's
+# `elapsed_ms` field — the SAME field `fix.spawn_abandoned` already carried on the failure
+# path), so the population this bound should be derived from only starts accumulating once
+# this row ships. RE-DERIVE FROM THAT INSTRUMENT once it holds a meaningful sample of
+# completed spawns — no earlier than 2026-10-01, and never from `sweepWallClockBoundMs`'s
+# own sweep-tick population above.
+#
+# UNTIL THEN, THIS VALUE MUST STILL BOUND SOMETHING, NOT BE UNBOUNDED (W1-T1044's whole
+# point stands: a spawn with no ceiling is the hang it was built to stop). value: 3600000
+# (1 hour) is checked against the ONE real fix-worker population that exists — the
+# pre-W1-T127 historical `fix.dispatch`→spawn-span pairs this task's rationale measured
+# (n=186, median 404.4s, p90 1346.2s/22.4min, max 5914.7s/98.6min) — comfortably above that
+# population's own p90 (2.67x), so it is not ROUTINELY exceeded, while still comfortably
+# above the general implement-class dispatch population's own mean/median (27.6min/25.0min,
+# n=63) a fix worker is narrower than. OFFERED AS MAGNITUDE, NOT DERIVED PRECISELY FROM IT —
+# see this task's own rationale (6) for why that population is historical evidence only.
+#
+# min: 1200000 (20 minutes) mirrors `workerStall`/`workerAbandon`'s own min above — the SAME
+# generous reclaim/observe window reasoning, and comfortably above `sweepWallClockBoundMs`'s
+# own max (900000) so an operator retuning either bound cannot collapse the two ranges into
+# one another. max: 7200000 (2 hours) mirrors `workerAbandon`'s own max above — the SAME
+# already-reviewed outer ceiling for a spawned worker's SDK stream, so this interim cannot be
+# widened past what is already accepted safe for a full worker run.
+fixSpawnWallClockBoundMs:
+  value: 3600000
+  origin: "net-new"
+  min: 1200000
+  max: 7200000
 
 sweep:
   staleDays:

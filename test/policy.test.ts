@@ -231,6 +231,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "proofTimeoutMs", "pruneGraceMs", "worktreeReapGraceMs", "pollIntervalMs", "fixStrikeCap", "workerStall",
     "workerAbandon",
     "sweepWallClockBoundMs",
+    "fixSpawnWallClockBoundMs",
     "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
@@ -528,6 +529,11 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // tick's wall-clock duration; this task's own rationale measured the healthy-vs-hung split
     // from scratch (see plan/policy.yaml's row for the derivation).
     "sweepWallClockBoundMs",
+    // W1-T1219: `fixSpawnWallClockBoundMs` joins them too — split OFF `sweepWallClockBoundMs`
+    // (a sweep tick and a fix-rung worker spawn are different populations), so no prior source
+    // literal ever bounded this one on its own; see plan/policy.yaml's row for why its value is
+    // interim.
+    "fixSpawnWallClockBoundMs",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

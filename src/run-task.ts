@@ -126,7 +126,6 @@ import {
   daemonBoot,
   daemonExitCode,
   runDaemon,
-  DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS,
   type CrashLoopVerdict,
   type DaemonOpts,
   type DaemonSummary,
@@ -432,6 +431,7 @@ import {
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import {
+  DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS,
   loadDefaultPolicy,
   loadPolicy,
   policyPath,
@@ -5170,6 +5170,14 @@ export function reclaimAbandonedWorker(
  * `deps.reclaimWorker` (best-effort) is what actually stops the process. Whatever the real
  * promise eventually does — resolve or reject — is logged separately so it is never silently
  * dropped, mirroring the SAME discipline daemon.ts's own `await deps.sweep()` bound uses.
+ *
+ * W1-T1219: the SUCCESS path now reports its own elapsed milliseconds too (`kind: "spawned"`
+ * carries `elapsedMs` alongside `result`) — the same field the `"abandoned"` branch already
+ * carried. Before this, the ONE elapsed figure this rung ever emitted existed only for spawns
+ * that hit the bound (right-censored at exactly the quantity a real derivation needs); the
+ * completed population was unmeasurable at any n. The caller (`runFixRung`) folds this into
+ * its `fix.dispatch` ledger row as `elapsed_ms`, so a future re-derivation of
+ * `fixSpawnWallClockBoundMs` has a real, uncensored sample to read.
  */
 async function spawnFixWorkerBounded(
   deps: {
@@ -5180,8 +5188,14 @@ async function spawnFixWorkerBounded(
   },
   args: SpawnWorkerArgs,
   ctx: { runId: string; taskId: string },
-): Promise<{ kind: "spawned"; result: WorkerResult } | { kind: "abandoned"; elapsedMs: number }> {
-  const boundMs = deps.spawnWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
+): Promise<
+  { kind: "spawned"; result: WorkerResult; elapsedMs: number } | { kind: "abandoned"; elapsedMs: number }
+> {
+  // W1-T1219: this bound is the FIX-RUNG SPAWN's own — see `fixSpawnWallClockBoundMs`'s own
+  // plan/policy.yaml row for why it is no longer `sweepWallClockBoundMs` (the sweep-tick bound,
+  // a different population). Every real call site now threads that row explicitly; this default
+  // fires only for a caller (test or otherwise) that supplies no `deps.spawnWallClockBoundMs`.
+  const boundMs = deps.spawnWallClockBoundMs ?? DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS;
   const startedAt = Date.now();
   const spawnPromise = deps.spawn(args);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -5222,7 +5236,7 @@ async function spawnFixWorkerBounded(
       );
       return { kind: "abandoned", elapsedMs };
     }
-    return { kind: "spawned", result: winner };
+    return { kind: "spawned", result: winner, elapsedMs: Date.now() - startedAt };
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -5395,9 +5409,11 @@ export async function runFixRung(opts: {
      * `deps.spawn` call below — see this task's own rationale for the measured incident (a
      * fix-rung worker's `until` shell loop with no exit condition ran 8,970s as a direct
      * daemon child; neither `--max-turns` nor `--max-budget-usd` can fire on a shell command
-     * that never returns). Optional: omitted defaults to {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}
-     * (daemon.ts) — POLICY DATA (see that constant's own doc), never a literal at this call
-     * site; the real call sites here thread `plan/policy.yaml`'s `sweepWallClockBoundMs` row.
+     * that never returns). Optional: omitted defaults to {@link DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS}
+     * (policy.ts) — POLICY DATA (see that constant's own doc), never a literal at this call
+     * site; the real call sites here thread `plan/policy.yaml`'s `fixSpawnWallClockBoundMs` row
+     * (W1-T1219 split this OFF `sweepWallClockBoundMs` — a sweep tick and this spawn are
+     * different populations, so one row could no longer bound both).
      */
     spawnWallClockBoundMs?: number;
     /**
@@ -5799,6 +5815,11 @@ export async function runFixRung(opts: {
     };
 
     let fixResult: WorkerResult;
+    // W1-T1219: the spawn's own elapsed milliseconds on the SUCCESS path — the same field
+    // `fix.spawn_abandoned` already carries on the failure path (below), folded into
+    // `fix.dispatch` so a completed spawn's duration is measurable at all (see design note
+    // (iii) of this task's own rationale for why the ledger could not measure it before).
+    let spawnElapsedMs: number | undefined;
     try {
       // W1-T1044: bounds this ONE spawn by wall-clock elapsed time — see
       // spawnFixWorkerBounded's own doc for the measured incident this closes.
@@ -5813,6 +5834,7 @@ export async function runFixRung(opts: {
         // "a strike is only spent once a worker demonstrably ran" invariant).
         return { outcome: "spawn_abandoned", review, strikes, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
       }
+      spawnElapsedMs = spawnOutcome.elapsedMs;
       fixResult = deps.account(spawnOutcome.result);
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
@@ -5841,7 +5863,16 @@ export async function runFixRung(opts: {
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now
     // is this round committed as a real strike.
     strikes = attempt;
-    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode, verdict_regime: verdictRegime });
+    deps.log("fix.dispatch", {
+      strike: strikes,
+      strike_cap: opts.strikeCap,
+      unmet_count: unmet.length,
+      round,
+      mode: fixMode,
+      verdict_regime: verdictRegime,
+      // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
+      elapsed_ms: spawnElapsedMs,
+    });
     deps.say(
       currentMergeConflict !== undefined
         ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE merge-conflict fix worker for ` +
@@ -7211,10 +7242,11 @@ async function runTask(
     /**
      * W1-T1044: override for the fix rung's worker-spawn wall-clock bound (see
      * `runFixRung`'s own `deps.spawnWallClockBoundMs` doc). Optional — omitted reads
-     * `plan/policy.yaml`'s `sweepWallClockBoundMs` row (`loadDefaultPolicy`), the SAME `??
-     * loadDefaultPolicy()` injection seam `test/config-reader-seams.test.ts` requires every
-     * unredirectable policy read to carry; a test overrides this directly to drive the bound
-     * without writing a fixture policy file.
+     * `plan/policy.yaml`'s `fixSpawnWallClockBoundMs` row (`loadDefaultPolicy`) — W1-T1219 split
+     * this OFF `sweepWallClockBoundMs`, so retuning the sweep tick's bound no longer moves this
+     * one — the SAME `?? loadDefaultPolicy()` injection seam `test/config-reader-seams.test.ts`
+     * requires every unredirectable policy read to carry; a test overrides this directly to
+     * drive the bound without writing a fixture policy file.
      */
     spawnWallClockBoundMs?: number;
     /**
@@ -8545,8 +8577,9 @@ async function runTask(
           readMergeFacts: (n) => fixRebaseMergeFactsFromRest(owner, task.repo, n),
           updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
-          // reclaim of whatever it abandoned — see runFixRung's own deps doc.
-          spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.sweepWallClockBoundMs,
+          // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
+          // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
+          spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs,
           reclaimWorker: reclaimAbandonedWorker,
         },
       });
@@ -16029,10 +16062,10 @@ export async function daemonCommand(
     // `DaemonOpts.laneCount`'s own doc for the proof.
     laneCount: DEFAULT_SWEEP_POLICY.dispatchLanes,
     wipLimit: DEFAULT_SWEEP_POLICY.wipLimit,
-    // W1-T1044: the wall-clock bound on `await deps.sweep()` — the SAME `plan/policy.yaml` row
-    // `buildSweepEffects`'s own `spawnWallClockBoundMsOverride` fallback reads for the fix-rung
-    // worker-spawn bound (b), so the daemon-side bound (a) and (b) never drift onto two
-    // independently-tuned numbers.
+    // W1-T1044: the wall-clock bound on `await deps.sweep()`. W1-T1219: this row no longer also
+    // feeds `buildSweepEffects`'s fix-rung worker-spawn bound — a sweep tick and that spawn are
+    // different populations, so each now reads its OWN `plan/policy.yaml` row (see
+    // `fixSpawnWallClockBoundMs`'s own doc for why one row could no longer bound both).
     sweepWallClockBoundMs: policy.values.sweepWallClockBoundMs,
   };
   const config = loadConfig();
@@ -19527,9 +19560,10 @@ export function buildSweepEffects(
   },
   // W1-T1044 — appended LAST, the same convention every dep above follows. OPTIONAL with no
   // default expression (mirrors `armSessionPrsOverride`'s own shape immediately above): the
-  // `??` fallback below reads `plan/policy.yaml`'s `sweepWallClockBoundMs` row so production
-  // wiring picks up an operator's edit with no code change, while a test overrides this
-  // directly to drive the bound without writing a fixture policy file.
+  // `??` fallback below reads `plan/policy.yaml`'s `fixSpawnWallClockBoundMs` row (W1-T1219 —
+  // split off `sweepWallClockBoundMs`, the sweep tick's own row) so production wiring picks up
+  // an operator's edit with no code change, while a test overrides this directly to drive the
+  // bound without writing a fixture policy file.
   spawnWallClockBoundMsOverride?: number,
   // W1-T1044 — appended LAST, same convention. Defaults to {@link reclaimAbandonedWorker}
   // (the real process-group kill, scoped by this run's own `REMUDERO_RUN_ID` marker); a test
@@ -19565,9 +19599,12 @@ export function buildSweepEffects(
   // operator's edit with no code change; a test overrides `armSessionPrsOverride` directly to
   // drive both sides of the gate without writing a fixture policy file.
   const armSessionPrs = armSessionPrsOverride ?? loadDefaultPolicy().values.sweep.armSessionPrs;
-  // W1-T1044: the SAME `plan/policy.yaml` row `daemonCommand`'s own `DaemonOpts.sweepWallClockBoundMs`
-  // reads for the daemon-side bound (a) — see this field's own doc for why one field feeds both.
-  const spawnWallClockBoundMs = spawnWallClockBoundMsOverride ?? loadDefaultPolicy().values.sweepWallClockBoundMs;
+  // W1-T1219: this fix-rung worker-spawn bound reads its OWN `plan/policy.yaml` row,
+  // `fixSpawnWallClockBoundMs` — split off `sweepWallClockBoundMs` (which `daemonCommand`'s
+  // `DaemonOpts.sweepWallClockBoundMs` still reads for the daemon-side sweep-tick bound) because
+  // a sweep tick and this implement-class worker spawn are different populations; see that
+  // field's own plan/policy.yaml row for the full derivation.
+  const spawnWallClockBoundMs = spawnWallClockBoundMsOverride ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs;
   // W1-T516 — an `armImpl` WRAPPER, not a change to the `arm` dep's own `pr.taskId` argument
   // below: test/arm-outcome-five-sites.test.ts source-locks that dep as an EXPRESSION body
   // passing `pr.taskId` straight through (the impl-BI fix, proving the outcome is RETURNED,

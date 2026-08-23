@@ -64,12 +64,25 @@ export interface PolicyValues {
    *  literal ever measured this. See plan/policy.yaml's own row for why the default equals
    *  #2251's recycle kill predicate over the same measured population. */
   workerAbandon: number;
-  /** W1-T1044: the WALL-CLOCK BOUND (ms) shared by (a) `await deps.sweep()` (daemon.ts's poll
-   *  loop) and (b) ONE fix-rung worker spawn inside `runFixRung` (run-task.ts) — see this
-   *  field's plan/policy.yaml row for the measured healthy-vs-hung derivation. OPTIONAL in
-   *  the committed row (same absent-means-default shape as {@link PolicyValues.autoTriage}):
-   *  an existing policy.yaml missing this row resolves to {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}. */
+  /** W1-T1044: the WALL-CLOCK BOUND (ms) on `await deps.sweep()` (daemon.ts's poll loop) — see
+   *  this field's plan/policy.yaml row for the measured healthy-vs-hung derivation. W1-T1219
+   *  split ONE fix-rung worker spawn inside `runFixRung` (run-task.ts) OFF this field onto its
+   *  own {@link PolicyValues.fixSpawnWallClockBoundMs} row — a sweep tick and an implement-class
+   *  worker spawn are different populations (see that field's own doc), so retuning one must
+   *  never move the other. OPTIONAL in the committed row (same absent-means-default shape as
+   *  {@link PolicyValues.autoTriage}): an existing policy.yaml missing this row resolves to
+   *  {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}. */
   sweepWallClockBoundMs: number;
+  /** W1-T1219: the WALL-CLOCK BOUND (ms) on ONE fix-rung worker spawn inside `runFixRung`
+   *  (run-task.ts) — split OFF {@link PolicyValues.sweepWallClockBoundMs}: a sweep tick (a
+   *  poll-loop classification pass over an already-fetched rollup) and a fix-rung spawn (an
+   *  implement-class Claude worker that reads a diff, edits source and commits) are different
+   *  populations, so one policy row can no longer bound both. See this field's plan/policy.yaml
+   *  row for why the committed value is INTERIM — the population needed to derive the real one
+   *  could not be measured until this same task started recording it. OPTIONAL in the committed
+   *  row (same absent-means-default shape as {@link PolicyValues.autoTriage}): an existing
+   *  policy.yaml missing this row resolves to {@link DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS}. */
+  fixSpawnWallClockBoundMs: number;
   sweep: {
     staleDays: number;
     strikeCap: number;
@@ -214,6 +227,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   workerStall: "net-new",
   workerAbandon: "net-new",
   sweepWallClockBoundMs: "net-new",
+  fixSpawnWallClockBoundMs: "net-new",
   "sweep.staleDays": "lifted",
   "sweep.strikeCap": "lifted",
   "sweep.wipLimit": "lifted",
@@ -391,6 +405,18 @@ function validateHeadroomCurve(
 const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
 
 /**
+ * W1-T1219: DEFAULT `fixSpawnWallClockBoundMs` — mirrors plan/policy.yaml's own row (net-new;
+ * derivation, and why it is INTERIM, in that file's comment). Used ONLY when the row is ABSENT
+ * from the loaded YAML — the SAME absent-means-default shape {@link DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS}
+ * above already uses, so an existing `policy.yaml` fixture that predates this task keeps loading
+ * clean rather than failing on a missing mapping. EXPORTED (unlike the sibling constant above)
+ * because `src/run-task.ts`'s `spawnFixWorkerBounded` — the ONE consumer of this bound — needs
+ * it as its own fallback when a caller supplies no `deps.spawnWallClockBoundMs` at all, the same
+ * role `daemon.ts`'s OWN `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS` plays for the sweep-tick bound.
+ */
+export const DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS = 3_600_000;
+
+/**
  * Validate a raw (parsed-YAML) value into a {@link Policy}. Throws {@link PolicyError} on any
  * structural violation, out-of-bound value, or origin-kind mismatch — mirrors
  * `src/lib/mounts.ts`'s `validateMounts`/`src/lib/alert-lane.ts`'s `validateAlertPolicy`
@@ -419,6 +445,12 @@ export function validatePolicy(raw: unknown): Policy {
   const sweepWallClockBoundMs = sweepWallClockBoundMsRaw
     ? numberField("sweepWallClockBoundMs", sweepWallClockBoundMsRaw, origin)
     : DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
+  // W1-T1219: OPTIONAL, same absent-means-default shape as `sweepWallClockBoundMs` immediately
+  // above (and `autoTriage` below) — a fixture that predates this task's split still loads clean.
+  const fixSpawnWallClockBoundMsRaw = raw.fixSpawnWallClockBoundMs as Record<string, unknown> | undefined;
+  const fixSpawnWallClockBoundMs = fixSpawnWallClockBoundMsRaw
+    ? numberField("fixSpawnWallClockBoundMs", fixSpawnWallClockBoundMsRaw, origin)
+    : DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS;
 
   const sweepRaw = raw.sweep;
   if (!isPlainObject(sweepRaw)) throw new PolicyError("policy.yaml: 'sweep' must be a mapping.");
@@ -486,6 +518,7 @@ export function validatePolicy(raw: unknown): Policy {
       workerStall,
       workerAbandon,
       sweepWallClockBoundMs,
+      fixSpawnWallClockBoundMs,
       sweep: {
         staleDays,
         strikeCap: sweepStrikeCap,
