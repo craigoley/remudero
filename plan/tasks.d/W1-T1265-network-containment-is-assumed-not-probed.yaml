@@ -1,0 +1,176 @@
+- id: W1-T1265
+  title: "NETWORK CONTAINMENT IS ASSUMED FROM CONFIGURATION — the one thing Standing rule 11 forbids, and the rule names a sandbox block as its own example: the filesystem arm probes an outside-cwd write and can return PROVEN-BROKEN, while the egress allowlist is declared, validated and passed but never attempted, so the network arm cannot return anything at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 70.00
+  files: [src/lib/containment.ts, test/containment.test.ts]
+  origin: oper#network-containment-assumed-2026-08-23
+  plan_refs: ["W1-T2", "W1-T237", "W1-T268"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED AT origin/main 8f2a9112, NOT CARRIED — AND ONE FIGURE IN THE BRIEFING IS CORRECTED
+    BELOW RATHER THAN REPEATED.
+
+    STANDING RULE 11 NAMES THIS EXACT SHAPE AS ITS OWN EXAMPLE. `MASTER-PLAN.md:4051` and
+    `docs/ORIENTATION.md:61`: "Isolation and containment are PROVEN PER RUN by probe, never assumed
+    from configuration. A setting that 'should' isolate (ZDOTDIR, A SANDBOX BLOCK, a stripped env)
+    is a hypothesis until a preflight probe confirms it on THIS machine, THIS run." The egress
+    allowlist IS a sandbox block. It is the rule's own worked example, and it is the one part of
+    containment the preflight never attempts.
+
+    THE ALLOWLIST IS REAL, WIRED AND WELL-GUARDED — THIS TASK DOES NOT RE-FILE IT AND MUST NOT
+    WEAKEN IT. `settings/worker.json` declares `sandbox.enabled: true`, `failIfUnavailable: true`
+    and four `network.allowedDomains` (github.com, api.github.com, codeload.github.com,
+    registry.npmjs.org). It reaches the spawn through `renderWorkerSettings` (`src/run-task.ts`) ->
+    `settingsFile` -> the SDK's `Options.settings` (`src/lib/worker.ts`) with `settingSources: []`,
+    so nothing from `~/.claude` merges in. And `validateWorkerSettingsFile`
+    (`src/lib/settings.ts:139`) refuses a misplaced key before spawn, because the SDK's
+    `SandboxSettingsSchema` is `$loose` and would SILENTLY STRIP one — the WS-0 hazard, where
+    `allowedDomains` at the sandbox root instead of under `network` leaves the worker with no
+    allowlist at all and no error.
+
+    SO THE DEFECT IS NOT ABSENCE. IT IS ASYMMETRY OF PROOF. `probeContainment`
+    (`src/lib/containment.ts`) spawns a real worker under the sandbox and observes an actual
+    attempted write; its verdict ladder returns PROVEN-BROKEN when the outside write LANDED
+    ("outside-cwd write SUCCEEDED — the sandbox did not engage (silently dropped)") and UNPROVEN
+    when no OS-denial was seen ("the write may never have been attempted"). Nothing equivalent
+    exists for egress: `grep -cE 'curl|fetch|http'` over `src/lib/containment.ts` reads ZERO,
+    against a control of EIGHT `outsideWrite` occurrences in the same file proving the grep reads
+    it. The filesystem arm can fail loudly; the network arm cannot fail at all.
+
+    CORRECTION TO THE BRIEFING, MADE RATHER THAN REPEATED. `ContainmentEvidence`
+    (`src/lib/containment.ts:67`) does NOT carry exactly two facts. It carries FOUR:
+    `outsideWriteCreated`, `osDenialSeen`, `insideWriteCreated`, and W1-T237's optional
+    `credentialFailure`. The distinction matters to this task rather than being pedantry:
+    `osDenialSeen` is the field that separates PROVEN-BROKEN from UNPROVEN, and `insideWriteCreated`
+    is the sanity signal that the probe mechanism was live at all. An egress arm that copies only
+    "did the attempt land" would reproduce the two-field shape the briefing describes and would
+    inherit neither of those two properties.
+  design: |
+    (i) Q1 — WHAT AN EGRESS PROBE MUST DO. The filesystem analogue is exact: attempt something the
+    policy should refuse, and observe the REFUSAL rather than the absence of success. So the egress
+    probe attempts a request to a domain that is NOT on the allowlist, from inside the sandboxed
+    worker, during the SAME once-per-run preflight `probeContainment` already owns.
+    (ii) AND WHAT IT MUST NOT DO — WITH THE CONSTRAINT STATED HONESTLY RATHER THAN PROMISED AWAY.
+    The requirement "must not reach a third party" is satisfiable in the CONTAINED case and NOT in
+    the broken one, and THE FILESYSTEM ARM HAS EXACTLY THE SAME PROPERTY: its probe really does
+    write outside cwd when containment is broken — that landed file IS the proven-broken evidence.
+    The egress probe therefore really does reach its target when containment is broken, and the
+    mitigation is to choose a target where that contact is inert. `example.com` (RFC 2606, reserved
+    by IANA precisely so documentation and tests may name it) is the safe shape: it resolves, it is
+    not on the allowlist, and a GET to it carries no payload and reaches no operator asset. DO NOT
+    use a live third-party service, and do not use the fleet's own hosts.
+    (iii) DNS FAILURE AND CONNECT REFUSAL ARE NOT EQUALLY GOOD EVIDENCE, AND THE DIFFERENCE IS THE
+    WHOLE DESIGN. A DNS failure is WEAK: NXDOMAIN, EAI_AGAIN and "no resolver configured" are
+    indistinguishable from a host with no network at all, so a probe that targets a guaranteed
+    non-resolving name (an RFC 6761 `.invalid` domain, say) would report the same failure whether
+    the sandbox engaged or the machine was simply offline — it would be structurally incapable of
+    discriminating, which is the `executed_stale` defect in another costume. A CONNECT-layer refusal
+    against a name that DOES resolve is stronger, because reaching the connect stage proves
+    resolution worked. STRONGEST is the sandbox's own refusal signature, which is what
+    `osDenialSeen` is to the filesystem arm: a named denial, not an inference from failure.
+    (iv) AND THE POSITIVE CONTROL IS NOT OPTIONAL — IT IS WHAT MAKES A ZERO MEAN ANYTHING. The
+    filesystem arm carries `insideWriteCreated` so that "the outside write did not land" cannot be
+    confused with "the probe never ran". The egress arm needs the same: an attempt to an ALLOWLISTED
+    domain that SUCCEEDS. Without it, "the blocked request failed" is indistinguishable from "this
+    host has no network", and the probe would report containment on a machine that simply could not
+    reach anything. THE ALLOWED-ATTEMPT SUCCEEDING IS THE EGRESS EQUIVALENT OF THE INSIDE WRITE
+    LANDING, and the verdict must consult it.
+    (v) Q2 — THE THREE-VALUED VERDICT, REUSING THE EXISTING VOCABULARY RATHER THAN INVENTING A
+    FOURTH STATE. `ContainmentError`'s doc already names the epistemology: "proven-holding |
+    proven-broken | unproven", with the `observed` field carrying the proven-broken string. The
+    egress arm maps onto it one-for-one:
+      - PROVEN-BROKEN: the non-allowlisted attempt CONNECTED or returned a response. The sandbox did
+        not engage. Mirrors `outsideWriteCreated`.
+      - PROVEN-HOLDING: the non-allowlisted attempt was refused with an observed denial, AND the
+        allowlisted control attempt succeeded. Mirrors `osDenialSeen` plus `insideWriteCreated`.
+      - UNPROVEN: anything else — no denial signature observed, the control attempt also failed, or
+        the probe never attempted. Mirrors the `!osDenialSeen` branch, and FAILS CLOSED exactly as
+        that branch already does.
+    Do NOT add a fourth state, and do NOT collapse UNPROVEN into broken: W1-T237's
+    `credentialFailure` arm is the precedent for a non-finding that must not be reported as a
+    containment result.
+    (vi) Q3 — WHAT MUST NOT CHANGE. THE PROBE OBSERVES; IT DOES NOT ENFORCE. The allowlist's
+    CONTENTS stay exactly as they are — this task adds no domain and removes none. `failIfUnavailable`
+    stays true. `settingSources: []` stays, so no settings file merges in behind the guard. And the
+    PINNED KEY-SET GUARD in `src/lib/settings.ts` stays strict: it is the only thing standing between
+    a misplaced key and a silently stripped allowlist, and a probe that made it feel redundant would
+    be a net loss. Nothing here moves enforcement, adds a network layer, or changes where policy is
+    applied.
+    (vii) DECISIONS SPLIT FROM I/O, MATCHING THE MODULE AS BUILT. The verdict is a PURE function over
+    evidence — the same shape the filesystem verdict already has — so the three-valued mapping is a
+    unit fixture with no network. The attempt itself rides the existing once-per-run
+    `probeContainment` spawn rather than adding a second spawn, because per-run granularity is
+    already argued in that function's own header and re-arguing it per-spawn would cost a probe
+    before recon AND implement AND resume.
+    (viii) THE FALSIFIER RUNS IN BOTH DIRECTIONS AND THE SECOND IS THE ONE THAT MATTERS. Direction
+    one: evidence showing a refused non-allowlisted attempt alongside a successful allowlisted one
+    verdicts PROVEN-HOLDING. Direction two, the control: evidence showing the non-allowlisted attempt
+    CONNECTING verdicts PROVEN-BROKEN, and evidence where the control attempt also failed verdicts
+    UNPROVEN rather than holding. Direction one alone is vacuous — a verdict that cannot say broken
+    proves nothing by saying held.
+  acceptance:
+    - claim: "an attempt to a domain outside the allowlist that connects is reported as proven-broken"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "a refused outside attempt alongside a successful allowlisted attempt is reported as holding"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "a refused outside attempt whose allowlisted control also failed is reported as unproven"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the egress verdict reuses the existing three-state vocabulary rather than adding a fourth"
+      proof: "unit test: test/containment.test.ts"
+  note: |
+    risk: high IS SET UP FRONT, AND BOTH READINGS ARE RECORDED. RULE 19's SPAN is the band's cause:
+    `files:` spans the containment module and its own suite, and `subsystemsOf` also derives
+    subsystems from the acceptance text, which here names an egress attempt, a control attempt and a
+    three-state verdict. AND THE REPO'S OWN SCORER AGREES INDEPENDENTLY, WHICH IS WORTH STATING
+    BECAUSE IT WILL LOOK LIKE A SURPRISE OTHERWISE: `src/lib/risk-score.ts:154` and
+    `src/lib/specialist-panel.ts:98` both match `/egress|allowedDomains|network[-_]polic/i` as HIGH
+    BLAST RADIUS, so any diff in this area scores high by construction. THAT IS CORRECT AND SHOULD
+    NOT BE ARGUED DOWN — a change near the egress boundary deserves the specialist panel.
+    BLAST RADIUS ARGUES LOWER AND IS RECORDED SO THE BAND IS NOT MISREAD: the probe OBSERVES and
+    never enforces, the allowlist's contents do not move, and a wrong verdict fails CLOSED into the
+    existing `unproven` branch, which already halts the run.
+
+    `src/run-task.ts` IS DELIBERATELY NOT DECLARED. `probeContainment` and the verdict both live in
+    `src/lib/containment.ts` (which imports `spawnWorker` itself); `run-task.ts` only CALLS the
+    preflight and handles its verdict, and nothing about adding an egress arm changes that call.
+    Declaring it would pay W1-T471's serialisation cost — it is declared by most of the pool — for a
+    file this task does not need to touch. `settings/worker.json` is NOT declared either: the
+    allowlist is correct and this task must not edit it (design vii).
+
+    THE SECOND FINDING, CARRIED AS CONTEXT AND NOT AS SCOPE. `api.anthropic.com` reads ZERO across
+    `settings/`, `deploy/` and `src/`, against a control of SEVEN files containing `anthropic`. The
+    inference that the model call travels ORCHESTRATOR-SIDE — outside the worker sandbox, which is
+    why the endpoint need not be allowlisted — is consistent with a working fleet and WAS NOT
+    CONFIRMED FROM SOURCE. It is recorded here because AN EGRESS PROBE WOULD SETTLE IT AS A SIDE
+    EFFECT: if the sandboxed worker's allowlisted control attempt succeeds while the endpoint is
+    absent from the list, the split is demonstrated rather than assumed. That is a side effect, not
+    a deliverable, and no criterion above depends on it.
+
+    SCOPE IS THE PROBE, NOT THE PLATFORM. No Kubernetes, no default-deny network layer, and no move
+    of enforcement below the SDK — the fleet is one container on one VM and that is deliberate. The
+    transferable idea from the runtime that prompted this is that a policy enforced BELOW the thing
+    it constrains can be tested from outside it; Remudero's is enforced inside the SDK, so the only
+    available proof is an attempt. This task adds the attempt and nothing else.
+
+    ID PROVENANCE — EIGHT SURFACES, EVERY CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, NONE
+    DISQUALIFIED. Swept at 8f2a9112 on an UNSHALLOWED clone (2018 commits). (1) `refs/rmd-id/*`:
+    target 1 — SEE BELOW — control W1-T1263 = 1, negative W1-T444444 = 0. (2) shard FILENAMES on
+    origin/main: target 0, control W1-T1260 = 1. (3) `- id:` declarations under plan/ on origin/main:
+    target 0, control W1-T1260 = 1. (4) open-PR TITLES: target 0, control `chore(plan)` = 3. (5)
+    open-PR HEAD refs: target 0, control `run-W1-T1249` = 1. (6) open-PR FILE LISTS: target 0,
+    control `plan/tasks.d/` = 3. (7) merged-PR `Remudero-Task:` trailers over the newest closed page
+    (97 merged): target 0, control 42 matched by the same anchored regex. (8) remote branches
+    `run-W1-T1265-*`: target 0, control `run-W1-T1249-*` = 1. COUNT-PER-HEAD SUBJECT SWEEP over 7
+    open PRs: ONE hit total, `run-W1-T1253` (the wipe-test SANDBOX subject generator — a different
+    sandbox), against a regex control scoring 6 on a known-subject string. EVERY CONTROL READ
+    NON-ZERO, SO NO SURFACE WAS DISQUALIFIED.
+
+    THE RESERVATION PREDATES THIS FILING AND WAS NOT MINTED HERE. `refs/rmd-id/W1-T1265` already
+    resolves on origin — a reserved-but-unfiled id, present on the refs surface and absent from all
+    seven content surfaces. This session pushed NO ref and minted nothing.
