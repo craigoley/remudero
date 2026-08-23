@@ -1,0 +1,162 @@
+- id: W1-T1259
+  title: "the three verbs that would answer 'is this system getting better' have never run on a cadence — `rule-efficacy`, `verdict-calibration` and `autonomy-rate` are all merged, all host-side, and reachable only by an operator typing them on the right machine"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    (1) THE THREE VERBS ARE ON MAIN AND NOTHING CALLS THEM BUT CLI DISPATCH. `rule-efficacy`
+    (#1605), `verdict-calibration` (#1614) and `autonomy-rate` (#1658) all registered and
+    dispatched from `src/run-task.ts`. Re-derived here rather than carried: the importer sweep
+    returns `src/run-task.ts` alone for `rule-efficacy.js` and `autonomy.js`, and
+    `src/lib/autonomy.ts` plus `src/run-task.ts` for `verdict-calibration.js` — and `autonomy.ts`
+    is itself imported only by `run-task.ts`, so that second importer is inside the same CLI-only
+    island rather than a second entry point.
+
+    (2) THE ORCHESTRATORS REFERENCE NONE OF THEM, WITH AN ORDERING CONTROL SO THE ZERO MEANS
+    ABSENCE. `src/lib/retro.ts`, `src/lib/daemon.ts` and `src/lib/sweep.ts` carry zero matches for
+    any of the three module names. The reader is not blind to those files: they hold 11, 17 and 8
+    sibling `./` imports respectively. And the importer query itself is not blind: run against
+    `./ledger.js` it returns a dozen `src/lib/` importers.
+
+    (3) HOST-SIDE ONLY, WHICH IS WHAT MAKES THE GAP STRUCTURAL RATHER THAN AN OVERSIGHT.
+    `rule-efficacy`'s own header says it: "HOST-SIDE, NOT A CI GATE: the ledger lives on the daemon
+    host; nothing in CI can read it." So the cheapest-looking cadence — a scheduled GitHub
+    Actions workflow — cannot run these AT ALL. The cadence has to live where the ledger is.
+
+    (4) THE MARGINAL COST IS NOT DOLLARS, AND THE CONTROL FOR THAT CLAIM HAD TO BE RE-QUALIFIED.
+    None of the three modules references `budgetUsd`, `spawnWorker` or `costUsd` — they read the
+    ledger union and compute. The first control chosen for that query, `src/lib/auto-triage.ts`,
+    reads 0 for the same symbols despite being the spending rung, so it was DISQUALIFIED rather
+    than used to license a zero; re-qualified on `src/lib/containment.ts` and
+    `src/lib/isolation.ts`, which do carry `budgetUsd`. Against that control the three modules
+    read 0. This puts them in a different class from the auto-triage rung, whose median run spends
+    $0.98 unsupervised and needs `maxPerDay`/`minIntervalMinutes` to bound spend rather than load.
+
+    (5) TWO OF THE THREE ARE PURE READERS AND THE THIRD HAS A BUILT-IN ZERO-WRITE MODE.
+    `verdict-calibration` and `autonomy` carry no write symbols at all (control: `src/lib/inbox.ts`
+    reads 6 for the same query). `rule-efficacy` is the only writer, and its single write is the
+    escalation described below.
+
+    (6) THE ESCALATION WAS DESIGNED FOR A POLL CADENCE THAT WAS THEN NEVER BUILT.
+    `escalateRepeatingRules`'s own doc says it is "IDEMPOTENT by rule id: a rule that already
+    carries an open `rule-efficacy:<ruleId>` proposal is never re-drafted, so the daemon's own
+    poll cadence (or a second manual `rmd rule-efficacy`) never duplicates it." The design named
+    the daemon poll as the expected caller. No such caller exists.
+
+  design: |
+    ONE CONCERN: give the three measurement verbs a cadence on the host where their corpus lives.
+
+    (i) THE SITE — THE DAEMON POLL WITH ITS OWN PACING BOUND, NOT THE RETRO TRIGGER AND NOT A
+    SEPARATE UNIT. Three candidates were weighed and this task picks one rather than leaving it
+    open:
+      - THE RETRO TRIGGER (`evaluateRetroTrigger`, `retro.mergesThreshold: 25` OR
+        `retro.daysThreshold: 7`, whichever crosses first) is the wrong grain. It can leave the
+        instruments blind for a full week, and it couples a cheap ledger read to this repo's most
+        expensive rung — so a retro that is skipped, deferred or fails takes the measurement with
+        it. Its thresholds are also tuned for retro's cost, and re-tuning them to suit a free read
+        would move a bound that means something else.
+      - A SEPARATE UNIT (a launchd/systemd timer, a scheduled workflow) is what the CI-shaped
+        instinct reaches for, and rationale (3) rules the CI half out entirely: nothing in CI can
+        read the ledger. A host timer would work but adds a second scheduler to operate, one that
+        can silently stop without the daemon noticing — the failure mode this task exists to end.
+      - THE DAEMON POLL (`pollIntervalMs: 60000`) is where the design already pointed
+        (rationale (6)), on the host that already holds the ledger, inside a process that is
+        already supervised. 60s is far too frequent for a metric, so this adds its OWN pacing
+        bound in `plan/policy.yaml` mirroring the shape `autoTriage` already uses
+        (`minIntervalMinutes` plus `maxPerDay`) — policy data, not a source constant, so the
+        cadence is retunable by a reviewed policy edit rather than a deploy.
+
+    (ii) THE SAFE MODE IS THE DEFAULT, AND IT ALREADY EXISTS. The cadence runs
+    `verdict-calibration` and `autonomy-rate` — both pure readers — and `rule-efficacy` with
+    `--no-escalate`, which the verb's own doc describes as running "the report only, with zero
+    writes." A cadence that writes nothing cannot launder anything, and it can be turned on
+    without an operator decision about proposals. Whether the escalating form is ever enabled is a
+    SEPARATE, opted-in policy flag, shipped OFF, exactly as the auto-triage rung was.
+
+    (iii) IF THE ESCALATING FORM IS EVER ENABLED, ITS EXISTING BOUNDS ARE THE CONTRACT.
+    `escalateRepeatingRules` drafts at most ONE proposal per REPEATING rule at
+    `>= RULE_EFFICACY_ESCALATION_THRESHOLD` (2) post-rule recurrences, through
+    `updateProposalRegistry` — the W1-T240 single-writer, never a hand-rolled JSON write —
+    idempotent by rule id, returning null and touching no disk when nothing needs drafting. The
+    cadence must not add a second write path, loosen the threshold, or bypass the single writer.
+
+    (iv) WHAT MUST NOT CHANGE — LAW 5, IN THE VERB'S OWN WORDS. `escalateRepeatingRules`'s doc:
+    "This verb PROPOSES; it never files a task itself — the inbox's own tiering and the operator's
+    ratification own the proposal's fate from here (auto-filing tasks from a metric is exactly the
+    laundering shape Law 5 forbids)." A CADENCE MUST NOT BECOME A FILING PATH. Running the metric
+    automatically is legitimate; letting the metric mint work without a human ratifying it is the
+    laundering shape, and running it on a timer makes that step easier to add by accident, not
+    harder. This task adds no filing step and its criteria pin that absence.
+
+    (v) AND THE NO-NAKED-ZERO CLAUSE SURVIVES THE CADENCE. P48: an empty or all-unmeasurable table
+    must render a refusal, "not a false '0% repeat-incident rate' headline over nothing measured."
+    On a timer this matters more, not less: an unattended run that quietly emits a healthy-looking
+    zero is worse than one nobody ran, because it manufactures the reassurance the instrument was
+    built to withhold.
+
+    (vi) NOT IN SCOPE. Changing any of the three reports' CONTENT or thresholds; the retro
+    trigger's own thresholds; enabling the escalating form; and any change to
+    `bodyContradictsDiff`-style gates or to CI. This task wires a cadence and its bound; it does
+    not touch what the instruments say.
+
+  acceptance:
+    - claim: "the daemon runs the three measurement verbs on its own cadence rather than only when an operator types them"
+      proof: "unit test: test/measurement-cadence.test.ts"
+    - claim: "the cadence is paced by policy data with both an interval bound and a per-day bound, not by the raw poll interval"
+      proof: "unit test: test/measurement-cadence.test.ts"
+    - claim: "the default cadence writes nothing — rule-efficacy runs in its no-escalate form and the other two are read-only"
+      proof: "unit test: test/measurement-cadence.test.ts"
+    - claim: "the cadence never files a task or mints an id from a metric, and the escalating form remains opt-in and off by default"
+      proof: "unit test: test/measurement-cadence.test.ts"
+    - claim: "an unattended run with nothing measurable renders a refusal rather than a zero that reads as health"
+      proof: "unit test: test/measurement-cadence.test.ts"
+  origin: oper#2026-08-23-measurement-verbs-have-no-cadence
+  plan_refs: ["#1605", "#1614", "#1658", "W1-T240", "W1-T264", "P48", "Law 5"]
+  files: [src/lib/daemon.ts, plan/policy.yaml, test/measurement-cadence.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    NO PROOF GREPS THIS SHARD'S OWN PATH. All five criteria use the pure-path `unit test:` form
+    naming `test/measurement-cadence.test.ts`, which is declared in `files:`. That file does not
+    exist yet — a legitimate forward reference, because a PATH is safe to forward-reference where
+    a SYMBOL NAME would be a guess, and the criteria state what must hold rather than naming
+    internals a builder may place differently.
+
+    `risk: high` IS RULE 19's SPAN, NOT THE BLAST RADIUS, AND IT WAS SET FROM THE LINTER RATHER
+    THAN GUESSED. The `files:` list spans the daemon, policy data and a new test, which
+    `sizingViolation` scores as more than one concern; decomposing a cadence from the bound that
+    paces it would produce a task that cannot be safely built alone. The real radius is bounded by
+    design (ii): the default form writes nothing.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN. Eight id
+    surfaces were swept, each against a control pre-qualified for THAT surface, and the rule
+    applied was to DISQUALIFY a surface whose own control read zero rather than report the
+    target's zero. Shard filenames 0 against W1-T1254 at 1; plan `- id:` lines 0 against W1-T1254
+    at 1; the reservation 1, which is the pre-mint, against a namespace of 292 refs; open PR
+    titles 0 against 3 titles carrying a `W1-T` id; open PR head branches 0 against 3 `run-W1-T`
+    heads; open PR file lists 0 with coverage at five captured of five enumerated, against
+    `plan/tasks.d/` paths at 2; merged trailers 0 against 51 carrying any trailer; merged subjects
+    0 against 51; merged `run-*` head credit 0 against 35 structured heads, with
+    `run-W1-T1259-*` at 0 against an 84-branch `run-*` namespace. No surface had to be
+    disqualified — every control read non-zero.
+
+    ONE CONTROL ELSEWHERE DID FAIL AND WAS REPLACED RATHER THAN LEANED ON: the spend-detection
+    query in rationale (4) was first controlled on `src/lib/auto-triage.ts`, which reads 0 for
+    `budgetUsd`/`spawnWorker`/`costUsd` despite being the spending rung. A zero control licenses
+    nothing, so it was re-qualified on files that do carry those symbols.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, READ THROUGH GIT OBJECTS
+    BECAUSE THE CONTENTS API CANNOT SEE THE FILE. `src/run-task.ts` exceeds GitHub's 1 MB contents
+    cap and comes back with empty content that greps to a clean zero at every head including main
+    — a silent zero that has already cost one sweep. Read through git objects instead, main and
+    all five open heads read identically: `rule-efficacy` occurrences in `src/run-task.ts` 15,
+    orchestrator references across `retro.ts`/`daemon.ts`/`sweep.ts` 0, and the control marker
+    `evaluateRetroTrigger` in `daemon.ts` 2. No open head is adding a rung, and the control being
+    non-zero and equal is what makes the middle column's zero a measurement. A first pass at this
+    table was discarded outright: a shell `grep -c ... || echo 0` emitted two values on a zero
+    match and broke the arithmetic, and `grep -c` counts LINES where the corrected reading counts
+    OCCURRENCES — which is why the figure here is 15 rather than the 14 that shell pass printed.
