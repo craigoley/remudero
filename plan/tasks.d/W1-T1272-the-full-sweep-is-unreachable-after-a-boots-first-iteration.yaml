@@ -1,0 +1,154 @@
+- id: W1-T1272
+  title: "THE FULL SWEEP IS UNREACHABLE AFTER A BOOT'S FIRST ITERATION — the freshness early-return sits 64 lines ABOVE the loop's only `deps.sweep()` call, so once the fleet's own merges advance origin/main past the boot sha every later iteration returns before reaching the gate, and the review cadence is set by the restart rate rather than by the queue"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 ON THE DAEMON HOST, in a scratch worktree proved equal to `origin/main` at
+    009651c2 before any reading. The clone was checked rather than assumed and was already full
+    (2,027 commits, `is-shallow-repository` false). Every ledger figure comes from
+    `resolveLedgerUnion` on a `"step":"<name>"` anchor over 21 archives with `ok:true, unread:0`;
+    the control `"step":"risk_judge.decision"` reads 150 on that same resolver.
+
+    (1) THE MECHANISM, IN SOURCE, WITH ITS OWN CONTROL. `src/lib/daemon.ts`'s iteration reads the
+    freshness verdict at :2295 and, when stale, `return summary("stale", detail)` at :2307 — it
+    leaves `runDaemon` entirely, and the entrypoint relaunches. The loop's ONLY full-sweep call,
+    `deps.sweep!()`, is at :2371, guarded by `if (deps.sweep)` at :2353 — SIXTY-FOUR LINES BELOW
+    the return. Control on "only": `deps.sweep!()` occurs exactly once in the file, against
+    `deps.sweepLight` at five sites. So the full reconciler is not chosen over the light one by any
+    condition — THERE IS NO CHOOSER. The light pass is the TICKER (`startInFlightTicker` calls
+    `deps.sweepLight()` every poll interval while a long await is in flight); the full pass is loop
+    BODY, and the body simply is not reached once freshness is stale.
+
+    (2) SO THE FLEET'S OWN THROUGHPUT CLOSES ITS OWN GATE. A boot's first iteration finds
+    origin/main equal to its boot sha and reaches the sweep. The fleet then merges something — 71
+    merges today, mean gap 14.6 minutes, median 9.4 — and from that moment every later iteration
+    returns at :2307 before reaching :2371. The freshness restart is not the villain here: it is
+    currently the ONLY thing that starts a full sweep at all.
+
+    (3) THE SHAPE IS VISIBLE IN THE ROWS, RE-DERIVED RATHER THAN CARRIED. 25 full passes
+    (`sweep.pass` with `enumerated > 1`) against 2,089 light passes today. 17 of the 25 fire BEFORE
+    their own boot's first `daemon.alive` row and 1 after — the full sweep runs ahead of the
+    ticker's first tick, which is exactly what "first iteration only" looks like. Per-boot counts
+    are 1 in SIXTEEN of the nineteen boots that swept at all (the outliers are 2, 2 and 5). Mean
+    boot lifetime 38.5 minutes over 18 boots with `daemon.alive` rows; light ticks per boot range 9
+    to 237.
+
+    (4) AND THE BACKLOG IT LEAVES IS MEASURED, NOT INFERRED. 540 `sweep.disposed` rows today carry
+    `stand_down_reason` "deferred to full sweep (light pass)" — work the light pass explicitly
+    punted to a full sweep that runs about once per 38.5 minutes.
+
+    (5) ONE CAUSE, NOT TWO. The arm runs only downstream of a posted verdict: all 11
+    `automerge.arm_skipped` rows today carry exactly one distinct reason, "remudero-review is not
+    success". A verdict is posted only in a full sweep. So "green and unreviewed" and "not armed"
+    are the same set by construction, and a single repair addresses both.
+
+    (6) THREE THINGS ARE RULED OUT, RECORDED SO NOBODY RE-CHASES THEM.
+      TRUNCATION IS NOT IT: a completed full pass runs p90 22.3 s, max 45.7 s, inside a 38.5-minute
+      boot — about fifty times the headroom it needs — and the freshness exits land BETWEEN passes
+      because the pass is over in under a minute. The wall-clock bound did fire, 3 times of 28
+      attempts, at `elapsed_ms` 559001/559020/559001 against `bound_ms` 559000; that is a different,
+      already-bounded failure.
+      ORDERING IS NOT IT: `orderPendingReviews` is oldest-first at `src/lib/sweep.ts:4127`, called
+      at :4999 immediately before `slice(0, reviewLanes)` at :5000, merged as `7500cf6a` (#2529).
+      91 reviews posted today over 89 distinct heads — the lane is not going round the same PRs.
+      THE LANE BUDGET IS NOT IT: 3 `review budget exhausted` rows in the whole day.
+
+    (7) AND NOTHING PINS THE ORDERING TODAY. `checkFreshness` occurs 6 times in
+    `src/lib/daemon.ts` and ZERO times in `test/daemon.test.ts`; control on that zero, the same
+    test file references the sweep dep 14 times, so the scan reaches the file and the absence is
+    real. The 110 tests there exercise the sweep and the freshness dep separately and never their
+    order.
+  design: |
+    ONE CONCERN: the full sweep must have a trigger that does not require the iteration to reach
+    its end. Not the ordering, not the lanes, not the bound.
+
+    (i) THE LEVER IS FREQUENCY, NEVER CONCURRENCY. A completed pass costs p90 22.3 s and max 45.7 s
+    (rationale 6), so three passes an hour costs about 135 seconds of the hour — under 4%. This
+    task must not widen `reviewLanes` or `dispatchLanes`: `plan/policy.yaml`'s own `reviewLanes`
+    comment records 3 builders + 3 reviewers at ~7.98 GiB against ~5.85 GiB available, "ABOUT FOUR
+    CONCURRENT WORKERS OF ANY KIND". More parallelism is the one thing this host cannot afford, and
+    it is not what is scarce — the gate is idle, not saturated.
+
+    (ii) THE SEAM IS THE ORDERING AND THE RE-TRIGGER, AND BOTH HALVES ARE NEEDED. An iteration that
+    is going to return for freshness should still reach the gate before it returns, and a boot that
+    lives 38 minutes should reach the gate more than once. Either alone leaves the other's shape:
+    reordering only converts "once at boot" into "once per boot plus one on the way out", and a
+    re-trigger alone still loses the pass on the iteration that returns.
+
+    (iii) THE RESTART STAYS, AND THAT IS NOT A CONCESSION. Removing the freshness exit would make
+    this WORSE, not better: it is currently the only full-sweep trigger in the system (rationale 2),
+    so a repair that suppressed it and did not replace it would take the gate from once per 38.5
+    minutes to never. The exit's own contract — never interrupting in-flight work, consulted only
+    between iterations — is unchanged.
+
+    (iv) THE WALL-CLOCK BOUND STAYS. `daemon.sweep.abandoned` fired 3 of 28 attempts today at
+    exactly its bound. A more frequent sweep makes that bound matter MORE, not less; nothing here
+    may weaken it, and a criterion pins that an overrunning pass is still abandoned.
+
+    (v) THE OPERATOR GATE STAYS. Nothing in this task arms, merges, or widens what the sweep is
+    permitted to do. It changes WHEN the existing gate runs, and nothing about what it decides.
+
+    (vi) NOT IN SCOPE, NAMED: `orderPendingReviews` (rationale 6, live and correct);
+    `reviewLanes`/`dispatchLanes` (design i); the sweep's own disposition logic; and the arm, which
+    is downstream and already correct (rationale 5).
+  acceptance:
+    - claim: "an iteration whose freshness verdict is stale still reaches the full sweep before it returns"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "a boot that outlives one iteration runs the full sweep more than once"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "a stale freshness verdict still ends the boot rather than being suppressed"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "a full sweep that overruns its wall-clock bound is still abandoned"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "the sweep still runs one at a time and no additional lane is taken"
+      proof: "unit test: test/daemon.test.ts"
+  files: [src/lib/daemon.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#full-sweep-unreachable-after-first-iteration-2026-08-23"
+  plan_refs: ["W1-T126", "W1-T513", "W1-T1044", "W1-T1049", "W1-T1218"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/daemon.test.ts`, which is declared in `files:` and already exists with 110
+    tests, so each resolves against a real file rather than a forward reference.
+
+    `risk: high` IS RULE 19'S SPAN AND IS SET UP FRONT RATHER THAN AFTER A REFUSAL. `files:` names
+    two stems, which the sizing check reads as distinct concerns and refuses at `medium`.
+    Decomposing is wrong: design (ii) is one rule — the gate must be reachable — applied at the two
+    points that can make it so, and either half alone leaves the other's failure standing. The
+    blast radius is the daemon's own loop, which is why the band is honest in both directions: a
+    mistake here does not corrupt a decision, it changes how often a correct decision is made.
+
+    TWO MEASURED GAPS ARE CARRIED UNRESOLVED RATHER THAN FOLDED IN, because neither is established
+    and folding an unexplained observation into a mechanism is how a wrong cause survives review.
+    FIRST: a 106-minute window on 2026-08-23, 14:44:35Z to 16:30:51Z, with NO `daemon.alive` rows
+    at all — a boot is missing from the ledger's view and this shard does not claim to know why.
+    SECOND: `automerge.rate_limit_refused` carries the fields `gh_bucket`, `gh_bucket_resets_at`
+    and `gh_bucket_operation`, and the most recent of its 11 rows reads `gh_bucket: "unknown"` and
+    `gh_bucket_resets_at: "unknown"` — so the shape shipped and the attribution did not. Whether
+    that is W1-T1235's remaining half or a separate defect is NOT established here.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T1272` resolves on origin against a namespace of 302 such refs; a reservation
+    existing is not evidence a shard does. EIGHT SURFACES WERE SWEPT, EACH CONTROL QUALIFIED ON ITS
+    OWN SURFACE BEFORE THE ZERO WAS TRUSTED: shard filenames 0 against W1-T1252 at 1; plan `- id:`
+    lines 0 against W1-T1252 at 1; the reservation 1, which is the pre-mint, against W1-T1252's own
+    reservation at 1; open PR titles 0 against W1-T1271 at 1 (live in an open title now); open PR
+    head branches 0 against `run-W1-T` heads at 3; open PR file lists 0 with coverage at ten
+    captured of ten enumerated, against `plan/tasks.d/` paths at 5 across the same heads; merged
+    trailers 0 against `Remudero-Task: W1-T1248` at 1, with 454 trailer-carrying commits on main;
+    and merged subject credit 0 against W1-T1252 at 1, with `run-W1-T1272-*` at 0 against a
+    namespace of 86 `run-*` branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, NOT A PRESENCE TEST, AND WAS
+    READ THROUGH GIT OBJECTS BECAUSE THE FILES INVOLVED EXCEED THE CONTENTS API'S LIMIT. Four
+    markers at every one of the ten open PR heads and at main: `checkFreshness`, `deps.sweep!()`
+    and `deps.sweepLight` in `src/lib/daemon.ts`, and `checkFreshness` in `test/daemon.test.ts`.
+    Main reads 6 / 1 / 5 / 0 and EVERY head reads exactly 6 / 1 / 5 / 0 — no head moves any marker.
+    The fourth marker's zero is the finding of rationale (7), and it is controlled by the same
+    file's 14 references to the sweep dep, so the scan reaches the file and the absence is real.
