@@ -159,7 +159,7 @@ const AUTONOMY_SRC = "learnings#standing-rule-8";
  * a reviewed diff to that baseline file, backed by its own arithmetic, never a
  * bare edit of the literal here.
  */
-export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800;
+export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 8148;
 
 /**
  * An entry's LIFECYCLE (W1-T33 + W1-T34 + W1-T88/P14). `active` (the
