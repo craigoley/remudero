@@ -1,0 +1,184 @@
+- id: W1-T1227
+  title: "THE FIX RUNG IS NEVER TOLD THE PR'S DECLARED SCOPE, SO ITS OWN REPAIR COMMIT MAKES THE PR STRUCTURALLY UNREVIEWABLE — a ci-log repair adds a path outside `files:` (or outside plan scope on a plan-only PR), the next round's rule-15/rule-25 refusal fires on the file the rung itself wrote, and the verdict is write-once per sha so only a human can undo it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    MEASURED 2026-08-23 in a scratch worktree proved equal to `origin/main` at 39a0b35a before any
+    reading, against LOCAL SOURCE at that head and the LIVE ledger and GitHub. The suite was NOT
+    run. Every zero carries a control qualified for its own surface.
+
+    (1) TWO INSTANCES, ONE SHAPE, BOTH ON 2026-08-23 AND BOTH STILL OPEN AS THIS IS WRITTEN.
+    `review.posted` at 00:52:13.984Z for W1-T1213 (PR #2545) reads
+    `failure_class=changeset_contradiction` on head `3d38a009`, with all 28 of that head's check
+    runs green. `review.posted` at 23:20:25.146Z the previous evening for PR-2527 reads
+    `failure_class=criteria_tampered` on head `852b5c3a`, and again at 00:33:06.675Z on `9ac76405`,
+    the merge that carried the same file forward. Neither verdict is about the work the task was
+    filed for.
+
+    (2) THE OFFENDING FILE IN EACH CASE WAS WRITTEN BY THE RUNG'S OWN FIX WORKER, AND THE ORDERING
+    IS PROVABLE RATHER THAN ASSUMED. `fix.dispatch` is logged AFTER the spawn returns — its own
+    comment says so: "A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is
+    this round committed as a real strike" (run-task.ts:5842). So a fix worker's commit necessarily
+    PRECEDES its `fix.dispatch` row, and the gap is the tell. Head `3d38a009`
+    ("fix(ci): recapture the stale CLAUDE.md size baseline on this branch", one file,
+    `scripts/claude-md-budget-baseline.json`) was committed 00:40:34Z and its
+    `fix.dispatch task=W1-T1213 mode=ci-log` row is 00:41:28Z — 54 seconds later. Head `852b5c3a`
+    ("test(w1-t187): retry the CI-flaky 500ms benchmark before failing", one file,
+    `test/w1-t187-benchmark.test.ts`) was committed 22:51:14Z with
+    `fix.dispatch task=PR-2527 mode=ci-log` at 22:52:35Z — 81 seconds later.
+
+    (3) THE CONTROL IS THE SAME MEASUREMENT ON HEADS THE ORIGINAL WORKER WROTE, AND IT SEPARATES
+    CLEANLY. `3229c9c1` (W1-T1088) was committed 14:19:29Z, its contradiction verdict posted
+    14:31:53Z, and the first `fix.dispatch` for that task is 14:33:32Z — the dispatch is 14 minutes
+    AFTER the commit and after the verdict. `8c9b03c8` (W1-T1100): committed 17:51:37Z, verdict
+    18:17:43Z, dispatch 18:20:21Z — 29 minutes after. `dd204e4c` (W1-T1065) was authored by a human
+    and the nearest fix row in the hour before it belongs to a different task. So the two 08-23
+    heads are the only ones in the ledger's whole history where a fix-rung commit preceded the
+    refusal it earned.
+
+    (4) SIZE. Across the WHOLE ledger there are 210 `review.posted` rows. Eight carry one of the
+    two classes — six `changeset_contradiction`, two `criteria_tampered` — spread over six distinct
+    heads. Two of those heads are fix-rung commits (2); three are original-worker or human heads
+    (3); the sixth, `9ac76405`, is a branch-update merge that inherits the fix commit's file rather
+    than adding one. The population is small and it is NEW: both fix-rung instances landed inside
+    one twelve-hour window, and none of the prior six months' rows has this shape.
+
+    (5) Q1 — NOTHING DISTINGUISHES AN IN-SCOPE EDIT FROM AN OUT-OF-SCOPE ADDITION, BECAUSE THE RUNG
+    NEVER LEARNS THE SCOPE. `renderFixPrompt`'s opts are exactly
+    `{ task: { id: string; title: string }; round; branch; evidence }` (run-task.ts:4197-4202) —
+    the task tuple carries an id and a title and NOTHING ELSE, so no fix prompt can name a declared
+    file. `runFixRung`'s own opts type DOES declare `task: { id; title; acceptance?; files? }`
+    (W1-T322's widening), and `task.files` is read ZERO times inside that function's whole span,
+    lines 5250-6187. Controls for that zero, both on the same surface: `opts.task` reads 8 in the
+    identical span, and `task.files` reads 8 elsewhere in the same file. The declared scope is in
+    the rung's hand and is passed to nothing.
+
+    (6) AND THE ORCHESTRATOR-SIDE GUARD THAT WOULD CATCH IT NEVER RUNS ON THIS PATH.
+    `scopeGuardOutOfScopeFiles(diffFiles, task.files)` is called once, at run-task.ts:8323, inside
+    `runTask` (declared 7142) — the IMPLEMENT push. The fix worker pushes itself, from an
+    instruction in its own prompt footer ("Then: `git push origin HEAD` (no -u) — never
+    force-push"), so no orchestrator-side scope comparison stands between a fix commit and the
+    remote. Even where it does run it "pushes and flagged rather than refused" by design
+    (`scope_guard.overrun`), which is the right call for a completed implement branch and says
+    nothing about a repair that has not been written yet.
+
+    (7) THE TWO REFUSALS THAT DO EXIST ARE REACTIVE, AND THE LEDGER SHOWS THEM FIRING ONE ROUND TOO
+    LATE. `runFixRung` already refuses to dispatch when the incoming verdict reports rule-15
+    criteria tampering, and again (W1-T297, Standing rule 25) when it reports instrument
+    entanglement — "no worker can legitimately resolve an entanglement by WRITING MORE CODE",
+    zero strikes spent, escalate immediately. Both read the verdict of a diff that ALREADY contains
+    the offending file. Measured on W1-T1213: the rung's worker wrote
+    `scripts/claude-md-budget-baseline.json` at 00:40:34Z, and `fix.instrument_entangled` fired at
+    00:52:15Z naming that exact path, followed by `fix.exhausted reason=instrument_entangled` two
+    seconds later. The guard is correct and it is eleven minutes and one whole round downstream of
+    the commit that made it true. `fix.instrument_entangled` has exactly ONE row in the entire
+    ledger and this is it.
+
+    (8) NO RE-RUN CLEARS EITHER PR. The verdict is written once per head sha, so only a NEW head
+    re-derives it — and the rung cannot produce a head that does not carry its own addition,
+    because the addition is what it believes fixed the build. Both PRs escalated to a human:
+    #2548 for W1-T1213 (naming rule 25), and #2539 and #2543 for PR-2527.
+
+    (9) NEIGHBOURS READ AND DISTINGUISHED, NONE RE-FILED. W1-T297 owns Standing rule 25 and the
+    instrument refusal itself — this task does not touch the rule, only the moment it is applied.
+    W1-T1116 owns the naming law this remedy obeys, and is cited for its shape rather than
+    reopened. W1-T362 owns `executed_stale` for `unit test:` proofs — the nearest existing
+    precedent for the reviewer refusing something that DISCRIMINATES NOTHING, and it is cited to
+    place this defect: an out-of-scope repair does not merely fail to help, it removes the PR's
+    eligibility to be judged at all. W1-T322 put `files` on the rung's own opts type; this task is
+    what uses it.
+  design: |
+    ONE CONCERN: the fix rung must know the PR's declared scope, and must stand down — by name —
+    when the only repair available to it would leave the PR structurally unreviewable.
+
+    (i) CARRY THE DECLARED SCOPE INTO THE RUNG'S DECISION. `renderFixPrompt` gains the declared
+    file list from the `files` the rung already holds (rationale 5), so the fix worker is told what
+    it may touch instead of inferring it from a failing check. This is a widening of an existing
+    opts tuple, not a new data source.
+
+    (ii) A NAMED STAND-DOWN, AT THE SEAM THAT ALREADY EXISTS. `fixRungStandDownReason` /
+    `preStrikeStandDown` (run-task.ts:5490-5551) already returns
+    `{ outcome: "stood_down", reason, standDownReason }` and already chooses between escalating a
+    decidable question and ledgering a settled one. The new reason joins that switch. It must carry
+    its own text: W1-T1116's law is that a disposition reports the action it INTENDED and never
+    leaves the refusal that overrode it unnamed, and a silent stand-down here would be exactly the
+    `alreadyDone` shape that task was filed against.
+
+    (iii) ON A PLAN-ONLY PR THE SCOPE IS PLAN SCOPE, NOT `files:`. Rationale (1)'s second instance
+    is not an out-of-`files:` addition at all — `test/w1-t187-benchmark.test.ts` was a real repair
+    of a real flake. It broke the PR because `planOnly` requires EVERY changed file to be in plan
+    scope (review.ts:3472) and rule 15 is exempted only by `planOnly` (:3477), so one test file
+    un-exempted a filing whose own `claim:`/`proof:` lines then read as tampering
+    (`criterionFieldTampered`, :6308). The predicate's own doc says the exemption "is what keeps it
+    clean". So the rung's scope test on a plan-only PR is membership in plan scope, and the two
+    cases must be distinguishable in the stand-down text.
+
+    (iv) THE RUNG NEVER EDITS THE PR BODY AND NEVER EDITS THE TASK RECORD. Not as a fallback, not
+    as a repair. The reviewer refuses the first (a body rewritten to match a diff is the
+    contradiction detector's own defeat condition) and Standing rule 15 gates the second. The only
+    honest outcomes are a repair inside scope, or a stand-down that says why.
+
+    (v) A REPAIR CONFINED TO A DECLARED FILE IS UNCHANGED. The common case must be provably inert:
+    same dispatch, same strike accounting, same prompt but for the added scope line. A criterion
+    pins this, because a guard that stands the rung down too eagerly strands every red PR and is
+    worse than the defect.
+
+    (vi) NOT IN SCOPE, NAMED: the write-once-per-sha property of the verdict (rationale 8) — that
+    is a separate concern about re-derivation and this task must not weaken it; the classes
+    `review.ts` assigns; Standing rule 25 itself (W1-T297); and any change to
+    `scopeGuardOutOfScopeFiles`'s push-and-flag disposition on the implement path (rationale 6),
+    which is correct where it stands.
+  acceptance:
+    - claim: "the fix prompt names the PR's declared scope before a fix worker is dispatched"
+      proof: "unit test: test/fix-rung-scope-standdown.test.ts"
+    - claim: "a repair that would add a path outside the declared files stands the rung down instead of dispatching"
+      proof: "unit test: test/fix-rung-scope-standdown.test.ts"
+    - claim: "on a plan-only PR a non-plan path stands the rung down for the plan-scope reason, not the files reason"
+      proof: "unit test: test/fix-rung-scope-standdown.test.ts"
+    - claim: "a repair confined to a declared file dispatches with the strike accounting unchanged"
+      proof: "unit test: test/fix-rung-scope-standdown.test.ts"
+    - claim: "the stand-down names the paths it observed and writes neither the PR body nor the task record"
+      proof: "unit test: test/fix-rung-scope-standdown.test.ts"
+  files: [src/run-task.ts, test/fix-rung-scope-standdown.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#fix-rung-repair-breaks-its-own-pr-reviewability-2026-08-23"
+  plan_refs: ["W1-T297", "W1-T1116", "W1-T362", "W1-T322", "W1-T76"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/fix-rung-scope-standdown.test.ts`, which is declared in `files:`, so on this
+    filing PR they resolve through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS HERE, NOT RULE 19'S SPAN. Two files, one concern. The band is what
+    it is because the change decides whether a red PR gets a repair at all: a stand-down that fires
+    too eagerly strands every red PR in the queue behind a human, which is a worse outage than the
+    one it closes — design (v) exists for that reason and carries its own criterion.
+
+    `src/run-task.ts` IS DECLARED AND THE W1-T471 COST IS ACCEPTED IN WRITING. The rung, its prompt
+    renderer and its stand-down seam all live in that file (run-task.ts:4197, :5490-5551, :5842),
+    and no function elsewhere sees them; there is no smaller declaration that reaches the defect.
+    Naming that path costs an effective dispatch lane while this task is in flight.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T1227` resolves on origin, against a namespace of 257 such refs, and the
+    reservation existing is not evidence a shard does. EIGHT ID SURFACES WERE SWEPT, each against a
+    control pre-qualified for THAT surface: shard filenames 0 against W1-T1213 at 1; plan `- id:`
+    lines 0 against W1-T1213 at 1; the reservation 1, which is the pre-mint itself; open PR titles
+    0 against W1-T1212 at 1; open PR head branches 0 against a `run-W1-T1213-` head at 1; open PR
+    file lists 0 with coverage at seven captured of seven enumerated, against a `plan/tasks.d/`
+    path at 1; merged trailers 0 against `Remudero-Task: W1-T1085` at 1; and merged subject credit
+    0 against W1-T1213 at 1, with `run-W1-T1227-*` at 0 against a namespace of 85 `run-*` branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, NOT A PRESENCE TEST. Four
+    markers were counted in `src/run-task.ts` at every one of the seven open PR heads and at main:
+    `renderFixPrompt`, `fix.stood_down`, `scopeGuardOutOfScopeFiles` and the phrase "declared
+    scope". Main reads 9 / 4 / 4 / 10 and EVERY head reads exactly 9 / 4 / 4 / 10 — no head moves
+    any marker, and the counts being non-zero and equal is the control that the reader worked. The
+    heads were read through `git` rather than the contents API, which refuses this file for size:
+    the API path returned an empty body for all seven, and treating that as a zero would have been
+    a false zero on every head at once.
