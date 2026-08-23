@@ -707,7 +707,14 @@ jobs:
           node --import tsx .github/scripts/containment-diff-trigger.ts changed-files.txt
       - name: Containment probe (test/containment.test.ts — required, this diff touches a containment-relevant path)
         if: steps.trigger.outputs.matched == 'true'
-        run: node --test --import tsx test/containment.test.ts
+        # W1-T1250: `--import ./test/setup/tmp-hygiene.ts` is NOT optional here, same reasoning as
+        # W1-T1217's identical fix to coverage-ratchet above. `src/lib/ci-parity.ts`'s
+        # `containment-probe:test` step already spells this invocation out WITH the harness import
+        # (its own `TMP_HYGIENE_IMPORT` constant), so `rmd preflight --ci-parity` was running this
+        # file WITH the harness while this required check ran it WITHOUT — a harness-dependent
+        # assertion could pass locally and still fail here. Bringing this line into line with
+        # ci-parity's mirror is the fix; ci-parity.ts itself is already correct and stays untouched.
+        run: node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts
 
   api-client-drift:
     # §7A packages/api-client GENERATOR + stale-client drift check (W3-T1b). "packages/api-client is
