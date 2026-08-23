@@ -28,6 +28,6 @@ raw: "DEPLOY_FAILED PERSISTS AFTER ITS CAUSE IS GONE, AND rmd status RENDERS IT
   in that path."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null
