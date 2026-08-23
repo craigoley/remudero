@@ -63,10 +63,23 @@ export function measureBytes(path) {
 
 /**
  * Compare the measured byte size against a recorded cap.
+ *
+ * `capBytes` ABSENT (undefined/null) is a legitimate, honest "no cap yet" contract and is left
+ * alone -- the caller reports it as "cap unset" and exits 0. `capBytes` PRESENT but not a number
+ * (e.g. a hand-edit that quotes the value, `"1000"` instead of `1000`) is a DIFFERENT thing: a
+ * declared cap that cannot be compared against. That must REFUSE, not silently no-op -- a
+ * required check that cannot determine its own threshold must not report OK. This throws rather
+ * than returning a violation because it is a config defect, not a size-budget breach; the caller
+ * is expected to catch it and fail the run before it prints anything claiming to enforce a cap.
+ *
  * @returns {string[]} human-readable violations; empty means the ratchet is satisfied.
+ * @throws {Error} if `capBytes` is present and not a number.
  */
 export function evaluateRatchet(actualBytes, baseline) {
   const violations = [];
+  if (baseline.capBytes !== undefined && baseline.capBytes !== null && typeof baseline.capBytes !== "number") {
+    throw new Error(`'capBytes' must be a number, got ${JSON.stringify(baseline.capBytes)}`);
+  }
   if (typeof baseline.capBytes === "number" && actualBytes > baseline.capBytes) {
     const overage = actualBytes - baseline.capBytes;
     violations.push(`CLAUDE.md is ${actualBytes} bytes > cap ${baseline.capBytes} bytes (${overage} bytes over)`);
@@ -93,7 +106,17 @@ function main(argv) {
   }
 
   const baseline = JSON.parse(readFileSync(values.baseline, "utf8"));
-  const violations = evaluateRatchet(actualBytes, baseline);
+
+  let violations;
+  try {
+    violations = evaluateRatchet(actualBytes, baseline);
+  } catch (err) {
+    // Refuse before printing anything about a cap -- a run that cannot determine its threshold
+    // must never print "cap <n> bytes" as if it were enforcing one.
+    console.error(`claude-md-budget-ratchet: ${values.baseline}: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(
     `claude-md-budget-ratchet: ${values.file} is ${actualBytes} bytes (cap ${baseline.capBytes ?? "unset"} bytes)`,
