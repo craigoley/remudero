@@ -18,10 +18,27 @@ host and the Mac mini, and were not among the mini's dangling objects. Meanwhile
 repository **cite them by path**, so those citations resolved to nothing for anyone who did not happen to
 be working on the one machine that still had them.
 
-They were recovered from the original authoring working tree, which had persisted inside a container.
-Each file's own header names that tree — `toplevel /home/user/remudero` — so the copies committed here
-came from the directory they were written in, not from a mirror or a re-derivation. A `git clone` cannot
-reproduce an ignored file, which is why no fresh checkout anywhere had them.
+They were recovered from the original authoring working tree, which had persisted inside a sandbox
+container. Each file's own header names that tree — `toplevel /home/user/remudero` — so the copies
+committed here came from the directory they were written in, not from a mirror or a re-derivation. A
+`git clone` cannot reproduce an ignored file, which is why no fresh checkout anywhere had them.
+
+## Why the loss was already costing something
+
+This is not a tidy-up. One of these files is load-bearing for an open proposal.
+
+`1ccfca2` (2026-08-05) proposed **P48, the Outcome-typed boundary**. P48 is Proposal 1 of
+`research-laws-and-gaps-2026-08-05.md` — the same design, mined from the same session, on the same day.
+
+Six days later `710b18b` (#1587, 2026-08-11) had to carry P48's still-checkable evidence into the
+MASTER-PLAN entry **because the report backing it could no longer be read**. That commit recorded the
+file as unrecoverable and stated the cost in terms: the census of instances behind P48 was gone, the
+figure could not be re-derived from the entry, and ratifying the proposal as written would have meant
+ratifying a number nobody could check. MASTER-PLAN still carries that finding today.
+
+The census in question is Part 1 of the recovered file. It is back. This directory does not ratify,
+amend, or re-argue P48 — it only restores the document P48 was drawn from, so that whoever takes that
+decision can read the evidence instead of working around its absence.
 
 ## What is here, and what is not
 
@@ -33,14 +50,15 @@ reproduce an ignored file, which is why no fresh checkout anywhere had them.
 | `recon-guard-complements.md` | 14152 | `ba67deb3e185b477e9511cc7c7a012c8e1980ea45fbc3b11c991a0e79e7701d2` | 2026-08-11 |
 
 Every digest above was verified on both sides of the copy, and `cmp` reported the files identical before
-they were staged.
+they were staged. Three of the four are dated 2026-08-05/06; `recon-guard-complements.md` is dated
+2026-08-11, which is recorded here rather than rounded into the others.
 
 **The accounting, stated plainly so nobody mistakes this for a complete rescue.** Tracked files cite
-**31 distinct `state/*.md` paths**. This commit recovers **3 of those 31**:
+**31 distinct `state/*.md` paths**. After this commit, **3 of those 31 now resolve** —
 `research-laws-and-gaps-2026-08-05.md`, `recon-guard-complements.md` and
-`recon-open-failing-composition.md`. `recon-proof-survey.md` is a **fourth file that no tracked file
-cites** — recovered because it survived alongside the others, not because anything pointed at it. **The
-remaining 28 cited paths are not here** and, on the evidence available at recovery time, are not anywhere.
+`recon-open-failing-composition.md`. **The other 28 do not**, and on the evidence available at recovery
+time they are not anywhere. `recon-proof-survey.md` is a **fourth file that no tracked file cites** —
+recovered because it survived alongside the others, not because anything pointed at it.
 
 ## Their citations still point at `state/`
 
