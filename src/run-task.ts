@@ -290,6 +290,8 @@ import {
   unreservedFiledIds,
   diffCitesResearchSource,
   formatPlanVerdictLine,
+  isInPlanScope,
+  outOfPlanScopeFiles,
   outOfPlanScopeFilesInDiff,
   parsePlanArgs,
   parsePlanVerdict,
@@ -3120,6 +3122,56 @@ export function scopeGuardOutOfScopeFiles(
 }
 
 /**
+ * W1-T1227 (THE FIX RUNG'S OWN REPAIR BREAKS ITS OWN PR'S REVIEWABILITY): the fix rung's
+ * pre-strike scope gate. `currentDiffFiles` is the PR's live changed-file list as of RIGHT NOW
+ * (before the next strike); `baselineDiffFiles` is the SAME list captured before this
+ * invocation's first strike — anything out-of-scope already present there predates the rung
+ * (e.g. `scopeGuardOutOfScopeFiles`'s own push-and-flag disposition on the implement path,
+ * rationale 6) and is deliberately NEVER re-flagged here: this guard is about what the FIX RUNG
+ * ITSELF adds, never a retroactive judgment on the diff it inherited.
+ *
+ * TWO SCOPE REGIMES, NEVER CONFLATED (design note iii). When every one of the task's OWN
+ * declared `files` is itself plan-scoped (`isInPlanScope`), the PR is plan-only, and plan-only
+ * requires EVERY changed file to stay in plan scope (review.ts's own `planOnly` predicate,
+ * `:3472`) — so the test here is plan-scope membership ({@link outOfPlanScopeFiles}), not exact
+ * membership in the declared list. Otherwise the test is exact membership in `declaredFiles`
+ * ({@link scopeGuardOutOfScopeFiles}, the SAME function the implement path already uses — never
+ * a parallel reimplementation). `scopeKind` on the return value says which regime fired, so the
+ * stand-down text (and a test) can tell the two apart rather than reading one generic sentence.
+ *
+ * Returns `undefined` when the task declares no `files` at all — a task with no scope signal
+ * gives this guard nothing to enforce, so it stays silent (fail OPEN, matching every other
+ * pre-strike check in this file) rather than refusing blind and stranding every red PR on a task
+ * that simply predates the `files:` convention (design note v).
+ *
+ * PURE: no I/O — both file lists are the caller's own reads, never fetched here.
+ */
+export function fixRungScopeStandDownReason(
+  currentDiffFiles: readonly string[],
+  baselineDiffFiles: readonly string[],
+  declaredFiles: readonly string[] | undefined,
+): { reason: string; scopeKind: "files" | "plan"; newOutOfScopePaths: string[] } | undefined {
+  if (!declaredFiles || declaredFiles.length === 0) return undefined;
+  const planOnlyTask = declaredFiles.every(isInPlanScope);
+  const outOfScope = (files: readonly string[]): string[] =>
+    planOnlyTask ? outOfPlanScopeFiles([...files]) : scopeGuardOutOfScopeFiles(files, declaredFiles);
+  const alreadyOutOfScope = new Set(outOfScope(baselineDiffFiles));
+  const newOutOfScopePaths = outOfScope(currentDiffFiles).filter((f) => !alreadyOutOfScope.has(f));
+  if (newOutOfScopePaths.length === 0) return undefined;
+  const scopeKind: "files" | "plan" = planOnlyTask ? "plan" : "files";
+  const reason =
+    scopeKind === "plan"
+      ? `a fix worker added path(s) outside plan scope on a plan-only PR: ${newOutOfScopePaths.join(", ")} — ` +
+        `every file this task declares is plan-scoped, so a repair may only touch plan/** (or MASTER-PLAN.md/` +
+        `ORIENTATION.md), never a src/test path, or the next round's rule-15 refusal fires on the file this ` +
+        `rung itself wrote`
+      : `a fix worker added path(s) outside the declared scope: ${newOutOfScopePaths.join(", ")} — declared ` +
+        `files: ${declaredFiles.join(", ")} — dispatching another strike would compound on a PR the next ` +
+        `round's rule-15/rule-25 refusal already can't recover from`;
+  return { reason, scopeKind, newOutOfScopePaths };
+}
+
+/**
  * W1-T322: task ids currently OPEN in `plan` — the set a report's `SHIPS-UNWIRED: <id>` marker
  * is checked against before it can honour an unreached export (see
  * {@link "./lib/review.js".ReviewEvidence.openTaskIds}'s doc). PURE — no I/O, reads only
@@ -4197,9 +4249,16 @@ export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule
  * or `noCriteria` alone fails the state even when every named criterion is
  * met); `evidence.review.summary` is what keeps the prompt from going out with
  * nothing to act on in that case.
+ *
+ * W1-T1227: `task.files` (W1-T322's widening of `runFixRung`'s own opts type) is now SURFACED
+ * here too — every prior version of this prompt carried only `id`/`title`, so a fix worker had
+ * no way to learn the PR's declared scope from its own instructions and could only infer it (or
+ * not) from a failing check. See {@link fixRungScopeStandDownReason} for the belt-and-suspenders
+ * half of this fix: a worker that ignores this line and pushes outside scope anyway is caught at
+ * the NEXT pre-strike gate, before another strike compounds on top of it.
  */
 export function renderFixPrompt(opts: {
-  task: { id: string; title: string };
+  task: { id: string; title: string; files?: readonly string[] };
   round: number;
   branch: string;
   evidence: FixEvidence;
@@ -4215,6 +4274,20 @@ export function renderFixPrompt(opts: {
         opts.evidence.constraint,
       ]
     : [];
+  // W1-T1227: named EXPLICITLY, mode-agnostic (every branch below splices this in), so the fix
+  // worker cannot claim it was never told. Omitted only when the task declares no `files` scope
+  // at all — silence here is never a licence, it is simply nothing to report.
+  const scopeBlock =
+    opts.task.files && opts.task.files.length > 0
+      ? [
+          "",
+          `DECLARED SCOPE (W1-T1227): this task's PR may only touch: ${opts.task.files.join(", ")}. If the ` +
+            `genuine fix requires a path outside that list, do NOT push it — say so in your REPORT's ` +
+            `'## Follow-ups' section instead and leave the branch as-is. A commit outside declared scope makes ` +
+            `the WHOLE PR unreviewable (Standing rule 15/25 refuse the next round on the file this fix itself ` +
+            `wrote, and only a human can undo it), not merely this one fix.`,
+        ]
+      : [];
   const footer = [
     "",
     `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
@@ -4262,6 +4335,7 @@ export function renderFixPrompt(opts: {
     return [
       header,
       ...constraintBlock,
+      ...scopeBlock,
       `This PR's merge state is DIRTY — GitHub cannot compute a clean merge ref, so NO check even`,
       `runs until the conflict is resolved; there is no review to react to either. Your target: MERGE`,
       `origin/main into this SAME branch (${opts.branch}) — never rebase, never force-push — resolve`,
@@ -4312,6 +4386,7 @@ export function renderFixPrompt(opts: {
     return [
       header,
       ...constraintBlock,
+      ...scopeBlock,
       `Required CI check(s) are FAILING — the failing signal here IS the CI log, not a reviewer`,
       `verdict. GitHub will not merge past a red required check no matter what any review verdict`,
       `says, and a review verdict sitting beside this one (if any exists at all — most often none`,
@@ -4342,6 +4417,7 @@ export function renderFixPrompt(opts: {
     return [
       header,
       ...constraintBlock,
+      ...scopeBlock,
       `The review gate is FAILING on ${n} unmet acceptance criteri${n === 1 ? "on" : "a"} whose reviewer`,
       `reason is a PROOF-KEYWORD COVERAGE gap — the report text never mentions the proof, this is`,
       `NOT an executed failure. The likely fix is the PR BODY's Acceptance block: add the`,
@@ -4358,6 +4434,7 @@ export function renderFixPrompt(opts: {
   return [
     header,
     ...constraintBlock,
+    ...scopeBlock,
     `The review gate is FAILING (${n} UNMET acceptance criterion${n === 1 ? "" : "a"}). Resolve ALL`,
     `of them together in this ONE pass — never fix one and leave another; patching one criterion`,
     `at a time is exactly what causes an infinite ping-pong across review rounds. Review summary:`,
@@ -5498,6 +5575,21 @@ export async function runFixRung(opts: {
   // {@link branchAuthorshipStandDownReason} documents: round 1 never reads
   // as foreign no matter what the live head is.
   let rungOwnHeadSha: string | undefined;
+  // W1-T1227: the changed-file list as it stood BEFORE this invocation's first strike —
+  // {@link fixRungScopeStandDownReason}'s baseline, so a path already out of scope before this
+  // rung ever ran (tolerated by `scopeGuardOutOfScopeFiles`'s push-and-flag disposition on the
+  // implement path) is never re-flagged as something the RUNG added. Best-effort: an omitted
+  // `deps.fetchPrDiffFiles`, or one that throws, degrades to `undefined` — the scope check below
+  // then simply never fires (fail OPEN, the same discipline every other pre-strike read in this
+  // function already follows), never a guessed baseline.
+  let baselineDiffFiles: string[] | undefined;
+  if (deps.fetchPrDiffFiles) {
+    try {
+      baselineDiffFiles = await deps.fetchPrDiffFiles(opts.prUrl);
+    } catch {
+      baselineDiffFiles = undefined;
+    }
+  }
 
   while (review.state !== "success" && strikes < opts.strikeCap) {
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -5569,6 +5661,72 @@ export async function runFixRung(opts: {
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
       return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
+    }
+
+    // W1-T1227 SITE — SCOPE GATE, BEFORE `strikes++`: a prior strike (this invocation's own, the
+    // only kind reachable here — round 1 has strikes===0 and an unchanged baseline, so this is a
+    // structural no-op on the very first pass) may have pushed a path outside the task's declared
+    // scope. Dispatching ANOTHER strike on top of that would compound on a PR the next round's
+    // rule-15/rule-25 refusal already cannot recover from (the verdict is write-once per sha, W1-T297)
+    // — this rationale's whole complaint is that today's ONLY catch for that (`review.criteriaTampered`
+    // / `review.instrumentEntangled`, below) fires a whole round later, only after CI has gone green
+    // and a full review has run. This check needs neither: it reads the live changed-file list
+    // directly, so it fires as soon as the offending push is visible on GitHub, escalating instead of
+    // spending another strike. Best-effort (`deps.fetchPrDiffFiles` omitted or throwing skips this
+    // round's check entirely, fail OPEN) and NEVER writes the PR body or the task record — it only
+    // ledgers, says, and (like the rule-15/rule-25 refusals beside it) escalates.
+    if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
+      let currentDiffFiles: string[] | undefined;
+      try {
+        currentDiffFiles = await deps.fetchPrDiffFiles(opts.prUrl);
+      } catch {
+        currentDiffFiles = undefined;
+      }
+      const scopeStandDown =
+        currentDiffFiles !== undefined
+          ? fixRungScopeStandDownReason(currentDiffFiles, baselineDiffFiles, opts.task.files)
+          : undefined;
+      if (scopeStandDown) {
+        const issueUrl = escalate(
+          {
+            class: "BLOCKED",
+            taskId: opts.taskId,
+            runId: opts.runId,
+            headSha: review.headSha,
+            summary: `fix rung standing down — a fix worker's own repair left this PR out of scope (${scopeStandDown.scopeKind}) — ${opts.prUrl}`,
+            detail:
+              `The blocked_review FIX RUNG (W1-T76, W1-T1227) refused to dispatch strike ${strikes + 1}: ` +
+              `${scopeStandDown.reason}. Only a human can undo an already-pushed out-of-scope commit — the ` +
+              `next round cannot, because the review verdict for this head is written once per sha (W1-T1227 ` +
+              `rationale 8) and a fix worker may never edit the PR body or the task record to route around it ` +
+              `(design note iv).`,
+            options: [
+              {
+                label: "revert",
+                detail: "drop the out-of-scope path(s) from this branch (revert that hunk), then re-run `rmd fix` to resume normally.",
+              },
+              {
+                label: "widen-scope",
+                detail: "if the out-of-scope path(s) genuinely belong to this task, widen the task's declared `files:` in plan/tasks.yaml, then re-run.",
+              },
+            ],
+            recommendation: "revert",
+          },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+        );
+        deps.log("fix.stood_down", {
+          site: "rung.scope",
+          strike: strikes + 1,
+          reason: scopeStandDown.reason,
+          scope_kind: scopeStandDown.scopeKind,
+          out_of_scope_paths: scopeStandDown.newOutOfScopePaths,
+          issue_url: issueUrl,
+        });
+        deps.say(
+          `fix rung: standing down before strike ${strikes + 1} — ${scopeStandDown.reason} — escalated: ${issueUrl}`,
+        );
+        return { outcome: "stood_down", review, strikes, reason: scopeStandDown.reason, standDownReason: scopeStandDown.reason, issueUrl };
+      }
     }
 
     // W1-T1095 (capability 1 — RECORD-AND-RESUME): a review naming an OUT-OF-DIFF blocker
@@ -8568,6 +8726,12 @@ async function runTask(
           // W1-T296: the pre-strike branch-authorship check's live-head
           // reader — same fresh-`gh`-read discipline as `readLiveState`.
           readLiveHead: ghLiveHead,
+          // W1-T1227: wired EXPLICITLY (never left to the internal `?? fetchPrDiffFilesViaGh`
+          // default `body-coverage` mode already used, W1-T307) so the pre-strike SCOPE gate
+          // ({@link fixRungScopeStandDownReason}) is actually live here, not just in a test that
+          // happens to wire it — a fresh `gh pr view --json files` read every round, same
+          // fresh-read discipline as `readLiveState`/`readLiveHead` above.
+          fetchPrDiffFiles: fetchPrDiffFilesViaGh,
           // W1-T1095: the SAME `ghLiveState` reader, aimed at whatever prerequisite PR number
           // a "blocked on #N" review names, in THIS task's own owner/repo — see runFixRung's
           // own `readPrerequisiteState` doc for the fail-safe (not-merged) default this takes
@@ -20131,6 +20295,10 @@ export function buildSweepEffects(
             // W1-T296: the SAME live-head reader every fix-rung call site
             // wires for the pre-strike branch-authorship check.
             readLiveHead: ghLiveHead,
+            // W1-T1227: wired EXPLICITLY here too — see the run-loop call site's own comment on
+            // this same field for why the internal `body-coverage`-only default is not enough to
+            // make the pre-strike SCOPE gate live on this (the cold/sweep-driven) dispatch path.
+            fetchPrDiffFiles: fetchPrDiffFilesViaGh,
             // W1-T1095: the SAME `ghLiveState` reader, aimed at whatever prerequisite PR
             // number a "blocked on #N" review names, in this SAME owner/repo — see
             // runFixRung's own `readPrerequisiteState` doc.
