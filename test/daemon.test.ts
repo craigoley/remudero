@@ -2963,6 +2963,214 @@ test("W1-T513: a third startInFlightTicker call site now exists (retro, dispatch
   );
 });
 
+// ── W1-T1272: THE FULL SWEEP IS UNREACHABLE AFTER A BOOT'S FIRST ITERATION ─────────────────
+// Before this task, `checkFreshness`'s stale-return sat 64 lines ABOVE the loop's only
+// `deps.sweep!()` call, so once the fleet's own merges advanced origin/main past the boot sha,
+// EVERY later iteration returned before ever reaching the sweep — the review cadence tracked
+// the daemon's restart rate, not the queue. The fix has two halves (design (ii)): the ORDERING
+// (a stale iteration still reaches the gate before it returns) and the RE-TRIGGER (a phase that
+// holds the loop for a long dispatch/retro re-fires the sweep on its own cadence, not only once
+// at the top of the iteration that started it).
+
+test("W1-T1272: a stale freshness verdict still reaches the full sweep before it returns", async () => {
+  const plan = fixturePlan();
+  let sweeps = 0;
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => {
+      throw new Error("FALSIFIER: dispatch must never be reached once freshness is stale");
+    },
+    checkFreshness: () => ({ stale: true, oldSha: "aaaaaaa1111111111111111111111111111111", newSha: "bbbbbbb2222222222222222222222222222222" }),
+    sweep: async () => {
+      sweeps += 1;
+    },
+    sleep: async () => {},
+  });
+  assert.equal(sweeps, 1, "the full sweep ran exactly once, reached from the stale branch, before runDaemon returned");
+  assert.equal(s.stopReason, "stale", "the stale verdict still ends the boot — running the sweep did not suppress it");
+});
+
+test("W1-T1272: a stale freshness verdict still ends the boot rather than being suppressed", async () => {
+  // A slow-but-healthy sweep (well inside the bound) must not turn a stale verdict into
+  // anything else — no swallowed exit, no fall-through into dispatch, no "error".
+  const plan = fixturePlan();
+  let sweepCompleted = false;
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => {
+      throw new Error("FALSIFIER: dispatch must never be reached once freshness is stale");
+    },
+    checkFreshness: () => ({ stale: true, oldSha: "aaaaaaa1111111111111111111111111111111", newSha: "bbbbbbb2222222222222222222222222222222" }),
+    sweep: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      sweepCompleted = true;
+    },
+    sleep: async () => {},
+  });
+  assert.ok(sweepCompleted, "the gate really ran (a no-op stub would prove nothing about ordering)");
+  assert.equal(s.stopReason, "stale", "the restart stays — design (iii): reaching the gate is additive, never a replacement for the exit");
+});
+
+test("W1-T1272: a boot that outlives one iteration runs the full sweep more than once", async () => {
+  // The SIMPLEST shape the criterion names: two non-stale iterations in the SAME boot each
+  // reach the gate — `checkStop` fires only once TWO sweeps have already been observed, so a
+  // regression that re-introduces a once-per-boot gate (e.g. a stray early return) fails this
+  // by never reaching the second one.
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  let sweeps = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-sweep-retrigger-iterations-"));
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: async (id) => {
+      merged.add(id);
+      return okResult(id);
+    },
+    sweep: async () => {
+      sweeps += 1;
+    },
+    checkStop: () => (sweeps >= 2 ? (requestStop(root, "two sweeps observed across two iterations"), stopDetail(root)) : undefined),
+    sleep: async () => {},
+  });
+  assert.ok(sweeps >= 2, `expected the full sweep to run more than once across this boot (saw ${sweeps})`);
+  assert.notEqual(s.stopReason, "error");
+});
+
+test("W1-T1272: a long-held dispatch re-triggers the full sweep more than once without waiting for the iteration to end", async () => {
+  // THE RE-TRIGGER, specifically: ONE single `runOne` call held open (the "a task can hold the
+  // daemon inside one call for a whole session" shape design (ii) names) — no second top-of-
+  // iteration pass happens until this one settles, so the ONLY way a second sweep can happen
+  // during it is the mid-flight retrigger inside the dispatch ticker, never the once-per-
+  // iteration call site.
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  let sweepCalls = 0;
+  let nowMs = 0;
+  let ticks = 0;
+  let releaseRunOne: (() => void) | undefined;
+  const runOneGate = new Promise<void>((resolve) => {
+    releaseRunOne = resolve;
+  });
+  const sleep: DaemonDeps["sleep"] = async () => {
+    ticks++;
+    nowMs += 10;
+    if (ticks >= 20) releaseRunOne?.();
+  };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        await runOneGate;
+        merged.add(id);
+        return okResult(id);
+      },
+      sweep: async () => {
+        sweepCalls += 1;
+      },
+      sweepLight: async () => {},
+      now: () => new Date(nowMs),
+      sleep,
+    },
+    { max: 1, sweepRetriggerIntervalMs: 5 },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  assert.deepEqual(s.merged, ["A"]);
+  // 1 (the once-per-iteration call before dispatch began) + at least 1 retrigger while `runOne`
+  // was held open — a regression that dropped the retrigger, or gated it on the top-of-iteration
+  // call site instead of the ticker, leaves this at exactly 1.
+  assert.ok(sweepCalls > 1, `expected more than one full sweep during this one long-held dispatch (saw ${sweepCalls})`);
+});
+
+test("W1-T1272: an over-running sweep is still abandoned when reached from the stale branch", async () => {
+  const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const root = mkdtempSync(join(tmpdir(), "daemon-sweep-retrigger-bound-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let sweepStarted = false;
+  const s = await runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async () => {
+        throw new Error("FALSIFIER: dispatch must never be reached once freshness is stale");
+      },
+      checkFreshness: () => ({ stale: true, oldSha: "aaaaaaa1111111111111111111111111111111", newSha: "bbbbbbb2222222222222222222222222222222" }),
+      // Never resolves — the measured incident's own shape, reused here against the NEW
+      // stale-branch call site rather than only the pre-existing once-per-iteration one.
+      sweep: () => {
+        sweepStarted = true;
+        return new Promise<void>(() => {});
+      },
+      sleep: REAL_SLEEP,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { pollIntervalMs: 30, sweepWallClockBoundMs: 20 },
+  );
+  assert.ok(sweepStarted, "the sweep genuinely started from the stale branch");
+  assert.equal(s.stopReason, "stale", "the bound firing does not change WHY the boot ended");
+  const abandoned = lines.find((l) => l.step === "daemon.sweep.abandoned");
+  assert.ok(abandoned, `expected daemon.sweep.abandoned, saw steps: ${lines.map((l) => l.step).join(", ")}`);
+  assert.equal(abandoned!.extra.bound_ms, 20);
+  void root;
+});
+
+test("W1-T1272: the sweep still runs one at a time and no additional lane is taken", async () => {
+  // Concurrency guard: across the once-per-iteration call AND every mid-flight retrigger, at
+  // most ONE `deps.sweep()` may be in flight at any instant, and `runOne` is still called
+  // exactly once for the one admitted task — the retrigger must never widen `laneCount`/
+  // `dispatchLanes` or race a second sweep against the first (design (i)/(v)).
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let sweepCalls = 0;
+  let runOneCalls = 0;
+  let nowMs = 0;
+  let ticks = 0;
+  let releaseRunOne: (() => void) | undefined;
+  const runOneGate = new Promise<void>((resolve) => {
+    releaseRunOne = resolve;
+  });
+  const sleep: DaemonDeps["sleep"] = async () => {
+    ticks++;
+    nowMs += 10;
+    if (ticks >= 20) releaseRunOne?.();
+  };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        runOneCalls += 1;
+        await runOneGate;
+        merged.add(id);
+        return okResult(id);
+      },
+      sweep: async () => {
+        sweepCalls += 1;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // A microtask-only gap (never a real timer — this suite's `sleep`/`now` are a fake,
+        // always-resolves-immediately clock, and racing a real `setTimeout` against a tight
+        // microtask loop elsewhere can starve the timer phase indefinitely). Yielding via an
+        // already-resolved promise is enough to surface a genuine overlap: a caller that ever
+        // invoked a second `deps.sweep()` without awaiting the first would run its own
+        // increment while this one is still suspended here.
+        await Promise.resolve();
+        inFlight -= 1;
+      },
+      sweepLight: async () => {},
+      now: () => new Date(nowMs),
+      sleep,
+    },
+    { max: 1, sweepRetriggerIntervalMs: 5 },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  assert.ok(sweepCalls > 1, `expected the retrigger to have fired at least once (saw ${sweepCalls} sweep calls)`);
+  assert.equal(maxInFlight, 1, "no two `deps.sweep()` calls ever overlapped");
+  assert.equal(runOneCalls, 1, "exactly one dispatch lane ran — the retrigger never widened laneCount/dispatchLanes");
+});
+
 test("W1-T463: DaemonOpts still carries exactly ONE lane-sizing knob (laneCount, dispatch-only) — no second, per-kind budget was introduced", () => {
   const start = daemonSrc.indexOf("export interface DaemonOpts {");
   assert.ok(start >= 0, "DaemonOpts must still exist verbatim");
