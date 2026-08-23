@@ -67,6 +67,45 @@
 
     **A SHALLOW CLONE WOULD HAVE MADE PATH (3) A FALSE NEGATIVE WITH A PASSING CONTROL** — a lane hit
     exactly that on this subject today. This clone was confirmed unshallow before any history query.
+
+    **CORRECTION, 2026-08-23 — THIS SHARD'S CENTRAL FACTUAL CLAIM WAS WRONG AND IS CORRECTED HERE
+    RATHER THAN DEFENDED. THE DOCUMENT SURVIVES.** A FIFTH PATH WAS NEVER CHECKED AND HAS IT: THE
+    ORIGINAL AUTHORING WORKING TREE, persisted in a sandbox container at `/home/user/remudero`.
+    OPERATOR-MEASURED 2026-08-23: `state/research-laws-and-gaps-2026-08-05.md`, **21,665 bytes, 264
+    lines, sha256 `91eadd510897f655f7ece805a3054fb7648c2f76f3546d55bbd0e55fe146f673`, mtime
+    2026-08-06T01:11:37Z**, with three siblings from the same directory —
+    `recon-guard-complements.md` (14,152, `ba67deb3…`), `recon-open-failing-composition.md` (10,088,
+    `a77d9876…`) and `recon-proof-survey.md` (9,077, `c575cf41…`), the last cited by nothing.
+
+    **NONE OF THAT IS RE-DERIVED HERE, AND THE PROVENANCE IS THE POINT.** The lane writing this
+    correction searched its own container and then the whole filesystem (`find / -xdev`) for those
+    names and for any `*/state/*.md`, with a positive control proving the search could see a file it
+    knew existed. Both returned nothing. The recovering container is not the one this ran in and
+    cannot be inspected from it, so these figures carry the operator's provenance exactly as paths
+    (1), (2) and (4) above already do.
+
+    **WHY THE FOUR PATHS WERE INSUFFICIENT RATHER THAN WRONG.** Each was correctly measured and none
+    is withdrawn. All four shared ONE ASSUMPTION: that a surviving copy would be found on a host or
+    in git. **AN IGNORED, UNTRACKED FILE CANNOT ARRIVE BY CLONE**, so the only place it could survive
+    was a working tree that had existed CONTINUOUSLY since the file was written — a category no
+    clone, no host inspection and no object walk can reach. The mtimes are what prove that lineage:
+    the state file at 2026-08-06 against tracked files at 2026-08-16, in one tree.
+
+    **AND WHAT DOES NOT CHANGE.** Re-derived on this branch: **31 distinct `state/*.md` paths are
+    cited across the tracked tree, and 0 of them resolve in a fresh clone.** Three of the four
+    recovered files are cited (`research-laws-and-gaps`, `recon-guard-complements`,
+    `recon-open-failing-composition`); `recon-proof-survey.md` is cited by NOTHING, measured at 0.
+    So **3 of 31 now resolve and 28 do not.** The placement defect and its cost are unaltered.
+    **RECOVERY BY ACCIDENT IS NOT A REMEDY** — the document survived by luck, in an environment the
+    operator does not control and cannot inspect, and W1-T1263 still owns the prevention. This shard
+    is not withdrawn and its finding is not softened.
+
+    **AND THE VOCABULARY CLAIM IS CORRECTED WHERE THE RECOVERED TEXT CONTRADICTS IT.** This shard
+    records Law 5's text as surviving nowhere. **IT SURVIVES IN THE RECOVERED FILE, WHICH STATES
+    IT:** "RECORDS LAUNDER AUTHORITY UNLESS THE AUTHOR CLASS RIDES THE RECORD." Quoted exactly, from
+    the operator's reading, and not paraphrased. **THE CIRCULARITY FINDING IS UNAFFECTED AND GETS
+    SHARPER:** `W1-T1259` still quotes `rule-efficacy.ts` as "LAW 5, IN THE VERB'S OWN WORDS" when a
+    real statement of the law existed the whole time in a file nothing in the tree could open.
   design: |
     (i) **Q1 — THE REMEDY IS NOT "WRITE THE LAWS DOCUMENT", AND THE EVIDENCE DECIDES BETWEEN THE TWO
     THAT REMAIN.**
