@@ -4361,12 +4361,13 @@ export async function runSweep(
   // known before the loop runs, and `sweep.summary`'s own `total` already carries it for any pass
   // that completes. The pair — this row present, a summary absent — is the mid-pass-death signal.
   //
-  // NOT REGISTERED in DECISION_RELEVANT_LEDGER_STEPS or RENDER_RELEVANT_LEDGER_STEPS, deliberately:
-  // nothing reads it yet (the consumer is out of scope here, one concern), and the decision set is
-  // the NEVER-ROTATED core, so registering an unread step there would keep it forever for no
-  // reader. It rotates like any other diagnostic row until a consumer exists; the change that
-  // builds that consumer registers it then, in the same PR, which is the discipline
-  // `test/ledger-rotation.test.ts` enforces.
+  // REGISTERED in RENDER_RELEVANT_LEDGER_STEPS (ledger.ts), NOT DECISION_RELEVANT_LEDGER_STEPS: the
+  // decision set is the NEVER-ROTATED core, and this row is recency-bounded like the rest of that
+  // render-relevant category, so it rotates on that window rather than being kept forever. The
+  // reader is `judgeSweepLiveness`, the `sweep-liveness` arm in `src/lib/doctor.ts` (W1-T1236),
+  // which pairs this row with the `sweep.summary` that should follow it, by time order, to detect a
+  // pass that died mid-loop. The registration that made this row render-relevant landed in W1-T1237,
+  // which is the discipline `test/ledger-rotation.test.ts` enforces.
 
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
