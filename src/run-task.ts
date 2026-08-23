@@ -16991,7 +16991,9 @@ async function deployCommand(rest: string[]): Promise<number> {
   requestDeploy(config.root, flagValue(rest, "--reason"));
   console.log(
     `### rmd deploy — requested (state/DEPLOY_REQUESTED). The supervisor will fast-forward + ` +
-      `kickstart the daemon at the next idle gap, health-check it, and roll back on failure.`,
+      `kickstart the daemon at the next idle gap, health-check it, and roll back on failure. If ` +
+      `the fleet is already on origin/main, there is nothing to fast-forward and the supervisor ` +
+      `consumes the request without a deploy.`,
   );
   return 0;
 }

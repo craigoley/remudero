@@ -82,6 +82,16 @@ export interface TriggerInputs {
 export interface Decision {
   deploy: boolean;
   reason: string;
+  /**
+   * Set ONLY on the `up-to-date` skip (never re-derived from `reason` — the two up-to-date
+   * wordings at `:157-158` differ by exactly this fact, and string-matching English is the shape
+   * that breaks the next time the sentence is edited). `true` iff the checkout already matches
+   * origin/main AND the running daemon's liveness was OBSERVED alive: a request satisfied by that
+   * fleet state is done and safe to consume. Liveness unobserved (`false` or `undefined`) leaves
+   * this `undefined` — a dead-or-unknown daemon under, say, a STOP marker must not have an
+   * operator's request silently discarded out from under it; see runDeployCycle's skip branch.
+   */
+  satisfied?: boolean;
 }
 
 /**
@@ -156,6 +166,10 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
         i.daemonAlive === true
           ? "up-to-date (install HEAD == origin/main, daemon alive and running it)"
           : "up-to-date (install HEAD == origin/main; daemon liveness not observed)",
+      // Only `daemonAlive === true` counts as OBSERVED — `false`/`undefined` both mean "not
+      // observed" (see the reason wording above) and must not consume a request out from under a
+      // fleet that might not even be running.
+      satisfied: i.daemonAlive === true ? true : undefined,
     };
   }
   if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}` };
@@ -661,8 +675,9 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   const origin = deps.originMain();
   const ceilingMs = opts.idleDeferCeilingMs ?? DEPLOY_IDLE_DEFER_CEILING_MS;
 
+  const markerWasPresent = deps.markerPresent();
   const decision = decideDeployTrigger({
-    markerPresent: deps.markerPresent(),
+    markerPresent: markerWasPresent,
     autoMode: deps.autoMode(),
     installHead: fromHead,
     originMain: origin,
@@ -674,7 +689,21 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   });
   if (!decision.deploy) {
     deps.clearDeferredSince?.(); // nothing being deferred — no active deploy attempt
-    deps.log("deploy.skip", { reason: decision.reason, install: short(fromHead), origin: short(origin) });
+    // W1-T1239: the `up-to-date` skip is the one outcome no later tick will ever revisit — a
+    // request it satisfies must be CONSUMED here (via the existing clearMarker(), never a new
+    // writer) or it strands as a level trigger that pre-authorises the next deploy (decideDeployTrigger
+    // :161, `markerPresent` — above the auto-mode arms). Every OTHER skip (dirty tree, not-idle,
+    // dry-run — none of which reach this branch; and the human-gated/already-failed skips below,
+    // which never see a marker here because :161 already claimed it) must leave the marker exactly
+    // as it found it, which is why this is gated on `decision.satisfied`, DATA from
+    // decideDeployTrigger, rather than re-derived by matching `reason` text.
+    const request: "consumed" | "retained" | "none" = !markerWasPresent
+      ? "none"
+      : decision.satisfied
+        ? "consumed"
+        : "retained";
+    if (request === "consumed") deps.clearMarker();
+    deps.log("deploy.skip", { reason: decision.reason, install: short(fromHead), origin: short(origin), request });
     return { deployed: false, reason: decision.reason, fromHead };
   }
 
