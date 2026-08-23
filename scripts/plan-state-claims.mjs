@@ -31,9 +31,17 @@
 // re-scanning for the same not-shipped vocabulary next to the id's text — a display-only lookup,
 // never a second membership decision.
 //
-// A POSITIVE CONTROL: an empty examined set on EITHER side (zero shipped-log ids, or zero
-// not-shipped ids) exits non-zero as UNEXAMINED, distinct from a clean "0 contradictions" pass —
-// the runner's natural failure mode is matching nothing, which must never render as a clean result.
+// A POSITIVE CONTROL, ONE PER SIDE, ON THE FACT THAT DISTINGUISHES A BROKEN SCAN FROM AN HONEST
+// EMPTY RESULT (W1-T1232): the shipped-log side has no "read but bound nothing" state, so
+// `shippedExamined === 0` still exits non-zero as UNEXAMINED unconditionally. The not-shipped side
+// reuses `extractAssertedUnbuiltTaskIds`'s `examinedLines` (phrase-bearing lines READ, whether or
+// not a task id bound) rather than the bound-id count: `notShippedLinesExamined === 0` means the
+// phrase extractor matched nothing anywhere in the document — a suspect scan (renamed vocabulary,
+// encoding fault) — and still exits UNEXAMINED. A region the extractor READ but bound no id in
+// (every phrase-bearing clause named a proposal or nothing) is an honest absence, not a broken
+// scan, and is reported OK — see MASTER-PLAN.md's rule 9, which tells an author to DELETE a
+// corrected id from this region rather than annotate it, and which this distinction exists to
+// keep from tripping the gate. The rendered report names the phrase-bearing line count either way.
 //
 // Usage:
 //   node --import tsx scripts/plan-state-claims.mjs [--master-plan MASTER-PLAN.md] [--plan plan/tasks.yaml]
@@ -150,13 +158,16 @@ export function firstNotShippedLine(masterPlanMd, id) {
  * The gate's whole decision: every SHIPPED-log id (both notations, short-form resolved against
  * `knownIds`) crossed against every not-shipped id (reused from W1-T410's
  * `extractAssertedUnbuiltTaskIds`). `contradictions` names each id found on both sides, with a
- * citation line from each side (design (iv)). `shippedExamined`/`notShippedExamined` are the
- * positive control's two counts (design (iii)) — both must be nonzero for a scan to count as
- * having examined anything at all.
+ * citation line from each side (design (iv)). `shippedExamined` and `notShippedLinesExamined` are
+ * the positive control's two counts (design (iii)) — both must be nonzero for a scan to count as
+ * having examined anything at all (W1-T1232: the not-shipped side's control is the PHRASE-LINE
+ * count, not the bound-id count — see the module doc). `notShippedExamined` is the bound-id count,
+ * carried through separately so the report can still say how many ids it found.
  */
 export function checkPlanStateConsistency(masterPlanMd, knownIds) {
   const shipped = extractShippedLogIds(masterPlanMd, knownIds);
-  const { ids: notShippedIds } = extractAssertedUnbuiltTaskIds(masterPlanMd);
+  const { ids: notShippedIds, examinedLines: notShippedLinesExamined } =
+    extractAssertedUnbuiltTaskIds(masterPlanMd);
   const notShippedSet = new Set(notShippedIds);
 
   const contradictions = [];
@@ -175,6 +186,7 @@ export function checkPlanStateConsistency(masterPlanMd, knownIds) {
   return {
     shippedExamined: shipped.size,
     notShippedExamined: notShippedSet.size,
+    notShippedLinesExamined,
     contradictions,
   };
 }
@@ -182,18 +194,24 @@ export function checkPlanStateConsistency(masterPlanMd, knownIds) {
 /** Render {@link checkPlanStateConsistency}'s result as the CLI's human-readable report. Three
  *  DISTINCT shapes (design (iii)): UNEXAMINED never reads like OK, and OK never reads like a
  *  contradiction report -- "zero contradictions found and zero claims examined must never print
- *  the same text". */
+ *  the same text". UNEXAMINED fires on `shippedExamined === 0` (unchanged) or
+ *  `notShippedLinesExamined === 0` (W1-T1232: no not-shipped-phrase-bearing line was read at all --
+ *  a broken scan) -- NEVER on `notShippedExamined === 0` alone, which just means every
+ *  phrase-bearing line that WAS read bound a proposal or nothing, an honest empty result. All
+ *  three shapes name the phrase-bearing line count so a reader can tell which case fired. */
 export function renderReport(result) {
-  const { shippedExamined, notShippedExamined, contradictions } = result;
-  if (shippedExamined === 0 || notShippedExamined === 0) {
+  const { shippedExamined, notShippedExamined, notShippedLinesExamined, contradictions } = result;
+  if (shippedExamined === 0 || notShippedLinesExamined === 0) {
     return (
       `plan-state-claims: UNEXAMINED -- ${shippedExamined} shipped-log id(s) examined, ` +
+      `${notShippedLinesExamined} not-shipped-phrase-bearing line(s) read, ` +
       `${notShippedExamined} not-shipped id(s) examined -- an empty scan is not a clean result.`
     );
   }
   if (contradictions.length === 0) {
     return (
       `plan-state-claims: OK -- ${shippedExamined} shipped-log id(s) examined, ` +
+      `${notShippedLinesExamined} not-shipped-phrase-bearing line(s) read, ` +
       `${notShippedExamined} not-shipped id(s) examined, 0 contradiction(s).`
     );
   }
@@ -209,7 +227,10 @@ export function renderReport(result) {
     );
   }
   lines.push("");
-  lines.push(`(examined ${shippedExamined} shipped-log id(s), ${notShippedExamined} not-shipped id(s))`);
+  lines.push(
+    `(examined ${shippedExamined} shipped-log id(s), ${notShippedLinesExamined} ` +
+      `not-shipped-phrase-bearing line(s) read, ${notShippedExamined} not-shipped id(s))`,
+  );
   return lines.join("\n");
 }
 
@@ -248,7 +269,11 @@ function main(argv) {
   // mode to catch.
   const result = checkPlanStateConsistency(masterPlanMd, knownIds);
   const report = renderReport(result);
-  if (result.shippedExamined === 0 || result.notShippedExamined === 0 || result.contradictions.length > 0) {
+  if (
+    result.shippedExamined === 0 ||
+    result.notShippedLinesExamined === 0 ||
+    result.contradictions.length > 0
+  ) {
     console.error(report);
     process.exitCode = 1;
     return;
