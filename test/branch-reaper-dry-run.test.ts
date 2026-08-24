@@ -109,6 +109,12 @@ test("the dry run issues NO delete call of any kind", () => {
     if (args[0] === "ls-remote") return "abc123\trefs/heads/main\ndef456\trefs/heads/stale-one\n";
     if (args[0] === "merge-base") return ""; // ancestor: succeeds
     if (args[0] === "rev-parse") return "def4567890\n";
+    // The reverse-drift citation scan (W1-T2226) uses `-o`; the forward per-branch check below
+    // doesn't. Answer it as "every declared name is cited outside the declaration block" so this
+    // test's synthetic "nothing is named in source" world stays about the FORWARD direction only.
+    if (args[0] === "grep" && args.includes("-o")) {
+      return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
+    }
     if (args[0] === "grep") throw new Error("exit 1: no match");
     if (cmd === "gh") return "[]";
     return "";
@@ -183,6 +189,11 @@ test("a FAILED PR read makes every branch read OPEN — never 'no PR' (W1-T119)"
     if (args[0] === "ls-remote") return "a1\trefs/heads/main\nb2\trefs/heads/would-be-deletable\n";
     if (cmd === "gh") throw new Error("gh: API rate limit exceeded");
     if (args[0] === "merge-base") return ""; // ancestor — would be deletable if PR state said none
+    // See the sibling test above: `-o` is the reverse-drift citation scan (W1-T2226), answered as
+    // fully cited so this test stays about the forward PR-read-failure direction only.
+    if (args[0] === "grep" && args.includes("-o")) {
+      return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
+    }
     if (args[0] === "grep") throw new Error("exit 1");
     if (args[0] === "rev-parse") return "b2b2b2\n";
     return "";
