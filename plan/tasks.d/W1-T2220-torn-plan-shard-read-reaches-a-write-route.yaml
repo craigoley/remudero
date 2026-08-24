@@ -1,0 +1,197 @@
+- id: W1-T2220
+  title: "A TORN READ OF A PLAN SHARD PARSES AS A VALID RECORD WITH ITS LATE FIELDS DEFAULTED, ON FIVE PER-REQUEST ROUTES ONE OF WHICH IS WRITE-SCOPED — `loadPlan` cannot tell a whole file from a prefix of one, and the ENOENT guard covers the rarer third of the race"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    RE-DERIVED 2026-08-24 in a scratch worktree proven at `origin/main` f0159242 before any reading;
+    the clone was checked and already full (2,106 commits), and the ledger union gate ran FIRST:
+    archiveCount 23, ok true, unread 0, with the control `"step":"risk_judge.decision"` reading 172.
+    THE EXPERIMENTAL FIGURES BELOW WERE RE-RUN IN THIS SESSION, NOT CARRIED — where a re-run
+    disagrees with the figure it was handed, BOTH are recorded.
+
+    (1) THE RACE, RE-DERIVED FROM SOURCE. `docker inspect` shows both `remudero-daemon` and
+    `remudero-serve` binding `/home/craigoleyagent/rmd-state2` to `/home/node/Remudero`. The
+    entrypoint sets `TREE="$CONFIG_ROOT/remudero"` and `cd "$TREE"` (:420), so both processes run
+    from ONE working tree. `checkout_target` does `git checkout --detach "$TARGET"` (:271), reached
+    at boot (:389) AND from the supervisor loop on every freshness restart (:625) — the second
+    path re-syncs the tree INSIDE a running container and never touches `rmd serve`. MEASURED:
+    `daemon.start` fired 27 times on 2026-08-23 with ZERO `serve.start` that day.
+
+    (2) `git checkout` WRITES BY TRUNCATE-IN-PLACE, AND THE TORN WINDOW IS REAL. RE-RUN HERE over
+    80 real `git checkout --detach` cycles against a 2 MB tracked file: 245,356 reads — 1,545 TORN,
+    188 zero-length, 229 ENOENT, i.e. 1,962 not-the-file (0.800%), with TORN OUTNUMBERING ENOENT
+    6.7 : 1. The figure this task was handed, from an earlier run of the same experiment, was
+    215,774 reads / 1,106 torn / 13 zero / 248 ENOENT (0.634%, 4.5 : 1). TWO INDEPENDENT RUNS,
+    DIFFERENT RATIOS, SAME DIRECTION: torn dominates ENOENT by between four and seven to one.
+
+    (3) AND THE GUARD COVERS THE RARER CASE. `plan.ts`'s shard loop skips ENOENT ONLY and rethrows
+    every other errno, with its own comment naming the cause — "a filing or a `git checkout` can
+    remove a shard mid-read". The repo already knows the hazard. Its provenance is still on the
+    remote: `origin/fix/loadplan-enoent-shard-race`, `fix(plan): skip a shard that vanished between
+    listing and reading`, 2026-08-15, now 720 commits behind main — the change landed, and nothing
+    since has addressed the torn half. A torn read raises NO error at all, so it never reaches that
+    catch.
+
+    (4) SILENT PARSE, RE-RUN. 60 real shards cut at six fractions: 299 of 360 PARSED and only 61
+    THREW — 83.1% silent, reproducing the handed figure exactly. WHAT THE SILENT ONES LOSE, which
+    the handed figure did not say: `acceptance` was emptied in 158 of the 299 and `files` in 144,
+    while `status` still read `queued` in all 299 — because an absent field DEFAULTS rather than
+    failing. A shard at 10% yields a real id, `status: queued`, no acceptance criteria and no
+    declared files, against a whole-file record carrying eight criteria and four paths.
+
+    (5) THE HANDED SEVERITY MECHANISM IS FALSIFIED, AND THAT IS RECORDED RATHER THAN QUIETLY
+    DROPPED. The brief's claim is that losing a `depends_on` line can only move a proposal toward
+    ready. MEASURED AGAINST THE WHOLE POPULATION THAT COULD SHOW IT: 56 of 535 shards declare a
+    non-empty `depends_on`; across 280 truncated parses of exactly those 56, 114 parsed, 166 threw,
+    and `depends_on` was emptied ZERO times. The reason is field order — `depends_on` is the fourth
+    key, ahead of the `rationale`/`design` blocks that are most of the file, so any cut deep enough
+    to leave a parseable record still carries it. THE PERMISSIVE-VIA-`depends_on` PATH IS NOT REAL.
+
+    (6) AND THE TWO OBVIOUS DAMAGE PATHS ARE BOTH SAFE, MEASURED. An id absent from the merged plan
+    fails `unmetDependencies`'s `!d` branch (`plan.ts`) and counts as UNMET — not ready, the safe
+    direction. A torn `plan/tasks.yaml` throws `PlanError`, and the dispatcher catches it
+    (`service.ts`), ledgers `service.error` and returns HTTP 500 — loud, recorded, and it does not
+    approve anything. `PlanError` is caught in exactly one other place in `panel-graph.ts`, which
+    is the fragment parser, not any of the five route loads.
+
+    (7) SO WHAT IS ACTUALLY EXPOSED IS THE RENDER, AND ONE UNMEASURED WRITE-SIDE CANDIDATE. The
+    proven damage is a WRONG RECORD SHOWN TO A HUMAN: `/v1/plan/view` and `/v1/trace` can render a
+    task with its acceptance criteria and declared files silently emptied. The remaining write-side
+    candidate is `blockingLintMessages` (`inbox.ts`), which merges the proposal fragment into the
+    base plan and collects only BLOCK-severity violations: a base plan missing tasks can produce
+    FEWER blocking messages than the true plan would, which is the permissive direction. THIS IS
+    REASONED FROM SOURCE AND NOT MEASURED — it is written down as the hypothesis to falsify first,
+    not as a finding.
+
+    (8) THE WRITE ROUTE IS REAL EVEN SO. `POST /v1/inbox/approve` (`panel-graph.ts`) is
+    `scope: "write"`, W1-T404 tier HIGH — "moves code" — and gates solely on
+    `classification.state === "ready"` before calling `deps.ratify.approve(...)`, a detached spawn.
+    Its gate input comes from `classifyAllProposals`, which calls `loadPlan(deps.planPath)` on the
+    request path. So a HIGH-tier gate reads through an unguarded surface whose content is
+    non-deterministic while a checkout is landing, whether or not the flip in (7) turns out to be
+    reachable.
+
+    (9) NO RECORDED INSTANCE EXISTS. Serve writes no per-route read line, the ENOENT skip logs
+    nothing, and a silently-truncated parse is unlogged by construction. The mechanism is proven,
+    reachable and quantified; nothing here should imply it has fired. MEASURED, AND IT SHARPENS
+    THAT LIMIT RATHER THAN SOFTENING IT: the LOUD half would be recorded, and it reads zero —
+    `"step":"service.error"` is 0 across the union and `cannot read plan file|shard` is 0, against
+    a control of 9 `"step":"service.unauthorized"` rows proving `service.*` reaches this ledger and
+    3 `duplicate task id` rows proving `PlanError` text does land in it. So the loud failure has
+    never fired, and the silent one cannot be seen from the ledger at all.
+
+    (10) THE BUILD-SHA DIVERGENCE IS CONTEXT, NOT THE DEFECT, AND IS RECORDED SEPARATELY. One serve
+    process ran 38 hours (2026-08-22T21:42:33 to 2026-08-24T11:40:35) while `daemon.start` fired 27
+    times on 08-23 alone; the tree took 148 commits and 59 added shards, so the board rendered a
+    471-shard boot snapshot while the lazy routes read a plan that grew to 530. `consoleSha` IS THE
+    FIELD WORKING, NOT FAILING — it is captured once at route-build and closed over deliberately as
+    the operator's staleness check, and `git rev-list -1 --before=2026-08-24T11:40:35Z origin/main`
+    resolves to exactly the sha the console displayed. This task does not change it.
+  design: |
+    ONE CONCERN: a partial read of a plan file must not become a trusted record. Not the lazy read,
+    not the shared tree, not the checkout cadence.
+
+    (i) THE DEFECT IS THE MISSING INTEGRITY BOUNDARY, NOT THE LAZY READ. The per-request load is
+    DELIBERATE AND COMMENTED (`run-task.ts`: panel-graph reloads the plan fresh every request,
+    "planPath alone is enough, no snapshot needed here the way board.ts's does"), and it is what
+    keeps the console current against a tree the daemon moves. Freezing it would trade a rare wrong
+    record for a permanently stale one. What is missing is that `loadPlan` cannot distinguish a
+    whole file from a prefix of one: YAML that stops early is still valid YAML, and every field
+    after the cut DEFAULTS instead of failing. That is the thing to close.
+
+    (ii) DO NOT WIDEN THE ENOENT SKIP INTO A CATCH-ALL. Its own comment forbids it in as many
+    words — EACCES/EIO/EISDIR mean the shard is there and unreadable, "which is exactly the
+    corruption this guard must not hide" — and a torn read throws nothing anyway, so widening the
+    catch would not even reach this case. The guard stays byte-identical.
+
+    (iii) THE THREE CANDIDATE REMEDIES, COSTED. (a) RETRY ON A SHORT READ: cheapest, but it needs a
+    definition of "short" that `loadPlan` does not have — there is no expected length, so the only
+    honest trigger is a stat/read/stat size disagreement, which detects the common case and misses
+    a same-length rewrite. (b) CONTENT-INTEGRITY CHECK BEFORE A RECORD IS TRUSTED: requires the
+    file to carry or imply its own completeness. A structural end-marker check is weak; comparing
+    the read against a re-stat'd size is the same test as (a) one layer up. Cost is one extra stat
+    per shard, times 535 shards, per request. (c) READ THE PLAN FROM GIT OBJECTS RATHER THAN THE
+    WORKING TREE: `git show <ref>:<path>` is atomic against a concurrent checkout by construction —
+    objects are immutable and content-addressed — and it is the discipline this repo already uses
+    for files over the contents-API cap. Cost is that it reads a COMMITTED plan, so an uncommitted
+    working-tree edit becomes invisible, and it spends a subprocess per read unless batched.
+
+    (iv) WHAT A WRITE ROUTE SPECIFICALLY NEEDS, AND IT IS NOT THE SAME AS A RENDER. A render can
+    afford (a): a retry that occasionally still shows a defaulted field is strictly better than
+    today and costs nothing when no checkout is landing. A GATE CANNOT — `POST /v1/inbox/approve`
+    is tier HIGH and irreversible in the direction that matters, so it needs (c): a plan read that
+    CANNOT be partial, not one that is usually not partial. Splitting the remedy by call site is
+    the point of this task; a single mechanism for all five routes either over-pays for four or
+    under-protects the fifth.
+
+    (v) WHAT MUST NOT CHANGE, PINNED BY CRITERIA. The shared `state/` dir STAYS — it is outside git,
+    survives every checkout, and is exactly why `state/PAUSE` and the daily-cost-ceiling override
+    live there. THE CONSOLE DOES NOT GET ITS OWN CHECKOUT — that costs the currency the lazy read
+    exists for and revives the hand-cloned-and-went-stale failure the entrypoint's own header says
+    it ended. `consoleSha` STAYS BOOT-CAPTURED — it is the only thing on the page that told the
+    operator the truth.
+
+    (vi) NOT IN SCOPE, NAMED: the checkout cadence and the freshness-restart loop; giving serve its
+    own tree or its own container; the board's boot-time snapshot; the 38-hour divergence of (10),
+    which is context; and W1-T404's tier table, which is only READ here.
+  acceptance:
+    - claim: "a plan file read short is refused rather than parsed into a record with defaulted fields"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+    - claim: "a shard that vanished between listing and reading is still skipped, and every other errno still throws"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+    - claim: "the write-scoped approve gate reads a plan that cannot have been partial"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+    - claim: "a complete plan on a quiet tree loads byte-for-byte as it does today"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+    - claim: "an uncommitted working-tree edit is either still visible or its invisibility is stated, never silent"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+  files: [src/lib/plan.ts, test/main-plan-load-guard.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#torn-plan-shard-read-reaches-a-write-route-2026-08-24"
+  plan_refs: ["W1-T404", "W1-T2212"]
+  note: |
+    THE HANDED SEVERITY CLAIM WAS TESTED AND FAILED, AND THE FAILURE IS THE MORE USEFUL RESULT.
+    Rationale (5): `depends_on` is emptied in ZERO of 280 truncated parses across all 56 shards that
+    declare one, because it sits ahead of the long prose blocks. The task is filed anyway because
+    the surface is real and the fields that ARE destroyed — `acceptance` in 158 of 299, `files` in
+    144 — are the ones a human reads. Filing it under the original mechanism would have made the
+    first builder chase a path that does not exist.
+
+    `risk: high` IS RULE 19'S SPAN, NOT A SEVERITY CLAIM. `files:` names two stems and the likely
+    diff is small, but the band is honest for a different reason: the wrong remedy here HIDES REAL
+    CORRUPTION, which is the failure design (ii) exists to forbid, and remedy (c) changes which
+    commit the plan comes from — a semantic change to every one of the five routes.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/main-plan-load-guard.test.ts`, which is declared in `files:` and already
+    exists.
+
+    THE ID WAS RESERVED AND CONFIRMED UNUSED. `refs/rmd-id/W1-T2220` resolves to
+    `f0de03147a443f6f2e8f0c74162422d44c6546a8` against a namespace of 339 refs. EIGHT SURFACES WERE
+    SWEPT AND EVERY ONE CARRIED A CONTROL THAT FIRES: shard filenames 0 against W1-T2211 at 1 (535
+    shards); plan `- id:` lines 0 against W1-T2211 at 1; the reservation, which is the pre-mint;
+    merged trailers 0 against `Remudero-Task: W1-T2201` at 1, with 467 trailer-carrying commits;
+    merged subject credit 0 against W1-T2211 at 2; live head-branch names 0 against the `run-*` and
+    `plan/*` namespaces at 86 and 25 of 135; branch-tip subjects 0 against W1-T2216 at 1; and
+    branch changed-file paths 0 against W1-T2216 at 1.
+
+    TWO SURFACES ARE BRANCH-DERIVED SUBSTITUTES AND THAT IS DISCLOSED. The REST `pulls` endpoint
+    returned HTTP 403 under a SECONDARY limit while `rate_limit` reported 4,958 of 5,000 core
+    remaining, so open-PR titles and file lists could not be read from the API and were measured
+    over live remote branches instead. The first control tried there, W1-T2211, READ ZERO AND WAS
+    DISQUALIFIED — its filing PR merged and its branch was deleted — and W1-T2216, whose PR is
+    open, was qualified in its place. W1-T2215 and W1-T2213 were disqualified the same way.
+
+    THE SUBJECT SWEEP FOUND ONE BRANCH ON THIS SUBJECT AND IT IS NOT COMPETING WORK.
+    `origin/fix/loadplan-enoent-shard-race` is the provenance of the ENOENT guard already on main,
+    dated 2026-08-15 and 720 commits behind. Four live branches touch the three subject files at
+    all, against a control of 44 touching any `src/` file; the other three are stale `run-*` heads.
+    At main the subject markers read: `loadPlan(deps.planPath)` in `panel-graph.ts` = 5, the ENOENT
+    skip in `plan.ts` = 1, `service.error` in `service.ts` = 2, against a control of 38 `loadPlan(`
+    call sites across `src/`.
