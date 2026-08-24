@@ -84,6 +84,58 @@
     rows above) and it has ANSWERED. This task is about what the answer revealed: the thing the
     probe observes has no owner in this tree. 1265 = we do not know. This = we know, and nobody
     owns it.
+
+    (7) THE Q1 COSTING IS INVALIDATED BY A FACT ABOUT HOW WORKERS RUN, RE-DERIVED HERE.
+    WORKERS ARE NOT SIBLING CONTAINERS. They are SDK spawns inside the daemon's OWN container:
+    `src/lib/worker.ts` imports `query` from `@anthropic-ai/claude-agent-sdk` and calls it, and the
+    string `--network` occurs ZERO times in that file and ZERO times in `settings/worker.json`
+    (controls on the same scan: `permissionMode` 2 and `allowedDomains` 2, so the query sees both
+    files). Repo-wide the ONLY `--network` is `deploy/serve-container.sh`, which starts the CONSOLE.
+    SO "THE CONTAINER's NETWORK NAMESPACE" IN DESIGN (i) IS THE DAEMON's. Restricting it restricts
+    the daemon, which legitimately needs github.com, the ACR and its own console — and A SHARED
+    NAMESPACE CANNOT DISTINGUISH WORKER TRAFFIC FROM DAEMON TRAFFIC, because there is only one set
+    of sockets. Re-costing all four against that: the SDK SANDBOX is the only option with per-worker
+    granularity at all, which raises rather than lowers its standing, since the objection to it was
+    never granularity but ownership. THE NETWORK NAMESPACE goes from "coarser than per-worker" to
+    UNABLE TO EXPRESS THE POLICY — the daemon's own allowlist is a strict superset of a worker's, so
+    any namespace rule wide enough for the daemon permits everything a worker wants. `bwrap` becomes
+    the only ownable option that can still separate the two, because it wraps a PROCESS rather than a
+    container, at the rebuild-gated cost already stated. `socat` is unchanged and still needs its own
+    verifier. The design's line "Each container has its own network namespace" is TRUE and IRRELEVANT
+    HERE: there is no worker container for it to be true of.
+
+    (8) OPERATOR RULING 1 — THE FLEET MUST BE ABLE TO OBSERVE ITS OWN OUTPUT. `remudero-serve` is a
+    FIRST-CLASS ALLOWED DESTINATION for the daemon and for every worker, not an exception carved out
+    of a deny rule. It sits on `rmd-net` at 172.18.0.3 with a DNS alias, and the daemon was attached
+    to that network at 2026-08-24T11:43Z; `http://remudero-serve:4317/` returns 401 from inside the
+    daemon, which is REACHABILITY WITHOUT A TOKEN. Those figures are the operator's own measurement
+    and are recorded as such: Docker's engine answers HTTP 500 on this workstation, so this session
+    could not re-run them. What this session DID confirm from the tree: `rmd-net` is the network
+    `deploy/serve-container.sh` attaches the console to by name, and the operator guide states the
+    container must sit on it because the tunnel resolves it by name.
+
+    (9) OPERATOR RULING 2 — READ YES, WRITE NO. Workers SEE the board and MUST NOT approve. A lane
+    that can approve can influence its own governance, which is a different and worse failure than
+    an over-wide egress rule: it is not exfiltration, it is self-ratification. THE WRITE-TOKEN
+    EXPOSURE IS FILED SEPARATELY AS W1-T404 — "one `write` grant reaches all 20 write-scoped routes"
+    — and is CITED HERE, NOT RE-FILED. This shard's boundary question is reachability; W1-T404's is
+    what a reachable credential may then do.
+
+    (10) OPERATOR RULING 3 — THE GATE CONDITION IS OBSERVABLE, NOT A JUDGEMENT. The arm STAYS
+    OBSERVATIONAL until an enforcer exists, and then gates on the probe reading `proven-holding` on a
+    run rather than on anyone's assessment that containment is ready. Design (iv)'s arithmetic is why:
+    every measured row reads `egress_contained: false`, so a gate armed before an enforcer exists
+    refuses EVERY dispatch for a boundary that has never once held. Gating on `proven-holding` cannot
+    do that — the condition is false until the enforcement actually works, and true only where it
+    demonstrably does.
+
+    (11) AND THE IRONY IS A CONSTRAINT, NOT A JOKE. Workers can reach the console TODAY *because* the
+    allowlist does not hold — `remudero-serve` is not among the four declared domains, so the only
+    reason ruling 1 is already satisfied is the very failure this shard exists to fix. WHATEVER LANDS
+    MUST PERMIT `rmd-net` DELIBERATELY. If it does not, W2's Playwright testing breaks the moment
+    containment starts working, and it breaks in the direction that reads as a test regression rather
+    than as a policy change — a boundary that begins holding looks exactly like a suite that began
+    failing.
   design: |
     ONE CONCERN: give the declared egress boundary an enforcement owner this tree can test.
 
