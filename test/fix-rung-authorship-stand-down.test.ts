@@ -24,18 +24,30 @@
  * reason escalates).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, branchAuthorshipStandDownReason, type LiveHeadResult } from "../src/run-task.js";
-import { stillRedRequiredNames, type RollupCheckEntry } from "../src/lib/sweep.js";
+import { runFixRung, branchAuthorshipStandDownReason, buildSweepEffects, type LiveHeadResult } from "../src/run-task.js";
+import { runSweep, stillRedRequiredNames, DEFAULT_SWEEP_POLICY, type OpenPrView, type RollupCheckEntry } from "../src/lib/sweep.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { readLedgerLines } from "../src/lib/status.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
 
 function result(over: Partial<WorkerResult> = {}): WorkerResult {
   return {
@@ -630,4 +642,181 @@ test("runFixRung (W1-T1278 criterion 5): the declined strike is NAMED in the led
   assert.equal(spawnCalls.length, 0, "no fix worker ran — nothing attempted a repair");
   assert.equal(updateBranchCalls.length, 0, "no branch update — the rung never resolves the conflict itself");
   assert.equal(pushCalls.length, 0, "no push — nothing was committed on the rung's behalf");
+});
+
+test("runFixRung (W1-T1278 condition B, fail-open): a THROWING readMergeFacts never manufactures a stand-down — the strike still spends, exactly as if condition B did not exist", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: noReviewYet,
+    // A ci-log dispatch (so condition B's guard — `currentMergeConflict === undefined` — holds),
+    // but the check named genuinely stays red every round: this fixture isolates condition B's
+    // OWN catch/fail-open arm from condition A, which would otherwise also have an opinion.
+    ciFailures: [{ name: "ci", logTail: "" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `s-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "red",
+      runReview: async () => noReviewYet,
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      readLiveState: async () => ({ ok: true, state: "OPEN" }),
+      // The gh outage shape: a rejected read, never a resolved `CONFLICTING`/`MEREGABLE`/`UNKNOWN`
+      // value. `fixRungStandDownReason`'s own catch around this call must swallow it and treat the
+      // strike exactly as though `mergeConflictCheck` had never been wired at all.
+      readMergeFacts: async () => {
+        throw new Error("gh api rate-limited");
+      },
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "the ONE strike this strikeCap allows is spent — an unreadable merge-facts read never declines it");
+  assert.equal(outcome.outcome, "escalated", "strikeCap=1 exhausts after that ONE strike, exactly as condition B's own doc promises for a failed read");
+  assert.equal(outcome.strikes, 1);
+});
+
+// ── W1-T1278 (condition A) — THE REAL PRODUCTION-WIRED `readCiRollup` CLOSURE ───────────────────
+//
+// Every fixture above injects `deps.readCiRollup` by hand, which proves `stillRedRequiredNames`
+// and `fixRungStandDownReason`'s composition are correct but never exercises the REAL adapter
+// `buildSweepEffects` wires at its own `runFixRung` call site (the ONE this task actually
+// changed) — a `gh pr view <url> --json statusCheckRollup` read through the real `ghJson`
+// gateway. This drives `buildSweepEffects(...).dispatchFix` through a REAL `runSweep` call over a
+// REAL ledger file and a REAL throwaway git repo, exactly like test/fix-dedup-seed.test.ts's own
+// "reaches the worker" fixture — `gh` is a STUB shell script on PATH, never the live gateway.
+
+function ghShimForCiRollup(dir: string, headRefName: string): void {
+  writeFileSync(
+    join(dir, "gh"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
+      // THE closure under test (buildSweepEffects's own `readCiRollup`, run-task.ts) reads
+      // exactly this shape: the ONE believed-red required check ("ci") now shows a LATER
+      // attempt already IN_PROGRESS on this same head — an OBSERVED supersession, never
+      // hand-fed to a stub dep the way every fixture above drives it.
+      '  *"statusCheckRollup"*) echo \'{"statusCheckRollup":[{"name":"ci","conclusion":"IN_PROGRESS","startedAt":"2026-08-24T00:10:00Z"}]}\' ;;',
+      // The live-state preflight (dispatchFixPreflightStandDown + rung.strike's own readLiveState)
+      // and condition B's readMergeFacts both resolve an OPEN, unmerged, non-dirty PR — neither
+      // stands the strike down before condition A ever gets a turn.
+      '  *"api"*"pulls/"*) echo \'{"state":"open","merged":false}\' ;;',
+      "  *) echo '{}' ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
+function ciRollupRepoFixture(): { bare: string; root: string; bin: string; repo: string; branch: string; owner: string } {
+  const owner = "acme";
+  const repo = "w1t1278-ciroll-repo";
+  const branch = "run-W1T1278CIROLL-1786500000000";
+  const bare = mkdtempSync(join(tmpdir(), "w1t1278-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "w1t1278-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
+  writeFileSync(join(seed, "README.md"), "seed\n");
+  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "seed"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "remote", "add", "origin", bare], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "checkout", "--quiet", "-b", branch], { encoding: "utf8", env: GIT_ENV });
+  writeFileSync(join(seed, "work.txt"), "work\n");
+  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "work"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", branch], { encoding: "utf8", env: GIT_ENV });
+  rmSync(seed, { recursive: true, force: true });
+
+  const root = mkdtempSync(join(tmpdir(), "w1t1278-root-"));
+  const bin = mkdtempSync(join(tmpdir(), "w1t1278-gh-"));
+  const repoDir = join(root, "repos", repo);
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+  execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+  ghShimForCiRollup(bin, branch);
+  return { bare, root, bin, repo, branch, owner };
+}
+
+function ciRollupCandidate(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 501,
+    prUrl: "https://github.com/acme/w1t1278-ciroll-repo/pull/501",
+    reviewState: "none",
+    checksState: "red",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    headSha: "cafe0501",
+    autoMergeArmed: false,
+    ciFailures: [{ name: "ci", logTail: "tsc: error TS2322" }],
+    ...over,
+  } as OpenPrView;
+}
+
+test("runFixRung, wired via buildSweepEffects' REAL production `readCiRollup` closure (not a hand-fed stub): a fresh `gh pr view --json statusCheckRollup` read showing the believed-red check already superseded declines the strike before it ever reaches the worker", async () => {
+  const { bare, root, bin, repo, branch, owner } = ciRollupRepoFixture();
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}:${savedPath}`;
+  try {
+    const TASK = "W1T1278CIROLL";
+    const ledgerPath = join(root, "ledger.ndjson");
+    const runId = "SWEEP-W1T1278-CIROLL";
+    const log = (step: string, extra: Record<string, unknown> = {}) =>
+      appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
+    const plan = {
+      tasks: [{ id: TASK, title: "w1t1278 fixture", repo, type: "implement", risk: "low", verify: "auto", status: "queued", attempts: 0, depends_on: [] }],
+      byId: new Map([[TASK, { id: TASK, title: "w1t1278 fixture" }]]),
+    };
+    let spawnCalls = 0;
+    const effects = buildSweepEffects(
+      owner,
+      repo,
+      { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath,
+      runId,
+      plan as never,
+      log,
+      DEFAULT_SWEEP_POLICY,
+      undefined,
+      async () => {
+        spawnCalls += 1;
+        return result({ sessionId: "should-never-spawn" }) as unknown as WorkerResult;
+      },
+    );
+
+    const candidate = ciRollupCandidate({ prUrl: `https://github.com/${owner}/${repo}/pull/501`, taskId: TASK, headSha: "cafe0501" });
+
+    const summary = await withLiveWritesAllowed(() =>
+      runSweep([candidate], { ...effects, ledgerPath, runId, log, dryRun: false }, DEFAULT_SWEEP_POLICY),
+    );
+
+    assert.equal(spawnCalls, 0, "the strike is declined before ever reaching the worker — the REAL wired readCiRollup closure supersedes it");
+    assert.equal(summary.actions[0].disposition, "blocked-fixable");
+    // Note: `acted:true` here is the SWEEP-level bookkeeping (dispatchFix returned without
+    // throwing — W1-T1127's own dedup contract, untouched by this task); it is orthogonal to
+    // the FIX RUNG'S OWN internal decision, asserted below via `fix.stood_down` and the absence
+    // of `fix.dispatch` — the actual, real-adapter-driven proof this test exists to give.
+    assert.equal(summary.actions[0].acted, true);
+
+    const lines = readLedgerLines(ledgerPath);
+    const stoodDown = lines.filter((l) => l.step === "fix.stood_down");
+    assert.equal(stoodDown.length, 1, `exactly one stand-down row; got ${JSON.stringify(lines.map((l) => l.step))}`);
+    assert.match(String(stoodDown[0].reason ?? ""), /already in flight/);
+    assert.ok(!lines.some((l) => l.step === "fix.dispatch"), "no fix-rung strike row exists — the pre-strike gate declined before dispatch");
+  } finally {
+    process.env.PATH = savedPath;
+    for (const d of [bare, root, bin]) rmSync(d, { recursive: true, force: true });
+  }
 });
