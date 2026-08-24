@@ -23,6 +23,6 @@ raw: "A SHARED TEST HELPER DOUBLES EVERY VERDICT LINE AND SILENTLY FAILS THE
   fix."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
 summary: null

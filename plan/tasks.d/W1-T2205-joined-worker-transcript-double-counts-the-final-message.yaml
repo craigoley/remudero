@@ -1,0 +1,200 @@
+- id: W1-T2205
+  title: "THE JOINED WORKER TRANSCRIPT `[text, blocks.join()]` DOUBLE-COUNTS THE FINAL MESSAGE, AND
+    EVERY COUNT-SENSITIVE PARSE OVER IT SILENTLY OVER-COUNTS — a 2-option AMBIGUOUS grill parses as
+    4 options, 4 exceeds DECISION_SUMMARY_MAX_OPTIONS (3), validateDecisionSummary returns null and
+    the needs-human issue fails open to a raw body, which is byte-identical to W1-T348 never having
+    been wired; join ONCE through a shared helper and make the option parse idempotent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    RE-DERIVED FROM SOURCE THIS TRIAGE PASS (feedback#fb-1785959570301-a65f94). The reporting entry
+    filed this as a TEST-HELPER defect and offered its own falsifying check. THAT CHECK WAS RUN AND
+    IT DID NOT FIRE — the entry's framing is recorded here as CORRECTED, not inherited, so nobody
+    re-derives it.
+
+    (1) THE ENTRY'S FALSIFIER, RUN, BOTH HALVES.
+    It said: *"if the helper is used by only this one suite and the joined-pair parse is unique to
+    the decision summary, the blast radius is one file and a comment on the helper is the whole
+    fix."*
+      - HALF ONE HOLDS: `t348FakeWorker` appears in test/triage.test.ts and nowhere else.
+      - HALF TWO FAILS: the joined-pair parse is NOT unique to the decision summary. Seventeen
+        sites in src/ build `[r.text, r.blocks.join("\n")].join("\n")` by hand and feed it to
+        `parseTriageVerdict` (src/run-task.ts, the grill path), `parsePlanVerdict`, `parseReport`
+        (twice), `parseReconReport`, `harvestFollowupsFromReport` (twice), `parseDraftedCandidate`
+        (src/lib/inbox.ts) and the diagnose/fix report joins; `noPrReportExcerpt`
+        (src/lib/worker.ts) builds the same join a ninth way. Seventeen test files independently
+        hand-roll `blocks: [text]` fixtures against them.
+    So the blast radius is not one file and a comment is not the fix.
+
+    (2) AND THE FIXTURE IS NOT THE DEFECT — IT IS FAITHFUL. This is the finding the entry did not
+    reach, and it inverts the remedy. In src/lib/worker.ts's result loop: `blocks.push(text)` for
+    EVERY assistant `type === "text"` block, in order (line ~1485), and then `text = r.result ?? ""`
+    off the terminal result envelope (line ~1529) — documented in the type as *"Final result text
+    (the `result` field of the SDK result message)"* against *"All assistant text blocks
+    concatenated, in order."* If the SDK's `result` IS the final assistant text block, then a REAL
+    worker result carries its last message twice in the joined transcript, exactly as
+    `t348FakeWorker` does. The fixture reproduces production; the parse is what is wrong.
+    STATED AS A HYPOTHESIS, NOT A FACT, BECAUSE IT COULD NOT BE CLOSED FROM DOCUMENTATION: the
+    published Agent SDK reference lists `SDKResultMessage.result` without stating its relationship
+    to the final `AssistantMessage`. THIS TASK'S FIRST STEP IS THEREFORE A MEASUREMENT, NOT AN EDIT
+    (see design (i)) — and the task has an unconditional core either way, per (3).
+
+    (3) THE UNCONDITIONAL DEFECT, TRUE AT HEAD REGARDLESS OF THE SDK QUESTION.
+    `parseGrillOptions` (src/lib/triage.ts) is `[...text.matchAll(/^\s*OPTION\s*:\s*(.+)$/gim)]` —
+    no dedupe, no cap. `decideTriage` guards `options.length < 2` and NOTHING above (verified at
+    src/lib/triage.ts, the ambiguous branch). So ANY repetition of an OPTION line in the transcript
+    — the join doubling it, the model restating its own choices, a worker quoting the prompt's
+    example OPTION lines back — inflates the list past 3. Then `escalateWithSummary`
+    (src/run-task.ts, the `decision.action === "grill"` branch) hands those options to
+    `summarizeEscalation`, which by W1-T348's OPTIONS-ARE-SACRED rule passes them through VERBATIM,
+    and `validateDecisionSummary` (src/lib/feedback.ts) rejects `options.length > 3` → `null` →
+    raw body. The operator ALSO sees the duplicated choice list on the issue itself.
+
+    (4) WHY THIS IS WORTH A TASK AND NOT A COMMENT. The failure is INDISTINGUISHABLE FROM THE
+    WIRING BEING ABSENT: W1-T348's whole deliverable is that a needs-human issue renders a
+    translated decision card instead of raw agent-register prose, and a grill that fails open
+    renders precisely what shipped before W1-T348. A test written against the faithful fixture
+    passes while proving the opposite of its claim — which is what cost the reporter two debugging
+    rounds. Today the ONLY record of the mechanism anywhere in the repo is a comment inside one
+    test body (test/triage.test.ts, at the `blocks: []` override), and `blocks: []` is load-bearing
+    there with nothing on the helper saying so.
+
+    (5) THE SECOND QUESTION THE ENTRY ASKS IS ALREADY RULED AND IS NOT REOPENED HERE. It asks
+    whether `validateDecisionSummary` should DISTINGUISH "no summary produced" from "summary
+    rejected as invalid". That is MASTER-PLAN P48 verbatim (*"ZERO IS OVERLOADED: A BOUNDARY READ'S
+    EMPTY ANSWER MUST SAY WHICH EMPTY IT IS"*), and P48's own membership rule DECIDES IT: the
+    criterion is a union over the stated face predicates, and P48 *"REPLACES the per-instance patch
+    treadmill and forbids further bespoke silent-zero filings outside the criterion"*.
+    `validateDecisionSummary` returns `DecisionSummary | null`, not a bare collection or count, so
+    it does not match FACE 1; it is not a logging-only truthiness guard, so not FACE 2; FACE 3 has
+    no predicate and no open recorded members. IT DOES NOT QUALIFY, and a bespoke null-discrimination
+    filing for it is forbidden until P48 is ratified. This task therefore fixes the OVER-COUNT that
+    makes the null happen, and touches neither the gate's bounds nor its return type.
+  design: |
+    ONE CONCERN: that a worker's report is COUNTED ONCE. Not what the report says, not what any
+    parser decides, not how a rejected summary is reported.
+
+    (i) MEASURE FIRST, AND WRITE THE MEASUREMENT DOWN. Establish from a REAL captured envelope
+    (a recorded stream fixture, or one live cheap spawn) whether `SDKResultMessage.result` equals
+    the last element of `blocks`. State the answer in the PR body either way — this is the
+    platform fact the whole entry turns on and it is NOT in the published reference. If it holds,
+    the doubling is a production defect on every joined parse; if it does not, the doubling is
+    fixture-only and (iii)'s idempotence is still required by rationale (3). NEITHER ANSWER
+    CANCELS THIS TASK; the answer only changes what the PR body claims.
+
+    (ii) ONE JOIN, ONE PLACE. LOAD-BEARING LITERAL: the shared helper is named `workerTranscript`
+    and lives in src/lib/worker.ts beside `noPrReportExcerpt`, which already builds this exact join
+    a ninth way — this task's grep proof names that symbol, so write the call sites to read
+    naturally with it rather than bolting it on. Its contract: given a `WorkerResult`, return the
+    worker's full said-text with the final message appearing ONCE, whatever the SDK's overlap turns
+    out to be. Hand-rolled `[r.text, r.blocks.join("\n")].join("\n")` expressions in src/run-task.ts
+    are replaced by calls to it. A second implementation of the join is refused for the reason
+    W1-T1118 already gives about two walks over one question: they drift, and then two parsers
+    disagree about one transcript.
+
+    (iii) THE OPTION PARSE BECOMES IDEMPOTENT, INDEPENDENTLY OF (ii). `parseGrillOptions`
+    de-duplicates on the `(label, detail)` pair, so N identical OPTION lines yield ONE option. This
+    is belt AND braces on purpose: (ii) fixes the transcript, (iii) fixes the parse, and the
+    duplicate-OPTION sources in rationale (3) are not all transcript-shaped. Order is preserved and
+    first occurrence wins — the labels must still match `RECOMMENDATION:` exactly, and
+    `decideTriage`'s `< 2` guard must still fire when a verdict genuinely offers one choice twice.
+
+    (iv) NOTHING ABOUT THE SUMMARY GATE MOVES. `DECISION_SUMMARY_MAX_OPTIONS`,
+    `DECISION_SUMMARY_MIN_OPTIONS`, `validateDecisionSummary`'s bounds, its `null` return, the
+    fail-open contract, and the verbatim pass-through of an escalation's own options are ALL
+    UNTOUCHED. Raising the cap to 4 would "fix" the symptom by admitting the duplicates into the
+    operator's card, which is the confidently-mistranslated failure W1-T348 exists to prevent.
+
+    (v) THE HELPER SAYS WHY. `t348FakeWorker` gets a comment stating that `text` and `blocks: [text]`
+    reproduce a real envelope's overlap deliberately, and that any suite overriding `blocks` is
+    asserting something about the JOIN. The comment is a by-product of the fix, never the fix — the
+    entry's own proposed remedy, refused as sufficient by rationale (1).
+
+    (vi) THE FALSIFIER MUST PROVE THE DISTINCTION, IN THE DIRECTION THAT FAILS TODAY. A test that
+    asserts `workerTranscript` exists proves nothing. The assertion that matters: a grill verdict
+    carrying EXACTLY TWO OPTION lines, driven through the SAME faithful `t348FakeWorker` shape (NOT
+    the `blocks: []` override), opens its needs-human issue carrying a VALIDATED decision summary.
+    That test MUST FAIL against current source — today it opens with a raw body — and the existing
+    `blocks: []` arm of test/triage.test.ts must keep passing unchanged, because the fix must not be
+    a fixture edit wearing a source edit's clothes.
+
+    EXPLICITLY NOT IN SCOPE, each with its owner, so a reader does not re-file it:
+      - WHETHER `validateDecisionSummary` DISTINGUISHES its two nulls — MASTER-PLAN P48, rationale
+        (5); forbidden as a bespoke filing until P48 ratifies. Its return type does not move here.
+      - THE ESCALATION ASK-TYPE SPLIT (W1-T346), THE RESIDUAL JUDGE (W1-T349), THE FEEDBACK
+        INTERPRETER (W1-T350) — untouched.
+      - THE OTHER JOINED-PAIR CONSUMERS' OWN SEMANTICS. `parseDraftedCandidate` (src/lib/inbox.ts),
+        the isolation and containment probe transcripts (which deliberately join `stderr` too) and
+        src/spike.ts are INVENTORIED here and left alone: this task converts the call sites in
+        src/run-task.ts only. Widening into them is how one join helper becomes a nine-module
+        refactor. A follow-up may adopt `workerTranscript` there once it exists.
+      - THE SEVENTEEN HAND-ROLLED `blocks: [text]` TEST FIXTURES. They are FAITHFUL per rationale
+        (2) and there is nothing to correct in them; consolidating them into a shared builder is a
+        separate hygiene argument this task takes no position on.
+  acceptance:
+    - claim: "a worker result whose final message also appears as its last assistant text block yields that message exactly once in the joined transcript"
+      proof: "unit test: test/worker.test.ts"
+    - claim: "an AMBIGUOUS verdict carrying exactly two OPTION lines yields exactly two options after the transcript join, and a genuinely single choice repeated still fails the two-choice guard"
+      proof: "unit test: test/triage.test.ts"
+    - claim: "a grill driven through the faithful fixture opens its needs-human issue with a validated decision summary instead of failing open to a raw body"
+      proof: "unit test: test/triage.test.ts"
+    - claim: "the dispatcher joins a worker's transcript through the one shared helper rather than a hand-rolled expression at each parse site"
+      proof: "grep: workerTranscript( in src/run-task.ts"
+  origin: "feedback#fb-1785959570301-a65f94"
+  plan_refs: ["W1-T348", "W1-T313", "W1-T1118", "P48"]
+  files: [src/lib/worker.ts, src/lib/triage.ts, src/run-task.ts, test/worker.test.ts, test/triage.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, recorded up front rather than shipped as a
+    lint refusal — the same correction already forced on W1-T1017, W1-T1086, W1-T1101 and W1-T1118.
+    `subsystemsOf` reads several concerns off this `files:` list (the worker module, triage, the
+    dispatcher monolith and two suites) and `lint-plan` refuses that below high. THE ACTUAL DIFF IS
+    ONE SMALL EXPORTED HELPER, A `.filter()` ON ONE MATCHALL, AND THE CALL SITES THAT ADOPT THEM; no
+    gate, bound, policy value, severity or verdict field moves.
+
+    `files:` DERIVED BY READING THE CHAIN, not guessed. The join and `noPrReportExcerpt` live in
+    src/lib/worker.ts; `parseGrillOptions`, `parseTriageVerdict` and `decideTriage` live in
+    src/lib/triage.ts; the hand-rolled joins and the `escalateWithSummary` grill branch live in
+    src/run-task.ts; the grill/summary end-to-end arms and `t348FakeWorker` live in
+    test/triage.test.ts; test/worker.test.ts EXISTS today, so both whole-file proofs execute on day
+    one. src/lib/feedback.ts is DELIBERATELY ABSENT — the summary gate does not move (design (iv)),
+    and listing it would invite exactly the cap-raising "fix" that criterion refuses.
+    src/lib/inbox.ts is DELIBERATELY ABSENT per the scope-out above.
+
+    ON THE GREP PROOF. `workerTranscript` reads ZERO across the repo at head, so it DISCRIMINATES
+    against the merge base rather than landing `executed_stale`, and it is stated POSITIVELY — it
+    greps text the change ADDS, never the hand-rolled expression it removes. It is a CALL-SITE
+    proof in the linter's own demanded form (`callSiteViolations`): the consumer path
+    src/run-task.ts, not the module that defines the symbol, because a helper nothing calls is the
+    W1-T348 defect this entry is a consequence of. The pattern carries no bracket, star, caret,
+    dollar or the words ` in `, so it splits at the single ` in ` before its path, and that path is
+    declared in `files:` (W1-T310).
+
+    THE OTHER THREE CRITERIA TAKE THE WHOLE-FILE `unit test:` FORM DELIBERATELY: they are
+    BEHAVIOURAL — "appears once, not twice", "two lines yield two options", "a summary lands where a
+    raw body lands today" — and a grep cannot express a count or a distinction.
+
+    verify:auto — every criterion is decidable in-process against fixtures the suites already build
+    (test/triage.test.ts already drives `triageCommand` end to end against an injected `spawn` and a
+    bare origin). The one live-ish step, design (i)'s envelope measurement, is a READ that informs
+    the PR body; it gates no criterion, so no criterion needs a human.
+
+    budget_usd 35 — above W1-T1118's 30 because the SDK measurement is real work and the call-site
+    conversion spans the monolith, far below W1-T348's 70, which built the wiring this repairs.
+
+    NO depends_on. W1-T348 is the task whose test surfaced this and it is `status: queued` — but
+    this shard REPAIRS A DEFECT THAT EXISTS AT HEAD in `parseGrillOptions` and the joins, both of
+    which predate it, and blocking behind a queued task would leave the over-count standing. File
+    overlap on src/run-task.ts and test/triage.test.ts is the correct and sufficient interlock:
+    `overlappingPaths` will serialise the two lanes without a declared dependency.
+
+    RE-READ THE SOURCE BEFORE ACTING RATHER THAN QUOTING THIS SHARD. Every line number and symbol
+    above was read off src/lib/worker.ts, src/lib/triage.ts, src/lib/feedback.ts and src/run-task.ts
+    during triage of fb-1785959570301-a65f94; the join sites and the ambiguous branch's guards are
+    the things most likely to have moved.
