@@ -1,0 +1,166 @@
+- id: W1-T2228
+  title: "`planBranchReap` computes only `undeclaredGuards` — the NAMED-BUT-UNDECLARED direction — so a DECLARED guard whose source citation has been removed survives indefinitely guarding a branch nothing references, and the branch-deleted form is never even visited because `facts` is built from branches that EXIST; the inverse is deliberately asserted silent because a dead declaration and a variable-referenced guard are indistinguishable to that predicate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main (HEAD compared by
+    sha, clone shallow-checked `false`). `src/run-task.ts` is ~1.5 MB and was read through git
+    objects, never the Contents API. No suite, no spawning verb, no branch deleted.
+
+    (1) THE ONE-DIRECTION COMPARISON, QUOTED FROM SOURCE. `planBranchReap`
+    (`src/lib/status.ts`) is the whole decision, and it computes exactly one inverse:
+
+    ```
+    if (f.namedInSource && !declared.has(f.name) && f.name !== "main") plan.undeclaredGuards.push(f.name);
+    ```
+
+    `reapBranchesCommand` (`src/run-task.ts`) then exits non-zero on `plan.undeclaredGuards.length > 0`
+    with "are named in source but MISSING from DECLARED_BRANCH_GUARDS — declare them or remove the
+    reference". There is no second array and no second message: the declared-but-not-named
+    direction has no detector anywhere in the tree. Swept across every TRACKED file, not just
+    `src/`: `DECLARED_BRANCH_GUARDS` occurs in six files —
+    `.github/workflows/fleet-heartbeat-watch.yml`, `docs/cli-reference.md`, `docs/operator-guide.md`,
+    `src/lib/task-id-reservation.ts` (a doc comment), `src/run-task.ts`, and
+    `test/branch-reaper-dry-run.test.ts` — and the only consumer is the single
+    `planBranchReap(facts, DECLARED_BRANCH_GUARDS)` call site.
+
+    (2) THERE ARE TWO DEAD-DECLARATION FORMS, NOT ONE, AND THE SECOND IS QUIETER. The loop
+    iterates `facts`, which the verb builds from `remoteBranchNames()` — `git ls-remote --heads
+    origin`, i.e. branches that EXIST. So:
+      (i) CITATION REMOVED, BRANCH ALIVE — `namedInSource` goes false, `declared.has(f.name)` still
+          returns true, the branch lands in `guarded` and no alarm fires. This is the operator's case.
+      (ii) BRANCH DELETED — no `BranchFacts` row is ever constructed for it, so the declaration is
+          not merely unreported, it is never VISITED. A guard entry for a branch that no longer
+          exists cannot be surfaced by this design at all.
+
+    (3) THE INVERSE IS NOT UNIMPLEMENTED — IT IS DELIBERATELY ASSERTED SILENT, AND THAT IS THE
+    REAL FINDING. `test/branch-reaper-dry-run.test.ts` carries a named test, "a declared guard the
+    grep cannot see is still guarded and is NOT drift", asserting `plan.undeclaredGuards` deep-equals
+    `[]` for `feedback-landing`, with the rationale "declared-but-ungreppable is the case the list
+    exists for". So a DEAD declaration and a LEGITIMATE variable-referenced guard are
+    indistinguishable to this predicate: `LANDING_BRANCH` recreates `feedback-landing` on the next
+    `landFeedback` and `DECISIONS_LANDING_BRANCH` does the same for `decisions-landing`, and no grep
+    over branch names can see either. The declaration's own doc comment already concedes the failure
+    mode — "A declared list rots: it is a convention that binds only while someone maintains it" —
+    and ships no detector for the rot.
+
+    (4) THE LIVE NEAR-MISS, OPERATOR-ATTRIBUTED 2026-08-24, WITH THE GIT-SIDE HALF RE-DERIVED HERE.
+    #2720 MERGED as `84728d8d` ("fix(reap): declare the dispatch-claim forensic branch so the drift
+    alarm clears"), adding `run-W1-T1265-1787503038601` to `DECLARED_BRANCH_GUARDS`. #2723 would have
+    removed the only citation of that name from `src/lib/dispatch-claim.ts`; it never merged — no
+    commit on main names it, and that file's last touch on main is #2668. The operator attributes the
+    close to their own judgement rather than to any gate, and nothing in the tree contradicts that:
+    there is no check that could have reported the resulting dead line. HAD THE ORDER BEEN REVERSED,
+    the entry would have become exactly form (2)(i) — a declaration guarding a branch nothing
+    references — silently. As it stands both are consistent today: the citation is live at
+    `dispatch-claim.ts` line 13 and the branch is live on origin (`ls-remote` reads 1 for
+    `run-W1-T1265-*`).
+
+    (5) AND THE ALARM THAT DOES EXIST IS HAND-RUN. `fleet-heartbeat-watch.yml`'s own comment states
+    that `rmd reap-branches` is "a hand-run DRY RUN — no workflow, no gate, no daemon call", so even
+    the detected direction surfaces only when a person runs the verb. Whatever this task adds
+    inherits that property and must not be mistaken for a gate.
+  design: |
+    (i) THE OBVIOUS CANDIDATE DOES NOT COVER IT, AND THE BRIEF'S REASON FOR THAT IS CORRECTED HERE
+    RATHER THAN CARRIED. `duplicateTitleViolations` is NOT unreachable: `opts.openTaskTitles` IS
+    assigned in `src/`, by `duplicateCorpusOpts` (`src/run-task.ts`), with a live call site in the
+    changed-tasks (`--base`) pass. The sentence "nothing in `src/` ever assigned
+    `opts.openTaskTitles`" is a verbatim quote of the comment heading W1-T1076's own wiring block,
+    which describes the PRE-W1-T1076 state — W1-T1076 IS the fix, and reading that comment instead of
+    running the predicate is what produces the opposite reading.
+
+    (ii) THE CONCLUSION SURVIVES ON A STRONGER MECHANISM THAN SCORING. `shardSlugFromPath`
+    (`src/lib/task-linter.ts`) matches only `tasks.d/<id>-<slug>.yaml`, so `planShardSlugCorpus`
+    over a CODE PR's changed files returns an EMPTY corpus and `duplicateTitleViolations` returns
+    `[]` at its first guard, before any similarity is computed. #2720 touched `src/run-task.ts` and
+    #2723 touched `src/lib/dispatch-claim.ts`; neither added a shard. The check is STRUCTURALLY
+    BLIND to code PRs, not merely bad at scoring them — and it is `severity: "warn"`, advisory,
+    never blocking. The 0.000 and 0.054 title figures the brief cites are correct and are the repo's
+    own — `task-linter.ts` records them at k=3 on the two pairs the check exists to catch — but they
+    are the REASON W1-T1076 changed what is scored to the filename slug, not evidence of
+    unreachability. THESE TWO PRs ARE NOT DUPLICATES; THEY ARE TWO REMEDIES FOR ONE ALARM, which no
+    similarity check over shard slugs can see.
+
+    (iii) WHAT MUST NOT CHANGE, AND THE MECHANICAL REASON IT MUST NOT. The list STAYS HAND-MAINTAINED
+    AND REVIEWED: nothing auto-prunes a declaration. This is not only prudence about an irreversible
+    delete — it is forced by (3). An auto-pruner keyed on `!namedInSource` removes exactly the
+    `feedback-landing` and `decisions-landing` entries, which are the entries the declared list
+    exists for, because no grep can see a branch referenced through a variable. An entry may also
+    legitimately PRECEDE its citation, so absence of a citation is not evidence of deadness.
+
+    (iv) THE REPORT IS THE DELIVERABLE, NOT A DELETION. The remedy is a second reported signal
+    beside `undeclaredGuards` — declared entries with no citation and, separately, declared entries
+    with no live branch — carrying enough context for a person to decide. It must be ANSWERABLE the
+    way the existing alarm is: the message says what to do. It must not delete a branch, must not
+    remove a declaration, and must not change what `planBranchReap` classifies as `guarded`,
+    `deletable` or `hold`.
+
+    (v) THE KNOWN-LEGITIMATE ENTRIES MUST NOT READ AS DRIFT. Whatever shape the new signal takes,
+    `feedback-landing`, `decisions-landing` and `heartbeat` are the calibration set: `heartbeat` is
+    guarded by a SUBSTRING grep that matches 18 files and is permanently named, while the two
+    landing branches are named only through constants and are often absent between landings. A
+    signal that reports all three is a bound firing on a healthy condition — this repo's recurring
+    defect — and is worse than no signal.
+
+    (vi) NOT IN SCOPE, NAMED: deleting any branch; changing the reap predicate's three buckets;
+    `duplicateTitleViolations`' cutoff, shingle width or corpus; making `reap-branches` a workflow or
+    a gate; and W1-T1268's dispatch-claim comment itself.
+  acceptance:
+    - claim: "a declared guard with no source citation is reported rather than silently honoured"
+      proof: "unit test: test/declared-guard-drift.test.ts"
+    - claim: "a declared guard whose branch no longer exists on origin is reported"
+      proof: "unit test: test/declared-guard-drift.test.ts"
+    - claim: "a variable-referenced guard such as feedback-landing is not reported as drift"
+      proof: "unit test: test/declared-guard-drift.test.ts"
+    - claim: "the named-but-undeclared alarm keeps reporting exactly what it reports today"
+      proof: "unit test: test/declared-guard-drift.test.ts"
+    - claim: "the three reap buckets are unchanged by the new signal"
+      proof: "unit test: test/declared-guard-drift.test.ts"
+    - claim: "no declaration is removed and no branch is deleted by the reported signal"
+      proof: "unit test: test/declared-guard-drift.test.ts"
+  files: [src/lib/status.ts, src/run-task.ts, test/declared-guard-drift.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#declared-but-not-named-2026-08-24"
+  plan_refs: ["W1-T447", "W1-T420", "W1-T1076", "W1-T1268", "W1-T509"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/declared-guard-drift.test.ts`, declared in `files:`, so on this filing PR it
+    resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` names the pure planner
+    (`src/lib/status.ts`), the verb that reports its answer (`src/run-task.ts`) and one new test;
+    the predicate and its reporting arm cannot be decomposed from each other, and Rule 19 sizes that
+    span at `risk: medium` as a violation. The blast radius is genuinely small — the signal is
+    reported, nothing is deleted.
+
+    THE BRIEF'S UNREACHABILITY PREMISE IS CORRECTED, NOT CARRIED — see design (i). The correction
+    matters because it changes the remedy: if `duplicateTitleViolations` were merely unwired, wiring
+    it would look like a candidate fix, and it is not one. It is wired, and it is structurally blind
+    to code PRs regardless.
+
+    ID PROVENANCE, AND WHY THIS ID RATHER THAN THE ONE NAMED. The operator named W1-T2227. At the
+    moment of filing, `refs/rmd-id/W1-T2227` already resolved — reserved by another host at
+    2026-08-24T14:50:08.455Z, THIRTY-FIVE SECONDS before the sweep read it, with W1-T2225 and
+    W1-T2226 minted nine minutes earlier and W1-T2223/W1-T2224 3.8 s apart; the fleet was minting
+    live. Taking it would have been the double-mint that has refused `loadPlan` on origin/main twice
+    (W1-T488, and W1-T533+W1-T534 renumbered to W1-T911/W1-T912). W1-T2228 was therefore reserved by
+    the repo's OWN mechanism before this shard was written — an orphan `commit-tree` over the empty
+    tree pushed with a PLAIN refspec, mirroring `gitRemoteRefReserver`, so a second writer is
+    structurally a non-fast-forward. It CREATED on the first attempt, which is the evidence the id
+    was free. Sweeps: shards on main 0, whole tree on main 0, all 138 origin refs 0, remote head
+    names 0, commit messages on main 0 — each with a control pre-qualified for its own surface
+    (`W1-T2222` for the shard and tree reads, `refs/rmd-id/W1-T2226` for the reservation read, the
+    138-head total for `ls-remote`, `W1-T2219`'s two commits for the message read). W1-T2223 is
+    recorded here as a live counter-example to "reserved implies filed": it has been reserved since
+    14:14:07.871Z with no shard, no branch and no PR, and nothing releases a remote reservation.
+
+    A CORRECTION TO AN EARLIER SESSION REPORT, RECORDED SO IT IS NOT RE-DERIVED. That report stated
+    #2720 had not merged. It has — `84728d8d` — and #2723 has not. Rationale (4) is the git-side
+    re-derivation, and it is the reason the near-miss is stated as order-dependent rather than as a
+    defect that shipped.
