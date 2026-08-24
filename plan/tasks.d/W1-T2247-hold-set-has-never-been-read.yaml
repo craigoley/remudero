@@ -1,0 +1,144 @@
+- id: W1-T2247
+  title: "The reaper holds every branch with no PR and commits not in main and nothing has ever asked what the work is — but `git cherry` decides only a quarter of them and mislabels squash-merges as absent, while PR state decides most of the rest, so the residue that actually needs judgement is twenty branches rather than seventy-five"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (d4c57da62f82b3c93ceefc9590e6da27e8ab427b), clone shallow-checked `false`. Files over 1 MB read
+    through git objects. No suite, no spawning verb, no poller. `rmd reap-branches` IS the dry run
+    and was run; it deletes nothing by construction. Ledger via `resolveLedgerUnion` at the STATE
+    dir with step names taken from source. Ref coverage verified before sweeping.
+
+    (1) THE POPULATION, AND IT MOVES WHILE YOU READ IT. Measured 2026-08-24 at d4c57da6: 136 heads,
+    6 guarded, 56 deletable, 74 held — and MINUTES LATER `git ls-remote` returned 135 with the hold
+    at 73, because a branch was deleted under the measurement. So this file carries the QUERY and a
+    timestamp, never a count to be quoted later: `rmd reap-branches`, plus
+    `git cherry -v origin/main origin/<branch>` per held branch. Every figure below is the 73-branch
+    reading and is stamped as such.
+
+    (2) Q1 — `git cherry` DECIDES A QUARTER, NOT MOST, SO THE DETERMINISTIC-VERB HYPOTHESIS FAILS.
+    Patch-id equivalence across all 73 held branches: 18 have EVERY commit already equivalent in
+    main (25%), 53 have every commit genuinely absent (73%), 2 are mixed, 0 errored. Control: 20
+    branches show at least one equivalence line, so the detector fires rather than reporting a
+    uniform absence; a branch known to be new reads `+`.
+
+    IF MOST HAD BEEN EQUIVALENT THIS WOULD BE A DETERMINISTIC VERB AND NO WORKER WOULD BE NEEDED.
+    They are not. But that is not the end of the arithmetic, and the next two paragraphs are why
+    this task is small rather than large.
+
+    (3) `git cherry` HAS A SQUASH BLIND SPOT, AND IT IS MEASURED RATHER THAN REASONED. A branch whose
+    PR SQUASH-merged has its commits collapsed into one on main, so the branch tip's patch-id does
+    not match and `git cherry` reports `+` — ABSENT — for work that is fully landed. VERIFIED on
+    `run-W1-T404-1786606793018`: 2 commits ahead, `git cherry` reports `+`, its PR #1709 merged
+    2026-08-13, main carries `ab85e661 … (#1709)`, and the two patch-ids differ (`20fbc00f9915`
+    against `4df860fd8100`). SEVEN of the 53 "genuinely absent" branches are this shape. The
+    mechanical test is therefore NOT sufficient on its own and must be crossed with PR state before
+    any of its output is acted on.
+
+    (4) PR STATE DECIDES MOST OF THE REMAINDER WITHOUT JUDGEMENT. Against a COMPLETE PR walk (2,234
+    rows, 2,044 distinct head refs), the 53 absent branches decompose: 23 have a CLOSED-UNMERGED PR
+    — a human already ruled on that work and declined it, so it is adjudicated, not unknown; 7 are
+    the squash false-negatives of §3; 3 have an OPEN PR and are live; and 20 HAVE NO PR AT ALL.
+
+    SO THE RESIDUE THAT NEEDS JUDGEMENT IS 20, NOT 75. That is the whole size of this task, and it is
+    the number that makes it worth doing: nobody ever ruled on those twenty, and for a branch with no
+    PR the commit on it may be the only copy of that work. The oldest is 41 days
+    (`diag/resume-spawn-enoent`), and the set is dominated by one-commit branches.
+
+    (5) Q2 — WHAT A WORKER ADDS, AND WHAT MAKES ITS VERDICT FALSIFIABLE. For the 20, the question is
+    "does this change still address something the current plan wants", which needs the diff, the
+    tree and the task list. "Still needed" is a judgement, and this repo's discipline is that a
+    judgement without a falsifier is a guess. SO THE VERDICT IS ONLY ADMISSIBLE IF IT CITES ONE OF
+    TWO CHECKABLE THINGS: a plan task id the change would serve, or a symbol or path in the CURRENT
+    tree that the change targets, together with whether that symbol still exists. Both are re-checked
+    against the tree and the plan WITHOUT re-running the model, so a wrong verdict is caught by a
+    grep rather than by trusting the reviewer. A verdict citing neither is REFUSED, not downgraded.
+
+    COST: 20 branches, one-off, against a fleet that spends roughly $6-9 per merged improvement —
+    call it $120-180 total, and it does not recur, because after this pass the residue is whatever
+    accumulates next. Costing it at 75 would have been wrong by a factor of nearly four, which is
+    what §3 and §4 buy.
+
+    (6) THE SIBLING, CITED NOT RE-FILED. W1-T2246 measures the OTHER half of the same misreading:
+    `prState` comes from a paginated PR walk, so 41 of the 74 it measured would be deletable on a
+    complete read and the hold is 33 rather than 74. THE TWO FINDINGS COMPOSE RATHER THAN COMPETE —
+    that one says the bucket is over-full because the PR read is incomplete; this one says that even
+    the correctly-held remainder is mostly decidable without judgement. Both point at the same
+    conclusion from opposite ends: the adjudication set is small and nobody has ever computed it.
+
+    THEY ALSO OVERLAP IN `files:` ON PURPOSE, and the dispatcher will serialize them. That is the
+    correct outcome: they touch the same classifier and landing them concurrently would conflict.
+
+    (7) NOTHING HAS RUN THE VERB, AS FAR AS THE CORPUS CAN SAY. `branch_reap.dry_run` — the step name
+    `reapBranchesCommand` actually writes, taken from source rather than guessed — reads 0 rows
+    across 672 archives, 0 unread, against controls `run.start` 787 and `review.posted` 1,623 in the
+    same union. THE LIMIT: that corpus's newest rows are 2026-08-12 and 2026-08-14, so a zero cannot
+    separate "never run" from "run after the corpus ends". It is consistent with nothing calling it,
+    not proof of it.
+  design: |
+    (i) TWO MECHANICAL PASSES BEFORE ANY JUDGEMENT, IN THIS ORDER. Patch-id equivalence
+    (`git cherry`) resolves the 18. PR state resolves the closed-unmerged, the merged, and the open.
+    Only what survives both is offered for adjudication. The order matters because the second pass
+    is what corrects the first's squash blind spot, and a design that ran only the first would ship
+    seven branches into judgement that need none.
+
+    (ii) EVERY BUCKET NAMES THE TEST THAT PUT IT THERE. "Equivalent in main by patch-id", "closed
+    unmerged, already declined", "merged, patch-id differs because of squash", "open PR", "no PR
+    ever" — five distinct reasons, never one string. The current single label is what hid all of
+    this, and W1-T2246 is the same lesson at the adjacent rung.
+
+    (iii) THE ADJUDICATION VERDICT CARRIES ITS CITATION OR IT IS REFUSED. See rationale §5. The
+    falsifier is that a verdict's citation is re-checkable against the tree and the plan by a reader
+    who never ran the model.
+  acceptance:
+    - claim: "a held branch whose commits are patch-equivalent in main is resolved without any judgement step"
+      proof: "unit test: test/hold-set-adjudication-residue.test.ts"
+    - claim: "a branch whose pr squash-merged is not reported as absent merely because its patch id differs"
+      proof: "unit test: test/hold-set-adjudication-residue.test.ts"
+    - claim: "a branch whose pr was closed unmerged is reported as already declined rather than as unknown"
+      proof: "unit test: test/hold-set-adjudication-residue.test.ts"
+    - claim: "each bucket names the test that placed it there rather than sharing one reason string"
+      proof: "unit test: test/hold-set-adjudication-residue.test.ts"
+    - claim: "an adjudication verdict that cites neither a plan task nor a current tree symbol is refused"
+      proof: "unit test: test/hold-set-adjudication-residue.test.ts"
+    - claim: "the run still deletes nothing and still prints the manifest with sha and name on stdout"
+      proof: "unit test: test/hold-set-adjudication-residue.test.ts"
+  files: [src/lib/status.ts, test/hold-set-adjudication-residue.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#hold-set-never-read-2026-08-24"
+  plan_refs: ["W1-T447", "W1-T119", "W1-T2246"]
+  note: |
+    NOTHING DELETES AND NOTHING AUTO-PRUNES. The output is a PER-BRANCH RECOMMENDATION the operator
+    rules on, the same shape as triage's proposal PR and the inbox's ratifiable draft. No branch is
+    removed by this task at any rung, and NOTHING AUTO-PRUNES A BRANCH BECAUSE A MODEL SAID SO — a
+    verdict is an input to a human ruling, never an action.
+
+    THE GUARDED SIX STAY GUARDED and protection keeps being evaluated first and winning outright.
+    THE MANIFEST STAYS ON STDOUT WITH SHA AND NAME: it is the only thing that makes a deletion
+    reversible (`git push origin <sha>:refs/heads/<name>`), and `state/` is gitignored — the path
+    where cited reports go to die. Do not move it to a file and do not drop the sha to shorten it.
+
+    AN OPERATOR-RUN ADJUDICATION AND AN AUTOMATIC ONE ARE DIFFERENT PROPOSALS AND THIS ARGUES THE
+    OPERATOR-RUN ONE. The reasons are specific rather than general: the residue is 20 and one-off, so
+    there is nothing for a schedule to amortise; the failure mode of a wrong verdict is a lost branch
+    with no PR, which is unrecoverable except through the manifest sha; and this repo has four bounds
+    that fired on healthy conditions, so an unattended rung acting on a model's judgement about
+    "still wanted" would be the worst of them. NO CRON, NO POLLER, NO DAEMON RUNG IS PROPOSED HERE.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (hold-set-adjudication-residue, status) at
+      risk:medium — Rule 19: raise to risk:high or decompose into one task per concern `sizingViolation` returns `undefined` on its first line at
+    `risk: high`, so that refusal is the only scoring of this span this shard will ever get.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/hold-set-adjudication-residue.test.ts`, declared in `files:` and
+    absent from this tree, so on the filing PR each resolves through W1-T456's forward-reference
+    carve-out.
