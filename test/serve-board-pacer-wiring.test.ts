@@ -153,6 +153,11 @@ test("W1-T999 + W1-T1007: a rate limited board fetch backs off through the pacer
     return [];
   });
 
+  // W1-T2219: readFailed() no longer forces its own fetch — trigger the attempt explicitly via
+  // a query method that calls index(), exactly like every real caller already does before
+  // consulting readFailed().
+  github.listMergedHeadBranches?.();
+
   assert.equal(
     github.readFailed?.(),
     false,
@@ -182,6 +187,11 @@ test("W1-T999 + W1-T1007: a board fetch refused past the retry bound is still cl
     calls += 1;
     rateLimitedThrow();
   });
+
+  // W1-T2219: readFailed() no longer forces its own fetch — trigger the attempt explicitly via
+  // a query method that calls index(), exactly like every real caller already does before
+  // consulting readFailed().
+  github.listMergedHeadBranches?.();
 
   assert.equal(github.readFailed?.(), true, "an exhausted retry bound rethrows, and the gateway marks the read failed");
   assert.equal(

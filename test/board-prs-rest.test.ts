@@ -316,6 +316,12 @@ test("a rate-limited fetch marks the gateway failed and answers empty — unchan
     },
   });
 
+  // W1-T2219: readFailed()/readFailureReason() no longer force their own fetch — trigger the
+  // (failing) attempt explicitly first via a query method that itself calls index(), exactly
+  // like every real caller already reaches these accessors after one of the calls below.
+  assert.equal(rest.listMergedHeadBranches?.(), null);
+  assert.equal(graphql.listMergedHeadBranches?.(), null);
+
   assert.equal(rest.readFailed?.(), true);
   assert.equal(graphql.readFailed?.(), true);
   assert.equal(rest.readFailureReason?.(), graphql.readFailureReason?.(), "the same classified reason on both");
@@ -324,7 +330,6 @@ test("a rate-limited fetch marks the gateway failed and answers empty — unchan
   // could read as "GitHub says there are zero PRs". board.ts holds each task's last-known status
   // off exactly this signal, which is why the stale rows are honest rather than wrong.
   assert.equal(rest.prByRef(URLS.merged), null);
-  assert.equal(rest.listMergedHeadBranches?.(), null);
   assert.equal(rest.findMergedByHeadBranch?.("W1-T264"), null);
   assert.deepEqual(rest.prByRef(URLS.merged), graphql.prByRef(URLS.merged));
 });
@@ -343,6 +348,10 @@ test("a failure does not clobber the delta cache — recovery costs a refresh, n
 
   gw.prByRef(URLS.merged); // cold pass populates the cache
   fail = true;
+  // W1-T2219: readFailed() no longer forces its own fetch — trigger the (failing) attempt
+  // explicitly first, exactly like every real caller already reaches this accessor after a
+  // query method that itself calls index().
+  gw.prByRef(URLS.merged);
   assert.equal(gw.readFailed?.(), true, "the failure is marked");
   fail = false;
   calls.length = 0;

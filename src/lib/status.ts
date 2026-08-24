@@ -125,6 +125,23 @@ export type StatusSource =
 export type GhFailureReason = "rate_limit" | "auth" | "transport" | "buffer_overflow" | "unknown";
 
 /**
+ * The FOURTH and FIFTH states {@link GitHub.readFailed}/{@link GitHub.readFailureReason} cannot
+ * express on their own (W1-T2219): a boolean plus a reason has room for exactly two answers —
+ * "failed" and "not failed" — and a caller reading either BEFORE any fetch has ever completed, or
+ * WHILE one is running, gets the second answer indistinguishably from a confirmed-clean read.
+ * `readState()` gives the same bookkeeping a fifth-and-sixth-state-free reading:
+ *   - `"not_attempted"` — no fetch has completed (or started) since this gateway was built.
+ *   - `"in_flight"` — a fetch is currently running (observable from a REENTRANT call made from
+ *     inside an injected `fetchAll`/`exec`; the real, synchronous `execFileSync` path blocks the
+ *     whole process for its duration, so nothing else on the SAME call stack can observe it, but
+ *     it is still bookkept accurately for any caller that can reach in mid-call).
+ *   - `"ok"` — the most recently COMPLETED fetch succeeded.
+ *   - `"failed"` — the most recently COMPLETED fetch failed; {@link GitHub.readFailed}/
+ *     {@link GitHub.readFailureReason} report exactly this same verdict, unchanged.
+ */
+export type GhReadState = "not_attempted" | "in_flight" | "ok" | "failed";
+
+/**
  * Classify a failed `gh` invocation's exit status + stderr (+ optionally the
  * underlying Node error `code`, W1-T181) into a {@link GhFailureReason}
  * (W1-T119 design (i)). Pure and exported so {@link ghGateway} /
@@ -604,6 +621,14 @@ export interface GitHub {
    * {@link GitHub} fixture was already written) so no existing implementer breaks —
    * omitted ⇒ treated as `false` (every prior null/[] result trusted as a real answer),
    * the same fail-soft discipline every other optional method here already follows.
+   *
+   * NEVER FORCES A FETCH (W1-T2219): reports the STICKY verdict of the most recently
+   * COMPLETED attempt only — a caller that asks this before any query method has ever run
+   * gets `false`, the SAME "not attempted" answer {@link ghGateway} (a sticky per-instance
+   * flag, no `gh` call of its own) always gave; {@link buildBatchedGithub} used to answer
+   * this by forcing its own cold fetch first, which meant asking whether a read failed
+   * PERFORMED the read and blocked the caller on it. {@link GitHub.readState} distinguishes
+   * "not attempted"/"in flight" from this pair's two answers for a caller that needs to.
    */
   readFailed?(): boolean;
   /**
@@ -615,8 +640,23 @@ export interface GitHub {
    * this only after `readFailed()` is `true`; {@link derivePrPrecedence}
    * defaults to `"unknown"` when a `readFailed`-reporting gateway does not
    * implement this method, never throwing and never guessing "absent".
+   *
+   * NEVER FORCES A FETCH (W1-T2219), for the same reason and in the same way as
+   * {@link readFailed} above — reads the sticky reason from the most recently COMPLETED
+   * attempt, `undefined` before any attempt has completed. Scoped to the PR channel only;
+   * {@link issueReadFailureReason} is the independent issue-channel twin.
    */
   readFailureReason?(): GhFailureReason | undefined;
+  /**
+   * W1-T2219: the state {@link readFailed}/{@link readFailureReason} cannot express on their
+   * own — see {@link GhReadState} for what each of its four values means. NEVER forces a
+   * fetch, exactly like the pair above; reads this gateway's own bookkeeping only. OPTIONAL,
+   * like every other method added after the first {@link GitHub} fixture — omitted ⇒ a
+   * caller falls back to `readFailed()` alone and cannot tell "not attempted" from
+   * "confirmed not failed", the pre-existing discipline this method sharpens, never replaces
+   * (design (ii): "beside the pair, never in place of it").
+   */
+  readState?(): GhReadState;
   /**
    * True if the most recent read SUCCEEDED but only PARTIALLY — {@link fetchBoardPrsRest}'s walk
    * hit its {@link BOARD_MAX_PAGES} ceiling on the open or closed half before exhausting it
@@ -656,6 +696,16 @@ export interface GitHub {
    * fetch, so the two failure flags never conflate a PR outage with an issue-read outage.
    */
   issueReadFailed?(): boolean;
+  /**
+   * W1-T2219: the CLASSIFIED reason the most recent failed {@link issueByUrl}-backing fetch
+   * actually failed — the issue-channel twin of {@link readFailureReason}, closing the gap
+   * rationale (2)(c) names: an issue-fetch failure was already classified and logged
+   * (`board_gateway.issue_fetch_failed`) but had no accessor a caller could reach it through,
+   * so {@link issueReadFailed} could say THAT the issue channel failed but never WHY. OPTIONAL
+   * — a caller consults this only after `issueReadFailed()` is `true`; omitted ⇒ a caller
+   * defaults to `"unknown"`, the same discipline `readFailureReason`'s own doc states.
+   */
+  issueReadFailureReason?(): GhFailureReason | undefined;
   /**
    * W1-T914: the `remudero-review` commit-status state for `prUrl`'s CURRENT head, three-valued
    * plus `"none"` — the SAME vocabulary lib/review.ts's `PostableReviewState` posts
@@ -3699,7 +3749,7 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
   // as a confirmed not-merged.
   let failed = false;
   let failureReason: GhFailureReason | undefined;
-  const run =
+  const rawRun =
     opts.exec ??
     // stdio's 3rd fd is now `pipe`, not `ignore` (W1-T119 design (i)): the
     // pre-fix triple discarded `gh`'s stderr — the one place a rate-limit or
@@ -3708,6 +3758,23 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
     // synchronous, so an unbounded `gh` parks the whole process, not just this read.
     ((args: string[]) =>
       execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: GH_CALL_TIMEOUT_MS }));
+  // W1-T2219: `attempted`/`inFlight` back `readState()` below — wrapping the ONE call point
+  // every query method already funnels through (`tryJson`/`tryLines`, both call `run`) means
+  // neither needs its own bookkeeping. `inFlight` is only observable from a REENTRANT call
+  // (an injected `opts.exec` that calls back into this gateway while it runs); the real
+  // `execFileSync` path blocks the whole process for its duration, same as everywhere else in
+  // this file that notes it.
+  let attempted = false;
+  let inFlight = false;
+  const run = (args: string[]): string => {
+    attempted = true;
+    inFlight = true;
+    try {
+      return rawRun(args);
+    } finally {
+      inFlight = false;
+    }
+  };
   const tryJson = <T>(args: string[]): T | null => {
     try {
       return JSON.parse(run(args)) as T;
@@ -3886,16 +3953,30 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       return view && typeof view.state === "string" ? { state: view.state, title: view.title } : null;
     },
     readFailed() {
+      // Already non-forcing (W1-T2219): this gateway never shelled out on its own initiative —
+      // every `gh` call here is driven by an actual query method — so the sticky `failed` flag
+      // is exactly the "most recently completed attempt" verdict `readFailed()` now promises.
       return failed;
     },
     readFailureReason() {
       return failureReason;
+    },
+    readState() {
+      if (inFlight) return "in_flight";
+      if (!attempted) return "not_attempted";
+      return failed ? "failed" : "ok";
     },
     // Shares the same sticky `failed` flag as `readFailed()` above (W1-T119's per-instance
     // "one outage taints every read since" discipline) — this per-task gateway makes one `gh`
     // call per query already, so there is no separate batched issue-fetch to distinguish.
     issueReadFailed() {
       return failed;
+    },
+    // W1-T2219: same one-`gh`-call-per-query shape as `issueReadFailed()` above — no separate
+    // issue-channel fetch to distinguish here, so this shares the SAME sticky reason
+    // `readFailureReason()` reports.
+    issueReadFailureReason() {
+      return failureReason;
     },
   };
 }
@@ -4080,6 +4161,13 @@ export function buildBatchedGithub(
   // must not keep shadowing a later fetch that actually succeeded.
   let lastFetchFailed = false;
   let lastFetchFailureReason: GhFailureReason | undefined;
+  // W1-T2219: backs `readState()` — `"not_attempted"` until `index()` first runs, `"in_flight"`
+  // for the duration of one attempt (observable from a REENTRANT call inside an injected
+  // `fetchAll`; the real, synchronous default `run` blocks the whole process, same as
+  // everywhere else in this file that notes it), then `"ok"`/`"failed"` mirroring
+  // `lastFetchFailed` — but, unlike that flag, never forced into being true by an accessor:
+  // only `index()` itself (called by an actual query method, or `warm()`) advances this.
+  let fetchState: GhReadState = "not_attempted";
   // W1-T415: set from `fetched.truncated` on every fetch this default `fetchAll` performs — an
   // INJECTED `opts.fetchAll` (every unit-test fixture predating this) bypasses `fetchBoardPrsRest`
   // entirely and so never touches this, leaving it at its initial `false`, the same omitted-⇒-
@@ -4248,6 +4336,11 @@ export function buildBatchedGithub(
       // GitHub method this gateway returns. Before this fix, a throwing `fetchAll` crashed the
       // caller; only the default execFileSync path degraded softly.
       let all: BatchedPr[];
+      // W1-T2219: flips BEFORE the attempt so a REENTRANT `readState()` call from inside an
+      // injected `fetchAll` observes "in_flight" rather than whatever the PREVIOUS attempt
+      // left behind — the exact discard rationale (2)(b)/(3) names ("the flags still hold the
+      // previous attempt's verdict" for as long as a call is in flight).
+      fetchState = "in_flight";
       try {
         // W1-T468: same shared-pacer guard as `fetchAllIssues` above — one pacer instance across
         // BOTH of this gateway's reads (and run-task.ts's sweep enumeration) is what actually
@@ -4255,11 +4348,13 @@ export function buildBatchedGithub(
         all = paceGhEntry(pacer, isGhRateLimitError, fetchAll);
         lastFetchFailed = false;
         lastFetchFailureReason = undefined;
+        fetchState = "ok";
         log("board_gateway.fetch_ok", { prCount: all.length });
       } catch (err) {
         lastFetchFailed = true;
         const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
         lastFetchFailureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code);
+        fetchState = "failed";
         // LOUD (W1-T181 design (ii)/(v)): the pre-fix catch was silent for hours — `lastFetchFailed
         // = true; return []` — with zero serve.log error lines, because ENOBUFS classified
         // "unknown" and nothing ever surfaced it. console.error guarantees this reaches
@@ -4429,19 +4524,27 @@ export function buildBatchedGithub(
       index();
       issueIndex();
     },
+    // W1-T2219: readFailed()/readFailureReason() no longer force `index()`. Pre-fix, EITHER
+    // accessor alone forced a fetch — so asking "did the read fail" PERFORMED the read and
+    // blocked the caller on a live `gh` call while reporting the PREVIOUS attempt's verdict
+    // for the whole duration (rationale (2)(b)/(3)). Every real caller in this codebase already
+    // reaches these AFTER a query method (`prByRef`/`findMergedByTrailer`/etc.) that itself
+    // calls `index()`, so the reported verdict for a classified failure is UNCHANGED from
+    // before this fix; the only case that changes is a caller that asks FIRST, which now gets
+    // the honest "not_attempted" reading `readState()` exposes below rather than a forced,
+    // blocking fetch pretending to answer about a read nobody has asked for yet.
     readFailed() {
-      // Forces a fetch first if the cache is cold/expired, so `readFailed()` alone
-      // (never preceded by any other method call) still reports accurately instead
-      // of trivially returning the initial `false`.
-      index();
       return lastFetchFailed;
     },
     readFailureReason() {
-      index();
       return lastFetchFailureReason;
     },
+    readState() {
+      return fetchState;
+    },
     readTruncated() {
-      // Same force-a-fetch-first shape as `readFailed()` above, for the same reason: a caller
+      // Same force-a-fetch-first shape as `readFailed()` used to have (W1-T415, unchanged here
+      // — `readTruncated()` is a distinct, THIRD signal this task does not touch): a caller
       // that asks this FIRST (never preceded by any other method call) still reports accurately
       // instead of trivially returning the initial `false`.
       index();
@@ -4450,6 +4553,14 @@ export function buildBatchedGithub(
     issueReadFailed() {
       issueIndex();
       return lastIssueFetchFailed;
+    },
+    // W1-T2219: closes rationale (2)(c) — `lastIssueFetchFailureReason` was already classified
+    // and logged (`board_gateway.issue_fetch_failed`) but had no accessor, so an issue-channel
+    // failure's REASON was reachable only by reading the ledger, never by a caller. Non-forcing,
+    // like `readFailureReason()` above — a caller consults this only after `issueReadFailed()`
+    // (which already forces `issueIndex()`) is `true`.
+    issueReadFailureReason() {
+      return lastIssueFetchFailureReason;
     },
   };
 }
