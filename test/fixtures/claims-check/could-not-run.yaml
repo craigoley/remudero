@@ -1,0 +1,10 @@
+# Fixture (W1-T2215): a claim that declares a precondition_paths input which does not exist. The
+# assertion itself is `true` -- if it were ever spawned it would exit 0, a PASS. If this fixture
+# ever reports PASS instead of COULD-NOT-RUN, the third-state decision consulted the assertion's
+# (would-be) exit code instead of the declared precondition, which is exactly the bug this task
+# closes.
+- id: fixture-could-not-run-would-pass
+  claim: "This claim's only input is missing, so it cannot be checked either way."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "true"
+  precondition_paths: ["definitely-not-a-real-precondition-input-xyz"]

@@ -8,7 +8,7 @@
 # fixture (test/claims-check.test.ts) proves a broken assertion actually turns the job RED and
 # names the failing claim, not just that the file parses.
 #
-# Schema per entry (all four fields required, all strings):
+# Schema per entry (the first four fields required, all strings; the fifth optional):
 #   id:           stable slug — printed in the CI failure output, never reused for a different fact
 #   claim:        the human-readable assertion the plan is making about the system
 #   plan_section: where the claim is asserted in prose (MASTER-PLAN.md section or a docs/*.md file)
@@ -16,6 +16,16 @@
 #                 claim holds. Keep it cheap, offline, and deterministic — no network, no live
 #                 GitHub state (a PR's default GITHUB_TOKEN cannot read branch-protection settings;
 #                 see the merge-gate claim below), no wall-clock dependence.
+#   precondition_paths (optional list of strings): every path (relative to the repo root) the
+#                 assertion needs to exist before it can say anything true or false about the
+#                 claim. When one is missing, scripts/claims-check.mjs (W1-T2215) reports the claim
+#                 `could-not-run` WITHOUT ever spawning the assertion — never "the plan is lying".
+#                 This matters most for a NEGATED assertion (`! grep ...`): grep exits 2 on a
+#                 missing file, and `!` turns that 2 into 0, a silent false PASS with no
+#                 diagnostic. Declaring the file here closes that fail-open hole. Most assertions
+#                 below are third-party binaries (grep/test/node --test) whose exit codes this repo
+#                 does not own, so this is the ONLY generalisable way to tell "could not run" from
+#                 "ran and disagrees" — see W1-T2215's design note.
 #
 # Seeded (W1-T29) with the six claims named in this task's design note. One of those six —
 # the merge-gate claim — had already DRIFTED by the time this file was written: the design note's
@@ -31,6 +41,7 @@
     spawnWorker's SDK Options and the worker settings template carry no MCP field at all."
   plan_section: "MASTER-PLAN.md §1 Architecture — four planes (Worker plane)"
   assertion: '! grep -rIiq "mcp" src/lib/worker.ts settings/worker.json'
+  precondition_paths: ["src/lib/worker.ts", "settings/worker.json"]
 
 - id: worker-env-strips-anthropic
   claim: "buildWorkerEnv strips every ANTHROPIC_* env var from the child process — a worker never
@@ -38,6 +49,7 @@
   plan_section: "MASTER-PLAN.md §9 Resource doctrine — mounts, windows & context (FIELD FINDING 1,
     the billing boundary)"
   assertion: 'node --test --import tsx --test-name-pattern "strips ANTHROPIC_\* from a polluted parent env" test/env.test.ts'
+  precondition_paths: ["test/env.test.ts"]
 
 - id: tasks-yaml-never-machine-written
   claim: "plan/tasks.yaml is never machine-written — no writeFileSync/writeFile call anywhere in
@@ -45,11 +57,13 @@
     file, via a plan-only human PR."
   plan_section: "MASTER-PLAN.md §13 Plan-sync: the in-repo PR flow (never scp again)"
   assertion: '! grep -rnE "writeFileSync\(|writeFile\(" src bin --include=*.ts --include=*.mjs --include=*.js 2>/dev/null | grep -i "tasks\.yaml"'
+  precondition_paths: ["src", "bin"]
 
 - id: default-budget-usd-100
   claim: "DEFAULT_BUDGET_USD is 100 — the runaway tripwire, not a work allowance."
   plan_section: "MASTER-PLAN.md §9 Resource doctrine — mounts, windows & context"
   assertion: 'grep -qE "^export const DEFAULT_BUDGET_USD = 100(\.0)?;" src/run-task.ts'
+  precondition_paths: ["src/run-task.ts"]
 
 - id: containment-fails-closed
   claim: "Containment fails closed: an unproven or silently-dropped sandbox BLOCKS the run (throws
@@ -57,6 +71,7 @@
     outside-cwd write is not itself proof; an OS denial must be OBSERVED."
   plan_section: "MASTER-PLAN.md §4A Workspace containment (fleet-wide)"
   assertion: 'node --test --import tsx test/containment.test.ts'
+  precondition_paths: ["test/containment.test.ts"]
 
 - id: merge-gate-required-contexts
   claim: "The merge gate's required status checks are [ci-gate, remudero-review] — the ci-gate
@@ -64,6 +79,7 @@
     deadlock a merge."
   plan_section: "docs/review-gate.md#required-contexts"
   assertion: 'grep -qF ''required_status_checks.contexts = ["ci-gate", "remudero-review"]'' docs/review-gate.md'
+  precondition_paths: ["docs/review-gate.md"]
 
 # Added by W1-T213 (RECON R-30): plan/claims.yaml's original six claims point at code/tests and,
 # for prose, only at docs/review-gate.md -- README.md, CONTRIBUTING.md and the operator guide
@@ -76,18 +92,21 @@
     real in WS-1 -- WS-1 closed 2026-07-15 and run-task.ts is real, dispatched code today."
   plan_section: "README.md#whats-here-today"
   assertion: 'node --test --import tsx --test-name-pattern "README.md does not claim the repo currently contains the WS-0 spike" test/docs-claims.test.ts'
+  precondition_paths: ["test/docs-claims.test.ts"]
 
 - id: docs-required-check-name
   claim: "CONTRIBUTING.md names ci-gate, not bare ci, as the required aggregator status check --
     matching docs/review-gate.md and live branch protection."
   plan_section: "CONTRIBUTING.md#required-status-checks"
   assertion: 'node --test --import tsx --test-name-pattern "CONTRIBUTING.md names ci-gate \(not bare ci\) as the required aggregator check" test/docs-claims.test.ts'
+  precondition_paths: ["test/docs-claims.test.ts"]
 
 - id: docs-repo-flag-coverage
   claim: "docs/operator-guide.md documents the --repo flag, a real flag parsed by run-task.ts
     (resolveReviewTarget and the drain/daemon/sweep/fix call sites)."
   plan_section: "docs/operator-guide.md#the-commands-rmd-binrmd"
   assertion: 'node --test --import tsx --test-name-pattern "docs/operator-guide.md documents the --repo flag" test/docs-claims.test.ts'
+  precondition_paths: ["test/docs-claims.test.ts"]
 
 - id: docs-verb-coverage
   claim: "docs/operator-guide.md's command table names every verb in the COMMANDS registry
@@ -95,6 +114,7 @@
     automatically instead of needing this task done again."
   plan_section: "docs/operator-guide.md#the-commands-rmd-binrmd"
   assertion: 'node --test --import tsx --test-name-pattern "docs/operator-guide.md.s command table covers every COMMANDS registry verb" test/docs-claims.test.ts'
+  precondition_paths: ["test/docs-claims.test.ts"]
 
 - id: docs-ci-gate-md-removed
   claim: "docs/ci-gate.md does not exist as a one-line CI-probe artifact masquerading as
@@ -119,6 +139,7 @@
     longer read GREEN locally while the reviewer judges it no-match."
   plan_section: "CLAUDE.md#writing-proofs-and-acceptance-criteria"
   assertion: 'node --test --import tsx --import ./test/setup/tmp-hygiene.ts --test-name-pattern "ACCEPTANCE #1: check-proof reports the SAME no-match verdict" test/check-proof-executor-parity.test.ts'
+  precondition_paths: ["test/check-proof-executor-parity.test.ts"]
 
 # Added by W1-T986 (fb-1785780032614-be23bf): CLAUDE.md's "Before you push" section prescribed a
 # hand-rolled scoped-lcov + `git diff --cached` recipe instead of naming the shipped single entry
@@ -135,6 +156,7 @@
     recipe that approximates CI rather than running it."
   plan_section: "CLAUDE.md#before-you-push"
   assertion: 'grep -qF "preflight --ci-parity" CLAUDE.md && ! grep -qE "diff-coverage\.mjs --lcov [^ ]+ --diff" CLAUDE.md'
+  precondition_paths: ["CLAUDE.md"]
 
 # Added by W1-T409 (the offline half of W1-T392's split): MASTER-PLAN.md's "## SHIPPED log"
 # section and its not-shipped prose ("not shipped"/"unbuilt"/"did not ship") are two lists a
@@ -152,3 +174,4 @@
     claims.mjs names the id and both lines when it finds one."
   plan_section: "MASTER-PLAN.md §SHIPPED log"
   assertion: 'node --import tsx scripts/plan-state-claims.mjs'
+  precondition_paths: ["MASTER-PLAN.md", "plan/tasks.yaml"]

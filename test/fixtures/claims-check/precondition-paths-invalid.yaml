@@ -1,0 +1,8 @@
+# Fixture (W1-T2215): a claim declaring a structurally invalid `precondition_paths` (a bare
+# string instead of a non-empty array of strings) -- must fail loudly at parse time, same
+# discipline as a missing required field, never silently ignored or silently coerced.
+- id: fixture-invalid-precondition-paths
+  claim: "This claim's precondition_paths is malformed."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "true"
+  precondition_paths: "not-an-array"

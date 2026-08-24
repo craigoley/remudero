@@ -1,0 +1,21 @@
+# Fixture (W1-T2215): one TRUE claim, one genuinely FALSE claim (no precondition -- exactly
+# test/fixtures/claims-check/one-false.yaml's shape), and one COULD-NOT-RUN claim (a missing
+# precondition input), all in the same run. Proves the three states are reported distinctly in one
+# pass: the true claim still PASSes, the false claim is still named under "THE PLAN IS LYING ABOUT
+# THE SYSTEM" exactly as before this task, and the could-not-run claim gets its own banner, never
+# that one, with its cause (the missing input) printed before its own claim prose.
+- id: fixture-mixed-true
+  claim: "The shell command `true` exits 0."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "true"
+
+- id: fixture-mixed-false-planted-lie
+  claim: "This is a deliberately false claim: that /definitely-not-a-real-path-xyz exists."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "test -e /definitely-not-a-real-path-xyz"
+
+- id: fixture-mixed-could-not-run
+  claim: "This claim's own prose should never be printed before its missing-input cause."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "true"
+  precondition_paths: ["definitely-not-a-real-precondition-input-xyz"]
