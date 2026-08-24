@@ -12,8 +12,14 @@ import { readFileSync } from "node:fs";
  * allowlist. This guard is therefore deliberately STRICTER than the SDK schema:
  * it rejects any unknown or MISPLACED key with a named error, before spawn.
  *
- * Key sets are PINNED to the installed version (SDK 0.3.209 / CLI 2.1.209). When
- * the platform is bumped (WS-7 release watcher), re-pin from the schema dump.
+ * Key sets verified equal to SandboxSettingsSchema at SDK 0.3.233, 2026-08-24
+ * (CLI 2.1.209) — `SANDBOX_KEYS` below is enforced against the live schema by
+ * test/settings.test.ts (W1-T2216), which parses the installed `sdk.d.ts` by
+ * brace depth (the schema object isn't exported at runtime, and the type-level
+ * `keyof SandboxSettings` widens to `string`, so neither mechanical check is
+ * available) and FAILS the suite on drift, naming the added/removed keys and
+ * the SDK version measured. When the platform is bumped (WS-7 release
+ * watcher), that test goes red until someone re-pins from the schema dump.
  */
 
 /** Named error so callers (and tests) can assert the guard fired by type. */
@@ -24,8 +30,10 @@ export class WorkerSettingsError extends Error {
   }
 }
 
-// Pinned from SandboxSettingsSchema (SDK 0.3.209).
-const SANDBOX_KEYS = new Set([
+// Verified equal to SandboxSettingsSchema at SDK 0.3.233, 2026-08-24 — see the
+// bidirectional comparison in test/settings.test.ts (W1-T2216), which fails
+// loudly (naming the delta) the day this drifts from the live schema.
+export const SANDBOX_KEYS = new Set([
   "enabled",
   "failIfUnavailable",
   "autoAllowBashIfSandboxed",
@@ -80,11 +88,11 @@ function checkKeys(obj: Record<string, unknown>, allowed: Set<string>, path: str
     if (belongs && path === "sandbox") {
       throw new WorkerSettingsError(
         `sandbox.${key} is not a valid top-level sandbox key; ` +
-          `'${key}' belongs under sandbox.${belongs} (silent-drop hazard — WS-0 FF10a, pinned SDK 0.3.209).`,
+          `'${key}' belongs under sandbox.${belongs} (silent-drop hazard — WS-0 FF10a, pinned SDK 0.3.233).`,
       );
     }
     throw new WorkerSettingsError(
-      `unknown key '${key}' in ${path} (pinned SDK 0.3.209 SandboxSettingsSchema).`,
+      `unknown key '${key}' in ${path} (pinned SDK 0.3.233 SandboxSettingsSchema).`,
     );
   }
 }

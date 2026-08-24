@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
+  SANDBOX_KEYS,
   validateWorkerSettings,
   WorkerSettingsError,
 } from "../src/lib/settings.js";
@@ -218,4 +219,200 @@ test("W1-T2213 ACCEPTANCE 2: all four denyRead entries (three re-anchored, one a
     assert.ok(settings.permissions.deny.includes(`Read(${entry})`), `permissions.deny must mirror ${entry}`);
   }
   assert.equal(settings.permissions.deny.length, 4, "permissions.deny mirrors denyRead one-for-one");
+});
+
+// ── W1-T2216: THE PINNED KEY-SET GUARD HAS NO ENFORCER — `SANDBOX_KEYS` (settings.ts)
+// is asserted, by a comment, to match the installed SDK's `SandboxSettingsSchema`.
+// Two mechanical routes were measured and are BOTH closed (task rationale (4)/(5)):
+// the schema object is not exported at runtime (29 exports, none matching
+// `/[Ss]chema/`), and the type-level `keyof SandboxSettings` widens to `string` —
+// a bogus member assigns to it cleanly, so a `Record<keyof SandboxSettings, true>`
+// exhaustiveness map can never fail. The only mechanical route left is parsing the
+// installed `sdk.d.ts` declaration by BRACE DEPTH — never proximity or a flat regex,
+// which would mistake a nested `network.allowedDomains`/`filesystem.denyRead` member
+// for a top-level one. The parser below refuses its own failure: before comparing
+// anything it asserts the extraction found a PLAUSIBLE set (non-empty, containing
+// the load-bearing anchors `enabled`/`network`/`filesystem`) — an extraction that
+// silently returns an empty set and reports "equal" would reproduce, one layer
+// down, the exact defect this task exists to close. ──────────────────────────────
+
+const SANDBOX_SCHEMA_DECLARATION_MARKER = "declare const SandboxSettingsSchema:";
+const SANDBOX_SCHEMA_ANCHOR_KEYS = ["enabled", "network", "filesystem"];
+
+/** Resolve the installed SDK's package directory without depending on `./package.json` being exported. */
+function resolveSdkPackageDir(): string {
+  const entryUrl = import.meta.resolve("@anthropic-ai/claude-agent-sdk");
+  return dirname(fileURLToPath(entryUrl));
+}
+
+function readInstalledSdkVersion(): string {
+  const pkg = JSON.parse(
+    readFileSync(join(resolveSdkPackageDir(), "package.json"), "utf8"),
+  ) as { version: string };
+  return pkg.version;
+}
+
+function findMatchingBraceClose(source: string, openIdx: number): number {
+  let depth = 0;
+  for (let i = openIdx; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Extract the top-level member names of a `declare const <name>: () => z.ZodObject<{ ... }, ...>;`
+ * declaration in a `.d.ts` file, by tracking BRACE DEPTH from the declaration's
+ * opening `{` to its matching close — the only route that cannot mistake a nested
+ * member for a top-level one. THROWS A NAMED PARSER FAULT (never returns an empty
+ * or implausible set silently) when: the declaration marker isn't found, it has no
+ * opening brace, the braces are unbalanced, or the extracted set is implausible
+ * (empty, or missing one of `anchors`).
+ */
+function extractTopLevelZodObjectMembers(
+  source: string,
+  declarationMarker: string,
+  anchors: string[],
+): string[] {
+  const declIdx = source.indexOf(declarationMarker);
+  if (declIdx === -1) {
+    throw new Error(`PARSER FAULT: declaration '${declarationMarker}' not found in source.`);
+  }
+  const openIdx = source.indexOf("{", declIdx);
+  if (openIdx === -1) {
+    throw new Error(`PARSER FAULT: no opening brace found after '${declarationMarker}'.`);
+  }
+  const closeIdx = findMatchingBraceClose(source, openIdx);
+  if (closeIdx === -1) {
+    throw new Error(
+      `PARSER FAULT: no matching closing brace found for '${declarationMarker}' (unbalanced braces).`,
+    );
+  }
+  const body = source.slice(openIdx, closeIdx + 1);
+  const memberLineRe = /^[ \t]*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:/;
+  const members: string[] = [];
+  let depth = 0;
+  for (const line of body.split("\n")) {
+    if (depth === 1) {
+      const m = memberLineRe.exec(line);
+      if (m) members.push((m[1] ?? m[2] ?? m[3])!);
+    }
+    for (const ch of line) {
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+    }
+  }
+  const missingAnchors = anchors.filter((a) => !members.includes(a));
+  if (members.length === 0 || missingAnchors.length > 0) {
+    throw new Error(
+      `PARSER FAULT: extraction from '${declarationMarker}' found an implausible member set ` +
+        `(${members.length} member(s); missing anchor keys: ${missingAnchors.join(", ") || "(none — but zero members)"}). ` +
+        `Treat this as a parser fault, never as "the schema is empty".`,
+    );
+  }
+  return members;
+}
+
+/**
+ * Compare a pinned key set to the schema's live members in BOTH directions.
+ * Returns `null` when equal, or a message naming the keys the schema ADDED
+ * (present live, not pinned), the keys the schema REMOVED (pinned, no longer
+ * live), and the SDK version measured — never a bare "sets differ".
+ */
+function formatSandboxKeySetDrift(pinned: Set<string>, live: string[], sdkVersion: string): string | null {
+  const liveSet = new Set(live);
+  const added = live.filter((k) => !pinned.has(k)).sort();
+  const removed = [...pinned].filter((k) => !liveSet.has(k)).sort();
+  if (added.length === 0 && removed.length === 0) return null;
+  return (
+    `SANDBOX_KEYS (src/lib/settings.ts) has drifted from the live SandboxSettingsSchema ` +
+    `at SDK ${sdkVersion}. ` +
+    `Added by the schema (present live, not pinned): ${added.length ? added.join(", ") : "(none)"}. ` +
+    `Removed from the schema (pinned, no longer live): ${removed.length ? removed.join(", ") : "(none)"}. ` +
+    `Re-pin SANDBOX_KEYS from the schema dump and update the marker comment in src/lib/settings.ts.`
+  );
+}
+
+test("W1-T2216: SANDBOX_KEYS matches SandboxSettingsSchema's live top-level members, in both directions", () => {
+  const sdkDtsPath = join(resolveSdkPackageDir(), "sdk.d.ts");
+  const dts = readFileSync(sdkDtsPath, "utf8");
+  const liveMembers = extractTopLevelZodObjectMembers(
+    dts,
+    SANDBOX_SCHEMA_DECLARATION_MARKER,
+    SANDBOX_SCHEMA_ANCHOR_KEYS,
+  );
+  const version = readInstalledSdkVersion();
+  const drift = formatSandboxKeySetDrift(SANDBOX_KEYS, liveMembers, version);
+  assert.equal(drift, null, drift ?? "");
+});
+
+test("W1-T2216: an extraction that finds no plausible member set fails as a parser fault, never as reported equality", () => {
+  assert.throws(
+    () =>
+      extractTopLevelZodObjectMembers(
+        "declare const SandboxSettingsSchema: () => z.ZodObject<{}, z.core.$loose>;",
+        SANDBOX_SCHEMA_DECLARATION_MARKER,
+        SANDBOX_SCHEMA_ANCHOR_KEYS,
+      ),
+    /PARSER FAULT/,
+    "an empty extraction must throw a named parser fault, never silently report an empty set as equal",
+  );
+  assert.throws(
+    () => extractTopLevelZodObjectMembers("no declaration in this source at all", SANDBOX_SCHEMA_DECLARATION_MARKER, SANDBOX_SCHEMA_ANCHOR_KEYS),
+    /PARSER FAULT/,
+    "a missing declaration marker must throw a named parser fault",
+  );
+  assert.throws(
+    () =>
+      extractTopLevelZodObjectMembers(
+        "declare const SandboxSettingsSchema: () => z.ZodObject<{\n    enabled: z.ZodOptional<z.ZodBoolean>;\n}, z.core.$loose>;",
+        SANDBOX_SCHEMA_DECLARATION_MARKER,
+        SANDBOX_SCHEMA_ANCHOR_KEYS,
+      ),
+    /PARSER FAULT/,
+    "a non-empty but anchor-missing set (no network/filesystem) must still fail as a parser fault",
+  );
+});
+
+test("W1-T2216: a drift failure names the keys ADDED, the keys REMOVED, and the SDK version measured", () => {
+  const message = formatSandboxKeySetDrift(
+    new Set(["enabled", "network", "goneFromSchema"]),
+    ["enabled", "network", "newInSchema"],
+    "9.9.9",
+  );
+  assert.ok(message, "a real drift must produce a message, not null");
+  assert.match(message!, /newInSchema/, "must name the key the schema ADDED");
+  assert.match(message!, /goneFromSchema/, "must name the key REMOVED from the schema");
+  assert.match(message!, /9\.9\.9/, "must name the SDK version it measured against");
+});
+
+test("W1-T2216: equal sets (either order) report no drift", () => {
+  assert.equal(formatSandboxKeySetDrift(new Set(["a", "b"]), ["b", "a"], "1.2.3"), null);
+});
+
+test("W1-T2216: the guard still refuses an unknown or misplaced sandbox key exactly as it does today", () => {
+  // Same hazard as the top-of-file suite (WS-0 FF10a) — pinned here explicitly so
+  // this criterion has its own named assertion, independent of the enforcer above.
+  assert.throws(
+    () => validateWorkerSettings({ ...GOOD, sandbox: { ...GOOD.sandbox, notARealKey: true } }),
+    WorkerSettingsError,
+  );
+  assert.throws(
+    () => validateWorkerSettings({ ...GOOD, sandbox: { ...GOOD.sandbox, denyRead: ["~/.ssh/**"] } }),
+    (e: unknown) => e instanceof WorkerSettingsError && /sandbox\.filesystem/.test((e as Error).message),
+  );
+});
+
+test("W1-T2216: the pin marker records what was verified and when, not a bare version", () => {
+  const settingsSrcPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "settings.ts");
+  const src = readFileSync(settingsSrcPath, "utf8");
+  assert.match(
+    src,
+    /verified equal to SandboxSettingsSchema at SDK \d+\.\d+\.\d+, \d{4}-\d{2}-\d{2}/,
+    "the pin marker must record the SDK version AND the date it was verified, not a bare version number",
+  );
 });
