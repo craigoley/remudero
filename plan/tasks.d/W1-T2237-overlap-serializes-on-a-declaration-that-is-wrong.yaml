@@ -1,0 +1,156 @@
+- id: W1-T2237
+  title: "`partitionByFileOverlap` serializes concurrently-runnable lanes on their DECLARED `files:`, but a merged implementation diff exceeded its declaration in 138 of 301 comparable cases, and every one of the 47 that overran onto a `src/` path landed on ground another task also declares — so the guard is protecting the declared set while two lanes edit the real one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (17d24844efb9e11b34557f6cd13b67d6acc1987e), clone shallow-checked `false`. `src/run-task.ts`
+    (1,533,033 bytes) read through git objects, never the Contents API. No suite, no spawning verb,
+    no poller. Every figure below was re-derived here through the repo's OWN predicates, and every
+    zero carries a control.
+
+    (1) THE MECHANISM. `partitionByFileOverlap` (`src/lib/dispatch-overlap.ts`) walks the
+    concurrently-runnable candidates in plan order and defers any whose `overlappingPaths` against
+    an already-placed task is non-empty. `overlappingPaths` reads `a.files ?? []` and `b.files ?? []`
+    — DECLARED on BOTH SIDES — and fail-closes on an empty side (an undeclared task overlaps every
+    entry of the other, or a synthetic `"*"` when both are empty). Its two call sites are
+    `drain.ts`'s dispatch pass and `daemon.ts`'s, both passing `Task[]`. It is not inert: the
+    ledger carries 30 `dispatch.serialized` rows. The defect is not that it fails to fire; it is
+    that it is aiming at a set that is frequently not the one the lane will edit.
+
+    (2) HOW OFTEN THE DECLARATION IS WRONG — MEASURED, WITH THE WINDOW NAMED. Over every commit on
+    `origin/main` carrying an anchored `^Remudero-Task:\s*<id>\s*$` trailer, window
+    2026-07-15T11:19:57-04:00 → 2026-08-24T17:56:48Z, with each task's `files:` read from the shard
+    AS IT STOOD AT ITS OWN MERGE COMMIT and the comparison run through the repo's own
+    `scopeGuardOutOfScopeFiles` (`src/run-task.ts`) rather than a hand-rolled predicate:
+    326 trailered, 305 implementation-shaped, 4 with an unresolvable shard, 0 declaring an empty
+    scope — 301 COMPARABLE, of which 138 EXCEEDED THEIR DECLARATION (45.8%): 123 (40.9%) onto a
+    `src/` or `test/` path, 47 (15.6%) onto a `src/` path. THE CONTROL IS THE COMPLEMENT: 163
+    compared clean, so the predicate discriminates rather than flagging everything.
+
+    (3) AND THE OVERRUNS LAND ON CONTESTED GROUND. All 47 of the `src/` overruns touched a path that
+    at least one OTHER task also declares — most often `src/run-task.ts` (16 of them),
+    `src/lib/ledger.ts` (5), `src/lib/policy.ts` (4), `src/lib/inbox.ts` (4), `src/lib/daemon.ts`
+    (3), `src/lib/review.ts` (3). Had those declarations been accurate, the overlap guard would have
+    held exactly those paths in its serialization set. CONTROL: `src/run-task.ts` is declared by 307
+    of 834 shards and a path no shard declares reads 0, so the "also declared" test is not
+    vacuously true. CAVEAT, STATED RATHER THAN GLOSSED: this figure uses TODAY'S declarations as an
+    approximation of who else claimed a path, because it asks which other tasks claim it now; only
+    the 138/301 figure in §2 uses the declaration as of each merge commit.
+
+    (4) NOTHING CLOSES IT. `rareOverlapWarnings` (`src/lib/dispatch-overlap.ts`) is the only
+    consumer that reads a PR's REAL diff, through `openPrFileScopes` (`src/run-task.ts`), whose own
+    doc says provenance "is the whole point" — but it reads real paths only on the OPEN-PR side, the
+    candidate stays declared, it is ceiling-gated so a pair sharing only a hub path is DELIBERATELY
+    silent, and its doc states outright that nothing there "influences `partitionByFileOverlap`'s
+    dispatch decision … and refuses no dispatch". The practical backstop is git, and a
+    NON-CONFLICTING concurrent edit to the same file merges silently — which is why this is not
+    self-limiting.
+
+    (5) Q1 — TWO SHAPES, WEIGHED, AND THE ONE THAT SURVIVES IS NOT THE OBVIOUS ONE.
+
+      SHAPE A — feed the overlap check's KNOWN side from real diffs. The seam exists and already
+      spends the healthy REST bucket rather than the repeatedly-exhausted GraphQL one. But it helps
+      only once a lane has an OPEN PR, which is after dispatch, so an in-flight lane that has not
+      opened one yet is still invisible. And it has a cost the ceiling on `rareOverlapWarnings`
+      exists precisely to avoid: with `src/run-task.ts` genuinely touched by a large share of
+      implementation work, serializing on OBSERVED hub overlap would defer far more than
+      serializing on declared overlap does today, and this repo's own recurring defect is a bound
+      that fires on a healthy condition. Any version of Shape A must be measured against dispatch
+      throughput before it is armed, not merely implemented.
+
+      SHAPE B — write the observed overrun back onto the shard as an amendment the author reviews.
+      This is the one that compounds: it makes declarations self-correcting, changes no dispatch
+      behaviour, and refuses nothing. BUT ITS OBSERVATION POINT MUST NOT BE `scope_guard.overrun`.
+      That guard sits inside `if (!branchOnOrigin)` in `src/run-task.ts` — the orchestrator fallback
+      push — and its own comment records that it "reaches ONE of `gitPushRunBranch`'s nine call
+      sites and only when the branch is ABSENT from origin". The ledger agrees: 3 rows, against 787
+      `run.start` rows in the same corpus. It observes almost nothing.
+
+      THE OBSERVATION POINT WITH COVERAGE ALREADY EXISTS, AND IT ALREADY COMPUTES BOTH DIRECTIONS.
+      `unwiredAdvisoriesFor` (`src/lib/review.ts`) emits `scope_violation` from
+      `scopeViolationFiles` for files the diff touched outside the declaration, AND `inverse_scope`
+      from `inverseScopeUntouchedFiles` for files the task declared and never touched. Its
+      `checkoutDir` gate covers only the `unwired_export` arm, so both scope arms run on every
+      reviewed PR whose task resolves. The drift is therefore already measured on both sides, per
+      PR, today — and nothing ever writes it back.
+
+    (6) Q2 — ONLY ONE SIDE IS FIXABLE, AND THIS SHARD IS SCOPED TO THAT. A candidate that has not
+    run has NO real diff, so at dispatch time its declaration is the only signal that exists and no
+    remedy makes it true. Promising symmetry here would be promising something the mechanism cannot
+    deliver. What CAN improve is the accuracy of the declaration a future dispatch reads, which is
+    Shape B, and the accuracy of the OTHER side where a real diff is already observable, which is
+    Shape A's narrow half. THE SCOPE: correct the side that has evidence, and report — never
+    predict — the side that does not.
+
+    (7) THE ADJACENT CASE, CITED NOT RE-FILED. W1-T1014 records that two PRs with no path overlap
+    can each be green and jointly red. This is its INVERSE: the overlap EXISTS and the guard cannot
+    see it, because the guard is reading a declaration rather than the change. W1-T434, W1-T1030,
+    W1-T401 and W1-T1227 are cited throughout above for the dispositions this shard must not
+    disturb; none is re-filed and none of their evidence is restated as this shard's own.
+  acceptance:
+    - claim: "the overlap decision consults an observed changed-file set for a lane that has one, not only its declaration"
+      proof: "unit test: test/overlap-uses-observed-scope.test.ts"
+    - claim: "a lane with no observed changed-file set still participates using its declaration, unchanged"
+      proof: "unit test: test/overlap-uses-observed-scope.test.ts"
+    - claim: "the fail-closed disposition on an undeclared and unobserved scope is preserved exactly"
+      proof: "unit test: test/overlap-uses-observed-scope.test.ts"
+    - claim: "an overrun observed at review time is reported against the declaration it exceeded rather than discarded"
+      proof: "unit test: test/overlap-uses-observed-scope.test.ts"
+    - claim: "the report names the declared side and the observed side separately so an author can tell drift from creep"
+      proof: "unit test: test/overlap-uses-observed-scope.test.ts"
+    - claim: "no path in this change refuses a dispatch, a push, or a merge that is permitted today"
+      proof: "unit test: test/overlap-uses-observed-scope.test.ts"
+    - claim: "the partition stays deterministic in candidate order with the observed input supplied"
+      proof: "unit test: test/overlap-uses-observed-scope.test.ts"
+  files: [src/lib/dispatch-overlap.ts, test/overlap-uses-observed-scope.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#declared-scope-vs-real-diff-2026-08-24"
+  plan_refs: ["W1-T171", "W1-T401", "W1-T434", "W1-T1014", "W1-T1030", "W1-T1227"]
+  note: |
+    NO REFUSAL, AND THE ARITHMETIC IS WHY. At 45.8% a refusal on scope overrun would block roughly
+    half of all merged implementation work. W1-T434 already removed one refusal on this exact path
+    because it destroyed the evidence separating a phantom revert from an under-declared `files:` —
+    the two shapes produce an identical file list — at roughly $29 of already-completed work per
+    firing, while the class it targeted merged anyway through the worker's own sandbox push. Its own
+    comment says the guard "could never contain a worker". Nothing in this shard reintroduces a
+    refusal at any rung: not at dispatch, not at push, not at review.
+
+    THREE THINGS STAY EXACTLY AS THEY ARE. `declaredScopeViolation` (`src/lib/task-linter.ts`) keeps
+    firing only on an absent or empty `files:` and keeps exempting `verify: human` — W1-T1030
+    already found it blocking records the dispatcher can never reach, and widening it is not the
+    answer here. The review-side advisory stays OUT of `state` and `floorState`; `src/lib/review.ts`
+    says in terms that it folds into neither, and this shard does not make an advisory binding. And
+    the fix rung's own pre-strike gate (W1-T1227) keeps its two regimes and keeps declining to
+    re-flag what it inherited.
+
+    A TEST FILE A WORKER LEGITIMATELY NEEDS MUST STILL BE ADDABLE. That is the single hardest
+    constraint here and it is what rules out every refusal-shaped remedy: 123 of the 301 comparable
+    merges overran onto a `src/` or `test/` path, and a large share of those are a worker adding the
+    test that makes its own change reviewable. The remedy is a declaration the author updates or a
+    report they read, never a gate that forces a worker to ship untested.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (dispatch-overlap, overlap-uses-observed-scope)
+      at risk:medium — Rule 19: raise to risk:high or decompose into one task per concern
+
+    Rule 19 derives the concern from each declared path's STEM, so a source file and the new test
+    that falsifies it read as two concerns whenever the test is not named after the source.
+    Decomposing a predicate from its own falsifier is not a real decomposition. AND THE BAND EXEMPTS
+    RATHER THAN CLEARS: `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` on its
+    first line at `risk: high`, so that refusal is the only scoring of this span this shard will
+    ever get — recorded here because nothing downstream re-derives it.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NONE NAMES AN EXISTING FILE. Every criterion uses
+    the pure-path `unit test:` form naming `test/overlap-uses-observed-scope.test.ts`, declared in
+    `files:` and absent from this tree, so on the filing PR each resolves through W1-T456's
+    forward-reference carve-out to `not_yet_built`. Falsified in the other direction: the same form
+    naming an existing path executes and is graded on its result — the shape that red-lined #2707.
