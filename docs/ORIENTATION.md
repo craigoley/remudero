@@ -1,44 +1,36 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-23T16:53:22.664Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-24T13:59:00.320Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-31 run(s) since the last retro marker. Verdicts: {"blocked":1,"blocked_ci":15,"failed":1,"merged":14}.
+52 run(s) since the last retro marker. Verdicts: {"blocked":1,"blocked_ci":11,"blocked_containment":22,"blocked_isolation":1,"merged":17}.
 
 ### Shipped since marker
-- W1-T1000003 → https://github.com/craigoley/remudero/pull/2541
-- W1-T1207 → https://github.com/craigoley/remudero/pull/2519
-- W1-T1208 → https://github.com/craigoley/remudero/pull/2522 (gate-side merge; run ended blocked_ci)
-- W1-T1210 → https://github.com/craigoley/remudero/pull/2521
-- W1-T1212 → https://github.com/craigoley/remudero/pull/2542 (gate-side merge; run ended blocked_ci)
-- W1-T1213 → https://github.com/craigoley/remudero/pull/2545 (gate-side merge; run ended blocked_ci)
-- W1-T1214 → https://github.com/craigoley/remudero/pull/2520 (gate-side merge; run ended blocked_ci)
-- W1-T1216 → https://github.com/craigoley/remudero/pull/2546 (gate-side merge; run ended blocked_ci)
-- W1-T1217 → https://github.com/craigoley/remudero/pull/2523 (gate-side merge; run ended blocked_ci)
-- W1-T1219 → https://github.com/craigoley/remudero/pull/2564
-- W1-T1222 → https://github.com/craigoley/remudero/pull/2540
-- W1-T1223 → https://github.com/craigoley/remudero/pull/2549 (gate-side merge; run ended blocked_ci)
-- W1-T1224 → https://github.com/craigoley/remudero/pull/2553 (gate-side merge; run ended blocked_ci)
-- W1-T1225 → https://github.com/craigoley/remudero/pull/2573 (gate-side merge; run ended blocked_ci)
-- W1-T1227 → https://github.com/craigoley/remudero/pull/2569 (gate-side merge; run ended blocked)
-- W1-T1232 → https://github.com/craigoley/remudero/pull/2568
-- W1-T1233 → https://github.com/craigoley/remudero/pull/2571
-- W1-T1234 → https://github.com/craigoley/remudero/pull/2575
-- W1-T1235 → https://github.com/craigoley/remudero/pull/2576
-- W1-T1236 → https://github.com/craigoley/remudero/pull/2572
-- W1-T1237 → https://github.com/craigoley/remudero/pull/2579
-- W1-T1238 → https://github.com/craigoley/remudero/pull/2581
-- W1-T1239 → https://github.com/craigoley/remudero/pull/2583 (gate-side merge; run ended blocked_ci)
-- W1-T1240 → https://github.com/craigoley/remudero/pull/2585
-- W1-T1250 → https://github.com/craigoley/remudero/pull/2610
+- W1-T1252 → https://github.com/craigoley/remudero/pull/2637
+- W1-T1256 → https://github.com/craigoley/remudero/pull/2646
+- W1-T1257 → https://github.com/craigoley/remudero/pull/2636
+- W1-T1262 → https://github.com/craigoley/remudero/pull/2650
+- W1-T1264 → https://github.com/craigoley/remudero/pull/2656
+- W1-T1266 → https://github.com/craigoley/remudero/pull/2659
+- W1-T1267 → https://github.com/craigoley/remudero/pull/2665
+- W1-T1270 → https://github.com/craigoley/remudero/pull/2664
+- W1-T1271 → https://github.com/craigoley/remudero/pull/2667
+- W1-T1272 → https://github.com/craigoley/remudero/pull/2674
+- W1-T1274 → https://github.com/craigoley/remudero/pull/2675
+- W1-T1277 → https://github.com/craigoley/remudero/pull/2673
+- W1-T1281 → https://github.com/craigoley/remudero/pull/2685
+- W1-T1282 → https://github.com/craigoley/remudero/pull/2697
+- W1-T1288 → https://github.com/craigoley/remudero/pull/2690
+- W1-T2204 → https://github.com/craigoley/remudero/pull/2691
+- W1-T2206 → https://github.com/craigoley/remudero/pull/2710
 
 ## Next runnable task
 
-**W1-T1252** — THE WIPE-TEST HARNESS LEDGERS PAIRS IT NEVER MEASURED, AND CANNOT REACH THE AGGREGATE ITS OWN DESIGN CALLS SIGNAL — every sandbox subject is already merged, so both arms refuse at zero cost and the pair is written anyway; the one `wipetest.pair` row in the ledger is that null pair
+**W1-T1269** — THE FIX RUNG RETRIES WITH NO TEST FOR PROGRESS AND THE EVIDENCE IS ALREADY IN HAND — the only quantity moving across strikes is `strikes` and it ASCENDS, while `unmetCriteria` is a `CriterionVerdict[]` carrying each `claim`, so a strike that fails IDENTICALLY is indistinguishable from one that fixed half; add an earlier stop on a repeated identical failure, never a longer leash
 
 - risk: high · depends_on: (none)
 
