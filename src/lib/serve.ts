@@ -4600,6 +4600,136 @@ export function resolveConsoleSha(
 }
 
 /**
+ * W1-T2229: `bootSha` (captured once, {@link resolveConsoleSha}) vs `currentSha` (the SAME
+ * primitive called again, fresh, at the moment this runs) — the whole trigger design (i) asks
+ * for: a comparison, never a timer. {@link CONSOLE_SHA_UNKNOWN} on EITHER side means "can't
+ * tell", and an unresolved sha is never read as evidence of drift — a transient git failure (no
+ * git on PATH, detached HEAD, an unreadable repo) degrades to "assume fresh", never to an exit
+ * decided on a guess. Design (vi)'s pin — "a console whose boot sha still matches the tree never
+ * exits" — holds for the degenerate case where both sides independently failed to resolve, too:
+ * `unknown === unknown` is EQUAL, not stale.
+ */
+export function isConsoleCodeStale(bootSha: string, currentSha: string): boolean {
+  if (bootSha === CONSOLE_SHA_UNKNOWN || currentSha === CONSOLE_SHA_UNKNOWN) return false;
+  return bootSha !== currentSha;
+}
+
+/** {@link gateStaleCodeExit}'s constructor deps — every side effect injectable, same discipline
+ *  {@link gatePrewarmOnClients} already follows for this module's other refcount gate. */
+export interface StaleCodeExitDeps {
+  /** The sha captured at boot — {@link ServeDeps.consoleSha} ?? {@link resolveConsoleSha}(),
+   *  resolved ONCE by the caller and handed in, never re-resolved by this gate. */
+  bootSha: string;
+  /** Re-resolve the CURRENT on-disk sha, fresh, uncached — defaults to {@link resolveConsoleSha}
+   *  itself (the identical primitive, called again). Injectable so a test never shells to git. */
+  resolveCurrentSha?: () => string;
+  /** Ends the process — defaults to `process.exit`. Injectable so a test observes the call
+   *  instead of the test runner actually dying under it. */
+  exit?: (code: number) => void;
+  /** One ledger line naming the decision, mirroring {@link ServiceOptions.log}. */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
+ *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
+export interface StaleCodeExitGate {
+  /** Wrap the console's SSE route so every open/close edge is refcounted against this gate too —
+   *  a SECOND, independent tap on the identical subscribe/unsubscribe edges
+   *  {@link gatePrewarmOnClients} already refcounts (rationale (4)), never a new tracking layer. */
+  wrapSse(route: SseRoute): SseRoute;
+  /** Wrap a HIGH-tier write route so its full request lifetime — call-in to the response actually
+   *  finishing or the connection closing — counts as in-flight. */
+  wrapWrite(route: Route): Route;
+}
+
+/**
+ * W1-T2229 design: the console notices its OWN code is stale and ends its own process — at a
+ * moment that costs nothing, never on a schedule. `RestartPolicy: unless-stopped` (rationale (2),
+ * unchanged by this task) restarts on a CLEAN exit, so `exit(0)` here is what turns "a merged fix
+ * reaches this console" from "a human restarts it" into "the next time nobody is watching and
+ * nothing is writing, it restarts itself."
+ *
+ * THE DECISION POINT FIRES ONLY AT THE TWO EDGES THAT CAN NEWLY SATISFY BOTH CONDITIONS — an SSE
+ * client disconnecting, or a HIGH-tier write finishing — NEVER on an interval (design (i)).
+ * Between those edges nothing calls {@link isConsoleCodeStale} at all: an idle console with a
+ * viewer still attached, or one mid-write, is never even asked the question, so the sha is
+ * re-resolved (a `git rev-parse`, not free) only at the instant an exit is actually a candidate.
+ *
+ * THE TWO CONDITIONS ARE AND-ED (design (iii)), and this gate is why: zero SSE subscribers with a
+ * write still in flight must not exit mid-write (rationale (6): this module drains nothing, so an
+ * exit today would drop the request and orphan a spawn already handed off), and zero in-flight
+ * writes with a viewer still watching must not exit out from under an operator for no reason
+ * (rationale (5): a quiet stream is not an idle process, but neither is a watched one).
+ *
+ * NOT COVERED, NAMED RATHER THAN GLOSSED (design (iv)): a detached spawn (`ratify.approve`) that
+ * outlives the HTTP request which triggered it reads zero on {@link wrapWrite}'s counter the
+ * moment that request returns, even while the spawned work continues outside it. Whether the exit
+ * must also wait on such a handoff is the one genuinely open question design (iv) names and this
+ * shard does not settle — this gate covers exactly the in-flight HTTP request, nothing broader.
+ */
+export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
+  const resolveCurrentSha = deps.resolveCurrentSha ?? resolveConsoleSha;
+  const exit = deps.exit ?? ((code: number) => process.exit(code));
+  const log = deps.log ?? (() => {});
+  let clients = 0;
+  let inFlightWrites = 0;
+
+  const maybeExit = (): void => {
+    if (clients !== 0 || inFlightWrites !== 0) return;
+    const currentSha = resolveCurrentSha();
+    if (!isConsoleCodeStale(deps.bootSha, currentSha)) return;
+    log("serve.stale_code_exit", { bootSha: deps.bootSha, currentSha, clients, inFlightWrites });
+    exit(0);
+  };
+
+  return {
+    wrapSse(route) {
+      return {
+        ...route,
+        subscribe: (send) => {
+          const unsubscribe = route.subscribe(send);
+          clients += 1;
+          let released = false;
+          return () => {
+            // Same defensive latch gatePrewarmOnClients's own release carries — a double-release
+            // from service.ts must not underflow the count past whatever remains connected.
+            if (released) return;
+            released = true;
+            unsubscribe();
+            clients -= 1;
+            maybeExit();
+          };
+        },
+      };
+    },
+    wrapWrite(route) {
+      return {
+        ...route,
+        handler: (req, res, ctx) => {
+          inFlightWrites += 1;
+          let released = false;
+          const release = (): void => {
+            if (released) return;
+            released = true;
+            inFlightWrites -= 1;
+            maybeExit();
+          };
+          // "finish" (the response flushed) and "close" (the connection dropped before it did,
+          // e.g. a client abort) both mean the request is DONE from this gate's point of view —
+          // covering both means a handler that throws before writing anything is still covered:
+          // createService's own dispatch catches that throw and sends a 500, which still fires
+          // "finish". A handler that never responds at all leaves the count at 1 forever, which
+          // is the safe direction — this gate never exits while it cannot prove the write ended.
+          res.once("finish", release);
+          res.once("close", release);
+          return route.handler(req, res, ctx);
+        },
+      };
+    },
+  };
+}
+
+/**
  * `GET /v1/version` — read-scoped, and the value is the one captured at server start (a closure
  * over `sha`, not a fresh resolution). READ scope deliberately: a commit sha is not a secret, and
  * requiring the WRITE token would make the operator's staleness check need his most privileged
@@ -4968,11 +5098,25 @@ export function buildServeServer(deps: ServeDeps): Server {
   // instance ServeDeps.confirmNonces's own doc requires; resolving it independently in each place
   // (each defaulting on its own) would issue nonces into a store the dispatch never consults.
   const confirmNonces = deps.confirmNonces ?? createConfirmNonceStore();
+  // W1-T2229: resolved ONCE, here, and threaded through to `buildServeRoutes` below (explicitly,
+  // via the spread) so `GET /v1/version` and the shell's "console build" chip report the EXACT
+  // sha {@link gateStaleCodeExit} is comparing against — never a second independent resolution
+  // that could drift from the one the exit decision uses.
+  const consoleSha = deps.consoleSha ?? resolveConsoleSha();
+  const staleExit = gateStaleCodeExit({ bootSha: consoleSha, log: deps.log });
+  const routes = buildServeRoutes({ ...deps, consoleSha, confirmNonces }).map((route) =>
+    // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
+    // five paths (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve`,
+    // `/v1/skills/run`) `HIGH_TIER_WRITE_PATHS` names client-side, read here off the route table's
+    // own declared `tier` (already asserted complete, above in `buildServeRoutes`) rather than a
+    // second hard-coded path list that could drift from it.
+    route.tier === "high" ? staleExit.wrapWrite(route) : route,
+  );
   const server = createService({
     tokens: deps.tokens,
     identity: deps.identity,
-    routes: buildServeRoutes({ ...deps, confirmNonces }),
-    sse: [prewarm.route],
+    routes,
+    sse: [staleExit.wrapSse(prewarm.route)],
     log: deps.log,
     confirmNonces,
     // W1-T404 design (iii), turned on LAST (design iii, this task): a no-op until now for want of
