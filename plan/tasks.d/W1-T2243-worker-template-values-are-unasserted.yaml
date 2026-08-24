@@ -1,0 +1,129 @@
+- id: W1-T2243
+  title: "THE WORKER TEMPLATE'S SECURITY-CRITICAL VALUES ARE UNASSERTED WHILE ITS KEYS ARE PINNED — `validateWorkerSettings` refuses an unknown key and enforces three booleans, but nothing anywhere asserts WHICH domains `sandbox.network.allowedDomains` holds, so a changed egress list passes every gate the fleet has and `api.anthropic.com`'s absence is guarded by nothing at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 60.00
+  files: [src/lib/settings.ts, test/worker-settings-values.test.ts]
+  origin: oper#unpinned-worker-template-2026-08-24
+  plan_refs: ["W1-T439", "W1-T425"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ASYMMETRY IS REAL AND ITS SHAPE IS NARROWER THAN "THE TEMPLATE IS NOT PINNED".
+    `verifyBundlePin(bundleText: string, pin: string): BundlePinResult` (src/lib/learnings.ts)
+    hash-pins the learnings global artifact. Its ONLY production call site is
+    `learningsImportCommand` (src/run-task.ts) — one operator-initiated import — and its own doc is
+    explicit that it *"deliberately does NOT recompute the hash from `entries`"*, leaving the
+    content-vs-hash re-derivation to `loadGlobalArtifact` at prompt-assembly time. So the learnings
+    path carries TWO checks and the worker template carries a different kind entirely.
+
+    BUT THE TEMPLATE IS NOT UNGUARDED, AND SAYING SO WOULD BE WRONG. Re-derived at HEAD:
+      `renderWorkerSettings` (src/lib/worker.ts) is PURE substitution —
+        `template.split("${HOOKS_DIR}").join(opts.hooksDir)`, then `JSON.parse` to fail loud, then
+        a 0600 write. No merge, no defaulting, no environment read.
+      `validateWorkerSettings` (src/lib/settings.ts) pins THREE key sets via `checkKeys`
+        (`SANDBOX_KEYS`, `NETWORK_KEYS`, `FILESYSTEM_KEYS`) AND enforces THREE VALUES:
+        `sandbox.enabled !== true` throws, `sandbox.failIfUnavailable !== true` throws, and a
+        non-empty `permissions.ask` throws.
+    So the guard already does more than key-checking, and a content hash would duplicate most of
+    what it covers.
+
+    WHAT THE GUARD CANNOT SEE IS EXACTLY ONE THING, AND IT IS THE THING THAT MATTERS.
+    `sandbox.network.allowedDomains` is an ALLOWED key whose CONTENTS nothing checks. Measured at
+    HEAD, the template carries four: `github.com`, `api.github.com`, `codeload.github.com`,
+    `registry.npmjs.org`. And:
+      `api.anthropic.com` returns ZERO hits across `test/`, `src/` and `plan/claims.yaml`.
+      The two `allowedDomains` assertions that DO exist are about other questions — one asserts a
+        recon finding for a MISSING config, the other an EMPTY-list fallback in containment.
+    NOTHING ASSERTS THE MEMBERSHIP OF THAT LIST, IN EITHER DIRECTION.
+
+    THE HAZARD IS THEREFORE LOW IN LIKELIHOOD AND HIGH IN CONSEQUENCE, AND THE SHARD SAYS BOTH.
+    `settings/worker.json` is TRACKED, so its values move only through reviewed PRs and any change
+    is visible in a diff. That bounds the likelihood sharply. What it does not do is make the
+    change CHECKABLE: "confirm the egress list did not move" is invisible in a diff in exactly the
+    way "confirm the licence did not move" was, which is W1-T439's argument and the reason that
+    task exists rather than resting on review.
+  design: |
+    (i) Q1 — THE HAZARD IS REACHABLE, BUT NOT AS A TEMPLATE-INTEGRITY PROBLEM, AND A CONTENT HASH
+    IS THE WRONG INSTRUMENT. A pin over the template refuses EVERY change to it, including the
+    legitimate ones — the file's own `$comment` records three separate reasoned edits (W1-T2211,
+    W1-T2213 and the SDK-schema note), so this is a file that genuinely moves. A hash forces a
+    re-pin on each, which is friction paid on every edit to catch a change that a targeted
+    assertion catches for free. This repo has already measured that trade going badly: a
+    zero-headroom byte ceiling cost more in fold-tax than it caught, twice in one day, and was
+    retired by operator decision.
+    SO THE SCOPE IS NOT A PIN. It is an ASSERTION on the two value families the existing guard
+    leaves open: the allowed-domain membership, and `permissions.deny`'s contents.
+
+    (ii) Q2 — THE SEAM ALREADY EXISTS AND ALREADY RUNS PRE-SPAWN, SO NOTHING NEW IS NEEDED.
+    `spawnWorker` (src/lib/worker.ts) opens at its declaration and its FIRST statement is
+    `validateWorkerSettingsFile(args.settingsFile)` — before `loadConfig`, before
+    `resolveClaudeExecutable`, before any worker home is materialised. Its own comment states the
+    contract: *"Validate-before-spawn guard (WS-0 FF10a) enforced at the spawn boundary, not by
+    caller convention: `claude -p` SILENTLY IGNORES an invalid settings file and drops containment
+    ... no unsandboxed worker is ever launched."*
+    A PIN VERIFIED AFTER THE SPAWN WOULD BE DECORATION, AND THIS ONE IS NOT: it is the first thing
+    the spawn does. Anything added inside `validateWorkerSettings` inherits that position at EVERY
+    call site — the guard is reached from `worker.ts`, from `containment.ts`'s GATE-1
+    (`probeContainment`), and from eight sites in `run-task.ts` — because they all route through
+    the one function. That is why this task adds no new gate.
+
+    (iii) Q3 — WHAT MUST NOT CHANGE, REFUSED BY NAME RATHER THAN OMITTED.
+      THE FOUR ALLOWED DOMAINS stay exactly `github.com`, `api.github.com`, `codeload.github.com`,
+        `registry.npmjs.org`. The assertion pins that membership; it does not edit it.
+      `api.anthropic.com` STAYS ABSENT, and becomes asserted rather than merely true.
+      `sandbox.failIfUnavailable: true` and `sandbox.enabled: true` keep their existing refusals,
+        untouched.
+      THE PINNED KEY-SET GUARD STAYS. `checkKeys` against `SANDBOX_KEYS` / `NETWORK_KEYS` /
+        `FILESYSTEM_KEYS` is not widened, narrowed, or replaced.
+      `${HOOKS_DIR}` SUBSTITUTION STAYS. `renderWorkerSettings` is not touched.
+
+    (iv) THE TEMPLATE-VERSUS-RENDERED TRAP IS AVOIDED BY CONSTRUCTION, NOT BY CARE. The brief's
+    warning is correct — a pin over the RENDERED output breaks on every host with a different
+    hooks path. This task is immune because the values it asserts do not contain the substitution:
+    `${HOOKS_DIR}` occurs in exactly one place in the template, inside
+    `hooks.PreToolUse[].hooks[].command`, and never inside `sandbox.network` or `permissions.deny`.
+    So the assertion reads identically on the template and on any host's rendered output, and the
+    acceptance requires that property to be proven rather than assumed.
+
+    (v) BOTH DIRECTIONS ARE PROVEN. An assertion that refused every domain list would be worse than
+    none, so each refusal is paired with the unchanged case it must still admit.
+  note: |
+    THE FIELD-SCALE CITATION IS ATTRIBUTED AND PARTLY UNVERIFIED, DELIBERATELY. arXiv 2606.26924 —
+    "A Deterministic Control Plane for LLM Coding Agents" — could NOT be read from the filing
+    environment: `arxiv.org` is blocked by the network egress proxy. A search confirmed the id
+    resolves to a real paper of that title and corroborated TWO of the brief's figures (10,008
+    repositories; 10.1% exact duplicates across independent repositories, fork-adjusted, SHA-256)
+    and added one the brief did not carry (75.5% of clone pairs crossing organisational
+    boundaries). It did NOT corroborate the brief's "58% single-commit" or "permissions rarely
+    declared". Those two are therefore recorded as the operator's figures, unverified here.
+    NOTHING IN THIS SHARD'S ARGUMENT RESTS ON ANY OF THEM: the case is made entirely from this
+    repo's own source. The citation is context for why the class matters in the field, not
+    evidence for the defect, and it is marked so because a paper cited from its title already cost
+    this project a retracted citation.
+
+    OUT OF SCOPE, NAMED SO IT IS NOT SILENTLY INHERITED: `.remudero/skills/*.yaml` (seven tracked
+    files) have their own parse-and-validate at `src/lib/skill.ts`, and whether that validator
+    should also assert values is a separate question with a separate blast radius. Not pursued
+    here.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS — the linter reads the source file and its
+    test as two concerns. The change itself is a value check inside a function that already
+    performs three.
+  acceptance:
+    - claim: "a changed allowed-domain list is refused before any worker spawns"
+      proof: "unit test: test/worker-settings-values.test.ts"
+    - claim: "the four allowed domains still validate unchanged"
+      proof: "unit test: test/worker-settings-values.test.ts"
+    - claim: "an added anthropic api domain is refused rather than admitted"
+      proof: "unit test: test/worker-settings-values.test.ts"
+    - claim: "the existing unknown-key refusals behave exactly as they do today"
+      proof: "unit test: test/worker-settings-values.test.ts"
+    - claim: "the two sandbox boolean invariants still refuse when either is flipped"
+      proof: "unit test: test/worker-settings-values.test.ts"
+    - claim: "the assertion reads the same on a rendered file from any hooks path"
+      proof: "unit test: test/worker-settings-values.test.ts"
