@@ -549,10 +549,21 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   };
 }
 
+// The #2612 fixture, reused across the `runSweep` suite below: `deps.readCiGateRollup` supplies a
+// FRESH read (design ii/iii — see `SweepDeps.readCiGateRollup`'s own doc) rather than a field
+// cached on the `OpenPrView` handed to `runSweep`, so every fixture here builds the rollup deps
+// consult, never a `pr({ staleCiGateTransition: … })` shortcut.
+const STALE_ROLLUP: RollupCheckEntry[] = [
+  { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-14T14:27:16Z" },
+  { name: "ci", conclusion: "SUCCESS", startedAt: "2026-08-14T14:27:00Z" },
+  { name: "coverage-ratchet", conclusion: "CANCELLED", startedAt: "2026-08-14T14:27:16Z" },
+  { name: "coverage-ratchet", conclusion: "SUCCESS", startedAt: "2026-08-14T17:03:13Z" },
+];
+
 test("runSweep: a PR red only because ci-gate's own verdict went stale re-drives its job exactly once, ledgered, and never spends a fix-rung strike", async () => {
-  const deps = fakeDeps();
+  const deps = fakeDeps({ readCiGateRollup: async () => STALE_ROLLUP });
   const transition: StaleCiGateTransition = { siblingName: "coverage-ratchet", siblingStartedAt: "2026-08-14T17:03:13Z" };
-  const subject = pr({ staleCiGateTransition: transition });
+  const subject = pr();
   const summary = await runSweep([subject], deps, DEFAULT_SWEEP_POLICY);
 
   assert.equal(deps.reaggregated.length, 1, "the re-drive fired exactly once");
@@ -574,32 +585,36 @@ test("runSweep: a PR red only because ci-gate's own verdict went stale re-drives
 });
 
 test("runSweep: a SECOND pass over the SAME head sha and the SAME sibling transition does NOT re-drive again (criterion 3)", async () => {
-  const transition: StaleCiGateTransition = { siblingName: "coverage-ratchet", siblingStartedAt: "2026-08-14T17:03:13Z" };
-  const first = fakeDeps();
-  const subject = pr({ staleCiGateTransition: transition });
+  const first = fakeDeps({ readCiGateRollup: async () => STALE_ROLLUP });
+  const subject = pr();
   await runSweep([subject], first, DEFAULT_SWEEP_POLICY);
   assert.equal(first.reaggregated.length, 1);
 
-  // Same ledger (so the prior re-drive is visible), same head sha, same transition — exactly
-  // what the NEXT pass would observe while GitHub's own re-run is still settling.
-  const second = fakeDeps({ ledgerPath: first.ledgerPath });
+  // Same ledger (so the prior re-drive is visible), same head sha, same rollup (so the SAME
+  // transition is observed again) — exactly what the NEXT pass would read while GitHub's own
+  // re-run is still settling.
+  const second = fakeDeps({ ledgerPath: first.ledgerPath, readCiGateRollup: async () => STALE_ROLLUP });
   await runSweep([subject], second, DEFAULT_SWEEP_POLICY);
   assert.equal(second.reaggregated.length, 0, "bounded — no second re-drive for the same (head, transition) pair");
   assert.equal(second.fixed.length, 0, "still never the fix rung's job while the recompute settles");
 });
 
 test("runSweep: a DIFFERENT sibling transition on the SAME head earns its own bounded re-drive — the bound is per-transition, not per-head", async () => {
-  const first = fakeDeps();
-  const firstTransition: StaleCiGateTransition = { siblingName: "coverage-ratchet", siblingStartedAt: "2026-08-14T17:03:13Z" };
-  await runSweep([pr({ staleCiGateTransition: firstTransition })], first, DEFAULT_SWEEP_POLICY);
+  const first = fakeDeps({ readCiGateRollup: async () => STALE_ROLLUP });
+  await runSweep([pr()], first, DEFAULT_SWEEP_POLICY);
   assert.equal(first.reaggregated.length, 1);
 
   // A LATER pass observes ci-gate concluded (stale) AGAIN on the SAME head, this time because a
-  // DIFFERENT required sibling flipped after that later verdict — a genuinely new transition, not
-  // a repeat of the one already re-driven.
-  const second = fakeDeps({ ledgerPath: first.ledgerPath });
-  const secondTransition: StaleCiGateTransition = { siblingName: "ci", siblingStartedAt: "2026-08-14T19:00:00Z" };
-  await runSweep([pr({ staleCiGateTransition: secondTransition })], second, DEFAULT_SWEEP_POLICY);
+  // DIFFERENT required sibling flipped after that LATER verdict — a genuinely new transition, not
+  // a repeat of the one already re-driven. `coverage-ratchet`'s success predates this rollup's own
+  // ci-gate `startedAt`, so only `ci`'s later success qualifies.
+  const secondRollup: RollupCheckEntry[] = [
+    { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-14T18:00:00Z" },
+    { name: "coverage-ratchet", conclusion: "SUCCESS", startedAt: "2026-08-14T17:03:13Z" },
+    { name: "ci", conclusion: "SUCCESS", startedAt: "2026-08-14T19:00:00Z" },
+  ];
+  const second = fakeDeps({ ledgerPath: first.ledgerPath, readCiGateRollup: async () => secondRollup });
+  await runSweep([pr()], second, DEFAULT_SWEEP_POLICY);
   assert.equal(second.reaggregated.length, 1, "a genuinely new transition still earns its own recompute");
   assert.equal(second.reaggregated[0].transition.siblingName, "ci");
 });

@@ -939,19 +939,6 @@ export interface OpenPrView {
    */
   cancelledRequiredChecks?: CancelledRequiredCheck[];
   /**
-   * W1-T1275 (design iii/iv) — the ONE stale-gate transition (if any) this PR's rollup currently
-   * shows: `ci-gate`'s own latest attempt concluded non-success, and a required sibling's own
-   * latest attempt is a LATER terminal success on the same head — proof the sibling flipped green
-   * on this head after the gate had already read and concluded (see {@link
-   * staleCiGateTransition}'s own doc for the derivation this field is expected to hold). Populated
-   * ALONGSIDE `ciFailures`/`cancelledRequiredChecks`, when `checksState === "red"`; `undefined`
-   * when checks aren't red or nothing has flipped since the gate's own verdict — including every
-   * caller that hasn't wired a producer for it yet, the pre-existing behaviour byte for byte.
-   * Never makes `checksState` anything but "red" on its own — a stale verdict is cleared only by
-   * GitHub re-running the gate's job and a LATER sweep pass observing the fresh result.
-   */
-  staleCiGateTransition?: StaleCiGateTransition;
-  /**
    * GitHub's own merge-conflict state, simplified (W1-T106, the #170 DIRTY
    * strand) — see {@link MergeState}'s own doc. `undefined`/`"unknown"` never
    * disposition CONFLICTED (fail-closed): only an OBSERVED `"dirty"` does.
@@ -3533,14 +3520,29 @@ export interface SweepDeps {
    */
   escalateCancelledCheck?: (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => void | Promise<void>;
   /**
+   * W1-T1275 (design ii/iii) — an OPTIONAL fresh read of ONE PR's live required-check rollup,
+   * consulted immediately before a blocked-fixable disposition acts — the SAME "never the
+   * `openPrs` snapshot this whole sweep pass started from" shape {@link readLiveState} (W1-T177)
+   * already uses just below, for the identical reason: `staleCiGateTransition` (this file) needs
+   * to compare `ci-gate`'s own concluded `startedAt` against a required sibling's CURRENT latest
+   * attempt, not a frame captured when this `OpenPrView` was built. Deliberately NOT a field on
+   * `OpenPrView` itself — that shape would need a producer literal wired into `buildOpenPrViews`
+   * (run-task.ts, out of this task's declared scope; see the task record's own note) merely to
+   * satisfy `test/producer-completeness.test.ts`, for a value that is only ever correct freshly
+   * read anyway. Optional: omitted, `staleCiGateTransition` is called with `undefined` and always
+   * returns `undefined` — this whole lane never fires, the pre-existing behaviour byte for byte.
+   */
+  readCiGateRollup?: (pr: OpenPrView) => (RollupCheckEntry[] | undefined) | Promise<RollupCheckEntry[] | undefined>;
+  /**
    * W1-T1275 (design ii/iv) — re-drive `ci-gate`'s OWN check-run job (the per-job Actions route,
    * the SAME endpoint {@link requeueCheck} above already uses — no new credential, no new client)
-   * when {@link OpenPrView.staleCiGateTransition} names a required sibling that reached a terminal
-   * success LATER than the gate's own concluded verdict. `runSweep` calls this AT MOST ONCE per
-   * (head, sibling-transition) — see {@link ciGateReaggregateDecision} and {@link
-   * reaggregatedCiGateKeysFromLedger} for the bound. Optional: omitted, the sweep still ledgers
-   * which transition it observed and stands down, taking no re-drive action — never a silent
-   * no-op, exactly like {@link requeueCheck}'s own contract.
+   * when {@link staleCiGateTransition}, applied to {@link SweepDeps.readCiGateRollup}'s fresh read,
+   * names a required sibling that reached a terminal success LATER than the gate's own concluded
+   * verdict. `runSweep` calls this AT MOST ONCE per (head, sibling-transition) — see {@link
+   * ciGateReaggregateDecision} and {@link reaggregatedCiGateKeysFromLedger} for the bound.
+   * Optional: omitted, the sweep still ledgers which transition it observed and stands down,
+   * taking no re-drive action — never a silent no-op, exactly like {@link requeueCheck}'s own
+   * contract.
    */
   reaggregateCiGate?: (pr: OpenPrView, transition: StaleCiGateTransition) => void | Promise<void>;
   /**
@@ -4844,8 +4846,13 @@ export async function runSweep(
               // already applies (design v). Bounded to firing the real re-drive AT MOST ONCE per
               // (head, sibling-transition) via the ledger (design iv); this pass never marks the
               // gate green itself either way (design i) — it only asks GitHub to re-evaluate, and
-              // stands down so no fix-rung strike is spent while that settles.
-              const staleTransition = isBlockedCi(pr) ? pr.staleCiGateTransition : undefined;
+              // stands down so no fix-rung strike is spent while that settles. The rollup is a
+              // FRESH read (`deps.readCiGateRollup`, design ii-iii's own doc) rather than a field
+              // cached on `pr` — the whole point is comparing against the CURRENT state, never a
+              // frame captured when this `OpenPrView` was built.
+              const ciGateRollup =
+                isBlockedCi(pr) && deps.readCiGateRollup ? await deps.readCiGateRollup(pr) : undefined;
+              const staleTransition = staleCiGateTransition(ciGateRollup);
               if (staleTransition) {
                 const key = ciGateReaggregateKey(pr.headSha, staleTransition);
                 const decision = ciGateReaggregateDecision(reaggregatedCiGateKeys.has(key));
