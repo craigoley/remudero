@@ -136,29 +136,44 @@ export function extractShippedLogIds(masterPlanMd, knownIds) {
   return shipped;
 }
 
-/** The first line (1-indexed) asserting `id` not-shipped, for the contradiction citation —
- *  see the module doc's note on why this is a display-only re-scan, not a second extractor. */
-export function firstNotShippedLine(masterPlanMd, id) {
+/** Every line (1-indexed), in document order, asserting `id` not-shipped -- the contradiction
+ *  citation's full site list (design (i), W1-T2223). A second, independent not-shipped site for
+ *  the same id must not be invisible just because a different site happens to sort first; see the
+ *  module doc's note on why this is a display-only re-scan, not a second extractor -- membership
+ *  (which ids are contradictions at all) is decided entirely by `extractAssertedUnbuiltTaskIds`,
+ *  never by this function or by `NOT_SHIPPED_PHRASE_RE`. */
+export function notShippedLines(masterPlanMd, id) {
   // Only a W1- id can appear in bare `T<n>` form -- extractAssertedUnbuiltTaskIds's own
   // normalizeAssertedTaskId assumes bare T<n> means W1-T<n> throughout this corpus.
   const bareForm = id.startsWith("W1-") ? id.slice(3) : undefined; // "W1-T148" -> "T148"
   const bareRe = bareForm ? new RegExp(`\\b${bareForm}\\b`) : undefined;
   const lines = masterPlanMd.split("\n");
+  const sites = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!NOT_SHIPPED_PHRASE_RE.test(line)) continue;
     if (line.includes(id) || (bareRe && bareRe.test(line))) {
-      return { lineNumber: i + 1, lineText: line };
+      sites.push({ lineNumber: i + 1, lineText: line });
     }
   }
-  return undefined;
+  return sites;
+}
+
+/** The first line (1-indexed) asserting `id` not-shipped. Kept as the single-site lookup its name
+ *  has always promised (design (i): "the function's name is honest — it returns the first — so
+ *  the fix is at the record, not at the name"); {@link notShippedLines} is now the contradiction
+ *  record's actual citation source. `undefined` when `id` is never asserted not-shipped anywhere,
+ *  same as before. */
+export function firstNotShippedLine(masterPlanMd, id) {
+  return notShippedLines(masterPlanMd, id)[0];
 }
 
 /**
  * The gate's whole decision: every SHIPPED-log id (both notations, short-form resolved against
  * `knownIds`) crossed against every not-shipped id (reused from W1-T410's
  * `extractAssertedUnbuiltTaskIds`). `contradictions` names each id found on both sides, with a
- * citation line from each side (design (iv)). `shippedExamined` and `notShippedLinesExamined` are
+ * citation line from the shipped side and EVERY not-shipped citation site (design (i)/(iv),
+ * W1-T2223 -- not only the first one found). `shippedExamined` and `notShippedLinesExamined` are
  * the positive control's two counts (design (iii)) — both must be nonzero for a scan to count as
  * having examined anything at all (W1-T1232: the not-shipped side's control is the PHRASE-LINE
  * count, not the bound-id count — see the module doc). `notShippedExamined` is the bound-id count,
@@ -173,13 +188,16 @@ export function checkPlanStateConsistency(masterPlanMd, knownIds) {
   const contradictions = [];
   for (const [id, shippedRef] of shipped) {
     if (!notShippedSet.has(id)) continue;
-    const notShippedRef = firstNotShippedLine(masterPlanMd, id);
+    // W1-T2223 (design (i)): every not-shipped site, not just the first -- a second, independent
+    // citation for the same id must not be invisible just because a different site sorts first.
+    const sites = notShippedLines(masterPlanMd, id);
+    const notShippedRefs =
+      sites.length > 0 ? sites : [{ lineNumber: undefined, lineText: "(not-shipped citation line not found)" }];
     contradictions.push({
       id,
       shippedLineNumber: shippedRef.lineNumber,
       shippedLineText: shippedRef.lineText,
-      notShippedLineNumber: notShippedRef?.lineNumber,
-      notShippedLineText: notShippedRef?.lineText ?? "(not-shipped citation line not found)",
+      notShippedRefs,
     });
   }
 
@@ -198,7 +216,14 @@ export function checkPlanStateConsistency(masterPlanMd, knownIds) {
  *  `notShippedLinesExamined === 0` (W1-T1232: no not-shipped-phrase-bearing line was read at all --
  *  a broken scan) -- NEVER on `notShippedExamined === 0` alone, which just means every
  *  phrase-bearing line that WAS read bound a proposal or nothing, an honest empty result. All
- *  three shapes name the phrase-bearing line count so a reader can tell which case fired. */
+ *  three shapes name the phrase-bearing line count so a reader can tell which case fired.
+ *
+ *  W1-T2223 (design (i)/(ii)): the contradiction report lists EVERY not-shipped citation site for
+ *  an id, not only the first, and when a not-shipped site resolves to the SAME physical line as
+ *  the shipped citation it is folded into one combined "SHIPPED AND NOT-SHIPPED" line rather than
+ *  printed twice under the same line number -- a reader must not have to notice that for
+ *  themselves. An id with exactly one citation site whose line differs from the shipped line
+ *  renders exactly as it always has (design criterion 5). */
 export function renderReport(result) {
   const { shippedExamined, notShippedExamined, notShippedLinesExamined, contradictions } = result;
   if (shippedExamined === 0 || notShippedLinesExamined === 0) {
@@ -221,10 +246,25 @@ export function renderReport(result) {
     "",
   ];
   for (const c of contradictions) {
-    lines.push(`  [${c.id}] SHIPPED at MASTER-PLAN.md:${c.shippedLineNumber}: "${c.shippedLineText.trim()}"`);
-    lines.push(
-      `  [${c.id}] NOT-SHIPPED at MASTER-PLAN.md:${c.notShippedLineNumber ?? "?"}: "${c.notShippedLineText.trim()}"`,
-    );
+    // design (ii): a not-shipped site sharing the shipped citation's exact line number reads as
+    // ONE combined line, never as a SHIPPED line followed by a NOT-SHIPPED line naming the same
+    // number -- that duplication is what made a genuinely two-site contradiction (#2718) read as
+    // a single-site one.
+    const sameLine = c.notShippedRefs.filter((r) => r.lineNumber === c.shippedLineNumber);
+    const otherSites = c.notShippedRefs.filter((r) => r.lineNumber !== c.shippedLineNumber);
+    if (sameLine.length > 0) {
+      lines.push(
+        `  [${c.id}] SHIPPED AND NOT-SHIPPED on the SAME LINE at MASTER-PLAN.md:${c.shippedLineNumber}: ` +
+          `"${c.shippedLineText.trim()}"`,
+      );
+    } else {
+      lines.push(`  [${c.id}] SHIPPED at MASTER-PLAN.md:${c.shippedLineNumber}: "${c.shippedLineText.trim()}"`);
+    }
+    for (const site of otherSites) {
+      lines.push(
+        `  [${c.id}] NOT-SHIPPED at MASTER-PLAN.md:${site.lineNumber ?? "?"}: "${site.lineText.trim()}"`,
+      );
+    }
   }
   lines.push("");
   lines.push(
