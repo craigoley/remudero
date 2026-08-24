@@ -77,6 +77,68 @@
     against the operator's checkout. `/v1/control/stop` and the cost-ceiling pair are the fleet's
     own brakes. A lane that holds this token can influence its own governance, which is the whole
     subject of this task.
+
+    (8) SUPERSEDES (7) — OPERATOR RULING, 2026-08-24: THE LIST NARROWS FROM FOUR TO TWO, AND (7)'s
+    FOUR IS NO LONGER THIS SHARD'S FINDING. The ruling and its reasoning, verbatim: "The operator
+    has ruled that the fleet building, reviewing and merging its own work is intended — so a finding
+    that treats console writes as a governance breach is measuring the wrong thing." And: "the
+    autonomy is deliberate, and the two exceptions are the budget and the ask-the-operator path."
+    (7) is left standing rather than rewritten, following this repo's amendment convention (the
+    W1-T1289 amendment's own words: the framing is corrected rather than contradicted) — but (7)
+    must be read THROUGH this section, not beside it.
+
+    (9) KEPT — THE COST-CEILING PAIR (`/v1/policy/daily-cost-ceiling` and its `/clear`). Verbatim:
+    "everything else the fleet does is bounded by spend, and a worker that can raise its own ceiling
+    removes the only hard limit that is not a judgement call. There is no equivalent capability it
+    already has." THE ROUTE TABLE ALREADY SAYS THIS IN ITS OWN WORDS —
+    `buildSetDailyCostCeilingRoute`'s tier comment (`src/lib/panel-graph.ts`) reads "MIDDLE —
+    reversible (lowered again / cleared) but a spend force multiplier: raising it spends nothing, it
+    removes the thing that would have stopped the spending." MEASURED QUALIFICATION, RECORDED
+    BECAUSE IT NARROWS THE CLAIM RATHER THAN SUPPORTING IT: THE RAISE IS BOUNDED.
+    `writeDailyCostCeilingOverride` (`src/lib/policy.ts:708-724`) validates against
+    `policy.bounds["sweep.dailyCostCeilingUsd"]` and REFUSES out of range at write time — "never
+    clamped or accepted" — and `plan/policy.yaml` commits `value: 500`, `min: 100`, `max: 2500`. So
+    the token buys at most a 5x raise, +$2,000 per instance per day, not an unbounded one, and the
+    genuinely hard limit is the COMMITTED BOUND, which this route cannot cross and which only a
+    reviewed plan-data PR moves. Two measured facts keep the concern alive anyway: the ceiling is
+    enforced PER INSTANCE, not per fleet (`plan/policy.yaml`'s own W1-T408 note — N containers each
+    independently enforce the same committed number), and a written override takes effect WITHOUT a
+    restart while a changed committed default does not (`loadDefaultPolicy` memoizes for the process
+    lifetime).
+
+    (10) KEPT — `/v1/questions/answer`. Verbatim: "a blocking question exists because the machine
+    reached something it could not decide and stopped to ask. Answering it does not extend an
+    existing power; it deletes the mechanism, and silently, since the answer looks identical either
+    way." THE SILENCE IS MECHANICAL, AND IT WAS MEASURED RATHER THAN ASSUMED. The route does record
+    a who: `origin = bearerTokenId(req)` is written into BOTH `plan/questions.ndjson` (via
+    `appendQuestionAnswer`) and the `panel.question_answered` ledger line. But `bearerTokenId` is
+    `hashToken(token)` (`src/lib/panel-actions.ts:79-86`), and `resolveServiceTokens` mints exactly
+    ONE write token for the whole console (`ServiceTokens = { read, write }`,
+    `src/lib/serve.ts:5332-5346`). A worker presenting the token it can read therefore hashes to THE
+    SAME `origin` the operator hashes to, so neither the question store nor the ledger can tell the
+    two apart. "Looks identical either way" is exact, not figurative.
+
+    (11) DROPPED — `/v1/manual/approve`, `/v1/inbox/approve` AND `/v1/skills/run`. Verbatim: "the
+    fleet already arms and merges its own work through `remudero-fleet[bot]`. Approving in a UI is
+    downstream of powers it has by design." And: "a worker already executes arbitrary code against
+    the checkout, so it adds nothing." WHAT WAS CHECKED AND WHAT WAS NOT, because the drop should
+    not read as more verified than it is: the MECHANISM is present in this tree — `automerge.armed`
+    is a registered ledger step (`src/lib/ledger.ts`) and the daemon mints its own GitHub App
+    installation token into `GH_TOKEN` (`src/lib/github-app.ts`), so fleet writes already carry an
+    app identity. THE LITERAL LOGIN WAS NOT CONFIRMED FROM THIS TREE: `remudero-fleet[bot]` occurs
+    ZERO times under `src/`, and the login is derived from the token's own slug rather than
+    hardcoded (`src/lib/review.ts:4310` names exactly that pattern). The drop rests on the operator's
+    ruling; the mechanism check corroborates it, and the absent literal is recorded rather than
+    glossed.
+
+    (12) AND THE LINE DOES NOT FOLLOW THE CONSEQUENCE TIER — WHICH IS THE ERROR (7) MADE. Both
+    surviving exceptions sit OUTSIDE the HIGH band (6) enumerates: the cost-ceiling pair is MIDDLE
+    and `/v1/questions/answer` is LOW, while three of the four (7) named were HIGH. W1-T404's tier
+    ranks REVERSIBILITY AND BLAST RADIUS; the operator's line asks a different question — does this
+    grant extend a power the fleet already holds by design, or delete a limit it has no other way
+    past. Reading the tier as a proxy for the governance line is what produced a list of four, and
+    it is recorded here so the next reader does not repeat it. The tier table itself is W1-T404's
+    and is still only READ here, exactly as design (vi) says.
   design: |
     ONE CONCERN: the write token must not be readable by a worker. Not the read token, not the
     state dir, not the console's own access model.
