@@ -1,0 +1,174 @@
+- id: W1-T2223
+  title: "`plan-state-claims` REPORTS ONE NOT-SHIPPED SITE PER ID AND STOPS, SO A SECOND SITE IS INVISIBLE UNTIL THE FIRST IS FIXED — `firstNotShippedLine` returns the FIRST match for both halves of a pair, and every additional site costs a full CI cycle to discover"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN at ecb7ccc7
+    before any reading; the clone was checked and already full (2,113 commits). The reserved id was
+    confirmed still unfiled and unclaimed before anything was written.
+
+    (1) THE DEFECT, RE-DERIVED FROM SOURCE. `firstNotShippedLine` (`scripts/plan-state-claims.mjs`)
+    walks `MASTER-PLAN.md` and RETURNS ON THE FIRST LINE that both matches `NOT_SHIPPED_PHRASE_RE`
+    (`/not shipped|unbuilt|did not ship/i`) and mentions the id in either notation. Its caller
+    builds exactly ONE contradiction record per id, carrying that one `notShippedLineNumber`. So a
+    second, different not-shipped site for the same id contributes nothing to the report.
+
+    (2) AND WHEN BOTH TRIGGERS SHARE ONE LINE, THAT LINE IS RETURNED FOR BOTH HALVES OF THE PAIR.
+    The shipped side and the not-shipped side are located independently, and nothing forbids them
+    resolving to the same physical line — a line reading "SHIPPED … though previously unbuilt"
+    satisfies both. The report then names one line number twice and reads as a single-site problem.
+
+    (3) PROVEN BY DRIVING THE REAL FUNCTION, NOT BY READING IT. Over a five-line corpus in which
+    line 2 carries BOTH triggers and line 4 carries a second, independent not-shipped citation for
+    the same id, `firstNotShippedLine` returns LINE 2. With line 2 reworded and nothing else
+    changed it returns LINE 4 — a site that was invisible in the first report. Control: a corpus
+    with no citation at all returns `undefined`, so the function is genuinely looking and the
+    invisibility is not a lookup failure. THAT IS THE WHOLE DEFECT: discovery is SERIAL, and each
+    step costs one red CI run.
+
+    (4) THE ORIGINATING INCIDENT IS OPERATOR-ATTRIBUTED AND I COULD NOT REPRODUCE ITS FIGURES —
+    SAID PLAINLY RATHER THAN REPEATED AS THOUGH MEASURED. The account is that on #2718 the report
+    named `MASTER-PLAN.md:778` for both halves of the `W1-T71` pair; after 778 was reworded the
+    check went red again naming `:1513`; and the census moved 33 → 32 not-shipped-phrase lines,
+    which is what revealed the second site. MEASURED HERE: #2718 is still OPEN (head `26fa1a2c`,
+    base `caa79046`), its base carries 20 phrase lines and its head 16, and the only T71 phrase
+    line at that base is `:721`. Neither 778, 1513, 33 nor 32 reproduces on any ref reachable now —
+    `MASTER-PLAN.md` has moved and that head is a `run-RETRO-*` branch that has been rewritten. THE
+    FIGURES ARE CARRIED AS ATTRIBUTED. The MECHANISM in (3) is first-hand and does not depend on
+    them.
+
+    (5) THE REPORTING IS GOOD AND ONLY THE COMPLETENESS IS AT ISSUE. The contradiction record
+    already carries the claim, the section, the id, the file and the line, and the caller renders
+    all of it. Nothing about that output should change; what is missing is that the record is
+    singular where the corpus is plural.
+
+    (6) THE SIBLING DEFECT IS MEASURED AND DELIBERATELY NOT FILED HERE — see design (v) for the
+    split and Q1 below for the measurement that settled it. `reapBranchesCommand`'s `namedInSource`
+    alarm (`src/run-task.ts`) computes `facts` as `names.map(...)` over the REMOTE BRANCH LISTING,
+    so `namedInSource` is only ever evaluated for a branch that still exists on origin. A source
+    citation to an ALREADY-DELETED branch is never enumerated and can never raise an alarm, so the
+    guard's coverage SHRINKS as branches are reaped — the opposite of what a drift detector should
+    do.
+
+    (7) ITS LIVE INSTANCE RE-DERIVES EXACTLY, AND IT IS A CONTROLLED PAIR. `src/lib/dispatch-claim.ts`
+    cites two branches in ONE comment block: `run-W1-T1265-1787503038601` reads `on-origin=1` and is
+    cited in `src/lib/dispatch-claim.ts` and `src/run-task.ts`, so it is enumerated and guarded;
+    `run-W1-T1265-1787503092377` reads `on-origin=0` and is cited in THE SAME TWO FILES, so it
+    dangles with no alarm. Same file, same line, same convention — the only difference is whether
+    the branch survived, which is exactly the variable the guard is blind to.
+
+    (8) RULE 19 WAS TESTED AGAINST THE PAIR RATHER THAN ASSUMED, AND IT DOES NOT REFUSE IT. Driving
+    `sizingViolation` over a synthetic task declaring both remedies' files: at `risk: medium` it
+    BLOCKS, naming 3 distinct subsystems (`plan-state-claims`, `reap-branches`, `run-task`); at
+    `risk: high` it returns no violation, because Rule 19 exempts high outright ("high already
+    assumes wide scope"). SO THE LINTER WOULD HAVE PERMITTED THE PAIR. The split below is made on
+    REMEDY grounds instead, and the measurement is recorded so nobody re-litigates it from the
+    linter.
+
+    (9) THE HONEST LIMIT. Nothing here establishes how many ids currently carry more than one
+    not-shipped site — the census that would answer it is exactly the quantity the incident
+    account uses, and it moves with every `MASTER-PLAN.md` edit. The defect is proven and its cost
+    per additional site is one CI cycle; the population it applies to today is not claimed.
+  design: |
+    ONE CONCERN: the report must name every site it can already see. Not the phrase regex, not the
+    membership decision, not the output format.
+
+    (i) RETURN ALL SITES, NOT THE FIRST. The function's name is honest — it returns the first — so
+    the fix is at the record, not at the name: one contradiction should carry every not-shipped
+    line for that id, and the renderer should list them. `NOT_SHIPPED_PHRASE_RE` is NOT touched:
+    this module's own comment says it is "a display lookup, not a second phrase-extractor", and
+    membership is decided entirely by the reused `extractAssertedUnbuiltTaskIds`. Widening the
+    regex would change WHICH ids are contradictions, which is a different task.
+
+    (ii) A SHARED LINE MUST READ AS ONE LINE, NOT TWO FINDINGS. When the shipped and not-shipped
+    sides resolve to the same physical line the report should say so explicitly rather than
+    printing the same number twice and leaving the reader to notice. That is a rendering rule, and
+    it is the half that made the #2718 report look like a single-site problem.
+
+    (iii) THE GATE'S VERDICT MUST NOT CHANGE. Reporting more sites per id must not turn a passing
+    run red or a failing run green: the set of contradicting IDS is unchanged, only the detail
+    under each. A test pinning "same ids in, same exit code out" is what stops this becoming a
+    behaviour change wearing a reporting change's clothes.
+
+    (iv) WHAT MUST NOT CHANGE, PINNED BY CRITERIA. Both checks STAY and NEITHER IS WEAKENED TO
+    REDUCE NOISE — the whole point is that the current report is too QUIET, so any change that
+    suppresses a finding is the wrong direction. `plan-state-claims` KEEPS NAMING the claim, the
+    section, the id, the file and the line; its reporting is good and only its completeness is at
+    issue.
+
+    (v) THE SIBLING IS SPLIT OUT ON REMEDY GROUNDS AND NEEDS ITS OWN ID. Rationale (8) shows Rule
+    19 would have allowed the pair at `risk: high`, so this is a judgement, not a linter refusal.
+    The two share a SHAPE — "the reporter can only name what survives its own filter" — and share
+    nothing else: different file, different enumeration bug, different fix, independently
+    falsifiable. Folding them in would produce one diff whose two halves could not be graded apart.
+
+    (vi) AND THE SIBLING'S OWN DESIGN QUESTION IS RECORDED SO ITS SHARD STARTS FROM IT, NOT FROM
+    SCRATCH. Weighing the alarm against the alternative: making the guard detect dead citations
+    means enumerating from SOURCE (grep the citation pattern, then ask the remote) rather than from
+    the remote listing — strictly more work every run, and it can only ever report, never prevent.
+    CITING A PR NUMBER INSTEAD OF A BRANCH NAME REMOVES THE OBLIGATION ENTIRELY, because a PR
+    number is permanent and a branch name is not; the citation in (7) would then never dangle and
+    there would be nothing for a guard to detect. THE CONVENTION CHANGE IS THE STRONGER ANSWER and
+    the guard change is the weaker one, but they are not exclusive: existing citations still need
+    detecting even after the convention changes, because the convention cannot retroactively fix
+    what is already written. That trade belongs in the sibling's shard, not this one.
+
+    (vii) NOT IN SCOPE, NAMED: `NOT_SHIPPED_PHRASE_RE` and the membership decision (i); the
+    `reapBranchesCommand` guard and the branch-citation convention (v)/(vi); the SHIPPED-log
+    parser; and W1-T2215's third-state question, which is about an unreadable input rather than an
+    incomplete enumeration and is only cited here.
+  acceptance:
+    - claim: "every not-shipped citation site for a contradicting id is named, not only the first"
+      proof: "unit test: test/plan-state-claims-completeness.test.ts"
+    - claim: "a shipped and a not-shipped trigger sharing one line is reported as one line rather than as two findings"
+      proof: "unit test: test/plan-state-claims-completeness.test.ts"
+    - claim: "the set of contradicting ids and the gate's exit code are unchanged by the richer report"
+      proof: "unit test: test/plan-state-claims-completeness.test.ts"
+    - claim: "the report still names the claim, the section, the id, the file and the line for every site"
+      proof: "unit test: test/plan-state-claims-completeness.test.ts"
+    - claim: "an id with exactly one citation site reports exactly as it does today"
+      proof: "unit test: test/plan-state-claims-completeness.test.ts"
+  files: [scripts/plan-state-claims.mjs, test/plan-state-claims-completeness.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#plan-state-claims-reports-one-site-at-a-time-2026-08-24"
+  plan_refs: ["W1-T392", "W1-T409", "W1-T2215"]
+  note: |
+    THE MECHANISM IS FIRST-HAND AND THE INCIDENT FIGURES ARE NOT. Rationale (3) drives the REAL
+    exported `firstNotShippedLine` over a corpus built for the purpose and shows the second site
+    appearing only after the first is reworded, with a no-citation control returning `undefined`.
+    Rationale (4) records that #2718's stated line numbers and census figures could not be
+    reproduced on any reachable ref and carries them as attributed. A reader must not cite 778,
+    1513, 33 or 32 as measured here.
+
+    EVERY PROOF IS A FORWARD REFERENCE BY CONSTRUCTION. All five criteria use the pure-path
+    `unit test:` form naming `test/plan-state-claims-completeness.test.ts`, which is declared in
+    `files:` and DOES NOT EXIST on this head — verified absent before writing — so the reviewer
+    grades them `not_yet_built` rather than executing them against a filing. `files:` is written in
+    the bare single-line form the shard-declared-files reader requires; a block-style list would
+    contribute nothing and silently forfeit that exemption.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    `risk: high` IS RULE 19'S SPAN AND ALSO A BLAST-RADIUS STATEMENT. `files:` names only two
+    stems, so the linter would pass this at `medium` — rationale (8) measured that. It is filed at
+    `high` anyway because the artefact is a CI GATE: a change that turns a passing run red reds
+    EVERY open PR at once, which is why design (iii) pins the verdict rather than only the output.
+
+    THE ID WAS CONFIRMED, NOT ASSUMED. The brief's header reads `2226` while its body says to file
+    under `W1-T2223`; both ids exist as reservations (W1-T2223 at 2026-08-24T14:14:07Z, W1-T2226 at
+    14:41:00Z). `W1-T2223` was taken as the instruction because the body names it explicitly and
+    asks for it to be confirmed still unfiled, which it is: zero shards on main against a control of
+    1 for W1-T2211, and zero live-branch claims against a control of 1 for W1-T2224. THE NAMESPACE
+    WAS VERIFIED EQUAL TO THE REMOTE FIRST — 345 local against 345 remote.
+
+    EIGHT SURFACES SWEPT, EVERY CONTROL PRE-QUALIFIED AND FIRING: shard filenames, plan `- id:`
+    lines, the reservation, merged trailers, merged subject credit, live branch names, branch-tip
+    subjects and branch changed-file paths. W1-T2221 WAS DISQUALIFIED AS THE BRANCH-SURFACE CONTROL
+    AND RE-QUALIFIED AS W1-T2224 — 2221's filing branch merged during this session, so it reads zero
+    there and no longer discriminates, exactly as a merged id does on the open-PR surfaces.
