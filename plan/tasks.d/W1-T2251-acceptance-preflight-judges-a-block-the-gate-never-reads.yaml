@@ -1,0 +1,149 @@
+- id: W1-T2251
+  title: "`rmd check-acceptance` and the reviewer call the SAME `parseAcceptanceBlock`, but the reviewer resolves a trailered PR's criteria from the shard and falls back to the body only at zero, while the preflight has no trailer branch at all — so on 74 of the 300 most recent merged PRs the verb judged a block the gate was never going to read, and called 88 of them defective while the gate passed every one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (6b1c77ccefc220a732040b0684b9986b044214d5), clone shallow-checked `false`. Files over 1 MB read
+    through git objects. No suite, no spawning verb, no poller. Every count below carries its
+    corpus and a control.
+
+    (1) Q1 — THEY SHARE ONE PARSER, SO THIS IS NOT TWO GRAMMARS. Both entry points call the same
+    function. `checkAcceptanceCommand` (`src/run-task.ts:11629`) runs
+    `acceptanceBlockDiagnostics(body)` then `parseAcceptanceBlock(body)` at `:11642-11643`, over the
+    file it was handed and NOTHING ELSE. The reviewer reaches
+    `parseAcceptanceBlock(body)` at `src/run-task.ts:10740` — but only inside
+    `if (criteria.length === 0)`, AFTER it has already tried to resolve the `Remudero-Task:`
+    trailer's shard. Read the lines, not the grep: the body path is a FALLBACK on that side and the
+    ONLY path on the preflight's.
+
+    SO THE DIVERGENCE IS INPUT HANDLING, NOT GRAMMAR — and the answer to "was the W1-T387 treatment
+    ever applied here" is NO. W1-T387 made `check-proof` judge a proof through
+    `execWhitelistedProof`, the reviewer's OWN executor, precisely so a local verdict and a PR-time
+    verdict cannot diverge. Acceptance got half of that: a shared PARSER, never a shared RESOLVER.
+    The parser is not where the disagreement lives.
+
+    (2) THE REPRODUCTION, AGAINST #2773's STORED BYTES. Fetched guarded on a successful read and a
+    non-null `.body` (8,578 chars, one trailer `Remudero-Task: W1-T2226`).
+    `rmd check-acceptance` on those exact bytes prints, verbatim:
+
+      bullets written: 1
+      criteria parsed: 1
+      empty proofs:    1
+      DEFECTIVE: 1 parsed criterion/criteria have an EMPTY proof — a claim with nothing to execute.
+
+    and exits 1. The gate, on the same head (d93b4aed), posted
+    `success  remudero-review: PASS — 5 criteria substantiated, no test theater`. W1-T2226's shard
+    carries EXACTLY FIVE acceptance criteria and its first claim is the same sentence the preflight
+    parsed out of the body. So the five came from the shard, through the trailer, and the body block
+    the preflight was grading never entered the gate's decision.
+
+    (3) Q2 — WHICH IS RIGHT ABOUT #2773: THE GATE. It judged the criteria that actually bind. The
+    preflight was not wrong about the BODY — that block genuinely carries a claim with no
+    executable proof — it was wrong about WHAT IT WAS GRADING. That distinction matters for the
+    remedy: nothing about the parser needs fixing.
+
+    THE COUNT, OVER A NAMED CORPUS. The 300 most recent MERGED PRs, classified locally with the
+    repo's own `acceptanceBlockDiagnostics` and `parseAcceptanceBlock`:
+
+      preflight REJECTS while the gate ACCEPTED : 88 of 300
+        of which the body has NO `## Acceptance` header at all : 14
+        of which the body HAS a header the preflight calls DEFECTIVE (the #2773 shape) : 74
+      preflight ACCEPTS while the gate REJECTED : 0 observed in this corpus
+      agree : 212
+
+    CONTROL: #2773 is in the 74, which is the shape the reproduction above measured directly.
+
+    AND THE ZERO IS A SURVIVORSHIP ARTEFACT, STATED RATHER THAN QUOTED AS A RESULT. A PR the gate
+    REJECTS tends not to merge, so a corpus of merged PRs cannot contain that direction by
+    construction. It is not zero in fact: CLAUDE.md records #1721 shipping eight claim/proof pairs
+    and measuring `criteria parsed: 0` against 22 of 22 green checks — the W1-T1097 shape, where the
+    preflight reports OK at zero because `defective` compares `criteriaParsed` against
+    `bulletsWritten` and both read zero. THAT HALF IS ALREADY FILED AS W1-T1097 AND IS CITED HERE,
+    NOT RE-FILED.
+
+    (4) THE TWO DIRECTIONS COST DIFFERENT THINGS, AND THE COMMON ONE IS THE CHEAPER ONE PER
+    INCIDENT. A body the gate accepts and the preflight rejects costs TRUST IN THE VERB: an author
+    who runs it on a trailered PR sees DEFECTIVE and exit 1 on a PR that is about to pass, and the
+    rational response is to stop running it. A body the preflight accepts and the gate rejects costs
+    a REVIEW CYCLE and a new head, because a posted verdict is never re-reviewed on the same sha. So
+    the frequent direction is the one that quietly retires the tool, and the rare one is the one
+    that burns a cycle. Both are worth closing; only the first is measurable from merged history.
+
+    (5) WHY THE VERB IS ADVISORY-AT-BEST TODAY, PUT PLAINLY. For any PR carrying a trailer — which
+    is every implementation PR by convention — `check-acceptance` is grading a block the gate will
+    read only if the shard yields nothing. It can therefore be confidently wrong in the reassuring
+    direction (W1-T1097) and confidently wrong in the alarming direction (this task), on the same
+    verb, in the same week. An advisory wrong in both directions should be CORRECTED OR RETIRED,
+    never promoted.
+  design: |
+    (i) THE PREFLIGHT RESOLVES CRITERIA THE WAY THE GATE DOES, AND SAYS WHICH SOURCE IT USED. The
+    reviewer's order is trailer-shard first, body block at zero. The preflight adopting that same
+    order is what makes the two agree; anything else re-implements the resolution and re-opens the
+    gap W1-T387 closed for proofs.
+
+    (ii) IT REPORTS THE SOURCE, NOT ONLY THE VERDICT. "criteria parsed: 5 (from W1-T2226's shard via
+    the body trailer)" versus "(from the body Acceptance: block)" is the line that would have made
+    #2773 self-explanatory to its author without reading any source.
+
+    (iii) A BODY BLOCK THAT WILL NOT BE READ IS STILL WORTH A WORD, BUT NOT A REFUSAL. When the
+    trailer resolves, a defective body block cannot fail the PR, so reporting it as DEFECTIVE
+    overstates. It is reported as unused, with its own defect named, and the exit code follows what
+    the GATE would do with this body — which is the whole point of a preflight.
+
+    (iv) THE ZERO-CRITERIA CASE KEEPS W1-T1097'S FIX AND DOES NOT PRE-EMPT IT. This task must not
+    change how `defective` treats `criteriaParsed` against `bulletsWritten`; that is W1-T1097's, and
+    landing both independently is the intent.
+  acceptance:
+    - claim: "the preflight resolves a trailered body's criteria from the same source the gate would use"
+      proof: "unit test: test/acceptance-preflight-agrees-with-gate.test.ts"
+    - claim: "the report names which source the criteria came from rather than only how many parsed"
+      proof: "unit test: test/acceptance-preflight-agrees-with-gate.test.ts"
+    - claim: "a defective body block on a trailered pr is reported as unused rather than as a refusal"
+      proof: "unit test: test/acceptance-preflight-agrees-with-gate.test.ts"
+    - claim: "an untrailered body is judged exactly as it is today with no change in verdict"
+      proof: "unit test: test/acceptance-preflight-agrees-with-gate.test.ts"
+    - claim: "the preflight exit code follows what the gate would do with the same body"
+      proof: "unit test: test/acceptance-preflight-agrees-with-gate.test.ts"
+  files: [src/run-task.ts, test/acceptance-preflight-agrees-with-gate.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#acceptance-preflight-gate-divergence-2026-08-24"
+  plan_refs: ["W1-T387", "W1-T1097"]
+  note: |
+    THE GATE STAYS AUTHORITATIVE AND STILL FAILS CLOSED ON NOTHING TO JUDGE. Nothing here touches
+    `judgeReview`, the `noCriteria` arm, or the resolution order at `src/run-task.ts:10740`. The
+    reviewer keeps preferring the trailer's shard and keeps falling back to the body only at zero,
+    and a PR with no criteria from either source keeps failing — "nothing to judge is never a pass"
+    is not weakened by a word.
+
+    THE REMEDY IS AGREEMENT, NEVER RELAXATION. The preflight is what moves, and it moves TOWARD the
+    gate. No assertion is loosened on either side, and no body that fails today starts passing
+    because of this task.
+
+    AND NOTHING MAKES THE PREFLIGHT BLOCKING. It is not wired into CI, not made a required check,
+    and not consulted by dispatch. An advisory that is wrong in both directions earns correction or
+    retirement, not promotion — promoting it would convert a false alarm into a blocked PR, which is
+    the opposite of the finding.
+
+    W1-T1097 IS CITED AND NOT RE-FILED: it owns the OTHER direction, where the verb reports OK on a
+    body it resolved zero criteria from. This task must not change `defective`'s
+    `criteriaParsed`-against-`bulletsWritten` comparison, so the two can land independently and in
+    either order.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (acceptance-preflight-agrees-with-gate,
+      run-task) at risk:medium — Rule 19: raise to risk:high or decompose into one task per concern The real blast radius is one advisory CLI verb and its
+    falsifier; no gate, no predicate and no merge path changes.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/acceptance-preflight-agrees-with-gate.test.ts`, declared in
+    `files:` and absent from this tree, so on the filing PR each resolves through W1-T456's
+    forward-reference carve-out.
