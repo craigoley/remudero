@@ -501,7 +501,10 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
 // output could not be parsed at all". Reusing it here would smuggle a re-ask in under a retry's
 // name — exactly the laundering hazard design (v) warns splitting this task in two would risk.
 
-/** The small, hard bound on unparseable-response retries — mirrors risk-judge.ts's
+/** BACKSTOP (W1-T1266): the healthy path — a PARSED verdict, adverse or not — returns on attempt
+ *  1, always; this bound fires only once something else has already failed (the worker
+ *  repeatedly producing unparseable output), never as the thing that normally stops the loop.
+ *  The small, hard bound on unparseable-response retries — mirrors risk-judge.ts's
  *  `RISK_JUDGE_MAX_ATTEMPTS` exactly (design v: the retry contract must be IDENTICAL in both
  *  rungs). Never applies to a PARSED verdict, adverse or not. */
 export const TRIAGE_VERDICT_MAX_ATTEMPTS = 3;

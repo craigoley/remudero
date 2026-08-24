@@ -324,6 +324,32 @@ export function parseRiskJudgeResponse(text: string): RiskJudgeParseOutcome {
 }
 
 /**
+ * FAIL-CLOSED default for {@link parseRiskJudgeVerdict}'s old one-shot contract — BYTE-IDENTICAL
+ * to this file's pre-W1-T2212 shape (never touched by this task: `test/risk-judge.test.ts` is
+ * outside its declared `files:` scope, so this constant, and the function below that returns it,
+ * keep their exact prior value/text rather than being folded into {@link
+ * MALFORMED_RESPONSE_VERDICT}'s new confidence-0 wording).
+ */
+const FAIL_CLOSED_VERDICT: RiskJudgeVerdict = {
+  verdict: "high",
+  confidence: 1,
+  reasons: ["judge output carried no parseable RISK_VERDICT — failing closed (never silent-proceed)"],
+};
+
+/**
+ * Back-compat single-shot parse: a real {@link RiskJudgeVerdict} either way, collapsing
+ * {@link RiskJudgeParseOutcome}'s `unparseable` arm into {@link FAIL_CLOSED_VERDICT} with no
+ * retry — unchanged from before this task. {@link realRiskJudge} does NOT use this — it retries
+ * on the `unparseable` arm directly via {@link parseRiskJudgeResponse} (W1-T2212) and fails
+ * closed to {@link MALFORMED_RESPONSE_VERDICT} instead, only once its bound is exhausted.
+ */
+export function parseRiskJudgeVerdict(text: string): RiskJudgeVerdict {
+  const outcome = parseRiskJudgeResponse(text);
+  if (outcome.kind === "parsed") return outcome.verdict;
+  return { ...FAIL_CLOSED_VERDICT, reasons: [...FAIL_CLOSED_VERDICT.reasons] };
+}
+
+/**
  * FAIL-CLOSED default once every bounded retry ({@link RISK_JUDGE_MAX_ATTEMPTS},
  * {@link realRiskJudge}) has still produced no parseable `RISK_VERDICT` — mirrors
  * flight-judge.ts's `FAIL_CLOSED_VERDICT` and review.ts's "never silently proceed" doctrine: an
@@ -333,7 +359,9 @@ export function parseRiskJudgeResponse(text: string): RiskJudgeParseOutcome {
  * {@link parseRiskJudgeResponse}'s own parsed path already uses for an absent
  * `RISK_CONFIDENCE`, not the opposite extreme. The reasons text names this a MALFORMED RESPONSE
  * explicitly, apart from an adverse judgment (acceptance criterion 6) — the exact confusion
- * issue #2696's title (`ESCALATED (high, confidence 1.00)`) caused when this was 1.
+ * issue #2696's title (`ESCALATED (high, confidence 1.00)`) caused when this was 1. Distinct from
+ * {@link FAIL_CLOSED_VERDICT} above (the OLD one-shot contract's unchanged fallback): ONLY
+ * {@link realRiskJudge}'s bound-exhausted branch ever returns this one.
  */
 const MALFORMED_RESPONSE_VERDICT: RiskJudgeVerdict = {
   verdict: "high",
@@ -343,20 +371,6 @@ const MALFORMED_RESPONSE_VERDICT: RiskJudgeVerdict = {
       "this is a MALFORMED RESPONSE, not an adverse risk judgment",
   ],
 };
-
-/**
- * Back-compat single-shot parse: a real {@link RiskJudgeVerdict} either way, collapsing
- * {@link RiskJudgeParseOutcome}'s `unparseable` arm into {@link MALFORMED_RESPONSE_VERDICT} with
- * no retry. {@link realRiskJudge} does NOT use this — it retries on the `unparseable` arm
- * directly via {@link parseRiskJudgeResponse} (W1-T2212) — this remains for any caller that
- * wants a single parse with no retry semantics (mirrors the old one-shot contract exactly, only
- * the failing-closed confidence changed from 1 to 0, per this function's own doc above).
- */
-export function parseRiskJudgeVerdict(text: string): RiskJudgeVerdict {
-  const outcome = parseRiskJudgeResponse(text);
-  if (outcome.kind === "parsed") return outcome.verdict;
-  return { ...MALFORMED_RESPONSE_VERDICT, reasons: [...MALFORMED_RESPONSE_VERDICT.reasons] };
-}
 
 // ── The deterministic controller (Standing rule 12: judgment is advisory;
 // supervision/action is deterministic — mirrors flight-judge.ts's
@@ -388,8 +402,8 @@ const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
  * inconsistently — so the text a human reads in the escalation is honest even when
  * the judge's own prose is not.
  *
- * The two internal fail-closed reasons ({@link MALFORMED_RESPONSE_VERDICT} and the catch
- * branch in {@link assessRisk}, both prefixed "judge ...") are exempt: they already
+ * The internal fail-closed reasons ({@link FAIL_CLOSED_VERDICT}, {@link MALFORMED_RESPONSE_VERDICT}
+ * and the catch branch in {@link assessRisk}, all prefixed "judge ...") are exempt: they already
  * truthfully name their OWN basis — the judge's unavailability or unparseable
  * output — not a claim about the change, so qualifying them again would be noise
  * at best and misleading at worst (they have nothing to do with the description).
@@ -674,11 +688,13 @@ export async function spawnRiskJudgeWorker(opts: {
 }
 
 /**
- * The small, hard bound on unparseable-response retries (W1-T2212 design (iii)): "a small
- * attempt cap; at the bound the SAME escalation fires as today, with the same class and the
- * same blocking effect." Never applies to a PARSED verdict, adverse or not — only
- * {@link RiskJudgeParseOutcome}'s `unparseable` arm ever reaches the retry branch in
- * {@link realRiskJudge}.
+ * BACKSTOP (W1-T1266): the healthy path — a PARSED verdict, adverse or not — returns on attempt
+ * 1, always; this bound fires only once something else has already failed (the judge repeatedly
+ * returning unparseable output), never as the thing that normally stops the loop. The small, hard
+ * bound on unparseable-response retries (W1-T2212 design (iii)): "a small attempt cap; at the
+ * bound the SAME escalation fires as today, with the same class and the same blocking effect."
+ * Never applies to a PARSED verdict — only {@link RiskJudgeParseOutcome}'s `unparseable` arm ever
+ * reaches the retry branch in {@link realRiskJudge}.
  */
 export const RISK_JUDGE_MAX_ATTEMPTS = 3;
 
