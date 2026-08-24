@@ -4107,10 +4107,19 @@ export function buildBatchedGithub(
   const changedFilesByUrl = new Map<string, string[] | null>();
   /**
    * W1-T914: per-URL memo for {@link GitHub.reviewState}, TTL-matched to `index()`'s own
-   * `ttlMs` — DELIBERATELY NOT a forever-memo like {@link changedFilesByUrl}: an open PR's
-   * `remudero-review` context is exactly the value this feature exists to keep LIVE (pending ->
-   * success/failure while the row stays open), so caching it past `ttlMs` would silently freeze
-   * "review in progress" on the console long after GitHub reported the real outcome.
+   * `ttlMs` for an OPEN row — an open PR's `remudero-review` context is exactly the value this
+   * feature exists to keep LIVE (pending -> success/failure while the row stays open), so caching
+   * IT past `ttlMs` would silently freeze "review in progress" on the console long after GitHub
+   * reported the real outcome.
+   *
+   * W1-T2217: for a row whose {@link BatchedPr.state} is no longer `"OPEN"` (i.e. `"MERGED"` or
+   * `"CLOSED"`), this IS a forever-memo, exactly like {@link changedFilesByUrl} — a merged or
+   * closed PR's combined status cannot change again, so re-fetching it on every tick past `ttlMs`
+   * buys nothing. `index()` already carries `.state` on the SAME batched fetch (no new call, no
+   * new field), and the COLD `state=closed` walk that feeds the board is an ever-growing
+   * population of exactly these terminal rows — without this, every PR the fleet ever merges
+   * keeps costing one more synchronous `gh` call on every `GET /v1/status` request past the TTL,
+   * forever. See `reviewState`'s own body for the read side of this distinction.
    */
   const reviewStateCache = new Map<string, { at: number; state: "success" | "failure" | "pending" | "none" }>();
   const fetchAll =
@@ -4371,10 +4380,17 @@ export function buildBatchedGithub(
       // BRANCH NAME (already resolved on this same batched index, zero extra list fetch) rather
       // than its sha: the combined-status endpoint's `:ref` accepts any git ref, and this gateway
       // never fetches a PR's `headRefOid` at all.
-      const headRef = index().byUrl.get(prUrl)?.headRefName;
+      const entry = index().byUrl.get(prUrl);
+      const headRef = entry?.headRefName;
       if (!headRef) return undefined; // this prUrl isn't in the current index -> undetermined
+      // W1-T2217: a MERGED or CLOSED row's combined status is immutable — the discriminator reads
+      // `.state` already sitting on this same batched index (no extra call), and once such a row
+      // has been fetched once, its cache entry is honoured forever, never re-checked against
+      // `ttlMs`. Only an OPEN row's memo still expires every TTL, because that is the one case
+      // where GitHub can still post a new `remudero-review` result.
+      const terminal = entry.state !== "OPEN";
       const cached = reviewStateCache.get(prUrl);
-      if (cached && now() - cached.at < ttlMs) return cached.state;
+      if (cached && (terminal || now() - cached.at < ttlMs)) return cached.state;
       try {
         const raw = JSON.parse(run(combinedStatusRestArgs(owner, repo, headRef))) as {
           statuses?: Array<{ context?: string; state?: string }>;
