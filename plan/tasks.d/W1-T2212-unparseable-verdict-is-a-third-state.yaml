@@ -1,0 +1,144 @@
+- id: W1-T2212
+  title: "an UNPARSEABLE model verdict is a THIRD STATE and two rungs store it inside their adverse one — the risk judge encodes it as a real `verdict: high, confidence: 1` so every consumer that reads the label sees a risk finding, and the triage rung collapses it into an untyped `action: error` that no rung may retry, so three paid dispatches produced nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main (behind-count 0).
+    No suite, no spawning verb. Both instances re-derived from GitHub and from source.
+
+    (1) THE RISK JUDGE, RE-DERIVED. Issue #2696 opened 2026-08-24T10:25:03Z, titled
+    `[BLOCKED] W1-T2201: risk judge ESCALATED (high, confidence 1.00)`, body carrying
+    "judge output carried no parseable RISK_VERDICT — failing closed (never silent-proceed)".
+    PR #2695 is TWO FILES (`src/lib/containment.ts` +142/-16, `test/containment-turn-budget.test.ts`
+    +330/-0) and MERGED UNCHANGED at 2026-08-24T11:45:30Z after manual review. THERE WAS NO RISK
+    FINDING TO READ.
+
+    (2) AND THE MECHANISM IS IN THE TYPE, NOT THE PROSE. `FAIL_CLOSED_VERDICT` (`src/lib/risk-judge.ts`)
+    IS a `RiskJudgeVerdict`: `{ verdict: "high", confidence: 1, reasons: [...] }`. The third state is
+    STORED INSIDE THE ADVERSE ONE, so every consumer that reads `verdict`/`confidence` — including the
+    escalation title an operator reads first — sees a genuine high-confidence risk finding. Only
+    `reasons[0]` distinguishes them, and no title renders it. THE SAME FUNCTION CONTRADICTS ITSELF ON
+    CONFIDENCE: the parsed path defaults a missing confidence to 0 because it must "never assume high
+    confidence that was never stated", while the UNPARSED path hardcodes 1.
+
+    (3) THE TRIAGE RUNG, RE-DERIVED, AND ITS SHAPE IS DIFFERENT. `decideTriage` (`src/lib/triage.ts`)
+    returns `{ action: "error", reason: "no ALREADY_DECIDED:/AMBIGUOUS:/PROPOSED: verdict line found
+    in the worker's output" }`. That IS a distinct action — but the CAUSE is prose only, and it shares
+    `action: "error"` with a substantively different failure one branch above (`triage worker touched
+    non-plan file(s)`), which is a worker that misbehaved rather than one that answered unreadably.
+    Nothing may retry either. `plan/feedback/fb-1785959570301-a65f94.yaml` is on main and its triage
+    finally landed as #2689 — the FOURTH dispatch; the three that failed left no PR by construction,
+    which is why their only trace is the fleet ledger.
+
+    (4) SO THE TWO RUNGS FAIL DIFFERENTLY AND NEITHER CAN SAY WHY. One reports a risk finding it never
+    read; the other reports an error whose cause is untyped. In both, the operator cannot separate a
+    real adverse judgment from a malformed response without opening the diff.
+
+    (5) AND THE CLASS IS WIDER THAN THE TWO INSTANCES — A THIRD SITE IS CONFIRMED, NOT SUSPECTED.
+    `flight-judge.ts` carries the IDENTICAL collapse: `FAIL_CLOSED_VERDICT: JudgeVerdict =
+    { state: "off_track", recommendation: "escalate", confidence: 1, evidence: [...] }`, and
+    `risk-judge.ts`'s own doc says it "mirrors flight-judge.ts's `FAIL_CLOSED_VERDICT`".
+    `src/lib/learnings.ts` cites the same doctrine again. This task does NOT declare those files;
+    they are named so a later reader knows the pattern is three-deep and not finished here.
+  design: |
+    (i) THE DISTINCTION MUST BE A TYPE, NOT A POLICY — THIS IS THE WHOLE ANSWER TO "ENFORCEABLE
+    RATHER THAN INTENDED". Make the parser return a discriminated union whose UNPARSEABLE arm is not
+    a verdict at all, so the retry branch is reachable ONLY from that arm. A parsed-but-adverse
+    verdict is then a DIFFERENT TYPE and cannot enter the retry path — the compiler refuses it, not a
+    reviewer. Any design where both states share one type and a boolean or a string decides
+    retryability re-creates exactly this defect one level down.
+
+    (ii) THE RETRY RE-REQUESTS, IT NEVER RE-ASKS. Build the prompt and the input ONCE and reuse the
+    same value for every attempt; nothing about the request may vary between them. Re-asking a judge
+    until it parses is one step from re-asking until it approves, and the difference is only
+    observable if the attempts are byte-identical. THE FALSIFIER: a test that captures every attempt's
+    prompt and asserts they are identical, and a second that asserts a parsed `high` verdict is
+    retried ZERO times. Without both, "only on unparseable" is an intention.
+
+    (iii) HARD-BOUNDED, AND THE BOUND CHANGES NOTHING ELSE. A small attempt cap; at the bound the
+    SAME escalation fires as today, with the same class and the same blocking effect. Each attempt
+    writes its own ledger row so the count is auditable after the fact rather than inferred.
+
+    (iv) AND NAME THE CAUSE WHERE THE OPERATOR ACTUALLY READS IT. The original defect is legibility:
+    `ESCALATED (high, confidence 1.00)` must not be the title of a malformed-response escalation. The
+    title must distinguish the two, and the risk judge's confidence must stop asserting 1 for a
+    verdict it never read — 0 is what its own parsed path uses for a value that was never stated.
+
+    (v) TWO FILES, ONE CONCERN, AND RULE 19 DOES NOT REFUSE IT — MEASURED, NOT ASSUMED.
+    `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` outright when `task.risk ===
+    "high"` ("Rule 19 exemption — high already assumes wide scope"), so this combination is permitted
+    at this band and would only have blocked at `risk:medium`. The span is declared deliberately: the
+    retry contract in (i)-(iii) must be IDENTICAL in both rungs, and splitting the task is the
+    likeliest way to end up with two divergent retry policies — which is the laundering hazard itself.
+
+    (vi) REFUSED BY NAME. An unparseable verdict STILL BLOCKS. The escalation STILL FIRES at the
+    bound. NOTHING proceeds on a verdict it could not read. No retry on any parsed verdict, adverse
+    or not. No widening of what counts as parseable to make more responses succeed.
+
+    (vii) NOT IN SCOPE, NAMED: `flight-judge.ts` and `learnings.ts` (rationale 5); the `touched
+    non-plan file(s)` arm of `decideTriage`, which is a real worker misbehaviour and must keep failing
+    without retry; and the judges' prompts, which this task does not tune.
+  acceptance:
+    - claim: "an unparseable response is a distinct state rather than a verdict value"
+      proof: "unit test: test/unparseable-verdict-third-state.test.ts"
+    - claim: "a parsed adverse verdict is never retried"
+      proof: "unit test: test/unparseable-verdict-third-state.test.ts"
+    - claim: "every retry attempt carries an identical prompt and input"
+      proof: "unit test: test/unparseable-verdict-third-state.test.ts"
+    - claim: "the retry stops at its bound and escalates exactly as it does today"
+      proof: "unit test: test/unparseable-verdict-third-state.test.ts"
+    - claim: "an unreadable verdict still blocks and nothing proceeds on it"
+      proof: "unit test: test/unparseable-verdict-third-state.test.ts"
+    - claim: "the escalation names a malformed response apart from an adverse judgment"
+      proof: "unit test: test/unparseable-verdict-third-state.test.ts"
+    - claim: "the triage rung reports its cause as data rather than as prose alone"
+      proof: "unit test: test/unparseable-verdict-third-state.test.ts"
+  files: [src/lib/risk-judge.ts, src/lib/triage.ts, test/unparseable-verdict-third-state.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#unparseable-verdict-third-state-2026-08-24"
+  plan_refs: ["W1-T2201"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/unparseable-verdict-third-state.test.ts`, declared in `files:`, so on the filing PR
+    it resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS RULE 19 SPAN AND BLAST RADIUS BOTH, AND THE SPAN WAS MEASURED RATHER THAN
+    ASSUMED — see design (v): `sizingViolation` exempts `risk:high` by an early return, so the
+    linter permits this pair and would only have refused it at a lower band. The BLAST RADIUS is that
+    both rungs gate whether unattended work proceeds.
+
+    TWO OF THE BRIEF'S PREMISES ARE CORRECTED HERE RATHER THAN CARRIED. FIRST, the two rungs do NOT
+    share a parser: `parseRiskJudgeVerdict` (`src/lib/risk-judge.ts`) matches
+    `/RISK_VERDICT:\s*(\w+)/i`, while `decideTriage` (`src/lib/triage.ts`) consumes a verdict parsed
+    by `/^[ \t]*ALREADY_DECIDED[ \t]*:[ \t]*(.+)$/gim` and its siblings — two files, two regexes,
+    nothing shared. SECOND, `rule-efficacy` does NOT refuse the laundering shape by name: it is a
+    MEASUREMENT module (`ruleEfficacyReport`, `escalateRepeatingRules`, given a cadence by W1-T1259)
+    that reports whether rules are working. The anti-laundering doctrine that IS in-tree lives
+    elsewhere — `onboard/recon.ts` ("never launders a guess as ground truth") and `open-prs-rest.ts`
+    ("would launder 'GitHub did not say' into 'definitely not a draft'") — and design (ii) rests on a
+    falsifier rather than on any of those citations.
+
+    THE THREE FAILED TRIAGE DISPATCHES LEFT NO GITHUB TRACE BY CONSTRUCTION — the rung's own contract
+    is "leaving no PR" — so their count is the operator's, taken from the fleet ledger, and is not
+    re-derivable from this host. What IS re-derived here: the feedback entry exists on main and the
+    succeeding triage landed as #2689.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T2212` resolves to
+    21939c9b9dd9b87553daa842354a27c903d7aa26, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight surfaces
+    were swept with a control PRE-QUALIFIED FOR EACH, AND THE OPEN-PR SURFACE WAS DISQUALIFIED ONCE
+    AND THEN RECOVERED — reported both ways rather than only the second. At the first sweep the
+    repository had ZERO open pull requests, so that surface had no corpus, no control could fire, and
+    its zero was unusable rather than evidence; the per-head subject sweep was inapplicable for the
+    same reason. By the re-sweep before pushing, two PRs were open (#2699, #2700), the control
+    `W1-T2211` read 1 there and this id read 0, so the surface qualified after all and the per-head
+    sweep ran. The other seven surfaces are a
+    declared `- id:` on main, a shard FILENAME on main, any occurrence in main's tree, the reservation
+    refs (a reserved id reads 1 and a non-reserved id reads 0), a LIVE `run-W1-T*` head, main's commit
+    messages, and merged PR bodies including the `Remudero-Task:` trailer.
