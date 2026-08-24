@@ -1,10 +1,10 @@
 {
-  "$comment": "Remudero worker policy TEMPLATE. Rendered at runtime by renderWorkerSettings(): ${HOOKS_DIR} is replaced with the absolute hooks dir (kept out of the committed tree). Passed to workers ONLY — never merged into ~/.claude/settings.json. Sandbox keys match the INSTALLED schema (SDK 0.3.209 / CLI 2.1.209): allowedDomains nests under `network`, denyRead under `filesystem`. W1-T2211: `~/../state/service-tokens.json` denies the console's write-token file by the SAME path serviceTokensPath(config.root) resolves — the worker's redirected HOME is config.root/worker-home (config.js workerHomeDir), so `~/..` reaches config.root and `state/service-tokens.json` is its sibling. Deliberately the ONE file, never `state/**` — workers legitimately read the rest of the state tree.",
+  "$comment": "Remudero worker policy TEMPLATE. Rendered at runtime by renderWorkerSettings(): ${HOOKS_DIR} is replaced with the absolute hooks dir (kept out of the committed tree). Passed to workers ONLY — never merged into ~/.claude/settings.json. Sandbox keys match the INSTALLED schema (SDK 0.3.209 / CLI 2.1.209): allowedDomains nests under `network`, denyRead under `filesystem`. W1-T2211: `~/../state/service-tokens.json` denies the console's write-token file by the SAME path serviceTokensPath(config.root) resolves — the worker's redirected HOME is config.root/worker-home (config.js workerHomeDir), so `~/..` reaches config.root and `state/service-tokens.json` is its sibling. Deliberately the ONE file, never `state/**` — workers legitimately read the rest of the state tree. W1-T2213: `~/.ssh/**`, `~/.aws/**` and `~/.config/remudero/**` were bare `~`-anchored, so under the SAME redirected HOME they resolved inside the worker's own scratch home rather than the operator's — a rule that either named nothing (`.ssh`/`.aws`, absent from this fleet's containers) or missed its target (`.config/remudero/config.json`, the live, mode-600 instance config `loadConfig` reads). `~/../..` escapes one level further than the token-deny's own `~/..`: `loadConfig` (config.ts) defaults `config.root` to `join(homedir(), \"Remudero\")`, so `~/..` reaches config.root exactly as the token deny relies on, and `~/../..` reaches the operator's REAL home one level above it — the SAME portable, config.root-relative escape the token deny already uses, extended by the one level that separates `config.root` from `homedir()` under that default.",
   "permissions": {
     "deny": [
-      "Read(~/.ssh/**)",
-      "Read(~/.aws/**)",
-      "Read(~/.config/remudero/**)",
+      "Read(~/../../.ssh/**)",
+      "Read(~/../../.aws/**)",
+      "Read(~/../../.config/remudero/**)",
       "Read(~/../state/service-tokens.json)"
     ],
     "allow": [],
@@ -30,9 +30,9 @@
     "autoAllowBashIfSandboxed": true,
     "filesystem": {
       "denyRead": [
-        "~/.ssh/**",
-        "~/.aws/**",
-        "~/.config/remudero/**",
+        "~/../../.ssh/**",
+        "~/../../.aws/**",
+        "~/../../.config/remudero/**",
         "~/../state/service-tokens.json"
       ]
     },

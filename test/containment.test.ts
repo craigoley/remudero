@@ -10,17 +10,23 @@ import {
   EGRESS_BLOCKED_HOST,
   EGRESS_BLOCKED_MARKER,
   EGRESS_TIMEOUT_SECONDS,
+  OPERATOR_HOME_READ_SUCCESS_MARKER,
+  PROBE_TURN_ALLOWANCE,
   STATE_READ_CONTROL_MARKER,
   TOKEN_READ_SUCCESS_MARKER,
   allowedHostFromSettings,
   assessContainment,
   assessEgressContainment,
+  assessOperatorHomeReadContainment,
   assessTokenReadContainment,
   classifyUnprovenState,
   containmentProbePrompt,
   defaultExecutor,
   egressProbeCommand,
+  operatorHomeReadProbeCommand,
+  probeCommandCount,
   probeContainment,
+  probeTurnBudget,
   stateReadControlBasename,
   tokenReadProbeCommand,
   type ContainmentEvidence,
@@ -855,5 +861,192 @@ test("W1-T2211: defaultExecutor observes the read arm's markers via existsSync, 
   const result: ProbeExecResult = await exec("readarmtok");
 
   assert.equal(result.tokenReadSucceeded, false, "no token-read marker was created ⇒ read did not succeed");
+  assert.equal(result.stateReadSucceeded, true, "the control marker WAS created ⇒ control read succeeded");
+});
+
+// ── W1-T2213: THE RE-ANCHORING ARM — a worker's read of the operator's real
+// `~/.config/remudero/config.json` (one of the six `~`-anchored denies re-
+// anchored to `~/../..`, design part (i)) is denied, and that denial is
+// OBSERVED (not assumed) by the same three-state verdict every other arm
+// uses. `assessOperatorHomeReadContainment` is the pure falsifier the shard's
+// acceptance criteria 3 and 4 point at; criterion 5 is the turn-budget test
+// at the bottom of this block. ──────────────────────────────────────────────
+
+/** Evidence with the filesystem arm already holding, so only this read arm is under test. */
+function operatorHomeReadEvidence(over: Partial<ContainmentEvidence>): ContainmentEvidence {
+  return {
+    outsideWriteCreated: false,
+    osDenialSeen: true,
+    insideWriteCreated: true,
+    ...over,
+  };
+}
+
+test("W1-T2213 ACCEPTANCE 3+4: the operator-home read DENIED plus the control read succeeding verdicts operator-home-read PROVEN-HOLDING, three-state", () => {
+  const v = assessOperatorHomeReadContainment(
+    operatorHomeReadEvidence({
+      operatorHomeReadSucceeded: false,
+      stateReadSucceeded: true,
+      operatorHomeReadDenialSeen: true,
+    }),
+  );
+  assert.equal(v.contained, true);
+  assert.match(v.reason, /DENIED/);
+  assert.match(v.reason, /control read succeeded/);
+});
+
+test("W1-T2213: the operator-home read SUCCEEDING (the re-anchored denyRead entry did not hold) verdicts operator-home-read PROVEN-BROKEN", () => {
+  const v = assessOperatorHomeReadContainment(
+    operatorHomeReadEvidence({
+      operatorHomeReadSucceeded: true,
+      stateReadSucceeded: true,
+      operatorHomeReadDenialSeen: false,
+    }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /PROVEN-BROKEN/);
+  assert.match(v.reason, /config\.json/);
+});
+
+test("W1-T2213: the ordinary-state control failing too verdicts operator-home-read UNPROVEN and never proven-holding — an over-broad deny cannot pass as a clean result", () => {
+  const v = assessOperatorHomeReadContainment(
+    operatorHomeReadEvidence({
+      operatorHomeReadSucceeded: false,
+      stateReadSucceeded: false,
+      operatorHomeReadDenialSeen: true,
+    }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.match(v.reason, /control read also failed/);
+});
+
+test("W1-T2213: an unobserved read attempt stays UNPROVEN rather than reading as denied", () => {
+  const v = assessOperatorHomeReadContainment(operatorHomeReadEvidence({}));
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.match(v.reason, /no read attempt was observed/);
+});
+
+test("W1-T2213: a control-succeeding read with no observed denial stays UNPROVEN", () => {
+  const v = assessOperatorHomeReadContainment(
+    operatorHomeReadEvidence({
+      operatorHomeReadSucceeded: false,
+      stateReadSucceeded: true,
+      operatorHomeReadDenialSeen: false,
+    }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.match(v.reason, /no denial was observed/);
+});
+
+test("W1-T2213: the read-arm command never prints the file's content — the read redirects to /dev/null", () => {
+  const cmd = operatorHomeReadProbeCommand("/home/op/.config/remudero/config.json");
+  assert.match(cmd, />\/dev\/null/);
+  assert.ok(cmd.includes(OPERATOR_HOME_READ_SUCCESS_MARKER));
+  assert.ok(cmd.includes(".config/remudero/config.json"));
+});
+
+test("W1-T2213 ACCEPTANCE 5: the probe prompt asks for the operator-home read as a distinct SIXTH step, and the turn cap absorbs it WITHOUT a hand-set literal", () => {
+  const prompt = containmentProbePrompt(
+    "tok",
+    "api.github.com",
+    "/root/state/service-tokens.json",
+    "/root/state/control.txt",
+    "/home/op/.config/remudero/config.json",
+  );
+  assert.match(prompt, /SIXTH command/, "the operator-home read check is asked for as an explicit sixth step");
+  assert.ok(prompt.includes(".config/remudero/config.json"));
+  assert.match(prompt, /^operatorhomeread: /m);
+  // Rationale (6): the prompt carried FOUR commands before W1-T2211 added the
+  // token-read arm as a fifth; this task adds the operator-home-read arm as a
+  // SIXTH, and the cap is DERIVED from the prompt's own numbered commands
+  // (probeCommandCount), not a hand-set literal — so the sixth command moves
+  // the cap automatically, with PROBE_TURN_ALLOWANCE untouched by this task
+  // (design part (iii)).
+  assert.equal(probeCommandCount(prompt), 6, "six numbered commands: write x2, tripwire, egress, token-read, operator-home-read");
+  assert.equal(PROBE_TURN_ALLOWANCE, 3, "the allowance itself is untouched — only the derived cap moves");
+  assert.equal(
+    probeTurnBudget(prompt),
+    probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE,
+    "the cap is DERIVED from the prompt's own command count, never a separate literal",
+  );
+  assert.equal(probeTurnBudget(prompt), 10, "6 commands + 1 report turn + 3 allowance = 10, moved automatically from 9");
+});
+
+test("W1-T2213: a reported operator-home-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async () => {
+  // Drives probeContainment's OWN wiring for this arm (not just the pure
+  // verdict): an executor that REPORTS a read attempt must have
+  // `operatorHomeReadDenialSeen` computed from the transcript.
+  const res = await probeContainment({
+    settingsFile: settingsFile(ENABLED),
+    token: "tok2213",
+    exec: async (): Promise<ProbeExecResult> => ({
+      transcript:
+        "tok2213 touch: ../tok2213.txt: Operation not permitted\n" +
+        "cat: /home/op/.config/remudero/config.json: Permission denied",
+      outsideWriteCreated: false,
+      insideWriteCreated: true,
+      operatorHomeReadSucceeded: false,
+      stateReadSucceeded: true,
+    }),
+  });
+  // The filesystem verdict is unchanged by this arm — it still governs the throw.
+  assert.equal(res.contained, true);
+  assert.equal(res.evidence.operatorHomeReadSucceeded, false);
+  assert.equal(res.evidence.stateReadSucceeded, true);
+  assert.equal(res.evidence.operatorHomeReadDenialSeen, true);
+  assert.equal(assessOperatorHomeReadContainment(res.evidence).contained, true);
+});
+
+test("W1-T2213: an UNRELATED permission-denied line that never mentions config/remudero does NOT satisfy operatorHomeReadDenialSeen", async () => {
+  const res = await probeContainment({
+    settingsFile: settingsFile(ENABLED),
+    token: "tok2213b",
+    exec: async (): Promise<ProbeExecResult> => ({
+      transcript:
+        "tok2213b touch: ../tok2213b.txt: Operation not permitted\n" +
+        "cat: /some/unrelated/path: Permission denied",
+      outsideWriteCreated: false,
+      insideWriteCreated: true,
+      operatorHomeReadSucceeded: false,
+      stateReadSucceeded: true,
+    }),
+  });
+  assert.equal(res.evidence.operatorHomeReadDenialSeen, false);
+  assert.equal(assessOperatorHomeReadContainment(res.evidence).contained, false);
+});
+
+test("W1-T2213: defaultExecutor observes this arm's marker via existsSync, exactly like the write, egress and token-read arms", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-containment-operatorhomearm-test-"));
+  const config = { root: dir } as Config;
+  const fakeSpawn = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
+    // Simulate the sandbox DENYING the operator-home read and ALLOWING the
+    // control read — create only the control-read marker inside cwd, mirroring
+    // what a real spawn would leave behind via `touch` in the probe command.
+    writeFileSync(join(args.cwd, STATE_READ_CONTROL_MARKER), "");
+    return {
+      sessionId: "s",
+      costUsd: 0,
+      numTurns: 0,
+      text: "REPORT\noperatorhomeread: operator-home read denied, control read succeeded",
+      blocks: [],
+      stderr: "",
+      subtype: "success",
+      isError: false,
+      apiError: false,
+      permissionDenials: [],
+    } as unknown as WorkerResult;
+  };
+
+  const exec = defaultExecutor("settings.json", config, undefined, fakeSpawn);
+  const result: ProbeExecResult = await exec("operatorhometok");
+
+  assert.equal(
+    result.operatorHomeReadSucceeded,
+    false,
+    "no operator-home-read marker was created ⇒ read did not succeed",
+  );
   assert.equal(result.stateReadSucceeded, true, "the control marker WAS created ⇒ control read succeeded");
 });
