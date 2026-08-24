@@ -34,6 +34,19 @@ export const DEFAULT_RISK: TaskRisk = "medium";
 /** A dependency is "satisfied" only once it has landed. */
 const MERGED_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 
+/**
+ * Retirement taxonomy (W1-T1287) — the sibling field that replaces the `RETIRED (…)` /
+ * `CLOSED UNBUILT (…)` title-prefix convention (carried by 2 of 790 tasks, read by nothing in
+ * `src/` or `test/`) with something a reader can actually filter on. Mirrors `learnings.ts`'s
+ * `lifecycle` shape: a small closed vocabulary, validated at load, fail-closed on anything else
+ * — the SAME three words (W1-T1287's rationale (2)) already found in use as candidate
+ * `TASK_STATUSES` members before that task's Q1 ruled a new status-enum member out precisely
+ * because it would re-litigate `blocked`'s exclusion semantics at four independent sites. A
+ * sibling field on an already-excluded record cannot perturb that exclusion BY CONSTRUCTION.
+ */
+export const RETIREMENT_REASONS = ["retired", "closed", "withdrawn"] as const;
+export type RetirementReason = (typeof RETIREMENT_REASONS)[number];
+
 export interface AcceptanceCriterion {
   claim: string;
   proof: string;
@@ -150,6 +163,20 @@ export interface Task {
    * repo-wide (all entries candidate, still budget-bounded).
    */
   files?: string[];
+  /**
+   * OPERATOR-ONLY retirement category (W1-T1287) — records WHY a `status: "blocked"` task will
+   * never be built, so a closed operator ruling (W1-T1261, W1-T1273 — both closed by ruling on
+   * 2026-08-23) is no longer indistinguishable from the 41 other `blocked` records that are
+   * merely dependency-stalled. NEVER auto-written: nothing in `src/` sets this field, the same
+   * way `status` itself is machine-derived-elsewhere but this sibling is not (see W1-T1287 Q3
+   * (x) — a retirement is a judgement call, not a re-verifiable assertion, so unlike
+   * `learnings.ts`'s `quarantined` arm there is deliberately no auto-flip writer to copy).
+   * Absent on every non-retired task, including every other `blocked` one. `blocked`'s own
+   * exclusion semantics at `isDispatchEligible` (lib/drain.ts), `assertRunnable` (this file),
+   * and `isOpenLintTask` (run-task.ts) read `status` alone and never this field — a task with
+   * and without `retirement` filters identically at all three.
+   */
+  retirement?: RetirementReason;
 }
 
 export class PlanError extends Error {
@@ -205,6 +232,10 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
     if (!TASK_STATUSES.includes(status)) {
       throw new PlanError(`task ${id}: invalid status '${status}'`);
     }
+    const retirement = e.retirement as RetirementReason | undefined;
+    if (retirement !== undefined && !RETIREMENT_REASONS.includes(retirement)) {
+      throw new PlanError(`task ${id}: invalid retirement '${String(retirement)}' (must be ${RETIREMENT_REASONS.join("|")})`);
+    }
     const task: Task = {
       id,
       title: req(e.title as string, "title", id),
@@ -227,6 +258,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
+      retirement,
     };
     byId.set(id, task);
     return task;
