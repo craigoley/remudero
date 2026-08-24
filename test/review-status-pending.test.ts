@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -16,6 +16,11 @@ import {
   type PrLifecycleState,
 } from "../src/lib/review.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
+import { runReview } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
+import type { Mount } from "../src/lib/mounts.js";
+import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import type { WorkerResult, SpawnWorkerArgs } from "../src/lib/worker.js";
 
 /**
  * W1-T913 (fb-1784901239119-1be356, PR #707): `remudero-review` was posted ONLY in a terminal
@@ -40,7 +45,7 @@ const NOT_MERGED: PrLifecycleState = { merged: false, closed: false };
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
-test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending via postReviewPending BEFORE the diff fetch, the advisory reviewer spawn, and judgeReview", () => {
+test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending via postReviewPending BEFORE the diff fetch and judgeReview", () => {
   const start = runTaskSrc.indexOf("async function runReview(");
   const end = runTaskSrc.indexOf("// ── THE blocked_review FIX RUNG");
   assert.ok(start > -1 && end > start, "could not locate runReview's body in run-task.ts");
@@ -48,18 +53,144 @@ test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending vi
 
   const pendingIdx = body.indexOf("postReviewPending(");
   const diffIdx = body.indexOf('execFileSync("gh", ["pr", "diff"');
-  const spawnIdx = body.indexOf("await spawnWorker(");
   const judgeIdx = body.indexOf("const computed = judgeReview(");
 
   assert.ok(pendingIdx > -1, "runReview must call postReviewPending");
-  assert.ok(diffIdx > -1 && spawnIdx > -1 && judgeIdx > -1, "could not locate runReview's expensive-work call sites");
+  assert.ok(diffIdx > -1 && judgeIdx > -1, "could not locate runReview's expensive-work call sites");
   assert.ok(pendingIdx < diffIdx, "the pending post must precede the diff fetch");
-  assert.ok(pendingIdx < spawnIdx, "the pending post must precede the advisory reviewer spawn");
   assert.ok(pendingIdx < judgeIdx, "the pending post must precede judgeReview");
+
+  // THE REVIEWER SPAWN IS ASSERTED BEHAVIOURALLY INSTEAD, in the test directly below. It used to
+  // be checked here as `body.indexOf("await spawnWorker(")`, but that call site is now the
+  // injectable seam `(args.spawnReviewerWorker ?? spawnWorker)(...)`, and swapping one literal for
+  // another would only move the same brittleness one refactor further out. The property this file
+  // owns — the pending post PRECEDES the expensive reviewer spawn — is unchanged and is now proven
+  // by RUNNING runReview and observing the real order of the two effects, which no comment and no
+  // renamed identifier can satisfy (W1-T1051).
 
   // The TERMINAL post still replaces it on completion — the SAME single guarded site, unchanged.
   const terminalPostIdx = body.indexOf("const posted = await postReviewStatusGuarded({");
   assert.ok(terminalPostIdx > judgeIdx, "the terminal post must still run, after judging, exactly as before this task");
+});
+
+// The BEHAVIOURAL half of criterion 1's spawn arm. Until the reviewer spawn became injectable it
+// could only be checked as source text (`body.indexOf("await spawnWorker(")`), because letting the
+// block run meant a real LLM call. It is a seam now, so the ordering this file exists to protect is
+// asserted by RUNNING runReview and recording the real sequence of two side effects: the pending
+// status POST (observed at the `gh` boundary, where postReviewStatusGuarded actually emits it) and
+// the reviewer spawn (observed at the seam). Both must happen, and in that order.
+
+const SEAM_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
+
+/** A COMPLETE WorkerResult — the reviewer block folds `workerLedgerFields(reviewer)` into its
+ *  ledger row and that reads the usage fields, so a partial fixture throws into the block's own
+ *  catch and the spawn would look like it never happened. */
+function pendingOrderWorkerResult(): WorkerResult {
+  return {
+    sessionId: "sess-order-1",
+    costUsd: 0,
+    numTurns: 0,
+    text: "REVIEW_VERDICT 1: PASS",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  } as WorkerResult;
+}
+
+/** A `gh` that APPENDS to `tracePath` when the pending review status is posted. The trace is taken
+ *  at the process boundary rather than from the ledger so the two events share one clock and one
+ *  file, which is what makes their order a fact rather than a comparison of timestamps. */
+function writeTracingGhStub(binDir: string, tracePath: string): void {
+  const script = `#!/bin/sh
+case "$*" in
+  *statuses/*state=pending*) printf 'pending\\n' >> '${tracePath}' ;;
+esac
+case "$1 $2" in
+  "api "*)
+    case "$*" in
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"abc1234def5678"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr view")
+    case "$*" in
+      *headRefOid*) echo '{"headRefOid":"abc1234def5678"}' ;;
+      *state*) echo '{"state":"OPEN"}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") echo "diff --git a/README.md b/README.md" ;;
+  *) exit 0 ;;
+esac
+`;
+  writeFileSync(join(binDir, "gh"), script, { mode: 0o755 });
+}
+
+test("W1-T913 criterion 1 (run lane, behavioural): the pending status POST really is emitted BEFORE the advisory reviewer spawn is called", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-pending-order-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const tracePath = join(root, "state", "order.trace");
+  writeFileSync(tracePath, "");
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-gh-stub-order-"));
+  writeTracingGhStub(binDir, tracePath);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${oldPath}`;
+
+  const acceptance: AcceptanceCriterion[] = [
+    { claim: "PENDING-ORDER-TOKEN the observable surface behaves", proof: "unit test: never-matches-PENDING-ORDER" },
+  ];
+  let spawns = 0;
+
+  try {
+    await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/1",
+      task: { id: "W1-T913-pending-order", acceptance },
+      report: "",
+      settingsFile: join(root, "settings.json"),
+      config: { claudeBin: "/bin/true", root } as Config,
+      log: () => {},
+      say: () => {},
+      account: (r: WorkerResult) => r,
+      // The block is allowed to RUN — `spawnReviewer: false` would skip the very effect being ordered.
+      spawnReviewerWorker: async (_a: SpawnWorkerArgs): Promise<WorkerResult> => {
+        spawns++;
+        appendFileSync(tracePath, "spawn\n");
+        return pendingOrderWorkerResult();
+      },
+      reviewerMount: SEAM_MOUNT,
+      ledgerPath: join(root, "state", "ledger.ndjson"),
+      runId: "REVIEW-PENDING-ORDER-1",
+    });
+  } finally {
+    process.env.PATH = oldPath;
+  }
+
+  const trace = readFileSync(tracePath, "utf8").split("\n").filter(Boolean);
+
+  // THE EXPENSIVE WORK IS REACHED. This is the half the old source-text assertion carried: if the
+  // spawn never runs, the ordering below is vacuously satisfiable and the test means nothing.
+  assert.equal(spawns, 1, "the advisory reviewer spawn must actually be called");
+  assert.ok(trace.includes("spawn"), "the spawn must be recorded in the shared trace");
+
+  // AND THE PENDING POST REALLY HAPPENED, at the gh boundary — not merely attempted. A run whose
+  // pending post threw would land in runReview's own catch and leave no trace entry at all.
+  assert.ok(trace.includes("pending"), "remudero-review=pending must be POSTed, not just attempted");
+
+  assert.equal(trace.indexOf("pending"), 0, "the pending post must be the FIRST of the two effects");
+  assert.ok(
+    trace.indexOf("pending") < trace.indexOf("spawn"),
+    "the pending post must precede the advisory reviewer spawn — the whole point of W1-T913",
+  );
 });
 
 test("W1-T913 criterion 1 (rmd review's own start): reviewCommand posts remudero-review=pending via postReviewPendingDep BEFORE materialize() and before runReviewDep()", () => {
