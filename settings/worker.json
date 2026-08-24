@@ -1,10 +1,11 @@
 {
-  "$comment": "Remudero worker policy TEMPLATE. Rendered at runtime by renderWorkerSettings(): ${HOOKS_DIR} is replaced with the absolute hooks dir (kept out of the committed tree). Passed to workers ONLY — never merged into ~/.claude/settings.json. Sandbox keys match the INSTALLED schema (SDK 0.3.209 / CLI 2.1.209): allowedDomains nests under `network`, denyRead under `filesystem`.",
+  "$comment": "Remudero worker policy TEMPLATE. Rendered at runtime by renderWorkerSettings(): ${HOOKS_DIR} is replaced with the absolute hooks dir (kept out of the committed tree). Passed to workers ONLY — never merged into ~/.claude/settings.json. Sandbox keys match the INSTALLED schema (SDK 0.3.209 / CLI 2.1.209): allowedDomains nests under `network`, denyRead under `filesystem`. W1-T2211: `~/../state/service-tokens.json` denies the console's write-token file by the SAME path serviceTokensPath(config.root) resolves — the worker's redirected HOME is config.root/worker-home (config.js workerHomeDir), so `~/..` reaches config.root and `state/service-tokens.json` is its sibling. Deliberately the ONE file, never `state/**` — workers legitimately read the rest of the state tree.",
   "permissions": {
     "deny": [
       "Read(~/.ssh/**)",
       "Read(~/.aws/**)",
-      "Read(~/.config/remudero/**)"
+      "Read(~/.config/remudero/**)",
+      "Read(~/../state/service-tokens.json)"
     ],
     "allow": [],
     "ask": []
@@ -31,7 +32,8 @@
       "denyRead": [
         "~/.ssh/**",
         "~/.aws/**",
-        "~/.config/remudero/**"
+        "~/.config/remudero/**",
+        "~/../state/service-tokens.json"
       ]
     },
     "network": {

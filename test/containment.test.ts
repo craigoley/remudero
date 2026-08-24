@@ -10,14 +10,19 @@ import {
   EGRESS_BLOCKED_HOST,
   EGRESS_BLOCKED_MARKER,
   EGRESS_TIMEOUT_SECONDS,
+  STATE_READ_CONTROL_MARKER,
+  TOKEN_READ_SUCCESS_MARKER,
   allowedHostFromSettings,
   assessContainment,
   assessEgressContainment,
+  assessTokenReadContainment,
   classifyUnprovenState,
   containmentProbePrompt,
   defaultExecutor,
   egressProbeCommand,
   probeContainment,
+  stateReadControlBasename,
+  tokenReadProbeCommand,
   type ContainmentEvidence,
   type ProbeExecResult,
 } from "../src/lib/containment.js";
@@ -700,4 +705,155 @@ test("W1-T1265: the probe prompt asks for the egress attempt and its outcome", (
   assert.match(prompt, /FOURTH command/, "the egress check is asked for as an explicit fourth step");
   assert.ok(prompt.includes(EGRESS_BLOCKED_HOST));
   assert.match(prompt, /^egress: /m);
+});
+
+// ── W1-T2211: THE READ ARM — a worker's read of the console's write-token path
+// is denied, and that denial is OBSERVED (not assumed) by the same three-state
+// verdict the write and egress arms already use. `assessTokenReadContainment`
+// is the pure falsifier the shard's acceptance criteria 1 and 2 point at; the
+// `stateReadSucceeded` control is criterion 3's own falsifier. ─────────────────
+
+/** Evidence with the filesystem arm already holding, so only the read arm is under test. */
+function tokenReadEvidence(over: Partial<ContainmentEvidence>): ContainmentEvidence {
+  return {
+    outsideWriteCreated: false,
+    osDenialSeen: true,
+    insideWriteCreated: true,
+    ...over,
+  };
+}
+
+test("W1-T2211 ACCEPTANCE 1+2: the token read DENIED plus the control read succeeding verdicts token-read PROVEN-HOLDING, three-state", () => {
+  const v = assessTokenReadContainment(
+    tokenReadEvidence({ tokenReadSucceeded: false, stateReadSucceeded: true, tokenReadDenialSeen: true }),
+  );
+  assert.equal(v.contained, true);
+  assert.match(v.reason, /DENIED/);
+  assert.match(v.reason, /control read succeeded/);
+});
+
+test("W1-T2211: the token read SUCCEEDING (the denyRead entry did not hold) verdicts token-read PROVEN-BROKEN", () => {
+  const v = assessTokenReadContainment(
+    tokenReadEvidence({ tokenReadSucceeded: true, stateReadSucceeded: true, tokenReadDenialSeen: false }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /PROVEN-BROKEN/);
+  assert.match(v.reason, /service-tokens\.json/);
+});
+
+test("W1-T2211 ACCEPTANCE 3: the ordinary-state control failing too verdicts token-read UNPROVEN and never proven-holding — an over-broad deny cannot pass as a clean result", () => {
+  const v = assessTokenReadContainment(
+    tokenReadEvidence({ tokenReadSucceeded: false, stateReadSucceeded: false, tokenReadDenialSeen: true }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.match(v.reason, /control read also failed/);
+});
+
+test("W1-T2211: an unobserved read attempt stays UNPROVEN rather than reading as denied", () => {
+  const v = assessTokenReadContainment(tokenReadEvidence({}));
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.match(v.reason, /no read attempt was observed/);
+});
+
+test("W1-T2211: a control-succeeding read with no observed denial stays UNPROVEN", () => {
+  const v = assessTokenReadContainment(
+    tokenReadEvidence({ tokenReadSucceeded: false, stateReadSucceeded: true, tokenReadDenialSeen: false }),
+  );
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.match(v.reason, /no denial was observed/);
+});
+
+test("W1-T2211: the read-arm command never prints either file's content — both reads redirect to /dev/null", () => {
+  const cmd = tokenReadProbeCommand("/root/state/service-tokens.json", "/root/state/control.txt");
+  assert.match(cmd, />\/dev\/null/);
+  assert.ok(cmd.includes(TOKEN_READ_SUCCESS_MARKER) && cmd.includes(STATE_READ_CONTROL_MARKER));
+  assert.ok(cmd.includes("service-tokens.json"));
+});
+
+test("W1-T2211: the control basename is scoped per-token so concurrent runs never collide", () => {
+  assert.notEqual(stateReadControlBasename("a"), stateReadControlBasename("b"));
+  assert.match(stateReadControlBasename("tok"), /tok/);
+});
+
+test("W1-T2211: the probe prompt asks for the token-read attempt and its outcome, as a distinct FIFTH step", () => {
+  const prompt = containmentProbePrompt("tok", "api.github.com", "/root/state/service-tokens.json", "/root/state/control.txt");
+  assert.match(prompt, /FIFTH command/, "the token-read check is asked for as an explicit fifth step");
+  assert.ok(prompt.includes("service-tokens.json"));
+  assert.match(prompt, /^tokenread: /m);
+});
+
+test("W1-T2211: a reported token-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async () => {
+  // Drives probeContainment's OWN read-arm wiring (not just the pure verdict): an
+  // executor that REPORTS a read attempt must have `tokenReadDenialSeen` computed
+  // from the transcript. The `undefined` arm is covered by the unobserved case above.
+  const res = await probeContainment({
+    settingsFile: settingsFile(ENABLED),
+    token: "tok2211",
+    exec: async (): Promise<ProbeExecResult> => ({
+      transcript:
+        "tok2211 touch: ../tok2211.txt: Operation not permitted\n" +
+        'cat: /root/state/service-tokens.json: Permission denied',
+      outsideWriteCreated: false,
+      insideWriteCreated: true,
+      tokenReadSucceeded: false,
+      stateReadSucceeded: true,
+    }),
+  });
+  // The filesystem verdict is unchanged by the read arm — it still governs the throw.
+  assert.equal(res.contained, true);
+  assert.equal(res.evidence.tokenReadSucceeded, false);
+  assert.equal(res.evidence.stateReadSucceeded, true);
+  assert.equal(res.evidence.tokenReadDenialSeen, true);
+  // And the pure verdict over that same evidence reads PROVEN-HOLDING.
+  assert.equal(assessTokenReadContainment(res.evidence).contained, true);
+});
+
+test("W1-T2211: an UNRELATED permission-denied line that never mentions service-tokens.json does NOT satisfy tokenReadDenialSeen", async () => {
+  const res = await probeContainment({
+    settingsFile: settingsFile(ENABLED),
+    token: "tok2211b",
+    exec: async (): Promise<ProbeExecResult> => ({
+      transcript:
+        "tok2211b touch: ../tok2211b.txt: Operation not permitted\n" +
+        "cat: /some/unrelated/path: Permission denied",
+      outsideWriteCreated: false,
+      insideWriteCreated: true,
+      tokenReadSucceeded: false,
+      stateReadSucceeded: true,
+    }),
+  });
+  assert.equal(res.evidence.tokenReadDenialSeen, false);
+  assert.equal(assessTokenReadContainment(res.evidence).contained, false);
+});
+
+test("W1-T2211: defaultExecutor observes the read arm's markers via existsSync, exactly like the write and egress arms", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-containment-readarm-test-"));
+  const config = { root: dir } as Config;
+  const fakeSpawn = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
+    // Simulate the sandbox DENYING the token read and ALLOWING the control read —
+    // create only the control-read marker inside cwd, mirroring what a real spawn
+    // would leave behind via `touch` in tokenReadProbeCommand.
+    writeFileSync(join(args.cwd, STATE_READ_CONTROL_MARKER), "");
+    return {
+      sessionId: "s",
+      costUsd: 0,
+      numTurns: 0,
+      text: "REPORT\ntokenread: token read denied, control read succeeded",
+      blocks: [],
+      stderr: "",
+      subtype: "success",
+      isError: false,
+      apiError: false,
+      permissionDenials: [],
+    } as unknown as WorkerResult;
+  };
+
+  const exec = defaultExecutor("settings.json", config, undefined, fakeSpawn);
+  const result: ProbeExecResult = await exec("readarmtok");
+
+  assert.equal(result.tokenReadSucceeded, false, "no token-read marker was created ⇒ read did not succeed");
+  assert.equal(result.stateReadSucceeded, true, "the control marker WAS created ⇒ control read succeeded");
 });

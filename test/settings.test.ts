@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   validateWorkerSettings,
   WorkerSettingsError,
 } from "../src/lib/settings.js";
+import { workerHomeDir, type Config } from "../src/lib/config.js";
+import { resolveServiceTokens, serviceTokensPath } from "../src/lib/serve.js";
 
 const GOOD = {
   permissions: { deny: ["Read(~/.ssh/**)"], allow: [], ask: [] },
@@ -64,4 +70,88 @@ test("rejects a misplaced filesystem key at the sandbox root", () => {
     () => validateWorkerSettings(bad),
     (e: unknown) => e instanceof WorkerSettingsError && /sandbox\.filesystem/.test((e as Error).message),
   );
+});
+
+// ── W1-T2211: A WORKER CAN READ THE CONSOLE'S WRITE TOKEN — the committed
+// TEMPLATE, not a fixture, must carry the fix. `${HOOKS_DIR}` is only ever
+// substituted inside `hooks.PreToolUse[0].hooks[0].command` (renderWorkerSettings,
+// worker.ts), so the raw committed file JSON.parses as-is for every assertion
+// below — no rendering step is needed to exercise the deny lists. ─────────────
+
+const WORKER_SETTINGS_TEMPLATE_PATH = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "settings",
+  "worker.json",
+);
+
+const ORIGINAL_DENY_READ_ENTRIES = ["~/.ssh/**", "~/.aws/**", "~/.config/remudero/**"];
+
+function readWorkerSettingsTemplate(): Record<string, unknown> {
+  return JSON.parse(readFileSync(WORKER_SETTINGS_TEMPLATE_PATH, "utf8"));
+}
+
+test("W1-T2211 ACCEPTANCE 4: the committed worker.json TEMPLATE still validates", () => {
+  assert.doesNotThrow(() => validateWorkerSettings(readWorkerSettingsTemplate()));
+});
+
+test("W1-T2211 ACCEPTANCE 4: the three ORIGINAL denyRead entries are unchanged, and exactly one new entry was added", () => {
+  const settings = readWorkerSettingsTemplate() as {
+    sandbox: { filesystem: { denyRead: string[] } };
+    permissions: { deny: string[] };
+  };
+  const denyRead = settings.sandbox.filesystem.denyRead;
+  for (const original of ORIGINAL_DENY_READ_ENTRIES) {
+    assert.ok(denyRead.includes(original), `original entry ${original} must be unchanged`);
+  }
+  assert.equal(denyRead.length, ORIGINAL_DENY_READ_ENTRIES.length + 1, "exactly one entry was added");
+  // `permissions.deny` mirrors `sandbox.filesystem.denyRead` as `Read(...)` rules
+  // (settings/worker.json's own $comment) — the mirror must gain the same one entry.
+  for (const original of ORIGINAL_DENY_READ_ENTRIES) {
+    assert.ok(settings.permissions.deny.includes(`Read(${original})`), `permissions.deny must still mirror ${original}`);
+  }
+  assert.equal(
+    settings.permissions.deny.length,
+    ORIGINAL_DENY_READ_ENTRIES.length + 1,
+    "permissions.deny gained exactly one mirrored entry too",
+  );
+});
+
+test("W1-T2211: the new entry names the token file SPECIFICALLY — never a blanket state/** deny (design part i)", () => {
+  const settings = readWorkerSettingsTemplate() as { sandbox: { filesystem: { denyRead: string[] } } };
+  const denyRead = settings.sandbox.filesystem.denyRead;
+  const added = denyRead.filter((e) => !ORIGINAL_DENY_READ_ENTRIES.includes(e));
+  assert.equal(added.length, 1, "exactly one new entry");
+  assert.match(added[0], /service-tokens\.json$/, "the new entry must name the token file by basename");
+  assert.doesNotMatch(added[0], /state\/\*\*$/, "must never be a blanket state/** deny");
+  assert.ok(
+    !denyRead.some((e) => e === "state/**" || e === "~/state/**" || e.endsWith("/state/**")),
+    "no entry anywhere in denyRead may be a blanket state/** deny",
+  );
+});
+
+test("W1-T2211: the new entry resolves to the SAME path serviceTokensPath(config.root) produces (design part i's own requirement)", () => {
+  const settings = readWorkerSettingsTemplate() as { sandbox: { filesystem: { denyRead: string[] } } };
+  const added = settings.sandbox.filesystem.denyRead.find((e) => !ORIGINAL_DENY_READ_ENTRIES.includes(e));
+  assert.ok(added, "a new denyRead entry must exist");
+  // `~` resolves to the worker's redirected HOME (workerHomeDir), never the real
+  // homedir — reproduce that resolution exactly, then apply the entry's own `..`
+  // segments, and compare against the resolver's own output for the SAME root.
+  const configRoot = "/tmp/rmd-w1-t2211-fixture-root";
+  const config = { root: configRoot } as Config;
+  const home = workerHomeDir(config);
+  assert.ok(added!.startsWith("~/"), "the entry must be `~`-anchored, like the other three");
+  const resolved = resolve(home, added!.slice(2));
+  assert.equal(resolved, serviceTokensPath(configRoot), "the deny entry must resolve to the resolver's own path");
+});
+
+test("W1-T2211 ACCEPTANCE 5: the token file's mode is unchanged (0600) and resolveServiceTokens is still create-once/read-thereafter (nothing rotates a token)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t2211-token-mode-"));
+  const first = resolveServiceTokens(dir);
+  const mode = statSync(serviceTokensPath(dir)).mode & 0o777;
+  assert.equal(mode, 0o600, "the token file must be created at mode 0600, unchanged by this fix");
+  // A second call on the SAME root must return the IDENTICAL tokens — create-once,
+  // read-thereafter — proving this change introduces no rotation.
+  const second = resolveServiceTokens(dir);
+  assert.deepEqual(second, first, "resolveServiceTokens must never mint a new pair on an existing file");
 });
