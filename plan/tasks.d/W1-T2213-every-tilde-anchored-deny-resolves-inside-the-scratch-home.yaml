@@ -1,0 +1,171 @@
+- id: W1-T2213
+  title: "ALL SIX `~`-ANCHORED WORKER DENIES RESOLVE INSIDE THE WORKER'S OWN SCRATCH HOME, SO NONE NAMES ANYTHING REAL — and two of the three paths they name do not exist in the container at all, while the third is a live 0600 file the anchoring misses"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-24 in a scratch worktree proved equal to `origin/main` at 7b5fe300 before any
+    reading; the clone was checked and already full (2,096 commits), and `src/run-task.ts`
+    (1,519,960 bytes, over the contents-API cap) was read through git objects. The ledger union
+    gate ran FIRST: archiveCount 22, ok true, unread 0, control `"step":"risk_judge.decision"` at
+    171. NO CREDENTIAL VALUE WAS READ OR PRINTED — every claim below is by path, mode and
+    ownership.
+
+    (1) THE ANCHORING, RE-DERIVED. A worker's HOME is redirected to
+    `workerHomeDir(config) = config.workerHomeRoot ?? join(config.root, "worker-home")`
+    (`src/lib/config.ts:357-359`), materialised per run as `worker-home-<runId>`
+    (`src/lib/worker-home.ts:527`, `:543`) — INSIDE the state root. `settings/worker.json` then
+    names `~/.ssh/**`, `~/.aws/**` and `~/.config/remudero/**` under
+    `sandbox.filesystem.denyRead`, and mirrors the same three as `Read(...)` rules under
+    `permissions.deny`. Counted at this head: SIX `~`-anchored entries across the two lists. Under
+    the redirected HOME each resolves inside the worker's own scratch directory rather than the
+    operator's.
+
+    (2) Q1 — AND THE ANSWER SPLITS BY PATH, WHICH MAKES THIS TWO FINDINGS, NOT ONE. The daemon
+    container mounts exactly TWO paths: `/home/craigoleyagent/rmd-state2 → /home/node/Remudero`
+    (rw) and `/home/craigoleyagent/.claude → /home/node/.claude` (rw). Probing by path only:
+      `/home/node/.ssh`             ABSENT
+      `/home/node/.aws`             ABSENT
+      `/home/node/.config/remudero` PRESENT, mode 755, one entry
+    So FOUR of the six entries (the `.ssh` and `.aws` pair in each list) name paths that DO NOT
+    EXIST in the container. For those, the defect is A RULE THAT MISLEADS — a reader of
+    `settings/worker.json` reasonably concludes the operator's keys are fenced off, and there is
+    nothing there to fence. THE REMAINING TWO ARE DIFFERENT: `/home/node/.config/remudero` holds
+    `config.json`, mode 600, owner `node`, 76 bytes — a real, sensitive file, whose deny is
+    anchored somewhere else entirely. That one is a boundary that does not cover its target.
+
+    (3) AND THE GRANTED CREDENTIALS ARE NOT ON THE LIST AT ALL, WHICH IS WHY THE LIST READS AS MORE
+    THAN IT IS. `WORKER_HOME_SYMLINKS` (`src/lib/worker-home.ts:134`) deliberately links `.claude`
+    (Claude Code session/config state) and `.config/gh` ("gh CLI auth token, so a worker can
+    open/merge PRs") back into every worker home. Those are DELIBERATE GRANTS and this task does
+    not touch them — they are named here only because a deny list that fences two absent paths
+    while two live credentials are symlinked in is a document that misleads about its own scope.
+
+    (4) THE SAME ANCHORING DISARMS THE HOOK'S OPERATOR ESCAPE HATCH. `hooks/deny-floor.sh`'s fifth
+    rule reads its pattern list from `${HOME}/.config/remudero/deny.local`. Under a worker's
+    redirected HOME that path is inside the scratch home, so an operator who writes machine-
+    specific protected paths there has written them somewhere no worker will ever read.
+
+    (5) AND NONE OF IT HAS EVER BEEN OBSERVED TO FIRE. `denyRead` occurs in `test/` exactly twice,
+    both in `test/settings.test.ts`, and both are assertions about the SHAPE of the settings file —
+    one inside a GOOD fixture, one asserting a MISPLACED `denyRead` is rejected by the validator.
+    The containment probe's filesystem arm tests only WRITES (`outside-cwd write OS-DENIED`,
+    `os_denial_seen`); it has no read case. DECLARED, VALIDATED FOR SHAPE, NEVER PROVEN — the same
+    class as W1-T1265's egress arm and W1-T1289's allowlist. Both are cited and NEITHER is
+    re-filed: this task is about the ANCHORING of the deny list and the absence of a read proof,
+    not about egress or the allowlist.
+
+    (6) Q2 — WHAT PROOF WOULD LOOK LIKE, AND IT COSTS EXACTLY ONE TURN. A shape assertion cannot
+    show a deny firing; W1-T1265's lesson is that only a probe answers this. The probe's prompt
+    (`containmentProbePrompt`, `src/lib/containment.ts:373`) lists four commands today — an
+    outside-cwd write, an inside-cwd write, the deny-floor tripwire, and the egress pair — and its
+    cap is now DERIVED: `probeTurnBudget(prompt) = probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE`
+    with `PROBE_TURN_ALLOWANCE = 3` (W1-T2201, merged; called at `:734`). So the budget stands at
+    4 + 1 + 3 = EIGHT today, and a FIFTH command — a read of a denied path — moves it to
+    5 + 1 + 3 = NINE automatically. The arm can carry a read case beside its write case for one
+    turn, with no literal to nudge.
+
+    (7) THE OVERLAP WITH W1-T2211 IS DELIBERATE AND NAMED. That task owns the SINGLE-FILE deny for
+    the console write token under the state root; this one owns the ANCHORING of the six existing
+    entries and the missing read proof. They share `settings/worker.json` and will serialize on
+    `overlappingPaths`, which is correct — neither should land a half-anchored file on top of the
+    other.
+  design: |
+    ONE CONCERN: a deny that names a path must resolve to the path it names. Not the grant set, not
+    the state root, not the token deny.
+
+    (i) RE-ANCHOR, NEVER REMOVE. All six entries stay. Each is expressed against the path it was
+    always meant to name — the operator's real home — rather than a `~` that the worker's own HOME
+    redirection re-points. A criterion pins that the count and the intent of the six are unchanged;
+    this task must not become a quiet narrowing of what is denied.
+
+    (ii) AND THE RE-ANCHORING MUST BE PROVEN, NOT DECLARED — rationale (5) is why this half is
+    load-bearing. A re-anchored entry that nothing observes is exactly what the current entries
+    are. The containment probe's filesystem arm gains a READ case beside its existing write case,
+    modelled on it field for field: a read of a denied path, observed by the same three-state
+    verdict, reported observationally and never gating.
+
+    (iii) THE COST IS ONE TURN AND IT IS TAKEN AUTOMATICALLY. Rationale (6): the cap is derived from
+    the command count, so adding the fifth command moves it 8 → 9 with no literal to touch. Nothing
+    here re-picks `PROBE_TURN_ALLOWANCE` or hand-sets a cap.
+
+    (iv) THE TWO ABSENT PATHS ARE RE-ANCHORED TOO, AND THAT IS DELIBERATE. `/home/node/.ssh` and
+    `/home/node/.aws` do not exist in today's container (rationale 2), so re-anchoring them changes
+    no observable behaviour NOW — but a mount list is operator configuration, not a constant, and a
+    deny that is correct only while a directory happens to be absent is the same unproven shape
+    this task exists to close.
+
+    (v) THE HOOK'S `deny.local` PATH IS NAMED AND NOT FIXED HERE. Rationale (4): it is anchored the
+    same way and is equally disarmed, but it lives in `hooks/deny-floor.sh` and its correction has
+    its own falsifier — an operator-written pattern file this task cannot generate to test against.
+    Recorded so the next reader does not mistake it for working.
+
+    (vi) WHAT MUST NOT CHANGE, PINNED BY CRITERIA: the six denies stay and are only re-anchored,
+    never removed; workers keep ORDINARY READ ACCESS TO THE STATE ROOT, which is their working
+    surface and which a broad deny would break; and nothing here touches the single-file token deny
+    W1-T2211 owns.
+
+    (vii) NOT IN SCOPE, NAMED: moving `worker-home` out of the state root — it is there so a
+    worker's scratch is swept with the run; the `WORKER_HOME_SYMLINKS` grants of rationale (3);
+    `hooks/deny-floor.sh` (v); and W1-T1265's egress arm and W1-T1289's allowlist, cited only.
+  acceptance:
+    - claim: "each worker deny resolves to the operator path it names rather than to the scratch home"
+      proof: "unit test: test/settings.test.ts"
+    - claim: "the deny list still carries every entry it carried before, none removed or narrowed"
+      proof: "unit test: test/settings.test.ts"
+    - claim: "a read of a denied path is observed by the probe rather than assumed"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the read case reports through the same three-state verdict the write case uses"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the probe's turn cap absorbs the added command without a hand-set literal"
+      proof: "unit test: test/containment.test.ts"
+  files: [settings/worker.json, src/lib/containment.ts, test/containment.test.ts, test/settings.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#tilde-anchored-denies-resolve-inside-scratch-home-2026-08-24"
+  plan_refs: ["W1-T2211", "W1-T2201", "W1-T1265", "W1-T1289", "W1-T18"]
+  note: |
+    NO CREDENTIAL VALUE APPEARS IN THIS RECORD. The one live file this task is about is described
+    only as `/home/node/.config/remudero/config.json`, mode 600, owner `node`, 76 bytes. It was
+    never opened.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/settings.test.ts` (6 tests today) or `test/containment.test.ts` (36), both
+    declared in `files:` and both already existing.
+
+    `risk: high` IS RULE 19'S SPAN. `files:` names four stems. The blast radius is smaller than
+    that: six string edits and one probe arm. The band is honest for a different reason — a
+    re-anchored deny that is WRONG fails silently in the same direction the current one does, which
+    is why criterion 3 makes the probe, not the file, the thing that has to pass.
+
+    Q1 IS ANSWERED "BOTH, SPLIT BY PATH", AND THE SPLIT IS THE USEFUL PART. Four of the six entries
+    name paths absent from the container — a rule that misleads, the smaller finding. Two name a
+    directory that exists and holds a 0600 file — a boundary that does not cover its target. A
+    reader who takes only the headline would over-state the first and miss the second.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND CONFIRMED UNUSED. `refs/rmd-id/W1-T2213` resolves to
+    `60751c383070547b4f1cc42fe70038c971101e0a` against a namespace of 332 such refs. ALL EIGHT
+    SURFACES CARRIED A CONTROL THAT FIRES THIS TIME AND NONE WAS DISQUALIFIED — the board has four
+    open PRs, so the three open-PR surfaces can discriminate, unlike the empty-board pass that
+    filed W1-T2211. One control WAS re-qualified before use: W1-T2211 itself reads 0 on the
+    main-tree surfaces because its filing PR is still open, so those were controlled on W1-T1278
+    instead, which reads 1 on each. The eight: shard filenames 0 against W1-T1278 at 1; plan
+    `- id:` lines 0 against W1-T1278 at 1; the reservation 1, which is the pre-mint, against
+    W1-T2211's own at 1; open PR titles 0 against W1-T1284 at 1; open PR head branches 0 against a
+    `run-W1-T` head at 1; open PR file lists 0 with coverage at four captured of four enumerated,
+    controlled on total file entries reading 5 across the same heads; merged trailers 0 against
+    `Remudero-Task: W1-T2201` at 1, with 489 trailer-carrying commits on main; and merged subject
+    credit 0 against W1-T1278 at 1, with `run-W1-T2213-*` at 0 against a namespace of 87 `run-*`
+    branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE, READ THROUGH GIT OBJECTS. Two
+    markers at every open PR head and at main: the number of `~`-anchored entries across
+    `settings/worker.json`'s two deny lists, and `probeTurnBudget` occurrences in
+    `src/lib/containment.ts`. Main reads 6 and 4; all four heads read 6 for the anchoring marker,
+    so NO HEAD IS RE-ANCHORING ANYTHING. One head (#2702) reads 0 for `probeTurnBudget` rather than
+    4 — its base predates W1-T2201 — and that is recorded as measured rather than smoothed, because
+    it is a fact about that head's base and not about this subject.
