@@ -84,6 +84,63 @@
     different subject. The id was not guessed — the operator supplied W1-T2222, whose reservation
     (2026-08-24T13:58:18Z) was then verified present, absent from main, and unclaimed by any live
     branch against a control of 1 for W1-T2221.
+    (11) THE FIELD HAS AN ANSWER TO THIS EXACT WALK, AND IT WAS READ RATHER THAN SUMMARISED.
+    `github.com/Untrivial-ai/agent-orchestrator`, cloned at `c7a22bb` (2026-08-25T01:23:44+05:30),
+    runs an ETag-guarded SCM observer at `backend/internal/observe/scm/observer.go`, whose header
+    describes a "polling loop, ETag/cache checks, semantic diffing, DB persistence". Its guard
+    interface takes the validator as an argument — `RepoPRListGuard(ctx, repo, etag)` and
+    `CommitChecksGuard(ctx, repo, headSHA, etag)` — and its cache holds `RepoPRListETag` and
+    `CommitChecksETag` as bounded maps with FIFO eviction. THE SHAPE IS THE ONE THIS SHARD'S ISSUE
+    ARM LACKS: a validator per endpoint, held beside the facts, sent on the next poll.
+
+    (12) AND ITS RESULT TYPE ALREADY SOLVES THE THING (iii) BELOW WORRIES ABOUT.
+    `ports.SCMGuardResult` is `{ ETag string; NotModified bool }`, documented as "an ETag-style
+    cache guard result. NotModified maps to HTTP 304 for providers that support it." Separately,
+    `SCMObservation.Fetched` is documented as "true ONLY when the provider refresh succeeded and
+    the nested facts are authoritative for this poll." THOSE TWO FIELDS CARRY THREE STATES —
+    unchanged (304), refreshed-and-authoritative, and read-failed-so-not-authoritative — WHICH IS
+    EXACTLY THE SPLIT AN ETag MISS NEEDS AND THE ONE A BARE BOOLEAN DESTROYS.
+
+    (13) Q1, PRIMARY LIMIT — GITHUB'S OWN DOCS, NOT A BLOG. The REST best-practices page states:
+    "Making a conditional request does not count against your primary rate limit if a `304`
+    response is returned and the request was made while correctly authorized with an
+    `Authorization` header", and separately that "each `304 Not Modified` response is fast and does
+    not use your rate limit". So on the primary limit the answer is yes, conditionally on being
+    authorized — which this fleet always is.
+
+    (14) Q1, SECONDARY LIMIT — THE DOCS DO NOT SAY, AND I COULD NOT MEASURE IT. The same page
+    mentions secondary limits only in other contexts (avoiding concurrent requests, pausing between
+    mutative ones) and gives NO guidance connecting conditional requests to them. I ATTEMPTED THE
+    MEASUREMENT AND IT IS CONFOUNDED: `x-ratelimit-used` moved +14 across roughly eleven
+    conditional requests that all returned 304, but the control moved +9 across three unconditional
+    reads plus two measuring reads, so background traffic from the daemon and serve — which share
+    this token and poll continuously — is of the same order as the signal. NOTHING HERE ESTABLISHES
+    WHETHER A 304 SPARES THE SECONDARY LIMIT, AND THAT IS THE LIMIT THAT HAS ACTUALLY BEEN BLOCKING
+    READS. The remedy's headline benefit is therefore proven for the wrong limit.
+
+    (15) Q2 — `gh api` CAN SEND ONE, AND THE 304 ARRIVES AS A THROW. MEASURED DIRECTLY: `gh api`
+    exposes `-H, --header key:value`, and re-requesting with `If-None-Match:` set to a previously
+    returned validator produces `HTTP/2.0 304 Not Modified` with `X-Ratelimit-Resource: core` on
+    the response. BUT `gh` EXITS 1 ON THAT 304. The gateway shells `gh` through `execFileSync`,
+    which throws on a non-zero exit, so a 304 would land in the SAME `catch` a real failure lands
+    in — and that catch is the one this repo has now filed three times as the
+    unreadable-input-as-finding class. The status line is visible with `-i`, so the information is
+    RECOVERABLE, but only by a caller that tolerates exit 1 and parses the status rather than
+    trusting the exit code.
+
+    (16) SO THE TRANSPORT QUESTION IS REAL BUT SMALLER THAN IT LOOKS, AND THE BOUNDARY IS STATED.
+    A different transport is NOT required: `-i` plus an exit-code-tolerant reader is enough to tell
+    304 from failure. What IS required is that the reader stop treating `execFileSync`'s throw as
+    proof of failure on this one call, which is a change to how the issue fetch is invoked rather
+    than to what invokes it. IF A FUTURE READING SHOWS `-i` CANNOT DISAMBIGUATE A 304 FROM A
+    TRANSPORT ERROR ON A REAL FAILURE, THEN THE REMEDY NEEDS A DIFFERENT TRANSPORT AND THAT IS
+    LARGER THAN THIS SHARD — said plainly rather than discovered later.
+
+    (17) WHAT THE ARITHMETIC WOULD HAVE BEEN. Rationale (3)/(6): the issue arm re-read ~3.04 MB
+    thirteen times in two hours across eight distinct byte values while `issueCount` moved 523 to
+    524 — ONE changed issue. A validator that held across the unchanged polls would have answered
+    TWELVE OF THOSE THIRTEEN with a 304 and no body. That is the size of the prize, and (14) is why
+    it is not yet bankable against the limit that actually bites.
   design: |
     ONE CONCERN: the index walk must stop reading rows it already holds. Not the per-row calls, not
     the TTL, not what the board displays.
