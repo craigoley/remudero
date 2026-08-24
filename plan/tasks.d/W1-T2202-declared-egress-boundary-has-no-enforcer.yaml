@@ -1,0 +1,161 @@
+- id: W1-T2202
+  title: "A DECLARED SECURITY BOUNDARY HAS NO ENFORCEMENT OWNER IN THIS TREE — `settings/worker.json` declares four allowlisted domains under a sandbox marked `enabled` and `failIfUnavailable`, the file reaches the SDK intact, and NOTHING IN THIS REPOSITORY ACTS ON THE ALLOWLIST: the only two readers validate its key placement and pick a probe target, and both disclaim enforcement in their own words"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/containment.ts, settings/worker.json, test/egress-enforcement-owner.test.ts]
+  origin: oper#declared-egress-boundary-has-no-owner-2026-08-24
+  plan_refs: ["W1-T1265", "W1-T11", "W1-T1", "#2668"]
+  status: blocked
+  attempts: 0
+  rationale: |
+    ★ FILED `status: blocked` ON PURPOSE. Every remedy below is an OPERATOR RISK DECISION, and the
+    one thing this task must not do is gate. See design (iv): gating today would refuse EVERY
+    dispatch, because the arm reads not-contained on every host measured. The unblocking condition
+    is a ruling, not a measurement.
+
+    (1) THE DECLARATION IS REAL AND THE CHAIN TO SPAWN IS INTACT. `settings/worker.json` sets
+    `sandbox.enabled: true` and `sandbox.failIfUnavailable: true` at lines 27-28, and declares four
+    domains under `sandbox.network.allowedDomains` at 37-43: `github.com`, `api.github.com`,
+    `codeload.github.com`, `registry.npmjs.org`. `renderWorkerSettings` (`src/lib/worker.ts:1645`)
+    is pure `${HOOKS_DIR}` substitution; `validateWorkerSettingsFile` is called at
+    `src/lib/worker.ts:855` and checks pinned key placement against the WS-0 hazard; the file
+    reaches the SDK with `settingSources` empty. Nothing on that path drops or rewrites the
+    allowlist.
+
+    (2) AND THERE THE TRAIL ENDS — BUT THE PRECISE CLAIM IS NARROWER THAN "NO CONSUMER", AND THE
+    NARROWER CLAIM IS THE STRONGER ONE. Two things in this repository read `allowedDomains`, and
+    NEITHER ENFORCES:
+      PLACEMENT   `src/lib/settings.ts` lists it among the pinned keys and rejects it at the
+                  sandbox ROOT (the WS-0 silent-drop typo). This proves the key is in the right
+                  PLACE. It proves nothing about anyone acting on it.
+      PROBE       `allowedHostFromSettings` (`src/lib/containment.ts:362`) reads the FIRST domain
+                  to choose a control target for the egress probe, and its own doc says it in
+                  terms: "THIS READS THE ALLOWLIST AND NEVER WRITES IT — the probe observes; it
+                  does not enforce."
+    So the allowlist is validated and observed. It is never applied. THE ENFORCER IS THE INSTALLED
+    SDK/CLI SANDBOX — external to this tree.
+
+    (3) THE MEASUREMENT SAYS THE SANDBOX IS ENGAGED AND ENFORCING ONE ARM AND NOT THE OTHER.
+    OPERATOR-MEASURED AND NOT RE-DERIVED HERE (see (5)): 26 of 26 `containment.probe` rows carrying
+    egress fields read `egress_contained: false` with ONE distinct `egress_reason`, all from
+    container hosts — and 17 OF THOSE 26 READ `contained: true` ON THE FILESYSTEM ARM IN THE SAME
+    ROW. That overlap is what makes this a specific gap rather than a sandbox that simply is not
+    running: the same sandbox, in the same invocation, holds the filesystem restriction and does
+    not hold the network one.
+
+    (4) THE VERSION COMMENT IS NOT A PIN, AND IT IS ALREADY STALE — THREE FIGURES DISAGREE,
+    MEASURED ON THIS TREE. `settings/worker.json`'s own `$comment` reads "SDK 0.3.209 / CLI
+    2.1.209". `package.json` declares `"@anthropic-ai/claude-agent-sdk": "^0.3.233"`.
+    `package-lock.json` resolves `0.3.233`. THE VERSION ACTUALLY INSTALLED IN THE SHARED
+    `node_modules` READS `0.3.220` — matching NEITHER the comment NOR the lockfile. If the SDK is
+    the enforcer, its version is a security dependency, and today it is described by a stale
+    comment, ranged by a caret that permits upward drift, pinned only by a lockfile the running
+    tree does not match, and checked by nothing.
+
+    (5) WHAT THIS SHARD DOES NOT CLAIM, STATED BEFORE ANYONE INFERS IT. NOBODY HAS REPRODUCED A
+    BLOCKED-HOST REQUEST FROM INSIDE A LIVE WORKER SANDBOX. The case rests on 26 identical readings
+    plus the filesystem-arm overlap, not on a direct test, and the 26 could not be re-derived from
+    the container this was filed in: `rmd ledger-grep` reports `archives: 0 matched` and refuses,
+    and the mandated control `"step":"risk_judge.decision"` refuses identically — a disqualified
+    surface, not a measured zero. A direct reproduction is the single most valuable next
+    observation and is named in design (v).
+
+    (6) THIS IS NOT W1-T1265, WHICH IS CITED AND NOT RE-FILED. W1-T1265 asks whether network
+    containment is PROBED at all — "assumed from configuration", Standing rule 11's own example.
+    That probe now exists (`egressProbeCommand`, `allowedHostFromSettings`, the `containment.probe`
+    rows above) and it has ANSWERED. This task is about what the answer revealed: the thing the
+    probe observes has no owner in this tree. 1265 = we do not know. This = we know, and nobody
+    owns it.
+  design: |
+    ONE CONCERN: give the declared egress boundary an enforcement owner this tree can test.
+
+    (i) Q1 — FOUR CANDIDATES, AND "THE SDK" IS ONE OF THEM RATHER THAN THE ANSWER.
+      THE SDK SANDBOX     Zero new code and it is already wired. COST: the enforcement lives
+                          outside this repository, cannot be unit-tested here, and its behaviour
+                          changes with a dependency version this tree does not pin (rationale (4)).
+                          This is the status quo, and the status quo is what measures as not
+                          holding.
+      THE CONTAINER's OWN Each container has its own network namespace. An egress policy applied
+      NETWORK NAMESPACE   there is enforced by the kernel, survives any SDK change, and is testable
+                          from inside. COST: it is coarser than per-worker — every process in the
+                          container shares it — so a rung that legitimately needs a domain a worker
+                          must not have would need its own container or its own exception.
+      `bwrap`             Named in `deploy/Dockerfile` and absent from the operator host, so it is
+                          an IMAGE-SIDE capability: a change to it ships only on an image rebuild,
+                          which is a slower loop and a boundary this repo already documents.
+                          COST: per-worker granularity at the price of a rebuild-gated remedy.
+      `socat`             Same image-side placement; useful as a controlled egress broker rather
+                          than a blocker. COST: it is a proxy, so it becomes a component that can
+                          itself fail open, and something must then verify IT.
+    WHAT THE COMPARISON IS FOR: an enforcement this tree OWNS AND CAN TEST is worth more than one
+    it declares and hopes for. Three of the four options are ownable here; the status quo is not.
+
+    (ii) Q2 — THE PIN. Today the SDK is pinned by `package-lock.json` alone, and rationale (4)
+    shows the running tree does not match it. What would DETECT a change: an assertion that the
+    installed SDK version equals the locked one, run where workers actually spawn rather than in
+    CI only — the same host-vs-CI split that has bitten this repo before. A comment naming a
+    version is documentation; it can never fail. If the SDK stays the enforcer, that assertion is
+    the minimum, and it belongs beside the containment probe rather than in a doc.
+
+    (iii) Q3 — WHAT MUST NOT CHANGE. The allowlist KEEPS ITS FOUR DOMAINS. `api.anthropic.com`
+    STAYS ABSENT — the worker reaches the model through the SDK's own transport, and adding it
+    would widen the boundary to the one host that makes the rest of the allowlist decorative.
+    `failIfUnavailable` STAYS TRUE. And THE ARM STAYS OBSERVATIONAL until an enforcer exists.
+
+    (iv) WHY GATING NOW WOULD BE WRONG, IN ONE LINE OF ARITHMETIC. Every measured row reads
+    `egress_contained: false`. A gate on that field would refuse EVERY dispatch on every container
+    host, immediately. Whether to accept that is an OPERATOR RISK DECISION — trading all throughput
+    for a boundary that may or may not be breachable — and it is explicitly not this task's to
+    make. That is why this shard is `status: blocked` rather than `queued`.
+
+    (v) THE OBSERVATION THAT WOULD MOVE THIS FURTHEST, NAMED SO IT IS NOT SKIPPED. Reproduce a
+    request to a NON-allowlisted host from inside a LIVE worker sandbox and record whether it
+    succeeds. If it is blocked, the probe's reason is the defect and the boundary holds; if it
+    succeeds, the boundary is confirmed breached and the priority of (i) changes completely. Until
+    one of those is recorded, this task is arguing from correlation.
+
+    (vi) NOT IN SCOPE. W1-T1265's probe question; the filesystem arm, which measures as holding;
+    the deny-floor arm; and the `excludedCommands` list.
+  acceptance:
+    - claim: "the egress allowlist has a reader in this tree that refuses a request to a non-allowlisted host, not merely one that validates or observes it"
+      proof: "unit test: test/egress-enforcement-owner.test.ts"
+    - claim: "a request to each of the four declared domains is permitted by that same reader"
+      proof: "unit test: test/egress-enforcement-owner.test.ts"
+    - claim: "api.anthropic.com remains absent from the allowlist and the enforcement does not special-case it"
+      proof: "unit test: test/egress-enforcement-owner.test.ts"
+    - claim: "an enforcement that cannot be established refuses rather than reporting success, so failIfUnavailable keeps its meaning"
+      proof: "unit test: test/egress-enforcement-owner.test.ts"
+    - claim: "the installed enforcer version is compared against the locked one, so a silent drift is detectable rather than documented"
+      proof: "unit test: test/egress-enforcement-owner.test.ts"
+  note: |
+    RISK BAND — BOTH READINGS, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
+    `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` at `risk: high`, so the span
+    was NEVER SCORED. The `files:` list was measured at `risk: medium` first and the result is
+    recorded in the PR. The real blast radius is high independently of Rule 19: this is a security
+    boundary, and an enforcement wired wrong fails closed on every dispatch.
+
+    NO PROOF GREPS THIS SHARD'S OWN PATH. All five criteria use the pure-path `unit test:` form
+    naming `test/egress-enforcement-owner.test.ts`, declared in `files:` and not yet existing — a
+    forward reference to a PATH rather than a guessed symbol.
+
+    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T2202` resolves against a namespace of 320 refs. Eight surfaces were swept and
+    ONE WAS DISQUALIFIED WITH NO REPLACEMENT AVAILABLE: open PR TITLES read 0 for this id, but the
+    control also reads 0 — neither open PR carries an id in its title — so that surface proves
+    nothing and is reported as disqualified rather than as evidence. The open-PR population remains
+    covered by head branches (0 against 2 `run-W1-T` heads) and file lists. The rest: shard
+    filenames 0 against W1-T1288 at 1; plan `- id:` lines 0 against W1-T1288 at 1; the reservation
+    1, the pre-mint; merged trailers 0 under `^Remudero-Task:\s*W1-T2202\s*$` against 39 carrying
+    any trailer; merged subjects 0 against 60; merged `run-*` credit 0 against 32 structured heads,
+    with `run-W1-T2202-*` at 0 against an 87-branch namespace.
+
+    THE SUBJECT WAS SWEPT AS WELL AS THE ID, AND ONE NEIGHBOUR IS REAL. `allowedDomains` matches
+    widely across docs and plan text, so the sweep was narrowed to the ENFORCEMENT question. The
+    only genuine neighbour is W1-T1265, delimited in rationale (6). The two readers found —
+    `src/lib/settings.ts` and `allowedHostFromSettings` — were read in full rather than counted,
+    which is how the "no consumer" framing was corrected to "two readers, neither enforcing".
