@@ -1292,8 +1292,88 @@ test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, r
   assert.ok(submitHandler);
   assert.match(submitHandler, /submitBtn\.dataset\.confirming === "true"/, "a second submit must be distinguished from the first");
   assert.match(submitHandler, /postJson\("\/v1\/feedback", \{ text: answer, replyTo, expansion \}\)/, "the confirmed submit must file WITH the previewed expansion");
-  assert.match(submitHandler, /submitBtn\.textContent = `Confirm: \$\{expansion\.claim\}/, "the armed label must read back the expansion");
-  assert.match(submitHandler, /setTimeout\(\(\) => resetAnswerButton\(submitBtn\), 8000\)/, "must reset after 8s, the same window as STOP/APPROVE");
+  assert.match(submitHandler, /submitBtn\.textContent =\s*\n?\s*`Confirm: \$\{expansion\.claim\}/, "the armed label must read back the expansion");
+});
+
+// ── W1-T2206: the preview leg used to be an unguarded await with no spinner, no disable and no
+// label change — the button read as dead for the whole model call, a second click launched a
+// SECOND paid preview, the fail-open leg gave no signal of its own, and the 8s arm expired
+// silently. These tests prove the click-to-file machine is legible at every step, over the SAME
+// extracted handler-body source the W1-T350 tests above already use.
+
+test("W1-T2206: the preview call renders a visible PENDING state (disabled + a plain-language label) for its whole duration, and clears it on EVERY exit — expansion, no expansion, and a rejected preview", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  // Entered BEFORE the preview fetch: the button must go pending before the model call starts,
+  // not after it settles.
+  const beforePreview = submitHandler.slice(0, submitHandler.indexOf('postJson("/v1/feedback/preview"'));
+  assert.match(beforePreview, /setAnswerPending\(submitBtn, true\)/, "the pending state must be entered before the preview fetch fires");
+  assert.match(beforePreview, /answerPending\.add\(replyTo\)/, "the in-flight guard must be armed before the preview fetch fires");
+  // The preview call itself is wrapped in try/catch/finally, and the finally clears pending on
+  // every exit -- a thrown/rejected fetch must not leave the control stuck disabled.
+  const previewBlock = submitHandler.match(/try \{([\s\S]*?)\} catch \{([\s\S]*?)\} finally \{([\s\S]*?)\}/);
+  assert.ok(previewBlock, "the preview fetch must be wrapped in try/catch/finally");
+  assert.match(previewBlock[3], /answerPending\.delete\(replyTo\)/, "finally must release the in-flight guard for EVERY exit");
+  assert.match(previewBlock[3], /setAnswerPending\(submitBtn, false\)/, "finally must clear the pending state for EVERY exit, including a rejected fetch");
+  // setAnswerPending itself must actually disable the control and change its label/announcement
+  // -- a class alone (easy to miss) is not a pending state.
+  const setAnswerPendingFn = html.match(/function setAnswerPending\(btn, pending\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(setAnswerPendingFn, "setAnswerPending must exist");
+  assert.match(setAnswerPendingFn, /btn\.disabled = pending/, "the control itself must be disabled while pending");
+  assert.match(setAnswerPendingFn, /textContent = "Expanding your answer/, "must name what is happening, in the operator's terms");
+});
+
+test("W1-T2206: a second submit for the SAME replyTo while its preview is still in flight starts no second preview and files nothing, checked BEFORE the armed/confirm branch — while a different replyTo stays independently submittable", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  const guardIdx = submitHandler.indexOf("answerPending.has(replyTo)");
+  const confirmingIdx = submitHandler.indexOf('submitBtn.dataset.confirming === "true"');
+  const previewIdx = submitHandler.indexOf('postJson("/v1/feedback/preview"');
+  assert.ok(guardIdx >= 0, "the re-entry guard must exist");
+  assert.ok(guardIdx < confirmingIdx && guardIdx < previewIdx, "the re-entry guard must run before EITHER the armed-confirm branch or the preview fetch, refusing re-entry outright");
+  assert.match(submitHandler, /if \(answerPending\.has\(replyTo\)\) return;/, "re-entry while pending must refuse silently -- no preview, no file");
+  // Keyed by a Set (membership per replyTo), the SAME per-key discipline as
+  // answerConfirmTimers/answerExpansions -- never a single shared in-flight flag, which would
+  // block a second, DIFFERENT grill answer mid-preview too.
+  assert.match(html, /const answerPending = new Set\(\);/, "the in-flight guard must be keyed per replyTo, not a single shared flag");
+});
+
+test("W1-T2206: the armed control states plainly that NOTHING IS FILED YET and the NEXT click files -- the exact ambiguity the operator hit", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  assert.match(
+    submitHandler,
+    /`Confirm: \$\{expansion\.claim\} \(RECON \$\{expansion\.recon\.length\}\) — nothing filed yet, click to file`/,
+    "the armed label must state the read-back AND the consequence together, in the control itself",
+  );
+});
+
+test("W1-T2206: the fail-open leg (no expansion) gets its OWN signal, distinct from the armed vocabulary", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
+  assert.ok(noExpansionBranch, "no `if (!expansion)` fallback branch found");
+  assert.match(noExpansionBranch, /submitBtn\.textContent = "Filed/, "the fail-open leg must say something happened");
+  assert.doesNotMatch(noExpansionBranch, /Confirm:/, "the fail-open leg must never borrow the armed 'Confirm: ...' vocabulary -- no confirm was ever shown");
+});
+
+test("W1-T2206: the 8s arm window (too short to read a four-section expansion) is widened, AND a lapsed arm is made VISIBLE so it is never presented as a fresh, un-clicked 'Answer'", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  assert.match(
+    submitHandler,
+    /setTimeout\(\(\) => resetAnswerButton\(submitBtn, \{ expired: true \}\), 30000\)/,
+    "the arm window must be widened past 8000ms AND flag the reset as expired, not a bare silent reset",
+  );
+  const resetAnswerButtonFn = html.match(/function resetAnswerButton\(btn, opts\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(resetAnswerButtonFn, "resetAnswerButton must exist");
+  assert.match(resetAnswerButtonFn, /classList\.toggle\("lapsed", expired\)/, "an expired reset must be visually distinct from a plain one");
+  assert.match(resetAnswerButtonFn, /expired \? "Answer \(expired/, "an expired reset's label must say so, never the plain 'Answer' a never-armed button also shows");
 });
 
 test("W1-T350: an expander failure/outage (nothing to show) leaves the FIRST click filing the plain submission, unchanged from before this task", () => {
