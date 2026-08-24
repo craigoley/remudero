@@ -1,0 +1,186 @@
+- id: W1-T2234
+  title: "The suite carries 26 host-caused failures on darwin that NO GATE CAN SEE — every `runs-on:` is `ubuntu-latest` — so a lane running `rmd preflight --ci-parity` shells `npm run test:ci` and meets 26 reds it did not cause, 17 of them from ONE `declare -A` on a host shipping bash 3.2, which reads as a catastrophic diff unless you already know"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha, clone
+    shallow-checked `false`. `src/run-task.ts` (1,533,033 bytes) read through git objects. NO SUITE
+    RUN — the census below was measured in a prior session and is carried, not re-derived. No poller,
+    no spawning verb.
+
+    (1) THE CENSUS, ATTRIBUTED WITH ITS SHA. Measured on darwin at `origin/main = 0c71906a` on an
+    UNMODIFIED tree: **9,185 tests, 9,159 pass, 26 fail, 0 skipped, 191.5 s, exit 1**. This shard is
+    filed one commit later at `22397d05`; nothing in that commit touches the suite.
+
+    (2) THE SIX CAUSES, WITH COUNTS AND EVIDENCE — AND ONE CORRECTED COUNT.
+      bash 3.2, no associative arrays — **17 tests**, `test/recycle-container.test.ts`.
+        `deploy/recycle-container.sh` line 198 is `declare -A CAPTURED=()`, the script's ONLY
+        `declare -A`, and `/bin/bash` on this host is `GNU bash, version 3.2.57(1)-release`. The
+        observed stderr is `declare: -A: invalid option`. THE LARGEST CLUSTER BY FAR.
+      darwin keychain — 2, `test/worker-credential-preflight.test.ts`, got `credential-item-missing`
+        where `credential-file-malformed` was expected.
+      BSD `date` without `-d` — 2, `test/fleet-heartbeat.test.ts`; the BSD arm reached
+        `unknown — no daemon.* line in the ledger` where `live` was expected.
+      ps / orphan-sweep — 2, `test/recovery-drill.test.ts`.
+      linux procfs — 1, `test/dispatch-memory-governor.test.ts`, `ENOENT … '/proc/meminfo'`.
+      macOS CoreFoundation env leak — 1, `test/proof-spawner-env-isolation.test.ts`,
+        `__CF_USER_TEXT_ENCODING` observed in the child env and absent from `PROOF_ENV_ALLOWLIST`
+        (`src/lib/review.ts`); the token appears nowhere under `src/`.
+      the W1-T2205 e2e — 1, `test/worker.test.ts`, which alone reads 67 tests / 66 pass / 1 fail.
+      **THE bash CLUSTER IS 17, NOT 16.** The 16 figure was carried in the recon report that produced
+      this task and is wrong: 16 + 2 + 2 + 2 + 1 + 1 + 1 = 25, one short of the run's own `# fail 26`,
+      while 17 + 2 + 2 + 2 + 1 + 1 + 1 = 26. The per-file recount over the same TAP output is the
+      correction, and the arithmetic is the falsifier that caught it.
+
+    (3) NO GATE CAN SEE ANY OF THEM — RE-DERIVED HERE, NOT CARRIED. Across all 16 workflow files
+    under `.github/workflows/` there are 29 `runs-on:` lines and **all 29 are `ubuntu-latest`**;
+    `macos` occurs **0** times against a CONTROL of 29 `ubuntu` occurrences. And
+    `test/notify-platform-guard.test.ts` records it in prose: `process.platform` is `linux`
+    "in this container and in CI". So `ci`, `coverage-ratchet`, `mutation-ratchet`, `remudero-review`
+    and every other required check are structurally blind to all 26, and will stay blind while the
+    set grows.
+
+    (4) THE COST IS CONCRETE AND ITS CALL SITE IS RE-DERIVED. `src/lib/ci-parity.ts` carries
+    `runStep("ci:test", () => shellOut(spawn, "npm run test:ci", "npm", ["run", "test:ci"], …))`, so a
+    lane running `rmd preflight --ci-parity` on the mini shells the FULL suite and meets all 26. A
+    lane cannot tell which reds are its diff's and which are the machine's, and the largest cluster —
+    17 tests in one file — comes from a single line of bash-4 syntax, which is exactly the shape that
+    reads as a catastrophic regression to a reader who does not already know the host.
+
+    (5) THE ASYMMETRY THAT EXPLAINS THE e2e. `assertWorkerCredentialFile` (`src/lib/worker-home.ts`)
+    takes `envToken: string | undefined = process.env.CLAUDE_CODE_OAUTH_TOKEN` and ACCEPTS a non-empty
+    token as an authenticated worker on non-darwin — which is exactly the bypass the e2e leans on when
+    it sets `CLAUDE_CODE_OAUTH_TOKEN` for determinism on a CI runner. THE DARWIN RUNG HAS NO TOKEN
+    BYPASS AT ALL: `spawnWorker` branches on `args.keychain?.platform ?? process.platform` and, on
+    `"darwin"`, calls the real `ensureWorkerKeychain`, which must provision through `security(1)`. The
+    test's own determinism workaround therefore works only on the platform it was written for.
+
+    (6) THE HONEST LIMIT, CARRIED RATHER THAN PAPERED OVER. The literal `provision-failed` string was
+    NOT captured: `runReview`'s reviewer block swallows the throw into `review.reviewer.error`, and
+    reading it would need a patch this task did not make. The two INDEPENDENT
+    `worker-credential-preflight` failures corroborate that this host's credential rung refuses, but
+    that specific reason class stays ATTRIBUTED to the operator rather than re-derived here.
+  design: |
+    (i) THE SIX SPLIT INTO THREE BUCKETS, AND A SINGLE REMEDY COVERS NONE OF THEM ALONE.
+      REPO DEFECTS, FIXABLE — 17 + 2 + 1 = 20 of 26:
+        `deploy/recycle-container.sh` is written against bash 4 syntax on a host shipping 3.2. That is
+        a PORTABILITY DEFECT in the script, not a test problem, and it is bounded: `declare -A` occurs
+        ONCE, in ONE file, and a sweep of `deploy/` and `scripts/` for bash-4 constructs
+        (`declare -A`, `mapfile`, `readarray`, `${x,,}`, `${x^^}`) names that file and no other. NOTE
+        THAT A SHEBANG CHANGE DOES NOT FIX IT HERE: the shebang is already `#!/usr/bin/env bash`, and
+        `env bash` on this host resolves to 3.2.57 — there is no bash 4+ installed at all — so the
+        remedy is either 3.2-compatible syntax or a DECLARED host prerequisite, never a silent
+        assumption that a newer bash is on PATH. (17)
+        The `fleet-heartbeat` pair is a HARNESS assumption, not a defect in `epoch_of`: that function
+        already carries a working BSD arm (`date -u -j -f "%Y-%m-%dT%H:%M:%S"` after stripping the
+        trailing `Z` and the fraction), and the test STUBS the BSD `date` while leaving its GNU
+        control arm to inherit the host's real `date` — which on darwin is BSD, so the control is not
+        a control. Stub both arms. (2)
+        The e2e is fixable at a seam that already exists — see (ii). (1)
+      PLATFORM FACTS THE ASSERTION MUST TOLERATE — 2 of 26:
+        `/proc/meminfo` does not exist on darwin, and macOS injects `__CF_USER_TEXT_ENCODING` into
+        child processes below Node's env, so no allowlist can keep it out. Neither is a defect to fix;
+        each needs an assertion that states what it actually requires (the probe reads the cgroup
+        limit WHERE ONE EXISTS; no DISALLOWED APPLICATION key is forwarded) rather than an exact-set
+        equality that a platform can break. NOT a skip — see (iii). (2)
+      UNDIAGNOSED, ONE DIAGNOSIS EACH — 2 of 26:
+        the `recovery-drill` pair (`false !== true` on the re-verified-dead assertion). This task must
+        not guess which bucket they fall in; naming them as undiagnosed is the honest output.
+
+    (ii) THE e2e's REMEDY ALREADY EXISTS AND IS NOT A SKIP. `SpawnWorkerArgs.keychain`
+    (`src/lib/worker.ts`) is a seam carrying `platform`, `runner`, `exists`, `readCredentialFile`,
+    `accountId` and `priorSpawnCredentialExpired`, and its own doc says tests inject it "to exercise
+    this gate deterministically off a non-macOS CI runner". But `runReview`'s `spawnWorker` call
+    passes `queryFn` and NO keychain — MEASURED: 0 occurrences of `keychain` in that block against a
+    CONTROL of 1 `queryFn`. Threading it through the way `reviewerQueryFn` already is lets the test
+    drive the REAL gate against injected `runner`/`exists`, so the darwin path stays EXERCISED on both
+    platforms rather than skipped on one.
+
+    (iii) WHAT MUST NOT CHANGE.
+      NO PLATFORM SKIP. A skipped test is a green that proves nothing. The suite does contain one
+      skip — `test/state-backup.test.ts`, `{ skip: process.platform === "win32" }` — and it is
+      recorded here as a FACT AND EXPLICITLY NOT A PRECEDENT, for a reason stronger than taste: it
+      skips on WINDOWS, a platform this fleet runs on nowhere, so it has never suppressed a single
+      result on any host that exists. A darwin skip would suppress 26.
+      `ensureWorkerKeychain` REFUSING HEADLESSLY IS CORRECT and is not the defect — W1-T235, the
+      2026-07-21 incident where a credential-dead worker's `$0` death read as containment UNPROVEN.
+      Nothing here weakens that refusal.
+      NO GATE IS ADDED THAT MAKES CI SLOWER TO CATCH SOMETHING CI STRUCTURALLY CANNOT SEE. A macos
+      runner is a PROPOSAL WITH A COST, not an obvious yes: it would roughly double the required-check
+      wall clock that `ci-gate`'s `WAIT_CAP_SECONDS` is already sized against, to observe a set that
+      is largely repo defects fixable without it. This task does not propose one.
+
+    (iv) SO THE DELIVERABLE IS SEPARATION, NOT SUPPRESSION. A lane must be able to say which reds are
+    the machine's — reported, named, and countable — so the remaining set is its own. Whatever shape
+    that takes must FAIL LOUDER, not quieter, when the host-caused set CHANGES: a baseline that
+    silently absorbs a new red is the same green-that-proves-nothing this section refuses.
+
+    (v) NOT IN SCOPE, NAMED: fixing `deploy/recycle-container.sh` (a real defect, bounded to one line,
+    and worth its own task); rewriting the two platform-fact assertions; diagnosing the
+    `recovery-drill` pair; threading the keychain seam through `runReview` (design (ii) names it as
+    the known remedy, not as this task's diff); adding any CI runner; and `ensureWorkerKeychain`
+    itself.
+  acceptance:
+    - claim: "a lane reports which suite failures are host-caused rather than diff-caused"
+      proof: "unit test: test/host-caused-suite-reds.test.ts"
+    - claim: "a host-caused failure that is new and undeclared still fails the lane loudly"
+      proof: "unit test: test/host-caused-suite-reds.test.ts"
+    - claim: "no test is skipped on any platform to reach the separation"
+      proof: "unit test: test/host-caused-suite-reds.test.ts"
+    - claim: "a diff-caused failure is never absorbed into the host-caused set"
+      proof: "unit test: test/host-caused-suite-reds.test.ts"
+    - claim: "the ci-parity step still shells the full suite exactly as it does today"
+      proof: "unit test: test/host-caused-suite-reds.test.ts"
+  files: [src/lib/ci-parity.ts, test/host-caused-suite-reds.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#darwin-host-caused-suite-reds-2026-08-24"
+  plan_refs: ["W1-T235", "W1-T312", "W1-T2205"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives each concern from a declared
+    path's stem, so a source file and a test not named after it trip it at `medium`. `files:` here is
+    one source file and one new test; the blast radius is a lane's own reporting, with no gate moved,
+    no test skipped and no branch or declaration removed.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/host-caused-suite-reds.test.ts`, declared in `files:`, so on this filing PR it
+    resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED, NOT ASSUMED. `rmd check-proof` on the declared path reads
+    `hits: 0`, `verdict: fail` — it names no existing file. The SAME verb on an EXISTING pure path,
+    `unit test: test/ci-parity-contract.test.ts`, reads `exit: 0`, `hits: 64`, `verdict: pass`. So the
+    dialect DOES execute a pure path when one exists, and the absent path's non-execution is the
+    forward reference rather than a broken proof. The first file tried for that falsifier,
+    `test/ci-parity.test.ts`, DOES NOT EXIST and read `hits: 0` exactly like the declared path — a
+    falsifier that discriminated nothing; it was replaced rather than reported.
+
+    THE CENSUS IS CARRIED, NOT RE-MEASURED — no suite was run for this filing. What WAS re-derived
+    here from source: the 29 `runs-on:` lines and the zero `macos` mentions, the
+    `notify-platform-guard` prose, the `runStep("ci:test", …)` call site, the `declare -A` line and
+    the host's bash version, the `keychain` seam's six fields against `runReview`'s zero, the
+    `CLAUDE_CODE_OAUTH_TOKEN` acceptance on non-darwin, and the `state-backup` skip's actual
+    predicate. The corrected 17 comes from a per-file recount of the SAME TAP output the census used.
+
+    ID PROVENANCE, AND WHY THIS ID RATHER THAN THE ONE NAMED. The operator named W1-T2233. Its
+    reservation resolved and was NOT this account's: `refs/rmd-id/W1-T2233` was minted by
+    `Ubuntu@Remudero` at 2026-08-24T17:30:09.477Z, FORTY SECONDS before the sweep read it, with
+    W1-T2232 minted by the same host six minutes earlier. THIS IS THE THIRD CONSECUTIVE FILING WHERE
+    THE NAMED ID WAS ALREADY THE FLEET'S (W1-T2227 by 35 s, W1-T2230 by 1 min, W1-T2233 by 40 s), so
+    the pattern is structural rather than bad luck: the triage rung mints faster than a brief can be
+    written and handed over. W1-T2234 was reserved by the repo's OWN mechanism before this shard was
+    written — an orphan `commit-tree` over the empty tree pushed with a PLAIN refspec, authored by
+    `cao825@Craigs-Mac-mini`. It CREATED on the first attempt, which is the evidence the id was free.
+
+    EIGHT SURFACES SWEPT, EACH WITH A CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, AND THE FETCHED REF
+    COUNT VERIFIED AGAINST THE REMOTE FIRST (137 heads and 352 `refs/rmd-id/*` on origin, 137 and 352
+    fetched — MATCH, so a zero here is a real absence and not a short fetch). Shards on main 0
+    (control W1-T2231 = 1); whole tree on main 0 (control 1); all 137 origin refs 0 (control 2);
+    remote head names 0 (control 137 heads read); commit messages on main 0 (control 1); reservation
+    MINE; merged-PR trailers 0 over 50,721 body lines read from squash-merge commit BODIES on main
+    (control 561 trailers, and W1-T1268 specifically = 2); the 25 newest PR heads 0 (control
+    W1-T2231 = 1).
