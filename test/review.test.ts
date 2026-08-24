@@ -1282,59 +1282,15 @@ test("rubricAdvisorySection: a diff exhibiting a rubric violation (two unrelated
 });
 
 // ── W1-T359 wiring: judgeRubric at the judgeReview call site, advisory-only ─
-// Source-text assertions on run-task.ts itself (the pattern test/review.test.ts
-// already uses for other run-task.ts wiring, e.g. the resolveAutoMergeArm/
-// armAndLogOutcome call-site checks above) — runReview shells out to `gh` and
-// spawns a worker, so its wiring is proven structurally rather than by
-// invoking the function end-to-end.
-test("W1-T359 wiring: runReview calls judgeRubric + rubricAdvisorySection, strictly after and independent of the binding judgeReview verdict, fail-open", () => {
-  const runReviewStart = runTaskSrc.indexOf("async function runReview(");
-  const runReviewEnd = runTaskSrc.indexOf("// ── THE blocked_review FIX RUNG");
-  assert.ok(runReviewStart > -1 && runReviewEnd > runReviewStart, "could not locate runReview's body in run-task.ts");
-  const runReviewSrc = runTaskSrc.slice(runReviewStart, runReviewEnd);
-
-  assert.match(runReviewSrc, /judgeRubric\(/, "runReview must invoke judgeRubric");
-  assert.match(runReviewSrc, /rubricAdvisorySection\(/, "runReview must render the rubric's advisory section");
-
-  // INDEPENDENCE (the falsifier's binding half): judgeReview's own call — the
-  // BINDING verdict — never references the rubric.
-  const judgeReviewCallIdx = runReviewSrc.indexOf("const computed = judgeReview(");
-  assert.ok(judgeReviewCallIdx > -1, "could not locate the judgeReview call site");
-  const judgeReviewCallEnd = runReviewSrc.indexOf("});", judgeReviewCallIdx) + 3;
-  const judgeReviewArgs = runReviewSrc.slice(judgeReviewCallIdx, judgeReviewCallEnd);
-  assert.doesNotMatch(judgeReviewArgs, /\brubric\b/i, "judgeReview's inputs must never reference the rubric");
-
-  // ORDER: judgeRubric is invoked strictly AFTER judgeReview's call completes —
-  // it consults `computed` (judgeReview's own output), never the reverse.
-  const judgeRubricCallIdx = runReviewSrc.indexOf("judgeRubric(");
-  assert.ok(judgeRubricCallIdx > judgeReviewCallEnd, "judgeRubric must be invoked after judgeReview's call completes");
-
-  // FAIL-OPEN: the judgeRubric call sits inside a try/catch, so a throw can
-  // only drop the advisory section — the binding verdict/post above is already
-  // a fixed value by the time this executes and cannot be touched.
-  const tryIdx = runReviewSrc.lastIndexOf("try {", judgeRubricCallIdx);
-  const catchIdx = runReviewSrc.indexOf("catch", judgeRubricCallIdx);
-  assert.ok(tryIdx > -1 && tryIdx < judgeRubricCallIdx, "judgeRubric's call must be inside a try block");
-  assert.ok(catchIdx > judgeRubricCallIdx, "judgeRubric's call must be followed by a catch");
-
-  // The advisory section posts regardless of verdict.state (a rubric concern
-  // can surface on an otherwise-passing review) — never folded into the
-  // unmet-criteria condition that gates the rest of the failure comment.
-  //
-  // W1-T434 WIDENED THIS GATE, AND THE INVARIANT DID NOT BREAK — only this test's literal
-  // encoding of it did. The gate was `if (hasUnmet || rubricSection)`; a second advisory
-  // (the declared-scope overrun) is now a further DISJUNCT, which can only make the comment
-  // post in strictly more cases and never fewer. So the assertion now pins what W1-T359
-  // actually owns — `rubricSection` is a top-level disjunct of the comment gate, alongside
-  // `hasUnmet` and independent of `verdict.state` — rather than the exact operand list, which
-  // any later advisory would break again for no reason.
-  const gate = runReviewSrc.match(/if \(hasUnmet \|\| ([^)]*)\) \{/);
-  assert.ok(gate, "the comment gate must still open on hasUnmet");
-  assert.ok(
-    gate[1].split("||").map((d) => d.trim()).includes("rubricSection"),
-    `rubricSection must remain a disjunct of the comment gate — found: ${gate[1]}`,
-  );
-});
+// W1-T2232 MOVED THIS FROM SOURCE TEXT TO BEHAVIOUR: this used to slice `runReview`'s body out
+// of `run-task.ts` and compare `indexOf("const computed = judgeReview(")` against
+// `indexOf("judgeRubric(")` — a lock on the CALL SITE'S STRING POSITION, not on the invariant
+// (test/review.test.ts's own W1-T434 comment above named this exact failure mode: "the invariant
+// did not break — only this test's literal encoding of it did"). `runReview`'s own args already
+// expose an injectable observer for this effect (`judgeRubricFn`, added by W1-T359 for exactly
+// this reason), so the ordering, independence, fail-open and gate-disjunct properties this test
+// used to assert on text are now proven by driving `runReview` end-to-end and observing what it
+// actually does — see test/wiring-ordering-behaviour.test.ts.
 
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ───
 // A floor-only PASS must never be byte-identical, in the ledger or console, to a

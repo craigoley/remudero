@@ -174,25 +174,15 @@ test("armOutcomeReason maps every outcome to a reason about that outcome", () =>
 });
 
 // ── 8: TRAP 2 — the withdrawal still beats the post; the arm still follows it ───────
-test("ORDERING: withdraw precedes the status post, and the arm follows the review.posted write", () => {
-  // Scope to runReview's body so the exported DECLARATIONS higher in the file are not matched,
-  // and locate each site WITHOUT depending on its indentation — otherwise moving a call (which
-  // changes its indent) makes this test fail on "site not found" rather than on the ordering,
-  // which is the property it exists to protect.
-  const body = SRC.slice(SRC.indexOf("async function runReview(args: {"));
-  const withdrawAt = body.indexOf("withdrawArmIfVerdictRefuses(");
-  const postAt = body.indexOf("await postReviewStatusGuarded({");
-  const ledgerWriteAt = body.indexOf('log("review.posted", {');
-  const armAt = body.indexOf("armIfVerdictPermits(");
-
-  assert.ok(withdrawAt > 0 && postAt > 0 && ledgerWriteAt > 0 && armAt > 0, "all four sites exist in runReview");
-  assert.ok(withdrawAt < postAt, "TRAP 2: the WITHDRAWAL must still precede the post — it beats GitHub to the merge (#973)");
-  assert.ok(postAt < ledgerWriteAt, "the post precedes the ledger write, unchanged");
-  assert.ok(
-    ledgerWriteAt < armAt,
-    "THE FIX: the arm must follow the review.posted write, because that line IS the evidence W1-T230's gate requires",
-  );
-});
+// W1-T2232 MOVED THIS FROM SOURCE TEXT TO BEHAVIOUR: this used to slice `runReview`'s body out
+// of `run-task.ts` and order four call-site literals (`withdrawArmIfVerdictRefuses(`, `await
+// postReviewStatusGuarded({`, `log("review.posted", {`, `armIfVerdictPermits(`) by `indexOf` —
+// a lock on where each call's TEXT sits, not on what it DOES. `runReview`'s own args already
+// expose an injectable observer for both effects this test protected (`disarm`, `arm`, plus the
+// real ledger file `ledgerPath` points at), so TRAP 2 (withdrawal beats the post) and THE FIX
+// (the arm follows the `review.posted` ledger write) are now proven by driving `runReview`
+// end-to-end and observing the injected `disarm`/`arm` calls and the real `gh` argv/ledger file
+// — see test/wiring-ordering-behaviour.test.ts.
 
 test("the comment above the arm no longer claims postReviewStatusGuarded writes review.posted", () => {
   const guarded = readFileSync(new URL("../src/lib/review.ts", import.meta.url), "utf8");
