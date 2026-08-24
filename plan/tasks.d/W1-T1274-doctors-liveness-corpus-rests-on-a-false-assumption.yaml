@@ -93,6 +93,91 @@
     (10) NOTHING PINS THIS TODAY. `test/doctor.test.ts` carries 36 tests and references
     `judgeLedgerFreshness` 4 times, all against synthetic ages — none against a corpus in which the
     daemon is alive and the prefix is silent.
+    (11) THE FIX SHIPPED, WORKS AS SPECIFIED, AND THIS TASK'S OWN FALSIFIER FIRED. RE-DERIVED
+    2026-08-24 over the ledger union (archiveCount 23, ok true, unread 0; control
+    `"step":"risk_judge.decision"` reading 173), with `HEAD == origin/main` proven at caa79046.
+    `daemon.tick` reads 0 before #2675 landed at 00:32:55 and 28 after it, all carrying
+    `poll_interval_ms: 60000`, so the row is live and unconditional exactly as designed. The bound
+    it was meant to satisfy is `boundMs = poll.pollIntervalMs * 2` (`doctor.ts`'s
+    `readLedgerAgeMs`) — TWO MINUTES — and it is still not met.
+
+    (12) THE DISTRIBUTION, BECAUSE THREE MAXIMA MISLEAD IN BOTH DIRECTIONS. Across the 948
+    `daemon.`-prefixed rows since landing there are 947 gaps: p50 1.0 min, p90 1.1, p99 2.0, max
+    69.3. ONLY 9 OF 947 GAPS EXCEED THE TWO-MINUTE BOUND — 1.0% — so by gap COUNT the prefix is
+    dense and the fix largely worked. BY WALL-CLOCK IT IS NOT: those 9 gaps cover 165.1 minutes of
+    778.3 observed, or 21.2% OF ELAPSED TIME. A liveness check is read at an instant, not sampled
+    per row, so the wall-clock share is the figure that decides it: roughly one moment in five, a
+    healthy daemon still looks dead to `ledger-freshness`.
+
+    (13) AND THE DENSITY IS NOT COMING FROM THE FIX. Of those 948 rows, `daemon.alive` supplies 490
+    (51.7%) and `daemon.tick` supplies 28 (3.0%). SEVEN OF THE NINE OVER-BOUND GAPS BEGIN ON A
+    `daemon.alive` ROW — that is, they start the moment `startInFlightTicker` stops and the next
+    `daemon.`-prefixed row has to wait for an iteration boundary. The corpus is carried by the
+    in-flight ticker; the per-iteration tick is a 3% contributor that fills in only where an
+    iteration happens to be short.
+
+    (14) THE ITERATION-LENGTH DISTRIBUTION, MEASURED BEFORE ANY BOUND IS DISCUSSED — Q1's
+    precondition, because a bound raised to fit an unmeasured iteration length is this repo's named
+    recurring defect. Consecutive `daemon.tick` deltas WITHIN a single daemon process (17 intervals
+    across 11 processes) read min 2.7, p50 24.0, p90 93.1, p99 120.5, max 120.5 MINUTES. Taken
+    across process boundaries as well (27 deltas) they read p50 8.9 and p99 120.5. THE SAMPLE IS
+    SMALL AND IS REPORTED AS SUCH: 28 ticks over 13.2 hours is 17 usable within-process intervals,
+    enough to establish the ORDER of the quantity — tens of minutes, not tens of seconds — and not
+    enough to pin a percentile to a minute.
+
+    (15) SO THE ORIGINAL DIAGNOSIS NAMED THE WRONG QUANTITY, AND THAT IS THE CORRECTION. Rationale
+    (1)-(8) blamed TICKER-LESS ITERATIONS. The real quantity is ITERATION LENGTH: a per-iteration
+    emitter cannot produce a gap shorter than an iteration, and at p50 24 minutes it can never
+    reach a two-minute bound. The fix is not defective — it does precisely what it says on the tin,
+    and (12) shows it helped — but it was aimed at a bound its own mechanism cannot satisfy.
+
+    (16) THE THREE REMEDIES, COSTED, WITH THE ONE THIS REPO FORBIDS NAMED AS FORBIDDEN. (a) A
+    SHORTER EMITTER IS NOT AVAILABLE AT THE LOOP LEVEL: anything emitted from the loop body is
+    per-iteration by construction, so this option collapses into (c). (b) A LONGER BOUND WOULD HAVE
+    TO CLEAR p99 = 120.5 MINUTES, i.e. a two-hour freshness window, during which the check could
+    not say "dead" at all — that is the bound-raised-to-fit-reality defect the brief names, and Q3
+    forbids it outright. (c) A HEARTBEAT INDEPENDENT OF ITERATION BOUNDARIES is the only candidate
+    that survives, AND IT ALREADY EXISTS IN THIS TREE: `startInFlightTicker` (`daemon.ts`) is a
+    `while (active) { await deps.sleep(pollIntervalMs); ... }` loop writing `daemon.alive` every
+    poll interval — it is simply scoped to three phases (dispatch, retro, sweep) instead of the
+    whole loop. The cost is a lifetime question, not a new mechanism: something must own starting
+    it at boot and stopping it at exit, and it must not keep writing while the process is wedged.
+
+    (17) AND THE WEDGE CASE IS WHY (c) IS SAFE RATHER THAN MERELY CHEAP — recorded because it is
+    the objection a reader will raise first. A `setTimeout`/`await sleep` heartbeat runs ON THE
+    EVENT LOOP, and this daemon's expensive calls are SYNCHRONOUS (`execFileSync`, see
+    `GH_CALL_TIMEOUT_MS`'s own doc: "a call that never returns does not merely stall the sweep, it
+    parks the daemon's only thread"). A blocked thread therefore STOPS the heartbeat, so the check
+    still says "dead" for a genuinely wedged process. That is the property Q3 demands and it comes
+    free from the mechanism rather than needing a guard.
+
+    (18) WHAT THE CHECK IS ACTUALLY FOR, AND THE HEALTH QUESTION ANSWERED DIRECTLY. A 24-minute
+    median iteration IS HEALTHY HERE: the loop awaits `runOne`, and a dispatched run legitimately
+    takes as long as the task it runs. So a two-minute liveness bound is asking the wrong question
+    of a per-iteration emitter — it is measuring "did the loop turn recently", when what `doctor`
+    needs to answer is "is this process alive". THOSE ARE DIFFERENT QUESTIONS AND THE CHECK
+    CONFLATES THEM. This is NOT a finding that long iterations are unhealthy; if a future
+    measurement shows the p99 of 120.5 minutes is itself pathological, that is a SEPARATE task with
+    a separate falsifier and must be filed as one, not folded in here.
+
+    (19) WHAT MUST NOT CHANGE, CARRIED FORWARD UNCHANGED FROM (9). `doctor` stays READ-ONLY and
+    NETWORK-FREE — its whole purpose is a cold SSH session with serve down and the API budget
+    gone — and the exit-code contract stays, where exit 2 "always means a check failed and never a
+    typo". AND THE CHECK MUST STILL BE ABLE TO SAY "DEAD": a bound wide enough never to fire is
+    worse than one that fires wrongly, which is the same judgement (8) already made against options
+    B and D and is why (16)(b) is refused rather than costed.
+
+    (20) THE DELIVERED DOCUMENTATION STATES THE PROPERTY THE MEASUREMENT REFUTES, AND THAT IS THE
+    ARTEFACT TO CORRECT. `doctor.ts`'s own header, written by this task, says the corpus "is never
+    silent for longer than about one poll interval while the loop is turning, regardless of which
+    ticker window happens to be open". MEASURED: silent for 69.3 minutes at the worst, and past the
+    bound for 21.2% of elapsed wall-clock, WHILE THE LOOP WAS TURNING. A reader trusting that
+    sentence would not look here at all.
+
+    (21) THE HONEST LIMIT. Nothing here establishes that a false FAIL was ever ACTED ON. `doctor`
+    is a hand-run, read-only verb that writes no ledger row of its own, so its verdicts leave no
+    trace in this corpus and the 21.2% figure is an exposure window, not an incident count. The
+    mechanism is measured and the exposure is quantified; no instance is claimed.
   design: |
     ONE CONCERN: the liveness check must read a corpus that is actually written whenever the daemon
     is alive. Not the bound, not the verdict, not the exit code.
