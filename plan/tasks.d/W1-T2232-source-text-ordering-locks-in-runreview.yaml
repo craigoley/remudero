@@ -1,0 +1,181 @@
+- id: W1-T2232
+  title: "Three tests prove ordering INSIDE `runReview` by reading `src/run-task.ts` as text and comparing `indexOf` of two call-expression literals, so the refactor they should survive is the one that breaks them — and unlike the other ten in the census, every effect they order already has an injectable observer on `runReview`'s own args, so the rewrite needs no new seam"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (22397d05558c83e302aa65a4a238c3cc62e1f5c8), clone shallow-checked `false`. `src/run-task.ts`
+    (1,533,033 bytes) read through git objects, never the Contents API. No suite, no spawning verb,
+    no poller. Every count below is dated and carries the query that produced it.
+
+    (1) IT HAS ALREADY HAPPENED TWICE, AND ONE OF THE TESTS CARRIES ITS OWN RECORD OF THE FIRST TIME.
+    #2717 replaced `runReview`'s advisory-reviewer call site and red-lined on
+    `test/review-status-pending.test.ts:51`'s `body.indexOf("await spawnWorker(")` — a lock on the
+    call site, not on the property. And `test/review.test.ts:1324-1325` says it in its own words,
+    about W1-T434 widening the failure-comment gate:
+
+      // W1-T434 WIDENED THIS GATE, AND THE INVARIANT DID NOT BREAK — only this test's literal
+      // encoding of it did.
+
+    That comment is the whole task in one sentence. The invariant held; the encoding of it did not;
+    the repair was to rewrite the assertion. This shard does that repair once more, deliberately,
+    for the cluster where it is cheap — before the next refactor pays for it again.
+
+    (2) THE CENSUS, RE-DERIVED 2026-08-24 AT 22397d05. 654 files under `test/`. 79 read a `src/`
+    path via `readFileSync`. 37 carry an ordering assertion between two source-text indices. The
+    intersection — reads `src/` as text AND indexes a CALL-EXPRESSION literal (`indexOf`/`lastIndexOf`
+    of a string ending in `(`) AND asserts an ordering between two such indices — is 16, of which 13
+    are the defect after excluding navigation-only anchors.
+
+    THE INTERMEDIATE COUNT IS QUERY-DEPENDENT AND THE INTERSECTION IS NOT. An earlier sweep read 37
+    as 32; re-running BOTH forms on this same tree reproduces both numbers, so the gap is the query,
+    not drift. The tight form anchored the identifier immediately after `assert.ok(`
+    (`assert\.ok\([A-Za-z_]*(Idx|At|Index)`) and therefore dropped every line carrying a guard before
+    the comparison — `assert.ok(returnIdx >= 0 && returnIdx < worktreeAddIdx, …)` is the live example,
+    and it is one of the defects. The intersection is 16 under either form. Quote the query, never the
+    number.
+
+    (3) EXPLICITLY NOT DEFECTS — RECORDED SO NOBODY RE-LITIGATES THEM. The deny-floor / plan-claims
+    family (`test/deny-floor-probe.test.ts`, `test/live-write-guard.test.ts`,
+    `test/ledger-read-intent.test.ts`, `test/instrument-isolation.test.ts`) greps source for a
+    FORBIDDEN pattern; asserting the absence of a banned construct is the job, not the defect, and
+    those tests must not be touched. `test/help-registry.test.ts:74` and
+    `test/lint-proof-name-resolution-wiring.test.ts:71` index a literal only to BOUND A SLICE, not to
+    prove a call is reached. The discriminator is the purpose: navigating to a body is fine; asserting
+    that a call site LOOKS a certain way IN ORDER TO PROVE IT IS REACHED is the defect.
+
+    (4) THE SPLIT IS MEASURED, NOT JUDGED. #2735 is the working model: a fake `gh` on PATH records
+    every argv, the log is snapshotted at the moment the ordered effect is reached, and the SPECIFIC
+    POST must already be in it. That works because the effect crosses an observable boundary and
+    because #2714 (`9b279dd8`) had already made the reviewer spawn injectable via `reviewerQueryFn`.
+    Re-derived here at 22397d05: `runTask`'s own opts object carries 20 optional dependencies
+    (`planPath, config, allowStale, skipGitSync, rerun, spawn, github, maskLearnings, containmentExec,
+    isolationExec, binaryPinDeps, runReview, fetchPrBody, recordDecision, workerAbandonMs,
+    spawnWallClockBoundMs, owner, noMerge, claimReserver, worktreeBaseDeps`) — that is the POSITIVE
+    CONTROL, and it fires. Against it, `probeIsolation`, `probeContainment`, `worktreeAdd`,
+    `assertLintClean`, `acquireInflightLock` and `spawnWorker` all read FALSE; `runReview` reads TRUE.
+
+    (5) THE THREE IN SCOPE, AND WHY EACH IS TRACTABLE TODAY. All three order sites INSIDE
+    `runReview`'s body, and `runReview`'s own args expose an observer for every one of them —
+    MEASURED, not assumed: its optional args are `reportIsSubstitute, budgetUsd, spawnReviewer,
+    reviewerQueryFn, headCheckoutDir, baseCheckoutDir, baseUnreadablePaths, materializationFailure,
+    disarm, headRefName, arm, judgeRubricFn, openTaskIds`, and `log` plus `ledgerPath` are REQUIRED.
+
+      - `test/review.test.ts:1290-1318` — proves `judgeRubric` runs strictly AFTER the binding
+        `judgeReview` verdict, inside a try/catch, and that `judgeReview`'s own inputs never reference
+        the rubric. It locates `const computed = judgeReview(` and `judgeRubric(` as text and orders
+        them, then finds `try {`/`catch` by `lastIndexOf`/`indexOf` around the second. `judgeRubricFn`
+        is already an injectable arg — added by W1-T359 for exactly this reason ("invoked ONLY so the
+        fail-open catch below is reachable from a test") — so both the ordering and the fail-open arm
+        are drivable without touching `src/`.
+      - `test/arm-ordering.test.ts:176-194` and `test/arm-on-passing-verdict.test.ts:159-172` — a
+        near-duplicate pair. Both slice `runReview`'s body and order the SAME four literals:
+        `withdrawArmIfVerdictRefuses(` (offset 16815), `await postReviewStatusGuarded({` (17394),
+        `log("review.posted", {` (19778), `armIfVerdictPermits(` (26791). Every one has an existing
+        observer: the withdrawal through the injectable `disarm`, the status POST through the fake-`gh`
+        argv exactly as #2735 does it, the `review.posted` line through the injected `log` AND the
+        ledger file, and the arm through the injectable `arm`. THIS CLUSTER WAS UNVERIFIED WHEN THE
+        BRIEF NAMED IT; it is verified here and INCLUDED.
+
+    (6) WHY NOT THE OTHER TEN — Q2, AND IT IS A QUESTION, NOT A TASK. They order two INTERNAL calls
+    that leave no trace, and the callees are not injectable (§4). Rewriting them behaviourally means
+    ADDING SEAMS TO `runTask`'s DEPENDENCY SURFACE, which is a design decision about how much of the
+    run path is mockable — not a test fix — and Rule 19 would refuse a shard spanning both clusters at
+    `risk: medium` anyway. The population, so whoever rules on the seam question has it in front of
+    them (file:line = the ordering assertions, 2026-08-24 at 22397d05):
+
+      - test/task-linter-wiring.test.ts:26,35,36,37 — the lint guard runs AFTER `assertRunnable` and
+        BEFORE the inflight lock, `worktreeAdd`, and the recon spawn.
+      - test/isolation-wiring.test.ts:29,30,31,39 — `probeIsolation` precedes `worktreeAdd`, the recon
+        spawn and the implement prompt; the fail-closed return precedes `worktreeAdd`.
+      - test/containment-wiring.test.ts:28 — the `ContainmentError` fail-closed return precedes
+        `worktreeAdd`.
+      - test/worktree-reap-boot-rung.test.ts:41,44,45,48 — the boot rung runs AFTER `pruneStaleRuns`
+        and BEFORE this run's own `worktreeAdd`, so it never races its own new worktree.
+      - test/one-shot-disk-reclaim-rung.test.ts:64,67,68,71 — the disk-reclaim rung runs AFTER the
+        reap-boot rung and BEFORE `worktreeAdd`.
+      - test/risk-judge-wiring.test.ts:40,43,59,62 — `runRiskJudge` is called AFTER the capped-refusal
+        branch, `pollToGate` only after the judge has had its say, and the real `escalate()` after the
+        disarm inside the escalate closure.
+      - test/arm-at-open.test.ts:720,736,887,895,949,981,1141,1144 — ledger line order mirrors source
+        order (panel before the arm decision, decision before the disarm, terminal verdict last).
+      - test/mounts-wiring.test.ts:159 — the `commitsAhead` guard runs BEFORE `ghPrCreateFillCommand`.
+      - test/worker-home-wiring.test.ts:15 — `materializeWorkerHome` runs before `buildWorkerEnv`, so
+        the scratch HOME exists on disk before the child env references it.
+      - test/risk-judge-change-view.test.ts:221,224 — the wrapper is declared, and calls
+        `changeView(prUrl)`, before it is wired in as the judge dependency.
+
+      ONE NUANCE THE BARE `false` HIDES, AND THE SEAM RULING NEEDS IT: `containmentExec` and
+      `isolationExec` ARE optional deps on `runTask`. The probes' EXEC LEAVES are injectable even
+      though the probe CALL SITES are not, so `isolation-wiring` and `containment-wiring` may be
+      cheaper than the other eight. Not scoped here; recorded so the ruling starts from the measurement.
+
+    (7) EXCLUDED BY OWNERSHIP, NOT BY CLASSIFICATION. `test/review-status-pending.test.ts:51` still
+    carries `body.indexOf("await spawnWorker(")` on this tree and is the fourteenth instance. PR #2735
+    is OPEN against exactly that line and owns it. Nothing here touches that file.
+
+    #2735 and W1-T434 are CITED as the model and the prior occurrence. Neither is re-filed and neither
+    task's evidence is restated as this shard's own.
+  acceptance:
+    - claim: "the judgeRubric ordering is proven by driving runReview through its injectable judgeRubricFn rather than by indexing the call site as text"
+      proof: "unit test: test/wiring-ordering-behaviour.test.ts"
+    - claim: "the fail-open arm is proven by a rubric judge that actually throws, not by locating a try and a catch around a literal"
+      proof: "unit test: test/wiring-ordering-behaviour.test.ts"
+    - claim: "the withdrawal is observed before the status post through the injected disarm and the gh argv log"
+      proof: "unit test: test/wiring-ordering-behaviour.test.ts"
+    - claim: "the arm is observed after the review posted ledger line through the injected arm and the ledger file"
+      proof: "unit test: test/wiring-ordering-behaviour.test.ts"
+    - claim: "each rewritten assertion fails when its ordered effect is never reached at all"
+      proof: "unit test: test/wiring-ordering-behaviour.test.ts"
+    - claim: "refactoring the ordered call sites leaves every rewritten assertion green"
+      proof: "unit test: test/wiring-ordering-behaviour.test.ts"
+  files: [test/review.test.ts, test/arm-ordering.test.ts, test/arm-on-passing-verdict.test.ts, test/wiring-ordering-behaviour.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#source-text-ordering-locks-2026-08-24"
+  plan_refs: ["W1-T359", "W1-T434", "W1-T1051", "W1-T2205"]
+  note: |
+    NOTHING IS DELETED AND NOTHING IS RELAXED. Every property these three tests prove is REAL and must
+    keep holding after the rewrite: `judgeRubric` strictly after the binding verdict and fail-open; the
+    withdrawal beating the post to GitHub (#973); the arm following the `review.posted` ledger write,
+    because that line IS the evidence W1-T230's gate reads. No assertion is removed, none is weakened
+    to a substring that matches anything, and no platform skip is added — W1-T1051 is the standing
+    warning about an assertion a comment could satisfy, and #2735's shape is the answer to it: match
+    ONE call, snapshotted at the moment the effect is reached, plus a reached-ness assertion so a green
+    can never survive the work never running.
+
+    TWO TRAPS MEASURED ON THIS PATH, BOTH INHERITED FROM #2735 AND NEITHER TO BE CHASED. (a)
+    `test/worker.test.ts`'s W1-T2205 end-to-end test reads 66/67 on an UNMODIFIED tree on darwin,
+    because `runReview`'s `spawnWorker` call takes no keychain seam and darwin runs the real
+    `ensureWorkerKeychain`, which refuses headlessly. Pre-existing; do not chase it and do not add a
+    platform skip — #2735's two-observer snapshot is the pattern that survives it. (b)
+    `live-write-guard` refuses `gh-pr-merge` by checking the CALL, not the destination, so a
+    PATH-stubbed `gh` is not enough; inject a no-op `disarm`.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 4 distinct subsystems/concerns (arm-on-passing-verdict, arm-ordering, review,
+      wiring-ordering-behaviour) at risk:medium — Rule 19: raise to risk:high or decompose into one
+      task per concern
+
+    Rule 19 derives the concern from each declared path's STEM, so four test files read as four
+    concerns even though all four are the SAME seam — ordering assertions inside `runReview`'s body,
+    every one of whose effects `runReview` already exposes an observer for (§5). Decomposing them
+    would mean three PRs building the same harness three times. AND THE BAND EXEMPTS RATHER THAN
+    CLEARS: `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` on its first line at
+    `risk: high`, so that refusal is the only scoring of this span this shard will ever get — recorded
+    here because nothing downstream will re-derive it. The actual blast radius is nil in production:
+    this shard changes no source file, deletes no test, and moves no gate.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH, AND NONE NAMES AN EXISTING TEST FILE. Every criterion
+    uses the pure-path `unit test:` form naming `test/wiring-ordering-behaviour.test.ts`, which is
+    declared in `files:` and DOES NOT EXIST on this tree — so on this filing PR each resolves through
+    W1-T456's forward-reference carve-out to `not_yet_built`. Falsified in the other direction:
+    the same form naming an existing path (`test/review.test.ts`) EXECUTES and would be graded on its
+    result, which is the shape that red-lined #2707.
