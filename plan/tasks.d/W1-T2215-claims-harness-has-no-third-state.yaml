@@ -1,0 +1,136 @@
+- id: W1-T2215
+  title: "`runClaim`'s `ok: result.status === 0` gives the whole claims gate one meaning for every non-zero exit, so an assertion that COULD NOT RUN is rendered as a lie about whatever it was going to check — and because 13 of the 14 assertions are third-party binaries whose exit codes this repo does not own, no exit-code convention can fix it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main (behind-count 0,
+    clone checked for shallowness). Source over 1 MB read through git objects. No suite beyond the
+    claims gate itself, no spawning verb. EVERY MEASUREMENT BELOW RAN AS CI RUNS IT —
+    `npm run --silent claims`. Invoking `scripts/plan-state-claims.mjs` directly exits 1 with
+    `ERR_MODULE_NOT_FOUND` on `src/lib/ledger.js`, which reads as "fails on both sides, therefore
+    base-caused"; that trap was avoided, not discovered.
+
+    (1) THE MEASURED INSTANCE, RE-DERIVED. PR #2648 at superseded head `3d04cdb2`: head alone
+    exit 0, `origin/main` alone exit 0, THE MERGE exit 1, the merge with the shard removed exit 0,
+    restored exit 1. Two files declared `W1-T1278` — `W1-T1278-fix-rung-spends-a-strike-on-a-
+    conflicted-head.yaml` on the head and `W1-T1278-the-fix-rung-dispatches-without-re-reading-the-
+    state.yaml` on main — so neither tree failed alone and only the union did. `MASTER-PLAN.md` was
+    BYTE-IDENTICAL across the merge, sha256 `aec58cab349092fc`, and the gate named it anyway.
+
+    (2) TWO COLLABORATING FACTS, NEITHER WRONG ALONE. `plan-state-claims.mjs` sets
+    `process.exitCode = 1` in its `loadPlan` catch AND on its genuine contradiction path — same
+    code, opposite meanings. `runClaim` (`scripts/claims-check.mjs`) records
+    `ok: result.status === 0`, so any non-zero is "FALSE", and `formatFailure` renders the claim's
+    own prose under "THE PLAN IS LYING ABOUT THE SYSTEM". The true cause survives only as the LAST
+    line, after the claim text, the `plan_section: MASTER-PLAN.md §SHIPPED log`, the assertion and
+    the exit code — three MASTER-PLAN references before the sentence naming the shard.
+
+    (3) THE COUNT IS THE SUBJECT, AND IT IS 13 OF 14 — MEASURED, NOT REASONED. Baseline: all 14
+    claims execute and PASS on origin/main. Classified by failure surface, with the third exit state
+    measured directly: a POSITIVE `grep` exits 0 on match, 1 on no-match and **2 on a missing or
+    unreadable file** — and the harness collapses 1 and 2. A `node --test` invocation with an
+    unresolvable loader exits **1**, indistinguishable from a failing test. So SEVEN `node --test`
+    assertions, ONE `node <script>` assertion (the measured instance) and TWO positive `grep`
+    assertions all render an environment fault as "the claim is false". THIS IS A HARNESS CONTRACT,
+    NOT A SCRIPT FIX.
+
+    (4) AND THREE OF THEM FAIL *OPEN*, WHICH IS WORSE AND IS NOT IN THE BRIEF. The negated shape
+    `! grep -q … <file>` turns grep's error exit 2 into **0**: MEASURED, a missing file makes the
+    claim read as HOLDING. Three assertions use that shape, so a gate whose whole purpose is to
+    catch the plan lying can be silenced by deleting the file it reads. EXACTLY ONE assertion has no
+    third state at all — `! test -f docs/ci-gate.md`, because `test` exits only 0 or 1.
+
+    (5) THE SIBLING, CITED AND NOT RE-FILED. W1-T2212 records the same shape — an unreadable input
+    encoded as an adverse finding — at the risk judge and the triage rung. This is the THIRD site,
+    and it is the one where the established remedy does not transfer; see design (i).
+  design: |
+    (i) AN EXIT-CODE CONVENTION CANNOT HOLD HERE, AND THAT IS THE ANSWER TO THE TWO-LINE REMEDY.
+    W1-T2212 found the enforceable version of this distinction is a TYPE rather than a policy. Here
+    there is nothing to type: 13 of the 14 assertions are `grep`, `test` and `node --test` — THIRD-
+    PARTY BINARIES WHOSE EXIT CODES THIS REPO DOES NOT OWN AND CANNOT CHANGE. `grep` has already
+    spent 2 on "error"; `node --test` spends 1 on everything. A house convention that "2 means could
+    not run" would bind exactly ONE assertion — the script this repo wrote — and would silently mean
+    something else in the other thirteen.
+
+    (ii) SO THE THIRD STATE MUST BE ESTABLISHED BY THE HARNESS, BEFORE THE EXIT CODE EXISTS. Give a
+    claim an optional declared PRECONDITION — the inputs its assertion needs — and have `runClaim`
+    check it FIRST. A failed precondition yields `could-not-run`, carrying what was missing; it never
+    consults the exit code, so it works identically for a binary the repo does not own and a script
+    it does. That is the only form that generalises across all fourteen.
+
+    (iii) THE CHEAP FIX STAYS, SCOPED TO WHAT IT CAN REACH. `plan-state-claims.mjs`'s `loadPlan`
+    catch may still take a distinct exit code and `formatFailure` may still branch on it — that is
+    correct for the one assertion this repo owns, and it is the measured instance. It is a
+    complement to (ii), never a substitute, and the shard must not let it stand alone.
+
+    (iv) RENDERING IS HALF THE DEFECT. A `could-not-run` result must print the CAUSE FIRST and must
+    NOT print "THE PLAN IS LYING ABOUT THE SYSTEM" — that banner is an accusation about the plan, and
+    the plan is not what failed. The claim's prose and its `plan_section` are the misleading part and
+    must not lead.
+
+    (v) THE FAIL-OPEN SHAPE IS THE HIGHER-SEVERITY HALF AND MUST BE CLOSED TOO. Rationale (4)'s three
+    negated greps currently PASS on a missing file. A precondition on the file they read converts
+    that silent pass into a `could-not-run`. Closing this ADDS reds where the gate is currently
+    blind; that is the point, and it is compatible with (vi).
+
+    (vi) REFUSED BY NAME. The check STAYS and STAYS REQUIRED — `claims` is #8 of the 14 names in
+    `ci-gate`'s REQUIRED list and branch protection holds exactly `remudero-review` and `ci-gate`,
+    re-derived. The contradiction detector is CORRECT and caught nothing wrong here; it is not
+    touched. A plan that will not load MUST STILL FAIL this gate. THE FIX MUST NOT REDUCE THE NUMBER
+    OF REDS — the defect is a wrong NAME, not an extra failure. No suppression, no demotion out of
+    the required list.
+
+    (vii) NOT IN SCOPE, NAMED: the contradiction detector itself; the fourteen claims' own truth;
+    W1-T2212's two sites; and any change to which checks `ci-gate` waits on.
+  acceptance:
+    - claim: "an assertion whose inputs are missing is reported as unable to run rather than as false"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+    - claim: "a genuinely false claim is still reported false exactly as it is today"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+    - claim: "the could-not-run rendering names the cause before the claim's own prose"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+    - claim: "a negated assertion no longer passes when the file it reads is absent"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+    - claim: "the third state is decided without consulting the assertion's exit code"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+    - claim: "an unloadable plan still fails the gate and the gate still exits non-zero"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+    - claim: "no claim that fails today passes after the change"
+      proof: "unit test: test/claims-harness-third-state.test.ts"
+  files: [scripts/claims-check.mjs, plan/claims.yaml, test/claims-harness-third-state.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#claims-harness-third-state-2026-08-24"
+  plan_refs: ["W1-T29", "W1-T2212"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/claims-harness-third-state.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS. The change decides what a REQUIRED gate says when it fails, and
+    design (v) deliberately ADDS reds on a currently-blind path — a mistake here either accuses the
+    plan of lying when it did not, or keeps a gate silent that should fire.
+
+    THE COUNT IN RATIONALE (3)/(4) WAS MEASURED, AND ITS METHOD IS RECORDED SO IT CAN BE RE-TAKEN.
+    A whole-harness perturbation is NOT the instrument: pointing the worktree's `node_modules` at an
+    empty directory kills `claims-check.mjs` itself (it imports `yaml`) before any claim runs, so it
+    discriminates nothing. The per-shape probes are what settle it — `grep` returning 2 on a missing
+    file, `! grep` turning that 2 into 0, `test` having no third state, and `node --test` returning 1
+    for an unresolvable loader.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T2215` resolves to
+    67f6083fd3318cc9516cf3f391d8b8f5a50ab4bc, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight surfaces
+    were swept, and THREE CONTROLS WERE DISQUALIFIED AND RE-QUALIFIED rather than accepted. W1-T2212
+    was rejected as the main-side control because its own PR is still open and it reads zero on every
+    main surface; W1-T2206 replaced it. AND THE TWO REST-BACKED SURFACES WERE UNUSABLE: the GitHub
+    REST API returned an HTTP 403 rate-limit payload, whose five JSON lines would have counted as
+    five PR rows — a size check would have passed it. Both were re-qualified over git protocol
+    instead: merged-PR trailers read from squash-merge COMMIT BODIES on main (396 present; control
+    `W1-T1278` reads 2, this id reads 0) and in-flight work read from live `run-W1-T*` heads (56
+    present, this id 0).
