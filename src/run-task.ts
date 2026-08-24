@@ -3801,8 +3801,8 @@ async function waitForCiGreen(
 
 /**
  * W1-T2205: `runReview`'s advisory-reviewer semantic parse, split out of the call site below
- * for the same reason every other `[r.text, r.blocks.join("\n")].join("\n")` site in this task
- * moved onto {@link workerTranscript}: a hand-rolled double join double-counts the reviewer's
+ * for the same reason every other hand-rolled `r.text` + joined-`blocks` site in this task
+ * moved onto {@link workerTranscript}: a manual double join double-counts the reviewer's
  * final message. Joins ONCE via `workerTranscript` before handing the result to
  * {@link parseReviewerVerdicts}. Only reachable with a live spawn (gated behind
  * `spawnReviewer !== false`) — see `reviewerQueryFn`'s own doc for the injectable seam
