@@ -1,0 +1,180 @@
+- id: W1-T2204
+  title: "NOTHING IN THE FLEET READS MAIN'S OWN CHECK STATE — there is a review gate, a merge gate, a fix rung and a three-class escalation taxonomy, and no reader of the trunk; and the one job that caught the measured skew is the one job that no-ops on a push to main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    **Q1 — NOTHING READS IT, AND THE ZERO IS CONTROLLED ON ITS OWN SURFACE.** Counted across the four
+    places that could plausibly hold such a reader — `src/lib/sweep.ts`, `src/lib/daemon.ts`,
+    `src/lib/doctor.ts`, `src/lib/escalate.ts`:
+
+      pattern              sweep  daemon  doctor  escalate
+      checksState             80       0       0         0     <- CONTROL
+      statusCheckRollup        3       0       0         0
+      branches/main            0       0       0         0
+      mainChecks               0       0       0         0
+      trunkHealth              0       0       0         0
+      defaultBranch            0       0       0         0
+
+    **THE CONTROL IS `checksState` AT 80 IN `sweep.ts`**: the sweep demonstrably reads per-PR check
+    state, so a zero in the same file for the trunk is ABSENCE, not a blind query. `doctor.ts` (743
+    lines) and `escalate.ts` (1277 lines) were confirmed readable before their zeros were believed —
+    an earlier pass of this same scan named `escalation.ts`, WHICH DOES NOT EXIST, and its zeros were
+    therefore unqualified and were re-taken.
+
+    **THE ONLY `branches/main` HIT IN ALL OF `src/` IS NOT A READ.** `src/run-task.ts:25331` (read
+    through git objects — the file is 1,502,392 bytes, over the Contents API's 1 MB cap where it
+    returns `encoding: "none"` and greps to a clean zero) is a PRINTED REMEDIATION STRING inside a
+    `gh api -X PUT … /branches/main/protection` instruction for an operator. The fleet tells a human
+    how to configure the trunk's protection and never looks at the trunk itself.
+
+    **THE PRECONDITION THAT MAKES SKEW POSSIBLE.** Branch protection on `main` requires
+    `remudero-review` and `ci-gate` with `strict: false` — a PR need not be up to date with main
+    before merging, so two changes to the same file can each be green against their own base and
+    broken in combination. **THIS ONE IS NOT RE-DERIVED HERE**: the protection endpoint returns
+    `403 Resource not accessible by integration` on this token, so it is carried as the operator's
+    reading and labelled as such rather than restated as measured.
+
+    **(2) IS TRUE BUT WEAKER THAN IT SOUNDS, AND THIS IS THE FINDING.** Main's own push run at
+    `68c8703b` registered **22 check-runs, 22 completed, 0 pending, 0 failing** — but **THIRTEEN OF
+    THEM CONCLUDED `skipped`**: `lint-plan`, `claims`, `commitlint`, `depcruise`, `jscpd-gate`,
+    `leak-grep`, `mutation-ratchet`, `containment-probe`, `api-client-drift`, `no-hand-rolled-fetch`,
+    `task-id-existence`, `assertion-discrimination`, `learnings-budget-ratchet`. `ci.yml`'s own `on:`
+    block says why: everything except `ci` stayed `pull_request`-only.
+
+    **AND `coverage-ratchet` IS WORSE THAN SKIPPED — IT CONCLUDES `success` HAVING RUN NOTHING.** Its
+    Test step carries the guard `[ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { echo "W1-T1033:
+    coverage-ratchet is PR-only; skipping the real test-with-coverage run…"; exit 0; }`, and the same
+    guard repeats on its diff and ratchet steps. So on a push to main the job registers, executes no
+    suite, and reports GREEN. **A NAIVE MAIN-HEALTH WATCHER READING MAIN'S ROLLUP WOULD READ THAT AS
+    A PASS** — the vacuous-pass family, on the trunk.
+
+    **WHY THAT MATTERS FOR THE MEASURED INSTANCE.** `a8001b9` (#2674, W1-T1272) changed
+    `src/lib/daemon.ts` **and** `test/daemon.test.ts` together. `c4c867d` (#2675, W1-T1274, merged
+    00:32:55Z) changed `src/lib/daemon.ts` and **NOT** that test — verified file-by-file. #2679, a
+    plan-schema PR touching neither, then failed `coverage-ratchet` at `test/daemon.test.ts:2223`,
+    W1-T356's wiring assertion, with `FLAKE-RETRY: retry ALSO failed`. **`ci` PASSED ON THE SAME HEAD
+    WHILE `coverage-ratchet` DID NOT** — so the failure is specific to the coverage job's
+    environment, and the coverage job is exactly the one that no-ops on main. **MAIN'S OWN RUN COULD
+    NOT HAVE CAUGHT THIS CLASS, EVEN IF SOMETHING HAD BEEN WATCHING IT.**
+
+    **AND THE SAME TEST HAS BEEN OBSERVED FAILING THE OTHER WAY ROUND**, which bounds how much any
+    watcher can promise: on #2669's head `eb1ef636`, `test/daemon.test.ts`'s W1-T356 assertion failed
+    in `ci` and PASSED in `coverage-ratchet` on the identical commit, while scoped runs read 110/110
+    on both main and the branch. One test, two jobs, opposite outcomes on the same input, twice in
+    one night. A trunk watcher reading a rollup inherits that instability; it does not resolve it.
+
+    **MAIN IS GREEN AS THIS IS FILED, AND THE SHARD IS NOT ABOUT TONIGHT'S RED.** At `68c8703b`:
+    0 failing, **0 pending** — the pending count is read and reported, because a failure count of
+    zero while checks are still in flight is not green, and that exact mistake was made twice
+    tonight. **THE SKEW MANIFESTED ONLY ON A PR BASE**, which is a narrower and still real finding:
+    the fleet learned about a broken trunk from an unrelated PR roughly forty minutes after the
+    second merge, and nothing else would have told it.
+
+    **Q2 — BOTH REMEDIES, COSTED, AND THEY COMPOSE.**
+
+    `strict: true` PREVENTS the skew by refusing a merge from a stale base. **THE CADENCE MAKES THAT
+    EXPENSIVE, AND HERE IS THE MEASUREMENT RATHER THAN THE ASSERTION**: 118 commits landed on `main`
+    in the last 24 hours, 549 in the last 7 days, with a MEDIAN GAP OF 346 SECONDS between
+    consecutive merges, a minimum of 2 seconds, and a busiest hour of 15. Against a required-check
+    wall-clock in the 8–13 minute range, a PR is very often stale before its own checks finish, so
+    `strict: true` means a rebase and a full re-run per PR — on the order of the same 118 extra CI
+    cycles a day. **WHAT IT MISSES**: nothing about semantic skew that is already on main, and
+    nothing that arrives by any path other than a PR merge.
+
+    A POST-MERGE MAIN-HEALTH READ keeps throughput and DETECTS rather than PREVENTS. **WHAT IT
+    MISSES**: every window between the merge and the read; every check that `skipped` on the push;
+    and — the sharp one — every check that concludes `success` without running, which today includes
+    the only job that caught the measured instance. A watcher built on main's rollup as it stands
+    would have reported green throughout.
+
+    **THEY COMPOSE, AND NEITHER IS SUFFICIENT ALONE.** `strict: true` narrows the window in which
+    skew can be created; the watcher covers what lands anyway. But the watcher is worth nothing until
+    main's own run actually exercises the checks it reports on — so the first move is to make main's
+    signal non-vacuous, and reading a rollup that is 13 skips and one hollow success is not a health
+    check. **NOT PROPOSED, BY NAME: `strict: true` AS THE SOLE REMEDY, AN AUTO-REVERT, A POLLER, OR A
+    SCHEDULED WORKFLOW THAT RUNS INDEPENDENTLY OF THE SWEEP.**
+
+    **Q3 — WHAT MUST NOT CHANGE.** NOTHING AUTO-REVERTS A MERGE: a red trunk produces a named
+    observation and an escalation, never a revert. THE ESCALATION TAXONOMY KEEPS ITS THREE CLASSES —
+    a trunk finding is carried inside the existing classes, not by adding a fourth. **AND A RED MAIN
+    MUST NOT BLOCK DISPATCH OF UNRELATED TASKS WITHOUT AN OPERATOR RULING.** The asymmetry is its own
+    hazard and cuts both ways: the fleet merged four PRs tonight while a red branch sat unattended,
+    which is the argument for a watcher; but a watcher that halts the queue on any red trunk converts
+    one broken test into a full stop, which is worse. The stand-down must be a named observation with
+    an operator decision attached, not an automatic gate.
+
+    **CITED, NOT RE-FILED.** `W1-T1282` — a rung with nothing it can legitimately change: a fix
+    worker on #2679 could not repair `test/daemon.test.ts` without writing outside W1-T1287's
+    declared span, which is that task's condition exactly. `W1-T1275` — the rollup that never
+    recomputes, which is why a stale trunk verdict would persist even once something reads it.
+  acceptance:
+    - claim: "the sweep reads the default branch's own check state and records it as a named observation"
+      proof: "unit test: test/main-health-watch.test.ts"
+    - claim: "a check that concluded skipped, or that concluded success without executing, is not counted as evidence the trunk is healthy"
+      proof: "unit test: test/main-health-watch.test.ts"
+    - claim: "a trunk read with checks still pending is reported as undetermined rather than as green"
+      proof: "unit test: test/main-health-watch.test.ts"
+    - claim: "a red trunk produces an escalation inside the existing three classes and never reverts a merge"
+      proof: "unit test: test/main-health-watch.test.ts"
+    - claim: "a red trunk does not by itself stop dispatch of unrelated tasks absent an operator ruling"
+      proof: "unit test: test/main-health-watch.test.ts"
+  files: [src/lib/sweep.ts, test/main-health-watch.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#nothing-reads-mains-own-check-state-2026-08-24"
+  plan_refs: ["W1-T1282", "W1-T1275", "W1-T1033", "W1-T1272", "W1-T1274"]
+  note: |
+    **NO PROOF IN THIS SHARD GREPS ITS OWN PATH.** All five criteria use the pure-path `unit test:`
+    form naming `test/main-health-watch.test.ts`, declared in `files:`, which is the sanctioned
+    forward reference: `check-proof` reads `verdict: fail` on it today because the file does not
+    exist yet, and it resolves instead through `shardDeclaredFilesInDiff`. A `grep:` proof naming
+    this shard would be out of scope by construction, since a `verify: auto` task cannot declare its
+    own plan record in `files:`.
+
+    **RISK BAND — BOTH READINGS RECORDED.** SPAN: `files:` crosses `src/` and `test/`, so Rule 19's
+    span reading is `high`. **THE BAND EXEMPTS THE SIZING CHECK RATHER THAN CLEARING IT** —
+    `sizingViolation` (`src/lib/task-linter.ts:197`) returns `undefined` outright at `risk: high`, so
+    a clean lint is NOT evidence the span was vetted. BLAST RADIUS: narrower than the band suggests —
+    one new read and one new observation inside the sweep, with no change to dispatch, the fix rung,
+    or the merge path. The danger is entirely in Q3's asymmetry, which is why criteria 4 and 5 exist
+    as a pair.
+
+    **THE FALSIFIER, STATED SO IT CAN BE RUN.** Falsified if a trunk read reports green over a rollup
+    whose checks skipped or concluded without executing — that is the vacuous-pass this task exists
+    to refuse, and it would mean the watcher was built on the signal as it stands rather than on a
+    signal made real first. Also falsified if an unrelated task's dispatch stops on a red trunk with
+    no operator ruling recorded, or if any merge is reverted automatically.
+
+    **MEASUREMENT PROVENANCE.** Clone checked NOT shallow (`--is-shallow-repository` false, 2082
+    commits) BEFORE any history query. `src/run-task.ts` read through git objects for the reason
+    given in the rationale. `resolveLedgerUnion` was run FIRST and returned `archiveCount 0,
+    ok false` against this container's only `state/`; **ZERO ARCHIVES REFUSES RATHER THAN ANSWERING
+    FROM THE LIVE FILE**, which holds roughly 0.3% of history, so NO LEDGER FIGURE IS QUOTED. Branch
+    protection could not be read (403) and is labelled as the operator's reading. Check-run counts
+    were taken with the pending count read alongside the failure count, and the rollup carried a
+    duplicate `Analyze (javascript-typescript)` entry — the superseded-attempt shape — which is why
+    names are deduped before any per-name conclusion is drawn.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T2204` reserved 2026-08-24T02:55:07Z, confirmed still held and
+    with no shard under it. Eight surfaces swept, each control pre-qualified on its own surface, and
+    **ONE SURFACE DISQUALIFIED AND RE-QUALIFIED RATHER THAN REPORTING THE TARGET'S ZERO**: the
+    open-PR-title surface's `W1-T` control read 0, because neither open PR carries a task id in its
+    title, so it was re-qualified on `chore(plan)` = 1. Reservation ref 1 against a namespace of 323;
+    shard filenames on main 0 (control `W1-T2201` = 1); `- id:` lines 0 (control `W1-T2201` = 1);
+    open-PR titles 0 (re-qualified control = 1); open-PR head branches 0 (control `run-*` = 86);
+    open-PR file lists 0 across 2 of 2 heads enumerated and captured, control 4 file entries;
+    anchored merged trailers `^Remudero-Task:\s*<id>\s*$` 0 (control `W1-T1286` = 1 across 98
+    merged), NOTED AS UNDER-CREDITING because plan filings often carry no trailer, while a bare
+    `--grep` over-credits; merged subjects 0 (control `(W1-T2201)` = 1 across 2082).
+
+    **THE SUBJECT WAS SWEPT AS WELL AS THE ID.** Five shards matched `main.*health` and every one was
+    read before filing: `W1-T1044` (sweep wall-clock bound) and `W1-T1274` (doctor's liveness corpus)
+    are unrelated, and the other three matched only because `re`**`main`**`ing` sits near
+    `daemon-`**`health`**`.ts` — a false-positive class worth naming. `trunk.*green`, `main is green`,
+    `post-merge.*main` and `mainHealth` all read 0 against a control of 61 shards matching
+    `fix rung`. The subject is not already filed.
