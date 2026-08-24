@@ -96,9 +96,20 @@ export function humanMs(ms: number): string {
 
 /**
  * LEDGER FRESHNESS — the single best liveness signal, and the reason is structural: `docker logs`
- * narrates ACTIONS and goes silent between them, so a quiet log is ambiguous; the ledger's
- * `daemon.`-prefixed rows do not stop while the daemon lives. FAIL past the bound rather than
- * WARN, because a stale ledger is the daemon being gone.
+ * narrates ACTIONS and goes silent between them, so a quiet log is ambiguous. FAIL past the bound
+ * rather than WARN, because a stale ledger is the daemon being gone.
+ *
+ * W1-T1274 — "`daemon.`-prefixed rows do not stop while the daemon lives" WAS ASSERTED HERE AND
+ * WAS FALSE: MEASURED, the prefix went silent for 102.5 minutes on 2026-08-23 while the daemon
+ * stayed alive and productive across the gap, because the only RECURRING `daemon.`-prefixed
+ * emitter (`daemon.alive`, a ticker) only runs inside three windows (retro, full sweep, dispatch
+ * settling) — every stretch of the loop outside those three wrote nothing with this prefix at
+ * all. What makes the sentence true now is `daemon.ts`'s `runDaemon` loop: it writes an
+ * UNCONDITIONAL `daemon.tick` row as the literal first statement of every iteration, on every
+ * path (idle, paused, dispatching, sweeping, or returning early at this very check) — so the
+ * corpus below (still every `daemon.`-prefixed row, never narrowed to `daemon.tick` alone or to a
+ * `run_id`, per rationale (7)/(8)) is never silent for longer than about one poll interval while
+ * the loop is turning, regardless of which ticker window happens to be open.
  */
 export function judgeLedgerFreshness(ageMs: number | undefined, boundMs: number): Check {
   const threshold = `<= ${humanMs(boundMs)}`;
@@ -108,7 +119,10 @@ export function judgeLedgerFreshness(ageMs: number | undefined, boundMs: number)
       verdict: "FAIL",
       measured: "no daemon row found",
       threshold,
-      detail: "no `daemon.`-prefixed ledger row at all — the daemon has not run, or the ledger path is wrong",
+      detail:
+        "no `daemon.`-prefixed ledger row at all — ordinarily the loop writes a `daemon.tick` row every " +
+        "iteration on top of its boot-time and ticker rows, so this means the daemon has not run, or the " +
+        "ledger path is wrong",
     };
   }
   return {
@@ -536,7 +550,12 @@ export function readMemInfo(readText: (p: string) => string = (p) => readFileSyn
   }
 }
 
-/** Newest `daemon.`-prefixed row age, via the already-exported {@link deriveLastPoll}. */
+/**
+ * Newest `daemon.`-prefixed row age, via the already-exported {@link deriveLastPoll}. Since
+ * W1-T1274, `runDaemon`'s loop (`daemon.ts`) writes an unconditional `daemon.tick` row into this
+ * SAME prefix on every iteration, so the age this returns no longer depends on which of the three
+ * `daemon.alive` ticker windows (retro/full-sweep/dispatch-settling) happens to be open.
+ */
 export function readLedgerAgeMs(lines: ReadonlyArray<Record<string, unknown>>, nowMs: number): { ageMs?: number; boundMs: number } {
   const poll = deriveLastPoll(lines);
   const parsed = poll.lastPollTs ? Date.parse(poll.lastPollTs) : NaN;
@@ -557,8 +576,12 @@ export function readAlivePhases(lines: ReadonlyArray<Record<string, unknown>>): 
 /**
  * The `run_id` of the newest `daemon.`-prefixed ledger line, by parsed `ts` — the SAME
  * winning-row rule {@link deriveLastPoll} already applies for ledger freshness, re-applied here
- * only to read that row's `run_id` rather than its `ts`. No new read: every `daemon.`-prefixed
- * line already carries `run_id`, so this needs no new ledger field or emitter (W1-T1099 design ii).
+ * only to read that row's `run_id` rather than its `ts`. Every `daemon.`-prefixed line already
+ * carries `run_id`, so no new ledger FIELD is needed here — but W1-T1274 DOES add a new emitter
+ * (`daemon.tick`, into this same `daemon.`-prefixed corpus, `daemon.ts`), and deliberately moves
+ * this function's predicate in lockstep with {@link readLedgerAgeMs}'s: both stay keyed on the
+ * full `daemon.`-prefix (never narrowed to `daemon.tick` alone, never widened to a bare `run_id` —
+ * W1-T1274 rationale (7)/(8)), so the two checks can never disagree about which run is current.
  */
 function newestDaemonRunId(lines: ReadonlyArray<Record<string, unknown>>): string | undefined {
   let bestId: string | undefined;

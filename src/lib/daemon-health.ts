@@ -8,10 +8,16 @@
  * own recon here):
  *   - LAST POLL: `src/lib/daemon.ts`'s `runDaemon` loop has no SINGLE ledger step name that fires
  *     unconditionally every tick (`daemon.pause`/`daemon.headroom`/`daemon.idle`/
- *     `daemon.iteration`/etc each fire on a DIFFERENT branch) — but every branch that does not
- *     exit the process logs at least one `daemon.`-prefixed line before its next tick. The MAX
- *     `ts` among every `daemon.`-prefixed ledger line is therefore a real, always-advancing "last
- *     poll" signal, with no new unconditional log call needed.
+ *     `daemon.iteration`/etc each fire on a DIFFERENT branch). W1-T1274 CORRECTS A FALSE CLAIM
+ *     THAT USED TO STAND HERE: "every branch that does not exit the process logs at least one
+ *     `daemon.`-prefixed line before its next tick" was MEASURED FALSE — the prefix went silent
+ *     for 102.5 minutes on 2026-08-23 while the daemon stayed alive, because the only RECURRING
+ *     `daemon.`-prefixed emitter (`daemon.alive`) is a ticker confined to three windows (retro,
+ *     full sweep, dispatch settling), and every stretch of the loop outside those three — plain
+ *     inter-iteration sleep, or an early return at the freshness check — wrote nothing with this
+ *     prefix at all. `runDaemon` now writes an UNCONDITIONAL `daemon.tick` row as the first
+ *     statement of every iteration, on every path, which is what makes the MAX `ts` among every
+ *     `daemon.`-prefixed ledger line a real, always-advancing "last poll" signal today.
  *   - NEXT-POLL COUNTDOWN: that same winning line's own `poll_interval_ms` (already logged on
  *     most of those lines) added to its `ts`; falls back to an injected default
  *     (`daemon.ts`'s `DEFAULT_POLL_INTERVAL_MS`) when the winning line carries none.
@@ -52,8 +58,13 @@ export interface DaemonPollInfo {
 /**
  * The MAX `ts` among every ledger line whose `step` starts with `"daemon."` — real, ledger-
  * sourced, and advancing every tick the daemon runs (see this module's header for why no single
- * step name is unconditional, and why the max-over-the-prefix is the correct substitute). Ties/
- * out-of-order lines are handled by comparing PARSED timestamps, never assuming ledger order.
+ * step name is unconditional, why `runDaemon` now writes one unconditionally regardless
+ * (`daemon.tick`, W1-T1274), and why the max-over-the-prefix — never narrowed to `daemon.tick`
+ * alone — is the correct read: every OTHER `daemon.`-prefixed line (`daemon.idle`,
+ * `daemon.iteration`, `daemon.alive`, boot-time rows, …) is an equally valid, equally real
+ * "the daemon is alive" signal, and this reader has always taken the newest of all of them
+ * rather than any one step name. Ties/out-of-order lines are handled by comparing PARSED
+ * timestamps, never assuming ledger order.
  */
 export function deriveLastPoll(
   lines: ReadonlyArray<Record<string, unknown>>,
