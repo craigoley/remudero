@@ -775,7 +775,7 @@ doctrine: ids, PRs and costs preserved, descriptive prose deleted).
   **Nine of the eleven have their PR url printed in that gather's own follow-up harvest** — R22-2
   predicted zero such rows. **No costs or turns are stated** (P48).
 - **★ STRADDLERS — 2 CODE PRs BELONGING TO NO CYCLE (R23's SECOND FINDING, and the class R25 confirmed
-  at n=3).** **T71/#2182 `rmd receipt <pr>`** — P17's ratified receipts task, carried as *unbuilt* by
+  at n=3).** **T71/#2182 `rmd receipt <pr>`** — P17's ratified receipts task, left *uncredited* by
   six consecutive syncs — and **T499/#2181**, both merged from runs starting ~5 minutes BEFORE the
   marker. **TASK L exists to make this automatic.**
 - **UNCREDITED-RUN REMAINDER — 16 runs, $80.954**, verdicts `blocked_ci`×9, `incomplete`×6, `blocked`×5,
@@ -1510,7 +1510,7 @@ and are maintained IN PLACE, not per-cycle.
   seven. **L stays an OPEN RECONCILIATION over the merge set**, and clause (i) may not be implemented
   with a constant. **★ THE STING THAT MAKES L WORTH ITS RANK: #2612 — the PR that supplied the bounded
   promotion judge, ending a six-cycle dark instrument — IS ONE OF THIS CYCLE'S STRADDLERS**, credited to
-  no cycle by any instrument, exactly as W1-T71/#2182 (P17's ratified receipts task, asserted unbuilt in
+  no cycle by any instrument, exactly as W1-T71/#2182 (P17's ratified receipts task, still uncredited in
   six syncs after it had merged) was the filing evidence. **WHY THIS IS NOT AN EXISTING NUMBER:** TASK G
   emits merges no RUN owns, TASK H emits runs that own no MERGE, TASK K asks whether the run set is
   COMPLETE — all three operate INSIDE one window; L is the only one that looks ACROSS the seam, and no
