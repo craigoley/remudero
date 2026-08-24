@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -430,6 +430,210 @@ function npmScriptEntry(job: string, script: string): CiParityEntry {
   };
 }
 
+// ── host-caused suite reds (W1-T2234) ──────────────────────────────────────────────────────
+//
+// THE GAP THIS CLOSES. `ci:test` above shells the FULL `npm run test:ci` suite, and every
+// `runs-on:` in .github/workflows/ci.yml is `ubuntu-latest` (0 `macos` occurrences against a
+// control of 29 `ubuntu` ones), so a darwin machine's OWN quirks — a bash shipped at 3.2 with
+// no `declare -A`, an unprovisioned keychain, a BSD `date` without `-d`, no `/proc`, macOS's
+// own `__CF_USER_TEXT_ENCODING` env injection — have never once been seen by a required check.
+// Measured on darwin at `origin/main = 0c71906a`, unmodified: 26 of the suite's reds trace to
+// exactly those six causes, one of them (`declare -A CAPTURED=()`, deploy/recycle-container.sh
+// line 198, on a host whose `/bin/bash` is 3.2.57(1)-release) alone accounting for 17 — the
+// largest cluster by far, and shaped exactly like a catastrophic diff to a reader who does not
+// already know the host. A lane running `--ci-parity` on such a machine cannot tell which of
+// its reds are its own diff's and which are the machine's.
+//
+// WHAT THIS DOES NOT DO (design v of the task record — read it before extending this table).
+// It does not fix `deploy/recycle-container.sh` (a real, one-line, bounded portability defect,
+// left for its own task), does not rewrite the two platform-fact assertions (`/proc/meminfo`,
+// the CoreFoundation env leak) that need a different KIND of assertion rather than a workaround,
+// does not diagnose the `recovery-drill` pair (carried here as UNDIAGNOSED, not guessed at), and
+// does not add a macOS CI runner (a real cost against `WAIT_CAP_SECONDS`, for a set that is
+// mostly fixable without one). And it never skips a test on any platform to get there — a
+// skipped test is a green that proves nothing, and a darwin skip here would suppress 26 of them.
+//
+// NOT A REWRITE OF `lib/host-parity.ts`, and the overlap with it (two of its
+// `HOST_PARITY_BASELINE` entries name the SAME `fleet-heartbeat`/`worker-credential-preflight`
+// darwin divergences this registry does) is real and deliberately not merged. That module diffs
+// an ACTUAL captured TAP stream (`readTapFailures`) against declared test IDENTITIES, for the
+// mini-vs-ci review-judge comparison — it needs a caller who captured the run's text. This step
+// runs INSIDE `ci:test`'s own `stream: true` leaf, which by construction never has that text
+// (see above), so it predicts from host FACTS instead of diffing observed failures — a
+// different mechanism for a different input availability, not a second copy of the same one.
+// Their two darwin entries corroborate each other's counts rather than one copying the other.
+//
+// SO THE SHAPE IS SEPARATION, NOT SUPPRESSION: `ci:test`'s own PASS/FAIL is untouched by any of
+// this — same command, same argv, same `stream: true` (this module cannot capture that child's
+// output without reintroducing the "container ran for an hour with zero output" defect
+// `stream` was added to fix, and doing so would need an async spawn rippling through every
+// entry in this table — out of scope, same as it was the last time this file said so). Instead,
+// `HOST_CAUSED_SUITE_REDS` is a registry of what THIS host is independently known to produce,
+// keyed by cheap, dependency-injected HOST FACTS (bash's major version, `process.platform`,
+// whether `/proc/meminfo` exists) rather than by re-parsing `ci:test`'s own swallowed text — so
+// the report is available EVERY run, not only the ones where a caller happens to have captured
+// output lying around. `ci:host-caused-suite-reds` runs alongside `ci:test`, always reports
+// `ok: true` (it is informational, never a verdict of its own — the day this table gates a
+// merge on a HOST FACT rather than on a test result is the day it stops testing the diff), and
+// NAMES every cluster this host is expected to produce. Anything else `ci:test` fails on is, by
+// construction, never matched here — an undeclared or new red is never absorbed into the
+// host-caused set, and `ci:test`'s own loud FAIL is exactly as loud, on exactly the same set of
+// reds, as it was before this table gained a step.
+//
+// THE CORRECTED COUNT. 17 (bash) + 2 (keychain) + 2 (BSD date) + 2 (recovery-drill, undiagnosed)
+// + 1 (procfs) + 1 (CoreFoundation) + 1 (the W1-T2205 e2e) = 26 — the task record's own
+// falsifier: an earlier carried figure of 16 for the bash cluster summed to 25, one short of the
+// run's `# fail 26`; the per-file recount that produces 17 is what closes the gap.
+
+/** Cheap, host-scoped facts {@link HOST_CAUSED_SUITE_REDS} entries key off — never a live
+ *  `ci:test` result, which `stream: true` (above) makes structurally unavailable here. Every
+ *  field is dependency-injectable via {@link computeHostFacts} so a test proves this registry's
+ *  logic without needing an actual darwin/bash-3.2 machine to run on. */
+export interface HostFacts {
+  platform: NodeJS.Platform;
+  /** `undefined` when no `bash` was found or its version text didn't parse — treated as "does
+   *  not apply" by every entry that keys off it, never as "applies": a probe that cannot tell
+   *  must not guess a verdict either way. */
+  bashMajorVersion: number | undefined;
+  hasProcMeminfo: boolean;
+}
+
+/** The leading `\d+` before the first `.` in either `$BASH_VERSION` shape ("3.2.57(1)-release")
+ *  or `bash --version`'s prose shape ("GNU bash, version 3.2.57(1)-release ...") — `undefined`
+ *  on anything else, deliberately, rather than a guessed 0. */
+export function parseBashMajorVersion(bashVersionText: string): number | undefined {
+  const m = /(\d+)\./.exec(bashVersionText);
+  return m ? Number(m[1]) : undefined;
+}
+
+/** PURE — see {@link buildPreflightSummary}'s own precedent for why: a test hands this raw
+ *  strings/booleans and asserts the derived facts, no spawn or filesystem involved. */
+export function computeHostFacts(input: { platform: NodeJS.Platform; bashVersionText: string; hasProcMeminfo: boolean }): HostFacts {
+  return {
+    platform: input.platform,
+    bashMajorVersion: parseBashMajorVersion(input.bashVersionText),
+    hasProcMeminfo: input.hasProcMeminfo,
+  };
+}
+
+/** The impure edge: reads `process.platform`, spawns `bash` (via the SAME injectable
+ *  `PreflightSpawn` seam every other step in this table uses — never a second spawn
+ *  mechanism), and checks `/proc/meminfo` via an injectable `hasFile` (default `existsSync`).
+ *  A `bash` that cannot be spawned at all is caught locally and reads as `bashMajorVersion:
+ *  undefined`, exactly like unparseable version text — never a thrown error out of this step. */
+export function detectHostFacts(repoRoot: string, spawn: PreflightSpawn, hasFile: (path: string) => boolean = existsSync): HostFacts {
+  let bashVersionText = "";
+  try {
+    const res = spawn("bash", ["-c", "echo $BASH_VERSION"], { cwd: repoRoot });
+    bashVersionText = res.stdout ?? "";
+  } catch {
+    bashVersionText = "";
+  }
+  return computeHostFacts({ platform: process.platform, bashVersionText, hasProcMeminfo: hasFile("/proc/meminfo") });
+}
+
+/** One of the census's six causes (the `recovery-drill` pair is its own entry, undiagnosed,
+ *  per design (i) of the task record — named here rather than guessed at) — `count` and `file`
+ *  are the MEASURED census figures, `appliesTo` is the cheap host-fact predicate that decides
+ *  whether THIS host is expected to reproduce it. Never a test NAME: matching by name would
+ *  need real `ci:test` output this module cannot capture (see the file comment above), and
+ *  matching this coarsely is exactly why `appliesTo` reads host facts rather than guessing from
+ *  the file alone — a diff-caused break in one of these files still reads as `ci:test`'s own
+ *  loud, unaffected FAIL; nothing here ever inspects (or could inspect) which test actually
+ *  failed. */
+export interface HostCausedSuiteRedEntry {
+  file: string;
+  cause: string;
+  count: number;
+  note: string;
+  appliesTo: (facts: HostFacts) => boolean;
+}
+
+export const HOST_CAUSED_SUITE_REDS: HostCausedSuiteRedEntry[] = [
+  {
+    file: "test/recycle-container.test.ts",
+    cause: "bash-3.2-no-associative-arrays",
+    count: 17,
+    note: "deploy/recycle-container.sh:198 `declare -A CAPTURED=()` is bash-4 syntax; this host's /bin/bash has no associative-array support",
+    appliesTo: (f) => f.bashMajorVersion !== undefined && f.bashMajorVersion < 4,
+  },
+  {
+    file: "test/worker-credential-preflight.test.ts",
+    cause: "darwin-keychain-unprovisioned",
+    count: 2,
+    note: "ensureWorkerKeychain refuses headlessly on an unprovisioned darwin keychain — correct (W1-T235), not a defect",
+    appliesTo: (f) => f.platform === "darwin",
+  },
+  {
+    file: "test/fleet-heartbeat.test.ts",
+    cause: "bsd-date-control-arm",
+    count: 2,
+    note: "the test's GNU control arm inherits this host's real `date`, which is BSD on darwin, so the control is not a control",
+    appliesTo: (f) => f.platform === "darwin",
+  },
+  {
+    file: "test/recovery-drill.test.ts",
+    cause: "undiagnosed-ps-orphan-sweep",
+    count: 2,
+    note: "UNDIAGNOSED — carried from the census, not re-derived here (W1-T2234 design i); named honestly rather than guessed at",
+    appliesTo: (f) => f.platform === "darwin",
+  },
+  {
+    file: "test/dispatch-memory-governor.test.ts",
+    cause: "linux-procfs-absent",
+    count: 1,
+    note: "the probe's cgroup-limit read expects /proc/meminfo, which does not exist on darwin — a platform fact, not a defect",
+    appliesTo: (f) => !f.hasProcMeminfo,
+  },
+  {
+    file: "test/proof-spawner-env-isolation.test.ts",
+    cause: "macos-corefoundation-env-leak",
+    count: 1,
+    note: "macOS injects __CF_USER_TEXT_ENCODING into every child env below Node's own env; no allowlist can keep it out",
+    appliesTo: (f) => f.platform === "darwin",
+  },
+  {
+    file: "test/worker.test.ts",
+    cause: "w1-t2205-e2e-darwin-keychain-asymmetry",
+    count: 1,
+    note: "the e2e's CLAUDE_CODE_OAUTH_TOKEN determinism bypass (worker-home.ts) exists only on non-darwin; darwin has no token bypass at all",
+    appliesTo: (f) => f.platform === "darwin",
+  },
+];
+
+/** The subset of {@link HOST_CAUSED_SUITE_REDS} this host's `facts` predict. */
+export function hostCausedSuiteRedsForFacts(facts: HostFacts): HostCausedSuiteRedEntry[] {
+  return HOST_CAUSED_SUITE_REDS.filter((e) => e.appliesTo(facts));
+}
+
+/** Builds the `ci:host-caused-suite-reds` leaf — ALWAYS `ok: true` (design: informational, not
+ *  a verdict; see the file comment above for why this table must never gate a merge on a host
+ *  fact) and always names, by file/cause/count, exactly which registered clusters this host is
+ *  expected to produce, so a reader of `ci:test`'s FAIL can subtract them and know the rest is
+ *  the diff's own — loudly, by omission: anything `ci:test` failed on that is not named here is
+ *  necessarily new or diff-caused. */
+export function hostCausedSuiteRedsStep(facts: HostFacts): CiParityLeafResult {
+  const applicable = hostCausedSuiteRedsForFacts(facts);
+  const factsLine = `platform=${facts.platform}, bash-major=${facts.bashMajorVersion ?? "unknown"}, /proc/meminfo=${facts.hasProcMeminfo}`;
+  if (applicable.length === 0) {
+    return {
+      ok: true,
+      detail:
+        `PASS — 0 of ${HOST_CAUSED_SUITE_REDS.length} known host-caused suite-red cluster(s) apply on this host (${factsLine}); ` +
+        "any ci:test failure here is this diff's own",
+    };
+  }
+  const total = applicable.reduce((sum, e) => sum + e.count, 0);
+  const lines = applicable.map((e) => `  - ${e.file} — ${e.cause} (~${e.count} test(s)): ${e.note}`);
+  return {
+    ok: true,
+    detail:
+      `PASS — ${applicable.length} of ${HOST_CAUSED_SUITE_REDS.length} known host-caused suite-red cluster(s) apply on this host (${factsLine}), ` +
+      `~${total} red(s) attributable to the machine, not this diff:\n${lines.join("\n")}\n` +
+      "any ci:test failure NOT matching one of these clusters is this diff's own and must be treated as blocking (W1-T2234)",
+  };
+}
+
 /**
  * `CI_PARITY_TABLE` — one entry per .github/workflows/ci.yml job (fourteen, at filing time).
  * `runCiParity`'s drift step fails the moment `parseCiJobNames` finds a job this table does not
@@ -458,6 +662,11 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       // process capturing it. Its `FLAKE-RETRY:` line — the record that a second full pass began —
       // was invisible for the same reason.
       runStep("ci:test", () => shellOut(spawn, "npm run test:ci", "npm", ["run", "test:ci"], { cwd: repoRoot, stream: true })),
+      // W1-T2234: named separately from ci:test, never gating it — see the file comment above
+      // "ci:host-caused-suite-reds". ci:test's own command/argv/stream mode are untouched by
+      // this entry; it only ADDS a report of which known clusters this host is expected to
+      // produce, so a red ci:test on a non-CI host can be told apart from this diff's own.
+      runStep("ci:host-caused-suite-reds", () => hostCausedSuiteRedsStep(detectHostFacts(repoRoot, spawn))),
     ],
   },
   {
