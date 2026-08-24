@@ -290,7 +290,7 @@ function parseGrillOptions(text: string): EscalationOption[] {
     const raw = m[1].trim();
     const sep = raw.indexOf("|");
     const option = sep >= 0 ? { label: raw.slice(0, sep).trim(), detail: raw.slice(sep + 1).trim() } : { label: raw, detail: "" };
-    const key = `${option.label} ${option.detail}`;
+    const key = JSON.stringify([option.label, option.detail]);
     if (seen.has(key)) continue;
     seen.add(key);
     options.push(option);
