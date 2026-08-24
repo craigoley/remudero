@@ -72,6 +72,26 @@ export interface PushEmptyCommitOpts {
 }
 
 /**
+ * Raised when a lane's push is refused because the branch is not where the lane believed it
+ * was (W1-T1288). `expectedHeadSha` is the head the lane carried a lease for — the value it
+ * read before minting `newSha` — never the value observed on the remote, because a refused
+ * push must never have to know what actually happened out there; that is an operator's read,
+ * not this leaf's. See the module header on {@link gitPushEmptyCommit} for the two shapes
+ * this covers: a lease git itself rejects, and a lease git elided.
+ */
+export class LanePushForeignHeadError extends Error {
+  override name = "LanePushForeignHeadError";
+  constructor(
+    message: string,
+    public readonly branch: string,
+    public readonly expectedHeadSha: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+  }
+}
+
+/**
  * Push an EMPTY commit onto `branch`, minting a fresh head sha — the ABSENT-check-suite
  * remedy (W1-T186 follow-up). Returns the new sha.
  *
@@ -81,13 +101,40 @@ export interface PushEmptyCommitOpts {
  * anywhere else in src/. It is not a new outward path — it is the existing one, called with
  * a different ref.
  *
- * WHY PLUMBING RATHER THAN `commit --allow-empty`. The only caller is the sweep, which runs
- * inside the DAEMON'S OWN CHECKOUT. A `git commit` there would move that checkout's HEAD and
- * dirty the very tree `checkCliFreshness` gates on — the exact class of defect W1-T191 exists
- * to remove. `commit-tree` against the head's OWN tree writes a commit object to the object
- * database and touches no working tree, no index, and no local branch (the same discipline
- * `feedback-landing.ts` already uses). The push is a FAST-FORWARD — the new commit's parent is
- * the current head — so it is never a force-push and can never discard someone else's work.
+ * WHY PLUMBING RATHER THAN `commit --allow-empty`. The caller (the sweep's post-fix
+ * re-verification rung) runs inside the DAEMON'S OWN CHECKOUT. A `git commit` there would move
+ * that checkout's HEAD and dirty the very tree `checkCliFreshness` gates on — the exact class
+ * of defect W1-T191 exists to remove. `commit-tree` against the head's OWN tree writes a commit
+ * object to the object database and touches no working tree, no index, and no local branch (the
+ * same discipline `feedback-landing.ts` already uses).
+ *
+ * W1-T1288 — THE LEASE, AND WHY A FAST-FORWARD PARENT IS NOT ENOUGH ON ITS OWN. The new
+ * commit's parent is `headSha`, so the push IS a fast-forward from the head this call was
+ * TOLD about — but `branch` is the PR's OWN branch (`sweepPostFixReverification`'s `redrive`
+ * passes `pr.headRefName`), a ref other lanes push too, and `headSha` can go stale between the
+ * caller's read and this push. A plain `newSha:refs/heads/branch` push has no way to express
+ * that staleness: git's non-fast-forward check only fires when the ref EXISTS and disagrees:
+ * the incident this task is filed against (oper#lane-push-clobbered-a-shared-branch-2026-08-23,
+ * PR #2668) hit the window where the ref was momentarily ABSENT, so the plain push reported
+ * `[new branch]` and silently replaced a concurrent lane's work rather than rejecting. So this
+ * pushes with `--force-with-lease=refs/heads/<branch>:<headSha>` — a PRECONDITION, not a
+ * permission: it requires the remote ref to be exactly at `headSha` right now, and refuses
+ * (never creates, never replaces) the moment that stops being true, including while the ref is
+ * absent (an absent ref never equals a non-empty `headSha`).
+ *
+ * THE MEASURED ELISION TRAP (`task-id-reservation.ts`'s header, reused here rather than
+ * re-derived): a lease git can ELIDE still exits 0 without ever checking it, so a caller that
+ * trusts the exit code alone can read a lease-skipped push as a lease-honoured one. This
+ * function does not: after the push returns, it re-reads the remote ref
+ * (`git ls-remote origin refs/heads/<branch>`) and throws {@link LanePushForeignHeadError}
+ * unless it now reads exactly `newSha` — so an elided or otherwise-wrong result is never
+ * mistaken for success.
+ *
+ * A REFUSAL RESTORES NOTHING. Whether the lease is rejected by git or the post-push read
+ * disagrees, this function only throws — it never retries, never re-reads a "current" head to
+ * push again, and never force-pushes a second time. The remote ref is left exactly as it was
+ * found; deciding which lane's work survives a real clobber stays an operator judgement
+ * (design note iv), not something this leaf attempts.
  */
 export function gitPushEmptyCommit(
   repoDir: string,
@@ -98,11 +145,37 @@ export function gitPushEmptyCommit(
 ): string {
   assertLiveWriteAllowed("git-push", `pushing an empty commit to ${branch} to mint a fresh head sha`);
   const capture = opts.capture ?? defaultGitCapture;
+  const exec = opts.exec ?? defaultPushExec;
+  const ref = `refs/heads/${branch}`;
   // The head's OWN tree — so the commit is empty by construction, not by a flag.
   const treeSha = capture("git", ["-C", repoDir, "rev-parse", `${headSha}^{tree}`]).trim();
   const newSha = capture("git", ["-C", repoDir, "commit-tree", treeSha, "-p", headSha, "-m", message]).trim();
-  (opts.exec ?? defaultPushExec)("git", ["-C", repoDir, "push", "origin", `${newSha}:refs/heads/${branch}`], {
-    stdio: "ignore",
-  });
+  try {
+    exec("git", ["-C", repoDir, "push", `--force-with-lease=${ref}:${headSha}`, "origin", `${newSha}:${ref}`], {
+      stdio: "ignore",
+    });
+  } catch (err) {
+    // Rejected non-fast-forward, rejected lease, or the ref moved/vanished under the lease —
+    // git's exit code is the whole signal here, and every one of those cases means the same
+    // thing to this caller: refuse, touch nothing else, let the caller decide what's next.
+    throw new LanePushForeignHeadError(
+      `refused to push ${branch}: the branch is no longer at the believed head ${headSha} ` +
+        `(a concurrent writer moved or removed it) — nothing was pushed`,
+      branch,
+      headSha,
+      { cause: err },
+    );
+  }
+  // THE ELISION CHECK (see the doc comment above): trust the ref's ACTUAL resulting value,
+  // never the exit code alone.
+  const observed = capture("git", ["-C", repoDir, "ls-remote", "origin", ref]).trim().split(/\s+/)[0];
+  if (observed !== newSha) {
+    throw new LanePushForeignHeadError(
+      `push to ${branch} reported success but the remote ref reads ${observed ? observed : "<absent>"}, ` +
+        `not the pushed ${newSha} — a lease git elided rather than checked; treating this as a refusal`,
+      branch,
+      headSha,
+    );
+  }
   return newSha;
 }
