@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { CLAUDE_BIN_ENV_OVERRIDE } from "../src/lib/worker.js";
+import { runReview } from "../src/run-task.js";
 import {
   decideAutoMergeArmAtSha,
   lastPendingReviewStatusFromLedger,
@@ -33,14 +35,16 @@ function tmpDir(): string {
 
 const NOT_MERGED: PrLifecycleState = { merged: false, closed: false };
 
-// ── criterion 1 — EVERY DETECTOR POSTS PENDING FIRST (structural: these three functions shell
-// out to `gh` and/or spawn a worker, so — exactly like test/review.test.ts's own W1-T359 wiring
-// check on the same functions — their ordering is proven over source text, never by driving them
-// end-to-end) ─────────────────────────────────────────────────────────────────────────────────
+// ── criterion 1 — EVERY DETECTOR POSTS PENDING FIRST (these three functions shell out to `gh`
+// and/or spawn a worker, so their ordering is proven over source text — exactly like
+// test/review.test.ts's own W1-T359 wiring check on the same functions — EXCEPT where a seam
+// exists to drive it for real: the run lane's pending-before-the-reviewer-spawn half is asserted
+// end-to-end below, over what `gh` observes, because #2714 made that spawn injectable and a
+// source-text lock on its call site had already red-lined a PR that only moved it) ────────────
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
-test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending via postReviewPending BEFORE the diff fetch, the advisory reviewer spawn, and judgeReview", () => {
+test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending via postReviewPending BEFORE the diff fetch and judgeReview", () => {
   const start = runTaskSrc.indexOf("async function runReview(");
   const end = runTaskSrc.indexOf("// ── THE blocked_review FIX RUNG");
   assert.ok(start > -1 && end > start, "could not locate runReview's body in run-task.ts");
@@ -48,18 +52,167 @@ test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending vi
 
   const pendingIdx = body.indexOf("postReviewPending(");
   const diffIdx = body.indexOf('execFileSync("gh", ["pr", "diff"');
-  const spawnIdx = body.indexOf("await spawnWorker(");
   const judgeIdx = body.indexOf("const computed = judgeReview(");
 
   assert.ok(pendingIdx > -1, "runReview must call postReviewPending");
-  assert.ok(diffIdx > -1 && spawnIdx > -1 && judgeIdx > -1, "could not locate runReview's expensive-work call sites");
+  assert.ok(diffIdx > -1 && judgeIdx > -1, "could not locate runReview's expensive-work call sites");
   assert.ok(pendingIdx < diffIdx, "the pending post must precede the diff fetch");
-  assert.ok(pendingIdx < spawnIdx, "the pending post must precede the advisory reviewer spawn");
   assert.ok(pendingIdx < judgeIdx, "the pending post must precede judgeReview");
 
   // The TERMINAL post still replaces it on completion — the SAME single guarded site, unchanged.
   const terminalPostIdx = body.indexOf("const posted = await postReviewStatusGuarded({");
   assert.ok(terminalPostIdx > judgeIdx, "the terminal post must still run, after judging, exactly as before this task");
+});
+
+// The pending-post-BEFORE-the-advisory-reviewer-spawn half of criterion 1 used to live in the
+// source-text test above as `body.indexOf("await spawnWorker(")`. That was a lock on a CALL SITE,
+// not on the behaviour: #2717 replaced that call site and red-lined on this assertion alone, and
+// #2714 (9b279dd8) has since made the very same spawn injectable via `reviewerQueryFn` — so the
+// literal is one refactor from failing again over a property that never moved.
+//
+// Asserted BEHAVIOURALLY below instead, against what `gh` itself observes. The fake `gh` on PATH
+// appends every argv it is called with to a log file, and that log is SNAPSHOTTED at the moment
+// the advisory reviewer spawn is reached; the `remudero-review`/`state=pending` POST for this
+// head must already be in the snapshot. Two things make it a real assertion rather than a
+// tautology (W1-T1051's warning — never an assertion a comment could satisfy):
+//
+//  - it matches that ONE POST specifically, not "some gh call happened first", so moving the
+//    pending post below the reviewer block fails it; and
+//  - `runReview`'s own returned `reviewerOutcome` must not be `not_attempted`, so a green that
+//    survives the expensive work never being reached — the exact defect criterion 1 exists to
+//    catch — is impossible. `spawnReviewer: false` reproduces that shape and fails here.
+//
+// WHY THE SNAPSHOT HAS TWO OBSERVERS. `runReview`'s `spawnWorker` call takes no keychain seam, so
+// on darwin it runs the REAL `ensureWorkerKeychain` rung and refuses headlessly (measured on this
+// repo's own mini: `provision-failed` reading the login keychain), while on a linux CI runner the
+// injected `reviewerQueryFn` is reached and returns. BOTH mean control got to the spawn — the
+// property under test — so both snapshot, and the run's `reviewerOutcome` distinguishes them
+// (`success` vs `spawn_error`) without either becoming a skip. The end-to-end harness (fake `gh`,
+// env-override `claude` binary for the executable preflight, `CLAUDE_CODE_OAUTH_TOKEN` for the
+// non-darwin credential preflight, injected `reviewerQueryFn` so nothing is spawned or spent)
+// mirrors test/worker.test.ts's own W1-T2205 `runReview` end-to-end test, where it was measured.
+
+test("W1-T913 criterion 1 (run lane, behavioural): the remudero-review=pending POST has ALREADY happened by the time runReview reaches the advisory reviewer spawn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-review-pending-e2e-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-review-pending-e2e-gh-"));
+  const oldPath = process.env.PATH;
+  const oldClaudeBinOverride = process.env[CLAUDE_BIN_ENV_OVERRIDE];
+  const oldOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  try {
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    const ledgerPath = join(root, "ledger.ndjson");
+    const ghLog = join(root, "gh-calls.log");
+
+    // Never a real secret — the injected `reviewerQueryFn` means it is never sent anywhere. Present
+    // so the non-darwin credential preflight is deterministic on a CI runner with no credential
+    // file, exactly as test/worker.test.ts's own end-to-end test documents.
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token-never-sent-reviewerQueryFn-intercepts-the-spawn";
+
+    // `--version` must exit 0 for `defaultCanExecute` to accept it; never actually run as a worker.
+    const fakeClaude = join(binDir, "claude");
+    writeFileSync(fakeClaude, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeClaude, 0o755);
+    process.env[CLAUDE_BIN_ENV_OVERRIDE] = fakeClaude;
+
+    // Records its own argv FIRST, then answers only what runReview's plumbing needs before the
+    // reviewer spawn: readHeadShaRest, postReviewPending's lifecycle read and status POST, and
+    // `gh pr diff`.
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(ghLog)}
+case "$1 $2" in
+  "api "*)
+    case "$*" in
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0002"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr view")
+    case "$*" in
+      *headRefOid*) echo '{"headRefOid":"cafebabe0002"}' ;;
+      *state*) echo '{"state":"OPEN"}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") echo "" ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    let ghCallsAtReviewerSpawn: string | undefined;
+    const snapshotGhCalls = () => {
+      if (ghCallsAtReviewerSpawn === undefined) ghCallsAtReviewerSpawn = readFileSync(ghLog, "utf8");
+    };
+
+    const reviewerQueryFn = (() => {
+      snapshotGhCalls();
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "REVIEW_VERDICT 1: PASS",
+          session_id: "s-reviewer-pending-order",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+        };
+      })();
+    }) as unknown as Parameters<typeof runReview>[0]["reviewerQueryFn"];
+
+    const verdict = await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/1",
+      task: { id: "W1-T913", acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-xyzzy" }] },
+      report: "This report deliberately substantiates nothing.",
+      settingsFile: join(root, "settings.json"),
+      config: { claudeBin: "/bin/true", root } as never,
+      // The spawn's OWN outcome line, whichever way it went — the second observer.
+      log: (step: string) => {
+        if (step === "review.reviewer" || step === "review.reviewer.error") snapshotGhCalls();
+      },
+      say: () => {},
+      account: (r: never) => r,
+      spawnReviewer: true,
+      reviewerQueryFn,
+      // Injected so the post-verdict withdrawal never reaches the real `gh pr merge` boundary.
+      // Without it the run trips `live-write-guard`'s REFUSED gh-pr-merge (the guard checks the
+      // CALL, not the destination, so the PATH-stubbed `gh` above is deliberately not enough) —
+      // nothing live happens either way, but the boundary is not this test's business at all.
+      disarm: () => {},
+      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+      ledgerPath,
+      runId: "REVIEW-PENDING-ORDER-1",
+    } as never);
+
+    assert.notEqual(
+      verdict.reviewerOutcome,
+      "not_attempted",
+      "the advisory reviewer spawn must actually be reached — an ordering assertion that passes when the expensive work never runs is the defect, not the proof",
+    );
+    assert.ok(ghCallsAtReviewerSpawn !== undefined, "the reviewer spawn was reached but nothing snapshotted the gh log at that point");
+    assert.match(
+      ghCallsAtReviewerSpawn!,
+      /statuses\/cafebabe0002 -f context=remudero-review -f state=pending/,
+      "the remudero-review=pending POST for THIS head must already have been made by the time the advisory reviewer is spawned",
+    );
+
+    // The same fact from the run's own ledger, at the SAME head: the pending post really went
+    // through the one guarded site rather than merely reaching `gh` by some other route.
+    const pending = readLedgerLines(ledgerPath).filter((l) => l.step === "review.pending_posted");
+    assert.equal(pending.length, 1, "exactly one review.pending_posted line for this head");
+    assert.equal(pending[0]?.head_sha, "cafebabe0002");
+  } finally {
+    process.env.PATH = oldPath;
+    if (oldClaudeBinOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];
+    else process.env[CLAUDE_BIN_ENV_OVERRIDE] = oldClaudeBinOverride;
+    if (oldOauthToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    else process.env.CLAUDE_CODE_OAUTH_TOKEN = oldOauthToken;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(binDir, { recursive: true, force: true });
+  }
 });
 
 test("W1-T913 criterion 1 (rmd review's own start): reviewCommand posts remudero-review=pending via postReviewPendingDep BEFORE materialize() and before runReviewDep()", () => {
