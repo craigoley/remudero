@@ -1,0 +1,134 @@
+- id: W1-T2224
+  title: "the count arm's enumeration group accepts any whitespace-free token and `looksLikePath` admits anything containing a dot or a slash, so a compact diffstat written after a comma parses as an enumerated filename and FAILS A TRUE CLAIM — the third false positive on the same line, after a backtick and a paren, each of which earned its own patch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main (behind-count 0,
+    clone shallow-checked). `src/lib/review.ts` is 412,808 bytes and was read through git objects.
+    No suite, no spawning verb. Every case below was RUN against the real `bodyContradictsDiff`.
+
+    (1) THE TWO PREDICATES, RE-DERIVED. The count arm's enumeration group is
+    `([^\s,]+(?:\s*,\s*[^\s,]+)*)` — comma-separated, and every item WHITESPACE-FREE by
+    construction. `looksLikePath(token)` is `/[./]/.test(token)` — it admits any token containing a
+    DOT OR A SLASH. Membership is then exact-string `includes` against `diffFiles`.
+
+    (2) THE TRIGGER IS NARROWER THAN "A DIFFSTAT", AND SAYING SO MATTERS. MEASURED against a
+    one-file diff, the NARRATIVE forms do NOT reproduce — a `--stat` tail whose items carry spaces
+    cannot become enumeration items, because the group stops at the first whitespace. What DOES
+    reproduce is any COMPACT, whitespace-free token carrying a dot or slash: a numstat triple, a
+    `--stat` line joined by a pipe, a `+added/-deleted` shorthand, a dotted version token. The ASCII
+    hyphen is incidental — it is whitespace-freeness plus a dot or slash that decides, not the dash.
+
+    (3) IT IS THE THIRD ON THE SAME LINE, AND THE FIRST TWO EACH EARNED THEIR OWN PATCH. The
+    function carries both prior fixtures verbatim: PR #1192 (W1-T288), where the enumeration items
+    arrived in backticks and `includes` failed on every correctly-enumerated file; and PR #1209
+    (W1-T304), where the final item arrived with a trailing paren that the #1194 strip — which
+    handled a trailing full stop and backticks but not a paren — left in place. The repo's own note
+    on that: "#1194 shipped exactly that narrower pair and it was incomplete". Each was closed by
+    WIDENING THE STRIP for the wrapper just observed.
+
+    (4) SO THE COMMON CAUSE IS ONE PREDICATE, NOT THREE ACCIDENTS — BUT THE TWO DIRECTIONS DIFFER
+    AND THE SHARD MUST NOT BLUR THEM. All three end at the same expression,
+    `named.some((f) => !diffFiles.includes(f))`, and all three are FALSE POSITIVES. The first two
+    are a REAL path whose TEXT did not match; this one is a NON-PATH admitted as a path. What
+    unifies them is that both halves decide by TEXT SHAPE rather than by contract — which token is
+    a filename is inferred from punctuation, and membership from exact string equality. THAT is
+    W1-T1271's class (checks keyed to text rather than contract), CITED AND NOT RE-FILED.
+
+    (5) AND THE FAMILY IS KNOWN AND UNCLOSED — THE FUNCTION SAYS SO ABOUT ITS SIBLING ARM. The
+    quotation guard's own doc records the workaround this defect forces: paraphrasing to get past
+    the gate "silently destroys the most useful record of what went wrong". The same run that filed
+    this re-fired when the author described the defect in prose and was cleared only by FENCING the
+    example — so the cost is paid twice, once by the false block and once by the record it deletes.
+
+    (6) A LIVE FALSE NEGATIVE SITS BESIDE IT, MEASURED. Because `looksLikePath` requires a dot or a
+    slash, an EXTENSIONLESS path is invisible to this arm: a body enumerating `Makefile` over a diff
+    that does not contain it reports ZERO contradictions today. The count arm still catches a wrong
+    COUNT, but the enumeration arm cannot see the wrong FILE. This is not a second defect to fix
+    here; it is the constraint that decides the remedy's direction — see design (ii).
+  design: |
+    (i) THE FINDING IS THE PATTERN, AND THIS SHARD REFUSES TO BE THE FOURTH PATCH. Three observed
+    wrappers, two strip-widenings, and a third case that a strip cannot reach at all — because the
+    offending token is not a wrapped path but a non-path. Widening the strip again, or bolting a
+    diffstat-shaped exclusion onto `looksLikePath`, closes the case in hand and leaves the next
+    compact token to be discovered the same way. The task is to stop inferring FILENAME-NESS FROM
+    PUNCTUATION, not to enumerate one more punctuation form.
+
+    (ii) AND NARROWING `looksLikePath` IS THE WRONG DIRECTION — RATIONALE (6) IS WHY. It does not
+    falsely admit; it falsely REJECTS, and that rejection is already live for every extensionless
+    tracked path (`Makefile`, `LICENSE`, `Dockerfile`, `CODEOWNERS`). A tighter shape test buys a
+    narrower false positive by widening an existing false negative on the arm whose whole job is
+    catching a body that names the wrong file.
+
+    (iii) THE DIRECTION OF ERROR IS SETTLED BY THE FUNCTION'S OWN DOC AND MUST STAY THAT WAY. The
+    FALSE POSITIVE is the costlier side — it blocks a correct PR — and the sibling refusal to widen
+    `stripQuotedRegions` is the counterweight: that was refused because it "would let a real
+    contradiction hide behind a single backtick". Both constraints bind at once, which is precisely
+    why the remedy cannot be a threshold on either predicate.
+
+    (iv) THE SHAPE THAT WOULD ACTUALLY CLOSE IT. Decide membership against the CONTRACT the caller
+    already holds — `diffFiles` — rather than against a guess about the token. A token is an
+    enumerated filename when it corresponds to a member of the changeset (exactly, or by an
+    unambiguous suffix/basename rule stated in one place), and everything else in the enumeration is
+    prose the arm must ignore rather than judge. That is testable against all three fixtures at once,
+    which is the property a fourth strip-widening would not have.
+
+    (v) REFUSED BY NAME. The count arm STILL FIRES on a genuine false count — verified in rationale
+    (2)'s own run, where a wrong count and a wrongly-enumerated dotted file each still report one.
+    The ABSENCE and ENUMERATION arms are untouched. `stripQuotedRegions` IS NOT WIDENED: its
+    narrowness is deliberate and documented, and rationale (5) cites the reason. No exclusion list of
+    diffstat spellings.
+
+    (vi) NOT IN SCOPE, NAMED: the extensionless false negative of rationale (6), which this design
+    must not worsen but is not chartered to fix; `CHANGESET_CONTEXT_RE`'s anchoring; and the
+    shorthand arm.
+  acceptance:
+    - claim: "a true count claim followed by a compact diffstat is no longer reported as a contradiction"
+      proof: "unit test: test/count-arm-diffstat-token.test.ts"
+    - claim: "the two prior wrapper fixtures still pass unchanged"
+      proof: "unit test: test/count-arm-diffstat-token.test.ts"
+    - claim: "a genuinely wrong count is still reported"
+      proof: "unit test: test/count-arm-diffstat-token.test.ts"
+    - claim: "a genuinely wrong enumerated filename is still reported"
+      proof: "unit test: test/count-arm-diffstat-token.test.ts"
+    - claim: "an extensionless enumerated path is no less visible than it is today"
+      proof: "unit test: test/count-arm-diffstat-token.test.ts"
+    - claim: "the quotation guard is unchanged and a fenced example is still silenced"
+      proof: "unit test: test/count-arm-diffstat-token.test.ts"
+  files: [src/lib/review.ts, test/count-arm-diffstat-token.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#count-arm-diffstat-token-2026-08-24"
+  plan_refs: ["W1-T274", "W1-T288", "W1-T304", "W1-T308", "W1-T1271"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/count-arm-diffstat-token.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS. The count arm is part of a REQUIRED review gate; a change here
+    decides whether correct PRs are blocked and whether false claims still land.
+
+    THE BRIEF'S CHARACTERISATION IS NARROWED HERE RATHER THAN REPEATED. "It reproduces with an ASCII
+    hyphen too" is not what the measurement shows: the hyphen is incidental. A narrative `--stat`
+    tail does NOT reproduce, because its items carry whitespace and the enumeration group is
+    whitespace-free by construction. What reproduces is a COMPACT token carrying a dot or a slash.
+    Reporting the wider claim would have made the eventual fix chase the wrong variable.
+
+    THE ORIGINAL INCIDENT IS THE OPERATOR'S AND IS ATTRIBUTED. The 2026-08-24 body that was failed
+    on a true claim was not re-read from this host; what is re-derived here is the mechanism, every
+    reproducing and non-reproducing shape, both prior fixtures, and the live false negative.
+
+    ID PROVENANCE. THE ID WAS NOT INFERRED. Three reservations were free and unused at filing time
+    (W1-T2222, W1-T2223, W1-T2224), so "the next free id" would have been ambiguous; this shard uses
+    the id the brief names, confirmed reserved and unused on every surface.
+    `refs/rmd-id/W1-T2224` resolves to 6fdcf98ceae0eb33b15c012affdb185456fd7c1f, read over git
+    protocol; live negative control, `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR
+    MESSAGE WAS NOT JUDGED. REF-COUNT CHECK: 343 `refs/rmd-id/*` refs exist. Eight surfaces were
+    swept with a control PRE-QUALIFIED FOR EACH, the main-side one chosen MERGED rather than an
+    open-PR zero (W1-T2219); the trailer surface was read from squash-merge commit BODIES on main
+    rather than over REST, which has been returning 403 rate-limit payloads.
