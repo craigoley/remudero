@@ -1,0 +1,160 @@
+- id: W1-T2216
+  title: "THE PINNED KEY-SET GUARD IS VERIFIED BY HAND AND ASSERTED IN PROSE, SO NOTHING FAILS WHEN THE SCHEMA MOVES — and the two mechanical ways of checking it are both unavailable: the schema object is not exported at runtime and `keyof SandboxSettings` widens to `string`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-24 in a scratch worktree proved equal to `origin/main` at 7b5fe300 before any
+    reading; the clone was checked and already full (2,096 commits). `sdk.d.ts` is 367,141 bytes
+    and was read from the installed tree, never through the contents API.
+
+    (1) THE SETS ARE EQUAL TODAY, RE-DERIVED BY THE METHOD THIS SHARD IS ABOUT. `SANDBOX_KEYS`
+    (`src/lib/settings.ts`) carries 15 entries. The live `SandboxSettingsSchema` top-level members
+    were extracted by opening at its declaration (`sdk.d.ts:2889`) and tracking BRACE DEPTH to its
+    close (`:2988`), taking only names at depth 1 — never by proximity or a flat line regex.
+    Diffed both directions: IN-SCHEMA-BUT-UNPINNED **none**; PINNED-BUT-NOT-IN-SCHEMA **none**.
+    Exactly equal, at SDK **0.3.233** — the version agreed by the worktree's `node_modules`,
+    `package-lock.json`, and the daemon container's own tree.
+
+    (2) AND THE RECORD DISAGREES WITH THE FACT. `src/lib/settings.ts` carries the marker
+    "SDK 0.3.209 / CLI 2.1.209" — four occurrences of `0.3.209` in that file — while the set it
+    labels is current with 0.3.233. Someone re-pinned the set and left the marker behind, so the
+    ONE artefact a reader would consult to decide whether the guard is current says the wrong
+    thing, in the safe-looking direction.
+
+    (3) WHY THE GUARD IS LOAD-BEARING AT ALL. Every sandbox schema object is `z.core.$strip` — 17
+    markers in `sdk.d.ts` against ZERO `$strict` — so a key the schema no longer carries is
+    discarded with no warning and no refusal. The guard is the only thing standing between a schema
+    drift and a silent no-op, and its currency is asserted by prose. W1-T1289 already records the
+    strip behaviour and the stale `$comment` in `settings/worker.json`; it is cited and NOT
+    re-filed. This task is about the guard having no enforcer, not about the strip behaviour.
+
+    (4) Q1 — THE RUNTIME ROUTE IS UNAVAILABLE, MEASURED. Requiring the package and listing its
+    exports gives 29 names, and `SandboxSettingsSchema` is NOT among them; nothing matching
+    `/[Ss]chema/` is exported at all. Control on the same read: `query` IS present, so the module
+    loaded and the enumeration is real. So "import the schema object and read its keys" cannot be
+    written.
+
+    (5) AND THE TYPE-LEVEL ROUTE IS VACUOUS, WHICH IS THE MORE DANGEROUS FINDING BECAUSE IT LOOKS
+    LIKE IT WORKS. `SandboxSettings` IS an exported type (`sdk.d.ts:2884`,
+    `z.infer<ReturnType<typeof SandboxSettingsSchema>>`) and it DOES resolve under the project's own
+    `tsconfig.json` — assigning `keyof SandboxSettings` to `number` errors TS2322, so the import is
+    live. But assigning the string `"zzz-not-a-member"` to `keyof SandboxSettings` compiles
+    CLEANLY: the key type has widened to `string`. A `Record<keyof SandboxSettings, true>`
+    exhaustiveness map therefore CANNOT FAIL — falsified in both directions, by deleting a member
+    (simulating an SDK addition) and by adding a bogus one (simulating a removal); both compiled at
+    exit 0. A test built that way would be a proof that cannot fail, which is the shape this repo
+    already refuses elsewhere.
+
+    (6) SO THE ONLY MECHANICAL ROUTE LEFT IS PARSING THE DECLARATION FILE, AND ITS RISK MUST BE
+    STATED RATHER THAN GLOSSED. Brace-depth tracking from the declaration is strictly better than
+    proximity or a flat regex — it cannot mistake a nested `network`/`filesystem`/`credentials`
+    member for a top-level one, which is exactly the error a line-based scan makes here. It is
+    still a parser over a GENERATED file whose formatting no contract guarantees. A test that
+    parses a `.d.ts` by regex is its own future defect, and the only thing that makes it shippable
+    is that it must fail LOUDLY when its own assumptions break rather than returning an empty set
+    and reporting equality.
+
+    (7) NOTHING TESTS THIS TODAY. `SANDBOX_KEYS` occurs ZERO times in `test/settings.test.ts`;
+    control, that suite exists and carries tests, and the same file is where `denyRead`'s two shape
+    assertions live. So the set is not compared to anything, by any means, anywhere.
+  design: |
+    ONE CONCERN: the guard's currency must be enforced by something that fails, not asserted by a
+    comment. Not the guard's contents, not the settings file, not the strip behaviour.
+
+    (i) THE ENFORCER PARSES THE DECLARATION, BECAUSE THE OTHER TWO ROUTES ARE CLOSED. Rationale (4)
+    and (5) rule out the runtime object and the type-level map by measurement. The test extracts
+    the top-level member names of `SandboxSettingsSchema` by brace depth from its declaration and
+    compares them to `SANDBOX_KEYS` in both directions.
+
+    (ii) AND THE PARSER MUST REFUSE ITS OWN FAILURE, WHICH IS THE HALF THAT MAKES (i) SAFE. Before
+    comparing, the extraction asserts it found a PLAUSIBLE set — non-empty, and containing anchors
+    that are load-bearing enough that their disappearance is itself news (`enabled`, `network`,
+    `filesystem`). An extraction that returns nothing must FAIL AS A PARSER FAULT, never pass as
+    "the schema is empty". A silent empty read reporting equality is precisely the defect this task
+    exists to close, reintroduced one layer down.
+
+    (iii) Q2 — ON DRIFT IT FAILS CI, AND THE COST IS NAMED RATHER THAN WAVED THROUGH. Failing on an
+    SDK bump is the point: it forces a human to re-pin, which is exactly what `settings.ts`'s own
+    comment already instructs ("When the platform is bumped … re-pin from the schema dump"). It
+    DOES block unrelated work on the day of a bump, because it is a repo-wide suite and any PR goes
+    red until someone re-pins. That is accepted here for one reason: the bump is a DELIBERATE act
+    that lands as a lockfile change, so the block is scoped to a moment someone chose, not to
+    random days — and the alternative, a warning, is what the current comment already is.
+
+    (iv) THE FAILURE MESSAGE NAMES THREE THINGS OR IT IS NOT ACTIONABLE: the keys ADDED by the
+    schema, the keys REMOVED from it, and the SDK VERSION it measured against. A bare "sets differ"
+    sends the next reader back to the 367 KB file this test exists to read for them.
+
+    (v) THE COMMENT FIX RIDES WITH THE BUILD, AS THE ARTEFACT AND NOT THE REMEDY. The marker
+    becomes a statement of what was verified and when — the shape "key sets verified equal to
+    SandboxSettingsSchema at SDK 0.3.233, 2026-08-24" — so a bare version number cannot go stale
+    the same way. THE TEST IS THE REMEDY. This is not a documentation task and must not be built as
+    one: a change that fixes only the comment has closed nothing.
+
+    (vi) NOTHING AUTO-UPDATES `SANDBOX_KEYS` FROM THE SCHEMA. An added key is a DECISION about what
+    a worker's settings may declare, not a sync — the test reports the delta and stops. A criterion
+    pins that the guard's own refusal behaviour is unchanged.
+
+    (vii) WHAT MUST NOT CHANGE: the four allowlisted domains, `api.anthropic.com` staying ABSENT
+    from them, `failIfUnavailable: true`, and the guard itself — which is only GAINING AN ENFORCER
+    and is never relaxed. Nothing here edits `settings/worker.json`.
+  acceptance:
+    - claim: "the pinned key set is compared to the live schema's members in both directions"
+      proof: "unit test: test/settings.test.ts"
+    - claim: "an extraction that finds no plausible member set fails as a parser fault rather than reporting equality"
+      proof: "unit test: test/settings.test.ts"
+    - claim: "a drift failure names the added keys, the removed keys and the version it measured"
+      proof: "unit test: test/settings.test.ts"
+    - claim: "the guard still refuses an unknown or misplaced key exactly as it does today"
+      proof: "unit test: test/settings.test.ts"
+    - claim: "the pin marker records what was verified and when, not a bare version"
+      proof: "unit test: test/settings.test.ts"
+  files: [src/lib/settings.ts, test/settings.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#pinned-key-set-guard-has-no-enforcer-2026-08-24"
+  plan_refs: ["W1-T1289", "W1-T2201"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/settings.test.ts`, declared in `files:` and already existing.
+
+    `risk: high` IS RULE 19'S SPAN. `files:` names two stems. The blast radius is one guard module
+    and its suite — but the band is honest for a second reason: criterion 2 is the one that decides
+    whether this task closes anything. A parser that silently returns an empty set and passes
+    reproduces the exact defect being fixed, one layer down, and would be indistinguishable from
+    success on the day it mattered.
+
+    THE TWO ALTERNATIVES WERE MEASURED, NOT ASSUMED, AND BOTH ARE CLOSED. The runtime object is not
+    exported (29 exports, none matching `/[Ss]chema/`, control `query` present). The type-level map
+    is vacuous: `SandboxSettings` resolves — assigning `keyof SandboxSettings` to `number` errors
+    TS2322 — but a bogus string assigns to `keyof SandboxSettings` cleanly, so the key type has
+    widened to `string`. That was falsified in BOTH directions, by removing a member and by adding
+    a bogus one; both compiled at exit 0 under the project's own `tsconfig.json`. Recorded because
+    a future reader will otherwise propose the type-level map as the obvious clean fix, and it
+    would ship a check that cannot fail.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND CONFIRMED UNUSED BEFORE ANYTHING WAS WRITTEN.
+    `refs/rmd-id/W1-T2216` resolves to `a2c785899f96fe3db703df389b88840bd7c6063b` against a
+    namespace of 335 such refs. ALL EIGHT SURFACES CARRIED A CONTROL THAT FIRES AND NONE WAS
+    DISQUALIFIED — the board has six open PRs. PER THE OPERATOR'S OWN RULING, W1-T2211 AND W1-T2213
+    WERE EXCLUDED AS CONTROLS FROM THE OUTSET RATHER THAN TRIED AND DISCARDED: both read zero on
+    main only because their filing PRs are open, so neither discriminates. The main-tree surfaces
+    were controlled on W1-T1289 instead, which reads 1, 1 and 2. The eight: shard filenames 0; plan
+    `- id:` lines 0; the reservation 1, which is the pre-mint, against W1-T2213's own at 1; open PR
+    titles 0 against W1-T2215 at 1; open PR head branches 0 against a `run-W1-T` head at 1; open PR
+    file lists 0 with coverage at six captured of six enumerated, controlled on total file entries
+    reading 7 across the same heads; merged trailers 0 against `Remudero-Task: W1-T2201` at 1, with
+    489 trailer-carrying commits on main; and merged subject credit 0 against W1-T1289 at 2, with
+    `run-W1-T2216-*` at 0 against a namespace of 87 `run-*` branches.
+
+    THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE. Two markers at every one of the
+    six open PR heads and at main: occurrences of `0.3.209` in `src/lib/settings.ts`, and
+    occurrences of `SANDBOX_KEYS` in `test/settings.test.ts`. Main reads 4 and 0; every head reads
+    exactly 4 and 0. No head is re-pinning the marker and no head is testing the set — the second
+    zero is rationale (7)'s finding, and the first marker being non-zero and uniform is the control
+    that the reader worked.
