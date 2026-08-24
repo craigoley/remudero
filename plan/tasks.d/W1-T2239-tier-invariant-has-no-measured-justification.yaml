@@ -1,0 +1,162 @@
+- id: W1-T2239
+  title: "G-17 asserts the Architect must outrank implement workers, and the retro's own gather never measures whether the tier gap buys anything — the four enforcement sites are authoring lanes carrying 3.9% of measured spend, and the one published measurement of harness-authoring finds that ability flat in base capability, so this shard adds the evidence W1-T167 already promised rather than moving any tier"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (6c278f1b4f1a30e30a1838120dfc0926332201eb), clone shallow-checked `false`. Files over 1 MB read
+    through git objects, never the Contents API. No suite, no spawning verb, no poller. Ledger read
+    through `resolveLedgerUnion` at the STATE dir, every step name taken from source, every zero
+    controlled.
+
+    (1) WHAT THE INVARIANT ACTUALLY ENFORCES, RE-DERIVED. `assertArchitectAboveWorker`
+    (`src/lib/retro.ts`) throws when `tierOf(architectModel) <= tierOf(workerModel)`. `tierOf`
+    substring-matches a config-maintained table — haiku 1, sonnet 2, opus 3, fable 3 — and returns 0
+    for an unknown string. It is FAIL-CLOSED BY THROWING, not by degrading: the lane dies. Four call
+    sites in `src/run-task.ts`, all Architect-tier authoring lanes — the retro, the triage rung, the
+    plan lane, and the inbox draft rung. The reviewer's tier and the risk judge's veto tier are NOT
+    among them and are out of scope here.
+
+    (2) WHY IT EXISTS, AND THIS IS THE PART THAT DECIDES HOW MUCH THE PAPER BEARS. It is a Craig
+    directive recorded in MASTER-PLAN §9, and its rationale is MIXED rather than purely one thing.
+    The plan text gives a CAPABILITY reason — the main agent "reasons through the plan and
+    orchestrates" — while `retro.ts`'s own doc comment gives a JUDGE-OVER-JUDGED reason: the
+    Architect "MUST ride a higher tier than the implement workers IT REVIEWS", and "a
+    same-or-lower-tier synthesizer is not an Architect". MASTER-PLAN separately applies G-17 to the
+    flight judge on the same reasoning, and `.remudero/mounts.yaml` applies it to the judge mount.
+
+    SO THE PAPER BEARS ON ONE HALF AND NOT THE OTHER, AND THIS SHARD IS SCOPED TO THE HALF IT
+    TOUCHES. Where the justification is ratification authority — a synthesizer that adjudicates
+    another agent's output should not be its peer — no capability measurement refutes it, and this
+    shard does not argue against it. Where the justification is that a stronger model AUTHORS BETTER
+    HARNESS TEXT, that is an empirical claim this repo has never tested.
+
+    ALSO NOTE, AND THE INVARIANT IS RELATIVE: MASTER-PLAN says in terms that "an economy install may
+    run Haiku workers under a Sonnet Architect and still comply". G-17 asserts an ORDERING, never
+    opus specifically. Nothing here proposes removing the ordering.
+
+    (3) THE CITATION, READ RATHER THAN TITLED. "Harness Updating Is Not Harness Benefit:
+    Disentangling Evolution Capabilities in Self-Evolving LLM Agents", Lin et al., arXiv 2605.30621v1,
+    28 May 2026, fetched and quoted at `arxiv.org/html/2605.30621v1`. THE TITLE IS AN IDENTITY CLAIM
+    BETWEEN TWO CAPABILITIES, NOT A NEGATION: every measured gain in it is POSITIVE. Its abstract
+    separates them — "harness-updating is flat in base capability" while "harness-benefit is
+    non-monotonic in base capability".
+
+    FINDING 1 (updating, flat): "The gap between the best and worst evolver is at most 3.1
+    percentage points (pp) on any benchmark", and "no evolver dominates across all substrates". On
+    the evolver table Qwen3-235B leads SWE at 8.2 pp and ranks last on MCP-Atlas at 0.6 pp, against
+    Opus 4.6's 7.4 and 3.6. On SkillsBench, Qwen3.5-9B posts 3.8 pp against Opus 4.6's 2.3, and the
+    case study finds "both evolved skills encode procedurally similar guidance and enable the same
+    agent to solve the task".
+
+    FINDING 2 (benefit, non-monotonic): on SWE, Qwen3-235B +19.3 and GPT-OSS-120B +15.8 against Opus
+    4.6 +2.6, Sonnet 4.6 +2.8, Haiku 4.5 +2.4. Weak-tier failure traces to ACTIVATION rather than to
+    authoring — "the skill-load rate is near ceiling for Opus 4.6, Sonnet 4.6, and Qwen3-235B
+    (0.957–0.961), but drops to 0.446 for GPT-OSS-120B and 0.251 for Qwen3-32B" — and strong-tier
+    flatness to a ceiling.
+
+    (4) Q1 — THE MAPPING'S LIMIT, STATED BEFORE ANY CONCLUSION, BECAUSE THE SHARD IS REFUTABLE
+    WITHOUT IT. The paper's "harness" is the artifact set an agent LOADS AT TASK TIME: skills,
+    prompts, memories, tools. `CLAUDE.md` is one of those, and so is a skill file. A PLAN SHARD IS
+    NOT — it is a work item consumed by a dispatcher, not context an agent loads to perform better.
+    So Finding 1 bears on RULE AND SKILL AUTHORING and says NOTHING DIRECTLY about
+    specification-writing, which is most of what the Architect lanes here actually produce.
+
+    WHAT REMAINS IS AN ARGUMENT, AND IT IS WRITTEN AS ONE. The argument is that G-17's
+    capability half rests on an untested premise, that the nearest published evidence on the
+    adjacent activity points away from it rather than toward it, and that this repo has the ledger to
+    settle its own version of the question. It is NOT a measurement of this repo, and it is NOT a
+    claim that the paper refutes G-17. Anyone building this must keep that distinction; asserting
+    more than this is the fastest way for the build to be correctly refused.
+
+    (5) Q2 — THIS FLEET'S ACTUAL ALLOCATION, MEASURED. `resolveLedgerUnion` at the state dir:
+    ok=true, 672 archives, live file read, 0 unread on every query. Window across the four lanes
+    2026-07-14T11:14:29.696Z → 2026-08-14T15:04:16.143Z; the corpus is stale relative to today, so
+    these are historical shares and not current ones. Notional `cost_usd`/`total_cost_usd` —
+    MASTER-PLAN's own cost semantics say this is API-equivalent price on subscription, not billed
+    spend, so the SHARES are the finding and the dollar totals are not a bill.
+
+      implement, step `verdict`          613 rows   $3631.58   85.6%   newest 2026-08-13T00:30:48Z
+      advisory reviewer, `review.reviewer` 561 rows $445.69    10.5%   newest 2026-08-12T23:47:20Z
+      retro Architect, `retro.synthesized`  18 rows $85.94      2.0%   newest 2026-08-12T12:47:53Z
+      triage Architect, `triage.synthesized` 74 rows $80.20     1.9%   newest 2026-08-14T15:04:16Z
+
+    THE ARCHITECT LANES ARE 3.9% OF MEASURED NOTIONAL SPEND, SO THIS FINDING IS ABOUT THE
+    INVARIANT'S JUSTIFICATION AND NOT ABOUT MONEY. Say it that way in any build; a cost argument
+    here would be false. Model attribution on the lanes agrees with the mount table where it is
+    present — retro `opus`×9 / `claude-opus-5`×7, triage `claude-opus-5`×52 / `opus`×22, reviewer
+    `sonnet`×525 — but 451 of 613 `verdict` rows carry NO `model` key at all, so the implement lane's
+    model mix is NOT established by this corpus and must not be quoted as though it were.
+    `plan.start` and `plan.synthesized` read 0 rows, so the plan lane has no observed spend in this
+    window; the step names were taken from source after guessed names (`retro.architect`,
+    `triage.architect`, `plan.verdict`) each read a clean 0. Control on the same union:
+    `review.posted` 1623 rows, `run.start` 787 rows.
+
+    (6) AN ADJACENT INCONSISTENCY FOUND WHILE RE-DERIVING, RECORDED NOT FIXED. `.remudero/mounts.yaml`
+    states that the Architect roles "all ride via architectModel(config, mounts) — a mount-table edit
+    here, not a code change". THREE of the four call sites pass the mounts table. THE PLAN LANE DOES
+    NOT: `src/run-task.ts` calls `architectModel(config)` with no second argument, so it resolves
+    through `config.architectModel ?? "opus"` and never reads the `architect:` row. Read the line,
+    not the grep's line number — it is the bare one-argument call, and `loadMounts` is invoked on the
+    NEXT line for other purposes. That is the same class as the #781 finding that a mounts row can
+    look authoritative while a code-level default governs. Out of scope for this shard's own change;
+    named here so whoever tunes the Architect mount knows one lane will not follow.
+
+  acceptance:
+    - claim: "the retro gather reports the architect-lane share of spend beside the per-class routing data it already collects"
+      proof: "unit test: test/tier-invariant-evidence.test.ts"
+    - claim: "the report names the window it covers and the newest row it saw, so a stale corpus cannot read as a current share"
+      proof: "unit test: test/tier-invariant-evidence.test.ts"
+    - claim: "a lane whose rows carry no model key is reported as unattributed rather than folded into a model total"
+      proof: "unit test: test/tier-invariant-evidence.test.ts"
+    - claim: "notional cost is labelled as api-equivalent rather than presented as billed spend"
+      proof: "unit test: test/tier-invariant-evidence.test.ts"
+    - claim: "the tier invariant still throws on a same-or-lower-tier architect exactly as it does today"
+      proof: "unit test: test/tier-invariant-evidence.test.ts"
+    - claim: "no mount row and no configured model is altered by this change"
+      proof: "unit test: test/tier-invariant-evidence.test.ts"
+  files: [src/lib/retro.ts, test/tier-invariant-evidence.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#tier-invariant-justification-2026-08-24"
+  plan_refs: ["W1-T63", "W1-T64", "W1-T167", "W1-T21"]
+  note: |
+    NO TIER MOVES ON THIS SHARD AND THE INVARIANT IS NOT DELETED. It proposes a MEASUREMENT and a
+    RE-EXAMINATION, not a downgrade. W1-T167 established routing as policy data with per-class cost
+    and outcome ledgered SO THE RETRO CAN EVALUATE IT; this is an input to that evaluation and
+    nothing more. `assertArchitectAboveWorker` keeps throwing on a same-or-lower-tier Architect,
+    `enforceTierInvariant` keeps rejecting a violating `mounts.yaml` at load, and the `architect:`
+    row is not edited.
+
+    THE REVIEWER'S TIER AND THE RISK JUDGE'S VETO TIER ARE OUT OF SCOPE. The judge mount rides opus
+    for a reason `.remudero/mounts.yaml` states independently — it supervises a worker and must
+    outrank what it supervises — and that is the ratification half of §2 above, which no capability
+    measurement speaks to. Do not let a build widen into them.
+
+    AND THE PAPER IS EVIDENCE FOR AN ARGUMENT, NEVER A MEASUREMENT OF THIS REPO. Its harness is
+    task-time context — skills, prompts, memories, tools — and a plan shard is a work item, not
+    context. A build that cites it as though it measured specification-writing here should be
+    refused. What this shard actually asks for is the local measurement, because this fleet's own
+    ledger can answer its own version of the question and never has.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (retro, tier-invariant-evidence) at risk:medium
+      — Rule 19: raise to risk:high or decompose into one task per concern
+
+    Rule 19 derives the concern from each declared path's STEM, so
+    a source file and the new test that falsifies it read as two concerns whenever the test is not
+    named after the source. AND THE BAND EXEMPTS RATHER THAN CLEARS: `sizingViolation`
+    (`src/lib/task-linter.ts`) returns `undefined` on its first line at `risk: high`, so that
+    refusal is the only scoring of this span this shard will ever get.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/tier-invariant-evidence.test.ts`, declared in `files:` and absent
+    from this tree, so on the filing PR each resolves through W1-T456's forward-reference carve-out
+    to `not_yet_built`.
