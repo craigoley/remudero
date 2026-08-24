@@ -37,6 +37,62 @@
     SURFACE half — that `rmd status` advertises tasks the dispatcher refuses. W1-T1201 owns the
     staleness clamp whose absence closed those PRs in the first place. This task owns only the
     predicate's reading.
+    (6) THE REMEDY SHIPPED ON ONE ARM AND THE HAZARD IS STILL LIVE ON THE OTHER. RE-DERIVED
+    2026-08-24 with `resolveLedgerUnion` pointed at the STATE DIR
+    (`/home/craigoleyagent/rmd-state2/state`, never the checkout's): archiveCount 23, ok true,
+    unread 0, control `"step":"risk_judge.decision"` reading 177. `"step":"dispatch.skipped"` totals
+    1,841 with its NEWEST ROW at 2026-08-24T17:18:38.984Z; of those, `reason:
+    "run-branch-already-pushed"` accounts for 894, newest 2026-08-24T17:18:38.346Z. CONTROL, so the
+    reason filter discriminates: the other 947 read `open-pr`.
+
+    (7) A CORRECTION TO THE TASK COUNT THIS AMENDMENT WAS HANDED, AND IT ORIGINATED IN AN EARLIER
+    TRUNCATED READ OF MY OWN. The 894 span SEVENTEEN distinct tasks, not eight. W1-T1098, W1-T1101,
+    W1-T1109 and W1-T1000002 at 197 each; W1-T1095 at 72; W1-T1269 at 23; and ELEVEN tasks at 1 each
+    — W1-T912, W1-T981, W1-T1009, W1-T499, W1-T1027, W1-T446, W1-T1085, W1-T1079, W1-T1110,
+    W1-T1104, W1-T1225. The arithmetic closes: 4x197 + 72 + 23 + 11 = 894. The earlier report showed
+    only the top eight because its own display was sliced at eight, and the figure was carried
+    forward as though it were the population.
+
+    (8) EVERY ONE OF THE 894 CAME THROUGH THE DAEMON. Grouped by `lane`, the reason reads
+    `daemon=894` and NOTHING ELSE — zero drain-lane rows of this reason, ever. CONTROL on the same
+    field: the other `dispatch.skipped` rows read `daemon=935, undefined=12`, so `lane` is populated
+    and does discriminate.
+
+    (9) AND THE EXCLUSION IS BUILT, SHIPPED AND WIRED TO THE WRONG LANE. `drain.ts:1680` and
+    `:2033` both read `pushedRunBranches.has(id) && !closedUnmergedRunBranches?.has(id)`, and
+    `drain.ts:1673`'s own comment names this task: "W1-T1207: `&& !closedUnmergedRunBranches?.has(id)`
+    is the whole fix". `daemon.ts:3023` reads `pushedRunBranches.has(id)` ALONE — no exclusion, and
+    no `closedUnmergedRunBranches` built anywhere in that file. The implementation merged as #2519
+    (`09f39332`, 2026-08-22T18:48:52Z, "fix(drain): stop a closed-unmerged PR's run branch from
+    blocking dispatch forever") and carries this task's trailer.
+
+    (10) THE STRUCTURAL REASON THE OTHER ARM COULD NOT BE REACHED, WHICH IS THE PART WORTH KEEPING.
+    #2519 touched exactly three files — `src/lib/drain.ts`, `src/run-task.ts` and
+    `test/run-branch-pr-state.test.ts` — and ZERO lines of `src/lib/daemon.ts`. THOSE THREE ARE
+    PRECISELY THIS SHARD'S OWN `files:`. `src/lib/daemon.ts` IS NOT IN IT, so a diff that had wired
+    the daemon site would have been out of declared scope. The fix did not miss the live path by
+    oversight; the record it was built from never named it.
+
+    (11) THE EFFECT IS REAL BUT PARTIAL, MEASURED EITHER SIDE OF THE MERGE. Of the 894, EIGHT
+    HUNDRED AND SEVENTY fired before #2519 merged and TWENTY-FOUR after. The post-fix remainder is
+    two tasks: W1-T1269 at 23 (newest 2026-08-24T17:18:38.346Z) and W1-T1225 at 1. So the rate fell
+    sharply and the hazard did not close — every post-fix instance is on the lane the fix could not
+    touch.
+
+    (12) AND THE REAPER'S HELD BRANCHES ARE NOT THIS POPULATION — RECORDED SO NOBODY RE-RUNS THE
+    CENSUS. `rmd reap-branches` reports 73 held (136 on origin, 6 guarded, 57 deletable), and ZERO
+    of the 73 is un-dispatching a queued task. The two sets are disjoint BY CONSTRUCTION: a
+    closed-unmerged PR's branch HAS a PR, so the reaper sorts it into deletable, while the hold
+    bucket is "no PR, commits not in main". Of the 17 tasks in (7), five have no branch on origin at
+    all and the three checked that do — W1-T1269, W1-T912, W1-T981 — are all classified DELETABLE,
+    not held. The hold bucket is the wrong place to look for this defect.
+
+    (13) WHAT MUST NOT CHANGE. THE GUARD KEEPS FIRING: it closed a real seconds-wide cache blind
+    spot (rationale (1)-(2)) and a task whose run branch genuinely is in flight must still be
+    skipped — the three sub-one-day branches in the census are live runs and their skips are the
+    mechanism working. AND NOTHING AUTO-DELETES A BRANCH TO UNBLOCK A TASK: the reaper's hold is
+    correct, 53 of its 73 carry exactly one commit not in main, and for a branch with no PR that may
+    be the only copy of that work. The remedy is the predicate, never the branch.
   design: |
     (i) THE PR STATES, DECIDED BY WHAT THE PROBE IS FOR. OPEN and DRAFT still mean in flight — a
     dispatch would collide with a live run, which is exactly what W1-T534 built this to prevent.
