@@ -1,4 +1,4 @@
-- id: W1-T2202
+- id: W1-T1289
   title: "A DECLARED SECURITY BOUNDARY HAS NO ENFORCEMENT OWNER IN THIS TREE — `settings/worker.json` declares four allowlisted domains under a sandbox marked `enabled` and `failIfUnavailable`, the file reaches the SDK intact, and NOTHING IN THIS REPOSITORY ACTS ON THE ALLOWLIST: the only two readers validate its key placement and pick a probe target, and both disclaim enforcement in their own words"
   repo: remudero
   depends_on: []
@@ -143,16 +143,29 @@
     naming `test/egress-enforcement-owner.test.ts`, declared in `files:` and not yet existing — a
     forward reference to a PATH rather than a guessed symbol.
 
-    THE ID WAS PRE-MINTED BY THE OPERATOR AND READ BACK BEFORE ANYTHING WAS WRITTEN.
-    `refs/rmd-id/W1-T2202` resolves against a namespace of 320 refs. Eight surfaces were swept and
-    ONE WAS DISQUALIFIED WITH NO REPLACEMENT AVAILABLE: open PR TITLES read 0 for this id, but the
-    control also reads 0 — neither open PR carries an id in its title — so that surface proves
-    nothing and is reported as disqualified rather than as evidence. The open-PR population remains
-    covered by head branches (0 against 2 `run-W1-T` heads) and file lists. The rest: shard
-    filenames 0 against W1-T1288 at 1; plan `- id:` lines 0 against W1-T1288 at 1; the reservation
-    1, the pre-mint; merged trailers 0 under `^Remudero-Task:\s*W1-T2202\s*$` against 39 carrying
-    any trailer; merged subjects 0 against 60; merged `run-*` credit 0 against 32 structured heads,
-    with `run-W1-T2202-*` at 0 against an 87-branch namespace.
+    RENUMBERED FROM W1-T2202 ON THIS SAME BRANCH, AND THE OLD SHARD WAS DELETED RATHER THAN
+    RENAMED ALONGSIDE. W1-T2202 was a REAL reservation — `refs/rmd-id/W1-T2202` resolves, minted by
+    a fleet lane (`1475147@Remudero`, 2026-08-24T02:08:47Z) four seconds after its sibling
+    `refs/rmd-id/W1-T2201` (`1474654@Remudero`, 02:08:43Z). It was the WRONG NUMBER, roughly 900
+    above the real frontier, and filing under it made the inflation self-sustaining: `next-task-id`
+    reads OPEN PLAN PRs and the git history of `plan/` among its surfaces, so this shard's own
+    filename fed 2202 straight back into the next mint. Re-derived here: the history scan over
+    `plan/` returns 2202 and NOTHING ELSE above 1288, and that single hit is this branch.
+
+    THE STRAY REFS ARE NAMED BECAUSE THEY WILL DO THIS AGAIN. Above the frontier the reservation
+    namespace holds `W1-T2201`, `W1-T2202`, `W1-T100000`, and `W1-T1000000` through `W1-T1000004`.
+    AND `next-task-id` CANNOT SEE ANY OF THEM: its own documented surfaces are `plan/tasks.yaml`,
+    every `plan/tasks.d/*.yaml` shard, open plan PRs, and the git history of `plan/` — the
+    `refs/rmd-id/*` namespace is not among them. So a stray reservation is invisible to the minter
+    while a stray FILING is not, which is why a bad number becomes permanent only once something
+    files under it. Retiring those refs is an operator decision and is not proposed here.
+
+    W1-T1289 IS FREE ON EVERY SURFACE THIS SESSION COULD READ: no `refs/rmd-id/W1-T1289`, no shard
+    filename, no `- id:` line. ITS RESERVATION IS NOT YET MINTED — `refs/rmd-id/*` pushes are
+    refused from this container with a transport 403 while `refs/heads/*` pushes succeed in the
+    same second, so the mint is an operator action. `task-id-existence` accepts EITHER a
+    reservation ref OR a declared plan record, so this shard satisfies it on the record arm; the
+    ref should still be minted so the double-mint protection is real rather than incidental.
 
     THE SUBJECT WAS SWEPT AS WELL AS THE ID, AND ONE NEIGHBOUR IS REAL. `allowedDomains` matches
     widely across docs and plan text, so the sweep was narrowed to the ENFORCEMENT question. The
