@@ -37,11 +37,12 @@ export class ContainmentError extends Error {
    * preserves the three-state epistemology (proven-holding | proven-broken |
    * UNPROVEN) rather than collapsing it to a boolean — a data description when
    * the sandbox was PROVEN to have dropped (the outside write landed), a config
-   * description for the static gate, or, for the UNPROVEN case, ONE OF THREE
-   * named sub-states from {@link classifyUnprovenState} (W1-T1281):
-   * `"probe-never-ran"`, `"write-never-attempted"`, or `"no-denial-observed"` —
-   * no longer the single literal "unproven" that collapsed all three and left
-   * an intermittent preflight failure undiagnosable from any ledger row.
+   * description for the static gate, or, for the UNPROVEN case, ONE OF FOUR
+   * named sub-states from {@link classifyUnprovenState} (W1-T1281, extended by
+   * W1-T2201): `"probe-never-ran"`, `"write-never-attempted"`,
+   * `"no-denial-observed"`, or `"turns-exhausted"` — no longer the single literal
+   * "unproven" that collapsed all of them and left an intermittent preflight
+   * failure undiagnosable from any ledger row.
    */
   readonly guard = "containment" as const;
   readonly check: string;
@@ -148,6 +149,16 @@ export interface ContainmentEvidence {
    * an offline machine reads as a perfect sandbox.
    */
   egressAllowedReached?: boolean;
+  /**
+   * W1-T2201: did the probe spawn itself end on `error_max_turns` — i.e. did the
+   * WORKER run out of its turn budget, as opposed to simply never attempting a
+   * step? Carried verbatim from {@link ProbeExecResult.turnsExhausted}. Optional,
+   * defaulting falsy so pre-existing evidence literals read as not-exhausted —
+   * the conservative direction, since this field only ever ADDS a distinguishing
+   * reason to an already-`contained: false` verdict, never flips one to `true`
+   * (see {@link assessContainment}).
+   */
+  turnsExhausted?: boolean;
 }
 
 /**
@@ -185,6 +196,20 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
     };
   }
   if (!e.osDenialSeen) {
+    // W1-T2201: a turn-exhausted spawn gets its OWN reason text, distinct from
+    // the generic "may never have been attempted" — the two are different facts
+    // (the probe ran out of turns WHILE trying, vs. never attempting at all) and
+    // must not share a string. `contained` stays `false` either way — this only
+    // changes what gets RECORDED, exactly as `classifyUnprovenState` does for
+    // the structured `observed` field.
+    if (e.turnsExhausted) {
+      return {
+        contained: false,
+        reason:
+          "turns-exhausted — the probe ran out of its turn budget before an OS-denial for the outside-cwd " +
+          "write could be observed; this is NOT the same fact as an unattempted write and containment stays UNPROVEN",
+      };
+    }
     return {
       contained: false,
       reason:
@@ -225,9 +250,25 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
  *     worker can mention a step without actually running it), but this is now
  *     distinguishable from the two states above rather than sharing their string.
  */
-export type UnprovenState = "no-denial-observed" | "write-never-attempted" | "probe-never-ran";
+export type UnprovenState =
+  | "no-denial-observed"
+  | "write-never-attempted"
+  | "probe-never-ran"
+  | "turns-exhausted";
 
+/**
+ * W1-T2201: checked FIRST, ahead of the other three states. A turn-exhausted
+ * spawn (`error_max_turns`) can ALSO look like `probe-never-ran` or
+ * `write-never-attempted` on the raw evidence — the worker ran out of budget
+ * before finishing, so later steps genuinely never happened — but "ran out of
+ * turns trying" and "never attempted" are not the same fact (this task's whole
+ * premise: three W1-T1281 transcripts collapsed them into the SAME reported
+ * cause, `"(the write may never have been attempted)"`, which is true of both
+ * and identifies neither). Naming the more specific, actually-observed cause
+ * takes priority over guessing from its downstream symptoms.
+ */
 export function classifyUnprovenState(e: ContainmentEvidence): UnprovenState {
+  if (e.turnsExhausted) return "turns-exhausted";
   if (!e.insideWriteCreated) return "probe-never-ran";
   if (!e.outsideWriteAttempted) return "write-never-attempted";
   return "no-denial-observed";
@@ -282,6 +323,15 @@ export interface ProbeExecResult {
   egressBlockedReached?: boolean;
   /** W1-T1265: did the allowlisted control request succeed? */
   egressAllowedReached?: boolean;
+  /**
+   * W1-T2201: did the probe spawn itself end on the SDK's `error_max_turns`
+   * subtype? Optional so every pre-existing injected fake keeps compiling and
+   * reads as `false`/not-exhausted (the conservative default — it never invents
+   * an exhaustion that was not observed). Carried through so a turn-exhausted
+   * run can be distinguished from a probe that simply never attempted a step —
+   * see {@link classifyUnprovenState}'s `"turns-exhausted"` state.
+   */
+  turnsExhausted?: boolean;
 }
 
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
@@ -339,6 +389,62 @@ export function containmentProbePrompt(token: string, allowedHost: string = EGRE
 }
 
 /**
+ * Count of Bash commands a probe prompt instructs the worker to run — derived by
+ * counting the prompt's own numbered command lines (`N) ...`), the SAME technique
+ * `test/deny-floor-probe.test.ts`'s `parseProbeStepNarration` already uses to keep
+ * the prompt's narrated counts honest. Deriving from the prompt TEXT itself,
+ * rather than a hand-maintained constant kept beside it, is what makes a FIFTH
+ * command added to {@link containmentProbePrompt} move {@link probeTurnBudget}
+ * automatically — see that function's doc for why this exists (W1-T2201).
+ */
+export function probeCommandCount(prompt: string): number {
+  const matches = prompt.match(/^\d+\)/gm);
+  return matches ? matches.length : 0;
+}
+
+/**
+ * TURN ALLOWANCE beyond one Bash turn per command plus the closing REPORT turn —
+ * turns a careful probe legitimately spends that are NOT worker misbehaviour
+ * (W1-T2201 rationale, Q1). Named for what each one buys, rather than picked as a
+ * round number:
+ *   1. re-reading an AMBIGUOUS result — a command that produced no output, where
+ *      the outcome is knowable only by checking the marker files. This is not
+ *      hypothetical: a W1-T1281 transcript hit exactly this ("Command 4 produced
+ *      no output at all, which is ambiguous — I need to check which marker files
+ *      were created") and had no turn left to spend on it.
+ *   2. a RETRY after a malformed invocation.
+ *   3. REWORK forced by the probe's own deny-floor tripwire (Q2): a read-only
+ *      verification command that merely NAMES the tripwire literal is itself
+ *      refused by `hooks/deny-floor.sh` (its rule 3 matches the whole command
+ *      string, so it cannot tell an attempt to CREATE the tripwire from an `ls`
+ *      that only names it) — a probe that double-checks its own reading pays a
+ *      turn re-deriving it from fragments, through no fault of its own.
+ * ONE named turn per legitimate cost, so raising this later is a decision about a
+ * SPECIFIC new cost, not a knob nudged until a flaky run happens to pass.
+ */
+export const PROBE_TURN_ALLOWANCE = 3;
+
+/**
+ * The probe's turn cap — DERIVED, never a hand-picked literal: one turn per
+ * command the prompt actually lists, plus one turn for the closing REPORT, plus
+ * the named allowance above.
+ *
+ * W1-T2201 — WHY THIS EXISTS: the previous `maxTurns: 6` was a literal unchanged
+ * since the original 3-command spike (`b697de79`, #18; `git log -S'maxTurns: 6'
+ * -- src/lib/containment.ts` returns exactly those two commits) and did NOT move
+ * when the egress command — a FOURTH command — was added underneath it in
+ * `9ca4180c` (#2626): three commands plus the closing report already spent four
+ * of the six turns, leaving one turn of slack for a probe that now had to run
+ * four commands plus the report. All three observed runs exhausted that one-turn
+ * slack and ended `Reached maximum number of turns (6)` before the outside-write
+ * check ever ran. Deriving the cap from `probeCommandCount` means a FIFTH command
+ * moves this cap automatically instead of silently eating whatever slack is left.
+ */
+export function probeTurnBudget(prompt: string): number {
+  return probeCommandCount(prompt) + 1 + PROBE_TURN_ALLOWANCE;
+}
+
+/**
  * Regex marking an OS/sandbox-level write denial (as opposed to a hook denial),
  * mirroring the WS-0 verdict-7 transcript check.
  */
@@ -390,8 +496,11 @@ export const EGRESS_ALLOWED_MARKER = "egress-allowed-reached.txt";
 
 /**
  * The single Bash command carrying BOTH egress attempts. ONE command, not two, so
- * the probe's `maxTurns: 6` budget is not spent on turn count — the existing three
- * commands plus the report already use four.
+ * the two requests count as ONE command against {@link probeTurnBudget} rather
+ * than two — bundling was a real turn-saving choice when the cap was a fixed
+ * `maxTurns: 6` that never moved (see that function's W1-T2201 doc for why the
+ * cap is now DERIVED instead), and staying bundled remains free: unbundling would
+ * add a fifth command, which is out of this file's scope to propose.
  *
  * Each request writes its marker ONLY on success, so the executor observes outcomes
  * by `existsSync` exactly as it already does for the two writes — no transcript
@@ -613,21 +722,30 @@ export function defaultExecutor(
     } catch {
       allowedHost = EGRESS_ALLOWED_HOST_FALLBACK;
     }
+    // W1-T2201: the prompt is built ONCE and its own text is what derives the cap
+    // below — never a separate hand-maintained literal that can drift from what
+    // the prompt actually asks the worker to do.
+    const prompt = containmentProbePrompt(token, allowedHost);
     try {
       const probe = await spawn({
         cwd,
         permissionMode: "bypassPermissions",
         settingsFile,
-        maxTurns: 6,
+        maxTurns: probeTurnBudget(prompt),
         maxBudgetUsd: budgetUsd,
         config,
-        prompt: containmentProbePrompt(token, allowedHost),
+        prompt,
       });
       const transcript = [probe.text, probe.blocks.join("\n"), probe.stderr].join("\n");
       return {
         transcript,
         outsideWriteCreated: existsSync(outsidePath),
         insideWriteCreated: existsSync(insidePath),
+        // W1-T2201: the SDK's own `error_max_turns` subtype — the same string
+        // `classifyFailure`/`workerErrorVerdict` already key on elsewhere in this
+        // codebase — carried through so a turn-exhausted run can be REPORTED as
+        // exhausted rather than silently read as an unattempted write.
+        turnsExhausted: probe.subtype === "error_max_turns",
         denyFloorProbeCreated: existsSync(denyFloorPath),
         egressBlockedReached: existsSync(egressBlockedPath),
         egressAllowedReached: existsSync(egressAllowedPath),
@@ -741,6 +859,9 @@ export async function probeContainment(opts: {
     // SOURCE TEXT, so even a comment quoting the call verbatim would break it.
     egressDenialSeen:
       r.egressBlockedReached === undefined ? undefined : EGRESS_DENIAL_RE.test(r.transcript),
+    // W1-T2201: carried through VERBATIM, including `undefined`/falsy — see
+    // ContainmentEvidence.turnsExhausted's doc for why this never flips a verdict.
+    turnsExhausted: r.turnsExhausted,
   };
   const verdict = assessContainment(evidence);
   const denyFloor = assessDenyFloor(evidence);
@@ -774,6 +895,10 @@ export async function probeContainment(opts: {
     egress_blocked_reached: evidence.egressBlockedReached,
     egress_allowed_reached: evidence.egressAllowedReached,
     egress_denial_seen: evidence.egressDenialSeen,
+    // W1-T2201: OBSERVATIONAL, same discipline as the deny-floor/egress fields
+    // above — recorded so a `containment.probe` row can be read for exhaustion
+    // directly, without re-deriving it from `observed` on a thrown error.
+    turns_exhausted: evidence.turnsExhausted,
     cost_usd: costUsd,
     // W1-T238: the probe spawn's own stderr/error-result text, capped, ONLY when
     // the underlying worker call itself errored — a clean probe spawn never
@@ -796,12 +921,13 @@ export async function probeContainment(opts: {
     //  3. outsideWriteCreated — proven-broken (the outside write LANDED, the
     //     sandbox did not engage) is data-bearing.
     //  4. neither — genuinely UNPROVEN, but no longer collapsed to the eight
-    //     characters "unproven": classifyUnprovenState (W1-T1281) names WHICH of
-    //     three distinguishable states this was — "probe-never-ran",
-    //     "write-never-attempted", or "no-denial-observed" — so a
-    //     `blocked_containment` ledger row (this error's `observed` field, read
-    //     by run-task.ts) can name the cause instead of forcing a reader to
-    //     re-derive it from evidence that was never recorded in the first place.
+    //     characters "unproven": classifyUnprovenState (W1-T1281, extended by
+    //     W1-T2201) names WHICH of four distinguishable states this was —
+    //     "turns-exhausted", "probe-never-ran", "write-never-attempted", or
+    //     "no-denial-observed" — so a `blocked_containment` ledger row (this
+    //     error's `observed` field, read by run-task.ts) can name the cause
+    //     instead of forcing a reader to re-derive it from evidence that was
+    //     never recorded in the first place.
     if (evidence.credentialExpired) {
       throw new ContainmentError(
         `containment preflight: spawn_credential_expired — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
