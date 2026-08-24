@@ -287,7 +287,64 @@ checkout_target() {
 # clone/fetch/checkout above runs ONCE, before this line"), and extracting this is what retires it.
 sync_tree() {
   log "work tree present at $TREE"
+
+  # ── DROP WORKTREE REGISTRATIONS WHOSE DIRECTORY IS GONE, BEFORE THE FETCH ─────────
+  # NOT the same "prune" as the fetch below. `fetch --prune` drops remote-tracking REFS;
+  # this drops WORKTREE ADMIN RECORDS under `.git/worktrees/` whose checkout directory no
+  # longer exists. The two are unrelated and neither does the other's job.
+  #
+  # WHY THIS CONTAINER ACCUMULATES THEM. The checkout is a bind mount shared with the host,
+  # so `.git/worktrees/` carries registrations the HOST created, pointing at host paths that
+  # have never existed in here. Measured 2026-08-24T00:40Z inside `remudero-daemon`: 22 such
+  # registrations, every one under `/home/craigoleyagent/work/`.
+  #
+  # WHY IT IS LOAD-BEARING RATHER THAN TIDY. `git gc` reads each registered worktree's HEAD.
+  # One unreadable HEAD aborts the whole repack — reproduced: `fatal: bad object
+  # worktrees/<name>/HEAD`, `fatal: failed to run repack`, exit 128. When the abort happens
+  # under AUTOMATIC gc it writes `.git/gc.log`, and git then declines every later automatic
+  # cleanup while that file exists ("Automatic cleanup will not be performed until the file is
+  # removed"). The daemon's checkout had not been packed since 2026-08-21: 6,059 loose objects,
+  # 65.80 MiB loose, 50.94 MiB packed — 0 / 0 / 18.31 MiB once the registrations went.
+  #
+  # AND `git gc` DOES NOT CLEAR THEM ITSELF: `gc.worktreePruneExpire` defaults to three months,
+  # so a registration stale for minutes is still consulted, and still aborts the repack.
+  #
+  # BEFORE THE FETCH, DELIBERATELY. The fetch is the first thing here that can trigger an
+  # automatic gc, so pruning first is what stops that gc tripping over a dead registration and
+  # writing the `gc.log` that silences every cleanup after it. Placing it inside `sync_tree`
+  # covers BOTH call sites — the boot path and the freshness restart below — in one line.
+  #
+  # A REGISTRATION THIS BOOT CREATES IS NOT PRUNED THIS BOOT, AND MUST NOT BE. Lanes start
+  # after this runs; their worktrees are live, and `prune` removes only records whose directory
+  # is ABSENT ("gitdir file points to non-existent location") — verified: a live worktree keeps
+  # both its registration and its files, and no worktree's contents are ever deleted by prune.
+  # A registration created during this boot is therefore cleared at the NEXT restart, which is
+  # the only moment it is safe to clear.
+  #
+  # NON-FATAL, AND THAT IS NOT DEFENSIVE PADDING: `git worktree prune` exits 0 on an already
+  # clean repo but 128 when the cwd is not a repository at all, and a boot must not die on a
+  # housekeeping step. Failure is logged and the sequence continues.
+  #
+  # THIS DOES NOT CLEAR AN EXISTING `gc.log`, and deliberately so — see the note beside the
+  # log line below.
+  git -C "$TREE" worktree prune || log "worktree prune FAILED — continuing (housekeeping never blocks the boot)"
+
   git -C "$TREE" fetch --prune origin || log "fetch FAILED — continuing on the tree as it stands"
+
+  # A REPO ALREADY STUCK STAYS STUCK, AND THE ENTRYPOINT SAYS SO RATHER THAN FIXING IT.
+  # `worktree prune` removes the CAUSE; it does not remove `.git/gc.log`, which is the thing
+  # actually suppressing automatic cleanup — verified directly: a planted gc.log survives a
+  # prune untouched. Clearing a gc.log this script did not write would be deleting another
+  # process's only record of why its repack failed, on a checkout shared with the host, with no
+  # way from in here to tell a stale log from one written seconds ago by a maintenance run that
+  # is still going. So this reports it and leaves the decision to an operator, who can clear it
+  # and repack when no lane is running:  rm -f .git/gc.log && git gc --prune=now
+  if [ -f "$TREE/.git/gc.log" ]; then
+    log "NOTE: $TREE/.git/gc.log exists — git is declining AUTOMATIC cleanup until it is removed."
+    log "  The stale registrations above are pruned, so the cause is gone, but the log is not"
+    log "  cleared here: it belongs to whatever wrote it. To recover, with no lane running:"
+    log "    rm -f $TREE/.git/gc.log && git -C $TREE gc --prune=now"
+  fi
 
   # ── THE DIRTY-TREE RULE IS THE DEPLOYER'S, NOT A NEW ONE ───────────────────────────────────
   # `decideDeploy` (src/lib/deployer.ts) guards its fast-forward with a clean-tree check whose
