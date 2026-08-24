@@ -1,0 +1,161 @@
+- id: W1-T2246
+  title: "`planBranchReap`'s `prState` comes from a paginated PR list, so 41 of the 74 branches the reaper reports as held-because-no-PR are merged or closed PR heads its own predicate would call deletable — the hold set is not 74 irreplaceable branches but 33, and the operator reading the manifest cannot tell which"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (d052ffe5a0f6486b3262ca6f9877520b73da0803), clone shallow-checked `false`. `src/run-task.ts`
+    (1,533,701 bytes) read through git objects. No suite, no spawning verb, no poller.
+    `rmd reap-branches` IS the dry run and was run — it deletes nothing by construction.
+    Ledger via `resolveLedgerUnion` at the STATE dir, step names taken from source, zeros controlled.
+
+    (1) THE THREE FACTS, RE-DERIVED. `reapBranchesCommand` (`src/run-task.ts`) is the dry run; its
+    own doc says "Reports which remote branches WOULD be deletable ... and DELETES NOTHING". The
+    manifest prints sha and name together "because that is the only thing that makes a future
+    deleting version reversible (`git push origin <sha>:refs/heads/<name>`)", to STDOUT and never
+    `state/` — "that path is gitignored and is where 29 cited reports went to die". Nothing calls
+    it: no workflow, no gate, no daemon rung.
+
+    (2) THE PREDICATE, WHICH IS WHAT THE RISK ARGUMENT HAS TO REST ON. `planBranchReap`
+    (`src/lib/status.ts`) evaluates protection FIRST and it wins outright; then
+    `deletable = prState === "merged" || prState === "closed" || (prState === "none" && tipInMain)`.
+    Only the third disjunct is self-evidently lossless. The first two rest on GitHub's answer about
+    a PR — which is exactly the input this task is about.
+
+    (3) THE CURRENT SPLIT, MEASURED 2026-08-24 AT d052ffe5. 136 heads on origin — 6 guarded, 56
+    deletable, 74 held. Coverage verified before sweeping: 136 local remote-tracking refs against
+    136 remote heads.
+
+    (4) THE HOLD SET IS MOSTLY MISLABELLED, AND THIS IS THE TASK. `prState` is built from a
+    paginated `pulls?state=all` walk, so a PR outside the window reads as `none`. Re-derived against
+    a COMPLETE walk (2,233 PR rows, 2,043 distinct head refs, `gh api --paginate`): of the 74 held,
+    45 DO have a PR head ref. Their true states: 17 merged, 24 closed-unmerged, 4 open. Under the
+    predicate above, the 17 satisfy `merged` and the 24 satisfy `closed` — so 41 OF THE 74 WOULD BE
+    DELETABLE ON A COMPLETE READ, and only the 4 open ones are correctly held for having a PR.
+    Controls: the lookup finds a branch known to have a PR, and a synthetic name reads 0.
+
+    THE HOLD SET IS THEREFORE 33, NOT 74 — the 29 with genuinely no PR plus the 4 open. That is the
+    number that matters, because "no PR and commits not in main" is the case where the branch may be
+    the only copy of the work, and it is being asserted about 74 branches when it is true of 29.
+
+    (5) THE REASON STRING IS THE SMALLER HALF OF THE DEFECT. The direction of the error is
+    conservative — a missed PR under-reaps rather than over-reaps — so nothing unsafe happens today.
+    What breaks is the operator's ability to act: the manifest offers 56 and asserts 74 are
+    untouchable, when the real division is 97 and 33. A verb nobody runs is a verb whose output
+    nobody can trust, and this is why.
+
+    (6) A SECOND, INDEPENDENT SOURCE OF THE SAME MISLABEL, FOUND WHILE MEASURING. `tipInMain` is
+    computed as `git merge-base --is-ancestor origin/<name> origin/main` against a LOCAL
+    remote-tracking ref. On a checkout that has not fetched that ref the command exits non-zero with
+    `fatal: Not a valid object name`, and the `catch` sets `tipInMain = false` — indistinguishable
+    from a tip genuinely not in main. MEASURED: the first run in a fresh worktree emitted 3 such
+    fatals on stderr; after fetching every head the fatals went to 0 AND THE SPLIT DID NOT MOVE
+    (56/74 both times), so the mechanism is real and its impact on this run was nil. Recorded as a
+    second unknown-read-as-a-negative, not as a driver.
+
+    (7) GROWTH IS NOT FLAT, WHICH IS WHY THIS IS NOT UNTIDINESS. Dating every surviving ref by its
+    `run-<id>-<epochMs>` suffix where present and by its first commit not in main otherwise, over
+    2026-07-14 → 2026-08-24 (41 days): net 3.3 surviving refs/day lifetime, but 6.5/day over the
+    last 14 days and 7.6/day over the last 7. By ISO week: W31 +2 and W32 +2 against W33 +38 and
+    W34 +44. The recent rate is roughly 2.3x the lifetime average and the backlog is compounding,
+    not resting.
+
+    THE CAUSE IS RECORDED IN-TREE AND IS NOT A BUG TO REVERSE. Neither merge path deletes: `armAuto`
+    dropped `--delete-branch` under W1-T1111 and `mergeDirect` under W1-T1050, both deliberately,
+    both with the reason in their own doc comments. So every merged PR leaves its head behind by
+    design, and nothing else removes one.
+
+    (8) Q2 — WHAT THE COST ACTUALLY IS, INCLUDING THE CANDIDATE THAT DID NOT SURVIVE.
+
+      `hasPushedRunBranch` UN-DISPATCHING A TASK — NOT OBSERVED IN THIS CORPUS, and that is a
+      measurement rather than a dismissal. `dispatch.skipped` reads 2,660 distinct rows across 672
+      archives, newest 2026-08-12T21:05:57Z. EVERY ONE carries `reason: "open-pr"`; the
+      `run-branch-already-pushed` reason `drain.ts` emits appears in none of them. Read the row, do
+      not guess its shape: `task_id` on these rows is the LANE (`DAEMON`) and the subject is `task`
+      — 114 distinct subjects under the open-PR reason. THE LIMIT: `onFiltered(t,
+      "run-branch-already-pushed")` was added by W1-T1205 and this corpus ends 2026-08-12, so its
+      absence may be corpus age rather than absence in fact. Anyone building this must re-measure on
+      a current corpus before repeating the claim in either direction.
+
+      THE PER-HEAD SUBJECT SWEEP — REAL BUT AS A CORRECTNESS RISK, NOT A TIME COST. Its danger is
+      the measured 29% blind spot when a bulk fetch created 95 refs against 134 on the remote and
+      the shortfall read as a clean zero. That failure scales with ref count and is why this file's
+      own measurement verified 136 against 136 before sweeping.
+
+      CLONE AND FETCH TIME — NOT REAL. A full `+refs/heads/*` fetch of all 136 refs measured 2.11s
+      real. Nothing is filed for that.
+
+    SO THE COST IS LEGIBILITY AND SWEEP CORRECTNESS, NOT THROUGHPUT OR TIME. Say it that way; a
+    performance argument here would be false.
+  design: |
+    (i) FIX THE INPUT, NOT THE LABEL. `prState` must come from a read that cannot silently miss an
+    old PR — a per-head lookup for the branches a paginated walk returned `none` for, or a walk that
+    proves it reached the end. Whatever the shape, it must REPORT its own completeness, because the
+    failure being fixed is precisely an incomplete read that looked complete.
+
+    (ii) SEPARATE "NO PR" FROM "COULD NOT TELL". The bucket label is currently a single string
+    asserting both no-PR and commits-not-in-main. An unreadable `origin/<name>` (§6) and an
+    out-of-window PR (§4) both land there today. A branch whose state could not be determined is
+    HELD — same disposition, different reason — and the reason must say which.
+
+    (iii) THE VERB STAYS A DRY RUN. This task does not add deletion. It makes the dry run's answer
+    true so that a later, separate proposal about deleting has something trustworthy to act on.
+
+    (iv) AN OPERATOR-RUN DELETING VERB AND AN AUTOMATIC ONE ARE DIFFERENT PROPOSALS AND THIS SHARD
+    PICKS NEITHER. If one is ever argued, it is the operator-run one: the manifest already makes a
+    hand deletion reversible, an operator has the context the predicate lacks, and this repo has
+    four bounds that fired on healthy conditions. NO CRON, NO POLLER, NO DAEMON RUNG IS PROPOSED
+    HERE, and none should be added without naming what gates it.
+  acceptance:
+    - claim: "a branch whose pr state could not be determined is reported as undetermined rather than as having no pr"
+      proof: "unit test: test/branch-backlog-reaper.test.ts"
+    - claim: "a merged pr head outside the paginated window is classified from a complete read rather than defaulting to held"
+      proof: "unit test: test/branch-backlog-reaper.test.ts"
+    - claim: "an unreadable local ref does not silently become commits not in main"
+      proof: "unit test: test/branch-backlog-reaper.test.ts"
+    - claim: "an open pr is still never deletable and still lands in hold"
+      proof: "unit test: test/branch-backlog-reaper.test.ts"
+    - claim: "protection is still evaluated first and still wins over every delete disjunct"
+      proof: "unit test: test/branch-backlog-reaper.test.ts"
+    - claim: "the manifest still prints sha with name on stdout and the run still deletes nothing"
+      proof: "unit test: test/branch-backlog-reaper.test.ts"
+  files: [src/lib/status.ts, test/branch-backlog-reaper.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#reaper-hold-set-mislabelled-2026-08-24"
+  plan_refs: ["W1-T447", "W1-T119", "W1-T1050", "W1-T1111", "W1-T1205", "W1-T1207"]
+  note: |
+    THE HOLD SET IS NOT TOUCHED AND NOTHING AUTO-DELETES. 55 of the 74 currently held carry exactly
+    ONE commit not in main (measured; the distribution is 55 at one, 8 at two, 8 at three, 2 at four,
+    1 at seven), 39 are older than 30 days by tip commit date and the oldest is 41 days
+    (`diag/resume-spawn-enoent`). For a branch with genuinely no PR that single commit may be the
+    only copy of that work. This task moves branches between REPORTED buckets by reading their state
+    correctly; it deletes none of them, and the six guarded stay guarded.
+
+    THE MANIFEST STAYS ON STDOUT AND KEEPS PRINTING SHA WITH NAME. It is the only thing that makes a
+    deletion reversible, and `state/` is gitignored — "where 29 cited reports went to die". Do not
+    move it to a file, and do not drop the sha to shorten the output.
+
+    AND THE RISK IS NOT NEAR ZERO, WHICH CORRECTS THE OBVIOUS READING. Of the 56 currently offered as
+    deletable, only 24 are merged PR heads; 31 are CLOSED-UNMERGED, whose commits are in main
+    NOWHERE, and exactly 2 of the 56 have a tip that is an ancestor of `origin/main`. So "deletable"
+    does not mean "recoverable from main" for most of the set — recovery runs through the manifest
+    sha. That is an argument for keeping the manifest and against ever deleting unattended, not an
+    argument for deleting sooner.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (branch-backlog-reaper, status) at risk:medium
+      — Rule 19: raise to risk:high or decompose into one task per concern `sizingViolation` returns `undefined` on its first line at
+    `risk: high`, so that refusal is the only scoring of this span this shard will ever get. The real
+    blast radius is a pure classifier and its falsifier.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/branch-backlog-reaper.test.ts`, declared in `files:` and absent
+    from this tree, so on the filing PR each resolves through W1-T456's forward-reference carve-out.
