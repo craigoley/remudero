@@ -12052,7 +12052,11 @@ export function planReverseBranchDrift(
  */
 export function reapBranchesCommand(
   rest: string[],
-  opts: { exec?: (cmd: string, args: string[]) => string; ledgerPath?: string } = {},
+  opts: {
+    exec?: (cmd: string, args: string[]) => string;
+    ledgerPath?: string;
+    readFile?: (path: string) => string;
+  } = {},
 ): number {
   const badArg = unknownArgError("reap-branches", rest, [], []);
   if (badArg) {
@@ -12148,11 +12152,15 @@ export function reapBranchesCommand(
   } catch {
     citationRaw = ""; // git grep exits 1 on no match — a real "nothing cited", not a failure
   }
+  const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   let declarationBlock: { file: string; start: number; end: number } | undefined;
   try {
-    const span = declaredGuardsBlockSpan(readFileSync(join(repoRoot, "src/run-task.ts"), "utf8"));
+    const span = declaredGuardsBlockSpan(readFile(join(repoRoot, "src/run-task.ts")));
     if (span) declarationBlock = { file: "src/run-task.ts", ...span };
   } catch {
+    // A repoRoot resolved to something unreadable (or an injected `readFile` standing in for
+    // that failure in tests) is not fatal: the reverse orphan check simply excludes nothing,
+    // same as `declaredGuardsBlockSpan` returning `undefined` for a marker it cannot find.
     declarationBlock = undefined;
   }
   const { danglingCitations, orphanDeclarations } = planReverseBranchDrift(

@@ -122,6 +122,44 @@ test("a declared branch that is legitimately absent from the remote is not repor
   );
 });
 
+// ── CRITERION 6: an unreadable declaration-span source excludes nothing, rather than aborting ─
+
+test("a readFile failure while locating the declaration block degrades to no exclusion, not a crash", () => {
+  const exec = (cmd: string, args: string[]): string => {
+    if (args[0] === "ls-remote") return "a1\trefs/heads/main\n";
+    if (args[0] === "merge-base") return "";
+    if (args[0] === "rev-parse") return "a1a1a1\n";
+    if (args[0] === "grep" && args.includes("-o")) {
+      // Cite every declared name (all at src/run-task.ts:1, where the un-excluded declaration
+      // itself lives) so drift stays at zero regardless of whether the exclusion applied — this
+      // test is about the readFile failure being caught, not about the exclusion's effect.
+      return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
+    }
+    if (args[0] === "grep") throw new Error("exit 1: no match");
+    if (cmd === "gh") return "[]";
+    return "";
+  };
+  const readFile = (): string => {
+    throw new Error("ENOENT: simulated unreadable src/run-task.ts");
+  };
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = () => {};
+  console.error = () => {};
+  let code: number;
+  try {
+    code = reapBranchesCommand([], { exec, readFile });
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+  }
+  assert.equal(
+    code,
+    0,
+    "a readFile failure is caught and degrades to declarationBlock=undefined, never an uncaught throw",
+  );
+});
+
 // ── CRITERION 5: the report changes what is REPORTED, never what is deleted or withheld ──────
 
 test("the set of branches deleted and the set withheld are unchanged by the added report", () => {
