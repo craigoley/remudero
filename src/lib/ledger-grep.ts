@@ -64,6 +64,27 @@ export interface LedgerUnionResult {
    */
   unread: string[];
   /**
+   * W1-T1286: `ledger.*` names (excluding the live file) that {@link ledgerRotationEntries}
+   * did NOT classify as either rotation form — present in `stateDir`'s own listing and dropped by
+   * the enumerator's suffix match one step before the coverage guard below ever sees them. Kept
+   * distinct from `unread`: an unread entry is a rotation the guard FOUND and failed to open; an
+   * unclassified name is one the enumerator never handed the guard at all, so a form it does not
+   * recognise cannot silently pass as "complete coverage".
+   *
+   * Optional so a `LedgerUnionResult` literal built before this field existed (a test fixture,
+   * say) keeps type-checking without change; `resolveLedgerUnion` itself always sets it, even to
+   * `[]`, and never omits it.
+   *
+   * NAMED, NOT REFUSED (see this module's W1-T1286 rationale). A stray `.bak`, a half-written
+   * `.tmp` left by the same out-of-band compression that produces the `.gz` half, or an operator
+   * scratch file is a real, undocumented possibility with no exclusion list beyond
+   * `NEVER_ROTATE_FILENAME` — so its presence alone does not flip `ok` false below. `ok` still
+   * refuses on `archiveCount === 0` or a genuinely unread rotation; a name this enumerator cannot
+   * place is surfaced here for a caller to act on, not treated as a failure of the classified
+   * corpus it sits beside.
+   */
+  unclassified?: string[];
+  /**
    * False when `archiveCount === 0` OR any rotation went unread. Coverage, not readability: a
    * verdict keyed on "did anything match" stays `true` while a whole form is skipped.
    */
@@ -205,11 +226,23 @@ export function resolveLedgerUnion(
   const rotations = ledgerRotationEntries(names, stateDir);
   const archiveFiles = rotations.map((e) => e.path);
 
+  // W1-T1286: the same cheap comparison the enumerator's own coverage rationale calls for —
+  // `names` is already in memory from the `readdirSync` above, so this is one filter and one
+  // Set lookup per name, zero additional I/O. `candidates` mirrors `ledgerRotationEntries`' own
+  // prefix filter (never its suffix classifier — introducing a second suffix matcher here would
+  // rebuild the exact two-enumerator defect this module replaced); anything in `candidates` that
+  // is not among `rotations`' own paths is a name the enumerator returned `undefined` for.
+  const rotationPaths = new Set(archiveFiles);
+  const unclassified = names
+    .filter((n) => n.startsWith("ledger.") && n !== NEVER_ROTATE_FILENAME)
+    .map((n) => join(stateDir, n))
+    .filter((p) => !rotationPaths.has(p));
+
   const livePath = join(stateDir, NEVER_ROTATE_FILENAME);
   const liveFileRead = fsDeps.existsSync(livePath);
 
   if (archiveFiles.length === 0) {
-    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread: [], ok: false, matches: [] };
+    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread: [], unclassified, ok: false, matches: [] };
   }
 
   const seen = new Set<string>();
@@ -258,6 +291,7 @@ export function resolveLedgerUnion(
     archiveCount: archiveFiles.length,
     liveFileRead,
     unread,
+    unclassified,
     ok: unread.length === 0,
     matches: unread.length === 0 ? matches : [],
   };
