@@ -13,7 +13,14 @@ import {
 } from "./review.js";
 import type { ArmDecision, AutomergeHold, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
-import { FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type AskType, type IssueGateway, type OpenIssue } from "./escalate.js";
+import {
+  FLEET_NOTICE_LABEL,
+  NEEDS_HUMAN_LABEL,
+  type AskType,
+  type EscalationClass,
+  type IssueGateway,
+  type OpenIssue,
+} from "./escalate.js";
 import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
 
 /**
@@ -1421,6 +1428,234 @@ export function requeuedCheckKeysFromLedger(lines: Array<Record<string, unknown>
     }
   }
   return out;
+}
+
+// ── W1-T2204 — MAIN'S OWN CHECK ROLLUP HAS NO READER ─────────────────────────────────────────
+//
+// Every predicate above this line reads a PR's rollup. Nothing anywhere in the fleet reads the
+// DEFAULT BRANCH's own — the shard's own control count is `checksState` at 80 hits in this file
+// against 0 for any of `mainChecks`/`trunkHealth`/`defaultBranch`. This section is that reader:
+// a pure transform from an already-fetched rollup (the SAME `RollupCheckEntry[]` shape
+// `checksStateFromRollup` already takes — no new gateway, no new `gh` call site) to a NAMED
+// observation of main's health, plus the two decisions Q3 requires stay separate from it: whether
+// to escalate (never a fourth taxonomy class), and whether that escalation, BY ITSELF, may stand
+// down dispatch of unrelated tasks (it may not — only a recorded operator ruling can).
+//
+// WHY "pending" ISN'T ENOUGH ON ITS OWN (acceptance 2/3): `checksStateFromRollup`'s
+// `REQUIRED_CHECK_OK` counts SKIPPED as green — correct for a PR, where GitHub's own
+// merge-eligibility already treats a skipped required check as satisfied. Main's push run is a
+// DIFFERENT question: this shard measured `ci.yml`'s `on:` block leaving thirteen required jobs
+// `pull_request`-only, so a push registers them SKIPPED not because the trunk is healthy but
+// because the workflow never asked the question — and `coverage-ratchet` is WORSE than skipped,
+// concluding SUCCESS on a push having run its own env-guard exit-0 instead of the real suite. A
+// watcher built on `checksStateFromRollup`'s PR-shaped leniency would read that rollup green. This
+// reader does not: SKIPPED and known-vacuous-success names are collected as `nonEvidenceChecks`
+// and excluded from ever making the verdict "green" — main only reads green off a check that
+// genuinely concluded, not one that registered and said nothing.
+
+/**
+ * Check names KNOWN — from `.github/workflows/ci.yml`'s own guard, cited verbatim in W1-T2204's
+ * rationale — to conclude SUCCESS on a push to main having executed no real work:
+ * `coverage-ratchet`'s Test/diff/ratchet steps each carry `[ "${GITHUB_EVENT_NAME}" =
+ * "pull_request" ] || { echo "…skipping…"; exit 0; }`. The check-runs API carries no field for
+ * "did this job actually do anything" — this is a NAMED, CITED allowlist of the jobs this repo's
+ * own workflow is known to special-case this way (policy-as-data, rule 2), not a general detector.
+ * A future vacuous-on-push job is added here by name, never by inventing new detection logic.
+ */
+export const PUSH_VACUOUS_SUCCESS_CHECK_NAMES: ReadonlySet<string> = new Set(["coverage-ratchet"]);
+
+/**
+ * Main's health, as read off its own rollup — the sibling of {@link OpenPrView.checksState} for
+ * the default branch rather than a PR. Three members ONLY, matching the three real postures a
+ * trunk read can support (acceptance 3 is exactly the middle one, named so a caller can never
+ * mistake it for "green"):
+ *   - "green"       — at least one required check GENUINELY concluded passing, none failed, none
+ *                      are still outstanding.
+ *   - "red"         — at least one required check concluded with a {@link REQUIRED_CHECK_FAIL}
+ *                      conclusion. Never auto-acted on beyond {@link mainHealthEscalationDecision}
+ *                      below — Q3 forbids a revert unconditionally.
+ *   - "undetermined"— no failure, but EITHER a required check is still running (nothing to read
+ *                      yet) OR every required check that DID conclude was skipped/known-vacuous
+ *                      (nothing real to read). Never collapsed into "green": that collapse is the
+ *                      exact vacuous-pass this task exists to refuse.
+ */
+export type MainHealthState = "green" | "red" | "undetermined";
+
+/** One named observation of main's own check rollup (acceptance 1) — never a bare boolean. */
+export interface MainHealthObservation {
+  readonly state: MainHealthState;
+  /** The head sha the rollup was read against. */
+  readonly sha: string;
+  /** Human-readable reason the state landed where it did — carried into any escalation. */
+  readonly reason: string;
+  /** Required check names whose latest (deduped) attempt concluded with a failing conclusion. */
+  readonly failingChecks: readonly string[];
+  /** Required check names skipped, or known-vacuous-success — excluded from evidence either way. */
+  readonly nonEvidenceChecks: readonly string[];
+  /** Required check names with no terminal conclusion yet. */
+  readonly pendingChecks: readonly string[];
+}
+
+/**
+ * Read main's own check rollup into a {@link MainHealthObservation} (acceptance 1). Reuses
+ * {@link dedupeRollupByLatestAttempt} and the exact required-contexts filter
+ * {@link checksStateFromRollup} already applies — the SAME gate, so this can never disagree with
+ * that function about which entries are even in play — but judges the gate against a STRICTER
+ * question than "does GitHub consider this required check satisfied": SKIPPED and
+ * `vacuousSuccessNames` members never count as evidence the trunk is healthy (acceptance 2), and a
+ * gate with a still-outstanding required check, or with nothing but non-evidence entries, reads
+ * "undetermined" rather than "green" (acceptance 3). `requiredContexts` empty/undefined degrades
+ * exactly like {@link checksStateFromRollup}'s own fallback — every reported context counts, fail
+ * toward the narrower gate rather than manufacturing a false positive off an unreadable protection
+ * rule.
+ */
+export function mainHealthFromRollup(
+  sha: string,
+  rollup: readonly RollupCheckEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined,
+  vacuousSuccessNames: ReadonlySet<string> = PUSH_VACUOUS_SUCCESS_CHECK_NAMES,
+): MainHealthObservation {
+  const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
+  const required = new Set(requiredContexts ?? []);
+  const knownRequired = required.size > 0;
+  const gate = dedupeRollupByLatestAttempt(
+    knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all,
+  );
+
+  if (gate.length === 0) {
+    return {
+      state: "undetermined",
+      sha,
+      reason: knownRequired
+        ? "required checks are configured but none have registered yet on main's head — undetermined, not green"
+        : "no check-run rollup observed for main's head — undetermined, not green",
+      failingChecks: [],
+      nonEvidenceChecks: [],
+      pendingChecks: [],
+    };
+  }
+
+  const failingChecks: string[] = [];
+  const nonEvidenceChecks: string[] = [];
+  const pendingChecks: string[] = [];
+  let evidenceOfGreen = false;
+  for (const c of gate) {
+    const name = c.name ?? c.context ?? "unknown";
+    const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+    if (REQUIRED_CHECK_FAIL.has(s)) {
+      failingChecks.push(name);
+    } else if (s === "SKIPPED" || vacuousSuccessNames.has(name)) {
+      nonEvidenceChecks.push(name);
+    } else if (s !== "SUCCESS" && s !== "NEUTRAL") {
+      pendingChecks.push(name);
+    } else {
+      evidenceOfGreen = true;
+    }
+  }
+
+  if (failingChecks.length > 0) {
+    return {
+      state: "red",
+      sha,
+      reason: `required check(s) concluded failing on main: ${failingChecks.join(", ")}`,
+      failingChecks,
+      nonEvidenceChecks,
+      pendingChecks,
+    };
+  }
+  if (pendingChecks.length > 0) {
+    return {
+      state: "undetermined",
+      sha,
+      reason: `required check(s) still pending on main, not yet concluded: ${pendingChecks.join(", ")} — undetermined, not green`,
+      failingChecks,
+      nonEvidenceChecks,
+      pendingChecks,
+    };
+  }
+  if (!evidenceOfGreen) {
+    return {
+      state: "undetermined",
+      sha,
+      reason: `every required check on main's head was skipped or a known vacuous pass (${
+        nonEvidenceChecks.join(", ") || "none"
+      }) — no genuine evidence the trunk is healthy, so undetermined rather than green`,
+      failingChecks,
+      nonEvidenceChecks,
+      pendingChecks,
+    };
+  }
+  return {
+    state: "green",
+    sha,
+    reason:
+      nonEvidenceChecks.length > 0
+        ? `required check(s) genuinely passed on main, excluding non-evidence entries: ${nonEvidenceChecks.join(", ")}`
+        : "required check(s) genuinely passed on main",
+    failingChecks,
+    nonEvidenceChecks,
+    pendingChecks,
+  };
+}
+
+/**
+ * Which of the fleet's existing THREE escalation classes a red-trunk finding is carried inside
+ * (acceptance 4) — `escalate.ts`'s own doc: "The loop never waits on a human except for four
+ * classes" (BLOCKED, MANUAL, HARD_STOP, GRILL), and GRILL is feedback-intake-only (MASTER-PLAN
+ * §7B) and unreachable from a sweep read, so the choice is among the three the sweep can actually
+ * raise. MANUAL is the fit, not a fourth class: `escalate.ts` lists "eyeball/playtest gates" among
+ * MANUAL's members — something genuinely off that only a human can look at and rule on. BLOCKED is
+ * the wrong shape (it is a specific PR's fix-rung exhausted after diagnose, not a trunk-wide
+ * reading), and HARD_STOP is the wrong shape too (destructive ops / spend / force-push / secrets —
+ * this call site never takes an action, it only reports).
+ */
+export function mainHealthEscalationClass(): EscalationClass {
+  return "MANUAL";
+}
+
+/** Whether, and how, a {@link MainHealthObservation} should escalate. Never a revert (Q3). */
+export interface MainHealthEscalationDecision {
+  readonly escalate: boolean;
+  readonly class?: EscalationClass;
+  readonly reason: string;
+}
+
+/**
+ * A red trunk produces an escalation inside the existing taxonomy and NOTHING else (acceptance 4)
+ * — in particular this function never touches a merge, never reverts one, and returns a decision
+ * object only, for a caller to act on. Anything short of "red" (including "undetermined") does not
+ * escalate: an in-flight or vacuous rollup is not itself evidence of a problem, only of an
+ * incomplete or uninformative read, and escalating on that would be the same false-positive shape
+ * this task's falsifier calls out for the opposite direction (a false green).
+ */
+export function mainHealthEscalationDecision(observation: MainHealthObservation): MainHealthEscalationDecision {
+  if (observation.state !== "red") {
+    return {
+      escalate: false,
+      reason: `main's own check state is "${observation.state}", not red — nothing to escalate: ${observation.reason}`,
+    };
+  }
+  return {
+    escalate: true,
+    class: mainHealthEscalationClass(),
+    reason: `main (${observation.sha}) is red — never auto-reverted, an operator ruling decides next steps: ${observation.reason}`,
+  };
+}
+
+/**
+ * Q3's asymmetry, held as its own boolean rather than folded into {@link
+ * mainHealthEscalationDecision} (acceptance 5): a red trunk escalates, but that escalation must
+ * NEVER, by itself, stop dispatch of unrelated tasks — "the fleet merged four PRs tonight while a
+ * red branch sat unattended… but a watcher that halts the queue on any red trunk converts one
+ * broken test into a full stop, which is worse." `operatorRuling` is the ledgered decision an
+ * operator has actually recorded in response to the escalation; omitting it (the default with no
+ * second argument at all) is exactly "no ruling recorded yet", so the falsifier this shard states
+ * — "an unrelated task's dispatch stops on a red trunk with no operator ruling recorded" — can
+ * never fire off this function alone: without an explicit `true`, it always returns `false`,
+ * red trunk or not.
+ */
+export function mainHealthShouldStandDownDispatch(observation: MainHealthObservation, operatorRuling?: boolean): boolean {
+  return observation.state === "red" && operatorRuling === true;
 }
 
 // ── W1-T1275 — THE REQUIRED ROLLUP NEVER RECOMPUTES ONCE ITS OWN RUN CONCLUDES ───────────────
