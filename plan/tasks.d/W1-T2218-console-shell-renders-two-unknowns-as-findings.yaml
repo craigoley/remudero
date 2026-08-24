@@ -118,6 +118,46 @@
     here: those three symbols appear across 25, 10 and 8 files respectively under `src/` and
     `test/`. NOTHING IN THIS SHARD PROPOSES TOUCHING ANY OF THEM; this task is two client-side
     labels and changes no server behaviour.
+    (13) A THIRD GLANCE VALUE IS UNRECONCILABLE, AND UNLIKE THE OTHER TWO IT PRODUCED A LIVE
+    MISDIAGNOSIS. `needs-me` renders `latestNeedsMeRows.length` (`serve.ts:2007`), and those rows
+    are a COMBINED set — the file's own comment at `:2623` names it: "task escalations + feedback
+    grilling/proposed + inbox ready/drafting". ONLY THE FIRST COMPONENT CAN CORRESPOND TO A GITHUB
+    ISSUE; a feedback row and an inbox row have no issue and never will. The strip publishes one
+    integer over three populations and names none of them.
+
+    (14) SAID PLAINLY, BECAUSE IT IS NOT THE SAME FAULT AS (1)-(12): THE COUNT IS CORRECT AND THE
+    LABEL IS INSUFFICIENT. This is NOT a fabricated zero — `.length` over a populated array is the
+    true size of that array — and it is NOT a false outage stamp. Nothing here is wrong. What is
+    missing is the one fact that makes the number readable: which of the three populations it came
+    from. It belongs in this shard because it is the same CLASS — a value rendered without the fact
+    that makes it interpretable — and it must not be described as the same DEFECT.
+
+    (15) THE MISDIAGNOSIS, MEASURED 2026-08-24 AND RE-DERIVED HERE. The board showed `needs me 69`
+    while `sweep.escalation_reconcile` read `issues_seen: 5` across FIVE CONSECUTIVE PASSES
+    (14:42:32, 15:03:18, 15:23:13, 15:46:13, 16:06:41 — each `total: 2, closed: 0, dropped:
+    {no_task_trailer: 2, no_referent: 1}`), with `sweep.escalation_reconcile.list_failed` reading
+    ZERO ALL-TIME against a control of 1,448 reconcile summaries, so the 5 is a SUCCESSFUL read and
+    not a degraded one. AN OPERATOR AND AN ASSISTANT BOTH READ THE 69 AS AN ESCALATION BACKLOG AND
+    WERE BOTH WRONG. That is the cost of the missing label: not a wrong number, but a number that
+    cannot be broken into its parts by anyone reading it, including the people who built it.
+
+    (16) AND THE COMPARISON THAT WAS ATTEMPTED IS THE PROOF THE LABEL IS NEEDED. 69 and 5 are not in
+    conflict and never were — they count different sets. A reader given "69 needs me" has no way to
+    learn that 5 of the underlying items are issues and the remainder are not, so the only available
+    inference is the wrong one. `merged_known` (`src/lib/board.ts`), already cited in (11) as the
+    shape to copy for the fabricated-zero half, is the same shape this needs: the number carried
+    beside the fact that makes it readable.
+
+    (17) RECORDED SEPARATELY AND DELIBERATELY NOT FOLDED IN: THE "unverified" NOTE IS A REAL
+    FAIL-OPEN AND IT WAS EARNING ITS KEEP DURING THAT READING. `serve.ts:2418` appends
+    " · issue state unverified (showing to be safe)" when `t.escalationUnverified` is set, and that
+    is CORRECT BEHAVIOUR: the issue read genuinely had failed. `board_gateway.issue_fetch_failed`
+    fired at 2026-08-24T16:37:25.220Z with `reason: "rate_limit"`, and AGAIN at 16:54:10.908Z while
+    this amendment was being written — 311 such failures all-time, against a control of 1,921
+    `board_gateway.issue_fetch_ok` rows whose newest (16:25:23.783Z, `issueCount: 525`) PREDATES
+    both. THIS ONE IS NOT A DEFECT. It is the console declining to assert what it could not read,
+    which is exactly what (1)-(12) ask the other three values to start doing, and nothing in this
+    shard should change it.
   design: |
     ONE CONCERN: the embedded client shell must render an unknown as unknown, using the model this
     file already contains.
