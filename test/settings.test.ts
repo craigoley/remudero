@@ -85,7 +85,12 @@ const WORKER_SETTINGS_TEMPLATE_PATH = join(
   "worker.json",
 );
 
-const ORIGINAL_DENY_READ_ENTRIES = ["~/.ssh/**", "~/.aws/**", "~/.config/remudero/**"];
+// W1-T2213: re-anchored from bare `~/.ssh/**` etc. — under the worker's redirected
+// HOME, `~` alone resolved inside the worker's own scratch home rather than the
+// operator's. `~/../..` escapes through config.root (the same `~/..` step the
+// service-tokens.json entry below relies on) one level further, to the operator's
+// real home — see the tests below this file's own W1-T2211 block for the proof.
+const ORIGINAL_DENY_READ_ENTRIES = ["~/../../.ssh/**", "~/../../.aws/**", "~/../../.config/remudero/**"];
 
 function readWorkerSettingsTemplate(): Record<string, unknown> {
   return JSON.parse(readFileSync(WORKER_SETTINGS_TEMPLATE_PATH, "utf8"));
@@ -154,4 +159,63 @@ test("W1-T2211 ACCEPTANCE 5: the token file's mode is unchanged (0600) and resol
   // read-thereafter — proving this change introduces no rotation.
   const second = resolveServiceTokens(dir);
   assert.deepEqual(second, first, "resolveServiceTokens must never mint a new pair on an existing file");
+});
+
+// ── W1-T2213: ALL SIX `~`-ANCHORED DENIES RESOLVE INSIDE THE WORKER'S OWN SCRATCH
+// HOME — `~/.ssh/**`, `~/.aws/**` and `~/.config/remudero/**` (each mirrored in
+// permissions.deny and sandbox.filesystem.denyRead, six entries) named the
+// operator's real home but, under the worker's redirected HOME, resolved inside
+// the worker's own scratch directory instead (rationale (1)/(2)). Re-anchored to
+// `~/../../...`: `~/..` reaches config.root exactly as the W1-T2211 token deny
+// above already relies on, and loadConfig's own default (`root: join(homedir(),
+// "Remudero")`, config.ts) puts the operator's real home exactly one level above
+// config.root, so `~/../..` reaches it — the SAME config.root-relative escape,
+// extended by the one level that separates config.root from homedir() under that
+// default. Design part (i): re-anchored, never removed. ─────────────────────────
+
+test("W1-T2213 ACCEPTANCE 1: each of the three re-anchored denyRead entries resolves to the OPERATOR's real home, not the worker's redirected scratch home", () => {
+  const settings = readWorkerSettingsTemplate() as { sandbox: { filesystem: { denyRead: string[] } } };
+  const denyRead = settings.sandbox.filesystem.denyRead;
+  // A fixture stand-in for the operator's real home — never the test runner's own
+  // `homedir()`, so this passes on any host — paired with config.root exactly as
+  // loadConfig's own default relates the two (see comment above).
+  const fakeRealHome = "/tmp/rmd-w1-t2213-fixture-realhome";
+  const config = { root: join(fakeRealHome, "Remudero") } as Config;
+  const home = workerHomeDir(config);
+  const cases: Array<[string, string]> = [
+    ["~/../../.ssh/**", join(fakeRealHome, ".ssh")],
+    ["~/../../.aws/**", join(fakeRealHome, ".aws")],
+    ["~/../../.config/remudero/**", join(fakeRealHome, ".config", "remudero")],
+  ];
+  for (const [entry, expectedDir] of cases) {
+    assert.ok(denyRead.includes(entry), `${entry} must be present in denyRead`);
+    assert.ok(entry.startsWith("~/"), "still `~`-anchored, like the entries it replaces");
+    const withoutGlob = entry.slice(2).replace(/\/\*\*$/, "");
+    const resolved = resolve(home, withoutGlob);
+    assert.equal(
+      resolved,
+      expectedDir,
+      `${entry} must resolve to the operator's real home (${expectedDir}), not the worker's scratch home (was under ${home})`,
+    );
+  }
+});
+
+test("W1-T2213 ACCEPTANCE 2: all four denyRead entries (three re-anchored, one already-anchored by W1-T2211) are still present, none removed or narrowed", () => {
+  const settings = readWorkerSettingsTemplate() as {
+    sandbox: { filesystem: { denyRead: string[] } };
+    permissions: { deny: string[] };
+  };
+  const denyRead = settings.sandbox.filesystem.denyRead;
+  assert.equal(denyRead.length, 4, "still exactly four denyRead entries — none removed by this re-anchoring");
+  for (const entry of ORIGINAL_DENY_READ_ENTRIES) {
+    assert.ok(denyRead.includes(entry), `${entry} must still be present`);
+  }
+  assert.ok(
+    denyRead.includes("~/../state/service-tokens.json"),
+    "the W1-T2211 token deny is untouched by this re-anchoring",
+  );
+  for (const entry of ORIGINAL_DENY_READ_ENTRIES) {
+    assert.ok(settings.permissions.deny.includes(`Read(${entry})`), `permissions.deny must mirror ${entry}`);
+  }
+  assert.equal(settings.permissions.deny.length, 4, "permissions.deny mirrors denyRead one-for-one");
 });
