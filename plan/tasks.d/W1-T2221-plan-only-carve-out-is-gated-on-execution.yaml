@@ -1,0 +1,154 @@
+- id: W1-T2221
+  title: "THE PLAN-ONLY CARVE-OUT IS GATED ON AN EXECUTION OUTCOME, NOT ON THE DIFF — `planOnly` is computed correctly from `isInPlanScope` and is then only consulted behind `state === \"success\" && capped`, so a filing whose proof path happens to name a test that already exists executes, gets semantically downgraded, fails, and is judged as an implementation over a diff that is one `plan/tasks.d/*.yaml` file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/lib/review.ts, test/plan-only-carve-out-reachable.test.ts]
+  origin: oper#plan-only-carve-out-unreachable-2026-08-24
+  plan_refs: ["W1-T205", "W1-T456", "W1-T1085", "W1-T427", "W1-T384", "W1-T168"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-24 from a scratch worktree proved equal to `origin/main` BY SHA
+    (`caa790464294f304462f6319ae13d7ed8004a404`); clone checked and not shallow (2,109 commits).
+    `src/lib/review.ts` (412,808 B) and `src/run-task.ts` (1,531,586 B, over the contents cap) read
+    as GIT OBJECTS. The five-PR divergence was RE-DERIVED LIVE from the API, not restated.
+
+    (1) THE DIVERGENCE, RE-DERIVED. Every one of the five diffs is a SINGLE `plan/tasks.d/*.yaml`
+    file — confirmed per PR from `/pulls/<n>/files`. Their `remudero-review` commit statuses read:
+    #2701, #2709, #2711 and #2712 each `success` with "PASS — plan-only PR (N criteria), gated
+    deterministically (lint-plan + the plan-PR emitter + plan-index checks); no proof e…"; #2707
+    `failure` with "FAIL — unmet: the pinned key set is compared to the live schema's members in
+    both directions (+4 more)". Same diff shape, opposite verdicts.
+
+    (2) THE PREDICATE THAT SEPARATES THEM IS THE PROOF PATH'S EXISTENCE, AND IT IS NOT ABOUT THE
+    DIFF AT ALL. #2707's shard points all five proofs at `test/settings.test.ts`, which EXISTS on
+    main. The four that passed name paths that do NOT exist —
+    `test/unparseable-verdict-third-state.test.ts`, `test/console-shell-unknowns.test.ts` and their
+    siblings. An absent declared path grades `not_yet_built` (W1-T456's forward-reference arm,
+    `review.ts:2413`) and executes nothing; an existing path RESOLVES, so the proof RUNS.
+
+    (3) Q1 — WHAT THE CARVE-OUT ACTUALLY KEYS ON, WITH file:line. `planOnly` itself is CORRECT and
+    keys on the diff: `review.ts:3582` — `const planOnly = diffFiles.length > 0 &&
+    diffFiles.every(isInPlanScope) && enforcementData.length === 0;`. IT IS THE CONSUMER THAT IS
+    GATED ON AN EXECUTION OUTCOME. `review.ts:3694` — `const capped = executableCriteria.length > 0
+    && executedCount === 0;` — is a fact about what RAN. The carve-out is reached only at
+    `review.ts:3737-3740`, inside `state === "success" ? capped ? planOnly ? planOnlySummary(...)`.
+    So THREE conditions must hold, and two of them are outcomes: nothing executed, and no criterion
+    unmet. A plan-only diff satisfies the first and can fail either of the others.
+
+    (4) AND `state` NEVER CONSULTS `planOnly`, WHICH IS THE SECOND CLOSED DOOR. `review.ts:3632`
+    computes `state = noCriteria || unmet.length > 0 || testTheater || criteriaTampered || … ?
+    "failure" : …`. A single semantic downgrade puts `unmet.length > 0` and the verdict is `failure`
+    BEFORE the summary branch is reached — so on #2707 the carve-out was never consulted at all,
+    not merely rendered differently.
+
+    (5) Q1's SECOND HALF — `isInPlanScope` IS ALREADY IN HAND, WHICH CHANGES THE REMEDY'S SHAPE.
+    `planOnly` is computed at 3582, ahead of `state` at 3632 and of the summary at 3737, and its
+    own doc records that this ordering was deliberate ("computed EARLY (moved up from below) so the
+    W1-T58 guard could consult it"). Nothing needs to be derived: the predicate exists, is early,
+    and is already consulted by one other check. THE FILE ALREADY CONTAINS THE EXEMPTION SHAPE —
+    `review.ts:3587`, `const criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff);`
+    — a check that is skipped on a plan-only diff, with its own comment: "a genuine Architect
+    plan-only correction is never this function's business to fail." That is one binding use of
+    `planOnly` before the summary; every other pre-3582 mention is documentation or the interface
+    field at 484 (read directly — an earlier filter of mine mis-classified them and is corrected
+    here).
+
+    (6) Q2 — WHAT THE SEMANTIC LANE ADDS ON A DIFF THAT CONTAINS NO CODE. `judgeCriterion`
+    (`review.ts:2567-2570`) can only DOWNGRADE: `if (semantic === false && met) { met = false;
+    reason = "reviewer judged the proof non-responsive (semantic downgrade)"; }`. On a filing, the
+    acceptance criteria are A SPECIFICATION OF WORK NOT YET DONE. Judging them "responsive" asks
+    whether a diff substantiates claims it was never meant to substantiate — the answer is
+    correctly no, and the verdict is therefore wrong about the artifact it is grading. W1-T205
+    names the filing's real gate and it PASSED on #2707: `lint-plan`, the plan-PR emitter and the
+    plan-index checks. WHAT WOULD BE LOST BY EXEMPTING IT: on a plan-only diff, nothing the
+    deterministic floor does not already hold — but the exemption must be keyed on `planOnly`
+    itself, never on "the proofs did not execute", or it inherits the same defect one level up.
+
+    (7) THE COST, ATTRIBUTED. `remudero-review=failure posted to 3b9b9fb — FAIL — unmet: the pinned
+    key set is compared to the live schema's members in both directions (+4 more)`, every unmet
+    criterion carrying `reason: reviewer judged the proof non-responsive (semantic downgrade)`. Then
+    two fix-rung strikes and `fix rung: ESCAPING after strike 2/2 — review false-block: deterministic
+    floor passes while the spawned reviewer blocks`, escalated as `issues/2713`. THE ESCAPE IS
+    W1-T168 WORKING CORRECTLY — its own string is `run-task.ts:5332` — AND IS CITED, NOT RE-FILED.
+    The defect is that it had anything to escape from.
+
+    (8) Q3 — WHAT MUST NOT CHANGE. A plan PR touching ANY non-plan path is NOT plan-only and keeps
+    the full review: `diffFiles.every(isInPlanScope)` already fails closed on one stray file, and
+    that direction is load-bearing (the same doc calls it out). The deterministic gates stay
+    REQUIRED — `lint-plan` is in `ci-gate`'s REQUIRED array and nothing here touches it. And nothing
+    merges without a `success` verdict. THE CARVE-OUT IS BEING MADE REACHABLE, NEVER WIDENED: the
+    set of PRs it applies to is unchanged; only the conditions under which it is consulted are.
+
+    (9) NEIGHBOURS READ IN FULL AND DISTINGUISHED — NONE RE-FILED. Narrowed from a 68-shard
+    `carve-out` sweep, which was too broad to be a subject, to three shards naming
+    `planOnlySummary`/`PLAN-ONLY: 0/`/`plan-only carve-out`. W1-T1085 owns `cappedAnnotation` taking
+    no `planOnly` argument, and its own title states "the posted STATUS already renders the W1-T205
+    carve-out correctly" — that is TRUE OF THE PATH WHERE THE CARVE-OUT IS REACHED, and this task is
+    about when it is not; the two are complementary and neither supersedes the other. W1-T427 owns
+    the `enforcementData` arm of the same line 3582. W1-T456 owns the REPAIR half — a filing that
+    fails cannot be fixed — and this owns why it failed. W1-T384 owns `criteriaTampered` firing on
+    plan-adjacent work, the other consumer of `!planOnly`.
+
+    (10) THIS SHARD'S OWN PROOFS ARE A FORWARD REFERENCE ON PURPOSE. They name
+    `test/plan-only-carve-out-reachable.test.ts`, verified ABSENT on main, declared in `files:`.
+    Pointing them at an existing test would make them execute — which is precisely the defect above,
+    and would have made this filing fail the way #2707 did.
+  design: |
+    ONE CONCERN: make the W1-T205 carve-out reachable on the diffs it was written for.
+
+    (i) THE CARVE-OUT IS CONSULTED ON `planOnly`, NOT ON AN EXECUTION OUTCOME. Rationale (3): the
+    diff predicate is already computed early and correctly. What changes is that a plan-only diff
+    reaches its own summary regardless of whether a proof happened to resolve.
+
+    (ii) THE SEMANTIC DOWNGRADE DOES NOT DECIDE A PLAN-ONLY FILING. Rationale (6): on a diff with no
+    code the downgrade grades a specification against an artifact that was never meant to satisfy it.
+    The exemption is keyed on `planOnly` — the shape `criteriaTampered` already uses at 3587 — never
+    on "nothing executed", which would reproduce the defect.
+
+    (iii) THE DETERMINISTIC FLOOR IS UNTOUCHED AND STAYS REQUIRED. `lint-plan`, the plan-PR emitter
+    and the plan-index checks are the filing's gate (W1-T205) and they already passed on the failing
+    PR. Nothing here weakens them, and nothing merges without a `success` verdict.
+
+    (iv) THE SEMANTIC REVIEWER IS UNCHANGED FOR CODE PRs. Not weakened, not suppressed, and the
+    downgrade REASON string is untouched — it is the only record of why a criterion failed, and
+    rationale (7) depends on being able to read it.
+
+    (v) NOT IN SCOPE, NAMED: `cappedAnnotation`'s missing `planOnly` argument (W1-T1085); the
+    `enforcementData` arm (W1-T427); the repair path for a failed filing (W1-T456);
+    `criteriaTampered`'s own scope question (W1-T384); W1-T168's false-block escape, which worked;
+    and the proof dialect, which is correct and is what makes the forward reference legible.
+  acceptance:
+    - claim: "a plan-only diff reaches its plan-only verdict even when a proof resolved and ran"
+      proof: "unit test: test/plan-only-carve-out-reachable.test.ts"
+    - claim: "a semantic downgrade alone does not fail a diff that touches only plan paths"
+      proof: "unit test: test/plan-only-carve-out-reachable.test.ts"
+    - claim: "a diff touching one path outside plan scope keeps the full review and the full downgrade"
+      proof: "unit test: test/plan-only-carve-out-reachable.test.ts"
+    - claim: "the deterministic floor still decides the filing and a failing floor still fails it"
+      proof: "unit test: test/plan-only-carve-out-reachable.test.ts"
+    - claim: "a code diff is judged exactly as it is today"
+      proof: "unit test: test/plan-only-carve-out-reachable.test.ts"
+  note: |
+    NO PROOF GREPS THIS SHARD'S OWN PATH, and no proof points at an existing test. The target
+    `test/plan-only-carve-out-reachable.test.ts` was checked ABSENT on main against a control that
+    IS present, so all five grade `not_yet_built` rather than executing — see rationale (10).
+
+    `risk: high` IS BLAST RADIUS. `sizingViolation` (`src/lib/task-linter.ts:196`) returns
+    `undefined` on its first line at `risk: high`, so the span was EXEMPTED rather than cleared;
+    scored honestly it is two stems, `review` and `plan-only-carve-out-reachable`. The band is set
+    because this decides whether a PR merges: a mistake either passes work that should have been
+    graded, or keeps failing filings that are correct.
+
+    THE SWEEP'S REF COUNT WAS VERIFIED BEFORE ANY ZERO WAS TRUSTED. A bulk fetch on 2026-08-24
+    produced 95 refs against 134 on the remote — a 29% blind spot that reads as a clean zero. Here
+    the refspecs were numbered one per head, fetched 134 of 134, and the count was compared to the
+    remote BEFORE sweeping.
+
+    ONE SURFACE UNDER-CREDITS BY CONSTRUCTION AND IS LABELLED: the anchored trailer scan reads 1 for
+    W1-T1127, a built task, and 0 for W1-T2220, a filing demonstrably on main.
