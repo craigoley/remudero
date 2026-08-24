@@ -1,0 +1,147 @@
+- id: W1-T2244
+  title: "AN OPERATOR OVERRIDE OF A RISK ESCALATION LEAVES NO RECORD — the CAPPED verdict has `--override-capped-by` and writes a decision-relevant row, the risk judge's own escape hatch is the words 'merge it by hand', and the only row an operator handling an escalation can produce carries no verdict, no confidence, no disposition and no reason, so the judge cannot be calibrated against what the operator actually did"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/ledger.ts, src/lib/panel-actions.ts, test/risk-override-record.test.ts]
+  origin: oper#risk-escalation-override-leaves-no-record-2026-08-24
+  plan_refs: ["W1-T182", "W1-T219", "W1-T248", "W1-T329", "W1-T346", "W1-T1031"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main 2e6a0748 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT.
+    ★ THE LEDGER WAS NOT READ AND NO LEDGER FIGURE IS CARRIED HERE. `resolveLedgerUnion` at the
+    reachable state dir returns `archiveCount: 0` and therefore `ok: false` -- the union's own
+    coverage refusal, not a count -- and the live file there holds only this container's
+    `cli.invoked` and `deploy.skip` scratch. THE OPERATOR'S FIGURE FOR `risk_judge.decision` COULD
+    NOT BE CONTROLLED FROM HERE AND IS NOT RESTATED AS THOUGH IT HAD BEEN. Every claim below is
+    from source or from the GitHub API.
+
+    (1) THE PATTERN EXISTS FOR EXACTLY ONE CLASS. A CAPPED verdict can be overridden with
+    `rmd review <pr> --override-capped-by <name> --override-capped-reason <text>`
+    (`src/run-task.ts:10857-10874`), which writes `automerge.capped_override_granted` carrying
+    `{by, reason, pr_url, head_sha}`. W1-T219 BOUND it to the head it was reviewed against, and
+    `cappedOverrideFromLedger` (`src/lib/review.ts:4566-4592`) refuses to honour it against any
+    other head. The step is read across five source files (`autonomy.ts`, `ledger.ts`,
+    `review.ts`, `sweep.ts`, `run-task.ts`).
+
+    (2) THE RISK JUDGE HAS NO EQUIVALENT, AND THE REPO SAYS SO IN ITS OWN WORDS. `escalate.ts`'s
+    `namesOperatorOnlyAct` derives its idioms from the historical corpus and lists them side by
+    side: "the CAPPED-verdict escalation's own `--override-capped-by <name>` escape hatch, the
+    risk judge's 'merge it by hand' option". One is a recorded credential; the other is a
+    sentence. A search for a risk-judge override step returns ZERO for both `risk_judge.override`
+    and `risk_override`, against a control of 13 for `override_granted` and 9 for
+    `risk_judge.escalated` in the same tree -- so the zero is absence, not a blind query.
+
+    (3) THE TWO MEASURED CASES, VERIFIED OVER REST RATHER THAN RECALLED. Both escalation issues
+    are CLOSED and both were closed by the operator account: one titled "[BLOCKED] W1-T2201: risk
+    judge ESCALATED (high, confidence 1.00)", the other "[BLOCKED] W1-T2221: risk judge ESCALATED
+    (high, confidence 0.78)". Closing an issue is the only trace either left.
+
+    (4) AND THE COST IS ALREADY ON RECORD. W1-T1031's shard, present on main, states verbatim:
+    "10 escalations over 75 decisions, 9 merged anyway and none prevented anything". THAT FIGURE
+    HAD TO BE RECONSTRUCTED BY HAND -- which is the argument for this task, not merely context
+    for it. A calibrator that had to reconstruct the denominator once will have to do it again.
+  note: |
+    ── Q1. WHAT `mark-handled` DOES TODAY: IT LEDGERS, AND THAT IS NOT THE SAME AS RECORDING A
+       VERDICT ────────────────────────────────────────────────────────────────────────────────
+
+    (i) IT DOES WRITE A ROW. `buildEscalationMarkHandledRoute` (`src/lib/panel-actions.ts`)
+    calls `deps.issues.close(input.issueUrl)` and then
+    `ledgerPanelAction(deps, "panel.escalation_marked_handled", input.taskId, origin, {issue_url})`.
+    So the step name is `panel.escalation_marked_handled` and the fields are the task id, the
+    bearer-token origin, and the issue url. THE ROUTE RESPONSE TEXT AT `serve.ts` IS ACCURATE
+    ABOUT ITS OWN SCOPE -- "Marked handled — the escalation issue is closed" -- and the route's
+    doc comment is deliberate about the naming: it is "mark handled", not "approve" or "resolve",
+    because "the name must not imply the underlying block is fixed".
+
+    (ii) WHAT THE ROW CANNOT CARRY. There is no verdict, no confidence, no disposition and no
+    reason field -- not truncated, not unread, ABSENT. A calibrator reading every one of these
+    rows learns that a button was pressed and which issue closed, and nothing about whether the
+    judge was right.
+
+    (iii) SO THIS IS NOT THE W1-T329 SHAPE, AND THE SMALLER FIX IS UNAVAILABLE. W1-T329's shape is
+    a reason that IS recorded and that nothing reads -- there, wiring a reader is the whole fix.
+    Here the reason does not exist to be read. Both halves were checked: the step appears in
+    exactly ONE source file, the writer itself, against a control of five source files that read
+    the capped override.
+
+    (iv) AND IT IS NOT IN THE NEVER-ROTATED CORE. `DECISION_RELEVANT_LEDGER_STEPS` (`ledger.ts`)
+    is the retained set `rotateLedger` keeps unconditionally. Membership, checked at runtime
+    rather than read off the list: `automerge.capped_override_granted` TRUE,
+    `risk_judge.escalated` TRUE, `panel.escalation_marked_handled` FALSE. The escalation is
+    decision-relevant and the capped override is decision-relevant; the only row an operator
+    handling an escalation can produce is neither, so it is subject to the per-step cap and
+    archives away. A new step MUST be registered there or the record decays exactly when a
+    calibrator would want history.
+
+    (v) AND IN THE TWO MEASURED CASES THE ROUTE NEVER RAN. Both issues were closed by hand over
+    REST, so not even the thin row above exists for them. Whatever is built must be reachable on
+    the path an operator actually uses, or it will record the cases that were never the problem.
+
+    ── Q2. WHAT THE OVERRIDE ROW MUST CARRY ────────────────────────────────────────────────────
+
+    (vi) FOUR FIELDS, AND THE FOURTH IS THE ONE THAT MATTERS. The escalation it answers (task id
+    and issue url); the judged VERDICT and CONFIDENCE as the judge actually emitted them, copied
+    rather than re-derived, so the row is self-contained when the escalation has rotated; the
+    operator's DISPOSITION (merged by hand / re-dispatched / abandoned); and a REASON CLASS.
+
+    (vii) THE REASON CLASS MUST SEPARATE TWO OPPOSITE SIGNALS: "the judge was wrong" -- it should
+    not have escalated, and this is a miscalibration data point -- from "the risk is real and I
+    accept it" -- it was right to escalate, and the operator took the cost knowingly. THESE POINT
+    IN OPPOSITE DIRECTIONS FOR A CALIBRATOR. A single "overridden" flag that collapsed them would
+    make every override look like judge error and would drive the threshold the wrong way, which
+    is worse than the silence there is today. A free-text reason is NOT a substitute: the class
+    must be a closed set the loader validates, with free text ALONGSIDE it, the same shape
+    `--override-capped-reason` already pairs with `--override-capped-by`.
+
+    (viii) BIND IT TO THE HEAD, FOR W1-T219's REASON. The capped override is head-keyed and
+    `cappedOverrideFromLedger` refuses it against any other head. An override record that
+    outlived the head it judged would be evidence about a diff that no longer exists.
+
+    ── Q3. WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────
+
+    (ix) THE ESCALATION STILL BLOCKS AND AUTO-MERGE STILL REFUSES. This task RECORDS an override;
+    it does not CREATE one, and it grants nothing. The row is written after the operator has
+    already acted, and no code path consults it to decide whether to proceed.
+
+    (x) NOTHING AUTO-OVERRIDES ON A CONFIDENCE THRESHOLD. W1-T248 established the fail-closed
+    contract: LOW confidence ESCALATES rather than proceeds. A calibration input must never
+    become a bypass, and the tempting shape -- "confidence below X auto-grants" -- inverts that
+    contract exactly. Whoever builds this must add no reader that gates dispatch or merge on the
+    new row.
+
+    (xi) RECORDING STAYS LOW-TIER PRECISELY BECAUSE IT GRANTS NOTHING. `mark-handled` is
+    `tier: "low"` on the stated ground that it is bookkeeping and trivially reversible. A row
+    that records what an operator already did is the same kind of thing. If a build finds itself
+    arguing for a higher tier, that is the signal it has drifted from recording into granting.
+
+    (xii) DO NOT RE-FILE W1-T1031 OR W1-T248. W1-T1031 is the judge's INPUT problem -- the judge
+    reasons over a description rather than the change, which is why one of the two measured
+    escalations misread a shard's defect description as the change's own scope. That is a real
+    defect and it is ALREADY FILED. THIS SHARD IS ABOUT THE RECORD, NOT THE JUDGE: it would still
+    be worth building against a perfectly calibrated judge, because the override history is what
+    proves the calibration.
+
+    (xiii) RULE 19 BAND. `risk: high` is set up front because `files:` spans two source stems and
+    Rule 19 sizes on SPAN. The band is the span reading, NOT a blast-radius judgement -- the
+    change adds a step and a route and perturbs no existing predicate.
+  acceptance:
+    - claim: "an operator override of a risk-judge escalation writes one ledger row carrying the escalation, the judged verdict and confidence, the disposition and a reason class"
+      proof: "unit test: test/risk-override-record.test.ts"
+    - claim: "the reason class is a closed set validated on write — an unrecognised class is REFUSED and no row is written, so the calibration signal cannot be polluted by free text"
+      proof: "unit test: test/risk-override-record.test.ts"
+    - claim: "judge-was-wrong and risk-accepted are recorded as DISTINCT classes and a reader can partition the rows by them — the two are never collapsed into a single overridden flag"
+      proof: "unit test: test/risk-override-record.test.ts"
+    - claim: "the new step is registered in DECISION_RELEVANT_LEDGER_STEPS, so rotation retains it as it already retains the escalation and the capped override"
+      proof: "unit test: test/risk-override-record.test.ts"
+    - claim: "the row is bound to the head sha it judged and a reader refuses to honour it against a different head, the same binding the capped override already carries"
+      proof: "unit test: test/risk-override-record.test.ts"
+    - claim: "recording changes no gate — the escalation still blocks, auto-merge still refuses, and no dispatch or merge decision reads the new row"
+      proof: "unit test: test/risk-override-record.test.ts"
+    - claim: "no confidence value auto-grants an override — a low-confidence escalation still escalates and is never bypassed by the recording path"
+      proof: "unit test: test/risk-override-record.test.ts"
