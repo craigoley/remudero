@@ -156,6 +156,23 @@ test("W1-T2219 acceptance: an issue-channel failure is reachable by a caller rat
   );
 });
 
+// ── acceptance: the per-task gateway's issue-channel reason is reachable too ────────────────────
+
+test("W1-T2219 acceptance: ghGateway's issueReadFailureReason() reports the classified reason", () => {
+  // ghGateway makes one `gh` call per query (no separate batched issue fetch, per the comment
+  // beside issueReadFailed()/issueReadFailureReason() above) -- issueByUrl is the query that
+  // drives its sticky failed/failureReason pair here, same as any other query method would.
+  const gh = ghGateway("o", "r", {
+    exec: () => {
+      throw Object.assign(new Error("boom"), { status: 1, stderr: "gh: API rate limit exceeded" });
+    },
+  });
+
+  assert.equal(gh.issueByUrl?.("https://x/issues/1"), null, "the failed fetch reports unavailable, not a false miss");
+  assert.equal(gh.issueReadFailed?.(), true);
+  assert.equal(gh.issueReadFailureReason?.(), "rate_limit", "the classified reason, reachable through the accessor");
+});
+
 // ── acceptance: a classified failure still reports exactly the reason it reports today ─────────
 
 test("W1-T2219 acceptance: a classified failure still reports exactly the reason it reports today", () => {
