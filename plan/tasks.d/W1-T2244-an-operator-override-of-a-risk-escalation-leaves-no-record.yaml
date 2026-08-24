@@ -46,6 +46,86 @@
     "10 escalations over 75 decisions, 9 merged anyway and none prevented anything". THAT FIGURE
     HAD TO BE RECONSTRUCTED BY HAND -- which is the argument for this task, not merely context
     for it. A calibrator that had to reconstruct the denominator once will have to do it again.
+    ── ADDED 2026-08-24, RATIONALE ONLY, POST-MERGE OF #2758. THE CONSUMER IS ALREADY BUILT ────
+
+    (5) THE SWEEP IS ALREADY LOOKING FOR THIS RECORD AND SAYS SO IN THE ROW IT WRITES. The
+    "mergeable" arm of `runSweep` refuses a head the risk judge escalated and names the refusal
+    verbatim at `src/lib/sweep.ts:4901-4902`:
+    "risk judge escalated this head, no operator override recorded — see ${issueUrl}", with the
+    issue-url-less form on the next line. The predicate behind it is at `sweep.ts:4869-4871`:
+    `prior.riskRefused.has(riskRefusedKey) && !(pr.taskId !== undefined &&`
+    `cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) !== undefined)`, and W1-T970's
+    own comment at `sweep.ts:4863-4867` states the exit conditions in its own words: the refusal
+    "clears on a NEW head sha (the key itself...) OR an explicit operator override — reusing
+    `cappedOverrideFromLedger` VERBATIM". SO THE READER IS NOT SPECULATIVE AND NEEDS NO BUILDING.
+    It is wired, it re-derives on every sweep pass, and it is waiting on a row.
+
+    (6) BUT THE PRODUCER IS NOT ABSENT — IT WEARS ANOTHER CLASS'S NAME, AND "NOTHING CAN PRODUCE
+    ONE" IS TOO STRONG A CLAIM TO CARRY. The override write at `src/run-task.ts:10859-10874` is
+    gated on `overrideBy && overrideReason` plus a resolvable task id, AND ON NOTHING ELSE — it
+    is NOT gated on the verdict being CAPPED. `cappedWordingApplies(verdict)` guards only the
+    sibling `else if` hint at `run-task.ts:10878`, never the write itself, and
+    `cappedOverrideFromLedger` (`src/lib/review.ts:4585-4598`) matches on step, `task_id` and
+    `head_sha` and tests nothing about CAPPED either. So an operator CAN clear a risk refusal
+    today: by running the whole `rmd review <pr>` lane — a fresh reviewer spawn and a re-posted
+    status, not a record-only verb — under a flag named for a different verdict class, leaving a
+    row indistinguishable from a genuine capped override. THAT IS WORSE FOR A CALIBRATOR THAN
+    SILENCE, and it is this shard's own thesis one layer down: the defect is not that the record
+    cannot be written, it is that the record cannot be written UNDER ITS OWN NAME, and the only
+    spelling available mislabels which verdict class it answers.
+
+    (7) AND NEITHER SPELLING HAS EVER BEEN USED. Over the ledger union at the state dir
+    (archiveCount 24, ok true, no unread rotation; window 2026-08-08T22:57:35.818Z ..
+    2026-08-24T21:08:51.652Z): `automerge.capped_override_granted` is ZERO and
+    `panel.escalation_marked_handled` is ZERO, against controls of 19 `risk_judge.escalated`,
+    179 `risk_judge.decision` and 36,092 `sweep.disposed` on that same union — so both zeros are
+    absence, not a blind query. Note (v) below said the panel route did not run in the two
+    measured cases; THE STRONGER FACT IS THAT IT HAS NEVER RUN AT ALL.
+
+    ── Q1 RE-DERIVED: THE DEFECT RECURS, AND IT IS NOT THE TAIL IT WAS ATTRIBUTED TO ───────────
+
+    (8) THREE PRs HAVE CARRIED THE STAND-DOWN, NOT ONE, SO THIS IS NOT A SINGLE INCIDENT.
+    86 `sweep.disposed` rows carry that text, all of them in `stand_down_reason` and none in
+    `reason` (control: 16,271 rows carry some `stand_down_reason`), spread over PR #2419 with 15
+    rows, #2695 with 70 and #2749 with 1. Twelve distinct PRs reached `risk_judge.escalated` in
+    the window; only these three ever reached the "mergeable" arm where the refusal is spelled,
+    which is why this count is smaller than the escalation count rather than equal to it.
+
+    (9) BUT THE 1,150-MINUTE ATTRIBUTION TO #2419 WAS MINE AND IT IS WRONG. Integrating each PR's
+    armed window by the disposition that opens each interval: #2419 held the risk stand-down for
+    26 minutes of its 1,186-minute armed window, and the other 1,124 minutes — 39 sweep rows —
+    carried "review success, required checks green — arming auto-merge" with NO stand-down reason
+    at all. #2695 is the clean case, 86 of its 91 armed minutes; #2749 holds it for 22 of 42.
+    TOTAL ATTRIBUTABLE: 134 MINUTES, 2.2 HOURS, ACROSS THREE PRs — about 6% of the 35.8-hour
+    "green + armed + unmerged" bucket, and NOT its largest contributor. #2432, itself in the
+    escalated set, spent 354 minutes in that bucket with ZERO rows carrying this reason. The
+    dichotomy therefore resolves both ways at once: IT RECURS, AND THE TAIL IS STILL UNEXPLAINED.
+    THAT MAKES THIS SHARD SMALLER THAN THE MEASUREMENT FIRST SUGGESTED AND STILL WORTH BUILDING;
+    the largest idle contributor is a SEPARATE, UNIDENTIFIED CAUSE and must not be filed here.
+
+    ── Q2 RE-DERIVED: WHAT THE SWEEP SHOULD DO WITH THE ROW ────────────────────────────────────
+
+    (10) RECORD AND CLEARANCE STAY TWO SEPARATE ACTS, AND THIS SHARD OWNS ONLY THE FIRST. Writing
+    the override record must NOT be what clears `refused` at `sweep.ts:4869-4871`. If it were,
+    the calibration row would silently become a merge authorisation — precisely the inversion
+    (x) already refuses under W1-T248's fail-closed contract, arriving by the back door of a
+    field added "only for calibration". THE SWEEP SHOULD READ THE NEW ROW FOR EXACTLY ONE
+    PURPOSE: to say, in its own stand-down text, that an override WAS recorded and under which
+    reason class, so the row a reader reaches first stops asserting "no operator override
+    recorded" while one exists. IT STILL MUST NOT MERGE, AND THE DISPOSITION MUST NOT CHANGE.
+    That is consistent with (ix), which pins that no path consults the row to DECIDE: naming a
+    recorded fact in a stand-down line is a read for DISPLAY that alters no disposition, and a
+    build must treat that boundary as stated rather than as licence to widen it. The clearance
+    path already exists and is explicit — `cappedOverrideFromLedger` — and the right end state is
+    that it keeps its grant semantics under a name that does not misreport the class it answers.
+
+    (11) A LIMIT THE BUILD MUST NOT INHERIT: THE LEDGER CANNOT SEE A HAND MERGE. Every one of the
+    631 `verdict.merged` rows in that window carries `source: "sweep.credit_backfill"` and no
+    other value occurs, so a PR merged by an operator over REST and one merged by GitHub
+    auto-merge are recorded identically. That is why the two cases here left no trace either
+    time, and it is a second reason the new record must be written on the path the operator
+    actually takes rather than inferred after the fact from a merge.
+
   note: |
     ── Q1. WHAT `mark-handled` DOES TODAY: IT LEDGERS, AND THAT IS NOT THE SAME AS RECORDING A
        VERDICT ────────────────────────────────────────────────────────────────────────────────
