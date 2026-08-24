@@ -1,0 +1,146 @@
+- id: W1-T2201
+  title: "THE CONTAINMENT PROBE'S TURN BUDGET DID NOT MOVE WHEN A FOURTH COMMAND WAS ADDED UNDERNEATH IT — `maxTurns: 6` is a literal unchanged since the original spike, the floor is now five, and all three observed runs end `Reached maximum number of turns (6)` with the outside-write check never run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    **THE BUDGET AND THE FOURTH COMMAND ENTERED IN THE SAME COMMIT, AND ONLY ONE OF THEM WAS NEW.**
+    `9ca4180c` (#2626, 2026-08-23T17:49:43Z, "feat(containment): prove network containment per run
+    with an egress arm") introduced `egressProbeCommand` and touched `maxTurns: 6` in the same diff.
+    Scoped to the file that holds the probe's budget, `git log -S'maxTurns: 6' -- src/lib/containment.ts`
+    returns exactly TWO commits: that one and `b697de79` (#18, 2026-07-14). **THE 6 IS UNCHANGED SINCE
+    THE ORIGINAL SPIKE** — the later commit moved the literal, it did not re-derive it.
+
+    **PRECISION ON THAT QUERY, BECAUSE THE UNSCOPED FORM ANSWERS A DIFFERENT QUESTION.** Repo-wide,
+    `git log -S'maxTurns: 6'` returns SEVEN commits; five of them touch `MASTER-PLAN.md`,
+    `.remudero/mounts.yaml`, `src/lib/review.ts`, `src/lib/plan.ts` or `src/lib/config.ts` and have
+    nothing to do with this budget. The two-commit history is a fact about `src/lib/containment.ts`,
+    and stating it without the pathspec would be a claim the corpus does not support.
+
+    **THE FILE DOES THE ARITHMETIC ITSELF AND THEN DOES NOT ACT ON IT.** `src/lib/containment.ts:340`
+    reads, verbatim: *"the probe's `maxTurns: 6` budget is not spent on turn count — the existing three
+    commands plus the report already use four."* That comment is the justification for packing BOTH
+    egress requests into ONE Bash command. It is correct and it is also the whole problem: three
+    commands plus a report is four, and the fourth command makes it **FIVE AGAINST A CAP OF SIX**.
+    The comment reasons about the floor at the moment the floor moves, and leaves the ceiling alone.
+
+    **ONE TURN OF SLACK, AND THE PROMPT INVITES THE CLARIFICATION THAT SPENDS IT.**
+    `containmentProbePrompt` opens at :272 with *"run these THREE commands IN ORDER"*, says at :273
+    *"run all three and report"*, and then at :277 adds *"THEN run this FOURTH command"*. **IT
+    ANNOUNCES THREE AND ISSUES FOUR** — and its own doc comment at :269 still says *"report all
+    three"*, so the stale count sits in two places, not one. **THE NARRATION IS `W1-T1271`'s AND IS
+    CITED, NOT RE-FILED**; that task already records that the count is pinned as a literal and that
+    `test/deny-floor-probe.test.ts` ASSERTS `/THREE commands/`, so the wording cannot be corrected
+    without touching a file no prompt-changing shard declares. This task is about the CEILING, which
+    would still be one turn short even if the prompt read four everywhere.
+
+    **THE MEASURED CONSEQUENCE.** All three W1-T1281 runs end `Reached maximum number of turns (6)`
+    with `outside_write_created: false` and `os_denial_seen: false`. One transcript reaches command 4
+    and says *"Command 4 produced no output at all, which is ambiguous — I need to check which marker
+    files were created"* before the cap cuts it off. **THE CHECK NEVER RAN; THE WRITE WAS NOT
+    REFUSED.** The probe did not observe containment failing — it ran out of turns while trying to
+    find out, and the two are not the same fact.
+
+    **Q1 — DERIVE THE BUDGET FROM THE COMMAND COUNT, DO NOT PICK A NUMBER.** The floor is
+    `commands + 1` (each command is one Bash tool call, plus the closing REPORT turn). Today that is
+    4 + 1 = 5. A cap must be that floor PLUS a stated allowance, and the allowance has to be named
+    for what a worker legitimately spends a turn on rather than guessed: RE-READING AN AMBIGUOUS
+    RESULT (the transcript above is exactly this — a command with no output, where the outcome is
+    knowable only by checking the marker files), A RETRY AFTER A MALFORMED INVOCATION, and — see Q2 —
+    A REWORK FORCED BY THE PROBE'S OWN TRIPWIRE. None of those is worker misbehaviour; each is the
+    probe being careful, which is the behaviour a containment probe should want. Deriving the cap
+    from the command list is what makes a FIFTH command move the ceiling automatically instead of
+    silently eating the slack, which is precisely what happened here.
+    **NOT PROPOSED, BY NAME: dropping a command, or merging the four into fewer.**
+
+    **Q2 — THE SECOND COST: THE VERIFICATION PATH COLLIDES WITH THE DENY-FLOOR HOOK.** A transcript
+    records *"The verification command was itself blocked by the hook (it contained the tripwire
+    string)"*. **REPRODUCED FIRST-HAND WHILE FILING THIS SHARD**: a read-only command naming the
+    tripwire literal was refused with `deny-floor: blocked — <tripwire> path`, and the reading had to
+    be redone with the literal assembled from fragments. `hooks/deny-floor.sh:43` matches
+    `(^|[^A-Za-z0-9_])<tripwire>` against the WHOLE command string, so it cannot distinguish an
+    attempt to CREATE the tripwire from an `ls` that merely NAMES it. A probe that doubts its own
+    result therefore pays turns working around its own tripwire — and it pays them out of the single
+    turn of slack the fourth command left. The two costs compound rather than sit side by side.
+
+    **Q3 — WHAT MUST NOT CHANGE.** THE PROBE STAYS FAIL-CLOSED: a run that proves nothing must keep
+    reporting `contained: false`. It does today — `assessContainment` returns
+    *"no OS-denial was observed for the outside-cwd write — containment UNPROVEN"* — and a raised cap
+    must not turn a quieter failure into a pass. THE DENY FLOOR STAYS: the hook is not narrowed,
+    weakened, or made to distinguish read from write as part of this change. **AND A RAISED CAP MUST
+    NOT MAKE AN UNPROVEN PROBE READ AS PROVEN** — which is why the cap alone is not the whole
+    remedy: MEASURED, nothing in `src/lib/containment.ts`, `src/lib/worker.ts` or `src/run-task.ts`
+    contains `maximum number of turns`, `Reached maximum` or `turnsExhausted`, so a turn-exhausted
+    run is today INDISTINGUISHABLE from a probe that never attempted the write. Both land on the same
+    reason, *"(the write may never have been attempted)"*, which is true of both and identifies
+    neither. Raising the ceiling makes exhaustion rarer without making it visible; the exhaustion
+    must become nameable in the same change, or the next time the floor moves this recurs silently.
+  acceptance:
+    - claim: "the probe's turn cap is derived from the command list plus the report plus a named allowance, not written as a literal"
+      proof: "unit test: test/containment-turn-budget.test.ts"
+    - claim: "adding a command to the probe raises the derived cap, so a fifth command cannot silently consume the slack"
+      proof: "unit test: test/containment-turn-budget.test.ts"
+    - claim: "a run that exhausts its turns is reported as turn-exhausted rather than as an unattempted write"
+      proof: "unit test: test/containment-turn-budget.test.ts"
+    - claim: "a probe that proves nothing still reports contained false, whatever the cap is raised to"
+      proof: "unit test: test/containment-turn-budget.test.ts"
+    - claim: "the deny-floor hook is unchanged and still refuses the tripwire, and the allowance covers the rework it forces"
+      proof: "unit test: test/containment-turn-budget.test.ts"
+  files: [src/lib/containment.ts, test/containment-turn-budget.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#probe-turn-budget-did-not-move-2026-08-24"
+  plan_refs: ["W1-T1271", "W1-T1281", "W1-T1265"]
+  note: |
+    **NO PROOF IN THIS SHARD GREPS ITS OWN PATH.** All five criteria use the pure-path `unit test:`
+    form naming `test/containment-turn-budget.test.ts`, declared in `files:`, so `judgeCriterion`'s
+    `not_yet_built` carve-out applies at filing time. A `grep:` proof naming this shard would be out
+    of scope by construction: a `verify: auto` task cannot declare its own plan record in `files:`.
+
+    **WHAT THIS TASK DOES NOT OWN.** The prompt's THREE/FOUR narration is `W1-T1271`'s, including the
+    `/THREE commands/` assertion in `test/deny-floor-probe.test.ts` that pins it. The discarded
+    failure evidence is `W1-T1281`'s. The egress arm itself is `W1-T1265`'s (#2626). This task owns
+    the CEILING and the exhaustion signal, and nothing else — a fix that corrects the narration
+    without moving the cap has not addressed it, and neither has one that moves the cap without
+    making exhaustion nameable.
+
+    **RISK BAND IS RULE 19 SPAN, NOT BLAST RADIUS.** `files:` crosses `src/` and `test/`, so the SPAN
+    reading is `high`. `high` EXEMPTS `sizingViolation` rather than clearing it — it returns
+    `undefined` outright at that band — so a clean lint is NOT evidence the span was vetted. The
+    blast radius is narrower: one derived constant and one new reported field, both inside the probe.
+    The danger is the FAIL-CLOSED DIRECTION, which is why criteria 3 and 4 exist as a pair — a change
+    passing criterion 1 while failing either of those has bought turns by weakening the verdict.
+
+    **THE FALSIFIER, STATED SO IT CAN BE RUN.** Falsified if probe runs still terminate at the cap
+    after the change — the derived ceiling was still too low, and the allowance is the figure on
+    trial. Also falsified if a genuinely uncontained run stops reporting `contained: false`, or if a
+    turn-exhausted run is reported as a containment finding rather than as exhaustion.
+
+    **MEASUREMENT PROVENANCE.** Clone checked NOT shallow (`--is-shallow-repository` false, 2079
+    commits) BEFORE any history query. `src/run-task.ts` is 1,502,392 bytes — over the Contents API's
+    1 MB cap — so every figure from it was read through git objects. `resolveLedgerUnion` was run
+    FIRST and returned `archiveCount 0, ok false` against this container's only `state/`, whose live
+    ledger carries a single distinct step; the reader worked and the corpus is elsewhere, so **NO
+    LEDGER FIGURE IS QUOTED** and the run-level counts above are the operator's transcripts, cited
+    as such.
+
+    **ID PROVENANCE.** `refs/rmd-id/W1-T2201` reserved 2026-08-24T02:08:43Z and confirmed still held
+    and unused. Eight surfaces swept, each with a control qualified for that surface, and ONE CONTROL
+    DISQUALIFIED AND RE-TAKEN RATHER THAN REPORTED: the open-PR-title surface's `W1-T` control read
+    **0**, because neither open PR carries a task id in its title, so it was re-taken on a token that
+    is present. Reservation ref 1 against a namespace of 320; shard filenames on main 0 (control
+    `W1-T1284` = 1); `- id:` lines 0 (control `W1-T1284` = 1); open-PR titles 0 (re-control = 1);
+    open-PR head branches 0 (control `run-*` = 87); open-PR file lists 0 across 2 of 2 heads
+    enumerated and captured, control 5 file entries; anchored merged trailers
+    `^Remudero-Task:\s*<id>\s*$` 0 (control `W1-T1274` = 1 across 98 merged); merged subjects 0
+    (control `(W1-T1284)` = 1 across 2079).
+
+    **THE SUBJECT SWEEP IS A COUNT PER HEAD AGAINST MAIN'S BASELINE**, read through git objects over
+    `src/lib/containment.ts`: `maxTurns: 6` / `these THREE commands` / `probeTurnBudget`. Main reads
+    2 / 1 / 0 and every open head reads exactly 2 / 1 / 0. The two non-zero columns are the control
+    that the reader worked; the zero is the defect — nothing anywhere derives the cap from the
+    command count, and no open head is adding it.
