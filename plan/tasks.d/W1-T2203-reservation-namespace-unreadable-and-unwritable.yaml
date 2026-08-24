@@ -1,0 +1,159 @@
+- id: W1-T2203
+  title: "THE ID RESERVATION NAMESPACE IS UNREADABLE BY THE MINTER AND UNWRITABLE BY ONE CLASS OF LANE — `next-task-id` reserves into `refs/rmd-id/*` and never reads it, so a stray reservation is invisible to the very verb that would trip over it, while a push to that namespace from an agent container returns HTTP 403 in the same second a branch push succeeds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/run-task.ts, test/reservation-namespace-visibility.test.ts]
+  origin: oper#reservation-namespace-unreadable-unwritable-2026-08-24
+  plan_refs: ["W1-T1055", "W1-T1268", "W1-T1011", "#2668"]
+  status: blocked
+  attempts: 0
+  rationale: |
+    ★ FILED `status: blocked` ON PURPOSE. Design (ii) weighs two remedies and DOES NOT PICK,
+    because the obvious one may be strictly worse (it converts a recoverable failure into an
+    immediate permanent one). Choosing between them is an operator ruling, not this task's.
+
+    (1) THE MINTER WRITES TO A NAMESPACE IT NEVER READS, AND THE SURFACE LIST SAYS SO IN ITS OWN
+    WORDS. `rmd next-task-id`'s usage line (`src/run-task.ts`, read through git objects because the
+    file is 1.43 MB and the contents API caps at 1 MB) declares the id "derived from the max across
+    plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted
+    (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in
+    the git history of plan/ (the fold class: an id filed then folded away, W1-T278)". FOUR
+    SURFACES, AND `refs/rmd-id` IS NOT ONE OF THEM: the substring occurs ZERO times inside that
+    list and exactly ONCE in the whole usage line — in the `--reserve` flag's own description,
+    which is the WRITE. The same verb reserves into a namespace it does not consult.
+
+    (2) SO A STRAY RESERVATION IS INVISIBLE AND A STRAY FILING IS NOT. A number nothing has filed
+    under is unreachable by every one of the four surfaces; the moment a shard or an open PR
+    carries it, three of the four see it at once. That is why a bad number becomes permanent only
+    once something files under it, and it is the mechanism behind 2026-08-24's inflation.
+
+    (3) THE NAMESPACE ABOVE THE PLAN FRONTIER, MEASURED. Against a frontier that was 1288 the
+    reservation namespace holds `W1-T2201`, `W1-T2202`, `W1-T2203`, `W1-T100000` and
+    `W1-T1000000` through `W1-T1000004`.
+    THE `W1-T1000000`-SERIES ARE NOT THE DEFECT AND MUST NOT BE DELETED. They are LIVE
+    dependency-chain fixtures with real shards on main — `W1-T1000003`
+    (`a-held-pr-is-visible-on-the-board`) depends on `W1-T1000002`
+    (`operator-merge-hold-is-a-refusal-not-a-disarm`), whose own note records that relationship in
+    both directions. They occupy a deliberately out-of-band range so a fixture id can never collide
+    with a real one.
+
+    (4) TWO FLEET LANES MINTED FOUR SECONDS APART AND NEITHER SAW THE OTHER'S REF — ANCHORS
+    RE-DERIVED FROM THE REFS THEMSELVES, NOT CARRIED. `refs/rmd-id/W1-T2201` resolves to an anchor
+    whose message reads "rmd-id reservation 1474654@Remudero 2026-08-24T02:08:43.702Z";
+    `refs/rmd-id/W1-T2202` reads "rmd-id reservation 1475147@Remudero 2026-08-24T02:08:47.275Z".
+    Different pids, 3.573 seconds apart, on the same host, both landing ~913 above the frontier.
+
+    (5) AND THE WRITE HALF: A REFSPEC POLICY, NOT A TOKEN PERMISSION. A push to `refs/rmd-id/*`
+    from inside an agent container returns HTTP 403 while a push to `refs/heads/*` succeeds in the
+    same second — that control is what distinguishes a namespace refusal from an outage or a
+    credential problem, and it was observed twice on 2026-08-23/24 by two independent lanes, each
+    running it. The same push succeeded FROM THE HOST on the first attempt at 2026-08-24T02:38Z,
+    creating `refs/rmd-id/W1-T1289`. The refusal is the egress proxy's refspec policy.
+
+    (6) Q1 — RE-DERIVED ACROSS ALL 322 ANCHORS, AND THE ANSWER CORRECTS THE OBVIOUS FRAMING.
+    Reservations from containers are NOT decorative: classified by the writer each anchor names,
+    `Remudero` wrote 116, `5935b6b32a81` 48, `5efb86ede91b` 46, `eae16667008a` 14 and
+    `b79658d95089` 10 — a container majority — against `Craigs-Mac-mini` at 33 and 53 whose
+    anchor text names no host. THE NARROW TRUE STATEMENT IS THE ONE THAT MATTERS: **NO RESERVATION
+    HAS EVER BEEN WRITTEN FROM A HOST NAMED `vm`**, which is the class the cloud agent lanes run
+    in, and it is that class which measures the 403. So the surface is decorative for exactly one
+    writer class — the one filing these shards — while the daemon and worker containers use it
+    freely. Reporting it as decorative for containers generally would have been false.
+
+    (7) AN INCIDENTAL OBSERVATION WORTH RECORDING, BECAUSE IT WEAKENS A GUARANTEE THIS NAMESPACE
+    RELIES ON. `refs/rmd-id/W1-T1289` does not hold an orphan: it resolves to `113302d3`, a
+    REACHABLE commit on main. `src/lib/task-id-reservation.ts`'s own header records why the anchor
+    must be an orphan — a payload unique to the writer is what makes a second writer's push a
+    structural non-fast-forward rather than a policy question — so a reservation anchored on a
+    shared commit does not carry that property. Not proposed for repair here; recorded so nobody
+    assumes every ref in the namespace has it.
+  design: |
+    ONE CONCERN: make the reservation namespace legible to the verb that writes it, or admit it is
+    not a lock for the lanes that cannot write it.
+
+    (i) THE TWO HALVES ARE INDEPENDENT AND EITHER CAN BE FIXED WITHOUT THE OTHER. The READ gap is
+    local: a fifth surface in `next-task-id`. The WRITE gap is environmental: a proxy refspec
+    policy this repository does not own. A remedy for one leaves the other exactly as it is.
+
+    (ii) Q2 — WEIGHED, NOT PICKED, AND THE OBVIOUS FIX MAY BE STRICTLY WORSE.
+      TEACH THE MINTER TO READ `refs/rmd-id/*`
+        BUYS: the minter stops handing out an id somebody already holds, and a race between two
+        minters is decided by the ref rather than by who files first.
+        COSTS: it makes every stray reservation IMMEDIATELY AND PERMANENTLY BINDING. On 2026-08-24
+        the strays at 2201/2202 cost nothing until a shard was filed under one; with this change
+        the frontier would have jumped to 2203 the instant they landed, with no filing and no
+        review. THE CURRENT ARRANGEMENT IS ACCIDENTALLY FORGIVING, and that forgiveness is load
+        bearing precisely because the write half is broken for some lanes.
+      ALLOW THE REFSPEC THROUGH THE PROXY
+        BUYS: reservations become real for every lane, which is the property `--reserve` was built
+        to provide (W1-T1055) and does not currently provide for agent containers.
+        COSTS: it widens a proxy that is a security boundary, for a namespace whose writes are
+        unreviewed and never expire — and nothing in this repo owns that policy, so the change is
+        made and audited somewhere else.
+      WHICH FAILURE IS RECOVERABLE, WHICH IS THE DECIDING QUESTION. A minter that hands out a
+      colliding id is recovered by renumbering before merge — measured twice this week and cheap.
+      A stray reservation made binding is recovered only by deleting a ref, which Q3 forbids doing
+      automatically and which the operator has ruled is a manual decision. A widened proxy is
+      recovered by narrowing it again, but any exposure in between is not recoverable at all.
+      ON THAT ORDERING the read fix trades a cheap recoverable failure for an expensive one, which
+      is why this shard refuses to pick and is filed `blocked`.
+
+    (iii) Q3 — WHAT MUST NOT CHANGE. THE EIGHT-SURFACE SWEEP STAYS: it is the thing that actually
+    caught every collision this week, and no change here reduces it. NOTHING DELETES A RESERVATION
+    AUTOMATICALLY — a contested or stray ref is an operator decision, and a rung that reclaimed one
+    would be re-opening the race the ref settled. AND A COLLISION STILL LOSES TO THE PR THAT
+    REACHES MAIN FIRST: merge order remains the tiebreak, not reservation order, because main is
+    the only surface every lane can read.
+
+    (iv) NOT IN SCOPE, EACH NAMED. Deleting the stray refs; renumbering any MERGED shard; and
+    reclaiming the 913-id gap — the operator has ruled that gap accepted. The `W1-T1000000`-series
+    fixtures, per rationale (3). W1-T1268 (#2668, MERGED) solves the same collision ONE LAYER DOWN
+    with a pre-artifact dispatch claim keyed on the task; it is BUILT, it is cited, and it is not
+    re-filed — its claim is taken at dispatch and says nothing about id minting. W1-T1055 built
+    `--reserve` itself and is the predecessor this task is downstream of.
+  acceptance:
+    - claim: "the minter's id derivation consults the reservation namespace it writes to, or refuses to claim the namespace protects anything"
+      proof: "unit test: test/reservation-namespace-visibility.test.ts"
+    - claim: "an id already holding a reservation is not offered by the minter as free"
+      proof: "unit test: test/reservation-namespace-visibility.test.ts"
+    - claim: "a lane that cannot write the reservation namespace reports that it holds nothing rather than reporting success"
+      proof: "unit test: test/reservation-namespace-visibility.test.ts"
+    - claim: "a reservation anchor that is not unique to its writer is rejected, so the non-fast-forward guarantee holds for every ref in the namespace"
+      proof: "unit test: test/reservation-namespace-visibility.test.ts"
+    - claim: "merge order remains the tiebreak for a collision, and nothing deletes a reservation automatically"
+      proof: "unit test: test/reservation-namespace-visibility.test.ts"
+  note: |
+    RISK BAND — BOTH READINGS, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
+    `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` at `risk: high`, so a `high`
+    band means the span was NEVER SCORED, not that it was scored and found narrow. The `files:`
+    list was measured at `risk: medium` first and that reading is recorded in the PR. The real
+    blast radius is high independently of Rule 19: this changes how ids are handed out fleet-wide,
+    and a minter wired wrong stalls every filing lane at once.
+
+    NO PROOF GREPS THIS SHARD'S OWN PATH. All five criteria use the pure-path `unit test:` form
+    naming `test/reservation-namespace-visibility.test.ts`, which is declared in `files:` and does
+    not exist yet — the sanctioned forward reference, verified through
+    `shardDeclaredFilesInDiff` rather than through `check-proof`, which reads `verdict: fail` on a
+    path that has not been created.
+
+    THE ID WAS PRE-MINTED AND READ BACK BEFORE ANYTHING WAS WRITTEN. `refs/rmd-id/W1-T2203`
+    resolves against a namespace of 322 refs, and no shard exists under it. Eight surfaces were
+    swept, each against a control pre-qualified on that surface and reading non-zero there: shard
+    filenames 0 against W1-T1288 at 1; `- id:` lines 0 against W1-T1288 at 1; the reservation 1,
+    the pre-mint; open PR titles 0 against 1 title carrying a `W1-T` id; open head branches 0
+    against 1 `run-W1-T` head; open PR file lists 0 with coverage at two of two enumerated,
+    against `plan/tasks.d/` at 1; merged trailers 0 under `^Remudero-Task:\s*W1-T2203\s*$` against
+    38 carrying any trailer; merged subjects 0 against 60. `run-W1-T2203-*` reads 0 against an
+    86-branch `run-*` namespace. No surface required disqualification.
+
+    THE SUBJECT WAS SWEPT AS WELL AS THE ID. `rmd-id` matches 135 shards and `refspec` 56, so the
+    sweep was narrowed to `reservation namespace`, which matches three — W1-T1055, W1-T1282 and
+    W1-T1288 — each read by title. W1-T1055 is the predecessor that BUILT `--reserve` and is cited
+    in design (iv); the other two are unrelated. W1-T1011 was read as well, being the nearest by
+    subject, and it is about WHEN a reservation is taken rather than whether the namespace can be
+    read or written.
