@@ -848,7 +848,10 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
       await withLiveWritesAllowed(() =>
         effects.dispatchFix(
           { prNumber: 7, prUrl: "https://github.com/acme/sandboxrepo/pull/7", taskId: TASK, reviewState: "failure" } as never,
-          { unmetCriteria: [{ claim: "c1", proof: "unit test: p", met: false, why: "unmet" }], ciFailures: [] } as never,
+          // W1-T1282: a real (non-empty) failing check — an empty `ciFailures: []` now stands
+          // the rung down before any strike (the two-reader-split guard), and this fixture is
+          // testing the push guard site, not ci-log evidence content.
+          { unmetCriteria: [{ claim: "c1", proof: "unit test: p", met: false, why: "unmet" }], ciFailures: [{ name: "ci", logTail: "build failed" }] } as never,
         ),
       );
     } catch {

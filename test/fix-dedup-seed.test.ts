@@ -257,6 +257,11 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
       prUrl: `https://github.com/${owner}/${repo}/pull/77`,
       taskId: TASK,
       headSha: "cafefeed77",
+      // W1-T1282: a real (non-empty) failing check — `checksState: "red"` alone (this fixture's
+      // own default) now stands the rung down before any strike when `ciFailures` reads empty
+      // (the two-reader-split guard). This fixture is testing the DEDUP mechanism, not ci-log
+      // evidence content, so it needs a genuinely non-empty list to reach the worker at all.
+      ciFailures: [{ name: "ci", logTail: "build failed" }],
     });
 
     const summary1 = await withLiveWritesAllowed(() =>
