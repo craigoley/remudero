@@ -136,6 +136,10 @@ test("the SAME gateway recovers on its next successful fetch — a timeout is on
     },
   });
 
+  // W1-T2219: readFailed()/readFailureReason() no longer force their own fetch — trigger the
+  // (failing) attempt explicitly first via a query method that itself calls index(), exactly
+  // like every real caller already reaches these accessors after one of the calls below.
+  assert.equal(gh.findMergedByTrailer("W1-T1"), null, "the timed-out fetch surfaces as no credit");
   assert.equal(gh.readFailed?.(), true, "first fetch times out");
   assert.equal(gh.readFailureReason?.(), "transport");
 
