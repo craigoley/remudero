@@ -29,6 +29,14 @@ function clientFn(name: string): string {
   return src as string;
 }
 
+/** The same verbatim-extraction discipline for a top-level `const` the extracted functions read. */
+function clientConst(name: string): string {
+  const re = new RegExp("const " + name + " =[\\s\\S]*?;\\n");
+  const src = HTML.match(re)?.[0];
+  assert.ok(src, `the shell's inline script must define ${name}`);
+  return src as string;
+}
+
 // ── (i)/(ii) THE BANNER: re-worded, not deleted — asserts only what THIS page load can see ──────
 
 interface BannerEl {
@@ -45,6 +53,15 @@ function bannerHarness() {
     "elements",
     [
       "var document = { getElementById: function (id) { return elements[id] === undefined ? null : elements[id]; } };",
+      // THE BANNER'S OWN COLLABORATORS, EXTRACTED VERBATIM TOO. `updateGithubBanner` renders its
+      // page-load clock through the shell's real `formatTimestamp`/`formatRelative` over the real
+      // `PAGE_LOADED_ISO` constant, so a sandbox holding only `updateGithubBanner` throws
+      // `formatTimestamp is not defined` before any assertion below can run. Pulling them from the
+      // SAME served script keeps this file's stated discipline -- never a reimplementation -- and
+      // means the exact string the operator sees is what gets asserted on.
+      clientConst("PAGE_LOADED_ISO"),
+      clientFn("formatRelative"),
+      clientFn("formatTimestamp"),
       clientFn("updateGithubBanner"),
       "return { updateGithubBanner: updateGithubBanner };",
     ].join("\n"),
@@ -58,9 +75,27 @@ test("W1-T2218: a page load with no completed GitHub read renders a label about 
   h.update([{ taskId: "W1-T1", indeterminate: true }]);
   assert.equal(h.banner.hidden, false);
   assert.match(h.banner.textContent, /no GitHub read has completed since this page loaded/);
-  // The falsifier this task names: the OLD label stamped a clock reading into the sentence.
+  // THE FALSIFIER THIS TASK NAMES, AND IT DISCRIMINATES RATHER THAN BANNING DIGITS. The defect was
+  // a clock presented AS THE OUTAGE START ("GitHub unreachable since 6:47 PM") -- a fact the page
+  // never observed. A clock presented as THIS PAGE LOAD's navigation start is the opposite: a fact
+  // the page holds about itself, and W1-T183 REQUIRES it, because every time cell must carry both
+  // a local clock reading and a relative one and this banner is a time cell. A blanket
+  // `/\d{1,2}:\d{2}/` ban forbade both and so forbade the very thing W1-T183 mandates; these three
+  // assertions forbid only the first.
   assert.doesNotMatch(h.banner.textContent, /since \d/i, "must never claim a stamped outage-start instant");
-  assert.doesNotMatch(h.banner.textContent, /\d{1,2}:\d{2}/, "no clock-time literal of any kind belongs in this label");
+  assert.doesNotMatch(h.banner.textContent, /GitHub unreachable since \d/, "the discarded outage-start sentence must never return");
+  // The page-load reading is the ONE clock this label may carry, and it is parenthesised. Outside
+  // those parentheses no clock literal belongs -- which still fails the old sentence, whose clock
+  // sat bare in the prose.
+  const outsidePageLoadReading = h.banner.textContent.replace(/\([^)]*\)/g, "");
+  assert.doesNotMatch(outsidePageLoadReading, /\d{1,2}:\d{2}/, "no clock-time literal belongs outside the page-load reading");
+
+  // PROVEN TO DISCRIMINATE, not merely claimed: the discarded label must still fail every predicate
+  // above. Without this, a later widening could quietly admit the outage-start shape again.
+  const discardedLabel = "GitHub unreachable since 6:47:40 PM EDT — statuses may be stale";
+  assert.match(discardedLabel, /since \d/i, "control: the discarded label is what these predicates must reject");
+  assert.match(discardedLabel, /GitHub unreachable since \d/);
+  assert.match(discardedLabel.replace(/\([^)]*\)/g, ""), /\d{1,2}:\d{2}/);
 });
 
 test("W1-T2218: the banner is re-worded rather than removed — the indeterminate signal still reaches the operator, and clears the instant no task reports it", () => {
