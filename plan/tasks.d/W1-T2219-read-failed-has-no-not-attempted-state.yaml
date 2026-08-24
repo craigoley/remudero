@@ -1,0 +1,141 @@
+- id: W1-T2219
+  title: "`readFailed()`/`readFailureReason()` are a boolean plus a reason with no NOT-ATTEMPTED and no IN-FLIGHT, and both accessors call `index()` — which FORCES the fetch — so a caller blocks on a live call while reading the PREVIOUS attempt's verdict, and `?? \"unknown\"` renders the absence of any verdict as a word that reads like a diagnosis"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main (behind-count 0,
+    clone shallow-checked). Files over 1 MB read through git objects. No suite, no spawning verb.
+
+    (1) THE STRING, TRACED END TO END FROM SOURCE. `src/lib/status-board.ts:1424` builds the
+    withheld-class reason as `github.readFailureReason?.() ?? "unknown"`. `readFailureReason()`
+    (`src/lib/status.ts:4423-4426`) returns `lastFetchFailureReason`, which is set ONLY in the catch
+    at `status.ts:4253` via `classifyGhFailure`, and cleared ONLY on success at `status.ts:4247-4248`
+    (`lastFetchFailed = false; lastFetchFailureReason = undefined;`). Before any attempt the pair is
+    `false`/`undefined`, so `?? "unknown"` turns "nothing has been classified" into a word an
+    operator reads as a finding.
+
+    (2) THREE DISCARDS, EACH RE-DERIVED. (a) The pair is a BOOLEAN PLUS A REASON with no
+    "not attempted" and no "in flight" — the two states a reader most needs to tell apart from a
+    real classification. (b) BOTH accessors call `index()` FIRST — `readFailed()` at
+    `status.ts:4420` and `readFailureReason()` at `4424`, each documented as "Forces a fetch first
+    if the cache is cold/expired" — so the caller BLOCKS on a live `gh` call while the flags still
+    hold the PREVIOUS attempt's verdict. (c) `readFailureReason()` returns ONLY the PR channel:
+    `lastIssueFetchFailureReason` occurs five times in the module and ZERO of them are inside
+    `readFailureReason()`, so an issue-fetch failure is classified, logged and then never exposed to
+    any caller.
+
+    (3) A CORRECTION TO THE FRAMING, MADE FROM SOURCE. "A call that never returns never reaches a
+    catch" is no longer true of this gateway: `classifyGhFailure` opens with
+    `if (code === "ETIMEDOUT") return "transport";` and the batched gateway passes
+    `timeout: GH_CALL_TIMEOUT_MS`, so a hung call DOES throw into the catch and DOES classify — after
+    up to sixty seconds. THE REAL DISCARD IS THE WINDOW BEFORE THAT: for as long as the call is in
+    flight, `index()` blocks the caller and the flags answer for the last attempt. That is discard
+    (2)(b), and it is the one the operator's symptom actually matches.
+
+    (4) THE CLASSIFIER'S WIDTH, RECORDED AS A SEPARATE OBSERVATION AND NOT AS THE DEFECT.
+    `/bad credentials|authentication|not logged in|gh auth login|401 unauthorized|unauthorized/i`
+    — bare `authentication` and bare `unauthorized` match any text containing either word, and
+    `401 unauthorized` is fully redundant against bare `unauthorized`. THIS IS NOT THE REMEDY: a
+    narrower regex would still return a STALE verdict for a call that never ran, which is the
+    actual defect.
+
+    (5) THE LEDGER FIGURES ARE THE OPERATOR'S AND ARE ATTRIBUTED, WITH THE REASON THIS HOST CANNOT
+    CONFIRM THEM. `resolveLedgerUnion` DOES NOT REFUSE HERE — run first, it resolves on the
+    operator state dir with `ok: true`, 672 archives and 189,594 `board_gateway.*` rows (it returns
+    `ok: false` only for this checkout's own empty `state/`). BUT ITS NEWEST ROW IS
+    2026-08-17T02:08:22.631Z, so it does NOT cover the operator's 2026-08-24 11:00-13:00Z window —
+    a query that reads its corpus perfectly and answers about the wrong period. The operator's
+    zero-failures-with-120-lines reading, the 135 auth rows split 127/8, and the 626-row transport
+    zero are therefore ATTRIBUTED, not re-derived. What this host CAN show, as a control that the
+    steps exist and are greppable: 17,001 failure rows locally — 16,966 `rate_limit`, 25 `unknown`
+    and 10 `transport`. Locally `transport` HAS fired, so that zero is window-specific rather than
+    structural, and the two readings do not contradict.
+  design: |
+    (i) THE BLAST RADIUS IS DISPATCH, NOT DECORATION — COUNTED HERE RATHER THAN ASSUMED. MEASURED:
+    68 INVOCATIONS of the pair across 8 FILES — `status.ts` 36, `board.ts` 11, `panel-graph.ts` 6,
+    `status-board.ts` 5, `run-task.ts` 4, `trace.ts` 3, `drain.ts` 2, `open-prs-rest.ts` 1. Two more
+    files (`daemon-health.ts`, `worker-home.ts`) MENTION the symbols without invoking them, which is
+    why a mention-count reads 10 files and an invocation-count reads 8; both are stated so neither is
+    mistaken for the other. `drain.ts` and `run-task.ts` are dispatch-side, so this changes WHAT
+    DISPATCH SEES and not only what the console prints — which is why it is not folded into
+    W1-T2218's client-render pair.
+
+    (ii) THE THIRD AND FOURTH STATES GO BESIDE THE PAIR, NEVER IN PLACE OF IT. Add "not attempted"
+    and "in flight" as states a caller can distinguish, and let the reason carry which CHANNEL it
+    describes so an issue-fetch failure stops being invisible. `?? "unknown"` must stop meaning
+    "absent": an unattempted read renders as unattempted.
+
+    (iii) AND THE FORCED FETCH IS THE PART THAT MAKES THIS URGENT RATHER THAN COSMETIC. An accessor
+    whose name reads as a cheap flag check performs a network call and blocks. Whatever shape the
+    third state takes, ASKING WHETHER A READ FAILED MUST NOT ITSELF PERFORM THE READ — otherwise the
+    honest answer is unobtainable without paying for it, and the caller is blocked at the exact
+    moment it wanted to report that it is blocked.
+
+    (iv) REFUSED BY NAME. IT STILL FAILS VISIBLY: `board_gateway.fetch_failed` and
+    `board_gateway.issue_fetch_failed` keep logging with their classified reason
+    (`status.ts:4260-4261`), unchanged. `deriveBlockers`'s else-branch keeps WITHHOLDING the
+    blocked-PR class outright (`status-board.ts:1420-1426`) — the withholding is CORRECT and only the
+    reason string is wrong. `classifyGhFailure` stays load-bearing for `isGhRateLimitError` and the
+    call pacer. AND THE REGEX IS NOT NARROWED AS THE REMEDY, per rationale (4).
+
+    (v) THE SIBLINGS ARE CITED, NOT RE-FILED. W1-T2215 (the claims harness) and W1-T2212 (the risk
+    judge and the triage rung) are the same class — an unreadable or unattempted input encoded as a
+    classified adverse finding — at other sites. W1-T2218 is the CLIENT-SIDE sibling of this exact
+    pair. None is re-derived here.
+
+    (vi) NOT IN SCOPE, NAMED: the regex's width (rationale 4); `GH_CALL_TIMEOUT_MS`; the pacer's
+    policy; and W1-T2218's client render.
+  acceptance:
+    - claim: "a read that was never attempted is distinguishable from one that failed"
+      proof: "unit test: test/read-failed-not-attempted.test.ts"
+    - claim: "a read still in flight is not reported as the previous attempt's verdict"
+      proof: "unit test: test/read-failed-not-attempted.test.ts"
+    - claim: "asking whether a read failed does not itself perform the read"
+      proof: "unit test: test/read-failed-not-attempted.test.ts"
+    - claim: "an issue-channel failure is reachable by a caller rather than only logged"
+      proof: "unit test: test/read-failed-not-attempted.test.ts"
+    - claim: "a classified failure still reports exactly the reason it reports today"
+      proof: "unit test: test/read-failed-not-attempted.test.ts"
+    - claim: "the blocked-pr class is still withheld when live state cannot be read"
+      proof: "unit test: test/read-failed-not-attempted.test.ts"
+    - claim: "both failure steps keep logging with their classified reason"
+      proof: "unit test: test/read-failed-not-attempted.test.ts"
+  files: [src/lib/status.ts, test/read-failed-not-attempted.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#read-failed-no-not-attempted-2026-08-24"
+  plan_refs: ["W1-T119", "W1-T181", "W1-T306", "W1-T2212", "W1-T2215", "W1-T2218"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/read-failed-not-attempted.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS. Design (i) counts 68 invocations across 8 files including two
+    dispatch-side ones; a wrong answer here changes what the drain believes about GitHub, not only
+    what a page prints.
+
+    TWO OF THE BRIEF'S PREMISES ARE CORRECTED HERE RATHER THAN CARRIED. FIRST, `resolveLedgerUnion`
+    does NOT refuse on this host — see rationale (5); it resolves with 672 archives, and the reason
+    the operator's figures still cannot be re-derived is that its newest row predates their window by
+    a week. That is a corpus-coverage limit, not a refusal, and the distinction matters because a
+    refusal would have been a tooling fault while this is simply the wrong window. SECOND, W1-T2215
+    does NOT read zero in `plan/tasks.d/`: its filing PR #2705 MERGED as `a932f055`, so the shard is
+    on main and reads 1 — it is a VALID merged control, not an open-PR zero, and it was used as one.
+
+    THE OPERATOR'S CONTAINER FIGURES ARE ATTRIBUTED THROUGHOUT. The 11:00-13:00Z zero, the 22
+    `fetch_ok` + 12 `issue_fetch_ok`, the 135/127/8 auth split and the 626-row transport zero are the
+    operator's; this host's own corpus is reported beside them with its window stated, and where the
+    two differ (locally `transport` fired 10 times) that is recorded as a window difference rather
+    than resolved in either direction.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T2219` resolves to
+    736610425b008551fcd0819ac88454545b005bd6, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight surfaces
+    were swept with a control PRE-QUALIFIED FOR EACH; the trailer surface was read from squash-merge
+    commit BODIES on main rather than over REST, which is returning 403 rate-limit payloads whose
+    JSON lines would otherwise count as rows.
