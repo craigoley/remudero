@@ -29,6 +29,25 @@ raw: "THE FEEDBACK PREVIEW GIVES NO SIGNAL DURING THE MODEL CALL, SO THE BUTTON
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2698
+summary:
+  headline: "W1-T347 preview path: missing pending state signal and unclear confirmation"
+  what_happened: First console use of feedback preview showed no pending indicator
+    during model processing, making it appear broken. The operator couldn't tell
+    whether repeated clicks regenerated previews, filed once, or multiple times.
+  decision: Authorize investigation of the feedback path state machine; verify
+    whether pending state already renders but was too fast; then establish what
+    users should see at each step before resuming this feature.
+  options:
+    - label: Reconnaissance only
+      consequence: Full state machine audit and falsifying check before fixes; ensures
+        precise diagnosis but delays user-facing improvements 1-2 days
+    - label: Quick fix + parallel investigation
+      consequence: Deploy spinner during model call immediately while mapping state
+        machine; solves broken-button perception today, addresses confirmation
+        semantics separately
+    - label: Hardened fix with server idempotency
+      consequence: Add pending state signal, server nonce for duplicate-filing
+        protection, clarified UI; most robust solution but requires backend work
+        and delays release
 expansion: null
