@@ -1,0 +1,132 @@
+- id: W1-T1288
+  title: "A LANE WRITING TO A SHARED BRANCH HAS NO FOREIGN-HEAD CHECK, AND `git push` CANNOT SUPPLY ONE — the fix rung stands down when it sees a head it did not produce, but nothing guards a lane's own PUSH, and a plain push into the instant where the ref is momentarily ABSENT reports `[new branch]` rather than rejecting, because there is no ancestor to reject against"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/lib/git-push.ts, test/lane-push-foreign-head.test.ts]
+  origin: oper#lane-push-clobbered-a-shared-branch-2026-08-23
+  plan_refs: ["W1-T296", "W1-T1268", "#2668"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (1) THE INCIDENT, AS THE OPERATOR MEASURED IT. On PR `#2668`, one lane read `head.sha` from the
+    API, a second lane pushed `00867162` at 23:30:21Z, and the first then pushed `f9a9d30c`
+    against its now-stale value. Git reported `* [new branch]` rather than rejecting a
+    non-fast-forward, BECAUSE THE REF WAS ABSENT AT THAT INSTANT and there was no ancestor to
+    reject against. The branch ref was replaced. Only `refs/pull/2668/head` being immutable
+    preserved the work.
+
+    (2) THE ASYMMETRY IS THE WHOLE POINT, AND THE READ SIDE ALREADY HAS THE GUARD.
+    `branchAuthorshipStandDownReason` (`src/run-task.ts:4808`, W1-T296) compares a freshly-read
+    `liveHead` against `rungOwnHeadSha` and stands the fix rung down on any head it did not
+    itself produce. It is a SHA-LINEAGE test, deliberately chosen over committer identity because
+    it "is exact, and needs no threshold". Its three fail-open arms are explicit: first round
+    (nothing pushed yet), unreadable head, and a live head equal to the rung's own.
+    IT GUARDS WHAT A RUNG IS ABOUT TO ACT ON. NOTHING GUARDS WHAT A LANE IS ABOUT TO PUSH.
+
+    (3) AND THE PUSH SEAM'S OWN DOC ASSERTS THE PROPERTY THIS INCIDENT FALSIFIES.
+    `gitPushEmptyCommit` (`src/lib/git-push.ts:92`) pushes `${newSha}:refs/heads/${branch}` with
+    no lease, and its header says it "is never a force-push and can never discard someone else's
+    work". That is TRUE FOR A FAST-FORWARD and false in the absent-ref window: a plain push onto a
+    ref that does not exist creates it outright, discarding whatever a concurrent writer put there
+    microseconds earlier. The claim is not wrong about force-pushing; it is silent about the case
+    where there is nothing to fast-forward FROM.
+
+    (4) THIS IS NOT W1-T1268, AND THAT SHARD IS CITED RATHER THAN RE-FILED. W1-T1268 takes a
+    dispatch-time claim keyed on the TASK, before a run spends. Two lanes legitimately working the
+    SAME PR after dispatch — an operator lane and a fix rung, or two operator lanes — are outside
+    its key entirely. It prevents duplicate admission; it says nothing about who may write a ref
+    once both are admitted.
+
+    (5) THE REPO ALREADY KNOWS THE ANSWER IN ANOTHER NAMESPACE. Every reservation ref this fleet
+    writes — `refs/rmd-id/*`, the dispatch claim, the triage claim, the shared pause — pushes an
+    ORPHAN payload unique to its writer, and their DELETES use `--force-with-lease`. That
+    machinery exists in `src/lib/task-id-reservation.ts`, `src/lib/dispatch-claim.ts` and
+    `src/lib/auto-triage.ts`, whose own comments record the four measured ways a naive lock
+    fails. None of it is applied to the branch a lane pushes.
+
+  design: |
+    ONE CONCERN: make a lane's push require the head it believed it was building on.
+
+    (i) Q1 — REACHABLE BY OPERATOR-DRIVEN LANES; THE FLEET IS PROTECTED BY CONSTRUCTION AND NOT BY
+    A CHECK. Every fleet worker push targets `refs/heads/run-<taskId>-<epochMs>`, a name derived
+    from `runId = ${taskId}-${Date.now()}`, so exactly one run owns it and no second writer is
+    expected. That makes the population OPERATOR LANES AND SHARED-PR LANES, which is SMALLER —
+    but it is also DIFFERENT IN KIND, and that is the part worth recording: the fleet is safe
+    because of a NAMING CONVENTION, not because anything would notice if two writers ever shared
+    a branch. A convention that nothing enforces is exactly the shape this repo files against.
+
+    (ii) Q2 — A PLAIN PUSH CANNOT BE MADE SAFE HERE, AND THE REASON INVERTS THE USUAL FRAMING OF
+    THE FLAG. The hazard is the window where the ref is momentarily ABSENT. A plain push has
+    nothing to compare against and creates the ref; git's non-fast-forward protection is not
+    bypassed, it is INAPPLICABLE. `--force-with-lease=<ref>:<freshly-read-value>` is the only form
+    that expresses a PRECONDITION rather than a permission — including the empty expected value,
+    which requires the ref to be absent. So the flag is not "a safer force" here; it is the only
+    way to state what the pusher believed. NO PLAIN PUSH IS SAFE IN THIS WINDOW, and the remedy
+    must be the lease, not a retry, a re-read, or a narrower race.
+
+    (iii) AND THE LEASE HAS A MEASURED FAILURE MODE THAT MUST NOT BE REPEATED.
+    `src/lib/task-id-reservation.ts`'s own header records it: `--force-with-lease=<ref>:` against
+    an existing ref ALREADY HOLDING THAT SHA exits 0 with `Everything up-to-date`, because git
+    elides the push and no lease is ever checked. Any wiring must therefore verify the ref's
+    resulting value rather than trusting the exit code alone.
+
+    (iv) Q3 — WHAT MUST NOT CHANGE. NO LANE FORCE-PUSHES WITHOUT A LEASE, and NOTHING
+    AUTO-RESTORES A CLOBBERED REF. The restore is an operator action, as it was on the night this
+    was filed. A rung that repaired a ref it had just overwritten would be deciding which of two
+    lanes' work survives, which is the one judgement that must stay with a human.
+
+    (v) NOT IN SCOPE. W1-T296's read-side stand-down, which stays as it is; W1-T1268's
+    admission-time claim; the reservation namespaces, which already lease; and any change to
+    `refs/pull/*`, which is GitHub's and was the only reason the work survived.
+  acceptance:
+    - claim: "a lane push carries a lease naming the head it believed it was building on"
+      proof: "unit test: test/lane-push-foreign-head.test.ts"
+    - claim: "a push whose expected head no longer matches is refused rather than creating or replacing the ref"
+      proof: "unit test: test/lane-push-foreign-head.test.ts"
+    - claim: "a push into the window where the ref is absent is refused unless absence was what the lease expected"
+      proof: "unit test: test/lane-push-foreign-head.test.ts"
+    - claim: "a lease that git elides is not read as success, because the resulting ref value is verified"
+      proof: "unit test: test/lane-push-foreign-head.test.ts"
+    - claim: "a refused push leaves the remote ref exactly as it found it and restores nothing"
+      proof: "unit test: test/lane-push-foreign-head.test.ts"
+  note: |
+    RISK BAND — BOTH READINGS, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
+    `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` at `risk: high`, so the span
+    was NEVER SCORED rather than scored and found narrow. The `files:` list was measured at
+    `risk: medium` first and the result is recorded in the PR. The real blast radius is genuinely
+    high independent of Rule 19: this changes how the fleet WRITES REFS, and a lease wired wrong
+    fails closed on every push rather than on a race.
+
+    NO PROOF GREPS THIS SHARD'S OWN PATH. All five criteria use the pure-path `unit test:` form
+    naming `test/lane-push-foreign-head.test.ts`, declared in `files:` and not yet existing — a
+    forward reference to a PATH, where a symbol name would be a guess.
+
+    THE ID WAS MINTED FOR THIS FILING, NOT INHERITED. `refs/rmd-id/W1-T1288` was pushed as an
+    orphan over the empty tree with the PLAIN refspec — no `+`, no lease — and the push returned
+    `* [new reference]` with exit 0 against a namespace of 318 refs. TWO EARLIER ATTEMPTS FAILED
+    AND NEITHER WAS READ AS A COLLISION: one returned `HTTP 403` from a container whose proxy
+    permits `refs/heads/*` and refuses `refs/rmd-id/*` (control: a branch push in the same second
+    exited 0), and one built a malformed refspec because `zsh` read `$SHA:refs/...` as the `:r`
+    history modifier. Both times the authoritative read — `git ls-remote` on the ref — showed it
+    ABSENT, so the id was free and neither exit code was mistaken for "taken".
+
+    EIGHT SURFACES WERE SWEPT AND ONE WAS DISQUALIFIED WITH NO REPLACEMENT AVAILABLE. Open PR
+    TITLES read 0 for this id, but the control also reads 0 — a single open PR whose title carries
+    no id at all — so that surface proves nothing and is reported as disqualified rather than as
+    evidence. The open-PR population is still covered by the two surfaces that do have live
+    controls: head branches (0 against 1 `run-W1-T` head) and file lists (0 against `test/` at 1).
+    The rest: shard filenames 0 against W1-T1285 at 1; plan `- id:` lines 0 against W1-T1285 at 1;
+    the reservation 1, which is this filing's own mint; merged trailers 0 under
+    `^Remudero-Task:\s*W1-T1288\s*$` against 40 carrying any trailer; merged subjects 0 against 59;
+    merged `run-*` credit 0 against 33 structured heads, with `run-W1-T1288-*` at 0 against an
+    86-branch namespace.
+
+    THE SUBJECT WAS SWEPT AS WELL AS THE ID. `foreign-head` and `shared branch` read 0 across all
+    shards. `force-with-lease` reads 25, `non-fast-forward` 15 and `clobber` 11; those were read
+    and the only near neighbour is W1-T296, which owns the READ-side stand-down and is cited in
+    rationale (2) rather than re-filed. Control: 523 shards carry `acceptance`.
