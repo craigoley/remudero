@@ -1,0 +1,182 @@
+- id: W1-T2240
+  title: "Every cost figure this project reports divides by a denominator that omits operator sessions — the ledger meters SPAWNS, and no step records a session's spend, so the console glance, the retro's calibration tables and the 5.2% evolver share are each correct for the fleet and silently incomplete for the project"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha, clone
+    shallow-checked `false`. `src/run-task.ts` (1,533,033 bytes) read through git objects. No suite,
+    no poller, no spawning verb.
+
+    (1) NO LEDGER STEP RECORDS OPERATOR-SESSION SPEND, AND THE CONTROL IS THE POINT. Fourteen steps
+    carry `cost_usd`, derived from source rather than from memory: `verdict`, `budget.warning`,
+    `implement.done`, `implement.resumed`, `recon.done`, `diagnose.worker_done`, `fix.done`,
+    `fix.exhausted`, `fix.spawn_infra_blocked`, `isolation.probe`, `retro.synthesized`,
+    `triage.synthesized`, `plan.synthesized`, `inbox.draft_synthesized`. Every one is emitted around
+    a SPAWN the fleet issued. The only session-shaped step is `operator_notes.injected`, and it is
+    session-shaped by NAME ONLY — it records that operator notes were injected into a fleet run, and
+    its payload is `{ count: operatorNotes.length }` with no cost field at all.
+    **THE ZERO IS CONTROLLED**: over the ledger union that step has 286 ROWS and 0 of them carry
+    `cost_usd`, so the absence is the FIELD's, not the step's; the same pass reads 589 cost-bearing
+    rows for `implement.done`. A sweep that found the step and stopped would have concluded the
+    opposite.
+
+    (2) THE MEASUREMENT, IN ONE PASS OVER THE LEDGER UNION AT THE STATE DIR — 672 archives, live file
+    read, 3,303 matching rows. Per step, rows / rows-with-cost / sum / newest row:
+      EVOLVER LANES (Architect, claude-opus-5)
+        retro.synthesized         18 / 18 / $85.94    newest 2026-08-12T12:47:53.330Z
+        triage.synthesized        74 / 74 / $80.20    newest 2026-08-14T15:04:16.143Z
+        inbox.draft_synthesized    9 /  9 / $49.87    newest 2026-07-24T01:32:49.911Z
+        plan.synthesized           0 /  0 / $0.00     newest (none)
+      SOLVER LANES (workers, sonnet/haiku)
+        implement.done           589 / 589 / $2458.51 newest 2026-08-13T00:30:45.894Z
+        fix.done                 323 / 323 / $1018.38 newest 2026-08-12T22:32:55.942Z
+        recon.done               650 / 650 / $232.79  newest 2026-08-12T23:51:31.667Z
+        implement.resumed         52 /  52 / $147.08  newest 2026-08-12T19:45:32.978Z
+        isolation.probe          611 / 611 / $91.92   newest 2026-08-12T23:50:53.304Z
+        fix.exhausted             67 /   0 / $0.00    newest 2026-08-12T08:39:50.322Z
+      EVOLVER 101 rows / $216.01 against SOLVER 2,225 rows / $3,948.67 — **5.2%**.
+
+    (3) THAT FIGURE CORRECTS AN EARLIER ONE OF MY OWN, AND THE CORRECTION IS RECORDED RATHER THAN
+    QUIETLY SUBSTITUTED. A prior pass reported 4.1% from a narrower step set: it omitted
+    `inbox.draft_synthesized` (an Architect lane, so the evolver side was understated) and
+    `isolation.probe`/`fix.exhausted` (worker spawns, so the solver side was too). Both sides moved
+    and the conclusion did not. **NEITHER FIGURE IS WRONG FOR THE PROJECT BY A LITTLE — BOTH ARE
+    CORRECT FOR THE FLEET AND SILENT ABOUT THE PROJECT**, which is this task's whole point.
+
+    (4) `verdict` IS EXCLUDED FROM BOTH SIDES DELIBERATELY, AND THE REASON IS RE-DERIVED FROM SOURCE.
+    Its `cost_usd` is the RUN's accumulated `costUsd`, built by `costUsd += r.costUsd` /
+    `costUsd += probe.costUsd` / `costUsd += isoProbe.costUsd` across the run's own spawns, and the
+    merged path says so in its own words: `verdict: merged · notional cost $…`. It is a per-run
+    ROLLUP CONTAINING the worker spawns, so adding it to either side double-counts. It reads 613
+    rows / $3,631.58 on the same pass — larger than any single worker step, which is exactly what a
+    rollup should look like and exactly how a careless sum inflates.
+
+    (5) THE CHANNEL THAT IS MISSING IS THE ONE THAT AUTHORS THE HARNESS. `CLAUDE.md` rules, most
+    shards, and the operator's own briefs are written in interactive sessions that run OUTSIDE the
+    daemon, on a subscription, with no spawn the fleet issued and no `WorkerResult` envelope to read.
+    The fleet's only cost source is `total_cost_usd: r.costUsd` off that envelope
+    (`workerLedgerFields`, `src/lib/worker.ts`), which exists precisely because the fleet spawned the
+    process. An operator session produces no such object anywhere the fleet can reach.
+
+    (6) WHAT ELSE INHERITS THE GAP — NAMED, EACH TRACED TO ITS OWN READ.
+      THE CONSOLE GLANCE. `computeGlanceSpend` (`src/lib/glance.ts`) returns `mergedToday` plus
+      `spendTodayUsd`/`spendWeekUsd` from `deriveDayCostUsd`/`deriveWeekCostUsd` over ledger lines —
+      the figure an operator actually reads as "what this project cost today", and it is fleet-only.
+      THE RETRO'S CALIBRATION TABLES. `TypeCalibration` and `ClassCalibration` (`src/lib/retro.ts`)
+      each build `totalCost` as `rs.reduce((s, r) => s + r.costUsd, 0)` over RUN RECORDS, so a
+      `docs`-class row's cost-per-turn excludes every operator session that authored the same class
+      of change — and routing decisions are meant to be evaluated off exactly those rows.
+      `rmd autonomy-rate`. Its ledger scan names eight steps (`automerge.armed`,
+      `automerge.capped_override_granted`, `review.posted`, `fix.resolved`, `fix.exhausted`,
+      `fix.stood_down`, `ratify.reframed`, `panel.operator_note_added`) and none of them is a session
+      step; its zero-touch denominator counts trailer-bearing merges, many of which a session
+      authored.
+      ANY "COST PER SHIPPED TASK" FIGURE, by construction — the numerator is fleet-metered and the
+      denominator is every merge, session-authored or not.
+
+    (7) THE CORPUS WINDOW, PER STEP, BECAUSE THE UNION'S NEWEST ROW DISAGREES WITH ITS STEPS' OWN.
+    The newest cost-bearing rows above land 2026-07-24 through 2026-08-14, while a raw `"ts"` scan
+    over the same files reads later rows from other steps. The per-step newest is the only honest
+    window for these figures, and none of them covers today.
+  design: |
+    (i) Q1 — WHAT IS ACTUALLY AVAILABLE, ANSWERED BEFORE ANY REMEDY.
+      A HOOK SURFACE EXISTS AND IS ALREADY PROVEN TO REACH INTERACTIVE SESSIONS. `.claude/settings.json`
+      registers a `PreToolUse` hook running `hooks/deny-floor.sh`, and its own comment states the
+      mechanism: an interactive `claude` session "loads a repo-level .claude/settings.json natively,
+      so this is the only surface that reaches it" — the same floor workers get via
+      `settings/worker.json`. So the repo already has a wire into the session lane and uses it.
+      WHAT IS NOT ESTABLISHED, AND MUST NOT BE ASSUMED: whether that surface exposes a session COST
+      figure. This task does not claim it does. Establishing that is step one of the work, and if the
+      answer is no, the task does not grow a second remedy — it stops at labelling.
+      AN API-SIDE FIGURE IS NOT AVAILABLE. Sessions run on a subscription, and W1-T268 measured the
+      billing dimension as 171,427 `subscription` against ZERO `api`, so there is no per-call billing
+      record to join against.
+      A MANUAL ENTRY IS POSSIBLE AND IS NOT PROPOSED — see (iii).
+      **SO THE DELIVERABLE IS LABELLING THE FIGURES HONESTLY, NOT COMPLETING THEM.** That is the
+      smaller task, and it is the one that holds whatever the hook turns out to expose.
+
+    (ii) Q2 — WHAT AN HONEST LABEL LOOKS LIKE, AND THE REPO ALREADY HAS BOTH HALVES OF IT.
+      KNOWNNESS RIDES BESIDE THE NUMBER: `merged_known: !githubUnreachable` (`src/lib/board.ts`) —
+      the count and whether it could be known travel together, so a reader never has to infer one
+      from the other.
+      AND AN UNKNOWN IS RENDERED, NEVER FABRICATED: `latestSpend ? costLabel(latestSpend.spendTodayUsd)
+      : "…"` (`src/lib/serve.ts`) renders an ellipsis rather than a zero when the figure is not yet
+      known. **THAT REFUSAL SITS DIRECTLY BESIDE THE FIGURE THIS TASK IS ABOUT**: the console already
+      refuses to invent a spend it cannot read, and then prints one that silently omits a channel.
+      The shape to add is the same one, one level up: the figure names the CHANNEL it covers, so
+      "fleet spend today" is never read as "spend today". A cost that silently omits a channel is the
+      same defect class as a count that cannot distinguish EMPTY from UNMEASURED.
+
+    (iii) Q3 — WHAT MUST NOT CHANGE.
+      **NOTHING ESTIMATES OR IMPUTES A SESSION COST.** W1-T268 is the precedent and it is exact: the
+      billing dimension read 171,427 `subscription` and ZERO `api` because FOURTEEN hardcoded
+      `billing_mode: "subscription"` sites in `run-task.ts` produced ~169k of those lines, making the
+      natural per-mode spend query wrong today and wrong under any future valve. An invented number
+      is worse than a named absence, and a label that says "unmeasured" is worth more than an
+      estimate that reads as measured.
+      THE FLEET-SIDE METERING STAYS EXACTLY AS IT IS. Every step in rationale (1) keeps emitting what
+      it emits today; `verdict` stays a rollup; the 5.2% figure remains CORRECT for what it measures
+      and is not withdrawn.
+      AND NO TIER, ROUTE OR MOUNT MOVES. This task is an input to the evaluation W1-T167 already
+      ledgers per-class cost and outcome for — never a replacement for it, and never a routing change.
+
+    (iv) NOT IN SCOPE, NAMED: adding any session-cost capture (that is step one's finding, not this
+    diff); changing any fleet ledger step or its payload; the `fix.exhausted` rows that carry no
+    `cost_usd` despite the field existing in source; `rmd autonomy-rate`'s own step list; and the
+    evolver/solver allocation argument itself, which is an argument and not a measurement of this
+    repo.
+  acceptance:
+    - claim: "a spend figure names the channel it covers rather than reading as total"
+      proof: "unit test: test/spend-figures-name-their-channel.test.ts"
+    - claim: "an unmeasured channel is rendered as unmeasured rather than as zero"
+      proof: "unit test: test/spend-figures-name-their-channel.test.ts"
+    - claim: "no session cost is estimated or imputed anywhere"
+      proof: "unit test: test/spend-figures-name-their-channel.test.ts"
+    - claim: "the fleet figure is unchanged in value by the labelling"
+      proof: "unit test: test/spend-figures-name-their-channel.test.ts"
+    - claim: "the existing refusal to fabricate an unknown spend still holds"
+      proof: "unit test: test/spend-figures-name-their-channel.test.ts"
+  files: [src/lib/glance.ts, test/spend-figures-name-their-channel.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#operator-session-spend-unmetered-2026-08-24"
+  plan_refs: ["W1-T159", "W1-T167", "W1-T268"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so a source file and a test not named after it trip it at `medium`. `files:` is one
+    source file and one new test; the blast radius is a rendered label beside a number whose value
+    does not move.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/spend-figures-name-their-channel.test.ts`, declared in `files:`, so on this filing
+    PR it resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL. `rmd check-proof` on the
+    declared path reads `exit: 1`, `hits: 0`, `verdict: fail`. The SAME verb on an EXISTING pure
+    path, `unit test: test/glance.test.ts` — the test file for the very module this task declares —
+    reads `exit: 0`, `hits: 40`, `verdict: pass`. The control file was confirmed to exist BEFORE the
+    falsifier was believed: an earlier filing used a control path that did not exist and read `hits:
+    0` exactly like the declared path, discriminating nothing.
+
+    THE 5.2% FIGURE SUPERSEDES A 4.1% OF MY OWN, AND BOTH ARE RECORDED — see rationale (3). The
+    earlier pass omitted one Architect lane and two worker steps. This is stated rather than
+    silently corrected because a shard that quietly replaces its own prior number is the shape this
+    task exists to object to.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T2240` resolves to
+    006098b78ad1349bb4b1e73a2050a97fde883842, authored `cao825@Craigs-Mac-mini`, reserved in a prior
+    session through the repo's own allocator and CONFIRMED UNCHANGED here rather than re-minted —
+    nothing releases a remote reservation, so an id reserved and not yet used stays reserved.
+
+    EIGHT SURFACES SWEPT, EACH WITH A CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, AND THE FETCHED REF
+    COUNT VERIFIED AGAINST THE REMOTE FIRST (137 heads and 359 `refs/rmd-id/*` on origin, 137 and 359
+    fetched — MATCH, so a zero here is a real absence and not a short fetch). Shards on main 0
+    (control W1-T2234 = 1); whole tree on main 0 (control 1); all 137 origin refs 0 (control 4);
+    remote head names 0 (control 137 heads read); commit messages on main 0 (control 1); reservation
+    MINE and unchanged; merged-PR trailers 0 read from squash-merge commit BODIES on main (control
+    567 trailers, W1-T1268 specifically 2); the 25 newest PR heads 0 (control W1-T2234 = 7).
