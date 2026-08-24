@@ -11925,6 +11925,115 @@ function remoteBranchNames(exec: (cmd: string, args: string[]) => string): strin
 }
 
 /**
+ * The ephemeral run-task branch convention: `run-<taskId>-<epochMs>`. A citation of this shape
+ * can dangle long after the branch itself is deleted (W1-T2226 rationale (2)/(3)): the branch is
+ * cited by a comment or doc example, the task lands and its branch is gone, and nothing edits the
+ * citation to match. (Do not use a live run branch as the doc example here — the whole point of
+ * this constant is that such an example outlives the branch it names.)
+ */
+const RUN_TASK_BRANCH_TOKEN_SRC = "run-[A-Za-z0-9]+-T[0-9]+-[0-9]{10,}";
+
+/** Escape a literal string for use inside a POSIX ERE (`git grep -E`) alternation. */
+function escapeEre(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * ONE ENUMERATION (W1-T2226 design (i)): a single pattern grep for every branch-shaped token —
+ * the run-task convention above, plus every `DECLARED_BRANCH_GUARDS` name literally — across the
+ * same four roots `namedInSource` already reads. Both reverse comparisons below are differences
+ * over this one list; there is no second enumeration.
+ */
+function branchCitationPattern(declaredGuards: readonly string[]): string {
+  const alternation = [RUN_TASK_BRANCH_TOKEN_SRC, ...declaredGuards.map(escapeEre)].join("|");
+  return `\\b(${alternation})\\b`;
+}
+
+/** One `git grep -n -o -E` hit: the file, its 1-indexed line, and the matched token. */
+export interface BranchCitationHit {
+  file: string;
+  line: number;
+  name: string;
+}
+
+/** Parse `git grep -n -o -E` output (`path:line:match`, one per line) into hits. */
+function parseBranchCitationHits(raw: string): BranchCitationHit[] {
+  const hits: BranchCitationHit[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const m = /^([^:]+):(\d+):(.*)$/.exec(line);
+    if (!m) continue;
+    hits.push({ file: m[1], line: Number(m[2]), name: m[3] });
+  }
+  return hits;
+}
+
+/**
+ * `DECLARED_BRANCH_GUARDS`'s own [start, end] line span (1-indexed, inclusive) inside
+ * `src/run-task.ts`'s CURRENT text, found dynamically rather than hardcoded — W1-T2226
+ * rationale (5): the declaration lives in a grepped root, so every declared name reads
+ * `namedInSource: true` by virtue of its own declaration, and a reverse check that fails to
+ * exclude this exact span can never report an orphan. Returns `undefined` if the marker moved or
+ * the text doesn't contain it, in which case the caller excludes nothing rather than guessing.
+ */
+function declaredGuardsBlockSpan(fileText: string): { start: number; end: number } | undefined {
+  const lines = fileText.split("\n");
+  const startIdx = lines.findIndex((l) => l.includes("export const DECLARED_BRANCH_GUARDS"));
+  if (startIdx === -1) return undefined;
+  for (let i = startIdx; i < lines.length; i++) {
+    if (lines[i].trim() === "];") return { start: startIdx + 1, end: i + 1 };
+  }
+  return undefined;
+}
+
+/** The two reverse comparisons a forward-only `namedInSource` scan cannot make (W1-T2226). */
+export interface ReverseBranchDrift {
+  /** Cited in source, absent from the remote listing AND undeclared — dangling. */
+  danglingCitations: string[];
+  /** Declared, but never cited anywhere outside its own declaration — orphaned. */
+  orphanDeclarations: string[];
+}
+
+/**
+ * PURE: given the citation hits already gathered from source (with the declaration block's own
+ * span so its self-citations can be excluded), the remote branch listing, and the declared list,
+ * report both directions of drift a forward-only comparison misses.
+ *
+ * (a) = citations − remote − declared. Declared names are subtracted too, not only remote ones
+ * (design (iii)): an ephemeral declared branch like `feedback-landing` is legitimately cited and
+ * absent between landings (rationale (9)), so the declared set is the correct suppression list
+ * for this arm as well as the forward one.
+ *
+ * (b) = declared − citations, with the declaration block's own citation of its own names excluded
+ * first — rationale (5), the load-bearing half of this direction: without the exclusion every
+ * declared name is trivially "cited" by its own entry and no orphan can ever be reported.
+ */
+export function planReverseBranchDrift(
+  citations: readonly BranchCitationHit[],
+  remoteNames: readonly string[],
+  declaredGuards: readonly string[],
+  declarationBlock: { file: string; start: number; end: number } | undefined,
+): ReverseBranchDrift {
+  const remote = new Set(remoteNames);
+  const declared = new Set(declaredGuards);
+  const cited = new Set<string>();
+  for (const hit of citations) {
+    if (
+      declarationBlock &&
+      hit.file === declarationBlock.file &&
+      hit.line >= declarationBlock.start &&
+      hit.line <= declarationBlock.end
+    ) {
+      continue; // the declaration's own line(s) never count as a citation of the name it declares
+    }
+    cited.add(hit.name);
+  }
+  const danglingCitations = [...cited].filter((n) => !remote.has(n) && !declared.has(n)).sort();
+  const orphanDeclarations = declaredGuards.filter((n) => !cited.has(n));
+  return { danglingCitations, orphanDeclarations };
+}
+
+/**
  * `rmd reap-branches` — the DRY RUN. Reports which remote branches WOULD be deletable, which are
  * guarded and why, and which are held; ledgers the answer; and DELETES NOTHING.
  *
@@ -11943,7 +12052,11 @@ function remoteBranchNames(exec: (cmd: string, args: string[]) => string): strin
  */
 export function reapBranchesCommand(
   rest: string[],
-  opts: { exec?: (cmd: string, args: string[]) => string; ledgerPath?: string } = {},
+  opts: {
+    exec?: (cmd: string, args: string[]) => string;
+    ledgerPath?: string;
+    readFile?: (path: string) => string;
+  } = {},
 ): number {
   const badArg = unknownArgError("reap-branches", rest, [], []);
   if (badArg) {
@@ -12018,6 +12131,45 @@ export function reapBranchesCommand(
   });
 
   const plan = planBranchReap(facts, DECLARED_BRANCH_GUARDS);
+
+  // THE REVERSE COMPARISONS (W1-T2226): ONE additional pattern grep, not one per branch — the
+  // 274-subprocess cost above is the per-branch forward direction; this is the single extra call
+  // that feeds both reverse ones.
+  let citationRaw = "";
+  try {
+    citationRaw = exec("git", [
+      "grep",
+      "-n",
+      "-o",
+      "-E",
+      "--",
+      branchCitationPattern(DECLARED_BRANCH_GUARDS),
+      "src/",
+      "scripts/",
+      "deploy/",
+      ".github/",
+    ]);
+  } catch {
+    citationRaw = ""; // git grep exits 1 on no match — a real "nothing cited", not a failure
+  }
+  const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
+  let declarationBlock: { file: string; start: number; end: number } | undefined;
+  try {
+    const span = declaredGuardsBlockSpan(readFile(join(repoRoot, "src/run-task.ts")));
+    if (span) declarationBlock = { file: "src/run-task.ts", ...span };
+  } catch {
+    // A repoRoot resolved to something unreadable (or an injected `readFile` standing in for
+    // that failure in tests) is not fatal: the reverse orphan check simply excludes nothing,
+    // same as `declaredGuardsBlockSpan` returning `undefined` for a marker it cannot find.
+    declarationBlock = undefined;
+  }
+  const { danglingCitations, orphanDeclarations } = planReverseBranchDrift(
+    parseBranchCitationHits(citationRaw),
+    names,
+    DECLARED_BRANCH_GUARDS,
+    declarationBlock,
+  );
+
   console.log(`branches:  ${names.length} on origin`);
   console.log(`guarded:   ${plan.guarded.length}  ${plan.guarded.join(", ")}`);
   console.log(`deletable: ${plan.deletable.length}`);
@@ -12043,17 +12195,35 @@ export function reapBranchesCommand(
       guarded: plan.guarded.length,
       hold: plan.hold.length,
       undeclared_guards: plan.undeclaredGuards,
+      dangling_citations: danglingCitations,
+      orphan_declarations: orphanDeclarations,
     });
   }
 
+  let drift = false;
   if (plan.undeclaredGuards.length > 0) {
+    drift = true;
     console.error(
       `rmd reap-branches: ${plan.undeclaredGuards.length} branch(es) are named in source but MISSING from ` +
         `DECLARED_BRANCH_GUARDS — declare them or remove the reference: ${plan.undeclaredGuards.join(", ")}`,
     );
-    return 1;
   }
-  return 0;
+  if (danglingCitations.length > 0) {
+    drift = true;
+    console.error(
+      `rmd reap-branches: ${danglingCitations.length} citation(s) name a branch absent from origin and ` +
+        `undeclared — remove the reference or add it to DECLARED_BRANCH_GUARDS: ${danglingCitations.join(", ")}`,
+    );
+  }
+  if (orphanDeclarations.length > 0) {
+    drift = true;
+    console.error(
+      `rmd reap-branches: ${orphanDeclarations.length} declared guard(s) are no longer cited anywhere outside ` +
+        `their own declaration — remove from DECLARED_BRANCH_GUARDS or restore the citation: ` +
+        `${orphanDeclarations.join(", ")}`,
+    );
+  }
+  return drift ? 1 : 0;
 }
 
 export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = {}): number {

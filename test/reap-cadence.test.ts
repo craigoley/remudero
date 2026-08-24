@@ -26,7 +26,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
-import { reapBranchesCommand } from "../src/run-task.js";
+import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -131,6 +131,12 @@ test("reap-cadence: no destructive call appears across several back-to-back invo
     if (args[0] === "ls-remote") return "abc123\trefs/heads/main\ndef456\trefs/heads/stale-one\n";
     if (args[0] === "merge-base") return ""; // ancestor: succeeds
     if (args[0] === "rev-parse") return "def4567890\n";
+    // The reverse-drift citation scan (W1-T2226) uses `-o`; answer it as "every declared name is
+    // cited outside the declaration block" so this test's synthetic "nothing is named in source"
+    // world stays about the cadence/destructive-call claim, not reverse drift.
+    if (args[0] === "grep" && args.includes("-o")) {
+      return DECLARED_BRANCH_GUARDS.map((n) => `src/run-task.ts:1:${n}`).join("\n");
+    }
     if (args[0] === "grep") throw new Error("exit 1: no match");
     if (cmd === "gh") return "[]";
     return "";
