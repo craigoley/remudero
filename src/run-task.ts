@@ -3872,6 +3872,26 @@ async function runReview(args: {
    * caller before this task.
    */
   reviewerQueryFn?: SpawnWorkerArgs["queryFn"];
+  /**
+   * The reviewer spawn itself, injectable — same `?? real` shape as `deps.policy ??
+   * loadPolicy(...)` and `opts.claimReserver ?? dispatchClaimReserverFor(repoDir)`. Absent ⇒ the
+   * real {@link spawnWorker}, so PRODUCTION IS UNCHANGED and every existing caller keeps today's
+   * behaviour.
+   *
+   * WHY THIS EXISTS. `spawnReviewer: false` above is a DISABLE switch, not a seam: it is the only
+   * way a test could avoid a real LLM call, and it skips the whole block — so the reviewer's
+   * transcript parse, its `review.reviewer` ledger row and its subtype handling had no covering
+   * test at all, while `runReview` itself was exported and directly driven by several. A test can
+   * now let the block RUN with a fixture worker instead of choosing between a real spawn and no
+   * coverage.
+   *
+   * OVERLAPS `reviewerQueryFn` ABOVE, WHICH LANDED SEPARATELY (#2714) FOR THE SAME W1-T2205 GAP.
+   * That one injects the SDK `query()` INSIDE a real `spawnWorker` call, so it covers strictly
+   * more — this one replaces the spawn outright and needs no fake `claude` binary, credential
+   * preflight or SDK message generator. Two seams at one call site is a duplication to resolve,
+   * not a design: see this PR's own body.
+   */
+  spawnReviewerWorker?: typeof spawnWorker;
   /** The (task_type="reviewer" × the under-review task's risk) mount (§9,
    * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
    * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
@@ -3992,7 +4012,7 @@ async function runReview(args: {
           "\n" +
           reviewerVerdictContract(criteria.length);
         const reviewer = args.account(
-          await spawnWorker({
+          await (args.spawnReviewerWorker ?? spawnWorker)({
             cwd: reviewCwd,
             permissionMode: "bypassPermissions",
             settingsFile: args.settingsFile,
