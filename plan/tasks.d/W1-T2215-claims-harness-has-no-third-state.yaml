@@ -48,6 +48,38 @@
     (5) THE SIBLING, CITED AND NOT RE-FILED. W1-T2212 records the same shape — an unreadable input
     encoded as an adverse finding — at the risk judge and the triage rung. This is the THIRD site,
     and it is the one where the established remedy does not transfer; see design (i).
+
+    (6) AND THE NEGATED-SHAPE HAZARD IS NOT THEORETICAL — THE REPO ALREADY CONTAINS ITS REMEDY.
+    MEASURED 2026-08-24 in a sandbox, never against this repo's own files. `plan/claims.yaml` line
+    33, `! grep -rIiq "mcp" src/lib/worker.ts settings/worker.json`, is UNGUARDED: with its targets
+    absent it exits 0 and the claim reads as HOLDING. Line 47,
+    `! grep -rnE "writeFileSync\(|writeFile\(" src bin … 2>/dev/null | grep -i "tasks\.yaml"`, is
+    UNGUARDED AND SELF-SILENCING — the `!` binds the PIPELINE so the second grep's status decides,
+    and `2>/dev/null` discards the first grep's error: with `src` and `bin` absent it exits 0 with
+    STDOUT AND STDERR BOTH ZERO BYTES, a clean pass carrying no diagnostic at all. Line 137,
+    `grep -qF "preflight --ci-parity" CLAUDE.md && ! grep -qE …`, is GUARDED BY CONSTRUCTION: the
+    positive arm runs first, so a missing file exits 2 at the `&&` before the negation can return 0.
+
+    (7) SO THE CHEAPEST FIRST STEP IS NOT THE PRECONDITION DESIGN. Line 137's shape is already the
+    remedy: MAKE A POSITIVE GUARD MANDATORY FOR A NEGATED ASSERTION AND LINT `plan/claims.yaml` FOR
+    IT. That is checkable AT AUTHOR TIME, needs no exit-code semantics this repo does not own, and
+    closes the manufactures-a-pass case without waiting on the harness contract. AND THE DETECTOR IS
+    NOT "STARTS WITH `!`" — that predicate matches line 104's `! test -f docs/ci-gate.md`, which is
+    CLEAN and needs no guard because `test` has no error exit, and it MISSES line 137's own negation,
+    which sits after an `&&`. The rule keys on a negated command that HAS an error exit state.
+
+    (8) A FIRST STEP, EXPLICITLY NOT A SUBSTITUTE. (7) reaches the two unguarded negations and
+    nothing else. The precondition work in design (ii) still stands for the OTHER ELEVEN SHAPES —
+    the seven `node --test` assertions, the one `node <script>`, the two positive greps and line
+    137 — because none of those can manufacture a pass but all of them still render an environment
+    fault as "the claim is false". Shipping (7) alone would close the smaller, louder half and leave
+    the misnaming defect this task was filed for entirely intact.
+
+    (9) NEITHER IS VACUOUS TODAY. All five targets — `src/lib/worker.ts`, `settings/worker.json`,
+    `src`, `bin` and `CLAUDE.md` — are PRESENT as of 2026-08-24, and all three assertions pass
+    HONESTLY on this tree. THIS IS A LATENT HAZARD, NOT A LIVE FALSE PASS, and the distinction is
+    load-bearing: nothing in the gate is lying right now, so this is a fix made before the incident
+    rather than after one.
   design: |
     (i) AN EXIT-CODE CONVENTION CANNOT HOLD HERE, AND THAT IS THE ANSWER TO THE TWO-LINE REMEDY.
     W1-T2212 found the enforceable version of this distinction is a TYPE rather than a policy. Here
