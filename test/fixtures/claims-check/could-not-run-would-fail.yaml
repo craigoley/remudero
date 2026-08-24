@@ -1,0 +1,10 @@
+# Fixture (W1-T2215): the mirror of could-not-run.yaml -- the assertion here is `false`, which
+# would exit 1 (a FAIL) if it were ever spawned. Paired with could-not-run.yaml's `true` (which
+# would PASS), these two together prove the could-not-run decision is blind to what the assertion's
+# exit code would have been in EITHER direction: it is decided purely from the missing
+# precondition path, before the assertion is ever run.
+- id: fixture-could-not-run-would-fail
+  claim: "This claim's only input is missing, so it cannot be checked either way."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "false"
+  precondition_paths: ["definitely-not-a-real-precondition-input-xyz"]

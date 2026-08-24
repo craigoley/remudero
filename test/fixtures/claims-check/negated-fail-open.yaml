@@ -1,0 +1,19 @@
+# Fixture (W1-T2215, design (v)): mirrors plan/claims.yaml's fail-open hazard (rationale (4)/(6)).
+# `! grep -q needle <missing-file>` exits 0 when its target is simply ABSENT (grep's own exit 2,
+# negated by `!`, becomes 0) -- a silent, undiagnosed PASS for a claim that is actually unchecked.
+# The "guarded" claim declares precondition_paths on the file the negated grep reads, so the
+# harness catches the missing input BEFORE the shell ever runs and reports could-not-run instead.
+# The "unguarded" sibling has the identical assertion with no precondition_paths declared at all,
+# documenting that the fix is the declared precondition -- not some change to what `!`/`grep`
+# themselves exit, which this repo cannot own (design (i)) -- so the same shape still exits 0
+# undiagnosed unless an author opts a claim into the guard.
+- id: fixture-negated-missing-file-guarded
+  claim: "Guarded: a negated grep over a declared-missing input must not read as holding."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: '! grep -q "needle" definitely-not-a-real-grep-target-xyz'
+  precondition_paths: ["definitely-not-a-real-grep-target-xyz"]
+
+- id: fixture-negated-missing-file-unguarded
+  claim: "Unguarded: without a declared precondition, the fail-open shape still exits 0 today."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: '! grep -q "needle" definitely-not-a-real-grep-target-xyz'
