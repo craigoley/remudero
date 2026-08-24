@@ -59,10 +59,19 @@
 
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { IncomingMessage } from "node:http";
-import { loadPlan, parseTasksFromYaml, PlanError, unmetDependencies, type MergedResolver, type Plan, type Task } from "./plan.js";
+import {
+  loadPlan,
+  loadPlanAtRef,
+  parseTasksFromYaml,
+  PlanError,
+  unmetDependencies,
+  type MergedResolver,
+  type Plan,
+  type Task,
+} from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
 import {
   projectPlan,
@@ -1136,8 +1145,18 @@ export function draftedTaskSummaries(fragmentYaml: string, proposalId: string): 
  * one they're asked about, but need the SAME registry/draft-cache/ledger/in-flight facts to do
  * it correctly — e.g. the conflict predicate needs every OTHER open proposal id). Assembled in
  * ONE place so the write routes can never drift from what GET /v1/inbox just rendered.
+ *
+ * `loadPlanFn` defaults to {@link loadPlan} (the working-tree read, torn-read-guarded per
+ * W1-T2220 remedy (a) — "usually not partial", the right cost for a render). The write-scoped,
+ * tier-HIGH `POST /v1/inbox/approve` gate below passes {@link loadPlanAtRef} instead — remedy
+ * (c), "cannot be partial" — since GET /v1/inbox and POST /v1/inbox/reframe never gate an
+ * irreversible action on `classifications` the way approve does (design note (iv): splitting
+ * the remedy by call site is the point, not a single mechanism for all three).
  */
-function classifyAllProposals(deps: PanelGraphDeps): {
+function classifyAllProposals(
+  deps: PanelGraphDeps,
+  loadPlanFn: (planPath: string) => Plan = loadPlan,
+): {
   registryPath: string;
   proposals: Proposal[];
   classifications: InboxClassification[];
@@ -1149,7 +1168,7 @@ function classifyAllProposals(deps: PanelGraphDeps): {
   const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
   const inflight = parseDraftInFlightCache(readFileIfExists(inflightPath));
 
-  const plan = loadPlan(deps.planPath);
+  const plan = loadPlanFn(deps.planPath);
   const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
   // W1-T510: absence from `projection` cannot happen for any id `classifyProposal`'s own
   // `unmetOutsideDeps` can name here — `projectPlan` derives one entry per `plan.tasks` (see
@@ -1329,7 +1348,14 @@ export function buildApproveProposalRoute(deps: PanelGraphDeps): Route {
     // W1-T404: HIGH — moves code (hands off to a detached rmd spawn: ratify/merge).
     tier: "high",
     handler: jsonAction(validateApproveProposal, (input, req, res) => {
-      const { proposals, classifications } = classifyAllProposals(deps);
+      // W1-T2220: this gate is the ONE call site among classifyAllProposals's three consumers
+      // that hands off to an irreversible detached spawn on `classifications`, so it alone reads
+      // the plan via loadPlanAtRef (remedy (c), "cannot be partial") rather than loadPlan's
+      // default stat/read/stat retry (remedy (a), "usually not partial") — see that function's
+      // own doc and classifyAllProposals's.
+      const { proposals, classifications } = classifyAllProposals(deps, (planPath) =>
+        loadPlanAtRef(deps.root, relative(deps.root, planPath)),
+      );
       if (!proposals.some((p) => p.id === input.proposalId)) {
         sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;

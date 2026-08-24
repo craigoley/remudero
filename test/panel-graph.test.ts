@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,6 +79,27 @@ const WRITE_TOKEN = "graph-write-token";
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-panel-graph-"));
+}
+
+/**
+ * A `tmpRoot()` that is ALSO a real git repo, for the POST /v1/inbox/approve tests: W1-T2220
+ * moved that one write-scoped call site off `loadPlan` (working tree) onto `loadPlanAtRef` (`git
+ * show HEAD:plan/tasks.yaml` — atomic against a torn checkout by construction, the guarantee a
+ * tier-HIGH gate needs), so its fixture now needs a real commit to read, not just a file on disk.
+ */
+function gitTmpRoot(): string {
+  const root = tmpRoot();
+  execFileSync("git", ["init", "--quiet", "-b", "main"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: root, stdio: "pipe" });
+  return root;
+}
+
+/** Commit whatever the fixture has written under `root` so far (plan/, state/, ...) so
+ *  `loadPlanAtRef`'s `git show HEAD:plan/tasks.yaml` sees it — see {@link gitTmpRoot}. */
+function commitAll(root: string): void {
+  execFileSync("git", ["add", "-A"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["commit", "--quiet", "-m", "test fixture"], { cwd: root, stdio: "pipe" });
 }
 
 function ledgerPathFor(root: string): string {
@@ -1188,9 +1210,10 @@ test("POST /v1/inbox/approve, POST /v1/inbox/reframe are write-scoped", async ()
 });
 
 test("POST /v1/inbox/approve: a genuinely READY proposal hands off to RatifyCliGateway.approve and ledgers panel.proposal_approve_requested with the panel's bearer as origin (acceptance 2)", async () => {
-  const root = tmpRoot();
+  const root = gitTmpRoot();
   const planPath = emptyPlanPath(root);
   seedReadyProposal(root, "P900");
+  commitAll(root);
   const ratify = fakeRatifyGateway();
 
   await withService({ ...depsFor(root, planPath), ratify }, async (base) => {
@@ -1208,11 +1231,12 @@ test("POST /v1/inbox/approve: a genuinely READY proposal hands off to RatifyCliG
 });
 
 test("POST /v1/inbox/approve: a NOT-READY proposal is REFUSED with 409 naming why, and the gateway is NEVER called (acceptance 6 -- no action the backend would refuse)", async () => {
-  const root = tmpRoot();
+  const root = gitTmpRoot();
   const planPath = emptyPlanPath(root);
   mkdirSync(join(root, "state"), { recursive: true });
   // no cached draft at all -> classifies not_ready ("no drafted candidate available yet").
   writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P902", summary: "no draft yet", evidenceAnchors: [] }] }));
+  commitAll(root);
   const ratify = fakeRatifyGateway();
 
   await withService({ ...depsFor(root, planPath), ratify }, async (base) => {
@@ -1226,10 +1250,11 @@ test("POST /v1/inbox/approve: a NOT-READY proposal is REFUSED with 409 naming wh
 });
 
 test("POST /v1/inbox/approve: an unknown proposal id -> 404, gateway never called", async () => {
-  const root = tmpRoot();
+  const root = gitTmpRoot();
   const planPath = emptyPlanPath(root);
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [] }));
+  commitAll(root);
   const ratify = fakeRatifyGateway();
 
   await withService({ ...depsFor(root, planPath), ratify }, async (base) => {

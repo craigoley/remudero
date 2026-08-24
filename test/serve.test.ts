@@ -134,6 +134,20 @@ function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-serve-"));
 }
 
+/** git-init `root`, for the one POST /v1/inbox/approve test below: W1-T2220 moved that write-
+ *  scoped call site off `loadPlan` (working tree) onto `loadPlanAtRef` (`git show
+ *  HEAD:plan/tasks.yaml`), so it needs a real commit to read, not just a file on disk. */
+function gitInit(root: string): void {
+  execFileSync("git", ["init", "--quiet", "-b", "main"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: root, stdio: "pipe" });
+}
+
+function commitAll(root: string): void {
+  execFileSync("git", ["add", "-A"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["commit", "--quiet", "-m", "test fixture"], { cwd: root, stdio: "pipe" });
+}
+
 function ledgerPathFor(root: string): string {
   const p = join(root, "state", "ledger.ndjson");
   mkdirSync(join(root, "state"), { recursive: true });
@@ -303,6 +317,7 @@ const READY_FRAGMENT = `
 
 test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve on a genuinely READY proposal hands off to a REAL detached bin/rmd spawn — the default is not merely constructed but actually wired all the way to the write route (W1-T193)", async () => {
   const root = tmpRoot();
+  gitInit(root);
   const deps = depsFor(root, planOf([]));
   const { ratify: _fake, ...panelGraphWithoutRatify } = deps.panelGraph as typeof deps.panelGraph & { ratify: unknown };
 
@@ -318,6 +333,7 @@ test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve o
       P900: { proposalId: "P900", fragmentYaml: READY_FRAGMENT, stampLine: "- P900 (plan) — RATIFIED 2026-07-22 -> W1-T900.", anchorFingerprint: "" },
     }),
   );
+  commitAll(root);
 
   await withServeServer({ ...deps, panelGraph: panelGraphWithoutRatify }, async (base) => {
     const res = await post(base, "/v1/inbox/approve", WRITE_TOKEN, { proposalId: "P900" });

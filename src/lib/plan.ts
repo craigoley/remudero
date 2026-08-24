@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -354,10 +355,54 @@ export function taskRecordPath(planPath: string, taskId: string): string | undef
   return undefined;
 }
 
-export function loadPlan(path: string): Plan {
+/**
+ * W1-T2220: the file-read primitives {@link loadPlan} uses, injectable so a torn/short-read
+ * race (a concurrent `git checkout --detach` truncating a shard IN PLACE while a request reads
+ * it) can be exercised deterministically in a test instead of only in an 80-cycle live rig. The
+ * real default just shells out to `node:fs`; nothing about the merge/dedup/depends_on logic
+ * below changes.
+ */
+export interface FileIntegrityIO {
+  statSize: (path: string) => number;
+  readFile: (path: string) => string;
+}
+
+const defaultIntegrityIO: FileIntegrityIO = {
+  statSize: (path) => statSync(path).size,
+  readFile: (path) => readFileSync(path, "utf8"),
+};
+
+/**
+ * Read a WHOLE file, refusing a torn/partial read rather than silently handing back a prefix.
+ * `loadPlan` cannot tell "the whole file" from "a prefix of it" from `readFileSync` alone — YAML
+ * that stops early is still valid YAML, and every field after the cut DEFAULTS instead of
+ * failing (measured: 83.1% of truncated shard cuts still parse). The only honest signal
+ * `loadPlan` has, with no expected length of its own, is a stat/read/stat size disagreement: if
+ * the byte size on disk before the read, the bytes actually read, and the byte size on disk
+ * after the read do not all agree, a writer touched this file DURING the read and the bytes are
+ * not trustworthy — retried a few times (the torn window measured ~0.8% of reads and is brief;
+ * a request-scoped retry loop costs nothing when no checkout is landing, per this task's design
+ * note (iv)), then refused outright rather than ever being handed to the YAML parser. This is
+ * remedy (a) of that design note: cheap, and "usually not partial" — see {@link loadPlanAtRef}
+ * for the write-gate's stronger "cannot be partial" guarantee.
+ */
+export function readWholeFile(path: string, io: FileIntegrityIO = defaultIntegrityIO, maxAttempts = 3): string {
+  let lastMismatch = "";
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const before = io.statSize(path);
+    const text = io.readFile(path);
+    const after = io.statSize(path);
+    const readBytes = Buffer.byteLength(text, "utf8");
+    if (before === readBytes && after === readBytes) return text;
+    lastMismatch = `stat ${before} vs read ${readBytes} bytes vs stat ${after} after`;
+  }
+  throw new Error(`short/torn read after ${maxAttempts} attempt(s) (${lastMismatch})`);
+}
+
+export function loadPlan(path: string, io: FileIntegrityIO = defaultIntegrityIO): Plan {
   let text: string;
   try {
-    text = readFileSync(path, "utf8");
+    text = readWholeFile(path, io);
   } catch (err) {
     throw new PlanError(`cannot read plan file (${path}): ${String(err)}`);
   }
@@ -369,7 +414,7 @@ export function loadPlan(path: string): Plan {
     const shardPath = join(shardDir, file);
     let shardText: string;
     try {
-      shardText = readFileSync(shardPath, "utf8");
+      shardText = readWholeFile(shardPath, io);
     } catch (err) {
       // A shard that VANISHED BETWEEN THE LISTING AND THIS READ is a race, not corruption, and
       // skipping it is the only correct answer — it is not in the plan any more. Throwing here
@@ -394,6 +439,96 @@ export function loadPlan(path: string): Plan {
 
   // Every declared dependency must resolve WITHIN THE MERGED VIEW (tasks.yaml + all
   // shards) — same contract loadPlanFromYaml enforces for a single blob.
+  for (const t of tasks) {
+    for (const dep of t.depends_on) {
+      if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
+    }
+  }
+  return { tasks, byId };
+}
+
+/**
+ * W1-T2220 remedy (c): load the plan from committed git objects — `git show <ref>:<path>` —
+ * rather than the working tree, for the ONE caller that cannot afford {@link loadPlan}'s
+ * stat/read/stat retry (remedy (a), "usually not partial"): `POST /v1/inbox/approve`, a
+ * write-scoped, tier-HIGH gate (W1-T404) that hands off to a detached `rmd approve` spawn and
+ * so is irreversible in the direction that matters. Git objects are immutable and
+ * content-addressed, so a blob at a fixed `ref` CANNOT be torn by a concurrent `git checkout
+ * --detach` truncating the working copy in place — this is atomic by construction, not merely
+ * unlikely to race, the stronger guarantee a gate needs over a render.
+ *
+ * `ref` defaults to `"HEAD"` — the commit the shared working tree is already checked out to
+ * (`checkout_target`'s `git checkout --detach "$TARGET"`), so this reads exactly what a quiet
+ * working tree would show, no network fetch and no second checkout (design note (v): the
+ * console/panel gets no checkout of its own). `repoRoot` is `deps.root`, the same repo root
+ * every other git-backed helper in this module already runs `-C` against.
+ *
+ * NAMED COST, NEVER SILENT (design note (iii)(c), acceptance criterion 5): this reads the
+ * COMMITTED plan at `ref` — an UNCOMMITTED working-tree edit to `plan/tasks.yaml` or a shard is
+ * INVISIBLE here. That is a real behavior difference from {@link loadPlan}, stated here and
+ * exercised by `test/main-plan-load-guard.test.ts`, never a silent divergence discovered later.
+ *
+ * Mirrors {@link loadPlan}'s own merge semantics (duplicate id across monolith/shard fails
+ * loud, every `depends_on` must resolve within the merged view) so the two loaders agree on
+ * every plan that is not mid-write — only the SOURCE of the bytes differs.
+ */
+export function loadPlanAtRef(
+  repoRoot: string,
+  planRelPath: string,
+  ref = "HEAD",
+  runGit: (args: string[]) => string = (args) =>
+    execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }),
+): Plan {
+  const tasks: Task[] = [];
+  const byId = new Map<string, Task>();
+  const ingest = (blob: string, label: string) => {
+    for (const t of parseTasksFromYaml(blob, label)) {
+      if (byId.has(t.id)) {
+        throw new PlanError(`duplicate task id '${t.id}' (${label} collides with an earlier plan entry)`);
+      }
+      byId.set(t.id, t);
+      tasks.push(t);
+    }
+  };
+
+  let monolithBlob: string;
+  try {
+    monolithBlob = runGit(["show", `${ref}:${planRelPath}`]);
+  } catch (err) {
+    throw new PlanError(`cannot read plan file at ${ref}:${planRelPath} in ${repoRoot}: ${String(err)}`);
+  }
+  ingest(monolithBlob, `${ref}:${planRelPath}`);
+
+  // List `tasks.d/` AT THE REF via `git ls-tree`, never `readdirSync` on the working tree — the
+  // working tree is exactly what this function exists to not trust. No `tasks.d/` at `ref` (the
+  // pre-sharding back-compat case `loadPlan` also honors) reads as an empty listing, same as
+  // `listShardFiles`'s ENOENT tolerance.
+  const shardRelDir = join(dirname(planRelPath), "tasks.d");
+  let shardListing = "";
+  try {
+    shardListing = runGit(["ls-tree", "--name-only", ref, `${shardRelDir}/`]);
+  } catch {
+    shardListing = "";
+  }
+  const shardRelPaths = shardListing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")))
+    .sort();
+  for (const shardRelPath of shardRelPaths) {
+    let shardBlob: string;
+    try {
+      shardBlob = runGit(["show", `${ref}:${shardRelPath}`]);
+    } catch (err) {
+      // Unlike loadPlan's ENOENT-skip for a shard that vanished mid-read off the working tree,
+      // there is no analogous benign race here: `shardRelPath` just came off `git ls-tree` AT
+      // THE SAME `ref` this `git show` reads, and objects at a fixed ref never vanish. A failure
+      // here is a real problem (git corruption, a gc mid-read) and must throw, never skip.
+      throw new PlanError(`cannot read plan shard at ${ref}:${shardRelPath} in ${repoRoot}: ${String(err)}`);
+    }
+    ingest(shardBlob, `${ref}:${shardRelPath}`);
+  }
+
   for (const t of tasks) {
     for (const dep of t.depends_on) {
       if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
