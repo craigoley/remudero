@@ -28,7 +28,7 @@ raw: "THE FEEDBACK PREVIEW GIVES NO SIGNAL DURING THE MODEL CALL, SO THE BUTTON
   ambiguity after the banner and not the missing signal."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
 summary: null
 expansion: null

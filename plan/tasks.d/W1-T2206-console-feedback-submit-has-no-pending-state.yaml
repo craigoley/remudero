@@ -1,0 +1,111 @@
+- id: W1-T2206
+  title: "the console feedback submit has NO state between the click and the model call's return — the preview is an unguarded await with no spinner, no disable and no label change, so the button reads as dead, a second click launches a SECOND paid preview, and the 8s arm expires silently; render a pending state and make every step of the click-to-file machine legible"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "FIRST REAL OPERATOR USE of W1-T350's console feedback round trip, 2026-08-05 evening
+    (feedback#fb-1785969218105-99834b). The operator pasted the write token, submitted, saw NOTHING,
+    clicked again several times, and eventually got 'Preview generated — nothing is filed yet.' His
+    words: 'bad ux… I have no idea if I still need to address this feedback in some way or not.'
+    THE FALSIFYING CHECK IS ANSWERED, AND IT FAILS: the entry allowed that a pending state might
+    already render and merely have been outrun by the operator's second click. IT DOES NOT EXIST.
+    Read at the submit handler on #needs-me-list (src/lib/serve.ts, the `.needs-me-answer` branch):
+    between `e.preventDefault()` and `await postJson(\"/v1/feedback/preview\", ...)` the handler
+    touches NO DOM. No `submitBtn.disabled`, no busy class, no label change, no spinner element. The
+    button keeps reading 'Answer' for the entire duration of a MODEL CALL. The missing-signal defect
+    is real, not a race.
+    THE CLICK-TO-FILE STATE MACHINE, ESTABLISHED FROM SOURCE (this is the RECON the entry asked for):
+    (a) IDLE — label 'Answer', data-confirming='false'.
+    (b) CLICK 1 — fires POST /v1/feedback/preview, a model call taking seconds. NO VISIBLE CHANGE.
+        The control stays enabled and stays submittable by Enter.
+    (c) PREVIEW RETURNS AN EXPANSION — ARM: label becomes 'Confirm: <claim> (RECON n) — file?',
+        aria-pressed='true', and answerExpansions/answerConfirmTimers are keyed by replyTo.
+    (d) PREVIEW RETURNS NO EXPANSION, OR THROWS — the FAIL-OPEN leg FILES IMMEDIATELY on that first
+        click (POST /v1/feedback, no expansion). One click, one filing, no confirm ever shown.
+    (e) CLICK 2 WHILE ARMED — files WITH the cached expansion, then resets. This is the leg the
+        banner describes and the only leg the banner's wording is true for.
+    WHAT REPEATED CLICKS ACTUALLY DO — the entry's central question, answered: because (b) renders
+    nothing and disables nothing, a click landing while a preview is in flight RE-ENTERS the handler
+    with data-confirming still 'false' and starts ANOTHER preview. Two clicks = TWO model calls, at
+    cost, and the later resolution overwrites answerExpansions.get(replyTo). If both previews land on
+    the fail-open leg (d), BOTH FILE. IDEMPOTENCY IS ABSENT BY CONSTRUCTION: POST /v1/feedback carries
+    no client id and no nonce, and captureFeedback (src/lib/feedback.ts) mints a fresh
+    generateFeedbackId() per call — every repeat click is a distinct durable entry. The entry's
+    premise that the arm-then-confirm idiom is CLIENT-SIDE ONLY is correct and re-verified here.
+    A SECOND LEGIBILITY DEFECT FOUND DURING THE RECON, NOT IN THE ENTRY: the arm auto-disarms after
+    8000ms (answerConfirmTimers) and does so SILENTLY, restoring the plain 'Answer' label. W1-T350's
+    own constraint is that the operator must READ and be able to CORRECT a four-section expansion
+    before it files — eight seconds is shorter than that read, so the common case is an operator whose
+    confirm click lands after expiry and silently buys a THIRD model call instead of filing.
+    SCOPE BOUNDARY — the sibling entry fb-1785969338913-dc3d0f, captured two minutes later, owns the
+    HONESTY question (a confirmation that does not gate the write, and a banner asserting 'nothing is
+    filed yet' after a fail-open filing). That is a separate ruling about what the server must enforce.
+    THIS task is the LEGIBILITY half: what the operator SEES at each step. The in-flight guard below
+    is claimed here because it IS the pending state, not because it is the double-file fix."
+  design: |
+    RENDER THE STATE THE MACHINE IS ALREADY IN. The confirmation step is DELIBERATE and must NOT be
+    removed, shortened into a single click, or made skippable — W1-T350's design constraint stands:
+    the operator must see and be able to correct the interpreter's expansion before it files. The fix
+    is making the state legible, never skipping it.
+    (i) A PENDING STATE ON THE PREVIEW LEG. From the moment the handler fires the preview until it
+    settles, the submit control must be visibly working: disabled, plus a label or adjacent line
+    naming what is happening in the operator's terms (the interpreter is expanding his text, and it
+    takes a few seconds). Any of the three the entry names — spinner, disabled button, 'thinking…'
+    line — satisfies this; pick ONE and state why. It must clear on EVERY exit: expansion, no
+    expansion, thrown error. A pending state that survives a rejected fetch is a worse dead button
+    than the one this replaces.
+    (ii) THE PENDING STATE IS ALSO THE IN-FLIGHT GUARD. A disabled control cannot be re-entered, so
+    the second click can no longer start a second paid preview or a second fail-open filing. Guard
+    the HANDLER, not only the attribute — W1-T202's own defense-in-depth note records that a disabled
+    submit button does not stop Enter-key implicit submission in every engine, so the same per-replyTo
+    re-entry check must refuse in JS. Keying stays per replyTo, matching the existing
+    answerConfirmTimers/answerExpansions discipline; two grill answers mid-preview at once must remain
+    independent.
+    (iii) SAY WHAT THE ARMED STATE MEANS, NOT ONLY WHAT IT CONTAINS. The armed label already reads
+    back the claim; what the operator could not determine was whether he had filed once, several times
+    or not at all. The armed control must state that NOTHING HAS BEEN FILED YET and that the next
+    click is the one that files — the read-back and the consequence together, in the control itself,
+    where the ambiguity actually bit.
+    (iv) THE SILENT 8s DISARM. Establish and fix the mismatch between an 8000ms arm and a
+    four-section expansion the operator is required to read. Either extend the window to a duration
+    that survives that read, or make the expiry VISIBLE so a lapsed arm never masquerades as a fresh
+    one. State the choice and the reasoning; a silent reset that costs a model call is the failure to
+    remove either way.
+    (v) THE FAIL-OPEN LEG NEEDS ITS OWN SIGNAL. Leg (d) files on one click with no confirm ever
+    shown. Whatever the operator sees there must not be the armed vocabulary — a first-time user who
+    saw a filing happen must be able to tell it apart from a preview that armed.
+    NOT IN SCOPE: whether the confirmation gates the write SERVER-SIDE, a submission nonce, dedup of
+    byte-identical entries, and the truthfulness of the WRITE_ACK banner text — all four belong to
+    feedback#fb-1785969338913-dc3d0f and must not be pre-empted here. Also out: removing or
+    shortening the confirm step itself, the file-raw escape's behaviour, and the expander prompt.
+  acceptance:
+    - claim: "the console feedback submit renders a visible pending state for the whole duration of the preview call and clears it on every exit — expansion returned, no expansion returned, and preview rejected"
+      proof: "unit test: test/serve.test.ts"
+    - claim: "a second submit arriving while a preview for the same replyTo is still in flight starts no second preview and files nothing, and two different replyTo forms remain independently submittable"
+      proof: "unit test: test/serve.test.ts"
+    - claim: "the armed control states that nothing is filed yet and that the next click files, and a lapsed arm is never presented as a fresh one"
+      proof: "unit test: test/serve.test.ts"
+  risk: medium
+  origin: feedback#fb-1785969218105-99834b
+  plan_refs: ["W1-T350", "W1-T202", "§7B"]
+  files: [src/lib/serve.ts, test/serve.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a DOM assertion against the served shell with an injected
+    preview response (the serve suites already drive this control through open-shell); the pending
+    state, the re-entry refusal and the armed wording all assert in-process with no operator.
+    risk:medium — one client-side surface and no route change, but it sits on an operator-facing
+    write path where a wrong guard could refuse a legitimate filing. Medium is the honest grade: it
+    argues down (no server change, no spend path, no dispatch) and up only because a stuck pending
+    state would be a worse dead button than the one it replaces, which is why clearing on the
+    rejected-fetch leg is acceptance-level rather than a note.
+    budget_usd 40 — one file, one control, and the cost is the falsifiers: three exit legs, the
+    re-entry case, and the two-forms-at-once independence case.
+    NO depends_on: the sibling entry fb-1785969338913-dc3d0f has not been triaged into a task yet, so
+    there is no id to depend on. If its task lands first and changes this handler, this one rebases —
+    both touch the same ~60 lines of serve.ts, so they must NOT batch together.
+    ONE CONCERN: what the operator sees between clicking and filing. Server-side gating is
+    deliberately excluded and named in NOT IN SCOPE so the two entries cannot be answered twice."
