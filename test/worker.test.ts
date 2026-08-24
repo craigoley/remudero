@@ -312,9 +312,20 @@ test("runReview (W1-T2205, end-to-end): the advisory reviewer's overlapping text
   const binDir = mkdtempSync(join(tmpdir(), "rmd-runreview-e2e-gh-"));
   const oldPath = process.env.PATH;
   const oldClaudeBinOverride = process.env[CLAUDE_BIN_ENV_OVERRIDE];
+  const oldOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   try {
     writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
     const ledgerPath = join(root, "ledger.ndjson");
+
+    // `runReview` has no keychain-override seam of its own, so its `spawnWorker` call runs the
+    // REAL non-darwin credential-file preflight (`assertWorkerCredentialFile`, worker-home.ts)
+    // against the process's real HOME. That preflight's own documented precedence accepts a
+    // non-empty `CLAUDE_CODE_OAUTH_TOKEN` as an authenticated worker regardless of what the
+    // `.credentials.json` file says — set here so this test is deterministic on a CI runner with
+    // no such file (this repo's own `ci` job measured that shape), not merely on a host that
+    // happens to already carry a real credential on disk. Never a real secret — the injected
+    // `reviewerQueryFn` above means the value is never sent anywhere.
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token-never-sent-reviewerQueryFn-intercepts-the-spawn";
 
     // `runReview`'s own `spawnWorker` call takes no `claudeExecutable` override (unlike
     // `e2eSpawnWorkerArgs` above), so `resolveClaudeExecutable` runs its REAL preflight —
@@ -402,6 +413,8 @@ esac
     process.env.PATH = oldPath;
     if (oldClaudeBinOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];
     else process.env[CLAUDE_BIN_ENV_OVERRIDE] = oldClaudeBinOverride;
+    if (oldOauthToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    else process.env.CLAUDE_CODE_OAUTH_TOKEN = oldOauthToken;
   }
 });
 
