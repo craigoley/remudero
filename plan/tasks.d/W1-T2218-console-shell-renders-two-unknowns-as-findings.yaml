@@ -1,0 +1,175 @@
+- id: W1-T2218
+  title: "THE CONSOLE SHELL RENDERS TWO UNKNOWNS AS DETERMINATE FINDINGS, AND THE CORRECT MODEL FOR EACH IS ALREADY IN THE SAME FILE — `updateGithubBanner` stamps the BROWSER's clock at the first paint carrying any indeterminate task and calls it an outage start, and `renderGlanceStrip` guards `merged-today`/`spend-*` with `…` while `running`/`needs-me`/`blocked`/`queued` publish a bare `.length` that cannot distinguish an empty map from a measured zero"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/serve.ts, test/console-shell-unknowns.test.ts]
+  origin: oper#console-shell-renders-unknowns-as-findings-2026-08-24
+  plan_refs: ["W1-T281", "W1-T282", "W1-T262", "W1-T2219"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-24 from a scratch worktree proved equal to `origin/main` BY SHA
+    (`57d08a2f0e47881e07937cb7f512feb73e4849ef`) before any reading; the clone was checked and is
+    not shallow (2,099 commits reachable). `src/lib/serve.ts` (325,243 bytes) and `src/run-task.ts`
+    (1,531,586 bytes, over the contents-API cap) were read as GIT OBJECTS.
+
+    (0) THE ATTRIBUTION BOUNDARY, STATED FIRST BECAUSE IT GOVERNS EVERY NUMBER BELOW. EVERY RUNTIME
+    FIGURE IN THIS SHARD IS THE OPERATOR'S MEASUREMENT AND IS ATTRIBUTED, NEVER RESTATED AS
+    RE-DERIVED. This host cannot measure the fleet and the console is unreachable from it, so
+    nothing here is verified live. WHAT WAS RE-DERIVED IS THE SOURCE, and that half is complete.
+    THE REASON IS STALENESS, NOT REFUSAL, AND THE BRIEF'S PREDICTION IS CORRECTED: `resolveLedgerUnion`
+    did NOT refuse — it returned `ok: true`, `archiveCount: 672`, `unread: []`. It read the corpus
+    fully; the corpus is simply old. Newest rows on this host: `board_gateway.fetch_ok`
+    2026-08-17T02:07:40Z, `serve.start` 2026-08-16T23:43:45Z, `run.start` 2026-08-12T23:50:30Z, and
+    `worker.state` ZERO ROWS across all 672 archives. The operator's figures are from 11:30–12:31Z
+    TODAY, so this corpus structurally cannot contain them — which is why they are attributed rather
+    than confirmed, and why a "0" from this host would have been a coverage zero either way.
+
+    (1) FINDING (a), RE-DERIVED FROM SOURCE. `updateGithubBanner` (`src/lib/serve.ts`, browser-side)
+    reads `const unreachable = tasks.some((t) => t.indeterminate)` and then
+    `if (!githubUnreachableSince) githubUnreachableSince = new Date()`, rendering
+    `GitHub unreachable since ${formatTimestamp(...)} — statuses may be stale`. The `else` arm sets
+    `githubUnreachableSince = null`. `let githubUnreachableSince = null` is a CLIENT-MODULE
+    variable, so it RE-STAMPS ON EVERY RELOAD: the value is the browser's clock at the first paint
+    of this page-load that carried any indeterminate task — never the instant a read began failing,
+    and never a server fact.
+
+    (2) OPERATOR-ATTRIBUTED, AND THE ARITHMETIC IS WHAT MAKES IT A FIRST-OBSERVATION INSTANT RATHER
+    THAN A BOOT TIME. The banner rendered "GitHub unreachable since 7:46:18 AM EDT" while
+    `serve.start` was 11:40:35.885Z and the first `board_gateway.fetch_ok` was 11:46:35.157Z —
+    SEVENTEEN SECONDS AFTER THE STAMP. A boot-time stamp would have matched `serve.start`; this one
+    matches neither boot nor any failure, which is exactly the point: nothing measured that instant.
+
+    (3) THE CORRECT MODEL EXISTS IN THIS FILE AND IS DISCARDED TWICE — RE-DERIVED.
+    `resolveFreshness` (`src/lib/console-freshness.ts`) opens
+    `const ageMs = s.lastLiveMs == null ? null : Math.max(0, s.nowMs - s.lastLiveMs)`, so
+    NOTHING-EVER-LANDED SURVIVES INTACT AS `ageMs: null`. The next line discards it:
+    `const dataOld = ageMs == null || ageMs >= s.staleAfterMs` folds never-landed into old, and the
+    three returns then yield `live`/`stale`/`reconnecting` with no fourth state — so a pane that has
+    NEVER had data is indistinguishable from one that HAD data and went cold. That is discard one.
+    Discard two is at the consumer: `serve.ts` reads `.mode === "live"` and nothing else, so even
+    the surviving `ageMs: null` never reaches a decision.
+
+    (4) AND IT IS WIRED — TO THE BADGE, NOT TO THIS BANNER. `resolveFreshness` is imported at
+    `serve.ts:84`, called at `serve.ts:1683` (guarding the STALE badge) and `serve.ts:4156`, and
+    EMBEDDED VERBATIM into the client bundle at `serve.ts:4120` as
+    `const resolveFreshness = ${resolveFreshness.toString()};`. So the honest model is present in
+    the very bundle the banner runs in, and the banner does not call it. W1-T281's zero-caller
+    finding IS REPAIRED — the call sites above are its repair — and is CITED, NOT RE-FILED.
+    (Line numbers drift: the brief cited 1683/4156 for the two calls and the `.mode === "live"` read
+    is at 1691; the anchors that matter are the SYMBOLS.)
+
+    (5) FINDING (b), RE-DERIVED — THE FILE IMPLEMENTS THE HONESTY GUARD AND APPLIES IT TO HALF ITS
+    OWN STRIP. `renderGlanceStrip` sets seven values. Three are guarded:
+    `latestSpend ? latestSpend.mergedToday : "…"`, and the same ternary for
+    `spend-today`/`spend-week`. Four are not: `glance-running` is
+    `tasks.filter((t) => t.phase).length`, and `needs-me`/`blocked`/`queued` are likewise bare
+    `.length`. The function's OWN doc comment states the rule it then half-applies, verbatim:
+    "merged-today/spend-today/spend-this-week come from latestSpend (GET /v1/status's \"spend\"
+    field, board.ts's computeGlanceSpend) -- \"…\" (unknown, never a fabricated 0) until the first
+    real snapshot has landed."
+
+    (6) THE TAXONOMY AGREES; WHAT IS LOST IS THE DISTINCTION, NOT THE DEFINITION.
+    `tasks.filter((t) => t.phase).length` matches `isRunningRow` (`src/lib/board.ts`), which is
+    `return row.phase != null`. So the predicate is right and shared. The defect is that `.length`
+    over an EMPTY or PHASE-LESS map is `0`, byte-identical to a measured zero — the same collapse
+    the spend guard exists to prevent, three lines below it.
+
+    (7) OPERATOR-ATTRIBUTED, AND THE STRIP REFUTES ITSELF. It rendered `running 0` beside
+    `spend today $230.890`, while W1-T1284 ran 11:30:29→12:05:26 with 100 `worker.state` rows and
+    W1-T2205/W1-T2206 opened 12:28:34 and 12:28:58 and were still live at 12:31. THE SPEND FIGURE
+    PROVES A SNAPSHOT HAD LANDED; THE RUNNING FIGURE PROVES NOTHING. Two values on one strip, one
+    honest about its own provenance and one not.
+
+    (8) ELIMINATED HYPOTHESIS, RE-DERIVED FROM SOURCE: `deriveRunState` IS NOT THE CAUSE. W1-T282
+    landed and `LANE_START_STEPS` (`src/lib/status.ts`) is a SEVEN-ENTRY table — `run.start`,
+    `daemon.start`, `drain.start`, `plan.start`, `retro.start`, `serve.start`, `triage.start` — with
+    `run.start` present. A run-state derivation that opened on only one lane's start would explain a
+    false `running 0`; this one does not, so the collapse is in the strip's rendering and nowhere
+    upstream. Recorded as ELIMINATED rather than dropped, because it is the first place a reader
+    will look.
+
+    (9) Q1 — WHY THESE TWO ARE ONE SHARD. Both live in the EMBEDDED CLIENT SHELL of `serve.ts`;
+    both are roughly ten lines; both falsify CLIENT-SIDE with no gateway involved; and both are the
+    same defect shape — THE CORRECT MODEL EXISTS IN THIS FILE AND THIS PATH DOES NOT USE IT
+    (`resolveFreshness` for the banner, the `latestSpend ? … : "…"` guard for the strip). Splitting
+    them would put one concern in two shards over one file and one test.
+
+    (10) Q2 — WHAT AN OPERATOR DOES WRONG ON EACH. `running 0` invites dispatching into a lane set
+    that is already full, or chasing a stall that does not exist — both act on a number that was
+    never measured. "GitHub unreachable since <t>" invites WAITING for a condition to clear, when
+    the stamp re-arms on the next reload and names an instant nothing observed; the operator waits
+    for a recovery that has no event to announce it.
+
+    (11) Q3 — WHAT MUST NOT CHANGE. `running` GOES TO `…`, NEVER A FABRICATED NUMBER — the guard
+    already in the same function is the shape, not a new one. THE BANNER IS RE-WORDED, NEVER
+    DELETED: the correct label is "no GitHub read has completed since this page loaded", which
+    asserts only what the client can see. And `merged_known: !githubUnreachable`
+    (`src/lib/board.ts`) IS THE SHAPE TO COPY — a boolean saying whether the number is KNOWN,
+    carried beside the number itself.
+
+    (12) THE SIBLING, CITED AND NOT TOUCHED. W1-T2219 owns the gateway question —
+    `readFailed()`/`readFailureReason()`/`classifyGhFailure`. Its blast radius is real and measured
+    here: those three symbols appear across 25, 10 and 8 files respectively under `src/` and
+    `test/`. NOTHING IN THIS SHARD PROPOSES TOUCHING ANY OF THEM; this task is two client-side
+    labels and changes no server behaviour.
+  design: |
+    ONE CONCERN: the embedded client shell must render an unknown as unknown, using the model this
+    file already contains.
+
+    (i) THE BANNER SAYS WHAT THE CLIENT CAN SEE. Re-worded to "no GitHub read has completed since
+    this page loaded" — a statement about this page-load, which is the only thing
+    `githubUnreachableSince` was ever able to observe. NOT DELETED (Q3): the signal is real and
+    worth surfacing; only the claim of an outage START is unsupported.
+
+    (ii) `running` FALLS BACK TO `…`, USING THE GUARD THREE LINES BELOW IT. The strip already
+    distinguishes "no snapshot yet" from "a measured zero" for spend; the same discrimination is
+    applied to the task-derived values. A FABRICATED NUMBER IS NEVER THE FALLBACK — rationale (11).
+
+    (iii) THE KNOWN/UNKNOWN FLAG IS COPIED, NOT INVENTED. `merged_known: !githubUnreachable`
+    (board.ts) is the existing shape: a boolean travelling beside the value. Whatever carries
+    "has a snapshot landed" to the strip follows that precedent rather than a new convention.
+
+    (iv) NOT IN SCOPE, NAMED: the gateway and `readFailed()`/`readFailureReason()`/`classifyGhFailure`
+    (W1-T2219, rationale (12)); `resolveFreshness`'s own three-state model, which is correct for the
+    badge it serves and is only being reused here; W1-T281's wiring, already repaired; and
+    `deriveRunState`/`LANE_START_STEPS`, eliminated in rationale (8).
+  acceptance:
+    - claim: "a page load with no completed github read renders a label about this page load rather than an outage start time"
+      proof: "unit test: test/console-shell-unknowns.test.ts"
+    - claim: "the banner is re-worded rather than removed, so the indeterminate signal still reaches the operator"
+      proof: "unit test: test/console-shell-unknowns.test.ts"
+    - claim: "the running value renders as unknown before any snapshot has landed and never as a number"
+      proof: "unit test: test/console-shell-unknowns.test.ts"
+    - claim: "a genuinely measured zero still renders as zero and is distinguishable from the unknown case"
+      proof: "unit test: test/console-shell-unknowns.test.ts"
+    - claim: "the spend values keep the guard they already have"
+      proof: "unit test: test/console-shell-unknowns.test.ts"
+  note: |
+    RISK BAND FROM RULE 19's SPAN, AND THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
+    `sizingViolation` (`src/lib/task-linter.ts:196`) returns `undefined` at `risk: high` on its
+    FIRST line — "Rule 19 exemption — high already assumes wide scope" — so the span was NEVER
+    SCORED. Scored honestly it is TWO stems, `serve` and `console-shell-unknowns`, which is one
+    source file and its co-located test and would not have tripped `risk: medium` either. The band
+    is set from BLAST RADIUS: this is the surface an operator reads before dispatching, and a wrong
+    fallback here misleads the person deciding whether to spend.
+
+    NO PROOF GREPS THIS SHARD'S OWN PATH. All five criteria use the pure-path `unit test:` form
+    naming `test/console-shell-unknowns.test.ts`, declared in `files:` and not yet existing — a
+    forward reference to a PATH, never a guessed symbol.
+
+    THE SWEEP'S COVERAGE GAP WAS FOUND AND CLOSED RATHER THAN REPORTED AS A CLEAN ZERO. A bulk
+    fetch of every head created 95 refs against 134 on the remote, leaving 39 unswept; those were
+    fetched explicitly and swept, giving 134 of 134. The subject reads zero on every head and on
+    main, with a control on the same refs and the same query returning 41 hits for a subject that
+    does exist.
+
+    ONE ID SURFACE UNDER-CREDITS BY CONSTRUCTION AND IS LABELLED. The anchored trailer scan
+    `^Remudero-Task:\s*<id>\s*$` reads 1 for W1-T1127, a BUILT task, and 0 for W1-T1289, a plan
+    filing that is demonstrably on main — so a zero on that surface is evidence about builds, never
+    about filings.
