@@ -394,8 +394,16 @@ export type TriageDecision =
        * answer parseably but contradicted itself against the files it touched (or, for AMBIGUOUS,
        * against its own OPTION/RECOMMENDATION contract). A reader (or a future caller) can now
        * branch on this field instead of pattern-matching `reason`'s prose.
+       *
+       * OPTIONAL, not required on every `error`: the AMBIGUOUS-with-fewer-than-2-OPTION-lines
+       * branch below deliberately omits it — main's pre-existing
+       * `decideTriage: a verdict genuinely offering ONE choice twice ... still fails the < 2
+       * guard` test (test/triage.test.ts, outside this task's declared scope) asserts that
+       * exact shape with `assert.deepEqual`, which fails closed on any extra key. Widening
+       * `cause` to that branch too is a genuine follow-up, not a regression — see this PR's
+       * Follow-ups.
        */
-      cause: "non_plan_files" | "unparseable_verdict" | "inconsistent_verdict";
+      cause?: "non_plan_files" | "unparseable_verdict" | "inconsistent_verdict";
     };
 
 /**
@@ -463,10 +471,10 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
     // actionable escalation; fail loud rather than let escalate() throw deeper in the pipeline
     // (or worse, silently drop the recommendation).
     if (verdict.options.length < 2) {
+      // `cause` deliberately omitted here — see the DecideTriageInput.cause doc comment above.
       return {
         action: "error",
         reason: `AMBIGUOUS verdict carries ${verdict.options.length} OPTION: line(s) — a grill needs at least 2 actionable choices`,
-        cause: "inconsistent_verdict",
       };
     }
     if (!verdict.options.some((o) => o.label === verdict.recommendation)) {
