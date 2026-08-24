@@ -1,0 +1,150 @@
+- id: W1-T2225
+  title: "`flight-judge.ts` CARRIES W1-T2212's COLLAPSE AND NOTHING CALLS IT — an unreadable judge output becomes `{state: \"off_track\", recommendation: \"escalate\", confidence: 1}`, indistinguishable from a real classification, and the stack that would consume it has zero production call sites, so this is a wire-or-retire decision before it is a fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 25.00
+  files: [src/lib/flight-judge.ts, test/flight-judge-unparseable-third-state.test.ts]
+  origin: oper#flight-judge-unparseable-collapse-2026-08-24
+  plan_refs: ["W1-T2212", "W1-T2215", "W1-T360", "W1-T478"]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-08-24 in a scratch worktree proved equal to `origin/main` BY SHA
+    (`ecb7ccc746f567d172bc58303a63c4185c402e05`); clone checked and not shallow. `src/run-task.ts`
+    (1,532,555 B) read as a GIT OBJECT. Ledger via `resolveLedgerUnion`: `ok`, **672 archives, 0
+    unread**, newest row 2026-08-12T23:50:30Z — so any claim about the last twelve days is NOT
+    covered by this corpus and is attributed rather than re-derived.
+
+    (1) THE COLLAPSE, RE-DERIVED AND QUOTED. `src/lib/flight-judge.ts` declares
+    `const FAIL_CLOSED_VERDICT: JudgeVerdict = { state: "off_track", recommendation: "escalate",
+    confidence: 1, evidence: ["judge output carried no parseable JUDGE_STATE/JUDGE_RECOMMENDATION
+    verdict — failing closed"] }`, under a doc that reads "FAIL-CLOSED default when the judge's
+    output carries no parseable verdict (a dead spawn, a malformed response, `error_max_turns`, …)".
+    `off_track` is a MEMBER of `JudgeState` — `VALID_STATES` lists it beside `productive`,
+    `converging`, `spiraling` and `blocked` — so "could not read the judge" is stored inside the
+    same type as "the judge classified this run off-track", with `confidence: 1` asserting maximum
+    certainty about a reading that never happened.
+
+    (2) AND `risk-judge.ts` SAYS IN ITS OWN DOC THAT IT MIRRORS THAT SHAPE, WHICH IS HOW THE CLASS
+    WAS FOUND: "FAIL-CLOSED default when the judge's response carries no parseable RISK_VERDICT
+    (malformed output, off-contract prose, …) — mirrors flight-judge.ts's `FAIL_CLOSED_VERDICT` and
+    review.ts's 'never silently proceed' doctrine". Nine further doc references across
+    `escalate.ts`, `learnings.ts`, `risk-score.ts`, `specialist-panel.ts` and `run-task.ts` name
+    flight-judge as the pattern they copy, so this file is the CLASS's reference implementation.
+
+    (3) W1-T2212 ESTABLISHED THE CLASS AND ITS REMEDY AND IS CITED, NOT RE-FILED — AND IT NAMED
+    THIS FILE OUT OF SCOPE IN TERMS. Its rationale records "`flight-judge.ts` carries the IDENTICAL
+    collapse" and its design's not-in-scope clause names `flight-judge.ts` and `learnings.ts`
+    explicitly. NONE OF ITS EVIDENCE IS RESTATED HERE as this task's own; what is re-derived above
+    is this file's text and this file's reachability.
+
+    (4) Q1 — NOTHING CALLS IT, AND THE ZERO IS CONTROLLED ON ITS OWN SURFACE. Production call sites
+    (excluding its own file, excluding comment lines) for `runFlightJudge`, `planJudgeAction`,
+    `parseJudgeVerdict`, `buildJudgePrompt` and `spawnFlightJudgeWorker`: ZERO each. The only
+    production import of the module anywhere is `src/lib/risk-score.ts`'s
+    `import type { JudgeState }` — a TYPE-ONLY import that carries no runtime call. CONTROL on the
+    identical query shape: `runRiskJudge` has ONE production call site (`src/run-task.ts`), and
+    `risk-judge.js` has three real production imports. The 30-odd other mentions of "flight-judge"
+    under `src/` are prose in doc comments, which is why a bare text count reads as reachability
+    and is not.
+
+    (5) AND THE LEDGER AGREES FOR THE WINDOW IT COVERS. Anchored on step names taken FROM SOURCE —
+    `flight_judge.verdict`, `flight_judge.action`, `flight_judge.escalated`, the three
+    `runFlightJudge` emits — each reads ZERO rows across 672 archives. CONTROL on the same corpus
+    and the same anchor form: `"step":"risk_judge.decision"` reads 87. THE WINDOW IS THE LIMIT: the
+    corpus's newest row is 2026-08-12, so this is evidence that the judge never ran up to that
+    date, and says nothing about the twelve days since.
+
+    (6) THE DOWNSTREAM CONSUMER IS DEAD TOO, WHICH IS WHAT MAKES THIS LATENT RATHER THAN LIVE.
+    `risk-score.ts`'s `confidenceFactor` branches on `metadata.flightJudgeState === "off_track"` to
+    set a risk band — so a collapsed verdict would drive a band as though the judge had genuinely
+    classified the run. But `confidenceFactor`, `scoreRisk` and `planRiskGate` have ZERO production
+    call sites; the only symbols of that module reached in production are `shouldRecordDecision`
+    and `reversibilityFactor`. So the whole §4B Layer-1/Layer-2 path is unreached end to end.
+
+    (7) SO THE HONEST ANSWER TO Q1 IS RETIRE-OR-WIRE FIRST, AND W1-T360 ALREADY OWNS THAT QUESTION.
+    W1-T360 records flight-signals and flight-judge as "one unwired stack" and asks wire-or-retire;
+    it is `verify: human`, `status: queued`. THIS TASK IS NOT A LIVE-DEFECT REPAIR AND DOES NOT
+    CLAIM TO BE. It is the fix that must land WITH the wiring if W1-T360 resolves to WIRE, and it is
+    retired alongside the module if W1-T360 resolves to RETIRE. Filing it now records the defect at
+    the moment it was measured so the wiring decision is not taken without it.
+
+    (8) Q2 — W1-T2212's TYPE-LEVEL REMEDY DOES NOT TRANSFER AS A DROP-IN, AND W1-T2215 IS THE
+    PRECEDENT FOR CHECKING RATHER THAN ASSUMING. W1-T2215 found the same remedy did NOT carry to
+    the claims harness because the repo does not own those exit codes. Here the repo DOES own the
+    type, so the compiler-refusal half is available — but the collapsed value CROSSES A MODULE
+    BOUNDARY: `risk-score.ts` accepts it as `flightJudgeState?: JudgeState`, a field typed on the
+    same union. A third state added to `JudgeVerdict` alone leaves `RiskTaskMetadata` still unable
+    to express "unreadable", so `confidenceFactor` would keep treating the collapse as a
+    classification. THE REMEDY MUST REACH BOTH TYPES OR IT MOVES THE DEFECT ONE MODULE DOWNSTREAM.
+    That is this site's own constraint and is why the answer was measured rather than inherited.
+
+    (9) W1-T478 IS A DIFFERENT TASK ON THE NEIGHBOURING FILE AND IS NOT RE-FILED. It owns the RISK
+    judge discarding the text that failed to parse — `files: [src/lib/risk-judge.ts,
+    test/risk-judge.test.ts]`, a report-quality defect about evidence. This task owns the FLIGHT
+    judge storing an unread verdict inside its adverse state. Different file, different failure.
+  design: |
+    ONE CONCERN: an unreadable flight-judge output must not be storable as a classification.
+
+    (i) THE UNPARSEABLE ARM IS NOT A VERDICT — the shape W1-T2212 established, applied here. What
+    `parseJudgeVerdict` returns when it cannot read the output must be a distinct value that
+    `planJudgeAction` cannot confuse with `off_track`, so a consumer that fails to handle it does
+    not compile.
+
+    (ii) AND THE THIRD STATE MUST REACH `risk-score.ts`'s METADATA TYPE. Rationale (8): stopping at
+    `JudgeVerdict` leaves `flightJudgeState?: JudgeState` accepting the collapsed value, which
+    relocates the defect rather than removing it.
+
+    (iii) WHAT MUST NOT CHANGE — Q3, AND THIS IS THE CONSTRAINT AN IMPLEMENTER MAY NOT SOFTEN. An
+    unparseable verdict STILL BLOCKS. The escalation STILL FIRES. Nothing proceeds on a verdict it
+    could not read. The change is what the value is CALLED and what the type ADMITS, never whether
+    the run is allowed to continue — `halt_and_escalate` remains the outcome.
+
+    (iv) SEQUENCING, STATED SO NOBODY BUILDS DEAD CODE: this lands WITH W1-T360's wiring, or is
+    retired with the module. Rationale (7). Building it against an unreached stack buys nothing and
+    adds a test to a path no run executes.
+
+    (v) NOT IN SCOPE, NAMED: `risk-judge.ts`'s own collapse (W1-T2212) and its discarded evidence
+    (W1-T478); `learnings.ts`, which W1-T2212 names beside this file; the wire-or-retire decision
+    itself (W1-T360); and the claims harness, where W1-T2215 showed the remedy does not carry.
+  acceptance:
+    - claim: "an output the judge could not parse yields a value that is not one of the five classifications"
+      proof: "unit test: test/flight-judge-unparseable-third-state.test.ts"
+    - claim: "an unreadable verdict still halts and still escalates"
+      proof: "unit test: test/flight-judge-unparseable-third-state.test.ts"
+    - claim: "a genuine off_track classification is still distinguishable from an unreadable one"
+      proof: "unit test: test/flight-judge-unparseable-third-state.test.ts"
+    - claim: "the risk-score metadata type cannot accept an unreadable verdict as a classification"
+      proof: "unit test: test/flight-judge-unparseable-third-state.test.ts"
+    - claim: "a parsed adverse verdict is unchanged in state, recommendation and confidence"
+      proof: "unit test: test/flight-judge-unparseable-third-state.test.ts"
+  note: |
+    NO PROOF GREPS THIS SHARD'S OWN PATH, AND NO PROOF POINTS AT AN EXISTING TEST.
+    `test/flight-judge-unparseable-third-state.test.ts` was checked ABSENT against a control that IS
+    present (`test/flight-judge.test.ts`), so every criterion grades `not_yet_built` instead of
+    executing — an executing proof on a filing gets semantically downgraded. `files:` is the bare
+    single-line form `SHARD_FILES_LINE_RE` demands; a block list would forfeit the exemption
+    silently.
+
+    `risk: high` IS RULE 19's MEASURED REFUSAL, NOT A CHOICE — AND THE BAND EXEMPTS THE CHECK
+    RATHER THAN CLEARING IT. Filed first at `medium`, `rmd lint-plan` REFUSED IT: "[sizing] spans 2
+    distinct subsystems/concerns (flight-judge, flight-judge-unparseable-third-state) at
+    risk:medium — Rule 19: raise to risk:high or decompose into one task per concern". The two
+    stems are one module and its co-located test, which is not a real decomposition, so the band
+    was raised. THE CONSEQUENCE IS STATED RATHER THAN ENJOYED: `sizingViolation`
+    (`src/lib/task-linter.ts:197`) returns `undefined` on its first line at `risk: high`, so at
+    this band the span is no longer SCORED at all — the refusal above is the only reading of it
+    that will ever exist for this shard. THE BLAST-RADIUS READING POINTS THE OTHER WAY: rationale
+    (4)-(6) show the path is unreached end to end, so blast radius today is nil. The band is the
+    linter's, not a claim about danger.
+
+    THE SWEEP'S REF COUNT WAS VERIFIED BEFORE ANY ZERO WAS TRUSTED: 138 fetched against 138 on the
+    remote, compared before sweeping. ONE SURFACE WAS DISQUALIFIED AND RE-QUALIFIED: `src/ test/
+    deploy/` first used W1-T2212 as its control, which reads ZERO there because it is a filing id
+    never cited in source; re-qualified on W1-T1127, which reads non-zero. And the anchored trailer
+    surface under-credits filings by construction — 1 for W1-T1127, 0 for W1-T2220, a filing that
+    is demonstrably on main.
