@@ -229,14 +229,16 @@ test("runSweep: with no repushAbsent dep wired the lane stands down to the ordin
 
 // ── THE PUSH LEAF: real argv, real guard, no remote ─────────────────────────────────────────
 
-test("gitPushEmptyCommit builds an empty commit from the head's OWN tree and fast-forwards the branch", () => {
+test("gitPushEmptyCommit builds an empty commit from the head's OWN tree and leases the push on that head", () => {
   const seen: Array<string[]> = [];
   const pushed: Array<string[]> = [];
   const newSha = withLiveWritesAllowed(() =>
     gitPushEmptyCommit("/repo", "run-W1-T253-1785378652634", "35d636d454cc", "chore(ci): re-trigger", {
       capture: (_file, args) => {
         seen.push(args);
-        return args[2] === "rev-parse" ? "treeabc\n" : "newsha1\n";
+        if (args[2] === "rev-parse") return "treeabc\n";
+        if (args[2] === "ls-remote") return "newsha1\trefs/heads/run-W1-T253-1785378652634\n";
+        return "newsha1\n";
       },
       exec: (_file, args) => {
         pushed.push(args);
@@ -248,9 +250,21 @@ test("gitPushEmptyCommit builds an empty commit from the head's OWN tree and fas
   // The tree comes from the head itself, which is what makes the commit empty by construction.
   assert.deepEqual(seen[0], ["-C", "/repo", "rev-parse", "35d636d454cc^{tree}"]);
   assert.deepEqual(seen[1], ["-C", "/repo", "commit-tree", "treeabc", "-p", "35d636d454cc", "-m", "chore(ci): re-trigger"]);
-  // A fast-forward onto the PR's own branch — no --force anywhere.
-  assert.deepEqual(pushed[0], ["-C", "/repo", "push", "origin", "newsha1:refs/heads/run-W1-T253-1785378652634"]);
-  assert.ok(!pushed[0]!.includes("--force"), "never a force-push — the new commit's parent is the current head");
+  // The new commit's parent is the believed head, so this IS a fast-forward — but the push also
+  // (W1-T1288) carries `--force-with-lease` naming that SAME head, so a foreign/absent ref is
+  // refused rather than silently created or replaced (see git-push.ts's doc comment).
+  assert.deepEqual(pushed[0], [
+    "-C",
+    "/repo",
+    "push",
+    "--force-with-lease=refs/heads/run-W1-T253-1785378652634:35d636d454cc",
+    "origin",
+    "newsha1:refs/heads/run-W1-T253-1785378652634",
+  ]);
+  assert.ok(!pushed[0]!.includes("--force"), "the lease is a precondition, not the bare permission flag");
+  // The resulting ref value is re-read rather than trusted from the exit code alone (the
+  // measured elision trap: a lease git elides still exits 0 without ever checking it).
+  assert.deepEqual(seen[2], ["-C", "/repo", "ls-remote", "origin", "refs/heads/run-W1-T253-1785378652634"]);
   // No working-tree verb: the daemon's own checkout must not move (W1-T191).
   const verbs = seen.flat().concat(pushed.flat());
   for (const forbidden of ["commit", "checkout", "add", "reset", "merge"]) {
