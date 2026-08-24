@@ -4941,6 +4941,119 @@ export function branchAuthorshipStandDownReason(
 }
 
 /**
+ * W1-T1284: a CONTENT snapshot of the local worktree {@link runFixRung} dispatches its strikes
+ * into — never a pointer (a tree sha two different commits could share) and never anything about
+ * `origin/main` (the base must never enter this identity — see {@link unchangedTreeStandDownReason}'s
+ * own doc for why). Three fields, re-derived from PrimeIntellect-ai/prime-agent's
+ * `captureGitWorktreeSnapshot` (`e319a66d`, packages/coding-agent/src/core/autonomous.ts): `status`
+ * (tracked modifications, staged or not — `git status --porcelain`), `diff` (the SAME uncommitted
+ * content against `HEAD`, not just a path list — a byte changed with no path added must still
+ * register), and `untrackedHash` (a hash of every untracked file's own bytes — an untracked ADD
+ * changes neither of the other two fields). NOT PROPOSED: prime-agent's IPython-kernel substrate,
+ * which this repo has no equivalent of.
+ */
+export type WorktreeSnapshot = { status: string; diff: string; untrackedHash: string };
+
+/**
+ * W1-T1284: FAILS TOWARD RUNNING — mirrors prime-agent's own `gitWorktreeSnapshotsEqual`
+ * (`!!a && !!b && ...`) exactly. An unreadable OR absent snapshot on EITHER side is never a
+ * match, so a read failure can only ever cause the caller to spend the strike, never to
+ * silently withhold one on a comparison it could not actually confirm.
+ */
+export function worktreeSnapshotsEqual(a: WorktreeSnapshot | undefined, b: WorktreeSnapshot | undefined): boolean {
+  return !!a && !!b && a.status === b.status && a.diff === b.diff && a.untrackedHash === b.untrackedHash;
+}
+
+/**
+ * W1-T1284 (the fix-rung pre-strike gate's fourth reason source, composed into
+ * {@link fixRungStandDownReason} below — never a parallel early return): is the worktree, right
+ * now, byte-identical to the snapshot recorded the last time THIS SAME gate was about to be
+ * spent against?
+ *
+ * THE DEFECT THIS CLOSES: the pre-strike gate already re-reads WHO moved the head
+ * (`branchAuthorshipStandDownReason`) and WHETHER the PR went terminal, both fresh every round —
+ * but a live head EQUAL to the rung's own last-pushed head reads as "fine, not foreign" (correctly,
+ * for THAT check's own purpose), so a strike whose worker pushed nothing at all left no signal
+ * anywhere that the next strike was about to run against a tree its own last strike never touched.
+ * This is that missing signal — read from the WORKTREE directly, never proxied through the PR's
+ * remote head sha, because `deps.push` is best-effort (a push that silently fails leaves real local
+ * progress with no remote trace) and an untracked file a worker adds never reaches the remote at
+ * all until it is committed.
+ *
+ * KEYED PER GATE (`gateKey` — see `runFixRung`'s own call site for its derivation: the sorted
+ * failing check names in ci-log mode, the sorted unmet-criterion claims in review mode, or the
+ * sorted conflicting-file list in merge-conflict mode) so a rung that fixed check A and moved on to
+ * a newly-red check B is never told "nothing changed" even on an unchanged sha (Q2's own
+ * falsifier — this is also why a base that moves under the branch, changing WHICH check is red,
+ * never trips this check: the gate key itself moves).
+ *
+ * `previousFailure` is `undefined` on the rung's first round (nothing recorded yet — exactly
+ * {@link branchAuthorshipStandDownReason}'s own "first round has no prior head" contract) and
+ * whenever the prior round's own snapshot capture was unreadable.
+ *
+ * PURE and exported so the boundary is unit-testable independent of the rung's git plumbing.
+ */
+export function unchangedTreeStandDownReason(
+  gateKey: string,
+  previousFailure: { gateKey: string; snapshot: WorktreeSnapshot } | undefined,
+  currentSnapshot: WorktreeSnapshot | undefined,
+): { reason: string } | undefined {
+  if (!previousFailure) return undefined; // first round, or the prior capture was unreadable
+  if (previousFailure.gateKey !== gateKey) return undefined; // a different gate — real ground moved
+  if (!worktreeSnapshotsEqual(previousFailure.snapshot, currentSnapshot)) return undefined; // real progress, or unreadable now — fail toward running
+  return {
+    reason:
+      `worktree content is byte-identical to the snapshot taken the last time this same gate ` +
+      `(${gateKey}) was about to be spent against — the previous strike changed nothing to re-check; ` +
+      `standing down rather than spending another strike on an unchanged tree`,
+  };
+}
+
+/**
+ * W1-T1284: the real worktree-content reader the fix rung wires for its pre-strike unchanged-tree
+ * check — three LOCAL git reads, never a remote one and never anything about `origin/main` (Q2's
+ * own "must not cover the base" constraint): `git status --porcelain=v1` (tracked modifications,
+ * staged or not), `git diff HEAD` (the SAME uncommitted content, not just a path list), and a hash
+ * of every untracked file's own BYTES (an untracked add changes neither of the first two). Re-
+ * derived from PrimeIntellect-ai/prime-agent's `captureGitWorktreeSnapshot` (`e319a66d`), minus
+ * its IPython-kernel substrate (not proposed here). Returns `undefined` on any git failure (an
+ * unreadable checkout, a missing worktree) — the caller's own {@link worktreeSnapshotsEqual}
+ * treats `undefined` as never-a-match, so a read failure can only ever cause a strike to spend,
+ * never to be silently withheld.
+ */
+export function captureWorktreeSnapshotViaGit(worktreePath: string): WorktreeSnapshot | undefined {
+  try {
+    const status = execFileSync("git", ["-C", worktreePath, "status", "--porcelain=v1", "-z", "--no-renames"], {
+      encoding: "utf8",
+      maxBuffer: 1 << 26,
+    });
+    const diff = execFileSync("git", ["-C", worktreePath, "diff", "--no-ext-diff", "--binary", "HEAD"], {
+      encoding: "utf8",
+      maxBuffer: 1 << 26,
+    });
+    const untracked = execFileSync("git", ["-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z"], {
+      encoding: "utf8",
+      maxBuffer: 1 << 26,
+    })
+      .split("\0")
+      .filter(Boolean)
+      .sort();
+    const hash = createHash("sha256");
+    for (const path of untracked) {
+      hash.update(path).update("\0");
+      try {
+        hash.update(readFileSync(join(worktreePath, path)));
+      } catch {
+        hash.update("<unreadable>");
+      }
+    }
+    return { status, diff, untrackedHash: hash.digest("hex") };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * W1-T177: resolve a stand-down reason from an OPTIONAL live-state reader —
  * shared by the fix rung's THREE internal checks (top of round; immediately
  * before a false-block escalation; immediately before the exhaustion
@@ -4971,6 +5084,12 @@ export function branchAuthorshipStandDownReason(
  * `foreignHead` — both ledger only (see the two params' own docs for why: a genuinely-red check
  * or a dirty merge state is a self-evident GitHub-reported fact, never an operator-decidable
  * question the way a foreign push is).
+ *
+ * W1-T1284 extends this SAME function with a FOURTH reason source — `unchangedTree` — again
+ * never a parallel early-return path, and again ONLY the caller at site `rung.strike` ever
+ * passes it. See {@link unchangedTreeStandDownReason}'s own doc for the defect it closes; it
+ * ledgers only, exactly like `redCheckSupersession`/`mergeConflictCheck` (an unchanged local
+ * tree is a self-evident fact this rung itself observed, never an operator-decidable question).
  */
 async function fixRungStandDownReason(
   readLiveState: ((prUrl: string) => LiveStateResult | Promise<LiveStateResult>) | undefined,
@@ -5003,6 +5122,19 @@ async function fixRungStandDownReason(
   mergeConflictCheck?: {
     prNumber: number | undefined;
     readMergeFacts: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
+  },
+  /**
+   * W1-T1284 — the identity of the gate THIS round is about to spend a strike against
+   * (`gateKey`, derived by the caller — see `runFixRung`'s own call site), the snapshot/gateKey
+   * pair recorded the last time this rung was about to spend a strike (`previousFailure`,
+   * `undefined` on the first round or after an unreadable capture), and a FRESH capture of the
+   * worktree right now. Omitted (no `deps.captureWorktreeSnapshot` wired) skips this check
+   * entirely — fail open, exactly like every other optional reason source here.
+   */
+  unchangedTree?: {
+    gateKey: string;
+    previousFailure: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
+    currentSnapshot: WorktreeSnapshot | undefined;
   },
 ): Promise<{ reason: string; foreignHead?: { headSha: string; author: string } } | undefined> {
   if (!readLiveState) return undefined;
@@ -5070,6 +5202,15 @@ async function fixRungStandDownReason(
           `strike on an already-superseded reading`,
       };
     }
+  }
+
+  if (unchangedTree) {
+    const unchanged = unchangedTreeStandDownReason(
+      unchangedTree.gateKey,
+      unchangedTree.previousFailure,
+      unchangedTree.currentSnapshot,
+    );
+    if (unchanged) return unchanged;
   }
 
   return undefined;
@@ -5955,6 +6096,16 @@ export async function runFixRung(opts: {
      * `ledgerLines?` seam `armAuto`/`disarmAuto` already take.
      */
     ledgerLines?: () => Array<Record<string, unknown>>;
+    /**
+     * W1-T1284: an OPTIONAL fresh capture of `opts.worktreePath`'s own local content —
+     * consulted ONLY at the pre-strike gate (site `rung.strike`), to detect a strike that
+     * pushed nothing changing nothing — see {@link unchangedTreeStandDownReason}'s own doc.
+     * Never the PR's remote head sha, and never anything about `origin/main`. Omitted, or a
+     * failed/throwing capture, behaves EXACTLY as before this check existed: the rung proceeds
+     * (fail open — a read failure can only ever cause a strike to spend). The real call sites
+     * wire {@link captureWorktreeSnapshotViaGit}.
+     */
+    captureWorktreeSnapshot?: (worktreePath: string) => WorktreeSnapshot | undefined | Promise<WorktreeSnapshot | undefined>;
   };
 }): Promise<FixRungOutcome> {
   const { deps } = opts;
@@ -5992,6 +6143,11 @@ export async function runFixRung(opts: {
   // {@link branchAuthorshipStandDownReason} documents: round 1 never reads
   // as foreign no matter what the live head is.
   let rungOwnHeadSha: string | undefined;
+  // W1-T1284: the (gate identity, worktree snapshot) pair recorded the last time this
+  // invocation's pre-strike gate ran — `undefined` on the first round (nothing recorded yet;
+  // see {@link unchangedTreeStandDownReason}'s own "first round" contract) and whenever
+  // `deps.captureWorktreeSnapshot` is not wired at all.
+  let lastGateSnapshot: { gateKey: string; snapshot: WorktreeSnapshot } | undefined;
   // W1-T1227: the changed-file list as it stood BEFORE this invocation's first strike —
   // {@link fixRungScopeStandDownReason}'s baseline, so a path already out of scope before this
   // rung ever ran (tolerated by `scopeGuardOutOfScopeFiles`'s push-and-flag disposition on the
@@ -6021,7 +6177,32 @@ export async function runFixRung(opts: {
     // this invocation did not itself produce, which escalates rather than
     // ledgering silently — see the `foreignHead` branch below. W1-T1278 composes TWO more —
     // condition A (a red required check's later attempt already in flight) and condition B (a
-    // dirty merge state) — see `fixRungStandDownReason`'s own doc for both.
+    // dirty merge state) — see `fixRungStandDownReason`'s own doc for both. W1-T1284 composes a
+    // FOURTH — the worktree byte-identical to the last time THIS SAME gate was about to be spent
+    // against — see `unchangedTreeStandDownReason`'s own doc.
+    //
+    // `gateKey` mirrors the SAME mode precedence `evidence` below derives from (merge-conflict,
+    // then ci-log, then review) — content only, never the base and never the check rollup (Q2's
+    // own constraint) — so a rung that fixed check A and moved on to a newly-red check B, or one
+    // whose base moved and flipped WHICH check is red, is never told "nothing changed".
+    const gateKey =
+      currentMergeConflict !== undefined
+        ? `merge-conflict:${(currentMergeConflict.files ?? []).slice().sort().join(",")}`
+        : noReviewYet
+        ? `ci:${(currentCiFailures ?? []).map((f) => f.name).slice().sort().join(",")}`
+        : `review:${visibleCriteria(review.criteria.filter((c) => !c.met))
+            .map((c) => c.claim)
+            .slice()
+            .sort()
+            .join(",")}`;
+    let currentTreeSnapshot: WorktreeSnapshot | undefined;
+    if (deps.captureWorktreeSnapshot) {
+      try {
+        currentTreeSnapshot = await deps.captureWorktreeSnapshot(opts.worktreePath);
+      } catch {
+        currentTreeSnapshot = undefined; // fail open — an unreadable capture never manufactures a stand-down
+      }
+    }
     const preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
       opts.prUrl,
@@ -6037,7 +6218,16 @@ export async function runFixRung(opts: {
       currentMergeConflict === undefined && deps.readMergeFacts && prNumber !== undefined
         ? { prNumber, readMergeFacts: deps.readMergeFacts }
         : undefined,
+      deps.captureWorktreeSnapshot ? { gateKey, previousFailure: lastGateSnapshot, currentSnapshot: currentTreeSnapshot } : undefined,
     );
+    // W1-T1284: recorded for the NEXT round's comparison regardless of what this round decides —
+    // a return below (any stand-down) means there IS no next round, so updating here first is
+    // inert on every exit path and correct on the one path that loops back to the top. An
+    // unreadable capture this round clears the record to `undefined` — exactly the documented
+    // "prior capture was unreadable" contract {@link unchangedTreeStandDownReason} reads.
+    if (deps.captureWorktreeSnapshot) {
+      lastGateSnapshot = currentTreeSnapshot ? { gateKey, snapshot: currentTreeSnapshot } : undefined;
+    }
     if (preStrikeStandDown) {
       if (preStrikeStandDown.foreignHead) {
         // W1-T296: a human or a sibling session appears to be actively
@@ -9346,6 +9536,9 @@ async function runTask(
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
           spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs,
           reclaimWorker: reclaimAbandonedWorker,
+          // W1-T1284: the pre-strike UNCHANGED-TREE check's live worktree reader — three LOCAL
+          // git reads against this rung's own checkout, never the PR's remote head.
+          captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
         },
       });
       review = rung.review;
@@ -21381,6 +21574,9 @@ export function buildSweepEffects(
             // wall-clock bound + best-effort reclaim close it here.
             spawnWallClockBoundMs,
             reclaimWorker: reclaimWorkerImpl,
+            // W1-T1284: same LOCAL worktree reader as the run-loop call site above — see that
+            // site's own comment.
+            captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
           },
         });
       } catch (e) {
