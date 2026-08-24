@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { armIfVerdictPermits } from "../src/run-task.js";
 
@@ -144,31 +143,13 @@ test("TRAP 3: a second review of the same PR re-arms idempotently — one ledger
 
 // ── ORDERING: the arm runs AFTER the post, unlike the withdrawal ───────────────────
 //
-// impl-BL CORRECTED THIS TEST, and the correction is the point. As written for impl-BG it
-// asserted `armAt > postAt` — that the arm follows `postReviewStatusGuarded` — on the stated
-// grounds that W1-T230's gate "recovers the verdict from the review.posted line the post
-// writes". THAT PREMISE WAS FALSE: `postReviewStatusGuarded` writes only `review.post_refused`
-// and `review.post_failed`; `runReview` itself appends `review.posted` 35 lines further down.
-// So the assertion was TRUE of the code and still let the defect through — the arm sat between
-// the post and the write, the gate found no evidence, and every arm on this path was refused.
-//
-// A weaker anchor made it worse: `"    armIfVerdictPermits("` matched on four-space indentation,
-// so moving the call (which changes its indent) fails this on "site not found" rather than on
-// the ordering it exists to protect. Both are fixed here — the assertion now names the LEDGER
-// WRITE as the thing the arm must follow, and the anchors are indentation-independent.
-test("ORDERING: runReview withdraws BEFORE posting and arms AFTER — the asymmetry is deliberate", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const body = src.slice(src.indexOf("async function runReview(args: {"));
-  const withdrawAt = body.indexOf("withdrawArmIfVerdictRefuses(");
-  const postAt = body.indexOf("await postReviewStatusGuarded({");
-  const ledgerWriteAt = body.indexOf('log("review.posted", {');
-  const armAt = body.indexOf("armIfVerdictPermits(");
-
-  assert.ok(withdrawAt > 0 && postAt > 0 && ledgerWriteAt > 0 && armAt > 0, "all four sites exist in runReview");
-  assert.ok(withdrawAt < postAt, "the WITHDRAWAL precedes the post — it must beat GitHub to the merge");
-  assert.ok(
-    armAt > ledgerWriteAt,
-    "the ARM follows the `review.posted` LEDGER WRITE — that line, not the status post, is the evidence " +
-      "W1-T230's gate requires, and arming before it is refused fail-closed",
-  );
-});
+// W1-T2232 MOVED THIS FROM SOURCE TEXT TO BEHAVIOUR. impl-BL's correction (recorded until now
+// in this test's own history) already taught the lesson: a source-text lock on where a call
+// SITS can be true of the code and still let the underlying defect through, and a weaker anchor
+// (four-space indentation) breaks on "site not found" the moment a call is reindented — neither
+// failure mode says anything about the ORDER the fix actually depends on. `runReview`'s own args
+// expose an injectable observer for both effects this test protected (`disarm`, `arm`, plus the
+// real ledger file `ledgerPath` points at), so "withdraw precedes the post" and "the arm follows
+// the review.posted ledger write" are now proven by driving `runReview` end-to-end and observing
+// the injected `disarm`/`arm` calls and the real `gh` argv/ledger file — see
+// test/wiring-ordering-behaviour.test.ts.
