@@ -90,7 +90,7 @@ import {
   type Proposal,
   type ReadinessContext,
 } from "./inbox.js";
-import { loadPlan, type MergedResolver, type Plan } from "./plan.js";
+import { loadPlan, type MergedResolver, type Plan, type RetirementReason } from "./plan.js";
 import { automergeHoldFromLedger, type AutomergeHold } from "./review.js";
 import {
   DEFAULT_MAX_TASK_DISPATCHES,
@@ -305,7 +305,19 @@ export interface BlockedPrBlocker {
   reason: string;
 }
 
-export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPrBlocker;
+/** A plan-declared `status: "blocked"` task carrying a `retirement` ruling (W1-T1287) — renders
+ *  the vocabulary the PLAN ITSELF already supplies, never a taxonomy this board mints (the same
+ *  design fence named above: "each class in its OWN vocabulary … that named-reason/breaker
+ *  signals don't already carry"). A blocked task WITHOUT `retirement` renders no row here at
+ *  all — exactly as before this field existed (the 41-of-43 dependency-stalled records this
+ *  field exists to leave alone). */
+export interface RetiredBlocker {
+  kind: "retired";
+  taskId: string;
+  reason: string;
+}
+
+export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPrBlocker | RetiredBlocker;
 
 /** `circuit_broken` and `indeterminate` are PURE ledger reads — ALWAYS present in full
  *  regardless of GitHub reachability (GitHub only ever ENRICHES `indeterminate`'s note, never
@@ -1361,7 +1373,31 @@ function deriveBlockedPrBlockers(candidates: BlockedPrBlocker[], github: GitHub,
   return candidates.filter((row) => !isSettled(row.prNumber)).slice(0, limit);
 }
 
+/** Human-readable label per {@link RetirementReason} — the plan record's own enum value doubles
+ *  as the identifier, but the board renders THIS prose alongside it so "naming the recorded
+ *  reason" (W1-T1287 acceptance 4) reads as an actual sentence, not a bare enum token. */
+const RETIREMENT_REASON_LABELS: Record<RetirementReason, string> = {
+  retired: "retired by operator ruling",
+  closed: "closed unbuilt — resolved without being built",
+  withdrawn: "withdrawn by the operator",
+};
+
+/** Plan-declared `status: "blocked"` tasks carrying a `retirement` ruling (W1-T1287) — a PURE
+ *  plan read, no ledger/GitHub involved (mirrors `deriveQueueHead`'s own plan-only sections).
+ *  Every other `blocked` task (no `retirement`) contributes no row here, unchanged from before
+ *  this field existed — Q3(ix) of the task record pins that in both directions. */
+function deriveRetiredBlockers(plan: Plan | undefined): RetiredBlocker[] {
+  if (!plan) return [];
+  const out: RetiredBlocker[] = [];
+  for (const t of plan.tasks) {
+    if (t.status !== "blocked" || t.retirement === undefined) continue;
+    out.push({ kind: "retired", taskId: t.id, reason: RETIREMENT_REASON_LABELS[t.retirement] });
+  }
+  return out;
+}
+
 function deriveBlockers(
+  plan: Plan | undefined,
   lines: Array<Record<string, unknown>>,
   projections: Map<string, StatusProjection> | undefined,
   github: GitHub | undefined,
@@ -1369,6 +1405,7 @@ function deriveBlockers(
 ): BlockersSection {
   const circuitBroken = deriveCircuitBrokenBlockers(lines);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
+  const retired = deriveRetiredBlockers(plan);
   let blockedPrs: BlockedPrBlocker[] = [];
   let blockedPrsUnverifiedReason: string | undefined;
   const raw = rawBlockedPrCandidates(lines);
@@ -1388,7 +1425,7 @@ function deriveBlockers(
       blockedPrsUnverifiedReason = `${raw.length} blocked-PR ledger ${raw.length === 1 ? "entry" : "entries"} could not be checked against live GitHub state (${reason}) — withheld rather than replay possibly-stale history as current`;
     }
   }
-  const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs];
+  const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs, ...retired];
   const section: BlockersSection = { rows, blockedPrsUnverifiedReason };
   section.nextAction = pickNextAction(BLOCKERS_NEXT_ACTIONS, section);
   return section;
@@ -1954,7 +1991,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now);
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
-  const blockers = deriveBlockers(lines, projections, deps.github, queueHeadLimit);
+  const blockers = deriveBlockers(plan, lines, projections, deps.github, queueHeadLimit);
   // W1-T1205: the SAME `hasPushedRunBranch` predicate the real dispatcher binds
   // (drain.ts/daemon.ts's own `readPushedRunBranches` + `runBranchTaskIds` pairing), read here
   // rather than shared with either — this is its own, unbatched call site (see
@@ -2106,12 +2143,20 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   const circuitBroken = b.rows.filter((r): r is CircuitBrokenBlocker => r.kind === "circuit_broken");
   const blockedPrs = b.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
   const indeterminate = b.rows.filter((r): r is IndeterminateBlocker => r.kind === "indeterminate");
-  if (circuitBroken.length === 0 && blockedPrs.length === 0 && indeterminate.length === 0 && !b.blockedPrsUnverifiedReason) {
+  const retired = b.rows.filter((r): r is RetiredBlocker => r.kind === "retired");
+  if (
+    circuitBroken.length === 0 &&
+    blockedPrs.length === 0 &&
+    indeterminate.length === 0 &&
+    retired.length === 0 &&
+    !b.blockedPrsUnverifiedReason
+  ) {
     out.push("no blockers");
   }
   for (const r of circuitBroken) out.push(`circuit-broken : ${r.taskId} — ${r.resetNote}`);
   for (const r of blockedPrs) out.push(`blocked PR     : #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""} [${r.disposition}] — ${r.reason}`);
   for (const r of indeterminate) out.push(`indeterminate  : ${r.taskId} — ${r.ghWindowNote}`);
+  for (const r of retired) out.push(`retired        : ${r.taskId} — ${r.reason}`);
   if (b.blockedPrsUnverifiedReason) out.push(`blocked PR     : unverified — ${b.blockedPrsUnverifiedReason}`);
   if (b.nextAction) out.push(`next action: ${b.nextAction}`);
   return out;
