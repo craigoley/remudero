@@ -93,6 +93,50 @@
     see it, because the guard is reading a declaration rather than the change. W1-T434, W1-T1030,
     W1-T401 and W1-T1227 are cited throughout above for the dispositions this shard must not
     disturb; none is re-filed and none of their evidence is restated as this shard's own.
+    (8) THE SECOND ARM, AND IT IS THE INVERSE OF (2)'s 45.8%. That figure counts a diff EXCEEDING
+    its declaration. THIS IS A FIX CONFINED BY ONE: an under-drawn `files:` bounded a merged
+    implementation to half its target, and the half it could not reach is still failing today. Same
+    guard, same declaration, opposite direction — and the second direction costs more, because an
+    overrun is visible in the diff while a confinement leaves no trace at all.
+
+    (9) THE INSTANCE, RE-DERIVED. #2519 (`09f39332`, 2026-08-22T18:48:52Z, "fix(drain): stop a
+    closed-unmerged PR's run branch from blocking dispatch forever") implemented W1-T1207 and
+    touched `src/lib/drain.ts`, `src/run-task.ts` and `test/run-branch-pr-state.test.ts` —
+    SET-IDENTICAL to that shard's own `files: [src/lib/drain.ts, src/run-task.ts,
+    test/run-branch-pr-state.test.ts]`, verified by sorted comparison — and ZERO lines of
+    `src/lib/daemon.ts`, which the list does not name.
+
+    (10) AND THE REMEDY IS WIRED TO ONE LANE ONLY. `drain.ts:1673` states it outright — "W1-T1207:
+    `&& !closedUnmergedRunBranches?.has(id)` is the whole fix" — wired at `:1680` and `:2033`.
+    `daemon.ts:3023` reads `pushedRunBranches.has(id)` ALONE, with no `closedUnmergedRunBranches`
+    built anywhere in that file. The declaration named the lane the fix reached and not the lane the
+    defect lives on.
+
+    (11) THE COST, MEASURED EITHER SIDE OF THAT MERGE, AND IT MOVED WHILE THIS WAS BEING WRITTEN.
+    Of the `dispatch.skipped` rows carrying `reason: "run-branch-already-pushed"`, 870 fired BEFORE
+    #2519 merged and 25 after — W1-T1269 at 24 (newest 2026-08-24T19:14:43.082Z) and W1-T1225 at 1.
+    AN EARLIER READ THE SAME DAY PUT THE TOTAL AT 894 WITH 24 AFTER; IT IS 895 AND 25 NOW, BECAUSE
+    THE HAZARD FIRED AGAIN TWO HOURS LATER. ALL OF THEM CARRY `lane: daemon` — 895 of 895 —
+    against a control of `daemon=937 / undefined=12` on the other skip reasons, so the lane field is
+    populated and does discriminate. The rate fell sharply and the hazard is still open, entirely on
+    the lane the fix could not reach.
+
+    (12) A CORRECTION TO HOW THIS WAS FRAMED TO ME, AND IT IDENTIFIES A THIRD QUADRANT. The framing
+    was that `inverse_scope` is an emitted advisory and this is what it costs when nothing writes it
+    back. MEASURED, NEITHER ADVISORY COULD HAVE FIRED HERE. `scope_violation` fires when the diff
+    touches a path OUTSIDE the declaration; `inverse_scope` fires when the declaration names a file
+    the diff never touched (`review.ts:601-620`). #2519's diff and W1-T1207's declaration are
+    SET-IDENTICAL, so both comparisons are satisfied and both advisories are silent BY
+    CONSTRUCTION. THE GAP IS NOT AN UNCONSUMED ADVISORY: BOTH ADVISORIES COMPARE THE DECLARATION TO
+    THE DIFF, AND NOTHING COMPARES THE DECLARATION TO THE DEFECT. A declaration that is wrong and a
+    diff that obeys it perfectly is the one shape this surface cannot see.
+
+    (13) WHICH IS WHY THE OBSERVED-SCOPE READING IN (5) IS THE RIGHT SHAPE FOR THIS ARM TOO, AND WHY
+    THE FIX ITSELF IS NOT THIS SHARD'S. Reading the real diff rather than the declaration closes
+    (2)'s direction; it does not close (12)'s, because a confined fix produces no wider diff to
+    observe. What (12) adds to this record is the LIMIT of the remedy, not an extension of it. THE
+    DAEMON-ARM WIRING BELONGS TO W1-T1207'S OWN BUILD — that task is filed, its `files:` is the
+    thing that needs redrawing, and neither it nor #2519 is re-filed here.
   acceptance:
     - claim: "the overlap decision consults an observed changed-file set for a lane that has one, not only its declaration"
       proof: "unit test: test/overlap-uses-observed-scope.test.ts"
