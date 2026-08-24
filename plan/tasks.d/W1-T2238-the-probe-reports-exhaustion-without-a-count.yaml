@@ -1,0 +1,159 @@
+- id: W1-T2238
+  title: "THE CONTAINMENT PROBE RECORDS THAT IT RAN OUT OF TURNS AND NEVER HOW MANY IT USED, SO THE ALLOWANCE CANNOT BE TUNED ON EVIDENCE — the envelope carries both a count and the cap it ran under, and the probe's own extraction keeps neither"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/containment.ts, test/probe-turn-observability.test.ts]
+  origin: "oper#probe-reports-exhaustion-without-a-count-2026-08-24"
+  plan_refs: ["W1-T2201", "W1-T303", "W1-T1281"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN BY SHA at
+    b7a980e7; the clone was checked and already full. `resolveLedgerUnion` was pointed at the STATE
+    DIR (`/home/craigoleyagent/rmd-state2/state`), never the checkout's: archiveCount 23, ok true,
+    unread 0, with the control `"step":"risk_judge.decision"` reading 178. THE TIMINGS AND RATES
+    BELOW ARE OPERATOR-ATTRIBUTED WHERE SAID; the code and the field census are first-hand.
+
+    (1) THE DERIVATION IS EXACTLY AS DESCRIBED AND IS NOT AT ISSUE. `PROBE_TURN_ALLOWANCE = 3` at
+    `containment.ts:514`, and `probeTurnBudget(prompt) = probeCommandCount(prompt) + 1 +
+    PROBE_TURN_ALLOWANCE` at `:532-534`, wired at `:1009` as `maxTurns: probeTurnBudget(prompt)`.
+    DRIVEN LIVE against the real `containmentProbePrompt`, the current numbers are
+    `probeCommandCount = 6`, allowance 3, BUDGET 10. That derivation is W1-T2201's subject and this
+    task keeps it.
+
+    (2) THE ROW RECORDS THE OUTCOME AND NOT THE QUANTITY. `containment.probe` carries
+    `turns_exhausted` as a BOOLEAN, set at `containment.ts:1218` from
+    `evidence.turnsExhausted`, which is itself derived at `:1023` as `probe.subtype ===
+    "error_max_turns"`. CENSUSED ACROSS ALL 391 `containment.probe` ROWS: the newest carries 33
+    fields — including twelve per-arm observational booleans, `cost_usd` and `stderr_excerpt` — and
+    ROWS CARRYING ANY TURN-COUNT FIELD (`num_turns`, `turns`, `max_turns`) NUMBER ZERO. CONTROL, on
+    the same scan: `cost_usd` is present on 391 of 391, so the absence is an absence and not a
+    failed read.
+
+    (3) AND THE COUNT WAS AVAILABLE AND DISCARDED AT THAT EXACT SITE. `WorkerResult`
+    (`worker.ts:87-131`) carries BOTH `numTurns` (the SDK's `num_turns`) and `maxTurns` (the cap the
+    call was CONFIGURED with). The probe's extraction at `containment.ts:1023-1033` keeps
+    `costUsd: probe.costUsd` and derives `turnsExhausted` from `probe.subtype` — AND KEEPS NEITHER
+    `probe.numTurns` NOR `probe.maxTurns`. Nothing had to be plumbed; two fields already on the
+    envelope were dropped one line away from the row that needed them.
+
+    (4) Q1 — WHAT IS ACTUALLY COMPARABLE, AND THE ANSWER IS NOT `num_turns` ALONE. W1-T303's ground
+    truth is recorded verbatim in `worker.ts:95-119`: `num_turns` is NOT guaranteed to count the
+    same unit `maxTurns` bounds; measured over every `recon.done` row for 2026-08-03 under a single
+    `maxTurns: 8`, ELEVEN `error_max_turns` failures every one landing at EXACTLY `num_turns: 9`
+    (cap+1), and ONE CLEAN SUCCESS AT `num_turns: 17` — nearly double the cap, no error, no resume.
+    The file's own conclusion: "`numTurns` alone cannot be reasoned about against a cap unless the
+    cap it actually ran under rides the SAME row".
+
+    (5) SO THE TWO PATHS DIFFER, AND THE ONE THIS TASK NEEDS IS THE UNUSABLE ONE. On the EXHAUSTION
+    path `num_turns` is comparable — 11 of 11 landed at cap+1 — but it tells us nothing we did not
+    already know from the subtype. On the SUCCESS path it is NOT comparable, and THAT is precisely
+    the path whose distribution would say whether the allowance is tight. RECORDING `num_turns`
+    ALONE WOULD THEREFORE NOT MAKE THE CAP TUNABLE. The pair `(numTurns, maxTurns)` on one row is
+    the minimum honest record, and even then the success-path number must be read as a
+    whole-session tally rather than as headroom.
+
+    (6) WHAT IS COMPARABLE IS ALREADY ON THE ROW, IN THE RIGHT UNIT. The budget is derived from
+    `probeCommandCount` — COMMANDS — and the probe already records per-arm completion in that same
+    unit: `outside_write_attempted`, `os_denial_seen`, `inside_write_created`,
+    `deny_floor_engaged`, `egress_blocked_reached`, `egress_allowed_reached`, `egress_denial_seen`,
+    `token_read_succeeded`, `state_read_succeeded`, `token_read_denial_seen`,
+    `operator_home_read_succeeded`, `operator_home_read_denial_seen`. HOW MANY ARMS REPORTED BEFORE
+    EXHAUSTION IS A PROGRESS MEASURE IN THE SAME UNIT THE CAP IS BUILT FROM, and unlike `num_turns`
+    it is comparable on BOTH paths.
+
+    (7) THE RATE AND THE COST. OPERATOR-MEASURED: `turns_exhausted: true` reads 2 against 12 false —
+    14% — up from 1 of 11 an hour earlier, and both exhausted runs retried and passed, so the cost
+    is one lost dispatch slot per instance rather than a stall. RE-DERIVED HERE: of 391
+    `containment.probe` rows only FOURTEEN carry `turns_exhausted` at all — the field is new, having
+    arrived with W1-T2201 — and within those the split is 2 true / 12 false, the same 14%. The two
+    are W1-T2220 at 2026-08-24T17:20:19.207Z and W1-T2222 at 19:16:29.251Z, MEAN COST $0.389
+    (the attributed figure was ~$0.35). A 14% rate over fourteen observations is a wide interval and
+    this shard does not treat it as a trend.
+
+    (8) Q2 — WHAT THE FIELD IS FOR, STATED SO IT CANNOT BE MISREAD AS A REQUEST TO RAISE THE CAP.
+    IT IS NOT TO RAISE THE ALLOWANCE. It is to make the next raise defensible. A distribution
+    CLUSTERED AT THE CAP means the allowance is tight and a raise is evidence-backed. ONE MOSTLY
+    WELL UNDER THE CAP WITH TWO OUTLIERS MEANS SOMETHING ELSE WENT WRONG IN THOSE RUNS, and raising
+    the allowance would hide it — buying the outliers a pass while the real cause goes unnamed. The
+    two readings call for opposite actions, and today NOTHING ON THE ROW DISTINGUISHES THEM.
+
+    (9) THE HONEST LIMIT. This task cannot promise the distribution will be legible once recorded.
+    Rationale (4)-(5) is the reason: if the success-path counter really is a whole-session tally
+    across compaction, then even `(numTurns, maxTurns)` pairs may cluster meaninglessly, and the
+    arm-completion count of (6) is what will carry the signal. WHICH OF THE TWO ACTUALLY
+    DISCRIMINATES IS ITSELF A MEASUREMENT THIS TASK ENABLES AND DOES NOT PRE-JUDGE.
+  design: |
+    ONE CONCERN: an exhausted probe must record how far it got. Not the cap, not the derivation, not
+    the failure behaviour.
+
+    (i) RECORD THE PAIR, NEVER THE COUNT ALONE. `numTurns` without the cap it ran under is exactly
+    the ambiguity W1-T303 diagnosed, and `worker.ts` already says so in as many words. Both fields
+    are on `WorkerResult` at the probe's own extraction site, so this is a carry, not a plumbing
+    change.
+
+    (ii) AND RECORD ARM COMPLETION, BECAUSE IT IS THE ONE MEASURE IN THE CAP'S OWN UNIT. Rationale
+    (6): the budget counts COMMANDS, the twelve per-arm booleans already report per command, and a
+    count of arms that reported is comparable on the success path where `num_turns` is not. Adding
+    it costs one reduction over fields the row already carries.
+
+    (iii) OBSERVATIONAL, NOT A GATE — the same discipline the deny-floor, egress, token-read and
+    re-anchoring arms already follow on this row, each recorded rather than gating precisely because
+    its behaviour under the installed CLI is unmeasured. Nothing here changes a verdict.
+
+    (iv) WHAT MUST NOT CHANGE, PINNED BY CRITERIA. THE CAP STAYS DERIVED — `commands + 1 +
+    allowance`, never a literal, which is W1-T2201's whole subject and the reason a fifth command
+    moves the cap by itself. THE PROBE STILL FAILS CLOSED ON EXHAUSTION. And `turns-exhausted`
+    REMAINS DISTINCT from "the write may never have been attempted" — the two reasons name different
+    states and collapsing them would undo W1-T1281's split.
+
+    (v) NOT IN SCOPE, NAMED: the value of `PROBE_TURN_ALLOWANCE`, which this task deliberately does
+    not move; the derivation itself; the retry behaviour that made both exhaustions recoverable; and
+    W1-T303's compaction hypothesis, which that shard files as a follow-up and this one only cites.
+  acceptance:
+    - claim: "an exhausted probe row records the turn count and the cap that call ran under, together"
+      proof: "unit test: test/probe-turn-observability.test.ts"
+    - claim: "a passing probe row records the same pair, so the distribution is readable and not only the failures"
+      proof: "unit test: test/probe-turn-observability.test.ts"
+    - claim: "the row records how many probe arms reported, in the same unit the budget is derived from"
+      proof: "unit test: test/probe-turn-observability.test.ts"
+    - claim: "the turn budget is still derived from the command count and the allowance, never a literal"
+      proof: "unit test: test/probe-turn-observability.test.ts"
+    - claim: "an exhausted probe still fails closed and still reports a reason distinct from an unattempted write"
+      proof: "unit test: test/probe-turn-observability.test.ts"
+  note: |
+    THE ID WAS RESERVED THROUGH THE ALLOCATOR, NOT NAMED. `rmd next-task-id --reserve` returned
+    `W1-T2238` and `RESERVED W1-T2238 on origin (refs/rmd-id/W1-T2238) after 1 attempt(s)`, with
+    provenance `max 2237 across tasks.yaml 280, shards 2237, open PRs 2220, history 2237`. No
+    candidate was reported held by another caller. The ref namespace was verified equal to the
+    remote BEFORE sweeping — 356 local, 356 remote.
+
+    EIGHT SURFACES SWEPT AND EVERY CONTROL FIRES: shard filenames 0 against W1-T2201 at 1 (552
+    shards); plan `- id:` lines 0 against W1-T2201 at 1; the reservation, which is the pre-mint;
+    merged trailers 0 against `Remudero-Task: W1-T2201` at 1; merged subject credit 0 against
+    W1-T2201 at 2; live branch names 0 against the `run-*` namespace at 88 of 136; branch-tip
+    subjects 0 against W1-T1266 at 1; and branch shard paths 0 against W1-T1266 at 1. W1-T2237 WAS
+    TRIED FIRST ON THE BRANCH SURFACES AND DISQUALIFIED ON THE SHARD-PATH ARM — it reads 1 on
+    subjects but 0 on paths, so it cannot discriminate there, and W1-T1266 was qualified in its
+    place.
+
+    EVERY PROOF IS A FORWARD REFERENCE BY CONSTRUCTION. All five criteria name
+    `test/probe-turn-observability.test.ts`, declared in `files:` and ABSENT on this head. The
+    falsifier is an EXISTING path — `test/containment.test.ts` — because an absent control would
+    read `hits: 0` exactly like the target and would discriminate nothing. `files:` is written in
+    the bare single-line form `SHARD_FILES_LINE_RE` demands.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    `risk: high` IS RULE 19'S SPAN AND A BLAST-RADIUS STATEMENT. `files:` names two stems and the
+    change is a carry plus a reduction. The band is honest because the artefact is the CONTAINMENT
+    PROBE: design (iv)'s three invariants are all things a careless edit breaks silently, and a
+    probe that stops failing closed looks exactly like a probe that started passing.
+
+    ONE ATTRIBUTED FIGURE WAS RE-MEASURED AND MOVED SLIGHTLY. The per-instance cost was given as
+    ~$0.35; measured across both exhausted rows it is $0.389. The rate, 2 of 14, reproduces exactly.
