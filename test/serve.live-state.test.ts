@@ -511,11 +511,15 @@ test("a /v1/status fetch that hangs (never resolves -- W1-T187's real 35-58s sta
   });
 });
 
-// ── (6) GitHub-gateway outage: a VISIBLE "GitHub unreachable since <t>" stamp, keyed off the
-// existing per-task indeterminate/throttled signal (W1-T119) -- see this file's header for why
-// this does NOT depend on W1-T155's not-yet-implemented monotonic/last-good mechanism ──────────
+// ── (6) GitHub-gateway outage: a VISIBLE "no GitHub read has completed since this page loaded"
+// banner, keyed off the existing per-task indeterminate/throttled signal (W1-T119) -- see this
+// file's header for why this does NOT depend on W1-T155's not-yet-implemented monotonic/
+// last-good mechanism. W1-T2218: the banner used to stamp "GitHub unreachable since <t>" with
+// the BROWSER's clock at first paint and call it an outage start -- a client-module variable
+// that re-arms on every reload and never observed a real failure instant (task rationale (1)-(2)).
+// It is re-worded, never removed, to assert only what this page load can see. ──────────────────
 
-test("GitHub-gateway outage: the board is VISIBLY stamped 'GitHub unreachable since <t>', clearing on the next successful read", async () => {
+test("GitHub-gateway outage: the board is VISIBLY banner'd 'no GitHub read has completed since this page loaded', never a fabricated outage-start timestamp, clearing on the next successful read", async () => {
   const root = tmpRoot();
   const ghState = { failed: true };
   const deps = fixtureDeps(root, [task({ id: "W1-T1" })], flakyGitHub(ghState));
@@ -524,7 +528,8 @@ test("GitHub-gateway outage: the board is VISIBLY stamped 'GitHub unreachable si
     try {
       await page.waitForFunction(() => document.getElementById("gh-unreachable-banner")?.hidden === false, null, { timeout: 5000 });
       const shown = await page.textContent("#gh-unreachable-banner");
-      assert.match(shown ?? "", /GitHub unreachable since/);
+      assert.match(shown ?? "", /no GitHub read has completed since this page loaded/);
+      assert.doesNotMatch(shown ?? "", /GitHub unreachable since \d/, "must never claim a stamped outage-start instant");
 
       ghState.failed = false;
       await page.waitForFunction(() => document.getElementById("gh-unreachable-banner")?.hidden === true, null, { timeout: 5000 });

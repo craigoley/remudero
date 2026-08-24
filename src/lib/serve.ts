@@ -1733,6 +1733,12 @@ export function renderShellHtml(
   // W1-T159 GLANCE LAYER state -- see renderGlanceStrip/updateTabTitle/updateGlanceAnomaly and
   // renderDaemonHealth, below, for where each is read/written.
   let latestSpend = null; // GET /v1/status's { mergedToday, spendTodayUsd, spendWeekUsd } (board.ts's computeGlanceSpend)
+  // W1-T2218: has a REAL /v1/status snapshot (cache-restored or freshly fetched) ever landed?
+  // Flips true at the SAME two sites latestSpend above does (paintSnapshot's cache restore,
+  // refreshAll's live poll success) -- never a third, independently-timed toggle. Lets
+  // glance-running fall back to "…" (never a fabricated 0) before the first snapshot, exactly
+  // like the latestSpend guard three lines below it in renderGlanceStrip.
+  let tasksSnapshotKnown = false;
   // W1-T1006: NEEDS ME's sixth row source, riding the SAME GET /v1/status response every other
   // board.ts-sourced field above does (board.ts's BoardSnapshot.blockedPrs/
   // blockedPrsUnverifiedReason) -- never a second fetch, so this can never drift from tasks'
@@ -1937,20 +1943,22 @@ export function renderShellHtml(
     return changed;
   }
 
-  // ── TRUST: "GitHub unreachable since <t>" -- DERIVED from the CURRENT snapshot's own
-  // per-task \`indeterminate\`/source:"throttled" signal (W1-T119) every render, never a latched
-  // string a later success forgets to clear (the operator-observed stale-banner-beside-live-data
-  // bug this task's error-lifecycle section names). Clears the instant no task reports it. ─────
-  let githubUnreachableSince = null;
+  // ── TRUST: "GitHub unreachable" -- DERIVED from the CURRENT snapshot's own per-task
+  // \`indeterminate\`/source:"throttled" signal (W1-T119) every render, never a latched string a
+  // later success forgets to clear (the operator-observed stale-banner-beside-live-data bug this
+  // task's error-lifecycle section names). Clears the instant no task reports it. W1-T2218: this
+  // banner used to stamp \`new Date()\` into a client-module variable and call it an outage START --
+  // that is the BROWSER's clock at the first paint carrying any indeterminate task, never the
+  // instant a read began failing and never a server fact (measured 17s off the real
+  // \`board_gateway.fetch_ok\`, task rationale (2)). The label now asserts only what this page load
+  // can actually see. NOT deleted -- the indeterminate signal still reaches the operator. ────────
   function updateGithubBanner(tasks) {
     const unreachable = tasks.some((t) => t.indeterminate);
     const banner = document.getElementById("gh-unreachable-banner");
     if (unreachable) {
-      if (!githubUnreachableSince) githubUnreachableSince = new Date();
       banner.hidden = false;
-      banner.textContent = \`GitHub unreachable since \${formatTimestamp(githubUnreachableSince.toISOString())} — statuses may be stale\`;
+      banner.textContent = "GitHub unreachable — no GitHub read has completed since this page loaded — statuses may be stale";
     } else {
-      githubUnreachableSince = null;
       banner.hidden = true;
       banner.textContent = "";
     }
@@ -2001,9 +2009,12 @@ export function renderShellHtml(
    *  NEEDS ME section itself just rendered, and a STRICT SUBSET of blocked by construction.
    *  merged-today/spend-today/spend-this-week come from latestSpend (GET /v1/status's "spend"
    *  field, board.ts's computeGlanceSpend) -- "…" (unknown, never a fabricated 0) until the
-   *  first real snapshot has landed. */
+   *  first real snapshot has landed. W1-T2218: running gets the SAME "…"-until-known guard --
+   *  \`tasks.filter(...).length\` is 0 both when tasksById is legitimately empty (a measured zero)
+   *  and when no snapshot has ever landed (an unmeasured absence), and a bare .length cannot tell
+   *  those apart. \`tasksSnapshotKnown\` (set beside latestSpend, above) carries that distinction. */
   function renderGlanceStrip(tasks) {
-    setGlanceValue("glance-running", tasks.filter((t) => t.phase).length);
+    setGlanceValue("glance-running", tasksSnapshotKnown ? tasks.filter((t) => t.phase).length : "…");
     setGlanceValue("glance-needs-me", latestNeedsMeRows.length);
     setGlanceValue("glance-blocked", tasks.filter(isBlockedRow).length);
     setGlanceValue("glance-queued", tasks.filter((t) => t.status === "queued").length);
@@ -2266,6 +2277,7 @@ export function renderShellHtml(
     // reload would flash "…" for merged-today/spend-today/spend-this-week even while every OTHER
     // stale-but-real number (task counts) restores immediately from this SAME cached snapshot.
     latestSpend = snapshot.spend ?? null;
+    tasksSnapshotKnown = true; // W1-T2218: a cache-restored snapshot is real data, not a guess
     latestBlockedPrs = snapshot.blockedPrs ?? [];
     latestBlockedPrsUnverifiedReason = snapshot.blockedPrsUnverifiedReason;
     latestFeedbackEntries = snapshot.feedbackEntries ?? [];
@@ -4285,6 +4297,7 @@ export function renderShellHtml(
     // W1-T159: "spend" rides on this SAME /v1/status response (board.ts's computeGlanceSpend) --
     // no extra round trip for merged-today/spend-today/spend-this-week.
     latestSpend = statusSnap.spend ?? null;
+    tasksSnapshotKnown = true; // W1-T2218: mirrors latestSpend's own write site, immediately above
     // W1-T1006: the blocked-PR queue rides this SAME /v1/status response too (board.ts's
     // BoardSnapshot.blockedPrs/blockedPrsUnverifiedReason) -- no second fetch, one snapshot.
     latestBlockedPrs = statusSnap.blockedPrs ?? [];
