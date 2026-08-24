@@ -1,0 +1,137 @@
+- id: W1-T2242
+  title: "A PROOF VERIFIES WHAT IT NAMES, SO A DEFECT NOBODY NAMED SURVIVES A FULL SET OF HELD CRITERIA — W1-T2217's criteria all held, the `.state` read landed exactly as specified, and the storm it shipped to retire improved by 11%, because no criterion named the cache-population path the guard depends on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/review.ts, test/fixture-proof-dialect.test.ts]
+  origin: oper#a-proof-verifies-only-what-it-names-2026-08-24
+  plan_refs: ["W1-T2217", "W1-T423", "W1-T387", "W1-T273", "W1-T277"]
+  status: blocked
+  attempts: 0
+  rationale: |
+    ★ FILED `status: blocked` ON PURPOSE, AND Q2 IS THE REASON. The arm this describes cannot ship
+    until approval of a fixture is a HUMAN OR GATE ACT rather than a worker act, and design (iii)
+    shows no such mechanism exists today. Building the dialect first would ship the test-theater
+    shape the reviewer already refuses, one directory to the left of where it looks.
+
+    (1) THE MOTIVATING CLASS, RE-DERIVED ON MAIN AT CURRENT LINE NUMBERS RATHER THAN CARRIED.
+    W1-T2217 shipped, every criterion held, and the defect survived. The `.state` read landed
+    exactly as specified. The guard that was supposed to retire the storm reads
+    `if (cached && (terminal || now() - cached.at < ttlMs)) return cached.state;` — and the only
+    `reviewStateCache.set(...)` sits INSIDE the `try`, after a successful parse, while the `catch`
+    arm returns `undefined` without ever populating it. So the cache cannot short-circuit the
+    population that matters: every read that FAILS re-hits the network next time, forever. MEASURED
+    AFTER THE MERGE: a cold `/v1/status` at 218,788 ms against a warm one at 195,403 ms — an 11%
+    improvement on a fix meant to retire the storm.
+
+    (2) AND THE POINT IS NOT THAT THE CRITERIA WERE BAD. They were satisfiable, mechanically
+    checked, and satisfied. THE DEFECT LIVED IN A LINE NO CRITERION NAMED — the `set` on the
+    success path — and a proof cannot fail on prose nobody wrote. That is the class: a full set of
+    held criteria is evidence about the named surface and silence about everything else.
+
+    (3) THE INTERNAL PRECEDENT EXISTS AND IS ONE LAYER ABOVE, WHICH IS WHY IT DOES NOT ALREADY
+    SOLVE THIS. W1-T423's golden-verdict suite runs fixture comparison for the REVIEWER: each case
+    under `test/fixtures/golden-verdicts/<case>/` holds the judge's real inputs plus a golden
+    naming the required verdict facts, and `test/golden-verdicts.test.ts` calls the real judges
+    rather than reimplementing them. Its README states the discipline this proposal borrows: a
+    golden "pins what the judgment must conclude, in the judge's own vocabulary — never a snapshot
+    of incidental output." BUT IT IS A TEST SUITE, NOT A PROOF DIALECT. It pins one judge's
+    end-to-end verdict; it cannot be written into a task's `acceptance` block as the evidence for
+    an arbitrary claim.
+
+    (4) THE EXTERNAL PRECEDENT, CARRIED WITH ITS OWN CAVEAT RATHER THAN OVERSOLD. Fowler's
+    approved-fixtures pattern is the outside name for this shape, and its own advocate calls it
+    "not a wholesale answer" and says it applies "selectively where it fits". That caveat is
+    load-bearing here: a fixture arm is a way to pin output that is otherwise unnameable, not a
+    replacement for `grep:` or `unit test:`, and design (iv) keeps those untouched.
+  design: |
+    ONE CONCERN: let a criterion pin output that no keyword can name, without weakening what a
+    proof means.
+
+    (i) Q1 — THE SMALLEST ARM IS ONE DIALECT KEYWORD, AND IT IS A FOURTH, NOT A REPLACEMENT.
+    Three dialects exist today: `grep:` and `unit test:` are executed, and `demonstration:`
+    (W1-T277) is the honest OPPOSITE — a proof the harness DECLINES to check, refused by
+    `parseWhitelistedProof` by construction and legal only on a `verify: human` task. A fixture arm
+    is therefore a FOURTH keyword naming a command whose OUTPUT is compared against an approved
+    file, and it is executed rather than declined.
+
+    (ii) Q1's DISCRIMINATION BAR IS THE HARD PART, AND A FIXTURE EARNS IT ONLY BY BEING RUN TWICE.
+    `executed_stale` (W1-T273, extended to `unit test:` by W1-T362) downgrades any proof that
+    "matched/passed on the head, but the SAME check ALSO matches/passes on the PR's MERGE-BASE".
+    For a fixture arm that means the comparison must be run at BOTH ends: the command's output must
+    MATCH the approved fixture at the head AND DIFFER from it at the merge-base. A FIXTURE THAT
+    MATCHES AT BOTH ENDS PROVES NOTHING AND IS THE `--lcov /dev/null` SHAPE IN A NEW COSTUME — an
+    OK that would have been an OK before the work existed. The arm must therefore carry the
+    base-side execution as part of its own definition, not as an optional extra, or it ships a
+    dialect whose default outcome is a downgrade nobody reads.
+
+    (iii) Q2 — AN APPROVED FIXTURE IS ONLY AS GOOD AS ITS APPROVAL, AND THERE IS NO MECHANISM
+    TODAY. A worker that writes its own fixture and approves it has built exactly the test-theater
+    shape the reviewer refuses. WORSE, AND MEASURED: `detectTestTheater` scans added test lines but
+    `isFixtureDataPath` EXPLICITLY EXCLUDES `test/fixtures/` from that scan — deliberately, so
+    fixture DATA is not judged as assertion-free test CODE. So a self-authored fixture would land
+    in the one directory the detector is built not to look at. The repository's `CODEOWNERS` is a
+    single blanket `* @craigoley` with no fixture-specific rule, and whether
+    `require_code_owner_reviews` is enforced could not be read from this container (HTTP 403,
+    a permissions refusal on branch protection, not a rate limit). Meanwhile auto-merge is armed by
+    the fleet on PRs that reach green.
+    THE CONCLUSION IS THEREFORE THE ONE THE BRIEF ASKS FOR IF NONE EXISTS: **THIS ARM CANNOT SHIP
+    WITHOUT AN APPROVAL MECHANISM.** What would count: a fixture path that a gate refuses to accept
+    when it is ADDED OR CHANGED in the same PR as the code it approves, so approval is necessarily
+    a separate act by a separate author. Naming which gate owns that is an operator ruling and is
+    not made here.
+
+    (iv) Q3 — WHAT MUST NOT CHANGE. THE EXISTING DIALECT ARMS ARE UNTOUCHED: `grep:` stays a basic
+    regex with its path clause, `unit test:` stays a literal title or a pure path, and
+    `demonstration:` stays the declined form. `rmd check-proof` AND THE REVIEWER CONTINUE TO SHARE
+    ONE EXECUTOR — W1-T387 collapsed them onto `execWhitelistedProof` precisely so a proof cannot
+    read green locally and be judged differently at PR time, and a fourth arm that added its own
+    execution path would reopen that. AND A PROOF THAT CANNOT EXECUTE STILL GRADES
+    `not_executable` AND NEVER PASSES: an absent fixture, an unreadable command, or a base-side
+    run that cannot be performed must degrade to the keyword floor, never to a pass.
+
+    (v) NOT IN SCOPE. W1-T2217's own fix, which is a separate repair of the cache-population path
+    and is cited rather than re-filed. W1-T423's suite, which stays exactly as it is. Any change to
+    `detectTestTheater`'s fixture exclusion, which exists for a good reason and would need its own
+    task. And any widening of what `demonstration:` means.
+  acceptance:
+    - claim: "a criterion can pin a command's output against an approved fixture and that proof executes rather than being declined"
+      proof: "unit test: test/fixture-proof-dialect.test.ts"
+    - claim: "a fixture proof that matches at the head and also matches at the merge-base is downgraded rather than counted as substantiation"
+      proof: "unit test: test/fixture-proof-dialect.test.ts"
+    - claim: "a fixture proof whose comparison cannot be performed grades as not executable and never as a pass"
+      proof: "unit test: test/fixture-proof-dialect.test.ts"
+    - claim: "the three existing dialect arms parse and execute exactly as they did before the fourth was added"
+      proof: "unit test: test/fixture-proof-dialect.test.ts"
+    - claim: "the reviewer and the local proof checker reach the same verdict for a fixture proof, through the one shared executor"
+      proof: "unit test: test/fixture-proof-dialect.test.ts"
+  note: |
+    RISK BAND — BOTH READINGS, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
+    `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` at `risk: high`, so a `high`
+    band means the span was NEVER SCORED rather than scored and found narrow. The declared write
+    surface was measured at `risk: medium` first and that reading is recorded in the PR. The real
+    blast radius is high independently of Rule 19: this changes what a PROOF MEANS, and a fourth
+    arm wired wrong would let a criterion pass on evidence nobody approved.
+
+    THE PROOFS NAME A PATH THAT DOES NOT YET EXIST, WHICH IS THE SANCTIONED FORWARD REFERENCE.
+    `test/fixture-proof-dialect.test.ts` is declared in `files:` and is verified through
+    `shardDeclaredFilesInDiff` rather than through `check-proof`, which reads `verdict: fail` on a
+    path that has not been created. THE FALSIFIER DISCRIMINATES: criterion 2 fails for a fixture
+    that matches at both ends, which is the exact shape criterion 1 would otherwise pass on, so the
+    pair cannot both hold for a fixture that proves nothing.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND VERIFIED **UNUSED**, NOT VERIFIED MINE. Its anchor
+    names another host (`2004013@Remudero`, 2026-08-24T20:27:33Z) and that is expected; nothing was
+    re-minted. What was checked is that no shard filename and no `- id:` line carries it, against a
+    control that reads 1 for a filed sibling on each surface, with the reservation present in a
+    namespace whose ref count was read directly.
+
+    THE LEDGER SURFACE IS DISQUALIFIED, NOT ANSWERED. `rmd ledger-grep` reports `state dir:
+    /root/Remudero/state` and `archives: 0 matched`, then refuses rather than falling back to the
+    live file — and the control step refuses identically, so the refusal is environmental and not
+    a property of the query. No ledger figure is claimed by this shard; the 218,788 ms and
+    195,403 ms readings in rationale (1) are the operator's, taken where the corpus lives.
