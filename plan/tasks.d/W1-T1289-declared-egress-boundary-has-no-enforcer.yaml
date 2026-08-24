@@ -136,6 +136,67 @@
     containment starts working, and it breaks in the direction that reads as a test regression rather
     than as a policy change — a boundary that begins holding looks exactly like a suite that began
     failing.
+    (12) THE FRAMING IS CORRECTED: THERE IS AN ENFORCER, AND THE POLICY GOES TO THE WRONG CHANNEL.
+    Operator-attributed, measured against the SDK on a workstation tree and RE-DERIVED HERE.
+    SAY WHICH VERSION: the tree reads `0.3.226` and `package-lock.json` locks `0.3.233` — they
+    disagree, and the number has moved three times across these sessions (0.3.220, 0.3.226, locked
+    0.3.233), so every claim below is anchored to 0.3.226 and is not portable to another build
+    without re-reading it. This is a workstation tree; the 26 probe rows come from CONTAINERS, whose
+    copy this session could not read.
+
+    (13) ELIMINATED HYPOTHESIS — "THE KEY MOVED AND THE VALIDATOR PINS A SHAPE THE SDK NO LONGER
+    READS." REFUTED, WITH ITS MEASUREMENT. At 0.3.226 `SandboxNetworkConfigSchema` declares
+    `allowedDomains` under `network`, and `settings/worker.json` places it at exactly that path with
+    its four domains. The nesting the pinned key-set guard exists to hold is the nesting the SDK
+    still reads. Recorded as ELIMINATED rather than dropped, because the same hypothesis will look
+    attractive again the next time the version moves — and because eliminating it is what made the
+    tier question visible.
+
+    (14) THE SDK IS NOT THE ENFORCER, SO PINNING IT PINS THE WRONG ARTIFACT. In `sdk.mjs` the
+    occurrence counts for `iptables`, `netns`, `unshare`, `nsjail` and `sandbox-exec` are ZERO, and
+    `allowedDomains` appears EXACTLY ONCE — the minified schema declaration, with no consumer.
+    Control on the same file and the same tool: `claude` appears 14 times, so the scan reads it.
+    `pathToClaudeCodeExecutable` is declared, so the SDK SPAWNS THE CLI and enforcement is
+    downstream in that binary. Design (ii)'s pin — assert the installed SDK version equals the
+    locked one — would therefore pin a package that does not enforce anything; the artifact whose
+    version matters is the `claude` CLI.
+
+    (15) THE TIER IS THE LIKELY DEFECT, AND THE REPO SUPPLIES ONLY ONE OF THE TWO CHANNELS.
+    `settings?:` is documented as "loaded into the \"flag settings\" layer, which has the highest
+    priority among USER-CONTROLLED settings", and `src/lib/worker.ts` passes the allowlist through
+    it (`settings: args.settingsFile`, with `settingSources: []` on the next line).
+    `managedSettings?:` is the POLICY tier — "the sole policy tier" with no admin tier present,
+    "filtered restrictive-only — non-allowlisted keys are dropped regardless" — and its documented
+    example is literally `managedSettings: { sandbox: { network: { allowManagedDomainsOnly: true } } }`.
+    `bwrapPath` and `socatPath`, the two Linux egress knobs, are "Only honored from
+    admin-controlled managed settings". MEASURED: `managedSettings` is supplied in ZERO files under
+    `src/`; control, `settings: args.settingsFile` is supplied in one. So a user-controlled channel
+    is carrying a policy whose own documented examples live in the policy tier.
+
+    (16) AND THE SDK CONTRADICTS ITSELF IN ONE FILE — CARRIED VERBATIM, NOT RESOLVED.
+    `sdk.d.ts:1894` says: "**Important:** Filesystem and network restrictions are configured via
+    permission rules, not via these sandbox settings: … Network access: Use `WebFetch` permission
+    rules", and its network example is headed "Configure network options (not restrictions)" —
+    WHILE THE SAME FILE DECLARES `allowedDomains` IN THE SANDBOX SCHEMA. Two statements that cannot
+    both be acted on. Whichever is stale, a reader who trusts the prose configures nothing and a
+    reader who trusts the schema configures a key the prose disowns. This is recorded as an open
+    contradiction because resolving it from the type file alone is not possible.
+
+    (17) WHAT THIS DOES TO DESIGN (i)'s COSTING: THREE OF FOUR OPTIONS BECOME PREMATURE.
+    The namespace, `bwrap` and `socat` options were all premised on NOTHING owning enforcement — the
+    comparison's own summary was "an enforcement this tree OWNS AND CAN TEST is worth more than one
+    it declares and hopes for". If the CLI owns it, that premise is false, and THE FIRST EXPERIMENT
+    IS A CHANNEL CHANGE, NOT A BUILD: none of the three should be costed further until the channel
+    question is answered, because all three would build an enforcer beside one that may already
+    work. THE OPERATOR MAY NOW WISH TO UNBLOCK THIS TASK; `status:` IS DELIBERATELY UNCHANGED BY
+    THIS AMENDMENT — that is the operator's call, not an amendment's.
+
+    (18) THE MEASUREMENT THAT WOULD SETTLE IT IS CONTAINER-SIDE, AND THIS SESSION COULD NOT TAKE IT.
+    Re-run the probe ONCE with the same four domains supplied via `managedSettings` instead of
+    `settings`, and read `sandbox.network` handling in the `claude` BINARY at the version inside a
+    container. Both are container-side; Docker's engine answers HTTP 500 on this workstation. NO SDK
+    VERSION CHANGE, NO KEY MOVE AND NO REMEDY IS PROPOSED HERE — none is indicated by this evidence,
+    and the channel experiment costs one probe run against a build already in service.
   design: |
     ONE CONCERN: give the declared egress boundary an enforcement owner this tree can test.
 
