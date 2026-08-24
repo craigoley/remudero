@@ -1,0 +1,196 @@
+- id: W1-T2249
+  title: "A DEAD PROBE AND A BROKEN BOUNDARY PRODUCE THE SAME VERDICT, AND ONLY THE FIRST HAS EVER HAPPENED — a containment probe whose own worker died on a 529 or an expired token is classified by `classifyUnprovenState` as one of four containment findings, throws the same `outside-cwd-denial` error, and is counted by `dispatchesWithoutNewOwnedPr` as a dispatch that produced nothing, so an API outage trips a task's circuit breaker and halts its dispatch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/containment.ts, src/lib/status.ts, test/containment-spawn-failure-class.test.ts]
+  origin: oper#dead-probe-and-broken-boundary-share-one-verdict-2026-08-24
+  plan_refs: ["W1-T238", "W1-T292", "W1-T1265", "W1-T1279", "W1-T1281", "W1-T2201"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main 52e03619 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA. ALL LEDGER FIGURES FROM `resolveLedgerUnion` AT THE STATE DIR: archiveCount 24,
+    liveFileRead true, ok true, unread none. Window 2026-08-08T21:59:00.337Z ..
+    2026-08-24T23:20:43.869Z. Newest row per step: `verdict` n=362 newest 23:20:43.869Z;
+    `containment.probe` n=406 newest 22:43:51.649Z; `run.start` n=406 newest 22:43:19.407Z;
+    `dispatch.circuit_broken` n=12 newest 22:42:06.044Z. `probe.containment` reads a clean ZERO
+    and IS NOT A STEP NAME; the real one is `containment.probe` and it reads 406, one per
+    `run.start`.
+
+    (1) THE BOUNDARY HAS NEVER BEEN OBSERVED TO BE BREACHED, AND BOTH HALVES OF THAT ARE
+    CONTROLLED. `outside_write_attempted === true && os_denial_seen === false` reads ZERO, against
+    controls of 27 probes with `outside_write_attempted === true` and 356 with
+    `os_denial_seen === true`. `outside_write_created === true` reads ZERO across all 406 probes,
+    on a field PRESENT on 406 of 406 and populated `false` every single time, so this is an
+    absence and not a missing field. In sixteen days the sandbox has never let an outside-cwd
+    write land.
+
+    (2) AND YET `blocked_containment` IS 50 VERDICTS ACROSS 37 DISTINCT TASK IDS since
+    2026-08-13T00:49:55.672Z, newest 2026-08-24T22:43:44.743Z. ALL 50 carry
+    `check: "outside-cwd-denial"` and nothing else; all 50 join to a `containment.probe` row on
+    the SAME `run_id` (50 of 50), and probes with `contained: false` number exactly 50, so the
+    two views agree completely. Every one of the 50 is "could not prove", never "proved unsafe".
+
+    (3) THE SPLIT, AND THE DATE EACH REASON BEGINS, MATCHES THE TWO FIXES EXACTLY.
+    `unproven` 30 rows / 26 tasks, 2026-08-13T00:49:55.672Z .. 2026-08-24T03:46:24.380Z.
+    `probe-never-ran` 4 rows / 4 tasks, from 2026-08-24T05:09:52.559Z.
+    `write-never-attempted` 7 rows / 3 tasks, from 2026-08-24T06:00:15.178Z.
+    `turns-exhausted` 9 rows / 8 tasks, from 2026-08-24T17:20:19.208Z.
+    W1-T1281 (`fix(containment): name the unproven state instead of discarding it`, #2685) merged
+    2026-08-24T04:12:34Z and the undifferentiated `unproven` label LAST APPEARS 26 MINUTES BEFORE
+    IT AND NEVER AGAIN. W1-T2201 (`fix(containment): derive the probe's turn cap from its command
+    count`, #2695) merged 2026-08-24T11:45:29Z and `turns_exhausted` is present on 0 of 377
+    probes before it and 29 of 29 after, true in 9. SO THE POST-W1-T1281 POPULATION IS 20, AND
+    ALL 20 CARRY `outside_write_attempted: false` (checked per row through the run_id join).
+    The fourth state `classifyUnprovenState` can return, `no-denial-observed`, reads ZERO.
+
+    (4) THE CAUSE IS IN THE TRANSCRIPTS AND IT IS NOT A BOUNDARY EVENT. Seven failing probes
+    carry a `stderr_excerpt` naming a transport or auth failure: five `API Error: 529 Overloaded`,
+    one `API Error: 401 OAuth access token has expired`, and one truncated command narration.
+    FOUR OF THE 529s LANDED WITHIN SIXTEEN MINUTES (05:09:52, 05:10:16, 05:10:27, 05:25:56) AND
+    TOOK OUT FOUR SEPARATE TASKS INCLUDING W1-T1279. The probe could not complete, so no denial
+    could be observed, so it failed closed. That is correct behaviour reported under the wrong
+    name.
+
+    (5) AND THE TWO ARMS THAT WERE SUPPOSED TO CATCH THIS HAVE NEVER FIRED. `containment.ts`
+    already throws `spawn_credential_expired` (W1-T292) and `spawn_credential_failure` ahead of
+    the unproven classifier, each with its own check symbol, precisely so a credential-dead
+    worker is never reported as a containment finding. `credential_expired === true` reads ZERO
+    and `credential_failure === true` reads ZERO across all 406 probes, on fields PRESENT on 406
+    of 406. The 2026-08-13 probe whose own excerpt reads verbatim "Failed to authenticate. API
+    Error: 401 OAuth access token has expired. Re-authenticate to continue" carries
+    `credential_expired: false` and was classified `unproven` under `check:
+    "outside-cwd-denial"`. THE PRECEDENT FOR NAMING A SPAWN FAILURE DISTINCTLY IS ALREADY IN THIS
+    FUNCTION, TWICE; the arm for a transport error was never added, and the arm for expiry does
+    not fire on its own literal condition.
+
+    (6) THE DOWNSTREAM COST IS MEASURED, NOT SUPPOSED. `dispatchesWithoutNewOwnedPr`
+    (`src/lib/status.ts:1768-1782`) counts EVERY `run.start` for a task and resets ONLY on
+    `pr.opened` or a merge credit. A containment refusal never reaches `pr.opened`, so it counts
+    in full. `isDispatchBreakerTripped` (`status.ts:1795-1801`) compares that count against
+    `maxDispatches`. The live row reads
+    `{task:"W1-T1279", freshCount:5, maxDispatches:5, priorCount:5, hasNewOwnedPr:false,
+    ledgerState:"tripped"}` and the breaker has re-tripped TWELVE times between
+    2026-08-24T09:40:38.142Z and 22:42:06.044Z, all twelve grouping to that one task. W1-T1279 has
+    ZERO `pr.opened` rows against a control of 392 `pr.opened` rows in the window. FIVE
+    INFRASTRUCTURE REFUSALS HALTED A TASK'S DISPATCH AND OPENED AN ESCALATION (#2693).
+
+    (7) THE POPULATION IS ENVIRONMENTAL, WHICH IS WHY A PER-TASK REMEDY WOULD MISS. 30 of the 37
+    distinct tasks fail EXACTLY ONCE; only 7 fail more than once. One container failed 13 of 13
+    probes in a 41-minute life; six sibling containers failed 0 of 72; the current one runs at 23
+    of 53. On that SAME host the rate is 3 of 6 before W1-T1281's merge and 20 of 47 after, so
+    the host is the variable and W1-T1281 only relabelled the reasons. And 28 of 41 consecutive
+    same-task run pairs whose first run failed SUCCEEDED on the next one, against an
+    unconditional failure rate of 12.3 percent.
+
+    (8) W1-T1279 DID NOT FAIL FIVE TIMES IDENTICALLY. Its five failures carry THREE different
+    `observed` values (`unproven`, `probe-never-ran`, `write-never-attempted`); the reason TEXT
+    was identical only because the earlier ones predate W1-T1281's split. Recorded here because
+    the same-shape reading is what made this look task-shaped.
+  note: |
+    ── Q1. CAN A SPAWN FAILURE BE NAMED WITHOUT WEAKENING THE GATE ─────────────────────────────
+
+    (i) YES, AND THE FUNCTION ALREADY DOES IT TWICE. The `spawn_credential_expired` and
+    `spawn_credential_failure` arms sit AHEAD of the unproven classifier and each throws its own
+    `ContainmentError` with its own check symbol, its own `observed` value, and the SAME
+    unconditional `throw`. Both refuse the run. Neither weakens the gate. The shape this task
+    needs already exists and must be followed rather than invented: a third pre-classifier arm
+    for a transport or API failure, thrown, failing closed, distinguishable by symbol.
+
+    (ii) THE RUN MUST STILL NOT PROCEED, AND THAT IS NOT NEGOTIABLE. W1-T1265 requires containment
+    PROVEN rather than assumed. A probe whose worker died proves nothing about the sandbox, so it
+    can never be treated as a pass. The distinction this task adds is in the NAME and in what
+    reads the name, never in whether the run continues.
+
+    (iii) NAMING ALONE IS INSUFFICIENT, AND THAT IS THE HALF THAT MAKES THIS A TASK. Nothing
+    downstream reads the check symbol to decide anything: a search across the tree finds it copied
+    onto a report in `retro.ts` and nowhere else. So a new symbol with no reader would be the
+    W1-T329 shape this repo already refuses, a reason recorded that nothing consults. The reader
+    that must exist is the breaker's own counter.
+
+    (iv) WHAT CHANGES DOWNSTREAM, PRECISELY. `dispatchesWithoutNewOwnedPr` must not count a run
+    refused for an infrastructure spawn failure. It counts `run.start` and resets on `pr.opened`;
+    the narrow change is to exclude a `run.start` whose run ended in the new class. NOTHING ELSE
+    MOVES: the breaker's threshold does not change, the reset rule does not change, and a genuine
+    dispatch-with-no-PR still counts exactly as it does today.
+
+    (v) AND THE EXPIRY ARM NEEDS ITS OWN LOOK. A transcript that says an OAuth token has expired
+    was classified `unproven`, so either the credential predicate does not read that text or it
+    was not reachable on that path. Whichever it is, the fix must not leave two arms that are
+    supposed to catch this and do not.
+
+    ── Q2. WHY THE EVIDENCE IS MOSTLY MISSING ──────────────────────────────────────────────────
+
+    (vi) IT IS NOT TRUNCATED AND IT IS NOT DROPPED. IT IS WRITTEN ON ONE PATH ONLY.
+    `containment.ts` records the excerpt as a CONDITIONAL SPREAD keyed on the worker result's own
+    error flag, and the comment beside it (W1-T238) says so outright: the field is recorded "ONLY
+    when the underlying worker call itself errored", so "a clean probe spawn never gets this
+    field". A probe that returns normally and simply observes no denial is a clean spawn by that
+    test, so the case that most needs a transcript is exactly the case that carries none.
+
+    (vii) THE COVERAGE NUMBERS, AND A CORRECTION TO THE READING OF THEM. `stderr_excerpt` is
+    present on 32 of 406 probes and absent on 18 of the 50 failures, which sounds like a diagnosis
+    resting on a minority. BUT ALL 18 EXCERPT-LESS FAILURES ARE `unproven`, every one of them
+    predating W1-T1281; every one of the 20 post-split failures carries an excerpt. So the
+    evidence gap is HISTORICAL, not ongoing.
+
+    (viii) WHICH DOES NOT CLOSE THE GAP, BECAUSE THE STRUCTURAL HOLE IS UNEXERCISED RATHER THAN
+    FIXED. The conditional spread still means a `contained: false` with no error flag would record
+    nothing, and `no-denial-observed` -- the one state that describes a probe that ran cleanly and
+    saw no denial -- reads ZERO so far. The day it fires it will arrive with no transcript. The
+    remedy is to record the excerpt on every REFUSING probe rather than on every ERRORING one; a
+    passing probe's row stays exactly as it is, which is the property W1-T238 was protecting.
+
+    ── Q3. WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────
+
+    (ix) NO RELAXING, SKIPPING, SAMPLING OR THRESHOLDING OF THE PROBE. The measurement
+    STRENGTHENS W1-T1265 rather than weakening it: the refusals are honest, and what they refuse
+    is a probe that could not run. A high failure rate is not an argument for trusting the
+    boundary. Whoever builds this must add no path on which containment is treated as proven
+    without an observed denial, and no sampling rate, retry budget or failure threshold that
+    would let a run proceed unproven.
+
+    (x) `turns-exhausted` STAYS DISTINCT, AND SO DO THE OTHER THREE. W1-T2201 earned that name
+    and it must survive intact, as must `probe-never-ran`, `write-never-attempted` and
+    `no-denial-observed`. THIS TASK ADDS A FIFTH REASON; IT DOES NOT MERGE THE FOUR. A build that
+    collapses any of them has done the opposite of what is asked.
+
+    (xi) THE BREAKER STILL BREAKS. Excluding an infrastructure refusal from the counter is not
+    disabling the counter. A task that genuinely dispatches five times without producing an owned
+    PR must still trip, at the same threshold, with the same reset rule. The redispatch storm
+    W1-T1279's own escalation cites is a real failure mode and this must not reopen it.
+
+    (xii) THE HOST QUESTION IS OUT OF SCOPE AND UNDIAGNOSED. Why one container failed 13 of 13
+    probes in 41 minutes while six siblings failed 0 of 72, and why the current one runs at 23 of
+    53, is NOT answered here and must not be filed against this id. It is a separate pass. This
+    task changes how a failed probe is NAMED and COUNTED, not how often it fails.
+
+    (xiii) DO NOT RE-FILE W1-T1265, W1-T1281 OR W1-T2201. W1-T1265 established that containment
+    must be proven; W1-T1281 split the unproven state into four; W1-T2201 added the exhaustion
+    state and its turn budget. All three shipped and all three hold. This shard sits BESIDE them:
+    it adds the class none of them covers, the spawn that died before it could observe anything.
+
+    (xiv) RULE 19 BAND. `risk: high` is set up front because `files:` spans two source stems and
+    Rule 19 sizes on SPAN. The band is the span reading and NOT a blast-radius judgement; the
+    change adds one pre-classifier arm, one exclusion in a counter, and perturbs no existing
+    threshold.
+  acceptance:
+    - claim: "a containment probe whose own worker died on a transport or API failure is refused under a distinct spawn-failure class, never under the outside-cwd-denial check"
+      proof: "unit test: test/containment-spawn-failure-class.test.ts"
+    - claim: "the new class still throws and still fails closed, so a run refused for it does not proceed and containment is never treated as proven"
+      proof: "unit test: test/containment-spawn-failure-class.test.ts"
+    - claim: "turns-exhausted, probe-never-ran, write-never-attempted and no-denial-observed all keep their own names and none of them is absorbed into the new class"
+      proof: "unit test: test/containment-spawn-failure-class.test.ts"
+    - claim: "the breaker's dispatch counter does not count a run refused for the new class, so a transport outage cannot trip a task's circuit"
+      proof: "unit test: test/containment-spawn-failure-class.test.ts"
+    - claim: "a task that dispatches without producing an owned PR still trips the breaker at the same threshold with the same reset rule"
+      proof: "unit test: test/containment-spawn-failure-class.test.ts"
+    - claim: "the probe transcript excerpt is recorded on every refusing probe rather than only when the worker result carries an error flag, and a passing probe's row is unchanged"
+      proof: "unit test: test/containment-spawn-failure-class.test.ts"
+    - claim: "a transcript naming an expired OAuth token is refused under a credential class rather than under an unproven containment state"
+      proof: "unit test: test/containment-spawn-failure-class.test.ts"
