@@ -1,0 +1,155 @@
+- id: W1-T2236
+  title: "THE FIX RUNG DISPATCHES `reviewer-unmet` WITH NOTHING UNMET IN 63% OF THAT MODE'S RUNS, BECAUSE IT IS THE CATCH-ALL DEFAULT — the sweep names N actionable gate failures with a remedy each, then `deriveFixMode` falls through `when: () => true` and the prompt carries only the empty criteria list"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/run-task.ts, src/lib/sweep.ts, test/fix-mode-gate-failures.test.ts]
+  origin: oper#reviewer-unmet-is-the-catch-all-mode-2026-08-24
+  plan_refs: ["W1-T457", "W1-T1282", "W1-T440"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN BY SHA at
+    9accfbed; the clone was checked and already full, and `src/run-task.ts` (~1.53 MB) was read
+    through git objects only. The ref namespace was verified equal to the remote BEFORE sweeping
+    (354 local, 354 remote), and the id was RESERVED THROUGH THE ALLOCATOR rather than named — see
+    the note. Ledger gate: archiveCount 23, ok true, unread 0, with the control
+    `"step":"risk_judge.decision"` reading 177 and newest-row-per-step reported for every step this
+    task reads (`fix.dispatch` 2026-08-24T17:41:42.371Z, `fix.done` 17:41:42.371Z, `fix.exhausted`
+    13:12:05.876Z, `fix.resolved` 17:53:11.260Z, `verdict` 17:50:12.184Z).
+
+    (1) BOTH SPLITS RE-DERIVE, AND A THIRD MODE CONTROLS THEM. `fix.dispatch` totals 151 and splits
+    `ci-log` 112 / `reviewer-unmet` 35 / `body-coverage` 4. ALL 112 ci-log rows carry
+    `unmet_count: 0` AND THAT IS CORRECT — the input there is a red check, not a criterion. 22 OF
+    THE 35 `reviewer-unmet` ROWS ALSO CARRY `unmet_count: 0` (63%), AND THAT IS NOT. The third mode
+    is the control the measurement needed: all 4 `body-coverage` rows carry `unmet_count > 0`, 0%
+    empty. DISTINCT VALUES PER MODE, so a zero is never a missing field: `reviewer-unmet` spans
+    [0,1,2,4,5], `ci-log` is [0] alone, `body-coverage` is [1,2,3,4] and never 0.
+
+    (2) WHAT THE 22 ACTUALLY HAD AS INPUT — THE ANSWER TO WHETHER THE DISPATCH IS EMPTY OR THE MODE
+    IS WRONG. Joining each of the 22 to its nearest preceding review-failure row on the same task
+    within 30 minutes, the reasons tally: NINE read `N actionable gate failure(s) (named remedy) —
+    strike N/N`; FOUR read `review failing with no actionable unmet criteria (contradictory) —
+    escalating`; four read `checks pending`; two read a bare `failure`; two read `required checks
+    red — ci-log fix`; one read `checks green, review orphaned by a push`. CONTROL, the 13
+    non-empty rows join to `N unmet criteri(a|on) — strike N/N`, the correct shape. SO THE DOMINANT
+    INPUT IS A GATE FAILURE THAT CARRIES A NAMED REMEDY — there IS something to work from, and the
+    mode discards it.
+
+    (3) THE MECHANISM, END TO END. `sweep.ts:2651` disposes `blocked-fixable` when
+    `pr.reviewState === "failure" && (pr.unmetCriteria.length > 0 || (pr.actionableGateFailures?.length ?? 0) > 0)`,
+    and `:2657` renders the reason naming those gate failures. `dispatchFix` then builds evidence as
+    `{ unmetCriteria: pr.unmetCriteria }`. `deriveFixMode` (`run-task.ts:4523-4526`) walks
+    `FIX_MODE_RULES` — `merge-conflict` on `mergeConflict`, `ci-log` on `ciFailures`,
+    `body-coverage` on its own predicate — and the LAST RULE IS `mode: "reviewer-unmet", when: () =>
+    true`. IT IS AN UNCONDITIONAL CATCH-ALL, NOT A CHOSEN MODE.
+
+    (4) AND `actionableGateFailures` NEVER CROSSES INTO THE EVIDENCE. It occurs 17 times under
+    `src/` against a control of 41 for `unmetCriteria`, and every one of those occurrences is on the
+    DISPOSITION side — produced by `actionableGateFailuresFromLedger` (`run-task.ts:20157`), set onto
+    the `OpenPrView` at `:20464`, and read for the disposition decision and the reason text. IT IS
+    NOT A `FixEvidence` FIELD AND NOT A FIX-MODE INPUT. So the sweep knows the remedy, says it out
+    loud in the reason, and the prompt goes out without it.
+
+    (5) THE LIVE INSTANCE MATCHES. On 2026-08-24 `rmd sweep` logged `fix rung: strike 1/2 (resume) —
+    dispatching ONE fix worker for 0 unmet criteria` on #2730, whose `remudero-review=failure` named
+    a body/diff contradiction and no unmet criterion at all. The newest row in the measured set is
+    the same shape: 2026-08-24T17:41:42.371Z, `W1-T2212`, strike 1, `verdict_regime: keyword_only`,
+    joined to `1 actionable gate failure (named remedy) — strike 1/2`.
+
+    (6) THE TWIN, QUOTED VERBATIM AND CITED NOT RE-FILED. `run-task.ts:19995-20006` records the
+    #1728 defect on the OTHER arm: "a stale SUPERSEDED attempt of a check name could still appear
+    here even after a later attempt of the SAME name went green, and `checksStateFromRollup` vetoes
+    on the wider REQUIRED_CHECK_FAIL set (also TIMED_OUT/CANCELLED/ACTION_REQUIRED/STARTUP_FAILURE),
+    so a required check red for one of THOSE reasons made `checksState` "red" while this producer
+    named nothing — the #1728 defect: an empty failing list dispatched behind a red disposition,
+    burning a ci-log fix-rung strike with nothing to fix (5 of 6 measured `fix.dispatch` rows for
+    this shape carried `unmet_count: 0`)." W1-T457 closed it by making the producer and
+    `checksStateFromRollup` agree BY CONSTRUCTION. W1-T1282 then stood the rung down on zero
+    enumerable CI failures. NEITHER REACHED `reviewer-unmet`: both are keyed on the CI arm.
+
+    (7) AND W1-T1282's ARGUMENT DOES NOT CARRY TO THIS ARM — TESTED, NOT ASSUMED, AND IT CHANGES THE
+    REMEDY. Within six hours of each of the 22: `fix.resolved` 10, `fix.exhausted` 8,
+    `escalation.issue_opened` 10, and the PR merged in 18. CONTROL, the 13 non-empty
+    `reviewer-unmet` rows: resolved 8, exhausted 6, escalated 8, merged 8. So the EMPTY dispatches
+    resolve at a comparable rate and their PRs merge MORE often, not less. "A dispatch with nothing
+    enumerable is never worth a strike" IS TRUE ON THE CI ARM AND IS NOT DEMONSTRATED HERE.
+
+    (8) THE LIMIT ON (7), STATED SO IT IS NOT OVER-READ. Those are six-hour co-occurrences on the
+    same task, not attributions: a PR can merge in that window because CI turned green or an
+    operator merged it, with the fix worker contributing nothing. What (7) establishes is the
+    NEGATIVE — there is no evidence these strikes are wasted — which is enough to refuse the
+    stand-down remedy and not enough to claim the strikes are productive.
+  design: |
+    ONE CONCERN: a review failure whose remedy is a named gate failure must reach the worker as that
+    remedy. Not the CI arm, not the strike cap, not the disposition.
+
+    (i) THE DEFECT IS THE MODE, NOT THE EMPTINESS — and that is why the remedy is not W1-T1282's.
+    Rationale (2) shows the dominant input carries a named remedy; rationale (7) shows the strikes
+    are not demonstrably wasted. Standing the rung down would discard a remedy that exists and stop
+    dispatches that may be working. The fix is to carry `actionableGateFailures` into the evidence
+    and select a mode on it, so the prompt names the remedy the sweep already named.
+
+    (ii) `reviewer-unmet` MUST STOP BEING A CATCH-ALL. `when: () => true` (`run-task.ts:4512-4513`)
+    means every unclassified evidence shape lands there and inherits a prompt built from
+    `unmetCriteria`. A rule that matches everything cannot be wrong, which is exactly why it hides
+    this. Whatever mode is added, the last rule should name what it is for.
+
+    (iii) AND AN UNCLASSIFIABLE FAILURE SHOULD BE NAMED, NOT DEFAULTED. Four of the 22 joined to
+    `review failing with no actionable unmet criteria (contradictory) — escalating` — the sweep had
+    already decided it was contradictory, and a dispatch happened anyway. That case wants a named
+    stand-down (W1-T1282's shape, on this arm) rather than a mode; the two remedies are not
+    alternatives and design (i) does not cover it.
+
+    (iv) WHAT MUST NOT CHANGE, PINNED BY CRITERIA. THE STRIKE CAP STAYS AT 2. THE RUNG STILL
+    DISPATCHES WHEN THERE ARE UNMET CRITERIA — the 13 non-empty rows are the working path and must
+    be byte-identical after this. AND A REVIEW FAILURE WITH NO UNMET CRITERION MUST STILL BLOCK THE
+    MERGE: the remedy is a correct mode or a named stand-down, NEVER proceeding as if the review
+    passed. A change that turns any of the 22 into a merge is the failure mode this task must not
+    ship.
+
+    (v) NOT IN SCOPE, NAMED: the CI arm and its two closed defects (W1-T457, W1-T1282), cited and
+    not re-filed; the disposition rule at `sweep.ts:2651`, which is correct and stays; the strike
+    cap; and `body-coverage`, which rationale (1) shows never dispatches empty.
+  acceptance:
+    - claim: "a review failure whose only evidence is a named gate failure dispatches in a mode that carries that remedy"
+      proof: "unit test: test/fix-mode-gate-failures.test.ts"
+    - claim: "the fix prompt for that shape names the remedy the sweep named, never an empty criteria list"
+      proof: "unit test: test/fix-mode-gate-failures.test.ts"
+    - claim: "a review failure with unmet criteria still dispatches exactly as it does today"
+      proof: "unit test: test/fix-mode-gate-failures.test.ts"
+    - claim: "a review failure with neither unmet criteria nor a named remedy stands down under a named reason rather than defaulting"
+      proof: "unit test: test/fix-mode-gate-failures.test.ts"
+    - claim: "no review failure reaches a merge as a result of this change"
+      proof: "unit test: test/fix-mode-gate-failures.test.ts"
+  note: |
+    THE ID WAS RESERVED THROUGH THE ALLOCATOR, NOT NAMED. `rmd next-task-id --reserve` returned
+    `W1-T2236` and `RESERVED W1-T2236 on origin (refs/rmd-id/W1-T2236) after 1 attempt(s)`, with
+    provenance `max 2235 across tasks.yaml 280, shards 2232, open PRs 2235, history 2232`. No
+    candidate was reported held by another caller, so no advance was needed. EIGHT SURFACES SWEPT
+    AND EVERY CONTROL FIRES: shard filenames 0 against W1-T2217 at 1 (548 shards); plan `- id:`
+    lines 0 against W1-T2217 at 1; the reservation, which is the pre-mint; merged trailers 0
+    against `Remudero-Task: W1-T2201` at 1; merged subject credit 0 against W1-T2217 at 2; live
+    branch names 0 against the `run-*` and `plan/*` namespaces at 87 and 25 of 137; branch-tip
+    subjects 0 against W1-T2235 at 1; and branch shard paths 0 against W1-T2235 at 1.
+
+    EVERY PROOF IS A FORWARD REFERENCE BY CONSTRUCTION, AND THE FALSIFIER DISCRIMINATES. All five
+    criteria name `test/fix-mode-gate-failures.test.ts`, declared in `files:` and ABSENT on this
+    head. The falsifier is an EXISTING path, not another absent one: an absent control would read
+    `hits: 0` exactly like the target and would prove nothing about which condition fired.
+    `files:` is written in the bare single-line form `SHARD_FILES_LINE_RE` demands.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    `risk: high` IS RULE 19'S SPAN AND A BLAST-RADIUS STATEMENT. `files:` names three stems across
+    the two modules that decide what a fix worker is told. The band is honest for a second reason:
+    design (iv)'s last invariant is that no review failure may reach a merge, and a mode change
+    that widened the dispatch path could do exactly that while looking like a working fleet.
+
+    ONE FIGURE IS NOT CLAIMED. Rationale (8): the six-hour outcome counts are co-occurrences on the
+    same task, not attributions. They are sufficient to refuse a stand-down-everything remedy and
+    insufficient to call the strikes productive.
