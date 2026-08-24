@@ -1744,12 +1744,15 @@ export function mergeDirectRefusalMayBeUnsettled(stderrText: string): boolean {
   return /\bHTTP 405\b/.test(stderrText);
 }
 
-/** W1-T1280 — the small attempt cap (design note iii): the FIRST 405 plus up to this many
- *  re-reads of {@link mergeFactsFromRest}. Bounded deliberately tight — this path runs only when
- *  `armFailureIsRateLimited` has already fired, i.e. the GraphQL budget is spent, so every extra
- *  read spends more of an already-exhausted quota (W1-T148's cost-governor rationale, restated
- *  in this task's own design note iii). A read that is still `UNKNOWN` after this many attempts
- *  refuses — the SAME `arm-error-ignored` outcome this path already returns today. */
+/** W1-T1280 — BACKSTOP (W1-T1266): the small attempt cap (design note iii): the FIRST 405 plus
+ *  up to this many re-reads of {@link mergeFactsFromRest}. The loop's NORMAL exit is a read that
+ *  settles CONFLICTING or MERGEABLE; this cap only fires once that normal exit has already failed
+ *  to arrive, i.e. the read is still `UNKNOWN` after every attempt. Bounded deliberately tight —
+ *  this path runs only when `armFailureIsRateLimited` has already fired, i.e. the GraphQL budget
+ *  is spent, so every extra read spends more of an already-exhausted quota (W1-T148's cost-
+ *  governor rationale, restated in this task's own design note iii). A read that is still
+ *  `UNKNOWN` at the bound refuses — the SAME `arm-error-ignored` outcome this path already
+ *  returns today. */
 export const REST_MERGE_UNSETTLED_MAX_READS = 3;
 
 /** W1-T1280 — the short interval (design note iii) between one `UNKNOWN` re-read and the next.
