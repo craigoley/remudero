@@ -1,0 +1,166 @@
+- id: W1-T2245
+  title: "The compaction ledger row cannot tell DISABLED from NEVER-NEEDED from FAILED — 1,498 rows carry `quality_suspect` and not one is true, while workers reach 276 turns against §8B's own 36+ figure, and the SDK's `compact_result: 'failed'` channel is never read, so the zero has at least three causes and the row names none of them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha, clone
+    shallow-checked `false`. `src/run-task.ts` (1,533,033 bytes) read through git objects. No suite,
+    no poller, no spawning verb. Every SDK claim re-derived at **0.3.233**, confirmed installed on
+    disk — `package.json` `^0.3.233`, lock `0.3.233`, disk `0.3.233`, all three agreeing.
+
+    (1) THE MECHANISM HAS NEVER FIRED, CONTROLLED BOTH WAYS. Over the ledger union at the state dir
+    (`archiveCount: 672`, `liveFileRead: true`, 2,395 matching rows, one pass, step names derived
+    from source as every step that spreads `workerLedgerFields`):
+      implement.done       589 rows, 427 carry `quality_suspect`, TRUE 0, `compaction_events` non-empty 0, newest 2026-08-13T00:30:45.894Z
+      recon.done           650 rows, 483 carry it,               TRUE 0, non-empty 0, newest 2026-08-12T23:51:31.667Z
+      review.reviewer      561 rows, 462 carry it,               TRUE 0, non-empty 0, newest 2026-08-12T23:47:20.499Z
+      triage.synthesized    74 rows,  74 carry it,               TRUE 0, non-empty 0, newest 2026-08-14T15:04:16.143Z
+      implement.resumed     52 rows,  33 carry it,               TRUE 0, non-empty 0, newest 2026-08-12T19:45:32.978Z
+      retro.synthesized     18 rows,  10 carry it,               TRUE 0, non-empty 0, newest 2026-08-12T12:47:53.330Z
+      inbox.draft_synthesized 9 rows,  9 carry it,               TRUE 0, non-empty 0, newest 2026-07-24T01:32:49.911Z
+      anchor.built         442 rows,   0 carry it — the NEGATIVE CONTROL: a step that should carry
+                           neither field carries neither, so a false positive would have shown.
+    The POSITIVE control is that 1,498 rows DO carry the field, so the reader works and it is the
+    VALUE that is uniformly false — not the query.
+
+    (2) THE OBVIOUS EXPLANATION IS REFUTED, WHICH IS WHY THIS IS A TASK AND NOT A NOTE. MASTER-PLAN
+    §8B asserts compaction "WILL fire (observed mean 19.8 turns, tasks at 36+)". Measured over the
+    same union: `num_turns` reads **max 276, p95 126, p50 10** across 1,284 rows, and the declared
+    caps seen are 20 and 400. So workers DO reach — and pass by an order of magnitude — the turn
+    range §8B says compaction fires in, and still record zero events. "Workers never get big enough"
+    does not survive its own numbers.
+
+    (3) AND THE HARNESS IS NOT DROPPING IT. `collectWorkerResult` (`src/lib/worker.ts`) iterates the
+    raw stream and calls `detectCompactionEvents([raw])` inside an UNCONDITIONAL `if (msg.type ===
+    "system")` branch — no subtype filter, no sampling — so any `compact_boundary` that arrived would
+    be detected. The collection stage is exonerated from source, not assumed.
+
+    (4) WHAT SURVIVES IS A THIRD READING NEITHER OF THE FIRST TWO NAMES: THE FEATURE MAY SIMPLY NOT BE
+    ON. The `Options` object the fleet builds passes `cwd`, `permissionMode`,
+    `pathToClaudeCodeExecutable`, `env`, `settings`, `settingSources: []` and a contained spawn fn.
+    It passes NO `autoCompactEnabled`, NO `precomputeCompactionEnabled` and NO `betas` — measured
+    zero for all three across `src/`, against a control of 18 `maxTurns`/`permissionMode`
+    occurrences in the same file. And `settingSources: []` means no settings file can turn it on
+    either. **THIS SHARD DOES NOT CLAIM THE FEATURE IS OFF** — `sdk.d.ts` documents
+    `autoCompactEnabled` as "Automatically compact conversation when context fills" and states no
+    default, so the default is unknown from the type alone. What IS established is that the fleet
+    never sets it, and that nothing on the ledger row records whether it was set.
+
+    (5) A FOURTH CAUSE IS INVISIBLE BY CONSTRUCTION. `sdk.d.ts:4684` reads
+    `compact_result?: 'success' | 'failed';` with `compact_error?: string;` on the next line — a
+    FAILURE channel on `SDKStatusMessage`, not on the boundary message. `detectCompactionEvents`
+    matches only `subtype: 'compact_boundary'`, so **a compaction that FAILED emits no boundary
+    message and the harness records nothing at all**: no event, no `quality_suspect`, no row. That
+    reads identically to a compaction that never happened.
+
+    (6) SO THE ZERO HAS AT LEAST THREE CAUSES AND THE ROW NAMES NONE. Never needed (refuted on
+    turns), not enabled (unrecorded), attempted and failed (unread). This is the repo's own
+    recurring defect — a count that cannot distinguish EMPTY from UNMEASURED — landing on the one
+    field review trust is supposed to rest on.
+
+    (7) THE VERSION CAVEAT IS RETIRED, AND HOW IT MOVED IS RECORDED. An earlier reading measured the
+    installed SDK at 0.3.226 against a lock of 0.3.233. Re-checked here, the install directory's
+    mtime is later the same day and its version reads 0.3.233, so the three sources now agree and
+    every claim above is re-derived at the version the fleet runs. The earlier disagreement was real
+    when taken and is noted so the two readings are not mistaken for a contradiction.
+  design: |
+    (i) Q1 — FOUR FINDINGS, ONE TASK, AND THE SPLIT IS STATED. The recon surfaced four: a flag with
+    no reader, a mechanism that never fires, an unwired re-injection, and two unread SDK fields.
+    They are NOT one defect and Rule 19 would rightly refuse the span. **THIS SHARD TAKES THE SECOND,
+    FOLDING IN ONLY THE HALF OF THE FOURTH THAT IS THE SAME QUESTION** — `compact_result`, because
+    "why is the count zero" and "one cause of zero is unreadable" are one investigation in one
+    function. The reason this one is first is not preference: **IF THE MECHANISM NEVER FIRES, THE
+    OTHER THREE COST NOTHING.** A flag with no reader is harmless while it is always false; an
+    unwired re-injection has nothing to re-inject; `preserved_messages` never arrives. Diagnosing
+    the zero is the PRECONDITION for deciding whether any of the other three is worth doing at all.
+
+    (ii) THE REMEDY IS TO MAKE THE ZERO EXPLAIN ITSELF, NOT TO TURN ANYTHING ON. The row records
+    what the spawn's compaction CONFIGURATION was alongside its RESULT, and reads the failure
+    channel, so `quality_suspect: false` becomes distinguishable from "not enabled" and from
+    "attempted and failed". **NOTHING IN THIS TASK ENABLES AUTO-COMPACTION**, changes an SDK option,
+    or alters what a worker is allowed to do — that would be a spawn-path behaviour change, which
+    (iv) forbids. The deliverable is that the next person asking "why zero" reads the answer off a
+    row instead of re-deriving it.
+
+    (iii) THE HONEST-LABEL PATTERN IS ALREADY IN THIS REPO AND IS REUSED, NOT INVENTED.
+    `merged_known` (`src/lib/board.ts`) carries knownness beside its number, and serve.ts's
+    `latestSpend ? … : "…"` renders an unknown rather than fabricating a zero. A compaction count
+    that cannot say whether compaction was possible is the same shape one level down.
+
+    (iv) Q3 — WHAT MUST NOT CHANGE.
+      THE LEDGERED COMPACTION FACT STAYS. W1-T36 built it because review trust depends on knowing a
+      run was compacted; this task ADDS to that row and removes nothing from it. `quality_suspect`
+      keeps its current meaning and its current write sites.
+      **NOTHING ADOPTS A BETA ON THE SPAWN PATH** — W1-T235 and W1-T236 are both incidents about
+      unguarded changes there, and no option this task adds is a beta.
+      **THE API COMPACTION BETA IS UNREACHABLE AND IS NOT PROPOSED.** Re-derived at 0.3.233:
+      `sdk.d.ts:3101` declares `export declare type SdkBeta = 'context-1m-2025-08-07';` — a
+      single-member union — and `Options.betas` is typed `SdkBeta[]`, so `compact-2026-01-12` cannot
+      be passed through this SDK at all. That is a fact about the type, not a policy preference, and
+      it forecloses the proposal rather than deferring it.
+
+    (v) NOT IN SCOPE, NAMED AND LEFT FOR THEIR OWN TASKS: `quality_suspect`'s missing READER (finding
+    one — harmless while the value is always false, and its remedy is a consumer, not a producer);
+    wiring `anchorReinjections` (finding three — one occurrence in `src/`, its own definition, and
+    zero live call sites, with `renderAnchorBlock` built and ledgered at `run-task.ts:8921` and never
+    sent, which is W1-T12e's drill); and the ordered `messagesToKeep` UUIDs whose own doc says they
+    supersede `preserved_segment` (the other half of finding four — real, and useful only once
+    something re-injects). Also out: MASTER-PLAN §8B's own "19.8 turns" figure, which this shard
+    measures against but does not amend.
+  acceptance:
+    - claim: "a zero compaction count records whether compaction was possible for that spawn"
+      proof: "unit test: test/compaction-zero-is-unexplained.test.ts"
+    - claim: "a compaction that failed is recorded rather than reading as one that never happened"
+      proof: "unit test: test/compaction-zero-is-unexplained.test.ts"
+    - claim: "a real compaction boundary still sets the suspect flag exactly as it does today"
+      proof: "unit test: test/compaction-zero-is-unexplained.test.ts"
+    - claim: "no sdk option is added, changed or enabled on the spawn path"
+      proof: "unit test: test/compaction-zero-is-unexplained.test.ts"
+    - claim: "the existing compaction fields keep their current names and meanings"
+      proof: "unit test: test/compaction-zero-is-unexplained.test.ts"
+  files: [src/lib/worker.ts, test/compaction-zero-is-unexplained.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#compaction-never-fired-2026-08-24"
+  plan_refs: ["W1-T36", "W1-T235", "W1-T236", "W1-T12e"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so a source file and a test not named after it trip it at `medium`. `files:` is one
+    source file and one new test, and the diff is additive fields on a row plus one branch that reads
+    a channel already arriving in the stream.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/compaction-zero-is-unexplained.test.ts`, declared in `files:`, so on this filing PR
+    it resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL. `rmd check-proof` on the
+    declared path reads `exit: 1`, `hits: 0`, `verdict: fail`. The SAME verb on an EXISTING pure path
+    — `unit test: test/compaction.test.ts`, the test file for the very module this finding concerns —
+    reads `exit: 0`, `hits: 106`, `verdict: pass`. The control file was confirmed present BEFORE the
+    falsifier was believed.
+
+    EVERY CITED LINE WAS READ, NOT ADDRESSED BY NUMBER. `sdk.d.ts:4684` reads
+    `compact_result?: 'success' | 'failed';` and `:3101` reads the single-member `SdkBeta` union; both
+    were printed rather than inferred from a grep's line number.
+
+    THE §8B COMPARISON IS AGAINST THE DOCUMENT'S OWN WORDS, quoted from `MASTER-PLAN.md`: "it WILL
+    fire (observed mean 19.8 turns, tasks at 36+)". The measured 276-turn maximum is the falsifier
+    for the never-big-enough reading, and it is the reason this shard exists rather than a note.
+
+    ID PROVENANCE. `refs/rmd-id/W1-T2245` resolves to
+    6298cd5088fe388a67c849fcac52bc8bdca8d5e4, authored `cao825@Craigs-Mac-mini`, reserved through the
+    repo's own allocator — an orphan `commit-tree` over the empty tree pushed with a PLAIN refspec,
+    CREATED on the first attempt, which is the evidence the id was free.
+
+    EIGHT SURFACES SWEPT, EACH WITH A CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, AND THE FETCHED REF
+    COUNT VERIFIED AGAINST THE REMOTE FIRST (141 heads and 363 `refs/rmd-id/*` on origin, 141 and 363
+    fetched — MATCH, so a zero here is a real absence and not a short fetch). Shards on main 0
+    (control W1-T2240 = 1); whole tree on main 0 (control 1); every origin ref 0 (control 2); remote
+    head names 0 (control, all heads read); commit messages on main 0 (control 1); reservation MINE;
+    merged-PR trailers 0 read from squash-merge commit BODIES on main (control 571 trailers, W1-T1268
+    specifically 2); the 25 newest PR heads 0 (control W1-T2240 = 1).
