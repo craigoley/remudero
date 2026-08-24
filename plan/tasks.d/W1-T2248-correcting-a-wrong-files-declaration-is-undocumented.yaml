@@ -1,0 +1,145 @@
+- id: W1-T2248
+  title: "A merged shard's `files:` can be provably wrong and nothing detects it before the risk judge does after the fact — and the exit already exists, because Rule 21's linter compares `acceptance` only and has never looked at `files:`, so the fix is a documented procedure rather than a new gate or a hole punched in Rule 21"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (231f6b80b924837d03af6a270616fe1785b0d2b0), clone shallow-checked `false`. Files over 1 MB read
+    through git objects. No poller, no spawning verb. One single-test run was executed as the
+    experiment below and its tree was restored and re-verified clean.
+
+    (1) THE LIVE INSTANCE, REPRODUCED BY EXPERIMENT RATHER THAN ASSERTED. W1-T2218 declares
+    `files: [src/lib/serve.ts, test/console-shell-unknowns.test.ts]`. Its build (#2738, head
+    eae2493f) changes THREE files, the third being `test/serve.live-state.test.ts` (+11/-6),
+    undeclared. RESTORING THE MERGE-BASE VERSION OF THAT FILE AGAINST THE BRANCH'S `src/` FAILS:
+
+      not ok 1 - GitHub-gateway outage: the board is VISIBLY stamped 'GitHub unreachable since <t>' …
+      The input did not match the regular expression /GitHub unreachable since/. Input:
+      'GitHub unreachable — no GitHub read has completed since this page loaded (…) — statuses may be stale'
+
+    Restoring the branch's own version passes 1/1 and the tree returns clean. CONTROL: the same
+    single test at the branch head, before any substitution, passes. So the omission is not a
+    tidiness question — the task cannot ship without editing that file, and its declaration says
+    otherwise.
+
+    (2) A SECOND INSTANCE THE SAME NIGHT, AND IT NAMES THE ONLY GATE THAT CATCHES THIS. #2773
+    (W1-T2226) touched `src/run-task.ts` plus THREE test files while declaring two; the RISK JUDGE
+    escalated it as `issues/2774` (open), naming `test/branch-reaper-dry-run.test.ts` and
+    `test/reap-cadence.test.ts` as undeclared, on the description and file list alone with no diff
+    read. THE JUDGE IS THE ONLY THING THAT SEES THIS, and it sees it at PR time — after the shard,
+    and its declaration, are already on main and already being read by dispatch.
+
+    (3) Q1 — THE EXIT ALREADY EXISTS, AND THE PREMISE THAT IT DOES NOT IS WRONG AT THE SOURCE.
+    RE-DERIVED: `postMergeAmendmentViolations` (`src/lib/task-linter.ts`) computes
+    `criteriaAdded(ctx.baseAcceptance, task.acceptance ?? [])` and returns violations ONLY from
+    ADDED ACCEPTANCE CRITERIA. IT NEVER READS `files:`, `title` OR `status:` AT ALL. Its four early
+    returns are: no context, unresolvable status, not merged, and no criteria delta. The sibling
+    guard `criterionFieldTampered` (`src/lib/review.ts`) walks the diff for `claim:`/`proof:`/
+    `satisfied_by:` lines — acceptance again — and `rule15FilingViolation` fires only on a task
+    declaring a task-record file alongside out-of-plan paths.
+
+    SO NOTHING IN THIS REPO BLOCKS CORRECTING A MERGED SHARD'S `files:`. A plan-only, human-authored
+    amendment that edits the declaration passes every gate today. The "acceptance, files:, title,
+    status: byte-identical" formulation is a CONVENTION carried in operator briefs and enforced by
+    hand; it is not what the linter does. THAT IS THE FINDING: the procedure exists, is legal, and
+    is written down nowhere an author would look.
+
+    AND IT HAS BEEN EXERCISED, THOUGH NOT FOR THIS. Scanning the 400 most recent commits touching
+    `plan/tasks.d/`, FIVE modified an existing `files:` line. Sampled, they are IMPLEMENTATION PRs
+    editing their own shard mid-build (e.g. W1-T500's own build editing
+    `W1-T500-write-tier-enforcement-is-off.yaml`), not deliberate post-hoc corrections of a wrong
+    declaration. So the mechanism has precedent; the USE this task is about has none.
+
+    OTHER CANDIDATE EXITS, CHECKED AND REPORTED. `plan.ts` carries a `retirement:` field with
+    reasons `retired | closed | withdrawn`, and `plan_refs` already exists as a pointer. Either can
+    RECORD a superseding correction without editing the declaration. Neither is wrong; both are
+    heavier than the direct amendment, and neither is documented for this purpose either.
+
+    THEREFORE THIS IS A DOCUMENTATION TASK AND THE SHARD SAYS SO. There is no gate to build and no
+    rule to weaken. What is missing is a written procedure, in the place an author already reads,
+    saying that a wrong `files:` on a merged shard is correctable by a plan-only amendment, what
+    evidence that amendment must carry, and what it must not touch.
+
+    (4) Q2 — SHOULD THE FIELD BE CORRECTABLE, ARGUED RATHER THAN ASSUMED. It already is, so the
+    real question is whether that should be narrowed. IT SHOULD NOT, and the cost of a wrong
+    declaration is why: W1-T171 serializes concurrent dispatch on `files:` glob intersection, so a
+    declaration that omits a file lets two lanes run concurrently on a file they both touch; and
+    W1-T2237 measured 138 of 301 merged implementation diffs exceeding their declaration, 47 of
+    those onto a `src/` path every one of which another task also declares. An immutable-and-wrong
+    `files:` poisons that consumer permanently.
+
+    THE COUNTER-ARGUMENT IS REAL AND IS NOT DISMISSED: a freely correctable `files:` is
+    indistinguishable, at the diff, from a worker widening its own declaration to match what it
+    happened to touch — which is precisely the drift Rule 21 exists to stop, and precisely what
+    #2773's judge escalated. THE RESOLUTION IS NOT A GATE BUT AN EVIDENCE REQUIREMENT: a correction
+    is admissible only when it carries a reproducible failure like §1 — the declared set, with the
+    omitted file restored to its base version, failing — because that is checkable by a reader who
+    did not run the build. A correction with no such evidence is drift wearing a correction's
+    clothes, and reads as one.
+
+    (5) THE DETECTION GAP IS NAMED HERE AND NOT SCOPED HERE. Nothing computes, at filing time or at
+    lint time, whether a declaration can possibly be sufficient — and nothing could, in general,
+    before the work is attempted. The judge catching it at PR time may be the right and only place.
+    That is a QUESTION for whoever rules on it, deliberately left out of this task's `files:` so it
+    does not become a second concern; W1-T2237 already carries the measurement it would rest on.
+  design: |
+    (i) DOCUMENT THE PROCEDURE WHERE THE AUTHOR ALREADY IS. `docs/operator-guide.md` mentions
+    neither `files:` nor Rule 21 today (measured: zero hits for `files:`), so the procedure has no
+    home. It gets one: what is guarded, what is not, and the exact shape of an admissible
+    correction.
+
+    (ii) THE PROCEDURE STATES ITS EVIDENCE REQUIREMENT AND ITS LIMITS IN THE SAME PLACE. Namely
+    that acceptance stays guarded, that a correction carries a reproducible failure, and that the
+    amendment is plan-only and human-authored.
+
+    (iii) THE FALSIFIER IS A SOURCE-TEXT ASSERTION ON THE GUIDE, the same shape the repo already
+    uses for documentation invariants, so the procedure cannot silently disappear.
+  acceptance:
+    - claim: "the operator guide states that a merged shard's declaration is correctable and names the gate that does not block it"
+      proof: "unit test: test/declared-files-correction-exit.test.ts"
+    - claim: "the guide states that acceptance remains guarded and is not made correctable by the same route"
+      proof: "unit test: test/declared-files-correction-exit.test.ts"
+    - claim: "the guide requires a correction to carry a reproducible failure rather than an assertion"
+      proof: "unit test: test/declared-files-correction-exit.test.ts"
+    - claim: "the guide states the amendment must be plan-only and human-authored"
+      proof: "unit test: test/declared-files-correction-exit.test.ts"
+    - claim: "the guide records that no rung applies a correction to its own declaration"
+      proof: "unit test: test/declared-files-correction-exit.test.ts"
+  files: [docs/operator-guide.md, test/declared-files-correction-exit.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#files-declaration-correction-exit-2026-08-24"
+  plan_refs: ["W1-T171", "W1-T180", "W1-T2237"]
+  note: |
+    RULE 21'S GUARD STAYS EXACTLY AS IT IS AND NOTHING WIDENS IT. `postMergeAmendmentViolations`
+    keeps blocking an added acceptance criterion on a merged task with no follow-up filed in the
+    same PR, keeps failing OPEN on an unresolvable derived status, and keeps its
+    `followUpFiled` escape hatch. This task adds no admissible edit to it, removes no early return,
+    and touches no field it reads. W1-T180 is cited for the follow-up requirement that escape hatch
+    serves and is not re-filed.
+
+    NO CORRECTION IS SELF-APPLIED. W1-T15 forbids a rung editing `tasks.yaml`, and nothing here
+    proposes one: the correction is authored by a person in a plan-only PR, exactly like every other
+    amendment. A rung that noticed a wrong declaration could at most REPORT it.
+
+    W1-T2237 IS CITED FOR THE COST AND IS NOT RE-FILED. Its measurement — 138 of 301 merged
+    implementation diffs exceeding their declaration, 47 onto a `src/` path every one of which
+    another task also declares — is what makes a permanently-wrong `files:` expensive rather than
+    untidy. This task does not restate its evidence as its own.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (declared-files-correction-exit, operator-guide)
+      at risk:medium — Rule 19: raise to risk:high or decompose into one task per concern The real blast radius is a documentation section and its
+    falsifier; no gate, no predicate and no runtime path changes.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/declared-files-correction-exit.test.ts`, declared in `files:` and
+    absent from this tree, so on the filing PR each resolves through W1-T456's forward-reference
+    carve-out.
