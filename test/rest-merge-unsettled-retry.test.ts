@@ -5,11 +5,15 @@
 // now runs: re-read `mergeFactsFromRest` (never sleep-and-hope), bounded, and refuse unchanged the
 // moment the predicate itself says CONFLICTING.
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
   attemptArm,
   mergeDirectRefusalMayBeUnsettled,
+  realArmDeps,
   REST_MERGE_UNSETTLED_MAX_READS,
   REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS,
   type FixRebaseMergeFacts,
@@ -233,4 +237,49 @@ test("omitting readMergeFacts skips the retry entirely — a 405 refuses exactly
   assert.equal(r.outcome, "arm-error-ignored");
   assert.deepEqual(calls, ["mergeDirect"]);
   assert.ok(said.some((s) => s.includes(`automerge.rate_limited_rest_merge_refused (W1-T1255): ${HTTP_405_PLAIN}`)));
+});
+
+// ── realArmDeps: the REAL wiring this task added, not the fixture above ────────────────────────
+// `readMergeFacts`/`sleepSync` are OPTIONAL on `ArmDeps` and every test above injects a fake for
+// each — none of them ever runs the real closure `realArmDeps()` builds. These two probes drive
+// those closures directly (a PATH-stubbed `gh`, never the live repo), the same discipline
+// `test/run-task.test.ts`'s own `realArmDeps` probe already applies to this file's siblings.
+test("realArmDeps: readMergeFacts (W1-T1280) reaches fixRebaseMergeFactsFromRest for a resolvable PR URL, and returns {} for one it cannot address", () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-stub-readmergefacts-"));
+  writeFileSync(
+    join(bin, "gh"),
+    // `readMergeFacts` -> `fixRebaseMergeFactsFromRest` -> two `gh api` reads (pulls/{n}, then
+    // compare/{base}...{head}), both routed through `ghJson`'s `-i` REST convention — this stub
+    // answers plain JSON with no `HTTP/` prefix, which `splitGhHeaderBlock` reads as body-only.
+    '#!/bin/sh\ncase "$2" in\n  repos/*/pulls/*) echo \'{"base":{"ref":"main"},"head":{"sha":"deadbeef"},"mergeable":true,"mergeable_state":"clean"}\';;\n  repos/*/compare/*) echo \'{"behind_by":0}\';;\n  *) exit 1;;\nesac\n',
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const d = realArmDeps();
+    assert.deepEqual(
+      d.readMergeFacts?.(PR),
+      { mergeable: "MERGEABLE", behindBy: 0 },
+      "a resolvable PR URL reaches the stubbed gh api reads and maps their payload",
+    );
+    assert.deepEqual(
+      d.readMergeFacts?.("not-a-pr-url"),
+      {},
+      "an unresolvable PR URL never reaches gh at all — mergeTargetFromPrUrl undefined short-circuits to {}",
+    );
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("realArmDeps: sleepSync (W1-T1280) short-circuits for ms<=0, and actually blocks via Atomics.wait for ms>0", () => {
+  const d = realArmDeps();
+  assert.doesNotThrow(() => d.sleepSync?.(0), "ms<=0 returns before reaching Atomics.wait");
+  assert.doesNotThrow(() => d.sleepSync?.(-5), "a negative ms is also treated as <=0");
+  // A tiny positive ms keeps this probe fast while still exercising the real `Atomics.wait` line
+  // — the assertion is that the call returns normally (rather than hangs or throws), proving the
+  // wait line actually ran rather than being skipped by the ms<=0 short-circuit above.
+  assert.doesNotThrow(() => d.sleepSync?.(5), "sleepSync(5) returns normally after the real Atomics.wait");
 });
