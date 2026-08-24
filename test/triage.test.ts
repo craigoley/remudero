@@ -25,7 +25,7 @@ import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { TRIAGE_WORKER_TOOLS, triageCommand } from "../src/run-task.js";
 import { escalate, renderIssueBody, type IssueGateway } from "../src/lib/escalate.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { workerTranscript, type WorkerResult } from "../src/lib/worker.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -151,6 +151,50 @@ test("parseTriageVerdict: AMBIGUOUS parses OPTION:/RECOMMENDATION: lines into th
   });
 });
 
+// ── W1-T2205: the option parse is idempotent — belt AND braces alongside workerTranscript's
+// join fix (worker.ts), because not every duplicate-OPTION source is transcript-shaped.
+
+test("parseTriageVerdict: a REPEATED OPTION line (identical label AND detail) collapses to ONE option, order preserved", () => {
+  const v = parseTriageVerdict(
+    [
+      "OPTION: cli-flag|add a --foo flag to the relevant command",
+      "OPTION: config-default|add a config default instead, no new flag",
+      "OPTION: cli-flag|add a --foo flag to the relevant command",
+      "RECOMMENDATION: cli-flag",
+      "AMBIGUOUS: does this want a CLI flag or a config default?",
+    ].join("\n"),
+  );
+  assert.deepEqual((v as { options: unknown }).options, [
+    { label: "cli-flag", detail: "add a --foo flag to the relevant command" },
+    { label: "config-default", detail: "add a config default instead, no new flag" },
+  ]);
+});
+
+test("parseTriageVerdict: OPTION lines that share a label but differ in detail are NOT collapsed — only the exact (label, detail) pair dedupes", () => {
+  const v = parseTriageVerdict(
+    [
+      "OPTION: cli-flag|add a --foo flag",
+      "OPTION: cli-flag|add a --bar flag instead",
+      "RECOMMENDATION: cli-flag",
+      "AMBIGUOUS: which flag name?",
+    ].join("\n"),
+  );
+  assert.equal((v as { options: unknown[] }).options.length, 2, "distinct details under the same label are two real choices, not a duplicate");
+});
+
+test("decideTriage: a verdict genuinely offering ONE choice twice (identical OPTION line repeated, nothing else) still fails the < 2 guard", () => {
+  const verdict = parseTriageVerdict(
+    ["OPTION: cli-flag|add a --foo flag", "OPTION: cli-flag|add a --foo flag", "RECOMMENDATION: cli-flag", "AMBIGUOUS: only one real choice here?"].join(
+      "\n",
+    ),
+  );
+  const d = decideTriage({ verdict, changedFiles: [] });
+  assert.deepEqual(d, {
+    action: "error",
+    reason: "AMBIGUOUS verdict carries 1 OPTION: line(s) — a grill needs at least 2 actionable choices",
+  });
+});
+
 test("parseTriageVerdict: an OPTION: line with no '|' detail parses to an empty detail", () => {
   const v = parseTriageVerdict("OPTION: bare-label\nRECOMMENDATION: bare-label\nAMBIGUOUS: what now?");
   assert.deepEqual((v as { options: unknown }).options, [{ label: "bare-label", detail: "" }]);
@@ -172,6 +216,39 @@ test("parseTriageVerdict: a marker mentioned mid-sentence (not line-anchored) do
 test("parseTriageVerdict: the LAST marker line wins when more than one appears", () => {
   const v = parseTriageVerdict("AMBIGUOUS: first guess\nOn reflection:\nPROPOSED: actually this is clear");
   assert.deepEqual(v, { kind: "proposed", summary: "actually this is clear" });
+});
+
+// ── W1-T2205: the join-then-parse pipeline, end to end (the FAILURE this task fixes) ────────
+//
+// `run-task.ts`'s grill path never calls `parseTriageVerdict` on `worker.text` alone — it calls
+// it on `workerTranscript(worker)`, the SAME joined shape a real dispatch parses. This proves the
+// join and the parse TOGETHER stay idempotent even when the SDK's `text`/`blocks` overlap holds
+// (measured true — see worker.test.ts's W1-T2205 tests and this task's PR body).
+
+test("workerTranscript + parseTriageVerdict + decideTriage: an AMBIGUOUS verdict with exactly two OPTION lines, run through the SAME overlapping text/blocks shape a real worker result carries, yields exactly two options and takes the grill branch", () => {
+  const verdictText = [
+    "GROUND: no existing task covers this.",
+    "OPTION: cli-flag|add a --foo flag to the relevant command",
+    "OPTION: config-default|add a config default instead, no new flag",
+    "RECOMMENDATION: cli-flag",
+    "AMBIGUOUS: does this want a CLI flag or a config default?",
+  ].join("\n");
+  // The overlapping shape: `blocks`'s own last (only) entry IS `text` — exactly what a real
+  // captured envelope carries (worker.test.ts), and exactly what `t348FakeWorker` reproduces.
+  const transcript = workerTranscript({ text: verdictText, blocks: [verdictText] });
+  const verdict = parseTriageVerdict(transcript);
+  const decision = decideTriage({ verdict, changedFiles: [] });
+  assert.equal(decision.action, "grill", "two genuinely distinct options must still reach the grill branch, not fail closed on an inflated count");
+  assert.equal((decision as { options: unknown[] }).options.length, 2, "the join must not double the OPTION count");
+});
+
+test("workerTranscript + parseTriageVerdict + decideTriage: a verdict genuinely offering ONE choice twice, run through the same overlapping shape, still fails the two-choice guard", () => {
+  const verdictText = ["OPTION: cli-flag|add a --foo flag", "OPTION: cli-flag|add a --foo flag", "RECOMMENDATION: cli-flag", "AMBIGUOUS: only one real choice?"].join(
+    "\n",
+  );
+  const transcript = workerTranscript({ text: verdictText, blocks: [verdictText] });
+  const decision = decideTriage({ verdict: parseTriageVerdict(transcript), changedFiles: [] });
+  assert.equal(decision.action, "error", "a genuinely single choice, repeated, must still fail the < 2 guard — the fix must not paper over this case");
 });
 
 // ── decideTriage ──────────────────────────────────────────────────────────────
@@ -1251,6 +1328,121 @@ test("W1-T348: a triage GRILL opens its needs-human issue WITH a validated decis
       argv,
       /File a new plan task from this feedback/,
       "the wired summarizer's headline reached the issue body, so escalateWithSummary served the grill path",
+    );
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T2205 (design note vi): THE FALSIFIER, in the direction that fails today ─────────────
+//
+// The test above deliberately overrides `blocks: []` — load-bearing there, per its own comment,
+// because the doubled join used to inflate two real options into four and fail the grill open.
+// This test does the OPPOSITE on purpose: it drives the SAME AMBIGUOUS-with-two-OPTIONS verdict
+// through the FAITHFUL `t348FakeWorker(verdictText)` shape (`blocks: [text]`, NOT `blocks: []`),
+// which is what a real captured envelope actually looks like (worker.test.ts's W1-T2205
+// measurement: `SDKResultMessage.result` IS the last assistant text block). Before this task's
+// fix, run-task.ts's hand-rolled `[worker.text, worker.blocks.join("\n")].join("\n")` doubled
+// every OPTION line here too, `validateDecisionSummary` rejected the inflated 4-option list, and
+// the grill fell back to a raw, untranslated body — this assertion (the wired summarizer's
+// headline reaching the issue) is what MUST fail against pre-fix source and MUST pass now.
+
+test("W1-T2205: a triage GRILL driven through the FAITHFUL overlapping fixture (blocks: [text], not blocks: []) still opens its needs-human issue WITH a validated decisionSummary — the join no longer inflates two real options into four", async () => {
+  const feedbackId = `fb-w1t2205-grill-${Date.now()}`;
+
+  const bare = mkdtempSync(join(tmpdir(), "w1t2205g-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: T348_GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "w1t2205g-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T348_GIT_ENV });
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n", "utf8");
+  writeFileSync(
+    join(seed, "plan", "tasks.yaml"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+  );
+  writeFileSync(
+    join(seed, "plan", "feedback", `${feedbackId}.yaml`),
+    [`id: ${feedbackId}`, "ts: '2026-08-05T00:00:00.000Z'", "raw: fixture entry for the W1-T2205 faithful-overlap GRILL proof", "attachments: []", "origin: cli", "status: new", "proposal_pr: null", ""].join("\n"),
+  );
+  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8" });
+  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "chore: seed plan"], { encoding: "utf8", env: T348_GIT_ENV });
+  execFileSync("git", ["-C", seed, "remote", "add", "origin", bare], { encoding: "utf8" });
+  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"], { encoding: "utf8", env: T348_GIT_ENV });
+  rmSync(seed, { recursive: true, force: true });
+
+  const home = mkdtempSync(join(tmpdir(), "w1t2205g-home-"));
+  const configRoot = mkdtempSync(join(tmpdir(), "w1t2205g-root-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t2205g-ghshim-"));
+  const argvLog = join(shimDir, "argv.txt");
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2));
+    process.env.HOME = home;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(configRoot, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: T348_GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    writeFileSync(
+      join(shimDir, "gh"),
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
+        'case "$*" in',
+        '  *"pr list"*) echo "[]" ;;',
+        '  *"issue create"*) echo "https://github.com/craigoley/remudero/issues/778" ;;',
+        '  *"issue list"*) echo "[]" ;;',
+        "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
+        '  *"pr diff"*) echo "" ;;',
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    await withLiveWritesAllowed(() =>
+      triageCommand([feedbackId], {
+        spawn: async (args: { cwd: string; prompt: string; tools?: string[] }) => {
+          if ((args.tools ?? []).length === 0) {
+            return t348FakeWorker(JSON.stringify(T348_SUMMARY_PAYLOAD));
+          }
+          const verdictText = [
+            "GROUND: no existing task covers this.",
+            "OPTION: cli-flag|add a --foo flag to the relevant command",
+            "OPTION: config-default|add a config default instead, no new flag",
+            "RECOMMENDATION: cli-flag",
+            "AMBIGUOUS: does this want a CLI flag or a config default?",
+          ].join("\n");
+          // THE FAITHFUL SHAPE, UNMODIFIED: `t348FakeWorker` already sets `blocks: [text]` —
+          // no override here, unlike the sibling test above. This is exactly what a real
+          // envelope carries (measured, worker.test.ts).
+          return t348FakeWorker(verdictText);
+        },
+      }),
+    ).catch(() => undefined); // bookkeeping after the issue open is not what this asserts
+
+    const argv = readFileSync(argvLog, "utf8");
+    assert.match(argv, /issue create/, "the grill path reached gh issue create");
+    assert.match(argv, /--label needs-human/, "and filed it on the needs-human lane");
+    // THE PROOF: the wired summarizer's own headline reached the issue body. Pre-fix, the
+    // doubled join inflated the two real options to four, DECISION_SUMMARY_MAX_OPTIONS (3)
+    // rejected them, validateDecisionSummary returned null, and escalateWithSummary fell back
+    // to the raw worker text — which never carries this headline string at all.
+    assert.match(
+      argv,
+      /File a new plan task from this feedback/,
+      "the wired summarizer's headline reached the issue body even through the faithful overlapping fixture",
     );
   } finally {
     process.env.HOME = savedHome;

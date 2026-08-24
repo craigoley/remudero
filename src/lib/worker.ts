@@ -285,6 +285,30 @@ export function workerFailureExcerpt(r: Pick<WorkerResult, "isError" | "stderr" 
 export const REPORT_EXCERPT_CAP = 4000;
 
 /**
+ * W1-T2205: THE ONE JOIN, ONE PLACE. `text` is documented as "Final result text (the `result`
+ * field of the SDK result message)"; `blocks` is "All assistant text blocks concatenated, in
+ * order" — and `collectWorkerResult` (worker.ts's result loop) pushes EVERY assistant text
+ * block onto `blocks`, THEN sets `text = r.result` off the terminal envelope. If the SDK's
+ * `result` is itself an echo of the last assistant text block (measured true for a real
+ * captured envelope — see this task's PR body for the citation either way), a hand-rolled
+ * `[r.text, r.blocks.join("\n")].join("\n")` carries the worker's final message TWICE. Every
+ * count-sensitive parse over that join (OPTION: lines, verdict markers, …) then silently
+ * over-counts — this function exists so that never happens more than once.
+ *
+ * Contract: SAME shape and ordering as the hand-rolled `[r.text, r.blocks.join("\n")].join("\n")`
+ * it replaces — `text` first, then `blocks` in their own chronological order — with the final
+ * message appearing EXACTLY ONCE. When `blocks`'s own last entry is not simply a repeat of
+ * `text` (the overlap does not hold, or `blocks` is empty), nothing is dropped; every existing
+ * call site's "last marker line wins" parsing therefore sees the identical text it always did,
+ * minus the duplicate.
+ */
+export function workerTranscript(r: Pick<WorkerResult, "text" | "blocks">): string {
+  const overlaps = r.blocks.length > 0 && r.blocks[r.blocks.length - 1] === r.text;
+  const blocks = overlaps ? r.blocks.slice(0, -1) : r.blocks;
+  return [r.text, ...blocks].join("\n");
+}
+
+/**
  * The capped, ledger-safe excerpt of a worker's own report — `text` + `blocks` joined, the
  * same shape run-task.ts's local `fullText` closure already builds for every parse at that
  * call site. Returns `undefined` for empty/whitespace-only input, so a truly silent no-op

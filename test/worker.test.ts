@@ -28,7 +28,9 @@ import {
   spawnWorker,
   workerKeychainGrantApps,
   workerLedgerFields,
+  workerTranscript,
 } from "../src/lib/worker.js";
+import { runReview } from "../src/run-task.js";
 
 // ── Synthetic SDK message streams ──────────────────────────────────────────
 // The real SDK yields a `type:"result"` envelope (even for an error subtype)
@@ -268,6 +270,152 @@ test("collectWorkerResult: a throw with NO result envelope is RE-RAISED (real tr
     /spawn ENOENT/,
     "a genuine spawn failure must not be silently swallowed",
   );
+});
+
+// ── W1-T2205: workerTranscript joins ONCE — the final message never counts twice ───────────
+//
+// MEASURED (this task's design note i, two real captured envelopes — a one-turn and a
+// two-turn live `query()` spawn against the actual SDK, not a guess off documentation): the
+// terminal `SDKResultMessage.result` string is byte-identical to the LAST assistant text block
+// `collectWorkerResult` already pushed onto `blocks` before it ever reads `result`. So a real
+// worker result carries its own final message twice in `blocks`/`text` — exactly what
+// `t348FakeWorker` (test/triage.test.ts) reproduces on purpose, and exactly what a hand-rolled
+// `[r.text, r.blocks.join("\n")].join("\n")` then counts twice.
+
+test("workerTranscript: a worker result whose final message also appears as its last assistant text block yields that message exactly once", () => {
+  const r = { text: "PROPOSED: file W1-T9999", blocks: ["GROUND: checked the plan first.", "PROPOSED: file W1-T9999"] };
+  const transcript = workerTranscript(r);
+  assert.equal(transcript.match(/PROPOSED: file W1-T9999/g)?.length, 1, "the overlapping final message must not double-count");
+  assert.match(transcript, /GROUND: checked the plan first\./, "the earlier, non-duplicated block still survives the join");
+});
+
+test("workerTranscript: the single-block overlap `t348FakeWorker` shape (blocks: [text]) collapses to ONE copy of the message", () => {
+  const text = "AMBIGUOUS: a or b?\nOPTION: a|pick a\nOPTION: b|pick b\nRECOMMENDATION: a";
+  const transcript = workerTranscript({ text, blocks: [text] });
+  assert.equal(transcript, text, "blocks' sole entry IS text — the join must not repeat it");
+  assert.equal(transcript.match(/^OPTION:/gm)?.length, 2, "each OPTION line appears once, not twice");
+});
+
+test("workerTranscript: text with NO overlap in blocks (the SDK fact does not hold, or blocks is empty) is still folded in — nothing is silently dropped", () => {
+  assert.equal(workerTranscript({ text: "final", blocks: ["a", "b"] }), "final\na\nb");
+  assert.equal(workerTranscript({ text: "final", blocks: [] }), "final");
+});
+
+// `runReview`'s advisory-reviewer semantic parse (run-task.ts) is the ONE `workerTranscript`
+// call site this task's fix touches that no OTHER test anywhere in the repo reaches: every
+// `runReview` test in test/review.test.ts disables the advisory-reviewer spawn via
+// `spawnReviewer: false`, because reaching it otherwise means a live SDK spawn that costs real
+// money. `reviewerQueryFn` (the injectable `queryFn` seam below, mirroring `fakeQueryFn`/
+// `capturingQueryFn` above) drives it end-to-end without spending anything.
+test("runReview (W1-T2205, end-to-end): the advisory reviewer's overlapping text/blocks reach the joined-transcript parse through a REAL spawnWorker call, exactly once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-runreview-e2e-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-runreview-e2e-gh-"));
+  const oldPath = process.env.PATH;
+  const oldClaudeBinOverride = process.env[CLAUDE_BIN_ENV_OVERRIDE];
+  const oldOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  try {
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }), "utf8");
+    const ledgerPath = join(root, "ledger.ndjson");
+
+    // `runReview` has no keychain-override seam of its own, so its `spawnWorker` call runs the
+    // REAL non-darwin credential-file preflight (`assertWorkerCredentialFile`, worker-home.ts)
+    // against the process's real HOME. That preflight's own documented precedence accepts a
+    // non-empty `CLAUDE_CODE_OAUTH_TOKEN` as an authenticated worker regardless of what the
+    // `.credentials.json` file says — set here so this test is deterministic on a CI runner with
+    // no such file (this repo's own `ci` job measured that shape), not merely on a host that
+    // happens to already carry a real credential on disk. Never a real secret — the injected
+    // `reviewerQueryFn` above means the value is never sent anywhere.
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "test-token-never-sent-reviewerQueryFn-intercepts-the-spawn";
+
+    // `runReview`'s own `spawnWorker` call takes no `claudeExecutable` override (unlike
+    // `e2eSpawnWorkerArgs` above), so `resolveClaudeExecutable` runs its REAL preflight —
+    // deterministic here via the env-override candidate (checked FIRST, before any live PATH
+    // lookup) rather than depending on whatever `claude` binary the host running this suite
+    // happens to have. `--version` must exit 0 for `defaultCanExecute` to accept it; the fake
+    // `queryFn` above means this binary is never actually EXECUTED as a worker, only preflighted.
+    const fakeClaude = join(binDir, "claude");
+    writeFileSync(fakeClaude, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeClaude, 0o755);
+    process.env[CLAUDE_BIN_ENV_OVERRIDE] = fakeClaude;
+
+    // Only what runReview's own plumbing (readHeadShaRest, postReviewPending, `gh pr diff`,
+    // the terminal status post) needs before it ever reaches the reviewer spawn — same shape
+    // as test/review.test.ts's own `runReview` fixtures, trimmed to what this test touches.
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "api "*)
+    case "$*" in
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0002"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr view")
+    case "$*" in
+      *headRefOid*) echo '{"headRefOid":"cafebabe0002"}' ;;
+      *state*) echo '{"state":"OPEN"}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") echo "" ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    // The overlapping shape MEASURED for a real envelope (worker.test.ts above, this task's
+    // design note): the terminal `result` string is byte-identical to the last assistant text
+    // block `collectWorkerResult` already pushed onto `blocks`. This queryFn reproduces that
+    // shape on purpose — a hand-rolled double join would parse this REVIEW_VERDICT line off a
+    // string carrying it twice; `workerTranscript` must not let that change the outcome.
+    const verdictText = "REVIEW_VERDICT 1: FAIL";
+    const reviewerQueryFn = (() => {
+      return (async function* () {
+        yield { type: "assistant", message: { content: [{ type: "text", text: verdictText }] } };
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: verdictText,
+          session_id: "s-reviewer-e2e",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+        };
+      })();
+    }) as unknown as Parameters<typeof runReview>[0]["reviewerQueryFn"];
+
+    let reviewerLedgered: Record<string, unknown> | undefined;
+    const verdict = await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/1",
+      task: { id: "W1-T2205", acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-xyzzy" }] },
+      report: "This report deliberately substantiates nothing.",
+      settingsFile: join(root, "settings.json"),
+      config: { claudeBin: "/bin/true", root } as never,
+      log: (step: string, extra?: Record<string, unknown>) => {
+        if (step === "review.reviewer") reviewerLedgered = extra;
+      },
+      say: () => {},
+      account: (r: never) => r,
+      spawnReviewer: true,
+      reviewerQueryFn,
+      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+      ledgerPath,
+      runId: "RUNREVIEW-E2E-1",
+    } as never);
+
+    assert.ok(reviewerLedgered, "the advisory reviewer actually spawned and ledgered — the injected queryFn was really reached");
+    assert.equal(reviewerLedgered!.downgrades, 1, "exactly ONE downgrade — the overlapping text/blocks must not double-count the REVIEW_VERDICT line");
+    assert.equal(verdict.reviewerOutcome, "success", "the injected reviewer completed, not just attempted");
+  } finally {
+    process.env.PATH = oldPath;
+    if (oldClaudeBinOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];
+    else process.env[CLAUDE_BIN_ENV_OVERRIDE] = oldClaudeBinOverride;
+    if (oldOauthToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    else process.env.CLAUDE_CODE_OAUTH_TOKEN = oldOauthToken;
+  }
 });
 
 // ── W1-T6: NDJSON ledger + context telemetry + brain-plane calls ───────────

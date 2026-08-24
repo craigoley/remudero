@@ -275,15 +275,27 @@ export type TriageVerdict =
  * choices (escalate.ts's `EscalationOption[]` shape), mirroring `rmd escalate --option`'s CLI
  * parsing (run-task.ts's `parseOptionFlags`). Only meaningful when the verdict resolves to
  * AMBIGUOUS (decideTriage validates count/shape there); harmless if unused otherwise.
+ *
+ * W1-T2205: IDEMPOTENT on the `(label, detail)` pair — belt AND braces alongside
+ * {@link "./worker.js".workerTranscript}'s join fix, because not every duplicate-OPTION source
+ * is transcript-shaped (a model restating its own choices, or quoting the prompt's own OPTION
+ * examples back, doubles a line with no join involved). Order is preserved and the FIRST
+ * occurrence of a pair wins; a genuinely single choice repeated verbatim still collapses to one
+ * option, so {@link decideTriage}'s `< 2` guard still fires for it exactly as it must.
  */
 function parseGrillOptions(text: string): EscalationOption[] {
-  return [...text.matchAll(/^[ \t]*OPTION[ \t]*:[ \t]*(.+)$/gim)].map((m) => {
+  const seen = new Set<string>();
+  const options: EscalationOption[] = [];
+  for (const m of text.matchAll(/^[ \t]*OPTION[ \t]*:[ \t]*(.+)$/gim)) {
     const raw = m[1].trim();
     const sep = raw.indexOf("|");
-    return sep >= 0
-      ? { label: raw.slice(0, sep).trim(), detail: raw.slice(sep + 1).trim() }
-      : { label: raw, detail: "" };
-  });
+    const option = sep >= 0 ? { label: raw.slice(0, sep).trim(), detail: raw.slice(sep + 1).trim() } : { label: raw, detail: "" };
+    const key = JSON.stringify([option.label, option.detail]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    options.push(option);
+  }
+  return options;
 }
 
 /** The LAST `RECOMMENDATION: <label>` line — {@link decideTriage} fails loud unless it matches
