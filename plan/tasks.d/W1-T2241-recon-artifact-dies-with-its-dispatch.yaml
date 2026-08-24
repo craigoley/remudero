@@ -1,0 +1,160 @@
+- id: W1-T2241
+  title: "A RECON THAT DIES WITH ITS DISPATCH IS PAID FOR AGAIN — the plan already proposes the artifact and this is its mint, not a new idea; and the key it proposes is stricter than its own invalidation rule, so almost nothing would survive it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    **THIS IS A MINT OF AN EXISTING PROPOSAL, NOT A NEW IDEA.** `MASTER-PLAN.md` already states the
+    defect, prices it, proposes the mechanism, and writes the falsifier. Read by line rather than by
+    grep, :1861-1862 says it in terms: recon output is specified as **TTL'd**, "nothing survives the
+    run that produced it, so a task whose first N dispatches die before opening a PR pays the full
+    read cost N+1 times." :1867-1871 proposes that "a recon run's OBSERVED/INFERRED/COULDN'T-VERIFY
+    output persists as a task-scoped artifact keyed `(task_id, plan_sha, head_sha)`; the next dispatch
+    of the SAME task loads it and is instructed to VERIFY-AND-EXTEND rather than re-derive; the
+    artifact INVALIDATES automatically when `plan_sha` or the task's declared `files:` change."
+    :1863-1864 says why it is not a new P-number — "P38's missing write path with the audience changed
+    from the corpus to the next dispatch" — and :1865-1866 says why it is separate from Task A. What
+    was missing was a task id, and that is all this shard supplies.
+
+    **THE PLAN ALSO WROTE THE FALSIFIER, SO NONE IS INVENTED HERE.** :1872-1876, verbatim in shape: a
+    seeded second dispatch with a valid prior artifact "receives it in-prompt and its ledger line
+    reads `recon.reused`"; the same dispatch after a `plan_sha` change "receives NOTHING and reads
+    `recon.invalidated(plan_sha)`"; a first dispatch reads `recon.absent` — "never a silent empty,
+    which is P48(ii) applied to this organ"; and a task whose artifact exists but whose declared
+    `files:` moved is invalidated, not reused. CONTROL ON THOSE NAMES: `recon.reused`,
+    `recon.invalidated` and `recon.absent` occur ZERO times in `src/`, while the step names this organ
+    actually emits today — taken from source, never guessed — are `recon.done`, `recon.retry` and
+    `recon.degraded`. So the falsifier's vocabulary is future, and the reader can tell.
+
+    **Q1 — THE COST, AND WHAT THIS CONTAINER CANNOT MEASURE.** The join the question asks for —
+    `recon.done` against `run.start` by `task_id` over a named window — CANNOT BE RUN HERE, and the
+    refusal is precise rather than a shrug. `resolveLedgerUnion` was pointed at the STATE DIR
+    (`/root/Remudero/state`) and, as a control, at the checkout; BOTH return `archiveCount 0,
+    ok=false` for every step queried, so the resolver refuses rather than answering from the live
+    file. That live file is 281 lines carrying exactly TWO distinct steps, `cli.invoked` and
+    `next_task_id.reserve` — this container's own CLI exhaust, with zero rotations. The daemon corpus
+    is on another host. **NO LEDGER FIGURE IS QUOTED.**
+
+    **WHAT IS QUOTED IS THE PLAN'S OWN MEASUREMENT, ATTRIBUTED.** :1877-1880: R16-4 pre-registered
+    runs-per-shipped-task among multi-run tasks at "2.67 → < 2.0", conditioned on this task shipping.
+    The R17 update scores that UNRESOLVABLE because the task was never built, and records that the
+    observed figure ROSE: "26 runs / 9 multi-run shipped tasks = 2.89". :1853-1860 carries the
+    harvest behind it — three separate W1-T342 runs each independently filing the same sentence about
+    reading two test files in full; four W1-T343 runs each filing the same "dependencies are all
+    merged and unblocked" bullet, three of them re-deriving the same `dispatchLanes` conflict from
+    scratch; W1-T353's two runs both filing "this recon only confirms scope."
+
+    **AND THE HONEST READING OF THAT FIGURE IS NARROWER THAN IT LOOKS.** Nine multi-run shipped tasks
+    is a small denominator, the R17 note names its own confound (lanes went live that cycle), and the
+    figure counts RUNS, not recon cost specifically. So this is not a large measured saving; it is
+    **cheap insurance against a repetition the harvest shows is verbatim**. Saying that plainly is
+    better than inflating it, and if a later measurement over the real corpus shows the re-dispatch
+    rate is low, that is an argument about size and not about whether the duplication is real.
+
+    **Q2 — THE KEY AS PROPOSED IS STRICTER THAN THE PROPOSAL'S OWN INVALIDATION RULE, AND ALMOST
+    NOTHING WOULD SURVIVE IT.** Measured on `origin/main` over a 7-day window:
+
+      key component                     changes/7d   median gap
+      head_sha (any commit to main)     570          508 s
+      plan_sha (any commit to plan/)    334          875 s
+      the task's own declared files:    ~1.0 per shard, ever
+
+    Against that, the window an artifact must survive is at minimum a full dispatch: PR open→merge
+    alone has a median of 1,236 s across 98 merged PRs, and that EXCLUDES recon and implement before
+    the PR opens. The window that actually matters — a dispatch dying, then the task being
+    re-dispatched — is longer still. **WITH `head_sha` IN THE KEY, AN ARTIFACT IS INVALIDATED BY THE
+    FIRST UNRELATED MERGE, AND ONE ARRIVES EVERY 508 SECONDS.** Essentially none survive. `plan_sha`
+    is only 1.7× looser and does not rescue it.
+
+    **THE PROPOSAL ALREADY CONTAINS THE LOOSER KEY; THE TRIPLE CONTRADICTS IT.** In the block at
+    :1853-1882, `head_sha` appears ONCE — only inside the key — while `plan_sha` appears three times,
+    and the INVALIDATION sentence at :1869-1870 names "`plan_sha` or the task's declared `files:`" and
+    **never mentions `head_sha` at all**. The `files:` component is the one that survives: across 60
+    sampled shards on main, the mean number of commits touching each is **1.00**, and 60 of 60 were
+    touched exactly once — a task's declared scope is effectively stable for its lifetime. So the
+    remedy is not a new design, it is deleting `head_sha` from the key so the key matches the
+    invalidation rule the same paragraph already states. **KEYING ON `(task_id, plan_sha,
+    files_digest)` IS THE PROPOSAL'S OWN SENTENCE; THE TRIPLE IS THE TYPO.** With `head_sha` retained,
+    the answer to "is it worth building" is NO, and that is a real answer rather than a hedge.
+
+    **Q3 — WHAT MUST NOT CHANGE.** RECON STILL RUNS WHEN THE KEY MISSES: a miss is `recon.absent` and
+    a full recon, never a degraded prompt and never a silent empty — the plan's own P48(ii) clause.
+    THE ARTIFACT IS EVIDENCE, NOT AUTHORITY: the next dispatch is instructed to VERIFY-AND-EXTEND, so
+    a claim it carries is a starting point to confirm, not a fact to build on. **AND NOTHING PROMOTES
+    AN ARTIFACT'S CLAIM INTO A PROMPT WITHOUT THE PROVENANCE CONTRACT** — `MASTER-PLAN.md:3042`, read
+    by line: "`RECON REPORT` — OBSERVED (command + output), INFERRED, COULDN'T-VERIFY. Prompts may
+    cite only OBSERVED." An artifact that flattened those three bands into undifferentiated text
+    would let an INFERRED claim reach a prompt as though observed, which is a worse failure than
+    re-deriving the recon.
+
+    **EXTERNAL RATIFICATION, ATTRIBUTED AND NOT QUOTED.** Anthropic's "Effective harnesses for
+    long-running agents" describes an initializer agent writing a structured progress artifact and a
+    coding agent that wakes, does one unit, tests, notes and commits — the same shape as this
+    proposal, and evidence that the problem is general rather than local to this fleet. **THE PAGE
+    COULD NOT BE FETCHED FROM THIS CONTAINER**: egress refused with `curl: (56) CONNECT tunnel failed,
+    response 403`. It is therefore attributed from the operator's description and NOT quoted, because
+    a quotation not read is a fabrication.
+  acceptance:
+    - claim: "a second dispatch of a task with a valid prior recon artifact receives it in-prompt and the reuse is ledgered under its own step"
+      proof: "unit test: test/recon-artifact-reuse.test.ts"
+    - claim: "a first dispatch with no artifact runs a full recon and records absence explicitly rather than a silent empty"
+      proof: "unit test: test/recon-artifact-reuse.test.ts"
+    - claim: "an artifact whose plan sha or declared files have moved is invalidated and the next dispatch re-derives"
+      proof: "unit test: test/recon-artifact-reuse.test.ts"
+    - claim: "the artifact preserves the observed, inferred and could-not-verify bands as distinct, so a prompt can cite only observed"
+      proof: "unit test: test/recon-artifact-reuse.test.ts"
+    - claim: "a reused artifact is offered as evidence to verify and extend, never as an authority the next dispatch may build on unchecked"
+      proof: "unit test: test/recon-artifact-reuse.test.ts"
+  files: [src/run-task.ts, src/lib/worker.ts, test/recon-artifact-reuse.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#recon-artifact-dies-with-its-dispatch-2026-08-24"
+  plan_refs: ["W1-T2237"]
+  note: |
+    **`files:` IS DRAWN AGAINST THE DEFECT, NOT THE DIFF I EXPECT.** The organ spans more than one
+    file and the declaration says so: `recon.done` is logged from `src/run-task.ts`, the recon prompt
+    is rendered there, and the OBSERVED/INFERRED/COULDN'T-VERIFY contract is parsed in
+    `src/lib/worker.ts` — a change that persists those bands cannot be confined to the dispatcher.
+    W1-T2237 measured 138 of 301 merged diffs exceeding their declaration, and #2519 shows the
+    opposite failure: a fix CONFINED by an under-drawn one. Declaring the parser alongside the
+    dispatcher costs nothing if untouched and prevents the confinement.
+
+    **THE PROOF PATH DOES NOT YET EXIST, WHICH IS THE POINT.**
+    `test/recon-artifact-reuse.test.ts` is absent from the tree, and `files:` is a BARE SINGLE-LINE
+    list so `SHARD_FILES_LINE_RE` matches and the forward-reference exemption applies — a block-style
+    list would silently forfeit it. **THE FALSIFIER FOR THAT EXEMPTION MUST DISCRIMINATE:** a
+    `check-proof` run against a NON-EXISTENT control path reads `hits: 0` exactly like the target, so
+    it proves nothing; the discriminating control is an EXISTING path such as `test/plan.test.ts`,
+    which resolves to real tests, against the declared path which does not.
+
+    **RISK BAND — BOTH READINGS.** SPAN: `files:` crosses `src/` and `test/` and names two source
+    files, so Rule 19's span reading is `high`. The band EXEMPTS the sizing check rather than clearing
+    it — `sizingViolation` returns `undefined` outright at `high` — so a clean lint is not evidence
+    the span was vetted. BLAST RADIUS: narrower — one artifact written at the end of recon, one read
+    at dispatch, one invalidation predicate. The danger is Q3's, not the span's.
+
+    **MEASUREMENT PROVENANCE.** Host `vm`, `/usr/bin/bash`, uid 0. Scratch worktree at a fresh path
+    outside `/tmp`, `HEAD == origin/main` proven by sha, `--is-shallow-repository` false (2140
+    commits) checked before any history query, removed after. Fetched `refs/rmd-id/*` verified at
+    363 local against 363 remote BEFORE sweeping. `src/run-task.ts` is 1,533,033 bytes — over the
+    Contents API's 1 MB cap, where it returns an empty body that greps to a clean zero — so every
+    figure from it was read through git objects. MASTER-PLAN lines were read BY LINE NUMBER, not by
+    grep output. Every GitHub read was guarded on curl's exit code and a non-null JSON body, never a
+    size floor.
+
+    **ID PROVENANCE — UNUSED, NOT OWNED.** `refs/rmd-id/W1-T2241` exists against a namespace of 363.
+    **ITS ANCHOR WAS DELIBERATELY NOT CHECKED**: the id was minted through the allocator on another
+    host, so its anchor cannot match this one, and refusing on that basis is how four lanes stalled
+    against valid reservations today. What was verified is that the id is UNUSED on all eight
+    surfaces, each control pre-qualified on its own surface: reservation ref 1 of 363; shard
+    filenames on main 0 (control `W1-T2204` = 1); `- id:` lines 0 (control = 1); open-PR titles 0
+    (control `W1-T` = 2 across 4 open PRs); open-PR head branches 0 (control `run-*` = 89); open-PR
+    file lists 0 across 4 of 4 heads enumerated and captured, control 11 file entries; anchored
+    merged trailers 0 (control `W1-T2219` = 1 across 98 merged); merged subjects 0 (control
+    `(W1-T2204)` = 2 across 2140). THE SUBJECT WAS SWEPT TOO: `recon.*artifact`, `recon.*cache`,
+    `plan_sha.*head_sha`, `recon.*re-dispatch` and `progress artifact` all read 0 across
+    `plan/tasks.d/`, against a control of 323 shards mentioning `recon`. Nothing is already filed.
