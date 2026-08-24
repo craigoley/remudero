@@ -10,10 +10,10 @@ import { classifyPushFailure } from "./task-id-reservation.js";
  * open PR or a pushed `run-<id>-<epoch>` branch. Neither exists at the moment a lane, OR AN
  * OPERATOR dispatching beside the fleet, decides to start a task. Two starts inside that window
  * both read nothing published and both spend a run — MEASURED 2026-08-23:
- * `run-W1-T1265-1787503038601` (#2625) and `run-W1-T1265-1787503092377` (#2626) branched
- * 53.776 SECONDS apart, both having correctly found no open PR, no pushed branch, and no
- * inflight lock (the same-host guard, `inflight-lock.ts`, cannot see a foreign host's pid — that
- * is the strictly cross-host, strictly pre-artifact gap this closes).
+ * TWO LANES — #2625 and #2626 — branched 53.776 SECONDS apart, both having correctly found no
+ * open PR, no pushed branch, and no inflight lock (the same-host guard, `inflight-lock.ts`,
+ * cannot see a foreign host's pid — that is the strictly cross-host, strictly pre-artifact gap
+ * this closes).
  *
  * WHAT THIS ADDS, AND WHAT IT DOES NOT. A claim is taken BEFORE any spend — see `run-task.ts`'s
  * dispatch-claim seam — the same position `decideTriageClaim` occupies ahead of the Architect
