@@ -3011,6 +3011,44 @@ function stripQuotedRegions(report: string): { scan: string; fenceUnbalancedAtEo
 }
 
 /**
+ * Does an enumeration TOKEN correspond to a member of `diffFiles` (W1-T2224)? Replaces a shape
+ * guess ("does the token look like a path, then does it exactly equal a member") with a contract
+ * check against `diffFiles` itself — the thing the caller already holds and the token is actually
+ * being judged against.
+ *
+ * THE THIRD FALSE POSITIVE ON THE SAME LINE. `looksLikePath` (any `.` or `/`) plus exact-string
+ * `includes` already needed two patches for two wrappers: backticks (PR #1192, W1-T288) and a
+ * trailing paren (PR #1209, W1-T304), both REAL, CORRECTLY-enumerated paths whose exact TEXT
+ * stopped matching once something else was pasted around them. A compact diffstat token — a
+ * numstat triple, a `--stat` line joined by a `|`, a path with a trailing `+N/-M` — is the same
+ * shape of failure: the real path is still IN the token, just with extra characters glued to one
+ * end, and no fixed strip class can anticipate every glue the next body will use.
+ *
+ * THREE WAYS A TOKEN NAMES A REAL FILE, each checked against `diffFiles` rather than inferred from
+ * punctuation:
+ *   (a) EXACT — the token (after the existing wrapper-strip) IS a `diffFiles` member;
+ *   (b) SUFFIX/BASENAME — the token is the final path segment, or a trailing path suffix, of
+ *       EXACTLY ONE `diffFiles` member — the shorthand a body writes when it drops the leading
+ *       directories ("review.ts" for "src/lib/review.ts");
+ *   (c) EMBEDDED — EXACTLY ONE `diffFiles` member appears INTACT inside the token — the shape a
+ *       diffstat token takes when it is pasted NEXT TO, rather than instead of, the real path
+ *       ("12/3/src/lib/review.ts", "src/lib/review.ts|12+++++-----").
+ * "Exactly one" in (b) and (c): an AMBIGUOUS match (two different `diffFiles` members both fit)
+ * is treated as no match at all — silence over a wrong guess, never the reverse.
+ *
+ * A token matching NONE of these is a genuinely wrong (or unrelated, e.g. a bare version number)
+ * name and still contradicts — test/count-arm-diffstat-token.test.ts's "genuinely wrong file" case,
+ * and test/body-contradicts-diff.test.ts's `NOT-IN-DIFF.ts`/`ABSENT.ts` fixtures, both unchanged.
+ */
+function enumeratedTokenMatchesChangeset(token: string, diffFiles: readonly string[]): boolean {
+  if (diffFiles.includes(token)) return true;
+  const bySuffix = diffFiles.filter((f) => f === token || f.endsWith(`/${token}`));
+  if (bySuffix.length === 1) return true;
+  const byEmbed = diffFiles.filter((f) => f.length > 0 && token.includes(f));
+  return byEmbed.length === 1;
+}
+
+/**
  * THE NARROW, FALSIFIABLE CHECK (W1-T274). Two PRs merged THIS WEEK on bodies
  * that contradicted their own diffs — #974 claimed "exactly one file:
  * MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md" over a 3-file
@@ -3110,6 +3148,13 @@ export function recognizeChangesetClaims(report: string, diffFiles: string[]): C
       // A single character class from each end handles quoting and punctuation in either order,
       // which is what makes it robust to the next wrapper rather than to the two seen so far.
       // `looksLikePath` still requires a `.` or `/`, so an over-strip cannot invent a match.
+      //
+      // MEMBERSHIP ITSELF IS A CONTRACT CHECK, NOT A THIRD WRAPPER (W1-T2224). The strip above
+      // still only removes a known class of QUOTING/BRACKETING punctuation; a compact diffstat
+      // token (a numstat triple, a `--stat` line joined by `|`, a trailing `+N/-M`) is not quoted
+      // or bracketed — the real path is glued to unrelated characters that no strip class should
+      // chase. {@link enumeratedTokenMatchesChangeset} decides by what `diffFiles` actually
+      // contains instead: see its own doc for why an unmatched token still contradicts.
       const named = m[2]
         .split(",")
         .map((s) =>
@@ -3119,7 +3164,7 @@ export function recognizeChangesetClaims(report: string, diffFiles: string[]): C
             .replace(/[`'")\].,;:\s]+$/, ""),
         )
         .filter(looksLikePath);
-      contradicted = named.some((f) => !diffFiles.includes(f));
+      contradicted = named.some((f) => !enumeratedTokenMatchesChangeset(f, diffFiles));
     }
     if (contradicted) out.push({ claim: m[0].trim(), files: [...diffFiles] });
   }
