@@ -260,6 +260,55 @@ export function parseJudgeVerdict(text: string): JudgeVerdict {
   return { state, recommendation, confidence, evidence };
 }
 
+// ── The third state (W1-T2225, mirrors risk-judge.ts's W1-T2212 shape): an
+// unreadable judge response is NOT a verdict ───────────────────────────────
+
+/**
+ * What the judge's raw output resolves to: either a real, parsed {@link JudgeVerdict}, or —
+ * when the output carries no parseable `JUDGE_STATE`/`JUDGE_RECOMMENDATION` — a DISTINCT
+ * `unreadable` arm that carries no `state` field at all, so it structurally cannot be mistaken
+ * for (or coerced into) a genuine `off_track` classification. This is deliberately NOT a
+ * `JudgeVerdict` with a synthesized state: `risk-score.ts`'s
+ * `RiskTaskMetadata.flightJudgeState` is typed {@link JudgeState} (the five real classifications
+ * only), so a real caller forwarding this arm has no `JudgeState` value to hand it — the type
+ * refuses the assignment before any run could store "could not read the judge" as though it were
+ * a genuine classification (see `test/flight-judge-unparseable-third-state.test.ts`).
+ */
+export type JudgeParseOutcome =
+  | { kind: "parsed"; verdict: JudgeVerdict }
+  | { kind: "unreadable"; raw: string; evidence: string[] };
+
+/**
+ * The third-state-aware parse ({@link JudgeParseOutcome}). {@link parseJudgeVerdict} above is
+ * UNCHANGED (byte-identical — still collapses an unparseable response into
+ * {@link FAIL_CLOSED_VERDICT}'s `off_track`/`escalate`/confidence-1 shape) so nothing that
+ * already depends on its one-shot `JudgeVerdict` contract is disturbed; a real caller that must
+ * keep an unreadable response OUT of the classification union uses this one instead.
+ */
+export function parseJudgeResponse(text: string): JudgeParseOutcome {
+  const stateMatch = text.match(/JUDGE_STATE:\s*(\w+)/i);
+  const recMatch = text.match(/JUDGE_RECOMMENDATION:\s*(\w+)/i);
+  const confMatch = text.match(/JUDGE_CONFIDENCE:\s*([\d.]+)/i);
+
+  const state = stateMatch?.[1]?.toLowerCase() as JudgeState | undefined;
+  const recommendation = recMatch?.[1]?.toLowerCase() as JudgeRecommendation | undefined;
+  if (!state || !VALID_STATES.has(state) || !recommendation || !VALID_RECOMMENDATIONS.has(recommendation)) {
+    return {
+      kind: "unreadable",
+      raw: text,
+      evidence: ["judge output carried no parseable JUDGE_STATE/JUDGE_RECOMMENDATION verdict — failing closed"],
+    };
+  }
+
+  let confidence = confMatch ? Number(confMatch[1]) : 0;
+  if (!Number.isFinite(confidence)) confidence = 0;
+  confidence = Math.min(1, Math.max(0, confidence));
+
+  const evidence = [...text.matchAll(/JUDGE_EVIDENCE:\s*(.+)/gi)].map((m) => m[1].trim());
+
+  return { kind: "parsed", verdict: { state, recommendation, confidence, evidence } };
+}
+
 // ── The deterministic controller (Standing rule 12: judgment is advisory,
 // supervision/action is deterministic) ─────────────────────────────────────
 
@@ -361,6 +410,34 @@ export function planJudgeAction(
     };
   }
   return natural;
+}
+
+/**
+ * {@link planJudgeAction}'s counterpart for {@link JudgeParseOutcome} (design (i)): the
+ * `unreadable` arm is handled BEFORE any `JudgeVerdict` exists, so it never reaches
+ * `planJudgeAction`/`naturalAction` and can never be confused with a genuine `off_track`
+ * classification. It STILL halts and STILL escalates (design (iii): the fix changes what the
+ * value is called and what the type admits, never whether the run is allowed to continue) —
+ * unconditionally, on every invocation, independent of the K-cap (an unreadable response is
+ * already terminal; there is nothing to defer). A `parsed` outcome delegates to
+ * {@link planJudgeAction} unchanged.
+ */
+export function planJudgeActionForOutcome(
+  state: FlightJudgeState,
+  outcome: JudgeParseOutcome,
+  config: FlightJudgeConfig,
+): ControllerAction {
+  if (outcome.kind === "unreadable") {
+    const next: FlightJudgeState = { ...state, invocations: state.invocations + 1 };
+    return {
+      kind: "halt_and_escalate",
+      reason:
+        "judge output carried no parseable verdict — failing closed; halts and escalates exactly " +
+        "like a genuine adverse classification, but is never stored as one",
+      state: next,
+    };
+  }
+  return planJudgeAction(state, outcome.verdict, config);
 }
 
 // ── The DI orchestrator: spawn the judge, then let the controller act ─────
