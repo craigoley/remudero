@@ -1,0 +1,181 @@
+- id: W1-T2226
+  title: "THE BRANCH-GUARD DRIFT ALARM COMPARES IN ONE DIRECTION FROM ONE ENUMERATION, SO IT IS BLIND AT BOTH ENDS — a citation to a deleted branch never enumerates, a declaration that outlives its citation never expires, and the declaration site satisfies the very grep meant to test it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN BY SHA at
+    fe9f3f20 before any reading; the clone was checked and already full (2,115 commits), and
+    `src/run-task.ts` (~1.53 MB, over the contents-API cap) was read through git objects only. The
+    reserved id was confirmed unused on all eight surfaces first, and the ref namespace was
+    verified equal to the remote before any sweep — 345 local against 345 remote.
+
+    (1) THE ENUMERATION IS THE DEFECT. `reapBranchesCommand` builds `facts` as `names.map(...)`
+    where `names` is the REMOTE BRANCH LISTING, and `namedInSource` is computed inside that map. So
+    the guard only ever asks its question about branches that still exist on origin. Both blind
+    spots below follow from that one choice, which is why they are one task and not two.
+
+    (2) (a) CITED-BUT-DELETED, RE-DERIVED AT #2723's PARENT AND SAID SO. #2723 ("cite the incident
+    by PR number, not by ephemeral branch") replaced both branch names with permanent PR numbers,
+    so the pair no longer exists on `main`. At its parent ecb7ccc7 the controlled pair reads:
+    `run-W1-T1265-1787503038601` on-origin=1, cited in `src/lib/dispatch-claim.ts` AND
+    `src/run-task.ts`, enumerated and guarded; `run-W1-T1265-1787503092377` on-origin=0, cited in
+    THE SAME TWO FILES, never enumerated and never alarmed. SAME FILE, SAME COMMENT BLOCK, SAME
+    CONVENTION — THE ONLY VARIABLE IS SURVIVAL, WHICH IS EXACTLY WHAT THE GUARD CANNOT SEE.
+
+    (3) AND (a) IS NOT HISTORICAL: THREE CITATIONS DANGLE ON MAIN RIGHT NOW. Enumerating
+    branch-shaped tokens from source OUTSIDE the declaration block and differencing against the
+    remote listing yields `run-W1-T1266-1787515609072`, `run-W1-T15-1785348476091` and
+    `run-W1-T152-1785348476091` — cited, absent from origin, unalarmed. CONTROL, so the comparison
+    is not merely over-firing: `diag/drain-concurrency`, `diag/drain-sequential-await`,
+    `heartbeat-azure` and `heartbeat-mini` are cited AND present, and correctly do not appear.
+
+    (4) (b) DECLARED-BUT-UNCITED, LIVE ON MAIN, EXACTLY ONE. `DECLARED_BRANCH_GUARDS` carries nine
+    entries. Differencing them against the citation set, with the declaration block itself
+    excluded, yields exactly one orphan: `run-W1-T1265-1787503038601`, whose only occurrences
+    anywhere under `src/`, `scripts/`, `deploy/` and `.github/` are its own declaration at
+    `run-task.ts:11900` and the comment at `:11893` that quotes the alarm which produced it.
+    `src/lib/dispatch-claim.ts` now cites it ZERO times. Nothing iterates the declared list, so the
+    entry guards a branch nothing references and will do so indefinitely.
+
+    (5) AND THE DECLARATION SATISFIES THE VERY GREP MEANT TO TEST IT — the part that makes a naive
+    reverse check useless. `namedInSource` greps `src/`, and `DECLARED_BRANCH_GUARDS` lives in
+    `src/run-task.ts`, so a declared branch is `namedInSource: true` BY VIRTUE OF ITS OWN
+    DECLARATION. A reverse pass that reuses that predicate can never report an orphan; it must
+    exclude the declaration block explicitly. This is measured, not reasoned: with the block
+    excluded the orphan appears, and with it included the same name reads as cited.
+
+    (6) HOW THE ORPHAN GOT THERE IS OPERATOR-ATTRIBUTED AND THE MECHANISM IS VISIBLE IN THE TREE.
+    #2720 declared the branch to clear the alarm; #2723 then removed both branch names in favour of
+    PR numbers; #2720 merged anyway, and the only thing that noticed was a human remembering. What
+    IS first-hand is the residue: the comment at `:11896` argues that the deleted half needs no
+    declaration because "a guard entry only ever protects a branch that EXISTS", which is correct
+    for a GUARD LIST and does not follow for a REPORT. THE TREE CONFLATES "SHOULD NOT BE DECLARED"
+    WITH "NEED NOT BE DETECTED", and that conflation is the artefact to correct.
+
+    (7) THE COST OF THE PRESENT SHAPE, MEASURED. `facts = names.map(...)` runs `git merge-base
+    --is-ancestor` AND `git grep -l -F <name>` once per remote branch: at 137 remote heads that is
+    274 SUBPROCESSES PER RUN. A single pattern grep for branch-shaped tokens across the same four
+    roots completes in 0.066 s and returns 15 distinct tokens. The reverse comparison is therefore
+    not an added cost centre — it is one grep against 274 spawns.
+
+    (8) THE `heartbeat` HAZARD IS REAL AND LARGER THAN REPORTED. `namedInSource` is a SUBSTRING
+    match. The token `heartbeat` occurs in 22 FILES across the grepped roots — the attributed
+    figure was 18 — against a control of 1 file for a full run-branch name. It is also a substring
+    of `heartbeat-mini` and `heartbeat-azure`, which are themselves declared. MEASURED AGAINST THE
+    REVERSE CHECK: `heartbeat` resolves to 131 citations and is NOT flagged, which is the outcome
+    Q3 requires; the same pass reports `main` at 967 and `feedback-landing` at 36.
+
+    (9) AND A NAIVE (a) CHECK WOULD FALSE-POSITIVE ON THE EPHEMERAL GUARDS — recorded because it is
+    the first thing that would go wrong. `decisions-landing` and `feedback-landing` are cited in
+    source and ABSENT from the remote right now, and both are legitimately so: the declaration's own
+    comment says `feedback-landing` is "recreated by landFeedback, often absent between landings".
+    So the dangling-citation comparison must subtract the DECLARED set, not just the remote set.
+    That is what makes the two comparisons complementary rather than independent.
+
+    (10) THE HONEST LIMIT. Nothing here establishes that a dangling citation or an orphan
+    declaration has ever caused a wrong reap. `reap-branches` prints its manifest to stdout and the
+    guard's effect is to WITHHOLD a deletion, so both blind spots are failures to REPORT, not
+    failures to protect. No incident is claimed; the exposure is that the report is silently
+    incomplete in both directions.
+  design: |
+    ONE CONCERN: the drift report must compare in both directions. Not the reap predicate, not the
+    open-PR hold, not the guard list's contents.
+
+    (i) ONE ENUMERATION, TWO COMPARISONS — this is the answer to whether (a) and (b) need one pass
+    or two. Build the citation set ONCE, from source, with the declaration block excluded. Then
+    (a) is `citations − remote − declared` and (b) is `declared − citations`. Both fall out of the
+    same list, and the remote listing is already in hand from `remoteBranchNames`. COST PER RUN:
+    one additional pattern grep, measured at 0.066 s, against the 274 subprocesses the present
+    per-branch map already spends.
+
+    (ii) THE DECLARATION BLOCK MUST BE EXCLUDED, AND THAT IS NOT A DETAIL. Rationale (5): the guard
+    list lives in a grepped root, so every declared name satisfies `namedInSource` on its own
+    entry. A reverse check that skips this reports zero orphans forever and looks like it works.
+    The exclusion is the load-bearing half of (b).
+
+    (iii) SUBTRACT THE DECLARED SET FROM (a), NOT ONLY THE REMOTE SET. Rationale (9): the
+    ephemeral landing branches are cited and routinely absent, by design. Declared names are
+    exactly the set an operator has already said "this may be missing and that is fine" about, so
+    they are the correct suppression list for the dangling-citation arm too.
+
+    (iv) SUBSTRING MATCHING STAYS, WITH ITS COST STATED. Keeping `namedInSource`'s substring
+    semantics is what protects `heartbeat` (22 files, 131 citations) from being flagged, which Q3
+    requires. The price is that a genuinely orphaned SHORT name would also never be flagged. That
+    is accepted here rather than fixed: tightening the match is a separate change with its own
+    falsifier, and loosening the guard is the direction this task must not take.
+
+    (v) WHAT MUST NOT CHANGE, PINNED BY CRITERIA. NOTHING AUTO-PRUNES A DECLARATION AND NOTHING
+    AUTO-EDITS A CITATION — an entry may legitimately precede its citation, and THE REPORT IS THE
+    DELIVERABLE, NOT A DELETION. `heartbeat` STAYS DECLARED though nothing writes or watches it,
+    and the reverse check must not flag it. THE REAP PREDICATE AND THE OPEN-PR HOLD ARE UNTOUCHED:
+    this task changes what is REPORTED, never what is deleted or withheld.
+
+    (vi) THE CONVENTION AND THE DETECTOR ARE COMPLEMENTARY, NOT ALTERNATIVES — carried from
+    W1-T2223's design (vi) rather than re-derived. Citing a PR NUMBER removes the obligation
+    entirely, because PR numbers are permanent and branch names are not; #2723 did exactly that for
+    the pair in (2). BUT A CONVENTION CANNOT RETROACTIVELY FIX CITATIONS ALREADY WRITTEN — three
+    still dangle on main per (3), and the orphan declaration in (4) is itself the residue of a
+    citation that moved. So the convention prevents new ones and the detector finds the existing
+    ones; neither substitutes for the other.
+
+    (vii) NOT IN SCOPE, NAMED: the reap predicate and the open-PR hold (v); `DECLARED_BRANCH_GUARDS`'
+    contents, which only the operator adds to; tightening `namedInSource`'s substring match (iv);
+    the branch-citation convention itself, which #2723 already moved; and W1-T2223's
+    `plan-state-claims` completeness defect, which is the SAME SHAPE IN A DIFFERENT FILE and is
+    cited here, not re-filed.
+  acceptance:
+    - claim: "a source citation naming a branch absent from the remote is reported"
+      proof: "unit test: test/reap-branches-reverse-drift.test.ts"
+    - claim: "a declared guard no longer cited outside its own declaration is reported"
+      proof: "unit test: test/reap-branches-reverse-drift.test.ts"
+    - claim: "the declaration block itself never counts as a citation of the name it declares"
+      proof: "unit test: test/reap-branches-reverse-drift.test.ts"
+    - claim: "a declared branch that is legitimately absent from the remote is not reported as a dangling citation"
+      proof: "unit test: test/reap-branches-reverse-drift.test.ts"
+    - claim: "the set of branches deleted and the set withheld are unchanged by the added report"
+      proof: "unit test: test/reap-branches-reverse-drift.test.ts"
+  files: [src/run-task.ts, test/reap-branches-reverse-drift.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#branch-guard-drift-compares-in-one-direction-2026-08-24"
+  plan_refs: ["W1-T2223", "W1-T447"]
+  note: |
+    (a) IS RE-DERIVED AT #2723's PARENT AND THE SHARD SAYS SO. Both branch names were replaced by
+    permanent PR numbers in #2723 (merged d32fa8fb), so the controlled pair cannot be reproduced on
+    current `main`; rationale (2) reads it at the parent ecb7ccc7 and names that commit. Rationale
+    (3) then shows (a) is still live on main with THREE different dangling citations, so the finding
+    does not rest on a commit that has moved.
+
+    ONE ATTRIBUTED FIGURE WAS RE-MEASURED AND DIFFERS. The brief gives `heartbeat` as occurring in
+    18 files; measured across the same four roots it is 22, against a control of 1 file for a full
+    run-branch name. The direction of the hazard is unchanged and the shard carries the measured
+    number.
+
+    EVERY PROOF IS A FORWARD REFERENCE BY CONSTRUCTION. All five criteria use the pure-path
+    `unit test:` form naming `test/reap-branches-reverse-drift.test.ts`, which is declared in
+    `files:` and DOES NOT EXIST on this head — verified absent before writing — so the reviewer
+    grades them `not_yet_built` rather than executing them against a filing. `files:` is written in
+    the bare single-line form `SHARD_FILES_LINE_RE` demands; a block-style list contributes nothing
+    to `shardDeclaredFilesInDiff` and would silently forfeit the exemption.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    `risk: high` IS RULE 19'S SPAN AND A BLAST-RADIUS STATEMENT. `files:` names two stems, so the
+    linter would pass this at `medium`. It is filed at `high` because the artefact EXITS NON-ZERO
+    ON DRIFT by its own contract, so a reverse check that over-fires reds every run of the verb —
+    which is why design (iii) subtracts the declared set and (iv) keeps substring matching.
+
+    THE ID WAS CONFIRMED, NOT ASSUMED. `refs/rmd-id/W1-T2226` resolves to
+    `86866b9df92c`, reserved 2026-08-24T14:41:00Z. EIGHT SURFACES SWEPT AND EVERY CONTROL FIRES:
+    shard filenames 0 against W1-T2211 at 1 (541 shards); plan `- id:` lines 0 against W1-T2211 at
+    1; the reservation, which is the pre-mint; merged trailers 0 against `Remudero-Task: W1-T2201`
+    at 1, with 467 trailer-carrying commits; merged subject credit 0 against W1-T2211 at 2; live
+    branch names 0 against the `run-*` and `plan/*` namespaces at 88 and 25 of 138; branch-tip
+    subjects 0 against W1-T2223 at 1; and branch shard paths 0 against W1-T2223 at 1. W1-T2224 WAS
+    TRIED AS THE SHARD-PATH CONTROL AND DISQUALIFIED — it reads 1 on subjects but 0 on shard paths,
+    so it cannot discriminate there, and W1-T2223 was qualified in its place.
