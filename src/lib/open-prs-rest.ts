@@ -1020,6 +1020,138 @@ export function fetchBoardPrsRest(
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────
+ * THE LABELLED-ISSUE DELTA (W1-T2222) — the board gateway's OTHER re-read, reusing the exact
+ * proven mechanism {@link fetchBoardPrsRest}'s COLD half already carries rather than inventing a
+ * second one.
+ *
+ * `fetchAllIssues` (lib/status.ts) backed the escalation join with a flat
+ * `labelledIssuesRestArgs(slug, NEEDS_HUMAN_LABEL, "all")` `--paginate` call — no `known`
+ * parameter, no `since`, no `updated_at` comparison anywhere on that path, so a TTL refresh
+ * re-read the WHOLE `needs-human` label set (523-524 rows, ~3.04 MB, MEASURED 2026-08-24) even
+ * when a single issue changed. `--paginate` cannot be interrupted mid-walk — `gh` itself issues
+ * every page inside one exec call — so, exactly like {@link boardPrsRestArgs} avoiding the same
+ * flag, this walks explicit `page`/`per_page` requests under this module's own control.
+ *
+ * ONE WALK, NOT TWO HALVES. Unlike a PR, an issue has no field that can move without bumping
+ * `updated_at` — labels, comments and the open/closed toggle all bump it — so there is no
+ * `auto_merge`-shaped reason to carve out an "open" half the way {@link fetchBoardPrsRest}
+ * deliberately does not rely on `updated_at` for its HOT half. Sorted `state=all&sort=updated&
+ * direction=desc`, the COLD half's stop test transfers verbatim: the first row whose `updated_at`
+ * matches `known` means every row below it, open or closed, is unchanged.
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * One page of the board's labelled-issue walk argv — the issue counterpart of
+ * {@link boardPrsRestArgs}: same `page`/`per_page` reasoning, same load-bearing
+ * `sort=updated&direction=desc`, the entire basis of the delta's early stop below.
+ */
+export function boardIssuesRestArgs(owner: string, repo: string, label: string, page: number, perPage: number): string[] {
+  return [
+    "api",
+    `repos/${owner}/${repo}/issues?labels=${encodeURIComponent(label)}&state=all&sort=updated&direction=desc&per_page=${perPage}&page=${page}`,
+  ];
+}
+
+/**
+ * The wire shape GitHub's REST `/issues` endpoint returns. Carries `pull_request` because that
+ * endpoint answers PRs too (dropped below, exactly as escalate.ts's `parseLabelledIssuesRest`
+ * drops them) and `updated_at`, the delta's stop key.
+ */
+interface RestIssueRow {
+  number: number;
+  html_url: string;
+  state: string;
+  title?: string;
+  updated_at: string;
+  pull_request?: unknown;
+}
+
+/** One board-issue row — {@link BatchedIssue}'s shape plus the `updatedAt` the delta stops on. */
+export interface BoardIssueRest {
+  number: number;
+  url: string;
+  state: string;
+  title?: string;
+  /** REST's `updated_at`. Not rendered — the delta's stop key. */
+  updatedAt: string;
+}
+
+function mapBoardIssue(row: RestIssueRow): BoardIssueRest {
+  return { number: row.number, url: row.html_url, state: row.state, title: row.title, updatedAt: row.updated_at };
+}
+
+/** Cold pass page size for issues — the label-scoped set measures ~523-524 rows (MEASURED
+ *  2026-08-24), so 100/page is ~6 requests on a cold cache. */
+const BOARD_ISSUE_FULL_PAGE_SIZE = 100;
+/** Delta page size, same reasoning as {@link BOARD_DELTA_PAGE_SIZE}: a steady-state refresh only
+ *  has to reach the first row it already holds unchanged, which in practice is row 1. */
+const BOARD_ISSUE_DELTA_PAGE_SIZE = 30;
+
+/** What a labelled-issue fetch cost, for the ledger — {@link BoardFetchResult}'s shape, restated
+ *  because the two walks are independent reads over independent row types. */
+export interface BoardIssueFetchResult {
+  rows: BoardIssueRest[];
+  /** REST requests issued. Steady state is 1. */
+  calls: number;
+  mode: "full" | "delta";
+  /** True if {@link BOARD_MAX_PAGES} stopped the walk — a truncated view, never silent. */
+  truncated: boolean;
+}
+
+/**
+ * Every issue carrying `label`, over REST, re-reading only what can have changed since the last
+ * successful call — the issue-fetch counterpart of {@link fetchBoardPrsRest}, reusing its proven
+ * stop test rather than a second mechanism (W1-T2222 design (iii)).
+ *
+ * ROWS THE WALK NEVER REACHES KEEP THEIR CACHED VALUES, same as the PR cold half: the walk is
+ * sorted `updated_at` descending, so the first row matching `known` means everything below it —
+ * on this page and every later one — is unchanged.
+ *
+ * THROWS on any failed page, exactly as {@link fetchBoardPrsRest} does, and WITHOUT mutating the
+ * caller's cache — the same W1-T181 discipline: a failure leaves the previous complete snapshot
+ * intact, so the next successful call is still a cheap delta rather than a cold re-walk.
+ */
+export function fetchLabelledIssuesRest(
+  owner: string,
+  repo: string,
+  label: string,
+  fetch: GhApiFetcher,
+  known?: ReadonlyMap<number, BoardIssueRest>,
+): BoardIssueFetchResult {
+  const mode: "full" | "delta" = known && known.size > 0 ? "delta" : "full";
+  const perPage = mode === "delta" ? BOARD_ISSUE_DELTA_PAGE_SIZE : BOARD_ISSUE_FULL_PAGE_SIZE;
+  const out = new Map<number, BoardIssueRest>(known ?? []);
+  let calls = 0;
+  let truncated = false;
+
+  for (let page = 1; page <= BOARD_MAX_PAGES; page += 1) {
+    const rawRows = fetch(boardIssuesRestArgs(owner, repo, label, page, perPage)) as RestIssueRow[];
+    calls += 1;
+    let reachedKnown = false;
+    for (const row of rawRows) {
+      if (row.pull_request !== undefined) continue; // the /issues endpoint answers PRs too.
+      // `!== undefined` on BOTH sides, not a bare `===`: an entry that is genuinely absent from
+      // `known` and a row that is (against the documented REST contract) missing `updated_at`
+      // must never compare equal to each other just because both read `undefined` — that would
+      // mark a NEVER-SEEN row "already known" on the very first, cache-less walk.
+      const cachedUpdatedAt = known?.get(row.number)?.updatedAt;
+      if (cachedUpdatedAt !== undefined && cachedUpdatedAt === row.updated_at) {
+        reachedKnown = true;
+        break;
+      }
+      out.set(row.number, mapBoardIssue(row));
+    }
+    // `rawRows.length`, NOT the post-filter issue count: GitHub's `per_page` counts every /issues
+    // row (issues AND pull requests) toward one page, so a page mixing PRs in can legitimately
+    // hold fewer than `perPage` issues while still being a FULL page with more to follow.
+    if (reachedKnown || rawRows.length < perPage) break;
+    if (page === BOARD_MAX_PAGES) truncated = true;
+  }
+
+  return { rows: [...out.values()], calls, mode, truncated };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
  * MERGE-STATE HYDRATION (the third instance of the single-PR-only field class)
  *
  * `mergeable` and `mergeable_state` are among the fields GitHub documents as single-PR-only, and

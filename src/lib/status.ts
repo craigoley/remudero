@@ -19,16 +19,18 @@ import { dirname } from "node:path";
 import { ledgerRotationEntries } from "./ledger-grep.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
+import { NEEDS_HUMAN_LABEL } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
 import type { WorkerState } from "./worker.js";
 import {
+  type BoardIssueRest,
   boardPrsRestArgs,
   type BoardPrRest,
   combinedStatusRestArgs,
   createGhCallPacer,
   fetchBoardPrsRest,
+  fetchLabelledIssuesRest,
   type GhCallPacer,
   mapRestPr,
   paceGhEntry,
@@ -4154,7 +4156,6 @@ export function buildBatchedGithub(
   const pacer = opts.pacer ?? (defaultGhCallPacer ??= createGhCallPacer(isTestRunner() ? { sleepSync: () => {} } : {}));
   const now = opts.now ?? (() => Date.now());
   const log = opts.log ?? (() => {});
-  const slug = `${owner}/${repo}`;
   // W1-T119: reflects only the MOST RECENT fetch attempt (reset on every call, unlike
   // ghGateway's sticky-for-instance-lifetime flag) — this gateway's single batched fetch
   // refreshes on its own `ttlMs` cadence, so a stale failure from an earlier TTL window
@@ -4190,6 +4191,11 @@ export function buildBatchedGithub(
   // turn one transient failure into a permanent cold re-walk. Untouched on a throw, so a recovery
   // costs 2 requests rather than 8.
   let knownBoardPrs: Map<number, BoardPrRest> | undefined;
+  // W1-T2222: the issue-fetch's OWN cross-refresh row cache, same reasoning and same "untouched
+  // on a throw" discipline as `knownBoardPrs` above — an independent map because the PR delta and
+  // the issue delta are independent reads with independent row shapes and independent failure
+  // modes (see `lastIssueFetchFailed` below).
+  let knownIssues: Map<number, BoardIssueRest> | undefined;
   /** W1-T413: per-URL changed-file memo for {@link GitHub.changedFiles}. `null` records a read
    *  that FAILED, so one unreachable PR is read once per gateway rather than once per task. */
   const changedFilesByUrl = new Map<string, string[] | null>();
@@ -4256,21 +4262,39 @@ export function buildBatchedGithub(
   // folded into the PR fetch/cache above — a PR-fetch outage and an issue-fetch outage are
   // different failures with different classified reasons, and {@link resolveEscalation}'s
   // fail-closed join needs its OWN `issueReadFailed()` signal rather than inheriting the PR
-  // fetch's. Scoped to `--label needs-human` (escalate.ts's `NEEDS_HUMAN_LABEL`) so this stays
-  // one small, bounded fetch (dozens of rows) rather than every issue in the repo.
+  // fetch's. Scoped to `--label needs-human` (escalate.ts's `NEEDS_HUMAN_LABEL`), which bounds
+  // WHICH issues this reads but not how many: MEASURED 2026-08-24, the label-scoped set itself is
+  // 523-524 rows (~3.04 MB) — see W1-T2222 and {@link fetchLabelledIssuesRest}'s own doc
+  // (open-prs-rest.ts) for why the set's size no longer sets the re-read cost below.
   let lastIssueFetchFailed = false;
   let lastIssueFetchFailureReason: GhFailureReason | undefined;
   const fetchAllIssues =
     opts.fetchAllIssues ??
     (() => {
-      // REST, not `gh issue list --label`: `gh` routes label filtering through GitHub's GraphQL
-      // `search()` connection, throttled account-wide here, so this fetch failed 100% of the time
-      // (`board_gateway.issue_fetch_ok` NEVER appeared in the ledger, against 505 failures) and
-      // every escalation join silently fell back to its fail-closed branch. Same deterministic
-      // list API `issues-intake.ts` already reads. See labelledIssuesRestArgs for why `--slurp`.
-      const raw = run(labelledIssuesRestArgs(slug, NEEDS_HUMAN_LABEL, "all"));
-      log("board_gateway.issue_fetch_bytes", { bytes: Buffer.byteLength(raw, "utf8") });
-      return parseLabelledIssuesRest(raw);
+      // W1-T2222: REST, page-walked under this module's own control — never `--paginate`, which
+      // issues every page inside one exec call and so cannot be interrupted mid-walk — and
+      // re-reading only what changed since the last successful call. `knownIssues` carries the
+      // COLD PR half's proven stop test over to this fetch rather than a second mechanism; see
+      // fetchLabelledIssuesRest's own doc for the soundness argument (sorted `updated_at`
+      // descending, first match means everything below it is unchanged).
+      let bytes = 0;
+      const fetchJson = (args: string[]): unknown => {
+        const raw = run(args);
+        bytes += Buffer.byteLength(raw, "utf8");
+        return JSON.parse(raw);
+      };
+      const fetched = fetchLabelledIssuesRest(owner, repo, NEEDS_HUMAN_LABEL, fetchJson, knownIssues);
+      // Reassigned only on a SUCCESSFUL return, exactly like `knownBoardPrs` above — a throw from
+      // `fetchLabelledIssuesRest` skips this line, so a transient failure leaves the previous
+      // complete snapshot intact and the NEXT successful call is still a cheap delta.
+      knownIssues = new Map(fetched.rows.map((r) => [r.number, r]));
+      log("board_gateway.issue_fetch_bytes", {
+        bytes,
+        restCalls: fetched.calls,
+        mode: fetched.mode,
+        truncated: fetched.truncated,
+      });
+      return fetched.rows.map((r) => ({ number: r.number, url: r.url, state: r.state, title: r.title }));
     });
 
   interface IssueIndex {
