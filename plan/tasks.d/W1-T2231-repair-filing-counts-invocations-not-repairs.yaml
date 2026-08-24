@@ -1,0 +1,192 @@
+- id: W1-T2231
+  title: "`acted: true` means THE LANE WAS INVOKED, and `dueRepairFilings` counts it as A PR WAS REPAIRED into a threshold of three — `case \"blocked-fixable\"` calls `deps.dispatchFix(...)` and never touches `acted`, so a dispatch that opened no strike is counted as a repair and its `reason`/`head_sha` are eligible to become the filed exemplar for the surface"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha, clone
+    shallow-checked `false`. `src/run-task.ts` (1,533,033 bytes) read through git objects, never the
+    Contents API. No suite, no spawning verb, no poller.
+
+    (1) THE DEFAULT, AND THE ONE PATH THAT KEEPS IT. `acted` is initialised
+    `let acted = !alreadyDone && !deps.dryRun` (`src/lib/sweep.ts`, the disposition walk) and is
+    flipped false ONLY by an explicit stand-down, `deps.dryRun`, or the `actionError` catch.
+    `case "blocked-fixable"` awaits `deps.dispatchFix(...)` and NEVER ASSIGNS `acted`, so the row
+    keeps the default whether or not `dispatchFix` opened a strike. `dispatchFix` can stand down
+    cleanly inside itself — the merge-state-dirty refusal is the live example — and write no
+    `fix.dispatch` row at all, and the disposed line still reads `acted: true`.
+
+    (2) THE ONE CONSUMER THAT READS IT AS WORK. `dueRepairFilings` (`src/lib/sweep.ts`) counts, in
+    its own words, "the DISTINCT PRs (`acted: true`) repaired" for each member of
+    `REPAIR_SURFACE_DISPOSITIONS` (`blocked-fixable`, `blocked-ambiguous`, `stale`, `conflicted`)
+    inside an epoch-anchored bucket, and a surface reaching `repairFilingThreshold` is DUE for one
+    `repair#<surface>` §7B feedback entry. `plan/policy.yaml` sets the threshold to 3 and the window
+    to 7 days, and warns in its own comment that a wrong recurrence key here "does not fail loudly —
+    it floods the Architect's front door."
+
+    (3) THE FIELD'S DOC IS NARROWER THAN THE FIELD IN BOTH DIRECTIONS. `SweepAction.acted`'s comment
+    reads "True ⇒ the gated effect actually fired; false ⇒ deduped (already true)". "Actually fired"
+    is a SPEND claim the true branch does not support, and the false branch names only dedup, omitting
+    stand-down, dry-run and the `actionError` catch — the three other ways it goes false.
+
+    (4) THE REMEDY'S SHAPE IS ALREADY IN-TREE, TWICE. `src/run-task.ts` records that counting
+    `sweep.disposed{disposition:"blocked-fixable",acted:true}` WAS the fix-strike proxy and that
+    W1-T78 REMOVED it, because counting both it and `fix.dispatch` "would double-count every real
+    strike" — the same conflation, already rejected once at a different reader. And
+    `PriorActions.reviewDelivered` states it outright for a sibling lane: "an `acted:true` post-review
+    dispose only proves the LANE WAS INVOKED, never that it reached a verdict", which is why
+    W1-T254/W1-T1213 keyed that set off `review.posted` instead of off `acted`. Neither is re-filed
+    here; both are the precedent.
+
+    (5) THE MEASUREMENT, AND IT CORRECTS THE OBVIOUS EXPECTATION. Over the ledger union resolved by
+    `resolveLedgerUnion` (672 archives, live file read):
+      SEEDS — distinct `pr@head` from `acted:true` rows on the two fix surfaces: 213.
+        59 are UNJOINABLE BY CONSTRUCTION — `finalizeDisposition` writes `task_id: pr.taskId ?? "SWEEP"`
+        and all 59 carry the literal "SWEEP", so they can never match a `fix.dispatch` task_id.
+        Of the 154 JOINABLE seeds, 40 (26%) never received a `fix.dispatch` for that task.
+        A raw miss count reads 99 of 213 (46%) and CONFLATES the two populations; the split figure is
+        the honest one and the raw one must not be quoted alone.
+      AT THE THRESHOLD — simulating `dueRepairFilings`' own arithmetic (7-day epoch buckets,
+      threshold 3, distinct PRs per surface): 10 (surface, bucket) pairs were DUE counting `acted:true`.
+      Recounting with only strike-spending PRs: STILL 10. **PHANTOM FIRINGS: ZERO.** Every due bucket
+      clears 3 on the spending count alone, by a slack of 8 to 30.
+      SO THE THRESHOLD DECISION WAS NEVER CHANGED IN THIS WINDOW, AND THIS SHARD MUST NOT CLAIM IT WAS.
+
+    (6) WHAT IS WRONG ANYWAY, MEASURED. The COUNT is inflated 1.4x to 2.2x on every `blocked-fixable`
+    bucket — acted 48/57/65/15 against spending 30/33/29/11 — so 82 distinct PRs across four buckets
+    were counted as repairs having contributed no strike. That matters beyond the count because
+    `dueRepairFilings` selects the FILED EXEMPLAR by last-write-wins per PR, carrying that row's
+    `reason`, `pr_url`, `head_sha` and `ts` into the `RepairFilingInstance` it hands the caller. So a
+    `repair#<surface>` entry can cite, as the evidence for a recurrence, an invocation during which
+    nothing was repaired. The defect is the EVIDENCE the entry carries and the number it reports —
+    not, on this corpus, whether it fired.
+
+    (7) THE CORPUS WINDOW, PER STEP, BECAUSE THE UNION'S OWN NEWEST ROW DISAGREES BY ELEVEN DAYS.
+    `resolveLedgerUnion` returns `ok`, 672 archives, live file read, for all three steps below; the
+    third is the PRE-QUALIFIED CONTROL proving the reader reaches recent rows at all:
+      sweep.disposed  16,598 rows   2026-07-17T22:02:56.828Z -> 2026-08-13T00:30:31.464Z
+      fix.dispatch       329 rows   2026-07-17T19:16:43.756Z -> 2026-08-12T22:32:55.941Z
+      review.posted    1,623 rows   2026-07-14T15:50:28.455Z -> 2026-08-14T15:10:47.687Z  (CONTROL)
+    A raw `"ts"` scan over the same files reads 2026-08-24T16:52:25.057Z as the union's newest row —
+    ELEVEN DAYS newer than either step this task measures. Quoting the union's newest row as this
+    task's window would overstate coverage by eleven days; the per-step newest is the only honest one.
+  design: |
+    (i) A SECOND FIELD OR A NARROWED PREDICATE — NEVER A CHANGE TO `acted`. The disposed row gains a
+    field that says whether the invoked lane actually SPENT anything (the `fix.dispatch` a
+    `blocked-fixable` dispatch opens, or its per-surface equivalent), and `dueRepairFilings` counts
+    THAT. This is `reviewDelivered`'s carve-out shape exactly: leave the invocation field alone and
+    key the measuring reader off the outcome the measurement is about.
+
+    (ii) `priorActionsFromLedger` IS A GATE AND THE FIELD IS EXACTLY RIGHT FOR IT. It asks "did this
+    lane get invoked for this `pr@head`", and INVOCATION is precisely what must not repeat. Its own
+    doc states the property — a stood-down lane "seeds no dedup key, spends no strike, and is
+    re-derived whole next pass". Nothing in this task touches that call site or its five sets.
+
+    (iii) THE `acted = false` ASSIGNMENTS ARE LOAD-BEARING IN THE OTHER DIRECTION. The cancelled-check
+    stand-down and the terminal-state pre-flight both set `acted = false` and both say why in place:
+    an `acted:true` row there "would seed `prior.fixed` for this head, which would then dedupe the
+    WHOLE blocked-fixable disposition away next pass". Flipping either to true to make the count
+    tidier would deadlock the disposition permanently. They stay.
+
+    (iv) EXPLICIT NON-CONSUMERS, EACH WITH ITS FIRING CONTROL, SO NOBODY RE-DERIVES THEM. Every one
+    reads ZERO occurrences of the token, against a control that fires in the SAME file:
+      the retro                — 0, control `fix.dispatch` = 5; it sums `r.costUsd`
+      `rmd autonomy-rate`      — 0, control `zeroTouchMergeRate` = 3; its eight ledger steps are
+                                 automerge.armed, automerge.capped_override_granted, review.posted,
+                                 fix.resolved, fix.exhausted, fix.stood_down, ratify.reframed,
+                                 panel.operator_note_added — `sweep.disposed` is NOT among them
+      the strike ledger        — 0 in `priorStrikesFor`/`deriveStrikeHistory`, control `fix.dispatch`
+                                 = 3; it counts `fix.dispatch` rows by `task_id`
+      `src/lib/board.ts`       — 0, control `fix.dispatch` = 3
+    `src/lib/status.ts`, `src/lib/serve.ts`, `src/lib/doctor.ts` and `src/lib/task-linter.ts` contain
+    the WORD "acted" in prose ("acted upon", "a human has not yet acted") and never the field; a
+    token sweep that does not read the lines will misreport all four as consumers.
+
+    (v) THE HUMAN-FACING HALF IS SEPARATE AND SMALLER, AND IS NOT THE DELIVERABLE. `actionsTaken`
+    increments on `acted` and is rendered as "N action(s) taken" and ledgered as `actions_taken` on
+    the `sweep.summary` row. A sweep of every tracked file finds NO `src/` consumer of
+    `actions_taken` — one test assertion and one shard's prose. It misleads a reader and measures
+    nothing, so it is named here and left to the same second field rather than given its own task.
+
+    (vi) THE SAME FAMILY, CITED NOT RE-FILED: W1-T1052 — "a failed auto-merge attempt is recorded
+    under a step name that says it was skipped". W1-T78 is the precedent in (4); W1-T1284 established
+    why the dedup gate exists and it held in all eight of its measured cases.
+
+    (vii) NOT IN SCOPE, NAMED: the `acted` field's own semantics and every assignment to it;
+    `priorActionsFromLedger`; `repairFilingThreshold` and `repairFilingWindowDays`, whose values are
+    NOT the defect (zero firings changed); the `task_id: pr.taskId ?? "SWEEP"` fallback; and the
+    `blocked-ambiguous`/`stale` surfaces' own spend analogues, which have no `fix.dispatch` join and
+    were carried unchanged in the measurement rather than guessed at.
+  acceptance:
+    - claim: "a dispatch that opened no strike is not counted as a repair"
+      proof: "unit test: test/repair-filing-counts-invocations.test.ts"
+    - claim: "a dispatch that did open a strike is still counted exactly as today"
+      proof: "unit test: test/repair-filing-counts-invocations.test.ts"
+    - claim: "the filed exemplar never cites a row whose lane spent nothing"
+      proof: "unit test: test/repair-filing-counts-invocations.test.ts"
+    - claim: "a seed row carrying the synthetic SWEEP task id is not silently counted as a repair"
+      proof: "unit test: test/repair-filing-counts-invocations.test.ts"
+    - claim: "the dedup gate still seeds from acted true and its five sets are unchanged"
+      proof: "unit test: test/repair-filing-counts-invocations.test.ts"
+    - claim: "a cancelled-check stand-down still records acted false and still avoids seeding the fix dedup"
+      proof: "unit test: test/repair-filing-counts-invocations.test.ts"
+  files: [src/lib/sweep.ts, test/repair-filing-counts-invocations.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#acted-as-a-spend-signal-2026-08-24"
+  plan_refs: ["W1-T78", "W1-T254", "W1-T905", "W1-T1052", "W1-T1213", "W1-T1284"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Filed at `medium` first and MEASURED: the
+    linter refused it — "[sizing] spans 2 distinct subsystems/concerns (repair-filing-counts-invocations,
+    sweep) at risk:medium — Rule 19: raise to risk:high or decompose". Rule 19 derives the concern from
+    each declared path's STEM, so a source file and its own test trip it whenever the test is not named
+    after the source. `files:` here is one source file and one new test; the actual blast radius is
+    small — a counting predicate and the evidence it selects, with nothing deleted and no gate moved.
+    Decomposing the predicate from the test that falsifies it is not a real decomposition.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/repair-filing-counts-invocations.test.ts`, declared in `files:`, so on this filing PR
+    it resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED, NOT ASSUMED. `rmd check-proof` on the declared path reads
+    `parse: OK — kind=test`, `hits: 0`, `verdict: fail` — it names no existing file. The SAME verb on
+    an EXISTING pure path, `unit test: test/sweep-repair-filing.test.ts`, reads `hits: 130`,
+    `verdict: pass` — so the dialect DOES execute a pure path when one exists, and the absent path's
+    non-execution is the forward reference rather than a broken proof. `check-proof` cannot see this
+    shard's `files:` declaration, which is why its `fail` is expected and is not the reviewer's verdict.
+
+    THE HEADLINE EXPECTATION IS CORRECTED IN RATIONALE (5) RATHER THAN CARRIED. The inflation is real
+    and large — 1.4x to 2.2x on every `blocked-fixable` bucket — but it changed ZERO filing decisions
+    over this corpus, because every due bucket clears the threshold of 3 on the spending count alone
+    with 8 to 30 to spare. A shard that claimed the threshold had fired on phantom repairs would be
+    unsupported by the very measurement it rests on. What IS defective is the number the entry reports
+    and the exemplar it carries, which is what the acceptance criteria are written against.
+
+    THE RAW MISS FIGURE MUST NOT BE QUOTED ALONE. 46% conflates 59 rows that carry the synthetic
+    `SWEEP` task id — unjoinable by construction — with 40 genuine no-spend stand-downs out of 154
+    joinable seeds (26%). Both numbers are recorded so neither is mistaken for the other.
+
+    ID PROVENANCE, AND WHY THIS ID RATHER THAN THE ONE NAMED. The operator named W1-T2230. Its
+    reservation resolved and was NOT this account's: `refs/rmd-id/W1-T2230` was minted by
+    `Ubuntu@Remudero` (the Azure host) at 2026-08-24T16:58:38.752Z, ONE MINUTE before the sweep read
+    it, with W1-T2229 minted by the same host 27 minutes earlier. The brief's own precondition — that
+    the reservation be this account's and unused — fails on ownership, and a one-minute-old
+    reservation from a live lane is the double-mint that has refused `loadPlan` on origin/main twice
+    (W1-T488, and W1-T533+W1-T534 renumbered to W1-T911/W1-T912). W1-T2231 was reserved by the repo's
+    OWN mechanism before this shard was written — an orphan `commit-tree` over the empty tree pushed
+    with a PLAIN refspec, mirroring `gitRemoteRefReserver`, authored by `cao825@Craigs-Mac-mini`. It
+    CREATED on the first attempt, which is the evidence the id was free.
+
+    EIGHT SURFACES SWEPT, EACH WITH A CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, AND THE FETCHED REF
+    COUNT VERIFIED AGAINST THE REMOTE FIRST (136 heads and 349 `refs/rmd-id/*` on origin, 136 and 349
+    fetched — MATCH, so a zero here is a real absence and not a short fetch). Shards on main 0
+    (control W1-T2222 = 4); whole tree on main 0 (control 4); all 136 origin refs 0 (control W1-T2228
+    = 4); remote head names 0 (control 136 heads read); commit messages on main 0 (control W1-T2219 =
+    2); reservation MINE; the 30 newest PR heads 0 (control W1-T2228 on PR #2727 = 6); merged-PR
+    trailers read from squash-merge commit BODIES on main 0 over 50,655 body lines (control: 560
+    `Remudero-Task:` trailers, and W1-T1268 specifically = 2) rather than over REST, which has been
+    returning 403 rate-limit payloads on this account today.
