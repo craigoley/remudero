@@ -1708,8 +1708,57 @@ export interface ArmDeps {
    *  (report `direct-merge-failed`), so this widens the interface without breaking any existing
    *  fixture that constructs an {@link ArmDeps}/`Pick<ArmDeps, …>` without it. */
   isMerged?: (prUrl: string) => boolean;
+  /** W1-T1280 — OPTIONAL. Fresh {@link FixRebaseMergeFacts} for `prUrl`, read over the SAME two
+   *  REST calls {@link fixRebaseMergeFactsFromRest} already wraps (never `--json`/GraphQL).
+   *  Consulted ONLY when the quota fallback's {@link mergeDirect} is refused with an HTTP 405
+   *  whose refusal text {@link mergeDirectRefusalMayBeUnsettled} recognises — GitHub's own
+   *  contract is that `mergeable: null` means "recomputing, ask again", never a conflict, and
+   *  this is how `attemptArm` asks again rather than trusting the refusal's wording. Absent on
+   *  every fixture written before this task (this Pick makes it optional for that reason): the
+   *  pre-existing behavior — treat the 405 as final — is exactly what omitting this dep still
+   *  produces, so no caller built before W1-T1280 is affected. */
+  readMergeFacts?: (prUrl: string) => FixRebaseMergeFacts;
+  /** W1-T1280 — OPTIONAL. Blocks the calling thread for `ms` between the bounded re-reads
+   *  {@link readMergeFacts} above drives — mirrors {@link GhCallPacer.sleepSync}'s own
+   *  `Atomics.wait`-backed real default (lib/open-prs-rest.ts). A test omits it (or injects a
+   *  no-op) so the retry loop's bound is provable without an actual sleep; a real caller gets a
+   *  genuinely blocking wait, matching this file's own synchronous `gh` calls (`attemptArm` has
+   *  no async caller — see the file's other `Atomics.wait` note for why an async timer would not
+   *  actually pace anything here). */
+  sleepSync?: (ms: number) => void;
   say: (msg: string) => void;
 }
+
+/**
+ * W1-T1280 — TRUE only when a REST merge refusal names the specific status GitHub returns for a
+ * pull request whose mergeability it has not (or no longer) computed as definitely conflicting:
+ * HTTP 405. Deliberately narrower than a bare "merge conflict" phrase match — GitHub's own prose
+ * on this status ("Pull Request has merge conflicts") sounds definite even when the underlying
+ * `mergeable` field is `null`, which is exactly the false inference this task closes (rationale
+ * (1)). The STATUS gates whether a re-read is even attempted; the re-read's own
+ * {@link mergeFactsFromRest} predicate — never this function, and never the message text below
+ * it — decides what the re-read means (design note i: "the trigger is the predicate, never the
+ * message").
+ */
+export function mergeDirectRefusalMayBeUnsettled(stderrText: string): boolean {
+  return /\bHTTP 405\b/.test(stderrText);
+}
+
+/** W1-T1280 — BACKSTOP (W1-T1266): the small attempt cap (design note iii): the FIRST 405 plus
+ *  up to this many re-reads of {@link mergeFactsFromRest}. The loop's NORMAL exit is a read that
+ *  settles CONFLICTING or MERGEABLE; this cap only fires once that normal exit has already failed
+ *  to arrive, i.e. the read is still `UNKNOWN` after every attempt. Bounded deliberately tight —
+ *  this path runs only when `armFailureIsRateLimited` has already fired, i.e. the GraphQL budget
+ *  is spent, so every extra read spends more of an already-exhausted quota (W1-T148's cost-
+ *  governor rationale, restated in this task's own design note iii). A read that is still
+ *  `UNKNOWN` at the bound refuses — the SAME `arm-error-ignored` outcome this path already
+ *  returns today. */
+export const REST_MERGE_UNSETTLED_MAX_READS = 3;
+
+/** W1-T1280 — the short interval (design note iii) between one `UNKNOWN` re-read and the next.
+ *  Never slept after a read that already settled (`MERGEABLE`/`CONFLICTING`) or after the LAST
+ *  attempt, so the bound above is exact: at most `REST_MERGE_UNSETTLED_MAX_READS - 1` sleeps. */
+export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 
 /**
  * W1-T1050: true when GitHub reports `prUrl` as MERGED right now — the ground truth `attemptArm`
@@ -1784,6 +1833,24 @@ export function realArmDeps(
       });
     },
     isMerged: (prUrl) => isPrMergedNow(prUrl),
+    // W1-T1280: the real two-REST-read wiring `fixRebaseMergeFactsFromRest` already wraps (W1-
+    // T1095 capability 3) — never `--json`/GraphQL, the same core-budget discipline every other
+    // real dep on this object follows. `mergeTargetFromPrUrl` unreadable ⇒ `undefined`, which
+    // `attemptArm`'s retry loop reads as `UNKNOWN` (the same fail-soft `mergeFactsFromRest`
+    // already applies to a payload it cannot parse), never a crash inside an arm attempt.
+    readMergeFacts: (prUrl) => {
+      const target = mergeTargetFromPrUrl(prUrl);
+      return target ? fixRebaseMergeFactsFromRest(target.owner, target.repo, target.prNumber) : {};
+    },
+    // W1-T1280: a genuinely blocking wait — `attemptArm` has no async caller (every dep on this
+    // object shells out via synchronous `execFileSync`/`ghJson`), so `Atomics.wait` on a private
+    // `SharedArrayBuffer` parks the one thread already parked by those calls, mirroring
+    // `defaultBlockingSleepSync` in lib/open-prs-rest.ts rather than a `setTimeout` that would
+    // never actually run before this synchronous function returns.
+    sleepSync: (ms) => {
+      if (ms <= 0) return;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    },
     say: (msg) => console.log(msg),
   };
 }
@@ -1901,7 +1968,7 @@ export function armAutoMergeDetailed(
  */
 export function attemptArm(
   prUrl: string,
-  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines">>,
+  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>,
 ): ArmAttemptResult {
   // MERGE (W1-T1000002 x W1-T1079): main widened this function's return to ArmAttemptResult so an
   // `arm-error-ignored` can carry the raw failure text; the hold refusal predates that shape and
@@ -1990,15 +2057,65 @@ export function attemptArm(
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
         return { outcome: "direct-merged", error: msg, rateLimit: quota };
       } catch (e3) {
-        const msg3 = String((e3 as { stderr?: unknown })?.stderr ?? (e3 as Error)?.message ?? e3);
+        let msg3 = String((e3 as { stderr?: unknown })?.stderr ?? (e3 as Error)?.message ?? e3);
         // W1-T1050's discipline, applied to this path too: a merge that LANDED must never be
         // reported as a failure just because something after it threw.
         if (deps.isMerged?.(prUrl)) {
           deps.say(`automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`);
           return { outcome: "direct-merged", error: msg, rateLimit: quota };
         }
+        // W1-T1280: THE RETRY. `deps.readMergeFacts` is OPTIONAL (see its doc on `ArmDeps`) —
+        // absent, this block is skipped byte-for-byte and the refusal below is unchanged from
+        // W1-T1255. Present, it fires ONLY when the refusal is the specific status GitHub uses
+        // for a mergeability it has not asserted (`mergeDirectRefusalMayBeUnsettled`) — a 405 on
+        // a head `mergeFactsFromRest` already calls CONFLICTING (rationale (4)'s #2605) never
+        // reaches this branch at all, because the FIRST read below resolves CONFLICTING and
+        // breaks immediately, refusing exactly as today, on the very next line.
+        if (deps.readMergeFacts && mergeDirectRefusalMayBeUnsettled(msg3)) {
+          for (let read = 1; read <= REST_MERGE_UNSETTLED_MAX_READS; read++) {
+            // THE RE-READ IS THE WHOLE RETRY (design note ii) — never a bare sleep-and-repeat.
+            // GitHub's own contract for `mergeable: null` is "recomputing, ask again", so asking
+            // again means a fresh `mergeFactsFromRest` read, not waiting out a guessed duration.
+            const facts = deps.readMergeFacts(prUrl);
+            if (facts.mergeable === "CONFLICTING") {
+              deps.say(
+                `automerge.rate_limited_rest_merge_conflict (W1-T1280): mergeFactsFromRest settled ` +
+                  `CONFLICTING on read ${read}/${REST_MERGE_UNSETTLED_MAX_READS} — ${prUrl}`,
+              );
+              break;
+            }
+            if (facts.mergeable === "MERGEABLE") {
+              deps.say(
+                `automerge.rate_limited_rest_merge_retry (W1-T1280): mergeFactsFromRest settled ` +
+                  `MERGEABLE on read ${read}/${REST_MERGE_UNSETTLED_MAX_READS} — retrying: ${prUrl}`,
+              );
+              try {
+                deps.mergeDirect(prUrl);
+                deps.say(
+                  `automerge.rate_limited_rest_merge (W1-T1255; settled mergeable on retry ${read}): ${prUrl}`,
+                );
+                return { outcome: "direct-merged", error: msg, rateLimit: quota };
+              } catch (e4) {
+                msg3 = String((e4 as { stderr?: unknown })?.stderr ?? (e4 as Error)?.message ?? e4);
+                if (deps.isMerged?.(prUrl)) {
+                  deps.say(
+                    `automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`,
+                  );
+                  return { outcome: "direct-merged", error: msg, rateLimit: quota };
+                }
+              }
+              break; // ONE retry attempt once settled MERGEABLE (design note ii) — never a second.
+            }
+            // Still UNKNOWN — GitHub has not computed it yet. Re-read after the short interval,
+            // bounded (design note iii); never sleep after the LAST attempt.
+            if (read < REST_MERGE_UNSETTLED_MAX_READS) {
+              deps.sleepSync?.(REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS);
+            }
+          }
+        }
         // GitHub refused the REST merge — the PR was not mergeable, which is the correct answer
-        // for a PR that is not already green. NOTHING MERGED.
+        // for a PR that is not already green (or the retry above settled CONFLICTING, or ran out
+        // of reads still UNKNOWN, or a settled-MERGEABLE retry was itself refused). NOTHING MERGED.
         deps.say(`automerge.rate_limited_rest_merge_refused (W1-T1255): ${msg3} — ${prUrl}`);
       }
       return { outcome: "arm-error-ignored", error: msg, rateLimit: quota };
@@ -2144,7 +2261,7 @@ function irreversibleSignalForWorktree(worktreePath: string): boolean {
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
-  deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines">>) = realArmDeps(),
+  deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "ledgerLines" | "readMergeFacts" | "sleepSync">>) = realArmDeps(),
   irreversible = false,
 ): ArmOutcome {
   if (irreversible) {
