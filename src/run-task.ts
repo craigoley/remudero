@@ -623,6 +623,7 @@ import {
   runPostFixReverification,
   runSweep,
   runSweepLightPass,
+  stillRedRequiredNames,
   strikeCapForAnswer,
   terminalStateReason,
   toQuestionEntry,
@@ -641,6 +642,7 @@ import {
   type MemoryGovernorResult,
   type MergeConflictEvidence,
   type OpenPrView,
+  type RollupCheckEntry,
   type PostFixReverificationSummary,
   type QueueGovernorResult,
   type PostReviewStallVerdict,
@@ -4843,6 +4845,15 @@ export function branchAuthorshipStandDownReason(
  * field so the caller knows to escalate, not just ledger — the terminal-state
  * reason never sets it (a merged/closed PR carries no operator-decidable
  * question; W1-T196's same reasoning).
+ *
+ * W1-T1278 extends this SAME function with TWO more reason sources — condition A
+ * (`redCheckSupersession`) and condition B (`mergeConflictCheck`) — again never a parallel
+ * early-return path, and again ONLY the caller at site `rung.strike` ever passes them (the
+ * `rung.false_block`/`rung.exhaustion` sites omit both, unchanged). Both are consulted ONLY
+ * after the terminal-state read comes back OPEN, exactly like `authorship`, and NEITHER sets
+ * `foreignHead` — both ledger only (see the two params' own docs for why: a genuinely-red check
+ * or a dirty merge state is a self-evident GitHub-reported fact, never an operator-decidable
+ * question the way a foreign push is).
  */
 async function fixRungStandDownReason(
   readLiveState: ((prUrl: string) => LiveStateResult | Promise<LiveStateResult>) | undefined,
@@ -4852,6 +4863,29 @@ async function fixRungStandDownReason(
   authorship?: {
     readLiveHead: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
     rungOwnHeadSha: string | undefined;
+  },
+  /**
+   * W1-T1278 (condition A) — the required check name(s) THIS round's ci-log evidence currently
+   * believes are red (`currentCiFailures`' own names), plus a FRESH reader of the PR's current
+   * status-check rollup — never the stale evidence that made those names red in the first place.
+   * Omitted (not ci-log mode, or no fresh reader wired) skips this check entirely — fail open,
+   * exactly like `authorship` above.
+   */
+  redCheckSupersession?: {
+    redNames: readonly string[];
+    readRollup: (prUrl: string) => RollupCheckEntry[] | Promise<RollupCheckEntry[]>;
+  },
+  /**
+   * W1-T1278 (condition B) — a fresh reader of THIS pull request's own merge facts, consulted
+   * ONLY when the rung is NOT already dispatching in merge-conflict mode (the caller omits this
+   * param whenever `currentMergeConflict !== undefined` — that mode already owns a dirty read
+   * correctly; see design note (iv), "hands the PR back to the sweep's own conflicted
+   * disposition, which owns merge-conflict mode already"). `prNumber` is `undefined` when
+   * `prUrl` does not parse — the check is then skipped, never guessed.
+   */
+  mergeConflictCheck?: {
+    prNumber: number | undefined;
+    readMergeFacts: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
   },
 ): Promise<{ reason: string; foreignHead?: { headSha: string; author: string } } | undefined> {
   if (!readLiveState) return undefined;
@@ -4881,6 +4915,46 @@ async function fixRungStandDownReason(
       log("fix.live_head_indeterminate", { site });
     }
   }
+
+  // W1-T1278 (condition B) — checked BEFORE condition A: a dirty merge state means GitHub is
+  // not even running checks, so it is the more fundamental blocker of the two (rationale (4):
+  // "#2605 is also one of the three blocked_ci PRs ... that did NOT merge — condition A's
+  // exception is condition B's instance").
+  if (mergeConflictCheck && mergeConflictCheck.prNumber !== undefined) {
+    let facts: FixRebaseMergeFacts | undefined;
+    try {
+      facts = await mergeConflictCheck.readMergeFacts(mergeConflictCheck.prNumber);
+    } catch {
+      facts = undefined; // fail open — an unreadable merge-facts read never manufactures a stand-down
+    }
+    if (facts?.mergeable === "CONFLICTING") {
+      return {
+        reason:
+          "merge state is dirty (mergeable === false or mergeable_state === \"dirty\") — a conflicted PR " +
+          "registers no new check runs, so a strike buys no information; standing down for the sweep's own " +
+          "conflicted disposition rather than retrying blindly",
+      };
+    }
+  }
+
+  if (redCheckSupersession && redCheckSupersession.redNames.length > 0) {
+    let rollup: RollupCheckEntry[] = [];
+    try {
+      rollup = await redCheckSupersession.readRollup(prUrl);
+    } catch {
+      rollup = []; // fail open — an unreadable rollup leaves every red name "still red" (see below)
+    }
+    const stillRed = stillRedRequiredNames(redCheckSupersession.redNames, rollup);
+    if (stillRed.length === 0) {
+      return {
+        reason:
+          `the only red required check(s) this strike would target (${redCheckSupersession.redNames.join(", ")}) ` +
+          `now show a later attempt already in flight on this head — standing down rather than spending a ` +
+          `strike on an already-superseded reading`,
+      };
+    }
+  }
+
   return undefined;
 }
 
@@ -5657,6 +5731,18 @@ export async function runFixRung(opts: {
      */
     fetchCiFailures?: (prUrl: string) => Promise<CiFailure[]>;
     /**
+     * W1-T1278 (condition A): a FRESH read of THIS PR's current status-check rollup — the raw,
+     * per-attempt entries `fetchCiFailures` above filters down to failing names only. Consulted
+     * ONLY at the pre-strike gate (site `rung.strike`), and ONLY when this round is dispatching
+     * in ci-log mode (`currentCiFailures` non-empty) — to answer "does the ONE (or more) required
+     * name I am about to spend a strike on still read red right now, or has a later attempt on
+     * this same head already superseded it" ({@link stillRedRequiredNames}). Never the caller's
+     * own `currentCiFailures` snapshot — a fresh `gh` read every round, mirroring `readLiveState`'s
+     * own discipline. Omitted, or a throwing read, skips this check entirely (fail open — the
+     * rung proceeds exactly as it did before this task).
+     */
+    readCiRollup?: (prUrl: string) => RollupCheckEntry[] | Promise<RollupCheckEntry[]>;
+    /**
      * W1-T256: fetch THIS PR's current body. Consulted ONLY in `body-coverage`
      * fix mode, where the fix worker was told (renderFixPrompt) that the review
      * floor judges the PR BODY, and the authoritative `reviewCommand`/`post-review`
@@ -5804,6 +5890,10 @@ export async function runFixRung(opts: {
       baselineDiffFiles = undefined;
     }
   }
+  // W1-T1278 (condition B): THIS rung's own PR number, parsed once — `undefined` when `prUrl`
+  // does not parse, in which case the pre-strike merge-conflict check below is skipped every
+  // round (never a guessed number).
+  const prNumber = prNumberFromRef(opts.prUrl);
 
   while (review.state !== "success" && strikes < opts.strikeCap) {
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -5812,13 +5902,24 @@ export async function runFixRung(opts: {
     // never the caller's snapshot. W1-T296 composes a SECOND reason source
     // into this SAME check (never a parallel early-return): a live head
     // this invocation did not itself produce, which escalates rather than
-    // ledgering silently — see the `foreignHead` branch below.
+    // ledgering silently — see the `foreignHead` branch below. W1-T1278 composes TWO more —
+    // condition A (a red required check's later attempt already in flight) and condition B (a
+    // dirty merge state) — see `fixRungStandDownReason`'s own doc for both.
     const preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
       opts.prUrl,
       "rung.strike",
       deps.log,
       deps.readLiveHead ? { readLiveHead: deps.readLiveHead, rungOwnHeadSha } : undefined,
+      noReviewYet && currentCiFailures && currentCiFailures.length > 0 && deps.readCiRollup
+        ? { redNames: currentCiFailures.map((f) => f.name), readRollup: deps.readCiRollup }
+        : undefined,
+      // Skipped whenever `currentMergeConflict` is already set — that mode already owns a dirty
+      // read correctly (design note iv); this check exists for every OTHER mode, where a dirty
+      // read would otherwise go unnoticed.
+      currentMergeConflict === undefined && deps.readMergeFacts && prNumber !== undefined
+        ? { prNumber, readMergeFacts: deps.readMergeFacts }
+        : undefined,
     );
     if (preStrikeStandDown) {
       if (preStrikeStandDown.foreignHead) {
@@ -9047,6 +9148,16 @@ async function runTask(
               statusCheckRollup?: RollupCheck[];
             };
             return fetchCiFailures(owner, task.repo, v.statusCheckRollup);
+          },
+          // W1-T1278 (condition A): the SAME `gh pr view --json statusCheckRollup` shape
+          // `fetchCiFailures` above reads, but RAW (never filtered to failing names only) — the
+          // pre-strike gate needs to see a currently-red name's PENDING later attempt, which
+          // `fetchCiFailures` itself deliberately excludes.
+          readCiRollup: async (prUrlArg) => {
+            const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
+              statusCheckRollup?: RollupCheck[];
+            };
+            return v.statusCheckRollup ?? [];
           },
           runReview,
           push: (wt) => {
@@ -21063,6 +21174,14 @@ export function buildSweepEffects(
                 statusCheckRollup?: RollupCheck[];
               };
               return fetchCiFailures(owner, repo, v.statusCheckRollup);
+            },
+            // W1-T1278 (condition A): same RAW rollup shape as the run-loop call site above —
+            // see that site's own comment for why this must stay separate from `fetchCiFailures`.
+            readCiRollup: async (prUrlArg) => {
+              const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
+                statusCheckRollup?: RollupCheck[];
+              };
+              return v.statusCheckRollup ?? [];
             },
             runReview,
             push: (wt) => {
