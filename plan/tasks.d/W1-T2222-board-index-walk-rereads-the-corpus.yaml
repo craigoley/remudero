@@ -1,0 +1,174 @@
+- id: W1-T2222
+  title: "THE BOARD'S INDEX WALK RE-READS THE WHOLE CORPUS EVERY CYCLE AND THE ISSUE HALF HAS NO DELTA MODE AT ALL — the cold PR half already stops at a known `updated_at`, the hot half and the issue fetch stop at nothing, and all of it shares one account budget with an unpaced per-row storm"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` (caa79046) PROVEN before
+    any reading; the clone was checked and already full (2,109 commits). Ledger gate FIRST:
+    archiveCount 23, ok true, with the control `"step":"risk_judge.decision"` reading 173. THE
+    REF COUNT WAS VERIFIED AGAINST THE REMOTE BEFORE SWEEPING and was one short — 339 local against
+    340 remote — so the sweep ran on refetched refs.
+
+    (1) THE OPERATOR'S MEASUREMENT RE-DERIVES EXACTLY, SCOPED TO THE SERVE CONTAINER. In
+    2026-08-24 11:00–12:59Z, host `e5afe226f001`: 17 PR fetches totalling 100,949,656 B and 13
+    issue fetches totalling 39,509,681 B — **140,459,337 B parsed on one thread in two hours** —
+    with the cold walk at 11:46:35.157Z reading 45,111,796 B over 23 REST calls. Every figure
+    matches. TWO CORRECTIONS ARE RECORDED RATHER THAN SMOOTHED OVER, BOTH NARROWING THE CLAIM.
+
+    (2) CORRECTION A: THE FIGURE IS SERVE-SCOPED, AND THE FLEET-WIDE NUMBER IS 3.2x LARGER. Across
+    ALL hosts in the same window the same steps read 382,401,045 B of PR fetches and 72,945,335 B
+    of issue fetches — 455,346,380 B — because the daemon runs its own gateway instance beside
+    serve's. The 140 MB is what ONE console cost; the account pays the larger number.
+
+    (3) CORRECTION B: `issue_fetch_bytes` IS NOT CONSTANT. Within serve it reads 3,036,532 B seven
+    times, 3,042,139 B five times and 3,043,262 B once; across all hosts there are EIGHT distinct
+    values spanning 3,035,602–3,046,196 B. `issueCount` moves 523 → 524 across the window. So the
+    payload is ~3.04 MB and tracks the issue set; it is not a fixed number. THE POINT SURVIVES AND
+    IS STRONGER STATED CORRECTLY: one issue changed in two hours and the fetch re-read ~3 MB
+    THIRTEEN TIMES to notice it.
+
+    (4) THE COLD PR HALF ALREADY HAS THE DELTA — THE HOT HALF DOES NOT. `fetchBoardPrsRest`
+    (`open-prs-rest.ts`) walks a `state=open` half and a `state=closed` half, each bounded by
+    `BOARD_MAX_PAGES = 50`. The COLD loop carries a real short-circuit: `if
+    (known?.get(row.number)?.updatedAt === row.updated_at) { reachedKnown = true; break; }`, and
+    its own doc proves the stop sound — the walk is sorted `updated_at` descending, so the first
+    matching row means every row below it is unchanged. THE HOT LOOP HAS NO SUCH TEST: it re-maps
+    every open row every cycle and exits only on a short page. `mode` is `delta` whenever `known`
+    is non-empty and `full` otherwise, and it selects only the PAGE SIZE
+    (`BOARD_DELTA_PAGE_SIZE = 30` against the full size), never whether a half is walked.
+
+    (5) SO THE 45 MB IS A COLD-CACHE COST, AND THE CONSOLE PAYS IT PER BOOT. Both `mode=full`
+    fetches in the window are cold walks — 45,111,796 B at 11:46:35 and 45,328,064 B at 12:47:25,
+    each over 23 REST calls — and the second one follows the serve restart at 12:33. Steady-state
+    delta fetches in the same window run 639,748–763,880 B over 2 calls. A restart therefore costs
+    roughly 45 MB and 23 calls before the console can render anything.
+
+    (6) THE ISSUE SIDE HAS NEITHER A DELTA NOR A NOTION OF ONE — ABSENT, NOT BROKEN.
+    `fetchAllIssues` (`status.ts`) is one line: `run(labelledIssuesRestArgs(slug,
+    NEEDS_HUMAN_LABEL, "all"))`, and that helper (`escalate.ts`) returns `["api",
+    "repos/<slug>/issues?labels=<label>&state=all&per_page=100", "--paginate"]`. THERE IS NO
+    `known` PARAMETER, NO `since`, AND NO `updated_at` COMPARISON ANYWHERE ON THIS PATH. Its cache
+    (`issueIndex`) is a pure TTL: `if (!issueCache || now() - issueCache.at >= ttlMs)` re-fetches
+    the WHOLE list. There is nothing to repair — the mechanism was never written.
+
+    (7) AND THE SOURCE'S OWN SIZING ASSUMPTION IS WRONG BY THREE ORDERS OF MAGNITUDE. The comment
+    above that fetch says it is "Scoped to `--label needs-human` ... so this stays one small,
+    bounded fetch (dozens of rows) rather than every issue in the repo." MEASURED: 523–524 rows and
+    ~3.04 MB. The scoping is real and the bound it was expected to produce is not; a reader
+    trusting that comment would not look here at all.
+
+    (8) THE COUPLING, AND IT IS WORSE THAN A SHARED BUDGET. Both halves of the walk wait their turn
+    on ONE pacer — `paceGhEntry(pacer, isGhRateLimitError, fetchAllIssues)` for issues and the
+    identical shape for PRs. BUT THE PER-ROW CALL DOES NOT: `reviewState` runs
+    `run(combinedStatusRestArgs(owner, repo, headRef))` DIRECTLY, with no `paceGhEntry` wrapper.
+    So the walk paces itself against a budget the per-row storm spends without pacing. OBSERVED
+    CONSEQUENCE: `board gateway: batched PR fetch failed (rate_limit)` repeated from 22:08 to
+    23:31Z on 2026-08-22 before the container was stopped — the paced caller is the one that
+    visibly failed.
+
+    (9) THIS IS NOT W1-T2217, WHOSE SHARD IS ALREADY ON MAIN AND IS ONLY CITED HERE. That task owns
+    the per-row `combinedStatusRestArgs` storm on a cold memo. THIS TASK OWNS THE WALK THAT FEEDS
+    THE INDEX, which runs on its own TTL regardless of whether any memo is warm — the two are
+    separable, they are separately measurable (`fetch_bytes`/`issue_fetch_bytes` against the
+    per-row calls), and (8) is precisely the reason they must not be merged: fixing either alone
+    still leaves the other spending the same budget.
+
+    (10) THE SWEEP CAUGHT A COLLISION AND THAT IS RECORDED AS A RESULT. The obvious id, W1-T2221,
+    was reserved 17 minutes before this brief and looked like the intended one; the open-PR
+    surfaces showed it ALREADY CLAIMED by `origin/plan/plan-only-carve-out-gated-on-execution` on a
+    different subject. The id was not guessed — the operator supplied W1-T2222, whose reservation
+    (2026-08-24T13:58:18Z) was then verified present, absent from main, and unclaimed by any live
+    branch against a control of 1 for W1-T2221.
+  design: |
+    ONE CONCERN: the index walk must stop reading rows it already holds. Not the per-row calls, not
+    the TTL, not what the board displays.
+
+    (i) THE COLD HALF IS FOR CLOSED AND MERGED WORK, AND ITS ROWS ARE IMMUTABLE. Its own doc says
+    so outright: "a merged PR's number, url, state, head ref, body, title and auto-merge record are
+    all frozen at merge", and "ROWS THE WALK NEVER REACHES KEEP THEIR CACHED VALUES. That is the
+    point." So the 50-page bound is a RUNAWAY GUARD ("50 pages is 5,000 PRs at the full size"),
+    never a requirement — on a warm cache the cold half already stops at page 1. What is missing is
+    a bound on the COLD-CACHE case, which is the only one that walks all 23 pages.
+
+    (ii) WHAT A RECENCY BOUND WOULD COST, STATED HONESTLY. Bounding the cold walk by recency means
+    the board can no longer name a PR that closed before the horizon. `changedFilesByUrl`
+    (`status.ts`) IS the in-tree precedent for the other half of this — it is a per-URL map with no
+    TTL at all, and the sibling `reviewStateCache` is documented as "DELIBERATELY NOT a
+    forever-memo like `changedFilesByUrl`" because an OPEN PR's review state changes while a
+    merged PR's file list does not. That distinction is exactly the one this task needs: immutable
+    rows may be held past a TTL; live rows may not.
+
+    (iii) THE ISSUE DELTA WOULD KEY ON `updated_at`, THE SAME FIELD THE COLD PR HALF ALREADY USES.
+    The current shape is `--paginate` over `state=all`; the REST issues endpoint accepts `since`,
+    and the rows carry `updated_at`. Either a `since` parameter or the PR half's stop-at-known-row
+    test would work, and reusing the PR half's proven rule is worth more than a second mechanism —
+    its soundness argument (sorted descending, first match means all below are unchanged) transfers
+    verbatim, and a `since` bound would additionally need a rule for issues that were CLOSED rather
+    than updated.
+
+    (iv) WHAT MUST NOT CHANGE, PINNED BY CRITERIA. `DEFAULT_BOARD_POLL_TTL_MS = 150_000` STAYS —
+    this task makes each poll cheaper, never rarer, and lengthening the TTL is the move that trades
+    freshness for bytes rather than removing waste. THE BOARD STILL SHOWS CLOSED WORK: a bound that
+    silently drops merged rows from the board is a regression, not a saving. AND NOTHING CACHES A
+    LIVE VALUE PAST ITS TTL — the exemption in (ii) is for rows frozen at merge and for nothing
+    else, which is the precise line `reviewStateCache`'s own comment already draws.
+
+    (v) THE PACER GAP IS NAMED AND NOT FIXED HERE. Rationale (8): the per-row `reviewState` call
+    bypasses the pacer the walk obeys. Correcting that changes W1-T2217's surface, and folding it
+    in would make this change's own proof ambiguous — a fall in bytes could then be credited to
+    either edit. It is recorded so the next reader does not mistake the walk's pacing for the
+    gateway's.
+
+    (vi) NOT IN SCOPE, NAMED: the per-row `combinedStatusRestArgs` storm (W1-T2217's); pacing the
+    per-row call (v); raising or lowering the TTL; `BOARD_MAX_PAGES` as a runaway guard, which
+    stays; and what the board renders, which this task must leave identical.
+  acceptance:
+    - claim: "a warm-cache poll stops walking open rows it already holds unchanged"
+      proof: "unit test: test/board-index-walk-bounds.test.ts"
+    - claim: "the issue fetch asks only for what changed since its last successful read"
+      proof: "unit test: test/board-index-walk-bounds.test.ts"
+    - claim: "a cold cache still reaches every row the board needs, bounded and reported rather than silently truncated"
+      proof: "unit test: test/board-index-walk-bounds.test.ts"
+    - claim: "the board still names closed and merged work after the bound is applied"
+      proof: "unit test: test/board-index-walk-bounds.test.ts"
+    - claim: "no value that can change while a PR is open is served past the poll TTL"
+      proof: "unit test: test/board-index-walk-bounds.test.ts"
+  files: [src/lib/open-prs-rest.ts, src/lib/status.ts, test/board-index-walk-bounds.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#board-index-walk-rereads-the-corpus-2026-08-24"
+  plan_refs: ["W1-T2217", "W1-T181", "W1-T914"]
+  note: |
+    EVERY PROOF IS A FORWARD REFERENCE BY CONSTRUCTION. All five criteria use the pure-path
+    `unit test:` form naming `test/board-index-walk-bounds.test.ts`, which is declared in `files:`
+    and DOES NOT EXIST on this head — verified absent before writing. That is deliberate: an
+    exact-path proof whose target EXISTS gets executed at review time, and an executed proof on a
+    plan-only filing is graded on work the filing has not done. `files:` is written in the bare
+    single-line form `SHARD_FILES_LINE_RE` requires, because a block-style list contributes
+    NOTHING to `shardDeclaredFilesInDiff` and would silently forfeit the exemption.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    `risk: high` IS RULE 19'S SPAN. `files:` names three stems across two long modules. The band is
+    honest for a second reason: design (iv)'s three invariants are all things a careless bound
+    breaks silently — a dropped merged row and a stale live value both LOOK like a working board.
+
+    THE ID WAS SUPPLIED BY THE OPERATOR AFTER THE SWEEP REFUSED TO GUESS ONE. `refs/rmd-id/W1-T2222`
+    resolves to `d58403921b5b279df658574dd7252b18eac1d1db`, reserved 2026-08-24T13:58:18Z, against a
+    namespace of 341 refs VERIFIED EQUAL TO THE REMOTE. EIGHT SURFACES WERE SWEPT AND EVERY ONE
+    CARRIED A CONTROL THAT FIRES: shard filenames 0 against W1-T2211 at 1 (538 shards); plan
+    `- id:` lines 0 against W1-T2211 at 1; the reservation, which is the pre-mint; merged trailers
+    0 against `Remudero-Task: W1-T2201` at 1, with 467 trailer-carrying commits; merged subject
+    credit 0 against W1-T2211 at 2; live branch names 0 against the `run-*` and `plan/*` namespaces
+    at 88 and 24 of 137; branch-tip subjects 0 against W1-T2221 at 1; and branch changed-file paths
+    0 against W1-T2221 at 1.
+
+    THE LAST TWO CONTROLS ARE THE ONES THAT MATTER, because W1-T2221 is claimed by an OPEN filing
+    branch rather than by main — the same reason a merged id reads zero there and does not
+    discriminate. W1-T2211 was disqualified on those two surfaces on an earlier sweep for exactly
+    that reason and is used only on the main-tree surfaces here.
