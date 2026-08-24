@@ -35,10 +35,13 @@ export class ContainmentError extends Error {
    * fields. `check` names WHICH gate fired (`sandbox-enabled` for the static
    * config gate, `outside-cwd-denial` for the empirical probe); `observed`
    * preserves the three-state epistemology (proven-holding | proven-broken |
-   * UNPROVEN) verbatim rather than collapsing it to a boolean — the literal
-   * "unproven" when no OS-denial was observed (the write may never have been
-   * attempted), a data description when the sandbox was PROVEN to have dropped
-   * (the outside write landed), or a config description for the static gate.
+   * UNPROVEN) rather than collapsing it to a boolean — a data description when
+   * the sandbox was PROVEN to have dropped (the outside write landed), a config
+   * description for the static gate, or, for the UNPROVEN case, ONE OF THREE
+   * named sub-states from {@link classifyUnprovenState} (W1-T1281):
+   * `"probe-never-ran"`, `"write-never-attempted"`, or `"no-denial-observed"` —
+   * no longer the single literal "unproven" that collapsed all three and left
+   * an intermittent preflight failure undiagnosable from any ledger row.
    */
   readonly guard = "containment" as const;
   readonly check: string;
@@ -71,6 +74,20 @@ export interface ContainmentEvidence {
   osDenialSeen: boolean;
   /** Did the write INSIDE cwd land? Sanity signal that the sandbox isn't over-blocking. */
   insideWriteCreated: boolean;
+  /**
+   * W1-T1281: did the transcript even MENTION this run's token — i.e. did the
+   * probe worker get far enough to report on the outside-cwd write step at all,
+   * whether or not that report matched {@link OS_DENIAL_RE}? Split out of the
+   * expression `osDenialSeen` already computes (`transcript.includes(token) &&
+   * OS_DENIAL_RE.test(...)`) so the two halves of that AND are separately
+   * readable: `osDenialSeen` false no longer conflates "attempted, but no
+   * denial phrase" with "never attempted at all" — see
+   * {@link classifyUnprovenState}. Optional — defaults falsy so pre-existing
+   * evidence literals that predate this field read as not-attempted, which is
+   * the conservative direction (it never manufactures a denial-adjacent state
+   * that wasn't observed).
+   */
+  outsideWriteAttempted?: boolean;
   /**
    * W1-T237: did the probe worker die on a credential/auth failure (isError PLUS
    * the conservative `CREDENTIAL_RE` signature) rather than ever attempting a
@@ -178,6 +195,42 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
     contained: true,
     reason: `outside-cwd write OS-DENIED; inside-cwd write ${e.insideWriteCreated ? "succeeded" : "absent"}`,
   };
+}
+
+/**
+ * W1-T1281 — THE THREE STATES `assessContainment`'S `!osDenialSeen` BRANCH USED TO
+ * COLLAPSE INTO THE LITERAL EIGHT CHARACTERS `"unproven"`, NOW NAMED SEPARATELY SO
+ * A `blocked_containment` LEDGER ROW CAN SAY WHICH ONE FIRED.
+ *
+ * PURE, over the SAME evidence `assessContainment` already read — no new signal is
+ * gathered, and NO VERDICT CHANGES: every state this returns still corresponds to
+ * `contained: false` and still fails closed. This function only decides what gets
+ * RECORDED alongside that unchanged decision (design part (i)).
+ *
+ * Checked in this order, per design part (iii):
+ *  1. `!insideWriteCreated` ⇒ `"probe-never-ran"`. The probe MECHANISM itself did
+ *     not run — not even the inside-cwd write, the sanity signal that the sandbox
+ *     isn't over-blocking, landed. This is a DIFFERENT fault from an instrument
+ *     that ran and simply observed nothing, and reporting it identically is the
+ *     exact credential-failure collapse W1-T237 already fixed once for a
+ *     different field (see `credentialFailure`/`credentialExpired` above) — this
+ *     is that fix for the remaining two states.
+ *  2. `!outsideWriteAttempted` ⇒ `"write-never-attempted"`. The instrument ran
+ *     (inside write landed) but the transcript never even mentioned this run's
+ *     token — the outside-cwd write step was never reached or never reported,
+ *     so there is nothing for a denial phrase to have matched.
+ *  3. otherwise ⇒ `"no-denial-observed"`. The instrument ran AND the outside-cwd
+ *     write step was reported on, but nothing in that report matched
+ *     {@link OS_DENIAL_RE} — the write may still not have been attempted (a
+ *     worker can mention a step without actually running it), but this is now
+ *     distinguishable from the two states above rather than sharing their string.
+ */
+export type UnprovenState = "no-denial-observed" | "write-never-attempted" | "probe-never-ran";
+
+export function classifyUnprovenState(e: ContainmentEvidence): UnprovenState {
+  if (!e.insideWriteCreated) return "probe-never-ran";
+  if (!e.outsideWriteAttempted) return "write-never-attempted";
+  return "no-denial-observed";
 }
 
 /** What one probe execution returns to the verdict layer. */
@@ -651,6 +704,11 @@ export async function probeContainment(opts: {
     // OS-denial pattern and flip a genuinely UNPROVEN run to contained.
     osDenialSeen:
       r.transcript.includes(token) && OS_DENIAL_RE.test(stripDenyFloorLines(r.transcript)),
+    // W1-T1281: the FIRST half of the `osDenialSeen` expression above, carried
+    // separately so a failure can distinguish "attempted but no denial phrase"
+    // from "never attempted at all" instead of collapsing both into one boolean
+    // — see classifyUnprovenState.
+    outsideWriteAttempted: r.transcript.includes(token),
     insideWriteCreated: r.insideWriteCreated,
     // W1-T237: isError PLUS BOTH conservative credential fragments — not "any
     // error" — so an unrelated error-result is never mislabelled a credential
@@ -695,6 +753,10 @@ export async function probeContainment(opts: {
     credential_expired: evidence.credentialExpired,
     outside_write_created: evidence.outsideWriteCreated,
     os_denial_seen: evidence.osDenialSeen,
+    // W1-T1281: carried so a row that PASSED can still be read for the same
+    // three-state split a failing row's `observed` field now names — the
+    // decision does not change, only what gets recorded alongside it.
+    outside_write_attempted: evidence.outsideWriteAttempted,
     inside_write_created: evidence.insideWriteCreated,
     // OBSERVATIONAL — recorded on the containment step rather than gating it, so
     // the deny floor stops being proven NEVER without a new bound that could park
@@ -733,9 +795,13 @@ export async function probeContainment(opts: {
     //     the keychain, don't investigate the sandbox).
     //  3. outsideWriteCreated — proven-broken (the outside write LANDED, the
     //     sandbox did not engage) is data-bearing.
-    //  4. neither — genuinely UNPROVEN (the write may never have been
-    //     attempted) and reports the literal "unproven" rather than a
-    //     fabricated data string.
+    //  4. neither — genuinely UNPROVEN, but no longer collapsed to the eight
+    //     characters "unproven": classifyUnprovenState (W1-T1281) names WHICH of
+    //     three distinguishable states this was — "probe-never-ran",
+    //     "write-never-attempted", or "no-denial-observed" — so a
+    //     `blocked_containment` ledger row (this error's `observed` field, read
+    //     by run-task.ts) can name the cause instead of forcing a reader to
+    //     re-derive it from evidence that was never recorded in the first place.
     if (evidence.credentialExpired) {
       throw new ContainmentError(
         `containment preflight: spawn_credential_expired — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
@@ -756,7 +822,7 @@ export async function probeContainment(opts: {
     }
     const observed = evidence.outsideWriteCreated
       ? "outside-cwd write succeeded (sandbox did not engage)"
-      : "unproven";
+      : classifyUnprovenState(evidence);
     throw new ContainmentError(
       `containment UNPROVEN: ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
       "outside-cwd-denial",

@@ -13,6 +13,7 @@ import {
   allowedHostFromSettings,
   assessContainment,
   assessEgressContainment,
+  classifyUnprovenState,
   containmentProbePrompt,
   defaultExecutor,
   egressProbeCommand,
@@ -145,7 +146,10 @@ test("containmentProbePrompt: attempts an OUTSIDE-cwd write then an INSIDE-cwd w
 
 // ── W1-T91/P23: structured guard-cause on the thrown ContainmentError ───────
 
-test("W1-T91 ACCEPTANCE: the UNPROVEN containment state (no OS-denial observed) round-trips as observed='unproven'", async () => {
+test("W1-T91 ACCEPTANCE: the UNPROVEN containment state (no OS-denial observed) round-trips as a NAMED sub-state, not the generic 'unproven' (W1-T1281)", async () => {
+  // The transcript never mentions the token at all, though the probe DID land
+  // its inside-cwd write — that specific combination is `write-never-attempted`
+  // (W1-T1281's classifyUnprovenState), not the collapsed literal "unproven".
   await assert.rejects(
     () =>
       probeContainment({
@@ -162,7 +166,8 @@ test("W1-T91 ACCEPTANCE: the UNPROVEN containment state (no OS-denial observed) 
       const err = e as ContainmentError;
       assert.equal(err.guard, "containment");
       assert.equal(err.check, "outside-cwd-denial");
-      assert.equal(err.observed, "unproven");
+      assert.equal(err.observed, "write-never-attempted");
+      assert.notEqual(err.observed, "unproven");
       return true;
     },
   );
@@ -234,7 +239,7 @@ test("probeContainment: a seeded error-result carrying 'Not logged in · Please 
   );
 });
 
-test("probeContainment: a genuine no-write, no-denial, non-error run still yields the generic unproven reason (credential path does not swallow it)", async () => {
+test("probeContainment: a genuine no-write, no-denial, non-error run yields the NAMED write-never-attempted state, not the generic unproven (credential path does not swallow it)", async () => {
   await assert.rejects(
     () =>
       probeContainment({
@@ -251,7 +256,8 @@ test("probeContainment: a genuine no-write, no-denial, non-error run still yield
       assert.ok(e instanceof ContainmentError);
       const err = e as ContainmentError;
       assert.equal(err.check, "outside-cwd-denial");
-      assert.equal(err.observed, "unproven");
+      assert.equal(err.observed, "write-never-attempted");
+      assert.notEqual(err.observed, "unproven");
       return true;
     },
   );
@@ -334,7 +340,7 @@ test("probeContainment: a seeded 'Not logged in · Please run /login' result sti
   );
 });
 
-test("probeContainment: an UNRELATED error-result that merely mentions 'expired' (rate-limit / session-window text) is NOT mislabelled a credential expiry — falls through to genuine unproven", async () => {
+test("probeContainment: an UNRELATED error-result that merely mentions 'expired' (rate-limit / session-window text) is NOT mislabelled a credential expiry — falls through to the NAMED probe-never-ran state", async () => {
   await assert.rejects(
     () =>
       probeContainment({
@@ -344,7 +350,10 @@ test("probeContainment: an UNRELATED error-result that merely mentions 'expired'
           // Deliberately shares the word "expired" with the real signature but
           // carries neither the "oauth session expired" NOR the "could not be
           // refreshed" fragment — a rate-limit / session-window message, not an
-          // auth-dead one.
+          // auth-dead one. insideWriteCreated: false ⇒ the probe mechanism
+          // itself never ran (W1-T1281's "probe-never-ran"), the state that
+          // matters most and was previously indistinguishable from any other
+          // unproven cause.
           transcript: "rate limit exceeded: the request session window expired, please retry later",
           outsideWriteCreated: false,
           insideWriteCreated: false,
@@ -355,7 +364,8 @@ test("probeContainment: an UNRELATED error-result that merely mentions 'expired'
       assert.ok(e instanceof ContainmentError);
       const err = e as ContainmentError;
       assert.equal(err.check, "outside-cwd-denial");
-      assert.equal(err.observed, "unproven");
+      assert.equal(err.observed, "probe-never-ran");
+      assert.notEqual(err.observed, "unproven");
       assert.notEqual(err.observed, "spawn_credential_expired");
       assert.notEqual(err.observed, "spawn_credential_failure");
       return true;
@@ -363,7 +373,7 @@ test("probeContainment: an UNRELATED error-result that merely mentions 'expired'
   );
 });
 
-test("probeContainment: isError alone (no credential-shaped text) does NOT trip the credential verdict — falls through to genuine unproven", async () => {
+test("probeContainment: isError alone (no credential-shaped text) does NOT trip the credential verdict — falls through to the NAMED probe-never-ran state", async () => {
   await assert.rejects(
     () =>
       probeContainment({
@@ -380,10 +390,162 @@ test("probeContainment: isError alone (no credential-shaped text) does NOT trip 
       assert.ok(e instanceof ContainmentError);
       const err = e as ContainmentError;
       assert.equal(err.check, "outside-cwd-denial");
-      assert.equal(err.observed, "unproven");
+      assert.equal(err.observed, "probe-never-ran");
+      assert.notEqual(err.observed, "unproven");
       return true;
     },
   );
+});
+
+// ── W1-T1281: the containment failure path no longer discards the evidence
+// that would name its cause. Every non-outside-write failure used to collapse
+// to the literal string "unproven"; classifyUnprovenState now names WHICH of
+// three states occurred, derived purely from evidence rather than left for a
+// reader to re-classify a blob. The verdict itself is UNCHANGED — all three
+// remain `contained: false` and FAIL CLOSED (design part (iv)). ──────────────
+
+test("classifyUnprovenState: a failure where the probe never ran at all is named as such rather than as unproven", () => {
+  const state = classifyUnprovenState({
+    outsideWriteCreated: false,
+    osDenialSeen: false,
+    insideWriteCreated: false, // the instrument itself did not run
+    outsideWriteAttempted: false,
+  });
+  assert.equal(state, "probe-never-ran");
+  assert.notEqual(state, "unproven");
+});
+
+test("classifyUnprovenState: a failure where the write step was never even reported is distinct from probe-never-ran", () => {
+  const state = classifyUnprovenState({
+    outsideWriteCreated: false,
+    osDenialSeen: false,
+    insideWriteCreated: true, // the instrument DID run — inside write landed
+    outsideWriteAttempted: false, // but the outside-write step was never reported
+  });
+  assert.equal(state, "write-never-attempted");
+  assert.notEqual(state, "unproven");
+  assert.notEqual(state, "probe-never-ran");
+});
+
+test("classifyUnprovenState: a failure where no OS-denial was observed records a state distinct from the other two", () => {
+  const state = classifyUnprovenState({
+    outsideWriteCreated: false,
+    osDenialSeen: false, // no denial phrase matched
+    insideWriteCreated: true, // the instrument ran
+    outsideWriteAttempted: true, // and the outside-write step WAS reported on
+  });
+  assert.equal(state, "no-denial-observed");
+  assert.notEqual(state, "unproven");
+  assert.notEqual(state, "probe-never-ran");
+  assert.notEqual(state, "write-never-attempted");
+});
+
+test("classifyUnprovenState: the three states are pairwise DISTINCT (the falsifier direction design part (vi) requires)", () => {
+  const probeNeverRan = classifyUnprovenState({
+    outsideWriteCreated: false,
+    osDenialSeen: false,
+    insideWriteCreated: false,
+    outsideWriteAttempted: false,
+  });
+  const writeNeverAttempted = classifyUnprovenState({
+    outsideWriteCreated: false,
+    osDenialSeen: false,
+    insideWriteCreated: true,
+    outsideWriteAttempted: false,
+  });
+  const noDenialObserved = classifyUnprovenState({
+    outsideWriteCreated: false,
+    osDenialSeen: false,
+    insideWriteCreated: true,
+    outsideWriteAttempted: true,
+  });
+  const all = [probeNeverRan, writeNeverAttempted, noDenialObserved];
+  assert.equal(new Set(all).size, 3, "all three states must be pairwise distinct, not one string for all three");
+  for (const s of all) assert.notEqual(s, "unproven");
+});
+
+test("classifyUnprovenState: the recorded state is DERIVED from evidence, not the reader re-classifying a raw blob — insideWriteCreated is checked FIRST (design part iii)", () => {
+  // Even when the transcript-attempted signal would suggest "write-never-attempted",
+  // a dead instrument (insideWriteCreated: false) must win — it is the MORE severe,
+  // DIFFERENT fault (the mechanism didn't run at all), never masked by a lesser one.
+  const state = classifyUnprovenState({
+    outsideWriteCreated: false,
+    osDenialSeen: false,
+    insideWriteCreated: false,
+    outsideWriteAttempted: false,
+  });
+  assert.equal(state, "probe-never-ran");
+});
+
+test("probeContainment: an unproven failure with the outside-write step reported but no denial phrase matched records 'no-denial-observed', still FAILS CLOSED", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "reportedtok",
+        exec: async (token) => ({
+          // The token IS mentioned (the step was reported on) but nothing in the
+          // report matches OS_DENIAL_RE — an ambiguous, non-denial outcome.
+          transcript: `outside: touch ../${token}.txt returned no output`,
+          outsideWriteCreated: false,
+          insideWriteCreated: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.check, "outside-cwd-denial");
+      assert.equal(err.observed, "no-denial-observed");
+      assert.notEqual(err.observed, "unproven");
+      assert.match(err.message, /FAIL CLOSED/);
+      return true;
+    },
+  );
+});
+
+test("probeContainment: ALL THREE unproven sub-states still refuse the run (verdict unchanged, only the record changes — design part iv)", async () => {
+  const fixtures: Array<{ label: string; result: ProbeExecResult; expected: string }> = [
+    {
+      label: "probe-never-ran",
+      result: { transcript: "", outsideWriteCreated: false, insideWriteCreated: false },
+      expected: "probe-never-ran",
+    },
+    {
+      label: "write-never-attempted",
+      result: {
+        transcript: "unrelated transcript text",
+        outsideWriteCreated: false,
+        insideWriteCreated: true,
+      },
+      expected: "write-never-attempted",
+    },
+    {
+      label: "no-denial-observed",
+      result: {
+        transcript: "outside: touch reported, no denial phrase present",
+        outsideWriteCreated: false,
+        insideWriteCreated: true,
+      },
+      expected: "no-denial-observed",
+    },
+  ];
+  for (const { label, result, expected } of fixtures) {
+    await assert.rejects(
+      () =>
+        probeContainment({
+          settingsFile: settingsFile(ENABLED),
+          token: label === "no-denial-observed" ? "" : "unused-token-not-in-transcript",
+          exec: async () => result,
+        }),
+      (e: unknown) => {
+        assert.ok(e instanceof ContainmentError, `${label}: must still throw ContainmentError`);
+        const err = e as ContainmentError;
+        assert.match(err.message, /FAIL CLOSED/, `${label}: must still fail closed`);
+        assert.equal(err.observed, expected, `${label}: must record its own distinct state`);
+        return true;
+      },
+    );
+  }
 });
 
 // ── defaultExecutor: the real-spawn path plumbs isError through (W1-T237) ──
