@@ -473,13 +473,22 @@ export interface ReviewVerdict {
    *
    * The one place `planOnly` is consequential: {@link decideAutoMergeArm} treats
    * a `planOnly` CAPPED verdict as armable without an operator override — the
-   * carve-out is an exemption from PROOF EXECUTION only, never from `state`
-   * itself (a plan-only PR whose criteria are genuinely unmet still fails like
-   * any other), and never from the deterministic gates that already bind a plan
-   * PR (lint-plan, the emitter's own structural checks, plan-index regeneration,
-   * commitlint). It also changes the RENDERING of a capped success (see
-   * {@link planOnlySummary}) so the posted status reads as deterministically
-   * gated rather than as proof-executed — never overstating what was checked.
+   * carve-out is an exemption from PROOF EXECUTION and, since W1-T2221, from the
+   * SEMANTIC downgrade too (never from `state` itself: a plan-only PR whose
+   * criteria are genuinely unmet — the deterministic FLOOR, pre-downgrade,
+   * still fails). W1-T2221 closed a gap where `planOnly` was consulted only
+   * behind `state === "success" && capped`: a filing whose declared proof path
+   * happened to name a test that already exists on `main` RESOLVED and RAN,
+   * the semantic lane downgraded it for judging a specification as if it were
+   * an implementation, and the carve-out below was never reached at all. `state`
+   * now rolls up a plan-only diff's criteria on `floorMet`, not the
+   * semantically-downgraded `met` (see `unmetForState` in {@link judgeReview}),
+   * so a plan-only PR is decided by the deterministic gates that already bind
+   * it (lint-plan, the emitter's own structural checks, plan-index
+   * regeneration, commitlint) — never by whether a proof happened to execute.
+   * It also changes the RENDERING of a capped success (see {@link
+   * planOnlySummary}) so the posted status reads as deterministically gated
+   * rather than as proof-executed — never overstating what was checked.
    */
   planOnly: boolean;
   /**
@@ -3629,9 +3638,19 @@ export function judgeReview(
 
   const unmet = verdicts.filter((v) => !v.met);
   const noCriteria = criteria.length === 0;
+  // W1-T2221: hoisted ahead of `state` (was previously computed only for `floorState`,
+  // below) so `state` itself can consult it on a plan-only diff — see `unmetForState`.
+  const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met));
+  // W1-T2221: on a plan-only diff, `state` is decided on the FLOOR (mechanical/executed,
+  // pre-downgrade) — a semantic downgrade alone must never fail a filing that has no code
+  // for the semantic lane to judge (design (ii)). `planOnly` is the exemption, never "a
+  // proof happened not to execute" — the same shape `criteriaTampered` above already uses,
+  // and the one W1-T2221's rationale (6) says must not be re-derived from execution facts.
+  // A code diff (`planOnly` false) is byte-identical to today: `unmetForState === unmet`.
+  const unmetForState = planOnly ? floorUnmet : unmet;
   const state: ReviewState =
     noCriteria ||
-    unmet.length > 0 ||
+    unmetForState.length > 0 ||
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
@@ -3659,7 +3678,6 @@ export function judgeReview(
   // suppressed by verdict stability (W1-T178), which only ever forgives a
   // SEMANTIC downgrade. This is the anchor a re-review of an unchanged head
   // checks before trusting a downgrade.
-  const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met));
   const floorState: ReviewState =
     noCriteria ||
     floorUnmet.length > 0 ||
@@ -3728,34 +3746,48 @@ export function judgeReview(
   // test theater" wording (criterion 1) — neither claim was measured. A
   // capped `state: "failure"` already renders via failSummary, which carries
   // its own specific unmet-criterion reason and never those two phrases
-  // either, so no extra branch is needed there. A capped PLAN-ONLY success
-  // renders via {@link planOnlySummary} instead of {@link cappedSummary} — see
-  // {@link ReviewVerdict.planOnly}'s doc (W1-T205): "0 proofs executed" is not
-  // a degradation for a PR with nothing executable to point at, so the status
-  // must read as deterministically gated, never as an uncertified claim.
+  // either, so no extra branch is needed there. A PLAN-ONLY success renders
+  // via {@link planOnlySummary} instead of {@link cappedSummary}/{@link
+  // passSummary} — see {@link ReviewVerdict.planOnly}'s doc (W1-T205): "0
+  // proofs executed" is not a degradation for a PR with nothing executable to
+  // point at, so the status must read as deterministically gated, never as an
+  // uncertified claim.
+  //
+  // W1-T2221: `planOnly` is now consulted BEFORE `capped`, not behind it — a
+  // plan-only diff whose declared proof path happened to resolve and RUN
+  // (`capped` false) still reaches {@link planOnlySummary}, exactly like one
+  // that executed nothing (`capped` true). Previously this branch was only
+  // reachable through `capped`'s `true` arm, so a proof that resolved routed
+  // a plan-only filing into `passSummary`/`failSummary` — the semantic-lane
+  // verdict of a diff with no code for that lane to judge (design (i)/(ii)).
   const summary =
     state === "success"
-      ? capped
-        ? planOnly
-          ? planOnlySummary(verdicts.length)
-          : cappedSummary(verdicts.length, keywordOnly, enforcementData)
-        : passSummary(
-            verdicts.length,
-            keywordOnly,
-            // W1-T305 (design (4)): a partially-observed PASS never renders identically to a fully-
-            // observed one — the fraction actually executed rides on the same commit-status text.
-            partiallyExecuted ? { executed: executedCount, executable: executableCriteria.length } : undefined,
-          )
+      ? planOnly
+        ? planOnlySummary(verdicts.length)
+        : capped
+          ? cappedSummary(verdicts.length, keywordOnly, enforcementData)
+          : passSummary(
+              verdicts.length,
+              keywordOnly,
+              // W1-T305 (design (4)): a partially-observed PASS never renders identically to a fully-
+              // observed one — the fraction actually executed rides on the same commit-status text.
+              partiallyExecuted ? { executed: executedCount, executable: executableCriteria.length } : undefined,
+            )
       : failSummary(
           // W1-T166: only VISIBLE unmet claims name themselves in the posted
           // summary — a holdout claim never reaches this text (see failSummary's
           // own doc for why: it becomes the commit-status description AND the
           // ledger's failure text, both worker-`gh`-readable).
-          visibleCriteria(unmet).map((v) => v.claim),
+          //
+          // W1-T2221: `unmetForState` (not `unmet`) so a plan-only diff's failure text names
+          // only genuine FLOOR failures, never a criterion that is merely semantically
+          // downgraded while its floor already passed — `unmetForState === unmet` on a code
+          // diff, so this is a no-op there (design (iv)).
+          visibleCriteria(unmetForState).map((v) => v.claim),
           testTheater,
           noCriteria,
           criteriaTampered,
-          unmet.length - visibleCriteria(unmet).length,
+          unmetForState.length - visibleCriteria(unmetForState).length,
           changesetContradictions,
           instrumentEntangled ? instrumentEntanglement : undefined,
           unprovenancedDecisionsEntries,
