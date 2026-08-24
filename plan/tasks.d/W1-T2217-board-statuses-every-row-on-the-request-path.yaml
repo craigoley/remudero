@@ -49,6 +49,47 @@
     `status.ts:4260`; it repeated from 22:08 to 23:31 UTC on 2026-08-22 before the container was
     stopped. The log window is the operator's; what is re-derived here is the emitter, its
     classification path, and the coupling.
+    (6) IT SHIPPED, ITS CRITERIA HOLD, AND THE STORM STILL RUNS. Measured 2026-08-24 against #2734
+    (`ac2b625c`, merged 17:15:03Z) with `remudero-serve` cold at 17:17:54 and no `board_gateway.*`
+    rows: a cold `/v1/status` returned HTTP 200 in 218,788 ms and a WARM one in 195,403 ms — ELEVEN
+    PERCENT FASTER — both reporting `tasks=820, withPrUrl=751, withReviewState=751`. THE TIMINGS ARE
+    OPERATOR-ATTRIBUTED; the code below is re-derived here.
+
+    (7) THE GUARD IS PRESENT AND CORRECT FOR THE CASE IT WAS WRITTEN FOR, AND UNREACHABLE FOR THE
+    ONE THAT DOMINATES. `status.ts:4391-4393` reads `const terminal = entry.state !== "OPEN"; const
+    cached = reviewStateCache.get(prUrl); if (cached && (terminal || now() - cached.at < ttlMs))
+    return cached.state;`. IT REQUIRES A CACHED ENTRY. `reviewStateCache.set(...)` sits on the
+    SUCCESS path only (`:4411`), and the `catch` at `:4413` returns `undefined` and caches nothing.
+    So terminality is knowable from `entry.state` alone, yet the guard consults it only AFTER a
+    cache hit it can never get.
+
+    (8) AND THE CALLS FAIL BY CONSTRUCTION, WHICH IS WHY THE CACHE NEVER FILLS.
+    `combinedStatusRestArgs(owner, repo, sha)` (`open-prs-rest.ts:506-508`) is called with
+    `entry.headRefName` (`status.ts:4384`) — A BRANCH NAME, NOT A SHA, and the parameter's own name
+    says `sha`. A merged PR's branch is deleted. VERIFIED DIRECTLY: `run-W1-T331-1785884370235`
+    reads 0 on origin and `gh api repos/craigoley/remudero/commits/run-W1-T331-1785884370235/status`
+    exits 1 with `{"message":"Ref not found","status":"404"}`. So every terminal row whose branch is
+    gone 404s, is never memoised, and is re-requested on every paint forever. The index holds
+    `prCount 2206` against 136 LIVE REMOTE HEADS, and the review-state histogram reads `none: 733`.
+
+    (9) THE SAMPLING, AND WHAT IT CANNOT SAY. 34 bounded samples across both passes caught a call in
+    flight EVERY TIME, EVERY REF DISTINCT — 24 in the cold pass, 8 more in the warm pass with ZERO
+    OVERLAP, spanning 2026-07-15 to 2026-08-23. Expected N was 3; observed is the full historical
+    population. THE HONEST LIMIT: THE EXACT `gh` CALL COUNT PER PAINT WAS NOT ESTABLISHED. Sampling
+    shows the calls continuous and serial for ~200 s but cannot count them; a per-call ledger row or
+    a before/after `core.used` snapshot would settle it, and the "before" reading was not taken.
+
+    (10) AND AN IMMUTABLE KEY IS NOT AVAILABLE WITHOUT A NEW FIELD — recorded so the obvious remedy
+    is not costed wrongly. `BatchedPr` (`status.ts:3903-3912`) carries `number, url, state,
+    headRefName, body, autoMergeRequest` and NO `headRefOid`; `:4382` says outright that this
+    gateway "never fetches a PR's `headRefOid` at all". Keying the status call on a sha would
+    therefore widen the batched fetch, which is a different change from the one the follow-up
+    proposes.
+
+    (11) THE FOLLOW-UP OWNS ALL OF THIS AND THE BOUNDARY IS EXPLICIT. W1-T2235 carries (6)-(10). The
+    ~14 s cold index walk measured in the same request — 45,919,114 B across 24 REST calls at
+    `prCount 2206`, plus a 3,048,634 B issue re-read — IS W1-T2222'S, WHICH IS FILED AND QUEUED. The
+    other ~200 s is this task's territory and the follow-up's. THEY MUST NOT BE FOLDED.
   design: |
     (i) THE STORM IS A COLD CACHE, WHICH IS WHY IT IS INTERMITTENT AND WHY THE REMEDY IS TRACTABLE.
     `reviewStateCache` is a per-URL memo held at GATEWAY scope and TTL-matched to `index()`, so a

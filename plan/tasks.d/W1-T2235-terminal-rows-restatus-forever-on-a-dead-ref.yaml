@@ -1,0 +1,156 @@
+- id: W1-T2235
+  title: "A TERMINAL BOARD ROW RE-STATUSES FOREVER BECAUSE ITS 404 IS NEVER MEMOISED — W1-T2217's guard reads `entry.state` only AFTER a cache hit it can never get, and the call is keyed on a deleted branch name, so 733 rows render `none` from a 404 on every paint"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/status.ts, src/lib/board.ts, test/board-terminal-review-state.test.ts]
+  origin: oper#terminal-rows-restatus-forever-on-a-dead-ref-2026-08-24
+  plan_refs: ["W1-T2217", "W1-T2222", "W1-T2215", "W1-T2212"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN BY SHA at
+    1d683564; the clone was checked and already full, and `src/run-task.ts` was not read at all —
+    this defect lives in `src/lib/status.ts`. The reservation was confirmed present and unused on
+    all eight surfaces before anything was written, and the ref namespace was verified equal to the
+    remote first (354 local, 354 remote). THE TIMINGS BELOW ARE OPERATOR-ATTRIBUTED; every code
+    claim is first-hand.
+
+    (1) W1-T2217 SHIPPED AND ITS CRITERIA HOLD. It merged as #2734 (`ac2b625c`, 17:15:03Z) and does
+    exactly what it says: a terminal row's memo is honoured past the TTL. This task does not
+    reopen it and does not contradict it — see design (v).
+
+    (2) BUT THE GUARD IS ORDERED WRONG, AND THAT IS THE WHOLE DEFECT. `status.ts:4391-4393`:
+    `const terminal = entry.state !== "OPEN"; const cached = reviewStateCache.get(prUrl);
+    if (cached && (terminal || now() - cached.at < ttlMs)) return cached.state;`
+    `terminal` IS KNOWABLE FROM `entry.state` ALONE — it needs no cache and no call — yet it is
+    consulted only as a modifier on a cache hit. A terminal row with no cache entry falls straight
+    through to the network.
+
+    (3) AND THE CACHE CAN NEVER FILL FOR THOSE ROWS. `reviewStateCache.set(...)` sits on the SUCCESS
+    path only (`:4411`); the `catch` at `:4413` returns `undefined` and caches nothing. So a row
+    whose call fails is re-requested on the next paint, and the next, forever.
+
+    (4) THE CALLS FAIL BY CONSTRUCTION. `combinedStatusRestArgs(owner, repo, sha)`
+    (`open-prs-rest.ts:506-508`) is invoked with `entry.headRefName` (`status.ts:4384`) — A BRANCH
+    NAME, NOT A SHA, though the parameter is named `sha`. A merged PR's head branch is deleted.
+    VERIFIED DIRECTLY: `run-W1-T331-1785884370235` reads 0 on origin, and
+    `gh api repos/craigoley/remudero/commits/run-W1-T331-1785884370235/status` exits 1 with
+    `{"message":"Ref not found","status":"404"}`. THE THREE FACTS COMPOSE: terminal rows are the
+    majority, their refs are deleted, their 404s are never cached.
+
+    (5) THE SCALE, MEASURED. The batched index holds `prCount 2206` against 136 LIVE REMOTE HEADS.
+    A cold `/v1/status` returned HTTP 200 in 218,788 ms and a WARM one in 195,403 ms — eleven
+    percent faster — both reporting `tasks=820, withPrUrl=751, withReviewState=751`, with the
+    review-state histogram reading `none: 733`. 34 bounded samples across both passes caught a call
+    in flight every time, EVERY REF DISTINCT (24 cold, 8 warm, ZERO OVERLAP), spanning 2026-07-15 to
+    2026-08-23. The warm pass re-storming is the proof that this is not a cold-start cost.
+
+    (6) `none: 733` IS A 404 LAUNDERED INTO A VERDICT, AND THAT IS THE SAME CLASS AS TWO OTHER
+    SHARDS. `deriveReviewState` (`board.ts:520-533`) turns an `undefined` from the gateway into
+    `"none"` whenever `safeReadFailed(github)` is false — and it IS false here, because the PR-LIST
+    fetch succeeded; only the per-row status call failed. So an unreadable input is rendered as a
+    determinate finding, exactly the shape W1-T2215 and W1-T2212 record at other sites. Both are
+    cited, neither re-filed.
+
+    (7) AN IMMUTABLE KEY IS NOT AVAILABLE WITHOUT WIDENING THE FETCH — recorded so the obvious
+    remedy is not costed wrongly. `BatchedPr` (`status.ts:3903-3912`) carries `number, url, state,
+    headRefName, body, autoMergeRequest` and NO `headRefOid`, and `:4382` says outright that this
+    gateway "never fetches a PR's `headRefOid` at all". Keying on a sha means adding a field to the
+    batched PR fetch, which is a larger change than either candidate in design (i).
+
+    (8) THE HONEST LIMIT, CARRIED. THE EXACT `gh` CALL COUNT PER PAINT WAS NOT ESTABLISHED. Sampling
+    shows the calls continuous and serial for roughly 200 seconds but cannot count them; a per-call
+    ledger row or a before/after `core.used` snapshot would settle it, and the "before" reading was
+    not taken. Nothing here claims a specific N.
+  design: |
+    ONE CONCERN: a terminal row must not reach the network. Not the TTL, not the index walk, not
+    what an OPEN row shows.
+
+    (i) THE TWO CANDIDATES, WEIGHED. (a) CHECK TERMINALITY BEFORE THE CACHE: `if (terminal) return
+    <not-applicable>` ahead of the `reviewStateCache` lookup. It needs no new data, makes no call,
+    and collapses N to the OPEN rows alone — which is the number the board was always supposed to
+    ask for. (b) MEMOISE THE 404: cache the failure so the second paint is cheap. It is strictly
+    weaker — it still pays one call per terminal row per process lifetime, it caches a network
+    outcome rather than a fact, and on a rate-limited host it caches the wrong thing entirely,
+    because a 403 and a 404 are indistinguishable at the `catch`.
+
+    (ii) THE BOARD NEEDS (a), AND THE REASON IS SEMANTIC RATHER THAN NUMERIC. A TERMINAL ROW HAS NO
+    LIVE CHECK STATE TO SHOW. `remudero-review` on a merged PR is history, not status; the feature
+    exists to watch a check go pending → success on a PR that is still open. So the correct answer
+    for a terminal row is not a cheaper fetch of the same value — it is that the value does not
+    apply. (b) would make a wrong answer fast; (a) stops asking a question that has no meaning.
+
+    (iii) SO A TERMINAL ROW RENDERS NOT-APPLICABLE, NEVER `none`. Rationale (6): `none` today is a
+    404 read as a verdict. A distinct state — carried on the row the way `merged_known`
+    (`board.ts`) carries knownness beside its number — lets the page say "this PR is merged, review
+    state does not apply" instead of asserting there was no review. The renderer must not collapse
+    the new state back into `none`.
+
+    (iv) WHAT MUST NOT CHANGE, PINNED BY CRITERIA. `DEFAULT_BOARD_POLL_TTL_MS = 150_000` STAYS. THE
+    BOARD STILL SHOWS CHECK STATE FOR OPEN PRs — that path is untouched and must keep expiring every
+    TTL. AND NOTHING CACHES A LIVE STATUS PAST ITS TTL: the memo's own doc forbids it because
+    `remudero-review` going pending → success is the value the feature exists for, and (a) must not
+    become a licence to freeze an OPEN row.
+
+    (v) THIS DOES NOT REOPEN W1-T2217. That task's claim — a terminal row's memo is honoured past
+    the TTL — is true and stays. What this adds is that the memo is unreachable for the rows that
+    dominate, so the guard needs to fire on `entry.state` before the cache rather than through it.
+    Its shard carries the measurement as rationale (6)-(11); this one carries the remedy.
+
+    (vi) NOT IN SCOPE, NAMED: the index walk and the issue re-read, which are W1-T2222's and are
+    filed and queued — the cold walk cost ~14 s of the 219 s measured (45,919,114 B across 24 REST
+    calls, plus a 3,048,634 B issue read) and the other ~200 s is this task's; widening `BatchedPr`
+    to carry a sha (rationale (7)); the TTL; and the OPEN-row path.
+  acceptance:
+    - claim: "a terminal board row makes no per-row status call at all, on a cold cache or a warm one"
+      proof: "unit test: test/board-terminal-review-state.test.ts"
+    - claim: "a terminal row renders a not-applicable review state rather than none"
+      proof: "unit test: test/board-terminal-review-state.test.ts"
+    - claim: "an open PR still has its review state fetched and still expires every poll interval"
+      proof: "unit test: test/board-terminal-review-state.test.ts"
+    - claim: "a failed status read on an open row is still reported as unreadable rather than as none"
+      proof: "unit test: test/board-terminal-review-state.test.ts"
+    - claim: "the number of per-row status calls for a board of terminal rows is zero"
+      proof: "unit test: test/board-terminal-review-state.test.ts"
+  note: |
+    THIS IS THE W1-T180 PAIR. W1-T2217 is merged, and this PR records a new finding against it, so
+    the follow-up that owns the finding is filed in the SAME PR rather than left to orphan. The
+    amendment adds RATIONALE ONLY — no acceptance criterion is added or changed on W1-T2217, which
+    is why `postMergeAmendmentViolations` reads zero on it in its own right; the pair is filed
+    because the FINDING needs an owner, not because the linter forced it.
+
+    THE TIMINGS ARE ATTRIBUTED AND SAY SO. 218,788 ms cold, 195,403 ms warm, `tasks=820`,
+    `withPrUrl=751`, `none: 733`, `prCount 2206`, 34 samples — all operator-measured. What is
+    first-hand here is the code: the guard's ordering, the success-only `set`, the `catch` that
+    caches nothing, the branch-name key, the missing `headRefOid`, and the live 404 on
+    `run-W1-T331-1785884370235` against 0 matching heads on origin.
+
+    THE EXACT CALL COUNT IS NOT CLAIMED. Rationale (8) carries that limit verbatim: sampling shows
+    the calls continuous and serial for ~200 s and cannot count them.
+
+    EVERY PROOF IS A FORWARD REFERENCE BY CONSTRUCTION. All five criteria use the pure-path
+    `unit test:` form naming `test/board-terminal-review-state.test.ts`, declared in `files:` and
+    ABSENT on this head — verified before writing — so the reviewer grades them `not_yet_built`.
+    `files:` is written in the bare single-line form `SHARD_FILES_LINE_RE` demands.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    `risk: high` IS RULE 19'S SPAN AND A BLAST-RADIUS STATEMENT. `files:` names three stems across
+    two modules the whole console reads through. The band is honest for a second reason: design
+    (iv)'s three invariants are all things a careless terminal-row shortcut breaks silently — an
+    OPEN row frozen at a stale check state looks exactly like a working board.
+
+    THE ID WAS SUPPLIED BY THE OPERATOR, NOT INFERRED. The brief carried an unfilled `<ID>` and
+    forbade inferring one; seven reservations were free and the two newest had been minted 53
+    seconds apart, so the sweep refused to guess and the operator minted `W1-T2235`
+    (`refs/rmd-id/W1-T2235` -> `8914bb7c5ac9`, reserved 2026-08-24T17:38:31Z). EIGHT SURFACES SWEPT,
+    EVERY CONTROL FIRING: shard filenames 0 against W1-T2217 at 1 (547 shards); plan `- id:` lines 0
+    against W1-T2217 at 1; the reservation, which is the pre-mint; merged trailers 0 against
+    `Remudero-Task: W1-T2201` at 1; merged subject credit 0 against W1-T2217 at 2; live branch names
+    0 against the `run-*` and `plan/*` namespaces at 88 and 25 of 138; branch-tip subjects 0 against
+    W1-T2232 at 1; and branch shard paths 0 against W1-T2232 at 1.
