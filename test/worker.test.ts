@@ -28,6 +28,7 @@ import {
   spawnWorker,
   workerKeychainGrantApps,
   workerLedgerFields,
+  workerTranscript,
 } from "../src/lib/worker.js";
 
 // ── Synthetic SDK message streams ──────────────────────────────────────────
@@ -268,6 +269,35 @@ test("collectWorkerResult: a throw with NO result envelope is RE-RAISED (real tr
     /spawn ENOENT/,
     "a genuine spawn failure must not be silently swallowed",
   );
+});
+
+// ── W1-T2205: workerTranscript joins ONCE — the final message never counts twice ───────────
+//
+// MEASURED (this task's design note i, two real captured envelopes — a one-turn and a
+// two-turn live `query()` spawn against the actual SDK, not a guess off documentation): the
+// terminal `SDKResultMessage.result` string is byte-identical to the LAST assistant text block
+// `collectWorkerResult` already pushed onto `blocks` before it ever reads `result`. So a real
+// worker result carries its own final message twice in `blocks`/`text` — exactly what
+// `t348FakeWorker` (test/triage.test.ts) reproduces on purpose, and exactly what a hand-rolled
+// `[r.text, r.blocks.join("\n")].join("\n")` then counts twice.
+
+test("workerTranscript: a worker result whose final message also appears as its last assistant text block yields that message exactly once", () => {
+  const r = { text: "PROPOSED: file W1-T9999", blocks: ["GROUND: checked the plan first.", "PROPOSED: file W1-T9999"] };
+  const transcript = workerTranscript(r);
+  assert.equal(transcript.match(/PROPOSED: file W1-T9999/g)?.length, 1, "the overlapping final message must not double-count");
+  assert.match(transcript, /GROUND: checked the plan first\./, "the earlier, non-duplicated block still survives the join");
+});
+
+test("workerTranscript: the single-block overlap `t348FakeWorker` shape (blocks: [text]) collapses to ONE copy of the message", () => {
+  const text = "AMBIGUOUS: a or b?\nOPTION: a|pick a\nOPTION: b|pick b\nRECOMMENDATION: a";
+  const transcript = workerTranscript({ text, blocks: [text] });
+  assert.equal(transcript, text, "blocks' sole entry IS text — the join must not repeat it");
+  assert.equal(transcript.match(/^OPTION:/gm)?.length, 2, "each OPTION line appears once, not twice");
+});
+
+test("workerTranscript: text with NO overlap in blocks (the SDK fact does not hold, or blocks is empty) is still folded in — nothing is silently dropped", () => {
+  assert.equal(workerTranscript({ text: "final", blocks: ["a", "b"] }), "final\na\nb");
+  assert.equal(workerTranscript({ text: "final", blocks: [] }), "final");
 });
 
 // ── W1-T6: NDJSON ledger + context telemetry + brain-plane calls ───────────
