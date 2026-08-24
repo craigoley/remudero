@@ -61,6 +61,20 @@ efforts:
 # claude-opus-5/high — the sole top-tier mount; strictly above every worker below. This row
 # governs the model the Architect-tier roles (retro, triage, the inbox-draft rung) all ride
 # via architectModel(config, mounts) — a mount-table edit here, not a code change.
+#
+# THREE OF THE FOUR LANES `assertArchitectAboveWorker` GUARDS, NOT ALL FOUR, AND THE FOURTH IS
+# DELIBERATE. The manual `rmd plan` command (`planCommand`, src/run-task.ts) calls the
+# ONE-ARGUMENT `architectModel(config)`, so its spawn model resolves through
+# `config.architectModel ?? "opus"` (src/lib/config.ts) and NEVER READS THIS ROW — an edit here
+# does not reach it. That is scoped out on purpose rather than missed: #781, the commit that
+# wired the other three, says so in terms — "judge and the manual `rmd plan` command are out of
+# the ruling's scope and unchanged" (MPG first-instance ruling fb-1784921980488-44b355 §4).
+# MEASURED at 2e6a0748: this row yields claude-opus-5 for retro/triage/draft while the plan lane
+# yields opus. BOTH ARE TIER 3, so the Tier Invariant holds on either path and this divergence is
+# not load-bearing for it — do not "fix" the call site to make the invariant pass; it already does.
+# And the row is NOT inert for that lane: the plan spawn still reads `max_turns` from here
+# (`mountsTable.architect.maxTurns`). Only the MODEL is config-governed there.
+#
 # MPG first-instance ruling (fb-1784921980488-44b355 §4): opus -> Opus 5, launch-day SOTA on
 # knowledge-work evals at unchanged cost.
 architect:

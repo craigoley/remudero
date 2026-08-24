@@ -24141,6 +24141,13 @@ export async function planCommand(
   const { owner, repo } = resolveOwnerRepo();
 
   // G-17 Tier Invariant: the plan Architect MUST outrank implement workers.
+  // ONE-ARGUMENT ON PURPOSE — the only Architect-tier site that does NOT read the mounts
+  // `architect:` row, so this resolves through `config.architectModel ?? "opus"`. #781 wired the
+  // other three and scoped this one out in terms: "judge and the manual `rmd plan` command are
+  // out of the ruling's scope and unchanged" (fb-1784921980488-44b355 §4). Passing `mountsTable`
+  // here would be a MODEL CHANGE for this lane, not a cleanup — see .remudero/mounts.yaml's
+  // `architect:` block for the measured before/after and why the invariant is unaffected either
+  // way. `mountsTable` loads below because this lane does take its turn cap from the row.
   const arch = architectModel(config);
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
