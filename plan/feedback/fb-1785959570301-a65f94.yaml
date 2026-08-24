@@ -24,5 +24,17 @@ raw: "A SHARED TEST HELPER DOUBLES EVERY VERDICT LINE AND SILENTLY FAILS THE
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2689
+summary:
+  headline: Test helper silently breaks verdict parsing
+  what_happened: t348FakeWorker puts identical content in text and blocks fields.
+    When joined, verdict lines double, exceed parse limits, and fail silently
+    instead of raising errors.
+  decision: Execute one of these approaches to resolve the issue.
+  options:
+    - label: Conduct full reconnaissance to establish fix scope
+      consequence: Methodical; determines if issue is isolated or pattern is widespread
+    - label: Skip investigation; fix helper only with comment
+      consequence: Fast; assumes isolated; silent-fail-open behavior remains in production
+    - label: Skip investigation; fix both helper and validateDecisionSummary
+      consequence: Comprehensive; prevents this class of bug; higher effort than minimal fix
