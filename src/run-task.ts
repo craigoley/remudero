@@ -3800,6 +3800,22 @@ async function waitForCiGreen(
 }
 
 /**
+ * W1-T2205: `runReview`'s advisory-reviewer semantic parse, split out of the call site below
+ * for the same reason every other `[r.text, r.blocks.join("\n")].join("\n")` site in this task
+ * moved onto {@link workerTranscript}: a hand-rolled double join double-counts the reviewer's
+ * final message. Joins ONCE via `workerTranscript` before handing the result to
+ * {@link parseReviewerVerdicts}. Only reachable with a live spawn (gated behind
+ * `spawnReviewer !== false`) — see `reviewerQueryFn`'s own doc for the injectable seam
+ * (`worker.test.ts`'s end-to-end `runReview` test) that drives it without spending real money.
+ */
+function reviewerSemanticVerdicts(
+  reviewer: Pick<WorkerResult, "text" | "blocks">,
+  criteriaCount: number,
+): (boolean | undefined)[] {
+  return parseReviewerVerdicts(workerTranscript(reviewer), criteriaCount);
+}
+
+/**
  * THE REVIEW GATE CALL SITE (W1-T1D — the piece W1-T1C built the reviewer for but
  * nothing ever called; the split left the call site unowned). After the PR is open
  * and `ci` is green, JUDGE the task's acceptance criteria and POST the
@@ -3844,6 +3860,18 @@ async function runReview(args: {
   account: (r: WorkerResult) => WorkerResult;
   /** false ⇒ deterministic floor only, no LLM spawn (used by the live proofs). */
   spawnReviewer?: boolean;
+  /**
+   * W1-T2205: injectable replacement for the SDK's own `query()`, threaded straight into the
+   * advisory reviewer's `spawnWorker` call below — see {@link SpawnWorkerArgs.queryFn}'s own
+   * doc for the live-spawn guard this trips when ABSENT (real spend) versus when a test injects
+   * it (no process, no guard) — the exact seam `worker.test.ts`'s `fakeQueryFn`/
+   * `capturingQueryFn` already use for `spawnWorker` directly. Exists so the
+   * `spawnReviewer!==false` branch — otherwise unreachable from any test in this repo, since
+   * every existing `runReview` test disables it via `spawnReviewer: false` instead — can be
+   * driven end-to-end without a real spawn. Absent ⇒ the real SDK `query()`, exactly every
+   * caller before this task.
+   */
+  reviewerQueryFn?: SpawnWorkerArgs["queryFn"];
   /** The (task_type="reviewer" × the under-review task's risk) mount (§9,
    * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
    * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
@@ -3978,10 +4006,11 @@ async function runReview(args: {
             maxTurns: args.reviewerMount.maxTurns,
             maxBudgetUsd: args.budgetUsd,
             config: args.config,
+            queryFn: args.reviewerQueryFn, // W1-T2205: absent ⇒ the real SDK query(), unchanged.
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
-        semantic = parseReviewerVerdicts(workerTranscript(reviewer), criteria.length);
+        semantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         reviewerSubtype = reviewer.subtype;
         log("review.reviewer", {
           session_id: reviewer.sessionId,
