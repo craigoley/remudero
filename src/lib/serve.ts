@@ -1236,6 +1236,15 @@ export function renderShellHtml(
   // embeds the live-indicator markup) stable across re-renders instead of flapping.
   const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  // W1-T2218: WHEN THIS PAGE LOADED -- read ONCE, and the ONE clock reading the shell can state as
+  // fact about itself. \`performance.timeOrigin\` is the navigation start; the \`Date.now()\` fallback
+  // covers an environment that does not expose it. This is NOT an outage start (the thing the old
+  // banner stamped and could not know) -- it is the boundary of what this page has observed, which
+  // is exactly what the banner claims.
+  const PAGE_LOADED_ISO = new Date(
+    typeof performance !== "undefined" && typeof performance.timeOrigin === "number" ? performance.timeOrigin : Date.now(),
+  ).toISOString();
+
   // W1-T183: per-phase elapsed ANOMALY thresholds -- DATA embedded by the server from
   // ServeDeps.phaseElapsedThresholdsMs (defaults to DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS),
   // never a constant baked into this template. A row's own phase looks itself up here (falling
@@ -1957,7 +1966,8 @@ export function renderShellHtml(
     const banner = document.getElementById("gh-unreachable-banner");
     if (unreachable) {
       banner.hidden = false;
-      banner.textContent = "GitHub unreachable — no GitHub read has completed since this page loaded — statuses may be stale";
+      banner.textContent =
+        \`GitHub unreachable — no GitHub read has completed since this page loaded (\${formatTimestamp(PAGE_LOADED_ISO)}) — statuses may be stale\`;
     } else {
       banner.hidden = true;
       banner.textContent = "";
