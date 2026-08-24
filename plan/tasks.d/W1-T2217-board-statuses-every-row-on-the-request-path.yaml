@@ -1,0 +1,145 @@
+- id: W1-T2217
+  title: "the board makes ONE SYNCHRONOUS `gh` call per row on the `GET /v1/status` request path, and N is board rows carrying a `prUrl` — a population fed by a COLD `state=closed` walk, so every PR the fleet merges makes the console permanently slower, and the module's own doc already prices this exact shape at ~0.4s x N"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main (behind-count 0,
+    clone shallow-checked). `src/run-task.ts` is 1,531,586 bytes and was read through git objects,
+    never the Contents API. No suite, no spawning verb. Every line below was re-derived at
+    `a932f055`, not carried from the brief.
+
+    (1) THE CALL, PER ROW, ON THE REQUEST PATH. `src/lib/board.ts:301` maps every `BoardRow`
+    (`const tasks: BoardRow[] = [...byId.values()].map((p) => {`) and `board.ts:326` calls
+    `deriveReviewState(p.prUrl, deps.github)` for every row carrying a `prUrl`. That resolves to
+    `src/lib/status.ts:4379`, `run(combinedStatusRestArgs(owner, repo, headRef))` — KEYED ON THE
+    HEAD BRANCH NAME, NOT A SHA, and deliberately: "the combined-status endpoint's `:ref` accepts
+    any git ref, and this gateway never fetches a PR's `headRefOid` at all."
+
+    (2) IT IS SYNCHRONOUS, AND THE MODULE SAYS WHAT THAT COSTS. `status.ts:4098` is
+    `execFileSync("gh", args, { …, maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS })`, and the
+    module header reads: "Both gateways shell `gh` through `execFileSync`, which is SYNCHRONOUS: a
+    call that never returns does not merely stall the sweep, it parks the daemon's only thread…
+    with nothing logged, because a hang is not an error." So this is a FROZEN PROCESS, not a slow
+    page — which is why `curl` to `remudero-serve:4317/` returned `000` at an 8-second timeout with
+    the connection ACCEPTED, `ps` sampled five times showed a different
+    `gh api …/commits/<ref>/status` each time, and a restart answered `401` in 3 ms (operator-
+    measured 2026-08-24T12:31Z; attributed, not re-derived from this host).
+
+    (3) N IS NOT WHAT IT LOOKS LIKE, AND THAT IS THE FINDING. It is board rows carrying a `prUrl`.
+    `fetchBoardPrsRest` (`src/lib/open-prs-rest.ts:989-1016`) walks a HOT `state=open` half AND a
+    COLD `state=closed` half, each to `BOARD_MAX_PAGES = 50`. So a PR merged on 2026-07-31 is still
+    a row and still gets statused, and the ENGINE OF THE GROWTH IS MERGED PRs ACCUMULATING IN THE
+    COLD WALK. MEASURED: 86 `run-*` heads, 802 plan tasks, 3 open PRs — NONE of them is N, and
+    DELETING STALE `run-*` HEADS WOULD NOT HELP.
+
+    (4) THE REPO ALREADY PRICED THIS SHAPE, IN THE DOC OF THE THING BUILT TO FIX IT.
+    `buildBatchedGithub`'s own header: "…on the board's `GET /v1/status` request path that is
+    ~0.4s x N — at 183 tasks, ~74s, and the browser hangs at 'loading…'." That paragraph describes
+    the defect `buildBatchedGithub` REMOVED for `findMergedByTrailer`, and W1-T914's `reviewState`
+    reintroduced the same shape on the same path.
+
+    (5) THE SHARED BUDGET IS WHY SATURDAY'S OUTAGE IS THE SAME EVENT. The per-row status calls and
+    the index walk share ONE account budget through ONE pacer, so a large N drains the quota the
+    index walk then needs. `board gateway: batched PR fetch failed (rate_limit)` is
+    `status.ts:4260`; it repeated from 22:08 to 23:31 UTC on 2026-08-22 before the container was
+    stopped. The log window is the operator's; what is re-derived here is the emitter, its
+    classification path, and the coupling.
+  design: |
+    (i) THE STORM IS A COLD CACHE, WHICH IS WHY IT IS INTERMITTENT AND WHY THE REMEDY IS TRACTABLE.
+    `reviewStateCache` is a per-URL memo held at GATEWAY scope and TTL-matched to `index()`, so a
+    steady-state refresh is NOT N calls. It fires on first paint after a restart, and on the first
+    tick after the TTL expires with a changed row set. AND THE EXPIRIES SYNCHRONISE: entries written
+    during one render share an `at`, so they lapse in the same tick rather than amortising — a
+    thundering herd once per TTL, not a trickle. Any remedy that only shortens the storm without
+    reducing N leaves that herd intact.
+
+    (ii) A MERGED PR's COMBINED STATUS CANNOT CHANGE, AND THE INDEX ALREADY KNOWS WHICH ROWS THOSE
+    ARE — FOR FREE. `BatchedPr` carries `state` (`status.ts:3907`) on the SAME batched fetch, and
+    `prStateFromRest` folds the merge signal into it. `reviewState` reads
+    `index().byUrl.get(prUrl)?.headRefName` and never consults `.state`. So the discriminator needs
+    no new call, no new field and no second fetch. THIS ALONE COLLAPSES N: from every row with a
+    `prUrl` to rows whose PR can still change — against a board fed by up to fifty pages of closed
+    PRs, that is the whole difference.
+
+    (iii) AND IT COSTS THE BOARD NOTHING IT CANNOT GET BACK, BUT THE DISTINCTION MUST BE DRAWN
+    CAREFULLY. A terminal row's status is IMMUTABLE, so it needs fetching at most ONCE — not once
+    per TTL. The memo's own doc forbids caching "past `ttlMs`" for a reason it scopes explicitly to
+    live values: "an open PR's `remudero-review` context is exactly the value this feature exists to
+    keep LIVE (pending -> success/failure WHILE THE ROW STAYS OPEN)". A forever-memo for a TERMINAL
+    row is therefore not the thing that rule forbids — and `changedFilesByUrl`, in this same
+    gateway, is already exactly that shape for an immutable value. THE IMPLEMENTER MUST GET THIS
+    DISTINCTION RIGHT OR NOT TAKE IT: if the terminal-immutability argument is not accepted, the
+    fallback is to skip the call for terminal rows and render no review state for them, which is
+    cheaper but shows less.
+
+    (iv) MOVING THE CALLS OFF THE REQUEST PATH IS THE OTHER AXIS AND IS NOT REQUIRED BY THIS TASK.
+    Rationale (2)'s real severity is that the calls are on a REQUEST path at all; even a small N of
+    synchronous `gh` calls parks the thread. Reducing N per (ii) makes the page usable; hoisting the
+    work into the poll loop would make a request never block on `gh`. This task must not be read as
+    settling that — it is named so a later reader knows the smaller fix was chosen deliberately.
+
+    (v) REFUSED BY NAME. `DEFAULT_BOARD_POLL_TTL_MS = 150_000` (`src/lib/serve.ts`) STAYS — W1-T999
+    derived it from the sweep distribution and it bounds how often a sweep STARTS, not what one
+    COSTS. The board STILL SHOWS CHECK STATE. NOTHING CACHES A LIVE STATUS PAST ITS TTL. No second
+    cache layer. No deleting `run-*` heads — rationale (3) shows they are not the population.
+
+    (vi) NOT IN SCOPE, NAMED: `status.ts:3710` is the OTHER `execFileSync` gateway and carries
+    `timeout` but NO `maxBuffer`, so Node's 1 MiB default still applies there — W1-T181's fix landed
+    at 4098 and not at 3710. It is NOT this incident's path and is named as a sibling, not folded
+    in. Also out: the pacer's own policy, the COLD walk's page bound, and `GH_CALL_TIMEOUT_MS`.
+  acceptance:
+    - claim: "a row whose pull request can no longer change is not statused on the request path"
+      proof: "unit test: test/board-status-per-row.test.ts"
+    - claim: "the discriminator reads state already on the batched index rather than making a call"
+      proof: "unit test: test/board-status-per-row.test.ts"
+    - claim: "an open row still resolves its review state live on every tick past the ttl"
+      proof: "unit test: test/board-status-per-row.test.ts"
+    - claim: "the board still renders check state for the rows it shows"
+      proof: "unit test: test/board-status-per-row.test.ts"
+    - claim: "no live status is served from a memo older than the ttl"
+      proof: "unit test: test/board-status-per-row.test.ts"
+    - claim: "a cold cache no longer issues one call for every row carrying a pull request"
+      proof: "unit test: test/board-status-per-row.test.ts"
+    - claim: "the poll interval and the call timeout are unchanged"
+      proof: "unit test: test/board-status-per-row.test.ts"
+  files: [src/lib/status.ts, test/board-status-per-row.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#board-status-per-row-request-path-2026-08-24"
+  plan_refs: ["W1-T181", "W1-T265", "W1-T914", "W1-T999"]
+  note: |
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/board-status-per-row.test.ts`, declared in `files:`, so on the filing PR it
+    resolves through W1-T456's `forwardReferenceFiles` carve-out to `not_yet_built`.
+
+    `risk: high` IS BLAST RADIUS. The change decides what the console shows for a row and how much
+    the daemon's only thread spends on a request path; a mistake either freezes a live review state
+    or reintroduces the herd.
+
+    ONE OF THE BRIEF'S OWN CITATIONS DID NOT SURVIVE RE-DERIVATION AND IS CORRECTED UPSTREAM OF THIS
+    FILING: the function is `combinedStatusRestArgs` (`src/lib/open-prs-rest.ts:506`), not
+    `commitStatusArgs`, which does not exist in the tree. Same line, same returned args. Every other
+    cited line — `board.ts:301`/`:326`, `status.ts:4379`/`:4098`/`:3710`/`:4260`,
+    `BOARD_MAX_PAGES = 50`, `DEFAULT_BOARD_POLL_TTL_MS = 150_000` — was re-derived verbatim at
+    `a932f055`.
+
+    THE OPERATOR'S TWO MEASUREMENTS ARE ATTRIBUTED, NOT CLAIMED. The container probe (2026-08-24
+    12:31Z) and the 22:08-23:31 rate-limit window on 2026-08-22 are the operator's; this host has no
+    route to that container. What is re-derived here is every source line, every population count,
+    and the coupling in rationale (5).
+
+    ID PROVENANCE. `refs/rmd-id/W1-T2217` resolves to
+    f70ba2ab59710841745ca33cda4f9b6b9b2a5696, read over git protocol; live negative control,
+    `refs/rmd-id/W1-T999999` returns EMPTY output. THE ANCHOR MESSAGE WAS NOT JUDGED. Eight surfaces
+    were swept with a control PRE-QUALIFIED FOR EACH. THE MAIN-SIDE CONTROL WAS CHOSEN AGAINST THE
+    OPEN-PR TRAP: an id whose filing PR is still open reads zero on main and discriminates nothing,
+    so W1-T2215 was used only after confirming its PR had MERGED (#2705, `a932f055`); the open-PR
+    surface was controlled separately with W1-T2216, which is in an open body now. The trailer
+    surface was read from squash-merge commit BODIES on main (397 present; control `W1-T1278` reads
+    2, this id 0) rather than over REST, which has been returning 403 rate-limit payloads whose JSON
+    lines would count as rows.
