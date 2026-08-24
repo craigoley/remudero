@@ -48,14 +48,27 @@
     running: the same sandbox, in the same invocation, holds the filesystem restriction and does
     not hold the network one.
 
-    (4) THE VERSION COMMENT IS NOT A PIN, AND IT IS ALREADY STALE — THREE FIGURES DISAGREE,
-    MEASURED ON THIS TREE. `settings/worker.json`'s own `$comment` reads "SDK 0.3.209 / CLI
-    2.1.209". `package.json` declares `"@anthropic-ai/claude-agent-sdk": "^0.3.233"`.
-    `package-lock.json` resolves `0.3.233`. THE VERSION ACTUALLY INSTALLED IN THE SHARED
-    `node_modules` READS `0.3.220` — matching NEITHER the comment NOR the lockfile. If the SDK is
-    the enforcer, its version is a security dependency, and today it is described by a stale
-    comment, ranged by a caret that permits upward drift, pinned only by a lockfile the running
-    tree does not match, and checked by nothing.
+    (4) THE VERSION COMMENT IS NOT A PIN AND IS ALREADY STALE — BUT THE RUNNING SYSTEM IS ON THE
+    LOCKED VERSION, AND AN EARLIER READING THAT SAID OTHERWISE WAS WRONG.
+    `settings/worker.json`'s own `$comment` reads "SDK 0.3.209 / CLI 2.1.209" while
+    `package.json` declares `"@anthropic-ai/claude-agent-sdk": "^0.3.233"` and `package-lock.json`
+    resolves `0.3.233`. MEASURED IN THE DAEMON'S OWN CONTAINER TREE
+    (`/home/node/Remudero/remudero`) at 2026-08-24T02:25Z, OPERATOR-TAKEN AND NOT RE-DERIVED HERE:
+    `@anthropic-ai/claude-agent-sdk` AND `@anthropic-ai/claude-agent-sdk-linux-x64` BOTH READ
+    `0.3.233` — matching the range and the lockfile exactly. An earlier recon reported `0.3.220`;
+    THAT FIGURE CAME FROM A DIFFERENT, STALE CHECKOUT — the container the recon itself ran in, not
+    the one that spawns workers — and it is withdrawn here rather than left in the record.
+
+    (4a) SO INSTALL FRESHNESS IS AN ELIMINATED HYPOTHESIS, WHICH STRENGTHENS THE FINDING RATHER
+    THAN WEAKENING IT. The 26 proven-broken rows all carry container hosts — `5935b6b32a81` ×23 and
+    `1abc274530a9` ×3 — so they were produced BY the locked version. The egress gap is therefore
+    NOT a stale-install defect and cannot be closed by reinstalling anything. Whatever is failing
+    to enforce is failing at `0.3.233`.
+
+    (4b) WHAT SURVIVES OF THE PIN ARGUMENT IS SMALLER AND STILL TRUE. A `$comment` naming 0.3.209
+    against an installed 0.3.233 is documentation that cannot fail, and a CARET RANGE permits
+    future upward drift in a security-relevant dependency with NOTHING WATCHING IT. The defect is
+    prospective — an unwatched range — rather than a divergence in force today.
 
     (5) WHAT THIS SHARD DOES NOT CLAIM, STATED BEFORE ANYONE INFERS IT. NOBODY HAS REPRODUCED A
     BLOCKED-HOST REQUEST FROM INSIDE A LIVE WORKER SANDBOX. The case rests on 26 identical readings
