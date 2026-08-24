@@ -1,0 +1,186 @@
+- id: W1-T2229
+  title: "THE CONSOLE NEVER LEARNS THAT ITS OWN CODE IS STALE, SO A MERGED FIX REACHES IT ONLY WHEN A HUMAN RESTARTS IT — both signals already exist and neither is a timer; the whole design is what makes exiting safe while a write is in flight"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    RE-DERIVED 2026-08-24 in a scratch worktree with `HEAD == origin/main` PROVEN BY SHA at
+    8b54ab36 before any reading; the clone was checked and already full (2,124 commits), and
+    `src/run-task.ts` (~1.53 MB) was read through git objects only. Ledger gate FIRST:
+    archiveCount 23, ok true, unread 0, NEWEST ROW 2026-08-24T16:31:59.899Z, 230,013 rows, with the
+    control `"step":"risk_judge.decision"` reading 175. The ref namespace was verified equal to the
+    remote BEFORE sweeping — 348 local against 348 remote.
+
+    (1) THE ASYMMETRY, MEASURED. `serve.start` fired TWICE today — 11:40:35 and 12:33:09 — both
+    operator hand-restarts, while `daemon_selfrestart_for_freshness` fired TWELVE times and
+    `daemon.start` fourteen. The console reported `console build 750b0e92b1ff` with main several
+    merges ahead. `tsx` loads the module graph once, and `serveCommand`'s own doc says so: "a
+    console started off a branch keeps serving that branch's code even after the checkout returns
+    to main". So the console's CODE is frozen at its boot commit while its lazy routes read a tree
+    the daemon rewrites underneath it.
+
+    (2) THE DEPLOY SIDE IS ALREADY SUFFICIENT AND THIS TASK CHANGES NONE OF IT. `remudero-serve`'s
+    `RestartPolicy` is `unless-stopped` with `MaximumRetryCount: 0` — it restarts on a CLEAN exit
+    and stays down only when the operator stops it deliberately — and the entrypoint fetches and
+    checks out main on every boot. NO DEPLOY CHANGE IS NEEDED, no restart policy is edited, and no
+    Docker socket is mounted.
+
+    (3) AND THE DAEMON'S MECHANISM IS A DIFFERENT ONE THAT SERVE DOES NOT RUN. The supervisor loop
+    is gated at `deploy/entrypoint.sh:492` — `if [ "$RESTART_THROTTLE_S" -eq 0 ]; then exec "$@"; fi`
+    — so a container without `RMD_RESTART_THROTTLE_S` never reaches it. The daemon sets it; serve
+    does not. CORRECTION TO THE BRIEF, MEASURED IN BOTH COPIES: `DAEMON_EXIT_STALE=75` is at
+    `:503`, not `:446`; `:492` is exact. The in-tree `deploy/entrypoint.sh` and the container's
+    `/usr/local/bin/rmd-entrypoint` agree line-for-line on both, which is the control that the file
+    I read is the file that runs. THIS TASK DOES NOT GIVE SERVE A SUPERVISOR LOOP.
+
+    (4) BOTH SIGNALS ALREADY EXIST AND NEITHER IS A TIMER. The console learns main's sha on every
+    lazy route read and already holds its own boot sha in `consoleSha`
+    (`serve.ts:4784`, `deps.consoleSha ?? resolveConsoleSha()`), so the comparison is free at a
+    point the process is already doing work. And `prewarmBoardGithub`'s refcount
+    (`serve.ts:329-345`) increments in `subscribe` and decrements in the unsubscribe it hands
+    back, with `if (clients === 1) …` / `if (clients === 0) stop()` and a `released` latch against
+    double-release; its own doc says "Refcounting those two edges is therefore the connection
+    count, not a proxy for it." NEITHER IS A POLLER.
+
+    (5) BUT THE REFCOUNT ANSWERS THE WRONG QUESTION, AND THAT IS THE WHOLE DESIGN. It counts SSE
+    SUBSCRIBERS. `clients === 0` says no viewer is streaming; it says nothing about whether
+    `/v1/manual/approve`, `/v1/inbox/approve` or `/v1/skills/run` is mid-flight. Those are
+    different questions and a quiet stream is not an idle process.
+
+    (6) AND THERE IS NO DRAIN TO FALL BACK ON. `src/lib/serve.ts` contains ZERO occurrences of
+    `process.on(`, `SIGTERM` or `SIGINT` — measured, against a control of 8 occurrences of
+    `/v1/manual/approve` in `src/` — so there is no grace period, no 503-and-close, and no
+    connection draining anywhere in the module. An exit today drops an in-flight request outright,
+    and a write that has already spawned a detached `ratify.approve` orphans the spawn while the
+    caller sees a reset.
+
+    (7) THE TREE ALREADY NAMES THE ROUTES THAT MUST NOT BE INTERRUPTED. `serve.ts:1403` declares
+    `HIGH_TIER_WRITE_PATHS = ["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run",
+    "/v1/inbox/approve", "/v1/skills/run"]` — the three the brief names plus the two drain
+    triggers. `/v1/skills/run` lives in `src/lib/panel-skill-run.ts:210`, OUTSIDE the
+    panel-actions/panel-graph modules a route inventory usually walks, which is why an earlier
+    enumeration of write routes missed it; it is recorded here so the next reader does not repeat
+    that. So the set this task must respect is already written down and already load-bearing for
+    the confirm-nonce gate.
+
+    (8) THE MEASURED CLIENT COST, RECORDED SO NOBODY RE-DERIVES IT. An open SSE stream recovers by
+    itself: the shell loops `await connectOnce()` then `setTimeout(1500)` (`serve.ts:4434-4436`),
+    so a viewer sees a ≤1.5 s gap plus boot. CORRECTION, RE-MEASURED: since the 12:33:09 boot the
+    ledger now reads `service.sse.open` ×2 and `service.sse.close` ×2 — ZERO open. One stream WAS
+    live during the operator's measurement and has since closed. The cost figure stands; the "one
+    live" no longer holds at this measurement's time, and the difference is why the refcount must
+    be read at the moment of the decision rather than assumed.
+
+    (9) THE HONEST LIMIT. Nothing here establishes that a stale console ever produced a WRONG
+    OPERATOR ACTION. `consoleSha` made the staleness visible and the two hand-restarts resolved it;
+    no incident is claimed. What is measured is the exposure: the console's code can lag main
+    indefinitely, and the only thing that has ever cleared it is a human.
+  design: |
+    ONE CONCERN: the console must notice its own staleness and end its process at a moment that
+    costs nothing. Not the restart policy, not the checkout, not what the page renders.
+
+    (i) THE TRIGGER IS A COMPARISON, NOT A TIMER. `consoleSha` is the boot sha; the lazy routes
+    already read the working tree. Comparing them at a point the process is already working adds no
+    schedule, no interval and no poll — rationale (4). A trigger that introduces a timer is the
+    wrong shape and this task must not take it.
+
+    (ii) WHAT WOULD MAKE EXITING SAFE — THE THREE CANDIDATES, WEIGHED. (a) A DRAIN needs signal
+    handling that does not exist (rationale (6)); adding a `SIGTERM` handler to gain a grace period
+    is a second mechanism whose failure mode is a console that refuses to die, and it does not help
+    a SELF-initiated exit at all, which is the case here. (b) A BARE REFUSAL — "do not exit while
+    any write route is open" — is the right RULE, but it cannot be implemented without knowing
+    whether one is open, so it collapses into (c). (c) AN IN-FLIGHT COUNTER over the write routes
+    is the smallest thing that answers the question actually being asked, and `HIGH_TIER_WRITE_PATHS`
+    (rationale (7)) already names the set. THE RECOMMENDATION IS (c) EXPRESSED AS (b): count
+    in-flight write requests, and treat a non-zero count as an absolute refusal to exit.
+
+    (iii) THE TWO CONDITIONS ARE AND-ED, AND NEITHER IS SUFFICIENT ALONE. Zero SSE subscribers
+    without an in-flight check exits during a write; zero in-flight writes without the refcount
+    exits under a watching operator for no reason. Rationale (5) is exactly the gap between them.
+
+    (iv) A DETACHED SPAWN ALREADY IN FLIGHT IS NOT COVERED BY A REQUEST COUNTER, AND THIS IS SAID
+    RATHER THAN GLOSSED. `ratify.approve` hands off to a detached process and RETURNS; the request
+    completes while the work continues outside it. A counter scoped to HTTP requests therefore
+    reads zero while that spawn runs. Whether the exit must also wait on such a handoff is the one
+    genuinely open question in this design, and it is named here as the thing to settle first
+    rather than assumed away.
+
+    (v) THE CAPABILITY, ARGUED ON ITS MERITS. A console that ends its own process HAS A POWER IT
+    DOES NOT HAVE TODAY, and no existing gate routes it — a daemon-written marker the console exits
+    on would be process management inside serve wearing a marker's clothes, and this shard will not
+    pretend otherwise. THE DISTINCTION THAT DOES HOLD IS THIS: serve exits, and DOCKER decides what
+    happens next. Serve gains "end my own process", which is a power over ITSELF and nothing else;
+    it does not gain "start a process", "restart a container" or any authority over another
+    component. That boundary is what makes the capability defensible, and it is defensible only
+    while the restart decision stays in the policy (rationale (2)) rather than moving into serve.
+
+    (vi) WHAT MUST NOT CHANGE, PINNED BY CRITERIA. `consoleSha` STAYS BOOT-CAPTURED — it is the only
+    honest field on the page and it is what made this visible. The shared state dir stays. The
+    console does NOT get its own checkout. No Docker socket is mounted. The restart policy is NOT
+    edited. AND NOTHING EXITS DURING A WRITE.
+
+    (vii) NOT IN SCOPE, NAMED: the daemon's supervisor loop and `DAEMON_EXIT_STALE` (rationale (3));
+    the entrypoint, the restart policy and anything under `deploy/`; giving serve its own tree; what
+    the page renders; and the lazy-read integrity question, which is a different defect about
+    partial reads rather than stale code.
+  acceptance:
+    - claim: "the console compares its boot sha against the tree it is already reading, with no timer and no poll"
+      proof: "unit test: test/serve-stale-code-exit.test.ts"
+    - claim: "a stale console with zero subscribers and zero in-flight writes ends its own process"
+      proof: "unit test: test/serve-stale-code-exit.test.ts"
+    - claim: "a stale console refuses to exit while any high-tier write route is in flight"
+      proof: "unit test: test/serve-stale-code-exit.test.ts"
+    - claim: "a stale console refuses to exit while a viewer is still subscribed"
+      proof: "unit test: test/serve-stale-code-exit.test.ts"
+    - claim: "a console whose boot sha still matches the tree never exits"
+      proof: "unit test: test/serve-stale-code-exit.test.ts"
+  files: [src/lib/serve.ts, test/serve-stale-code-exit.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#console-never-learns-its-code-is-stale-2026-08-24"
+  plan_refs: ["W1-T260", "W1-T154", "W1-T2222"]
+  note: |
+    TWO ATTRIBUTED FIGURES WERE RE-MEASURED AND CORRECTED. `DAEMON_EXIT_STALE=75` is at
+    `deploy/entrypoint.sh:503`, not `:446`; `:492` is exact. And the SSE reading has moved: since
+    the 12:33:09 boot the ledger now reads open ×2 / close ×2, so ZERO streams are open — one WAS
+    live during the operator's measurement and has since closed. Both corrections are in the
+    rationale rather than smoothed over, and neither changes the finding.
+
+    ONE ROUTE THE EARLIER INVENTORY MISSED. `/v1/skills/run` is declared in
+    `src/lib/panel-skill-run.ts`, outside the panel-actions/panel-graph modules a write-route walk
+    normally covers. `serve.ts`'s `HIGH_TIER_WRITE_PATHS` already names it alongside
+    `/v1/manual/approve` and `/v1/inbox/approve`, so the set this task must respect is pre-existing
+    and needs no new list.
+
+    EVERY PROOF IS A FORWARD REFERENCE BY CONSTRUCTION. All five criteria use the pure-path
+    `unit test:` form naming `test/serve-stale-code-exit.test.ts`, which is declared in `files:` and
+    DOES NOT EXIST on this head — verified absent before writing — so the reviewer grades them
+    `not_yet_built` rather than executing them against a filing. `files:` is written in the bare
+    single-line form `SHARD_FILES_LINE_RE` demands; a block-style list contributes nothing to
+    `shardDeclaredFilesInDiff` and would silently forfeit the exemption.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH.
+
+    `risk: high` IS RULE 19'S SPAN AND A BLAST-RADIUS STATEMENT. `files:` names two stems, so the
+    linter would pass this at `medium`. It is filed at `high` because the deliverable is a process
+    ENDING ITSELF: the failure directions are a console that exits under a live write (design (iii))
+    and a console that never exits at all, and both look like a working page until someone looks.
+
+    THE ID WAS CONFIRMED, NOT INFERRED. The brief's body carried an unfilled `<ID>` placeholder and
+    warned against reading "next free"; the header names 2229, and `refs/rmd-id/W1-T2229` resolves
+    to `b9911697531f`, reserved 2026-08-24T16:31:19Z — so the id was taken from the header and
+    VERIFIED, never derived from the namespace. EIGHT SURFACES SWEPT AND EVERY CONTROL FIRES: shard
+    filenames 0 against W1-T2211 at 1 (545 shards); plan `- id:` lines 0 against W1-T2211 at 1; the
+    reservation, which is the pre-mint; merged trailers 0 against `Remudero-Task: W1-T2201` at 1,
+    with 471 trailer-carrying commits; merged subject credit 0 against W1-T2211 at 3; live branch
+    names 0 against the `run-*` and `plan/*` namespaces at 88 and 23 of 136; branch-tip subjects 0
+    against W1-T2216 at 1; and branch shard paths 0 against W1-T2216 at 1.
+
+    FOUR CONTROLS WERE DISQUALIFIED ON THE BRANCH SURFACES BEFORE ONE QUALIFIED. W1-T2223, W1-T2226,
+    W1-T2227 and W1-T2228 all read ZERO there — the first two because their filing PRs merged and
+    their branches were deleted — so none of them discriminates. W1-T2216, whose filing PR is still
+    open on `origin/plan/pinned-key-set-guard-has-no-enforcer`, was qualified in their place.
