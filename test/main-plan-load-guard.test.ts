@@ -276,3 +276,47 @@ test("main-plan-load-guard: an uncommitted working-tree edit is either still vis
     "an uncommitted addition must be invisible to loadPlanAtRef — it reads the last COMMIT, documented as this function's named cost",
   );
 });
+
+// (6) loadPlanAtRef MIRRORS loadPlan's OWN MERGE SEMANTICS — a shard re-declaring a monolith id
+// must refuse to load exactly like FAILURE MODE 1 above, just sourced from `git show` instead of
+// the working tree. Without this, the write gate could wave through the very corruption class
+// `loadPlan` was already hardened against.
+test("main-plan-load-guard: a shard id colliding with the committed monolith makes loadPlanAtRef refuse, same as loadPlan", () => {
+  const dir = gitPlanRepo(task("W1-T1"), { "collides.yaml": task("W1-T1") });
+  assert.throws(
+    () => loadPlanAtRef(dir, "plan/tasks.yaml"),
+    /duplicate task id/,
+    "a shard re-declaring a monolith id must refuse to load via loadPlanAtRef too",
+  );
+});
+
+// (7) A `git show` FAILURE ON THE MONOLITH IS A NAMED, THROWN ERROR — never a silent empty plan.
+// Exercised via the injectable `runGit` param (loadPlanAtRef's own escape hatch for exactly this),
+// since forcing a real `git show` to fail without also breaking the fixture repo is awkward.
+test("main-plan-load-guard: loadPlanAtRef refuses loudly when the committed monolith blob cannot be read", () => {
+  const runGit = (): string => {
+    throw new Error("fatal: path 'plan/tasks.yaml' does not exist in 'HEAD'");
+  };
+  assert.throws(
+    () => loadPlanAtRef("/no/such/repo", "plan/tasks.yaml", "HEAD", runGit),
+    /cannot read plan file at HEAD:plan\/tasks\.yaml/,
+    "a failed git show for the monolith must throw a named PlanError, never hand back an empty/partial plan",
+  );
+});
+
+// (8) A FAILED SHARD LISTING READS AS "NO SHARDS", NEVER A CRASH — `git ls-tree` failing (a
+// detached/corrupt ref, a gc mid-read) must not take down a plan whose monolith read fine; it is
+// tolerated the same way a missing `tasks.d/` directory already is.
+test("main-plan-load-guard: loadPlanAtRef treats a failed shard listing as no shards rather than crashing", () => {
+  const runGit = (args: string[]): string => {
+    if (args[0] === "show") return task("W1-T1") + "\n";
+    if (args[0] === "ls-tree") throw new Error("fatal: some transient git failure");
+    throw new Error(`unexpected git invocation: ${args.join(" ")}`);
+  };
+  const plan = loadPlanAtRef("/no/such/repo", "plan/tasks.yaml", "HEAD", runGit);
+  assert.deepEqual(
+    plan.tasks.map((t) => t.id),
+    ["W1-T1"],
+    "a git ls-tree failure must degrade to zero shards, not abort a monolith that read fine",
+  );
+});
