@@ -6095,6 +6095,35 @@ export async function runFixRung(opts: {
       return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
     }
 
+    // W1-T1282 SITE — THE ZERO-ENUMERABLE-FAILURES GUARD, BEFORE `strikes++`: dispatch's own
+    // `checksState` (the check-run/status rollup) and this rung's ci-log EVIDENCE (`ciFailures`,
+    // a separate miner keyed off `detailsUrl`) are two independent readers — see this shard's own
+    // rationale for why they can disagree. A ci-log round (`noReviewYet`, never a merge-conflict
+    // round, which carries its own evidence shape) whose evidence miner enumerated ZERO failing
+    // checks has nothing to hand a fix worker: dispatching it anyway burns a strike and, at the
+    // strike cap, escalates an issue whose own "Failing check(s)" section prints its own emptiness
+    // — measured verbatim on #2641/issues/2653: "(no evidence — this was checked and is empty)".
+    // `currentCiFailures` must be a REAL (defined) empty array here, never `undefined` —
+    // `undefined` means "no `deps.fetchCiFailures` dep, or one that threw", i.e. failing-check
+    // DETAIL is simply UNKNOWN, not zero (see the `?? []` comment further down); standing down on
+    // an unknown would be fail-CLOSED, exactly what this rung's fail-open discipline forbids
+    // everywhere else. Checked every round, not just the first — a later strike's own push can
+    // leave CI non-green while the refreshed miner still enumerates nothing (the SAME split,
+    // recurring mid-rung). Mirrors the shape `fixRungStandDownReason`'s three ledger-only reasons
+    // (terminal state / redCheckSupersession / mergeConflictCheck) and the W1-T1223 cancelled-
+    // check arm (`runSweep`, sweep.ts) already use: never fall through to a strike, never log
+    // `fix.dispatch` (the one ledger step a strike is counted from) — ledger the reason and stand
+    // down, exactly as those sites do.
+    if (currentMergeConflict === undefined && noReviewYet && currentCiFailures !== undefined && currentCiFailures.length === 0) {
+      const reason =
+        "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
+        "evidence miner disagree, so there is nothing to hand a fix worker; standing down rather than " +
+        "spending a strike on empty evidence";
+      deps.log("fix.stood_down", { site: "rung.empty_ci_failures", strike: strikes + 1, reason });
+      deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
+      return { outcome: "stood_down", review, strikes, reason, standDownReason: reason };
+    }
+
     // W1-T1227 SITE — SCOPE GATE, BEFORE `strikes++`: a prior strike (this invocation's own, the
     // only kind reachable here — round 1 has strikes===0 and an unchanged baseline, so this is a
     // structural no-op on the very first pass) may have pushed a path outside the task's declared

@@ -218,10 +218,18 @@ test("runFixRung: a blocked_ci exhaustion whose failing-check list was CHECKED A
     ...fixRungBaseOpts(),
     strikeCap: 1,
     initialReview: fakeReview("failure", []),
-    ciFailures: [], // opts.ciFailures !== undefined — the list WAS collected, and is empty
+    // W1-T1282: round 1 must start with REAL evidence — a genuinely empty `ciFailures` now
+    // stands the rung down BEFORE any strike (the two-reader-split guard this task adds), which
+    // this file's own concern (the ESCALATION's rendering, once one is reached) never disputes.
+    // Round 1 dispatches on this real check, then its post-strike refresh (`fetchCiFailures`
+    // below) is what goes empty — the SAME "checked and is empty" shape, discovered mid-rung
+    // rather than at round 1, and still reachable because the loop exits (strikeCap 1) before
+    // this guard's next top-of-round check would otherwise catch it too.
+    ciFailures: [{ name: "ci", logTail: "irrelevant — round 1 dispatches on this" }],
     deps: {
       spawn: async () => result(),
       waitForCiGreen: async () => "red",
+      fetchCiFailures: async () => [], // opts.ciFailures !== undefined — the list WAS collected, and is empty
       runReview: async () => {
         throw new Error("runReview must never be called — CI never went green");
       },
@@ -399,10 +407,14 @@ test("runFixRung: an empty-evidence exhaustion still writes the same fix.exhaust
     ...fixRungBaseOpts(),
     strikeCap: 1,
     initialReview: fakeReview("failure", []),
-    ciFailures: [],
+    // W1-T1282: see the sibling test above — round 1 needs real evidence to reach a strike at
+    // all under the new zero-enumerable-failures guard; the post-strike refresh is what goes
+    // empty here, reaching the SAME exhaustion-with-empty-evidence shape this test targets.
+    ciFailures: [{ name: "ci", logTail: "irrelevant — round 1 dispatches on this" }],
     deps: {
       spawn: async () => result(),
       waitForCiGreen: async () => "red",
+      fetchCiFailures: async () => [],
       runReview: async () => {
         throw new Error("runReview must never be called — CI never went green");
       },
