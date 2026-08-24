@@ -24,17 +24,30 @@
  * reason escalates).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, branchAuthorshipStandDownReason, type LiveHeadResult } from "../src/run-task.js";
+import { runFixRung, branchAuthorshipStandDownReason, buildSweepEffects, type LiveHeadResult } from "../src/run-task.js";
+import { runSweep, stillRedRequiredNames, DEFAULT_SWEEP_POLICY, type OpenPrView, type RollupCheckEntry } from "../src/lib/sweep.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { readLedgerLines } from "../src/lib/status.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
 
 function result(over: Partial<WorkerResult> = {}): WorkerResult {
   return {
@@ -385,4 +398,425 @@ test("runFixRung (criterion 5): repeated invocations that observe the SAME forei
   assert.equal(issues.calls.length, 1, "exactly ONE needs-human issue created across both invocations");
   assert.equal(issues.comments.length, 1, "the second observation appends a comment instead of opening a sibling");
   assert.equal(first.issueUrl, second.issueUrl, "both invocations report the identical issue url");
+});
+
+// ── W1-T1278 — THE FIX RUNG RE-READS THE STATE BEFORE SPENDING A STRIKE ─────────────────────────
+//
+// Condition A: a `blocked_ci`-shaped strike is about to target the ONLY required check name it
+// believes is red, but a FRESH read shows a later attempt on that SAME name already running —
+// declining buys nothing wrong (criterion 1), a genuinely-still-red name still gets its strike
+// (criterion 2), and a second, genuinely-still-red name keeps the rung dispatching even though a
+// FIRST name was superseded (criterion 3). Condition B: a FRESH merge-facts read shows the PR is
+// actually dirty (`mergeable_state: dirty`) — a state that registers no new check runs at all, so
+// no strike (however spent) can observe progress; the rung declines and defers (criterion 4), and
+// the decline is legible on the ledger with nothing repaired by the rung itself (criterion 5).
+
+// ── stillRedRequiredNames — the pure boundary for condition A ───────────────────────────────────
+
+test("stillRedRequiredNames: a red name whose fresh latest attempt is a NON-TERMINAL (still running) status with an observed startedAt is dropped — superseded", () => {
+  const rollup: RollupCheckEntry[] = [{ name: "coverage-ratchet", state: "IN_PROGRESS", startedAt: "2026-08-24T00:10:00Z" }];
+  assert.deepEqual(stillRedRequiredNames(["coverage-ratchet"], rollup), []);
+});
+
+test("stillRedRequiredNames: a red name whose fresh latest attempt is STILL a terminal failure stays red", () => {
+  const rollup: RollupCheckEntry[] = [{ name: "coverage-ratchet", state: "FAILURE", startedAt: "2026-08-24T00:10:00Z" }];
+  assert.deepEqual(stillRedRequiredNames(["coverage-ratchet"], rollup), ["coverage-ratchet"]);
+});
+
+test("stillRedRequiredNames: a name absent from the fresh rollup, or present with no observed startedAt, fails OPEN — stays red, never manufactures a stand-down", () => {
+  assert.deepEqual(stillRedRequiredNames(["coverage-ratchet"], []), ["coverage-ratchet"]);
+  assert.deepEqual(
+    stillRedRequiredNames(["coverage-ratchet"], [{ name: "coverage-ratchet", state: "IN_PROGRESS" }]),
+    ["coverage-ratchet"],
+    "present but no startedAt is still unreadable — never treated as an observed later attempt",
+  );
+});
+
+test("stillRedRequiredNames: of TWO red names, only the one with an observed pending later attempt is dropped — the other stays red", () => {
+  const rollup: RollupCheckEntry[] = [
+    { name: "coverage-ratchet", state: "IN_PROGRESS", startedAt: "2026-08-24T00:10:00Z" },
+    { name: "ci", state: "FAILURE", startedAt: "2026-08-24T00:05:00Z" },
+  ];
+  assert.deepEqual(stillRedRequiredNames(["coverage-ratchet", "ci"], rollup), ["ci"]);
+});
+
+// ── the full rung, behaviorally — the five acceptance criteria ──────────────────────────────────
+
+test("runFixRung (W1-T1278 criterion 1): a strike is DECLINED when the only red required name has a later attempt already in flight on the same head", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: noReviewYet,
+    ciFailures: [{ name: "coverage-ratchet", logTail: "mutation survivor at line 12" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `s-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => ({ ...noReviewYet, state: "success", headSha: "sha-1" }),
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => logs.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+      readLiveState: async () => ({ ok: true, state: "OPEN" }),
+      // A FRESH read shows the ONE believed-red required check now has a later attempt
+      // executing right now — an OBSERVED fact, never inferred from a timestamp or a name.
+      readCiRollup: async () => [{ name: "coverage-ratchet", state: "IN_PROGRESS", startedAt: "2026-08-24T00:10:00Z" }],
+    },
+  });
+
+  assert.equal(spawnCalls.length, 0, "no fix worker is dispatched — the strike is declined before it is spent");
+  assert.equal(outcome.outcome, "stood_down");
+  assert.equal(outcome.strikes, 0, "the strike counter never moved");
+  assert.match(outcome.standDownReason ?? "", /coverage-ratchet/);
+  assert.match(outcome.standDownReason ?? "", /already in flight/);
+  const stoodDown = logs.filter((l) => l.step === "fix.stood_down");
+  assert.equal(stoodDown.length, 1);
+  assert.equal(stoodDown[0].extra?.site, "rung.strike");
+  assert.equal(stoodDown[0].extra?.strike, 1, "named as the strike that was about to be spent");
+});
+
+test("runFixRung (W1-T1278 criterion 2): a red required name with NO later attempt still gets its strike, and the strike cap is unchanged", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: noReviewYet,
+    ciFailures: [{ name: "coverage-ratchet", logTail: "mutation survivor at line 12" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `s-${spawnCalls.length}` });
+      },
+      // CI never goes green — the check genuinely stays broken every round.
+      waitForCiGreen: async () => "red",
+      runReview: async () => noReviewYet,
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      readLiveState: async () => ({ ok: true, state: "OPEN" }),
+      // A FRESH read confirms the SAME check is STILL red — no superseding attempt exists.
+      readCiRollup: async () => [{ name: "coverage-ratchet", state: "FAILURE", startedAt: "2026-08-24T00:05:00Z" }],
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "the ONE strike this strikeCap allows is spent — never declined");
+  assert.equal(outcome.outcome, "escalated", "strikeCap=1 exhausts after that ONE strike — the cap itself is unmoved by this task");
+  assert.equal(outcome.strikes, 1);
+});
+
+test("runFixRung (W1-T1278 criterion 3): a SECOND red required name with nothing pending keeps the rung dispatching, even though the first has a later attempt in flight", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: noReviewYet,
+    ciFailures: [
+      { name: "coverage-ratchet", logTail: "mutation survivor at line 12" },
+      { name: "ci", logTail: "tsc: error TS2322" },
+    ],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `s-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => ({ ...noReviewYet, state: "success", headSha: "sha-1" }),
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      readLiveState: async () => ({ ok: true, state: "OPEN" }),
+      // coverage-ratchet is superseded, but "ci" is genuinely, still red — real work remains.
+      readCiRollup: async () => [
+        { name: "coverage-ratchet", state: "IN_PROGRESS", startedAt: "2026-08-24T00:10:00Z" },
+        { name: "ci", state: "FAILURE", startedAt: "2026-08-24T00:05:00Z" },
+      ],
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "the rung still dispatches — one red name still needs real work");
+  assert.match(spawnCalls[0].prompt, /MODE: ci-log/);
+  assert.equal(outcome.outcome, "fixed");
+});
+
+test("runFixRung (W1-T1278 criterion 4): a PR whose merge state is dirty DECLINES the strike and defers — never retries, never holds open indefinitely", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+  const updateBranchCalls: number[] = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 3,
+    initialReview: noReviewYet,
+    // Dispatched believing CI is red (ci-log mode) — the #2605 shape: the TRUE state is a merge
+    // conflict, which registers no new check runs at all.
+    ciFailures: [{ name: "ci", logTail: "" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `s-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => ({ ...noReviewYet, state: "success", headSha: "sha-1" }),
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      readLiveState: async () => ({ ok: true, state: "OPEN" }),
+      readMergeFacts: async () => ({ mergeable: "CONFLICTING" }),
+      updateBranch: async (n) => {
+        updateBranchCalls.push(n);
+        return { ok: true };
+      },
+    },
+  });
+
+  assert.equal(spawnCalls.length, 0, "no fix worker is dispatched against a state that cannot be observed making progress");
+  assert.equal(outcome.outcome, "stood_down");
+  assert.equal(outcome.strikes, 0, "declined, not spent — the strike is never charged");
+  assert.match(outcome.standDownReason ?? "", /dirty/);
+  assert.equal(updateBranchCalls.length, 0, "the rung never attempts to resolve the conflict itself (design note v)");
+});
+
+test("runFixRung (W1-T1278 criterion 5): the declined strike is NAMED in the ledger, and no conflict is resolved by the rung", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const updateBranchCalls: number[] = [];
+  const pushCalls: string[] = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 3,
+    initialReview: noReviewYet,
+    ciFailures: [{ name: "ci", logTail: "" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `s-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => ({ ...noReviewYet, state: "success", headSha: "sha-1" }),
+      push: (wt) => pushCalls.push(wt),
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => logs.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+      readLiveState: async () => ({ ok: true, state: "OPEN" }),
+      readMergeFacts: async () => ({ mergeable: "CONFLICTING" }),
+      updateBranch: async (n) => {
+        updateBranchCalls.push(n);
+        return { ok: true };
+      },
+    },
+  });
+
+  assert.equal(outcome.outcome, "stood_down");
+  const stoodDown = logs.filter((l) => l.step === "fix.stood_down");
+  assert.equal(stoodDown.length, 1, "exactly ONE ledger line names the declined strike");
+  assert.equal(stoodDown[0].extra?.site, "rung.strike");
+  assert.equal(stoodDown[0].extra?.strike, 1, "names the strike that was about to be spent");
+  assert.equal(stoodDown[0].extra?.reason, outcome.standDownReason);
+  assert.match(String(stoodDown[0].extra?.reason ?? ""), /dirty/);
+
+  assert.equal(spawnCalls.length, 0, "no fix worker ran — nothing attempted a repair");
+  assert.equal(updateBranchCalls.length, 0, "no branch update — the rung never resolves the conflict itself");
+  assert.equal(pushCalls.length, 0, "no push — nothing was committed on the rung's behalf");
+});
+
+test("runFixRung (W1-T1278 condition B, fail-open): a THROWING readMergeFacts never manufactures a stand-down — the strike still spends, exactly as if condition B did not exist", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: noReviewYet,
+    // A ci-log dispatch (so condition B's guard — `currentMergeConflict === undefined` — holds),
+    // but the check named genuinely stays red every round: this fixture isolates condition B's
+    // OWN catch/fail-open arm from condition A, which would otherwise also have an opinion.
+    ciFailures: [{ name: "ci", logTail: "" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `s-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "red",
+      runReview: async () => noReviewYet,
+      push: () => {},
+      issues: fakeIssueStore(),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      readLiveState: async () => ({ ok: true, state: "OPEN" }),
+      // The gh outage shape: a rejected read, never a resolved `CONFLICTING`/`MEREGABLE`/`UNKNOWN`
+      // value. `fixRungStandDownReason`'s own catch around this call must swallow it and treat the
+      // strike exactly as though `mergeConflictCheck` had never been wired at all.
+      readMergeFacts: async () => {
+        throw new Error("gh api rate-limited");
+      },
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "the ONE strike this strikeCap allows is spent — an unreadable merge-facts read never declines it");
+  assert.equal(outcome.outcome, "escalated", "strikeCap=1 exhausts after that ONE strike, exactly as condition B's own doc promises for a failed read");
+  assert.equal(outcome.strikes, 1);
+});
+
+// ── W1-T1278 (condition A) — THE REAL PRODUCTION-WIRED `readCiRollup` CLOSURE ───────────────────
+//
+// Every fixture above injects `deps.readCiRollup` by hand, which proves `stillRedRequiredNames`
+// and `fixRungStandDownReason`'s composition are correct but never exercises the REAL adapter
+// `buildSweepEffects` wires at its own `runFixRung` call site (the ONE this task actually
+// changed) — a `gh pr view <url> --json statusCheckRollup` read through the real `ghJson`
+// gateway. This drives `buildSweepEffects(...).dispatchFix` through a REAL `runSweep` call over a
+// REAL ledger file and a REAL throwaway git repo, exactly like test/fix-dedup-seed.test.ts's own
+// "reaches the worker" fixture — `gh` is a STUB shell script on PATH, never the live gateway.
+
+function ghShimForCiRollup(dir: string, headRefName: string): void {
+  writeFileSync(
+    join(dir, "gh"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
+      // THE closure under test (buildSweepEffects's own `readCiRollup`, run-task.ts) reads
+      // exactly this shape: the ONE believed-red required check ("ci") now shows a LATER
+      // attempt already IN_PROGRESS on this same head — an OBSERVED supersession, never
+      // hand-fed to a stub dep the way every fixture above drives it.
+      '  *"statusCheckRollup"*) echo \'{"statusCheckRollup":[{"name":"ci","conclusion":"IN_PROGRESS","startedAt":"2026-08-24T00:10:00Z"}]}\' ;;',
+      // The live-state preflight (dispatchFixPreflightStandDown + rung.strike's own readLiveState)
+      // and condition B's readMergeFacts both resolve an OPEN, unmerged, non-dirty PR — neither
+      // stands the strike down before condition A ever gets a turn.
+      '  *"api"*"pulls/"*) echo \'{"state":"open","merged":false}\' ;;',
+      "  *) echo '{}' ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
+function ciRollupRepoFixture(): { bare: string; root: string; bin: string; repo: string; branch: string; owner: string } {
+  const owner = "acme";
+  const repo = "w1t1278-ciroll-repo";
+  const branch = "run-W1T1278CIROLL-1786500000000";
+  const bare = mkdtempSync(join(tmpdir(), "w1t1278-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "w1t1278-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
+  writeFileSync(join(seed, "README.md"), "seed\n");
+  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "seed"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "remote", "add", "origin", bare], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "checkout", "--quiet", "-b", branch], { encoding: "utf8", env: GIT_ENV });
+  writeFileSync(join(seed, "work.txt"), "work\n");
+  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "work"], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", branch], { encoding: "utf8", env: GIT_ENV });
+  rmSync(seed, { recursive: true, force: true });
+
+  const root = mkdtempSync(join(tmpdir(), "w1t1278-root-"));
+  const bin = mkdtempSync(join(tmpdir(), "w1t1278-gh-"));
+  const repoDir = join(root, "repos", repo);
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+  execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+  execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+  ghShimForCiRollup(bin, branch);
+  return { bare, root, bin, repo, branch, owner };
+}
+
+function ciRollupCandidate(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 501,
+    prUrl: "https://github.com/acme/w1t1278-ciroll-repo/pull/501",
+    reviewState: "none",
+    checksState: "red",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    headSha: "cafe0501",
+    autoMergeArmed: false,
+    ciFailures: [{ name: "ci", logTail: "tsc: error TS2322" }],
+    ...over,
+  } as OpenPrView;
+}
+
+test("runFixRung, wired via buildSweepEffects' REAL production `readCiRollup` closure (not a hand-fed stub): a fresh `gh pr view --json statusCheckRollup` read showing the believed-red check already superseded declines the strike before it ever reaches the worker", async () => {
+  const { bare, root, bin, repo, branch, owner } = ciRollupRepoFixture();
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}:${savedPath}`;
+  try {
+    const TASK = "W1T1278CIROLL";
+    const ledgerPath = join(root, "ledger.ndjson");
+    const runId = "SWEEP-W1T1278-CIROLL";
+    const log = (step: string, extra: Record<string, unknown> = {}) =>
+      appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
+    const plan = {
+      tasks: [{ id: TASK, title: "w1t1278 fixture", repo, type: "implement", risk: "low", verify: "auto", status: "queued", attempts: 0, depends_on: [] }],
+      byId: new Map([[TASK, { id: TASK, title: "w1t1278 fixture" }]]),
+    };
+    let spawnCalls = 0;
+    const effects = buildSweepEffects(
+      owner,
+      repo,
+      { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath,
+      runId,
+      plan as never,
+      log,
+      DEFAULT_SWEEP_POLICY,
+      undefined,
+      async () => {
+        spawnCalls += 1;
+        return result({ sessionId: "should-never-spawn" }) as unknown as WorkerResult;
+      },
+    );
+
+    const candidate = ciRollupCandidate({ prUrl: `https://github.com/${owner}/${repo}/pull/501`, taskId: TASK, headSha: "cafe0501" });
+
+    const summary = await withLiveWritesAllowed(() =>
+      runSweep([candidate], { ...effects, ledgerPath, runId, log, dryRun: false }, DEFAULT_SWEEP_POLICY),
+    );
+
+    assert.equal(spawnCalls, 0, "the strike is declined before ever reaching the worker — the REAL wired readCiRollup closure supersedes it");
+    assert.equal(summary.actions[0].disposition, "blocked-fixable");
+    // Note: `acted:true` here is the SWEEP-level bookkeeping (dispatchFix returned without
+    // throwing — W1-T1127's own dedup contract, untouched by this task); it is orthogonal to
+    // the FIX RUNG'S OWN internal decision, asserted below via `fix.stood_down` and the absence
+    // of `fix.dispatch` — the actual, real-adapter-driven proof this test exists to give.
+    assert.equal(summary.actions[0].acted, true);
+
+    const lines = readLedgerLines(ledgerPath);
+    const stoodDown = lines.filter((l) => l.step === "fix.stood_down");
+    assert.equal(stoodDown.length, 1, `exactly one stand-down row; got ${JSON.stringify(lines.map((l) => l.step))}`);
+    assert.match(String(stoodDown[0].reason ?? ""), /already in flight/);
+    assert.ok(!lines.some((l) => l.step === "fix.dispatch"), "no fix-rung strike row exists — the pre-strike gate declined before dispatch");
+  } finally {
+    process.env.PATH = savedPath;
+    for (const d of [bare, root, bin]) rmSync(d, { recursive: true, force: true });
+  }
 });

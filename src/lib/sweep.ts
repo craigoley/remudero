@@ -1332,6 +1332,44 @@ export function cancelledRequiredCheckNames(
     .map((c) => c.name ?? c.context ?? "unknown");
 }
 
+/**
+ * W1-T1278 (condition A) — of `redNames` (the required check names a fix rung's CI-LOG evidence
+ * currently believes are red, possibly stale — see this task's own rationale for the measured
+ * MEDIAN 104-minute gap between a `blocked_ci` read and the PR actually resolving), which are
+ * STILL red on a FRESH `rollup` read: their LATEST (deduped, {@link dedupeRollupByLatestAttempt} —
+ * the SAME rule {@link checksStateFromRollup} itself reads red from) attempt is still a member of
+ * {@link REQUIRED_CHECK_FAIL}.
+ *
+ * A name is dropped from the returned set ONLY when the fresh deduped entry sharing its key
+ * carries an observed `startedAt` AND a currently NON-TERMINAL status — neither
+ * {@link REQUIRED_CHECK_OK} nor {@link REQUIRED_CHECK_FAIL} — i.e. a LATER ATTEMPT the rung can
+ * see is executing RIGHT NOW, on THIS same fresh read of THIS same head. That is deliberately
+ * narrower than "no longer red": a fresh entry that already concluded SUCCESS is left exactly as
+ * before this task (out of this narrow gate's scope — design note (ii) forbids widening past the
+ * one shape it names, "an attempt already in flight", since one notch wider is "never fix a red
+ * PR"). An implementation that instead inferred "in flight" from a name, a timestamp on the STALE
+ * failure, or a retry count would be GUESSING, which design note (iii) forbids explicitly — this
+ * reads the check-run set's own observed status, nothing else.
+ *
+ * A name ABSENT from the fresh rollup entirely, or present with no `startedAt` at all (an
+ * unreadable/indeterminate read), is NEVER dropped — it fails toward "still red", the same
+ * fail-open-toward-proceeding direction every other stand-down source in this file already takes:
+ * an unreadable rollup must never manufacture a stand-down.
+ */
+export function stillRedRequiredNames(redNames: readonly string[], rollup: RollupCheckEntry[] | undefined): string[] {
+  if (redNames.length === 0) return [];
+  const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
+  const deduped = dedupeRollupByLatestAttempt(all);
+  const byKey = new Map(deduped.map((c) => [c.name ?? c.context ?? "", c] as const));
+  return redNames.filter((name) => {
+    const fresh = byKey.get(name);
+    if (!fresh || !fresh.startedAt) return true; // unreadable/absent — fail open, still red
+    const s = (fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase();
+    const inFlight = !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s);
+    return !inFlight; // an OBSERVED later attempt still running is the ONLY thing dropped
+  });
+}
+
 /** One re-queue/escalate decision for one cancelled required check. */
 export interface CancelledCheckRequeueDecision {
   requeue: boolean;
