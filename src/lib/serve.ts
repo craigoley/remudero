@@ -715,6 +715,11 @@ export function renderShellHtml(
      as STOP's own .confirming (an unmissable state change), a distinct (non-danger) accent since
      approving is not a destructive action the way STOP is. */
   button.proposal-approve-btn.confirming { background: var(--accent); color: #04101f; border-color: var(--accent); }
+  /* W1-T2206: the Answer control's PENDING (preview in flight) and LAPSED (expired-arm) states.
+     .pending rides on button:disabled's own dimming above, plus a wait cursor; .lapsed gets a
+     distinct, non-armed accent so an expired arm is never visually mistaken for a fresh one. */
+  .needs-me-answer-submit.pending { cursor: wait; }
+  .needs-me-answer-submit.lapsed { border-color: var(--status-blocked); color: var(--status-blocked); }
   /* fb-…9daa9b: the UP NEXT write-actions (per-row Run + Drain now) — same arm-then-confirm
      visual language as APPROVE (a non-destructive accent), sized to sit inside a task row. */
   .up-next-run-btn { padding: 0.15rem 0.5rem; font-size: 0.8rem; margin-left: 0.4rem; flex: 0 0 auto; }
@@ -2465,6 +2470,12 @@ export function renderShellHtml(
   // from before this task: never a single-click submit of an unseen rewrite, but never a
   // second click required for a plain, un-expandable answer either. "File raw" is the escape
   // (design (iv)) — one deliberate click away, always skips the preview entirely.
+  // W1-T2206: the preview leg used to be an unguarded await with no spinner, no disable and no
+  // label change -- the button read as dead for the whole model call, a second click launched a
+  // SECOND paid preview, and the 8s arm expired silently. The submit handler below now renders a
+  // pending state for that whole call (disabled + "Expanding your answer…"), refuses re-entry
+  // per replyTo while pending, states plainly on the armed control that nothing is filed yet,
+  // and widens+surfaces the arm's expiry. See the handler's own comments for the per-leg detail.
   function needsMeGrillHtml(e) {
     const rawHtml = \`<span class="detail">asks: \${escapeHtml(e.raw)}</span>\`;
     return (
@@ -3285,11 +3296,40 @@ export function renderShellHtml(
   // once) -- keyed by replyTo, mirroring approveConfirmTimers's own per-proposalId keying.
   const answerConfirmTimers = new Map();
   const answerExpansions = new Map();
-  function resetAnswerButton(btn) {
+  // W1-T2206: replyTo keys with a preview currently in flight -- membership (not a single
+  // shared flag) is what keeps two DIFFERENT grill answers mid-preview at once independent,
+  // matching answerConfirmTimers/answerExpansions's own per-replyTo discipline. This set is
+  // also the re-entry guard the submit handler below checks in JS (see that comment for why
+  // "disabled" alone is not enough).
+  const answerPending = new Set();
+  // W1-T2206 design (i): the pending state must be VISIBLE for the whole preview call --
+  // disabled (so it doubles as the in-flight guard's own attribute) plus a plain-language label
+  // naming what is happening. A text-label swap is chosen over a spinner: it is the SAME idiom
+  // every other control in this file already uses for state (armed labels, DRAFTING, etc.), adds
+  // no new CSS/animation surface, and needs no REDUCED_MOTION branch (W1-T156) since nothing
+  // animates.
+  function setAnswerPending(btn, pending) {
+    btn.disabled = pending;
+    btn.classList.toggle("pending", pending);
+    btn.setAttribute("aria-busy", pending ? "true" : "false");
+    if (pending) {
+      btn.classList.remove("lapsed");
+      btn.textContent = "Expanding your answer…";
+      announce("Expanding your answer — this takes a few seconds.");
+    }
+  }
+  // W1-T2206 design (iv): a lapsed 8s(→30s, see the timer below) arm resets SILENTLY today,
+  // reading identically to a never-armed button -- the operator's next click then buys a THIRD
+  // model call instead of filing what he thinks he already confirmed. "expired" marks that
+  // distinctly (a ".lapsed" class + a label naming what happened) so it is never presented as a
+  // fresh, un-clicked "Answer".
+  function resetAnswerButton(btn, opts) {
+    const expired = !!(opts && opts.expired);
     btn.dataset.confirming = "false";
     btn.setAttribute("aria-pressed", "false");
     btn.classList.remove("confirming");
-    btn.textContent = "Answer";
+    btn.classList.toggle("lapsed", expired);
+    btn.textContent = expired ? "Answer (expired — click to retry)" : "Answer";
     const form = btn.closest(".needs-me-answer");
     const replyTo = form && form.dataset.replyTo;
     if (replyTo) {
@@ -3312,6 +3352,12 @@ export function renderShellHtml(
       const answer = input.value.trim();
       if (!answer) return;
       const submitBtn = answerForm.querySelector(".needs-me-answer-submit");
+      // W1-T2206 design (ii): the pending state below IS the in-flight guard, but W1-T202's own
+      // note is that "disabled" alone does not stop every engine's Enter-key implicit submit --
+      // so a click/Enter landing on THIS replyTo while its preview is still resolving must
+      // refuse in JS too, starting no second paid preview and filing nothing. Keyed per replyTo
+      // so a second, DIFFERENT grill answer mid-preview stays fully independent.
+      if (answerPending.has(replyTo)) return;
       // W1-T350: a SECOND submit while armed files WITH the expansion the first submit already
       // read back -- the round trip's whole point (never file an unseen rewrite).
       if (submitBtn.dataset.confirming === "true") {
@@ -3323,7 +3369,12 @@ export function renderShellHtml(
         return;
       }
       // First submit: PREVIEW the expansion -- FAIL-OPEN, never blocks filing on an expander
-      // outage/timeout (this task's stated failure mode).
+      // outage/timeout (this task's stated failure mode). W1-T2206: render the pending state for
+      // the WHOLE call, and clear it on every exit below (expansion, no expansion, or a thrown/
+      // rejected preview fetch) -- a pending state that survives a rejected fetch is a worse dead
+      // button than the unguarded await it replaces.
+      answerPending.add(replyTo);
+      setAnswerPending(submitBtn, true);
       let expansion = null;
       try {
         const previewRes = await postJson("/v1/feedback/preview", { text: answer, replyTo });
@@ -3333,25 +3384,41 @@ export function renderShellHtml(
         }
       } catch {
         expansion = null;
+      } finally {
+        answerPending.delete(replyTo);
+        setAnswerPending(submitBtn, false);
       }
       if (!expansion) {
-        // Nothing to show -- file exactly as before this task, single click, unchanged: the
-        // fail-open falsifier this bar names ("an expander error or timeout leaves plain raw
-        // submission working unchanged").
+        // W1-T2206 design (v): fail-open files on this ONE click with no confirm ever shown --
+        // it must never borrow the armed vocabulary below, so an operator who just watched a
+        // filing happen can tell it apart from a preview that armed instead.
+        submitBtn.textContent = "Filed (no expansion available)";
         await postJson("/v1/feedback", { text: answer, replyTo });
         input.value = "";
         refreshAll();
         return;
       }
-      // ARM: the armed control shows the expansion's read-back before anything files -- never a
-      // single-click submit of an unseen rewrite (this task's console acceptance bar).
+      // ARM: the armed control shows the expansion's read-back AND states plainly that nothing
+      // is filed yet and the NEXT click is the one that files -- design (iii), the exact
+      // ambiguity the operator hit ("no idea if I still need to address this... or not").
       answerExpansions.set(replyTo, expansion);
       submitBtn.dataset.confirming = "true";
       submitBtn.setAttribute("aria-pressed", "true");
       submitBtn.classList.add("confirming");
-      submitBtn.textContent = \`Confirm: \${expansion.claim} (RECON \${expansion.recon.length}) — file?\`;
+      submitBtn.classList.remove("lapsed");
+      submitBtn.textContent =
+        \`Confirm: \${expansion.claim} (RECON \${expansion.recon.length}) — nothing filed yet, click to file\`;
       clearTimeout(answerConfirmTimers.get(replyTo));
-      answerConfirmTimers.set(replyTo, setTimeout(() => resetAnswerButton(submitBtn), 8000));
+      // W1-T2206 design (iv): 8000ms (STOP/APPROVE/RUN/etc.'s shared window, all one-line
+      // confirms) is shorter than the four-section expansion W1-T350 requires the operator to
+      // READ before confirming -- the common case was a confirm click landing AFTER expiry,
+      // silently buying a THIRD model call instead of filing. Widened to 30s to survive that
+      // read, and the expiry itself is made VISIBLE (resetAnswerButton's "expired" state) so a
+      // lapsed arm is never presented as a fresh, un-clicked one either way.
+      answerConfirmTimers.set(
+        replyTo,
+        setTimeout(() => resetAnswerButton(submitBtn, { expired: true }), 30000),
+      );
     } else if (reframeForm) {
       // W1-T193: REFRAME captures the operator's own words VERBATIM -- a textarea, not a link
       // to a terminal (the wrong asymmetry: agreeing easy, disagreeing hard). Wired to the
