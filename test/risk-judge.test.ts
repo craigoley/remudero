@@ -107,11 +107,12 @@ test("parseRiskJudgeVerdict clamps out-of-range confidence into [0,1]", () => {
   assert.equal(under.confidence, 0);
 });
 
-test("parseRiskJudgeVerdict FAILS CLOSED (high, confidence 1) on unparseable output", () => {
+test("parseRiskJudgeVerdict FAILS CLOSED (high, confidence 0) on unparseable output — W1-T2212: never assert a confidence it never read", () => {
   const v = parseRiskJudgeVerdict("not sure what to make of this diff, seems fine I guess");
   assert.equal(v.verdict, "high");
-  assert.equal(v.confidence, 1);
+  assert.equal(v.confidence, 0);
   assert.ok(v.reasons.length > 0);
+  assert.match(v.reasons.join(" "), /MALFORMED RESPONSE/);
 });
 
 test("parseRiskJudgeVerdict FAILS CLOSED on an invalid verdict value", () => {

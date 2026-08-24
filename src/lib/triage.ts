@@ -331,6 +331,26 @@ export function parseTriageVerdict(text: string): TriageVerdict | null {
   return hits[hits.length - 1].verdict;
 }
 
+// ── THE THIRD STATE (W1-T2212), AS A TYPE ────────────────────────────────────
+//
+// `parseTriageVerdict` already refused to fabricate a verdict on unparseable output (`null`,
+// never a fake `TriageVerdict`) — the defect this task removes was one layer down, in
+// `decideTriage`, which folded that `null` into `action: "error"`, the SAME action a worker that
+// physically misbehaved (touched a non-plan file) also produces. `TriageOutcome` below is the
+// discriminated union that makes "unparseable" a state distinct from "produced a verdict" BEFORE
+// either ever reaches `decideTriage` — {@link runTriageWithRetry}'s retry branch (design (i)) is
+// reachable ONLY from `kind: "unparseable"`, never from `kind: "verdict"` (adverse or not).
+
+export type TriageOutcome = { kind: "verdict"; verdict: TriageVerdict } | { kind: "unparseable" };
+
+/** Classify one worker attempt's raw output text — the third-state boundary {@link
+ *  runTriageWithRetry} narrows its retry decision on. Pure wrapper over {@link
+ *  parseTriageVerdict}. */
+export function classifyTriageOutcome(text: string): TriageOutcome {
+  const verdict = parseTriageVerdict(text);
+  return verdict === null ? { kind: "unparseable" } : { kind: "verdict", verdict };
+}
+
 // ── Deterministic decision (pure) ────────────────────────────────────────────
 
 export interface DecideTriageInput {
@@ -338,6 +358,13 @@ export interface DecideTriageInput {
   /** Repo-relative paths the worker itself touched (`git diff --name-only` before the harness's
    * own status write), e.g. from `git -C <worktree> diff --name-only origin/main`. */
   changedFiles: string[];
+  /** How many attempts {@link runTriageWithRetry} spent before reaching this call, when driven
+   *  through the retry loop (W1-T2212). OPTIONAL and undefined by default — `decideTriage`'s
+   *  existing direct caller (run-task.ts's `triageCommand`, still a single call with no retry
+   *  loop wired in) passes none, so its `no ALREADY_DECIDED:/...` message stays byte-identical
+   *  to before this field existed. When present alongside a null `verdict`, it is folded into
+   *  the message so the operator sees HOW MANY attempts the malformed response survived. */
+  attempts?: number;
 }
 
 export type TriageDecision =
@@ -354,7 +381,22 @@ export type TriageDecision =
       recommendation: string;
     }
   | { action: "propose"; status: Extract<FeedbackStatus, "proposed">; detail: string; files: string[] }
-  | { action: "error"; reason: string };
+  | {
+      action: "error";
+      reason: string;
+      /**
+       * THE CAUSE AS DATA, NOT PROSE ALONE (W1-T2212 acceptance criterion 7): three shapes share
+       * `action: "error"` for the sole reason that none may ever produce a plan PR, but they are
+       * NOT the same failure. `non_plan_files` is a worker that physically misbehaved.
+       * `unparseable_verdict` is a worker whose output {@link runTriageWithRetry} could not read
+       * after exhausting its bounded retries (never retried further past that bound — the SAME
+       * escalation fires as before, design (iii)). `inconsistent_verdict` is a worker that DID
+       * answer parseably but contradicted itself against the files it touched (or, for AMBIGUOUS,
+       * against its own OPTION/RECOMMENDATION contract). A reader (or a future caller) can now
+       * branch on this field instead of pattern-matching `reason`'s prose.
+       */
+      cause: "non_plan_files" | "unparseable_verdict" | "inconsistent_verdict";
+    };
 
 /**
  * The three-way verdict as a PURE function (mirrors {@link "./dep-review.js".decideDepReview}):
@@ -372,24 +414,48 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
   // the prompt must agree on what "plan file" means.
   const nonPlan = input.changedFiles.filter((f) => !f.startsWith("plan/") && f !== "MASTER-PLAN.md");
   if (nonPlan.length > 0) {
-    return { action: "error", reason: `triage worker touched non-plan file(s): ${nonPlan.join(", ")}` };
-  }
-  if (!input.verdict) {
     return {
       action: "error",
-      reason: "no ALREADY_DECIDED:/AMBIGUOUS:/PROPOSED: verdict line found in the worker's output",
+      reason: `triage worker touched non-plan file(s): ${nonPlan.join(", ")}`,
+      cause: "non_plan_files",
+    };
+  }
+  if (!input.verdict) {
+    // THE THIRD STATE'S TERMINAL SHAPE (W1-T2212): reached either directly (a caller with no
+    // retry loop, `attempts` undefined — the message stays BYTE-IDENTICAL to before this field
+    // existed) or via runTriageWithRetry once its bound is exhausted (`attempts` present) — "at
+    // the bound the SAME escalation fires as today, with the same class and the same blocking
+    // effect" (design iii). `cause: "unparseable_verdict"` distinguishes this from a worker that
+    // physically misbehaved (`non_plan_files`, above) as DATA (acceptance criterion 7), never
+    // only as prose a reader has to pattern-match.
+    return {
+      action: "error",
+      reason:
+        input.attempts === undefined
+          ? "no ALREADY_DECIDED:/AMBIGUOUS:/PROPOSED: verdict line found in the worker's output"
+          : `no ALREADY_DECIDED:/AMBIGUOUS:/PROPOSED: verdict line found after ${input.attempts} attempt(s) — ` +
+            "the worker's output was unparseable (a MALFORMED RESPONSE), not an adverse verdict",
+      cause: "unparseable_verdict",
     };
   }
   if (input.verdict.kind === "already_decided") {
     if (input.changedFiles.length > 0) {
-      return { action: "error", reason: `ALREADY_DECIDED but files were changed: ${input.changedFiles.join(", ")}` };
+      return {
+        action: "error",
+        reason: `ALREADY_DECIDED but files were changed: ${input.changedFiles.join(", ")}`,
+        cause: "inconsistent_verdict",
+      };
     }
     return { action: "no_task", status: "rejected", detail: input.verdict.citation };
   }
   if (input.verdict.kind === "ambiguous") {
     const verdict = input.verdict; // narrowed local — property-access narrowing doesn't survive into a closure below
     if (input.changedFiles.length > 0) {
-      return { action: "error", reason: `AMBIGUOUS but files were changed: ${input.changedFiles.join(", ")}` };
+      return {
+        action: "error",
+        reason: `AMBIGUOUS but files were changed: ${input.changedFiles.join(", ")}`,
+        cause: "inconsistent_verdict",
+      };
     }
     // The async needs-human issue is the ONLY grill mechanism (W1-T42, LEARNINGS.md
     // "AskUserQuestion neither works headlessly nor stalls") — an AMBIGUOUS verdict with fewer
@@ -400,12 +466,14 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
       return {
         action: "error",
         reason: `AMBIGUOUS verdict carries ${verdict.options.length} OPTION: line(s) — a grill needs at least 2 actionable choices`,
+        cause: "inconsistent_verdict",
       };
     }
     if (!verdict.options.some((o) => o.label === verdict.recommendation)) {
       return {
         action: "error",
         reason: `AMBIGUOUS verdict's RECOMMENDATION (${JSON.stringify(verdict.recommendation)}) does not match any OPTION label (${verdict.options.map((o) => o.label).join(", ")})`,
+        cause: "inconsistent_verdict",
       };
     }
     return {
@@ -418,9 +486,85 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
   }
   // proposed
   if (input.changedFiles.length === 0) {
-    return { action: "error", reason: "PROPOSED but no plan files were changed" };
+    return { action: "error", reason: "PROPOSED but no plan files were changed", cause: "inconsistent_verdict" };
   }
   return { action: "propose", status: "proposed", detail: input.verdict.summary, files: input.changedFiles };
+}
+
+// ── W1-T2212: THE BOUNDED, BYTE-IDENTICAL RETRY (design ii/iii) ──────────────────────────────
+//
+// "The retry RE-REQUESTS, it never RE-ASKS." `runTriageWithRetry` calls `deps.spawnAttempt` with
+// the SAME `prompt` value on every attempt — nothing about the request may vary between them.
+// This is deliberately NOT the relint loop (run-task.ts's `runRelintLoop`, which re-prompts the
+// worker WITH the prior round's violations folded in — a genuine RE-ASK): that loop exists to
+// correct a worker's PLAN LINT violations, a completely different failure mode from "the worker's
+// output could not be parsed at all". Reusing it here would smuggle a re-ask in under a retry's
+// name — exactly the laundering hazard design (v) warns splitting this task in two would risk.
+
+/** The small, hard bound on unparseable-response retries — mirrors risk-judge.ts's
+ *  `RISK_JUDGE_MAX_ATTEMPTS` exactly (design v: the retry contract must be IDENTICAL in both
+ *  rungs). Never applies to a PARSED verdict, adverse or not. */
+export const TRIAGE_VERDICT_MAX_ATTEMPTS = 3;
+
+/** One triage worker attempt's raw result — the caller's own spawn, never this module's
+ *  concern (mirrors risk-judge.ts's injected `spawn`). */
+export interface TriageAttemptResult {
+  /** The worker's raw concatenated output text, fed to {@link classifyTriageOutcome}. */
+  text: string;
+  /** Ground truth: what the worker actually touched THIS attempt (fresh per attempt — a retried
+   *  worker starts from the same worktree state, so this is re-read, never carried over). */
+  changedFiles: string[];
+}
+
+export interface TriageRetryDeps {
+  /** Spawn ONE triage attempt with the given prompt and return its raw result. Called with the
+   *  IDENTICAL `prompt` value on every attempt — see this section's own doc above. */
+  spawnAttempt: (prompt: string) => Promise<TriageAttemptResult>;
+  /** One ledger-shaped line per attempt (design iii: "each attempt writes its own ledger row so
+   *  the count is auditable after the fact rather than inferred"). No-op default. */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+export interface TriageRetryResult {
+  decision: TriageDecision;
+  changedFiles: string[];
+  /** How many attempts were actually spent — 1 when the first attempt parsed, up to
+   *  `maxAttempts` when every attempt was unparseable. */
+  attempts: number;
+}
+
+/**
+ * Spawn up to `maxAttempts` triage attempts with the SAME `prompt`, retrying ONLY while
+ * {@link classifyTriageOutcome} reports `unparseable` (design i: the retry branch is reachable
+ * ONLY from that arm — never from a parsed verdict, adverse or not, which returns on its very
+ * first attempt). At the bound, falls through to {@link decideTriage} with `verdict: null` —
+ * the SAME `action: "error"`/`cause: "unparseable_verdict"` outcome a single unparseable
+ * response has always produced (design iii: "the SAME escalation fires as today"). An unreadable
+ * verdict therefore still blocks and nothing proceeds on it at any point in this loop.
+ */
+export async function runTriageWithRetry(
+  prompt: string,
+  deps: TriageRetryDeps,
+  maxAttempts: number = TRIAGE_VERDICT_MAX_ATTEMPTS,
+): Promise<TriageRetryResult> {
+  if (maxAttempts < 1) throw new Error("runTriageWithRetry: maxAttempts must be >= 1");
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { text, changedFiles } = await deps.spawnAttempt(prompt);
+    const outcome = classifyTriageOutcome(text);
+    deps.log?.("triage.verdict_attempt", { attempt, max_attempts: maxAttempts, kind: outcome.kind });
+    if (outcome.kind === "verdict") {
+      return { decision: decideTriage({ verdict: outcome.verdict, changedFiles }), changedFiles, attempts: attempt };
+    }
+    if (attempt === maxAttempts) {
+      return {
+        decision: decideTriage({ verdict: null, changedFiles, attempts: attempt }),
+        changedFiles,
+        attempts: attempt,
+      };
+    }
+  }
+  /* c8 ignore next */
+  throw new Error("runTriageWithRetry: unreachable — the loop above always returns by its last iteration");
 }
 
 // ── Post-hoc deterministic guards (pure, mirroring lib/retro.ts's codeFilesInDiff) ─────────────
