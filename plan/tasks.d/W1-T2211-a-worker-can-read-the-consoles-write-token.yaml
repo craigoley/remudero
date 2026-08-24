@@ -1,0 +1,167 @@
+- id: W1-T2211
+  title: "A WORKER CAN READ THE CONSOLE'S WRITE TOKEN, SO A LANE CAN APPROVE ITS OWN WORK — the token sits under the STATE root, which no `denyRead` entry covers, no hook matches, and the worker's own uid owns; and `denyRead` has never been shown to block anything anywhere"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    MEASURED 2026-08-24 in a scratch worktree proved equal to `origin/main` at 7b5fe300 before any
+    reading; the clone was checked and already full (2,096 commits), and `src/run-task.ts`
+    (1,519,960 bytes, over the contents-API cap) was read through git objects. The ledger union
+    gate ran FIRST: archiveCount 22, ok true, unread 0, with the control
+    `"step":"risk_judge.decision"` reading 171. THE TOKEN'S VALUE WAS NEVER READ, PRINTED OR
+    QUOTED — every claim about it below is by PATH, MODE and OWNERSHIP.
+
+    (1) THE TWO PATHS DO NOT MEET, RE-DERIVED. `settings/worker.json`'s
+    `sandbox.filesystem.denyRead` lists exactly three entries — `~/.ssh/**`, `~/.aws/**`,
+    `~/.config/remudero/**` — and `permissions.deny` mirrors them as `Read(...)` rules. The write
+    token resolves through `serviceTokensPath(configRoot) = join(configRoot, "state",
+    "service-tokens.json")` (`src/lib/serve.ts:5302`), whose own doc says "config.root, like every
+    other `<root>/state/*` control file". THE STATE ROOT IS NOT THE CONFIG DIR, and no denyRead
+    entry names it.
+
+    (2) THE FILE IS INSIDE THE WORKER'S OWN MOUNT AND ITS OWN UID OWNS IT. On the daemon host the
+    file is mode 600, size 160; inside `remudero-daemon` the same file is visible at
+    `/home/node/Remudero/state/service-tokens.json`, mode 600, uid 1000, gid 1000 — and the
+    container's process identity is `uid=1000(node) gid=1000(node)`. So the 0600 mode GRANTS the
+    read rather than withholding it: the worker is the owner. No content was read to establish
+    this.
+
+    (3) THE HOOK CANNOT SEE THE READ AT ALL, AND CARRIES NO RULE FOR IT EITHER WAY. The single
+    `PreToolUse` entry in `settings/worker.json` declares
+    `"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit"` — `Read` IS NOT IN THE MATCHER, so a
+    `Read` tool call on this path never reaches `hooks/deny-floor.sh`. And the hook carries no rule
+    for it in any case: `service-tokens` and `state/` occur ZERO times in that file, against a
+    control of SIX `deny()` call sites in the same file (force-push to a default branch, `gh auth`
+    mutation, the `FORBIDDEN_PROBE` path, `gh api POST` to a commit-status endpoint, `deny.local`
+    patterns, and the inline `gh` polling loop), so the scan reaches and the zero is an absence.
+
+    (4) AND THE `~`-ANCHORED DENIES DO NOT POINT WHERE THEY READ AS POINTING. A worker's HOME is
+    redirected to `workerHomeDir(config) = config.workerHomeRoot ?? join(config.root,
+    "worker-home")` (`src/lib/config.ts:357-359`) — a directory INSIDE the state root — while the
+    real instance config is `configPath() = join(homedir(), ".config", "remudero",
+    "config.json")`. Under that HOME, `~/.config/remudero/**` names a path inside the worker's own
+    scratch home, not the operator's config dir. The same anchoring silently disarms the hook's
+    fifth rule, which reads its pattern list from `${HOME}/.config/remudero/deny.local`.
+
+    (5) Q1's CONTROL COULD NOT BE PRODUCED, AND THAT IS ITSELF THE FINDING. The brief asks for a
+    path `denyRead` demonstrably DOES block. There is none in this tree: `denyRead` appears in
+    `test/` exactly twice, both in `test/settings.test.ts` — once at :15 inside a GOOD fixture and
+    once at :62 asserting that a MISPLACED `denyRead` at the sandbox root is REJECTED BY THE
+    VALIDATOR. Both are assertions about the SHAPE of the settings file. NOTHING ANYWHERE
+    DEMONSTRATES `denyRead` BLOCKING A READ AT RUNTIME. The containment probe's only filesystem
+    arm tests WRITES (`outside-cwd write OS-DENIED`, `os_denial_seen`), never reads. So the deny
+    list is a declaration whose enforcement is unobserved — the same class as W1-T1265's egress
+    arm, which found the network allowlist equally unenforced when it finally looked.
+
+    (6) Q2 — WHAT THE WRITE TOKEN GRANTS, ENUMERATED FROM THE ROUTE TABLE. One grant reaches every
+    write-scoped route (`src/lib/service.ts:50`: `Scope = "read" | "write"`, and the W1-T404 ruling
+    quoted in that file — "one `write` grant reaches all 20 write-scoped routes"). By its own
+    consequence tier:
+      HIGH   — `/v1/manual/approve`, `/v1/inbox/approve`, `/v1/skills/run`, `/v1/drain/kick`,
+               `/v1/drain/run`
+      MIDDLE — `/v1/control/pause`, `/v1/control/resume`, `/v1/control/stop`, `/v1/quiet-hours`,
+               `/v1/policy/daily-cost-ceiling`, `/v1/policy/daily-cost-ceiling/clear`
+      LOW    — `/v1/questions/answer`, `/v1/escalation/mark-handled`, `/v1/drain/feedback`,
+               `/v1/feedback`, `/v1/feedback/preview`, `/v1/feedback/decision`,
+               `/v1/inbox/reframe`, `/v1/auth/scope`
+
+    (7) AND THE ONES ON THE WRONG SIDE OF THE OPERATOR'S LINE ARE NAMED. The ruling is that workers
+    get READ and not WRITE. Four grants are governance rather than bookkeeping:
+    `/v1/manual/approve` and `/v1/inbox/approve` let a lane APPROVE — the thing that decides
+    whether its own work proceeds; `/v1/questions/answer` lets a lane answer the clarification
+    question that is blocking it, closing its own escalation; and `/v1/skills/run` executes a skill
+    against the operator's checkout. `/v1/control/stop` and the cost-ceiling pair are the fleet's
+    own brakes. A lane that holds this token can influence its own governance, which is the whole
+    subject of this task.
+  design: |
+    ONE CONCERN: the write token must not be readable by a worker. Not the read token, not the
+    state dir, not the console's own access model.
+
+    (i) DENY THE TOKEN PATH SPECIFICALLY, NEVER THE STATE TREE. `state/**` is the fleet's working
+    surface and workers legitimately read most of it — a blanket deny would break the very lanes
+    this protects. The deny names the one file, by the same path the resolver produces.
+
+    (ii) AND THE DENY MUST BE PROVEN, NOT DECLARED — rationale (5) is why this is the load-bearing
+    half. A `denyRead` entry that nothing observes is exactly what the egress allowlist turned out
+    to be. The containment probe already owns the pattern for proving a filesystem restriction
+    (`outside-cwd write OS-DENIED`, three-state verdict, observational reporting), and a READ arm
+    modelled on its existing WRITE arm is what turns this from a claim into a reading. Its verdict
+    stays three-state and nothing is marked contained without evidence.
+
+    (iii) `Read` MUST BE IN THE HOOK'S MATCHER OR THE HOOK IS NOT A SECOND LAYER. Rationale (3): a
+    `Read` tool call never reaches `deny-floor.sh` today. Whether the floor should also carry a
+    rule is a separate judgement, but a matcher that excludes `Read` cannot be relied on as
+    defence-in-depth for a READ, and the shard says so rather than leaving it implied.
+
+    (iv) THE `~`-ANCHORING IS NAMED AND NOT FIXED HERE. Rationale (4) shows `~/.config/remudero/**`
+    resolves under the worker's redirected HOME. Correcting that changes what THREE existing denies
+    cover and is its own task with its own falsifier; folding it in would make this change's own
+    proof ambiguous. It is recorded so the next reader does not mistake those three entries for
+    working protections.
+
+    (v) WHAT MUST NOT CHANGE, PINNED BY CRITERIA: the READ token stays available to workers by
+    operator ruling — the fleet must be able to see what it builds, so nothing here denies
+    `service-tokens.json` to the read path or removes console access. The file stays 0600. NOTHING
+    ROTATES A TOKEN AUTOMATICALLY — rotation is create-once/read-thereafter and remains an operator
+    act.
+
+    (vi) NOT IN SCOPE, NAMED: moving the state dir; revoking worker console access; a blanket
+    `state/**` deny; the `~`-anchoring of the three existing denies (iv); and the consequence-tier
+    table itself, which is W1-T404's and is only read here.
+  acceptance:
+    - claim: "a worker's read of the console write-token path is denied"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the denial is observed rather than assumed, by the same three-state verdict the write arm uses"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "a worker's read of an ordinary state path it legitimately uses still succeeds"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "the settings file still validates and its existing deny entries are unchanged"
+      proof: "unit test: test/settings.test.ts"
+    - claim: "the token file's mode is unchanged and nothing in this change rotates a token"
+      proof: "unit test: test/settings.test.ts"
+  files: [settings/worker.json, src/lib/containment.ts, test/containment.test.ts, test/settings.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#worker-can-read-console-write-token-2026-08-24"
+  plan_refs: ["W1-T404", "W1-T1265", "W1-T18", "W1-T203"]
+  note: |
+    THE TOKEN'S VALUE APPEARS NOWHERE IN THIS RECORD. Every claim about it is by path, mode,
+    ownership or route table: mode 600, uid 1000, gid 1000, size 160, visible in the worker mount
+    at `/home/node/Remudero/state/service-tokens.json`. The file was never opened.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. All five criteria use the pure-path `unit test:`
+    form naming `test/containment.test.ts` or `test/settings.test.ts`, both declared in `files:`
+    and both already existing.
+
+    `risk: high` IS RULE 19'S SPAN. `files:` names four stems. The blast radius is narrower than
+    that suggests — one deny entry, one probe arm, two suites — but the band is honest for a second
+    reason: a deny drawn one path too wide breaks the lanes that legitimately read the state tree,
+    which is why design (i) names the single file and criterion 3 pins that ordinary state reads
+    still succeed.
+
+    THE CONTROL THAT COULD NOT BE PRODUCED IS RECORDED AS A RESULT, NOT OMITTED. Rationale (5): the
+    brief asked for a path `denyRead` demonstrably blocks, and this tree has none — the only
+    `denyRead` references in `test/` are shape assertions in `test/settings.test.ts`. That absence
+    is why design (ii) makes the proof, not the declaration, the load-bearing half of the remedy.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND CONFIRMED UNUSED. `refs/rmd-id/W1-T2211` resolves to
+    `24edaeedc75286f087ae67851e32a197a30af1ff` against a namespace of 331 such refs. FIVE OF THE
+    EIGHT SURFACES CARRIED A CONTROL THAT FIRES AND ARE REPORTED; THREE WERE DISQUALIFIED RATHER
+    THAN COUNTED, because the board is empty right now — there are ZERO open PRs, so the open-PR
+    title, head-branch and file-list surfaces have no control that can discriminate and their zeros
+    would mean nothing. The five that stand: shard filenames 0 against W1-T1278 at 1; plan `- id:`
+    lines 0 against W1-T1278 at 1; the reservation 1, which is the pre-mint, against W1-T1278's own
+    at 1; merged trailers 0 against `Remudero-Task: W1-T2201` at 1, with 489 trailer-carrying
+    commits on main; and merged subject credit 0 against W1-T1278 at 1, with `run-W1-T2211-*` at 0
+    against a namespace of 86 `run-*` branches.
+
+    THE SUBJECT SWEEP IS AGAINST MAIN ALONE, FOR THE SAME REASON. With no open PR heads there is
+    nothing to count per head, so the per-head sweep is disqualified rather than reported as a row
+    of zeros. At main the three markers read: `denyRead` entries in `settings/worker.json` = 3,
+    `serviceTokensPath` definitions in `src/lib/serve.ts` = 1, and `service-tokens`/`state/` rules
+    in `hooks/deny-floor.sh` = 0 — the last being the defect itself, controlled by that file's six
+    `deny()` sites.
