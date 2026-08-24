@@ -683,6 +683,7 @@ import {
   cacheTokenLedgerFields,
   noPrReportExcerpt,
   workerLedgerFields,
+  workerTranscript,
   worktreeAdd,
   worktreeLockIsPidAlive,
   worktreeRemove,
@@ -3980,10 +3981,7 @@ async function runReview(args: {
             prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
           }),
         );
-        semantic = parseReviewerVerdicts(
-          [reviewer.text, reviewer.blocks.join("\n")].join("\n"),
-          criteria.length,
-        );
+        semantic = parseReviewerVerdicts(workerTranscript(reviewer), criteria.length);
         reviewerSubtype = reviewer.subtype;
         log("review.reviewer", {
           session_id: reviewer.sessionId,
@@ -6708,7 +6706,7 @@ export async function runFixRung(opts: {
 
     // The fix rung's own footer carries the same '## Follow-ups' invitation (renderFixPrompt
     // above); PR provenance included (the fix rung always has one).
-    harvestFollowupsFromReport([fixResult.text, fixResult.blocks.join("\n")].join("\n"), {
+    harvestFollowupsFromReport(workerTranscript(fixResult), {
       label: "fix",
       prUrl: opts.prUrl,
       log: deps.log,
@@ -6759,7 +6757,7 @@ export async function runFixRung(opts: {
     // failure reason in a later round can be the gate reporting an OLD observation, not
     // a live one; re-check the CURRENT body/criteria coverage directly before assuming
     // the reported reason still holds.
-    let reviewReport = [fixResult.text, fixResult.blocks.join("\n")].join("\n");
+    let reviewReport = workerTranscript(fixResult);
     // W1-T1254: `reviewReport` above is the WORKER'S OWN NARRATIVE, and the body is fetched only
     // in `body-coverage` below — so `reviewer-unmet`, `ci-log` and `merge-conflict` hand the
     // reviewer prose that was never a claim about the changeset. `judgeReview` skips
@@ -7430,7 +7428,7 @@ export function alreadySatisfiedVerdict(
 function workerSignal(r: WorkerResult): FailureSignal {
   return {
     subtype: r.subtype,
-    text: [r.text, r.blocks.join("\n"), r.stderr].join("\n"),
+    text: [workerTranscript(r), r.stderr].join("\n"),
     apiError: r.apiError,
   };
 }
@@ -7691,7 +7689,7 @@ export const RECON_UNVERIFIED_PREFIX = "RECON DID NOT ESTABLISH THIS — verify 
  * doc exists to prevent cannot arise here, because there is nothing to be empty.
  */
 function reconObservedToContext(recon: WorkerResult, taskId: string, recordPath?: string): string {
-  const parsed = parseReconReport([recon.text, recon.blocks.join("\n")].join("\n"));
+  const parsed = parseReconReport(workerTranscript(recon));
   const nonEmptyLines = (s: string): string[] =>
     s
       .split("\n")
@@ -8804,7 +8802,7 @@ async function runTask(
     // (recon never opens one); the retro harvest still cites its run/task. Skipped on a
     // degraded recon: the final attempt's text is an error envelope, not a report to harvest.
     if (!reconDegradedSubtype) {
-      harvestFollowupsFromReport([recon.text, recon.blocks.join("\n")].join("\n"), { label: "recon", log, say });
+      harvestFollowupsFromReport(workerTranscript(recon), { label: "recon", log, say });
     }
 
     // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33;
@@ -8964,7 +8962,7 @@ async function runTask(
           maxBudgetUsd: budgetUsd,
           settingsFile,
           config,
-          prompt: renderDiagnosePrompt(task, [impl.text, impl.blocks.join("\n"), impl.stderr].join("\n")),
+          prompt: renderDiagnosePrompt(task, [workerTranscript(impl), impl.stderr].join("\n")),
         }),
       );
       log("diagnose.worker_done", {
@@ -8975,7 +8973,7 @@ async function runTask(
         // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(d),
       });
-      return { text: [d.text, d.blocks.join("\n")].join("\n") };
+      return { text: workerTranscript(d) };
     };
 
     let driverResult: Awaited<ReturnType<typeof runDiagnoseThenRetry>>;
@@ -9028,7 +9026,7 @@ async function runTask(
     const implFail = failOnWorkerError(impl, "implement");
     if (implFail) return implFail;
 
-    const fullText = (r: WorkerResult) => [r.text, r.blocks.join("\n")].join("\n");
+    const fullText = (r: WorkerResult) => workerTranscript(r);
 
     // ── DECISION_REQUEST → auto-choose RECOMMENDED → resume (§4).
     const decision = parseDecisionRequest(fullText(impl));
@@ -15061,7 +15059,7 @@ async function retroCommand(
       gitPushRunBranch(worktreePath, { force: true });
     }
 
-    let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;
+    let prUrl = parseReport(workerTranscript(worker))?.prUrl;
     if (!prUrl) {
       // GUARD (W1-T64): 0 commits ahead of origin/main means the Architect produced
       // nothing to PR (its subtype is already logged above via retro.synthesized) —
@@ -23787,7 +23785,7 @@ async function triageCommandLocked(
         });
         // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
         const changedFiles = worktreeChangedFiles(worktreePath);
-        const verdict = parseTriageVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
+        const verdict = parseTriageVerdict(workerTranscript(worker));
         return { decision: decideTriage({ verdict, changedFiles }), changedFiles };
       },
       filed: (r) => r.decision.action === "propose",
@@ -24232,7 +24230,7 @@ export async function planCommand(
           ...workerLedgerFields(worker),
         });
         const changed = worktreeChangedFiles(worktreePath);
-        return { decision: decidePlanArchitect({ verdict: parsePlanVerdict([worker.text, worker.blocks.join("\n")].join("\n")), changedFiles: changed }), changedFiles: changed };
+        return { decision: decidePlanArchitect({ verdict: parsePlanVerdict(workerTranscript(worker)), changedFiles: changed }), changedFiles: changed };
       },
       filed: (r) => r.decision.action === "propose",
       // Only the ids THIS run reserved — the plan carries 193 tasks that already fail the linter.
@@ -25499,7 +25497,7 @@ export async function dispatchAlertFixRun(
       ...workerLedgerFields(worker),
     });
 
-    const report = parseReport([worker.text, worker.blocks.join("\n")].join("\n"));
+    const report = parseReport(workerTranscript(worker));
     if (report?.prUrl) {
       deps.ensureTaskTrailer(report.prUrl, taskId);
       log("alert-fix.pr_opened", { pr_url: report.prUrl, origin: `alert#${originId}` });
