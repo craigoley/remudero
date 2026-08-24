@@ -11886,6 +11886,18 @@ export const DECLARED_BRANCH_GUARDS: readonly string[] = [
   // the drift alarm below reported them on the live repo, which is the alarm working as intended.
   "diag/drain-concurrency",
   "diag/drain-sequential-await",
+  // Cited by lib/dispatch-claim.ts's header as the forensic record behind W1-T1268 — the two
+  // dispatches that branched 53.776 s apart, #2625 and #2626, both having correctly found no open
+  // PR, no pushed branch and no inflight lock. Deleting this one dangles that citation. DECLARED
+  // after the drift alarm reported it on the live repo: "1 branch(es) are named in source but
+  // MISSING from DECLARED_BRANCH_GUARDS ... run-W1-T1265-1787503038601".
+  //
+  // ONLY #2625's BRANCH IS DECLARED, AND THE ASYMMETRY IS THE POINT. The same comment also names
+  // `run-W1-T1265-1787503092377` (#2626), which MERGED — GitHub deleted that head, so it is not a
+  // remote branch and the alarm never named it. A guard entry only ever protects a branch that
+  // EXISTS; declaring a deleted one would assert a branch that is gone. So that half of the
+  // citation is already historical, and this list is not the place to record it.
+  "run-W1-T1265-1787503038601",
 ];
 
 /** Every remote branch name, newest-agnostic — `git ls-remote --heads`, parsed. */
