@@ -2357,6 +2357,20 @@ export async function runDaemon(
   };
 
   for (;;) {
+    // LIVENESS TICK (W1-T1274). THE ONE ROW THIS LOOP WRITES UNCONDITIONALLY, EVERY ITERATION,
+    // ON EVERY PATH BELOW — max_reached, stop, pause, a stale-freshness early return, idle, or a
+    // full dispatch/sweep/retro pass. Every OTHER `daemon.`-prefixed step is either boot-time and
+    // one-shot, or (`daemon.alive`, {@link startInFlightTicker}) confined to the three windows
+    // that ticker actually runs in (retro/full-sweep/dispatch-settling) — so a stretch of the loop
+    // outside all three (the inter-iteration `deps.sleep`, and every tick that returns early at
+    // the freshness check before a ticker is ever started) wrote NO `daemon.`-prefixed row at all.
+    // MEASURED: the `daemon.`-prefix went silent for 102.5 minutes on 2026-08-23 while the daemon
+    // stayed alive, alternating exactly those short, ticker-less iterations back to back — the
+    // false FAIL `judgeLedgerFreshness`/`deriveLastPoll` (doctor.ts, daemon-health.ts) read against
+    // a two-minute bound. Placed as literally the first statement of the loop body, before even
+    // `checkStop`, so it cannot be skipped by any branch below.
+    log("daemon.tick", { poll_interval_ms: pollIntervalMs });
+
     if (opts.max !== undefined && attempted.length >= opts.max) {
       return summary("max_reached", `${opts.max} task(s)`);
     }

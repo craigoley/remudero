@@ -30,6 +30,7 @@ import {
   readAlivePhases,
   readCurrentRunAlivePhases,
   readGitLocks,
+  readLedgerAgeMs,
   readPauseAgeMs,
   readSweepPassSummaryTimestamps,
   refuseUnsupportedArgs,
@@ -413,6 +414,77 @@ test("doctor: ledger freshness is measured from the newest row and needs no daem
   const none = judgeLedgerFreshness(undefined, 10 * MIN);
   assert.equal(none.verdict, "FAIL");
   assert.match(none.measured, /no daemon row/);
+});
+
+// ── W1-T1274 — the liveness corpus rests on a false assumption, corrected ─────────────────────
+//
+// MEASURED (rationale (3)/(5)): the `daemon.`-prefix went silent for 102.5 minutes on 2026-08-23
+// while the daemon stayed alive, because its only RECURRING emitter (`daemon.alive`) is a ticker
+// confined to three windows (retro, full sweep, dispatch settling) — every stretch of the loop
+// outside those three (plain inter-iteration sleep, or an early return at this very freshness
+// check) wrote nothing with the prefix at all. The fix is an unconditional `daemon.tick` row
+// (`daemon.ts`'s `runDaemon` loop, first statement of every iteration, every path) that joins the
+// SAME `daemon.`-prefixed corpus `readLedgerAgeMs`/`deriveLastPoll` already read — never narrowed
+// to `daemon.tick` alone, never widened to a `run_id` (rationale (7)/(8)).
+
+const REAL_POLL_INTERVAL_MS = 60_000; // the live daemon's own observed poll_interval_ms (rationale (2))
+const REAL_BOUND_MS = REAL_POLL_INTERVAL_MS * 2; // the derived two-minute bound
+
+function tickRow(ts: string): Record<string, unknown> {
+  return { step: "daemon.tick", ts, poll_interval_ms: REAL_POLL_INTERVAL_MS };
+}
+
+test("W1-T1274: a daemon alive but outside every ticker window is not reported as failed", () => {
+  // Ten minutes of iterations, one minute apart, none of them inside a ticker window — no
+  // `daemon.alive`, no boot row, nothing but the new unconditional per-iteration row. This is
+  // exactly the shape rationale (5) names: "the inter-iteration await deps.sleep(...)... and
+  // every iteration that returns at the freshness check before the sweep ticker is ever started".
+  const now = Date.parse("2026-08-23T16:30:00.000Z");
+  const lines: Record<string, unknown>[] = [];
+  for (let i = 10; i >= 0; i--) {
+    lines.push(tickRow(new Date(now - i * MIN).toISOString()));
+  }
+  const { ageMs, boundMs } = readLedgerAgeMs(lines, now);
+  assert.equal(boundMs, REAL_BOUND_MS);
+  assert.ok(ageMs !== undefined && ageMs <= REAL_BOUND_MS, `age ${ageMs}ms must be inside the ${REAL_BOUND_MS}ms bound`);
+  assert.equal(judgeLedgerFreshness(ageMs, boundMs).verdict, "OK", "alive-but-ticker-silent must not FAIL");
+
+  // CONTROL, PRE-FIX SHAPE: strip the unconditional row and leave only a boot-time one-shot row
+  // from ten minutes ago (the OLD corpus, as measured — rationale (3)) — the same silence now
+  // correctly FAILs, proving the OK above comes from the new row and not from a widened bound.
+  const preFixLines = [{ step: "daemon.boot", ts: new Date(now - 10 * MIN).toISOString(), poll_interval_ms: REAL_POLL_INTERVAL_MS }];
+  const preFix = readLedgerAgeMs(preFixLines, now);
+  assert.equal(judgeLedgerFreshness(preFix.ageMs, preFix.boundMs).verdict, "FAIL", "control: without the new row, the same gap still reads as it measurably did before this fix");
+});
+
+test("W1-T1274: a daemon that is genuinely gone is still reported as failed at the same bound", () => {
+  // The tick rows simply stop — no process is alive to write the next one.
+  const now = Date.parse("2026-08-23T16:30:00.000Z");
+  const lines = [tickRow(new Date(now - 10 * MIN).toISOString()), tickRow(new Date(now - 5 * MIN).toISOString())];
+  const { ageMs, boundMs } = readLedgerAgeMs(lines, now);
+  assert.equal(boundMs, REAL_BOUND_MS, "the bound is unchanged by this fix — still 2x the observed poll interval");
+  assert.equal(judgeLedgerFreshness(ageMs, boundMs).verdict, "FAIL", "5 minutes of silence past a 2-minute bound is still a genuine FAIL");
+});
+
+test("W1-T1274: rows written by a worker after the daemon is gone do not keep the check green", () => {
+  // MEASURED (rationale (4)/(8)): worker rows inherit the daemon's OWN run_id but never its
+  // `daemon.`-prefixed step names — `pr.polling`, `fix.dispatch`, `review.posted`, etc. A lane
+  // still writing after the daemon died must read as what it is, not as a live daemon.
+  const now = Date.parse("2026-08-23T16:30:00.000Z");
+  const lastRealTick = new Date(now - 10 * MIN).toISOString();
+  const lines: Record<string, unknown>[] = [tickRow(lastRealTick)];
+  for (let i = 9; i >= 1; i--) {
+    lines.push({ step: "pr.polling", ts: new Date(now - i * MIN).toISOString(), run_id: "DAEMON-1787493725647" });
+  }
+  const { ageMs, boundMs } = readLedgerAgeMs(lines, now);
+  assert.equal(ageMs, now - Date.parse(lastRealTick), "age is measured from the last daemon.-prefixed row, ignoring every worker row after it");
+  assert.equal(judgeLedgerFreshness(ageMs, boundMs).verdict, "FAIL", "9 minutes of worker-only rows must not read as a live daemon");
+});
+
+test("W1-T1274: the absent-corpus detail names the rows the check actually looks for", () => {
+  const none = judgeLedgerFreshness(undefined, REAL_BOUND_MS);
+  assert.match(none.detail!, /daemon\.tick/, "the detail names the per-iteration row an operator should expect");
+  assert.match(none.detail!, /daemon\./, "and still names the wider daemon.-prefixed corpus it falls back to");
 });
 
 // ── criterion 4 — every check prints its value beside its threshold ────────────────────────────
