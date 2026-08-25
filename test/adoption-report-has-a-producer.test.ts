@@ -358,77 +358,138 @@ test("SHAPE 4: a gate observes a true subject and drops off the report", () => {
   }
 });
 
-// ── defensive fallbacks: an unreadable/non-git surface never crashes the report ────────────────
+// ── unreachable-I/O branches (never a caller's mocked path) — proven directly so a real,
+// non-git checkout / an absent schema file / an unreadable plan or workflow file all degrade
+// exactly as documented, rather than only appearing "covered" through a stub that never lets
+// the real catch branch fire. ─────────────────────────────────────────────────────────────────
 
-test("the real defaultAdoptionShipDate falls back to \"unknown\" against a checkout with no .git", () => {
-  // No `shipDateFor` override here — the production default (a real `git log`) actually runs.
-  // `checkoutDir` (a bare tmpdir fixture) is never a git repository, so the pickaxe read fails
-  // and the function's own catch must return "unknown" rather than throw or misdate.
-  const checkoutDir = buildFixtureCheckout();
-  const stateDir = join(checkoutDir, "state");
-  buildLedgerFixture(stateDir);
+test("shipDateFor omitted + a real, non-git checkout ⇒ the default git-log resolver's own catch fires, 'unknown'", () => {
+  // No shipDateFor override here — this is the ONE test in this file that lets the module's own
+  // default (`defaultAdoptionShipDate`) run for real. The checkout has no `.git` at all, so its
+  // `git log -S <needle> -- <file>` read throws ("not a git repository") and the resolver's catch
+  // must degrade to the literal string "unknown" rather than propagate.
+  const checkoutDir = tmp("rmd-adopt-nogit-");
   try {
-    const result = runMeasurementCadenceReport({ stateDir, cwd: checkoutDir, escalate: false, gitLog: NO_GIT, checkoutDir });
-    assert.ok(result.adoptionReport, "the producer must always attach an adoptionReport");
-    const symbol = findingsByShape(result.adoptionReport, "symbol-no-caller").find((f) => f.mechanism === "orphanMechanism");
-    assert.equal(symbol?.shippedAt, "unknown", "a `git log` failure against a non-repo checkout must fall back, never throw");
+    mkdirSync(join(checkoutDir, "src/lib"), { recursive: true });
+    writeFileSync(join(checkoutDir, "src/lib/mechanism.ts"), "export function orphanMechanism(): number {\n  return 1;\n}\n");
+    const result = runMeasurementCadenceReport({
+      stateDir: join(checkoutDir, "state"),
+      cwd: checkoutDir,
+      escalate: false,
+      gitLog: NO_GIT,
+      checkoutDir,
+      // shipDateFor deliberately omitted
+    });
+    const finding = result.adoptionReport?.findings.find((f) => f.shape === "symbol-no-caller" && f.mechanism === "orphanMechanism");
+    assert.ok(finding, "the orphaned symbol must still be found even off the real resolver");
+    assert.equal(finding?.shippedAt, "unknown", "a git-log failure in a non-git checkout must degrade to 'unknown', never throw");
   } finally {
     rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
 
-test("SHAPE 2 scan returns no findings, never throws, when src/lib/plan.ts is absent from the checkout", () => {
-  const checkoutDir = tmp("rmd-adopt-noplan-");
-  const stateDir = join(checkoutDir, "state");
-  mkdirSync(join(checkoutDir, "src/lib"), { recursive: true });
-  writeFileSync(join(checkoutDir, "src/lib/mechanism.ts"), "export function orphanMechanism(): number {\n  return 1;\n}\n");
-  buildLedgerFixture(stateDir);
+test("SHAPE 2: no src/lib/plan.ts in the checkout ⇒ the schema read's own catch fires, zero findings, no throw", () => {
+  const checkoutDir = tmp("rmd-adopt-noschema-");
   try {
-    const report = runReport(checkoutDir, stateDir);
-    assert.deepEqual(findingsByShape(report, "field-no-writer"), [], "no Task schema to read ⇒ no field findings, not a throw");
+    mkdirSync(join(checkoutDir, "src/lib"), { recursive: true }); // deliberately no plan.ts written under it
+    const report = runReport(checkoutDir, join(checkoutDir, "state"));
+    assert.deepEqual(findingsByShape(report, "field-no-writer"), [], "an absent schema file must read as zero fields, never throw");
   } finally {
     rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
 
-test("SHAPE 2 scan treats an unreadable plan/ file as no hit, never throws", () => {
+test("SHAPE 2: an unreadable plan/ file degrades to empty text — the writer search still finds the readable file", () => {
   const checkoutDir = buildFixtureCheckout();
   const stateDir = join(checkoutDir, "state");
   buildLedgerFixture(stateDir);
-  const unreadablePlanFile = join(checkoutDir, "plan/tasks.yaml");
-  chmodSync(unreadablePlanFile, 0o000);
+  const unreadable = join(checkoutDir, "plan/unreadable.yaml");
+  writeFileSync(unreadable, "unadoptedField: this-must-never-be-seen\n");
+  chmodSync(unreadable, 0o000);
   try {
     const report = runReport(checkoutDir, stateDir);
-    // The one plan/ file present is now unreadable — it degrades to "" text (no key hits at all),
-    // so even the previously-written control field must now be reported too, never a thrown error.
+    // The unreadable file's content is invisible (read failed ⇒ "") so the field it "writes" must
+    // still report as unadopted — proving the catch degraded to "" rather than surfacing an error
+    // OR silently treating the unreadable file's content as a real write.
     assert.ok(
-      findingsByShape(report, "field-no-writer").some((f) => f.mechanism === "usedField:"),
-      "an unreadable plan/ file must degrade to zero hits, not crash the scan",
+      findingsByShape(report, "field-no-writer").some((f) => f.mechanism === "unadoptedField:"),
+      "an unreadable plan file's content must never count as a write",
+    );
+    // The readable control fixture (plan/tasks.yaml, `usedField: hello`) must still be found.
+    assert.ok(!findingsByShape(report, "field-no-writer").some((f) => f.mechanism === "usedField:"));
+  } finally {
+    chmodSync(unreadable, 0o644);
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+test("SHAPE 4: a ledger with no containment.probe row at all leaves both predicates unmeasurable, never a false pass", () => {
+  // A real ROTATION file (so `resolveLedgerUnion` reports `ok: true`, real archive present) whose
+  // rows never match either predicate's `ledgerLinePattern` at all — `present` stays 0 for both,
+  // which must land each predicate's id on `shape4Unmeasurable`, never silently counted as clean.
+  const stateDir = tmp("rmd-adopt-shape4-nomatch-");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "ledger.2026-08-01T00-00-00-000Z.ndjson"),
+    [JSON.stringify({ step: "unrelated.thing", note: "no containment.probe row here at all" })].join("\n") + "\n",
+  );
+  try {
+    const report = runReport(undefined, stateDir);
+    assert.deepEqual(
+      report.shape4Unmeasurable.slice().sort(),
+      ADOPTION_SHAPE4_PREDICATES.map((p) => p.id).sort(),
+      "a ledger with zero matching rows must mark BOTH declared predicates unmeasurable",
+    );
+    assert.deepEqual(findingsByShape(report, "gate-no-subject"), [], "unmeasurable is never read as a clean pass");
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("SHAPE 4: a malformed JSON line that still text-matches the pattern is skipped, never thrown", () => {
+  // The line below CONTAINS the literal text `"step": "containment.probe"` (so the regex — a
+  // plain text match, not a JSON parse — selects it into `matches`) but is not valid JSON
+  // (unquoted key, unterminated object). `scanShape4Gates`'s own `JSON.parse` must catch this and
+  // `continue`, counting it toward neither `present` nor `trueCount`, and the run must not throw.
+  const stateDir = tmp("rmd-adopt-shape4-malformed-");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "ledger.2026-08-01T00-00-00-000Z.ndjson"),
+    [
+      '{"step": "containment.probe", credential_expired: true', // malformed — text-matches, parse-fails
+      JSON.stringify({ step: "containment.probe", credential_expired: false }), // real, present, never true
+    ].join("\n") + "\n",
+  );
+  try {
+    const report = runReport(undefined, stateDir);
+    assert.ok(
+      findingsByShape(report, "gate-no-subject").some((f) => f.mechanism === "credential_expired"),
+      "the one well-formed, present-but-never-true row must still be counted despite the malformed sibling line",
     );
   } finally {
-    chmodSync(unreadablePlanFile, 0o644);
-    rmSync(checkoutDir, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
 
-test("SHAPE 3 scan treats an unreadable workflow file as no reference, never throws", () => {
+test("SHAPE 3: an unreadable .github/workflows file degrades to empty text, never throws", () => {
   const checkoutDir = buildFixtureCheckout();
   const stateDir = join(checkoutDir, "state");
   buildLedgerFixture(stateDir);
   mkdirSync(join(checkoutDir, ".github/workflows"), { recursive: true });
-  const workflowPath = join(checkoutDir, ".github/workflows/ci.yml");
-  // References `orphan.mjs` ONLY from this workflow step — but the file is then made unreadable,
-  // so the scan must treat it as "" (no reference there), the same as any other absent surface.
-  writeFileSync(workflowPath, "jobs:\n  build:\n    steps:\n      - run: node scripts/orphan.mjs\n");
-  chmodSync(workflowPath, 0o000);
+  const unreadable = join(checkoutDir, ".github/workflows/unreadable.yml");
+  writeFileSync(unreadable, "run: node scripts/orphan.mjs\n");
+  chmodSync(unreadable, 0o000);
   try {
     const report = runReport(checkoutDir, stateDir);
+    // The unreadable workflow's own reference to scripts/orphan.mjs must never be seen ⇒ the
+    // script is still reported as un-invoked, proving the read failure degraded to "" rather than
+    // throwing or silently counting as a real reference.
     assert.ok(
       findingsByShape(report, "script-no-invoker").some((f) => f.mechanism === "scripts/orphan.mjs"),
-      "an unreadable workflow file must never count as a reference — the script stays orphaned",
+      "an unreadable workflow file's content must never count as an invocation",
     );
   } finally {
-    chmodSync(workflowPath, 0o644);
+    chmodSync(unreadable, 0o644);
     rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
