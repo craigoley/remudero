@@ -7,6 +7,7 @@
   principles: {tdd: strict}
   budget_usd: 70.00
   risk: high
+  priority: 2
   rationale: |
     Filed by measuring, from a scratch worktree PROVEN equal to origin/main by sha (57d47446),
     clone shallow-checked `false`. RE-DERIVED ON origin/main, NOT on the PR that hit it — the
