@@ -84,6 +84,12 @@ import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.
 import { resolveFreshness } from "./console-freshness.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
 import { readLedgerLines } from "./status.js";
+import {
+  startInstallationTokenRefresh,
+  TOKEN_REFRESHED_STEP,
+  TOKEN_REFRESH_FAILED_STEP,
+  type RefreshOptions,
+} from "./github-app.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
 export const DEFAULT_SERVE_PORT = 4317;
@@ -211,6 +217,67 @@ export interface ServeDeps {
    * codebase uses (design note ii), never a second definition of "in flight" declared here.
    */
   peek?: { root?: string; isLive?: (runId: string) => boolean };
+  /**
+   * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
+   * `run-task.ts`'s `serveCommand` already arms for the daemon (`github-app.ts`'s
+   * `startInstallationTokenRefresh`), run here instead in the CONSOLE's own process against the
+   * console's own environment. It talks directly to GitHub's token-exchange endpoint and NEVER
+   * calls the daemon — design (ii) refuses any renewal path that would couple the console's
+   * `--restart=unless-stopped` lifetime to the daemon's. Gated on config presence exactly like
+   * the daemon's own call: a console with no `GH_APP_ID`/`GH_APP_INSTALLATION_ID`/
+   * `GH_APP_PRIVATE_KEY_PATH` in its environment (the console's default today — see
+   * `deploy/serve-container.sh`) is byte-identical to before this task, zero timers, zero ledger
+   * lines. OPTIONAL and defaults to the real `startInstallationTokenRefresh` against real
+   * `process.env`; a test injects a fake `start` (and/or a throwaway `env`) so it never mints a
+   * real token or opens a real timer.
+   */
+  githubAppRefresh?: {
+    start?: typeof startInstallationTokenRefresh;
+    env?: NodeJS.ProcessEnv;
+  };
+}
+
+/**
+ * What the console currently knows about its own GitHub credential's renewability — never the
+ * credential itself (design iii: no secret reaches a log line, a ledger row, or disk, and that
+ * includes this state, which carries only a reason string github-app.ts itself already ledgers).
+ */
+export interface GithubCredentialState {
+  /** Whether this process armed its own in-process refresh loop. `false` means the console's
+   *  `GH_TOKEN`, whatever value it holds, is fixed for this process's entire life — no App
+   *  config was present to renew it from (claim: "a credential that cannot be replaced is
+   *  reported by the console rather than presented as a working board"). */
+  armed: boolean;
+  /** The reason string of the most recent FAILED refresh attempt, cleared the next time a
+   *  refresh succeeds. Absent when `armed` is false (no attempt was ever made) or no attempt has
+   *  failed yet. Only ever a fixed reason string — see {@link GithubCredentialState}'s own doc. */
+  lastFailureReason?: string;
+}
+
+/**
+ * Wrap a ledger `log` so every `github_app.token_refresh_failed` / `github_app.token_refreshed`
+ * line it observes ALSO updates `state` IN PLACE — a live object {@link buildShellRoute}'s
+ * handler (below) reads FRESH on every request, the same "read the state, don't cache a
+ * snapshot" discipline that route's idle-reasons panel already follows (impl-FC). Every line is
+ * forwarded to `log` completely UNCHANGED — this only ever OBSERVES what github-app.ts already
+ * ledgers, never a second, divergent copy of its reasoning.
+ */
+function trackGithubCredentialState(
+  log: RefreshOptions["log"] | undefined,
+): { state: GithubCredentialState; log: (step: string, extra?: Record<string, unknown>) => void } {
+  const state: GithubCredentialState = { armed: false };
+  return {
+    state,
+    log: (step, extra) => {
+      if (step === TOKEN_REFRESH_FAILED_STEP) {
+        const reason = extra?.reason;
+        state.lastFailureReason = typeof reason === "string" ? reason : "refresh failed";
+      } else if (step === TOKEN_REFRESHED_STEP) {
+        state.lastFailureReason = undefined;
+      }
+      log?.(step, extra);
+    },
+  };
 }
 
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
@@ -432,6 +499,11 @@ export function renderShellHtml(
   // fragment. Appended last and defaulted to "" so every existing caller and test is unaffected,
   // and so the client script below is untouched -- byte-identical to main, deliberately.
   idleReasonsHtml: string = "",
+  // W1-T2269: the "github credential" glance chip's inner HTML, rendered SERVER-SIDE by
+  // buildShellRoute (renderGithubCredentialHtml) — same "static span, no client-script risk"
+  // discipline the "console build" chip beside it already follows. Appended last and defaulted
+  // so every existing caller/test is unaffected.
+  githubCredentialHtml: string = renderGithubCredentialHtml({ armed: false }),
 ): string {
   return `<!doctype html>
 <html lang="en">
@@ -918,6 +990,7 @@ export function renderShellHtml(
        client-script field, so this carries no risk to the template literal below. -->
   <section id="console-version" class="daemon-health" aria-label="Console build">
     <span class="glance-item"><span class="glance-label">console build</span><span class="glance-value" id="console-sha">${consoleSha.slice(0, 12)}</span></span>
+    <span class="glance-item"><span class="glance-label">github credential</span><span class="glance-value" id="github-credential">${githubCredentialHtml}</span></span>
   </section>
   <p id="top-status" role="status" aria-live="polite">loading…</p>
   <p id="summary" class="counts" aria-live="polite"></p>
@@ -4734,6 +4807,17 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
  * over `sha`, not a fresh resolution). READ scope deliberately: a commit sha is not a secret, and
  * requiring the WRITE token would make the operator's staleness check need his most privileged
  * credential. The payload carries the sha and nothing else — no token, no path, no config.
+ *
+ * W1-T2269 deliberately does NOT extend this payload with the credential-renewability state
+ * (see {@link GithubCredentialState}): an existing test (test/serve.test.ts, "the served payload
+ * carries the sha and NO credential-shaped key") asserts this endpoint's keys and values stay
+ * clear of anything token/secret/bearer/auth/password/credential-shaped, as a standing security
+ * invariant on this specific surface — a `githubCredential` key, or a `lastFailureReason` value
+ * that happened to contain the word "token" (github-app.ts's own reason strings do), would trip
+ * it. That state is reported on the SHELL instead (see {@link renderGithubCredentialHtml} and
+ * the "github credential" glance chip {@link buildShellRoute} renders), which is also the more
+ * literal reading of the acceptance claim: "reported by the console ... rather than presented as
+ * a working board" names the BOARD, not a JSON API response.
  */
 export function buildVersionRoute(sha: string): Route {
   return {
@@ -4745,6 +4829,32 @@ export function buildVersionRoute(sha: string): Route {
       res.end(JSON.stringify({ sha }));
     },
   };
+}
+
+/**
+ * The "github credential" glance chip's inner text — rendered SERVER-SIDE, the same
+ * "no client-script risk" discipline the sibling "console build" chip already follows (see that
+ * section's own comment). Three states, all named rather than inferred from a blank value
+ * (standing rule: "absent is not zero" — idle-reasons-panel.ts's header):
+ *   - not armed: the console holds whatever `GH_TOKEN` it was started with for its whole life —
+ *     this is claim 2's "a credential that cannot be replaced", surfaced rather than left to
+ *     look like a normal, healthy board.
+ *   - armed, no failure recorded: the in-process refresh loop is live.
+ *   - armed, most recent attempt failed: named with github-app.ts's own reason string, never a
+ *     bare "failed" that would send the operator back to the ledger to find out why.
+ */
+function renderGithubCredentialHtml(state: GithubCredentialState): string {
+  if (!state.armed) {
+    return `<span class="gh-credential-static">static (no renewal configured)</span>`;
+  }
+  if (state.lastFailureReason) {
+    // `lastFailureReason` is one of github-app.ts's own fixed reason strings (never user input,
+    // never a secret — see that module's file header) but escaped anyway: the render site should
+    // never depend on the producer's string set staying free of `<`/`&` forever.
+    const escaped = state.lastFailureReason.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `<span class="gh-credential-failed">refresh failed: ${escaped}</span>`;
+  }
+  return `<span class="gh-credential-ok">refreshing (App)</span>`;
 }
 
 /**
@@ -4762,6 +4872,10 @@ function buildShellRoute(
   // shifts. `readLedger` is the same `readLedgerLines` the board's routes already use — one ledger
   // read path, never a second.
   idle: { ledgerPath?: string; readLedger?: (p: string) => ReadonlyArray<Record<string, unknown>>; now?: () => Date } = {},
+  // W1-T2269: the LIVE credential-renewability object {@link buildServeRoutes} arms — read fresh
+  // on every request, same as `idle` above, so a refresh failure that lands after boot shows up
+  // on the very next page load without a server restart. Defaulted so no existing caller shifts.
+  credential: GithubCredentialState = { armed: false },
 ): Route {
   return {
     method: "GET",
@@ -4785,7 +4899,7 @@ function buildShellRoute(
         panel = renderIdleReasonsHtml({ kind: "unknown", why: `ledger unreadable: ${String((e as Error)?.message ?? e)}` });
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel));
+      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel, renderGithubCredentialHtml(credential)));
     },
   };
 }
@@ -4935,6 +5049,19 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
   // than not reporting at all.
   const consoleSha = deps.consoleSha ?? resolveConsoleSha();
+  // W1-T2269: armed ONCE, here, alongside consoleSha above — buildServeRoutes runs exactly once
+  // per process (this function's own doc, immediately above). Gated on config presence inside
+  // startInstallationTokenRefresh itself: a console with no GH_APP_* names in its environment
+  // (the default — see deploy/serve-container.sh) gets `armed: false` and nothing else changes,
+  // byte-identical to before this task. Talks directly to GitHub, never to the daemon (design ii,
+  // ServeDeps.githubAppRefresh's own doc) — so this never makes the console's boot depend on the
+  // daemon being reachable (claim: "the console starts and serves when the daemon is absent").
+  const githubCredential = trackGithubCredentialState(deps.log);
+  const startGithubAppRefresh = deps.githubAppRefresh?.start ?? startInstallationTokenRefresh;
+  githubCredential.state.armed = startGithubAppRefresh({
+    log: githubCredential.log,
+    env: deps.githubAppRefresh?.env,
+  }).armed;
   const fleetControlDeps: PanelActionDeps = { root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   // W1-T288: the SAME fleetControlDeps root/ledgerPath, plus the (optional, injectable)
@@ -5046,9 +5173,12 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // analytics-route.ts's module header for the reader discipline and scope.
     buildAnalyticsRoute({ ...deps.analytics, ledgerPath: deps.ledgerPath }),
     buildAuthScopeRoute(),
-    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, consoleSha, {
-      ledgerPath: deps.ledgerPath,
-    }),
+    buildShellRoute(
+      deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
+      consoleSha,
+      { ledgerPath: deps.ledgerPath },
+      githubCredential.state,
+    ),
     buildVersionRoute(consoleSha),
     // W1-T945: read-only run-tail reader — root defaults to fleetControlRoot (= config.root, the
     // same root the tail writer resolves state/runs/<runId>.tail against); isLive defaults to

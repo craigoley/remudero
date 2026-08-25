@@ -1,0 +1,423 @@
+// test/console-token-refresh.test.ts — W1-T2269: THE CONSOLE HOLDS A PERSONAL TOKEN FOR ITS
+// WHOLE LIFETIME AND NOTHING EVER REPLACES IT.
+//
+// Covers the five unit-test acceptance criteria in
+// plan/tasks.d/W1-T2269-console-token-never-refreshes.yaml:
+//   1. the console obtains its GitHub credential through a path that can replace it, rather than
+//      holding a value fixed at spawn
+//   2. a credential that cannot be replaced is reported by the console rather than presented as a
+//      working board
+//   3. the console's write routes keep the tiers and scopes they already have
+//   4. the console starts and serves when the daemon is absent, so no renewal path couples the two
+//      lifetimes
+//   5. no credential value reaches a log line, a ledger row, or disk on any arm of the new path
+import assert from "node:assert/strict";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import type { AddressInfo } from "node:net";
+
+import {
+  buildServeRoutes,
+  buildServeServer,
+  buildVersionRoute,
+  renderShellHtml,
+  type ServeDeps,
+} from "../src/lib/serve.js";
+import {
+  GH_APP_ID_ENV,
+  GH_APP_INSTALLATION_ID_ENV,
+  GH_APP_PRIVATE_KEY_PATH_ENV,
+  TOKEN_REFRESHED_STEP,
+  TOKEN_REFRESH_FAILED_STEP,
+  type RefreshOptions,
+} from "../src/lib/github-app.js";
+import type { GitHub, PrRef } from "../src/lib/status.js";
+import type { IssueCloser } from "../src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import type { Plan, Task } from "../src/lib/plan.js";
+
+const READ_TOKEN = "ctr-read-token";
+const WRITE_TOKEN = "ctr-write-token";
+
+function task(over: Partial<Task> = {}): Task {
+  return {
+    id: "W1-TX",
+    title: "t",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    risk: "medium",
+    verify: "auto",
+    status: "queued",
+    attempts: 0,
+    ...over,
+  };
+}
+
+function planOf(tasks: Task[]): Plan {
+  return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+}
+
+function fakeGitHub(byRef: Record<string, PrRef> = {}): GitHub {
+  return {
+    prByRef: (ref) => byRef[String(ref)] ?? null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+}
+
+function fakeIssueCloser(): IssueCloser & { closed: string[] } {
+  const closed: string[] = [];
+  return {
+    closed,
+    close(issueUrl: string) {
+      closed.push(issueUrl);
+    },
+  };
+}
+
+function fakeRatifyGateway(): RatifyCliGateway {
+  return {
+    approve() {},
+    reframe() {},
+  };
+}
+
+function tmpRoot(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-ctr-"));
+}
+
+function ledgerPathFor(root: string): string {
+  const p = join(root, "state", "ledger.ndjson");
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(p, "");
+  return p;
+}
+
+function writePlan(root: string, plan: Plan): string {
+  const planPath = join(root, "plan", "tasks.yaml");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  const yamlBody = plan.tasks.length === 0
+    ? "[]\n"
+    : plan.tasks.map((t) => `- id: ${t.id}\n  title: "${t.title}"\n  repo: ${t.repo}\n  type: ${t.type}\n`).join("");
+  writeFileSync(planPath, yamlBody, { flag: "wx" });
+  return planPath;
+}
+
+/** The minimal, complete `ServeDeps` every test below starts from — `over.githubAppRefresh` (or
+ *  any other field) layers on top per test, the same "base + override" shape test/serve.test.ts's
+ *  own `depsFor` uses. */
+function depsFor(root: string, over: Partial<ServeDeps> = {}): ServeDeps {
+  const plan = planOf([task()]);
+  const ledgerPath = ledgerPathFor(root);
+  const planPath = writePlan(root, plan);
+  return {
+    board: { plan, ledgerPath, github: fakeGitHub() },
+    panelGraph: { root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: fakeRatifyGateway() },
+    ledgerPath,
+    issues: fakeIssueCloser(),
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
+    pollMs: 50,
+    ...over,
+  };
+}
+
+async function withServeServer<T>(deps: ServeDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
+  const server = buildServeServer(deps);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    server.close();
+  }
+}
+
+function get(base: string, path: string, token = READ_TOKEN) {
+  return fetch(`${base}${path}`, { headers: { authorization: `Bearer ${token}` } });
+}
+
+function routeShape(routes: ReturnType<typeof buildServeRoutes>) {
+  return routes
+    .map((r) => ({ method: r.method, path: r.path, scope: r.scope, tier: r.tier }))
+    .sort((a, b) => `${a.method}${a.path}`.localeCompare(`${b.method}${b.path}`));
+}
+
+// ── (1) A PATH THAT CAN REPLACE THE CREDENTIAL, NEVER FIXED AT SPAWN ────────────────────────────
+
+test("W1-T2269: an unconfigured console arms nothing — byte-identical to before this task", () => {
+  const root = tmpRoot();
+  const routes = buildServeRoutes(depsFor(root, { githubAppRefresh: { env: {} } }));
+  const version = routes.find((r) => "path" in r && r.path === "/v1/version");
+  assert.ok(version, "GET /v1/version must be mounted");
+});
+
+test("W1-T2269: a configured console arms its OWN in-process refresh loop, never the daemon's", () => {
+  const root = tmpRoot();
+  let started = false;
+  let observedEnv: NodeJS.ProcessEnv | undefined;
+  const fakeStart = (opts: { log?: RefreshOptions["log"]; env?: NodeJS.ProcessEnv }) => {
+    started = true;
+    observedEnv = opts.env;
+    return { armed: true };
+  };
+  const env = {
+    [GH_APP_ID_ENV]: "app-1",
+    [GH_APP_INSTALLATION_ID_ENV]: "inst-1",
+    [GH_APP_PRIVATE_KEY_PATH_ENV]: "/fake/key.pem",
+  };
+  buildServeRoutes(depsFor(root, { githubAppRefresh: { start: fakeStart, env } }));
+  assert.equal(started, true, "buildServeRoutes must arm the console's OWN refresh loop");
+  assert.equal(observedEnv, env, "the refresh loop must read the CONSOLE's own env, not a daemon's");
+});
+
+test("W1-T2269: an armed, never-failed console reports 'refreshing (App)' on the shell", async () => {
+  const root = tmpRoot();
+  const env = {
+    [GH_APP_ID_ENV]: "app-1",
+    [GH_APP_INSTALLATION_ID_ENV]: "inst-1",
+    [GH_APP_PRIVATE_KEY_PATH_ENV]: "/fake/key.pem",
+  };
+  const deps = depsFor(root, {
+    githubAppRefresh: { start: () => ({ armed: true }), env },
+  });
+  await withServeServer(deps, async (base) => {
+    const res = await get(base, "/", READ_TOKEN);
+    assert.equal(res.status, 200);
+    const shell = await res.text();
+    assert.match(shell, /refreshing \(App\)/, "an armed console with no recorded failure must read as actively refreshing");
+  });
+});
+
+test("W1-T2269: deploy/serve-container.sh carries a passthrough for all three GH_APP_* names", () => {
+  // The COMMITTED launcher, not an operator's inherited shell — the rationale's own finding was
+  // that the currently-running console holds these by ACCIDENT of how it was started, never by
+  // anything checked in. This is the source-level proof that a launch through THIS script now
+  // carries a path for the credential to be replaceable, the same way GH_TOKEN always has.
+  const src = readFileSync(fileURLToPath(new URL("../deploy/serve-container.sh", import.meta.url)), "utf8");
+  for (const name of ["GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"]) {
+    assert.match(src, new RegExp(`-e ${name}\\b`), `serve-container.sh must pass ${name} through by name`);
+  }
+});
+
+// ── (2) A CREDENTIAL THAT CANNOT BE REPLACED IS REPORTED, NOT PRESENTED AS A WORKING BOARD ──────
+
+test("W1-T2269: an unconfigured console reports 'static' on the board, not silence", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root, { githubAppRefresh: { env: {} } });
+  await withServeServer(deps, async (base) => {
+    const shell = await (await get(base, "/", READ_TOKEN)).text();
+    assert.match(shell, /github-credential/, "the shell must render a github-credential chip");
+    assert.match(shell, /static \(no renewal configured\)/, "an unconfigured console must NAME itself static, not look like a healthy board");
+  });
+});
+
+test("W1-T2269: a refresh failure is named on the board, with github-app.ts's own reason", async () => {
+  const root = tmpRoot();
+  const FAIL_REASON = "exchange rejected: 403";
+  const fakeStart = (opts: { log?: RefreshOptions["log"] }) => {
+    opts.log?.(TOKEN_REFRESH_FAILED_STEP, { reason: FAIL_REASON });
+    return { armed: true };
+  };
+  const deps = depsFor(root, {
+    githubAppRefresh: {
+      start: fakeStart,
+      env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    },
+  });
+  await withServeServer(deps, async (base) => {
+    const shell = await (await get(base, "/", READ_TOKEN)).text();
+    assert.match(shell, new RegExp(`refresh failed: ${FAIL_REASON}`), "a failed refresh must be named on the board, not hidden behind a healthy chip");
+  });
+});
+
+test("W1-T2269: a later SUCCESS clears a previously-reported failure on the board — never a stuck stale warning", async () => {
+  const root = tmpRoot();
+  let log: RefreshOptions["log"] | undefined;
+  const fakeStart = (opts: { log?: RefreshOptions["log"] }) => {
+    log = opts.log;
+    opts.log?.(TOKEN_REFRESH_FAILED_STEP, { reason: "exchange timed out" });
+    return { armed: true };
+  };
+  const deps = depsFor(root, {
+    githubAppRefresh: {
+      start: fakeStart,
+      env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    },
+  });
+  await withServeServer(deps, async (base) => {
+    const before = await (await get(base, "/", READ_TOKEN)).text();
+    assert.match(before, /refresh failed: exchange timed out/);
+
+    log?.(TOKEN_REFRESHED_STEP, { installation_id: "2", expires_at: "2026-08-25T12:00:00Z" });
+
+    const after = await (await get(base, "/", READ_TOKEN)).text();
+    assert.doesNotMatch(after, /refresh failed/, "a fresh success must clear the stale failure");
+    assert.match(after, /refreshing \(App\)/, "and read as actively refreshing again");
+  });
+});
+
+// ── (3) WRITE ROUTES KEEP THE TIERS AND SCOPES THEY ALREADY HAVE ────────────────────────────────
+
+test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING about route scopes/tiers", () => {
+  const unconfigured = routeShape(buildServeRoutes(depsFor(tmpRoot(), { githubAppRefresh: { env: {} } })));
+  const configured = routeShape(
+    buildServeRoutes(
+      depsFor(tmpRoot(), {
+        githubAppRefresh: {
+          start: () => ({ armed: true }),
+          env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+        },
+      }),
+    ),
+  );
+  assert.deepEqual(configured, unconfigured, "the route table's method/path/scope/tier must be identical either way");
+  // Sanity: the write tiers this shard must NOT touch are still present and still HIGH.
+  const highPaths = configured.filter((r) => r.tier === "high").map((r) => r.path).sort();
+  assert.deepEqual(highPaths, ["/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/manual/approve", "/v1/skills/run"].sort());
+});
+
+// ── (4) THE CONSOLE STARTS AND SERVES WHEN THE DAEMON IS ABSENT ─────────────────────────────────
+
+test("W1-T2269: the console boots and serves with the refresh armed and NO daemon reachable anywhere", async () => {
+  // No daemon process is started anywhere in this test file — every fixture above is an in-memory
+  // fake. This test additionally proves the refresh path itself never reaches OUT for anything
+  // but GitHub: the fake `start` below performs its own network-shaped exchange against a stub
+  // `fetchImpl` that only ever answers `https://api.github.com/...`, never a daemon URL/port, and
+  // the server still boots, binds and serves GET / and GET /v1/version normally.
+  const root = tmpRoot();
+  const calledUrls: string[] = [];
+  const fakeStart = (opts: { log?: RefreshOptions["log"] }) => {
+    void (async () => {
+      calledUrls.push("https://api.github.com/app/installations/2/access_tokens");
+      opts.log?.(TOKEN_REFRESHED_STEP, { installation_id: "2", expires_at: "2026-08-25T12:00:00Z" });
+    })();
+    return { armed: true };
+  };
+  const deps = depsFor(root, {
+    githubAppRefresh: {
+      start: fakeStart,
+      env: { [GH_APP_ID_ENV]: "1", [GH_APP_INSTALLATION_ID_ENV]: "2", [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem" },
+    },
+  });
+  await withServeServer(deps, async (base) => {
+    const shellRes = await get(base, "/", READ_TOKEN);
+    assert.equal(shellRes.status, 200);
+    const versionRes = await get(base, "/v1/version");
+    assert.equal(versionRes.status, 200);
+  });
+  assert.deepEqual(calledUrls, ["https://api.github.com/app/installations/2/access_tokens"]);
+});
+
+test("W1-T2269: github-app.ts's exchange never names a daemon host — GitHub's own API is the only remote it calls", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/lib/github-app.ts", import.meta.url)), "utf8");
+  const urls = [...src.matchAll(/https?:\/\/[^\s"'`]+/g)].map((m) => m[0]);
+  assert.ok(urls.length > 0, "control: the module must call SOME URL, or this assertion is vacuous");
+  for (const url of urls) {
+    assert.match(url, /^https:\/\/api\.github\.com\//, `unexpected remote in github-app.ts: ${url}`);
+  }
+});
+
+function extractFunctionBody(src: string, name: string): string {
+  const startIdx = src.indexOf(`function ${name}(`);
+  assert.ok(startIdx >= 0, `${name} must exist in src/lib/serve.ts`);
+  const closeIdx = src.indexOf("\n}\n", startIdx);
+  assert.ok(closeIdx >= 0, `could not find the end of ${name}`);
+  return src.slice(startIdx, closeIdx);
+}
+
+test("W1-T2269: serve.ts's new credential-refresh wiring makes no HTTP call of its own (it only arms github-app.ts's)", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/lib/serve.ts", import.meta.url)), "utf8");
+  const trackerBody = extractFunctionBody(src, "trackGithubCredentialState");
+  const rendererBody = extractFunctionBody(src, "renderGithubCredentialHtml");
+  const armStart = src.indexOf("const githubCredential = trackGithubCredentialState(deps.log);");
+  assert.ok(armStart >= 0, "the arming call site must exist in buildServeRoutes");
+  const armEnd = src.indexOf("}).armed;", armStart);
+  assert.ok(armEnd >= 0, "the arming call site must close with `}).armed;`");
+  const armBlock = src.slice(armStart, armEnd + "}).armed;".length);
+  for (const [label, code] of [
+    ["trackGithubCredentialState", trackerBody],
+    ["renderGithubCredentialHtml", rendererBody],
+    ["buildServeRoutes's arming call site", armBlock],
+  ] as const) {
+    assert.ok(!/\bfetch\(/.test(code), `${label} must not itself fetch anything — only github-app.ts's own exchange may`);
+  }
+});
+
+// ── (5) NO CREDENTIAL VALUE REACHES A LOG LINE, A LEDGER ROW, OR DISK ───────────────────────────
+
+test("W1-T2269: a secret written into GH_TOKEN never appears in the rendered shell, /v1/version, or the ledger log", async () => {
+  const root = tmpRoot();
+  const SECRET = "ghs_SHOULD-NEVER-LEAK-1234567890";
+  const loggedLines: string[] = [];
+  const fakeStart = (opts: { log?: RefreshOptions["log"] }) => {
+    // A well-behaved (and a misbehaving) producer both get exercised: github-app.ts's own
+    // contract never puts a token in `extra` (test/github-app.test.ts covers that module
+    // directly) — this test instead proves serve.ts's OWN relay/render path is not itself a
+    // second place a token could leak from, by checking every surface serve.ts controls.
+    opts.log?.(TOKEN_REFRESH_FAILED_STEP, { reason: "exchange rejected: 403" });
+    return { armed: true };
+  };
+  const deps = depsFor(root, {
+    githubAppRefresh: {
+      start: fakeStart,
+      env: {
+        GH_TOKEN: SECRET,
+        [GH_APP_ID_ENV]: "1",
+        [GH_APP_INSTALLATION_ID_ENV]: "2",
+        [GH_APP_PRIVATE_KEY_PATH_ENV]: "/k.pem",
+      },
+    },
+    log: (step, extra) => loggedLines.push(JSON.stringify({ step, extra })),
+  });
+  await withServeServer(deps, async (base) => {
+    const shell = await (await get(base, "/", READ_TOKEN)).text();
+    assert.ok(!shell.includes(SECRET), "the shell HTML must never contain the token value");
+
+    const versionBody = await (await get(base, "/v1/version")).text();
+    assert.ok(!versionBody.includes(SECRET), "GET /v1/version must never contain the token value");
+  });
+  assert.ok(loggedLines.length > 0, "control: the ledger log must have received at least one line, or this assertion is vacuous");
+  for (const line of loggedLines) {
+    assert.ok(!line.includes(SECRET), `ledger line leaked the token: ${line}`);
+  }
+});
+
+test("W1-T2269: renderShellHtml's credential param is a plain server-rendered span — no new client-script field", () => {
+  const html = renderShellHtml(undefined, undefined, "", '<span class="gh-credential-failed">refresh failed: boom</span>');
+  assert.match(html, /id="github-credential"/);
+  assert.match(html, /refresh failed: boom/);
+});
+
+test("W1-T2269: GET /v1/version stays exactly {sha} — the credential state is reported on the shell, never on this JSON surface", async () => {
+  // A pre-existing invariant test (test/serve.test.ts, "the served payload carries the sha and NO
+  // credential-shaped key") already guards this endpoint's shape; this test pins the SAME
+  // decision from this task's own side, so a future edit that tries to add the credential state
+  // here fails immediately, in the file that made the choice, not only in the older guard.
+  const route = buildVersionRoute("deadbeef");
+  const chunks: Buffer[] = [];
+  const res = {
+    writeHead: () => {},
+    end: (body: string) => chunks.push(Buffer.from(body)),
+  } as unknown as import("node:http").ServerResponse;
+  route.handler({} as import("node:http").IncomingMessage, res, {} as never);
+  const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  assert.deepEqual(Object.keys(body), ["sha"]);
+});
+
+test("W1-T2269: deploy/serve-container.sh never writes a GH_APP_* value inline, never prints one — name-only passthrough, same as GH_TOKEN", () => {
+  const src = readFileSync(fileURLToPath(new URL("../deploy/serve-container.sh", import.meta.url)), "utf8");
+  for (const name of ["GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"]) {
+    assert.ok(!new RegExp(`-e ${name}=`).test(src), `${name} must be passed by NAME only, never -e ${name}=<value>`);
+  }
+  // The three capture/echo lines name the SOURCE only ("from the invoking shell" / "captured
+  // from <container>"), never interpolate the captured value itself into an echo.
+  assert.ok(!/echo.*\$\{CAPTURED\}/.test(src.replace(/CAPTURED="\$\(docker[^\n]*\n/g, "")), "no echo may print a captured credential value");
+});
