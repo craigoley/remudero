@@ -112,6 +112,20 @@ export function isAllocatableTaskId(n: number): boolean {
   return Number.isInteger(n) && n > 0 && n <= MAX_ALLOCATABLE_TASK_ID;
 }
 
+/**
+ * The prefix {@link mintNextTaskId} stamps on a degradation it raised because a source READ FINE
+ * and answered something no other source corroborates — as opposed to one it could not read at
+ * all. SHARED so {@link describeMint} can tell the two apart from `degraded` alone.
+ *
+ * WHY NOT A THIRD VALUE ON {@link MintSources} (operator ruling, 2026-08-25). `null` there means
+ * exactly one thing — NO USABLE CEILING FROM THIS SOURCE — and every consumer that folds the
+ * sources into a max is correct to read it that way. WHY the ceiling is unusable is already
+ * carried, one field across, in `degraded`. Only the RENDERER needs to distinguish them, so only
+ * the renderer looks, and a widened `MintSources` would push a distinction through every consumer
+ * to carry something the object already holds.
+ */
+export const UNTRUSTED_SOURCE_REASON_PREFIX = "read fine but uncorroborated";
+
 /** Why a mint source contributed nothing — carried on the result, never swallowed. */
 export interface MintDegradation {
   /** Which source could not be read (`shards` | `open-prs`). */
@@ -258,7 +272,7 @@ export function mintNextTaskId(opts: {
       degraded.push({
         source: "open-prs",
         reason:
-          `read fine but uncorroborated: its highest mention leads the plan's own ceiling by ${lead} ` +
+          `${UNTRUSTED_SOURCE_REASON_PREFIX}: its highest mention leads the plan's own ceiling by ${lead} ` +
           `(> ${MAX_MENTION_LEAD}), so it was dropped rather than used as the ceiling — a mention is ` +
           "prose and may name an id nothing has filed",
       });
@@ -276,8 +290,26 @@ export function mintNextTaskId(opts: {
 }
 
 /** One-line provenance for a mint — what it derived from, and any source it could not read. */
+/**
+ * How a source that contributed NO ceiling should read. `null` alone cannot say why, so this asks
+ * `degraded` — the field that already knows — and names the condition rather than the value: a
+ * source read and disbelieved is a different fact from one never read, and rendering the second
+ * for the first says "we never looked" when we looked and did not believe it.
+ *
+ * NEVER THE NUMBER. The whole point of nulling an untrusted source is that its id does not get
+ * repeated back at an author; `test/task-id-existence-check.test.ts` scans `src/**` for cited ids
+ * and requires each to exist, and it has already caught one comment that would have re-burned
+ * them. This describes the condition and prints no id.
+ */
+function renderAbsentSource(mint: MintedTaskId, source: string): string {
+  return mint.degraded.some((d) => d.source === source && d.reason.startsWith(UNTRUSTED_SOURCE_REASON_PREFIX))
+    ? "read and not trusted"
+    : "not enumerated";
+}
+
 export function describeMint(mint: MintedTaskId): string {
-  const src = `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, open PRs ${mint.sources.openPrs ?? "not enumerated"}`;
+  const openPrs = mint.sources.openPrs ?? renderAbsentSource(mint, "open-prs");
+  const src = `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, open PRs ${openPrs}`;
   const warn = mint.degraded.length
     ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
     : "";

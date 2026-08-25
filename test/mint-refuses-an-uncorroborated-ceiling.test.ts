@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { MAX_MENTION_LEAD, mintNextTaskId } from "../src/lib/task-id.js";
+import { describeMint, MAX_MENTION_LEAD, mintNextTaskId } from "../src/lib/task-id.js";
 
 // A plan whose REAL ceiling is 2288, matching the shape the fleet actually carries: a low
 // monolith and a much higher shard set. The gap between those two is itself large (280 vs 2288),
@@ -87,6 +87,67 @@ test("an EMPTY plan cannot be led astray either — with no plan ceiling to corr
     const mint = mintNextTaskId({ planPath, openPrTexts: () => ["W1-T7"] });
     assert.equal(mint.n, 8);
     assert.equal(mint.degraded.filter((d) => d.source === "open-prs").length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── The renderer: a null source must say WHICH kind of nothing it is ─────────────────────────
+//
+// `describeMint` used to render every null `openPrs` as "not enumerated", which reads as "we
+// never looked" — wrong for a source that was read and disbelieved, and the one line an operator
+// actually sees. The information was already one field across in `degraded`.
+
+test("describeMint distinguishes a source never read from one read and not trusted", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-mint-render-"));
+  try {
+    const planPath = planWithCeiling(dir, 280, 2288);
+
+    // FIXTURE ONE — genuinely unreadable: the enumerator throws, so nothing was ever looked at.
+    const unreadable = mintNextTaskId({
+      planPath,
+      openPrTexts: () => {
+        throw new Error("gh: exit 1");
+      },
+    });
+    const unreadableText = describeMint(unreadable);
+
+    // FIXTURE TWO — the 22:34 case: read fine, and its ceiling led the plan by 7711.
+    const untrusted = mintNextTaskId({
+      planPath,
+      openPrTexts: () => ['`dispatchClaimRef("W1-T9999")` and the holder sha, plus the drop command.'],
+    });
+    const untrustedText = describeMint(untrusted);
+
+    assert.match(unreadableText, /open PRs not enumerated/, "an unread source still reads 'not enumerated'");
+    assert.doesNotMatch(unreadableText, /read and not trusted/);
+
+    assert.match(untrustedText, /open PRs read and not trusted/, "a disbelieved source must not claim we never looked");
+    assert.doesNotMatch(untrustedText, /open PRs not enumerated/);
+
+    assert.notEqual(unreadableText, untrustedText, "the two conditions must not render identically");
+
+    // Both still carry their own DEGRADED clause, so the one-line advisory stays self-explaining.
+    assert.match(unreadableText, /DEGRADED: open-prs \(cannot enumerate open PRs/);
+    assert.match(untrustedText, /DEGRADED: open-prs \(read fine but uncorroborated/);
+    assert.match(untrustedText, /7711/, "the lead arithmetic stays on the advisory");
+
+    // AND NEITHER RENDERING ECHOES THE BURNED NUMBER.
+    assert.doesNotMatch(untrustedText, /9999/, "the outlier id must never be repeated back at an author");
+    assert.doesNotMatch(untrustedText, /10000/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("describeMint still prints the number when the source WAS usable, so the fix costs the healthy path nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-mint-render-ok-"));
+  try {
+    const planPath = planWithCeiling(dir, 280, 2288);
+    const text = describeMint(mintNextTaskId({ planPath, openPrTexts: () => ["W1-T2289"] }));
+    assert.match(text, /open PRs 2289/);
+    assert.doesNotMatch(text, /not enumerated|read and not trusted/);
+    assert.doesNotMatch(text, /DEGRADED/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
