@@ -1,0 +1,190 @@
+- id: W1-T2279
+  title: "THE CONSOLE HAS NO WRITTEN STANDARD FOR WHAT A MESSAGE MUST TELL AN OPERATOR, AND THE ONES THAT ACTUALLY MISLED WERE WRONG RATHER THAN UNCLEAR — adopt ISO 24495-1:2023's four reader-first principles as a STRUCTURAL contract over unstructured messages only, hold every hard-won precise sentence out of scope, and record that `NextActionRule` already type-enforces the one mechanically checkable part while the message inside one such rule is false anyway"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [docs/operator-message-standard.md, test/operator-message-standard.test.ts]
+  origin: oper#console-messages-have-no-written-standard-2026-08-25
+  plan_refs: ["W1-T2264", "W1-T2273", "W1-T2244", "W1-T238", "W1-T1281"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (0) WHAT THE STANDARD SAYS, AND WHERE THAT WAS CONFIRMED — READ FIRST, BECAUSE THIS SHARD
+    DELIBERATELY CITES NO CLAUSE NUMBER.
+
+    ISO 24495-1:2023, "Plain language — Part 1: Governing principles and guidelines", edition 1,
+    approved 2023-06-20, ICS 01.140.10. Its four governing principles are stated as properties of
+    the READER's experience rather than of the text, and that framing is the part worth adopting:
+
+      - Readers get what they need                (relevant)
+      - Readers can easily find what they need    (findable)
+      - Readers can easily understand what they find (understandable)
+      - Readers can easily use the information    (usable)
+
+    The standard's own definition of plain language is "communication in which wording, structure
+    and design are so clear that intended readers can easily find what they need, understand what
+    they find, and use that information" — three verbs, to which the four principles add a fourth
+    demand, relevance, that the definition does not carry.
+
+    CONFIRMED FROM: the International Plain Language Federation (iplfederation.org/iso-standard),
+    which co-developed the standard, for the four principles verbatim; and PLAIN
+    (plainlanguage.com), for the definition, the June 2023 publication and the developing bodies.
+    Corroborated on edition, approval date, page count and scope by the SIS catalogue entry.
+
+    NOT CONFIRMED, AND THEREFORE NOT CITED ANYWHERE IN THIS SHARD: the clause NUMBERS. iso.org's
+    own page and the ANSI preview PDF both returned HTTP 403 to this session, and the SIS entry
+    truncates before the table of contents. A builder who needs a clause number must obtain the
+    standard itself; DO NOT let one appear in the doc this task writes on the strength of this
+    shard, because nobody here has read it. The principles are named because they were verified;
+    the numbering is omitted because it was not.
+
+    (1) THE FRAMING CORRECTION, WHICH MUST SURVIVE INTO THE DOC: THE CONSOLE's WORST FAILURE WAS
+    NOT PROSE.
+
+    `fleet-control.ts`'s pause line reads "PAUSE held on <ref> (set from another host) — run `rmd
+    resume` to clear". It names the condition, the cause and the remedy in one sentence. It is
+    already, by the four principles above, a good message. It cost 3h51m anyway, because NOTHING
+    RENDERED IT — the finding W1-T2264 owns. No plain-language pass reaches a message that is
+    never displayed, and a task that treats the pause outage as a wording problem would have
+    produced a rewrite of a sentence that was never the defect.
+
+    (2) AND THE ONES THAT DID MISLEAD SHARE A SHAPE THAT IS NOT A PROSE SHAPE — THEY WERE WRONG.
+
+      - `status-board.ts`'s `renderLatchesBlock` prints "no active latches" from `if
+        (!latches.rows.length)`. An EMPTY COLLECTION is rendered as a proven negative. The list
+        was empty because the collector cannot see a ref-backed latch — W1-T2264 again, which
+        owns that collector and must not be re-filed here.
+      - `status-board.ts`'s liveness rule "the daemon is not running — `rmd up` ... to resume the
+        fleet" applies on `!ctx.services.find((s) => s.service === "daemon")?.running`. The
+        optional chain cannot distinguish a row present with `running: false` from NO ROW AT ALL,
+        so an unobserved daemon and a stopped daemon produce the same sentence.
+      - the sweep's `required check red: <name>` reported `coverage-ratchet` as red when its
+        conclusion was `cancelled`. A conclusion that is not a failure was rendered as one.
+      - `review.ts`'s acceptance author-time check emits "<n> criterion/criteria have no proof"
+        under `defect: "empty-proofs"`, from a guard that fires on `d.emptyProofs > 0 ||
+        d.criteriaParsed === 0`. On the SECOND arm `emptyProofs` is zero, and the message names a
+        defect whose own count is zero while the real condition — nothing parsed at all — is never
+        stated.
+
+    Three of those four are ONE defect: an absent, unpopulated or unobserved input rendered as a
+    proven negative. That is the same discipline W1-T238 and W1-T1281 already fought for on the
+    containment path, where an unproven state was forced to name itself rather than collapse into
+    a verdict. A PLAIN-LANGUAGE PASS OVER ANY OF THESE MAKES THEM WORSE, because it improves the
+    delivery of a false statement. The doc this task writes must say that in its own first
+    paragraph, or it will be read as licence to polish.
+
+    (3) Q1 — THE PROPOSED STRUCTURE, AND AN HONEST SPLIT OF WHAT A MACHINE CAN CHECK.
+
+    The structure is four-part, and the fourth part is the one that would have caught the exhibits
+    above:
+
+      i.   WHAT HAPPENED — the condition, named as observed.
+      ii.  WHY IT MATTERS TO THIS READER — the consequence, in the reader's terms.
+      iii. WHAT THE READER CAN DO — and where there is nothing, the message SAYS there is nothing
+           rather than omitting the part.
+      iv.  IF THE MESSAGE ASSERTS A NEGATIVE OR AN ABSENCE, it distinguishes "observed absent"
+           from "not observed", or it does not assert it.
+
+    MECHANICALLY CHECKABLE: only (iii), and only as a SLOT — whether a required field exists and
+    is populated or explicitly null, never whether what it says is right. The repo already proves
+    the slot works: `NextActionRule` in `status-board.ts` declares `action: (ctx: TCtx) => string`
+    as a REQUIRED field, so a liveness rule cannot exist without naming an action, and
+    `escalate.ts`'s `Escalation` already documents `detail` as "what happened, why it's stuck" and
+    declares `options` REQUIRED with the comment that an escalation with no options is a bare
+    alert. Two surfaces already carry the structure in their TYPES. What is missing is that it was
+    never written down, never named as a standard, and never extended to (iv).
+
+    REVIEWER-JUDGED, AND A LINT MUST NOT CLAIM OTHERWISE: (i), (ii), and whether the action in
+    (iii) is the RIGHT action. A readability score is not an acceptance criterion and this repo
+    cannot compute one honestly — do not add one, do not gate on one, and do not let a word count
+    or a sentence-length threshold stand in for a reader.
+
+    THE PROOF THAT STRUCTURE IS NOT TRUTH IS ALREADY IN THE EXHIBITS: "the daemon is not running"
+    SITS INSIDE a `NextActionRule` and therefore already satisfies (iii) completely — a filled
+    action slot, a named command, a stated consequence — and it is still false. Any check this
+    task ships must be described as catching the MISSING part, never as certifying the message.
+
+    (4) Q2 — WHAT MUST SURVIVE IS PRECISION, AND THE MECHANISM IS SCOPE, NOT REVIEW.
+
+    `containment.ts` says "containment UNPROVEN: turns-exhausted — the probe ran out of its turn
+    budget before an OS-denial for the outside-cwd write could be observed; this is NOT the same
+    fact as an unattempted write and containment stays UNPROVEN". It is dense, it is hard to read,
+    and the distinction it draws is what stops a false verdict. There is no way to prove a rewrite
+    preserved a distinction, because a distinction lives in the reader's head and a diff cannot
+    see it; a reviewer who understood the sentence before is exactly the reader least able to tell
+    whether the new one still teaches it.
+
+    So the answer is not a stronger review — it is that THOSE SENTENCES ARE OUT OF SCOPE. The doc
+    must define the governed set as messages that are UNSTRUCTURED — assembled ad hoc at a call
+    site, carrying no declared condition/consequence/action — and must exclude by name any message
+    whose precision was itself the subject of a merged task, the containment verdict strings
+    (W1-T238, W1-T1281) foremost. A later per-surface rewrite inherits that exclusion.
+
+    (5) Q3 — SURFACES, AND WHY THE LIST IS SHORT.
+
+    IN SCOPE: `rmd status`'s blocks, rendered by `renderStatusBoardText` and its per-section
+    helpers in `status-board.ts`, and the console's rendered rows, which read the same board
+    model. One audience — an operator deciding whether to intervene — and both already carry a
+    `nextAction` slot, so the standard describes what is there rather than inventing it.
+
+    IN SCOPE ONLY AS THE NARRATIVE HALF: the escalation issue body's `summary` and `detail`, read
+    on a phone, by a person who may be nowhere near a terminal. THE OPTION-TO-ACTION HALF IS
+    W1-T2273's AND MUST NOT BE RE-FILED — that task makes an option terminate in something
+    executable; this one says nothing about options beyond noting the slot already exists.
+
+    OUT OF SCOPE: the daemon's stdout. Its only readers are operators debugging, it is
+    high-volume, and its lines are the forensic record every retro greps — restating them would
+    invalidate the searches that depend on their current wording, at no gain to any reader who is
+    not already reading source.
+
+    (6) WHAT MUST NOT CHANGE.
+
+    NO MESSAGE IS REWRITTEN BY THIS TASK. It establishes the standard and the check; a rewrite is
+    a separate, later, per-surface job that cites this doc. And no message is simplified into
+    being wrong: where a true statement is unavoidably technical, the remedy is to ADD what the
+    reader can do, never to remove what it says.
+  note: |
+    SIZING BAND: `risk: high` is set UP FRONT and the band is Rule 19's SPAN, not blast radius.
+    The build writes a NORMATIVE document and the test that enforces it — two verbs across two
+    files, and the pairing is what Rule 19 measures. Nothing in this task touches a source file,
+    so the blast radius is a doc and a test.
+
+    THE CHECK RUNS AS A UNIT TEST, NOT A NEW CI JOB. `ci` already runs the whole suite, so a test
+    is a gate; adding a workflow entry would widen `files:` to `.github/workflows/ci.yml` for no
+    additional enforcement.
+
+    ID PROVENANCE: W1-T2279 was reserved on `refs/rmd-id/W1-T2279` before this filing and verified
+    UNUSED across the reservation ref, the shard filenames on origin/main, the declared ids in
+    `plan/`, open-PR titles, open-PR head branches, open-PR bodies, merged `Remudero-Task:`
+    trailers and merged commit subjects, each zero paired with a positive control on its own
+    surface. Note for whoever mints next: the advisory `rmd next-task-id` answered with an id that
+    already has a shard on origin/main, because it reads the LOCAL checkout and this one was
+    behind; and `refs/rmd-id/W1-T2277` is RESERVED WITH NO SHARD ANYWHERE, so another caller may
+    be mid-filing on it — it is held, not free.
+
+    WHAT THIS TASK IS NOT: it is not a style guide, not a readability gate, not a rewrite, and not
+    a second attempt at either W1-T2264 (the latch and liveness collectors, which own the reason
+    those two messages are wrong) or W1-T2273 (escalation options as actions).
+  acceptance:
+    - claim: "a written standard names the four reader-first principles it adopts and cites no clause number that was not read"
+      proof: "unit test: test/operator-message-standard.test.ts"
+    - claim: "the standard states in its opening that the messages which misled were wrong rather than unclear, and that polishing a false statement makes it worse"
+      proof: "unit test: test/operator-message-standard.test.ts"
+    - claim: "the governed set is defined as unstructured messages only, and the containment verdict strings are excluded by name"
+      proof: "unit test: test/operator-message-standard.test.ts"
+    - claim: "the standard separates the part a machine can check from the part only a reader can judge, and claims no readability score"
+      proof: "unit test: test/operator-message-standard.test.ts"
+    - claim: "the check tests for a populated or explicitly null action slot and never asserts that a message is true"
+      proof: "unit test: test/operator-message-standard.test.ts"
+    - claim: "a message asserting an absence is required to distinguish observed absent from not observed"
+      proof: "unit test: test/operator-message-standard.test.ts"
+    - claim: "the surfaces in scope are named alongside the daemon stdout exclusion and the reason for it"
+      proof: "unit test: test/operator-message-standard.test.ts"
+    - claim: "the standard records that a filled action slot did not stop the daemon liveness message from being false"
+      proof: "unit test: test/operator-message-standard.test.ts"
+    - claim: "no existing operator message is reworded by this task"
+      proof: "unit test: test/operator-message-standard.test.ts"
