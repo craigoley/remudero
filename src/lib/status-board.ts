@@ -72,6 +72,7 @@ import {
   type LearningsInjectionTotals,
 } from "./digest.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
+import { dispatchClaimRef } from "./dispatch-claim.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { IDLE_REASON_ID_CAP, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
@@ -767,6 +768,21 @@ export interface StatusBoardDeps {
    * remote is never read as `"absent"`.
    */
   readSharedPauseState?: (repoDir: string) => SharedPauseRead;
+  /**
+   * W1-T2270: read of every currently-held PER-TASK dispatch claim (dispatch-claim.ts's
+   * `dispatchClaimRef`, `refs/rmd-dispatch/<taskId>`) — a git ref namespace {@link buildLatchRows}'s
+   * STATIC_LATCHES loop cannot see for the same reason it could not see `refs/rmd-pause/hold`
+   * before W1-T2264: every one of those rows is sourced from `fs.existsSync` on a local path.
+   * `decideDispatchClaimRelease` refuses a time-based expiry on the stated ground that a stranded
+   * claim is "a visible ref an operator can drop" — this is the read that makes it actually
+   * visible, so that premise stops being false. Exactly ONE `git ls-remote` against the whole
+   * namespace (never one round trip per task, and never the anchor decode a HOLDER's pid/host
+   * would cost — see {@link DispatchClaimsRead}'s own doc). Defaults to a real read via
+   * `defaultReadDispatchClaims`. Returns `{status: "unreachable"}` (never throws) when origin
+   * cannot be reached — an unreachable remote is reported as UNDETERMINED, never as "no claim
+   * held" and never as a specific task's claim (Q3's same fail-closed direction, applied here).
+   */
+  readDispatchClaims?: (repoDir: string) => DispatchClaimsRead;
 }
 
 // ── origin/main (local, no fetch) ───────────────────────────────────────────────────────────
@@ -811,6 +827,60 @@ function defaultReadPushedRunBranches(repoDir: string): string {
 function defaultReadSharedPauseState(repoDir: string): SharedPauseRead {
   if (!fs.existsSync(join(repoDir, ".git"))) return "absent";
   return readSharedPause(realSharedPauseGitDeps(repoDir));
+}
+
+/**
+ * W1-T2270: every currently-held `refs/rmd-dispatch/<taskId>` claim (dispatch-claim.ts), read via
+ * exactly ONE `git ls-remote origin 'refs/rmd-dispatch/*'` — the same cost profile
+ * {@link defaultReadSharedPauseState} already keeps for the singleton PAUSE ref, applied to a
+ * NAMESPACE instead of one ref because a dispatch claim is per-task, not fleet-wide.
+ *
+ * `"unreachable"` on a nonzero exit — an unreadable remote is a FAILED READ, never scored
+ * `"clear"` (the identical fail-closed direction {@link decideDispatchClaim} itself takes, and
+ * {@link readSharedPause}'s own UNREACHABLE-MEANS-HELD precedent). `"clear"` on exit 0 with no
+ * matching ref at all. `holder` is the anchor's own sha — never a second round trip to decode the
+ * pid/host {@link gitDispatchClaimReserver}'s `mintAnchor` embeds in the commit message, mirroring
+ * this file's OWN SHARED_PAUSE row (which also skips that second round trip) and reusing the exact
+ * word `decideDispatchClaim`'s own refusal message already gives that sha: "holder".
+ */
+export type DispatchClaimsRead =
+  | { readonly status: "clear" }
+  | { readonly status: "held"; readonly claims: ReadonlyArray<{ readonly taskId: string; readonly holder: string }> }
+  | { readonly status: "unreachable" };
+
+/** Every `refs/rmd-dispatch/<taskId>` line off a `ls-remote origin 'refs/rmd-dispatch/*'`, parsed
+ *  the same "split on tab, strip the known prefix" way {@link runBranchTaskIds} already parses its
+ *  own wildcard sweep — a malformed or unrelated line is skipped rather than thrown. */
+function parseDispatchClaimLsRemote(output: string): ReadonlyArray<{ taskId: string; holder: string }> {
+  const prefix = dispatchClaimRef(""); // "refs/rmd-dispatch/" — the SAME builder the reserver uses
+  const out: Array<{ taskId: string; holder: string }> = [];
+  for (const rawLine of output.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const [sha, ref] = line.split("\t");
+    if (!sha || !ref || !ref.startsWith(prefix)) continue;
+    const taskId = ref.slice(prefix.length);
+    if (taskId) out.push({ taskId, holder: sha });
+  }
+  return out;
+}
+
+/** Real default for {@link StatusBoardDeps.readDispatchClaims} — see that field's own doc. Guarded
+ *  on `.git` existing first, exactly like {@link defaultReadSharedPauseState}, for the identical
+ *  reason: no repo here means no remote could ever exist to be unreachable. */
+function defaultReadDispatchClaims(repoDir: string): DispatchClaimsRead {
+  if (!fs.existsSync(join(repoDir, ".git"))) return { status: "clear" };
+  let stdout: string;
+  try {
+    stdout = execFileSync("git", ["-C", repoDir, "ls-remote", "origin", `${dispatchClaimRef("")}*`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).toString();
+  } catch {
+    return { status: "unreachable" };
+  }
+  const claims = parseDispatchClaimLsRemote(stdout);
+  return claims.length ? { status: "held", claims } : { status: "clear" };
 }
 
 // ── Ledger derivation ────────────────────────────────────────────────────────────────────────
@@ -1061,6 +1131,11 @@ function buildLatchRows(
   // instruction stands, which is the fail-closed direction: an unreadable answer must never
   // silence a real failure.
   originMainSha?: string,
+  // W1-T2270: same pre-bound-thunk shape as `readSharedPauseState` just above, for the same
+  // reason — a test injects any of the three outcomes without a real repo checkout. Optional and
+  // appended last (Q1's own convention on this exact function) so no positional caller shifts;
+  // omitted reads as `{status: "clear"}`, matching a repo that has never taken a dispatch claim.
+  readDispatchClaims: () => DispatchClaimsRead = () => ({ status: "clear" }),
 ): LatchRow[] {
   const rows: LatchRow[] = [];
 
@@ -1110,6 +1185,34 @@ function buildLatchRows(
           "optimistically (an unreachable remote is never read as clear)",
       });
     }
+  }
+
+  // Per-task dispatch claims (W1-T2270) — `refs/rmd-dispatch/<taskId>`, a git ref namespace
+  // STATIC_LATCHES cannot see (file-only, same gap W1-T2264 closed for the singleton PAUSE ref).
+  // `decideDispatchClaimRelease` leaves a claim held by another lane for an OPERATOR precisely
+  // because cross-host liveness is not decidable — this row is what makes that claim actually
+  // findable, never a fourth release arm: it reads and reports, it never drops anything.
+  const dispatchClaims = readDispatchClaims();
+  if (dispatchClaims.status === "held") {
+    for (const { taskId, holder } of dispatchClaims.claims) {
+      rows.push({
+        name: `dispatch-claim:${taskId}`,
+        consequence:
+          `${taskId}'s dispatch claim ${dispatchClaimRef(taskId)} is held (holder ${holder}) with no ` +
+          `landed work observed — a new dispatch of ${taskId} is refused until an operator drops it: ` +
+          `git push origin :${dispatchClaimRef(taskId)}`,
+      });
+    }
+  } else if (dispatchClaims.status === "unreachable") {
+    // UNDETERMINED, NEVER "NO CLAIM HELD" (Q3's own fail-closed direction, applied here): a
+    // failed read must not silently render as a clear fleet — it names what it could not tell.
+    rows.push({
+      name: "DISPATCH_CLAIMS",
+      consequence:
+        `cannot reach origin to read held dispatch claims (${dispatchClaimRef("")}*) — undetermined, ` +
+        "not clear: a task may be silently stranded on another lane's unreleased claim and this board " +
+        "cannot yet tell which",
+    });
   }
 
   // Inflight locks — one row per LIVE lock (a dead-pid lock is stale debris, not an active
@@ -1236,6 +1339,14 @@ const LATCHES_NEXT_ACTIONS: readonly NextActionRule<LatchesSection>[] = [
     // it to live for a hold this host did not necessarily set.
     applies: (ctx) => ctx.rows.some((r) => r.name === "SHARED_PAUSE"),
     action: () => "a cross-host hold may be affecting dispatch beyond this host — see the SHARED_PAUSE row above before assuming it is local",
+  },
+  {
+    // W1-T2270: same reasoning as SHARED_PAUSE just above — never names the releasing action
+    // itself (the row's own consequence already names the ref and the operator's drop command),
+    // and this covers both the confirmed-held rows and the single unreachable-remote row.
+    applies: (ctx) => ctx.rows.some((r) => r.name.startsWith("dispatch-claim:") || r.name === "DISPATCH_CLAIMS"),
+    action: () =>
+      "a per-task dispatch claim may be stranding a task on another lane — see the dispatch-claim row(s) above for the ref and holder to drop",
   },
   {
     applies: (ctx) => ctx.rows.some((r) => r.name === "PAUSE"),
@@ -2047,6 +2158,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const crashLoopWindow = deps.crashLoopWindow ?? DEFAULT_CRASHLOOP_WINDOW;
   const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
   const readSharedPauseState = deps.readSharedPauseState ?? defaultReadSharedPauseState;
+  const readDispatchClaims = deps.readDispatchClaims ?? defaultReadDispatchClaims;
 
   const lines = readLedger(ledgerPath);
   const boots = deriveDaemonBoots(lines);
@@ -2101,7 +2213,9 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   };
 
   // ── LATCHES ──
-  const rows = buildLatchRows(root, nowMs, isPidAlive, () => readSharedPauseState(deps.repoDir), originSha);
+  const rows = buildLatchRows(root, nowMs, isPidAlive, () => readSharedPauseState(deps.repoDir), originSha, () =>
+    readDispatchClaims(deps.repoDir),
+  );
   const latchesSection: LatchesSection = { rows, nextAction: undefined };
   latchesSection.nextAction = pickNextAction(LATCHES_NEXT_ACTIONS, latchesSection);
 
