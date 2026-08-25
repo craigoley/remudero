@@ -14253,6 +14253,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           statusResolvable: taskStatusResolvable,
           merged: proj?.merged ?? false,
           baseAcceptance: oldTask?.acceptance,
+          // W1-T2254: `oldTask` (the whole base-ref shard) is already resolved above for
+          // `baseAcceptance` — widening the context to carry it needs no new resolution, git
+          // read, or base-ref lookup, so mergedFieldChangeViolations can diff every other
+          // reportable field too.
+          baseTask: oldTask,
           followUpFiled: followUpCarriesCriteria(added, followUpTasks),
         },
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
