@@ -1,0 +1,151 @@
+- id: W1-T2265
+  title: "EIGHT BRANCHES OF THE DAEMON LOOP SKIP DISPATCH AND EACH SPENDS A FULL POLL INTERVAL DOING IT — the loop runs twelve rungs strictly serially with dispatch twelfth and last at `daemon.ts:3419`, and eight `continue` statements target the outer `for (;;)` above it, every one preceded by `await deps.sleep(pollIntervalMs)`, so a tick that defers for any reason costs sixty seconds of dispatch latency whether or not anything was dispatchable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/daemon.ts, test/daemon-dispatch-reachability.test.ts]
+  origin: oper#dispatch-is-twelfth-and-skippable-2026-08-25
+  plan_refs: ["W1-T160", "W1-T276", "W1-T1044", "W1-T1272"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main b5dc5a11 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS. EVERY STEP NAME WAS GREPPED OUT OF
+    SOURCE AS A LITERAL BEFORE IT WAS QUERIED. LEDGER FROM `resolveLedgerUnion` AT THE STATE DIR:
+    ok true, archiveCount 25, liveFileRead true, unread none. Newest row per step:
+    `daemon.alive` n=10050 newest 2026-08-25T10:50:29.363Z; `daemon.boot` n=290 newest
+    10:34:01.715Z; `daemon.tick` n=285 newest 10:34:03.473Z; `run.start` n=424 newest
+    08:38:46.648Z; `verdict` n=381 newest 09:14:11.882Z; `retro_triggered` n=15 newest
+    10:36:08.073Z; `sweep.disposed` n=37109 newest 10:50:32.896Z; `dispatch.concurrent_set`
+    n=160 newest 08:37:31.526Z.
+
+    (1) TWELVE RUNGS, ALL AWAITED, DISPATCH LAST. In one body of `for (;;)` at
+    `src/lib/daemon.ts:2359`: pause `:2472`, freshness sweep `:2500`, main sweep `:2559`,
+    `sweepOrphans` `:2571`, `sweepFeedbackLanding` `:2587`, `checkGithubPosture` `:2608`,
+    `runMeasurementCadence` `:2637`, headroom/park `:2768`/`:2808`, quota `:2922`, retro
+    `:2947-2963`, console kick `:2987`, and DISPATCH LAST at `:3419` —
+    `await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)))`.
+
+    (2) AND EIGHT `continue` STATEMENTS TARGET THE OUTER LOOP, RESOLVED BY BRACE DEPTH RATHER
+    THAN BY PROXIMITY. `:2472` pause, `:2768` and `:2808` headroom/park, `:2922` quota, `:2967`
+    retro, and `:3311`, `:3348`, `:3386` in the dispatch-selection region. SIX OTHERS DO NOT
+    SKIP DISPATCH and are named here so the count is not overstated: `:2870`, `:2884` and `:2886`
+    belong to `for (const bucket of ["core", "graphql"])` at `:2868`, and `:2987`, `:2988` and
+    `:2993` belong to `for (const kick of deps.pendingKicks())` at `:2981`.
+
+    (3) EVERY ONE OF THE EIGHT HAS THE SAME TWO LINES BEFORE IT. `await deps.sleep(pollIntervalMs);`
+    then `continue;` — the retro's, quoted from `:2966-2968`, is
+    `ticks++; await deps.sleep(pollIntervalMs); continue;`. So a deferral is not merely a skipped
+    rung: it is a skipped rung PLUS a full poll interval before the next attempt.
+
+    (4) THE POLL IS SIXTY SECONDS AND IT IS THE LARGER HALF. `poll_interval_ms` reads 60000 on
+    ALL 1,132 `daemon.alive` rows in the window, with no other value present, and `daemon.tick`
+    fired 285 times in that window. If each iteration ends in one poll, that alone is 4.75 h =
+    13.7% OF A 34.7-HOUR WINDOW, against a largest-idle-bucket of 9.71 h. The fixed poll is
+    roughly half the bucket and the serial rungs are the rest.
+
+    (5) THE FLEET IS NOT IDLE THE WAY IT LOOKS. Two independent instruments over the same window:
+    interval reconstruction (`run.start` to its own `verdict`) puts A RUN IN FLIGHT 59.5% of wall
+    clock, and the daemon's own `daemon.alive` phase reads `dispatch` for 53.6%. THEY DIFFER BY
+    5.9 pp, which is recorded as an unexplained residual rather than reconciled by picking one.
+
+    (6) AND THE ALTERNATIVES ARE RULED OUT, EACH AGAINST ITS OWN CONTROL. NOT BOOT COST: boot to
+    first `daemon.tick` is a median 1.8 s and 0.06% of the window, with a median boot-to-first-
+    dispatch of 2.20 min against a 68.1 min median process lifetime. NOT RATE LIMITS: the
+    GraphQL user-ID refusal fired THREE times in 24 h of container logs. NOT EMPTINESS:
+    `daemon.idle` fired 5 times in-window against a control of 1,184 corpus-wide.
+
+    (7) THE RETRO IS NOT THE MAIN COST AND THIS SHARD SAYS SO UP FRONT. Of 13.94 h of idle, the
+    retro accounts for 1.91 h — 13.7% of idle and 5.5% of the window — against 9.71 h (69.7% of
+    idle) for the loop between rungs. `retro_triggered` fired twice in the window against 15
+    corpus-wide. A SHARD AIMED AT THE RETRO WOULD BE AIMED AT AN EIGHTH OF THE PROBLEM.
+  note: |
+    ── Q1. IS THE RETRO's `continue` DELIBERATE? YES, AND THE REASON IS ALREADY WRITTEN DOWN ────
+
+    (i) IT IS DELIBERATE, AND W1-T276 STATES THE REJECTED ALTERNATIVE IN ITS OWN WORDS: "Making
+    the retro non-blocking (fire-and-forget) is the obvious larger fix and is NOT this task: the
+    loop's single-threadedness is what makes its dispatch accounting sound, and a detached retro
+    would race the very plan it rewrites. Bounding the blindness is the honest small fix;
+    removing the blocking is a different, larger design question."
+
+    (ii) SO THE CONSISTENCY ARGUMENT THE BRIEF ANTICIPATED EXISTS AND IS RECORDED. A retro reads
+    and rewrites the plan; a dispatch selects from it and writes run branches. W1-T276 names that
+    race explicitly and declines to open it.
+
+    (iii) AND THE ASYMMETRY WAS SEEN AND CHOSEN, NOT MISSED. The same shard says: "THE ASYMMETRY,
+    verified at ebb6777. The dispatch path is protected ... The retro path is not ... is a bare
+    await inside the same single-threaded `for (;;)`, with `continue` immediately after. Nothing
+    ticks while it runs." `sweepLightDuringRetro` (`daemon.ts:1445-1459`) is the fix it shipped,
+    and its own acceptance required "the test must assert it never dispatches".
+
+    (iv) THEREFORE THIS IS NEITHER A DOCUMENTATION TASK NOR A DEFECT IN THE RETRO. The reason is
+    documented, the choice is sound, and the retro is an eighth of the cost. WHAT IS UNDOCUMENTED
+    IS THE SHAPE THE RETRO SHARES WITH SEVEN OTHER BRANCHES: `sleep(poll)` then `continue`, on
+    paths that have nothing to do with plan consistency. THAT is this task.
+
+    ── Q2. ORDER OR CONCURRENCY ────────────────────────────────────────────────────────────────
+
+    (v) CONCURRENCY IS REFUSED, AND NOT BY THIS SHARD's PREFERENCE. Running the retro without
+    awaiting it is exactly the alternative W1-T276 rejected with a stated reason. Reopening it
+    would be overturning a ruling on the strength of a wall-clock measurement, and the
+    measurement does not touch the plan-race argument at all. A BUILD MUST NOT DETACH THE RETRO.
+
+    (vi) ORDER IS THE ANSWER, BUT THE ONE-LINE VERSION IS WRONG AND WOULD BE UNSAFE. Moving
+    `:3419` to the top of the body would place dispatch ABOVE the pause check, the headroom park
+    and the quota gate — three rungs whose whole purpose is to stop a dispatch that must not
+    happen. Those must stay above it. The rungs dispatch can safely precede are the
+    OBSERVATIONAL ones: `sweepOrphans`, `sweepFeedbackLanding`, `checkGithubPosture`,
+    `runMeasurementCadence`, and the retro. None of them gates a dispatch; each merely delays it.
+
+    (vii) AND ORDER ALONE DOES NOT FIX THE LARGER HALF. Reordering removes the rung latency; it
+    does not remove the sixty seconds each deferring branch spends before retrying, which is the
+    ~4.75 h. A build that reorders and leaves eight unconditional `sleep(poll)` calls in place
+    has addressed the smaller half. THE TWO GO TOGETHER: dispatch should be reachable before the
+    observational rungs, AND a branch that defers for a non-safety reason should not also spend a
+    full poll.
+
+    (viii) THE SHAPE OF THE TEST FOLLOWS FROM THAT. It should assert reachability — that from a
+    given loop state, `:3419` is reached — rather than asserting an ordering of statements, so a
+    later refactor that preserves reachability does not break it.
+
+    ── Q3. WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────
+
+    (ix) NO LANE COUNT MOVES, AND THIS MEASUREMENT IS AN ARGUMENT AGAINST MOVING ONE: the lanes
+    are skipped by control flow, not exhausted by demand, so more of them would sit in the same
+    skipped branch. `dispatchLanes` and `reviewLanes` stay where they are and this task must not
+    read them.
+
+    (x) THE PAUSE CHECK STAYS FIRST AND KEEPS ITS `continue`. A paused fleet must not dispatch,
+    and `:2472` is the guarantee. The headroom park at `:2768`/`:2808` and the quota gate at
+    `:2922` stay above dispatch for the same reason: each exists to REFUSE a dispatch, and a
+    reordering that puts dispatch in front of them converts a safety gate into a post-mortem.
+
+    (xi) THE RETRO STAYS BLOCKING. W1-T276's ruling stands, `sweepLightDuringRetro` stays, and
+    its own guarantee that the light ticker never dispatches stays with it.
+
+    (xii) AND THE FRESHNESS RESTART STAYS. It costs 0.06% of wall clock and exists because a
+    daemon running stale code is worse. Nothing here touches it.
+
+    (xiii) RULE 19 BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as
+    spanning two concerns — the `daemon` stem and this task's own test stem — and refuses that at
+    `risk: medium`. THE BAND IS THE SPAN READING AND NOT A BLAST-RADIUS JUDGEMENT: the change
+    moves statements within one loop body and adds no rung, no gate and no threshold.
+  acceptance:
+    - claim: "dispatch is reached on a tick where an observational rung ran, rather than being skipped until the next poll"
+      proof: "unit test: test/daemon-dispatch-reachability.test.ts"
+    - claim: "a tick that fires a retro still reaches dispatch on that same tick"
+      proof: "unit test: test/daemon-dispatch-reachability.test.ts"
+    - claim: "a paused fleet still does not dispatch, and the pause check still runs before any dispatch decision"
+      proof: "unit test: test/daemon-dispatch-reachability.test.ts"
+    - claim: "a parked or quota-refused tick still does not dispatch, so each safety gate keeps its refusal"
+      proof: "unit test: test/daemon-dispatch-reachability.test.ts"
+    - claim: "a branch that defers for a non safety reason does not also spend a full poll interval before retrying"
+      proof: "unit test: test/daemon-dispatch-reachability.test.ts"
+    - claim: "the retro is still awaited and the light sweep ticker that runs during it still never dispatches"
+      proof: "unit test: test/daemon-dispatch-reachability.test.ts"
+    - claim: "the assertion is on dispatch being reached rather than on the order of statements in the body"
+      proof: "unit test: test/daemon-dispatch-reachability.test.ts"
