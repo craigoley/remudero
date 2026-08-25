@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
 import {
   anySpecialistConcern,
   buildSpecialistCommentArgs,
@@ -230,7 +231,11 @@ test("W1-T948: a task without the declaration does not fire the testing trigger"
   assert.equal(testingTrigger(taskMetadataFromPrinciples(undefined)), null);
 });
 
-test("W1-T948: removing the assignment fails the positive test", async () => {
+// SKIPPED INSIDE STRYKER'S SANDBOX (skipInMutationSandbox): this reads its own module's source
+// off disk and asserts the substitution target occurs EXACTLY ONCE. In the sandbox that path
+// resolves to an INSTRUMENTED copy — the literal is gone and the count reads 0 — which is the
+// wrong question, not a failing answer. It still runs on the real tree under `ci`.
+test("W1-T948: removing the assignment fails the positive test", skipInMutationSandbox(), async () => {
   // Mutating the SOURCE proves the positive test above is carried by the
   // assignment under test, not by some neighbouring accident (a no-op
   // mutation would be indistinguishable from a surviving mutant by result
