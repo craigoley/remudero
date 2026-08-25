@@ -1,0 +1,150 @@
+- id: W1-T2267
+  title: "The orchestrator's fallback push fires on a REMOTE PRESENCE PROBE, never on the worker's push result, so a worker whose copied `GH_TOKEN` expired is indistinguishable from one that never pushed — the run then succeeds on the orchestrator's fresh token and records nothing, and on the tighter proxy 3 of 589 worker spans already reach the token's stated one-hour life"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (171b816a600327256d410cb49a143ebd66003ffd), clone shallow-checked `false`. `src/run-task.ts` read
+    through git objects. No suite, no spawning verb, no poller. Ledger read through
+    `resolveLedgerUnion` at the STATE dir with step names grepped from source; every zero controlled.
+
+    (1) THE REFUTED PREMISE, FIRST, SO NOBODY RE-DERIVES IT. An earlier framing held that the fleet's
+    highest-frequency GitHub caller runs on a token a refresh cannot reach. IT DOES NOT.
+    `waitForCiGreen`'s six call sites are ALL orchestrator-side — `runTask` (`:9832`), `runFixRung`
+    (`:6915`), `retroCommand` (`:15608`), `triageCommandLocked` (`:24455`), `planCommand` (`:24867`)
+    and `approveCommand` (`:25569`) — and `runTask` is the daemon's own IN-PROCESS dispatch:
+    `run-task.ts:17484` wires `runOne: (taskId) => runTask(taskId, …)` and `daemon.ts:3419` calls it
+    directly under `Promise.allSettled`. `ghJsonAsync` (`:3534`) execs `gh` with NO `env` override, so
+    the child inherits `process.env` AT EXEC TIME — the exact property a refresh relies on, and the
+    one `github-app.ts` describes as reaching "every `gh` spawn, every `git` push and every worker
+    with ZERO call-site change". THE POLL IS ALREADY ON THE REFRESHABLE CHANNEL. Nothing in this
+    shard rests on that premise, and it is recorded here so the next reader does not spend the hour.
+
+    (2) WHAT ACTUALLY REMAINS, AND IT IS NARROW. `env.ts`'s `ALLOWLIST` copies `GH_TOKEN` into a
+    worker's child env at spawn, and `github-app.ts` says a refresh "cannot reach an already-spawned
+    child". That bounds the WORKER'S OWN `gh`/`git` calls, which in practice is the push path, and
+    pushing is rare against a poll that runs every few seconds.
+
+    AND THE TRADE-OFF IS SETTLED, NOT REOPENED HERE. `github-app.ts` records the decision in its own
+    words: "Of the three ways to close that (a fresh re-read inside the worker, a retry-once-on-401
+    in the push path, or accepting the gap for long runs), this task takes the THIRD", because the
+    other two "require editing `src/lib/worker.ts` or `src/lib/git-push.ts`, neither of which is in
+    this task's declared file list", and it closes "Filed as a follow-up, not silently absorbed."
+    THIS SHARD IS THAT FOLLOW-UP FOR THE OBSERVABILITY HALF ONLY. It does not re-litigate which of
+    the three options is right and it does not prevent the failure.
+
+    (3) Q1 — THE FALLBACK OBSERVES ABSENCE, NEVER CAUSE, SO A TOKEN EXPIRY IS INVISIBLE BY
+    CONSTRUCTION. The orchestrator fallback sits behind `if (!branchOnOrigin)`, and `branchOnOrigin`
+    is set by a REMOTE PRESENCE PROBE:
+
+      execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch],
+        { stdio: "ignore" });
+
+    inside a `try` whose `catch` binds no error and sets the flag false. THREE THINGS FOLLOW, AND
+    EACH IS A PROPERTY OF THAT SHAPE RATHER THAN AN INFERENCE. The probe asks the REMOTE whether the
+    ref exists; it never sees the worker's push at all — not its exit code, not its stderr, not
+    whether one was attempted. `stdio: "ignore"` discards even the probe's own output. And the
+    `catch` is bare, so nothing distinguishes a probe that failed from a ref that is genuinely
+    absent.
+
+    THE RUN THEN SUCCEEDS. `gitPushRunBranch(worktreePath)` runs from the orchestrator, which holds
+    the refreshed token, so the branch lands and the run proceeds to open its PR. A worker whose
+    credential died and a worker that simply never pushed produce the SAME observable: one
+    `fallback: pushing branch from orchestrator (outside sandbox)` line on stdout, no ledger row
+    naming a cause, and a green outcome. NOTHING ANYWHERE RECORDS THAT A CREDENTIAL EXPIRED.
+
+    THE PATH IS LIVE, ATTRIBUTED NOT RE-DERIVED: the operator reports that line firing 2026-08-25 for
+    W1-T2236. This host's ledger corpus ends 2026-08-13/14 (§4), so that firing is outside what can
+    be measured here and is carried as the operator's observation.
+
+    (4) Q2 — THE REACH IS REAL AND RARE, WHICH IS WHY THIS SHRINKS TO OBSERVABILITY. Two halves,
+    measured separately, and one of them could not be measured at all.
+
+    THE TOKEN SIDE COULD NOT BE DERIVED HERE AND IS ATTRIBUTED. `github_app.token_refreshed` and
+    `github_app.token_refresh_failed` — both step names grepped from `src/lib/github-app.ts` — read
+    ZERO rows across 672 archives with nothing unread, against a control of 787 `run.start` rows on
+    the same union, so the query works and the corpus simply predates the App path. The one-hour
+    figure is `github-app.ts`'s own: "Runs here routinely exceed the token's one-hour life."
+
+    THE WORKER SIDE WAS MEASURED, ON TWO PROXIES, BECAUSE THE LOOSER ONE OVERSTATES. Pairing by
+    `run_id` over the union: `run.start` to `verdict`, 613 runs, p50 16.1 min, p90 42.6, p99 74.5,
+    max 106.0, with 22 at or beyond 60 minutes. But that is the WHOLE RUN, and the copied token only
+    has to survive from spawn to the worker's push. The tighter proxy is `run.start` to
+    `implement.done`: 589 paired spans, p50 11.0 min, p90 31.2, p99 59.4, MAX 67.5, with THREE at or
+    beyond 60 minutes.
+
+    SO THE HONEST ANSWER IS "REACHABLE BUT RARE", AND NEITHER EXTREME IS TRUE. It is not "no worker
+    has ever come close" — the p99 sits at 59.4 minutes, one minute under the stated life, and three
+    spans crossed it. It is also not common: three in 589 is half a percent. A remedy priced against
+    that rate would be expensive for the return; an INSTRUMENT that makes the failure legible when it
+    does happen is cheap and is what this task asks for.
+
+    (5) WHY LEGIBILITY IS THE RIGHT ASK RATHER THAN A RETRY. The failure mode this closes is not a
+    lost push — the fallback already prevents that, and did its job this morning. It is that the
+    fleet cannot answer "has this ever happened?" A rate of 0.5% is exactly the regime where nobody
+    notices without an instrument and everybody argues about it with anecdotes, which is the shape
+    W1-T1068 already names on the adjacent rung: the token refresher can die silently. CITED, NOT
+    RE-FILED — that task is about the refresher failing; this one is about the consumer's failure
+    being unattributable even when the refresher is healthy.
+  design: |
+    (i) THE FALLBACK RECORDS WHY IT FIRED, NOT ONLY THAT IT DID. Absence of the ref is what triggers
+    it and that does not change; what changes is that the run carries a reason the reader can act on,
+    and an unknown cause is reported AS unknown rather than omitted.
+
+    (ii) A CREDENTIAL FAILURE IS DISTINGUISHABLE FROM A PUSH THAT WAS NEVER ATTEMPTED. Those are the
+    two shapes that collapse today. Whatever evidence separates them, the bare `catch` that discards
+    it is the thing to change.
+
+    (iii) THE PROBE'S OWN FAILURE IS NOT A REF ABSENCE. `stdio: "ignore"` plus an unbound `catch`
+    makes an unreadable remote look identical to a missing branch — the unknown-read-as-a-negative
+    shape this fleet has corrected on several other rungs.
+
+    (iv) NOT IN SCOPE: preventing the expiry, refreshing the worker's copy, retrying the push, or
+    reopening the three-option decision in `github-app.ts`.
+  acceptance:
+    - claim: "the fallback push records a reason for firing rather than only that it fired"
+      proof: "unit test: test/worker-push-credential-visibility.test.ts"
+    - claim: "a push that failed on an expired credential is distinguishable from one never attempted"
+      proof: "unit test: test/worker-push-credential-visibility.test.ts"
+    - claim: "a remote probe that could not be read is reported as unknown rather than as an absent branch"
+      proof: "unit test: test/worker-push-credential-visibility.test.ts"
+    - claim: "the branch still reaches origin on every path the fallback covers today"
+      proof: "unit test: test/worker-push-credential-visibility.test.ts"
+    - claim: "a cause the run cannot determine is named as undetermined rather than left out"
+      proof: "unit test: test/worker-push-credential-visibility.test.ts"
+  files: [src/run-task.ts, test/worker-push-credential-visibility.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#worker-push-failure-names-no-cause-2026-08-25"
+  plan_refs: ["W1-T1068", "W1-T142", "W1-T434"]
+  note: |
+    THE ORCHESTRATOR FALLBACK PUSH STAYS. It exists because a worker push failing must not lose the
+    work, and the operator reports it doing exactly that on 2026-08-25. Nothing here removes it,
+    narrows its trigger, or makes it conditional on diagnosing a cause first: the branch must still
+    reach origin on every path it covers today, and a run that cannot determine WHY still pushes.
+
+    THE WORKER KEEPS THE ABILITY TO PUSH ITS OWN BRANCH. `github.com` stays in `allowedDomains`
+    because that push is why it is there, and `api.anthropic.com` STAYS ABSENT. NO NEW EGRESS of any
+    kind is proposed or implied.
+
+    AND THE THREE-OPTION DECISION STAYS CLOSED. `github-app.ts` weighed a fresh re-read inside the
+    worker, a retry-once-on-401 in the push path, and accepting the gap, and took the third with its
+    reasons written down. THIS IS ABOUT SEEING THE FAILURE, NOT PREVENTING IT. A build that adds a
+    retry or a re-read has answered a different question than the one asked.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (run-task, worker-push-credential-visibility) at
+      risk:medium — Rule 19: raise to risk:high or decompose into one task per concern The real blast radius is one `catch` and the line beside it; no
+    gate, no merge path and no dispatch decision reads either.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/worker-push-credential-visibility.test.ts`, declared in `files:`
+    and absent from this tree, so on the filing PR each resolves through W1-T456's forward-reference
+    carve-out.
