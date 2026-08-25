@@ -186,6 +186,37 @@ as code** — see [plan-sync.md](plan-sync.md). A plan-only PR needs an
 <pr-number>` can post the required status; there is no separate "plan admin"
 bypass.
 
+## Correcting a merged shard's wrong `files:` declaration
+
+A merged shard's `files:` declaration can be wrong — narrower than what the
+build actually touched — and correcting it is allowed: `postMergeAmendmentViolations`
+(Standing rule 21, `src/lib/task-linter.ts`) is the only gate that fires on a
+post-merge edit to an already-merged task, and it computes violations from
+`acceptance` alone. It never reads `files:`, `title`, or `status:` at all. So a
+plan-only edit that corrects a merged shard's `files:` line passes Rule 21
+today; no gate blocks it, and no gate needs to be built or weakened to allow it.
+
+**Acceptance stays guarded.** Rule 21 still blocks any added or changed
+acceptance criterion on a merged task that has no follow-up task filed in the
+same PR. A `files:` correction does not touch that guard and does not make
+acceptance correctable by the same route — the two fields are not symmetric,
+and only one of them is checked.
+
+**An admissible correction carries a reproducible failure, not an assertion.**
+Restore the declared set's omitted file to its merge-base version against the
+branch's other declared files and show the build fails without it, then show
+the branch's own version restores it to green. A correction with no such
+evidence is drift wearing a correction's clothes, and reads as one — it is
+indistinguishable, at the diff, from a worker widening its own declaration to
+match whatever it happened to touch, which is precisely what Rule 21 exists to
+stop.
+
+**The amendment must be plan-only and human-authored.** A person opens a
+plan-only PR that edits only the `files:` line, exactly like any other plan
+amendment — never a rung editing its own declaration mid-build. No rung
+applies a correction to its own declaration: a rung that notices a wrong
+`files:` may at most report it, and a human authors the amendment.
+
 ## Onboarding a new project
 
 `rmd project init <repo> ...` seeds a target repo with the same gate stack
