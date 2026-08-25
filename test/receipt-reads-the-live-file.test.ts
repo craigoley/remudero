@@ -155,9 +155,85 @@ test("receiptCommand exits non-zero and prints no receipt when the ledger union 
 });
 
 // ── claim: "every pr opened emitter records the branch it opened" ──────────────────────────────
+// A branch a `pr.opened` emitter DID record for a given PR must survive to the receipt even when
+// this task passes through MORE THAN ONE of the five known `log("pr.opened", ...)` call sites for
+// the SAME `pr_url` — e.g. an initial open through one call site, then a later "adopted" event
+// through `run-task.ts:25305`. Before this fix `buildReceipt` took the LAST `pr.opened` line for a
+// `pr_url` unconditionally, so a branch one emitter genuinely recorded could be SHADOWED by a
+// later, blanker emission for that exact same PR. `resolvePrOpened` (src/lib/receipt.ts) now
+// prefers, within the exact-`pr_url` tier, whichever line actually carries `branch` — so whichever
+// emitter recorded the branch it opened, for THIS pr_url, that record survives: never a different
+// PR's branch, never a guess, only what a real emitter actually wrote down for the PR this receipt
+// is about.
+
+test("the branch an emitter recorded for this PR survives even when a LATER pr.opened emission for the same PR omits it", () => {
+  // run-task.ts:25305's shape (branch) followed by run-task.ts:24601's shape (no branch) — the
+  // exact "later, blanker emission for the same pr_url" case this fix targets.
+  const earlyWithBranch: ReceiptLedgerLine = {
+    run_id: RUN_ID,
+    task_id: TASK_ID,
+    step: "pr.opened",
+    pr_url: PR_URL,
+    branch: BRANCH,
+    adopted: true,
+  };
+  const laterNoBranch: ReceiptLedgerLine = {
+    run_id: RUN_ID,
+    task_id: TASK_ID,
+    step: "pr.opened",
+    pr_url: PR_URL,
+    plan_only: false,
+    mode: "adopt",
+  };
+  const receipt = buildReceipt([earlyWithBranch, laterNoBranch], { taskId: TASK_ID, prUrl: PR_URL });
+  assert.deepEqual(
+    receipt.predicate.pr.branch,
+    { value: BRANCH },
+    "an earlier emitter's recorded branch for this exact PR must not be shadowed by a later, blanker one",
+  );
+
+  // The SAME two lines in the OPPOSITE order (the branch recorded LAST, not first) still resolve
+  // identically — this is a genuine reconciliation across every pr.opened line for this pr_url,
+  // never an accident of array/ledger order.
+  const reversedReceipt = buildReceipt([laterNoBranch, earlyWithBranch], { taskId: TASK_ID, prUrl: PR_URL });
+  assert.deepEqual(reversedReceipt.predicate.pr.branch, { value: BRANCH });
+});
+
+test("a branch recorded for a DIFFERENT pr_url never bleeds into this receipt's pr.branch", () => {
+  // The fix only re-orders the search WITHIN the exact-pr_url tier; it never widens which tier is
+  // searched — an exact pr_url match is still preferred wholesale over the task's OTHER pr.opened
+  // lines, exactly as before this fix.
+  const otherPr: ReceiptLedgerLine = {
+    run_id: RUN_ID,
+    task_id: TASK_ID,
+    step: "pr.opened",
+    pr_url: "https://github.com/craigoley/remudero/pull/1",
+    branch: "run-some-other-pr",
+  };
+  const thisPrNoBranch: ReceiptLedgerLine = {
+    run_id: RUN_ID,
+    task_id: TASK_ID,
+    step: "pr.opened",
+    pr_url: PR_URL,
+    plan_only: false,
+  };
+  const receipt = buildReceipt([otherPr, thisPrNoBranch], { taskId: TASK_ID, prUrl: PR_URL });
+  assert.equal(
+    receipt.predicate.pr.branch.value,
+    null,
+    "a DIFFERENT PR's branch must never be attributed to this one",
+  );
+  assert.equal(
+    "reason" in receipt.predicate.pr.branch && receipt.predicate.pr.branch.reason,
+    `"pr.opened" ledger line for ${PR_URL} carries no branch field`,
+  );
+});
+
 // The five REAL `log("pr.opened", ...)` payload shapes in src/run-task.ts, copied verbatim (only
 // `run-task.ts:25305`'s shape carries `branch` — the other four's writer-side gap is the second,
-// OUT-OF-SCOPE defect this task names but does not fix, see this file's header note).
+// OUT-OF-SCOPE defect this task names but does not fix, see this file's header note). Exercised
+// one at a time (a task whose only `pr.opened` line came from that ONE call site) to prove the
+// reader has no blind spot across any of the five real shapes, whichever ships a `branch` fix next.
 
 const PR_OPENED_EMITTER_SHAPES: ReadonlyArray<{ site: string; extra: Record<string, unknown> }> = [
   { site: "run-task.ts:9387", extra: {} },
@@ -167,7 +243,7 @@ const PR_OPENED_EMITTER_SHAPES: ReadonlyArray<{ site: string; extra: Record<stri
   { site: "run-task.ts:25305", extra: { branch: BRANCH, adopted: true } },
 ];
 
-test("buildReceipt resolves pr.branch correctly against every known pr.opened emitter payload shape", () => {
+test("buildReceipt resolves pr.branch correctly against every known pr.opened emitter payload shape, one at a time", () => {
   for (const shape of PR_OPENED_EMITTER_SHAPES) {
     const line: ReceiptLedgerLine = { run_id: RUN_ID, task_id: TASK_ID, step: "pr.opened", pr_url: PR_URL, ...shape.extra };
     const receipt = buildReceipt([line], { taskId: TASK_ID, prUrl: PR_URL });

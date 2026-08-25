@@ -23,6 +23,14 @@
  * matched archive could not be read) is surfaced as a refusal, `{ ok: false, reason }`, never
  * downgraded to an empty line list that would make every leaf read `absent` and look
  * indistinguishable from "this run never emitted the row".
+ *
+ * W1-T2257 (second half): four of the five `log("pr.opened", ...)` call sites in `src/run-task.ts`
+ * write no `branch` field at all — a WRITER defect in that file's emitters, out of this module's
+ * scope to fix. What IS this module's job: when a single task's ledger carries MORE THAN ONE
+ * `pr.opened` line for the exact same `pr_url` (one emitter's call site fired, then later another
+ * did, for the same PR), {@link resolvePrOpened} makes sure a branch ANY of them recorded survives
+ * to the receipt — never shadowed by a later, blanker emission for that same PR, never a different
+ * PR's branch, never a guess.
  */
 
 import { resolveLedgerUnion, type LedgerGrepFsDeps } from "./ledger-grep.js";
@@ -209,14 +217,42 @@ export function resolveReceiptLedgerLines(stateDir: string, fsDeps?: LedgerGrepF
  * `{ value: null, reason }` — see {@link ReceiptField}. Nothing here fabricates a value; a
  * receipt with three null fields is an honest receipt, not a broken one.
  */
+/**
+ * Which `pr.opened` line names `opts.prUrl`'s branch, when more than one exists for this task.
+ *
+ * W1-T2257: four of the five `log("pr.opened", ...)` call sites in `src/run-task.ts` write no
+ * `branch` field at all (a WRITER defect that file's own emitters, not this reader, must fix — see
+ * this module's header note). But a SINGLE task can pass through more than one of those call sites
+ * for the SAME PR over its lifecycle (an initial open, then a later re-open/adopt event) — so more
+ * than one `pr.opened` line can carry the identical `pr_url`. Naively taking the LAST such line
+ * (this function's predecessor) means a branch one emitter DID record for this exact PR can be
+ * shadowed by a later, blanker emission for that same PR — losing real, already-recorded
+ * information for no reason. THE READER'S JOB: whichever emitter recorded the branch it opened,
+ * for THIS pr_url, that record must survive to the receipt — never a different PR's branch, and
+ * never a guess, only what was genuinely written down for the PR the receipt is about.
+ *
+ * Ties (same tier, same branch-carrying-ness) still resolve to the LATEST line, unchanged from
+ * before — this only re-orders the search to look for a `branch` FIRST within a tier, it never
+ * widens which tier is searched (an exact `pr_url` match is still preferred wholesale over the
+ * task's other `pr.opened` lines, exactly as it was).
+ */
+function resolvePrOpened(lines: ReceiptLedgerLine[], prUrl: string): ReceiptLedgerLine | undefined {
+  const latestWithBranchElseLatest = (rows: ReceiptLedgerLine[]): ReceiptLedgerLine | undefined => {
+    const reversed = [...rows].reverse();
+    return reversed.find((l) => typeof l.branch === "string") ?? reversed[0];
+  };
+  const forThisPr = lines.filter((l) => l.step === STEP.prOpened && l.pr_url === prUrl);
+  if (forThisPr.length > 0) return latestWithBranchElseLatest(forThisPr);
+  const anyPrOpened = lines.filter((l) => l.step === STEP.prOpened);
+  return latestWithBranchElseLatest(anyPrOpened);
+}
+
 export function buildReceipt(ledgerLines: readonly ReceiptLedgerLine[], opts: BuildReceiptOptions): ReceiptPredicate {
   const { taskId, prUrl } = opts;
   const lines = ledgerLines.filter((l) => l.task_id === taskId);
 
   const runStart = lines.find((l) => l.step === STEP.runStart);
-  const prOpened =
-    [...lines].reverse().find((l) => l.step === STEP.prOpened && l.pr_url === prUrl) ??
-    [...lines].reverse().find((l) => l.step === STEP.prOpened);
+  const prOpened = resolvePrOpened(lines, prUrl);
   const learningsInjected = lines.find((l) => l.step === STEP.learningsInjected);
   const implementDone = [...lines].reverse().find((l) => l.step === STEP.implementDone);
   const reviewPosted = [...lines].reverse().find((l) => l.step === STEP.reviewPosted);
