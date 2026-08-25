@@ -52,7 +52,9 @@ import {
   type ServiceOptions,
   type ServiceTokens,
   type SseRoute,
+  type WriteTier,
 } from "./service.js";
+import type { EscalationOption, EscalationOptionRoute } from "./escalate.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
 import {
@@ -90,6 +92,49 @@ import {
   TOKEN_REFRESH_FAILED_STEP,
   type RefreshOptions,
 } from "./github-app.js";
+
+/**
+ * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
+ * either a button (route + payload + the tier that gates it) or the "operator only, no button"
+ * marker, for ONE {@link EscalationOption}.
+ *
+ * Resolved PURELY off `option.kind` (escalate.ts) — `option.label`/`option.detail` ride along
+ * on the result UNCHANGED (note (xiv): the prose survives on every option, including the ones
+ * that are operator-only) but are never CONSULTED to decide `executable`. This is note (iii)'s
+ * "renderer stays dumb": the vocabulary an option's shape is drawn from lives in exactly ONE
+ * place — the `kind` escalate.ts's emitter already validated via `validateEscalationOptionKind`
+ * — never re-derived here by matching words in the prose against a route, which would put the
+ * same vocabulary in two places and let them drift (the two-enumerator defect this repo has
+ * already paid for elsewhere). An option with no `kind` (every producer this task did not
+ * touch — run-task.ts, triage.ts — none is in this task's own file scope) resolves exactly like
+ * one explicitly marked `operator-only`: today's behavior, unchanged.
+ */
+export type EscalationOptionAffordance =
+  | {
+      readonly executable: true;
+      readonly route: EscalationOptionRoute;
+      readonly tier: WriteTier;
+      readonly payload: Readonly<Record<string, unknown>>;
+      readonly label: string;
+      readonly detail: string;
+    }
+  | { readonly executable: false; readonly label: string; readonly detail: string };
+
+/** See {@link EscalationOptionAffordance}. */
+export function resolveEscalationOptionAffordance(option: EscalationOption): EscalationOptionAffordance {
+  const kind = option.kind;
+  if (kind !== undefined && kind.type === "executable") {
+    return {
+      executable: true,
+      route: kind.route,
+      tier: kind.tier,
+      payload: kind.payload ?? {},
+      label: option.label,
+      detail: option.detail,
+    };
+  }
+  return { executable: false, label: option.label, detail: option.detail };
+}
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
 export const DEFAULT_SERVE_PORT = 4317;
