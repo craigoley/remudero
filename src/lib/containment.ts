@@ -110,7 +110,7 @@ export interface ContainmentEvidence {
   credentialFailure?: boolean;
   /**
    * W1-T292: did the probe worker die on an EXPIRED copied OAuth token (isError
-   * PLUS the conservative `CREDENTIAL_EXPIRED_RE` + `CREDENTIAL_REFRESH_FAILED_RE`
+   * PLUS the conservative `CREDENTIAL_EXPIRED_RE` + `CREDENTIAL_TOKEN_EXPIRED_RE`
    * signature) rather than the never-logged-in signature above? A DISTINCT field
    * (not folded into `credentialFailure`) so the recovery path can key on a
    * stable `spawn_credential_expired` symbol — "re-mint/refresh the token" is a
@@ -997,15 +997,20 @@ const CREDENTIAL_LOGIN_HINT_RE = /run \/login/i;
 
 /**
  * Regex marking the SDK's OTHER credential-dead result text: a copied OAuth
- * token that has since EXPIRED (as opposed to never being logged in at all)
- * exits "OAuth session expired and could not be refreshed" at $0 before any
- * turn — a distinct string from CREDENTIAL_FAILURE_RE/CREDENTIAL_LOGIN_HINT_RE
- * above, so it previously matched neither and fell through to the generic
- * "unproven" verdict W1-T237 exists to prevent. Same conservative shape: both
- * fragments must appear, applied only in combination with `isError`.
+ * token that has since EXPIRED (as opposed to never being logged in at all).
+ * W1-T292 matched this against "OAuth session expired and could not be
+ * refreshed", but that phrasing is no longer what the SDK emits. W1-T2250's
+ * observed excerpt — corroborated independently by W1-T2249's ledger read,
+ * both attributed rather than re-derived by a live probe here — reads "Failed
+ * to authenticate. API Error: 401 OAuth access token has expired.
+ * Re-authenticate to continue" at $0 before any turn: a distinct string from
+ * CREDENTIAL_FAILURE_RE/CREDENTIAL_LOGIN_HINT_RE above, so it previously
+ * matched neither pair and fell through to the generic "unproven" verdict
+ * W1-T237/W1-T292 exist to prevent. Same conservative shape: both fragments
+ * must appear, applied only in combination with `isError`.
  */
-const CREDENTIAL_EXPIRED_RE = /oauth session expired/i;
-const CREDENTIAL_REFRESH_FAILED_RE = /could not be refreshed/i;
+const CREDENTIAL_EXPIRED_RE = /failed to authenticate/i;
+const CREDENTIAL_TOKEN_EXPIRED_RE = /oauth access token has expired/i;
 
 /**
  * Default executor: spawn a real sandboxed worker in a scratch cwd under the
@@ -1206,13 +1211,17 @@ export async function probeContainment(opts: {
       r.isError === true &&
       CREDENTIAL_FAILURE_RE.test(r.transcript) &&
       CREDENTIAL_LOGIN_HINT_RE.test(r.transcript),
-    // W1-T292: a SECOND, DISTINCT credential-dead signature — an expired copied
-    // OAuth token — kept out of `credentialFailure` above so the two never
-    // collapse into one reason. Same conservative both-fragments-required shape.
+    // W1-T292, phrases re-derived by W1-T2250: a SECOND, DISTINCT credential-dead
+    // signature — an expired copied OAuth token — kept out of `credentialFailure`
+    // above so the two never collapse into one reason. Same conservative
+    // both-fragments-required shape, now matched against the text the SDK
+    // actually emits ("Failed to authenticate. API Error: 401 OAuth access token
+    // has expired...") rather than the superseded "OAuth session expired and
+    // could not be refreshed".
     credentialExpired:
       r.isError === true &&
       CREDENTIAL_EXPIRED_RE.test(r.transcript) &&
-      CREDENTIAL_REFRESH_FAILED_RE.test(r.transcript),
+      CREDENTIAL_TOKEN_EXPIRED_RE.test(r.transcript),
     // Carried through VERBATIM, including `undefined` — an executor that never
     // reported a tripwire outcome must stay UNOBSERVED, never default to engaged.
     denyFloorProbeCreated: r.denyFloorProbeCreated,
