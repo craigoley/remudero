@@ -373,7 +373,24 @@ test("W1-T1045: abandonment releases the lock and the lane", async () => {
       isolationExec: clockBoundCleanIsolationExec,
     });
     assert.notEqual(res2.verdict, "blocked_inflight", "the task is dispatchable again — no lock contention");
-    assert.equal(second.calls.length, 2, "the second dispatch actually spawned recon+implement, never refused early");
+    // W1-T2241 SUPERSEDED THE PROXY, NOT THE PROPERTY. This asserted `calls.length === 2` — recon
+    // plus implement — as the way to say "the second dispatch actually spawned, never refused
+    // early". Recon output is now keyed on `(task_id, plan_sha, files_digest)` and reused across
+    // dispatches, so a redispatch whose key still matches legitimately skips the recon spawn: that
+    // is exactly the cost W1-T2241 exists to stop paying, and a dispatch that died before opening a
+    // PR — abandonment included — is the case its own rationale names.
+    //
+    // THE ASSERTION IS STILL EXACT IN BOTH DIRECTIONS, not relaxed. Zero spawns means the dispatch
+    // was refused early and fails; two spawns means the artifact was NOT reused and also fails.
+    assert.equal(second.calls.length, 1, "the second dispatch spawned the implement worker, never refused early");
+    // AND IT IS THE IMPLEMENT SPAWN CARRYING THE REUSED ARTIFACT, never merely "some spawn": the
+    // VERIFY-AND-EXTEND framing is injected only by `reconArtifactToContext`, so a recon-only spawn,
+    // or a reuse that silently did not happen, fails here rather than passing on the count alone.
+    assert.match(
+      String(second.calls[0]?.prompt ?? ""),
+      /VERIFY-AND-EXTEND/,
+      "the one spawn is the implement worker, carrying the reused recon artifact",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

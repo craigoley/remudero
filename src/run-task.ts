@@ -7885,23 +7885,36 @@ export const RECON_UNVERIFIED_PREFIX = "RECON DID NOT ESTABLISH THIS — verify 
  * heading to leave behind — the silently-empty-block condition {@link reconDegradedContextNote}'s
  * doc exists to prevent cannot arise here, because there is nothing to be empty.
  */
+function nonEmptyLines(s: string): string[] {
+  return s
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+}
+
+/**
+ * Render OBSERVED lines as plain cited bullets and COULDN'T-VERIFY lines as
+ * unverified-prefixed cited bullets — the ONE place this pair of templates lives, shared by
+ * the live-recon path (`reconObservedToContext`) and the reused-artifact path
+ * (`reconArtifactToContext`, W1-T2241) so a source-level uniqueness check on either template
+ * (test/recon-gaps-relayed.test.ts's own mutant-detection) has exactly one substitution target
+ * to guard, not two copies that could silently drift apart.
+ */
+function renderReconClaimLines(taskId: string, observedLines: string[], gapLines: string[]): string[] {
+  return [
+    ...observedLines.map((l) => `- ${l} ${citation(`recon#${taskId}`)}`),
+    ...gapLines.map((l) => `- ${RECON_UNVERIFIED_PREFIX}${l} ${citation(`recon#${taskId}`)}`),
+  ];
+}
+
 function reconObservedToContext(recon: WorkerResult, taskId: string, recordPath?: string): string {
   const parsed = parseReconReport(workerTranscript(recon));
-  const nonEmptyLines = (s: string): string[] =>
-    s
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
   const lines = nonEmptyLines(parsed?.observed ?? "");
   const gaps = nonEmptyLines(parsed?.couldntVerify ?? "");
   // Each line becomes a cited CONTEXT claim (provenance from recon). The record line leads: it is
   // stable per task, while recon's output is per-run (cache-aware ordering, W1-T35). Gaps come
   // LAST so the prompt reads observations-then-caveats, and each carries the prefix above.
-  return [
-    taskRecordContextLine(taskId, recordPath),
-    ...lines.map((l) => `- ${l} ${citation(`recon#${taskId}`)}`),
-    ...gaps.map((l) => `- ${RECON_UNVERIFIED_PREFIX}${l} ${citation(`recon#${taskId}`)}`),
-  ]
+  return [taskRecordContextLine(taskId, recordPath), ...renderReconClaimLines(taskId, lines, gaps)]
     .filter((s) => s.length > 0)
     .join("\n");
 }
@@ -7944,6 +7957,170 @@ function reconDegradedContextNote(
   const recordLine = taskRecordContextLine(taskId, recordPath, acceptance);
   if (recordLine) lines.push(recordLine);
   return lines.join("\n");
+}
+
+// ── W1-T2241: RECON ARTIFACT — a recon run's TTL'd, task-scoped write-forward ───────────────
+//
+// THE DEFECT (MASTER-PLAN §5C's TASK B / P38, mint of an existing proposal, not a new one):
+// recon output is specified as TTL'd — nothing survives the run that produced it — so a task
+// whose first N dispatches die before opening a PR pays the full recon read cost N+1 times.
+// The harvest is verbatim, not incremental: three separate W1-T342 runs each independently
+// filed the same "read both fixture test files in full" sentence; four W1-T343 runs each filed
+// the same dependency-unblocked bullet, three re-deriving the same `dispatchLanes` conflict.
+//
+// THE KEY IS `(task_id, plan_sha, files_digest)`, NOT the plan's literal `head_sha` triple.
+// MASTER-PLAN:1861 keys the artifact `(task_id, plan_sha, head_sha)` but :1869-1870's own
+// invalidation sentence names only "`plan_sha` or the task's declared `files:`" — head_sha
+// never appears there. Measured on origin/main over a 7-day window, head_sha (any commit to
+// main) changes every ~508s median — an artifact keyed on it is invalidated by the FIRST
+// unrelated merge and essentially nothing survives to be reused. plan_sha is only 1.7x looser.
+// The `files:` component is the one that actually holds: 60 of 60 sampled shards were touched
+// by exactly one commit, ever. So this keys on the proposal's OWN invalidation sentence —
+// `(task_id, plan_sha, files_digest)` — dropping head_sha as the typo the triple contradicts.
+//
+// WHAT plan_sha AND files_digest ARE, CONCRETELY. Neither is a git plumbing sha (a git tree
+// object would also change on an unrelated file's mtime-only re-stage in some workflows, and
+// plumbing calls would need a repo, not just a worktree checkout) — both are content digests
+// computed straight off the WORKTREE this dispatch already checked out fresh from
+// `origin/main`, so "current" always means "what this dispatch would itself see":
+//   - `planSha` hashes every file under `<worktree>/plan/`, sorted by repo-relative path —
+//     a proxy for "any commit to plan/", the exact invalidation trigger MASTER-PLAN:1869 names.
+//   - `filesDigest` hashes the content of the task's own declared `files:` (an absent file —
+//     e.g. a forward-referenced test path not yet created — contributes a fixed "absent"
+//     sentinel rather than throwing, so a file's later CREATION is itself a digest change).
+//
+// STORAGE. One JSON file per task under `state/recon-artifacts/<task_id>.json` (config.root's
+// `state/` dir, the same root the ledger/status/inflight machinery already treats as durable
+// cross-run scratch — see `ledgerPath`, `statusPath`, `inflightDir` beside it). Never inside a
+// worktree (worktrees are reaped) and never inside `plan/` (that would be the machine writing a
+// human-owned tree — the exact hazard `plan/tasks.yaml`'s own header forbids). A corrupt or
+// unreadable artifact is treated as ABSENT, never fatal — recon degrading a worker's whole
+// dispatch over a broken cache file would be a worse defect than the one this organ fixes.
+export interface ReconArtifact {
+  task_id: string;
+  plan_sha: string;
+  files_digest: string;
+  observed: string;
+  inferred: string;
+  couldnt_verify: string;
+  written_at: string;
+  run_id: string;
+}
+
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
+}
+
+/**
+ * Content digest of every file under `<worktreePath>/plan/`, sorted by repo-relative path —
+ * the `plan_sha` key component. A missing `plan/` dir (should not happen in a real checkout,
+ * but a test fixture may omit it) hashes to the digest of an empty file list rather than
+ * throwing, so a plan-less fixture still gets a stable, comparable value.
+ */
+export function planSha(worktreePath: string): string {
+  const planDir = join(worktreePath, "plan");
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (entry.isFile()) files.push(p);
+    }
+  };
+  walk(planDir);
+  files.sort();
+  return sha256Hex(files.map((f) => `${relative(worktreePath, f)}:${sha256Hex(readFileSync(f, "utf8"))}`).join("\n"));
+}
+
+/**
+ * A declared file's content digest, or the `"absent"` sentinel — a SINGLE filesystem call
+ * (`readFileSync`), never a separate `existsSync`/`statSync` pre-check followed by a read of the
+ * same path: CodeQL's `js/file-system-race` flags exactly that shape (the file can change, or
+ * vanish, between the check and the read it gates). A missing file (a forward-referenced path not
+ * yet created) and a non-regular entry sharing the declared name (e.g. a directory) both throw out
+ * of `readFileSync` and both read as the same "absent" sentinel — the same semantics the old
+ * check-then-read had, without the race window.
+ */
+function fileDigestOrAbsent(p: string): string {
+  try {
+    return sha256Hex(readFileSync(p, "utf8"));
+  } catch {
+    return "absent";
+  }
+}
+
+/**
+ * Content digest of the task's own declared `files:` — the OTHER invalidation key component
+ * (MASTER-PLAN:1869-1870 names both, together, as the whole invalidation rule). Declared paths
+ * are sorted before hashing so the digest is independent of the order `files:` happens to list
+ * them in — only WHICH files and WHAT they contain, never their declared order, should be able
+ * to invalidate a reuse.
+ */
+export function filesDigest(worktreePath: string, files: ReadonlyArray<string>): string {
+  const sorted = [...files].sort();
+  const combined = sorted.map((f) => `${f}:${fileDigestOrAbsent(join(worktreePath, f))}`).join("\n");
+  return sha256Hex(combined);
+}
+
+function reconArtifactPath(root: string, taskId: string): string {
+  return join(root, "state", "recon-artifacts", `${taskId}.json`);
+}
+
+/** Fail-soft: a missing OR corrupt artifact both read as ABSENT — never a thrown error, since
+ *  that would make a broken cache file cost a dispatch its recon, exactly the harm this exists
+ *  to remove. */
+export function loadReconArtifact(root: string, taskId: string): ReconArtifact | undefined {
+  const p = reconArtifactPath(root, taskId);
+  if (!existsSync(p)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(p, "utf8"));
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as ReconArtifact).plan_sha === "string" &&
+      typeof (parsed as ReconArtifact).files_digest === "string" &&
+      typeof (parsed as ReconArtifact).observed === "string" &&
+      typeof (parsed as ReconArtifact).inferred === "string" &&
+      typeof (parsed as ReconArtifact).couldnt_verify === "string"
+    ) {
+      return parsed as ReconArtifact;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeReconArtifact(root: string, artifact: ReconArtifact): void {
+  const p = reconArtifactPath(root, artifact.task_id);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(artifact, null, 2));
+}
+
+/**
+ * The CONTEXT block injected when a PRIOR recon artifact is REUSED — a valid
+ * `(task_id, plan_sha, files_digest)` match found on disk, so THIS dispatch skips spawning
+ * recon entirely and recites the earlier run's bands instead. Same shape as
+ * `reconObservedToContext` (OBSERVED then COULDN'T-VERIFY, INFERRED never relayed — see that
+ * function's doc for why: `section()` strips the header label, so a relayed INFERRED line
+ * would be indistinguishable from an OBSERVED one once extracted, and `assertProvenance` would
+ * admit it with the same standing).
+ *
+ * EVIDENCE, NOT AUTHORITY (MASTER-PLAN Q3 / :1868). Every line is explicitly framed as a prior
+ * claim to VERIFY-AND-EXTEND, never a settled fact — the header says so once, up front, rather
+ * than trusting each bullet's own wording to carry that caveat.
+ */
+export function reconArtifactToContext(artifact: ReconArtifact, taskId: string, recordPath?: string): string {
+  const lines = nonEmptyLines(artifact.observed);
+  const gaps = nonEmptyLines(artifact.couldnt_verify);
+  const header =
+    `- REUSED RECON ARTIFACT from a prior dispatch of this task (written ${artifact.written_at}): ` +
+    "the claims below are EVIDENCE to VERIFY-AND-EXTEND, not settled fact — confirm each before " +
+    `building on it, the same as you would recon's own OBSERVED output. ${citation(`recon#${taskId}`)}`;
+  return [header, taskRecordContextLine(taskId, recordPath), ...renderReconClaimLines(taskId, lines, gaps)]
+    .filter((s) => s.length > 0)
+    .join("\n");
 }
 
 /**
@@ -8930,75 +9107,148 @@ async function runTask(
         prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock),
       });
 
-    let recon = account(await spawnRecon());
-    log("recon.done", {
-      session_id: recon.sessionId,
-      cost_usd: recon.costUsd,
-      num_turns: recon.numTurns,
-      subtype: recon.subtype,
-      attempt: 1,
-      // W1-T6: every worker call ledgers the standard telemetry shape.
-      ...workerLedgerFields(recon),
-    });
+    // W1-T2241: RECON ARTIFACT REUSE — before ever spawning recon, check whether a VALID prior
+    // artifact exists for THIS task at THIS `(plan_sha, files_digest)`. Both are computed against
+    // `worktreePath`, already checked out fresh from `origin/main` above, so "current" always
+    // means what THIS dispatch would itself observe — never a stale read of the orchestrator's
+    // own tree. See `planSha`/`filesDigest`/`ReconArtifact`'s doc (above `RECON_MAX_TURNS`) for
+    // the key's derivation and why it drops `head_sha`.
+    const currentPlanSha = planSha(worktreePath);
+    const currentFilesDigest = filesDigest(worktreePath, task.files ?? []);
+    const priorReconArtifact = loadReconArtifact(config.root, taskId);
+    const reconArtifactValid =
+      !!priorReconArtifact &&
+      priorReconArtifact.plan_sha === currentPlanSha &&
+      priorReconArtifact.files_digest === currentFilesDigest;
 
-    // W1-T299: recon is a READ-ONLY preamble — a worker ERROR here (overwhelmingly
-    // `error_max_turns`; RECON_MAX_TURNS's own doc above measured 11/18 recons dying on the cap
-    // on 2026-08-03) used to be FATAL to the WHOLE RUN via failOnWorkerError, ending dispatch
-    // before implement ever spawned and burning a strike toward `dispatchesWithoutNewOwnedPr`'s
-    // per-task breaker with no PR and no chance of ever getting one. Degrade instead of abort:
-    // ONE bounded retry, and if that ALSO errors, proceed to implement anyway with an EXPLICIT
-    // "recon context absent" claim (reconDegradedContextNote, never a silently empty CONTEXT
-    // block) and a loud `recon.degraded` ledger line naming the subtype.
-    //
-    // The ONE exception is a budget breach: workerErrorVerdict's own doc says dollars are the
-    // hard backstop, never retried anywhere in this file — recon gets no special case there and
-    // stays fatal on a budget breach, unchanged from before this task.
-    //
-    // OPEN QUESTION the task file left for the implementer: should a degraded-recon run be
-    // exempted from `dispatchesWithoutNewOwnedPr`? Decided NO — `run.start` above already
-    // ledgered this dispatch before recon ever spawned, so it counts as a REAL dispatch exactly
-    // like every other run regardless of what recon does; a task whose recon can never complete
-    // must still eventually trip the breaker rather than dispatch forever for free.
+    let recon: WorkerResult | undefined;
     let reconDegradedSubtype: string | undefined;
-    const reconVerdict1 = workerErrorVerdict(recon, costUsd, "recon");
-    if (reconVerdict1) {
-      if (reconVerdict1.budgetBreach) {
-        const reconFail = failOnWorkerError(recon, "recon");
-        if (reconFail) return reconFail;
+    let reusedReconArtifact: ReconArtifact | undefined;
+
+    if (reconArtifactValid) {
+      // HIT: recon is skipped entirely this dispatch — the cost this task exists to stop
+      // paying twice. `reconArtifactToContext` (below, at the CONTEXT-render site) frames every
+      // relayed line as evidence to VERIFY-AND-EXTEND, never authority (MASTER-PLAN Q3).
+      reusedReconArtifact = priorReconArtifact;
+      say(`recon artifact reused (written ${priorReconArtifact!.written_at}) — recon skipped this dispatch`);
+      log("recon.reused", {
+        plan_sha: currentPlanSha,
+        files_digest: currentFilesDigest,
+        written_at: priorReconArtifact!.written_at,
+        source_run_id: priorReconArtifact!.run_id,
+      });
+    } else {
+      // MISS: a full recon runs, exactly as before this task (MASTER-PLAN Q3 — "recon still
+      // runs when the key misses"). The MISS ITSELF is ledgered explicitly, distinguishing a
+      // first-ever dispatch (`recon.absent`) from a prior artifact this task's `plan_sha` or
+      // `files:` has since moved past (`recon.invalidated`) — never a silent, unexplained
+      // full recon (P48(ii): no silent empty).
+      if (priorReconArtifact) {
+        const reason = priorReconArtifact.plan_sha !== currentPlanSha ? "plan_sha" : "files_digest";
+        say(`recon artifact invalidated (${reason} changed) — running a full recon`);
+        log("recon.invalidated", {
+          reason,
+          prior_plan_sha: priorReconArtifact.plan_sha,
+          plan_sha: currentPlanSha,
+          prior_files_digest: priorReconArtifact.files_digest,
+          files_digest: currentFilesDigest,
+        });
+      } else {
+        log("recon.absent", { plan_sha: currentPlanSha, files_digest: currentFilesDigest });
       }
-      say(`recon worker errored (${recon.subtype}) — one bounded retry before degrading (W1-T299)`);
-      log("recon.retry", { subtype: recon.subtype, num_turns: recon.numTurns });
+
       recon = account(await spawnRecon());
       log("recon.done", {
         session_id: recon.sessionId,
         cost_usd: recon.costUsd,
         num_turns: recon.numTurns,
         subtype: recon.subtype,
-        attempt: 2,
+        attempt: 1,
+        // W1-T6: every worker call ledgers the standard telemetry shape.
         ...workerLedgerFields(recon),
       });
-      const reconVerdict2 = workerErrorVerdict(recon, costUsd, "recon");
-      if (reconVerdict2) {
-        if (reconVerdict2.budgetBreach) {
+
+      // W1-T299: recon is a READ-ONLY preamble — a worker ERROR here (overwhelmingly
+      // `error_max_turns`; RECON_MAX_TURNS's own doc above measured 11/18 recons dying on the cap
+      // on 2026-08-03) used to be FATAL to the WHOLE RUN via failOnWorkerError, ending dispatch
+      // before implement ever spawned and burning a strike toward `dispatchesWithoutNewOwnedPr`'s
+      // per-task breaker with no PR and no chance of ever getting one. Degrade instead of abort:
+      // ONE bounded retry, and if that ALSO errors, proceed to implement anyway with an EXPLICIT
+      // "recon context absent" claim (reconDegradedContextNote, never a silently empty CONTEXT
+      // block) and a loud `recon.degraded` ledger line naming the subtype.
+      //
+      // The ONE exception is a budget breach: workerErrorVerdict's own doc says dollars are the
+      // hard backstop, never retried anywhere in this file — recon gets no special case there and
+      // stays fatal on a budget breach, unchanged from before this task.
+      //
+      // OPEN QUESTION the task file left for the implementer: should a degraded-recon run be
+      // exempted from `dispatchesWithoutNewOwnedPr`? Decided NO — `run.start` above already
+      // ledgered this dispatch before recon ever spawned, so it counts as a REAL dispatch exactly
+      // like every other run regardless of what recon does; a task whose recon can never complete
+      // must still eventually trip the breaker rather than dispatch forever for free.
+      const reconVerdict1 = workerErrorVerdict(recon, costUsd, "recon");
+      if (reconVerdict1) {
+        if (reconVerdict1.budgetBreach) {
           const reconFail = failOnWorkerError(recon, "recon");
           if (reconFail) return reconFail;
         }
-        // Second failure — DEGRADE, never abort: proceed to implement with an EMPTY recon
-        // context (reconDegradedContextNote below makes the absence explicit in the prompt).
-        reconDegradedSubtype = recon.subtype;
-        log("recon.degraded", {
-          subtype: recon.subtype,
+        say(`recon worker errored (${recon.subtype}) — one bounded retry before degrading (W1-T299)`);
+        log("recon.retry", { subtype: recon.subtype, num_turns: recon.numTurns });
+        recon = account(await spawnRecon());
+        log("recon.done", {
+          session_id: recon.sessionId,
+          cost_usd: recon.costUsd,
           num_turns: recon.numTurns,
-          reason: `recon errored twice in a row (${recon.subtype}) — bounded retry exhausted; implement proceeds with an EMPTY recon context`,
+          subtype: recon.subtype,
+          attempt: 2,
+          ...workerLedgerFields(recon),
         });
-        say(`⚠️ recon.degraded (${recon.subtype}) — implement proceeds with NO recon context`);
+        const reconVerdict2 = workerErrorVerdict(recon, costUsd, "recon");
+        if (reconVerdict2) {
+          if (reconVerdict2.budgetBreach) {
+            const reconFail = failOnWorkerError(recon, "recon");
+            if (reconFail) return reconFail;
+          }
+          // Second failure — DEGRADE, never abort: proceed to implement with an EMPTY recon
+          // context (reconDegradedContextNote below makes the absence explicit in the prompt).
+          reconDegradedSubtype = recon.subtype;
+          log("recon.degraded", {
+            subtype: recon.subtype,
+            num_turns: recon.numTurns,
+            reason: `recon errored twice in a row (${recon.subtype}) — bounded retry exhausted; implement proceeds with an EMPTY recon context`,
+          });
+          say(`⚠️ recon.degraded (${recon.subtype}) — implement proceeds with NO recon context`);
+        }
+      }
+
+      // W1-T2241: persist the artifact for the NEXT dispatch of this SAME task — only on a
+      // genuine success (never on a degrade: the final attempt's text is an error envelope, not
+      // a report worth keeping) and only when the transcript actually parses as a RECON REPORT
+      // (an unparseable "success" has nothing worth persisting either — same guard
+      // `reconObservedToContext` already applies via `parseReconReport`'s `null` return).
+      if (!reconDegradedSubtype) {
+        const parsedForArtifact = parseReconReport(workerTranscript(recon));
+        if (parsedForArtifact) {
+          writeReconArtifact(config.root, {
+            task_id: taskId,
+            plan_sha: currentPlanSha,
+            files_digest: currentFilesDigest,
+            observed: parsedForArtifact.observed,
+            inferred: parsedForArtifact.inferred,
+            couldnt_verify: parsedForArtifact.couldntVerify,
+            written_at: new Date().toISOString(),
+            run_id: runId,
+          });
+        }
       }
     }
 
     // Recon's own optional '## Follow-ups' section (renderReconPrompt above) — no `pr_url`
     // (recon never opens one); the retro harvest still cites its run/task. Skipped on a
-    // degraded recon: the final attempt's text is an error envelope, not a report to harvest.
-    if (!reconDegradedSubtype) {
+    // degraded recon (the final attempt's text is an error envelope, not a report) AND on a
+    // reused artifact (no fresh transcript this dispatch — the artifact's origin run already
+    // harvested its own follow-ups when it ran).
+    if (recon && !reconDegradedSubtype) {
       harvestFollowupsFromReport(workerTranscript(recon), { label: "recon", log, say });
     }
 
@@ -9067,9 +9317,14 @@ async function runTask(
     // resolves against the orchestrator's `planPath`, and that absolute answer is what sent
     // workers writing into the daemon's own checkout.
     const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId));
-    const reconContext = reconDegradedSubtype
-      ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
-      : reconObservedToContext(recon, taskId, recordPath);
+    // W1-T2241: a reused artifact takes precedence — it is mutually exclusive with the other two
+    // arms (see the recon dispatch above: `reusedReconArtifact` is only ever set when recon was
+    // never spawned this dispatch, so `reconDegradedSubtype`/`recon` never apply to that arm).
+    const reconContext = reusedReconArtifact
+      ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
+      : reconDegradedSubtype
+        ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
+        : reconObservedToContext(recon!, taskId, recordPath);
     const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
