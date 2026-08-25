@@ -77,6 +77,32 @@
     than confirmed here. What IS confirmed from source is that each such row carries the ref name
     and the remedy verbatim, because `checkSharedPause` builds that string and the tick logs it as
     the row's detail.
+
+    LATER MEASUREMENT — TWO OF THE THREE DEFERRED HALTS ARE REFUTED, AND THE ENUMERATION ABOVE IS
+    LEFT EXACTLY AS IT WAS. It was an honest reading when written and a reader should be able to see
+    what was claimed beside what was later measured, so nothing above is softened or rewritten. The
+    evidence for each correction lives where it was taken and is not restated here.
+
+    THE PER-TASK CIRCUIT BREAKER IS NOT INVISIBLE. It is already rendered TWICE on `rmd status` — the
+    `kind: "circuit_broken"` blocker class and the attempts/perpetual row — across seven references
+    in `status-board.ts`, against 2,114 `dispatch.circuit_broken` ledger rows, so it is live as well
+    as visible. "INVISIBLE" was true only OF THE LATCH BLOCK, which is a different claim from
+    "invisible on the surface an operator runs", and this shard's enumeration did not distinguish
+    them. A latch row for it would be a THIRD rendering on one verb.
+
+    THE LIFETIME CAP IS INVISIBLE BUT NOT YET REACHABLE. Zero board surfaces read `lifetime_capped`,
+    so the enumeration is right that nothing shows it — but it has never fired: zero
+    `dispatch.lifetime_capped` rows since it shipped 2026-08-04, in a corpus where its sibling
+    breaker fired 2,114 times over an overlapping window. Nothing to file until it fires once.
+
+    THE THIRD WENT SOMEWHERE, AND NOT WHERE THIS SHARD EXPECTED. The cross-host dispatch claim is
+    filed as W1-T2270 — CITED, NOT RE-FILED — and deliberately NOT as a board row. The subject there
+    is the contradiction underneath: `dispatch-claim.ts` refuses a time-based expiry on the stated
+    ground that "a claim that outlives its lane is a visible ref an operator can drop", while THIS
+    shard measured that no surface can render a git ref at all. So the trade was priced against a
+    property that does not exist, which is a design question rather than a rendering one. That
+    reframing is why the deferral above resolved to one task instead of three.
+
   note: |
     RULE 19 BAND. `files:` is one source file and its test; the sizing check derives concerns from
     basenames, so a test whose name does not match its source reads as a span whatever the change
