@@ -12170,6 +12170,16 @@ export function reapBranchesCommand(
     declarationBlock,
   );
 
+  // W1-T2228 form (2)(ii): `plan.missingBranches` (status.ts) is the RAW, citation-blind answer
+  // to "declared, but no branch of that name is on origin" — it necessarily also contains
+  // `feedback-landing`/`decisions-landing` on a between-landings repo, since status.ts has no
+  // citation information to tell those apart from a genuinely dead entry (design (v)). Only this
+  // reporting arm can make that call, because only it has the citation scan: a declared name is
+  // reported here as a DEAD guard iff its branch is gone from origin AND nothing outside its own
+  // declaration cites it either (i.e. it is ALSO in `orphanDeclarations`) — `feedback-landing` is
+  // cited via `LANDING_BRANCH`, so it never lands in `orphanDeclarations` and never reaches here.
+  const deadDeclaredGuards = plan.missingBranches.filter((n) => orphanDeclarations.includes(n));
+
   console.log(`branches:  ${names.length} on origin`);
   console.log(`guarded:   ${plan.guarded.length}  ${plan.guarded.join(", ")}`);
   console.log(`deletable: ${plan.deletable.length}`);
@@ -12197,6 +12207,7 @@ export function reapBranchesCommand(
       undeclared_guards: plan.undeclaredGuards,
       dangling_citations: danglingCitations,
       orphan_declarations: orphanDeclarations,
+      missing_branches: deadDeclaredGuards,
     });
   }
 
@@ -12221,6 +12232,13 @@ export function reapBranchesCommand(
       `rmd reap-branches: ${orphanDeclarations.length} declared guard(s) are no longer cited anywhere outside ` +
         `their own declaration — remove from DECLARED_BRANCH_GUARDS or restore the citation: ` +
         `${orphanDeclarations.join(", ")}`,
+    );
+  }
+  if (deadDeclaredGuards.length > 0) {
+    drift = true;
+    console.error(
+      `rmd reap-branches: ${deadDeclaredGuards.length} declared guard(s) name a branch absent from origin AND ` +
+        `are not cited anywhere else — the branch is gone, remove the declaration: ${deadDeclaredGuards.join(", ")}`,
     );
   }
   return drift ? 1 : 0;

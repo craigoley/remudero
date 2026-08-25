@@ -2187,13 +2187,24 @@ export interface BranchFacts {
   namedInSource: boolean;
 }
 
-/** The dry run's answer: three disjoint buckets plus the drift alarm (W1-T447). */
+/** The dry run's answer: three disjoint buckets plus the drift alarms (W1-T447, W1-T2228). */
 export interface BranchReapPlan {
   deletable: string[];
   guarded: string[];
   hold: string[];
   /** Branches the NAME GREP protects that the declared list does not — the drift signal. */
   undeclaredGuards: string[];
+  /**
+   * DECLARED, but no branch of that name is on origin (W1-T2228 form (2)(ii)). `facts` is built
+   * only from branches that EXIST (`remoteBranchNames`), so a dead declaration for a deleted
+   * branch is never even visited by the loop below — this is the one comparison that must run
+   * against the full declared list rather than against `facts`. Citation status is irrelevant
+   * here on purpose: `feedback-landing` is cited (via `LANDING_BRANCH`) and routinely absent
+   * between landings, so "no branch on origin" alone is a normal, non-drift state for an
+   * ephemeral guard — see reapBranchesCommand's separate no-citation check (`orphanDeclarations`,
+   * W1-T2226) for the direction that DOES need citation to disambiguate a dead entry from one.
+   */
+  missingBranches: string[];
 }
 
 /**
@@ -2224,7 +2235,24 @@ export function planBranchReap(
   declaredGuards: readonly string[],
 ): BranchReapPlan {
   const declared = new Set(declaredGuards);
-  const plan: BranchReapPlan = { deletable: [], guarded: [], hold: [], undeclaredGuards: [] };
+  const plan: BranchReapPlan = {
+    deletable: [],
+    guarded: [],
+    hold: [],
+    undeclaredGuards: [],
+    missingBranches: [],
+  };
+  // THE RAW (2)(ii) CANDIDATE, computed against the declared list directly rather than against
+  // `facts` — `facts` has no row at all for a branch that is no longer on origin, so this is the
+  // one comparison in this function that cannot be a clause inside the loop below. PURE and
+  // UNCONDITIONAL on purpose: this function has no citation information, so it cannot itself
+  // decide whether a name absent from `facts` is a dead declaration or an ephemeral one
+  // (`feedback-landing` reads identically to a truly dead entry from here). The caller — which
+  // does have the citation scan — is where that disambiguation belongs (W1-T2228 design (v)).
+  const factNames = new Set(facts.map((f) => f.name));
+  for (const name of declaredGuards) {
+    if (name !== "main" && !factNames.has(name)) plan.missingBranches.push(name);
+  }
   for (const f of facts) {
     // `main` is never a candidate, whatever else is true of it.
     const isGuarded = f.name === "main" || f.namedInSource || declared.has(f.name);
