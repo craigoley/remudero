@@ -10334,13 +10334,13 @@ async function runTask(
     // wipe-test.ts (`resolveWipeTestArmPermission`); this call site only consults it and skips
     // `armAutoMergeAtOpen` outright when it refuses, so a wipe-test PR is never armed and can
     // never merge out from under the pair it belongs to.
-    // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
-    // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
-    // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
     const armOutcome: ArmOutcome | "no-merge-boundary-refused" = wipeTestArmDecision.armed
       ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
       : "no-merge-boundary-refused";
+    // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
+    // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
+    // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
     log("automerge.armed", {
       at: "verdict",
       outcome: armOutcome,
