@@ -13,7 +13,10 @@ import { readFileSync } from "node:fs";
  * it rejects any unknown or MISPLACED key with a named error, before spawn.
  *
  * Key sets verified equal to SandboxSettingsSchema at SDK 0.3.233, 2026-08-24
- * (CLI 2.1.209) — `SANDBOX_KEYS` below is enforced against the live schema by
+ * (CLI 2.1.220, the version the DAEMON CONTAINER resolves — not the operator
+ * shell's, which reads a newer one; `pathToClaudeCodeExecutable` is resolved
+ * FRESH at spawn time, so the container's binary is the one workers use) —
+ * `SANDBOX_KEYS` below is enforced against the live schema by
  * test/settings.test.ts (W1-T2216), which parses the installed `sdk.d.ts` by
  * brace depth (the schema object isn't exported at runtime, and the type-level
  * `keyof SandboxSettings` widens to `string`, so neither mechanical check is
