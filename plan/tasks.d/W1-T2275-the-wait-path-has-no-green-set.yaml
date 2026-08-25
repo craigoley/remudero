@@ -100,6 +100,36 @@
       THE SHARD DOES NOT PICK. Note that fixing §1 alone may make §4 moot for the observed cases — a
       `neutral` osv-scanner stops being pending whether or not it is required — so the taxonomy is
       the smaller change and the scope question can be ruled on separately.
+
+    (5) RETIRED AS A DUPLICATE — W1-T2274 IS THE SURVIVOR, AND THE REASON IS ITS CONTENT, NOT ITS
+    TIMESTAMP. Both shards were filed for the same defect within minutes of each other and both are
+    on main. This one is retired `retired` (superseded) rather than `closed` (completed) or
+    `withdrawn` (by ruling): the work is still wanted, it is simply carried by the other id.
+
+    WHAT W1-T2274 HAS THAT THIS SHARD DOES NOT, taken from its own text rather than asserted.
+    IT SHOWS THE BLOCK WAS WRONG IN OUTCOME, not only in wording: both blocked PRs merged afterwards,
+    at 13:16:02Z and 13:53:09Z. IT SHOWS THE CANCELLED CHECK'S OWN TWO ATTEMPTS — `coverage-ratchet`
+    concluding `cancelled` at 02:19:16Z and then `success` on the re-run at 03:08:03Z — so the red
+    verdict was contradicted by the check itself. IT FINDS A FIFTH CLASSIFIER, `redChecks`
+    (`src/lib/dep-review.ts:214`), which this shard's four-site enumeration missed.
+
+    AND IT CORRECTS A CLAIM BOTH BRIEFS CARRIED, INCLUDING THIS SHARD'S. `checkWaitStalled` decides
+    stalled from the rollup SIGNATURE and from `rollupHasRunningCheck`, NEVER from the `pending`
+    list — so reclassifying `neutral` would not by itself have changed the stall DECISION on either
+    head. What the misclassification corrupts is the REASON the verdict carries, and separately the
+    sweep's own state. This shard's §2 reads the two stalls as caused by the pending-list defect;
+    that reading is WRONG and W1-T2274 is where the corrected one lives. A future reader arriving
+    here should follow the survivor rather than trust this paragraph's neighbours.
+
+    (6) HOW THE DUPLICATE HAPPENED, RECORDED AS AN OBSERVATION AND NOT FILED. The allocator did its
+    job and the reading of it did not. `rmd next-task-id --reserve` reported `W1-T2274: HELD BY
+    ANOTHER CALLER — the fleet` and advanced, and that was read as a NUMBERING collision rather than
+    as a signal that another caller was already filing THIS SUBJECT. The anchor carries
+    `<pid>@<container>`, which is enough to know a caller exists and NOT enough to know you are about
+    to duplicate them. That is a gap between what the reservation proves and what a filer needs, and
+    it is named here so the next filer recognises the shape — no task is filed for it and `files:` is
+    not widened.
+
   design: |
     (i) ONE TAXONOMY, CONSULTED BY EVERY SITE. The wait path gains a green set rather than a literal
     `SUCCESS` comparison, and it is the SAME set site C already uses — never a fourth hand-copy, which
@@ -125,6 +155,7 @@
       proof: "unit test: test/check-conclusion-taxonomy.test.ts"
   files: [src/run-task.ts, test/check-conclusion-taxonomy.test.ts]
   status: queued
+  retirement: retired
   attempts: 0
   origin: "recon#wait-path-has-no-green-set-2026-08-25"
   plan_refs: ["W1-T382", "W1-T457", "W1-T1223", "W1-T2249"]
