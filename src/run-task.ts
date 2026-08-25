@@ -575,6 +575,7 @@ import {
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
+  classifyGhFailure,
   createDispatchBreakerCache,
   DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   deriveStatus,
@@ -3364,6 +3365,81 @@ export function scopeGuardOutOfScopeFiles(
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
   const declared = new Set(declaredFiles);
   return diffFiles.filter((f) => !declared.has(f));
+}
+
+/** The `git ls-remote --exit-code` probe's OWN failure evidence — captured from the `catch`
+ *  at the fallback-push site (W1-T2267) instead of discarded. `status` is `null` when the
+ *  process never produced one at all (e.g. git itself failed to spawn). */
+export interface RemotePresenceProbeFailure {
+  status: number | null;
+  stderr: string;
+}
+
+/** {@link fallbackPushCause}'s answer: the fallback always fires for the same reason
+ *  (`branchOnOrigin === false`), but WHY that is true splits into four distinguishable shapes.
+ *  `detail` is always populated — a cause is never reported bare (acceptance #1/#5). */
+export type FallbackPushCause =
+  | { cause: "probe_unreadable"; detail: string }
+  | { cause: "credential_expired"; detail: string }
+  | { cause: "push_not_attempted"; detail: string }
+  | { cause: "undetermined"; detail: string };
+
+/**
+ * W1-T2267 — WHY THE ORCHESTRATOR'S FALLBACK PUSH FIRED, NOT ONLY THAT IT DID (design
+ * (i)/(ii)/(iii)). A worker whose copied `GH_TOKEN` expired mid-run and a worker that simply
+ * never pushed both collapse to the identical observable today — `branchOnOrigin === false` —
+ * and a `git ls-remote` probe that itself could not read the remote collapses onto that same
+ * flag too, because the old bare `catch` bound no error and the probe ran with `stdio: "ignore"`.
+ * This is PURE (no I/O — every input is evidence the caller already holds) and reused by both the
+ * behavioral fallback site and its own fixture-only unit suite.
+ *
+ * `--exit-code` gives `git ls-remote` status exactly `2` ONE specific meaning: the remote WAS
+ * reached and simply has no matching ref. Any other status — or none, when the process never ran
+ * at all — means the PROBE failed to answer, which is a different claim from "the branch is
+ * absent" (design (iii)): reported as `probe_unreadable`, classified through the SAME
+ * {@link classifyGhFailure} every other gh/git failure in this file already reuses (status.ts),
+ * never a new parallel string match.
+ *
+ * When the probe DID cleanly confirm the ref is missing, the worker's own transcript+stderr is
+ * the remaining evidence — this task declares no edit to worker.ts/git-push.ts, so the worker's
+ * own push attempt is opaque beyond what it already reported. Reusing `classifyGhFailure` AGAIN,
+ * this time against that text, trips the SAME auth-phrase regex a stale-credential `git push`
+ * failure would ("Authentication failed", "bad credentials", …) and separates a
+ * `credential_expired` push from one the transcript never mentions attempting
+ * (`push_not_attempted`) from anything else (`undetermined` — NAMED, never silently dropped;
+ * design (ii), acceptance #2/#5).
+ */
+export function fallbackPushCause(
+  probe: RemotePresenceProbeFailure | undefined,
+  workerEvidence: string,
+): FallbackPushCause {
+  if (!probe || probe.status !== 2) {
+    const reason = classifyGhFailure(probe?.status ?? null, probe?.stderr ?? "");
+    return {
+      cause: "probe_unreadable",
+      detail:
+        `git ls-remote could not confirm the branch is absent (status ${probe?.status ?? "none"}, ` +
+        `classified ${reason})${probe?.stderr ? `: ${probe.stderr}` : ""}`,
+    };
+  }
+  if (classifyGhFailure(null, workerEvidence) === "auth") {
+    return {
+      cause: "credential_expired",
+      detail: "the worker's own transcript/stderr carries a git/gh authentication failure",
+    };
+  }
+  if (!/\bgit\s+push\b/i.test(workerEvidence)) {
+    return {
+      cause: "push_not_attempted",
+      detail: "no \"git push\" invocation appears anywhere in the worker's own transcript",
+    };
+  }
+  return {
+    cause: "undetermined",
+    detail:
+      "the branch is confirmed absent from origin but neither a credential failure nor a missing " +
+      "push attempt is evident in the worker's own transcript",
+  };
 }
 
 /**
@@ -9673,15 +9749,35 @@ async function runTask(
 
     // Ensure the branch is on origin (worker pushes without -u).
     let branchOnOrigin = false;
+    let probeFailure: RemotePresenceProbeFailure | undefined;
     try {
       execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], {
-        stdio: "ignore",
+        // W1-T2267: was `stdio: "ignore"`, which discarded the probe's own stderr — the exact
+        // evidence `fallbackPushCause` needs to tell an unreadable remote from a genuinely
+        // absent ref. stdout/stdin stay ignored; only stderr is captured.
+        stdio: ["ignore", "ignore", "pipe"],
       });
       branchOnOrigin = true;
-    } catch {
+    } catch (e) {
       branchOnOrigin = false;
+      // W1-T2267: capture the probe's exit status/stderr instead of a bare, unbound `catch` —
+      // see `fallbackPushCause` (above scopeGuardOutOfScopeFiles) for what this evidence feeds.
+      const err = e as { status?: number | null; stderr?: Buffer | string };
+      probeFailure = {
+        status: typeof err.status === "number" ? err.status : null,
+        stderr: err.stderr !== undefined ? String(err.stderr).trim() : "",
+      };
     }
     if (!branchOnOrigin) {
+      // W1-T2267: WHY the fallback fired, not only that it did (design (i)). Computed and
+      // ledgered BEFORE the push below, from evidence already in hand — the probe's own
+      // status/stderr and the implement worker's own transcript+stderr (identical evidence
+      // `workerSignal` already builds for the retry classifier, just reused for a different
+      // question). This does not gate or delay the push itself (design note: "a run that cannot
+      // determine WHY still pushes" — acceptance #4).
+      const pushCause = fallbackPushCause(probeFailure, [workerTranscript(impl), impl.stderr].join("\n"));
+      log("fallback_push.cause", { branch, cause: pushCause.cause, detail: pushCause.detail });
+      say(`fallback push firing for ${branch} — cause: ${pushCause.cause} (${pushCause.detail})`);
       // W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG — the ONE orchestrator-initiated push in this
       // file (the worker itself normally pushes from inside its own sandbox; this fallback runs on
       // whatever the worktree holds, which is exactly the shape a refreshed/collapsed/squashed
