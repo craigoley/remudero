@@ -86,6 +86,61 @@
     2026-08-12T23:47:53.826Z, `risk_judge.escalated` 2026-08-12T13:53:17.117Z.** This host's corpus
     ends thirteen days before the four escalations above, so it cannot carry them; the GitHub issues
     are the independent evidence and the ledger figure is the historical base rate only.
+
+    (8) THE POPULATION FACT THAT DECIDES WHETHER AN ADJUDICATOR CAN EVER BE VALIDATED, AND IT IS
+    NOT A CAPACITY QUESTION. Measured 2026-08-25 on a LIVE union at the state dir (ok true, 26
+    archives, liveFileRead true, unread none, 254,311 rows, oldest 2026-08-08T21:59:00.337Z,
+    NEWEST ROW 0.0 MINUTES OLD): ALL 25 RISK-JUDGE ESCALATIONS, ALL TIME, WERE EVENTUALLY MERGED.
+    25 OF 25. THE ESCALATION HAS NEVER ONCE STOPPED A CHANGE. The 25 distinct escalated task ids
+    were resolved against the same merge-credit reader the dispatcher trusts (`isMergeCreditLine`),
+    which sees 788 credited ids on that union; the control holds in both directions, a
+    known-credited id resolving true and a known-uncredited one false.
+
+    (9) AND THE CONSEQUENCE, WHICH IS THE POINT AND NOT A FOOTNOTE. A CONSTANT-CLEAR ADJUDICATOR
+    WOULD AGREE WITH THE OPERATOR ON 100% OF THE HISTORICAL RECORD. OUTCOME AGREEMENT CANNOT
+    VALIDATE A REMEDY IN THIS CLASS. An instrument whose only evidence is "it cleared the ones the
+    operator went on to merge" is indistinguishable from a rubber stamp by construction, because
+    the null hypothesis scores perfectly. So any future instrument here needs PRE-REGISTERED
+    DISCRIMINATORS, declared before it runs, rather than a hit rate computed after: a citation a
+    human can check, a polarity-inverted negative control it must refuse to clear, a clear rate
+    split by reason class rather than pooled, and a non-clearing arm that is required to fire.
+
+    (10) AND THE TARGET IS NARROWER THAN THE DISARM RATE SUGGESTS. Judge-caused disarms are 25 OF
+    141 — 17.7%. The bulk is 109 (77.3%) reading "verdict refuses auto-merge: remudero-review is
+    not success", plus 7 capped (6 reading "CAPPED verdict (zero proofs executed)" and 1 "capped
+    verdict refused auto-merge"). `risk_judge.decision` corroborates from the other side: 25
+    ESCALATE / 182 PROCEED OF 207, of which 22 HIGH and 3 CONFIDENCE-FLOOR. So a remedy scoped to
+    the judge addresses about a sixth of the disarm population, and must not be described as
+    fixing the 12% arm-to-disarm rate; the larger share is a review problem with a different cause
+    and a different fix.
+
+    (11) THE RECOGNITION TEST, CARRIED VERBATIM, BECAUSE IT IS WHAT KEEPS A WORKER OFF THE WRONG
+    QUESTION. "A decision is irreducibly the operator's when its truth-maker is not in the artefact
+    — when answering it does not read evidence but creates a rule." ITS GRAMMATICAL TELL: A REASON
+    CITING A PROPERTY OF THE CHANGE IS FACT-SETTLING; A REASON CITING A NORM IS PRECEDENT-SETTING.
+    WORKED EXAMPLE, from `issues/2863`: "an unusual operational control pattern that deviates from
+    established practice" — a claim NO DIFF CAN REFUTE, because reading the code only confirms the
+    pattern is unusual, which the judge already said. The test is applied to the judge's own reason
+    text, not to the change, so it costs nothing and can run before any worker is spent.
+
+    (12) AND THE ORDERING IS A CONSTRAINT, NOT A PREFERENCE. FRAMING SHIPS BEFORE ANY ADJUDICATOR.
+    If the framing works, the inversion class shrinks and an adjudicator's population shrinks with
+    it, which changes both its cost case and its warrant — so building the expensive instrument
+    first would size it against a population the cheap fix is about to change. THIS SHARD'S OWN
+    "NOT BOTH, NOT YET" APPLIES TO THAT ORDERING EXACTLY AS IT APPLIES TO PASSING A DIFF.
+
+    (13) ONE CORRECTION TO THIS RECORD'S OWN CORPUS LIMIT, RECORDED RATHER THAN EDITED. Rationale
+    (7) states that this host's corpus ends thirteen days before the four escalations and gives
+    `risk_judge.decision` at 87 decisions, 10 escalations, newest 2026-08-12T23:47:53.826Z. THAT
+    READING IS NOT REPRODUCIBLE HERE TODAY. On the union above, `risk_judge.decision` reads n=207
+    with NEWEST 2026-08-25T18:55:51.030Z and `risk_judge.escalated` n=25 with newest
+    2026-08-25T18:49:55.737Z; 207 of 207 are distinct on (task_id, run_id), so no dedup collapses
+    them. Only ONE ledger corpus exists on this host, checked by enumeration, so the two readings
+    cannot be of different state dirs. The cause is not established here and is not asserted; what
+    is established is that the ledger CAN see today, the four escalations ARE in it, and (7)'s
+    stale-window caveat must not be relied on by a builder. This is exactly the failure the
+    standing rail names — a positive control proves a query can see its corpus, never that the
+    corpus covers the window — and it is recorded against this record rather than edited into it.
   design: |
     (i) Q2 — THE REMEDY IS THE FRAMING, AND THE MEASURED EVIDENCE SAYS SO RATHER THAN THE ARGUMENT.
     One sentence in `buildRiskJudgePrompt` telling the judge that the description states the DEFECT
