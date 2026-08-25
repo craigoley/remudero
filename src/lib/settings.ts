@@ -73,6 +73,28 @@ const FILESYSTEM_KEYS = new Set([
   "allowManagedReadPathsOnly",
 ]);
 
+/**
+ * Fleet egress allowlist (W1-T2243). `checkKeys` above pins WHICH settings
+ * keys may exist; this pins WHICH domains `sandbox.network.allowedDomains`
+ * may name — a value the key check alone never inspects. Every domain the
+ * committed template (settings/worker.json) ships today must be a member of
+ * this set, so a changed egress list (typo, merge conflict, or an
+ * unreviewed add) is refused before any worker spawns, rather than silently
+ * widening what the fleet can reach. `api.anthropic.com` is deliberately
+ * absent and therefore refused like any other non-member: a worker able to
+ * reach the model API directly could route its own inference, bypassing
+ * every containment check that assumes a worker's only network access is to
+ * source control and package registries. Widening this list is a reviewed
+ * code change here, never a template-only edit.
+ */
+export const ALLOWED_NETWORK_DOMAINS = Object.freeze([
+  "github.com",
+  "api.github.com",
+  "codeload.github.com",
+  "registry.npmjs.org",
+]);
+const ALLOWED_NETWORK_DOMAINS_SET = new Set(ALLOWED_NETWORK_DOMAINS);
+
 /** Where a misplaced key actually belongs — powers a helpful named error. */
 function homeOf(key: string): string | null {
   if (NETWORK_KEYS.has(key)) return "network";
@@ -128,8 +150,21 @@ export function validateWorkerSettings(settings: unknown): void {
   }
 
   if (sandbox.network !== undefined) {
-    if (!isObject(sandbox.network)) throw new WorkerSettingsError("`sandbox.network` must be an object.");
-    checkKeys(sandbox.network, NETWORK_KEYS, "sandbox.network");
+    const network = sandbox.network;
+    if (!isObject(network)) throw new WorkerSettingsError("`sandbox.network` must be an object.");
+    checkKeys(network, NETWORK_KEYS, "sandbox.network");
+    if (Array.isArray(network.allowedDomains)) {
+      for (const domain of network.allowedDomains) {
+        if (typeof domain === "string" && !ALLOWED_NETWORK_DOMAINS_SET.has(domain)) {
+          throw new WorkerSettingsError(
+            `sandbox.network.allowedDomains includes '${domain}', which is not in the fleet's ` +
+              `pinned egress allowlist (${ALLOWED_NETWORK_DOMAINS.join(", ")}); widening worker ` +
+              `egress requires a reviewed change to ALLOWED_NETWORK_DOMAINS in src/lib/settings.ts, ` +
+              `not a template-only edit (W1-T2243).`,
+          );
+        }
+      }
+    }
   }
   if (sandbox.filesystem !== undefined) {
     if (!isObject(sandbox.filesystem))
