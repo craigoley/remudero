@@ -1,0 +1,133 @@
+- id: W1-T2262
+  title: "ONE PUSHABLE REF HALTS EVERY LANE ON EVERY HOST AND NAMES NOBODY — `refs/rmd-pause/hold` is written by a plain `git push` with the same `GH_TOKEN` every worker holds, the deny floor's six rules do not reach it, and the anchor commit that already records who set the hold is minted, pushed, and never read back"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: oper#pause-ref-write-is-ungated-and-unattributed-2026-08-25
+  files: [hooks/deny-floor.sh, src/lib/fleet-control.ts, test/pause-hold-is-attributable.test.ts]
+  rationale: |
+    **THE WRITE SIDE OF THE CROSS-HOST HOLD IS UNGATED AND UNATTRIBUTED. RE-DERIVED FROM SOURCE ON
+    THIS HEAD, NOT ACCEPTED FROM THE BRIEF THAT PROMPTED IT.**
+
+    `sharedPauseRef()` (`src/lib/fleet-control.ts`) returns `refs/rmd-pause/hold`. `writeSharedPause`
+    reaches it with `run(["push", "origin", `<anchor>:<ref>`])` — a plain `git push`, no lease, no
+    create-if-absent, because the module header reasons that two operators pausing at once both want
+    the same outcome. That reasoning is sound for CONTENTION and silent about AUTHORITY.
+
+    **THE POLICY SURFACE DOES NOT NAME THE REF.** `grep -ar 'rmd-pause' settings .remudero` returns
+    **0**. That zero is controlled two ways in the same corpus with the same tool and flags:
+    `grep -ar 'deny'` returns **4**, and `grep -ar 'refs/'` returns **0** — so the finding is not
+    merely "the pause ref is unmentioned", it is that NO ref namespace is mentioned by any policy
+    surface at all. `settings/worker.json`'s `permissions.deny` is four entries and every one is a
+    `Read(...)` rule; `permissions.allow` is empty. W1-T2211's own entry,
+    `Read(~/../state/service-tokens.json)`, denies the console's write-token file by exact path —
+    a READ of a FILE. A ref push is neither.
+
+    **THE DENY FLOOR DOES HAVE A `Bash` MATCHER, WHICH MAKES THE GAP SHARPER, NOT SOFTER.**
+    `settings/worker.json` wires a `PreToolUse` hook on `Bash|Write|Edit|MultiEdit|NotebookEdit` to
+    `hooks/deny-floor.sh`, and that script's rule 1 already polices `git push`: it matches
+    `git[[:space:]]+push[[:space:]].*(--force|-f)` and then a default-branch operand. So the floor
+    reaches `git push` in principle and declines to reach THIS push in fact. Six rules exist;
+    none names a ref namespace.
+
+    **AND THE NETWORK ALLOWLIST PERMITS THE DESTINATION BY DESIGN.** `sandbox.network.allowedDomains`
+    lists `github.com`, `api.github.com`, `codeload.github.com`, `registry.npmjs.org`. A worker MUST
+    reach `github.com` to push a branch and open a PR, so there is no egress remedy here that does
+    not also break the worker's core function. W1-T1289 is already filed against that same declared
+    boundary — its title is that the boundary "HAS NO ENFORCEMENT OWNER IN THIS TREE".
+
+    **THE ANCHOR ALREADY CARRIES THE ATTRIBUTION AND EVERY READER DISCARDS IT.**
+    `realSharedPauseGitDeps.mintAnchor` builds its commit with
+    `rmd-pause hold ${process.pid}@${hostname()} ${new Date().toISOString()}` — pid, host and an ISO
+    timestamp, minted into the very object the ref points at. `readSharedPause` runs
+    `ls-remote origin <ref>` and reduces the result to `res.stdout.trim() ? "held" : "absent"`,
+    discarding the sha `ls-remote` returned on that same line. `checkSharedPause` then renders
+    `PAUSE held on refs/rmd-pause/hold (set from another host)` — "another host", when the object it
+    just proved present names WHICH host. Across `src/`, `sharedPauseRef` appears 10 times and
+    **0** of them `cat-file` or `show` the anchor; the control is that `cat-file` is used 3 times
+    elsewhere in `src/`, so the tool and the corpus are not the reason for the zero.
+
+    This is the "already computed and discarded" class CLAUDE.md names as the cheapest fix here, and
+    it is what turns an anonymous fleet-wide halt into an accountable one.
+
+    **WHO CAN SET IT — THE MECHANISM IS PROVEN, THE 2026-08-25 INSTANCE IS NOT.**
+    `pauseCommand` (`src/run-task.ts`) calls `loadConfig()` and then `ledgerPathFor(config)`.
+    `loadConfig` reads `configPath()`, which derives from `homedir()`, and falls back to
+    `root: join(homedir(), "Remudero")` when the file has no `root` — and `createOrReadExclusive`
+    CREATES that file when absent rather than failing. A worker's home is redirected:
+    `workerHomeDir(config)` returns `config.workerHomeRoot ?? join(config.root, "worker-home")`.
+    So a worker invoking the verb resolves a config.root INSIDE its own scratch home, writes its
+    local PAUSE flag there, and appends its ledger rows there — while `writeSharedPause` pushes to
+    the REAL origin every daemon reads. The local half is scratch; the remote half is global.
+
+    **CORRECTION TO THE FRAMING THAT PROMPTED THIS: a pause writes TWO ledger steps, not one.**
+    The generic CLI row (`step: "cli.invoked"`, one write site) and `pauseCommand`'s own
+    `step: "fleet.pause"` both land at `ledgerPathFor(config)`. Any search for the act that looks
+    only for `cli.invoked` is searching the narrower of the two.
+
+    **THE 03:27:38Z SETTER CANNOT BE NAMED AND THIS SHARD DOES NOT PRETEND OTHERWISE.** The ledger
+    reachable from this container resolves to `$HOME/Remudero/state` and holds **0** archives of
+    either rotation form — `.gz` 0, plain 0, live 1 — so `resolveLedgerUnion` would report
+    `ok: false` on it rather than answering from the live file, and no window can be derived from
+    it. Per step, on that live file: `daemon.pause` **0**, `daemon.tick` **0**, `fleet.pause` **0**,
+    against a control of `cli.invoked` **300** spanning 2026-08-21T03:30:04Z..2026-08-25T07:06:00Z
+    with only two distinct steps present and every row stamped `host: vm`. Those zeros are not
+    evidence the fleet never paused; they are evidence THIS IS NOT THE DAEMON'S LEDGER — which is
+    the hypothesised mechanism, observed directly rather than argued. The count and window of the
+    incident's own rows are therefore re-derivable only where that ledger lives.
+
+    **WHAT MUST NOT CHANGE.** The hold stays, and stays CROSS-HOST: W1-T1216 built it because a
+    per-host flag left other daemons dispatching, and stopping the fleet from anywhere is the point.
+    `rmd resume` stays able to clear it from a running daemon — the paused daemon idles IN-PROCESS
+    (`daemon.ts`'s pause arm logs a heartbeat, sleeps on the injected clock, and `continue`s) rather
+    than exiting, precisely so no restart is needed. `readSharedPause`'s three-way classification
+    stays, including UNREACHABLE-MEANS-HELD: a failed read is never scored free. And nothing gains a
+    timer — a hold that expires on its own is worse than one that holds too long, because the fleet
+    would resume dispatching against a condition nobody cleared.
+
+    **THE REMEDY IS A TRIPWIRE PLUS AN ATTRIBUTION, AND IT IS NOT THE BOUNDARY.**
+    `hooks/deny-floor.sh` says so in its own header: it "is a tripwire, NOT a sandbox — the OS
+    sandbox is the real boundary; this catches a small, explicit set of never-do operations". A
+    seventh rule matching a push whose refspec names the pause namespace is consistent with rule 1
+    and cheap, and it is defeated by any refspec assembled from shell variables, so it must be
+    landed as a tripwire and never described as containment. The durable remedy is SERVER-SIDE: the
+    write path is narrow enough to protect, because `writeSharedPause` and `clearSharedPause` have
+    **0** call sites outside `fleet-control.ts` and are reached only by `rmd pause`/`rmd resume` and
+    the console's panel actions, while the daemon's per-tick path only READS (`checkSharedPause`,
+    5 call sites outside the module). A token that may read the namespace and not write it costs the
+    automatic path nothing. That decision is the operator's; this shard builds the in-tree half and
+    records the boundary question rather than closing it.
+  note: |
+    RULE 19 BAND. `files:` spans the tripwire and the attribution seam, so the sizing check reads it
+    as a two-concern span; `risk: high` is set for that SPAN, not for blast radius. Both halves
+    answer one question — whether a fleet-wide hold can be set anonymously by any token-holder — and
+    splitting the falsifier from the record it falsifies would not be a real decomposition.
+
+    NAMED, NOT FILED — THE VISIBILITY HALF IS A SEPARATE DEFECT AND `files:` IS NOT WIDENED FOR IT.
+    A cross-host hold is invisible to the surface built to explain a motionless fleet.
+    `src/lib/status-board.ts` renders "no active latches" when its row list is empty, and every latch
+    row it can build is keyed by a LOCAL FILE path — 5 rows declared, 5 carrying a `path:` key,
+    the PAUSE row among them reading `pauseFilePath`. The shared hold has no local file, so on a host
+    that did not set the hold the PAUSE row never materialises and the block reports no latches while
+    the fleet dispatches nothing. `checkSharedPause` and `sharedPauseRef` appear **0** times in that
+    file, against a control of 3 `PAUSE` mentions in the same file, so the surface does not consult
+    the shared read at all. The second, related gap: the pause detail reaches the ledger and no
+    console stream, so container logs render a paused fleet and a stalled one identically. Both
+    belong to a shard that owns `status-board.ts`; this one does not.
+  acceptance:
+    - claim: "the deny floor refuses a push whose refspec names the shared pause namespace, and leaves an ordinary branch push alone"
+      proof: "unit test: test/pause-hold-is-attributable.test.ts"
+    - claim: "a refspec assembled indirectly still reaches the remote, and that limitation is asserted rather than assumed"
+      proof: "unit test: test/pause-hold-is-attributable.test.ts"
+    - claim: "the anchor minted for a hold carries process, host and timestamp fields a reader can recover"
+      proof: "unit test: test/pause-hold-is-attributable.test.ts"
+    - claim: "a held read renders detail naming the recorded setter instead of an anonymous other host"
+      proof: "unit test: test/pause-hold-is-attributable.test.ts"
+    - claim: "an anchor whose payload cannot be recovered still renders a held detail rather than degrading to absent"
+      proof: "unit test: test/pause-hold-is-attributable.test.ts"
+    - claim: "an unreachable read stays held and no code path clears the hold on elapsed time alone"
+      proof: "unit test: test/pause-hold-is-attributable.test.ts"
