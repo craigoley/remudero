@@ -268,14 +268,61 @@ export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
   };
 }
 
+/** One `ls-remote` outcome, carrying the sha `readSharedPause` (below) throws away — the seam
+ *  {@link checkSharedPause} uses to recover WHO set the hold instead of just THAT it is held. */
+interface SharedPauseLsRemote {
+  status: number;
+  /** The ref's current sha, when the read succeeded and the ref exists. */
+  sha?: string;
+}
+
+function lsRemoteSharedPause(deps: SharedPauseGitDeps): SharedPauseLsRemote {
+  const res = deps.run(["ls-remote", "origin", sharedPauseRef()]);
+  if (res.status !== 0) return { status: res.status };
+  const line = res.stdout.trim().split("\n")[0] ?? "";
+  const sha = line.split("\t")[0]?.trim();
+  return { status: 0, sha: sha || undefined };
+}
+
 /**
  * `git ls-remote origin <ref>`, classified into the three outcomes rationale (10) measured.
  * PURE given `deps` — the network round trip is `deps.run`'s problem, not this function's.
  */
 export function readSharedPause(deps: SharedPauseGitDeps): SharedPauseRead {
-  const res = deps.run(["ls-remote", "origin", sharedPauseRef()]);
+  const res = lsRemoteSharedPause(deps);
   if (res.status !== 0) return "unreachable";
-  return res.stdout.trim() ? "held" : "absent";
+  return res.sha ? "held" : "absent";
+}
+
+/** The pid/host/timestamp {@link realSharedPauseGitDeps}'s `mintAnchor` embeds in the anchor
+ *  commit's message. Every field is a raw string off the commit — no parsing beyond splitting the
+ *  message apart, so a reader never has to trust anything the writer didn't already commit. */
+export interface SharedPauseAnchorInfo {
+  pid: string;
+  host: string;
+  timestamp: string;
+}
+
+/** Matches the exact message `mintAnchor` mints: `rmd-pause hold <pid>@<host> <ISO timestamp>`.
+ *  `^`/`m` so it finds the message line regardless of the `tree`/`author`/`committer` header
+ *  lines `cat-file -p` prints ahead of it. */
+const ANCHOR_MESSAGE_RE = /^rmd-pause hold (\S+)@(\S+) (\S+)\s*$/m;
+
+/**
+ * Best-effort recovery of {@link SharedPauseAnchorInfo} off a hold's anchor commit — the payload
+ * `mintAnchor` already minted and every reader before this one discarded (see the module header's
+ * "already computed and discarded" note). `null` on ANY failure to recover it: an unreachable
+ * remote, a GC'd/missing object, or a commit whose message doesn't match the expected shape (an
+ * anchor minted by something other than {@link realSharedPauseGitDeps}). A caller that gets `null`
+ * still knows the ref is held — {@link checkSharedPause} never lets a failed anchor read degrade
+ * "held" into "absent".
+ */
+export function readSharedPauseAnchor(sha: string, deps: SharedPauseGitDeps): SharedPauseAnchorInfo | null {
+  const res = deps.run(["cat-file", "-p", sha]);
+  if (res.status !== 0) return null;
+  const m = ANCHOR_MESSAGE_RE.exec(res.stdout);
+  if (!m) return null;
+  return { pid: m[1]!, host: m[2]!, timestamp: m[3]! };
 }
 
 /** Create-or-update {@link sharedPauseRef}. Who "wins" a race between two operators pausing at
@@ -306,16 +353,34 @@ export function clearSharedPause(deps: SharedPauseGitDeps): boolean {
  *
  * UNREACHABLE READS AS HELD (design (ii)): `readSharedPause` returning `"unreachable"` produces a
  * truthy detail string, exactly like a real hold — never `undefined`. A failed read is never
- * scored free.
+ * scored free. Nothing here compares the anchor's timestamp against the clock, either — a hold
+ * never expires on elapsed time alone; `resumeFleet` is the only thing that clears it.
+ *
+ * NAMES THE SETTER (W1-T2262): a `"held"` read now recovers {@link readSharedPauseAnchor} off the
+ * same sha `ls-remote` just returned and, when that recovers, renders WHO set the hold (pid, host,
+ * timestamp) instead of the old "(set from another host)" — an anonymous fleet-wide halt is what
+ * this closes. An anchor that fails to recover (unreachable, GC'd, minted by something that didn't
+ * use the expected message shape) still renders a HELD detail — it degrades the ATTRIBUTION, never
+ * the VERDICT.
  */
 export function checkSharedPause(root: string, deps: SharedPauseGitDeps): string | undefined {
   const local = pauseDetail(root);
   if (local) return local;
-  const shared = readSharedPause(deps);
-  if (shared === "held") {
-    return `PAUSE held on ${sharedPauseRef()} (set from another host) — run \`rmd resume\` to clear`;
+  const ls = lsRemoteSharedPause(deps);
+  if (ls.status === 0 && ls.sha) {
+    const anchor = readSharedPauseAnchor(ls.sha, deps);
+    if (anchor) {
+      return (
+        `PAUSE held on ${sharedPauseRef()} — set by pid ${anchor.pid}@${anchor.host} at ` +
+        `${anchor.timestamp} — run \`rmd resume\` to clear`
+      );
+    }
+    return (
+      `PAUSE held on ${sharedPauseRef()} (setter unrecoverable — anchor ${ls.sha} unreadable) — ` +
+      "run `rmd resume` to clear"
+    );
   }
-  if (shared === "unreachable") {
+  if (ls.status !== 0) {
     return (
       `cannot reach origin to read ${sharedPauseRef()} — holding rather than dispatching ` +
       `optimistically (an unreachable remote is never read as clear)`

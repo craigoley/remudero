@@ -92,4 +92,21 @@ if printf '%s' "$cmd" | grep -Eq '\b(for|while|until)\b'; then
   fi
 fi
 
+# 7) a `git push` whose refspec names the shared cross-host pause namespace (W1-T2262 —
+#    `refs/rmd-pause/hold`, `src/lib/fleet-control.ts`). `writeSharedPause`/`clearSharedPause`
+#    push straight to that ref with the SAME `GH_TOKEN` every worker holds, and rule 1 above only
+#    ever looks at `--force`-to-default-branch — no rule named this namespace at all. Matches the
+#    literal ref text anywhere in a `git push` command, so `git push origin <sha>:refs/rmd-pause/
+#    hold` and `git push origin :refs/rmd-pause/hold` (a delete) both trip it, regardless of
+#    force/lease flags. THIS IS A TRIPWIRE, NOT A BOUNDARY (see the file header): a refspec
+#    assembled indirectly — `ref=refs/rmd-pause/hold; git push origin "$anchor:$ref"` — never
+#    puts the literal text in `$cmd` and is NOT caught here; that limitation is asserted, not
+#    papered over, by test/pause-hold-is-attributable.test.ts. The durable remedy is a server-side
+#    rule on who may write that ref (recorded in W1-T2262's rationale, not solved by this hook).
+if printf '%s' "$cmd" | grep -Eq 'git[[:space:]]+push\b'; then
+  if printf '%s' "$cmd" | grep -Eq 'refs/rmd-pause/'; then
+    deny "git push naming the shared pause namespace (refs/rmd-pause/, W1-T2262)"
+  fi
+fi
+
 exit 0
