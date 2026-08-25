@@ -3930,6 +3930,9 @@ async function runReview(args: {
    * this task already gets.
    */
   reportIsSubstitute?: boolean;
+  /** (2026-08-25) WHY it is a substitute, threaded into `judgeReview`'s evidence so the refusal
+   *  can name the never-fetched case instead of asserting a fetch failure that did not happen. */
+  reportSubstituteCause?: import("./lib/review.js").ReportSubstituteCause;
   settingsFile: string;
   config: Config;
   budgetUsd?: number;
@@ -4127,6 +4130,7 @@ async function runReview(args: {
     report,
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
     reportIsSubstitute: args.reportIsSubstitute,
+    reportSubstituteCause: args.reportSubstituteCause,
     semantic,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
@@ -7067,6 +7071,10 @@ export async function runFixRung(opts: {
     // fetch correct for free. W1-T1100 (#2415) added this flag and guarded both consumers; none
     // of its hunks reached this call site, whose `report:` line still blames to #762.
     let reviewReportIsSubstitute = true;
+    // The DEFAULT cause matches the default flag: these three modes never ask for the body,
+    // so "never-fetched" is the truth and the mode name is the actionable half of it. Only
+    // the catch below may overwrite it, so a fetch failure can never be asserted by accident.
+    let reviewReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause = { kind: "never-fetched", fixMode };
     if (fixMode === "body-coverage") {
       const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
       try {
@@ -7075,6 +7083,7 @@ export async function runFixRung(opts: {
         // the flag true, which is the honest reading: the catch below logs and falls through.
         reviewReportIsSubstitute = false;
       } catch (e) {
+        reviewReportSubstituteCause = { kind: "fetch-failed" };
         deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
       // W1-T307: THE COMMIT THAT CHANGES THE DIFF OWNS THE CLAIM ABOUT THE DIFF. This strike
@@ -7131,6 +7140,7 @@ export async function runFixRung(opts: {
       task: opts.task,
       report: reviewReport,
       reportIsSubstitute: reviewReportIsSubstitute,
+      reportSubstituteCause: reviewReportSubstituteCause,
       settingsFile: opts.settingsFile,
       config: opts.config,
       budgetUsd: opts.budgetUsd,
@@ -9989,10 +9999,14 @@ async function runTask(
     // so `bodyContradictsDiff` and the keyword floor both know this is not the PR body.
     let reviewReport = fullText(impl);
     let reviewReportIsSubstitute = true;
+    let reviewReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause | undefined;
     try {
       reviewReport = await fetchPrBodyFn(prUrl);
       reviewReportIsSubstitute = false;
     } catch (e) {
+      // This path ALWAYS attempts the fetch, so a substitute here can only mean the read
+      // FAILED -- unlike the fix rung, where three of four modes never ask at all.
+      reviewReportSubstituteCause = { kind: "fetch-failed" };
       log("review.body_fetch_error", { error: String((e as Error)?.message ?? e) });
     }
     let review = await runReviewFn({
@@ -10002,6 +10016,7 @@ async function runTask(
       task,
       report: reviewReport,
       reportIsSubstitute: reviewReportIsSubstitute,
+      reportSubstituteCause: reviewReportSubstituteCause,
       settingsFile,
       config,
       budgetUsd,
