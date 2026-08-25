@@ -133,12 +133,19 @@ export interface BoardRow extends StatusProjection {
    *                  unresolvable head) — a CANNOT-READ, not a state GitHub actually reported.
    *                  Renders as unreadable (with the snapshot's own `generated_at` as its
    *                  last-known age), never silently folded into "none" or a stale green/red.
+   *   "not-applicable" — (W1-T2235) the row's PR is MERGED or CLOSED: `remudero-review` watches
+   *                  a check go pending -> success on a PR that is STILL OPEN, so a terminal PR's
+   *                  combined status is history, not a value this feature has an opinion about.
+   *                  Never a network call behind it, unlike every other value above — and never
+   *                  folded into "none", which means "asked GitHub, nothing was posted": "none"
+   *                  is a fact about a live PR, "not-applicable" is that the question doesn't
+   *                  apply to this one.
    *
    * Bound to {@link GitHub.reviewState} (status.ts) — the SAME combined-status read
    * open-prs-rest.ts's `combinedStatusRestArgs` already documents and run-task.ts's sweep-side
    * `reviewStateFromRollup` already consumes — never a second, console-only derivation.
    */
-  reviewState?: "success" | "failure" | "pending" | "none" | "unreadable";
+  reviewState?: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
 }
 
 /** GET /v1/status's body — one {@link BoardRow} per plan task, as of `generated_at`. */
@@ -508,8 +515,9 @@ function safeReadFailed(github: BoardDeps["github"]): boolean {
  * THE THREE FAIL-SOFT CASES, KEPT DISTINCT ON PURPOSE (this task's whole point):
  *   - the gateway doesn't implement {@link GitHub.reviewState} at all (an older fixture/gateway)
  *     -> `"none"`: honestly unresolved, never a guessed pending or green.
- *   - the method itself returned a real value (INCLUDING its own `"none"`) -> that value,
- *     verbatim — this is the ONLY arm that can produce `"pending"`/`"success"`/`"failure"`.
+ *   - the method itself returned a real value (INCLUDING its own `"none"` and, W1-T2235, its
+ *     own `"not-applicable"` for a terminal row) -> that value, verbatim — this is the ONLY arm
+ *     that can produce `"pending"`/`"success"`/`"failure"`/`"not-applicable"`.
  *   - the method returned `undefined` (its own read failed) OR THREW -> `"unreadable"` when
  *     `readFailed()` confirms GitHub is having a bad day, `"none"` otherwise (a `prUrl` this
  *     gateway simply cannot resolve a head for, e.g. it fell out of the batched index) — the

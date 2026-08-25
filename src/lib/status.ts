@@ -722,6 +722,12 @@ export interface GitHub {
    * `remudero-review` entry in `statuses[]` (never synthesised from the endpoint's own
    * roll-up-of-a-rollup top-level `state`, exactly like `rollupFromRest`'s own rule).
    *
+   * W1-T2235: `"not-applicable"` is returned for a MERGED or CLOSED row, ALWAYS, without any
+   * network call — a terminal PR's combined status is history, not something `remudero-review`
+   * (which watches pending -> success while a PR stays open) has an opinion about. Never
+   * collapsed into `"none"`: `"none"` means "asked GitHub, no review status posted",
+   * `"not-applicable"` means "did not ask, the question does not apply to a closed row".
+   *
    * `undefined` MEANS THE READ ITSELF COULD NOT BE TRUSTED — a `gh`/REST failure, or a `prUrl`
    * this gateway cannot resolve a head ref for — and is NEVER collapsed into `"none"`: a caller
    * that cannot tell "no review posted" from "GitHub could not be asked" would render an outage
@@ -734,7 +740,7 @@ export interface GitHub {
    * rather than inventing a pending or green state it never observed, the same fail-soft
    * discipline this whole interface already follows.
    */
-  reviewState?(prUrl: string): "success" | "failure" | "pending" | "none" | undefined;
+  reviewState?(prUrl: string): "success" | "failure" | "pending" | "none" | "not-applicable" | undefined;
 }
 
 /** Reader for the append-only ledger; injectable for tests. */
@@ -4234,14 +4240,19 @@ export function buildBatchedGithub(
    * IT past `ttlMs` would silently freeze "review in progress" on the console long after GitHub
    * reported the real outcome.
    *
-   * W1-T2217: for a row whose {@link BatchedPr.state} is no longer `"OPEN"` (i.e. `"MERGED"` or
-   * `"CLOSED"`), this IS a forever-memo, exactly like {@link changedFilesByUrl} — a merged or
-   * closed PR's combined status cannot change again, so re-fetching it on every tick past `ttlMs`
-   * buys nothing. `index()` already carries `.state` on the SAME batched fetch (no new call, no
-   * new field), and the COLD `state=closed` walk that feeds the board is an ever-growing
-   * population of exactly these terminal rows — without this, every PR the fleet ever merges
-   * keeps costing one more synchronous `gh` call on every `GET /v1/status` request past the TTL,
-   * forever. See `reviewState`'s own body for the read side of this distinction.
+   * W1-T2217 tried memoising a terminal row's result here forever instead of re-fetching it past
+   * `ttlMs`. W1-T2235 found that memo UNREACHABLE for exactly the rows it targeted: the guard
+   * only consulted `entry.state` as a modifier on a cache HIT, so a terminal row with no entry yet
+   * fell straight through to a network call keyed on `entry.headRefName` — a branch name, deleted
+   * the moment its PR merges — which 404s, and the `catch` below caches nothing, so the same row
+   * re-fails on every single paint forever.
+   *
+   * W1-T2235's fix: a MERGED/CLOSED row never reaches this cache at all. `entry.state` is
+   * checked FIRST, ahead of any cache lookup or network call, in `reviewState` below, and a
+   * terminal row returns `"not-applicable"` straight from that check — a terminal PR's combined
+   * status is history, not a value `remudero-review` (which watches pending -> success on an OPEN
+   * PR) has any opinion about. Only an OPEN row's result is ever stored here, and it still expires
+   * every `ttlMs`, exactly as W1-T2217 left it for that case.
    */
   const reviewStateCache = new Map<string, { at: number; state: "success" | "failure" | "pending" | "none" }>();
   const fetchAll =
@@ -4528,16 +4539,22 @@ export function buildBatchedGithub(
       // than its sha: the combined-status endpoint's `:ref` accepts any git ref, and this gateway
       // never fetches a PR's `headRefOid` at all.
       const entry = index().byUrl.get(prUrl);
-      const headRef = entry?.headRefName;
-      if (!headRef) return undefined; // this prUrl isn't in the current index -> undetermined
-      // W1-T2217: a MERGED or CLOSED row's combined status is immutable — the discriminator reads
-      // `.state` already sitting on this same batched index (no extra call), and once such a row
-      // has been fetched once, its cache entry is honoured forever, never re-checked against
-      // `ttlMs`. Only an OPEN row's memo still expires every TTL, because that is the one case
-      // where GitHub can still post a new `remudero-review` result.
-      const terminal = entry.state !== "OPEN";
+      if (!entry) return undefined; // this prUrl isn't in the current index -> undetermined
+      // W1-T2235: a MERGED or CLOSED row has NO live check state to show, full stop — checked
+      // FIRST, ahead of any cache lookup and ahead of any network call, never as a modifier on a
+      // cache hit the row can never reach in the first place (that ordering was the whole
+      // defect: `entry.headRefName` is a branch name GitHub deletes on merge, so the network call
+      // below 404s for every terminal row, and the `catch` at the bottom of this method caches
+      // nothing, so the same row re-failed on every single paint, forever). `remudero-review`
+      // exists to watch a check go pending -> success on a PR that is still open; a terminal PR's
+      // combined status is history, not a value this feature has any opinion about, so the
+      // correct answer is not a cheaper fetch of the same field — it is that the field does not
+      // apply. `.state` is already sitting on this same batched index; no new call, no new field.
+      if (entry.state !== "OPEN") return "not-applicable";
+      const headRef = entry.headRefName;
+      if (!headRef) return undefined; // open PR with no resolvable head ref -> undetermined
       const cached = reviewStateCache.get(prUrl);
-      if (cached && (terminal || now() - cached.at < ttlMs)) return cached.state;
+      if (cached && now() - cached.at < ttlMs) return cached.state;
       try {
         const raw = JSON.parse(run(combinedStatusRestArgs(owner, repo, headRef))) as {
           statuses?: Array<{ context?: string; state?: string }>;
