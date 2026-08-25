@@ -12035,21 +12035,37 @@ export function followupLedgerUnionNdjson(stateDir: string): string {
   return result.matches.join("\n");
 }
 
+/** Seam for {@link checkAcceptanceCommand} (W1-T2251) — defaults to the real, shard-merging
+ *  {@link loadPlan} against this checkout's `plan/tasks.yaml`, so a test can point it at a temp
+ *  plan file instead. Never a second resolver: this is the SAME function `reviewCommand` calls. */
+export interface CheckAcceptanceDeps {
+  planPath?: string;
+}
+
 /**
- * `rmd check-acceptance <body-file>` — read a PR body from a file and report what
- * {@link "./lib/review.js".parseAcceptanceBlock} ACTUALLY resolves from it, against what the author
- * wrote. Exits non-zero when the two disagree.
+ * `rmd check-acceptance <body-file>` — read a PR body from a file and report what the GATE
+ * would actually judge it against, before it reaches one.
+ *
+ * W1-T2251 (THE FIX): resolve criteria the SAME way `reviewCommand` does — a `Remudero-Task:`
+ * trailer's task, read from the shard-merging {@link loadPlan} (never a second resolver), falling
+ * back to the body's own `## Acceptance` block only when the trailer resolves nothing — rather
+ * than reading {@link "./lib/review.js".parseAcceptanceBlock} over the body ALONE, which is what
+ * this command did before and is what let it call a block DEFECTIVE that the gate was never
+ * going to read (74 of 300 merged PRs, filing rationale). Every trailered implementation PR hits
+ * the trailer branch; the fallback exists for the untrailered/unresolvable case, where this
+ * command's behaviour and exit code are BYTE-IDENTICAL to before (acceptance criterion 4) — W1-
+ * T1097's `criteriaParsed`-vs-`bulletsWritten` zero-criteria handling is untouched either way.
  *
  * THE POPULATION THIS SERVES. `gh pr create` is GraphQL, and GraphQL exhaustion has repeatedly
  * forced PRs to be opened over REST — which bypasses the orchestrator path that emits the house
  * Acceptance block (`plan-pr-emitter.ts`'s `renderAcceptanceBlock`, guaranteed to round-trip). A
  * REST-opened PR therefore carries HAND-AUTHORED markdown, and nothing checks it before it is
  * posted. That emitter is reusable but has no CLI surface; this is the smallest surface that lets a
- * hand-authored body be checked with the reviewer's OWN parser before it reaches the gate.
+ * hand-authored body be checked with the reviewer's OWN resolution before it reaches the gate.
  *
  * READ-ONLY: writes no ledger line, no state file, opens nothing.
  */
-export function checkAcceptanceCommand(rest: string[]): number {
+export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
   const file = rest.find((a) => !a.startsWith("--"));
   if (!file) {
     console.error("usage: rmd check-acceptance <body-file>");
@@ -12062,17 +12078,63 @@ export function checkAcceptanceCommand(rest: string[]): number {
     console.error(`check-acceptance: cannot read ${file}: ${String((e as Error)?.message ?? e)}`);
     return 2;
   }
+
+  // design (i): trailer → that task's shard, exactly as `reviewCommand` resolves it — falling
+  // through to the body block only when the trailer is absent or resolves zero criteria.
+  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
+  const taskId = reviewTaskIdFromBody(body);
+  let criteria: AcceptanceCriterion[] = [];
+  if (taskId) {
+    try {
+      const plan = loadPlan(planPath);
+      const t = plan.byId.get(taskId);
+      if (t?.acceptance?.length) criteria = t.acceptance;
+    } catch {
+      // A bad/absent plan is not this command's concern either — fall through to the body,
+      // exactly like reviewCommand's own catch does.
+    }
+  }
+  const trailerResolved = criteria.length > 0;
+
   const d = acceptanceBlockDiagnostics(body);
-  const criteria = parseAcceptanceBlock(body);
+  if (!trailerResolved) criteria = parseAcceptanceBlock(body);
+
+  // design (ii): name the SOURCE, not only the count.
+  const source = trailerResolved
+    ? `${taskId}'s shard via the body trailer`
+    : criteria.length
+      ? "the body Acceptance: block"
+      : "NONE (fail closed — nothing to judge is never a pass)";
+  const emptyProofs = criteria.filter((c) => !c.proof).length;
+
   console.log(`file:            ${file}`);
-  console.log(`header found:    ${d.headerFound}`);
-  console.log(`bullets written: ${d.bulletsWritten}`);
-  console.log(`criteria parsed: ${d.criteriaParsed}`);
-  console.log(`empty proofs:    ${d.emptyProofs}`);
+  console.log(`criteria source: ${source}`);
+  console.log(`criteria parsed: ${criteria.length}`);
+  console.log(`empty proofs:    ${emptyProofs}`);
   criteria.forEach((c, i) => {
     console.log(`  [${i + 1}] claim: ${c.claim.slice(0, 88)}`);
     console.log(`      proof: ${c.proof ? c.proof.slice(0, 88) : "(EMPTY — nothing will execute)"}`);
   });
+
+  if (trailerResolved) {
+    // design (iii): once the trailer resolves, the body's OWN block is not what the gate reads —
+    // a defective block is named as UNUSED, never as a refusal, and the exit code follows what
+    // the gate would do with this body: it has real criteria to judge (from the shard), so this
+    // is not the "nothing to judge" fail-closed case, and passes — matching #2773 (filing
+    // rationale (2)), where the gate posted PASS on the same body this command called DEFECTIVE.
+    if (d.defective) {
+      console.log(
+        `note: the body's own Acceptance: block is DEFECTIVE (header found: ${d.headerFound}, bullets ` +
+          `written: ${d.bulletsWritten}, criteria parsed: ${d.criteriaParsed}, empty proofs: ${d.emptyProofs}) ` +
+          `but UNUSED — the gate reads ${taskId}'s shard, never this body's block, once the trailer resolves.`,
+      );
+    }
+    console.log(`OK — the gate would judge this PR from ${taskId}'s shard, not this body's block.`);
+    return 0;
+  }
+
+  // Untrailered (or trailer present but unresolved to any criteria): judged exactly as before —
+  // acceptance criterion 4, no change in verdict or exit code.
   if (!d.defective) {
     console.log("OK — the parser resolves exactly what was written, and every proof is non-empty.");
     return 0;
