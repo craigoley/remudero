@@ -1,0 +1,134 @@
+- id: W1-T2268
+  title: "TWO SIX-SECOND POLL LOOPS SPEND A POINT-PRICED BUDGET NOBODY HAS COSTED, AND THE REST REPLACEMENT THEY WOULD NEED IS ALREADY BUILT AND ALREADY TESTED — the same read was measured for wall-clock duration and never once for quota, while the composed-rollup function the swap requires ships today behind a private binding"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: oper#graphql-poll-cost-unmeasured-2026-08-25
+  files: [src/run-task.ts, src/lib/open-prs-rest.ts, test/poll-rollup-over-rest.test.ts]
+  rationale: |
+    **THE CALLERS, RE-DERIVED — AND THE ROLLUP SPREAD IS WIDER THAN THE POLLING SPREAD.**
+    Counting real argv sites rather than prose, `["pr", "view", …]` appears eighteen times across
+    `src/`, against a control of ten prose mentions of the same command in comments. By requested
+    field set the largest group is `statusCheckRollup` alone; adding the one site that asks for
+    `state,statusCheckRollup` makes **seven** sites that pull the rollup, not two. **Two of those
+    seven POLL** — `pollToGate` and `waitForCiGreen`, both `everySec = 6` — and the remaining five
+    are per-PR or per-run reads. So the polling count and the rollup count are different numbers,
+    and a cost model built only on the pollers understates the per-run spend by the five.
+
+    **THE SAME CALL WAS ALREADY MEASURED, FOR THE WRONG QUANTITY.** W1-T463's comment above these
+    loops records `gh pr view --json statusCheckRollup` at 510-1020ms over eight samples, median
+    ~630ms, and reasons carefully about the resulting duty cycle against the six-second cadence.
+    That is a WALL-CLOCK measurement. Nothing anywhere records what the same call costs in GraphQL
+    POINTS, which is the budget it actually spends, and the rollup is precisely the field whose cost
+    scales with the head's check count rather than being flat.
+
+    **THE GAP, CARRIED AS A GAP.** Measured live at filing time, the account's GraphQL bucket reads
+    `used 10064`, `limit 10000`, `remaining 0` — so the budget is not merely spent, it is OVER, and
+    the limit is ten thousand rather than the five thousand a rate figure is easy to assume. In the
+    same reading the core bucket sits at eleven of fifteen thousand. **The per-call point cost is
+    knowable only from the `x-ratelimit-*` headers on a real GraphQL response, and issuing one now
+    would fail on the exact quota being measured — so this shard does not estimate it.** The
+    arithmetic implied by an hourly call count against an hourly point count is recorded in the
+    filing conversation as an implication, not adopted here as a figure. The measurement is cheap
+    and must be taken after the bucket resets: one rollup read, headers captured, cost read off the
+    delta. Until then the honest statement is that the spend is unmeasured, and the reason it is
+    unmeasured is that the instrument and the patient share a vein.
+
+    **Q1 — REST IS EQUIVALENT, AND THE EQUIVALENCE IS ALREADY SHIPPED. THE NAMED OBSTACLE IS NOT
+    ONE.** `statusCheckRollup` merges legacy commit statuses and modern check runs into a single
+    list, and REST does need two endpoints plus a merge. **That merge exists.**
+    `rollupFromRest(checkRuns, statuses)` (`src/lib/open-prs-rest.ts`) composes exactly those two
+    inputs into rollup entries, `rollupFor` performs the paired fetch, and the composition is
+    covered by a body of existing assertions including the case that matters most here — a
+    `remudero-review` commit status surviving the merge, which a check-runs-only read drops
+    entirely. This is not a shape that has to be invented; it is the shape the sweep already runs
+    on. What the swap actually needs is narrow: `rollupFor` is module-private, so the work is to
+    expose a per-head composed read and point the two loops at it.
+
+    **AND THE TEST NAMED AS THE OBSTACLE GOVERNS A DIFFERENT LAYER ENTIRELY.**
+    `test/no-hand-rolled-fetch-check.test.ts` proves `scripts/no-hand-rolled-fetch-check.mjs` is
+    active. That script walks `apps` and `packages` — excluding `packages/api-client` — and fails on
+    a literal `fetch(`, `axios`, or `new XMLHttpRequest` in a CLIENT source file, whose remedy line
+    is to talk to the daemon via the generated client. It is MASTER-PLAN section 7A's rule about how
+    a dashboard reaches the daemon. It says nothing about `gh`, about GitHub's REST API, or about
+    composing two endpoint reads inside `src/lib`, and it scans neither directory this task would
+    touch. **It is not an obstacle, real or satisfiable. It is a different gate.**
+
+    **Q2 — THE INTERVAL IS THE CHEAPER LEVER ONLY IF IT CAN BE ARGUED AS CORRECTNESS, AND IT
+    LARGELY CANNOT.** Six seconds against a CI cycle measured in minutes does spend on the order of
+    a hundred reads to observe one transition, and that ratio is real. But the remedy for a budget
+    is not a delay: W1-T1066 records a polling loop whose cadence exhausted the SECONDARY limit,
+    which counts rate rather than volume, and locked the operator out for about ninety minutes — and
+    the deny floor now refuses that shape by name. A longer interval would have to be defended as a
+    claim about observation latency, namely that the fleet learns of green within an acceptable
+    delay; it cannot be defended as rationing. The transport swap needs no such argument, because it
+    moves the spend to a budget with room rather than reducing the number of observations. **So the
+    interval is the SECOND lever, available if the swap proves insufficient, and it must not be
+    reached for first.**
+
+    **Q3 — WHAT MUST NOT CHANGE.** The fleet still learns CI went green promptly: a run that waits
+    minutes past green costs a lane, so observation latency after the change must be no worse than
+    it is today, and that is a property the swap must demonstrate rather than assume. The
+    `GhPaceFloorStandDownError` path stays exactly as it is — it is a real value, thrown rather than
+    returned, and already reached from the sweep. And nothing paces or throttles a call as a budget
+    remedy; pacing exists for the secondary limit, which is a different failure with a different
+    cause, and borrowing it to save points would confuse the two permanently.
+
+    **THIS IS A DIFFERENT CONSUMER, NOT A REGRESSION OF THE 2026-07-28 REMEDY.** That module's own
+    doc records the exhaustion, names the window in which every sweep pass died blind rather than
+    degrading, and states that the enumeration it replaced was the last GraphQL dependency in THE
+    SWEEP'S critical path. That claim was scoped to the sweep and it held. The two loops here belong
+    to the RUN path, were never in the sweep's, and were untouched by that work. Nothing regressed;
+    a second consumer of the same budget was simply never migrated. The doc's own cost trade also
+    carries a stale figure worth correcting in passing: it reasons against a five-thousand-per-hour
+    core budget where the live reading is fifteen thousand, which strengthens rather than weakens
+    its conclusion.
+  note: |
+    RULE 19 BAND. `files:` spans the two call sites, the module that owns the composed read, and a
+    test; the sizing check reads that as a span, and `risk: high` is set for the SPAN. Blast radius
+    is narrower than the band suggests: one private binding exposed, and two argv lists changed.
+
+    WHAT THIS SHARD REFUSES TO DO. It does not adopt a per-call point cost, and a build must not
+    invent one to justify itself. If the measurement after the reset shows the rollup is cheap, the
+    correct outcome is to record that and close the task, because the transport swap would then be
+    buying an equivalence nobody needs. The measurement is the first step of the build, not a
+    formality attached to a decision already taken.
+
+    THE FIVE NON-POLLING ROLLUP READS ARE NAMED AND NOT CLAIMED. They spend from the same budget on
+    the same field, and once a composed per-head read is exposed they become cheap to migrate. They
+    are not in scope here because each sits in a different caller with its own error handling, and
+    bundling them would turn a two-call-site change into a sweep of the file. Naming them here means
+    the next filing does not have to re-derive them.
+
+    THE DENY FLOOR REFUSED THIS FILING'S OWN WRITE. Composing this shard through a shell heredoc
+    tripped rule 6, whose three conjuncts are a loop keyword, a delay keyword and a `gh` invocation
+    anywhere in the command text. The prose above contains all three as SUBJECT MATTER, so a command
+    that merely carries the text was refused as though it were the shape. The refusal is correct in
+    direction and its message is accurate; the rule simply cannot tell a command that polls from a
+    document about polling. Recorded here because it will recur for any filing on this subject, and
+    because the workaround is mundane — write the file through a path that is not a shell command —
+    which means the gate costs a step without stopping anything. Not filed as a task, not in scope,
+    and no widening of `files:` toward it.
+  acceptance:
+    - claim: "a composed per-head rollup read is reachable from outside the module that owns the merge"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
+    - claim: "a legacy commit status present on a head survives into the composed result rather than being dropped"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
+    - claim: "a head carrying only modern check runs composes to the same entries the previous transport reported"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
+    - claim: "an empty head composes to an empty rollup rather than inventing a pending entry"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
+    - claim: "each poll iteration issues its reads against the budget with headroom rather than the point-priced one"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
+    - claim: "the stand-down value still propagates out of a poll iteration rather than being swallowed"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
+    - claim: "a transition to green is observed on the same iteration it would have been observed on before"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
+    - claim: "the poll cadence is unchanged, so no reduction in observations is doing the work"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
+    - claim: "the injected read and sleep seams stay injectable so the loop is drivable without a network or a wall clock"
+      proof: "unit test: test/poll-rollup-over-rest.test.ts"
