@@ -184,7 +184,7 @@ test("receiptCommand resolves the task id from the PR body's Remudero-Task trail
         body: `Some prose mentioning Remudero-Task: W1-T20c mid-body.\n\nRemudero-Task: ${TASK_ID}\n`,
       }),
       config: { root: "/tmp/rmd-receipt-command-test" } as never,
-      readLedgerLines: () => fullLedger(),
+      resolveReceiptLedgerLines: () => ({ ok: true, lines: fullLedger() }),
     });
   } finally {
     console.log = realLog;
@@ -210,7 +210,7 @@ test("receiptCommand rejects an unknown flag before any network call — fail lo
         throw new Error("must not be called — bad-arg refusal happens before any gh call");
       },
       config: { root: "/tmp/rmd-receipt-command-test" } as never,
-      readLedgerLines: () => [],
+      resolveReceiptLedgerLines: () => ({ ok: true, lines: [] }),
     });
   } finally {
     console.error = realError;
@@ -235,7 +235,7 @@ test("receiptCommand refuses (never guesses) when the PR body carries no Remuder
         body: "no trailer here",
       }),
       config: { root: "/tmp/rmd-receipt-command-test" } as never,
-      readLedgerLines: () => [],
+      resolveReceiptLedgerLines: () => ({ ok: true, lines: [] }),
     });
   } finally {
     console.error = realError;
