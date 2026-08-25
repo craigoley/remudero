@@ -1,0 +1,136 @@
+- id: W1-T2272
+  title: "`acceptance-author-gate` refuses with a typed defect name and the fix rung already owns a head-preserving body write, but that arm fires only for a stale changeset claim and only AFTER a strike has committed — so a body-only defect the gate has already diagnosed is repaired by an operator instead, and the eligibility patch this looks like was already applied at `fixRungTaskFor`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (ce38a8c1d1f33c0e7377a1e20009a8c7d713a63d), clone shallow-checked `false`. `src/run-task.ts` read
+    through git objects. No suite, no spawning verb, no poller. Ledger read at the STATE dir with
+    newest row per step; every zero controlled. REST and `git` only.
+
+    (1) Q1 — THE ELIGIBILITY PATCH THIS LOOKS LIKE IS ALREADY APPLIED, AND SAYING SO IS THE POINT.
+    The premise was that the sweep passes `pr.taskId` RAW where other lanes route through
+    `escalationTaskIdFor`, as W1-T516 fixed one dep over for the arm. RE-DERIVED, AND IT DOES NOT
+    HOLD FOR THE FIX DEP: `fixRungTaskFor` (`src/run-task.ts`) already calls
+    `id: escalationTaskIdFor(pr)` and returns `synthetic: true` for a PR with no resolvable task. So
+    this is NOT the same patch in a second place.
+
+    NOR IS ANY OTHER GATE IN THE WAY, EACH CHECKED RATHER THAN ASSUMED. `isBlockedCi` is the whole
+    of `pr.checksState === "red"` — it consults no task id, so a red-gate PR routes to
+    `blocked-fixable` with or without a trailer. `fixHeadAcceptable(head, taskId, synthetic)` accepts
+    a synthetic whose head is not a dispatched run branch (`ownRunBranch || !isDispatchedRunBranch`),
+    which is exactly the descriptive-branch shape both measured PRs have. AND THE STRIKE LEDGER
+    ALREADY CARRIES SYNTHETIC IDS: `sweep.fix.synthetic_task` reads 19 rows of which 13 are
+    `PR-<n>`-keyed, and `fix.dispatch` reads 329 of which 14 are, against 296 keyed to a real task.
+    The fix rung already dispatches on PRs it cannot attribute.
+
+    SO THE GAP IS NOT WHICH PRs THE RUNG MAY TOUCH. It is what the rung can do when it gets there.
+
+    (2) THE INSTRUMENT ALREADY EXISTS AND IS ALREADY HEAD-PRESERVING. `updatePrBodyViaGh` runs
+    `gh pr edit <pr> --body <body>` — no commit, no push, the head sha unmoved — and it is wired as
+    `runFixRung`'s injectable `updatePrBody` dep. W1-T1254 uses it: when a strike's commit changes
+    the file set, `deriveChangesetClaimUpdate` rewrites the stale changeset claim and the run
+    ledgers `fix.body_claim_updated`.
+
+    BUT THAT ARM IS BOUND TO ONE DEFECT AND TO A LATER MOMENT. It fires only for a stale changeset
+    claim, and only after a strike has already committed — the update exists to keep the body honest
+    about a commit the rung just made. A PR whose ONLY defect is its body has nothing for that arm to
+    react to, so the rung either spends a strike on a commit that was never needed or does nothing.
+
+    (3) THE GATE ALREADY NAMES THE DEFECT, TYPED, SO THE REPAIR NEED NOT GUESS.
+    `AcceptanceAuthorTimeDefect` (`src/lib/review.ts`) is the union
+    `"no-header" | "no-trailer" | "unparseable" | "empty-proofs"`, set at the two refusal sites, and
+    `scripts/acceptance-author-gate.mjs` prints it as `REFUSED (${result.defect})`. THE DIAGNOSIS IS
+    ALREADY STRUCTURED AND ALREADY ON THE PR. What is missing is a consumer.
+
+    (4) THE LIVE INSTANCES, MEASURED 2026-08-25. Two agent-authored PRs went red on this gate and were
+    repaired by hand: #2797 refused `no-header`, #2831 refused `empty-proofs`. Both fixes were a
+    single body write with the head sha unmoved, so NEITHER COST A CI CYCLE — which is precisely what
+    the existing mechanism in §2 does, applied by a person because nothing dispatches it. Their heads
+    are `fix/…` and `plan/…` descriptive branches, which is why §1 checked `fixHeadAcceptable` rather
+    than assuming it.
+
+    (5) AND THE MECHANISM IS UNEXERCISED, WHICH A BUILD MUST NOT GLOSS. `fix.body_claim_updated` reads
+    ZERO rows across 672 archives with nothing unread, against a control of 329 `fix.dispatch` rows on
+    the same union. So the body-write path exists in source and has never been observed running here.
+    Whoever builds this is extending a mechanism that is proven by unit test and not by production,
+    and should say so rather than treating W1-T1254's arm as a working precedent.
+
+    (6) WHY THIS IS WORTH DOING GIVEN ONLY TWO INSTANCES. Not the count — the SHAPE. The gate produces
+    a machine-readable defect name, the repair is mechanical and head-preserving, and the rung that
+    would perform it is already eligible and already holds the tool. Every part exists; nothing
+    connects them. That is a cheaper class of task than one needing a new capability, and the two
+    instances are what surfaced it rather than what justifies it.
+  design: |
+    (i) THE REPAIR IS DRIVEN BY THE GATE'S OWN DEFECT NAME, NEVER BY A GUESS. `no-header` and
+    `empty-proofs` are structural and mechanically repairable; `no-trailer` and `unparseable` are not
+    obviously so, and a defect the rung cannot repair deterministically must fall through to the
+    existing path rather than be attempted.
+
+    (ii) IT HAPPENS BEFORE A STRIKE IS SPENT ON A COMMIT, because a body-only defect needs no commit.
+    A repair that first pushes a commit has already cost the CI cycle the operator's own fix avoided.
+
+    (iii) IT REUSES `updatePrBody`, NOT A SECOND WRITE PATH. One injectable dep, one `gh pr edit`, the
+    head sha unmoved.
+
+    (iv) NOT IN SCOPE: which PRs the rung may touch (§1 — already resolved), the changeset-claim arm's
+    own trigger, and any change to what the gate refuses.
+  acceptance:
+    - claim: "a body-only gate refusal is repaired without a commit and with the head sha unmoved"
+      proof: "unit test: test/acceptance-gate-body-repair.test.ts"
+    - claim: "the repair is chosen from the gate's own defect name rather than from the body's content"
+      proof: "unit test: test/acceptance-gate-body-repair.test.ts"
+    - claim: "a defect the rung cannot repair deterministically falls through to the existing path"
+      proof: "unit test: test/acceptance-gate-body-repair.test.ts"
+    - claim: "a repaired body is never recorded as satisfying any task's acceptance"
+      proof: "unit test: test/acceptance-gate-body-repair.test.ts"
+    - claim: "the strike ceiling counts a body repair exactly as it counts any other attempt"
+      proof: "unit test: test/acceptance-gate-body-repair.test.ts"
+    - claim: "an unchanged tree still stands the rung down after a body repair"
+      proof: "unit test: test/acceptance-gate-body-repair.test.ts"
+  files: [src/run-task.ts, test/acceptance-gate-body-repair.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#gate-names-the-defect-and-nothing-repairs-it-2026-08-25"
+  plan_refs: ["W1-T516", "W1-T1254", "W1-T440"]
+  note: |
+    Q2 — THE ATTRIBUTION BOUNDARY IS A CONSTRAINT, NOT A CAVEAT. `criteriaRecoverable`
+    (`src/lib/sweep.ts`) stays keyed STRICTLY to a resolved `Remudero-Task:` trailer. Its own doc
+    states the reason and it is quoted here because a build will be tempted to widen it: widening the
+    field's meaning "would read as silently crediting an unattributed PR, which #1527 forbids", and
+    `test/openpr-taskid-resolver.test.ts` locks a plan-only filing PR to `criteriaRecoverable: false`
+    regardless.
+
+    SO THE PERMISSION IS EXACTLY THIS AND NO WIDER: a fix worker on an untracked PR MAY repair a
+    defect the gate itself named, and MAY NOT claim that the PR satisfies any task's acceptance. The
+    two are separable because the gate's defect is structural — a missing header, a proof with
+    nothing to execute — and judging whether a criterion is MET is a different question the rung is
+    not entitled to answer for a PR with no resolved task. A build that lets a body repair set or
+    imply `criteriaRecoverable`, or that credits the PR against a task, has crossed the line this
+    paragraph exists to draw.
+
+    Q3 — THE CEILING AND THE STAND-DOWN STAY. Widening WHICH PRs the rung may touch must not widen
+    HOW MANY TIMES it may try: the two-strike ceiling is unchanged and a body repair counts as an
+    attempt exactly like any other. The unchanged-tree stand-down stays, so a rung that repaired a
+    body and changed nothing else does not loop.
+
+    AND THE HEAD SHA MUST NOT MOVE ON A BODY REPAIR. That is the whole economic argument — both
+    measured repairs cost no CI cycle precisely because the head stood still — and a fix that pushes
+    a commit to carry a body change has spent the cycle it was meant to save.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (acceptance-gate-body-repair, run-task) at
+      risk:medium — Rule 19: raise to risk:high or decompose into one task per concern The real blast radius is one arm of one rung; no gate changes,
+    no dispatch decision changes, and nothing new is granted write access.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/acceptance-gate-body-repair.test.ts`, declared in `files:` and
+    absent from this tree, so on the filing PR each resolves through W1-T456's forward-reference
+    carve-out.
