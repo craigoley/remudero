@@ -931,12 +931,27 @@ test("FALSIFIER — W1-T470 coverage-improvement dedupe: dropping the coverage.i
 // the child; and 0 only when this test is skipped entirely. The decisive control — removing this
 // one file from the union — gives 0 shifted records and 1 `SF:` block.
 //
-// THE MECHANISM, RECORDED BECAUSE IT IS THE VALUABLE PART: `NODE_V8_COVERAGE` is set on the parent
-// under `--experimental-test-coverage` and is INHERITED by a plain `spawnSync` child. The child
-// collects coverage on the mutated copy, and the lcov reporter keys on the path RELATIVE to each
-// process's own cwd — so the parent's `src/lib/ledger.ts` and the child's `src/lib/ledger.ts`
-// resolve to the same key and MERGE. THE CORRUPTION TRAVELS BY RELATIVE PATH, NOT BY INODE, which
-// is exactly why moving the file cannot help and why this change does not claim to.
+// THE MECHANISM, RECORDED BECAUSE IT IS THE VALUABLE PART — AND CORRECTED. `NODE_V8_COVERAGE` is
+// set on the parent under `--experimental-test-coverage` and IS inherited by a `spawnSync` child,
+// so the child collects coverage on whatever copy it imports. But THE MERGE KEY IS THE ABSOLUTE
+// PATH, never the rendered one. The lcov reporter renders each absolute coverage URL relative to
+// the REPORTING process's cwd, and only readers sharing one absolute path merge at all.
+//
+// Reproduced in miniature, both directions. TWO children importing TWO copies at DIFFERENT absolute
+// paths produce TWO `SF:` blocks in the parent's report — `SF:src/lib/probemod.js` and
+// `SF:sbroot/src/lib/probemod.js`, the second being the sandbox path expressed relative to the
+// parent — and they cannot merge. ONE absolute path whose CONTENT SHIFTS between two reads produces
+// ONE `SF:` block carrying TWO line-sets for the same functions (`FN:5,6,7` and `FN:3,5,6`) with the
+// hits split across them, `FNDA:0` appearing twice for the same name. That second shape is the
+// `src/lib/ledger.ts` shape, `FNDA` split included.
+//
+// SO SANDBOXING DOES NOT REMOVE A COLLISION — IT ADDS AN `SF:` BLOCK, and the duplicate-name count
+// RISING from 16 to 27 is this change working, not regressing: un-sandboxed the two readers shared
+// one absolute path and collapsed into a single block, and a distinct sandbox path can no longer
+// merge into it. Closing the corruption is a separate change that must stop the child reporting at
+// all, and note for whoever takes it: `delete env.NODE_V8_COVERAGE` IS A NO-OP — node re-injects the
+// variable into every child regardless of the `env` option, and even a hand-built `{ PATH, HOME }`
+// still carries it. Only `NODE_V8_COVERAGE: ""` lands, which is why the strip was left out of here.
 //
 // NOT FIXED HERE, AND DELIBERATELY: `test/dispatch-lifetime-breaker.test.ts`'s own W1-T951 check
 // writes the real `src/lib/status.ts` in exactly this shape. A sibling instance of the same
