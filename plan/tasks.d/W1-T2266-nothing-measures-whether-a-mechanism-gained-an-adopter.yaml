@@ -1,0 +1,183 @@
+- id: W1-T2266
+  title: "Nothing measures whether a shipped mechanism ever gained an adopter, so the gap is found by accident: four distinct shapes (symbol with no caller, field with no writer, script with no invoker, gate with no subject) and the only existing scan answers one of them, diff-scoped, so it never sees the backlog"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha, clone
+    shallow-checked `false`. `src/run-task.ts` (1,546,814 bytes) read through git objects. No suite,
+    no poller, no spawning verb.
+
+    (1) THE POPULATION, RE-DERIVED, WITH EVERY ZERO CONTROLLED. Four shapes, and the control for each
+    is a symbol of the SAME KIND that the same query CAN see:
+      SYMBOL WITH NO CALLER
+        `anchorReinjections`  — 1 `src/` file (`src/lib/compaction.ts`), 2 occurrences, definition
+          and one doc reference. CONTROL: `detectCompactionEvents` spans `compaction.ts` AND
+          `worker.ts`, so a cross-file caller IS visible to this query.
+        `generateSandboxTask` — 1 `src/` file (`src/lib/wipe-test.ts`), 7 occurrences, all self.
+          CONTROL: `buildReceipt` spans `receipt.ts` AND `run-task.ts`.
+      FIELD WITH NO WRITER
+        `retirement:` — 0 raw key hits across `plan/`. CONTROL: `^\s*status:` matches 703 files, so
+          the corpus is readable and the key form is right.
+      SCRIPT WITH NO INVOKER
+        `scripts/credit-surface-gate.mjs` and `scripts/state-citation-check.mjs` — 0 workflows,
+          0 `package.json`, 0 `src/`, each. CONTROL: `diff-coverage` matches 1 workflow.
+      GATE WITH NO SUBJECT
+        the containment credential arms — `credential_expired` PRESENT on 187 rows and TRUE on 0;
+          `credential_failure` PRESENT on 249 and TRUE on 0, over 669 `containment.probe` rows in a
+          672-archive union. THE PRESENCE COUNTS ARE THE CONTROL: the fields are read on every row
+          that carries them, and the VALUE is what is never true.
+
+    (2) AND ONE INSTANCE RESOLVED WHILE THE LIST WAS BEING WRITTEN, WHICH IS THE POINT AND NOT A
+    FOOTNOTE. `opts.openTaskTitles` is NOW ASSIGNED, at `src/run-task.ts:13480` — W1-T1076's wiring
+    shipped. The comment at `src/run-task.ts:13406` reading "nothing in `src/` ever assigned
+    `opts.openTaskTitles`" is a HISTORICAL NOTE describing the state that wiring fixed, and reading
+    it as current is the exact trap this class sets: the evidence of the defect outlives the defect.
+    **THE POPULATION MOVES, SO A SNAPSHOT AGES**, and a measure taken once and quoted later is worse
+    than no measure — which is the argument for a CADENCE rather than an audit.
+
+    (3) THE ONE EXISTING SCAN ANSWERS ONE SHAPE, PARTIALLY, AND ITS OWN DOC SAYS WHY.
+    `src/lib/reachability.ts` (W1-T322, ADVISORY ONLY) parses "a diff for ADDED `export function
+    <name>(` lines" — `scanUnreachedExports(diff, checkoutDir)`. TWO LIMITS, BOTH FROM ITS OWN
+    SOURCE. It is DIFF-SCOPED: it sees what a PR introduces, never the accumulated backlog, so an
+    export that went unadopted last month is invisible to it forever. And its SEAM-DEFAULT DISCOUNT
+    excuses "an exported symbol referenced within its OWN defining file beyond its definition" —
+    measured 396 seam-defaults against 24 true orphans, and correct at that ratio. That discount is
+    also precisely why it could never have flagged `duplicateTitleViolations`: an optional opts field
+    consulted inside its own module is the shape being excused. So reachability covers shape 1 for
+    NEW code and nothing else.
+
+    (4) THE SHAPES DIFFER IN WHERE THE EVIDENCE LIVES, NOT MERELY IN WHAT IS UNADOPTED, WHICH IS WHY
+    ONE QUERY CANNOT FIND THEM. Shape 1 is answered from `src/`; shape 2 from `plan/`, which is DATA
+    AND NOT CODE; shape 3 from three surfaces at once (workflows, `package.json`, `src/`). Shapes 1-3
+    are static and can share a HARNESS though not a query — three different corpora. SHAPE 4 IS
+    CATEGORICALLY APART: the code runs, its subject is empty, and only the LEDGER can say so. Any
+    report claiming to cover "unadopted mechanisms" from a checkout alone silently omits the shape
+    that has already cost the most.
+
+    (5) THE LEDGER STATE OF THIS HOST, STATED SO THE CADENCE FIGURES ARE NOT MISREAD.
+    `resolveLedgerUnion` returns `ok: true` with 672 archives, so it did not refuse — but the newest
+    row in the corpus is 2026-08-14T15:10:47.687Z (control: 1,623 `review.posted` rows), and the
+    cadence shipped 2026-08-23T20:42Z. All five `measurement_cadence.*` steps therefore read ZERO
+    here, AND THAT IS CORPUS AGE RATHER THAN NON-ADOPTION. The operator's reading is carried as
+    ATTRIBUTED: `measurement_cadence.ran` reads 5, all with `verdict_calibration.status: "measured"`,
+    first at 2026-08-23T21:08:15Z. THE CADENCE HAS FIRED; this host simply cannot see it.
+  design: |
+    (i) Q1 — A FOURTH VERB ON THE EXISTING CADENCE, WITH ZERO NEW POLICY. `decideMeasurementCadence`
+    (W1-T1259) already paces three verbs at `minIntervalMinutes: 360` and `maxPerDay: 4` behind a
+    marker, and logs five `measurement_cadence.*` steps. A PURE READER FITS THAT SHAPE EXACTLY: it
+    adds no policy block, no second marker, no new interval, and no write. The module's own header
+    states the motivation for this task one level down — the three verbs were "merged, HOST-SIDE
+    ONLY … reachable only through `src/run-task.ts`'s CLI dispatch — so an operator who never types
+    the command never sees whether the system is getting better." An adoption report is the same
+    sentence about mechanisms rather than about metrics.
+
+    (ii) AND LAW 5 IS INHERITED RATHER THAN RESTATED. The module pins it in its own doc: "Nothing in
+    this module files a task or mints an id." A fourth verb under that roof cannot auto-file without
+    breaking a pin that is already load-bearing for three other verbs — which is a stronger guarantee
+    than a sentence in this shard would be.
+
+    (iii) Q2 — THE PRODUCER IS AN ACCEPTANCE CRITERION, NOT A CAUTION. The module's consumer half is
+    dead code without a producer: `src/run-task.ts` says so at its own wiring site — the consumer
+    "(`daemon.ts` reads `deps.checkMeasurementCadence`/`deps.runMeasurementCadence` in its poll loop)
+    is dead code without a line at the `daemonCommand` call site actually constructing this and
+    wiring it in (PR #1066's own lesson, restated at that call site below)". AND #1066 IS RECORDED
+    VERBATIM AT `src/run-task.ts:14233`: it "shipped the rung's CONSUMER … and never wired a
+    producer … `deps.checkAutoTriage` was therefore `undefined` in every production boot, the `if`
+    was always false, and setting `autoTriage.enabled: true` in policy did nothing at all."
+    THE PRODUCER FOR THIS FAMILY ALREADY EXISTS AND IS NAMED: `buildMeasurementCadenceDaemonHooks`
+    (`src/run-task.ts`), wired at the `daemonCommand` call site. A fourth verb that is not reachable
+    THROUGH that wiring is inert, and — uniquely for this task — WOULD ITSELF BE AN INSTANCE OF THE
+    CLASS IT MEASURES. That is why it is criterion 2 with an executable proof rather than a sentence.
+
+    (iv) Q3 — SHAPE 4 IS THE MISFIT AND THE SHARD SAYS SO PLAINLY. Shapes 1-3 are discoverable: a
+    scan can ENUMERATE exports, plan keys and scripts without being told what to look for. SHAPE 4
+    CANNOT BE DISCOVERED. "Is `credential_expired` ever true" and "does the wipe-test have more than
+    one pair" are hand-written predicates over runtime data; there is no generic query that yields
+    them. So the verb carries a DECLARED LIST of shape-4 predicates and reports each with its own
+    control, and it CANNOT find a shape-4 instance nobody wrote down.
+    **AND THAT DECLARED LIST IS ITSELF A THING THAT GOES UNADOPTED — THE RISK IS NAMED HERE RATHER
+    THAN PRETENDED AWAY.** A list nobody extends is a list that reports four instances forever while
+    the fifth goes unseen, which is this task's own defect wearing this task's own remedy. The
+    mitigation is not a gate: it is that the report PRINTS THE LIST'S OWN SIZE AND LAST-EDIT DATE
+    beside its findings, so a stale list is visible as a stale list rather than as a clean result.
+
+    (v) WHAT MUST NOT CHANGE.
+      **NOTHING AUTO-FILES FROM A METRIC (LAW 5).** An adoption count is a number; a shard needs
+      evidence of a defect. The output is a report an operator reads, never a task a rung mints.
+      **NOTHING BECOMES BLOCKING.** A gate that reddens on an unadopted mechanism would fail the one
+      PR that cannot yet have an adopter — the PR that ships it. Advisory is not a weaker choice
+      here, it is the only correct one.
+      **NOTHING PROPOSES DELETING UNADOPTED CODE.** The deny-floor probe, the golden-verdict suite
+      and the escape ladder all sat unused before they mattered. The finding is that nobody knows the
+      gap exists, never that the gap is waste.
+      **EVERY COUNT CARRIES ITS MECHANISM'S SHIP DATE.** `retirement: 0 of 46` read thirty-one hours
+      after the field shipped is a BACKLOG, not a failure, and the number is meaningless without the
+      date beside it. Measured ship dates for the current population: `anchorReinjections`
+      2026-07-19, the credential arms 2026-08-03, `generateSandboxTask` 2026-08-23,
+      `credit-surface-gate.mjs` 2026-08-22, `state-citation-check.mjs` 2026-08-23, `retirement:`
+      2026-08-24 — a range wide enough that a single undated list would be actively misleading.
+
+    (vi) NOT IN SCOPE, NAMED: widening `reachability.ts` past its diff scope or removing its
+    seam-default discount, both of which are correct as they stand (W1-T322); changing the cadence's
+    interval, cap or marker; the `retirement:` backlog itself (W1-T1287's field, an operator ruling
+    per shard); wiring any of the unadopted mechanisms; and deleting anything.
+  acceptance:
+    - claim: "the report names each unadopted mechanism with the shape it belongs to"
+      proof: "unit test: test/adoption-report-has-a-producer.test.ts"
+    - claim: "the verb is reachable through the daemon producer and not only through the cli"
+      proof: "unit test: test/adoption-report-has-a-producer.test.ts"
+    - claim: "every reported count carries the ship date of the mechanism it counts"
+      proof: "unit test: test/adoption-report-has-a-producer.test.ts"
+    - claim: "a runtime-shape instance is read from a declared list rather than discovered"
+      proof: "unit test: test/adoption-report-has-a-producer.test.ts"
+    - claim: "the declared list reports its own size and last edit beside its findings"
+      proof: "unit test: test/adoption-report-has-a-producer.test.ts"
+    - claim: "the verb writes nothing and files nothing"
+      proof: "unit test: test/adoption-report-has-a-producer.test.ts"
+    - claim: "no result of the report can fail a check or block a merge"
+      proof: "unit test: test/adoption-report-has-a-producer.test.ts"
+    - claim: "a mechanism that gained an adopter stops being reported"
+      proof: "unit test: test/adoption-report-has-a-producer.test.ts"
+  files: [src/lib/measurement-cadence.ts, src/run-task.ts, test/adoption-report-has-a-producer.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#adoption-gap-unmeasured-2026-08-25"
+  plan_refs: ["W1-T322", "W1-T1076", "W1-T1259", "W1-T1287"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` names the cadence module, the file
+    carrying its producer, and one new test — three stems, so Rule 19 refuses `medium`. The producer
+    file is declared DELIBERATELY and is not scope creep: criterion 2 requires the verb be reachable
+    through `buildMeasurementCadenceDaemonHooks`, and a task that asserts a producer exists while
+    declaring only the consumer's file would ship the very defect #1066 recorded.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/adoption-report-has-a-producer.test.ts`, declared in `files:`, so on this filing PR
+    it resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL. `rmd check-proof` on the
+    declared path reads `exit: 1`, `hits: 0`, `verdict: fail`. The SAME verb on an EXISTING pure path
+    — `unit test: test/measurement-cadence.test.ts`, the test file for the very module this task
+    extends — reads `exit: 0`, `hits: 172`, `verdict: pass`. The control file was confirmed present
+    BEFORE the falsifier was believed.
+
+    THE CADENCE FIGURES ARE ATTRIBUTED AND THE REASON IS MEASURED. `resolveLedgerUnion` did NOT
+    refuse (`ok: true`, 672 archives), but this corpus's newest row is 2026-08-14T15:10:47.687Z
+    against a cadence that shipped 2026-08-23T20:42Z, so its five steps read zero here as CORPUS AGE.
+    Everything else in rationale (1) is re-derived on this host with its own control.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND IS NOT RE-MINTED. This shard VERIFIES THE ID IS UNUSED
+    rather than that it is this account's, which is the condition that governs filing.
+
+    EIGHT SURFACES SWEPT FOR USAGE, EACH WITH A CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, AND THE
+    FETCHED REF COUNT VERIFIED AGAINST THE REMOTE FIRST (137 heads and 385 `refs/rmd-id/*` on origin,
+    137 and 385 fetched — MATCH, so a zero is a real absence and not a short fetch). Shards on main 0
+    (control W1-T2257 = 2); whole tree on main 0 (control 2); every origin ref 0 (control 5); remote
+    head names 0 (control, all heads read); commit messages on main 0 (control 2); merged-PR trailers
+    0 read from squash-merge commit BODIES on main (control 595 trailers, W1-T1268 specifically 2);
+    the 25 newest PR heads 0 (control W1-T2257 = 21). REST and `git` were used throughout; no GraphQL
+    call was made, so no quota was consumed.
