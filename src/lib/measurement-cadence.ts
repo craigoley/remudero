@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } from "./rule-efficacy.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
+import { resolveLedgerUnion, type LedgerUnionResult } from "./ledger-grep.js";
 
 /**
  * lib/measurement-cadence.ts — W1-T1259: gives `rule-efficacy`, `verdict-calibration` and
@@ -187,10 +188,441 @@ export interface AutonomyRateCadenceResult extends MeasurementCadenceVerbStatus 
   zeroTouchRate: number | null;
 }
 
+// ── The adoption report: a fourth verb (W1-T2266) ──────────────────────────────────────────────
+//
+// "Is this system getting better" (the three verbs above) and "did anything anyone shipped ever
+// get ADOPTED" are different questions — a mechanism can be perfectly correct and still never be
+// called, read, invoked, or given a subject. This verb answers the second question, on the SAME
+// cadence and through the SAME producer as the three above (design (i)): no new policy block, no
+// second marker, no new interval, and — per this module's own Law 5 pin — no write of its own.
+//
+// FOUR SHAPES, THREE DISCOVERABLE AND ONE DECLARED (design (iv)). A symbol with no caller, a plan
+// field with no writer, and a script with no invoker can each be found by a SCAN that enumerates
+// its own candidates from source — nobody has to say in advance which export, which field, which
+// script to look at. A runtime gate with no subject cannot: "is `credential_expired` ever true"
+// is a hand-written predicate over ledger data, and no generic query yields it. So shapes 1-3 are
+// live scans below; shape 4 is a DECLARED LIST (`ADOPTION_SHAPE4_PREDICATES`), and the list's own
+// size and last-edit date travel with every report it produces — a list nobody extends is a list
+// that reports the same instances forever while a new one goes unseen, and this is how that
+// staleness stays VISIBLE instead of silent (design (iv)'s own named risk).
+//
+// EVERY FINDING CARRIES ITS MECHANISM'S SHIP DATE (design (v)): a count read thirty-one hours
+// after the thing it counts shipped is a BACKLOG, not a failure, and is meaningless without the
+// date beside it to tell the two apart.
+//
+// ADVISORY ONLY, LIKE THE SCAN IT SITS BESIDE (`reachability.ts`, W1-T322): nothing below can
+// fail a check, block a merge, or file a task — an adoption count is a number for an operator to
+// read, never a verdict this module renders. NOT IN SCOPE (design (vi)): widening
+// `reachability.ts` itself past its own diff scope, or proposing that any unadopted mechanism be
+// deleted — the finding is that nobody knows the gap exists, never that the gap is waste.
+
+export type AdoptionShape = "symbol-no-caller" | "field-no-writer" | "script-no-invoker" | "gate-no-subject";
+
+/** One mechanism this report could not find an adopter for. */
+export interface AdoptionFinding {
+  shape: AdoptionShape;
+  /** The mechanism's own name: an export identifier, a plan field key, a script path, or a
+   *  ledger field name. */
+  mechanism: string;
+  /** Repo-relative path this mechanism is defined in (or lives at, for a script). */
+  definedIn: string;
+  /** ISO date this mechanism SHIPPED, so the count beside it reads as a backlog and never a
+   *  false failure (design (v)). `"unknown"` only when the git read itself failed. */
+  shippedAt: string;
+  detail: string;
+}
+
+/** One shape-4 (gate-with-no-subject) predicate — hand-written because shape 4 cannot be
+ *  discovered (design (iv)): "is this field ever true" has no generic query. `ledgerLinePattern`
+ *  bounds {@link resolveLedgerUnion}'s own read to the ledger step that carries `field`; a line
+ *  that matches but doesn't parse as JSON, or parses without `field` present, sits outside this
+ *  predicate's population either way — never a false positive. */
+export interface AdoptionShape4Predicate {
+  id: string;
+  mechanism: string;
+  definedIn: string;
+  shippedAt: string;
+  ledgerLinePattern: RegExp;
+  field: string;
+  detail: string;
+}
+
+/**
+ * THE DECLARED LIST (design (iv)) — the current shape-4 population, re-derived per this task's
+ * own rationale: the containment credential arms, present on every `containment.probe` row that
+ * carries them and true on none. Extend this list by hand when a new hand-written gate predicate
+ * is found; bump {@link ADOPTION_SHAPE4_LIST_LAST_EDITED} in the SAME change, so a report always
+ * carries proof of whether the list itself is current.
+ */
+export const ADOPTION_SHAPE4_PREDICATES: readonly AdoptionShape4Predicate[] = [
+  {
+    id: "credential_expired",
+    mechanism: "credential_expired",
+    definedIn: "state ledger `containment.probe` rows",
+    shippedAt: "2026-08-03",
+    ledgerLinePattern: /"step"\s*:\s*"containment\.probe"/,
+    field: "credential_expired",
+    detail: "present on every containment.probe row that carries the field, never observed true",
+  },
+  {
+    id: "credential_failure",
+    mechanism: "credential_failure",
+    definedIn: "state ledger `containment.probe` rows",
+    shippedAt: "2026-08-03",
+    ledgerLinePattern: /"step"\s*:\s*"containment\.probe"/,
+    field: "credential_failure",
+    detail: "present on every containment.probe row that carries the field, never observed true",
+  },
+];
+
+/** {@link ADOPTION_SHAPE4_PREDICATES}'s own last-edit date — printed beside every report
+ *  (design (iv)'s mitigation for its own named risk: a stale declared list must be VISIBLE as
+ *  stale, not silently read as a clean result). Bump by hand whenever the list above changes. */
+export const ADOPTION_SHAPE4_LIST_LAST_EDITED = "2026-08-25";
+
+export interface AdoptionReportResult {
+  /** Every mechanism, across all four shapes, that this run could not find an adopter for —
+   *  empty is a real, measured "clear", never an unset default. */
+  findings: AdoptionFinding[];
+  /** {@link ADOPTION_SHAPE4_PREDICATES}'s own length, alongside the findings it produced. */
+  shape4ListSize: number;
+  /** {@link ADOPTION_SHAPE4_LIST_LAST_EDITED}, alongside the findings — design (iv). */
+  shape4ListLastEdited: string;
+  /** Predicate ids the ledger union could not measure this run (corpus absent, or present on
+   *  zero rows) — named rather than silently read as "adopted" (this module's own P48 discipline,
+   *  applied to shape 4). */
+  shape4Unmeasurable: string[];
+}
+
+const ADOPTION_SKIP_DIR_NAMES = new Set(["node_modules", ".git", "dist", "build", "coverage"]);
+
+/** Recursively list every FILE under `root`/`rel`, as repo-relative POSIX paths. Missing roots
+ *  are silently skipped — same discipline `reachability.ts`'s own file walk uses, duplicated here
+ *  (that walker isn't exported, and a periodic backlog scan importing a diff-scoped advisory's
+ *  private internals would be the wrong coupling either way). */
+function walkAdoptionFiles(root: string, rel: string, out: string[]): void {
+  let entries;
+  try {
+    entries = readdirSync(join(root, rel), { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (ADOPTION_SKIP_DIR_NAMES.has(e.name)) continue;
+    const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) walkAdoptionFiles(root, childRel, out);
+    else if (e.isFile()) out.push(childRel);
+  }
+}
+
+function isAdoptionTestPath(path: string): boolean {
+  return /(^|\/)test(s)?\//.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path);
+}
+
+function escapeAdoptionRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface AdoptionCorpusFile {
+  rel: string;
+  text: string;
+  isTest: boolean;
+}
+
+/** Read every candidate file ONCE — `src/`, `scripts/`, `bin/`, `test/`, the same reference
+ *  surface `reachability.ts` scans — so a symbol/script reachability check is a regex test over
+ *  an already-loaded string, never a repeat disk read per candidate (measured on this repo:
+ *  ~1,100 files / ~20MB read once in well under a second; the O(candidates * files) cost that
+ *  follows is then pure in-memory regex — ~2s for the full `src/lib` population on this host). */
+function buildAdoptionCorpus(checkoutDir: string): AdoptionCorpusFile[] {
+  const rels: string[] = [];
+  for (const root of ["src", "scripts", "bin", "test"]) walkAdoptionFiles(checkoutDir, root, rels);
+  const out: AdoptionCorpusFile[] = [];
+  for (const rel of rels) {
+    try {
+      out.push({ rel, text: readFileSync(join(checkoutDir, rel), "utf8"), isTest: isAdoptionTestPath(rel) });
+    } catch {
+      // unreadable — never the reason a real caller goes unfound; just skip it
+    }
+  }
+  return out;
+}
+
+/** Default ship-date resolver: a real `git log` read, injectable ONLY for tests. `needle` given
+ *  ⇒ a pickaxe search (`-S`) for the oldest commit that introduced the exact string under `file`
+ *  (a symbol name, or a `<field>?:` declaration) — the file's own history alone would misdate a
+ *  field or symbol added long after the file itself was created. `needle` omitted ⇒ the file's
+ *  own oldest ADD event (`--diff-filter=A --follow`), correct for a script: the mechanism IS the
+ *  file. */
+function defaultAdoptionShipDate(checkoutDir: string, file: string, needle?: string): string {
+  try {
+    const args = needle
+      ? ["log", "-S", needle, "--format=%aI", "--", file]
+      : ["log", "--diff-filter=A", "--follow", "--format=%aI", "--", file];
+    const out = execFileSync("git", args, { cwd: checkoutDir, encoding: "utf8", maxBuffer: 1 << 24 }).trim();
+    const lines = out.split("\n").filter(Boolean);
+    return lines.length ? lines[lines.length - 1] : "unknown"; // git log is newest-first; oldest is last
+  } catch {
+    return "unknown";
+  }
+}
+
+/** SHAPE 1 — symbol with no caller. Enumerates every `export function`/`export const` declared
+ *  directly in `src/lib/**` (never `src/run-task.ts` — deliberately bounded to the "organ" layer
+ *  this task's own examples both live in, `compaction.ts`/`wipe-test.ts`; the CLI entry point is
+ *  a wiring surface, not a mechanism, and scanning it would flood the report with call-site glue
+ *  that has exactly one caller by construction) and reports every one with no reference outside
+ *  its own definition — the SAME two accepted shapes `reachability.ts`'s `isExportReachable`
+ *  uses (a real cross-file caller, or the seam-default discount for a reference elsewhere in its
+ *  own defining file), re-implemented against the pre-read {@link AdoptionCorpusFile} corpus
+ *  rather than reading disk per candidate (see {@link buildAdoptionCorpus}'s own doc for why). */
+function scanUnadoptedSymbols(
+  checkoutDir: string,
+  corpus: AdoptionCorpusFile[],
+  shipDateFor: (checkoutDir: string, file: string, needle?: string) => string,
+): AdoptionFinding[] {
+  const EXPORT_DECL_RE = /^export\s+(?:async\s+)?function\s+(\w+)\s*\(|^export\s+const\s+(\w+)\s*=/gm;
+  const findings: AdoptionFinding[] = [];
+  const seen = new Set<string>();
+  for (const file of corpus) {
+    if (!file.rel.startsWith("src/lib/") || file.isTest) continue;
+    for (const m of file.text.matchAll(EXPORT_DECL_RE)) {
+      const name = m[1] ?? m[2];
+      if (!name) continue;
+      const key = `${file.rel}::${name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const re = new RegExp(`(?<![\\w$])${escapeAdoptionRegExp(name)}(?![\\w$])`);
+      const defRe = new RegExp(
+        `export\\s+(?:async\\s+)?function\\s+${escapeAdoptionRegExp(name)}\\b|export\\s+const\\s+${escapeAdoptionRegExp(name)}\\b`,
+      );
+      let reached = false;
+      for (const candidate of corpus) {
+        if (candidate.rel === file.rel) {
+          const dm = defRe.exec(candidate.text);
+          const beyond = dm ? candidate.text.slice(0, dm.index) + candidate.text.slice(dm.index + dm[0].length) : candidate.text;
+          if (re.test(beyond)) {
+            reached = true;
+            break;
+          }
+          continue;
+        }
+        if (candidate.isTest) continue;
+        if (re.test(candidate.text)) {
+          reached = true;
+          break;
+        }
+      }
+      if (!reached) {
+        findings.push({
+          shape: "symbol-no-caller",
+          mechanism: name,
+          definedIn: file.rel,
+          shippedAt: shipDateFor(checkoutDir, file.rel, name),
+          detail: `no reference to \`${name}\` outside its own definition in ${file.rel}`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+/** SHAPE 2 — field with no writer. Enumerates every OPTIONAL field (`name?:`) declared on
+ *  `src/lib/plan.ts`'s `Task` interface — the one schema plan/ data is written against — and
+ *  reports every one with ZERO raw `<field>:` key hits across `plan/`'s own corpus, the same
+ *  measure this task's own rationale used (`retirement:` — 0 raw key hits, control `^\s*status:`
+ *  matching 703 files). A REQUIRED field can never appear here: every parsed task carries it, so
+ *  its hit count is never zero — this scan needs no separate required/optional split to stay
+ *  quiet on them. */
+function scanUnadoptedFields(
+  checkoutDir: string,
+  shipDateFor: (checkoutDir: string, file: string, needle?: string) => string,
+): AdoptionFinding[] {
+  const schemaPath = "src/lib/plan.ts";
+  let text: string;
+  try {
+    text = readFileSync(join(checkoutDir, schemaPath), "utf8");
+  } catch {
+    return [];
+  }
+  const ifaceMatch = /export interface Task \{([\s\S]*?)\n\}/.exec(text);
+  if (!ifaceMatch) return [];
+  const names = new Set<string>();
+  for (const m of ifaceMatch[1].matchAll(/^\s*(\w+)\?:/gm)) names.add(m[1]);
+
+  const planRels: string[] = [];
+  walkAdoptionFiles(checkoutDir, "plan", planRels);
+  const planFiles = planRels
+    .filter((r) => r.endsWith(".yaml") || r.endsWith(".yml"))
+    .map((r) => {
+      try {
+        return readFileSync(join(checkoutDir, r), "utf8");
+      } catch {
+        return "";
+      }
+    });
+
+  const findings: AdoptionFinding[] = [];
+  for (const name of names) {
+    const re = new RegExp(`^\\s*${escapeAdoptionRegExp(name)}:\\s`, "m");
+    const hit = planFiles.some((t) => re.test(t));
+    if (!hit) {
+      findings.push({
+        shape: "field-no-writer",
+        mechanism: `${name}:`,
+        definedIn: schemaPath,
+        shippedAt: shipDateFor(checkoutDir, schemaPath, `${name}?:`),
+        detail: `0 raw \`${name}:\` key hits across plan/ — declared optional on Task, never written`,
+      });
+    }
+  }
+  return findings;
+}
+
+/** SHAPE 3 — script with no invoker. Enumerates every `scripts/**` file and reports every one
+ *  with zero references across the three surfaces a script can be reached from: a `.github/
+ *  workflows/*` step, `package.json`, or a `src/**` spawn — the same three surfaces this task's
+ *  own rationale swept (0 workflows, 0 package.json, 0 src/, for both named scripts; control:
+ *  `diff-coverage` matches 1 workflow). */
+function scanUnadoptedScripts(
+  checkoutDir: string,
+  corpus: AdoptionCorpusFile[],
+  shipDateFor: (checkoutDir: string, file: string, needle?: string) => string,
+): AdoptionFinding[] {
+  const scriptRels: string[] = [];
+  walkAdoptionFiles(checkoutDir, "scripts", scriptRels);
+
+  const workflowRels: string[] = [];
+  walkAdoptionFiles(checkoutDir, ".github/workflows", workflowRels);
+  const workflowTexts = workflowRels.map((r) => {
+    try {
+      return readFileSync(join(checkoutDir, r), "utf8");
+    } catch {
+      return "";
+    }
+  });
+  let packageJsonText = "";
+  try {
+    packageJsonText = readFileSync(join(checkoutDir, "package.json"), "utf8");
+  } catch {
+    // no package.json — treated as "no reference there", same as any other absent surface
+  }
+  const srcTexts = corpus.filter((f) => f.rel.startsWith("src/")).map((f) => f.text);
+
+  const findings: AdoptionFinding[] = [];
+  for (const rel of scriptRels) {
+    if (!/\.(mjs|cjs|js|ts)$/.test(rel)) continue;
+    const base = rel.slice(rel.lastIndexOf("/") + 1);
+    const re = new RegExp(escapeAdoptionRegExp(base));
+    const invoked = workflowTexts.some((t) => re.test(t)) || re.test(packageJsonText) || srcTexts.some((t) => re.test(t));
+    if (!invoked) {
+      findings.push({
+        shape: "script-no-invoker",
+        mechanism: rel,
+        definedIn: rel,
+        shippedAt: shipDateFor(checkoutDir, rel),
+        detail: `0 references to \`${base}\` across .github/workflows, package.json, src/`,
+      });
+    }
+  }
+  return findings;
+}
+
+/** SHAPE 4 — gate with no subject, over the DECLARED {@link ADOPTION_SHAPE4_PREDICATES} list
+ *  (design (iv): this shape cannot be discovered). Reads the ledger union ONCE per distinct
+ *  `ledgerLinePattern` (the two credential predicates above share one), then for each predicate
+ *  counts lines where `field` is PRESENT vs TRUE — the presence count IS the control (this
+ *  task's own rationale): a predicate that never sees its own field at all is unmeasurable, not
+ *  a clean pass, and is named in the returned `unmeasurable` list rather than silently read as
+ *  adopted. */
+function scanShape4Gates(
+  stateDir: string,
+  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult,
+): { findings: AdoptionFinding[]; unmeasurable: string[] } {
+  const findings: AdoptionFinding[] = [];
+  const unmeasurable: string[] = [];
+  const cache = new Map<string, LedgerUnionResult>();
+  for (const p of ADOPTION_SHAPE4_PREDICATES) {
+    const key = p.ledgerLinePattern.source;
+    let union = cache.get(key);
+    if (!union) {
+      union = ledgerUnion(stateDir, p.ledgerLinePattern);
+      cache.set(key, union);
+    }
+    if (!union.ok) {
+      unmeasurable.push(p.id);
+      continue;
+    }
+    let present = 0;
+    let trueCount = 0;
+    for (const line of union.matches) {
+      let row: unknown;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!row || typeof row !== "object" || !(p.field in (row as Record<string, unknown>))) continue;
+      present += 1;
+      if ((row as Record<string, unknown>)[p.field] === true) trueCount += 1;
+    }
+    if (present === 0) {
+      unmeasurable.push(p.id);
+      continue;
+    }
+    if (trueCount === 0) {
+      findings.push({
+        shape: "gate-no-subject",
+        mechanism: p.mechanism,
+        definedIn: p.definedIn,
+        shippedAt: p.shippedAt,
+        detail: `${p.detail} (present on ${present}, true on 0)`,
+      });
+    }
+  }
+  return { findings, unmeasurable };
+}
+
+/**
+ * THE FOURTH VERB'S ENTRY POINT (design (i)/(iv)). Static scans (shapes 1-3) run only when
+ * `checkoutDir` is supplied — omitted ⇒ they're skipped, never faked as "clean" (an EXISTING
+ * caller that hasn't opted in, e.g. this module's own pre-W1-T2266 tests, pays no new I/O and
+ * gets no new findings, rather than a silently-wrong all-clear). Shape 4 always runs; it reads
+ * only `stateDir`, the same root every other verb in this module already requires.
+ */
+function runAdoptionReport(opts: {
+  checkoutDir?: string;
+  stateDir: string;
+  shipDateFor: (checkoutDir: string, file: string, needle?: string) => string;
+  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
+}): AdoptionReportResult {
+  const findings: AdoptionFinding[] = [];
+  if (opts.checkoutDir) {
+    const corpus = buildAdoptionCorpus(opts.checkoutDir);
+    findings.push(...scanUnadoptedSymbols(opts.checkoutDir, corpus, opts.shipDateFor));
+    findings.push(...scanUnadoptedFields(opts.checkoutDir, opts.shipDateFor));
+    findings.push(...scanUnadoptedScripts(opts.checkoutDir, corpus, opts.shipDateFor));
+  }
+  const shape4 = scanShape4Gates(opts.stateDir, opts.ledgerUnion);
+  findings.push(...shape4.findings);
+  return {
+    findings,
+    shape4ListSize: ADOPTION_SHAPE4_PREDICATES.length,
+    shape4ListLastEdited: ADOPTION_SHAPE4_LIST_LAST_EDITED,
+    shape4Unmeasurable: shape4.unmeasurable,
+  };
+}
+
 export interface MeasurementCadenceRunResult {
   ruleEfficacy: RuleEfficacyCadenceResult;
   verdictCalibration: VerdictCalibrationCadenceResult;
   autonomyRate: AutonomyRateCadenceResult;
+  /** W1-T2266's fourth verb. Optional on the TYPE ONLY so a `DaemonDeps.runMeasurementCadence`
+   *  override authored before this field existed (e.g. a hand-built test literal simulating the
+   *  daemon's injected dependency, never calling this module's own producer) still type-checks —
+   *  {@link runMeasurementCadenceReport} itself NEVER omits it. */
+  adoptionReport?: AdoptionReportResult;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — the SAME shallow-clone refusal
@@ -223,6 +655,17 @@ export interface MeasurementCadenceReportOpts {
   gitLog?: (cwd: string) => { dump: string; ref: string };
   /** Injectable ONLY for tests — defaults to `<stateDir>/inbox-proposals.json`. */
   registryPath?: string;
+  /** W1-T2266: repo checkout root for the adoption report's static scans (shapes 1-3: symbol,
+   *  field, script). Optional — omitted skips those three scans entirely (shape 4, the ledger
+   *  gate scan, still runs off `stateDir` regardless), so an EXISTING caller that hasn't opted in
+   *  pays no new I/O and gets no new findings. Production (`buildMeasurementCadenceDaemonHooks`)
+   *  always supplies `repoRoot`. */
+  checkoutDir?: string;
+  /** Injectable ONLY for tests — production takes a real `git log` read (this module's own
+   *  `defaultAdoptionShipDate`). */
+  shipDateFor?: (checkoutDir: string, file: string, needle?: string) => string;
+  /** Injectable ONLY for tests — production takes {@link resolveLedgerUnion}. */
+  ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
 }
 
 /**
@@ -310,5 +753,13 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     zeroTouchRate: aReport.zeroTouchRate,
   };
 
-  return { ruleEfficacy, verdictCalibration, autonomyRate };
+  // ── the fourth verb: the adoption report (W1-T2266) ──────────────────────────────────────────
+  const adoptionReport = runAdoptionReport({
+    checkoutDir: opts.checkoutDir,
+    stateDir: opts.stateDir,
+    shipDateFor: opts.shipDateFor ?? defaultAdoptionShipDate,
+    ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
+  });
+
+  return { ruleEfficacy, verdictCalibration, autonomyRate, adoptionReport };
 }
