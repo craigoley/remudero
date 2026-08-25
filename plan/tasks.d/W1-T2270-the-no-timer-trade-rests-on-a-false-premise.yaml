@@ -1,0 +1,165 @@
+- id: W1-T2270
+  title: "`decideDispatchClaimRelease` refuses a time-based expiry on the stated ground that a stranded claim is a visible ref an operator can drop, and `StaticLatchDef` makes a file path a REQUIRED field so no git ref can be rendered at all — the trade was made against a surface that does not exist, and a lane killed before its `finally` leaves a per-task halt nothing clears and nothing shows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (cd60cdb95249271fbbe035d07ffa5e807604325d), clone shallow-checked `false`. `src/run-task.ts` read
+    through git objects. No suite, no spawning verb, no poller. Ledger read at the STATE dir with step
+    names grepped from source; every zero controlled. REST and `git` only.
+
+    (1) THE SUBJECT IS THE CONTRADICTION, NOT A MISSING BOARD ROW. Framed as "add a latch row" this
+    reads as a rendering change and will be triaged as cosmetic. Framed accurately it is a DESIGN
+    DECISION RESTING ON A FALSE PREMISE: a module gave up a safety mechanism in exchange for a
+    property another module cannot provide, and neither knows about the other. The remedy set below
+    is deliberately plural for that reason — a rendering fix is one option among three, not the task.
+
+    (2) HALF ONE, VERBATIM: THE TRADE. `decideDispatchClaimRelease` (`src/lib/dispatch-claim.ts`)
+    documents itself as "PURE. The three-arm release, in order, with NO TIME-BASED EXPIRY — mirrors
+    `decideTriageClaimRelease` exactly; see that function's own doc for why a timer is refused ('a
+    claim that outlives its lane is a visible ref an operator can drop; a claim that expires under a
+    running lane re-opens the exact race this exists to close')." Its third arm reads "OPERATOR —
+    anything else. Cross-host liveness is NOT decidable (the reason `isHolderStale` refuses to widen
+    into a cross-host question at all, W1-T396), so the honest answer is a person, not a guess."
+
+    BOTH SENTENCES REST ON THE SAME ASSUMPTION: that a stranded claim is SEEN. The refusal of a timer
+    is not arbitrary and this shard does not call it wrong — it is a considered trade whose stated
+    consideration is operator visibility.
+
+    (3) HALF TWO, AND IT IS STRONGER THAN "THESE FIVE HAPPENED TO BE FILES". W1-T2264 (merged, #2812)
+    measured that `status-board.ts`'s latch block renders only file-backed holds. RE-DERIVED HERE AT
+    THE TYPE LEVEL: `StaticLatchDef` declares `path: (root: string) => string` as a REQUIRED field,
+    five entries populate it, and the whole block contains ZERO references to `refs/`, `ls-remote` or
+    `show-ref`. So a git-ref hold is not merely unrendered — IT IS UNREPRESENTABLE IN THE TYPE THE
+    BLOCK ITERATES. `refs/rmd-dispatch/<taskId>` materialises nowhere.
+
+    (4) AND THE HALT IS REAL, NOT THEORETICAL. `run-task.ts:8974` refuses the run outright:
+    `if (!claimDecision.proceed)` returns a blocked verdict for `taken` or `unreachable`. The release
+    is in a `finally` at `:10422`, so an ORDERLY exit clears the ref — success or failure alike. A
+    lane that never reaches its `finally` does not: a SIGKILL, a container reap, a host that
+    disappears. There is no timer by design (§2), no expiry, and nothing else in the tree sweeps
+    these refs. THE RESULT IS A PER-TASK HALT THAT NOTHING CLEARS AND NOTHING SHOWS.
+
+    (5) Q2 — THE RATE IS UNMEASURED, AND THIS HOST CANNOT MEASURE IT. STATED PLAINLY RATHER THAN
+    REPORTED AS A ZERO. `dispatch.claim` reads 0 rows over the union at the state dir (672 archives,
+    nothing unread). THAT ZERO IS NOT EVIDENCE OF ABSENCE, and the reason is sharper than corpus age:
+    the live ledger's newest row is 2026-08-25T11:45:30Z — AFTER `dispatch-claim.ts` shipped
+    2026-08-23 — but every row written here since 2026-08-23 is `cli.invoked` (2,310 of them) plus a
+    single `next_task_id.reserve`. `run.start` since that date reads ZERO against 200 in the file
+    overall. THE CONTROLS SEPARATE THE TWO EXPLANATIONS: the ledger is live and being written (2,310
+    rows prove it), and what is absent is DISPATCH, not logging. This host has not dispatched a task
+    since the claim shipped; the dispatching lane runs on a container host whose ledger is not on
+    this machine.
+
+    SO THE HONEST ANSWER IS "UNMEASURED", NOT "NEVER". Whoever builds this must re-take the count on
+    a state root that actually dispatches before sizing anything, and must not read this shard as
+    evidence that stranding is frequent — or that it is rare.
+
+    (6) WHY IT IS WORTH FILING ANYWAY, GIVEN AN UNMEASURED RATE. Not the frequency — the ASYMMETRY.
+    An orderly exit is covered, so the failure only appears when a lane dies abnormally, which is
+    exactly when nobody is watching. And the consequence is silent: the next dispatch of that task is
+    refused with a reason that names the ref, but no surface an operator runs shows the ref exists,
+    so the task simply stops being dispatched and the board reports no active latches. The module
+    already decided this case needs a person; the finding is that the person has no way to find out.
+
+    (7) TWO REFUTATIONS RECORDED SO NOBODY RE-DERIVES THEM. W1-T2264 enumerated three more invisible
+    halts alongside this one. TWO OF THEM DO NOT SURVIVE MEASUREMENT.
+
+    THE CIRCUIT BREAKER IS ALREADY RENDERED TWICE ON `rmd status`. `status-board.ts` carries seven
+    references to `circuit_broken`, including the blocker class at `:273`/`:1292` and the attempts row
+    at `:352`/`:1547`, whose own doc says it is "the SAME streak count the circuit breaker itself
+    trips on, so this row's number and BLOCKERS' `circuit_broken` class can never disagree". The
+    ledger carries 2,114 `dispatch.circuit_broken` rows, so it is live as well as visible. A latch row
+    would be its THIRD rendering on one verb. W1-T2264's "INVISIBLE" is wrong about this one — it is
+    invisible to the LATCH BLOCK, which is a different claim.
+
+    THE LIFETIME CAP IS INVISIBLE BUT NOT YET REACHABLE. No board surface reads `lifetime_capped` —
+    zero hits across `status-board.ts`, `status.ts` and `task-card.ts`, against seven for
+    `circuit_broken` as the control — so W1-T2264 is right that it cannot be seen. But it has never
+    fired: 0 `dispatch.lifetime_capped` rows since it shipped 2026-08-04, in a corpus where its
+    sibling breaker fired 2,114 times over an overlapping window. Revisit if it ever fires; do not
+    file it now.
+
+    W1-T2264 IS CITED FOR THE KEY-SHAPE FINDING AND IS NOT RE-FILED. Its subject is that the latch
+    block's rule is "a latch is a file that exists"; this shard's subject is a different module having
+    traded something away on the assumption that the rule was broader.
+  design: |
+    (i) Q1 — AT LEAST THREE REMEDIES, AND THIS SHARD PICKS NONE. Each is stated with what it costs so
+    the ruling is made on the trade rather than on whichever was written first.
+
+      (a) A BOARD ROW FOR THE HELD CLAIM. Cost: the claim is PER-TASK, so this is a row per held task,
+      a different shape from the fleet-wide singleton `refs/rmd-pause/hold` that W1-T2264's own fix
+      added. It also needs a remote read inside a section whose two ledger-derived classes are
+      documented as "PURE ledger reads", so it changes what the latch block is allowed to do, not
+      only what it shows. Cheapest to describe, not cheapest to build.
+
+      (b) THE CLAIM PATH SURFACING ITSELF. Cost: lower coupling — the refusal at `run-task.ts:8974`
+      already knows the ref and the holder, so the information exists at the point of refusal and
+      only has to reach somewhere an operator looks. But it surfaces only when a NEW dispatch is
+      attempted and refused, so a task nobody re-dispatches stays silent. Fixes the loud case, not
+      the quiet one.
+
+      (c) REVISITING THE NO-TIMER TRADE, NOW THAT ITS PREMISE IS KNOWN FALSE. THIS IS THE ONE THE
+      MODULE'S OWN ARGUMENT MOST DIRECTLY INVITES — the trade was priced against visibility, and the
+      visibility is not there, so the price was wrong. IT IS ALSO THE MOST DANGEROUS OF THE THREE,
+      AND THAT IS SAID HERE RATHER THAN DISCOVERED LATER: the module's own sentence explains why a
+      timer is worse than a stranded ref — "a claim that expires under a running lane re-opens the
+      exact race this exists to close" — so a timer chosen to fix visibility would trade a halt
+      nobody can see for a race the claim exists to prevent. Restoring the premise (a) or (b) aim at
+      is the conservative direction; changing the trade is not.
+
+    (ii) WHICHEVER LANDS, THE INFORMATION MUST DISTINGUISH A HELD CLAIM FROM AN UNREADABLE REMOTE.
+    `decideDispatchClaim` already has a fail-closed `unreachable` arm, and reporting the two the same
+    way would repeat the unknown-read-as-a-negative shape this fleet has corrected on several rungs.
+
+    (iii) NOT IN SCOPE: the fleet-wide pause row (W1-T2264 shipped it), the circuit breaker and the
+    lifetime cap (§7), and any change to when a claim is TAKEN.
+  acceptance:
+    - claim: "a claim held by a lane that never released it is discoverable from a surface an operator runs"
+      proof: "unit test: test/dispatch-claim-stranded-visibility.test.ts"
+    - claim: "a task with no held claim produces no such report, so a clear fleet still reads clear"
+      proof: "unit test: test/dispatch-claim-stranded-visibility.test.ts"
+    - claim: "an unreadable remote is reported as undetermined rather than as a held claim"
+      proof: "unit test: test/dispatch-claim-stranded-visibility.test.ts"
+    - claim: "an unreadable remote is likewise never reported as no claim held"
+      proof: "unit test: test/dispatch-claim-stranded-visibility.test.ts"
+    - claim: "the report names the ref and the holder so the operator arm has what it needs to act"
+      proof: "unit test: test/dispatch-claim-stranded-visibility.test.ts"
+    - claim: "nothing in the change releases a claim it reports"
+      proof: "unit test: test/dispatch-claim-stranded-visibility.test.ts"
+  files: [src/lib/status-board.ts, test/dispatch-claim-stranded-visibility.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#no-timer-trade-rests-on-a-false-premise-2026-08-25"
+  plan_refs: ["W1-T2264", "W1-T1268", "W1-T396"]
+  note: |
+    THE THREE RELEASE ARMS STAY: HOLDER, EVIDENCE, OPERATOR. Rendering a hold is NOT authority to
+    release it and must never become a fourth arm. The whole point of the operator arm is that
+    cross-host liveness is undecidable, and a surface that could see a claim would be no better placed
+    to judge whether its lane is alive than the module that already refused to guess.
+
+    `rmd status` STAYS READ-ONLY AND CHEAP. Its own help says it "writes nothing, spawns nothing,
+    always exits 0", and it is the verb an operator runs first precisely because of that. A remedy
+    that makes it slow or stateful has broken the surface it was trying to improve.
+
+    AND NO TIMER IS ADDED BY THIS SHARD. Design (i)(c) raises revisiting the trade as a QUESTION for
+    the ruling, with its own danger stated; it is not this task's conclusion and a build must not read
+    it as one.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (dispatch-claim-stranded-visibility,
+      status-board) at risk:medium — Rule 19: raise to risk:high or decompose into one task per
+      concern The real blast radius is one read-only board section; no gate, no
+    merge path and no dispatch decision reads it.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/dispatch-claim-stranded-visibility.test.ts`, declared in `files:`
+    and absent from this tree, so on the filing PR each resolves through W1-T456's forward-reference
+    carve-out.
