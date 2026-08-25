@@ -232,7 +232,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "workerAbandon",
     "sweepWallClockBoundMs",
     "fixSpawnWallClockBoundMs",
-    "sweep", "drain", "retro", "autoTriage", "measurementCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
+    "sweep", "drain", "retro", "autoTriage", "measurementCadence", "digestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
 
@@ -542,6 +542,12 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "measurementCadence.minIntervalMinutes",
     "measurementCadence.maxPerDay",
     "measurementCadence.escalate",
+    // W1-T2277: the three `digestCadence.*` fields join them too — the digest was reachable
+    // only by an operator typing `rmd digest`, never on any cadence, so there is no source
+    // constant to cite for any of these three fields' origin either.
+    "digestCadence.enabled",
+    "digestCadence.minIntervalMinutes",
+    "digestCadence.maxPerDay",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);
