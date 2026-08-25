@@ -733,7 +733,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // dispatched task's `## Follow-ups` section) and its two harvest marks, `followup.harvested`/
   // `followup.deduped` (retro.ts's `recordFollowupHarvest`, one line per entry within such a
   // section) — mined together by `mineFollowups` (retro.ts:2139), which matches a mark back to
-  // its source entry by `entryId` (`${runId}:${index}`) to decide whether to mint a fresh
+  // its source entry by `entryId` (`${runId}:${ts}:${index}`, W1-T2252) to decide whether to mint a fresh
   // candidate for the Architect or skip an already-adjudicated one. DECISION-RELEVANT, NOT
   // RENDER OR HEALTH: `mineFollowups`'s own doc (retro.ts:2131-2134) states a followup "must
   // survive PAST the marker window (a discovery from three retros ago is still worth

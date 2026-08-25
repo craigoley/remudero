@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { declaredConsoleRoutes, type DeclaredRoute } from "./helpers/declared-routes.js";
+import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { buildPanelActionRoutes, type IssueCloser } from "../src/lib/panel-actions.js";
 import { createService } from "../src/lib/service.js";
@@ -128,7 +129,11 @@ async function withListening<T>(server: ReturnType<typeof buildServeServer>, fn:
 
 // ── the general check ────────────────────────────────────────────────────────
 
-test("every console route declared in src/lib is mounted on the real server", async () => {
+// SKIPPED INSIDE STRYKER'S SANDBOX (skipInMutationSandbox): `declaredConsoleRoutes` scans
+// src/lib SOURCE TEXT with a line-anchored `path:` regex. Instrumentation rewrites those lines,
+// so the scan under-counts (measured: 25 against the >= 30 floor) and the mount comparison below
+// would run against a corrupted declared set. It still runs on the real tree under `ci`.
+test("every console route declared in src/lib is mounted on the real server", skipInMutationSandbox(), async () => {
   const root = tmpRoot();
   const deps = depsFor(root);
   const declared = declaredConsoleRoutes();

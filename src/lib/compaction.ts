@@ -47,6 +47,39 @@ export function detectCompactionEvents(messages: unknown[]): CompactionEvent[] {
 }
 
 /**
+ * One compaction ATTEMPT that FAILED (W1-T2245). `sdk.d.ts:4684` ground truth (0.3.233):
+ * `SDKStatusMessage` (`{type:"system", subtype:"status"}`) carries `compact_result?: 'success' |
+ * 'failed'` and `compact_error?: string` — a channel `detectCompactionEvents` above NEVER reads,
+ * because it matches only `subtype:"compact_boundary"`. A compaction that fails emits no boundary
+ * message, so before this it produced NO event, NO `quality_suspect`, NO row — indistinguishable
+ * from a call that never attempted compaction at all. `error` is the SDK's own `compact_error`
+ * string when present; absent (never guessed) when the status message carried none.
+ */
+export interface CompactionFailure {
+  error?: string;
+}
+
+/**
+ * Scan a raw SDK message stream for `{type:"system", subtype:"status"}` messages whose
+ * `compact_result` reads `"failed"`. Same discipline as {@link detectCompactionEvents}: pure,
+ * total over `type`/`subtype`/`compact_result` string checks, any other message shape silently
+ * skipped. `collectWorkerResult` (worker.ts) calls this LIVE, per message, alongside the boundary
+ * detector — this reads an existing channel already arriving in the stream; it adds no SDK option
+ * and changes no spawn behaviour.
+ */
+export function detectCompactionFailures(messages: unknown[]): CompactionFailure[] {
+  const failures: CompactionFailure[] = [];
+  for (const raw of messages) {
+    const msg = raw as { type?: string; subtype?: string; compact_result?: string; compact_error?: string };
+    if (msg?.type !== "system" || msg.subtype !== "status" || msg.compact_result !== "failed") continue;
+    const failure: CompactionFailure = {};
+    if (typeof msg.compact_error === "string") failure.error = msg.compact_error;
+    failures.push(failure);
+  }
+  return failures;
+}
+
+/**
  * A call/run is QUALITY-SUSPECT (MASTER-PLAN §8B) the moment ONE compaction
  * fired — its acceptance proofs must be re-verified against repo state
  * (W1-T3F), never trusted from a possibly-lossy REPORT.

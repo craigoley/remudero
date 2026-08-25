@@ -1,0 +1,248 @@
+- id: W1-T2284
+  title: "The risk judge's `description` IS the shard title, and every shard title in this repo is a defect statement in the negative voice — so on the one class of work this fleet exists to do, a fix, the judge is handed the bug report and asked to grade the patch; it quoted W1-T2263's title back as the change and escalated the fix that REMOVED that defect at 0.85, the highest confidence of the day, over a `remudero-review` PASS on 8 of 8 criteria"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  risk: high
+  rationale: |
+    Filed by reading and measuring, from a scratch worktree PROVEN equal to origin/main by sha
+    (daa4b5be), clone shallow-checked `false`. `src/run-task.ts` read via git objects and cited by
+    SYMBOL — #2851 relocated symbols in that file today and every line number from earlier briefs
+    has drifted. No suite, no poller, no spawning verb.
+
+    (1) THE DESCRIPTION IS THE TITLE. ONE LINE, INSIDE `runTask` (`src/run-task.ts`):
+        change: { description: `${task.title} — ${prUrl}`, files: task.files },
+    and the SAME string arrives a SECOND time three lines later —
+    `planContext: { taskId: task.id, title: task.title, taskType: task.type }`. So the judge reads
+    the shard title twice and the PR title never.
+
+    (2) AND THE TITLE IS A DEFECT STATEMENT, BY CONVENTION. The five most recently filed shards on
+    main, opening words: *"THE SERVE PROCESS'S BOARD GATEWAY IS THE ONE UNPACED CONSTRUCTION AND IT
+    EXHAUSTED GITHUB'S SECONDARY LIMIT"*; *"THE CONSOLE'S USAGE PANEL READS A FILE ITS OWN CONTAINER
+    CANNOT SEE"*; *"THE ACCESS JWT PROVIDER IS BUILT, TESTED AND HAS ZERO PRODUCTION CALL SITES"*;
+    *"RULING — REMUDERO IS BRING-YOUR-OWN-SUBSCRIPTION"*; *"the node runtime the whole fleet executes
+    is INHERITED and never asserted"*. Four of five are the broken state in the present tense. **THE
+    JUDGE IS THEREFORE HANDED A DESCRIPTION OF THE DEFECT AND ASKED WHETHER THE CHANGE IS RISKY**,
+    and the more precisely a shard names what is wrong, the more alarming its fix reads.
+
+    (3) THE 0.85 CASE, RE-DERIVED END TO END. W1-T2263's title, verbatim from the shard:
+    *"A SEMANTIC DOWNGRADE OVERWRITES THE ONLY FIELD THAT COULD NAME THE REMEDY — … then the floor's
+    accumulated reason is REPLACED by a fixed eight-word constant …"*
+    Issue 2853's escalation reason, verbatim: *"The description explicitly identifies this change as
+    a 'SEMANTIC DOWNGRADE' … The description states that 'the floor's accumulated reason is REPLACED
+    by a fixed eight-word constant' … passing gates do not negate a deliberate semantic downgrade in
+    data quality."* **THE JUDGE QUOTED THE DEFECT STATEMENT AND GRADED IT AS THE CHANGE.**
+    The PR is `fix(review): append the semantic downgrade note instead of overwriting reason`
+    (#2852), and its diff at `daa4b5be` does the exact opposite of what the judge described:
+        -    reason = "reviewer judged the proof non-responsive (semantic downgrade)";
+        +    reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
+    The REMOVED line IS the constant the title names, and the added line is the `${reason} — NOTE: …`
+    append idiom the source comment says a sibling dialect branch already uses. `remudero-review` on
+    that head read **`PASS — 8 criteria substantiated, no test theater`, state `success`**. Merged by
+    hand.
+
+    (4) FOUR ESCALATIONS ARE IN SCOPE, NOT THREE, AND THEY ARE NOT ONE FAILURE MODE. Read fresh from
+    the issues rather than carried:
+        2769  2026-08-24  W1-T2216  #2765  LOW  0.60 — floor, not a misread
+        2824  2026-08-25  W1-T2246  #2820  HIGH 0.72 — a scope fact
+        2846  2026-08-25  W1-T2252  #2845  LOW  0.68 — floor, not a misread
+        2853  2026-08-25  W1-T2263  #2852  HIGH 0.85 — the inversion
+    **ONLY ONE OF THE FOUR IS AN INVERSION.** 2769's own text reads *"Change implements the stated
+    plan exactly … the unusualness is deliberate design within stated constraints, not unplanned
+    deviation"* — a CORRECT reading that escalated because 0.60 < 0.7. 2846 likewise: *"Change
+    directly addresses the named plan issue"*, escalated at 0.68. 2824 named an undeclared third
+    file, `src/run-task.ts` at +92/-10 — a real observation the judge could only have made from the
+    `ACTUAL CHANGE` block, and it made it correctly. **THE BRIEF'S "THREE ESCALATIONS, ALL THREE
+    CARRYING THE PHRASE" IS TRUE OF THE PHRASE AND NOT OF THE DIAGNOSIS**, and the correction
+    matters because it is what decides Q2.
+
+    (5) THE PHRASE IS THE PROMPT'S OWN RULE, NOT A DISCLOSURE — AND W1-T454 PUT IT THERE ON PURPOSE.
+    `evidenceQualifiedReason` (`src/lib/risk-judge.ts`) prepends *"on the change's description/files
+    alone, no diff was read — "* to every non-internal reason. `buildRiskJudgePrompt` states it as an
+    instruction: *"YOU ARE NOT SHOWN A DIFF (W1-T454). The description and files list below are
+    everything you get — no patch, no hunks, no code."* So the diff is **DELIBERATELY NOT PASSED**,
+    which is the third of the brief's three possibilities and the only one the source supports.
+
+    (6) AND THIS EXACT DEFECT WAS ALREADY MEASURED ONCE, BY W1-T1031, WHOSE REMEDY WAS NOT THIS ONE.
+    `RiskJudgeChangeView`'s own doc: *"a description that correctly NAMES the defect it removes reads
+    to the judge exactly like a description that INTRODUCES one, because nothing about the change's
+    real shape was ever shown (10/75 `risk_judge.decision` rows escalated, 9 merged anyway, none
+    prevented anything; three same-day escalations on implementations whose descriptions named their
+    own subject)."* **THAT IS THIS TASK'S SENTENCE, WRITTEN BEFORE THIS TASK.** W1-T1031 answered it
+    with a bounded REST diffstat and its doc says plainly *"STILL NOT A DIFF"*. The diffstat shipped,
+    and 2853 happened anyway — because a `+84/-4` line count cannot tell a removal of the named
+    defect from an introduction of it. **The measurement was right and the remedy was aimed at the
+    wrong half: the problem is the FRAMING of the description, not the absence of a shape.**
+
+    (7) THE LEDGER CANNOT SEE TODAY AND SAYS SO. Step names taken from source (`risk_judge.decision`,
+    `risk_judge.escalated`, `risk_judge.parse_attempt`). Over the union at the state dir, per form
+    (666 `.gz` / 6 plain / 1 live), `risk_judge.decision` reads 64/23/0 and `risk_judge.escalated`
+    8/2/0, controlled in every form by `run.start` at 257438/1314/200. Deduped across the union:
+    **87 distinct decisions, 10 escalations — 11.5%**, against a control of 787 distinct `run.start`
+    (from 258,952 raw rows, so the dedup is load-bearing). **NEWEST ROW PER STEP: `risk_judge.decision`
+    2026-08-12T23:47:53.826Z, `risk_judge.escalated` 2026-08-12T13:53:17.117Z.** This host's corpus
+    ends thirteen days before the four escalations above, so it cannot carry them; the GitHub issues
+    are the independent evidence and the ledger figure is the historical base rate only.
+
+    (8) THE POPULATION FACT THAT DECIDES WHETHER AN ADJUDICATOR CAN EVER BE VALIDATED, AND IT IS
+    NOT A CAPACITY QUESTION. Measured 2026-08-25 on a LIVE union at the state dir (ok true, 26
+    archives, liveFileRead true, unread none, 254,311 rows, oldest 2026-08-08T21:59:00.337Z,
+    NEWEST ROW 0.0 MINUTES OLD): ALL 25 RISK-JUDGE ESCALATIONS, ALL TIME, WERE EVENTUALLY MERGED.
+    25 OF 25. THE ESCALATION HAS NEVER ONCE STOPPED A CHANGE. The 25 distinct escalated task ids
+    were resolved against the same merge-credit reader the dispatcher trusts (`isMergeCreditLine`),
+    which sees 788 credited ids on that union; the control holds in both directions, a
+    known-credited id resolving true and a known-uncredited one false.
+
+    (9) AND THE CONSEQUENCE, WHICH IS THE POINT AND NOT A FOOTNOTE. A CONSTANT-CLEAR ADJUDICATOR
+    WOULD AGREE WITH THE OPERATOR ON 100% OF THE HISTORICAL RECORD. OUTCOME AGREEMENT CANNOT
+    VALIDATE A REMEDY IN THIS CLASS. An instrument whose only evidence is "it cleared the ones the
+    operator went on to merge" is indistinguishable from a rubber stamp by construction, because
+    the null hypothesis scores perfectly. So any future instrument here needs PRE-REGISTERED
+    DISCRIMINATORS, declared before it runs, rather than a hit rate computed after: a citation a
+    human can check, a polarity-inverted negative control it must refuse to clear, a clear rate
+    split by reason class rather than pooled, and a non-clearing arm that is required to fire.
+
+    (10) AND THE TARGET IS NARROWER THAN THE DISARM RATE SUGGESTS. Judge-caused disarms are 25 OF
+    141 — 17.7%. The bulk is 109 (77.3%) reading "verdict refuses auto-merge: remudero-review is
+    not success", plus 7 capped (6 reading "CAPPED verdict (zero proofs executed)" and 1 "capped
+    verdict refused auto-merge"). `risk_judge.decision` corroborates from the other side: 25
+    ESCALATE / 182 PROCEED OF 207, of which 22 HIGH and 3 CONFIDENCE-FLOOR. So a remedy scoped to
+    the judge addresses about a sixth of the disarm population, and must not be described as
+    fixing the 12% arm-to-disarm rate; the larger share is a review problem with a different cause
+    and a different fix.
+
+    (11) THE RECOGNITION TEST, CARRIED VERBATIM, BECAUSE IT IS WHAT KEEPS A WORKER OFF THE WRONG
+    QUESTION. "A decision is irreducibly the operator's when its truth-maker is not in the artefact
+    — when answering it does not read evidence but creates a rule." ITS GRAMMATICAL TELL: A REASON
+    CITING A PROPERTY OF THE CHANGE IS FACT-SETTLING; A REASON CITING A NORM IS PRECEDENT-SETTING.
+    WORKED EXAMPLE, from `issues/2863`: "an unusual operational control pattern that deviates from
+    established practice" — a claim NO DIFF CAN REFUTE, because reading the code only confirms the
+    pattern is unusual, which the judge already said. The test is applied to the judge's own reason
+    text, not to the change, so it costs nothing and can run before any worker is spent.
+
+    (12) AND THE ORDERING IS A CONSTRAINT, NOT A PREFERENCE. FRAMING SHIPS BEFORE ANY ADJUDICATOR.
+    If the framing works, the inversion class shrinks and an adjudicator's population shrinks with
+    it, which changes both its cost case and its warrant — so building the expensive instrument
+    first would size it against a population the cheap fix is about to change. THIS SHARD'S OWN
+    "NOT BOTH, NOT YET" APPLIES TO THAT ORDERING EXACTLY AS IT APPLIES TO PASSING A DIFF.
+
+    (13) ONE CORRECTION TO THIS RECORD'S OWN CORPUS LIMIT, RECORDED RATHER THAN EDITED. Rationale
+    (7) states that this host's corpus ends thirteen days before the four escalations and gives
+    `risk_judge.decision` at 87 decisions, 10 escalations, newest 2026-08-12T23:47:53.826Z. THAT
+    READING IS NOT REPRODUCIBLE HERE TODAY. On the union above, `risk_judge.decision` reads n=207
+    with NEWEST 2026-08-25T18:55:51.030Z and `risk_judge.escalated` n=25 with newest
+    2026-08-25T18:49:55.737Z; 207 of 207 are distinct on (task_id, run_id), so no dedup collapses
+    them. Only ONE ledger corpus exists on this host, checked by enumeration, so the two readings
+    cannot be of different state dirs. The cause is not established here and is not asserted; what
+    is established is that the ledger CAN see today, the four escalations ARE in it, and (7)'s
+    stale-window caveat must not be relied on by a builder. This is exactly the failure the
+    standing rail names — a positive control proves a query can see its corpus, never that the
+    corpus covers the window — and it is recorded against this record rather than edited into it.
+  design: |
+    (i) Q2 — THE REMEDY IS THE FRAMING, AND THE MEASURED EVIDENCE SAYS SO RATHER THAN THE ARGUMENT.
+    One sentence in `buildRiskJudgePrompt` telling the judge that the description states the DEFECT
+    THE TASK EXISTS TO REMOVE and the change under assessment is the REMEDY. Costs nothing per PR,
+    scales to any diff size, and is the only thing that touches the one case that was actually wrong.
+    **2853 IS AN INVERSION AND FRAMING FIXES IT: the judge had every fact it needed and read the
+    polarity backwards.** The same sentence would have cost 2769 and 2846 nothing — both already
+    read the change correctly.
+
+    (ii) AND THE DIFF IS A SEPARATE, WEAKER CASE THAT THIS TASK SHOULD NOT SMUGGLE IN. **2824 IS THE
+    ONLY CASE A DIFF WOULD HAVE CHANGED**, and it would have changed it from "escalate" to "resolve
+    itself" — the judge already HAD the scope fact from the `ACTUAL CHANGE` block and stated it
+    correctly; what it lacked was the thirty lines that show the undeclared file's change is benign.
+    That is a real improvement and a real cost: tokens on every judged PR, on the cheapest configured
+    mount whose floor `RISK_JUDGE_CHANGE_VIEW_FILE_CAP`'s own doc puts at 40,000 tokens of context,
+    and no bound that fits a large PR. **SO: NOT BOTH, NOT YET.** Ship the framing, keep the
+    measurement running, and let a diff be argued on its own evidence later — the warrant today is
+    one escalation a human resolved by reading thirty lines, which the shard should call a cheap
+    outcome rather than a failure.
+
+    (iii) THE SENTENCE MUST NOT BECOME A LICENCE. The framing tells the judge what the description
+    IS; it must not tell the judge that a fix is therefore safe. The failure mode to test for is the
+    obvious one: a prompt that says "the description is the defect, the change is the remedy" invites
+    "therefore low risk", which would convert a reading error into a rubber stamp. The new test must
+    carry a falsifier in that direction — a change whose description names a defect AND whose gates
+    state is genuinely concerning must still be able to reach `high`.
+
+    (iv) THE DOUBLE-DELIVERY IS PART OF THE SCOPE AND MAY BE PART OF THE FIX. `task.title` reaches
+    the judge as BOTH `change.description` and `planContext.title`. Whether the remedy relabels the
+    description at its construction site in `runTask`, or adds the framing in
+    `buildRiskJudgePrompt`, or both, is the task's to decide — `files:` declares both modules so the
+    answer cannot drift outside what was declared. **That is deliberate: an undeclared third file is
+    exactly what escalation 2824 fired on, and this shard should not reproduce it.**
+
+    (v) Q3 — WHAT MUST NOT CHANGE.
+      **THE JUDGE KEEPS ITS VETO AND KEEPS ESCALATING WHEN UNSURE.** All four escalations stopped an
+      unattended merge and all four were right to. Two were the confidence floor firing on a correct
+      reading, which is the floor working, not failing.
+      **`DEFAULT_CONFIDENCE_THRESHOLD` IS NOT MOVED.** Not to 0.6, not anywhere. Two of the four
+      cases sit just under 0.7 and would vanish if it dropped — that is the outcome to refuse, not
+      to engineer. Nothing here lowers a threshold and nothing auto-merges past a high verdict.
+      **`evidenceQualifiedReason` KEEPS QUALIFYING.** If the judge still has not read a diff, every
+      reason must keep saying so. A framing sentence changes what the description MEANS, not what the
+      judge has SEEN, and the qualifier is the sentence that keeps those two apart.
+      **THE OPERATOR GATES EVERY MERGE.** Nothing in this task arms, merges, or widens what may
+      proceed unattended.
+
+    (vi) THE CALIBRATION COST IS CITED, NOT RE-FILED. Three hand-merges past the judge today produced
+    NO calibration record: W1-T2244 is the producer for exactly that, and its build (#2828) is
+    blocked on W1-T2276's source-map defect. **NEITHER IS RE-FILED HERE.** They are named so the
+    reader knows why the base rate in rationale (7) stops at 2026-08-12 and why today's four cases
+    exist only as GitHub issues.
+
+    (vii) NOT IN SCOPE, NAMED: passing a real diff; `RISK_JUDGE_CHANGE_VIEW_FILE_CAP`; the confidence
+    threshold; the shard-title convention itself (the titles are correct and useful — the judge's
+    reading of them is what is wrong); `parseRiskJudgeResponse`'s third state; and the escalation
+    taxonomy.
+  acceptance:
+    - claim: "the judge's prompt states that the description names the defect the task removes and the change under assessment is the remedy"
+      proof: "unit test: test/risk-judge-description-is-the-defect.test.ts"
+    - claim: "a fix whose description states the defect in the negative voice is not classified high on that basis alone"
+      proof: "unit test: test/risk-judge-description-is-the-defect.test.ts"
+    - claim: "a change with a genuinely concerning gates state still reaches high, so the framing is not a licence"
+      proof: "unit test: test/risk-judge-description-is-the-defect.test.ts"
+    - claim: "every non-internal reason still carries the no-diff-was-read qualifier"
+      proof: "unit test: test/risk-judge-description-is-the-defect.test.ts"
+    - claim: "the confidence threshold is unchanged and a below-threshold verdict still escalates"
+      proof: "unit test: test/risk-judge-description-is-the-defect.test.ts"
+    - claim: "the task title is not delivered to the judge twice under two different labels"
+      proof: "unit test: test/risk-judge-description-is-the-defect.test.ts"
+  files: [src/lib/risk-judge.ts, src/run-task.ts, test/risk-judge-description-is-the-defect.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#judge-grades-the-patch-by-reading-the-bug-report-2026-08-25"
+  plan_refs: ["W1-T454", "W1-T970", "W1-T1031", "W1-T2212", "W1-T2244", "W1-T2263", "W1-T2276"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so two source modules and a test named after neither trip it at `medium`. The change
+    is prompt text plus, if the task chooses (iv), one field label at the construction site.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/risk-judge-description-is-the-defect.test.ts`, declared in `files:`, so on this
+    filing PR it resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL, CONFIRMED PRESENT BEFORE IT WAS
+    BELIEVED. `rmd check-proof` on the declared path reads `exit: 1`, `hits: 0`, `verdict: fail`. The
+    SAME verb on an EXISTING pure path — `unit test: test/risk-judge.test.ts`, the test file for the
+    very module this task changes — reads `verdict: pass`.
+
+    THE TWO LANES HOLDING W1-T2282 AND W1-T2283 WERE CHECKED TWICE AND NEITHER COVERS THIS SUBJECT.
+    At first read neither had filed anything. BOTH OPENED A PR WHILE THIS SHARD WAS BEING WRITTEN,
+    and the re-check immediately before commit found them: **#2859 `chore(plan): file docs/ as the
+    uncovered knowledge corpus (W1-T2282)`** and **#2858 `chore(plan): file W1-T2283 — the requeue
+    arm can only name a check that never gets cancelled`**. Neither touches the risk judge, the
+    judge's prompt inputs, or the description-is-the-defect inversion. The re-check is recorded
+    rather than the first read, because the first read would have been stale by the time this was
+    pushed — which is the whole reason the rail exists.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND IS NOT RE-MINTED. `refs/rmd-id/W1-T2284` resolves to
+    c5f84f87114de83f5aadc3b4cb1cd76609d70603; this shard VERIFIES THE ID IS UNUSED rather than that
+    it is this account's. Remote ref counts read first (141 heads, 403 `refs/rmd-id/*`): shards on
+    main 0 (control W1-T2276 = 1); whole tree at HEAD 0 (control 1); remote head names 0 (control,
+    90 `run-*` heads read); commit subjects and bodies on main 0 (control 1); open PR titles, bodies
+    and head refs 0 across all 7 open PRs (control `W1-T2` = 7). Presence of a reservation is not
+    usage.

@@ -1,0 +1,163 @@
+- id: W1-T2286
+  title: "THE CORRECTOR FOR A FIELD THAT IS WRONG HALF THE TIME IS ALREADY BUILT AND NOTHING CALLS IT — `partitionByFileOverlap` takes an `observedByTask` union that defaults to empty, all three callers pass candidates alone, `ObservedScopeByTask` is referenced only inside its own module, and across 368 measurable trailer-bearing commits on main 177 (48.1%) touched a file outside the declared set while the packing and serialization path scored every one of them on the declaration alone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/lib/dispatch-overlap.ts, src/lib/drain.ts, src/lib/daemon.ts, test/observed-scope-wiring.test.ts]
+  origin: oper#the-scope-corrector-is-built-and-unwired-2026-08-25
+  plan_refs: ["W1-T2237", "W1-T2248", "W1-T2254", "W1-T2266", "W1-T1031"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (0) THE MEASUREMENT, AND THE HYPOTHESIS IT REFUTES.
+
+    Across every non-merge commit on origin/main carrying an anchored `Remudero-Task:` trailer,
+    comparing each commit's own changed files against that task's `files:` AS DECLARED IN THE TREE
+    AT THAT SAME COMMIT — measured at origin/main b6bd43ea:
+
+      trailered non-merge commits                        512
+      measurable (shard and files: resolvable there)     368
+      touched a file OUTSIDE the declared set            177   48.1%
+      exactly within the declared set                    191
+
+    That reproduces W1-T2237's 45.8% on a different window, so the rate is a property of the field
+    and not of one sample.
+
+    THE MONOLITH HYPOTHESIS IS REFUTED. `src/run-task.ts` is 18 of 499 undeclared file-instances —
+    3.6%. The tail by category is `test/` 302 (60.5%), `src/` 87 (17.4%), `docs/` 38 (7.6%),
+    repo-root 26, `plan/` 19, other 12, `.github/` 10, `scripts/` 5. The single most-undeclared
+    file is `test/run-task.test.ts` at 22, ahead of `src/run-task.ts` at 18. Two-thirds of
+    overrunning commits carry no undeclared production source at all. The field predicts SOURCE
+    reasonably and fails on the TESTS that `principles: {tdd: strict}` guarantees will exist and
+    that a recon lane cannot enumerate before the build — which is a smaller and more tractable
+    problem than "declarations are sloppy", and a different one from "the monolith is unavoidable".
+
+    (1) AND THE CORRECTOR IS ALREADY IN THE TREE, INERT.
+
+    `partitionByFileOverlap` (`src/lib/dispatch-overlap.ts`) takes a second parameter,
+    `observedByTask`, defaulting to `NO_OBSERVED_SCOPE`. `effectiveScope` unions a task's declared
+    `files:` with whatever that map holds for its id before `overlappingPaths` compares two tasks.
+    W1-T2237 shipped it. Nothing supplies it:
+
+      callers of partitionByFileOverlap : drain.ts (x2, one inside `isDisjointFromEvery`),
+                                          daemon.ts (x1) — every one passes `candidates` alone
+      ObservedScopeByTask outside its own module : 0 files
+
+    THE ZERO IS CONTROLLED TWICE. Inside `dispatch-overlap.ts` the symbol resolves (the grep can
+    see it), and `partitionByFileOverlap` itself resolves in 4 files outside that module (a
+    cross-module reference to this module IS findable). So the zero is absence, not a blind query.
+    This is W1-T2266's "field with no writer" shape landing on the exact field this task is about.
+
+    (2) Q1 — WHICH CONSUMERS THIS FIXES, AND WHICH IT CANNOT REACH. THEY ARE TWO TASKS.
+
+    FIXED BY WIRING IT — the packing and serialization path, where a wrong `files:` is NOISY:
+      - `packDisjointFirst` / `isDisjointFromEvery` (`drain.ts`) — slot packing. Under-declaring
+        admits a colliding pair; over-declaring (and an empty list, which `overlappingPaths`
+        fail-closes as overlapping everything) burns lanes.
+      - `partitionByFileOverlap`'s own serialization verdict, the same union both call sites read.
+
+    NOT REACHED, AND NOT THIS TASK:
+      - `shardDeclaredFilesInDiff` (`src/lib/review.ts`) parses the `files:` line OUT OF THE PR's
+        OWN DIFF TEXT to build `ProofExecContext.forwardReferenceFiles`, which gates the
+        `not_yet_built` carve-out. A proof path absent from `files:` grades `executed_fail` rather
+        than `not_yet_built` — A WRONG OUTCOME, NOT A NOISY ONE. It reads the declaration AS
+        WRITTEN, at review time, in a different process, from the diff rather than from the plan.
+        A dispatch-time observed union cannot reach it, and no amount of observation makes a
+        declaration correct at the moment it is authored.
+      - The risk judge's scope signal (W1-T1031). Feeding it observed paths would be ACTIVELY
+        WRONG: it exists to compare the declaration against the actual change, so a corrector that
+        made the two agree by construction would delete the signal rather than improve it.
+
+    SO A SELF-CORRECTING PACKING INPUT AND A CORRECT DECLARATION ARE TWO TASKS. This one is the
+    first. The second — the `executed_fail`/`not_yet_built` misgrade — is NOT filed here and is
+    named so a later filing can find it.
+
+    (3) Q2 — THE `test/`-EXEMPTION IS COMPLEMENTARY, NOT AN ALTERNATIVE, AND MUST NOT BE APPLIED
+    HERE.
+
+    Exempting `test/` from the DRIFT SIGNAL would remove 60.5% of the undeclared instances while
+    leaving every production-file flag intact, including the two real ones the judge caught on
+    2026-08-25. That acts on a DIFFERENT consumer from this task: the signal path, not the packing
+    path. The two do not overlap and neither substitutes for the other.
+
+    AND THE EXEMPTION MUST NOT LEAK INTO THIS WIRING. Two tasks that both touch
+    `test/run-task.test.ts` GENUINELY COLLIDE, and the file is the single most-undeclared path in
+    the corpus — exempting test paths from the overlap union would remove the largest source of
+    real, observable collisions from the one consumer that is supposed to see them. The exemption
+    belongs to the signal; the observed union belongs to the pack.
+
+    (4) WHERE THE OBSERVATIONS COME FROM IS THE BUILD's FIRST DECISION, AND IT NEEDS EVIDENCE.
+
+    Two candidate producers exist and this shard picks neither. `scope_guard.overrun` already
+    ledgers `out_of_scope` and `declared_files` on a run whose closure binds the task id, and the
+    merged diff for a credited task is derivable from git with no API call. Whichever is chosen
+    must be available AT DISPATCH TIME on the host that runs the partition, and the choice must be
+    made against a measured read rather than assumed: the ledger corpus on this host answered
+    `ok=true` over 672 archives with `unread=0` for `dispatch.serialized` (30 rows) and
+    `scope_guard.overrun` (3 rows), controls firing (`risk_judge.decision` 87, a nonsense step 0)
+    — BUT ITS NEWEST ROW IN ALL THREE QUERIES IS 2026-08-12, THIRTEEN DAYS BEFORE THIS FILING. A
+    positive control proves the query can see its corpus; it does not prove the corpus covers the
+    window. The 48.1% above therefore comes from git, not from the ledger, and a builder who
+    reaches for ledger rows as the producer must first establish that the corpus is current on the
+    host that would read it.
+  note: |
+    SIZING BAND: `risk: high` is set UP FRONT and the band is Rule 19's SPAN, not blast radius —
+    the build spans the module that owns the parameter, two call sites in two other modules, and
+    the test. `files:` deliberately names all four rather than the minimum: a task about
+    under-declared `files:` that under-declares its own would be its own counter-example.
+
+    WHAT MUST NOT CHANGE. The risk judge keeps its scope signal — 32.8% of overrunning commits
+    carry a genuine undeclared source file, and nothing here feeds it observed paths.
+    `packDisjointFirst` keeps reading the field; the observed set is a UNION with the declaration,
+    never a replacement for it. And NOTHING AUTO-EDITS A MERGED SHARD's `files:`: the
+    operator-guide procedure W1-T2248 shipped on 2026-08-25 is the sanctioned path, it is
+    plan-only and human-authored, and `mergedFieldChangeViolations` (W1-T2254) warns rather than
+    blocks. This task writes no plan file at runtime and proposes no rung that edits a declaration.
+
+    A CORRECTION TO RECORD, WITHOUT WIDENING `files:` TO CARRY IT. `docs/operator-guide.md`'s
+    section "Correcting a merged shard's wrong `files:` declaration", landed 2026-08-25 by
+    W1-T2248, states that Rule 21 "never reads `files:`, `title`, or `status:` at all". W1-T2254
+    landed AFTER it the same day and added `mergedFieldChangeViolations`, whose
+    `REPORTED_MERGED_FIELDS` list includes `files`, `status`, `depends_on`, `priority`, `risk`,
+    `verify`, `type`, `principles`, `budget_usd` and `retirement`. Measured through the real
+    two-argument signature: a widened `files:` on a merged task now returns
+    `post-merge-field-drift/warn`, while an added acceptance criterion returns
+    `post-merge-amendment/block` and an unchanged task returns nothing. The guide is
+    DIRECTIONALLY RIGHT — no gate blocks a `files:` correction, and a `warn` never reaches
+    `lint-plan`'s exit code — and SPECIFICALLY FALSE on "never reads". It is not amended here
+    because that would widen this task's `files:` to carry a documentation fix, which is the
+    scope-creep this very task exists to make visible. It is recorded for whoever owns the guide.
+
+    RE-FILES NOTHING. W1-T2237 shipped the parameter and measured the rate; W1-T2248 shipped the
+    correction procedure and is CREDITED and permanently un-dispatchable; W1-T2254 widened Rule 21
+    to report the other fields; W1-T2266 owns counting adopterless mechanisms in general, of which
+    this is one instance and not the census.
+
+    ID PROVENANCE: W1-T2286 was reserved before this filing and verified UNUSED across all eight
+    surfaces — reservation ref, shard filenames on origin/main, declared ids in `plan/`, open-PR
+    titles, head branches and bodies, merged `Remudero-Task:` trailers and merged commit subjects
+    — each zero paired with a positive control on its own surface, and every merged-surface
+    control chosen from an id that is actually merged.
+  acceptance:
+    - claim: "the overlap partition receives an observed scope map at every call site rather than defaulting to the empty one"
+      proof: "unit test: test/observed-scope-wiring.test.ts"
+    - claim: "an observed path is unioned with the declaration and never replaces it, so a declared path is still compared"
+      proof: "unit test: test/observed-scope-wiring.test.ts"
+    - claim: "a task with no observations is scored exactly as it is today, so the wiring changes nothing for an unobserved task"
+      proof: "unit test: test/observed-scope-wiring.test.ts"
+    - claim: "two tasks that touch the same test file are serialized once the observation is present, where the declaration alone called them disjoint"
+      proof: "unit test: test/observed-scope-wiring.test.ts"
+    - claim: "test paths are not exempted from the observed union, because a shared test file is a real collision"
+      proof: "unit test: test/observed-scope-wiring.test.ts"
+    - claim: "the risk judge scope signal is not fed observed paths, so an undeclared source file is still flagged"
+      proof: "unit test: test/observed-scope-wiring.test.ts"
+    - claim: "the proof forward reference carve out is untouched, since it reads the declaration from the diff and not from this map"
+      proof: "unit test: test/observed-scope-wiring.test.ts"
+    - claim: "no merged shard files declaration is edited at runtime by this wiring"
+      proof: "unit test: test/observed-scope-wiring.test.ts"
+    - claim: "the falsifier holds: removing the observed map from a call site turns the serialization check red"
+      proof: "unit test: test/observed-scope-wiring.test.ts"

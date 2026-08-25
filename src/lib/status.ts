@@ -1771,16 +1771,51 @@ export function isMergeCreditLine(line: Record<string, unknown>): boolean {
  * that resets on its own merge each pass is NOT this counter's remit and is unchanged:
  * {@link dispatchesEver} is the lifetime bound that catches it, and no step resets that.
  */
+/**
+ * W1-T2249: the containment preflight's `check` symbol for a probe whose OWN
+ * worker died on a transport/API failure (a 529, a dropped connection) before
+ * it ever attempted a write — see `src/lib/containment.ts`'s
+ * `spawn-transport-failure` arm. A run refused for THIS reason never reached
+ * the task worker at all: nothing about the task's own ability to produce a PR
+ * was tested, so it must not count toward "dispatched with no new owned PR"
+ * any more than a run that never dispatched would.
+ */
+const SPAWN_TRANSPORT_FAILURE_CHECK = "spawn-transport-failure";
+
 export function dispatchesWithoutNewOwnedPr(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
 ): number {
+  // W1-T2249 — PRE-SCAN, two passes over the (small, per-task) line set rather
+  // than one: a run's own `verdict` line always lands AFTER its `run.start` in
+  // ledger order, so the set of run_ids to EXCLUDE must be known before the
+  // counting pass below reaches their `run.start` lines. Narrow on purpose —
+  // ONLY the new spawn-transport-failure class is excluded here; NOTHING ELSE
+  // about the counter moves (design part (iv)): the threshold is unchanged,
+  // the `pr.opened`/merge-credit reset is unchanged, and a genuine dispatch
+  // that produces no PR still counts exactly as it does today.
+  const transportFailureRunIds = new Set<string>();
+  for (const line of lines) {
+    if (
+      line.task_id === taskId &&
+      line.step === "verdict" &&
+      line.verdict === "blocked_containment" &&
+      line.check === SPAWN_TRANSPORT_FAILURE_CHECK &&
+      typeof line.run_id === "string"
+    ) {
+      transportFailureRunIds.add(line.run_id);
+    }
+  }
   let count = 0;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "pr.opened" || isMergeCreditLine(line)) {
       count = 0; // forward progress — a new PR, or a credited merge, resets the streak
     } else if (line.step === "run.start") {
+      // W1-T2249: a run.start whose OWN run ended in spawn_transport_failure is an
+      // infrastructure refusal, not a dispatch that "produced nothing" — exclude it
+      // rather than let an API outage trip the breaker in the task worker's stead.
+      if (typeof line.run_id === "string" && transportFailureRunIds.has(line.run_id)) continue;
       count++;
     }
   }
@@ -2203,7 +2238,53 @@ export interface BranchFacts {
   tipInMain: boolean | "unknown";
   /** The branch NAME appears in `src/`, `scripts/`, `deploy/` or `.github/`. */
   namedInSource: boolean;
+  /**
+   * PATCH-ID EQUIVALENCE (W1-T2247): `git cherry -v origin/main origin/<name>` decides only a
+   * quarter of a held set on its own and MISLABELS A SQUASH-MERGE AS ABSENT (every commit reads
+   * `+` because the squash collapsed them into one new diff on main), so this field is never
+   * consulted for a branch whose `prState` already resolved it — see `planBranchReap`'s ordering.
+   * It exists for the OTHER shape: a branch with no PR at all whose commits are, commit-for-
+   * commit, already equivalent (every line `-`) to something in main (e.g. cherry-picked by
+   * hand). `true` = every commit equivalent. `false` or omitted = not proven equivalent (mixed,
+   * every commit genuinely absent, or never measured) — the conservative default, so an absent
+   * measurement can never manufacture a resolution the caller never proved.
+   */
+  patchIdEquivalentInMain?: boolean;
 }
+
+/**
+ * WHY A BRANCH LANDS WHERE IT LANDS (W1-T2247 design (ii)): five distinct reasons a branch is
+ * deletable or held, plus the two carried over unchanged from W1-T447/W1-T2246 (`protected`,
+ * `state_undetermined`) — NEVER one shared string. `merged_squash_patch_id_differs` exists
+ * because `git cherry`'s squash blind spot (rationale §3) must never be reported as though it
+ * were the SAME thing as a genuine `no_pr_ever` — the disposition is identical (deletable) but
+ * the reason a reader would grep for is not, and collapsing the two back into one string is
+ * exactly the mislabel this task ends.
+ */
+export type BranchReapReason =
+  | "protected"
+  | "merged"
+  | "merged_squash_patch_id_differs"
+  | "closed_unmerged"
+  | "tip_in_main"
+  | "patch_id_equivalent"
+  | "open"
+  | "no_pr_ever"
+  | "state_undetermined";
+
+/** Operator-facing label for each {@link BranchReapReason} — never printed as one shared string. */
+export const BRANCH_REAP_REASON_LABEL: Readonly<Record<BranchReapReason, string>> = {
+  protected: "guarded — named in source or on the declared list",
+  merged: "PR merged",
+  merged_squash_patch_id_differs:
+    "PR merged (squash) — patch id differs from main, so patch-id alone would misreport this as absent",
+  closed_unmerged: "PR closed unmerged — already declined by a human, not unknown",
+  tip_in_main: "no PR — every commit already an ancestor of main",
+  patch_id_equivalent: "no PR — every commit patch-id equivalent to a commit already in main, resolved without judgement",
+  open: "PR open — in use, not swept",
+  no_pr_ever: "no PR ever opened and no commit proven landed — the residue that needs adjudication",
+  state_undetermined: "could not be proven either way — state undetermined, not a confirmed no-PR hold",
+};
 
 /** The dry run's answer: three disjoint buckets plus the drift alarms (W1-T447, W1-T2228). */
 export interface BranchReapPlan {
@@ -2232,6 +2313,14 @@ export interface BranchReapPlan {
    * W1-T2226) for the direction that DOES need citation to disambiguate a dead entry from one.
    */
   missingBranches: string[];
+  /**
+   * EVERY BRANCH NAMES THE TEST THAT PLACED IT (W1-T2247 design (ii)): one {@link BranchReapReason}
+   * per `facts` entry, keyed by branch name. `deletable`/`guarded`/`hold`/`undetermined` stay the
+   * disjoint bucket arrays callers already depend on — this is the reason WITHIN whichever bucket
+   * the name already landed in, never a second classification. A reader who wants "why" greps this
+   * map instead of re-deriving it from the bucket the name happens to be in.
+   */
+  reasons: Record<string, BranchReapReason>;
 }
 
 /**
@@ -2278,6 +2367,7 @@ export function planBranchReap(
     undetermined: [],
     undeclaredGuards: [],
     missingBranches: [],
+    reasons: {},
   };
   // THE RAW (2)(ii) CANDIDATE, computed against the declared list directly rather than against
   // `facts` — `facts` has no row at all for a branch that is no longer on origin, so this is the
@@ -2295,13 +2385,38 @@ export function planBranchReap(
     const isGuarded = f.name === "main" || f.namedInSource || declared.has(f.name);
     if (isGuarded) {
       plan.guarded.push(f.name);
+      plan.reasons[f.name] = "protected";
       if (f.namedInSource && !declared.has(f.name) && f.name !== "main") plan.undeclaredGuards.push(f.name);
       continue;
     }
-    const deletable =
-      f.prState === "merged" || f.prState === "closed" || (f.prState === "none" && f.tipInMain === true);
-    if (deletable) {
+    // MERGED AND CLOSED ARE DECIDED BY `prState` ALONE, BEFORE PATCH ID IS EVEN CONSULTED
+    // (W1-T2247 acceptance: a squash-merged branch must never read "absent" merely because its
+    // patch id differs from main's). `patchIdEquivalentInMain` only ever SPLITS THE REASON for an
+    // already-deletable merged head — it can never downgrade a merged or closed PR out of
+    // `deletable`, and it is never even examined for one.
+    if (f.prState === "merged") {
       plan.deletable.push(f.name);
+      plan.reasons[f.name] = f.patchIdEquivalentInMain === false ? "merged_squash_patch_id_differs" : "merged";
+      continue;
+    }
+    if (f.prState === "closed") {
+      plan.deletable.push(f.name);
+      plan.reasons[f.name] = "closed_unmerged";
+      continue;
+    }
+    if (f.prState === "none" && f.tipInMain === true) {
+      plan.deletable.push(f.name);
+      plan.reasons[f.name] = "tip_in_main";
+      continue;
+    }
+    // THE FOURTH DISJUNCT (W1-T2247): no PR at all, and every commit is patch-id equivalent to
+    // one already in main — content-identical even though `tipInMain` may read `false` or
+    // `"unknown"` (a rebase or hand cherry-pick changes the sha without changing the patch).
+    // Resolved WITHOUT any judgement step, same as the ancestor disjunct above: removing the ref
+    // cannot lose information no other ref already holds.
+    if (f.prState === "none" && f.patchIdEquivalentInMain === true) {
+      plan.deletable.push(f.name);
+      plan.reasons[f.name] = "patch_id_equivalent";
       continue;
     }
     plan.hold.push(f.name);
@@ -2310,9 +2425,68 @@ export function planBranchReap(
     // never provable either way — both are "could not tell", not "confirmed no PR" (W1-T2246).
     if (f.prState === "unknown" || (f.prState === "none" && f.tipInMain === "unknown")) {
       plan.undetermined.push(f.name);
+      plan.reasons[f.name] = "state_undetermined";
+    } else if (f.prState === "open") {
+      plan.reasons[f.name] = "open";
+    } else {
+      // Confirmed: no PR ever, tip not an ancestor, and not patch-id equivalent either — this is
+      // the residue W1-T2247 exists to size correctly (rationale §4: 20, not 75).
+      plan.reasons[f.name] = "no_pr_ever";
     }
   }
   return plan;
+}
+
+/**
+ * A CITATION FOR ONE ADJUDICATION VERDICT (W1-T2247 rationale §5 / design (iii)) — the residue of
+ * branches `planBranchReap` could not resolve mechanically (`no_pr_ever`, one per `plan.hold`
+ * minus `plan.undetermined` and minus every `open`). "Still needed" is a judgement, and this
+ * repo's discipline is that a judgement without a falsifier is a guess: a citation names EITHER a
+ * plan task id the change would serve, OR a symbol/path in the CURRENT tree the change targets
+ * together with whether that symbol still exists — both re-checkable by a grep against the tree
+ * and the plan, WITHOUT re-running whatever produced the verdict.
+ */
+export type AdjudicationCitation =
+  | { kind: "plan_task"; taskId: string }
+  | { kind: "tree_symbol"; path: string; exists: boolean };
+
+/** One operator-facing verdict on a held, no-PR branch (W1-T2247 design (iii)). */
+export interface AdjudicationVerdict {
+  branch: string;
+  verdict: "still needed" | "no longer needed";
+  /** Absent means the verdict cites nothing — {@link admitAdjudicationVerdict} refuses it. */
+  citation?: AdjudicationCitation;
+}
+
+/** {@link admitAdjudicationVerdict}'s answer: never a silent downgrade, only admit or refuse. */
+export interface AdjudicationAdmission {
+  admissible: boolean;
+  /** Set only when `admissible` is `false` — why this verdict does not count as an answer. */
+  refusalReason?: string;
+}
+
+/**
+ * THE VERDICT CARRIES ITS CITATION OR IT IS REFUSED (W1-T2247 rationale §5) — refused outright,
+ * never downgraded to "unconfirmed" or otherwise accepted with a caveat, because an accepted
+ * guess is indistinguishable from a checked answer to every reader downstream of this function.
+ * PURE and re-checkable: this function only ever inspects whether a citation is PRESENT and,
+ * for a `tree_symbol` citation, whether its own `path` is non-empty — it does not itself walk the
+ * plan or the tree (design (iii): that re-check is the caller's job, against the live plan and
+ * tree, precisely so a wrong verdict is caught by a grep rather than by trusting this function).
+ */
+export function admitAdjudicationVerdict(verdict: AdjudicationVerdict): AdjudicationAdmission {
+  const c = verdict.citation;
+  const hasPlanCitation = c?.kind === "plan_task" && c.taskId.trim().length > 0;
+  const hasTreeCitation = c?.kind === "tree_symbol" && c.path.trim().length > 0;
+  if (!hasPlanCitation && !hasTreeCitation) {
+    return {
+      admissible: false,
+      refusalReason:
+        `adjudication verdict for "${verdict.branch}" cites neither a plan task id nor a current ` +
+        "tree symbol — refused, not downgraded (W1-T2247 rationale §5)",
+    };
+  }
+  return { admissible: true };
 }
 
 /**

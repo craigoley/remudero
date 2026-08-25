@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { CI_PARITY_TABLE, parseCiJobNames, runCiParity } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
+import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -172,7 +173,14 @@ test("mutation-ratchet job: the trigger step calls scripts/mutation-ratchet.mjs 
   assert.ok(trigger, "expected scripts/mutation-ratchet.mjs --changed-files <path>, the SAME predicate ci.yml's mutation-ratchet job's trigger step calls");
 });
 
-test("mutation-ratchet job: a diff the trigger script reports as NOT required never runs stryker locally — the expensive step is skipped for the identical reason CI would skip it", () => {
+// SKIPPED INSIDE STRYKER'S SANDBOX (skipInMutationSandbox), and for a DIFFERENT reason than its two
+// siblings: nothing here reads source text. The assertion below is a substring test for "stryker"
+// over recorded spawn args, and every arg is `join(repoRoot, ...)` — inside the sandbox repoRoot
+// ITSELF contains that substring, so the check matches the sandbox's own directory name rather
+// than a stryker invocation. Measured both ways: same 23 calls and the same single trigger call,
+// with the predicate reading false on the real root and true on a sandbox-shaped one. It still
+// runs on the real tree under `ci`.
+test("mutation-ratchet job: a diff the trigger script reports as NOT required never runs stryker locally — the expensive step is skipped for the identical reason CI would skip it", skipInMutationSandbox(), () => {
   const { spawn, calls } = recordingSpawn({
     "mutation-ratchet.mjs --changed-files": { status: 0, stdout: "mutation-ratchet: skip -- no relevant path touched\n" },
   });

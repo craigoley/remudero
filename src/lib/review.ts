@@ -275,6 +275,15 @@ export interface ReviewEvidence {
    */
   semantic?: (boolean | undefined)[];
   /**
+   * (W1-T2263) Optional per-criterion bounded clause the fresh reviewer attached to a FAIL
+   * line — see {@link parseReviewerVerdictClauses}. Index-aligned to `criteria`/`semantic`,
+   * same as it. Consulted by {@link judgeCriterion} ONLY where `semantic[i] === false`; absent
+   * or `undefined` at an index leaves that criterion's downgrade reason exactly as it reads
+   * with no clause. Never a second reviewer call — the clause is captured off the SAME
+   * transcript {@link parseReviewerVerdicts} already parses `semantic` from.
+   */
+  semanticClauses?: (string | undefined)[];
+  /**
    * The checkout dir whitelisted proofs execute in — MUST be the PR HEAD sha (the
    * runner's own worktree when judging its own run; a fresh checkout fetched at
    * the head sha on the `rmd review` path). NEVER the operator's working checkout
@@ -2326,6 +2335,15 @@ export function judgeCriterion(
    * report text, so it can still flip a criterion to `executed_pass` regardless of this flag.
    */
   reportSubstituted?: boolean,
+  /**
+   * (W1-T2263) A bounded trailing clause the fresh reviewer attached to a FAIL line naming
+   * what would answer the claim — see {@link parseReviewerVerdictClauses}. Consulted ONLY
+   * when `semantic === false && met` (the downgrade arm below): it never rescues a proof
+   * (the arm stays downgrade-only) and never annotates a PASS (Q3 — the ask is a clause on
+   * the existing FAIL line, not new prose elsewhere). `undefined` when the reviewer supplied
+   * no clause, leaving today's constant reason text as the whole appended note.
+   */
+  semanticClause?: string,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
 
@@ -2573,9 +2591,18 @@ export function judgeCriterion(
   // Semantic can only DOWNGRADE: an explicit `false` fails the criterion even if
   // it was mechanically substantiated (or executed-pass); it can never rescue an
   // unpasted / executed-fail proof.
+  //
+  // W1-T2263: APPEND to the floor's accumulated `reason`, never replace it — every earlier
+  // branch above built `reason` up (mechanical coverage, execution outcome, a dialect note in
+  // this same `${reason} — NOTE: …` idiom), and a bare overwrite here threw all of that away in
+  // the one branch where an author most needs to know what was weighed. When the reviewer's
+  // FAIL line carried a bounded trailing clause (`semanticClause`, threaded from
+  // {@link parseReviewerVerdictClauses}), it rides along after the downgrade note so the row
+  // can name what would answer the claim, not just that it didn't.
   if (semantic === false && met) {
     met = false;
-    reason = "reviewer judged the proof non-responsive (semantic downgrade)";
+    const downgradeNote = "reviewer judged the proof non-responsive (semantic downgrade)";
+    reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
   }
 
   return { ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, floorMet, holdout: !!criterion.holdout };
@@ -3619,7 +3646,7 @@ export function judgeReview(
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>
-    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx, evidence.reportIsSubstitute),
+    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx, evidence.reportIsSubstitute, evidence.semanticClauses?.[i]),
   );
   const testTheater = detectTestTheater(evidence.diff);
 
@@ -5170,6 +5197,16 @@ export function reviewerVerdictContract(count: number): string {
 }
 
 /**
+ * (W1-T2263) Widened off the original bare `REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL)\b` — adds
+ * a trailing capture group for whatever the reviewer wrote after the token, SAME LINE ONLY
+ * (the character class excludes `\r`/`\n`, so a clause can never span lines by construction).
+ * {@link parseReviewerVerdicts} still reads only groups 1/2 from this, so its own return value
+ * is byte-identical to before the widening; {@link parseReviewerVerdictClauses} is the new
+ * reader of group 3. One regex, two readers, so they can never disagree about which line matched.
+ */
+const REVIEW_VERDICT_LINE_RE = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL)\b([^\r\n]*)/gi;
+
+/**
  * Parse the reviewer's `REVIEW_VERDICT <n>: PASS|FAIL` lines into a semantic
  * array index-aligned to the criteria (length `count`). `FAIL` ⇒ `false` (forces
  * that criterion to fail); `PASS`/absent ⇒ `undefined` (defer to the mechanical
@@ -5179,14 +5216,57 @@ export function reviewerVerdictContract(count: number): string {
  */
 export function parseReviewerVerdicts(text: string, count: number): (boolean | undefined)[] {
   const semantic: (boolean | undefined)[] = new Array(count).fill(undefined);
-  const re = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL)\b/gi;
-  for (const m of text.matchAll(re)) {
+  for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
     const n = Number(m[1]) - 1;
     if (n < 0 || n >= count) continue;
     // Only ever record a downgrade; a PASS leaves the floor to decide.
     if (m[2].toUpperCase() === "FAIL") semantic[n] = false;
   }
   return semantic;
+}
+
+/** Longest clause {@link parseReviewerVerdictClauses} carries into a criterion's reason — long
+ *  enough to name a remedy, short enough that an overlong or runaway line can't reach the
+ *  ledger whole (W1-T2263 acceptance: "bounded ... rather than carried whole"). */
+const REVIEWER_CLAUSE_MAX_CHARS = 160;
+
+/** Pull the bounded clause off a FAIL line's own trailing text (everything after the
+ *  `PASS|FAIL` token, already confined to one line by {@link REVIEW_VERDICT_LINE_RE}'s
+ *  character class). {@link reviewerVerdictContract}'s own example shows a parenthetical
+ *  after the token (`FAIL   (proof missing, unpasted, or non-responsive)`), so a leading
+ *  `(...)` is unwrapped when present; freeform trailing prose (no parens) is accepted as-is.
+ *  Returns `undefined` for empty/whitespace-only trailing text — a plain `FAIL` with nothing
+ *  after it. */
+function extractBoundedClause(trailing: string): string | undefined {
+  const s = trailing.trim();
+  if (!s) return undefined;
+  const paren = s.match(/^\(([^)]*)\)/);
+  const inner = (paren ? paren[1] : s).trim();
+  if (!inner) return undefined;
+  return inner.length > REVIEWER_CLAUSE_MAX_CHARS ? `${inner.slice(0, REVIEWER_CLAUSE_MAX_CHARS).trimEnd()}…` : inner;
+}
+
+/**
+ * (W1-T2263) Companion to {@link parseReviewerVerdicts}, reading the SAME transcript and the
+ * SAME widened regex for the bounded clause a FAIL line may carry naming what would answer the
+ * claim — no second question, no second spawn (the transcript is already in hand wherever
+ * `parseReviewerVerdicts` is called). Index-aligned to `count`, exactly like
+ * `parseReviewerVerdicts`'s own return. `undefined` at an index when that criterion's line was
+ * PASS, absent, or a FAIL with no trailing clause — a PASS line is never annotated (Q3: the
+ * reviewer keeps no new channel besides the bounded FAIL clause). `parseReviewerVerdicts`'s own
+ * return value is unaffected by anything this function does — they are two independent readers
+ * of one regex pass, so a caller that only wants today's booleans keeps getting exactly that.
+ */
+export function parseReviewerVerdictClauses(text: string, count: number): (string | undefined)[] {
+  const clauses: (string | undefined)[] = new Array(count).fill(undefined);
+  for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
+    const n = Number(m[1]) - 1;
+    if (n < 0 || n >= count) continue;
+    if (m[2].toUpperCase() !== "FAIL") continue; // PASS lines never gain a clause.
+    const clause = extractBoundedClause(m[3]);
+    if (clause) clauses[n] = clause;
+  }
+  return clauses;
 }
 
 // ── Acceptance criteria from a PR body (manual plan/doc PRs) ───────────────

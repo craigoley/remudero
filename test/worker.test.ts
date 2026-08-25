@@ -494,6 +494,11 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
     verdict: "success",
     quality_suspect: false,
     compaction_events: [],
+    // W1-T2245: now ALWAYS present off a real `collectWorkerResult` call (default false/[] when
+    // the caller passed no `compactionConfigured` and the stream carried no failed-status
+    // message) — see WorkerResult.compactionConfigured/compactionFailures' own docs.
+    compaction_configured: false,
+    compaction_failures: [],
     max_turns: 20,
   });
   assert.equal(BILLING_MODE, "subscription");

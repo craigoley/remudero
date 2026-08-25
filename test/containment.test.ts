@@ -274,12 +274,15 @@ test("probeContainment: a genuine no-write, no-denial, non-error run yields the 
   );
 });
 
-// ── W1-T292: EXPIRED copied OAuth token — a SECOND, DISTINCT credential-dead
-// signature from W1-T237's never-logged-in one. "OAuth session expired and
-// could not be refreshed" matches NEITHER CREDENTIAL_FAILURE_RE ("not logged
-// in") NOR CREDENTIAL_LOGIN_HINT_RE ("run /login"), so before this fix it fell
-// through to the generic unproven verdict — the exact misdiagnosis W1-T237
-// was built to prevent, just via a different message shape. ──────────────────
+// ── W1-T292 (phrases re-derived by W1-T2250): EXPIRED copied OAuth token — a
+// SECOND, DISTINCT credential-dead signature from W1-T237's never-logged-in
+// one. "Failed to authenticate. API Error: 401 OAuth access token has
+// expired. Re-authenticate to continue" matches NEITHER CREDENTIAL_FAILURE_RE
+// ("not logged in") NOR CREDENTIAL_LOGIN_HINT_RE ("run /login"), so it falls
+// through to the generic unproven verdict unless the expired-token arm itself
+// matches it — the exact misdiagnosis W1-T237 was built to prevent, just via a
+// different message shape. (W1-T292's original fixture text, "OAuth session
+// expired and could not be refreshed", is superseded — see W1-T2250.) ───────
 
 test("assessContainment: credentialExpired ⇒ FAILS CLOSED with the DISTINCT spawn_credential_expired reason, never spawn_credential_failure or UNPROVEN", () => {
   const v = assessContainment({
@@ -294,14 +297,14 @@ test("assessContainment: credentialExpired ⇒ FAILS CLOSED with the DISTINCT sp
   assert.doesNotMatch(v.reason, /UNPROVEN/);
 });
 
-test("probeContainment: a seeded error-result carrying 'OAuth session expired and could not be refreshed' (an EXPIRED copied token) yields the DISTINCT spawn_credential_expired reason, FAILS CLOSED", async () => {
+test("probeContainment: a seeded error-result carrying 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue' (an EXPIRED copied token) yields the DISTINCT spawn_credential_expired reason, FAILS CLOSED", async () => {
   await assert.rejects(
     () =>
       probeContainment({
         settingsFile: settingsFile(ENABLED),
         token: "expiredtok",
         exec: async () => ({
-          transcript: "OAuth session expired and could not be refreshed",
+          transcript: "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue",
           outsideWriteCreated: false,
           insideWriteCreated: false,
           isError: true,

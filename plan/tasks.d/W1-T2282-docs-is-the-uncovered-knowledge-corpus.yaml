@@ -1,0 +1,157 @@
+- id: W1-T2282
+  title: "`docs/` IS THE ONLY KNOWLEDGE CORPUS THAT NEVER GOT THIS REPO's OWN RETRIEVED-NOT-INJECTED TREATMENT — MASTER-PLAN.md has a generated index and a staleness gate, `learnings/` has an index, a ratchet and per-task matching, CLAUDE.md is up-front by a recorded decision, and `docs/` has NONE of the three: five of its twenty-seven files are named by nothing outside `docs/`, one names a path that does not resolve as written, and `docs/adr/` has held only a README and a template since 2026-07-17"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [scripts/generate-docs-index.mjs, docs/docs-index.json, test/docs-index.test.ts]
+  origin: oper#docs-is-the-uncovered-knowledge-corpus-2026-08-25
+  plan_refs: ["W1-T37", "W1-T33", "W1-T19", "W1-T418", "W1-T2266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (0) THE WARRANT IS AN ASYMMETRY MEASURED HERE, NOT A FEATURE OBSERVED ELSEWHERE.
+
+    This repo already decided how a knowledge corpus should reach a worker, wrote the decision
+    down, and shipped it twice. `src/lib/plan-index.ts`'s module doc states it outright: the plan
+    is "NOT shipped to workers — that would be a context tax paid on every run", so instead a
+    compact index of headings, one-line summaries and a grep hint is generated into
+    `plan/plan-index.json`, and `npm run plan-index:check` fails when the committed index does not
+    match a fresh regeneration. It names the model it is applying — "RETRIEVED, not INJECTED" —
+    and says it is "the same discipline as the learnings index (W1-T33)".
+
+    Measured on origin/main, corpus by corpus:
+
+      MASTER-PLAN.md  index: plan/plan-index.json    staleness gate: plan-index:check
+      learnings/      index: yes                     staleness gate: learnings-index:check, plus
+                                                     learnings-budget-ratchet, plus per-task
+                                                     retrieval (`matchedLearnings`, run-task.ts)
+      CLAUDE.md       injected up front BY DECISION  budget gate: claude-md-budget-ratchet
+      docs/           index: NONE                    staleness gate: NONE    retrieval: NONE
+
+    `package.json` carries `plan-index`, `plan-index:check`, `learnings-index`,
+    `learnings-index:check`, `learnings-assert`, `learnings-assert:check` and
+    `learnings-budget-ratchet`. It carries NO docs-related script at all. Nothing walks `docs/`:
+    `orientation.ts` only regenerates `docs/ORIENTATION.md`, and `runbook-coverage.ts` reads
+    exactly one file, `docs/operator-guide.md`, against a hand-written `REQUIRED_PROCEDURES` list.
+    There is no `readdirSync` over `docs/` anywhere in `src/`.
+
+    (1) SO A DOC IS REACHABLE ONLY IF SOMETHING ELSE ALREADY NAMES ITS PATH, AND FIVE ARE NAMED BY
+    NOTHING.
+
+    Counting files outside `docs/` that reference each doc by path (units: FILES referencing, not
+    occurrences — an occurrence count gives different, larger numbers for the same corpus, and the
+    two must not be compared):
+
+      0 refs — docs/adr/template.md, docs/audits/README.md, docs/research/README.md,
+               docs/research/recon-proof-survey.md, docs/system-diagrams.md
+      1 ref  — docs/adr/README.md, docs/alert-lane.md, docs/control-surface.md,
+               docs/open-decisions.md, docs/probe.md, and three under docs/research/
+      high   — docs/ORIENTATION.md (32), docs/cli-reference.md (27), docs/operator-guide.md (27)
+
+    Five of twenty-seven have no incoming citation, so no prompt, shard or grep hint leads a worker
+    to them; they are unreachable by construction rather than by neglect. The distribution is the
+    finding: the three most-cited files are the ones every brief already names, and the tail is
+    invisible.
+
+    (2) AND THE CORPUS IS UNCHECKED IN THE OTHER DIRECTION TOO — A DOC MAY NAME A PATH THAT DOES
+    NOT EXIST, AND ONE DOES.
+
+    Every path-like token in `docs/system-diagrams.md` resolves EXCEPT `lib/status.ts`, which does
+    not exist as written; the file is `src/lib/status.ts`. That is a live defect in a file that is
+    itself in the zero-citation group above — the diagram nobody points at contains the pointer
+    that does not land. An operator reported today that this same diagram sent a lane to read the
+    wrong bring-up script, which is the cost this shard exists for: a stale document someone acted
+    on. `docs/adr/` holds only `README.md` and `template.md`, both last touched 2026-07-17, so the
+    decision record the architecture doc implies exists has never had an entry.
+
+    (3) WHAT ALREADY EXISTS AND MUST NOT BE RE-BUILT.
+
+    `test/docs-claims.test.ts` IS a real gate and it has falsifiers: it asserts README.md does not
+    still claim the WS-0 spike, that CONTRIBUTING.md names `ci-gate` rather than bare `ci`, that
+    the operator guide documents `--repo` and covers every COMMANDS verb, that `docs/ci-gate.md`
+    stays deleted, and that CLAUDE.md still states the unit-test/grep dialect asymmetry — each
+    paired with a test that reverts the doc and proves the check goes red. It is hand-enumerated,
+    one check per named claim, and it names five artifacts. It does not name `docs/system-diagrams.md`
+    and it asserts nothing about the corpus as a whole. This task must EXTEND that discipline to a
+    property, not duplicate any of its five claims.
+
+    (4) THE BEARING FROM OUTSIDE, STATED NARROWLY.
+
+    Devin's Knowledge item is a DOCUMENTED MECHANISM: content plus a required TRIGGER DESCRIPTION
+    — "all Knowledge requires a trigger description" — plus an optional `!macro` and a scope of no
+    repo, one repo or all repos, retrieved "when relevant, not all at once or all at the
+    beginning". Its rules mechanism is documented too: `AGENTS.md` for always-on guidance,
+    `.devin/rules/*.md` with frontmatter `trigger: always_on | manual | model_decision | agent |
+    glob`, and hierarchical discovery where subdirectory rules load lazily when the agent touches
+    files there. The single transferable idea is the REQUIRED RETRIEVAL KEY: a document without one
+    is not merely under-read, it is unreachable, which is exactly what the five zero-citation files
+    above are. Devin's repository INDEXING is NOT a documented mechanism — its page describes the
+    user workflow and names no index, no refresh trigger and no staleness model — so nothing here
+    is derived from it, and this task does not import a product's workflow. It applies THIS repo's
+    own recorded pattern, already shipped twice, to the one corpus that never received it.
+
+    (5) SHAPE OF THE FIX.
+
+    Mirror `scripts/generate-plan-index.mjs` and its `--check` mode: generate `docs/docs-index.json`
+    from `docs/**` — path, title, one-line summary, grep hint — and fail when the committed index
+    does not match a fresh regeneration, the same staleness discipline `plan-index:check` already
+    enforces. The generator also refuses a doc that names a repo-relative path which does not
+    resolve, which is what catches the `lib/status.ts` case. The check runs as a unit test rather
+    than a new CI job, because `ci` already runs the whole suite and a workflow entry would widen
+    `files:` for no additional enforcement. An index entry gives every doc a retrieval key, so
+    "reachable" stops depending on whether some other file happened to cite it.
+  note: |
+    SIZING BAND: `risk: high` is set UP FRONT and the band is Rule 19's SPAN, not blast radius —
+    the build spans a generator, its generated artifact and the test that enforces both. No
+    source file under `src/` is touched and no existing doc is rewritten by this task.
+
+    THE SECOND CANDIDATE WAS REFUTED, AND IS RECORDED HERE SO IT IS NOT RE-FILED. CLAUDE.md is
+    injected in full on every session and measures 65324 bytes against a 65536-byte cap — 212
+    bytes of headroom — so adding a rule today requires deleting one, and Devin's split of
+    always-on `AGENTS.md` from trigger-scoped `.devin/rules/*.md` looked like it bore on that.
+    It does not: `src/lib/plan-index.ts` records that "CLAUDE.md up front + glob/grep for
+    retrieval" is a DELIBERATE choice, adopted because it "bypasses the issues of stale
+    indexing". Filing against it would have argued with a recorded decision, and would have
+    traded it for the half of Devin's design that is undocumented. The asymmetry that survives
+    that refutation is `docs/` alone, which is why this filing is one shard and not two.
+
+    WHAT MUST NOT CHANGE: the operator gates every merge and deploy. Rule 15 and Law 5 stand —
+    nothing auto-files, auto-mints or auto-ratifies, and this task adds no verb that does. The
+    evidence discipline is not traded for speed: controls on zeros, discriminating falsifiers, and
+    observed-versus-inferred stay. No existing operator message, doc or diagram is rewritten here
+    — the defective `lib/status.ts` pointer is the CHECK's first finding, repaired under its own
+    change, not silently edited by this one.
+
+    BOUNDARY AGAINST W1-T2266: that task counts mechanisms that gained no adopter, and its four
+    shapes are a symbol with no caller, a field with no writer, a script with no invoker and a gate
+    with no subject. All four are CODE. A document with no incoming citation is none of them, and
+    the corpus, the query and the artifact all differ.
+
+    ID PROVENANCE: W1-T2282 was reserved before this filing and verified UNUSED across the
+    reservation ref, shard filenames on origin/main, declared ids in `plan/`, open-PR titles, head
+    branches and bodies, merged `Remudero-Task:` trailers and merged commit subjects — each zero
+    paired with a positive control on its own surface. NO SECOND ID WAS MINTED, because only one
+    shard is warranted. Two controls had to be re-qualified mid-sweep: W1-T2279 and W1-T2258 both
+    read zero on the merged surfaces because their PRs are still OPEN, so a merged id was
+    substituted for each.
+  acceptance:
+    - claim: "every file under docs is present in a generated index with a path, a title and a one line summary"
+      proof: "unit test: test/docs-index.test.ts"
+    - claim: "a committed index that does not match a fresh regeneration fails the check"
+      proof: "unit test: test/docs-index.test.ts"
+    - claim: "a doc that names a repo relative path which does not resolve is refused, and the offending path is named"
+      proof: "unit test: test/docs-index.test.ts"
+    - claim: "the falsifier holds: removing an entry from the committed index turns the check red rather than passing quietly"
+      proof: "unit test: test/docs-index.test.ts"
+    - claim: "a doc with no incoming citation still appears in the index, so reachability does not depend on another file naming it"
+      proof: "unit test: test/docs-index.test.ts"
+    - claim: "the index excludes itself, so generating it does not create an entry that regenerates on every run"
+      proof: "unit test: test/docs-index.test.ts"
+    - claim: "none of the five claims already asserted by the docs claims test is duplicated by this check"
+      proof: "unit test: test/docs-index.test.ts"
+    - claim: "no existing document is rewritten by this task, and the unresolved path is reported rather than silently corrected"
+      proof: "unit test: test/docs-index.test.ts"

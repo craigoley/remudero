@@ -1,0 +1,166 @@
+- id: W1-T2273
+  title: "EVERY ESCALATION OPTION TERMINATES IN A SHELL COMMAND, SO THE CONSOLE CAN ACKNOWLEDGE WHAT HAPPENED AND CANNOT BE WHERE IT HAPPENS — an option is free prose rendered under `## Options`, the route table carries no review, merge, close or reject path, and the console's entire write surface has never recorded an operator action: all fourteen `panel.*` steps read ZERO on a ledger the console has itself written 1,449 rows to"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/escalate.ts, src/lib/serve.ts, test/escalation-options-are-executable.test.ts]
+  origin: oper#escalation-options-are-prose-not-actions-2026-08-25
+  plan_refs: ["W1-T2244", "W1-T2264", "W1-T8", "W1-T1216"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main ce38a8c1 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS. LEDGER FROM `resolveLedgerUnion` AT
+    THE STATE DIR: ok true, archiveCount 25, liveFileRead true, unread none.
+
+    (1) THE CORPUS QUESTION WAS ASKED FIRST AND THE ZERO SURVIVES IT. The prior recon named "does
+    `serve.ts` write elsewhere" as its own unchecked limit, so it was checked before anything
+    else. `serveCommand` resolves its ledger through `ledgerPathFor(config)`
+    (`src/run-task.ts:812-814`), the ONE helper whose own doc records that every inlined
+    `join(config.root, "state", "ledger.ndjson")` was routed through it precisely so a relocation
+    changes one line. `config.root` on this host is the state dir this measurement reads. AND THE
+    CONSOLE DEMONSTRABLY WRITES THERE: 1,449 rows carry `task_id: "SERVE"` on that same union —
+    `board_gateway.fetch_ok` 273, `board_gateway.fetch_failed` 287, `service.sse.open` 80 and
+    more, from host `e5afe226f001` among others. SO THE LEDGER IS THE RIGHT ONE AND THE CONSOLE
+    IS AN ACTIVE WRITER TO IT.
+
+    (2) AND ON THAT SAME LEDGER, ALL FOURTEEN `panel.*` STEP NAMES READ ZERO. The names are
+    grepped from source, not guessed: `panel.escalation_marked_handled`, `panel.manual_approved`,
+    `panel.question_answered`, `panel.pause_requested`, `panel.resume_requested`,
+    `panel.stop_requested`, `panel.quiet_hours_toggled`, `panel.feedback_submitted`,
+    `panel.operator_note_added`, `panel.proposal_accepted`, `panel.proposal_rejected`,
+    `panel.proposal_approve_requested`, `panel.proposal_reframe_requested`,
+    `panel.skill_invoked`. A regex over `"step":"panel[.][a-z_]+"` returns n=0 against the 1,449
+    `SERVE` rows above and 1,433 `daemon.headroom` rows on the same union. THE CONSOLE'S WRITE
+    SURFACE HAS NEVER RECORDED AN OPERATOR ACTION, AND THAT IS AN ABSENCE, NOT A BLIND QUERY.
+
+    (3) THE TWO MEASURED OPTIONS BLOCKS, VERBATIM, AND NEITHER IS EXECUTABLE.
+    `issues/2810` offered: "**re-judge** — re-examine the reviewer's reasoning against the
+    deterministic floor and re-post `remudero-review` by hand (e.g. `rmd review`) if the block is
+    unwarranted." `issues/2824` offered: "**review-manually** — read the diff and either merge it
+    by hand or push a follow-up fix, then re-drain." BOTH TERMINATE IN A SHELL COMMAND.
+
+    (4) AND THE ROUTE TABLE CONFIRMS WHY, WITH A CONTROLLED ZERO. Every write route and its tier:
+    `/v1/manual/approve` HIGH, `/v1/drain/kick` HIGH, `/v1/drain/run` HIGH, `/v1/inbox/approve`
+    HIGH, `/v1/skills/run` HIGH; `/v1/control/pause`, `/v1/control/resume`, `/v1/control/stop`,
+    `/v1/quiet-hours` MIDDLE; `/v1/escalation/mark-handled`, `/v1/questions/answer`,
+    `/v1/drain/feedback`, `/v1/auth/scope` LOW. THE COUNT OF `/v1` PATHS CONTAINING "review",
+    "merge", "close" OR "reject" IS ZERO FOR EACH, against a CONTROL of 5 paths containing
+    "approve". The nearest reachable action is `/v1/drain/kick`, which dispatches a TASK by id —
+    a different operation from re-reviewing a PR.
+
+    (5) SO THE SHAPE OF THE GAP IS NOT "a missing button". An option is FREE PROSE assembled into
+    the issue body under the `"## Options"` heading (`src/lib/escalate.ts:742`), and the module's
+    own note at `:708-709` treats it as display text. A free-text option can never have a button,
+    because nothing on the rendering side can know what pressing it would do.
+
+    (6) AND THE COST IS DATED. Of seven operator interventions on 2026-08-25, ZERO were initiable
+    from the console as a whole action. One — `rmd resume` — had a route
+    (`/v1/control/resume`, middle tier) THE OPERATOR COULD NOT KNOW TO PRESS: W1-T2264 measured
+    that the latch block enumerates four FILE paths and nothing else, so a `refs/rmd-pause/hold`
+    halted every lane while the board printed "no active latches" for 3h51m. CITED, NOT RE-FILED.
+  note: |
+    ── Q1. WHAT AN OPTION WOULD HAVE TO BE ─────────────────────────────────────────────────────
+
+    (i) A CLOSED SET, NOT FREE PROSE — AND THAT IS THE WHOLE CHANGE. The options an escalation
+    emits must be drawn from a vocabulary the console knows how to render, exactly as
+    `escalate.ts` already keeps its LABELS a closed set (`BLOCKED` → `escalation-blocked`,
+    `MANUAL`, `HARD_STOP`, `GRILL`). A free-text option cannot carry a button because nothing on
+    the rendering side can know what pressing it would do. THE PROSE DOES NOT GO AWAY: it stays
+    as the human-readable explanation beside the typed kind, the same way a reason class and free
+    text sit beside each other elsewhere in this fleet.
+
+    (ii) AND EACH OPTION CARRIES A ROUTE AND A PAYLOAD, OR IT CARRIES NEITHER AND SAYS SO. An
+    option the console can execute names the route it posts to and the payload it posts. An
+    option the console CANNOT execute — because the act is the operator's, see Q2 — must be
+    marked as such rather than rendered identically and silently doing nothing. AN OPTION THAT
+    LOOKS PRESSABLE AND IS NOT IS WORSE THAN ONE THAT SAYS "do this in a shell".
+
+    (iii) THE RENDERER STAYS DUMB. `serve.ts` should render what the option declares; it must not
+    map option prose to routes by pattern-matching, which would put the vocabulary in two places
+    and let them drift — the same two-enumerator defect this repo has already paid for elsewhere.
+
+    ── Q2. WHICH OPTIONS MUST NOT BECOME ROUTES ────────────────────────────────────────────────
+
+    (iv) THE DISTINCTION IS "LET HIM DO IT" VERSUS "LET HIM DECIDE IT AND THE FLEET DOES IT", AND
+    ONLY THE SECOND IS IN SCOPE. A console that can merge is a loaded gun: it turns one mis-click
+    into an unreviewed merge on main. A console that can RECORD "I judge this safe to merge, and
+    here is why" is a decision surface, and the merge still happens through the gate the operator
+    already controls.
+
+    (v) SO: NO MERGE ROUTE. NO PR-CLOSE ROUTE. NO REJECT ROUTE. Their absence today is CORRECT and
+    this task must not end it. `review-manually` from `issues/2824` is the clearest case — "merge
+    it by hand" is not a button, it is a ruling, and what the console owes is a way to record the
+    ruling and its reason.
+
+    (vi) AND `re-judge` IS THE OPPOSITE CASE, WHICH IS WHY BOTH ARE WORTH HAVING. Re-posting
+    `remudero-review` changes no branch state, merges nothing and is idempotent per head. It is
+    the shape of option that CAN safely carry a route. A build should treat it as the worked
+    example and `review-manually` as the worked counter-example.
+
+    (vii) THE EXISTING TIERS DECIDE THE REST AND MUST NOT BE RE-INVENTED. HIGH already gates the
+    five paths that spend real budget or dispatch work; MIDDLE gates fleet control; LOW gates
+    recording and acknowledgement. A new executable option belongs in one of those three, chosen
+    by what it costs, never in a fourth tier invented for escalations.
+
+    ── Q3. THE THREE MISSING PIECES OF THE ROUND TRIP ──────────────────────────────────────────
+
+    (viii) (i) NO ROUTE EMITS THE DECISION RECORD. W1-T2244 defines a row carrying the
+    escalation, the judged verdict and confidence, the disposition and a validated reason class,
+    bound to the head sha. Nothing in the route table would call it: `/v1/escalation/mark-handled`
+    stays a LOW-tier close-the-issue action and carries no verdict, no reason, no disposition.
+    CITED, NOT RE-FILED.
+
+    (ix) (ii) NOTHING READS IT BACK, AND A TWO-WAY CHANNEL NEEDS A READER THAT IS NOT A GATE.
+    W1-T2244's own pins forbid a gate consuming the row, and that pin is RIGHT and must survive.
+    But a reader that is not a gate is a different thing: THE FIX RUNG TAKING "judge-was-wrong,
+    here is why" AS EVIDENCE FOR ITS NEXT ATTEMPT, exactly as it takes ci-log evidence today.
+    Evidence steers an attempt; it does not authorise a merge. Without such a reader the operator
+    types a reason into a ledger nothing consults, and the channel is one-way with extra steps.
+
+    (x) (iii) THE REASON HAS NO INPUT SURFACE. A closed reason class needs a PICKER and free text
+    needs a FIELD, and `serve.ts` has neither. This is the smallest of the three and the one most
+    easily forgotten, because a route that accepts a reason looks complete from the server side
+    while the operator has nowhere to type one.
+
+    ── WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────────
+
+    (xi) THE OPERATOR GATES EVERY MERGE AND DEPLOY. No merge route, no PR-close route, no
+    auto-resolve of an escalation. Nothing here widens auto-merge and nothing closes a PR on a
+    score or a signal.
+
+    (xii) THE CONSOLE STAYS READ-MOSTLY AND ITS EXISTING TIERS STAY. This adds a vocabulary and at
+    most one executable option kind; it does not re-tier an existing route and does not add a
+    tier.
+
+    (xiii) ESCALATION STAYS THE FALLBACK, NOT THE FIRST MOVE. Making an option pressable must not
+    make escalating cheaper than fixing — if anything the fleet should escalate LESS once it can
+    act, and a build that raises escalation volume has moved the wrong number.
+
+    (xiv) AND THE PROSE SURVIVES. An option's human-readable sentence is what makes an escalation
+    legible to somebody reading it on a phone at midnight. Typing the option adds a machine-
+    readable sibling; it does not replace the sentence with an enum.
+
+    (xv) RULE 19 BAND. `risk: high` is set UP FRONT because `files:` spans two source stems and
+    Rule 19 sizes on SPAN. THE BAND IS THE SPAN READING AND NOT A BLAST-RADIUS JUDGEMENT: the
+    change types a field the emitter already writes and renders it on a surface that already
+    renders the prose.
+  acceptance:
+    - claim: "an escalation option carries a machine readable kind drawn from a closed set, alongside the prose sentence it already renders"
+      proof: "unit test: test/escalation-options-are-executable.test.ts"
+    - claim: "an option the console can execute names the route and payload it posts, and an option it cannot execute is marked as operator only"
+      proof: "unit test: test/escalation-options-are-executable.test.ts"
+    - claim: "the renderer reads what the option declares and never maps prose to a route by pattern matching"
+      proof: "unit test: test/escalation-options-are-executable.test.ts"
+    - claim: "no route is added that merges a pull request, closes one, or rejects one"
+      proof: "unit test: test/escalation-options-are-executable.test.ts"
+    - claim: "an executable option is assigned one of the three existing tiers and no fourth tier is introduced"
+      proof: "unit test: test/escalation-options-are-executable.test.ts"
+    - claim: "the human readable sentence survives on every option, including the ones that are operator only"
+      proof: "unit test: test/escalation-options-are-executable.test.ts"
+    - claim: "an unrecognised option kind is refused at the emitter rather than rendered as an inert button"
+      proof: "unit test: test/escalation-options-are-executable.test.ts"

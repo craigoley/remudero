@@ -24,8 +24,11 @@
 //       floor anywhere), `keyword-floor` (`floor_degraded` — some criteria fell back while the
 //       verdict was NOT capped) or `degraded-arm` (`capped` — zero proofs executed, armed only
 //       via a plan-only carve-out or an explicit operator override). A row with no matching
-//       `review.posted` line carries `verdictClass: null` and is reported UNMEASURABLE, honestly
-//       — never silently dropped or guessed.
+//       `review.posted` line, OR whose `automerge.armed` line itself carried no `head_sha` at all
+//       (W1-T2258 — only the review lane's own arm helper put one on the row before this task;
+//       every other lane's arm silently could not join), carries `verdictClass: null` and is
+//       reported UNMEASURABLE, honestly, with the two shapes told apart by `unjoinableCause` —
+//       never silently dropped or guessed, and never merged into one undifferentiated count.
 //   (b) a GIT EVENT dump ({@link parseGitEventDump}), the failing-split classifier's
 //       `%s%x00%b%x01` shape (run-task.ts's `classifyFailingMergeEvidence`) extended with a
 //       leading `\x02` record separator plus the commit sha and committer-date-ISO (needed to
@@ -68,18 +71,48 @@ import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } fro
 
 export type VerdictClass = "full-pass" | "keyword-floor" | "degraded-arm";
 
+/** Why a {@link VerdictRow} could not be joined to a merge/rate — see {@link
+ *  VerdictCalibrationReport.unmeasurableByCause}. `no-head-sha` and `no-review-posted` are set by
+ *  {@link mineVerdictRows} (the MINING side: two different reasons the verdict is unrecoverable —
+ *  the arm row itself never carried a head, vs one that did but found no matching verdict);
+ *  `merge-sha-unrecoverable` and `git-history-unavailable` are set by {@link
+ *  verdictCalibrationReport} (the JOIN side, against git history). Kept as ONE enum, not two
+ *  parallel ones, so a consumer breaking the count down by cause never has to know which stage
+ *  produced it — W1-T2258's whole point is that these must never be merged into a single silent
+ *  drop again. */
+export type UnmeasurableCause = "no-head-sha" | "no-review-posted" | "merge-sha-unrecoverable" | "git-history-unavailable";
+
 /** One armed merge's verdict, joined from an `automerge.armed` line to its `review.posted`
- *  line. `verdictClass` is `null` — never a guessed default — when no `review.posted` line for
- *  the same task+head could be found; `classifyWhy` then names the reason. */
+ *  line. `verdictClass` is `null` — never a guessed default — when the row could not be
+ *  classified; `classifyWhy`/`unjoinableCause` then name the reason. */
 export interface VerdictRow {
   taskId: string;
-  headSha: string;
+  /** ABSENT exactly when the `automerge.armed` line itself carried no `head_sha` (W1-T2258) —
+   *  never inferred or defaulted (the module doc's "NOTHING BACKFILLS" clause). A row in this
+   *  shape can never join to a `review.posted` line (there is no key to join on) and always
+   *  carries `verdictClass: null` with `unjoinableCause: "no-head-sha"`. */
+  headSha?: string;
   /** The `automerge.armed` line's own `ts` — the arm event, used to locate the merge commit
    *  (the earliest task-id-citing commit AT OR AFTER this instant). */
   armedTs: string;
+  /** The `automerge.armed` line's own `lane` field (W1-T449: `"review"` | `"operator"` |
+   *  `"sweep"`, or the ambient lane a caller's own ledger-append closure defaulted to when the
+   *  row was written outside `logArmAttribution`, e.g. `"run-task"`), when present. ABSENT for
+   *  every row mined before W1-T449 added the field. Read-only passthrough — this module never
+   *  classifies differently by lane; {@link verdictCalibrationReport} uses it only to LABEL which
+   *  population a published rate was computed over, never to re-derive a verdict (design note
+   *  (v): "the review lane is the only one that posts a review.posted row at all" — reviewCommand's
+   *  own ledger-append closure hardcodes `lane: "review"` on every `review.posted` line it writes,
+   *  whichever higher-level command called it, so a class populated from more than one ARM lane is
+   *  blending judgments of different rigor under one rate). */
+  lane?: string;
   verdictClass: VerdictClass | null;
   /** Present only when `verdictClass === null`. */
   classifyWhy?: string;
+  /** Present only when `verdictClass === null` and set by {@link mineVerdictRows} itself (never
+   *  guessed downstream) — see {@link UnmeasurableCause}'s own doc for why this stays a single
+   *  enum shared with the join-side causes. */
+  unjoinableCause?: "no-head-sha" | "no-review-posted";
 }
 
 export interface VerdictMiningResult {
@@ -134,14 +167,43 @@ export function mineVerdictRows(stateDir: string, fsDeps?: LedgerGrepFsDeps): Ve
     const taskId = typeof line.task_id === "string" ? line.task_id : undefined;
     const headSha = typeof line.head_sha === "string" ? line.head_sha : undefined;
     const armedTs = typeof line.ts === "string" ? line.ts : undefined;
-    if (!taskId || !headSha || !armedTs) continue; // structurally malformed line — never counted either way, matching resolveLedgerUnion's own line-shape discipline
+    const lane = typeof line.lane === "string" ? line.lane : undefined;
+    // No task id or no arm timestamp: genuinely no identity to key or date a row by — this
+    // `continue` stays silent, matching resolveLedgerUnion's own line-shape discipline.
+    if (!taskId || !armedTs) continue;
+    // W1-T2258 — THE DEFECT THIS CLOSES. This used to share ONE guard with the branch above
+    // (`!taskId || !headSha || !armedTs`), so a row with a real task id and timestamp but no
+    // `head_sha` was dropped exactly as silently as a structurally malformed line — no
+    // `classifyWhy`, no entry in the unmeasurable list — even though `:139-149` two lines below
+    // already had the vocabulary for "counted, and here is why it could not be classified".
+    // Measured: only the review lane's own arm helper (`armIfVerdictPermits`) put `head_sha` on
+    // its row; every other lane's arm (run-task's deferred at-verdict arm, and every
+    // `armAndLogOutcome` caller: dep-review, retro, triage, plan, approve, sweep) systematically
+    // did not — a LANE SPLIT, not a sample, so a caveat alone would still misrepresent the
+    // resulting rate as fleet-wide (see verdictCalibrationReport's own doc).
+    if (!headSha) {
+      rows.push({
+        taskId,
+        armedTs,
+        lane,
+        verdictClass: null,
+        unjoinableCause: "no-head-sha",
+        classifyWhy:
+          `automerge.armed row for task ${taskId} at ${armedTs} carries no head_sha — this arm's ` +
+          "write path never put one on the row, so it cannot be joined to any review.posted line " +
+          "(never inferred from the PR's current head, a git read, or defaulted)",
+      });
+      continue;
+    }
     const postedLine = posted.get(`${taskId}\0${headSha}`);
     if (!postedLine) {
       rows.push({
         taskId,
         headSha,
         armedTs,
+        lane,
         verdictClass: null,
+        unjoinableCause: "no-review-posted",
         classifyWhy:
           `no matching review.posted line for task ${taskId} at head ${headSha} — the verdict ` +
           "this arm relied on could not be recovered from the union",
@@ -150,7 +212,7 @@ export function mineVerdictRows(stateDir: string, fsDeps?: LedgerGrepFsDeps): Ve
     }
     const verdictClass: VerdictClass =
       postedLine.capped === true ? "degraded-arm" : postedLine.floor_degraded === true ? "keyword-floor" : "full-pass";
-    rows.push({ taskId, headSha, armedTs, verdictClass });
+    rows.push({ taskId, headSha, armedTs, lane, verdictClass });
   }
   return { ledger, rows };
 }
@@ -318,16 +380,33 @@ export interface ClassOutcome {
   total: number;
   revertedCount: number;
   followupFixedCount: number;
-  /** `null` when `total < minPopulationFloor` — a rate over an anecdote must refuse to print. */
+  /** `null` when the rate is REFUSED — see {@link ClassOutcome.rateRefusedReason}. */
   revertRate: number | null;
-  /** `null` under the same floor. */
+  /** `null` under the same refusal. */
   followupFixRate: number | null;
+  /** The lane(s) `total` was actually drawn from — an armed row's own `lane` field, deduped,
+   *  sorted, comma-joined; `"none"` at `total: 0`. Absent-lane rows read as `"review"` (the only
+   *  lane capable of producing a classified row before W1-T2258 fixed the other write paths —
+   *  see the module doc's "review lane is the only one that posts a review.posted row" finding).
+   *  NEVER blended into a fleet-wide claim without saying so: design note (v)'s reporting
+   *  decision — a caveat is not enough when the exclusion (by lane) tracks the very axis (verdict
+   *  class) this report measures, so this field is the label a consumer reads instead. */
+  lanes: string;
+  /** Set exactly when a rate is `null` — WHY it was refused, so "too few rows" (a population
+   *  floor refusal) is never confused with "spans more than one arm lane" (a lane-purity refusal
+   *  — the fleet-wide-vs-per-lane reporting decision itself). */
+  rateRefusedReason?: "below-population-floor" | "mixed-lane-population";
 }
 
 export interface UnmeasurableRow {
   taskId: string;
-  headSha: string;
+  /** Absent exactly when the row's own {@link VerdictRow.headSha} was absent — see that field's
+   *  own doc; never inferred here either. */
+  headSha?: string;
   why: string;
+  /** Which of the four {@link UnmeasurableCause} shapes this row is — see that type's own doc
+   *  for why it is ONE enum shared across the mining and join stages. */
+  cause: UnmeasurableCause;
 }
 
 export interface VerdictCalibrationReport {
@@ -339,6 +418,19 @@ export interface VerdictCalibrationReport {
   /** Rows whose merge sha (or verdict class) could not be recovered — P48's no-naked-zero
    *  clause: every one of these is named, never folded into a denominator as if measured. */
   unmeasurable: UnmeasurableRow[];
+  /** `verdictRows.length` — every arm row this report was actually handed, so a consumer can
+   *  always see the denominator behind `classes`/`unmeasurable` (W1-T2258 acceptance: "the report
+   *  states how many arms it saw"). Always equals `armsClassified + unmeasurable.length` — every
+   *  row this report iterates lands in exactly one of the two. Rows `mineVerdictRows` itself
+   *  never turned into a `VerdictRow` at all (no task id, or no arm timestamp — the one silent
+   *  drop this task leaves silent, see that function's own doc) are outside this count. */
+  armsSeen: number;
+  /** `classes[].total` summed — the arms that reached a verdict class AND a locatable merge
+   *  commit. */
+  armsClassified: number;
+  /** `unmeasurable.length` broken out by {@link UnmeasurableCause}, so "no head sha" is never
+   *  merged into "merge sha could not be recovered" or "no matching review.posted line". */
+  unmeasurableByCause: Record<UnmeasurableCause, number>;
 }
 
 const VERDICT_CLASSES: readonly VerdictClass[] = ["full-pass", "keyword-floor", "degraded-arm"];
@@ -368,37 +460,52 @@ export function verdictCalibrationReport(
   const minPopulationFloor = opts.minPopulationFloor ?? MIN_POPULATION_FLOOR;
   const commits = opts.gitReadError ? [] : parseGitEventDump(gitDump);
 
-  const totals = new Map<VerdictClass, { total: number; reverted: number; fixed: number }>(
-    VERDICT_CLASSES.map((c) => [c, { total: 0, reverted: 0, fixed: 0 }]),
+  const totals = new Map<VerdictClass, { total: number; reverted: number; fixed: number; lanes: Set<string> }>(
+    VERDICT_CLASSES.map((c) => [c, { total: 0, reverted: 0, fixed: 0, lanes: new Set<string>() }]),
   );
   const unmeasurable: UnmeasurableRow[] = [];
+  const unmeasurableByCause: Record<UnmeasurableCause, number> = {
+    "no-head-sha": 0,
+    "no-review-posted": 0,
+    "merge-sha-unrecoverable": 0,
+    "git-history-unavailable": 0,
+  };
+  const pushUnmeasurable = (row: Pick<VerdictRow, "taskId" | "headSha">, why: string, cause: UnmeasurableCause): void => {
+    unmeasurable.push({ taskId: row.taskId, headSha: row.headSha, why, cause });
+    unmeasurableByCause[cause] += 1;
+  };
 
   for (const row of verdictRows) {
     if (opts.gitReadError) {
-      unmeasurable.push({ taskId: row.taskId, headSha: row.headSha, why: `git history unavailable: ${opts.gitReadError}` });
+      pushUnmeasurable(row, `git history unavailable: ${opts.gitReadError}`, "git-history-unavailable");
       continue;
     }
     if (row.verdictClass === null) {
-      unmeasurable.push({
-        taskId: row.taskId,
-        headSha: row.headSha,
-        why: row.classifyWhy ?? "verdict class could not be determined from the ledger",
-      });
+      pushUnmeasurable(
+        row,
+        row.classifyWhy ?? "verdict class could not be determined from the ledger",
+        // row.unjoinableCause is set by mineVerdictRows for both its own drop shapes; a
+        // hand-built VerdictRow (fixtures, other callers) that sets verdictClass: null without it
+        // falls back to the pre-existing "no matching review.posted line" reading.
+        row.unjoinableCause ?? "no-review-posted",
+      );
       continue;
     }
     const merge = locateMergeCommit(commits, row.taskId, row.armedTs);
     if (!merge) {
-      unmeasurable.push({
-        taskId: row.taskId,
-        headSha: row.headSha,
-        why:
-          `no commit on the read git history cites ${row.taskId} at or after its arm timestamp ` +
+      pushUnmeasurable(
+        row,
+        `no commit on the read git history cites ${row.taskId} at or after its arm timestamp ` +
           `(${row.armedTs}) — the merge sha could not be recovered`,
-      });
+        "merge-sha-unrecoverable",
+      );
       continue;
     }
     const bucket = totals.get(row.verdictClass)!;
     bucket.total += 1;
+    // W1-T2258 — every row is counted regardless of lane (never a second silent drop), but the
+    // LANE it came from travels with the bucket so the rate below can refuse to blend lanes.
+    bucket.lanes.add(row.lane ?? "review");
     if (wasReverted(commits, merge, row.taskId, policy.windowDays)) bucket.reverted += 1;
     if (hasFollowupFix(commits, merge, row.taskId, policy.windowDays)) bucket.fixed += 1;
   }
@@ -406,15 +513,26 @@ export function verdictCalibrationReport(
   const classes: ClassOutcome[] = VERDICT_CLASSES.map((verdictClass) => {
     const b = totals.get(verdictClass)!;
     const belowFloor = b.total < minPopulationFloor;
+    const mixedLane = b.lanes.size > 1;
+    const refuseRate = belowFloor || mixedLane;
+    const rateRefusedReason: ClassOutcome["rateRefusedReason"] = !refuseRate
+      ? undefined
+      : belowFloor
+        ? "below-population-floor"
+        : "mixed-lane-population";
     return {
       verdictClass,
       total: b.total,
       revertedCount: b.reverted,
       followupFixedCount: b.fixed,
-      revertRate: belowFloor ? null : b.reverted / b.total,
-      followupFixRate: belowFloor ? null : b.fixed / b.total,
+      revertRate: refuseRate ? null : b.reverted / b.total,
+      followupFixRate: refuseRate ? null : b.fixed / b.total,
+      lanes: b.lanes.size === 0 ? "none" : Array.from(b.lanes).sort().join(", "),
+      ...(rateRefusedReason ? { rateRefusedReason } : {}),
     };
   });
 
-  return { policy, minPopulationFloor, classes, unmeasurable };
+  const armsClassified = classes.reduce((sum, c) => sum + c.total, 0);
+
+  return { policy, minPopulationFloor, classes, unmeasurable, armsSeen: verdictRows.length, armsClassified, unmeasurableByCause };
 }

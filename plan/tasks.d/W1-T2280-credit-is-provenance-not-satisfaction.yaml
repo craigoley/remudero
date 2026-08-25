@@ -1,0 +1,220 @@
+- id: W1-T2280
+  title: "A TASK IS CREDITED MERGED ON PROVENANCE AND NEVER ON SATISFACTION, AND NO INSTRUMENT CAN SEE THE DIFFERENCE — `deriveStatus` credits an anchored `Remudero-Task:` trailer on a merged, ownership-asserted PR and reads `acceptance` zero times in its 124 lines; `isDispatchEligible`'s OPENING rung at `drain.ts:487` makes that terminal for 783 of 859 tasks; and `proofQueueAudit`, the one instrument that resolves a task's proofs against the real checkout, is scoped to OPEN+UNMERGED at `run-task.ts:13976` and exempts whole-file test paths by construction at `proof-queue-audit.ts:164` — an exemption that is correct for a queued task and wrong for a credited one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/proof-queue-audit.ts, src/run-task.ts, test/credited-task-proof-visibility.test.ts]
+  origin: oper#credited-and-unsatisfied-is-invisible-2026-08-25
+  plan_refs: ["W1-T150", "W1-T180", "W1-T506", "W1-T1053", "W1-T1076", "W1-T1223"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main f3109443 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA AND CLEAN, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS. Every ledger figure comes
+    from one `resolveLedgerUnion` read at the state dir: ok true, archiveCount 26, liveFileRead
+    true, unread none, unclassified one (`ledger.ndjson.bak`, named rather than swallowed).
+
+    (1) THE CREDIT KEY IS AN ANCHORED TRAILER, NOT A CITATION, AND THE FILING BRIEF'S WORRY IS
+    REFUTED AT THE REGEX. `hasAnchoredTrailer` (`status.ts:2702-2705`) tests
+    `^Remudero-Task: <id>$` with the `m` flag against the PR body, and `creditsByAnchoredTrailer`
+    (`:2585-2600`) additionally requires the PR state to be MERGED, refuses outright on an
+    unreadable head, and re-asserts ownership through `ownsBranch`'s `^run-<id>-\d+$`. A PR that
+    mentions a task in passing therefore credits NOTHING. The rung list at `status.ts:60-88`
+    names all six paths and calls this one anchor-verified against a fuzzy search hit explicitly.
+
+    (2) BUT NONE OF THE SIX RUNGS READS `acceptance`, AND THAT IS THE REAL DEFECT. `deriveStatus`
+    runs `status.ts:3421-3544` and the token `acceptance` appears ZERO times inside it, against a
+    whole-file control of 7 occurrences elsewhere. Two of the six rungs are bare declarations that
+    are never re-verified at all, and the module says so: `pr:` in tasks.yaml (rung b) and a
+    `manual.completed` ledger line (rung b2), the latter documented at `:71-79` as DECLARED
+    credit, never re-verified against GitHub. So credit answers WHO SHIPPED IT, never WHAT SHIPPED.
+
+    (3) THE WRITE SITE AND ITS SOURCE LITERAL. `runCreditBackfill` (`sweep.ts:6478`) appends one
+    `verdict.merged` line per candidate at `:6511-6519` with `source: "sweep.credit_backfill"`
+    HARDCODED at `:6515`. Its input is built by `buildCreditCandidates`
+    (`run-task.ts:21095-21118`), whose whole body is `deriveStatus(task, deps)` per plan task and
+    a push when `proj.merged`. Nothing between the trailer and the ledger row consults a proof.
+
+    (4) THE POPULATION, RE-MEASURED RATHER THAN CARRIED. 783 distinct task ids carry a merge
+    credit across the union under `isMergeCreditLine`'s own two shapes (`step: verdict.merged`, or
+    `step: verdict` with `verdict: merged`). ALL 783 ARE IN THE PLAN; zero credited ids are
+    unfiled; 76 plan tasks are uncredited. 1,043 credit rows in total, 904 carrying
+    `source: sweep.credit_backfill` and 139 carrying no `source` field (the live terminal
+    verdicts). The brief's 783 of 859 reproduces exactly.
+
+    (5) Q1, RUN IN FULL, AND ITS ANSWER IS NOT THE ONE THE PROXY WAS EXPECTED TO GIVE. Every one
+    of the 783 credited tasks' acceptance proofs was parsed through the reviewer's OWN
+    `parseWhitelistedProof` and resolved against this checkout. 3,073 criteria, 6 `satisfied_by`
+    skipped. Test paths present 1,619. Grep proofs that still match 271. Name-filtered test
+    titles 908, NOT MEASURED here. Free prose carrying no dialect 259. AND THE TWO CAUSES THE
+    BRIEF NAMED READ AS FOLLOWS: DECLARED TEST PATH ABSENT — ZERO. GREP PATH ABSENT — ZERO.
+    Only 13 candidate tasks surface at all: 8 `refused-parse` and 5 `grep-zero`.
+
+    (6) AND THE CONTROL PROVES THE INSTRUMENT WORKS. The same run over the 76 UNCREDITED tasks
+    reads 214 absent test paths across 38 tasks, 10 grep-zero and 2 grep-path-absent, out of 338
+    criteria. The proxy fires loudly on the queue and is nearly silent on the credited set, which
+    is evidence about the corpus and not about the code that read it.
+
+    (7) THE 13 ARE ALMOST ALL FALSE POSITIVES, AND THE ERROR MODE IS RELOCATION. The 8
+    `refused-parse` are all early ids (W1-T4, W1-T66, W1-T67, W1-T77, W1-T78, W1-T87, W1-T90,
+    W1-T107) whose proofs predate the `grep: <pattern> in <path>` dialect and carry no `in`
+    clause. Of the 5 `grep-zero`, four were checked by hand and every one is proof rot with the
+    work standing: `refreshInstallationToken(` moved out of `run-task.ts` into
+    `src/lib/github-app.ts`; `fetchBoardPrsRest` out of `serve.ts` into `src/lib/open-prs-rest.ts`;
+    `claude-md-budget-ratchet` from `ci-gate.yml` into `ci.yml`; `idle_reasons` out of
+    `auto-triage.ts` into `idle-reasons-panel.ts` and `serve.ts`. THE SYMBOL EXISTS IN ALL FOUR
+    CASES. Not one of the 13 is established as credited-and-unsatisfied.
+
+    (8) W1-T1076, WORKED, AND IT SCORES CLEAN. All 8 of its criteria carry name-filtered
+    `unit test:` proofs, and all 8 RESOLVE — `resolveNameFilteredCandidates` returns `resolved`
+    for every one, each to a real `test("W1-T1076: ...")` declaration in
+    `test/knowledge-dedup.test.ts` at lines 261, 285, 310, 338, 371, 422, 442 and 463. Its corpus
+    wiring shipped as the brief states. SO ITS ACCEPTANCE IS SATISFIED, CRITERION FOR CRITERION.
+    The unbuilt `max(slug, title)` metric is real — `Math.max` appears ZERO times in
+    `task-linter.ts` and the scoring path at `:2075-2078` scores `opts.duplicateSlug` alone — but
+    it was NEVER one of W1-T1076's eight criteria. It arrived later, in rationale prose.
+
+    (9) W1-T1223, WORKED, AND ITS PREMISE IS REFUTED. Its 4 criteria all name the literal path
+    `test/cancelled-required-check-requeue.test.ts`, which EXISTS and carries 14 test
+    declarations. The re-queue is not uncalled: `runSweep` invokes `deps.requeueCheck` at
+    `sweep.ts:5233-5234`; the real effect is wired at `run-task.ts:21873-21882` and POSTs
+    `repos/{owner}/{repo}/actions/jobs/{job_id}/rerun`, the single job and never the whole run;
+    `buildSweepEffects` (`:21559`) is constructed in production at `:22251` and `:23019`. WHAT IS
+    TRUE IS THAT IT HAS NEVER FIRED: `sweep.check_requeued`, `sweep.check_requeue.dispatched`,
+    `sweep.check_requeue.error` and `sweep.check_requeue.no_job_id` — all four literals grepped
+    from source — read n=0 across the union, against a live control of
+    `sweep.credit_backfill.summary` n=1,523, newest 2026-08-25T17:15:04.048Z. Built, wired, cold.
+
+    (10) SO THE PROXY IS NOT MERELY FALSE-POSITIVE-PRONE. IT IS FALSE-NEGATIVE ON BOTH MOTIVATING
+    CASES. Neither worked case is credited-and-unsatisfied by its own criteria, and a build that
+    ships a proof-rerun sweep over the credited set would spend 3,073 resolutions to surface 13
+    rows of which zero are confirmed, and would still name neither W1-T1076 nor W1-T1223.
+
+    (11) THE SIGNAL THAT DOES FIND THEM IS THE AMENDMENT, NOT THE PROOF. For each credited task,
+    the earliest merge-credit timestamp was compared against the newest commit touching its own
+    shard file. NINETEEN credited tasks were edited AFTER their credit row. Eighteen of the
+    nineteen filed NO new shard in that same commit; the sole exception is W1-T2217, whose commit
+    `ecd1ccc0` added `W1-T2235`. W1-T1076 is the most recent of the eighteen: credited
+    2026-08-20, amended 2026-08-25 by `5850c679`, no follow-up.
+
+    (12) AND RULE 21 EXPLAINS WHY THAT IS THE HOLE. `postMergeAmendmentViolations`
+    (`task-linter.ts:1462-1483`) blocks a PR that adds an acceptance criterion to a merged task
+    unless a follow-up task carrying it is filed in the SAME PR, and its own message at
+    `:1478-1480` states the reason: MERGED is terminal, an amendment does not re-queue the task,
+    and the drain skips a merged id outright. `criteriaAdded` (`:1277-1284`) keys on the criterion
+    only. SO AN AMENDMENT THAT ADDS NO CRITERION TRIPS NOTHING — and rationale-only amendment is
+    the sanctioned shape for recording a finding against a merged shard. The new work lands in
+    prose that no instrument reads, on a task the dispatcher will never look at again.
+
+    (13) THE INSTRUMENT THAT EXISTS, AND EXACTLY WHERE IT LOOKS AWAY. `proofQueueAudit`
+    (`src/lib/proof-queue-audit.ts:136`) already resolves proofs through the reviewer's own parser
+    and resolver and splits offenders into three named causes. Its production caller derives
+    `population` at `run-task.ts:13976` as the OPEN, UNMERGED tasks only. And at
+    `proof-queue-audit.ts:160-165` a literal test-file path with `nameFiltered` unset returns
+    early and is NEVER reported, under a comment naming it the legitimate forward-reference shape.
+    BOTH DECISIONS ARE CORRECT FOR A QUEUED TASK. Both are wrong for a credited one: a task whose
+    work has merged has no forward left to reference.
+
+    (14) AND THE PAIRING PRIMITIVE FOR THE RELOCATION HALF IS ALREADY BUILT AND UNUSED.
+    `proofGrepTargets` (`status.ts:3643`) pairs every proof-derived symbol — `grep:` and
+    `unit test:` alike — with every path the task declared in `files:`, deliberately widened past
+    the `grep:`-only predicate by W1-T506. Its only callers in the tree are in
+    `test/status.test.ts`; `src/` contains none.
+  note: |
+    (i) THIS IS A REPORT AND NOT A GATE, AND THAT IS THE LOAD-BEARING HALF. `proofQueueAudit`'s
+    own module doc already pins this posture and gives the reason: gating would stop the queue
+    against a standing population of pre-existing violations, and a gate with one false positive
+    is deleted within a week. Everything below inherits that pin unchanged. The verb exits 0 on
+    what it finds. No dispatch, CI job, arm decision or merge may consult its verdict.
+
+    (ii) CREDITING STAYS AND NOTHING HERE UN-CREDITS A ROW. 783 of 859 is mostly correct and
+    exists so work that shipped does not re-dispatch. This task appends no ledger line, deletes
+    none, and writes no correction. `runCreditBackfill` is not in `files:` and must not be edited.
+
+    (iii) NO `status:` MOVES AND NO TASK IS RE-QUEUED. The remedy is that an operator can SEE a
+    credited task whose work is unfinished. It is not that the fleet reopens it.
+
+    (iv) `isMerged` MUST NOT LEARN TO READ ACCEPTANCE. `isDispatchEligible` (`drain.ts:481`) reads
+    `acceptance` zero times today, against a whole-file control of one occurrence in a comment,
+    and it stays that way. A dispatch gate that runs proofs is a different and much larger system,
+    and `src/lib/drain.ts` is deliberately absent from `files:`.
+
+    (v) THE DEFAULT POPULATION DOES NOT CHANGE. `rmd proof-queue-audit` with no new flag must
+    audit exactly the open, unmerged set it audits today, with the same three causes and the same
+    forward-reference exemption. The credited pass is additive and opt-in, so an existing caller
+    or CI step reading that output sees byte-identical behaviour.
+
+    (vi) AND THE FORWARD-REFERENCE EXEMPTION IS NOT DELETED, IT IS MADE CONDITIONAL. For an
+    unmerged task a whole-file test path naming an unwritten test is a sanctioned authoring
+    pattern and must stay unreportable. It is only for a CREDITED task that the same shape is
+    evidence, because the work it pointed forward to has already been declared done.
+
+    (vii) RELOCATION MUST BE SEPARABLE FROM ABSENCE, OR THE REPORT IS NOISE. Four of the five
+    grep-zero candidates measured in rationale (7) are symbols that moved file. A row that cannot
+    tell "the symbol is gone" from "the symbol is elsewhere" would have a measured false-positive
+    rate of at least 80% on the only population it has, and would be ignored, and an ignored
+    report is an absent one. `proofGrepTargets` (rationale (14)) already supplies the pairing.
+
+    (viii) THE AMENDED-AFTER-CREDIT SIGNAL HAS ITS OWN ERROR MODE AND MUST DECLARE IT. Several of
+    the nineteen are RETRACTIONS, not new work — `chore(plan): retract W1-T476's starvation claim`
+    and `chore(plan): amend W1-T977 — retract the impossibility claim` are both on the list, and
+    neither needs a follow-up. A build must not classify intent. It reports that the shard changed
+    after its credit and that no follow-up was filed alongside, and names that limit in its own
+    output.
+
+    (ix) AND THE SIGNAL'S COVERAGE IS PARTIAL, MEASURED, AND MUST BE PRINTED RATHER THAN IMPLIED.
+    Of the 783 credited tasks, 556 map to their own file under `plan/tasks.d/`; 227 do not,
+    because they are declared inline in `plan/tasks.yaml` — 255 id lines in one 13,084-line file
+    whose mtime says nothing about any single task. A per-file signal is blind to those 227. A
+    report that prints 19 without printing 227-unmeasurable is lying by omission, which is the
+    same defect W1-T2271 was filed against in the containment arm.
+
+    (x) THE CREDITED POPULATION COMES FROM THE READER THE DISPATCHER ALREADY TRUSTS.
+    `readMergeCreditedTaskIds` (`status.ts:1206`) answers this across all three ledger forms and
+    `isMergeCreditLine` (`:1733`) is the single line-shape test. A second hand-maintained copy of
+    what a merge credit looks like is exactly what once let a back-credited task stay
+    circuit-broken, per that function's own removed-predecessor comment at `sweep.ts:6441-6457`.
+
+    (xi) THE NAME-FILTERED RESOLVER IS THE EXPENSIVE ONE AND ITS COST MUST BE HONEST. 908 of the
+    3,073 credited criteria carry name-filtered titles, and `resolveNameFilteredCandidates` costs
+    roughly 207ms per proof by its own caller's recorded measurement. That is minutes of wall
+    clock for one pass. This stays an on-demand local verb and goes nowhere near the PR path, and
+    a build must name the number rather than discover it in CI.
+
+    (xii) NO NEW LEDGER STEP IS REQUIRED AND NONE SHOULD BE INVENTED CASUALLY. If the pass logs at
+    all it logs a summary, never a row per credited task — the 5,209-no-op-lines lesson
+    `runCreditBackfill` records against itself at `sweep.ts:6528-6535` applies with equal force to
+    a walk over 783 tasks.
+
+    (xiii) AND THIS TASK FILES NOTHING AND MINTS NOTHING. It does not open follow-up shards for
+    what its report names, it does not edit any other task's `rationale:`, and it must not amend
+    W1-T1076 or W1-T1223. Both are cited as worked cases; neither is re-filed.
+
+    (xiv) RULE 19 BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as
+    spanning more than one concern — the `proof-queue-audit` stem, the `run-task` verb stem and
+    this task's own test stem — and refuses that at `risk: medium`. THE BAND IS THE SPAN READING
+    AND NOT A BLAST-RADIUS JUDGEMENT: the change adds an opt-in population and two causes to a
+    verb that already exits 0 unconditionally, and gates nothing.
+  acceptance:
+    - claim: "the audit can be pointed at the merge-credited population and names what it finds there, and the open and unmerged default is unchanged when no such request is made"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"
+    - claim: "a whole-file test path proof is reported when its file is absent and the task is credited, and the identical proof on an uncredited task is still never reported"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"
+    - claim: "a proof whose symbol exists at another declared path is named as relocated rather than as unsatisfied"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"
+    - claim: "a credited task whose shard changed after its own merge credit with no follow-up task filed alongside is named"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"
+    - claim: "a credited task whose amendment did file a follow-up in the same change is not named"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"
+    - claim: "the count of credited tasks the amendment signal cannot see is printed alongside the count it can"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"
+    - claim: "the credited population is read through the same merge credit line shape the dispatcher already trusts rather than a second copy of it"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"
+    - claim: "the pass appends no ledger credit, moves no status, and the dispatch gate still reads no acceptance"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"
+    - claim: "the verb exits zero on every population it audits, so no gate can read its verdict"
+      proof: "unit test: test/credited-task-proof-visibility.test.ts"

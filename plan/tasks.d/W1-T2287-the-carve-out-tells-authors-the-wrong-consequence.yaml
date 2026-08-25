@@ -1,0 +1,163 @@
+- id: W1-T2287
+  title: "THE DETECTOR FOR THIS DEFECT ALREADY FIRES ON EXACTLY THE RIGHT CONDITION AND NAMES A CONSEQUENCE THAT DOES NOT HAPPEN — `proof-scope` warns that a proof path outside `files:` means the scope guard \"will refuse a branch touching it\", but `scopeGuardOutOfScopeFiles` pushes and flags rather than refusing, while the consequence it never mentions is that the proof grades `executed_fail` instead of `not_yet_built`: a wrong verdict, latent at zero today because every dispatchable task with a mis-declared proof path names a test file that already exists"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 20.00
+  files: [src/lib/task-linter.ts, test/proof-scope-consequence.test.ts]
+  origin: oper#the-carve-out-tells-authors-the-wrong-consequence-2026-08-25
+  plan_refs: ["W1-T456", "W1-T310", "W1-T2286", "W1-T2216", "W1-T205"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (0) THE MECHANISM, RE-DERIVED.
+
+    `judgeCriterion` (`src/lib/review.ts`) grades a proof `not_yet_built` only when FOUR conjuncts
+    hold: the proof is `kind === "test"`, it is NOT name-filtered (a pure path, no title), the path
+    is absent from the head (`!existsSync`), AND the path is a member of
+    `ProofExecContext.forwardReferenceFiles`. That set is built as a UNION of two sources —
+    `shardDeclaredFilesInDiff(evidence.diff)`, which parses a `files:` line out of the PR's own
+    diff text, and `evidence.taskDeclaredFiles`, which `run-task.ts` supplies from `task.files`.
+
+    So the fourth conjunct is the declaration. When a proof names a pure path that the task's own
+    `files:` omits, the carve-out cannot fire, the proof executes against a path that is not there,
+    `node --test` exits nonzero, and the criterion grades `executed_fail` — which overrides keyword
+    coverage and FAILS the PR. THAT IS A WRONG OUTCOME, NOT A NOISY ONE, and it is the only `files:`
+    consumer where a wrong value changes a verdict rather than the quality of a decision.
+
+    TWO PARSER DETAILS BOUND IT FURTHER, both worth knowing before touching this. `SHARD_FILES_LINE_RE`
+    is `/^\s*files:\s*\[(.*)\]\s*$/` — the BRACKETED SINGLE-LINE form ONLY, so a shard written with a
+    YAML block list contributes nothing from the diff arm. And the diff arm reads ADDED lines only,
+    so on a build PR (which does not re-add its own shard) the whole set comes from
+    `taskDeclaredFiles`.
+
+    (1) AND IT IS UNREACHABLE BY THE OBVIOUS FIX. W1-T2286 wires `observedByTask` into
+    `partitionByFileOverlap`, which corrects packing and serialization AT DISPATCH TIME, in the
+    daemon. This runs at REVIEW time, in a different process, off the PR's diff text and the task
+    record. No dispatch-time union reaches it, and no amount of observation makes a declaration
+    correct at the moment it is authored. W1-T2286 is cited and NOT re-filed; this is the second of
+    the two tasks that filing already named.
+
+    (2) Q1 — MEASURED FIRST, AND THE ANSWER SHRANK THE TASK. THE LIVE POPULATION IS ZERO.
+
+    Across the whole plan at origin/main 6650b14a, resolved through `loadPlan`:
+
+      pure-path `unit test:` proofs                              1905
+        path IS in the task's own files:                         1567   <- CONTROL, fires
+        path NOT in its own files:                                338   <- input condition, common
+
+    But a mis-declaration only produces the wrong grade when the path is ALSO absent at head:
+
+        NOT in files: and path EXISTS at head                     333   executes normally, inert
+        NOT in files: and path MISSING at head                      5   would grade executed_fail
+        CONTROL in files: and MISSING (carve-out fires as designed) 231
+        CONTROL in files: and exists                              1336
+
+    THOSE FIVE INSTANCES ARE TWO TASKS — W1-T204 and W1-T214 — AND BOTH ARE `verify: human`.
+    `isDispatchEligible` (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` before the
+    linter is ever consulted, so neither can ever be dispatched, built, or reviewed. Split by that
+    field:
+
+      verify:auto, proof path NOT in files:                       325
+        ...AND missing at head                                      0   <- LIVE RISK IS ZERO
+      verify:human, mis-declared AND missing                        5   <- inert, cannot dispatch
+      CONTROL verify:auto with the path IN files:                 1513
+
+    So this has never fired and cannot fire from the plan as it stands. It is a LATENT WRONG
+    OUTCOME WITH A NAMED TRIGGER, and the trigger is precise: a NEW `verify: auto` shard filed with
+    a pure-path proof naming a test file that does not exist yet AND omitted from its own `files:`.
+    That is the ordinary shape of every forward-referencing filing, which is why the input condition
+    is common (338) even though the conjunction is currently empty.
+
+    (Note for whoever re-runs this: W1-T204 shows four commit subjects naming it, and all four are
+    FILING subjects — `chore(plan): file W1-T203/T204/T205 ...` — which over-credit. Its trailer
+    count and its merged `run-*` head count are both zero, against controls of 1 and 36.)
+
+    (3) SO THE DEFECT WORTH FIXING TODAY IS NOT THE GRADE — IT IS THAT THE DETECTOR ALREADY EXISTS
+    AND TELLS THE AUTHOR THE WRONG THING.
+
+    `proofScopeViolations` (`src/lib/task-linter.ts`, W1-T310) fires on EXACTLY this condition: a
+    proof naming a path outside the task's declared `files:`. Its message says the consequence is
+    that "the scope guard (run-task.ts's `scopeGuardOutOfScopeFiles`) will refuse a branch touching
+    it, AFTER the work is done".
+
+    THAT CONSEQUENCE DOES NOT HAPPEN. The implement path's own ledger line states the disposition in
+    its own words — "pushed and flagged rather than refused: the branch is the only evidence that
+    separates a phantom revert from an under-declared files:, and a refusal reaped it" — and the
+    call site pushes after logging `scope_guard.overrun`. So the warning names a refusal that was
+    removed, and omits the one consequence that IS real and IS a verdict: the `executed_fail` grade
+    above. An author who reads it fixes the wrong thing, or dismisses it because the named
+    consequence never materialises.
+
+    Severity compounds it: `opts.proofScope ?? "warn"`, and NOTHING passes `opts.proofScope`
+    anywhere in `src/` (the knob appears 11 times, all inside `task-linter.ts` itself), so it is
+    always `warn` — and a `warn` never reaches `lint-plan`'s exit code.
+
+    (4) Q2 — WHY `files:` IS IN THE PREDICATE, AND WHY REMOVING IT WOULD BE WRONG.
+
+    The condition the carve-out "really wants" looks like `!existsSync(path)` alone — the path is
+    not built yet — and that is observable without the declaration. But absence has two causes and
+    only one of them is legitimate: a path that is PLANNED and not yet written, versus a path that
+    is MISTAKEN — a typo, a renamed file, a proof pointing at something that will never exist.
+    `files:` is the only evidence available at review time that distinguishes them, because it is
+    the author's own statement of intent, written before the build.
+
+    Drop it and every proof naming a nonexistent path grades `not_yet_built`, which is the
+    test-theatre direction: a criterion that can never fail because its target can never appear.
+    So the answer to "should the grade depend on `files:` at all" is YES, and the declaration is
+    doing work no other signal can do here. THIS TASK DOES NOT REMOVE IT.
+  note: |
+    SCOPE. Two files, one concern: make the existing detector name the consequence that actually
+    happens, and gate its severity on the conjunction that actually produces a wrong verdict. No new
+    gate is built, no grading logic in `review.ts` is touched, and `files:` stays in the predicate.
+    `risk: high` is set because `sizingViolation` REFUSED `medium` when this shard was linted —
+    verbatim: "spans 2 distinct subsystems/concerns (proof-scope-consequence, task-linter) at
+    risk:medium — Rule 19: raise to risk:high or decompose". The band is Rule 19's SPAN, not blast
+    radius: the blast radius is one linter message and its test. The refusal was measured, not
+    anticipated, and the band was raised rather than the scope narrowed to fit it.
+
+    WHAT MUST NOT CHANGE. A proof that names an EXISTING path and fails still grades
+    `executed_fail` — the carve-out must never become a route by which a real failure reads as
+    not-yet-built. That is the test-theatre direction W1-T2216's brace-depth parser and the
+    reviewer's semantic downgrade both exist to close, and nothing here widens the carve-out's
+    conjuncts. And NOTHING FEEDS OBSERVED PATHS TO THE RISK JUDGE: it exists to compare the
+    declaration against reality, so making the two agree by construction would delete the signal
+    rather than improve it.
+
+    WHY THIS IS NOT A SEVERITY BUMP DRESSED UP. Escalating `proof-scope` to `block` outright would
+    fail 325 currently-dispatchable `verify: auto` tasks whose proofs are mis-declared and entirely
+    harmless, because their test files exist. The conjunction that produces the wrong verdict —
+    mis-declared AND absent at head AND `verify: auto` — is measured at ZERO today, so gating on it
+    blocks nothing that exists and catches the first one that appears. A bump without that
+    conjunction is the "bound that fires on a healthy condition" shape this repo has filed three
+    times.
+
+    RE-FILES NOTHING. W1-T456 shipped the carve-out; W1-T310 shipped the `proof-scope` check;
+    W1-T2286 wires the dispatch-time corrector and explicitly cannot reach this; W1-T2216 owns the
+    brace-depth parser; W1-T205 owns the plan-only proof-execution floor. NOTE: W1-T2286 is still
+    IN FLIGHT on an open PR at the time of this filing, not yet on origin/main — it reads zero on
+    the merged surfaces for that reason and not because it is unfiled.
+
+    ID PROVENANCE: W1-T2287 was reserved before this filing and verified UNUSED across all eight
+    surfaces, each zero paired with a positive control on its own surface, and every merged-surface
+    control drawn from an id that is actually merged rather than one sitting on an open PR.
+  acceptance:
+    - claim: "the proof scope warning names the grading consequence rather than a branch refusal that does not happen"
+      proof: "unit test: test/proof-scope-consequence.test.ts"
+    - claim: "the message no longer claims the scope guard refuses a push, because that path pushes and flags"
+      proof: "unit test: test/proof-scope-consequence.test.ts"
+    - claim: "severity escalates only when the proof path is absent at head and the task is dispatchable"
+      proof: "unit test: test/proof-scope-consequence.test.ts"
+    - claim: "a mis declared proof whose test file already exists stays advisory, so no currently dispatchable task is failed"
+      proof: "unit test: test/proof-scope-consequence.test.ts"
+    - claim: "a verify human task is never escalated, since it cannot reach a review at all"
+      proof: "unit test: test/proof-scope-consequence.test.ts"
+    - claim: "the declaration stays in the carve out predicate, so a proof naming a mistaken path still fails"
+      proof: "unit test: test/proof-scope-consequence.test.ts"
+    - claim: "a proof naming an existing path that fails still grades as an executed failure"
+      proof: "unit test: test/proof-scope-consequence.test.ts"
+    - claim: "the falsifier holds: restoring the old refusal wording turns the consequence check red"
+      proof: "unit test: test/proof-scope-consequence.test.ts"

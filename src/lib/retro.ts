@@ -2433,15 +2433,33 @@ function followupMatchesTitle(text: string, titleWords: Set<string>): boolean {
  * deduped — PURE over `records` (idempotent: re-mining the same ledger twice
  * with no new events yields the same result), never itself writing a ledger
  * line. An entry already named by a `followup.harvested`/`followup.deduped`
- * line (matched on {@link FollowupCandidate.entryId}, `${runId}:${index}`
+ * line (matched on {@link FollowupCandidate.entryId}, `${runId}:${ts}:${index}`
  * within its source event) is skipped — the mechanism `mineOverrunClasses`'
  * sibling miners get for free from marker-scoping, but a followup must
  * survive PAST the marker window (a discovery from three retros ago is still
- * worth surfacing), so this module tracks it explicitly instead. `openTitles`
- * (W1-T105 design iv) is the caller-supplied set of existing open task titles
- * / open proposal text — an entry whose significant-word content is largely
- * already covered by one of them (see {@link followupMatchesTitle}) is
- * DEDUPED rather than minted a second time as a candidate for the same work.
+ * worth surfacing), so this module tracks it explicitly instead.
+ *
+ * W1-T2252: the key carries the source row's own `ts`, not just `run_id` and
+ * the entry's position within that row. A single run emits `report.followups`
+ * from up to five call sites (`harvestFollowupsFromReport`, four call sites in
+ * run-task.ts), so `run_id` ALONE is not enough to disambiguate — with `index`
+ * restarting at zero for every row, a second row's entry 0 collided onto the
+ * SAME id as the first row's entry 0 and was silently dropped by
+ * `processed.has(entryId)` before ever being considered (measured: 521 of
+ * 1,426 declared entries, 36.5%). `ts` is written by the ledger appender on
+ * every row without exception and is never repeated across a run's multiple
+ * rows, so `run_id:ts:index` needs no writer change and no backfill — it is
+ * computed purely from fields a `report.followups` row already carries. The
+ * one cost: marks already written under the OLD `run_id:index` spelling will
+ * not match the new key, so the first mine pass after this change re-surfaces
+ * every entry it can see as though unharvested — a ONE-TIME re-surfacing of
+ * already-seen candidates (not a loop, not a crash, not a silent false match)
+ * that a later real retro harvests again under the new key and then never
+ * repeats. `openTitles` (W1-T105 design iv) is the caller-supplied set of
+ * existing open task titles / open proposal text — an entry whose
+ * significant-word content is largely already covered by one of them (see
+ * {@link followupMatchesTitle}) is DEDUPED rather than minted a second time
+ * as a candidate for the same work.
  */
 export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []): FollowupHarvest {
   const processed = new Set<string>();
@@ -2465,7 +2483,7 @@ export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []
       const text = e?.text;
       if (type !== "research" && type !== "task" && type !== "action") return;
       if (typeof text !== "string" || !text.trim()) return;
-      const entryId = `${r.run_id ?? "?"}:${i}`;
+      const entryId = `${r.run_id ?? "?"}:${r.ts ?? "?"}:${i}`;
       if (processed.has(entryId)) return;
       const candidate: FollowupCandidate = {
         entryId,

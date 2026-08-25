@@ -54,6 +54,63 @@
     `run.start` reads zero there, so the file is this container's own local exhaust and cannot
     answer the question. Reported as unmeasured rather than as an absence. The step name itself IS
     confirmed from source — `github_app.token_refreshed` is emitted by `github-app.ts`.
+    **RESOLVED 2026-08-25 — THE ANSWER IS NEITHER READING, AND (A)'s SOURCE READING STANDS.**
+    Operator-measured on the host: `docker inspect remudero-serve` shows FOUR credential names —
+    `GH_TOKEN`, `GH_APP_ID`, `GH_APP_INSTALLATION_ID`, `GH_APP_PRIVATE_KEY_PATH` — plus
+    `RMD_SERVE_NETWORK`. The live container really does carry all four, AND (A)'s repo reading is
+    also correct: at `cd60cdb`, `deploy/serve-container.sh` mentions `GH_TOKEN` 15 times and each
+    of the three `GH_APP_*` names ZERO times. Both readings are right about their own object. The
+    disagreement was never about drift, and (A)'s own hedge — that a live four would "locate a
+    third launch path" — is what turned out to be true, in a stronger form: there is no third
+    launch path in the repo at all.
+
+    **THREE SUB-CLAIMS IN THE RECONCILING BRIEF DID NOT REPRODUCE. CORRECTING THEM STRENGTHENS ITS
+    CONCLUSION RATHER THAN WEAKENING IT.** (i) `deploy/serve-container.sh` has been touched by
+    exactly ONE commit, not two — `59ec3c21` (#2534) at 2026-08-22T23:02:59Z; control:
+    `.dependency-cruiser.cjs` reads 3 commits under the identical query, so the counter is not
+    blind. (ii) The image's `org.opencontainers.image.revision` label `3873867` IS a real commit,
+    but it is `chore(plan): file the restart that strands the drain lock (W1-T1067) (#2310)` from
+    2026-08-20T17:57:15Z — a PLAN-ONLY filing that never touched the script. (iii) The script did
+    not EXIST at that sha: `git ls-tree 3873867 deploy/` lists `Dockerfile`, `entrypoint.sh`,
+    `host-update.sh`, `recycle-container.sh`, `verify-image.sh` and nothing more. So "HEAD's
+    version is that version and nothing drifted" cannot hold as stated — and the image's own
+    `Created` stamp, 2026-08-22T21:42:30Z, PREDATES `59ec3c21` by 1h20m. THE RUNNING CONSOLE WAS
+    BUILT BEFORE THE COMMITTED LAUNCHER EXISTED, which settles the question harder than sameness
+    would have: it cannot have been started by a file that did not yet exist.
+
+    **AND THE SECOND "LAUNCH PATH" IS NOT ONE — RE-DERIVED, WITH A CORRECTION TO THE MECHANISM.**
+    `deploy/host-update.sh:353` does contain `docker run -d --name remudero-serve`, but it sits
+    inside `cat <<PRINTED` (opened line 240, closed line 379): RUNBOOK TEXT the script PRINTS,
+    never a command it RUNS. The delimiter is UNQUOTED (`<<PRINTED`, not `<<'PRINTED'`), and that
+    is precisely WHY the block carries escaped `\\` continuations and
+    `\${RMD_SERVE_HOST:-0.0.0.0}` — the escapes exist so the text survives expansion and reaches
+    the operator verbatim. Reading the escaping as evidence of a QUOTED heredoc reaches the right
+    answer by the wrong route; the heredoc bounds are the evidence. It also passes no `GH_TOKEN`
+    at all (0 occurrences in the printed block; control: 3 elsewhere in the same file).
+
+    **WHERE THIS LANDS THE TASK: A CAPABILITY PRESENT AND UNWIRED — PRESENT BY INHERITANCE, NOT BY
+    DESIGN.** Neither committed path starts the running console, so the three `GH_APP_*` names
+    reached it from an OPERATOR SHELL that had them exported. The App credentials sit in the
+    console's environment today by accident of how it happened to be launched, while `serve.ts`
+    still references `refreshInstallationToken` nowhere — present, and unused. THE CONSEQUENCE THE
+    BUILD MUST HOLD ONTO: A CONTAINER RE-CREATED FROM THE COMMITTED SCRIPT WOULD LOSE THEM. Any
+    design that assumes those names are present because something PUTS them there is building on an
+    inherited shell that no committed file reproduces, and `--restart=unless-stopped` does not
+    preserve an environment across a re-create.
+
+    **THIS DISCHARGES THE SECOND MEASUREMENT THE `note:` OWES** — the live `docker inspect` behind
+    correction (A). The FIRST remains owed and unmeasured: the ledger half, against the operator's
+    state root, with a control that fires.
+
+    **ADJACENT, RECORDED NOT PURSUED — WHY THE LATCH BLOCK IS FILE-SHAPED.** The same runbook
+    documents `state/PAUSE` and `state/STOP` as plain FILES under the state root ("no exec, no
+    console, works from a phone"). That is a LOCAL pause surface, distinct from the fleet-wide
+    `refs/rmd-pause/hold` (`fleet-control.ts`). W1-T2264 found the latch block can only see
+    file-backed holds; THIS IS WHY — the board was built when the file was the only pause there
+    was, and `checkSharedPause`'s own doc records the ref as "AN ADDITION, NEVER A REPLACEMENT",
+    consulted only when the local file is silent. Cited, NOT re-filed: W1-T2264 owns it, and this
+    shard's `files:` is not widened to reach it.
+
   design: |
     **Q1 — WHAT THE CONSOLE DOES WITH THE TOKEN: IT WRITES, SO THIS IS AN AUTHORITY QUESTION AND
     THE SHARD IS THE LARGER OF THE TWO SHAPES THE BRIEF OFFERED.**
@@ -130,7 +187,7 @@
   status: queued
   attempts: 0
   origin: "oper#console-token-never-refreshes-2026-08-25"
-  plan_refs: ["W1-T2211", "W1-T1068", "W1-T1069", "W1-T1222", "W1-T2218", "W1-T2222", "W1-T2235", "W1-T181"]
+  plan_refs: ["W1-T2264", "W1-T2211", "W1-T1068", "W1-T1069", "W1-T1222", "W1-T2218", "W1-T2222", "W1-T2235", "W1-T181"]
   note: |
     RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. The declared files cross a runtime concern
     (`serve.ts`, `github-app.ts`) and a deploy concern (`serve-container.sh`), which fails sizing at

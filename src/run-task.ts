@@ -398,7 +398,7 @@ import { gunzipSync } from "node:zlib";
 import { ledgerRotationEntries, resolveLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import { injectCoverageImprovementTask } from "./lib/coverage-improvement.js";
-import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
+import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
   measurementCadenceCheck,
@@ -562,7 +562,7 @@ import {
   type ReviewVerdict,
 } from "./lib/review.js";
 import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-audit.js";
-import { buildReceipt } from "./lib/receipt.js";
+import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
@@ -756,6 +756,18 @@ import {
   planReverseBranchDrift,
   remoteBranchNames,
 } from "./lib/branch-reaper.js";
+// The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
+// initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
+// an interface change. `resolveRepoRoot` is re-exported below so every existing import path
+// (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
+// were not exported before this move and stay that way, used here under their original names.
+import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+export { resolveRepoRoot };
+// `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
+// anchored to the `commandSpec`/`COMMANDS` registry it reads. Re-exported below for
+// test/run-task.test.ts's existing import.
+import { unknownArgError } from "./lib/cli-args.js";
+export { unknownArgError };
 
 /**
  * The REAL reads behind the binary-pin rung, as one object so the wiring is a single argument and
@@ -1154,43 +1166,6 @@ export async function peekCommand(
   return 0;
 }
 
-/**
- * Resolve the repo root a `rmd` invocation GATES, in priority order — replacing the
- * old INSTALL-PATH derivation (`dirname(dirname(fileURLToPath(import.meta.url)))`,
- * which named WHERE THE SCRIPT LIVES, never where the operator is standing). The
- * #271 fixture: one checkout's `bin/rmd`, invoked with cwd inside a DIFFERENT work
- * tree, used to silently gate the INSTALL tree's plan — a false green that never
- * opened the file under test.
- *   1. an explicit `--repo-root <path>` escape hatch, read directly off argv (a
- *      GLOBAL flag scanned here rather than through any one command's own flag
- *      allow-list — see `stripRepoRootFlag` below for why `main()` strips it before
- *      per-command validation runs).
- *   2. CWD-ASCENT: `git rev-parse --show-toplevel` from `cwd` — the tree the
- *      INVOKING shell is standing in, not the tree the running code happens to live in.
- *   3. Fall back to the INSTALL path ONLY when `cwd` is not inside a git work tree
- *      at all (e.g. a bare/scripted context) — reported on stderr so the fallback
- *      is never silent.
- */
-export function resolveRepoRoot(
-  argv: string[],
-  cwd: string,
-  showToplevel: (dir: string) => string = (dir) =>
-    execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(),
-): string {
-  const flagIdx = argv.indexOf("--repo-root");
-  if (flagIdx >= 0 && argv[flagIdx + 1] !== undefined) return resolve(argv[flagIdx + 1]);
-  try {
-    return showToplevel(cwd);
-  } catch (e) {
-    const installRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-    console.error(
-      `### rmd: cwd (${cwd}) is not inside a git work tree (${(e as Error).message}) — ` +
-        `falling back to the install root (${installRoot})`,
-    );
-    return installRoot;
-  }
-}
-
 /** Strips a global `--repo-root <path>` pair off argv before per-command flag
  *  validation — so a command whose own allow-list doesn't mention `--repo-root`
  *  (nearly all of them) never rejects it as an unexpected argument. */
@@ -1200,21 +1175,9 @@ export function stripRepoRootFlag(argv: string[]): string[] {
   return [...argv.slice(0, i), ...argv.slice(i + 2)];
 }
 
-const repoRoot = resolveRepoRoot(process.argv.slice(2), process.cwd());
-
 /** Owner org, read from THIS repo's origin — no hardcoded account in the tree. */
 function resolveOwner(): string {
   return resolveOwnerRepo().owner;
-}
-
-/** Owner + repo, parsed from THIS repo's origin url — no hardcoded slug in the tree. */
-function resolveOwnerRepo(): { owner: string; repo: string } {
-  const url = execFileSync("git", ["-C", repoRoot, "config", "--get", "remote.origin.url"], {
-    encoding: "utf8",
-  }).trim();
-  const m = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
-  if (!m) throw new Error(`could not parse owner/repo from origin url`);
-  return { owner: m[1], repo: m[2] };
 }
 
 /**
@@ -2866,6 +2829,15 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
  * fixture/lane override keeps working unchanged) OR the richer {@link ArmAttemptResult} the new
  * default, {@link armAutoMergeDetailed}, returns — either way the `error` text, when there is
  * one, is merged onto the SAME row this function already wrote, not a second line.
+ *
+ * W1-T2258 — appended LAST, the same convention every dep above follows: `headSha`, when the
+ * caller has one, rides onto the SAME `automerge.armed`/`arm_skipped`/`arm_failed` row this
+ * function already writes, as `head_sha`. This is the fix at the writer lib/verdict-calibration.ts's
+ * join needed — every non-review lane (dep-review, retro, triage, plan, approve, sweep) called
+ * this wrapper without ever putting a head on the row, so its `automerge.armed` line could never
+ * join to the matching `review.posted` line, no matter how the reader side counted. Optional and
+ * unenforced: an omitted head still logs the row (never blocks an arm) — it simply stays
+ * unjoinable, exactly as it does today.
  */
 export function armAndLogOutcome(
   prUrl: string,
@@ -2873,6 +2845,7 @@ export function armAndLogOutcome(
   log: (step: string, extra?: Record<string, unknown>) => void,
   arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
   lane: ArmLane = "operator",
+  headSha?: string,
 ): ArmOutcome {
   const result = arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
@@ -2881,7 +2854,15 @@ export function armAndLogOutcome(
   // function already writes — see `logArmAttribution`'s own doc for the second, named step it
   // additionally emits.
   const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
-  logArmAttribution(log, outcome, prUrl, taskId, lane, error !== undefined ? { outcome, error } : { outcome }, rateLimit);
+  logArmAttribution(
+    log,
+    outcome,
+    prUrl,
+    taskId,
+    lane,
+    { ...(error !== undefined ? { outcome, error } : { outcome }), ...(headSha !== undefined ? { head_sha: headSha } : {}) },
+    rateLimit,
+  );
   return outcome;
 }
 
@@ -5856,6 +5837,14 @@ export function fixRebaseMergeFactsFromRest(
  * function exists to reach. Best-effort: a `ps`/kill hiccup here costs nothing more than the
  * process staying alive for a LATER orphan sweep to find once its run truly ends — it never
  * throws back into the rung that already ledgered the abandonment (`fix.spawn_abandoned`).
+ *
+ * W1-T2261: a no-match run and a kill are now LEDGERED DISTINCTLY (`fix.spawn_reclaimed` per
+ * killed candidate vs. `fix.spawn_reclaim_no_match` once, when nothing matched) — before this,
+ * both were silent (the whole loop swallowed by the `try`/`catch` below), so the abandon line
+ * an operator saw was identical whether the worker actually died or quietly kept running. This
+ * closes half of that: the OTHER half was `fixArgs` (this file) never setting the markers this
+ * function matches on in the first place, so `readMarkers` always read `undefined` and the loop
+ * matched nothing on every real abandonment — see `fixArgs`'s own W1-T2261 note.
  */
 export function reclaimAbandonedWorker(
   info: { runId: string; taskId: string; elapsedMs: number },
@@ -5869,15 +5858,30 @@ export function reclaimAbandonedWorker(
     listCandidates?: typeof defaultListCandidates;
     readMarkers?: typeof defaultReadMarkers;
     kill?: typeof killProcessGroup;
+    /** W1-T2261: optional ledger sink — omitted (every pre-existing test) ⇒ no log call, byte-
+     *  identical to before this task. Both real call sites (`runTaskBody` and `buildSweepEffects`'s
+     *  `reclaimWorkerImpl` default) now bind this to the SAME `log` the rung/sweep already writes
+     *  `fix.spawn_abandoned`/`fix.spawn_reclaim_failed` through, so the three lines land in one
+     *  ledger stream. */
+    log?: (step: string, extra?: Record<string, unknown>) => void;
   } = {},
 ): void {
   const listCandidates = deps.listCandidates ?? defaultListCandidates;
   const readMarkers = deps.readMarkers ?? defaultReadMarkers;
   const kill = deps.kill ?? killProcessGroup;
+  const log = deps.log ?? (() => {});
   try {
+    let matched = false;
     for (const candidate of listCandidates()) {
       const markers = readMarkers(candidate.pid);
-      if (markers?.runId === info.runId) kill(candidate.pid);
+      if (markers?.runId === info.runId) {
+        matched = true;
+        kill(candidate.pid);
+        log("fix.spawn_reclaimed", { run_id: info.runId, task_id: info.taskId, pid: candidate.pid, elapsed_ms: info.elapsedMs });
+      }
+    }
+    if (!matched) {
+      log("fix.spawn_reclaim_no_match", { run_id: info.runId, task_id: info.taskId, elapsed_ms: info.elapsedMs });
     }
   } catch {
     /* best-effort — see doc above */
@@ -6818,6 +6822,14 @@ export async function runFixRung(opts: {
       // prompt-injection payload riding in that log can't reach the
       // network via WebFetch/WebSearch.
       tools: FIX_WORKER_TOOLS,
+      // W1-T2261: the attribution markers `reclaimAbandonedWorker` later matches an abandoned
+      // spawn's live process against (worker.ts's `workerMarkerEnv` merges these into the
+      // child's env as REMUDERO_RUN_ID/REMUDERO_TASK_ID). Omitting them — the defect this
+      // closes — left `defaultReadMarkers` reading `undefined` for every candidate, so
+      // `markers?.runId === info.runId` could never match and the reclaim kill never fired on
+      // the one process it exists to stop.
+      runId: opts.runId,
+      taskId: opts.taskId,
     };
 
     let fixResult: WorkerResult;
@@ -9985,7 +9997,12 @@ async function runTask(
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
           spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs,
-          reclaimWorker: reclaimAbandonedWorker,
+          // W1-T2261: binds this rung's OWN `log` through so a match/no-match reclaim outcome
+          // (`fix.spawn_reclaimed`/`fix.spawn_reclaim_no_match`) lands in the same ledger stream
+          // as `fix.spawn_abandoned` — the bare function reference below this before this task
+          // reached `reclaimAbandonedWorker`'s default no-op log, so neither outcome was ever
+          // recorded, only inferred from the process table staying quiet.
+          reclaimWorker: (info) => reclaimAbandonedWorker(info, { log: (s, extra) => log(s, extra) }),
           // W1-T1284: the pre-strike UNCHANGED-TREE check's live worktree reader — three LOCAL
           // git reads against this rung's own checkout, never the PR's remote head.
           captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
@@ -10320,10 +10337,14 @@ async function runTask(
     const armOutcome: ArmOutcome | "no-merge-boundary-refused" = wipeTestArmDecision.armed
       ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
       : "no-merge-boundary-refused";
+    // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
+    // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
+    // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
     log("automerge.armed", {
       at: "verdict",
       outcome: armOutcome,
       irreversible,
+      head_sha: review.headSha,
       ...(wipeTestArmDecision.reason ? { reason: wipeTestArmDecision.reason } : {}),
     });
 
@@ -11441,7 +11462,9 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       dep_review: true,
       proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
     });
-    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm);
+    // W1-T2258: `view.headRefOid` is the SAME head the `review.posted` line just above was keyed
+    // to — already in hand, no extra read needed to close the join gap for this lane.
+    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm, "operator", view.headRefOid);
     console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`);
     // impl-FR — THE DETECTOR. This lane is the ONLY arm path for a Dependabot PR: the sweep's
     // ordered, first-match-wins DISPOSITION_RULES put `dep-review` above both `mergeable` and
@@ -12035,21 +12058,37 @@ export function followupLedgerUnionNdjson(stateDir: string): string {
   return result.matches.join("\n");
 }
 
+/** Seam for {@link checkAcceptanceCommand} (W1-T2251) — defaults to the real, shard-merging
+ *  {@link loadPlan} against this checkout's `plan/tasks.yaml`, so a test can point it at a temp
+ *  plan file instead. Never a second resolver: this is the SAME function `reviewCommand` calls. */
+export interface CheckAcceptanceDeps {
+  planPath?: string;
+}
+
 /**
- * `rmd check-acceptance <body-file>` — read a PR body from a file and report what
- * {@link "./lib/review.js".parseAcceptanceBlock} ACTUALLY resolves from it, against what the author
- * wrote. Exits non-zero when the two disagree.
+ * `rmd check-acceptance <body-file>` — read a PR body from a file and report what the GATE
+ * would actually judge it against, before it reaches one.
+ *
+ * W1-T2251 (THE FIX): resolve criteria the SAME way `reviewCommand` does — a `Remudero-Task:`
+ * trailer's task, read from the shard-merging {@link loadPlan} (never a second resolver), falling
+ * back to the body's own `## Acceptance` block only when the trailer resolves nothing — rather
+ * than reading {@link "./lib/review.js".parseAcceptanceBlock} over the body ALONE, which is what
+ * this command did before and is what let it call a block DEFECTIVE that the gate was never
+ * going to read (74 of 300 merged PRs, filing rationale). Every trailered implementation PR hits
+ * the trailer branch; the fallback exists for the untrailered/unresolvable case, where this
+ * command's behaviour and exit code are BYTE-IDENTICAL to before (acceptance criterion 4) — W1-
+ * T1097's `criteriaParsed`-vs-`bulletsWritten` zero-criteria handling is untouched either way.
  *
  * THE POPULATION THIS SERVES. `gh pr create` is GraphQL, and GraphQL exhaustion has repeatedly
  * forced PRs to be opened over REST — which bypasses the orchestrator path that emits the house
  * Acceptance block (`plan-pr-emitter.ts`'s `renderAcceptanceBlock`, guaranteed to round-trip). A
  * REST-opened PR therefore carries HAND-AUTHORED markdown, and nothing checks it before it is
  * posted. That emitter is reusable but has no CLI surface; this is the smallest surface that lets a
- * hand-authored body be checked with the reviewer's OWN parser before it reaches the gate.
+ * hand-authored body be checked with the reviewer's OWN resolution before it reaches the gate.
  *
  * READ-ONLY: writes no ledger line, no state file, opens nothing.
  */
-export function checkAcceptanceCommand(rest: string[]): number {
+export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps = {}): number {
   const file = rest.find((a) => !a.startsWith("--"));
   if (!file) {
     console.error("usage: rmd check-acceptance <body-file>");
@@ -12062,17 +12101,63 @@ export function checkAcceptanceCommand(rest: string[]): number {
     console.error(`check-acceptance: cannot read ${file}: ${String((e as Error)?.message ?? e)}`);
     return 2;
   }
+
+  // design (i): trailer → that task's shard, exactly as `reviewCommand` resolves it — falling
+  // through to the body block only when the trailer is absent or resolves zero criteria.
+  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
+  const taskId = reviewTaskIdFromBody(body);
+  let criteria: AcceptanceCriterion[] = [];
+  if (taskId) {
+    try {
+      const plan = loadPlan(planPath);
+      const t = plan.byId.get(taskId);
+      if (t?.acceptance?.length) criteria = t.acceptance;
+    } catch {
+      // A bad/absent plan is not this command's concern either — fall through to the body,
+      // exactly like reviewCommand's own catch does.
+    }
+  }
+  const trailerResolved = criteria.length > 0;
+
   const d = acceptanceBlockDiagnostics(body);
-  const criteria = parseAcceptanceBlock(body);
+  if (!trailerResolved) criteria = parseAcceptanceBlock(body);
+
+  // design (ii): name the SOURCE, not only the count.
+  const source = trailerResolved
+    ? `${taskId}'s shard via the body trailer`
+    : criteria.length
+      ? "the body Acceptance: block"
+      : "NONE (fail closed — nothing to judge is never a pass)";
+  const emptyProofs = criteria.filter((c) => !c.proof).length;
+
   console.log(`file:            ${file}`);
-  console.log(`header found:    ${d.headerFound}`);
-  console.log(`bullets written: ${d.bulletsWritten}`);
-  console.log(`criteria parsed: ${d.criteriaParsed}`);
-  console.log(`empty proofs:    ${d.emptyProofs}`);
+  console.log(`criteria source: ${source}`);
+  console.log(`criteria parsed: ${criteria.length}`);
+  console.log(`empty proofs:    ${emptyProofs}`);
   criteria.forEach((c, i) => {
     console.log(`  [${i + 1}] claim: ${c.claim.slice(0, 88)}`);
     console.log(`      proof: ${c.proof ? c.proof.slice(0, 88) : "(EMPTY — nothing will execute)"}`);
   });
+
+  if (trailerResolved) {
+    // design (iii): once the trailer resolves, the body's OWN block is not what the gate reads —
+    // a defective block is named as UNUSED, never as a refusal, and the exit code follows what
+    // the gate would do with this body: it has real criteria to judge (from the shard), so this
+    // is not the "nothing to judge" fail-closed case, and passes — matching #2773 (filing
+    // rationale (2)), where the gate posted PASS on the same body this command called DEFECTIVE.
+    if (d.defective) {
+      console.log(
+        `note: the body's own Acceptance: block is DEFECTIVE (header found: ${d.headerFound}, bullets ` +
+          `written: ${d.bulletsWritten}, criteria parsed: ${d.criteriaParsed}, empty proofs: ${d.emptyProofs}) ` +
+          `but UNUSED — the gate reads ${taskId}'s shard, never this body's block, once the trailer resolves.`,
+      );
+    }
+    console.log(`OK — the gate would judge this PR from ${taskId}'s shard, not this body's block.`);
+    return 0;
+  }
+
+  // Untrailered (or trailer present but unresolved to any criteria): judged exactly as before —
+  // acceptance criterion 4, no change in verdict or exit code.
   if (!d.defective) {
     console.log("OK — the parser resolves exactly what was written, and every proof is non-empty.");
     return 0;
@@ -12106,20 +12191,30 @@ export function checkAcceptanceCommand(rest: string[]): number {
 export interface ReceiptCommandDeps {
   gh?: (args: string[]) => unknown;
   config?: Config;
-  readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
+  /** W1-T2257: defaults to the real {@link resolveReceiptLedgerLines} — the archive∪live UNION,
+   *  scoped to the steps `buildReceipt` reads, NEVER the live `ledger.ndjson` file alone (which
+   *  rotation empties). A test overrides this to drive both the resolved-lines and the refused
+   *  (`ok: false`) path without touching a real state dir. */
+  resolveReceiptLedgerLines?: (stateDir: string) => ReceiptLedgerRead;
 }
 
 /**
  * `rmd receipt <pr>` (W1-T71, ratifies P17) — the deterministic in-toto-style run receipt,
  * printed for a merged (or open) PR. Resolves the task id from the PR body's trailer via
  * {@link reviewTaskIdFromBody} (the SAME #119-hardened extractor `rmd review` already uses —
- * never a second dialect), reads this checkout's ledger, and hands both to the pure
- * {@link buildReceipt} (src/lib/receipt.ts). READ-ONLY: writes no ledger line, no state file,
- * posts nothing — the "posted on every merged PR" integration (design item 3) is a separate,
- * operator-observed call site (Rule 18), not this command's job.
+ * never a second dialect), reads this checkout's ledger via {@link resolveReceiptLedgerLines}
+ * (src/lib/receipt.ts) and hands the result to the pure {@link buildReceipt}. READ-ONLY: writes
+ * no ledger line, no state file, posts nothing — the "posted on every merged PR" integration
+ * (design item 3) is a separate, operator-observed call site (Rule 18), not this command's job.
  *
  * A PR whose body carries no resolvable task id (a hand-opened PR, or one predating the
  * trailer contract) REFUSES rather than guessing — never fabricates a receipt for the wrong task.
+ *
+ * W1-T2257: the ledger read is the archive∪live UNION, never `ledger.ndjson` alone — that live
+ * file is exactly the slice ledger rotation empties, keeping only the newest row per step and
+ * archiving the rest. A refused union (see {@link resolveReceiptLedgerLines}) REFUSES here too
+ * (non-zero exit, a named reason) rather than silently printing a receipt of null leaves that
+ * would look indistinguishable from "this run never emitted anything".
  */
 export async function receiptCommand(prArg: string, rest: string[] = [], deps: ReceiptCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("receipt", rest, ["--repo"]);
@@ -12147,9 +12242,13 @@ export async function receiptCommand(prArg: string, rest: string[] = [], deps: R
     return 1;
   }
   const config = deps.config ?? loadConfig();
-  const ledgerPath = ledgerPathFor(config);
-  const lines = (deps.readLedgerLines ?? readLedgerLines)(ledgerPath);
-  const receipt = buildReceipt(lines, { taskId, prUrl: view.url ?? prArg });
+  const stateDir = dirname(ledgerPathFor(config));
+  const resolved = (deps.resolveReceiptLedgerLines ?? resolveReceiptLedgerLines)(stateDir);
+  if (!resolved.ok) {
+    console.error(`rmd receipt: ${resolved.reason}`);
+    return 1;
+  }
+  const receipt = buildReceipt(resolved.lines, { taskId, prUrl: view.url ?? prArg });
   console.log(JSON.stringify(receipt, null, 2));
   return 0;
 }
@@ -12868,21 +12967,28 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
   if (gitReadError) {
     console.log(`  git history: UNAVAILABLE — ${gitReadError}`);
   }
+  // W1-T2258: THE DENOMINATOR, NAMED — how many arms this report saw and how many it could
+  // classify, so a consumer reading the class rates below can never mistake a ratio of whatever
+  // survived the join for a rate over every arm (design note (iv): "a consumer that cannot see
+  // the denominator cannot tell a rate from a ratio of whatever survived").
+  console.log(`  arms seen: ${report.armsSeen}, classified: ${report.armsClassified}, unmeasurable: ${report.unmeasurable.length}`);
   console.log("");
   console.log(`attribution policy: window ${report.policy.windowDays}d — ${report.policy.overlapRuleDescription}`);
   console.log("");
   for (const c of report.classes) {
     const label = c.verdictClass === "full-pass" ? "full PASS" : c.verdictClass === "keyword-floor" ? "keyword floor" : "degraded arm";
     if (c.revertRate === null) {
-      console.log(
-        `  ${label.padEnd(14)} n=${c.total} — UNMEASURABLE (below the minimum population floor of ${report.minPopulationFloor}; counts only)`,
-      );
+      const reason =
+        c.rateRefusedReason === "mixed-lane-population"
+          ? `spans more than one arm lane (${c.lanes}) — the honest presentation is per-lane, never a blended fleet-wide rate (W1-T2258 design note (v))`
+          : `below the minimum population floor of ${report.minPopulationFloor}; counts only`;
+      console.log(`  ${label.padEnd(14)} n=${c.total} — UNMEASURABLE (${reason})`);
       console.log(`  ${" ".repeat(14)}   reverted ${c.revertedCount}/${c.total}, follow-up-fixed ${c.followupFixedCount}/${c.total}`);
     } else {
       const revertPct = (c.revertRate * 100).toFixed(1);
       const fixPct = (c.followupFixRate! * 100).toFixed(1);
       console.log(
-        `  ${label.padEnd(14)} n=${c.total} — revert rate ${revertPct}% (${c.revertedCount}/${c.total}), follow-up-fix rate ${fixPct}% (${c.followupFixedCount}/${c.total})`,
+        `  ${label.padEnd(14)} n=${c.total} — revert rate ${revertPct}% (${c.revertedCount}/${c.total}), follow-up-fix rate ${fixPct}% (${c.followupFixedCount}/${c.total}) — lane(s): ${c.lanes}`,
       );
     }
   }
@@ -12891,8 +12997,12 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
     console.log("unmeasurable: none");
   } else {
     console.log(`unmeasurable: ${report.unmeasurable.length} row(s)`);
+    // W1-T2258: broken out BY CAUSE — "no head sha" is never merged into "merge sha could not
+    // be recovered" or "no matching review.posted line" (design note (iv)).
+    const causeOrder: UnmeasurableCause[] = ["no-head-sha", "no-review-posted", "merge-sha-unrecoverable", "git-history-unavailable"];
+    console.log(`  by cause: ${causeOrder.map((c) => `${c}=${report.unmeasurableByCause[c]}`).join(", ")}`);
     for (const u of report.unmeasurable) {
-      console.log(`  ${u.taskId} @ ${u.headSha}: ${u.why}`);
+      console.log(`  ${u.taskId} @ ${u.headSha ?? "no head sha"} [${u.cause}]: ${u.why}`);
     }
   }
 
@@ -14191,6 +14301,11 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           statusResolvable: taskStatusResolvable,
           merged: proj?.merged ?? false,
           baseAcceptance: oldTask?.acceptance,
+          // W1-T2254: `oldTask` (the whole base-ref shard) is already resolved above for
+          // `baseAcceptance` — widening the context to carry it needs no new resolution, git
+          // read, or base-ref lookup, so mergedFieldChangeViolations can diff every other
+          // reportable field too.
+          baseTask: oldTask,
           followUpFiled: followUpCarriesCriteria(added, followUpTasks),
         },
         // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
@@ -15703,7 +15818,18 @@ async function retroCommand(
     // `review.posted` rows keyed exactly "RETRO" = 0, rows keyed RETRO* = 7795. The literal
     // has NEVER matched a verdict — every retro PR in this repo's history was refused here at
     // the W1-T230 gate, and then logged `automerge.armed` anyway. `runId` is the id in scope.
-    const armOutcome = armAndLogOutcome(prUrl, runId, log);
+    //
+    // W1-T2258: this lane holds no headSha variable of its own — `readHeadShaRest(prUrl)` is
+    // the SAME live REST read `reviewCommand` (just above) already made to post its own
+    // `review.posted` line, best-effort here too: a failed read leaves the row unjoinable,
+    // exactly as it is today, never blocking the arm itself.
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(prUrl);
+    } catch {
+      /* best-effort — see the comment above */
+    }
+    const armOutcome = armAndLogOutcome(prUrl, runId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     say(`retro PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
@@ -21612,7 +21738,13 @@ export function buildSweepEffects(
   // (the real process-group kill, scoped by this run's own `REMUDERO_RUN_ID` marker); a test
   // overrides it with a recorder so the abandon-then-reclaim sequence is provable without a
   // real spawned process.
-  reclaimWorkerImpl: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void> = reclaimAbandonedWorker,
+  // W1-T2261: the default now binds THIS function's own `log` param (param 7, above) through —
+  // the bare `reclaimAbandonedWorker` reference this replaced left every match/no-match outcome
+  // silently swallowed by that function's own no-op default, on the ONE call site the measured
+  // incident actually hit (this doc's own W1-T1044 comment). A test overriding this parameter
+  // still receives its own recorder unchanged; only the PRODUCTION default gained a ledger sink.
+  reclaimWorkerImpl: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void> = (info) =>
+    reclaimAbandonedWorker(info, { log }),
   // W1-T1000002 — appended LAST, the same convention every dep above follows. Default is the
   // real `disarmAutoMerge` (a live `gh pr merge --disable-auto`), so production wiring is
   // unchanged; a test overrides it with a recorder so the sweep's converging withdrawal (design
@@ -21708,6 +21840,9 @@ export function buildSweepEffects(
           return result;
         },
         "sweep",
+        // W1-T2258: `pr.headSha` (OpenPrView) is the head this disposition was decided against —
+        // already in hand, no extra read needed to close the join gap for this lane.
+        pr.headSha,
       );
       // The fold itself is `sweepArmAttemptOutcome` (pure, beside `armFailureAction`) so each of
       // its arms is a unit fixture rather than a branch only a whole sweep pass can reach.
@@ -23762,33 +23897,6 @@ function flagValue(rest: string[], flag: string): string | undefined {
   return i >= 0 ? rest[i + 1] : undefined;
 }
 
-/**
- * Strict arg check for a FLAGS-ONLY subcommand: return an error string for the FIRST
- * unrecognized token (a bare positional, or a `--flag` not in `valueFlags`/`boolFlags`),
- * else null. `valueFlags` consume the following token as their value. This is what makes a
- * SPAWNING command fail loud on junk instead of draining — `rmd daemon install --dry-run`
- * silently ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored.
- */
-export function unknownArgError(
-  command: string,
-  rest: string[],
-  valueFlags: string[],
-  boolFlags: string[] = [],
-): string | null {
-  const vf = new Set(valueFlags);
-  const bf = new Set(boolFlags);
-  for (let i = 0; i < rest.length; i++) {
-    const tok = rest[i];
-    if (bf.has(tok)) continue;
-    if (vf.has(tok)) {
-      i++; // skip its value
-      continue;
-    }
-    return `rmd ${command}: unexpected argument '${tok}' — see \`rmd --help\``;
-  }
-  return null;
-}
-
 /** The repo + plan a `rmd daemon` run targets, resolved from its flags. */
 export interface DaemonTarget {
   owner: string;
@@ -24586,7 +24694,17 @@ async function triageCommandLocked(
     // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
     // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
     // must pass to find it.
-    const armOutcome = armAndLogOutcome(prUrl, taskId, log);
+    // W1-T2258: this lane holds no headSha variable of its own — `readHeadShaRest(prUrl)` is
+    // the SAME live REST read `reviewCommand` (just above) already made to post its own
+    // `review.posted` line, best-effort here too: a failed read leaves the row unjoinable,
+    // exactly as it is today, never blocking the arm itself.
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(prUrl);
+    } catch {
+      /* best-effort — see the comment above */
+    }
+    const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     say(`triage PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
@@ -24958,7 +25076,17 @@ export async function planCommand(
     // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
     // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
     // must pass to find it.
-    const armOutcome = armAndLogOutcome(prUrl, taskId, log);
+    // W1-T2258: this lane holds no headSha variable of its own — `readHeadShaRest(prUrl)` is
+    // the SAME live REST read `reviewCommand` (just above) already made to post its own
+    // `review.posted` line, best-effort here too: a failed read leaves the row unjoinable,
+    // exactly as it is today, never blocking the arm itself.
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(prUrl);
+    } catch {
+      /* best-effort — see the comment above */
+    }
+    const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     say(`plan PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
@@ -25660,7 +25788,17 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     // (see the no-trailer comment above) — reviewCommand's own taskId resolve
     // therefore falls back to `PR-${view.number}` and its review.posted ledger
     // line is keyed to that same fallback, not `proposalId`.
-    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log);
+    // W1-T2258: this lane holds no headSha variable of its own — `readHeadShaRest(result.prUrl)`
+    // is the SAME live REST read `reviewCommand` (just above) already made to post its own
+    // `review.posted` line, best-effort here too: a failed read leaves the row unjoinable,
+    // exactly as it is today, never blocking the arm itself.
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(result.prUrl);
+    } catch {
+      /* best-effort — see the comment above */
+    }
+    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
     return reviewCode;

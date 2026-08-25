@@ -1,0 +1,161 @@
+- id: W1-T2281
+  title: "`grounding_sources` is the ONLY skill-registry field anything consumes, and it is the one nothing verifies — six declared sources across five of the seven skills resolve to no file today, `design-review`'s ENTIRE corpus is one of them, and `searchGroundingSources` is written to `catch { continue }` so a skill grounded against nothing returns the same empty result as a skill that searched and found nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading and measuring, from a scratch worktree PROVEN equal to origin/main by sha
+    (f3109443), clone shallow-checked `false`. `src/run-task.ts` read via git objects. No suite, no
+    poller, no spawning verb. The probe below wrote two throwaway files under `.remudero/skills/`
+    and removed them; `git status --porcelain` was clean afterwards.
+
+    (1) THE VALIDATOR CHECKS SHAPE AND ONLY SHAPE, MEASURED WITH A DISCRIMINATING CONTROL.
+    `validateSkill` (`src/lib/skill.ts`) is six calls to `requiredString`/`requiredStringArray` —
+    non-empty string, or non-empty list of non-empty strings. Nothing more. A probe skill declaring
+    a tool that does not exist (`NoSuchToolAtAll`), a `permission_profile`, `tier` and `gate` that
+    name nothing, and a `grounding_sources` path that is not a file **LOADS AND IS LISTED** by
+    `rmd skill list`. THE CONTROL FIRES: the same verb refuses a STRUCTURALLY broken sibling by
+    name — *"skill 'zzz-broken': 'tools' must be a non-empty list of non-empty strings."* So the
+    silence on semantics is a real absence and not a broken query.
+
+    (2) AND `grounding_sources` IS THE ONE FIELD THAT MATTERS, WHICH IS WHY THIS IS NOT MERELY
+    COSMETIC. A tree search for consumers of `skill.tools`, `.tier`, `.permission_profile` and
+    `.gate` outside `skill.ts`'s own loader and `renderSkillList` returns **ZERO** — control: the
+    same search for `grounding_sources` returns four hits across `skill.ts` and
+    `panel-skill-run.ts`. The four unread fields are inert today and their laxity costs nothing
+    yet; **the ONE field with a live consumer is the one whose declared values are wrong.**
+
+    (3) SIX DECLARED SOURCES RESOLVE TO NO FILE, ACROSS FIVE OF THE SEVEN SKILLS. Every
+    `grounding_sources` entry in `.remudero/skills/*.yaml` checked against the tree at f3109443:
+        design-review: MASTER-PLAN.md#7C     -> MISSING   (its ONLY source)
+        feedback:      MASTER-PLAN.md#7B     -> MISSING   (3 of its 4 resolve)
+        refactor:      MASTER-PLAN.md#3A     -> MISSING   (2 of its 3 resolve)
+        setup:         MASTER-PLAN.md#5A     -> MISSING
+        setup:         MASTER-PLAN.md#WS-4   -> MISSING   (2 of its 4 resolve)
+        retro:         state/ledger.ndjson   -> MISSING   (2 of its 3 resolve)
+    `plan` and `review` are clean, which is the control inside the measurement — the checker can
+    see a source that DOES resolve.
+
+    (4) TWO DISTINCT CAUSES, AND NEITHER IS A TYPO.
+    **(a) THE `#fragment` SYNTAX WAS WRITTEN AS IF THE LOADER UNDERSTOOD ANCHORS. IT DOES NOT.**
+    Four of the six are `MASTER-PLAN.md#<section>`. `searchGroundingSources` does
+    `readFileSync(join(root, source))`, so the literal string `MASTER-PLAN.md#7C` is opened as a
+    filename and is not one. The intent is legible and defensible — ground this skill on ONE
+    SECTION rather than a 100KB document — and the loader simply never implemented it.
+    **(b) `retro` RESTS ON A `state/` PATH, WHICH CLAUDE.md ALREADY FORBIDS.** `.gitignore:34` is
+    `state/` and `git ls-files state/` returns 0, so `state/ledger.ndjson` is absent from every
+    fresh checkout BY CONSTRUCTION and never exists in a container. The house rule — *"never let a
+    tracked artifact rest its evidence on a `state/` path"* — is written about reports; this is a
+    tracked artifact under `.remudero/` doing exactly that, and the rule's own reasoning applies
+    unchanged.
+
+    (5) THE READER IS DESIGNED TO SWALLOW IT, AND SAYS SO. `searchGroundingSources`'s own doc:
+    *"A missing or unreadable source file degrades to 'found nothing there' rather than throwing —
+    a caller must still get an answer against a half-populated repo."* The implementation is
+    `try { readFileSync(...) } catch { continue; }`. **THAT DEGRADATION IS CORRECT AT RUNTIME AND IS
+    NOT WHAT THIS TASK CHANGES** — a half-populated repo must still answer. What is missing is the
+    check at the OTHER end: nothing ever asks whether a DECLARED source could resolve, so
+    `design-review` returns `[]` for every query and the caller cannot tell that from a corpus that
+    was searched and had no match.
+
+    (6) THE COST TODAY IS LATENT AND THE SHARD SAYS SO RATHER THAN INFLATING IT. `POST
+    /v1/skills/run` (`src/lib/panel-skill-run.ts`) *"wires exactly ONE skill+mode pair"* — Refine,
+    which is the `plan` skill, and `plan`'s four sources all resolve. So no live invocation is
+    grounding against nothing right now. **The defect fires the moment a second skill is wired,
+    which is the route's stated purpose**, and the six bad declarations are sitting in the tree
+    waiting for it. This is a gap measured HERE, in this repo's own artifacts, not an idea imported
+    from elsewhere.
+  design: |
+    (i) THE REMEDY IS A CHECK AT DECLARATION TIME, NOT A CHANGE TO RUNTIME DEGRADATION. Something
+    must refuse — or at minimum name — a `grounding_sources` entry that cannot resolve, at the
+    point the registry is loaded or linted. `searchGroundingSources`'s `catch { continue }` STAYS:
+    a source that vanishes at runtime must still degrade quietly, and conflating the two would
+    break the half-populated-repo contract its doc protects.
+
+    (ii) THE `#fragment` FORM NEEDS A RULING, NOT A DELETION. Four declarations express a real
+    intent the loader never implemented. Two honest options, and the task must pick one and say
+    which: RESOLVE the fragment (open the file, scope the search to the named section) or REFUSE
+    the syntax and rewrite the four to bare paths. **Silently dropping the anchor to
+    `MASTER-PLAN.md` is the WORST option** — it would make `design-review` ground on the entire
+    100KB document, which is the thing the anchor was written to avoid, while reporting success.
+
+    (iii) `retro`'s `state/` SOURCE IS A RE-POINTING, NOT A FIX TO `state/`. Do not propose
+    un-ignoring `state/` — CLAUDE.md records why that entry is load-bearing (W1-T255/W1-T256: the
+    daemon's own runtime exhaust, and `state/service-tokens.json`). The ledger IS readable, through
+    `resolveLedgerUnion`/`ledgerRotationEntries` (`src/lib/ledger-grep.ts`, W1-T444), which is the
+    sanctioned in-process reader over all three file forms. Whether a skill's declarative
+    `grounding_sources` list can express "the ledger union" at all is the open question this task
+    must answer rather than assume.
+
+    (iv) WHAT THIS TASK DELIBERATELY DOES NOT DO — THE OTHER FOUR FIELDS. `tools`,
+    `permission_profile`, `tier` and `gate` are equally unvalidated and are LEFT ALONE. Nothing
+    reads them (measured in rationale (2)), so tightening them now would be a validator for a
+    contract with no consumer — and W1-T2266 already owns the question of whether a shipped
+    mechanism ever gained an adopter. Scope is the one field with a live reader.
+
+    (v) RULE 15 AND LAW 5 ARE UNTOUCHED, AND THE DISTINCTION THAT MIGHT HAVE CHALLENGED THEM
+    COLLAPSES ON INSPECTION. It is tempting to argue that a DETERMINISTIC, TESTABLE artifact is a
+    different category from a prose learning, so the ratification gate that exists because prose
+    cannot be tested need not apply. **THE ARTIFACT HERE REFUTES THAT.** A skill is exactly such an
+    artifact — a validated YAML profile, name bound to filename, loaded deterministically — and
+    `output_contract` is still PROSE, `grounding_sources` is still unverified, and six of its
+    entries are wrong in the tree today. Being schema-valid bought shape and nothing else. So the
+    distinction does not survive contact with this repo's own registry, and **nothing in this task
+    auto-writes a skill, auto-files a task, or mints an id.** If a future task wants that argument
+    it must be made as a CHANGE TO RULE 15, named as such — not slipped past it under this one.
+
+    (vi) NOT IN SCOPE, NAMED: the four unread fields; wiring a second skill to `POST
+    /v1/skills/run`; `searchGroundingSources`'s 3-excerpt/200-char caps; the `state/` gitignore
+    entry; any change to MASTER-PLAN §5B's skill shape; and whether skills should be authored
+    automatically, which no evidence here supports and which rule 15 forbids regardless.
+  acceptance:
+    - claim: "a skill declaring a grounding source that cannot resolve is named rather than accepted silently"
+      proof: "unit test: test/skill-grounding-sources-resolve.test.ts"
+    - claim: "every grounding source declared by every skill in the shipped registry resolves"
+      proof: "unit test: test/skill-grounding-sources-resolve.test.ts"
+    - claim: "a skill whose entire declared corpus is unresolvable is distinguishable from one that searched and matched nothing"
+      proof: "unit test: test/skill-grounding-sources-resolve.test.ts"
+    - claim: "the section-anchor form is either resolved or refused, never silently widened to the whole file"
+      proof: "unit test: test/skill-grounding-sources-resolve.test.ts"
+    - claim: "no skill declares a grounding source under a path absent from a fresh checkout"
+      proof: "unit test: test/skill-grounding-sources-resolve.test.ts"
+    - claim: "a source that vanishes at runtime still degrades to no-match rather than throwing"
+      proof: "unit test: test/skill-grounding-sources-resolve.test.ts"
+  files: [src/lib/skill.ts, .remudero/skills, test/skill-grounding-sources-resolve.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#deterministic-skills-recon-2026-08-25"
+  plan_refs: ["W1-T44", "W1-T255", "W1-T256", "W1-T284", "W1-T444", "W1-T2266"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so a source module, a config directory and a test named after neither trip it at
+    `medium`. The change is one check plus the declarations it reddens.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/skill-grounding-sources-resolve.test.ts`, declared in `files:`, so on this filing
+    PR it resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL, CONFIRMED PRESENT BEFORE IT
+    WAS BELIEVED. `rmd check-proof` on the declared path reads `exit: 1`, `hits: 0`, `verdict: fail`.
+    The SAME verb on an EXISTING pure path — `unit test: test/skill.test.ts`, the test file for the
+    very module this task changes — reads `verdict: pass`.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND IS NOT RE-MINTED; NO MINT WAS CALLED, BECAUSE ONLY ONE
+    SHARD IS WARRANTED. `refs/rmd-id/W1-T2281` resolves to 86799f0d565fa341b56a3101effe383cf8e12dc5;
+    this shard VERIFIES THE ID IS UNUSED rather than that it is this account's. Five surfaces swept,
+    each control pre-qualified for its own surface, remote ref counts read first (142 heads, 400
+    `refs/rmd-id/*`): shards on main 0 (control W1-T2276 = 1); whole tree at HEAD 0 (control 1);
+    remote head names 0 (control, 92 `run-*` heads read); commit subjects and bodies on main 0
+    (control 1); open PR titles, bodies and head refs 0 across all 7 open PRs (control `W1-T2` = 7).
+    Presence of a reservation is not usage.
+
+    A SECOND SHARD WAS CONSIDERED AND REFUSED. The recon's other candidate — that the operator's
+    repeated filing rails exist only as prose — has no defect measured in this repo to anchor it,
+    and its only real warrant would have been "another project automates this", which does not
+    justify a task. W1-T1076 already owns duplicate-shard detection at filing time and covers the
+    W1-T2274/W1-T2275 pair retired today (#2840); W1-T2266 already owns the adoption gap. Filing
+    fewer was the correct outcome.

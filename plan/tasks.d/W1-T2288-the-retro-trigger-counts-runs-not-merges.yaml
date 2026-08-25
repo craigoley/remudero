@@ -1,0 +1,147 @@
+- id: W1-T2288
+  title: "THE RETRO's TRIGGER ITERATES RUNS IN A REPOSITORY WHERE MOST MERGES ARE NOT RUNS — `retroTriggerCheck` builds its merge count from `shippedSince(gatherRuns(parseLedger(readFileSync(ledgerPathFor(config)))))`, so the iteration domain is runs and the corpus is the LIVE ledger file with no rotation union; a merge with no run is unreachable by every credit path, and `ownBranchOf` rejects any head that is not `run-<id>-<epoch>`, which is every plan filing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/run-task.ts, src/lib/retro.ts, test/retro-trigger-corpus.test.ts]
+  origin: oper#the-retro-trigger-counts-runs-not-merges-2026-08-25
+  plan_refs: ["W1-T2252", "W1-T1259", "W1-T160", "W1-T1013"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (0) THE MECHANISM, RE-DERIVED FROM SOURCE.
+
+    `retroTriggerCheck` (`src/run-task.ts`) assembles its input in three lines:
+
+      const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+      const runs = gatherRuns(parseLedger(ledgerNdjson));
+      const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
+
+    and hands that number to `evaluateRetroTrigger`, which fires at
+    `mergesSinceMarker >= policy.mergesThreshold` or `daysSinceMarker >= policy.daysThreshold`.
+    TWO INDEPENDENT PROPERTIES OF THOSE THREE LINES BOUND WHAT CAN EVER BE COUNTED.
+
+    FIRST, THE ITERATION DOMAIN IS RUNS. `shippedSince` opens with
+    `const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;` and every credit
+    path is inside `for (const r of scoped)`. A merge with NO run has no loop iteration and is
+    therefore unreachable — not undercounted, structurally invisible. The ownership assert
+    compounds it: each credit is gated on `github.headRefName(...) === ownBranchOf(r.runId)`, and
+    `ownBranchOf` builds `run-<taskId>-<epoch>`, so a `plan/*` or `fix/*` head is REJECTED even
+    when a run exists.
+
+    CREDIT WHERE IT IS DUE, BECAUSE THE OBVIOUS SECOND CRITICISM IS WRONG. `shippedSince` DOES
+    already handle gate-side merges: when a run ended some other verdict it calls
+    `github.findMergedByTrailer(r.taskId)` and credits the merge with `source: "github"` and the
+    annotation `gate-side merge; run ended <verdict>`. Its own doc names that as "the gap
+    `mergedSince` alone cannot see". So the defect is NOT that gate-side merges are missed — they
+    are handled. The defect is that the domain being iterated is runs, so the handling only ever
+    reaches merges that HAD one.
+
+    SECOND, THE CORPUS IS THE LIVE FILE ONLY. `ledgerPathFor(config)` returns
+    `join(config.root, "state", "ledger.ndjson")` and it is read with a bare `readFileSync`.
+    Neither `resolveLedgerUnion` nor `ledgerRotationEntries` appears anywhere in that function,
+    though both exist (`src/lib/ledger-grep.ts`). `rotateLedger` retains only
+    `MAX_RETAINED_LINES_PER_STEP` newest rows per step, so a run whose rows have rotated out is
+    invisible to `gatherRuns` even when the run happened. The trigger therefore reads a corpus that
+    shrinks under it.
+
+    (1) Q1 — DEFECT OR AGED ASSUMPTION? ARGUED FROM `retro.ts`'s OWN DOC.
+
+    The module doc says the retro "reduces the append-only ledger + LEARNINGS into a structured
+    gather (calibration by task type, verdict distribution, merged-since list) that the higher-tier
+    Architect worker then synthesizes into a plan-only PR", under the heading "the harness must SYNC
+    ITS OWN PLAN".
+
+    THAT SUBJECT IS MIXED, AND THAT IS THE WHOLE ANSWER. Two of the three gathered artifacts —
+    calibration by task type, verdict distribution — ARE about worker behaviour, and for those a
+    run-counted trigger is exactly right. The third, the merged-since list, and the output itself, a
+    plan-only PR that syncs the repository's own plan, are about the REPOSITORY's progress. So the
+    retro already reviews merges while being triggered by runs. When nearly every merge was a worker
+    run the two coincided and the distinction did not exist; it is an AGED ASSUMPTION rather than a
+    coding error, and it aged because the merge mix changed underneath it.
+
+    MEASURED FROM GIT, WHICH NEEDS NO LEDGER: on 2026-08-25, at origin/main 7db8eb81, main took 70
+    commits, of which 39 are `chore(plan)` filings and 30 carry a `Remudero-Task:` trailer (control:
+    96 commits on 2026-08-24). The window is named because it moves: this figure was re-derived when
+    main advanced mid-filing, and the earlier reading at 6650b14a was 69/38/30. A `chore(plan)` filing merged from a `plan/*` branch is not a run and never had
+    one, so on that day's evidence a majority of what the retro would review cannot reach its
+    trigger.
+
+    (2) Q2 — SHOULD THE HARVEST BE COUPLED TO THE RETRO AT ALL, AND WHAT WOULD DECOUPLING COST?
+
+    The follow-up harvest (`mineFollowups`, marked by `followup.harvested`/`followup.deduped`) runs
+    inside the retro and nowhere else, and it is the only intake path that feeds `learnings/`. So it
+    inherits whatever cadence the trigger happens to produce, and when the trigger under-fires the
+    harvest simply does not run — while `report.followups` keeps being written by every reporting
+    run. The backlog accumulates; nothing is lost, but nothing is read either.
+
+    DECOUPLING NEEDS NO NEW CADENCE, AND THAT IS THE POINT. `decideMeasurementCadence`
+    (`src/lib/measurement-cadence.ts`) already exists with a marker, `minIntervalMinutes` and
+    `maxPerDay`, and already fails closed on an unreadable marker
+    ("measurement cadence marker unreadable — failing closed"). So the question is NOT "build a
+    second cadence" but "which existing owner runs the harvest", and the cost of moving it is the
+    cost of that decision plus a marker: the harvest becomes independent of how many runs happened,
+    at the price of no longer being guaranteed to sit inside a retro's transaction. That trade is
+    the operator's to make and this shard does not make it — it names it so the choice is explicit.
+
+    (3) A DISCIPLINE NOTE ON THE EVIDENCE, BECAUSE THIS ONE NEARLY WENT WRONG.
+
+    The ledger figures motivating this task were measured on the FLEET host (a union of 26 archives,
+    newest rows seconds old). THIS FILING COULD NOT REPRODUCE THEM, and the reason is worth
+    recording rather than hiding. The operator checkout's own `state/ledger.ndjson` has a newest
+    timestamp seconds old and LOOKS live — but the only steps still being written to it are
+    `cli.invoked` and `next_task_id.reserve`, which are this session's own reader invocations. Every
+    daemon-emitted step on that host stops at 2026-08-17T02:08. A positive control proves a query
+    can see its corpus; a current newest-timestamp does not prove the corpus is still being fed by
+    the thing under study, because the observer can be the one feeding it. The git-derived counts in
+    (1) are used precisely because they need no ledger.
+  note: |
+    SIZING BAND: `risk: high` is set UP FRONT and the band is Rule 19's SPAN, not blast radius — the
+    build spans the caller that assembles the count (`src/run-task.ts`) and the module that defines
+    what counting means (`src/lib/retro.ts`), plus the test. `files:` names all three deliberately
+    rather than the minimum.
+
+    WHAT MUST NOT CHANGE. The retro stays OPERATOR-RATIFIED: Rule 15's "never auto-filed" stands, and
+    the Architect ratifies a finding into a `learnings/*.yaml` shard rather than the harness writing
+    one. NOTHING LOWERS THE 25-MERGE THRESHOLD to make the retro fire more often — a retro that runs
+    on thin evidence is worse than one that waits, and the fix here is what gets COUNTED, never how
+    few are required. AND NOTHING AUTO-FILES A HARVESTED FOLLOW-UP: the harvest produces candidates
+    for a human, and no change here gives it a filing path.
+
+    NOT A THRESHOLD CHANGE, AND THE DIFFERENCE MATTERS. Correcting the corpus makes the SAME
+    threshold reachable by the merges the retro already reviews. Lowering the threshold would make
+    the retro fire on the same thin run evidence, more often — the "bound tuned instead of its
+    population examined" shape this repo has filed repeatedly.
+
+    RE-FILES NEITHER CITED TASK. W1-T2252 fixed the follow-up harvest ENTRY KEY (`run_id:ts:index`)
+    and is merged; its fix being unobservable is the COST cited here, not the subject. W1-T1259 is
+    cited for its own scope and is untouched. W1-T160 owns the daemon's retro cadence hooks, and
+    W1-T1013 owns the `report.followups`/`followup.harvested`/`followup.deduped` line family.
+
+    ID PROVENANCE: W1-T2288 was reserved before this filing and verified UNUSED across all eight
+    surfaces, each zero paired with a positive control on its own surface, and both merged-surface
+    controls drawn from ids that are actually merged (W1-T2252, W1-T2260) rather than any sitting on
+    an open PR.
+  acceptance:
+    - claim: "the trigger counts merges the retro reviews rather than only merges that had a worker run"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"
+    - claim: "a merge on a branch that is not a run branch is counted, since a plan filing never has one"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"
+    - claim: "the gate side crediting that already works is preserved and not reimplemented"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"
+    - claim: "the count no longer depends on rows surviving rotation in the live ledger file alone"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"
+    - claim: "the merges threshold is unchanged, so the fix is what is counted and never how few are required"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"
+    - claim: "the days threshold arm is untouched and still fires on an idle repository"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"
+    - claim: "the ownership assert still rejects a merge credited to a branch that is not the run's own"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"
+    - claim: "nothing in the trigger path files a task or ratifies a learning without an operator"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"
+    - claim: "the falsifier holds: restoring the runs only domain turns the plan filing count check red"
+      proof: "unit test: test/retro-trigger-corpus.test.ts"

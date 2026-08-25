@@ -25,6 +25,67 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
+/**
+ * Control-flow constructs that, sitting between the arm call and the gate, would mean control can
+ * reach `pollToGate` on a path that did NOT arm — or not reach it at all. `await` is included
+ * deliberately: an interleaved await is exactly what W1-T975 deferred the arm past, so one
+ * appearing in the span means the arm is no longer immediately before the gate in the only sense
+ * that matters. Matched against source with comments and string literals removed, so prose and log
+ * payloads can never trip them and can never mask them.
+ */
+const GATING_CONSTRUCTS = [
+  "await",
+  "return",
+  "throw",
+  "continue",
+  "break",
+  "if (",
+  "else",
+  "while (",
+  "for (",
+  "switch (",
+  "catch",
+] as const;
+
+/**
+ * Remove line comments, block comments and string/template literals, replacing each literal with a
+ * space so token boundaries survive. This is what makes the reachability assertion below survive a
+ * refactor that preserves what it protects: W1-T2258 broke the previous character-distance proxy by
+ * adding a comment and one log field, neither of which is code, and both of which vanish here.
+ */
+function stripCommentsAndStringLiterals(src: string): string {
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === "/" && d === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && d === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      i++;
+      while (i < src.length && src[i] !== quote) {
+        if (src[i] === "\\") i++;
+        i++;
+      }
+      i++;
+      out += " ";
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 // ── W1-T125: move auto-merge arming from "after review" to "at PR creation".
 // W1-T975 MOVED IT AGAIN — deferred from "at PR creation" to "the point this run
 // commits to a verdict" (right before `pollToGate`: ci green, review passed, the
@@ -951,43 +1012,68 @@ test(
 );
 
 test(
-  "WIRING (W1-T975): the deferred arm call sits immediately before pollToGate — no longer close " +
-    "after pr.opened, and armAutoMergeAtOpen is called from exactly one site",
+  "WIRING (W1-T975): the deferred arm call reaches pollToGate with nothing gating in between, " +
+    "and armAutoMergeAtOpen is called from exactly one site",
   () => {
-    // The old post-review site's own OLD armAutoMerge(prUrl, taskId) call was already removed by
-    // W1-T125 — that regression is still guarded by the '`old post-review armAutoMerge(...)` call
-    // must be removed' assertion this test used to make; keep it, it costs nothing.
+    // W1-T975 requires the arm to be DEFERRED to the gate rather than firing close after
+    // `pr.opened`. This used to be proven by TEXT PROXIMITY — `armAutoMergeAtOpen(prUrl,` had to
+    // appear within a 900-character window before `pollToGate` — which is a proxy for the
+    // invariant, not the invariant. W1-T2258 added a three-line comment and one field to the
+    // already-present, non-gating `log("automerge.armed", ...)` call that sits between them; the
+    // call did not move, nothing gating was inserted, and the window went 761 -> 1078 characters,
+    // so a diff that PRESERVED what the test protects broke the test. Restoring adjacency would
+    // have meant deleting a comment to satisfy a grep.
+    //
+    // What actually matters is REACHABILITY: once the arm has fired, control must reach the gate
+    // unconditionally, in the same block, with nothing in between that could skip it, return
+    // early, throw past it, or interleave another await. That is asserted directly below, over
+    // the span between the two call sites with comments and string literals removed — so prose
+    // and log payloads cannot move it, and inserted CODE can.
+    //
+    // This is strictly stronger than the window it replaces, and it subsumes the old
+    // "not close after pr.opened" falsifier: moving the arm back up there puts thousands of
+    // characters of real control flow between it and the gate, and this assertion fails on the
+    // first `await`.
     const pollIdx = runTaskSrc.indexOf("const outcome = await pollToGate(prUrl,");
     assert.ok(pollIdx >= 0, "pollToGate must still be called");
+    const armIdx = runTaskSrc.lastIndexOf("armAutoMergeAtOpen(prUrl,", pollIdx);
+    assert.ok(armIdx >= 0, "armAutoMergeAtOpen must be called before pollToGate");
+    assert.ok(armIdx < pollIdx, "the arm must fire BEFORE the gate, never after it");
+
+    const span = stripCommentsAndStringLiterals(runTaskSrc.slice(armIdx, pollIdx));
+
+    // Nothing between the arm and the gate may divert, defer or repeat control flow.
+    for (const gating of GATING_CONSTRUCTS) {
+      assert.ok(
+        !span.includes(gating),
+        `nothing gating may sit between the arm and the gate — found \`${gating}\` in the span, so ` +
+          "control can now reach pollToGate on a different path than the one that armed",
+      );
+    }
+
+    // ...and both must sit in the SAME block: a balanced span that never closes out of its own
+    // scope proves the gate is not inside a branch the arm can miss.
+    let depth = 0;
+    let escaped = false;
+    for (const ch of span) {
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth < 0) escaped = true;
+      }
+    }
+    assert.equal(escaped, false, "the gate must not sit in a block the arm's own block has closed");
+    assert.equal(depth, 0, "the arm and the gate must sit at the same block depth");
+
+    // The old, pre-W1-T125 call must not have crept back anywhere in that span (the window this
+    // replaces could only ever check 900 characters of it, and grew weaker as the file grew).
     assert.ok(
-      !/armAutoMerge\(prUrl, taskId\)/.test(runTaskSrc.slice(Math.max(0, pollIdx - 900), pollIdx)),
+      !/armAutoMerge\(prUrl, taskId\)/.test(span),
       "the old, pre-W1-T125 armAutoMerge(prUrl, taskId) call must not have crept back in here",
     );
 
-    // W1-T975: armAutoMergeAtOpen must now be reachable in the window IMMEDIATELY BEFORE
-    // pollToGate — the deferred call site this task moves it to.
-    const before = runTaskSrc.slice(Math.max(0, pollIdx - 900), pollIdx);
-    assert.match(
-      before,
-      /armAutoMergeAtOpen\(prUrl,/,
-      "armAutoMergeAtOpen must fire immediately before pollToGate — the W1-T975 deferred arm call site",
-    );
-
-    // And it must NOT be reachable close after `pr.opened` any more — the OLD W1-T125 site this
-    // task removes. `pr.opened` sits far upstream now (>20,000 chars before pollToGate on the
-    // current source), so a generous 1300-char window still proves the call moved away, not
-    // merely that the file grew.
-    const openedIdx = runTaskSrc.indexOf('log("pr.opened", { pr_url: prUrl });');
-    assert.ok(openedIdx >= 0 && openedIdx < pollIdx);
-    const afterOpened = runTaskSrc.slice(openedIdx, openedIdx + 1300);
-    assert.doesNotMatch(
-      afterOpened,
-      /armAutoMergeAtOpen\(prUrl,/,
-      "FALSIFIER: armAutoMergeAtOpen must NOT fire close after pr.opened any more — W1-T975 moved it",
-    );
-
-    // Exactly one call site in the whole file — the one just proven above, right before
-    // pollToGate — never two (e.g. a forgotten duplicate left at the old PR-open site).
+    // Exactly one call site in the whole file — never two (e.g. a forgotten duplicate left at the
+    // old PR-open site). With one site, the reachability proof above is a proof about THE arm.
     const callSites = runTaskSrc.split("armAutoMergeAtOpen(prUrl,").length - 1;
     assert.equal(callSites, 1, "armAutoMergeAtOpen must be called from exactly one site in runTask");
   },
