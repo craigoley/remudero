@@ -1,0 +1,206 @@
+- id: W1-T2257
+  title: "`receiptCommand` reads `ledgerPathFor(config)` — THE LIVE FILE, never the union — while rotation retains only the newest rows per step, so the verb emits a receipt of nulls; and a second, independent defect survives the union because four of the five `pr.opened` emitters write no `branch` at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha, clone
+    shallow-checked `false`. `src/run-task.ts` (1,542,304 bytes) read through git objects. No suite,
+    no poller, no spawning verb.
+
+    (1) THE CALL SITE, NAMED AND READ. `receiptCommand` (`src/run-task.ts`, declared at 11701)
+    reads three consecutive lines at 11727-11729:
+        const ledgerPath = ledgerPathFor(config);
+        const lines = (deps.readLedgerLines ?? readLedgerLines)(ledgerPath);
+        const receipt = buildReceipt(lines, { taskId, prUrl: view.url ?? prArg });
+    `ledgerPathFor(config)` is THE LIVE FILE. `resolveLedgerUnion` is never called on this path.
+    Rotation keeps only the newest rows per step and archives the rest, so the verb's input is
+    exactly the slice rotation has already emptied.
+
+    (2) BOTH FIGURES, RE-DERIVED HERE RATHER THAN CARRIED — THE UNION RESOLVED ON THIS HOST. The
+    step-scoped union (`archiveCount: 672`, `liveFileRead: true`, 5,589 matching rows across the
+    nine steps `buildReceipt` reads) returned `ok: true`, so these are measurements and not
+    attributions. Every receipt the ledger knows was rebuilt by calling `buildReceipt` itself, over
+    the population the verb is for — tasks carrying a `pr.opened` row — and scored by counting
+    `{value: null}` leaves:
+        LIVE FILE  tasks-with-a-PR 188   FULL 0   PARTIAL 113   ENTIRELY NULL 75
+        UNION      tasks-with-a-PR 442   FULL 0   PARTIAL 441   ENTIRELY NULL 1
+    The operator's own reading of the same shape is 0 of 361 full with 236 entirely null on the
+    live file, and 0 of 392 full with 391 partial and 1 entirely null over the union; the
+    denominators differ because the corpora and the task population differ, and BOTH READINGS AGREE
+    ON THE TWO NUMBERS THAT MATTER — FULL IS ZERO EITHER WAY, AND THE UNION COLLAPSES THE
+    ENTIRELY-NULL POPULATION TO EXACTLY ONE. The union fixes most of it and not all of it.
+
+    (3) THE SECOND DEFECT IS A WRITER INCONSISTENCY, AND ALL FIVE EMITTERS ARE RE-DERIVED.
+    `log("pr.opened", ...)` occurs at exactly five sites in `src/`:
+        run-task.ts:9387   { pr_url }
+        run-task.ts:15343  { pr_url, plan_only }
+        run-task.ts:24189  { pr_url, plan_only, action }
+        run-task.ts:24601  { pr_url, plan_only, mode }
+        run-task.ts:25305  { pr_url, branch, adopted }
+    FOUR WRITE NO `branch`. ONLY 25305 DOES. Measured over the same union, `pr.opened` reads 484
+    rows and 3 carry a `branch` field — the reader is fine and says so in its own words, emitting
+    `"pr.opened" ledger line for ${prUrl} carries no branch field` (`src/lib/receipt.ts`) rather
+    than guessing. NOTHING ABOUT THE READ FIXES THIS.
+
+    (4) AND THE HEADLINE "ZERO FULL" IS OVER-DETERMINED ON THIS CORPUS, WHICH THE PER-LEAF COUNT
+    SHOWS AND WHICH MUST BE STATED OR THE NUMBER MISLEADS LATER. Across the 442 union receipts, the
+    null-leaf frequencies are:
+        442/442  predicate.prompt_template_hash
+        439/442  predicate.pr.branch
+        431/442  predicate.learnings.injected_ids
+        295/442  predicate.merge.state
+        233/442  predicate.merge.automerge_outcome
+    `prompt_template_hash` is null on EVERY receipt — so it, not `pr.branch`, is what pins FULL at
+    zero here. **THAT LEAF IS ONE OF THE TWO WITHDRAWALS**, and the source itself anticipates it:
+    the field's own doc says it is "Absent-with-reason on any run that predates this task, or whose
+    `prompt.linted` line was rotated away — never guessed."
+
+    (5) THE TWO WITHDRAWALS, RECORDED SO NOBODY RE-FINDS THEM AS DEFECTS. `prompt_template_hash`
+    and `matched_ids` (which the receipt surfaces as `learnings.injected_ids`) are BOTH EMITTED AT
+    HEAD. W1-T71 shipped 2026-08-20 and this corpus's newest relevant rows land 2026-08-12 to
+    2026-08-14, so their zeros are CORPUS AGE, NOT DEFECTS. They are named here because they are the
+    two leaves most likely to be re-discovered as bugs by the next reader of the numbers above.
+    ── ADDED 2026-08-25, RATIONALE ONLY. THE SUPERSEDED SIBLING'S COST FIGURE, AND WHY IT EXISTED ──
+
+    (6) THE WALL-CLOCK COST OF THE STEP-SCOPED READ, CARRIED FROM #2789 AND ATTRIBUTED. #2789 filed
+    this same defect under W1-T2256 and was CLOSED UNMERGED as superseded by this shard. Before it
+    closed it measured what this shard did not: **9,101 ms per union read, and 79,145 ms across the
+    nine steps a receipt needs, over roughly 150 MB.** THAT IS THE OPERATOR'S MEASUREMENT, NOT
+    RE-DERIVED HERE — no timing run was made for this amendment, and the figure is recorded as
+    attributed so a later reader does not mistake it for this host's own.
+
+    (7) AND IT IS COMPLEMENTARY TO RATIONALE (2)/(design ii), NOT A REPEAT OF THEM. This shard
+    measured the SHAPE of the read: unscoped dies on a 4 GB heap, step-scoped completes. #2789
+    measured its DURATION: step-scoped completes in about eighty seconds. Together they say the
+    thing neither says alone — **THE SCOPE IS NOT OPTIONAL AND THE SCOPED READ IS STILL SLOW.** A
+    verb an operator types about one PR should not spend eighty seconds re-reading 672 archives, so
+    design (ii)'s "step-scoping alone is what makes the read tractable" is TRUE FOR CORRECTNESS AND
+    INSUFFICIENT FOR ERGONOMICS: a task-id or window narrowing, which design (ii) called a further
+    narrowing not required for correctness, is what this figure argues for on top of it.
+
+    (8) WHY A SUPERSEDED SIBLING EXISTED AT ALL, RECORDED SO NOBODY CONCLUDES A SWEEP FAILED.
+    **ONE BRIEF WAS ISSUED TWICE BY THE OPERATOR, ONCE WITH AN UNFILLED ID PLACEHOLDER**, so the
+    same defect was filed under two ids — W1-T2256 (#2789) and W1-T2257 (this one). BOTH SHARDS
+    SWEPT CLEAN ON ALL EIGHT SURFACES, AND CORRECTLY SO: the collision was UPSTREAM OF THE SWEEP,
+    in the brief, not in the plan. An id sweep answers "is this id used"; it cannot answer "has this
+    DEFECT already been filed under another id", and no surface it reads carries that question. The
+    duplicate-shard checks that could see it are `duplicateTitleViolations` (advisory, and blind to
+    a filing whose corpus has not yet landed) — so this is a gap in the brief-issuing path, not a
+    defect in the sweep, and the next reader should not spend time hardening the sweep against it.
+
+    (9) THE DENOMINATOR DISAGREEMENT IS EXPECTED AND WAS NAMED BY BOTH REPORTS. This shard read
+    188 tasks-with-a-PR on the live file and 442 over the union; the operator's reading of the same
+    shape was 361 and 392. Neither is wrong: the corpora differ (this host's `containment`-era
+    archives against the fleet host's) and the task population is defined differently (a `pr.opened`
+    row present in the corpus being read, versus a task list). BOTH FIGURES STAY RECORDED; the two
+    numbers that carry the finding — FULL is zero on both corpora, and the union collapses
+    entirely-null to one — agree exactly.
+
+    (10) AND THE ACCEPTANCE CRITERIA ARE UNCHANGED BY THIS AMENDMENT, DELIBERATELY. None of them
+    uses "a full receipt" as its bar, because `prompt_template_hash` is null on 442 of 442 and is a
+    withdrawn corpus-age field, so fixing BOTH defects would still not produce one on this corpus.
+    An amendment that added a full-receipt criterion would be adding a bar the task cannot clear for
+    a reason unrelated to the task. The determinism, no-fabrication and signing-out-of-scope pins in
+    design (iv) all stand unchanged.
+
+  design: |
+    (i) Q1 — READING THE UNION IS SAFE, AND ITS REFUSAL IS THE FEATURE. `resolveLedgerUnion` refuses
+    a partial corpus and returns `ok: false` on `archiveCount === 0`, so a receipt built on it
+    INHERITS THAT REFUSAL rather than silently emitting nulls that look like absence. That is
+    strictly better than today: the verb currently cannot tell "this run never emitted the row" from
+    "rotation archived it", and every leaf reads the same either way.
+
+    (ii) BUT THE COST IS REAL AND WAS MEASURED, NOT ESTIMATED. An UNSCOPED union read over 672
+    archives EXHAUSTED A 4 GB V8 HEAP and died `FATAL ERROR: Reached heap limit` before scoring a
+    single receipt. Scoped to the nine steps `buildReceipt` actually reads, the same union returns
+    5,589 rows and completes comfortably. **SO THE VERB MUST SCOPE THE UNION, AND THE SCOPE THAT IS
+    ALREADY CORRECT IS BY STEP** — the nine step names are derivable from the reader itself, so the
+    scope cannot drift from what the receipt needs. A task-id or window scope is a further
+    narrowing and is not required for correctness; step-scoping alone is what makes the read
+    tractable, and it is the one this task should take.
+
+    (iii) Q2 — FIXING THE READER ALONE MOVES NO RECEIPT FROM PARTIAL TO FULL, AND THIS SHARD SAYS SO
+    PLAINLY RATHER THAN IMPLYING THE UNION IS THE FIX. Measured: FULL is 0 on the live file and 0 on
+    the union. What the union DOES buy is the collapse of the entirely-null population from 75 to 1,
+    which is the difference between a receipt that says nothing and one that says most things —
+    real, and not the same as full. NEITHER DEFECT IS PREREQUISITE TO THE OTHER: they are
+    independent, one a reader and one a writer, and either can ship first. Fixing both still would
+    not reach FULL on this corpus, for the corpus-age reason in rationale (4) — which is an argument
+    for not making "a full receipt" the acceptance bar at all.
+
+    (iv) Q3 — WHAT MUST NOT CHANGE.
+      **THE MODULE NEVER FABRICATES.** Every leaf stays `{value}` or `{value: null, reason}` —
+      absent-with-reason, never defaulted, never guessed. A union read must widen what can be FOUND,
+      never what can be ASSUMED, and a leaf that is still absent after the widening must still say
+      why.
+      **DETERMINISM STAYS.** Same ledger in, byte-identical bytes out: no wall-clock, no random ids,
+      no generation timestamp. A union read is deterministic over a fixed corpus and must not
+      introduce an ordering that depends on filesystem enumeration.
+      **SIGNING IS OUT OF SCOPE AND ITS TEST STAYS TRUE.** `test/receipt.test.ts` asserts no
+      signature key exists on the receipt and no signing dependency landed; that must keep passing
+      untouched. THE UNBANKING TEST IS "a named consumer outside this repo reads a receipt and
+      rejects it for being unsigned", AND NO SUCH CONSUMER EXISTS — so signing is not deferred on
+      taste, it is unfalsifiable today.
+
+    (v) NOT IN SCOPE, NAMED: `prompt_template_hash` and `matched_ids`, both withdrawn in rationale
+    (5); the rotation policy itself, which is correct and bounded on purpose; `buildReceipt`'s leaf
+    set; and any receipt envelope, signature or version field.
+  acceptance:
+    - claim: "the verb reads a corpus rotation has not emptied"
+      proof: "unit test: test/receipt-reads-the-live-file.test.ts"
+    - claim: "a refused corpus read surfaces as a refusal rather than as absent leaves"
+      proof: "unit test: test/receipt-reads-the-live-file.test.ts"
+    - claim: "every pr opened emitter records the branch it opened"
+      proof: "unit test: test/receipt-reads-the-live-file.test.ts"
+    - claim: "a leaf still missing after the widened read keeps its own reason"
+      proof: "unit test: test/receipt-reads-the-live-file.test.ts"
+    - claim: "no leaf is defaulted or guessed by the widened read"
+      proof: "unit test: test/receipt-reads-the-live-file.test.ts"
+    - claim: "the same ledger still yields byte identical receipt bytes"
+      proof: "unit test: test/receipt-reads-the-live-file.test.ts"
+    - claim: "the receipt still carries no signature key"
+      proof: "unit test: test/receipt-reads-the-live-file.test.ts"
+  files: [src/lib/receipt.ts, test/receipt-reads-the-live-file.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#receipt-reads-the-rotated-file-2026-08-25"
+  plan_refs: ["W1-T71", "W1-T244", "W1-T1097"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so a source file and a test not named after it trip it at `medium`. `files:` is one
+    source file and one new test. NOTE THAT THE `pr.opened` EMITTERS LIVE IN `src/run-task.ts`,
+    WHICH IS DELIBERATELY NOT DECLARED: the writer fix is a separate concern from the reader fix
+    (design (iii) says neither is prerequisite to the other), and declaring a second source file
+    here would widen the scope past what one task should carry.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/receipt-reads-the-live-file.test.ts`, declared in `files:`, so on this filing PR it
+    resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL. `rmd check-proof` on the
+    declared path reads `exit: 1`, `hits: 0`, `verdict: fail`. The SAME verb on an EXISTING pure path
+    — `unit test: test/receipt.test.ts`, the test file for the very module this task changes — reads
+    `exit: 0`, `hits: 58`, `verdict: pass`. The control file was confirmed present BEFORE the
+    falsifier was believed.
+
+    THE FIGURES ARE RE-DERIVED, NOT ATTRIBUTED, BECAUSE THE UNION RESOLVED. `resolveLedgerUnion`
+    returned `ok: true` with 672 archives and the live file read, so the rail's refusal condition did
+    not apply here. Where this host's denominators differ from the operator's, both are recorded and
+    the difference is named rather than reconciled away.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND IS NOT RE-MINTED. This shard VERIFIES THE ID IS UNUSED
+    rather than that it is this account's, which is the condition that governs filing.
+
+    EIGHT SURFACES SWEPT FOR USAGE, EACH WITH A CONTROL PRE-QUALIFIED FOR ITS OWN SURFACE, AND THE
+    FETCHED REF COUNT VERIFIED AGAINST THE REMOTE FIRST (133 heads and 376 `refs/rmd-id/*` on origin,
+    133 and 376 fetched — MATCH, so a zero here is a real absence and not a short fetch). Shards on
+    main 0 (control W1-T2250 = 1); whole tree on main 0 (control 1); every origin ref 0 (control 3);
+    remote head names 0 (control, all heads read); commit messages on main 0 (control 1); merged-PR
+    trailers 0 read from squash-merge commit BODIES on main (control 585 trailers, W1-T1268
+    specifically 2); the 25 newest PR heads 0 (control W1-T2250 = 7). The reservation EXISTS, and
+    presence is not usage.
