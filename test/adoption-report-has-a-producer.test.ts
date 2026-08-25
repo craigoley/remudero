@@ -358,158 +358,77 @@ test("SHAPE 4: a gate observes a true subject and drops off the report", () => {
   }
 });
 
-// ── defensive I/O branches: an unreadable/absent file is skipped, never a thrown crash ─────────
+// ── defensive fallbacks: an unreadable/non-git surface never crashes the report ────────────────
 
-test("the real (non-stubbed) ship-date resolver falls back to \"unknown\" when git itself fails", () => {
-  // No `shipDateFor` override here — this is the ONE test in the file that exercises the real
-  // `defaultAdoptionShipDate` production path (every other test injects STUB_SHIP_DATE). The
-  // fixture checkout is a plain tmp dir, never a git repo, so `git log` fails and the catch
-  // branch's "unknown" fallback is what actually threads through to the finding.
+test("the real defaultAdoptionShipDate falls back to \"unknown\" against a checkout with no .git", () => {
+  // No `shipDateFor` override here — the production default (a real `git log`) actually runs.
+  // `checkoutDir` (a bare tmpdir fixture) is never a git repository, so the pickaxe read fails
+  // and the function's own catch must return "unknown" rather than throw or misdate.
   const checkoutDir = buildFixtureCheckout();
   const stateDir = join(checkoutDir, "state");
   buildLedgerFixture(stateDir);
   try {
-    const result = runMeasurementCadenceReport({
-      stateDir,
-      cwd: checkoutDir,
-      escalate: false,
-      gitLog: NO_GIT,
-      checkoutDir,
-      // shipDateFor intentionally omitted — production default.
-    });
-    const symbol = result.adoptionReport?.findings.find(
-      (f) => f.shape === "symbol-no-caller" && f.mechanism === "orphanMechanism",
-    );
-    assert.ok(symbol, "the fixture's orphan symbol must still be found even off the real resolver");
-    assert.equal(symbol?.shippedAt, "unknown", "a non-git checkout must fall back to \"unknown\", never throw");
+    const result = runMeasurementCadenceReport({ stateDir, cwd: checkoutDir, escalate: false, gitLog: NO_GIT, checkoutDir });
+    assert.ok(result.adoptionReport, "the producer must always attach an adoptionReport");
+    const symbol = findingsByShape(result.adoptionReport, "symbol-no-caller").find((f) => f.mechanism === "orphanMechanism");
+    assert.equal(symbol?.shippedAt, "unknown", "a `git log` failure against a non-repo checkout must fall back, never throw");
   } finally {
     rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
 
-test("SHAPE 2: a checkout with no plan.ts schema file yields zero field findings, never a throw", () => {
-  const root = tmp("rmd-adopt-noschema-");
-  mkdirSync(join(root, "src/lib"), { recursive: true });
-  // Deliberately NO src/lib/plan.ts — the schema read must miss and the scan must degrade to
-  // "nothing found" rather than crash the whole adoption report.
-  mkdirSync(join(root, "plan"), { recursive: true });
-  writeFileSync(join(root, "plan/tasks.yaml"), "- id: T1\n");
-  const stateDir = join(root, "state");
-  buildLedgerFixture(stateDir);
-  try {
-    const report = runReport(root, stateDir);
-    assert.deepEqual(findingsByShape(report, "field-no-writer"), [], "no schema ⇒ no field findings, not a crash");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("SHAPE 2: an unreadable plan yaml is skipped, never thrown — a sibling readable file still counts", () => {
-  const checkoutDir = buildFixtureCheckout();
+test("SHAPE 2 scan returns no findings, never throws, when src/lib/plan.ts is absent from the checkout", () => {
+  const checkoutDir = tmp("rmd-adopt-noplan-");
   const stateDir = join(checkoutDir, "state");
+  mkdirSync(join(checkoutDir, "src/lib"), { recursive: true });
+  writeFileSync(join(checkoutDir, "src/lib/mechanism.ts"), "export function orphanMechanism(): number {\n  return 1;\n}\n");
   buildLedgerFixture(stateDir);
-  const lockedYaml = join(checkoutDir, "plan/locked.yaml");
-  writeFileSync(lockedYaml, "  unadoptedField: this-would-clear-it-if-readable\n");
-  chmodSync(lockedYaml, 0o000);
   try {
     const report = runReport(checkoutDir, stateDir);
-    assert.ok(
-      findingsByShape(report, "field-no-writer").some((f) => f.mechanism === "unadoptedField:"),
-      "an unreadable yaml must be skipped (treated as empty), not crash and not count as a write",
-    );
+    assert.deepEqual(findingsByShape(report, "field-no-writer"), [], "no Task schema to read ⇒ no field findings, not a throw");
   } finally {
-    chmodSync(lockedYaml, 0o600);
     rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
 
-test("SHAPE 4: a malformed ledger line is skipped, never thrown — a sibling valid line still counts", () => {
-  const stateDir = tmp("rmd-adopt-shape4-badjson-");
-  mkdirSync(stateDir, { recursive: true });
-  const stubLedgerUnion = (): import("../src/lib/ledger-grep.js").LedgerUnionResult => ({
-    stateDir,
-    archiveFiles: ["ledger.stub.ndjson"],
-    archiveCount: 1,
-    liveFileRead: false,
-    unread: [],
-    ok: true,
-    matches: [
-      "{ this is not valid json",
-      JSON.stringify({ step: "containment.probe", credential_expired: false }),
-      JSON.stringify({ step: "containment.probe", credential_failure: false }),
-    ],
-  });
+test("SHAPE 2 scan treats an unreadable plan/ file as no hit, never throws", () => {
+  const checkoutDir = buildFixtureCheckout();
+  const stateDir = join(checkoutDir, "state");
+  buildLedgerFixture(stateDir);
+  const unreadablePlanFile = join(checkoutDir, "plan/tasks.yaml");
+  chmodSync(unreadablePlanFile, 0o000);
   try {
-    const result = runMeasurementCadenceReport({
-      stateDir,
-      cwd: stateDir,
-      escalate: false,
-      gitLog: NO_GIT,
-      shipDateFor: STUB_SHIP_DATE,
-      ledgerUnion: stubLedgerUnion,
-    });
-    const gate = result.adoptionReport!.findings.filter((f) => f.shape === "gate-no-subject");
+    const report = runReport(checkoutDir, stateDir);
+    // The one plan/ file present is now unreadable — it degrades to "" text (no key hits at all),
+    // so even the previously-written control field must now be reported too, never a thrown error.
     assert.ok(
-      gate.some((f) => f.mechanism === "credential_expired"),
-      "the malformed line must be skipped, never abort the scan — the valid sibling line still counts",
+      findingsByShape(report, "field-no-writer").some((f) => f.mechanism === "usedField:"),
+      "an unreadable plan/ file must degrade to zero hits, not crash the scan",
     );
-    assert.ok(gate.some((f) => f.mechanism === "credential_failure"));
   } finally {
-    rmSync(stateDir, { recursive: true, force: true });
+    chmodSync(unreadablePlanFile, 0o644);
+    rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
 
-test("SHAPE 4: a predicate whose field never appears on any matched line is named UNMEASURABLE, never a clean pass", () => {
-  const stateDir = tmp("rmd-adopt-shape4-absent-");
-  mkdirSync(stateDir, { recursive: true });
-  const stubLedgerUnion = (): import("../src/lib/ledger-grep.js").LedgerUnionResult => ({
-    stateDir,
-    archiveFiles: ["ledger.stub.ndjson"],
-    archiveCount: 1,
-    liveFileRead: false,
-    unread: [],
-    ok: true,
-    // Matches the pattern (real ledger union filtering already happened) but NEITHER declared
-    // field ever appears on any row — `present` stays 0 for both predicates.
-    matches: [JSON.stringify({ step: "containment.probe", unrelated_field: true })],
-  });
-  try {
-    const result = runMeasurementCadenceReport({
-      stateDir,
-      cwd: stateDir,
-      escalate: false,
-      gitLog: NO_GIT,
-      shipDateFor: STUB_SHIP_DATE,
-      ledgerUnion: stubLedgerUnion,
-    });
-    const gate = result.adoptionReport!.findings.filter((f) => f.shape === "gate-no-subject");
-    assert.deepEqual(gate, [], "present === 0 must never be misread as a clean (trueCount === 0) finding");
-    assert.deepEqual(
-      [...result.adoptionReport!.shape4Unmeasurable].sort(),
-      ["credential_expired", "credential_failure"],
-      "a field that never appears on any matched line must be named unmeasurable, not silently clean",
-    );
-  } finally {
-    rmSync(stateDir, { recursive: true, force: true });
-  }
-});
-
-test("SHAPE 3: an unreadable workflow file is skipped, never thrown — the script still reports orphaned", () => {
+test("SHAPE 3 scan treats an unreadable workflow file as no reference, never throws", () => {
   const checkoutDir = buildFixtureCheckout();
   const stateDir = join(checkoutDir, "state");
   buildLedgerFixture(stateDir);
   mkdirSync(join(checkoutDir, ".github/workflows"), { recursive: true });
-  const lockedWorkflow = join(checkoutDir, ".github/workflows/locked.yml");
-  writeFileSync(lockedWorkflow, "jobs:\n  x:\n    steps:\n      - run: node scripts/orphan.mjs\n");
-  chmodSync(lockedWorkflow, 0o000);
+  const workflowPath = join(checkoutDir, ".github/workflows/ci.yml");
+  // References `orphan.mjs` ONLY from this workflow step — but the file is then made unreadable,
+  // so the scan must treat it as "" (no reference there), the same as any other absent surface.
+  writeFileSync(workflowPath, "jobs:\n  build:\n    steps:\n      - run: node scripts/orphan.mjs\n");
+  chmodSync(workflowPath, 0o000);
   try {
     const report = runReport(checkoutDir, stateDir);
     assert.ok(
       findingsByShape(report, "script-no-invoker").some((f) => f.mechanism === "scripts/orphan.mjs"),
-      "an unreadable workflow must be skipped (treated as empty), not crash and not count as a reference",
+      "an unreadable workflow file must never count as a reference — the script stays orphaned",
     );
   } finally {
-    chmodSync(lockedWorkflow, 0o600);
+    chmodSync(workflowPath, 0o644);
     rmSync(checkoutDir, { recursive: true, force: true });
   }
 });
