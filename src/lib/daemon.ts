@@ -2925,10 +2925,22 @@ export async function runDaemon(
     // RETRO CADENCE TRIGGER (W1-T160): evaluated once per tick, AFTER headroom (an
     // automated retro spawns a real, budget-costing Architect run — the same class of
     // spend headroom exists to gate, so a fired retro under a near-exhausted pool waits
-    // like any other dispatch would) and BEFORE the normal task-dispatch pick, so a
-    // fired retro this tick displaces dispatch for the tick rather than racing it.
+    // like any other dispatch would) and BEFORE the normal task-dispatch pick.
     // Best-effort: a caught error costs one logged tick, never the daemon's life (same
     // discipline as deps.sweep/deps.sweepOrphans above).
+    //
+    // W1-T2265: NO `sleep(pollIntervalMs)`/`continue` here, DELIBERATELY, unlike the
+    // pause/headroom/cost-and-queue-governor gates above. Those three exist to REFUSE a
+    // dispatch and must keep their poll-and-retry shape (task rationale, "what must not
+    // change"). The retro gates nothing — W1-T276's ruling that it stays BLOCKING (a bare
+    // `await`, still wrapped in `sweepLightDuringRetro` so the light sweep keeps ticking
+    // while it runs) is unchanged below — it only ever DELAYED reaching dispatch, by
+    // costing a full poll interval before the next attempt even when this same tick's
+    // `dispatchSet` (computed further down) would otherwise have had work to admit.
+    // Falling through here — instead of restarting the loop — lets a tick that fires the
+    // retro still reach dispatch selection/admission/`runOne` below, on the SAME tick,
+    // with no invented reordering of the rungs still above this point (pause, freshness,
+    // headroom, the cost/queue governor) and no change to any of their own gates.
     if (deps.checkRetroTrigger) {
       let decision: RetroTriggerDecision | undefined;
       try {
@@ -2962,9 +2974,6 @@ export async function runDaemon(
             log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
           }
         }
-        ticks++;
-        await deps.sleep(pollIntervalMs);
-        continue;
       }
     }
 
