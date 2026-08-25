@@ -704,6 +704,215 @@ export function assertArchitectAboveWorker(architectModel: string, workerModel: 
   }
 }
 
+// ── G-17 evidence (W1-T2239): the ARCHITECT-LANE SHARE OF SPEND, measured ──
+//
+// MASTER-PLAN §9 gives G-17 TWO reasons: a ratification-authority half (the
+// Architect adjudicates a worker's output, so it must outrank what it
+// reviews — untouched by anything below) and a CAPABILITY half (a
+// higher-tier model authors better harness text) that this repo has never
+// measured against its own ledger. This section is that measurement, laid
+// beside {@link aggregateByClass}'s per-class routing data — an INPUT to the
+// retro's own re-examination, never a change to the invariant: {@link
+// assertArchitectAboveWorker} above still throws unconditionally, and no
+// `.remudero/mounts.yaml` row or `config.architectModel` is read, let alone
+// written, by anything here.
+//
+// The four Architect-tier authoring lanes (src/run-task.ts call sites of
+// assertArchitectAboveWorker) and the two comparison lanes (the implement
+// worker and the advisory reviewer) are identified by the ONE ledger `step`
+// name each writes on its terminal/telemetry line — the same discipline
+// every other miner in this file uses (DONE_STEPS, REPLAY_RESULT_STEP, …).
+
+const ARCHITECT_LANE_STEPS: Readonly<Record<string, string>> = {
+  retro: "retro.synthesized",
+  triage: "triage.synthesized",
+  plan: "plan.synthesized",
+  inbox_draft: "inbox.draft_synthesized",
+};
+
+/** Non-Architect lanes reported for SCALE ONLY — "share of what" needs a
+ *  denominator, and these are the two lanes whose spend the Architect lanes
+ *  actually sit beside (the implement worker G-17 says the Architect must
+ *  outrank, and the advisory reviewer, itself out of this shard's scope but
+ *  already the dominant non-implement cost). */
+const COMPARISON_LANE_STEPS: Readonly<Record<string, string>> = {
+  implement: "verdict",
+  reviewer: "review.reviewer",
+};
+
+/** The bucket a row with no `model` key reports under — NEVER folded into a
+ *  real model's count, so a corpus that is mostly unattributed (the rationale's
+ *  451-of-613 `verdict` rows) reads as unattributed rather than as a silent
+ *  majority for whichever model happened to be read first. */
+export const UNATTRIBUTED_MODEL = "unattributed";
+
+/** One model's row-count within a single lane (see {@link UNATTRIBUTED_MODEL}). */
+export interface LaneModelShare {
+  model: string;
+  rows: number;
+}
+
+/** One lane's measured spend — rows, NOTIONAL (never billed) cost, the newest
+ *  row it saw, and its model attribution. */
+export interface LaneSpend {
+  lane: string;
+  step: string;
+  rows: number;
+  /** Sum of each row's `cost_usd` (falling back to `total_cost_usd`, the same
+   *  precedence {@link gatherRuns}'s `costLine` uses) — NOTIONAL / API-equivalent
+   *  price on a subscription install, never billed spend (MASTER-PLAN's own
+   *  cost semantics; see {@link ModelClassWeeklyBurn}'s doc for the same caveat). */
+  costUsd: number;
+  /** The most recent `ts` this lane's rows carried — absent only when the lane
+   *  logged zero rows in the corpus this ran over. */
+  newestTs?: string;
+  models: LaneModelShare[];
+}
+
+/** `r.cost_usd`, falling back to `r.total_cost_usd` — the SAME precedence
+ *  {@link gatherRuns}'s `costLine` already uses, so this reads the identical
+ *  notional figure the per-type/per-class tables above are built from. */
+function costOf(r: LedgerRecord): number {
+  if (typeof r.cost_usd === "number") return r.cost_usd;
+  if (typeof r.total_cost_usd === "number") return r.total_cost_usd;
+  return 0;
+}
+
+function laneSpendOf(lane: string, step: string, rows: LedgerRecord[]): LaneSpend {
+  const models = new Map<string, number>();
+  let newestTs: string | undefined;
+  for (const r of rows) {
+    const model = typeof r.model === "string" && r.model.length > 0 ? r.model : UNATTRIBUTED_MODEL;
+    models.set(model, (models.get(model) ?? 0) + 1);
+    if (typeof r.ts === "string" && (newestTs === undefined || r.ts > newestTs)) newestTs = r.ts;
+  }
+  return {
+    lane,
+    step,
+    rows: rows.length,
+    costUsd: round(rows.reduce((s, r) => s + costOf(r), 0)),
+    ...(newestTs !== undefined ? { newestTs } : {}),
+    models: [...models.entries()]
+      .map(([model, n]) => ({ model, rows: n }))
+      .sort((a, b) => (a.model < b.model ? -1 : a.model > b.model ? 1 : 0)),
+  };
+}
+
+/** The whole G-17-evidence gather: the four Architect lanes, the two
+ *  comparison lanes, the Architect lanes' combined share of the measured
+ *  total, and the WINDOW (oldest → newest `ts` seen across every lane below)
+ *  so a stale corpus cannot read as a current share. */
+export interface ArchitectLaneShareReport {
+  architectLanes: LaneSpend[];
+  comparisonLanes: LaneSpend[];
+  architectRows: number;
+  /** NOTIONAL / API-equivalent — see {@link LaneSpend.costUsd}. */
+  architectCostUsd: number;
+  totalRows: number;
+  /** NOTIONAL / API-equivalent — see {@link LaneSpend.costUsd}. */
+  totalCostUsd: number;
+  /** `architectCostUsd / totalCostUsd`; `0` when the measured total is $0
+   *  (an empty corpus, not a divide-by-zero). */
+  shareOfSpend: number;
+  windowStartTs?: string;
+  windowEndTs?: string;
+}
+
+/**
+ * Measure the Architect-lane share of spend over `records` — a PURE reduction,
+ * exactly like every other miner in this file (never touches `.remudero/mounts.yaml`,
+ * `config`, or any file: it takes ONLY the already-parsed ledger records `buildGather`
+ * hands it, the same corpus {@link aggregateByType}/{@link aggregateByClass} read).
+ * Single pass over `records`: each row is bucketed by its `step` into at most one
+ * of the six named lanes (an unrecognized step contributes to none of them).
+ */
+export function architectLaneShare(records: LedgerRecord[]): ArchitectLaneShareReport {
+  const laneOfStep = new Map<string, string>();
+  for (const [lane, step] of Object.entries(ARCHITECT_LANE_STEPS)) laneOfStep.set(step, lane);
+  for (const [lane, step] of Object.entries(COMPARISON_LANE_STEPS)) laneOfStep.set(step, lane);
+
+  const rowsByLane = new Map<string, LedgerRecord[]>();
+  for (const lane of laneOfStep.values()) rowsByLane.set(lane, []);
+  let windowStartTs: string | undefined;
+  let windowEndTs: string | undefined;
+  for (const r of records) {
+    const lane = typeof r.step === "string" ? laneOfStep.get(r.step) : undefined;
+    if (!lane) continue;
+    rowsByLane.get(lane)!.push(r);
+    if (typeof r.ts === "string") {
+      if (windowStartTs === undefined || r.ts < windowStartTs) windowStartTs = r.ts;
+      if (windowEndTs === undefined || r.ts > windowEndTs) windowEndTs = r.ts;
+    }
+  }
+
+  const architectLanes = Object.entries(ARCHITECT_LANE_STEPS).map(([lane, step]) =>
+    laneSpendOf(lane, step, rowsByLane.get(lane) ?? []),
+  );
+  const comparisonLanes = Object.entries(COMPARISON_LANE_STEPS).map(([lane, step]) =>
+    laneSpendOf(lane, step, rowsByLane.get(lane) ?? []),
+  );
+  const allLanes = [...architectLanes, ...comparisonLanes];
+  const architectRows = architectLanes.reduce((s, l) => s + l.rows, 0);
+  const architectCostUsd = round(architectLanes.reduce((s, l) => s + l.costUsd, 0));
+  const totalRows = allLanes.reduce((s, l) => s + l.rows, 0);
+  const totalCostUsd = round(allLanes.reduce((s, l) => s + l.costUsd, 0));
+  return {
+    architectLanes,
+    comparisonLanes,
+    architectRows,
+    architectCostUsd,
+    totalRows,
+    totalCostUsd,
+    shareOfSpend: totalCostUsd === 0 ? 0 : round(architectCostUsd / totalCostUsd),
+    ...(windowStartTs !== undefined ? { windowStartTs } : {}),
+    ...(windowEndTs !== undefined ? { windowEndTs } : {}),
+  };
+}
+
+/** Render one {@link ArchitectLaneShareReport} lane row (markdown table body). */
+function laneSpendRow(l: LaneSpend): string {
+  const models = l.models.length ? l.models.map((m) => `${m.model}×${m.rows}`).join(", ") : "(no rows)";
+  return `| ${l.lane} (\`${l.step}\`) | ${l.rows} | $${l.costUsd.toFixed(2)} | ${l.newestTs ?? "(none)"} | ${models} |`;
+}
+
+/** Render the lane table (markdown) — Architect lanes first, then the two
+ *  comparison lanes, in the SAME row shape so the share is legible at a glance. */
+export function architectLaneShareTable(g: ArchitectLaneShareReport): string {
+  return [
+    "| lane (`step`) | rows | notional $ (api-equivalent, NOT billed) | newest row | models (unattributed = no `model` key) |",
+    "|---|---|---|---|---|",
+    ...g.architectLanes.map(laneSpendRow),
+    ...g.comparisonLanes.map(laneSpendRow),
+  ].join("\n");
+}
+
+/** Render the full G-17-evidence section — printed beside the per-class
+ *  calibration table in {@link renderGather} (W1-T2239's own acceptance:
+ *  "the retro gather reports the architect-lane share of spend beside the
+ *  per-class routing data it already collects"). */
+export function renderArchitectLaneShare(g: ArchitectLaneShareReport): string {
+  const windowLine =
+    g.windowStartTs !== undefined && g.windowEndTs !== undefined
+      ? `Window covered: ${g.windowStartTs} → ${g.windowEndTs} · newest row seen: ${g.windowEndTs} — ` +
+        `a corpus this stale reads as a HISTORICAL share, never a current one.`
+      : "Window covered: (no rows in any of the six lanes below) — no window, no share to trust.";
+  return [
+    "## G-17 Architect-lane share of spend (W1-T2239 — evidence for the capability half, not a tier move)",
+    "MASTER-PLAN §9's ratification-authority half of G-17 is unaffected by anything below; this " +
+      "measures ONLY the capability half (a higher-tier Architect authors better harness text), " +
+      "which this repo has never tested against its own ledger. `assertArchitectAboveWorker` keeps " +
+      "throwing on a same-or-lower-tier Architect regardless of this number, and no mount row moves.",
+    windowLine,
+    `Architect lanes (retro + triage + plan + inbox-draft): ${g.architectRows} rows, ` +
+      `$${g.architectCostUsd.toFixed(2)} notional — ${(g.shareOfSpend * 100).toFixed(1)}% of the ` +
+      `${g.totalRows}-row / $${g.totalCostUsd.toFixed(2)}-notional measured total below.`,
+    "Every $ figure on this table is NOTIONAL / API-EQUIVALENT price on a subscription install " +
+      "(MASTER-PLAN's own cost semantics) — never billed spend.",
+    "",
+    architectLaneShareTable(g),
+  ].join("\n");
+}
+
 // ── The full gather + its rendering ───────────────────────────────────────
 
 // ── MAST-coded verdicts (W1-T89, ratifies P18's mineable core) ─────────────
@@ -1351,6 +1560,13 @@ export interface RetroGather {
   /** W1-T165: the golden-task replay pass-rate FOR THIS CYCLE (`sinceTs`-scoped, unlike
    *  `mutationGateLifetime` above — see {@link replayPassRateForCycle}'s doc for why). */
   replay: ReplayCalibration;
+  /** W1-T2239: the G-17 Architect-lane share of spend, evidence for the tier
+   *  invariant's capability rationale — computed over the FULL `records` (never
+   *  `scoped`), the SAME "a figure truncated to one retro cycle is not the
+   *  figure asked for" reasoning {@link mutationGateLifetime} above already
+   *  uses, because a stale-corpus HISTORICAL share is still what this asks for
+   *  (see {@link ArchitectLaneShareReport.windowStartTs}/`windowEndTs`). */
+  architectLaneShare: ArchitectLaneShareReport;
 }
 
 /**
@@ -1479,6 +1695,9 @@ export function buildGather(opts: {
     // immediately above — see `replayPassRateForCycle`'s doc for why a per-cycle figure is what
     // the task's own proof asks for.
     replay: replayPassRateForCycle(records, opts.sinceTs),
+    // W1-T2239: FULL `records`, same reasoning as `mutationGateLifetime` above — a
+    // measurement of the fleet's own allocation must not truncate to the marker window.
+    architectLaneShare: architectLaneShare(records),
   };
 }
 
@@ -1578,6 +1797,8 @@ export function renderGather(g: RetroGather): string {
     "",
     "## Calibration (BY TASK CLASS, W1-T167) — is the docs/plan-lint routing discount paying off",
     classCalibrationTable(g.byClass),
+    "",
+    renderArchitectLaneShare(g.architectLaneShare),
     "",
     renderReplayCalibration(g.replay),
     "",
