@@ -65,6 +65,49 @@
     HEAD. W1-T71 shipped 2026-08-20 and this corpus's newest relevant rows land 2026-08-12 to
     2026-08-14, so their zeros are CORPUS AGE, NOT DEFECTS. They are named here because they are the
     two leaves most likely to be re-discovered as bugs by the next reader of the numbers above.
+    ── ADDED 2026-08-25, RATIONALE ONLY. THE SUPERSEDED SIBLING'S COST FIGURE, AND WHY IT EXISTED ──
+
+    (6) THE WALL-CLOCK COST OF THE STEP-SCOPED READ, CARRIED FROM #2789 AND ATTRIBUTED. #2789 filed
+    this same defect under W1-T2256 and was CLOSED UNMERGED as superseded by this shard. Before it
+    closed it measured what this shard did not: **9,101 ms per union read, and 79,145 ms across the
+    nine steps a receipt needs, over roughly 150 MB.** THAT IS THE OPERATOR'S MEASUREMENT, NOT
+    RE-DERIVED HERE — no timing run was made for this amendment, and the figure is recorded as
+    attributed so a later reader does not mistake it for this host's own.
+
+    (7) AND IT IS COMPLEMENTARY TO RATIONALE (2)/(design ii), NOT A REPEAT OF THEM. This shard
+    measured the SHAPE of the read: unscoped dies on a 4 GB heap, step-scoped completes. #2789
+    measured its DURATION: step-scoped completes in about eighty seconds. Together they say the
+    thing neither says alone — **THE SCOPE IS NOT OPTIONAL AND THE SCOPED READ IS STILL SLOW.** A
+    verb an operator types about one PR should not spend eighty seconds re-reading 672 archives, so
+    design (ii)'s "step-scoping alone is what makes the read tractable" is TRUE FOR CORRECTNESS AND
+    INSUFFICIENT FOR ERGONOMICS: a task-id or window narrowing, which design (ii) called a further
+    narrowing not required for correctness, is what this figure argues for on top of it.
+
+    (8) WHY A SUPERSEDED SIBLING EXISTED AT ALL, RECORDED SO NOBODY CONCLUDES A SWEEP FAILED.
+    **ONE BRIEF WAS ISSUED TWICE BY THE OPERATOR, ONCE WITH AN UNFILLED ID PLACEHOLDER**, so the
+    same defect was filed under two ids — W1-T2256 (#2789) and W1-T2257 (this one). BOTH SHARDS
+    SWEPT CLEAN ON ALL EIGHT SURFACES, AND CORRECTLY SO: the collision was UPSTREAM OF THE SWEEP,
+    in the brief, not in the plan. An id sweep answers "is this id used"; it cannot answer "has this
+    DEFECT already been filed under another id", and no surface it reads carries that question. The
+    duplicate-shard checks that could see it are `duplicateTitleViolations` (advisory, and blind to
+    a filing whose corpus has not yet landed) — so this is a gap in the brief-issuing path, not a
+    defect in the sweep, and the next reader should not spend time hardening the sweep against it.
+
+    (9) THE DENOMINATOR DISAGREEMENT IS EXPECTED AND WAS NAMED BY BOTH REPORTS. This shard read
+    188 tasks-with-a-PR on the live file and 442 over the union; the operator's reading of the same
+    shape was 361 and 392. Neither is wrong: the corpora differ (this host's `containment`-era
+    archives against the fleet host's) and the task population is defined differently (a `pr.opened`
+    row present in the corpus being read, versus a task list). BOTH FIGURES STAY RECORDED; the two
+    numbers that carry the finding — FULL is zero on both corpora, and the union collapses
+    entirely-null to one — agree exactly.
+
+    (10) AND THE ACCEPTANCE CRITERIA ARE UNCHANGED BY THIS AMENDMENT, DELIBERATELY. None of them
+    uses "a full receipt" as its bar, because `prompt_template_hash` is null on 442 of 442 and is a
+    withdrawn corpus-age field, so fixing BOTH defects would still not produce one on this corpus.
+    An amendment that added a full-receipt criterion would be adding a bar the task cannot clear for
+    a reason unrelated to the task. The determinism, no-fabrication and signing-out-of-scope pins in
+    design (iv) all stand unchanged.
+
   design: |
     (i) Q1 — READING THE UNION IS SAFE, AND ITS REFUSAL IS THE FEATURE. `resolveLedgerUnion` refuses
     a partial corpus and returns `ok: false` on `archiveCount === 0`, so a receipt built on it
