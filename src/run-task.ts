@@ -5837,6 +5837,14 @@ export function fixRebaseMergeFactsFromRest(
  * function exists to reach. Best-effort: a `ps`/kill hiccup here costs nothing more than the
  * process staying alive for a LATER orphan sweep to find once its run truly ends — it never
  * throws back into the rung that already ledgered the abandonment (`fix.spawn_abandoned`).
+ *
+ * W1-T2261: a no-match run and a kill are now LEDGERED DISTINCTLY (`fix.spawn_reclaimed` per
+ * killed candidate vs. `fix.spawn_reclaim_no_match` once, when nothing matched) — before this,
+ * both were silent (the whole loop swallowed by the `try`/`catch` below), so the abandon line
+ * an operator saw was identical whether the worker actually died or quietly kept running. This
+ * closes half of that: the OTHER half was `fixArgs` (this file) never setting the markers this
+ * function matches on in the first place, so `readMarkers` always read `undefined` and the loop
+ * matched nothing on every real abandonment — see `fixArgs`'s own W1-T2261 note.
  */
 export function reclaimAbandonedWorker(
   info: { runId: string; taskId: string; elapsedMs: number },
@@ -5850,15 +5858,30 @@ export function reclaimAbandonedWorker(
     listCandidates?: typeof defaultListCandidates;
     readMarkers?: typeof defaultReadMarkers;
     kill?: typeof killProcessGroup;
+    /** W1-T2261: optional ledger sink — omitted (every pre-existing test) ⇒ no log call, byte-
+     *  identical to before this task. Both real call sites (`runTaskBody` and `buildSweepEffects`'s
+     *  `reclaimWorkerImpl` default) now bind this to the SAME `log` the rung/sweep already writes
+     *  `fix.spawn_abandoned`/`fix.spawn_reclaim_failed` through, so the three lines land in one
+     *  ledger stream. */
+    log?: (step: string, extra?: Record<string, unknown>) => void;
   } = {},
 ): void {
   const listCandidates = deps.listCandidates ?? defaultListCandidates;
   const readMarkers = deps.readMarkers ?? defaultReadMarkers;
   const kill = deps.kill ?? killProcessGroup;
+  const log = deps.log ?? (() => {});
   try {
+    let matched = false;
     for (const candidate of listCandidates()) {
       const markers = readMarkers(candidate.pid);
-      if (markers?.runId === info.runId) kill(candidate.pid);
+      if (markers?.runId === info.runId) {
+        matched = true;
+        kill(candidate.pid);
+        log("fix.spawn_reclaimed", { run_id: info.runId, task_id: info.taskId, pid: candidate.pid, elapsed_ms: info.elapsedMs });
+      }
+    }
+    if (!matched) {
+      log("fix.spawn_reclaim_no_match", { run_id: info.runId, task_id: info.taskId, elapsed_ms: info.elapsedMs });
     }
   } catch {
     /* best-effort — see doc above */
@@ -6799,6 +6822,14 @@ export async function runFixRung(opts: {
       // prompt-injection payload riding in that log can't reach the
       // network via WebFetch/WebSearch.
       tools: FIX_WORKER_TOOLS,
+      // W1-T2261: the attribution markers `reclaimAbandonedWorker` later matches an abandoned
+      // spawn's live process against (worker.ts's `workerMarkerEnv` merges these into the
+      // child's env as REMUDERO_RUN_ID/REMUDERO_TASK_ID). Omitting them — the defect this
+      // closes — left `defaultReadMarkers` reading `undefined` for every candidate, so
+      // `markers?.runId === info.runId` could never match and the reclaim kill never fired on
+      // the one process it exists to stop.
+      runId: opts.runId,
+      taskId: opts.taskId,
     };
 
     let fixResult: WorkerResult;
@@ -9966,7 +9997,12 @@ async function runTask(
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
           spawnWallClockBoundMs: opts.spawnWallClockBoundMs ?? loadDefaultPolicy().values.fixSpawnWallClockBoundMs,
-          reclaimWorker: reclaimAbandonedWorker,
+          // W1-T2261: binds this rung's OWN `log` through so a match/no-match reclaim outcome
+          // (`fix.spawn_reclaimed`/`fix.spawn_reclaim_no_match`) lands in the same ledger stream
+          // as `fix.spawn_abandoned` — the bare function reference below this before this task
+          // reached `reclaimAbandonedWorker`'s default no-op log, so neither outcome was ever
+          // recorded, only inferred from the process table staying quiet.
+          reclaimWorker: (info) => reclaimAbandonedWorker(info, { log: (s, extra) => log(s, extra) }),
           // W1-T1284: the pre-strike UNCHANGED-TREE check's live worktree reader — three LOCAL
           // git reads against this rung's own checkout, never the PR's remote head.
           captureWorktreeSnapshot: captureWorktreeSnapshotViaGit,
@@ -21688,7 +21724,13 @@ export function buildSweepEffects(
   // (the real process-group kill, scoped by this run's own `REMUDERO_RUN_ID` marker); a test
   // overrides it with a recorder so the abandon-then-reclaim sequence is provable without a
   // real spawned process.
-  reclaimWorkerImpl: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void> = reclaimAbandonedWorker,
+  // W1-T2261: the default now binds THIS function's own `log` param (param 7, above) through —
+  // the bare `reclaimAbandonedWorker` reference this replaced left every match/no-match outcome
+  // silently swallowed by that function's own no-op default, on the ONE call site the measured
+  // incident actually hit (this doc's own W1-T1044 comment). A test overriding this parameter
+  // still receives its own recorder unchanged; only the PRODUCTION default gained a ledger sink.
+  reclaimWorkerImpl: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void> = (info) =>
+    reclaimAbandonedWorker(info, { log }),
   // W1-T1000002 — appended LAST, the same convention every dep above follows. Default is the
   // real `disarmAutoMerge` (a live `gh pr merge --disable-auto`), so production wiring is
   // unchanged; a test overrides it with a recorder so the sweep's converging withdrawal (design
