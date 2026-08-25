@@ -1,0 +1,168 @@
+- id: W1-T2254
+  title: "RULE 21 GUARDS ONE FIELD AND EVERY OTHER FIELD OF A MERGED SHARD IS EDITABLE, INCLUDING A PROOF — `postMergeAmendmentViolations` reads `ctx.statusResolvable`, `ctx.merged`, `ctx.baseAcceptance`, `task.acceptance` and `ctx.followUpFiled` and nothing else, so all twenty-one other fields escape untouched, a merged criterion can be DELETED without a word, and the executable half of a criterion can be swapped for a weaker one because `criteriaAdded` compares claims and never proofs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/merged-shard-field-tamper.test.ts]
+  origin: oper#rule-21-guards-one-field-2026-08-25
+  plan_refs: ["W1-T15", "W1-T171", "W1-T180", "W1-T1287", "W1-T2248"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main 8522ea47 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS. EVERY STEP NAME WAS GREPPED OUT OF
+    SOURCE AS A LITERAL BEFORE IT WAS QUERIED. LEDGER FIGURES FROM `resolveLedgerUnion` AT THE
+    STATE DIR: archiveCount 24, liveFileRead true, ok true, unread none; window
+    2026-08-08T21:59:00.337Z .. 2026-08-25T00:07:06.947Z. Newest row per step: `lint.blocked` n=3
+    newest 2026-08-10T12:14:23.848Z; `verdict.merged` n=635 newest 2026-08-24T23:22:52.482Z;
+    `run.start` n=412 newest 2026-08-25T00:07:06.947Z. `lint.warned`, `plan.verdict`,
+    `plan.start`, `plan.id_minted` and `plan.relint_refused` all read ZERO against those non-zero
+    siblings on the same union, and the linter itself appends no ledger line at all, so there is
+    no step that records a post-merge amendment refusal.
+
+    (1) THE GUARD'S WHOLE READ SURFACE, FROM SOURCE. `postMergeAmendmentViolations`
+    (`src/lib/task-linter.ts:1329-1347`) consults `ctx.statusResolvable`, `ctx.merged`,
+    `ctx.baseAcceptance`, `task.acceptance` and `ctx.followUpFiled`, AND NOTHING ELSE. The five
+    other `.status` hits in that file are unrelated: link resolution at `:1175` and `:1191`, and
+    `NON_OPEN_FILING_STATUSES` at `:1567`, `:1648` and `:1653`, which are filing-time checks on
+    an OPEN task. Controls in the same file: `criterionFieldTampered` 2, `baseAcceptance` 2.
+
+    (2) FALSIFIED LIVE, WITH THE REAL FUNCTION AND A FIRING CONTROL. Against a merged task with
+    `merged: true`, `statusResolvable: true`, `followUpFiled: false`: `status` merged to queued
+    with acceptance byte-identical returns EMPTY; `title`, `files`, `risk` and `type` all
+    rewritten returns EMPTY; a proof rewritten under an identical claim returns EMPTY; and the
+    control, one criterion appended, returns ONE `block:post-merge-amendment`. All four
+    reproduced exactly as W1-T1287's section (xii) recorded them.
+
+    (3) AND THE ENUMERATION IS COMPLETE RATHER THAN SAMPLED. Every field the `Task` interface
+    (`src/lib/plan.ts:102-181`) declares was mutated ONE AT A TIME against the same firing
+    control: `id`, `title`, `repo`, `depends_on`, `type`, `verify`, `risk`, `priority`, `status`,
+    `attempts`, `pr`, `principles`, `budget_usd`, `hand_built`, `note`, `rationale`, `origin`,
+    `prompt`, `context`, `files` and `retirement`. ALL TWENTY-ONE RETURN EMPTY. There is no
+    partial coverage to build on; outside `acceptance` the surface is zero.
+
+    (4) THE GUARDED FIELD IS ITSELF MOSTLY UNGUARDED, AND THIS IS THE PART THAT IS NOT COSMETIC.
+    `criteriaAdded` (`task-linter.ts:1272-1279`) keys on `criterionKey`, which is the CLAIM, so
+    the proof is never compared. Measured on the same live function: a proof emptied to the empty
+    string returns EMPTY; a proof deleted outright returns EMPTY; a merged criterion REMOVED
+    returns EMPTY; `acceptance` deleted entirely returns EMPTY. Only a NEW claim string fires.
+    SO THE EXECUTABLE HALF OF A MERGED CRITERION CAN BE REPLACED WITH A WEAKER ONE, OR DELETED,
+    AND NOTHING OBJECTS — while a pure rewording of a claim, which changes no obligation, DOES
+    fire. The check is inverted with respect to what it is protecting.
+
+    (5) THE GAP IS IN USE, NOT HYPOTHETICAL. Every merged-shard amendment this week proved
+    `acceptance`, `files:`, `title` and `status:` byte-identical by HAND-ROLLED sha256 through the
+    plan loader, because nothing enforces it; the convention is operator-enforced and has been
+    mistaken for a linter check more than once. And the edit path is well travelled: of 568 shard
+    records on origin/main, 100 carry at least one commit AFTER the commit that added them, and
+    within those later commits `status:` changed on 18, `files:` changed on 19 and `title:`
+    changed on 6, against a control of 17 where a `claim:` changed. THAT IS AN UPPER BOUND AND
+    THE SHARD SAYS SO: a record edited while its task is still queued is ordinary authoring and
+    Rule 21 was never engaged. What the number establishes is that the edit path is used
+    constantly, not that 18 tasks were tampered with.
+
+    (6) AND THE GUARD HAS NEVER FIRED. `post-merge-amendment` appears in ZERO ledger rows,
+    against a control of 3 `lint.blocked` rows in the whole corpus. Its one firing shape has not
+    been exercised in production even once.
+
+    (7) THE PLUMBING FOR A WIDER CHECK ALREADY EXISTS, WHICH IS WHY THIS IS SMALL. The call site
+    at `src/run-task.ts:13857-13860` builds the context with `baseAcceptance: oldTask?.acceptance`
+    — so `oldTask`, the WHOLE base-ref task, is already resolved and in hand. Widening the context
+    to carry it needs no new resolution, no new git read and no new base-ref lookup.
+  note: |
+    ── Q1. THE FULL ESCAPE SET, FIELD BY FIELD, WITH ITS CONSUMER ──────────────────────────────
+
+    (i) GUARDED TODAY: `acceptance`, and only against an ADDED or REWORDED CLAIM. Nothing else in
+    the type is inspected at all.
+
+    (ii) UNGUARDED WITH A LIVE CONSUMER THAT A POST-MERGE EDIT WOULD POISON. `status:` feeds
+    dispatch eligibility — `src/lib/drain.ts:510` branches on `t.status === "blocked"` — so
+    flipping a merged task back to queued re-arms a dispatch the fleet already paid for.
+    `files:` feeds W1-T171's overlap serialization through `partitionByFileOverlap`
+    (`src/lib/dispatch-overlap.ts`, wired at `drain.ts:594` and `:1819`), so a narrowed
+    declaration silently un-serializes two runs that must not touch the same paths at once.
+    `depends_on` feeds the DAG. `priority` feeds the dispatch comparator at `drain.ts:355-356`.
+    `risk`, `verify`, `type`, `principles` and `budget_usd` each steer a lane, a gate or a spend
+    cap. `retirement` feeds the board's bucketing. THESE ARE THE FIELDS WORTH REPORTING.
+
+    (iii) UNGUARDED AND NOT WORTH GUARDING, NAMED AS SUCH RATHER THAN LEFT IMPLICIT.
+    `hand_built` has exactly TWO mentions in the whole of `src/`, both in `plan.ts` — the
+    interface declaration at `:141` and the loader's own copy at `:254` — and ZERO consumers,
+    against a control of 26 mentions for `budget_usd`. A field nothing reads cannot be poisoned,
+    and a check that reports it manufactures noise. `note`, `rationale` and `title` are prose an
+    amendment is EXPECTED to change; reporting them would make the check fire on every legitimate
+    rationale amendment and it would be turned off within a week.
+
+    (iv) SO THE CHECK MUST BE SCOPED BY CONSUMER, NOT BY IMMUTABILITY. The question a build must
+    ask of each field is "does anything read this after the task merges", not "is this field
+    conceptually final". That is the line between a useful report and a nuisance.
+
+    ── Q2. WHETHER A GUARD IS EVEN THE REMEDY, AND HOW W1-T2248 STILL HOLDS ────────────────────
+
+    (v) W1-T2248's RULING IS BINDING HERE AND THIS TASK MUST NOT CONTRADICT IT. That shard states
+    that a merged `files:` can be provably wrong and must stay correctable, and that "THE
+    RESOLUTION IS NOT A GATE BUT AN EVIDENCE REQUIREMENT". It owns the documentation half. CITED,
+    NOT RE-FILED, AND NOT REOPENED.
+
+    (vi) BOTH HOLD, AND THE RECONCILIATION IS THAT THIS TASK BUILDS A DETECTOR AND NOT A LOCK.
+    W1-T2248 argues about whether a change is PERMITTED. This task is about whether a change is
+    VISIBLE. A report that names which fields moved on a merged task does not forbid moving them;
+    it makes the correction W1-T2248 wants into a declared act instead of an invisible one, which
+    is precisely the evidence requirement that ruling asks for, generalised past `files:`.
+
+    (vii) THE ESCAPE HATCH ALREADY HAS A SHAPE IN THIS FILE AND SHOULD BE COPIED, NOT INVENTED.
+    The acceptance guard's own `ctx.followUpFiled` is an explicit, in-PR declaration that makes an
+    otherwise-blocking change legitimate. A field report should work the same way: the amendment
+    declares which fields it changes and why, and a declared change passes. NOTHING NEW IS
+    INVENTED and no field becomes unreachable.
+
+    (viii) IF THE TWO CANNOT BE HELD TOGETHER, W1-T2248 WINS AND THIS TASK NARROWS. If a build
+    finds itself unable to report a `files:` change without also blocking it, the correct outcome
+    is to drop `files:` from this check and keep the rest, NOT to override that ruling. Say so in
+    the PR rather than resolving it silently.
+
+    ── Q3. WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────
+
+    (ix) THE ACCEPTANCE GUARD STAYS EXACTLY AS IT IS AND KEEPS ALL FIVE EARLY EXITS. Verified
+    live, each applied to the firing control: no context supplied returns EMPTY;
+    `statusResolvable: false` returns EMPTY; `merged: false` returns EMPTY; no delta against the
+    base returns EMPTY; `followUpFiled: true` returns EMPTY. All five must still return EMPTY
+    after this task.
+
+    (x) `fail OPEN on an unreadable derived status` IS THE ONE MOST AT RISK AND IS PINNED HERE.
+    A guard that failed CLOSED on an unreadable input would block every amendment during a
+    GitHub outage or a token failure — the same class of incident that has already stamped the
+    board unreachable this week. Any new check must inherit that fail-open discipline, not just
+    the existing one.
+
+    (xi) NOTHING SELF-APPLIES A CORRECTION. W1-T15. This check REPORTS a changed field; it must
+    never rewrite one back to its base value, and it must not offer to. The detector's output is
+    for a human, and Craig gates the merge.
+
+    (xii) AND IT IS A REPORT, NOT A NEW TERMINAL STATE. Rule 21's meaning is unchanged: MERGED
+    stays terminal, an amendment still does not re-queue a task, and this adds no path that
+    would.
+
+    (xiii) RULE 19 BAND. `risk: high` is set UP FRONT because `files:` spans two source stems and
+    Rule 19 sizes on SPAN. THE BAND IS THE SPAN READING AND NOT A BLAST-RADIUS JUDGEMENT: the
+    context object gains a field the call site already has resolved, one function reads it, and
+    no existing predicate or threshold moves.
+  acceptance:
+    - claim: "a merged task whose status changed since the base ref is reported, naming the field and both values"
+      proof: "unit test: test/merged-shard-field-tamper.test.ts"
+    - claim: "a merged task whose declared files changed is reported, and the change stays permitted rather than blocked"
+      proof: "unit test: test/merged-shard-field-tamper.test.ts"
+    - claim: "a proof rewritten under an identical claim is reported, so the executable half of a merged criterion cannot be weakened in silence"
+      proof: "unit test: test/merged-shard-field-tamper.test.ts"
+    - claim: "a merged acceptance criterion that is removed is reported rather than passing as no delta"
+      proof: "unit test: test/merged-shard-field-tamper.test.ts"
+    - claim: "a field that nothing reads after a task merges is not reported, so the check does not fire on prose or on a dead field"
+      proof: "unit test: test/merged-shard-field-tamper.test.ts"
+    - claim: "the existing acceptance guard is unchanged and each of its five early exits still returns no violation, including failing open on an unreadable derived status"
+      proof: "unit test: test/merged-shard-field-tamper.test.ts"
+    - claim: "the check reports and never rewrites, so no field is restored to its base value by any code path"
+      proof: "unit test: test/merged-shard-field-tamper.test.ts"
