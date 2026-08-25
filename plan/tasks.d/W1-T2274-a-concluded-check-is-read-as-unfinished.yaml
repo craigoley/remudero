@@ -1,0 +1,219 @@
+- id: W1-T2274
+  title: "The two poll loops classify a check by a RED set and the literal string SUCCESS, so the four GitHub conclusions in neither bucket — NEUTRAL, SKIPPED, STALE, and CANCELLED-as-terminal — are read as unfinished or as failed, while the sweep two files away already reads all but one of them correctly"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha (3eb7055b),
+    clone shallow-checked `false`. `src/run-task.ts` read via git objects. No suite, no poller, no
+    spawning verb. Both symptoms RE-DERIVED from GitHub's own check-run records, not carried.
+
+    (1) BOTH SYMPTOMS COME OUT OF ONE FUNCTION, AND THE TWO MESSAGES ARE ITS OWN TWO RETURN PATHS.
+    `pollToGate` (`src/run-task.ts:3555`) has exactly two non-terminal exits, and each produced one
+    of the observed verdicts verbatim:
+        `required check red: ${red.name ?? red.context ?? "unknown"}`
+        `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
+    The first fires off `RED_CONCLUSIONS` (`src/run-task.ts:1397`); the second off the `pending` list
+    `checkWaitStalled` (`src/run-task.ts:3738`) builds. **THE TWO SYMPTOMS ARE NOT TWO DEFECTS.**
+    They are one vocabulary, consulted twice, in opposite directions.
+
+    (2) THE CONCLUDED-READ-AS-PENDING ARM, RE-DERIVED. `checkWaitStalled` builds `pending` as
+    everything that is neither red nor the literal `"SUCCESS"`:
+        const state = String(c.conclusion ?? c.status ?? c.state ?? "");
+        return !RED_CONCLUSIONS.has(state) && state !== "SUCCESS";
+    `NEUTRAL` is in neither set, so a check that concluded cleanly lands in `pending` and stays
+    there forever, because NEUTRAL never becomes SUCCESS. On both captured heads the check had
+    already finished when the fleet named it pending, read fresh from
+    `repos/craigoley/remudero/commits/<sha>/check-runs`:
+        d1d53187 (#2830)  osv-scanner  status completed  conclusion neutral  12:54:25Z -> 12:54:28Z
+        a062de4d (#2833)  osv-scanner  status completed  conclusion neutral  13:36:18Z -> 13:36:21Z
+    Three seconds of runtime each, hours before the verdict. **BOTH PRs LATER MERGED** — #2830 at
+    13:16:02Z and #2833 at 13:53:09Z — so the block was wrong in outcome and not only in wording.
+
+    (3) THE CANCELLED-READ-AS-FAILED ARM, RE-DERIVED, AND THE READ WAS CORRECT-AT-THE-TIME.
+    #2794 carries ONE commit (`9e8683a4`), so no head ever changed under it. `filter=all` on that
+    sha shows the same check name twice:
+        coverage-ratchet  01:44:01Z -> 02:19:16Z  conclusion cancelled   (id 97655132319)
+        coverage-ratchet  02:37:42Z -> 03:08:03Z  conclusion success     (id 97664897775)
+    The `cancelled` attempt WAS the latest when the loop read it, so the poll did not misread the
+    wire. What it got wrong is what `cancelled` MEANS: `RED_CONCLUSIONS` contains it, `pollToGate`
+    returns on the first red it finds, and that return is TERMINAL — the loop never polls again.
+    The re-run 18 minutes later succeeded and the PR merged at 07:22:01Z. **A CONCLUSION MEANING
+    "NOBODY REACHED A VERDICT" WAS SPENT AS "A VERDICT CAME BACK BAD".**
+
+    (4) WHAT EACH CLASSIFIER ACTUALLY HANDLES. There are FOUR distinct vocabularies, not one, and
+    naming them separately is the point — three read the same rollup and disagree:
+      **a. THE PROGRESS CHECK** — `checkWaitStalled` (`src/run-task.ts:3738`). Bucket "done" is the
+      single literal `SUCCESS`. NEUTRAL, SKIPPED and STALE all fall into `pending`. 5 of 8 handled.
+      **b. THE RED ROLLUP** — `RED_CONCLUSIONS` (`src/run-task.ts:1397`) = FAILURE, CANCELLED,
+      TIMED_OUT, ACTION_REQUIRED, STARTUP_FAILURE, ERROR. Read by `pollToGate:3572` and
+      `ciGateFromRollup` (`src/run-task.ts:3620`). CANCELLED is folded into failure; STALE is absent
+      and reads as not-red; NEUTRAL and SKIPPED are correctly not-red but then hit (a).
+      **c. THE ARM GATE** — `checksStateFromRollup` (`src/lib/sweep.ts:1204`) over
+      `REQUIRED_CHECK_OK` (`src/lib/sweep.ts:1112`) = SUCCESS, SKIPPED, NEUTRAL and
+      `REQUIRED_CHECK_FAIL` (`src/lib/sweep.ts:1123`). **THIS ONE IS ALREADY RIGHT ABOUT NEUTRAL**,
+      and its own comment records the identical incident — "`osv-scanner`'s NEUTRAL — present on
+      essentially every PR here — read as PENDING FOREVER", issue #1698, PRs #1692 and #1699. 7 of
+      8 handled. The disposition rules (`src/lib/sweep.ts:2693` and eight siblings) consume
+      `checksState` and add no vocabulary of their own, so the arm gate inherits this one entirely.
+      **d. THE FIX RUNG's ENUMERATION** — `fetchCiFailures` (`src/run-task.ts:20533`) filters on the
+      EXPORTED `REQUIRED_CHECK_FAIL`, deliberately, so producer and predicate "agree BY
+      CONSTRUCTION" (the #1728 defect its doc names). It agrees with (c) and therefore disagrees
+      with (a) and (b).
+    Two further sites, for completeness: `redChecks` (`src/lib/dep-review.ts:214`) copies (b) —
+    its own comment says "mirrors run-task.ts's RED_CONCLUSIONS", and it mirrors the gap too;
+    `reviewStateFromRollup` (`src/run-task.ts:20324`) is scoped to the one context that only ever
+    posts SUCCESS/FAILURE/ERROR and is sound as written.
+
+    (5) `stale` IS HANDLED NOWHERE, IN ANY OF THE FOUR. A tree grep for the token as a conclusion
+    returns ZERO across every classifier; the control is `CANCELLED`, which reads 10 in
+    `src/lib/sweep.ts` and 4 in `src/run-task.ts`, so the query can see conclusion tokens where they
+    exist. In (a) STALE reads pending forever; in (c) it is in neither set and holds `checksState`
+    at "pending" forever — **the ONE value even the corrected sweep gets wrong**; and in
+    `stillRedRequiredNames` (`src/lib/sweep.ts:1323`) "neither OK nor FAIL" is the definition of
+    in-flight, so a STALE entry would be read as a later attempt executing right now and would drop
+    a red name it should have kept.
+
+    (6) THE LEDGER CANNOT CORROBORATE THIS AND SAYS SO. Over the union at the state dir — 666 `.gz`
+    rotations, 6 plain, 1 live, each form separately confirmed readable (`run.start` reads 257438 /
+    1314 / 200) — `pr.stalled` and `ci.stalled` read **0 in all three forms**. That zero is
+    CORPUS-SCOPED, not an absence: this host's newest `pr.checks` row is 2026-08-07T04:30:27Z and
+    its newest `sweep.disposed` row is 2026-08-13T00:30:31Z, while the live file runs to
+    2026-08-25T14:00:05Z carrying only `cli.invoked`/`daemon.*` rows. The run lanes that emit these
+    steps do not write here. **The two verdict strings are therefore OPERATOR-ATTRIBUTED and are
+    not re-derived**; the check-run records in (2) and (3) are the independent evidence, and they
+    are the half that matters, because the defect is in how a conclusion is read and not in how
+    often it happened.
+  design: |
+    (i) THE REMEDY IS ONE SHARED VOCABULARY, TAKEN FROM THE SURFACE THAT ALREADY LEARNED THIS.
+    `REQUIRED_CHECK_OK`/`REQUIRED_CHECK_FAIL` are not new work — one is already exported for exactly
+    this reason (W1-T457, so `fetchCiFailures` could stop hand-copying a narrower set). The poll
+    loops read a THIRD, older set that predates both. Aligning them is a deletion, not an invention.
+
+    (ii) Q1 — WHAT EACH OF THE SIX SHOULD MEAN, AND THEY ARE NOT INTERCHANGEABLE.
+      **NEUTRAL -> DONE, COUNTS AS GREEN.** A clean no-findings result. GitHub's own branch
+      protection treats it as satisfying a required check; W1-T103 already wrote that down. This is
+      the one that produced both August 25 blocks.
+      **SKIPPED -> DONE, COUNTS AS GREEN.** A condition excluded the job. Same merge-eligibility
+      semantics, and `src/lib/dep-review.ts:207` already documents the live case (OSV-Scanner skips
+      for `github.actor == 'dependabot[bot]'`).
+      **CANCELLED -> ITS OWN STATE. NEITHER DONE NOR RED.** It means no verdict was reached, which
+      is a different claim from both. W1-T1223 ALREADY BUILT THIS STATE — `cancelledRequiredCheckNames`
+      (`src/lib/sweep.ts:1286`) names precisely these, and its doc gives the same reason in the same
+      words: "what distinguishes 'nobody reached a verdict' from 'a verdict came back bad'". What
+      W1-T1223 did NOT do is teach the poll loops, which still fold it into red and return
+      terminally on it. **The poll loops should re-queue-or-wait where the sweep re-queues, never
+      return a `blocked_ci` verdict naming a check that never ran.**
+      **TIMED_OUT -> RED.** Infrastructure, but a bounded job that exceeded its bound is a real
+      negative result and the diff may well be the cause. It stays where it is.
+      **STALE -> ITS OWN STATE, AND TODAY IT HAS NONE ANYWHERE.** GitHub marks a run stale when its
+      result can no longer be attributed to the head. That is "this reading is void", which is
+      closer to CANCELLED than to either pole: not evidence of health, not evidence of a defect, and
+      specifically not something to wait on, since a stale run will never conclude again.
+      **ACTION_REQUIRED -> RED, AND IT IS THE ONE THAT MUST NOT BECOME A WAIT.** It means a human
+      must intervene. Folding it toward pending would produce exactly the unbounded wait Q3 forbids.
+      The distinction that carries all six: NEUTRAL and SKIPPED are RESULTS, TIMED_OUT and
+      ACTION_REQUIRED are VERDICTS, and CANCELLED and STALE are NON-RESULTS. Only the third pair
+      needs a state the vocabulary does not currently have.
+
+    (iii) Q2 — SHOULD THE WAIT SPAN NON-REQUIRED CHECKS. THE MEASUREMENT FIRST, BECAUSE IT SETTLES
+    WHAT THE ARGUMENT IS ABOUT. `osv-scanner` is NOT in `.github/workflows/ci-gate.yml`'s `REQUIRED`
+    list. `"scan-pr / osv-scan"` IS — a DIFFERENT check name, and on both captured heads it read
+    `success` while `osv-scanner` read `neutral`. So the required set was satisfied on both PRs and
+    the block came entirely from a check nobody declared required. **AND THE ASYMMETRY IS ALREADY
+    IN THE TREE**: `checksStateFromRollup` takes `requiredContexts` and filters the gate to it;
+    `pollToGate` and `waitForCiGreen` take no such argument and read the WHOLE rollup.
+      **FOR NARROWING TO REQUIRED:** the required list is the repo's own written statement of what
+      must be true to merge, it is version-controlled and reviewable, the sweep already honours it,
+      and a check outside it blocking a merge is by definition a gate nobody agreed to. Both August
+      25 blocks disappear under this rule alone.
+      **AGAINST, AND THIS IS THE REAL COST:** a non-required check that goes RED after the arm
+      arrives too late to stop anything. Today the poll loops' over-broad read is the only thing
+      that catches it, accidentally. Narrowing converts a false block into a missed signal, and a
+      missed signal is the quieter failure.
+      **THE SHAPE THAT PAYS BOTH:** the two are not the same question. WAITING should be narrow —
+      only a required check's absence is a reason to hold, because only a required check can block
+      the merge. RED should stay wide — any check concluding failure is worth naming, whether or not
+      it gates. The implementation is one filter on the pending set and none on the red find, and
+      it needs no new state. **THIS IS A DESIGN NOTE, NOT A RULING** — the operator gates which of
+      the three the task builds, and `REQUIRED` itself is NOT edited by this task either way.
+
+    (iv) Q3 — WHAT MUST NOT CHANGE.
+      **THE PROGRESS BOUND STAYS. FIVE IDENTICAL POLLS STILL STOPS THE WAIT.** `STALL_WINDOW = 5`
+      is untouched, and so is `rollupHasRunningCheck`'s exemption for a rollup with something
+      actually executing. An unbounded wait is worse than a wrong verdict, and W1-T382's own doc
+      already argues the number is not the defect. Nothing here raises it, and nothing here adds a
+      clock.
+      **NOTHING TREATS AN UNKNOWN CONCLUSION AS SUCCESS.** A value in neither set must fail toward
+      waiting or toward red, never toward green. This is the property that makes widening the OK set
+      safe: the set is enumerated, not defaulted, so a ninth value GitHub invents tomorrow lands in
+      the unknown bucket rather than silently arming a merge. **The falsifier the new test must
+      carry is exactly this** — a rollup entry with a conclusion no set names must NOT reach green.
+      **`REQUIRED` IS NOT EDITED BY THIS TASK.** Not to add `osv-scanner`, not to remove anything,
+      not to reconcile it with `scan-pr / osv-scan`. Whether those two names should both exist is a
+      separate question about the workflow, not about how a conclusion is classified.
+      **THE SWEEP's TWO SETS ARE THE SOURCE, NOT A FOURTH ONE.** The remedy that adds a fifth
+      vocabulary has failed. `checksStateFromRollup`'s own doc refuses a fifth `checksState` member
+      for the same reason and that refusal stands — this task aligns the poll loops onto the
+      existing sets, it does not widen `OpenPrView["checksState"]`.
+
+    (v) NOT IN SCOPE, NAMED: the `REQUIRED` list's contents; the `osv-scanner` versus
+    `scan-pr / osv-scan` duplication in the workflows; `STALL_WINDOW`'s value; `ci-gate.yml`'s
+    `WAIT_CAP_SECONDS`; W1-T1223's re-queue mechanism itself (this task may CONSUME
+    `cancelledRequiredCheckNames`, it does not change it); and any change to what `checksState` is
+    allowed to be.
+  acceptance:
+    - claim: "a check whose conclusion is neutral is classified as done rather than pending"
+      proof: "unit test: test/check-conclusion-vocabulary.test.ts"
+    - claim: "a check whose conclusion is skipped is classified as done rather than pending"
+      proof: "unit test: test/check-conclusion-vocabulary.test.ts"
+    - claim: "a cancelled required check is distinguished from a failed one rather than folded into red"
+      proof: "unit test: test/check-conclusion-vocabulary.test.ts"
+    - claim: "a stale conclusion is classified rather than left holding the wait open"
+      proof: "unit test: test/check-conclusion-vocabulary.test.ts"
+    - claim: "an unrecognised conclusion never reaches green"
+      proof: "unit test: test/check-conclusion-vocabulary.test.ts"
+    - claim: "five identical readings with nothing running still stops the wait"
+      proof: "unit test: test/check-conclusion-vocabulary.test.ts"
+    - claim: "the poll loops read the same conclusion sets the sweep reads"
+      proof: "unit test: test/check-conclusion-vocabulary.test.ts"
+  files: [src/run-task.ts, src/lib/sweep.ts, test/check-conclusion-vocabulary.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#concluded-check-read-as-pending-2026-08-25"
+  plan_refs: ["W1-T103", "W1-T382", "W1-T457", "W1-T1223", "W1-T1278"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so two source files and a test named after neither trip it at `medium`. The change
+    itself is small — one shared set replacing a third private one, plus the two states (ii) says
+    are missing.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/check-conclusion-vocabulary.test.ts`, declared in `files:`, so on this filing PR it
+    resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL, AND THE CONTROL WAS CONFIRMED
+    PRESENT BEFORE IT WAS BELIEVED. `rmd check-proof` on the declared path reads `exit: 1`,
+    `hits: 0`, `verdict: fail`. The SAME verb on an EXISTING pure path — `unit test:
+    test/check-wait-progress.test.ts`, the test file for `checkWaitStalled` itself — reads
+    `verdict: pass`.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND IS NOT RE-MINTED. `refs/rmd-id/W1-T2274` resolves to
+    aa3ba6c3879f2c3549244e480ed5c9392abccaec; this shard VERIFIES THE ID IS UNUSED rather than that
+    it is this account's. Six surfaces swept, each with a control pre-qualified for its own surface,
+    and the remote ref counts read first (138 heads, 394 `refs/rmd-id/*`): shards on main 0 (control
+    W1-T2250 = 2); whole tree at HEAD 0 (control 5); remote head names 0 (control, 89 `run-*` heads
+    read); commit subjects and bodies on main 0 (control 3); open PR titles, bodies and head refs 0
+    across all 3 open PRs (control `W1-T2` = 3). Presence of a reservation is not usage.
+
+    THE PREMISE THAT THE FLEET "WAITS FOREVER" IS NARROWED RATHER THAN REPEATED. The wait is
+    bounded — `checkWaitStalled` decides stalled from the rollup SIGNATURE and from
+    `rollupHasRunningCheck`, never from the `pending` list, so reclassifying NEUTRAL would not by
+    itself have changed the stall DECISION on either head. What the misclassification corrupts is
+    the REASON the verdict carries, and in the sweep's own vocabulary (c) it corrupts the state
+    itself, which is where the measured 65-minute and 237-minute pending readings came from. Both
+    are worth fixing; only the second is a forever-wait, and the shard says which is which.
