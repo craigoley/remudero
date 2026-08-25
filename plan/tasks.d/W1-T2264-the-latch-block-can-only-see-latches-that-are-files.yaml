@@ -1,0 +1,122 @@
+- id: W1-T2264
+  title: "THE LATCH BLOCK CAN ONLY SEE A LATCH THAT IS A FILE, AND MORE THAN ONE THING THAT HALTS DISPATCH IS NOT — the surface an operator runs first to ask why nothing is moving reports no active latches while a git ref holds the whole fleet, and the same blindness covers the cross-host dispatch claim, the per-task circuit breaker and the lifetime cap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: oper#latch-block-blind-to-non-file-holds-2026-08-25
+  files: [src/lib/status-board.ts, test/latch-rows-see-a-ref-backed-hold.test.ts]
+  rationale: |
+    **Q1 FIRST, BECAUSE IT DECIDES THE SIZE OF THE TASK: `path:` IS INCIDENTAL, NOT STRUCTURAL.**
+
+    `StaticLatchDef` (`src/lib/status-board.ts`) declares `name`, `path: (root: string) => string`,
+    `consequence` and an optional `superseded`. The OUTPUT type `LatchRow` declares `name`,
+    `ageMs?`, `consequence` and `superseded?` — **no path at all**. In the builder, `def.path(root)`
+    is consumed at exactly three statements: `fs.existsSync(path)` as the presence gate,
+    `readJsonMarker(path)` for the detail JSON, and `markerAgeMs(path, json, nowMs)` for age. Every
+    one of those is about SOURCING a row, and none of them survives into the row.
+
+    **AND THE BUILDER ALREADY HAS THREE NON-TABLE ROW SOURCES, SO A FOURTH IS NOT A NEW SHAPE.**
+    After the `STATIC_LATCHES` loop, the same function pushes `inflight:<taskId>` rows from a
+    directory scan gated on pid liveness, `kick:<taskId>` rows from the console's pending-kick
+    markers, and a `drain-now` row. The inflight and kick rows compute `ageMs` by parsing an ISO
+    STRING rather than reading an mtime, which is precisely what a ref-backed row would do. And
+    `ageMs` is optional: `formatAgeMs(undefined)` returns `"unknown"`, an already-supported
+    rendering, so a row whose age is not cheaply available still renders.
+
+    **SO THE ANSWER IS: ONE MORE ROW SOURCED FROM `checkSharedPause`, AND THIS IS SMALL.** The
+    `StaticLatchDef` table stays exactly as it is; nothing about file-backed latches changes.
+
+    **THE BLINDNESS, MEASURED.** `STATIC_LATCHES` declares five entries and all five carry a `path:`
+    key. `checkSharedPause`, `sharedPauseRef`, `dispatchClaimRef`, `circuitBreaker` and
+    `headroomExhausted` each appear ZERO times in `status-board.ts`, against controls in the same
+    file of three `PAUSE` mentions and eight `inflight` mentions — so the tool and the corpus are
+    not the reason for the zeros. `renderLatchesBlock` emits `"no active latches"` whenever its row
+    list is empty, which on a host that did not itself set a shared hold is exactly what happens.
+
+    **Q2 — MORE THAN ONE IS INVISIBLE, SO THE FINDING IS THE KEY AND NOT THE PAUSE.** What can stop
+    work, and what the latch block can see:
+
+    - `state/STOP`, `state/PAUSE`, `QUIET_HOURS`, `DEPLOY_AUTO`, `DEPLOY_FAILED` — files, VISIBLE.
+    - local inflight locks, pending kicks, drain-now — files, VISIBLE by their own sources.
+    - `refs/rmd-pause/hold`, the fleet-wide cross-host hold — a git ref, INVISIBLE.
+    - `refs/rmd-dispatch/<taskId>`, the cross-host dispatch claim (`dispatch-claim.ts`) — a git ref,
+      INVISIBLE. Note the shape: a LOCAL inflight lock for the same task renders a row, and its
+      cross-host equivalent does not, so the board is host-local exactly where the fleet is not.
+    - the per-task dispatch circuit breaker (P29(ii), consulted in `drain.ts` before the in-flight
+      guard) — derived from the ledger, INVISIBLE.
+    - the lifetime dispatch cap, checked alongside the breaker — INVISIBLE.
+    - headroom exhaustion, which ends a drain with its own summary — INVISIBLE.
+
+    Four kinds of halt, one visible only because it happens to be stored as a file. **The rule the
+    block actually implements is "a latch is a file that exists", and that rule was never stated as
+    a policy; it is what the first five latches happened to have in common.** The board is not
+    missing a pause row. It is missing every hold that is not a file, and it will keep missing the
+    next one for the same reason.
+
+    **Q3 — WHAT MUST NOT CHANGE.** `rmd status` stays READ-ONLY and stays CHEAP. Read-only is
+    already a stated discipline in this very builder: the drain-now row is commented PEEK ONLY,
+    never consume, because a status read must never erase the request it reports. That discipline
+    extends unchanged to a hold the block can now see — rendering a latch is not authority to
+    release it, and nothing here may delete a ref. Cheap means one `ls-remote`, which is what
+    `readSharedPause` already performs on the daemon's every tick, not a fleet-wide scan; anything
+    that would need a second round trip belongs behind the optional `ageMs`, which may simply stay
+    `"unknown"`. And the read must fail SOFT: an unreachable remote makes a paused fleet read as
+    held for dispatch purposes, but a status board that throws is worse than one that says it could
+    not tell, so the row must be able to say which of the three states it saw.
+
+    **WHAT I DID NOT RE-DERIVE.** The state dir reachable here holds no archives of either rotation
+    form, so `resolveLedgerUnion` reports `ok: false` on it rather than answering from the live
+    file. On that live file, `daemon.pause`, `daemon.tick` and `drain.headroom` each read zero
+    against a control of three hundred and seventeen `cli.invoked` rows with only two distinct steps
+    present — a scratch ledger, not the fleet's. The hold window, the per-tick row count and the
+    board output observed during it therefore stand as the operator's measurement, attributed rather
+    than confirmed here. What IS confirmed from source is that each such row carries the ref name
+    and the remedy verbatim, because `checkSharedPause` builds that string and the tick logs it as
+    the row's detail.
+  note: |
+    RULE 19 BAND. `files:` is one source file and its test; the sizing check derives concerns from
+    basenames, so a test whose name does not match its source reads as a span whatever the change
+    is. `risk: high` is set for that SPAN and carries no claim about blast radius, which is one
+    additional row source inside a function that already has four.
+
+    NAMED, NOT FILED, AND `files:` IS NOT WIDENED TO COVER IT. The second surface is stdout: a
+    paused daemon, an idle sweep and a dead process all print the same nothing, because the fleet
+    only writes to the console when it spawns. That is why an operator can exhaust processes,
+    sockets, locks and rate limits before reaching the ledger that held the answer on every tick.
+    Fixing it means changing what the daemon prints, which is a different file and a different
+    argument about log volume; it does not belong to the board.
+
+    CITED, RE-FILED NEITHER. W1-T2262 owns the same ref's WRITE side — that it is reachable by a
+    plain push with the token every worker holds, and that the anchor recording who set it is never
+    read back. This shard owns the READ side and depends on none of that work: a row can be
+    rendered from the three-way read alone. W1-T1274 is the precedent for this exact failure mode
+    on the same verb, where one run reported the daemon not running and, four lines later, that it
+    had run seconds earlier — a board section answering confidently from a corpus that could not
+    represent the state being asked about.
+
+    THE ADJACENT CASE THIS SHARD DELIBERATELY LEAVES OPEN: if the key is the defect rather than the
+    pause, then the dispatch claim, the breaker and the lifetime cap each want a row too. Those are
+    three more sources with three more cost questions, and bundling them would make one task the
+    board-wide rewrite this is not. They are enumerated above so the next filing does not have to
+    re-derive them.
+  acceptance:
+    - claim: "a held shared read produces a latch row whose consequence names the ref and the remedy verb"
+      proof: "unit test: test/latch-rows-see-a-ref-backed-hold.test.ts"
+    - claim: "an absent shared read produces no row, so a clear fleet still reports no active latches"
+      proof: "unit test: test/latch-rows-see-a-ref-backed-hold.test.ts"
+    - claim: "an unreachable shared read produces a row that says so rather than throwing or reading as clear"
+      proof: "unit test: test/latch-rows-see-a-ref-backed-hold.test.ts"
+    - claim: "the row renders with an unknown age rather than requiring a second round trip to the remote"
+      proof: "unit test: test/latch-rows-see-a-ref-backed-hold.test.ts"
+    - claim: "building the rows performs no write and removes no marker, including the peek-only request marker"
+      proof: "unit test: test/latch-rows-see-a-ref-backed-hold.test.ts"
+    - claim: "a local file-backed hold on the same host still renders exactly one row rather than two"
+      proof: "unit test: test/latch-rows-see-a-ref-backed-hold.test.ts"
+    - claim: "every file-backed latch keeps the row it renders today, unchanged in name and consequence"
+      proof: "unit test: test/latch-rows-see-a-ref-backed-hold.test.ts"
+    - claim: "the next-action line fires for a hold the block can now see, and names no releasing action"
+      proof: "unit test: test/latch-rows-see-a-ref-backed-hold.test.ts"
