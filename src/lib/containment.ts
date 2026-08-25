@@ -1398,14 +1398,26 @@ export async function probeContainment(opts: {
     operator_home_read_denial_seen: evidence.operatorHomeReadDenialSeen,
     cost_usd: costUsd,
     // W1-T238, WIDENED BY W1-T2249: the probe spawn's own stderr/error-result
-    // text, capped, recorded on EVERY REFUSING probe (`!verdict.contained`) —
-    // not only when the underlying worker call itself errored (`r.isError`).
-    // The narrower `r.isError` gate meant a probe that returned normally and
-    // simply observed no denial (the `no-denial-observed` state) carried NO
-    // transcript at all, exactly the case that most needs one; a passing
-    // probe's row is UNCHANGED by this widening, since `verdict.contained` is
-    // `true` there and the field stays absent, the property W1-T238 protected.
-    ...(!verdict.contained ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
+    // text, capped, recorded when the underlying worker call itself errored
+    // (`r.isError` — W1-T238's original rule, LOAD-BEARING AND UNCHANGED) OR on
+    // a REFUSING probe (`!verdict.contained` — this task's addition, for the
+    // `no-denial-observed` state that returned normally and so carried no
+    // transcript at all).
+    //
+    // THE DISJUNCTION IS LOAD-BEARING: the two arms are INDEPENDENT and neither
+    // subsumes the other. `!verdict.contained` ALONE silently DROPPED the field
+    // from the errored-but-CONTAINED quadrant (`isError` true, verdict
+    // contained — a probe that observed the OS denial and then hit a transient
+    // tool error), which is precisely the quadrant W1-T238 added the field for.
+    // That absence is not neutral: under W1-T238's convention an absent field
+    // ASSERTS "this probe spawn did not error", so dropping it reports a false
+    // state as a proven one — the exact collapse this task was filed to
+    // prevent, one predicate away from committing it in its own diff.
+    //
+    // A CLEAN probe — `!r.isError` AND `verdict.contained` — still carries no
+    // field at all, both arms being false there, so a passing run's ledger line
+    // stays exactly as it was: the property W1-T238 protects, unweakened.
+    ...(r.isError || !verdict.contained ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
   if (!verdict.contained) {
     // OBSERVED (W1-T91/P23 part i, extended by W1-T237, W1-T292, then
