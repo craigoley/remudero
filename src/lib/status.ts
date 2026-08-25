@@ -2185,10 +2185,22 @@ function ownsBranch(head: string | undefined, taskId: string): boolean {
 /** What is known about one remote branch, gathered by the caller (W1-T447). */
 export interface BranchFacts {
   name: string;
-  /** The most decisive PR state for this head: a merged PR beats a closed one beats open. */
-  prState: "merged" | "closed" | "open" | "none";
-  /** `git merge-base --is-ancestor origin/<name> origin/main` SUCCEEDED — every commit is in main. */
-  tipInMain: boolean;
+  /**
+   * The most decisive PR state for this head: a merged PR beats a closed one beats open.
+   * `"unknown"` means the caller could not prove a complete read — e.g. a bulk paginated walk
+   * that neither found this head nor proved it reached the end of history, and whose per-head
+   * follow-up (W1-T2246) also failed. It must NEVER be produced by silently treating an
+   * incomplete read as `"none"` — that collapse is the defect this field exists to end.
+   */
+  prState: "merged" | "closed" | "open" | "none" | "unknown";
+  /**
+   * `git merge-base --is-ancestor origin/<name> origin/main` SUCCEEDED — every commit is in
+   * main. `"unknown"` means the check itself could not be evaluated (e.g. `origin/<name>` was
+   * never fetched on this checkout) — this is DELIBERATELY NOT `false`, because `false` is a
+   * decided "not an ancestor" and collapsing an unreadable ref into that decided answer is
+   * exactly the second defect W1-T2246 fixes (rationale §6).
+   */
+  tipInMain: boolean | "unknown";
   /** The branch NAME appears in `src/`, `scripts/`, `deploy/` or `.github/`. */
   namedInSource: boolean;
 }
@@ -2198,6 +2210,15 @@ export interface BranchReapPlan {
   deletable: string[];
   guarded: string[];
   hold: string[];
+  /**
+   * SUBSET OF `hold` (W1-T2246): the branches held not because they are decisively "no PR, tip
+   * not in main" but because at least one of those two facts could not be proven — `prState` read
+   * `"unknown"`, or `prState` read `"none"` while `tipInMain` read `"unknown"`. Disposition is
+   * unchanged (still held, never swept), only the REASON is separated, because a manifest that
+   * calls both cases "no PR" cannot be trusted to tell an operator which of the 74 are the 29 with
+   * genuinely no other copy of the work and which are merely unread.
+   */
+  undetermined: string[];
   /** Branches the NAME GREP protects that the declared list does not — the drift signal. */
   undeclaredGuards: string[];
   /**
@@ -2229,6 +2250,15 @@ export interface BranchReapPlan {
  * closed-unmerged PR head, or NO PR with a tip already an ancestor of main — the last means every
  * commit exists in main already, so removing the ref cannot lose information. An OPEN PR is never
  * deletable; it lands in `hold` rather than `guarded` because it is in use, not infrastructure.
+ * `"unknown"` NEVER SATISFIES A DISJUNCT — an unproven `prState` and an unproven `tipInMain` both
+ * read as NOT deletable, the same conservative direction W1-T119 already established for a wholly
+ * failed PR read, extended here to a partially incomplete one (W1-T2246).
+ *
+ * `undetermined` IS THE REASON SPLIT WITHIN `hold` (W1-T2246): a branch lands there when its
+ * `hold` disposition rests on a fact that could not be proven, rather than on a decisive "no PR"
+ * plus a decisive "tip not in main". Disposition never changes — nothing here is swept — only the
+ * label the operator reads is more honest about which of the held branches are truly the only
+ * copy of their work and which are simply unread.
  *
  * `undeclaredGuards` IS AN ALARM, NOT A RESULT. A declared list alone rots — measured repeatedly
  * here — and a name grep alone cannot see a branch referenced only through a variable
@@ -2245,6 +2275,7 @@ export function planBranchReap(
     deletable: [],
     guarded: [],
     hold: [],
+    undetermined: [],
     undeclaredGuards: [],
     missingBranches: [],
   };
@@ -2268,8 +2299,18 @@ export function planBranchReap(
       continue;
     }
     const deletable =
-      f.prState === "merged" || f.prState === "closed" || (f.prState === "none" && f.tipInMain);
-    (deletable ? plan.deletable : plan.hold).push(f.name);
+      f.prState === "merged" || f.prState === "closed" || (f.prState === "none" && f.tipInMain === true);
+    if (deletable) {
+      plan.deletable.push(f.name);
+      continue;
+    }
+    plan.hold.push(f.name);
+    // `"unknown"` PR state means merged/closed was never ruled out; `"none"` PR state paired with
+    // an `"unknown"` tip means the third disjunct's own precondition (`tipInMain === true`) was
+    // never provable either way — both are "could not tell", not "confirmed no PR" (W1-T2246).
+    if (f.prState === "unknown" || (f.prState === "none" && f.tipInMain === "unknown")) {
+      plan.undetermined.push(f.name);
+    }
   }
   return plan;
 }
