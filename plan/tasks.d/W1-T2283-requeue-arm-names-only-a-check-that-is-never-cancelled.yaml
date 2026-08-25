@@ -1,0 +1,211 @@
+- id: W1-T2283
+  title: "THE CANCELLED-CHECK REQUEUE CAN ONLY NAME A CHECK THAT NEVER GETS CANCELLED — `sweep.ts:1292` strips `REVIEW_CONTEXT`, `:1293` keeps only branch protection's declared required contexts, and protection names exactly `remudero-review` and `ci-gate`, so after the strip the arm's whole candidate set is the single name `ci-gate`; the check that actually gets cancelled is `coverage-ratchet`, which is not required, and the required aggregate it takes down concludes `failure` rather than `cancelled`, so `:1294`'s CANCELLED test refuses whatever `:1293` did not already drop — measured on #2794 and #2841 across 49 sweep passes with zero re-queues and one strike cap burned through"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/sweep.ts, src/run-task.ts, test/cancelled-check-arm-can-see-it.test.ts]
+  origin: oper#requeue-arm-names-only-ci-gate-2026-08-25
+  plan_refs: ["W1-T1066", "W1-T1223", "W1-T1282", "W1-T2274", "W1-T2280"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main f3109443 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA AND CLEAN, NOT SHALLOW, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS. main ADVANCED TO
+    daa4b5be MID-PASS AND THIS SHARD SITS ON THAT HEAD: the intervening commit (#2852) touches only
+    `src/lib/review.ts` and `test/downgrade-names-the-remedy.test.ts`, and every line cited below was
+    re-read at daa4b5be and is unchanged — `REVIEW_CONTEXT` is still `review.ts:41`, the gate is
+    still `sweep.ts:1291-1295`, and `REQUIRED_CHECK_FAIL` is still `sweep.ts:1123`. Ledger figures
+    come from `resolveLedgerUnion` at the state dir: ok true, archiveCount 26, liveFileRead true,
+    unread none, unclassified one (`ledger.ndjson.bak`, named rather than swallowed). GitHub reads
+    were REST and `gh api`, never GraphQL.
+
+    (1) THE GATE, THREE LINES. `cancelledRequiredCheckNames` (`sweep.ts:1286-1297`) refuses on an
+    empty required set at `:1291`, strips `REVIEW_CONTEXT` at `:1292`, keeps only declared required
+    contexts at `:1293`, and only then tests for the literal CANCELLED conclusion at `:1294-1295`.
+    `REVIEW_CONTEXT` is `"remudero-review"` (`review.ts:41`). Branch protection on `main` names
+    exactly two required contexts, read live: `remudero-review` and `ci-gate`. SO AFTER `:1292` THE
+    ARM's ENTIRE CANDIDATE SET IN THIS REPOSITORY IS THE ONE NAME `ci-gate`.
+
+    (2) AND THE CHECK THAT GETS CANCELLED IS NOT THAT ONE. Both measured incidents have the same
+    shape, taken from the runs' own attempt history:
+
+      #2794 — `coverage-ratchet` job 97655132319 CANCELLED 2026-08-25T02:19:16Z; required `ci-gate`
+      job 97655131652 concluded FAILURE 02:29:39Z, ten minutes later.
+      #2841 — `coverage-ratchet` job 97865158457 CANCELLED 16:14:56Z; `ci-gate` job 97865158300
+      concluded FAILURE 16:25:24Z, ten minutes later.
+
+    `ci-gate` is the aggregate; it reports its OWN failure when a dependency is cancelled. So
+    `:1293` drops `coverage-ratchet` before the conclusion test is ever applied to it, and `:1294`
+    then refuses `ci-gate` because its conclusion is FAILURE. TWO INDEPENDENT REFUSALS, AND
+    WIDENING EITHER ALONE REACHES NOTHING.
+
+    (3) THERE IS A THIRD REFUSAL EARLIER STILL, AND IT WAS NOT IN THE FILING BRIEF. The producer at
+    `run-task.ts:21045` builds `cancelledRequiredChecks` ONLY when `checksState === "red"`. While a
+    cancellation is fresh and the aggregate has not yet concluded, the pull request reads pending
+    and the arm's input is `undefined`. MEASURED: #2794 disposed `wait — checks pending` on 7
+    consecutive sweeps from 02:20:28 to 02:29:13 and flipped to `blocked-fixable` at 02:30:22, one
+    pass after `ci-gate` concluded; #2841 disposed `wait` on 8 passes from 16:15:07 to 16:25:21 and
+    flipped at 16:26:29. Roughly ten and a half minutes each, blind.
+
+    (4) AND THAT SAME OBSERVATION PROVES THE REQUIRED LIST IS READABLE IN THE CONTAINER, WHICH
+    RETIRES THE OTHER HYPOTHESIS. If `requiredContexts` were empty, `checksStateFromRollup`
+    (`sweep.ts:1204`) would judge ALL checks, and `coverage-ratchet` CANCELLED — a member of
+    `REQUIRED_CHECK_FAIL` (`:1123`) — would have turned both pull requests red the moment it was
+    cancelled. Both stayed `wait` for another ten minutes and turned red only when `ci-gate`
+    concluded. So the required-contexts filter is demonstrably being applied, on the live container,
+    on both incidents.
+
+    (5) THE COST, FROM THE SWEEP's OWN LEDGER. 49 sweep passes across the two incidents produced
+    zero re-queues: 32 disposed rows on #2794 between 02:19:16 and 03:35, and 25 on #2841 between
+    16:14:56 and 16:45. Seventeen consecutive `blocked-fixable` rows on each. And the fix rung was
+    spent: `fix.dispatch strike=1/2` on W1-T2238 at 03:31:21.829Z, and on W1-T2248 BOTH strikes,
+    `strike=1/2` at 16:42:50.783Z and `strike=2/2` at 16:44:38.584Z, followed by
+    `fix.exhausted reason=ci_never_green` at 16:44:44.602Z. A strike cap burned through on a diff
+    carrying no defect. That is the #2434/#2444 incident W1-T1223 exists to prevent, recurring with
+    its remedy merged.
+
+    (6) THE EVIDENCE MINER ALREADY SEES WHAT THE ARM CANNOT, WHICH IS THE SHARPEST FACT HERE.
+    `fetchCiFailures` (`run-task.ts:20563-20585`) filters the SAME rollup on `REQUIRED_CHECK_FAIL`
+    — which CONTAINS `"CANCELLED"` (`sweep.ts:1123`) — and does NOT narrow to required contexts at
+    all. Its own export comment at `:1116-1118` says the set is shared so the producer and the
+    predicate cannot drift. So the fleet's fix-rung evidence path can enumerate a cancelled
+    non-required check, and the one arm built to act on a cancellation cannot. The two readers of
+    one rollup disagree by construction, and the disagreement runs the wrong way.
+
+    (7) WHAT IS ALREADY RULED OUT, RECORDED SO NOBODY RE-DERIVES IT.
+      THE BOUND IS EMPTY, NOT WRONG. `requeuedCheckKeysFromLedger` (`sweep.ts:1380`) seeds the
+      marker set solely from `CHECK_REQUEUE_STEP` rows, read once per pass at `:4632`. Those rows
+      read n=0 across the union, against live controls on the SAME read of `sweep.disposed`
+      n=38,065 and `sweep.pass` n=35,610, newest 2026-08-25T17:38:57.602Z. The decision is taken at
+      `:5216` BEFORE the marker is added at `:5232`, so a first try cannot suppress itself.
+      BOTH CONSTRUCTION SITES SUPPLY THE DEP. `buildSweepEffects` (`run-task.ts:21559`) returns a
+      `Pick<SweepDeps, ...>` whose member list names `"requeueCheck"` and `"escalateCancelledCheck"`
+      at `:21664-21665`. `sweepCommand` (`:22205`) constructs it at `:22251`; `buildSweepHook`
+      (`:22947`) constructs it at `:23019` and is wired into `DaemonDeps.sweep` at `:18614`. Both
+      spread `...effects` into the `runSweep` deps. #1066's missing-producer shape is refuted.
+      THE TAXONOMY IS NOT THE CAUSE EITHER. `cancelledRequiredCheckNames` re-reads the raw rollup
+      independently of `checksStateFromRollup`, on the same dedupe rule, so folding CANCELLED into
+      red does not blind it. W1-T2274's collapse is real and is NOT this defect. Cited, not
+      re-filed.
+
+    (8) Q1(i) — MAKE A CANCELLED CHECK NAMEABLE WHEN IT IS NOT REQUIRED. Cheap: it deletes a filter
+    on a rollup already in hand, needs no new GitHub call, and lands both fixtures directly. THE
+    OBJECTION IS AUTHORITY, NOT COST. `required` is the operator's own declared list, and it is
+    what today bounds which checks the fleet may act on. Widening past it lets the fleet re-queue a
+    job nobody declared load-bearing — and the re-queue is a real CI mutation, unattended. The
+    counter-argument is that re-queueing is not gating: it re-runs a job that already ran and takes
+    no verdict, so the authority being widened is smaller than it looks. Both readings are
+    defensible and the shard does not pick.
+
+    (9) Q1(ii) — SEPARATE AN AGGREGATE's FAILURE FROM ITS DEPENDENCY's CANCELLATION. Correct, and
+    it names the true cause rather than routing around it: `ci-gate` failing BECAUSE a job was
+    cancelled is not the same event as `ci-gate` failing because a test broke, and only the second
+    should reach the fix rung. It needs the run's JOBS rather than the rollup entry, so one new
+    GitHub read per red pull request. COSTED: 136 `blocked-fixable` rows today across 8 distinct
+    pull requests (control 2026-08-24: 235 rows across 15). At the measured sweep cadence — 1,448
+    distinct disposed timestamps today, roughly 70 seconds apart — an uncached read is 136 calls a
+    day and a read keyed on `${headSha}@${checkName}` is 8. THE KEYING IS THE WHOLE COST QUESTION.
+
+    (10) AND THE DEDUPE RULE BOUNDS BOTH REMEDIES THE SAME WAY. `dedupeRollupByLatestAttempt` keeps
+    only the newest attempt per name, so once the operator re-runs the job the cancellation is
+    superseded and invisible. Both #2794 and #2841 were already re-run by hand before their fix
+    dispatch fired — 02:37:42 and 16:41:24 — so a remedy that reads late sees nothing. Whichever is
+    built must fire inside the window rationale (3) measures, not after it.
+  note: |
+    (i) THE BOUND STAYS. `cancelledCheckRequeueDecision` (`sweep.ts:1354`) re-queues once per
+    `${headSha}@${checkName}` and escalates on the second observation of the same pair. W1-T1066
+    records a polling loop that locked the operator out of his own repository for ninety minutes; a
+    re-queue loop is worse than a hand re-queue. Nothing here relaxes, widens or clocks that bound,
+    and the marker stays ledgered BEFORE the attempt, never after.
+
+    (ii) `runs/{run_id}/rerun-failed-jobs` STAYS REFUSED. The target is the single job,
+    `repos/{owner}/{repo}/actions/jobs/{job_id}/rerun` (`run-task.ts:21879`). On #2794, 25 of 27
+    check-runs on that head were already green when `coverage-ratchet` was cancelled; a whole-run
+    re-run would have re-spent every one of them.
+
+    (iii) `required` IS NOT EDITED BY THIS TASK. Branch protection is READ. This task must not add,
+    remove or reorder a required context, and it must not propose making `coverage-ratchet`
+    required as the remedy — that changes what blocks a merge, which is the operator's call and a
+    different, larger decision.
+
+    (iv) AND `REVIEW_CONTEXT` STAYS EXCLUDED. The strip at `:1292` exists because `remudero-review`
+    is a status the fleet posts itself, not a job it can re-queue. A build that reaches its
+    candidate set by deleting that line has widened the wrong filter.
+
+    (v) A GENUINE FAILURE MUST STILL REACH THE FIX RUNG. The whole value of the arm is that it
+    fires ONLY on an absent verdict. A remedy that also stands down on real failures would stop the
+    drain against every red pull request, which is strictly worse than today's waste.
+
+    (vi) AND THE ARM STAYS THE SWEEP's LANE, NOT THE FIX RUNG's. W1-T1223 design (v) puts gate
+    reconciliation in `runSweep` and this task does not move it. What Q2 asks is whether the fix
+    rung ALSO needs a discriminator, and the answer measured here is that it does not need a new
+    one: the information is upstream, in the miner.
+
+    (vii) Q2, ANSWERED FROM THE LEDGER: A DIFF WITH NO DEFECT IS DISTINGUISHABLE BEFORE THE STRIKE,
+    BUT NOT BY THE GUARD THAT EXISTS. W1-T1282's guard (`run-task.ts:6386-6396`) stands down only
+    when `currentCiFailures` is a defined EMPTY array. It fires — `fix.stood_down` site
+    `rung.empty_ci_failures` reads n=3, newest 2026-08-25T10:10:14.622Z, against a control of site
+    `rung.strike` n=18 on the same read — and it correctly did NOT fire here, because the miner
+    handed it a non-empty list. The list was non-empty with a `ci-gate` entry whose failure traces
+    to a cancellation, and per rationale (6) the miner's own filter would have carried a cancelled
+    non-required entry too. So the guard's question is the wrong one: it asks whether there is ANY
+    evidence, never whether the evidence names an absent verdict.
+
+    (viii) AND THE AFTER-THE-FACT DETECTOR ALREADY EXISTS, WHICH IS HOW WE KNOW THE COST IS REAL.
+    `fix.stood_down` with reason "worktree content is byte-identical to the snapshot taken the last
+    time this same" fired three times across the two incidents — 03:31:26.465Z on W1-T2238, and
+    16:51:09.833Z and 16:52:41.928Z on W1-T2248. The worker found nothing to change. That signal
+    arrives AFTER the strike is counted, which is exactly one dispatch too late.
+
+    (ix) NO NEW LEDGER STEP IS INVENTED CASUALLY. `CHECK_REQUEUE_STEP` and the four
+    `sweep.check_requeue*` literals already exist and already read zero; a remedy that makes them
+    non-zero needs no new vocabulary. If the aggregate-cause read of Q1(ii) is built, its outcome
+    rides the row that already exists rather than a second one beside it.
+
+    (x) THE TWO FIXTURES ARE THE TEST, AND BOTH ARE OFFLINE. Every figure in rationale (2) is a job
+    id and a conclusion, so both incidents serialise to a rollup fixture plus a jobs fixture with no
+    network. A build that cannot land both without a live call has built the wrong seam.
+
+    (xi) AND THE PRODUCER GATE IS PART OF THE SURFACE, NOT A SEPARATE TASK. Rationale (3) measures
+    ten and a half minutes per incident where the arm's input is `undefined` because the aggregate
+    had not concluded. Whether the arm should ACT in that window is a build decision with a real
+    objection — a slow job is not a cancelled one — but discarding the observation is not, because
+    the rollup read that would carry it has already happened.
+
+    (xii) W1-T1223 IS CITED AND NOT RE-FILED, AND ITS POSITION IS PART OF THE STORY. It is credited
+    merged and therefore sits behind `isDispatchEligible`'s opening rung at `drain.ts:487`, so the
+    fleet cannot re-dispatch it to close its own gap. That is W1-T2280's subject. This task exists
+    as a separate id for exactly that reason, and it must not amend W1-T1223's record.
+
+    (xiii) NOTHING HERE REQUEUES A CHECK BY HAND OR AS A SIDE EFFECT OF BEING BUILT. The remedy is
+    that the arm can SEE the cancellation. Verifying it must not POST to any rerun endpoint against
+    a live pull request.
+
+    (xiv) RULE 19 BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as
+    spanning more than one concern — the `sweep` predicate stem, the `run-task` producer stem and
+    this task's own test stem — and refuses that at `risk: medium`. THE BAND IS THE SPAN READING AND
+    NOT A BLAST-RADIUS JUDGEMENT: the change widens what one predicate may name and leaves the
+    bound, the endpoint and the required list alone.
+  acceptance:
+    - claim: "the arm names the cancelled check on the first incident's rollup, where the cancelled job is not one of the declared required contexts"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
+    - claim: "the arm names it on the second incident's rollup as well, recorded eleven hours later on a different pull request"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
+    - claim: "a required check that genuinely failed is never named, so a real defect still reaches the fix rung"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
+    - claim: "a cancelled attempt superseded by a later attempt on the same head is never named"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
+    - claim: "a cancellation observed while the aggregate has not yet concluded is carried rather than discarded"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
+    - claim: "the once per head sha and check name bound is unchanged and still refuses a second attempt on the same pair"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
+    - claim: "the re-queue target is still the single job and never the workflow run that carries already green siblings"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
+    - claim: "the declared required contexts are read and never written, and the review context stays excluded from the candidate set"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
+    - claim: "the fix rung spends no strike on a pull request whose entire red verdict traces to a cancellation"
+      proof: "unit test: test/cancelled-check-arm-can-see-it.test.ts"
