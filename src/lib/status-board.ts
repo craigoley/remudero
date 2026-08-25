@@ -61,6 +61,7 @@ import {
 } from "./daemon.js";
 import { COST_ANOMALY_STEP } from "./cost-anomaly.js";
 import { IMAGE_DRIFT_STEP } from "./image-drift.js";
+import { TOKEN_REFRESHED_STEP, TOKEN_REFRESH_FAILED_STEP } from "./github-app.js";
 import {
   aggregateCacheHitTotals,
   aggregateLearningsInjection,
@@ -611,12 +612,35 @@ export interface MergeHeldRow {
  * carries the cost-anomaly rows W1-T931 shipped plus W1-T1021's image-drift finding plus
  * W1-T1000003's merge-hold rows; a future sentinel is a new field here, not a new section.
  */
+/**
+ * THE FLEET IS RUNNING ON THE FALLBACK TOKEN RIGHT NOW — the newest `github_app.token_refresh_failed`
+ * is newer than the newest `github_app.token_refreshed` (or there has never been a success), so
+ * `refreshInstallationToken` left `process.env.GH_TOKEN` exactly as it found it and every `gh` spawn
+ * since is billing the PERSONAL token's buckets instead of the installation's.
+ *
+ * DELIBERATELY A CURRENT-STATE READ, NOT A COUNT OF HISTORICAL FAILURES. The exchange retries on the
+ * `REFRESH_MARGIN_MS` cadence, so an isolated failure followed by a success is the system working and
+ * must render nothing; only a failure that is still the LAST word means the fallback is standing.
+ * Same "latest wins" comparison {@link ImageDriftRow} already gets from `isNewer`.
+ */
+export interface TokenFallbackRow {
+  /** Why the last exchange failed, verbatim off the row (`exchange timed out`, `exchange rejected: 403`, …). */
+  reason: string;
+  /** When that failure was recorded. */
+  ts?: string;
+  /** When the last SUCCESSFUL refresh was, if there has ever been one — absent means never. */
+  lastOkTs?: string;
+}
+
 export interface NeedsMeSection {
   costAnomaly: CostAnomalyRow[];
   imageDrift?: ImageDriftRow;
   /** W1-T1000003: currently-standing operator merge holds — empty (never `undefined`) when
    *  none stand, so the quiet case renders no row at all (design (iii)). */
   mergeHeld: MergeHeldRow[];
+  /** The standing App-token fallback, if one stands — absent when the last refresh succeeded, so a
+   *  healthy fleet renders no row. */
+  tokenFallback?: TokenFallbackRow;
 }
 
 export interface StatusBoardModel {
@@ -1830,12 +1854,33 @@ function deriveNeedsMe(lines: ReadonlyArray<Record<string, unknown>>): NeedsMeSe
     imageDrift = { buildSha, bakedSha, ts };
   }
 
+  // THE STANDING APP-TOKEN FALLBACK. Two "latest wins" scans over the SAME `lines` already in
+  // hand, compared against each other: the fallback stands iff the newest failure is newer than
+  // the newest success. `isNewer`'s own contract does the never-succeeded case for free — an
+  // absent success makes any dated failure newer — which is exactly the boot-on-fallback shape.
+  let lastFail: { reason: string; ts?: string } | undefined;
+  let lastOkTs: string | undefined;
+  for (const l of lines) {
+    const ts = typeof l.ts === "string" ? l.ts : undefined;
+    if (l.step === TOKEN_REFRESH_FAILED_STEP) {
+      if (lastFail && !isNewer(ts, lastFail.ts)) continue;
+      lastFail = { reason: typeof l.reason === "string" ? l.reason : "unstated", ts };
+    } else if (l.step === TOKEN_REFRESHED_STEP) {
+      if (lastOkTs && !isNewer(ts, lastOkTs)) continue;
+      lastOkTs = ts;
+    }
+  }
+  const tokenFallback =
+    lastFail && isNewer(lastFail.ts, lastOkTs)
+      ? { reason: lastFail.reason, ...(lastFail.ts ? { ts: lastFail.ts } : {}), ...(lastOkTs ? { lastOkTs } : {}) }
+      : undefined;
+
   // W1-T1000003: currently-standing operator merge holds — a pure re-read of the SAME hold
   // reader sweep.ts/run-task.ts already consult, never a second gateway or ledger pass (this
   // module already has `lines` in hand from the read `deriveNeedsMe`'s caller performed once).
   const mergeHeld = deriveMergeHeld(lines);
 
-  return { costAnomaly, imageDrift, mergeHeld };
+  return { costAnomaly, imageDrift, mergeHeld, ...(tokenFallback ? { tokenFallback } : {}) };
 }
 
 /**
@@ -2317,9 +2362,17 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
  *  "no rule matches, no line" doctrine elsewhere. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   const out = ["── NEEDS ME ─────────────────────────────────────────────"];
-  if (n.costAnomaly.length === 0 && !n.imageDrift && n.mergeHeld.length === 0) {
+  if (n.costAnomaly.length === 0 && !n.imageDrift && n.mergeHeld.length === 0 && !n.tokenFallback) {
     out.push("nothing needs you");
     return out;
+  }
+  if (n.tokenFallback) {
+    const since = n.tokenFallback.lastOkTs ? `last good refresh ${n.tokenFallback.lastOkTs}` : "no successful refresh on record";
+    out.push(
+      `token fallback : the App installation token refresh last FAILED (${n.tokenFallback.reason}) — ` +
+        `GH_TOKEN was left as found, so gh calls are billing the personal token's buckets, not the ` +
+        `installation's (${since})`,
+    );
   }
   for (const r of n.mergeHeld) {
     const target = r.prNumber !== undefined ? `PR #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""}` : "the whole fleet";

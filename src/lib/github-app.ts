@@ -86,6 +86,17 @@ const JWT_TTL_SEC = 9 * 60;
 // this amount rather than a magic number that would silently drift out of sync with it.
 export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
 
+/**
+ * THE TWO STEP NAMES THIS MODULE WRITES, OWNED HERE so there is exactly ONE spelling of each —
+ * the same "small module owns its step constant" precedent `src/lib/cost-anomaly.ts`'s
+ * `COST_ANOMALY_STEP` and `src/lib/image-drift.ts`'s `IMAGE_DRIFT_STEP` already set, and imported
+ * by the reader (`deriveNeedsMe`, `src/lib/status-board.ts`) for the same reason: a second
+ * hand-typed copy of a step name is how a reader and a writer silently stop agreeing.
+ */
+export const TOKEN_REFRESHED_STEP = "github_app.token_refreshed";
+/** @see TOKEN_REFRESHED_STEP */
+export const TOKEN_REFRESH_FAILED_STEP = "github_app.token_refresh_failed";
+
 export interface RefreshOptions {
   /** Overrides the value `GH_APP_ID_ENV` would otherwise supply — test seam only. */
   appId?: string;
@@ -166,7 +177,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   try {
     privateKeyPem = readKey(keyPath);
   } catch {
-    log("github_app.token_refresh_failed", { reason: "private key unreadable" });
+    log(TOKEN_REFRESH_FAILED_STEP, { reason: "private key unreadable" });
     return { ok: false, reason: "private key unreadable" };
   }
 
@@ -174,7 +185,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   try {
     jwt = signAppJwt(appId, privateKeyPem, now);
   } catch {
-    log("github_app.token_refresh_failed", { reason: "jwt signing failed" });
+    log(TOKEN_REFRESH_FAILED_STEP, { reason: "jwt signing failed" });
     return { ok: false, reason: "jwt signing failed" };
   }
 
@@ -200,7 +211,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
     });
   } catch {
     const reason = timeoutController.signal.aborted ? "exchange timed out" : "exchange request failed";
-    log("github_app.token_refresh_failed", { reason });
+    log(TOKEN_REFRESH_FAILED_STEP, { reason });
     return { ok: false, reason };
   } finally {
     clearTimeout(timeoutTimer);
@@ -210,7 +221,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
     // design (v): a 403 here reads exactly like a missing-scope rejection, not the rate limit
     // this whole task exists to route around — naming the status keeps the two from being
     // confused again the way this incident already confused them once.
-    log("github_app.token_refresh_failed", { reason: `exchange rejected: ${res.status}` });
+    log(TOKEN_REFRESH_FAILED_STEP, { reason: `exchange rejected: ${res.status}` });
     return { ok: false, reason: `exchange rejected: ${res.status}` };
   }
 
@@ -218,12 +229,12 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   try {
     body = (await res.json()) as { token?: string; expires_at?: string };
   } catch {
-    log("github_app.token_refresh_failed", { reason: "exchange response unparsable" });
+    log(TOKEN_REFRESH_FAILED_STEP, { reason: "exchange response unparsable" });
     return { ok: false, reason: "exchange response unparsable" };
   }
 
   if (!body.token || !body.expires_at) {
-    log("github_app.token_refresh_failed", { reason: "exchange response missing token" });
+    log(TOKEN_REFRESH_FAILED_STEP, { reason: "exchange response missing token" });
     return { ok: false, reason: "exchange response missing token" };
   }
 
@@ -233,7 +244,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   // THE SEAM (file header): every existing GH_TOKEN consumer reads process.env at call/spawn
   // time, so this line — and only this line — is what reaches all three with no call-site change.
   env.GH_TOKEN = body.token;
-  log("github_app.token_refreshed", { installation_id: installationId, expires_at: body.expires_at });
+  log(TOKEN_REFRESHED_STEP, { installation_id: installationId, expires_at: body.expires_at });
   return { ok: true, expiresAtMs };
 }
 
@@ -306,7 +317,7 @@ export function startInstallationTokenRefresh(opts: {
         // too, that is swallowed, never left to take the already-armed timer down with it.
         rearm(REFRESH_MARGIN_MS);
         try {
-          opts.log?.("github_app.token_refresh_failed", {
+          opts.log?.(TOKEN_REFRESH_FAILED_STEP, {
             reason: `refresh threw: ${err instanceof Error ? err.message : String(err)}`,
           });
         } catch {
