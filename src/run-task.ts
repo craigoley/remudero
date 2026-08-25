@@ -12285,6 +12285,65 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
 }
 
 /**
+ * FOLD ONE `state`/`merged_at!=null` ROW INTO THE MOST DECISIVE `prState` SEEN SO FAR for one
+ * head — merged beats open beats closed, and this never downgrades. Shared by the bulk paginated
+ * walk and the per-head follow-up (`perHeadPrState`) below it so the "most decisive wins" rule is
+ * defined exactly once (W1-T2246).
+ */
+function foldPrState(
+  cur: BranchFacts["prState"] | undefined,
+  state: string,
+  merged: string,
+): BranchFacts["prState"] {
+  const next: BranchFacts["prState"] = merged === "true" ? "merged" : state === "open" ? "open" : "closed";
+  if (cur === "merged" || (cur === "open" && next === "closed")) return cur;
+  return next;
+}
+
+/**
+ * PER-HEAD PR STATE, for exactly the branches a bulk paginated walk answered `"none"` for
+ * (W1-T2246 design (i)). The bulk walk (`reapBranchesCommand` below) reads `pulls?state=all` in
+ * date-descending pages capped at 8 (800 rows) — cheap for the corpus as a whole, but an old PR
+ * outside that window reads identically to a branch that never had one. GitHub's `head` filter
+ * answers "every PR (any state) whose head is THIS branch" directly, so a single call per
+ * candidate proves the branch's own history rather than trusting how far the bulk walk got.
+ *
+ * REPORTS ITS OWN COMPLETENESS: a failed call, or a response so large (>=100 rows) that this
+ * unpaginated single call cannot itself be proven complete, returns `"unknown"` rather than
+ * silently falling back to `"none"` — the exact collapse this task exists to end.
+ */
+function perHeadPrState(
+  exec: (cmd: string, args: string[]) => string,
+  owner: string,
+  repo: string,
+  branch: string,
+): BranchFacts["prState"] {
+  // `/` is legal, unescaped, in a query-string VALUE (RFC 3986) and GitHub's own `head` examples
+  // use it bare against branches like `diag/resume-spawn-enoent` — encode everything else that
+  // could otherwise corrupt the query (`&`, `#`, `%`, a literal `:`…) and then restore the slash.
+  const head = encodeURIComponent(`${owner}:${branch}`).replace(/%2F/g, "/");
+  let raw: string;
+  try {
+    raw = exec("gh", [
+      "api",
+      `repos/${owner}/${repo}/pulls?head=${head}&state=all&per_page=100`,
+      "--jq",
+      '.[]|"\\(.state)\\t\\(.merged_at!=null)"',
+    ]);
+  } catch {
+    return "unknown"; // the per-head read itself failed — not the same as "confirmed no PR"
+  }
+  const lines = raw.split("\n").filter((l) => l.trim());
+  if (lines.length >= 100) return "unknown"; // a filtered single call still can't prove it's ALL of them
+  let result: BranchFacts["prState"] | undefined;
+  for (const l of lines) {
+    const [state, merged] = l.split("\t");
+    result = foldPrState(result, state, merged);
+  }
+  return result ?? "none"; // zero rows against this exact head IS a proven "no PR" — the control
+}
+
+/**
  * `rmd ledger-grep <pattern>` — the deduplicated union of every `state/ledger.*.ndjson.gz`
  * archive and the live `state/ledger.ndjson`, for `pattern`. Replaces the manual
  * `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches
@@ -12351,11 +12410,7 @@ export function reapBranchesCommand(
     for (const l of lines) {
       const [ref, state, merged] = l.split("\t");
       if (!ref) continue;
-      const cur = prState.get(ref);
-      // Most decisive wins: merged beats open beats closed.
-      const next: BranchFacts["prState"] = merged === "true" ? "merged" : state === "open" ? "open" : "closed";
-      if (cur === "merged" || (cur === "open" && next === "closed")) continue;
-      prState.set(ref, next);
+      prState.set(ref, foldPrState(prState.get(ref), state, merged));
     }
     if (lines.length < 100) break;
   }
@@ -12363,13 +12418,28 @@ export function reapBranchesCommand(
   const facts: BranchFacts[] = names.map((name) => {
     // W1-T119: a FAILED PR read is not "no PR". If the fetch broke, every branch reads OPEN — the
     // conservative direction, since an open PR is never deletable, so the run can only under-reap.
-    const state: BranchFacts["prState"] = prReadFailed ? "open" : (prState.get(name) ?? "none");
-    let tipInMain = false;
+    // W1-T2246: a bulk `"none"` is NOT "no PR" either — the bulk walk above is a bounded,
+    // date-descending window, so `"none"` here means only "not seen in the window", and an old PR
+    // outside it reads identically to one that never existed. `perHeadPrState` proves this ONE
+    // head's own history directly rather than trusting how far the bulk walk got.
+    const state: BranchFacts["prState"] = prReadFailed
+      ? "open"
+      : (prState.get(name) ?? perHeadPrState(exec, owner, repo, name));
+    let tipInMain: BranchFacts["tipInMain"] = false;
     try {
       exec("git", ["merge-base", "--is-ancestor", `origin/${name}`, "origin/main"]);
       tipInMain = true;
-    } catch {
-      tipInMain = false;
+    } catch (err) {
+      // `--is-ancestor` exits 1 with NO stderr when the ref resolves and simply is not an
+      // ancestor — a real, decided "not in main". It fails with `fatal: Not a valid object name`
+      // when `origin/<name>` was never fetched on THIS checkout — indistinguishable from the
+      // first case by "it threw" alone, but not by what it printed: `execFileSync` folds the
+      // child's stderr into the thrown error's message, so that fatal is visible right here
+      // (W1-T2246 rationale §6 — this is the "unreadable ref silently became commits not in
+      // main" defect; `"unknown"` is neither `true` nor `false` and planBranchReap treats it as
+      // NOT satisfying the third disjunct, same as a decided `false` would, but reports it apart).
+      const msg = err instanceof Error ? err.message : String(err);
+      tipInMain = /not a valid object|fatal:/i.test(msg) ? "unknown" : false;
     }
     let namedInSource = false;
     try {
@@ -12443,7 +12513,18 @@ export function reapBranchesCommand(
     }
     console.log(`  ${sha}\t${b}`);
   }
-  console.log(`hold:      ${plan.hold.length}  (no PR, commits not in main)`);
+  // W1-T2246: "no PR" and "could not tell" are different reasons for the same disposition — a
+  // single "(no PR, commits not in main)" string asserted BOTH about the whole bucket, which is
+  // exactly the mislabel this task ends. `plan.undetermined` is a SUBSET of `plan.hold`, so the
+  // confirmed count below is never negative and the two lines always sum to `plan.hold.length`.
+  const confirmedHold = plan.hold.length - plan.undetermined.length;
+  console.log(
+    `hold:      ${plan.hold.length}  (${confirmedHold} confirmed no PR + commits not in main, ` +
+      `${plan.undetermined.length} state undetermined)`,
+  );
+  if (plan.undetermined.length > 0) {
+    console.log(`  undetermined: ${plan.undetermined.join(", ")}`);
+  }
   console.log("DRY RUN — nothing was deleted.");
 
   if (opts.ledgerPath) {
@@ -12455,6 +12536,7 @@ export function reapBranchesCommand(
       deletable: plan.deletable.length,
       guarded: plan.guarded.length,
       hold: plan.hold.length,
+      undetermined: plan.undetermined.length,
       undeclared_guards: plan.undeclaredGuards,
       dangling_citations: danglingCitations,
       orphan_declarations: orphanDeclarations,
