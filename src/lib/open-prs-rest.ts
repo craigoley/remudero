@@ -34,7 +34,7 @@
  * PAGE, which `JSON.parse` rejects outright, and the `--slurp` that fixes that cannot be
  * combined with `--jq`.
  */
-import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./sweep.js";
+import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
 
 export function openPrsRestArgs(owner: string, repo: string): string[] {
   return ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`];
