@@ -14,10 +14,15 @@
  *         from the sweep's own producer through `routeFix`/`runSweep`'s `dispatchFix` call
  *         and `runFixRung`'s per-round evidence build. A new `gate-fix` mode selects on it.
  *   (ii)  `reviewer-unmet`'s own rule is now named (`unmetCriteria.length > 0`), never an
- *         unconditional catch-all.
- *   (iii) A review-mode round with NEITHER unmet criteria NOR a named gate failure now
- *         stands down under a named ledger reason (`rung.empty_review_evidence`) instead of
- *         dispatching a worker with nothing to act on.
+ *         unconditional catch-all — every shape that DOES carry a named remedy routes to
+ *         `gate-fix` instead, carrying that remedy rather than an empty list.
+ *   (iii) PINNED, UNCHANGED (test/escalation-evidence-floor.test.ts, W1-T487): a round with
+ *         NEITHER unmet criteria NOR a named gate failure is NOT stood down early — it still
+ *         spends its strike and dispatches (falling back to `reviewer-unmet`'s honest,
+ *         if-empty rendering, exactly as before this task) and, on exhaustion, still
+ *         escalates; an empty-evidence rung is never suppressed. This task narrows WHICH
+ *         shapes render an empty `reviewer-unmet` list (routing the ones with a named remedy
+ *         to `gate-fix` instead) — it never adds a new way for the rung to go quiet.
  *   (iv)  PINNED, UNCHANGED: the strike cap; a real unmet-criteria dispatch renders exactly
  *         as before; no review failure is ever treated as if it passed.
  */
@@ -276,15 +281,19 @@ test("runFixRung (criteria 1/2, round 1): unmetCriteria EMPTY but actionableGate
   assert.equal(dispatched[0].extra?.unmet_count, 0, "unmet_count is honestly 0 — the remedy is carried in a SEPARATE field, not manufactured as a fake criterion");
 });
 
-// ── criterion 4 — neither unmet criteria nor a named remedy: stand down, never default ──────────
+// ── criterion 4 — neither unmet criteria nor a named remedy: still dispatch, never suppress ──────
+// PINNED UNCHANGED (test/escalation-evidence-floor.test.ts, W1-T487): an evidence-less round is
+// never stood down early — it spends its strike, dispatches (falling back to `reviewer-unmet`'s
+// honest, if-empty rendering), and still escalates at exhaustion exactly as before this task.
 
-test("runFixRung (criterion 4, round 1): unmetCriteria EMPTY and actionableGateFailures EMPTY/absent stands down BEFORE strike 1 — never spawns a worker, never spends a strike, ledgers a named reason instead of defaulting to reviewer-unmet with an empty list", async () => {
+test("runFixRung (criterion 4, round 1): unmetCriteria EMPTY and actionableGateFailures EMPTY/absent still dispatches — falls back to reviewer-unmet honestly rather than being suppressed", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const issues = fakeIssueStore();
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts({ id: "W1-T2236C", title: "some task" }),
-    strikeCap: 2,
+    strikeCap: 1,
     initialReview: reviewVerdict({ criteria: [], summary: "remudero-review: FAIL — contradictory" }),
     // No `actionableGateFailures:` at all — the genuinely-unclassifiable shape.
     deps: {
@@ -293,13 +302,10 @@ test("runFixRung (criterion 4, round 1): unmetCriteria EMPTY and actionableGateF
         return result({ sessionId: "fix-session-1" });
       },
       waitForCiGreen: async () => "green",
-      runReview: async () => {
-        throw new Error("must never be reached — no strike should ever be dispatched");
-      },
-      push: () => {
-        throw new Error("must never be reached — no strike should ever push");
-      },
-      issues: fakeIssueStore(),
+      // Still failing after the one strike this rung is capped to — reaches exhaustion.
+      runReview: async () => reviewVerdict({ state: "failure", criteria: [], testTheater: false, headSha: "sha-1" }),
+      push: () => {},
+      issues,
       ledgerPath: tmpLedgerPath(),
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
@@ -307,26 +313,34 @@ test("runFixRung (criterion 4, round 1): unmetCriteria EMPTY and actionableGateF
     },
   });
 
-  assert.equal(spawnCalls.length, 0, "no fix worker is ever spawned");
-  assert.equal(outcome.outcome, "stood_down");
-  assert.equal(outcome.strikes, 0, "no strike consumed");
-  assert.match(outcome.standDownReason ?? "", /no unmet acceptance criterion and no actionable gate failure named/i);
-
-  const stoodDown = logs.filter((l) => l.step === "fix.stood_down" && l.extra?.site === "rung.empty_review_evidence");
-  assert.equal(stoodDown.length, 1, "the stand-down is ledgered, not silent");
-  assert.equal(stoodDown[0].extra?.strike, 1, "named as the strike that was about to be spent");
+  assert.equal(spawnCalls.length, 1, "the round still dispatches — never suppressed on empty evidence alone");
+  assert.equal(
+    outcome.outcome,
+    "escalated",
+    "strike cap reached with the review still failing — exhaustion escalates, exactly as before this task",
+  );
+  assert.equal(issues.calls.length, 1, "the escalation still opens exactly one issue");
 
   const dispatched = logs.filter((l) => l.step === "fix.dispatch");
-  assert.equal(dispatched.length, 0, "fix.dispatch — the one step a strike/prior.fixed dedup is counted from — is never logged");
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].extra?.mode, "reviewer-unmet", "falls back honestly — there is no remedy to name");
+  assert.equal(dispatched[0].extra?.unmet_count, 0);
+
+  assert.equal(
+    logs.filter((l) => l.step === "fix.stood_down" && l.extra?.site === "rung.empty_review_evidence").length,
+    0,
+    "this task never adds a new stand-down path — the removed guard's site never fires",
+  );
 });
 
-test("runFixRung (criterion 4, mid-rung recurrence): round 1 has a real unmet criterion and dispatches; round 2's fresh re-review comes back with unmetCriteria empty and testTheater/contradictions absent — stands round 2 down instead of striking on nothing", async () => {
+test("runFixRung (criterion 4, mid-rung recurrence): round 1 has a real unmet criterion and dispatches; round 2's fresh re-review comes back with unmetCriteria empty and testTheater/contradictions absent — round 2 STILL dispatches, falling back to reviewer-unmet honestly", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const issues = fakeIssueStore();
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts({ id: "W1-T2236D", title: "some task" }),
-    strikeCap: 3,
+    strikeCap: 2,
     initialReview: reviewVerdict({
       criteria: [criterion({ claim: "criterion A", met: false, reason: "executed and failed" })],
       summary: "1 unmet criterion",
@@ -340,10 +354,10 @@ test("runFixRung (criterion 4, mid-rung recurrence): round 1 has a real unmet cr
       // Round 1's strike leaves the review STILL FAILING (state stays "failure" — this rung's
       // loop condition is `review.state !== "success"`), but every named criterion now reads
       // MET, testTheater false, no changeset contradictions: a genuinely contradictory verdict,
-      // never something a fix worker can act on.
+      // never something a fix worker can act on — round 2 still dispatches on it honestly.
       runReview: async () => reviewVerdict({ state: "failure", criteria: [criterion({ claim: "criterion A", met: true })], testTheater: false, headSha: "sha-1" }),
       push: () => {},
-      issues: fakeIssueStore(),
+      issues,
       ledgerPath: tmpLedgerPath(),
       log: (step, extra) => logs.push({ step, extra }),
       say: () => {},
@@ -351,14 +365,26 @@ test("runFixRung (criterion 4, mid-rung recurrence): round 1 has a real unmet cr
     },
   });
 
-  assert.equal(spawnCalls.length, 1, "exactly ONE strike — round 1's; round 2 never dispatches");
-  assert.equal(outcome.outcome, "stood_down");
-  assert.equal(outcome.strikes, 1, "strikes never incremented past round 1");
-  assert.match(outcome.standDownReason ?? "", /no unmet acceptance criterion and no actionable gate failure named/i);
+  assert.equal(spawnCalls.length, 2, "both rounds dispatch — round 2's empty-evidence shape is never suppressed");
+  assert.equal(
+    outcome.outcome,
+    "escalated",
+    "strike cap reached with the review still failing — exhaustion escalates, exactly as before this task",
+  );
+  assert.equal(outcome.strikes, 2);
+  assert.equal(issues.calls.length, 1);
 
-  const stoodDown = logs.filter((l) => l.step === "fix.stood_down" && l.extra?.site === "rung.empty_review_evidence");
-  assert.equal(stoodDown.length, 1);
-  assert.equal(stoodDown[0].extra?.strike, 2, "named as the strike that was about to be spent");
+  const dispatched = logs.filter((l) => l.step === "fix.dispatch");
+  assert.equal(dispatched.length, 2);
+  assert.equal(dispatched[0].extra?.mode, "reviewer-unmet", "round 1 is the ordinary unmet path");
+  assert.equal(dispatched[1].extra?.mode, "reviewer-unmet", "round 2 falls back honestly too — no remedy exists to name");
+  assert.equal(dispatched[1].extra?.unmet_count, 0);
+
+  assert.equal(
+    logs.filter((l) => l.step === "fix.stood_down" && l.extra?.site === "rung.empty_review_evidence").length,
+    0,
+    "this task never adds a new stand-down path — the removed guard's site never fires",
+  );
 });
 
 test("runFixRung (criteria 1/2, mid-rung recurrence): round 2's fresh re-review is itself a gate failure (testTheater true) — derived FRESH off the live review, never the stale round-1 seed, and dispatches in gate-fix mode", async () => {
@@ -404,26 +430,25 @@ test("runFixRung (criteria 1/2, mid-rung recurrence): round 2's fresh re-review 
 
 // ── criterion 5 — no review failure reaches a merge as a result of this change ───────────────────
 
-test("runFixRung (criterion 5): the empty-review-evidence stand-down never treats the review as passing, escalates NOTHING, and rewrites NOTHING — it only ledgers and says, exactly like the sibling terminal-state stand-downs", async () => {
+test("runFixRung (criterion 5): an empty-evidence round dispatches honestly (falling back to reviewer-unmet) but still never treats the still-failing review as passing — no merge armed, no PR-body rewrite while it exhausts", async () => {
   const issues = fakeIssueStore();
   let updatePrBodyCalls = 0;
-  const sayLines: string[] = [];
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts({ id: "W1-T2236F", title: "some task" }),
-    strikeCap: 2,
+    strikeCap: 1,
     initialReview: reviewVerdict({ criteria: [], summary: "contradictory" }),
     deps: {
       spawn: async () => result(),
       waitForCiGreen: async () => "green",
-      runReview: async () => {
-        throw new Error("must never be reached");
-      },
+      // Still failing after the one strike this rung is capped to — reaches exhaustion, never
+      // treated as if it passed.
+      runReview: async () => reviewVerdict({ state: "failure", criteria: [], testTheater: false, headSha: "sha-1" }),
       push: () => {},
       issues,
       ledgerPath: tmpLedgerPath(),
       log: () => {},
-      say: (msg) => sayLines.push(msg),
+      say: () => {},
       account: (r) => r,
       updatePrBody: async () => {
         updatePrBodyCalls++;
@@ -431,11 +456,10 @@ test("runFixRung (criterion 5): the empty-review-evidence stand-down never treat
     },
   });
 
-  assert.equal(outcome.outcome, "stood_down", "never 'fixed' — the review is never treated as if it passed");
-  assert.equal(outcome.review.state, "failure", "the review verdict this stand-down returns still reads failing — nothing here can arm a merge");
-  assert.equal(issues.calls.length, 0, "no needs-human issue is opened for this reason");
-  assert.equal(updatePrBodyCalls, 0, "the stand-down never rewrites the PR body");
-  assert.ok(sayLines.some((m) => /standing down/.test(m)), "the operator narration names the stand-down too");
+  assert.equal(outcome.outcome, "escalated", "still failing after the one strike — exhaustion escalates, never silently 'fixed'");
+  assert.equal(outcome.review.state, "failure", "the returned verdict still reads failing — nothing here can arm a merge");
+  assert.equal(issues.calls.length, 1, "the escalation still opens exactly one issue, unsuppressed by the empty evidence");
+  assert.equal(updatePrBodyCalls, 0, "an escalating rung never rewrites the PR body — that path is reserved for an armed merge");
 });
 
 // ── W1-T923 sweep-side wiring (design note i) — the disposition rule itself is UNCHANGED and ──────

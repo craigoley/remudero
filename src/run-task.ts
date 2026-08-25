@@ -4527,13 +4527,18 @@ interface FixModeRule {
  *                        `evidence.review.unmetCriteria` is non-empty. W1-T2236: NAMED,
  *                        not unconditional — see this doc block's own header, above. An
  *                        evidence shape that reaches NONE of these five rows (no unmet
- *                        criteria, no named gate failure, no CI/merge-conflict evidence)
- *                        is never expected to reach this function at all: `runFixRung`'s
- *                        own pre-strike guard (site `rung.empty_review_evidence`) stands
- *                        that shape down before a strike is ever spent — see its own doc.
- *                        `deriveFixMode`'s fallback below still names `reviewer-unmet` for
- *                        that unreachable-in-practice case, purely so the function stays
- *                        total or a fixture calling it directly still gets a legible mode.
+ *                        criteria, no named gate failure, no CI/merge-conflict evidence —
+ *                        the #1991-adjacent shape where the reviewer's own reasons name no
+ *                        single unambiguous cause either) still reaches `deriveFixMode`:
+ *                        `runFixRung` still spends the strike and still dispatches, exactly
+ *                        as it did before this task (W1-T487's escalation-evidence-floor
+ *                        invariant — an empty-evidence rung is never suppressed, only its
+ *                        eventual escalation names the absence honestly). `deriveFixMode`'s
+ *                        fallback below names `reviewer-unmet` for that shape, purely so the
+ *                        function stays total; nothing about this task widens WHEN that
+ *                        empty-list prompt goes out, it only narrows it (design note i/ii)
+ *                        by routing every shape that DOES carry a named remedy to `gate-fix`
+ *                        instead.
  */
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
@@ -6665,59 +6670,37 @@ export async function runFixRung(opts: {
     }
 
     // W1-T2236: holdout criteria are reviewer-visible but WORKER-hidden — computed here (rather
-    // than only at the evidence-building site further below) so the empty-review-evidence guard
+    // than only at the evidence-building site further below) so the gate-failure derivation
     // immediately below can read the SAME worker-visible unmet set the eventual dispatch would
     // carry, never a second independently-recomputed copy.
     const rawUnmet = review.criteria.filter((c) => !c.met);
     const unmet = visibleCriteria(rawUnmet);
     // W1-T2236: this round's structured gate-failure remedy (the `gate-fix` mode's ONLY input —
     // see {@link FixEvidence.actionableGateFailures}'s own doc). Review-mode rounds only (never
-    // ci-log/merge-conflict, which carry their own evidence shape and stand-down guard already).
-    // ROUND 1 (`strikes === 0`) prefers the sweep's own already-computed seed
-    // (`opts.actionableGateFailures`, W1-T923's producer) — `review` this early is still
-    // `buildFixRungDispatchArgs`'s lossy ledger reconstruction (no `testTheater`/
-    // `changesetContradictions`), so deriving from it directly would read `[]` even for the exact
-    // shape this field exists to carry. Every LATER round re-derives FRESH off that round's own
-    // live re-review instead — never this stale seed — via the SAME `reviewLedgerReasons`/
-    // `actionableGateFailuresFromReasons` pair the ledger's own `review.posted` line uses,
-    // mirroring `currentCiFailures`' own per-round refresh via `deps.fetchCiFailures`. GATED ON
-    // `unmet.length === 0` — the SAME precondition `actionableGateFailuresFromLedger`
-    // (run-task.ts) enforces before ever calling `actionableGateFailuresFromReasons` — because
-    // `reviewLedgerReasons` returns ONE entry per VISIBLE unmet criterion too; without this
-    // guard a single genuine unmet criterion (`reasons.length === 1`, the ordinary case) would
-    // be misread as a single-form gate-failure remedy and wrongly derive `gate-fix` mode
-    // instead of `reviewer-unmet` (design note i is additive, never a widening of when a gate
-    // failure is claimed).
+    // ci-log/merge-conflict, which carry their own evidence shape already). ROUND 1
+    // (`strikes === 0`) prefers the sweep's own already-computed seed (`opts.actionableGateFailures`,
+    // W1-T923's producer) — `review` this early is still `buildFixRungDispatchArgs`'s lossy ledger
+    // reconstruction (no `testTheater`/`changesetContradictions`), so deriving from it directly
+    // would read `[]` even for the exact shape this field exists to carry. Every LATER round
+    // re-derives FRESH off that round's own live re-review instead — never this stale seed — via
+    // the SAME `reviewLedgerReasons`/`actionableGateFailuresFromReasons` pair the ledger's own
+    // `review.posted` line uses, mirroring `currentCiFailures`' own per-round refresh via
+    // `deps.fetchCiFailures`. GATED ON `unmet.length === 0` — the SAME precondition
+    // `actionableGateFailuresFromLedger` (run-task.ts) enforces before ever calling
+    // `actionableGateFailuresFromReasons` — because `reviewLedgerReasons` returns ONE entry per
+    // VISIBLE unmet criterion too; without this guard a single genuine unmet criterion
+    // (`reasons.length === 1`, the ordinary case) would be misread as a single-form gate-failure
+    // remedy and wrongly derive `gate-fix` mode instead of `reviewer-unmet` (design note i is
+    // additive, never a widening of when a gate failure is claimed). When this reads empty/undefined
+    // (no named remedy either), the round still dispatches exactly as it always has — W1-T487's
+    // escalation-evidence-floor invariant requires an empty-evidence rung to still spend its
+    // strikes and still escalate at exhaustion, never stand down early on empty evidence alone.
     const gateFailuresNow: ActionableGateFailure[] | undefined =
       currentMergeConflict === undefined && !noReviewYet && unmet.length === 0
         ? strikes === 0 && opts.actionableGateFailures !== undefined
           ? opts.actionableGateFailures
           : actionableGateFailuresFromReasons(reviewLedgerReasons(review))
         : undefined;
-
-    // W1-T2236 SITE — THE EMPTY-REVIEW-EVIDENCE GUARD, BEFORE `strikes++`: a review-mode round
-    // (merge-conflict/ci-log rounds carry their own evidence shape and their own guard above)
-    // whose review is FAILING with `rawUnmet` empty (design note i: NOT ONLY the worker-visible
-    // `unmet` — a review can fail on a holdout criterion ALONE (W1-T166), which empties the
-    // visible `unmet` set while `rawUnmet` still carries the real, hidden reason; that shape must
-    // keep dispatching exactly as before, via the review's own redacted summary, never stand
-    // down) AND no structured gate-failure remedy either has NOTHING to hand a fix worker.
-    // Dispatching it anyway was the measured defect this task fixes: `deriveFixMode`'s old
-    // `reviewer-unmet` catch-all (`when: () => true`) matched, and the prompt went out naming
-    // zero unmet criteria — 63% of that mode's measured dispatches (this task's own rationale).
-    // Mirrors the W1-T1282 ci-log guard immediately above (`rung.empty_ci_failures`): never falls
-    // through to a strike, never logs `fix.dispatch` (the one step a strike/`prior.fixed` dedup is
-    // counted from) — ledgers the reason and stands down instead. The review itself is left
-    // UNTOUCHED and still FAILING, so nothing here arms a merge (design note iv). Checked every
-    // round, not just the first — the contradictory shape can recur mid-rung too.
-    if (currentMergeConflict === undefined && !noReviewYet && rawUnmet.length === 0 && (gateFailuresNow?.length ?? 0) === 0) {
-      const reason =
-        "review failing with no unmet acceptance criterion and no actionable gate failure named — " +
-        "nothing to hand a fix worker; standing down rather than spending a strike on empty evidence";
-      deps.log("fix.stood_down", { site: "rung.empty_review_evidence", strike: strikes + 1, reason });
-      deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
-      return { outcome: "stood_down", review, strikes, reason, standDownReason: reason };
-    }
 
     // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
     // binary crash that debited a fix-rung strike, and escalated, on a worker that
