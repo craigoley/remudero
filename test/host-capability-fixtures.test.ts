@@ -243,6 +243,32 @@ const DECLARED: readonly Declared[] = [
       "does not apply: EISDIR/ENOTDIR deny writeFileSync too, but they also deny the unlinkSync this test needs " +
       "to observe succeeding, so neither substitutes for a real read-only FILE.",
   },
+  {
+    kind: "chmod",
+    file: "adoption-report-has-a-producer.test.ts",
+    key: "0o000",
+    count: 2,
+    reason:
+      "W1-T2266 SHAPE 2/3: the ONLY fixture that reaches the adoption walk's unreadable-file catch arm. " +
+      "CHMOD_REMEDY does not apply, and the reason is mechanical rather than stylistic: walkAdoptionFiles " +
+      "(src/lib/measurement-cadence.ts) pushes a child only on `e.isFile()`, so a DIRECTORY at the path — the " +
+      "EISDIR shape — is skipped at ENUMERATION and never reaches the readFileSync whose catch degrades to \"\". " +
+      "Substituting it would silently stop covering the branch, which is test theatre, not a safer fixture. " +
+      "Root bypasses read denial, so at uid 0 the file IS read: the content is then seen as a real write, the " +
+      "expected finding is absent, and the assertion FAILS LOUDLY. It does not go vacuous — the uid-0 failure " +
+      "direction here is red, never green.",
+  },
+  {
+    kind: "chmod",
+    file: "adoption-report-has-a-producer.test.ts",
+    key: "0o644",
+    count: 2,
+    reason:
+      "The RESTORE half of the two 0o000 fixtures above, one per site, in each test's own `finally` — not a " +
+      "denial at all. Unlike the 0o644 husks in spawn-nopid-diagnosis/toolchain-refusal-errno, nothing here " +
+      "depends on the absent execute bit; these exist so rmSync can remove the fixture tree afterwards. They " +
+      "disappear if and when the 0o000 sites do.",
+  },
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
   {
     kind: "platform-tool",
