@@ -224,7 +224,21 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // comment requires: the calibration failed at 19-vs-18 while test 2 stayed green, so the reader
   // arrived already seamed and is NOT allowlisted — adding it to ALLOWED would fail test 3's
   // STALE-ENTRY LOCK and test 5, both of which refuse a seamed reader an allowlist entry.
-  assert.equal(readers.length, 19, `expected 19 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  //
+  // TWENTY since `buildDigestCadenceDaemonHooks`'s own `policyFor` (run-task.ts, W1-T2277) landed —
+  // a SEVENTEENTH consumer, also SEAMED (`deps.policy ?? loadPolicy(policyPath(repoRoot))`),
+  // resolving the `digestCadence` rows that give the fleet digest its own daemon schedule. It is a
+  // STRUCTURAL SIBLING of the nineteenth above, not a second kind of thing: the same thunk shape,
+  // reading a sibling row, in the hook builder next to it — `buildMeasurementCadenceDaemonHooks`
+  // reads `values.measurementCadence`, this one reads `values.digestCadence`. Two hook builders,
+  // two rows, two seamed reads, and the detector counts reads rather than builders.
+  // IT PASSED TEST 2 BEFORE THIS NUMBER MOVED, which is the order this comment requires: the
+  // calibration failed at 20-vs-19 while test 2 stayed green, so the reader arrived already seamed
+  // and is NOT allowlisted — adding it to ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5.
+  // The file set is UNCHANGED by it (`src/run-task.ts` already carried the nineteenth), so the
+  // `files` assertion below needed no edit — which is itself the check that this reader landed
+  // where its sibling lives rather than opening a new unredirectable surface.
+  assert.equal(readers.length, 20, `expected 20 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
