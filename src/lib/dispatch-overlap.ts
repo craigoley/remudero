@@ -48,7 +48,61 @@ export interface OverlapPartition {
   dispatch: Task[];
   /** Candidates deferred to a later pass, one entry per deferred task. */
   serialized: SerializedDeferral[];
+  /**
+   * One entry per candidate whose OBSERVED scope (see {@link ObservedScopeByTask})
+   * reached a path its DECLARED `files:` never named — W1-T2237's finding that a
+   * merged diff exceeded its declaration in 138 of 301 comparable cases, 47 of them
+   * onto contested `src/` ground. Populated purely from the `observedByTask` input
+   * below; a call site that passes none (every production call site today — see
+   * that parameter's doc) always gets `overruns: []`. NEVER consulted by this
+   * function's own dispatch/serialize decision above and NEVER written anywhere —
+   * W1-T2237 §6/§13 scope this shard to REPORTING the drift a caller can act on
+   * (a human amending a shard's `files:`, e.g.), not to auto-correcting it or
+   * refusing on it.
+   */
+  overruns: ScopeOverrunReport[];
 }
+
+/**
+ * ONE candidate's REAL changed-file set, as of whenever the caller observed it —
+ * e.g. `openPrFileScopes`'s (`src/run-task.ts`) read of an open PR's actual diff.
+ * Deliberately NOT `Task["files"]`-shaped: an observed scope is a flat list of
+ * concrete repo-relative paths a diff touched, never a glob, because nothing
+ * declares wildcards over a diff — a diff either touched a path or it didn't.
+ */
+export interface ObservedScope {
+  files: readonly string[];
+}
+
+/**
+ * Per-task observed scope, keyed by task id — OPTIONAL input to
+ * {@link partitionByFileOverlap}. A task absent from this map (every candidate,
+ * on every production call site as of W1-T2237 — this is wired ONLY through this
+ * function's default parameter, never threaded from drain.ts or daemon.ts) is
+ * scored on its DECLARATION alone, exactly as before this shard: W1-T2237 §5 (Q1)
+ * is explicit that arming the observed side against LIVE dispatch needs its own
+ * throughput measurement first, so this shard builds the capability without
+ * wiring it into either dispatch loop.
+ */
+export type ObservedScopeByTask = ReadonlyMap<string, ObservedScope>;
+
+/**
+ * The declared-vs-observed comparison for ONE task, reported rather than
+ * discarded (W1-T2237 §12: "nothing compares the declaration to the defect" —
+ * this is that comparison). `overrun` is the subset of `observed` not covered by
+ * ANY glob in `declared`; `declared` and `observed` are carried in FULL (not just
+ * the overrun) so a reader can tell DRIFT (an overrun onto ground unrelated to the
+ * declared scope) from CREEP (an overrun immediately adjacent to it) without
+ * re-deriving either side.
+ */
+export interface ScopeOverrunReport {
+  task: string;
+  declared: string[];
+  observed: string[];
+  overrun: string[];
+}
+
+const NO_OBSERVED_SCOPE: ObservedScopeByTask = new Map();
 
 /**
  * True iff glob `a` and glob `b` can describe the SAME repo-relative path — i.e.
@@ -140,6 +194,38 @@ function overlappingPaths(a: Pick<Task, "files">, b: Pick<Task, "files">): strin
 }
 
 /**
+ * `task`'s scope for OVERLAP-COMPARISON purposes: its declared `files:` UNIONED
+ * with whatever `observedByTask` recorded for its id (deduped; order irrelevant
+ * to `overlappingPaths`, which only asks whether the resulting glob set
+ * intersects another). A task absent from `observedByTask`, or present with an
+ * empty `files` list, reduces to its bare declaration — so this is a strict
+ * no-op for every call site that passes no observed scope at all (every
+ * production call site today), preserving the ORIGINAL fail-closed disposition
+ * on an undeclared-and-unobserved task exactly: declared `[]` union observed `[]`
+ * is still `[]`, which `overlappingPaths` already treats as overlapping
+ * everything.
+ */
+function effectiveScope(task: Pick<Task, "id" | "files">, observedByTask: ObservedScopeByTask): Pick<Task, "files"> {
+  const declared = task.files ?? [];
+  const observed = observedByTask.get(task.id)?.files ?? [];
+  if (observed.length === 0) return { files: declared };
+  return { files: [...new Set([...declared, ...observed])] };
+}
+
+/**
+ * The subset of `observed` not covered by any glob in `declared` — the
+ * comparison W1-T2237 §12 found nothing performs ("both advisories compare the
+ * declaration to the diff, and nothing compares the declaration to the defect").
+ * Coverage is `globsIntersect`, the SAME glob semantics the collision guard above
+ * uses, so a declared `src/lib/*.ts` covers an observed `src/lib/drain.ts` here
+ * exactly as it would suppress a collision there — one glob engine, not two that
+ * could drift apart.
+ */
+function overrunFiles(declared: readonly string[], observed: readonly string[]): string[] {
+  return observed.filter((o) => !declared.some((d) => globsIntersect(d, o)));
+}
+
+/**
  * Partitions `candidates` — a set the caller has already established are
  * otherwise concurrently runnable — into one pass of pairwise-`files:`-disjoint
  * tasks plus a list of deferrals. DETERMINISTIC: candidates are placed in the
@@ -151,19 +237,54 @@ function overlappingPaths(a: Pick<Task, "files">, b: Pick<Task, "files">): strin
  * simply absent from `dispatch`; it remains eligible for the NEXT pass (once the
  * task(s) it collided with have left the in-flight set), which this function does
  * not model — the caller re-invokes it with a fresh candidate list next tick.
+ *
+ * `observedByTask` (W1-T2237) is OPTIONAL and defaults to empty: when supplied,
+ * the collision check above compares each pair's {@link effectiveScope} (declared
+ * UNION observed) rather than the bare declaration, so a lane whose REAL diff
+ * already reaches a path is serialized against another lane declaring or
+ * touching that same path even if its OWN `files:` never named it. A candidate
+ * missing from `observedByTask` is scored on its declaration alone, unchanged.
+ * This can only ever ADD a deferral, never remove one the bare-declaration
+ * comparison would have produced (union is a superset of the declared side
+ * alone) — so it refuses no dispatch that is eligible today; it can only
+ * SERIALIZE a pair one more pass finds independent anyway, which is this
+ * module's existing, non-blocking backstop (module doc above), never a refusal.
+ * `overruns` is computed from the SAME two inputs per candidate and is pure
+ * reporting (see {@link ScopeOverrunReport}) — it does not feed back into
+ * `dispatch`/`serialized` above.
  */
-export function partitionByFileOverlap(candidates: readonly Task[]): OverlapPartition {
+export function partitionByFileOverlap(
+  candidates: readonly Task[],
+  observedByTask: ObservedScopeByTask = NO_OBSERVED_SCOPE,
+): OverlapPartition {
   const dispatch: Task[] = [];
   const serialized: SerializedDeferral[] = [];
+  const overruns: ScopeOverrunReport[] = [];
   for (const candidate of candidates) {
-    const blocker = dispatch.find((placed) => overlappingPaths(placed, candidate).length > 0);
+    const effectiveCandidate = effectiveScope(candidate, observedByTask);
+    const blocker = dispatch.find(
+      (placed) => overlappingPaths(effectiveScope(placed, observedByTask), effectiveCandidate).length > 0,
+    );
     if (blocker) {
-      serialized.push({ task: candidate.id, blockedBy: blocker.id, paths: overlappingPaths(blocker, candidate) });
+      serialized.push({
+        task: candidate.id,
+        blockedBy: blocker.id,
+        paths: overlappingPaths(effectiveScope(blocker, observedByTask), effectiveCandidate),
+      });
     } else {
       dispatch.push(candidate);
     }
+
+    const observed = observedByTask.get(candidate.id)?.files ?? [];
+    if (observed.length > 0) {
+      const declared = candidate.files ?? [];
+      const overrun = overrunFiles(declared, observed);
+      if (overrun.length > 0) {
+        overruns.push({ task: candidate.id, declared: [...declared], observed: [...observed], overrun });
+      }
+    }
   }
-  return { dispatch, serialized };
+  return { dispatch, serialized, overruns };
 }
 
 /**
