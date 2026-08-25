@@ -180,6 +180,44 @@ fi
 export GH_TOKEN
 echo "serve-container: GH_TOKEN ${GH_TOKEN_SOURCE} (value never printed, never written to disk)"
 
+# ── 4b. GH_APP_* — OPTIONAL, CAPTURED THE SAME WAY, NEVER REFUSED (W1-T2269) ────────────────────
+# `src/lib/github-app.ts`'s `startInstallationTokenRefresh` lets the console mint its OWN
+# installation tokens in-process, straight from GitHub's token-exchange endpoint — it never asks
+# the daemon for one (a design constraint: a renewal path that reached INTO the daemon would make
+# the console's `--restart=unless-stopped` lifetime depend on the daemon's, exactly what these two
+# containers are split apart to avoid — see this file's own "WHY IT IS A SEPARATE CONTAINER" note
+# above). Captured the SAME way GH_TOKEN is above — prefer this shell's own, else whatever the
+# live daemon container's environment carries — because that IS how the running console holds
+# these three today: inherited from whoever's shell happened to launch it, never from a committed
+# script. This closes that: any launch through THIS script now carries them the same way GH_TOKEN
+# always has, rather than only when the launching operator's shell happened to.
+#
+# ABSENT IS NOT REFUSED, on any of the three — mirrors `startInstallationTokenRefresh`'s own
+# contract exactly: a console with none of them set starts and serves precisely as it did before
+# this task, `GH_TOKEN` (whatever it holds at spawn) keeps authenticating every `gh`/`git` call,
+# and the operator sees an explicit "static (no renewal configured)" chip on the board rather than
+# a silent behaviour change. A `GH_APP_PRIVATE_KEY_PATH` that does not resolve to a readable file
+# INSIDE this container (this script mounts no new volume for it) degrades the same graceful way:
+# `refreshInstallationToken` reports "private key unreadable", ledgers it, and leaves `GH_TOKEN`
+# exactly as it found it — never a boot failure, never a masked one either (see the board chip).
+for VAR_NAME in GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH; do
+  CURRENT="${!VAR_NAME:-}"
+  if [ -n "${CURRENT}" ]; then
+    export "${VAR_NAME}"
+    echo "serve-container: ${VAR_NAME} from the invoking shell (value never printed, never written to disk)"
+  elif [ -n "${DAEMON_STATE_DIR}" ]; then
+    CAPTURED="$(docker inspect "${DAEMON_CONTAINER}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+      | sed -n "s/^${VAR_NAME}=//p" | head -1 || true)"
+    if [ -n "${CAPTURED}" ]; then
+      printf -v "${VAR_NAME}" '%s' "${CAPTURED}"
+      export "${VAR_NAME}"
+      echo "serve-container: ${VAR_NAME} captured from ${DAEMON_CONTAINER} (value never printed, never written to disk)"
+    fi
+    unset CAPTURED
+  fi
+done
+unset CURRENT VAR_NAME
+
 # ── 5. AN EXISTING CONTAINER IS NEVER SILENTLY REPLACED ─────────────────────────────────────────
 # Replacing the console is a deliberate act: it is frequently the only surface an operator has on a
 # fleet they are away from, and this script is also the natural thing to re-run "just to check".
@@ -204,6 +242,9 @@ RUN_ARGS=(
   --network "${NETWORK}"
   --user 1000:1000
   -e GH_TOKEN
+  -e GH_APP_ID
+  -e GH_APP_INSTALLATION_ID
+  -e GH_APP_PRIVATE_KEY_PATH
   -e "RMD_SERVE_NETWORK=${SERVE_NETWORK_ENV_VALUE}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   "${REF}"
@@ -213,7 +254,8 @@ RUN_ARGS=(
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo "serve-container: --dry-run, nothing changed. The launch would be:"
   echo "  docker ${RUN_ARGS[*]}"
-  echo "  (-e GH_TOKEN passes the NAME; the value is read from this script's environment.)"
+  echo "  (-e NAME passes the NAME only; each value is read from this script's own environment —"
+  echo "   docker drops a name this script never set, so the three GH_APP_* names are optional.)"
   if [ "${CONTAINER_EXISTS}" -eq 1 ] && [ "${REPLACE}" -ne 1 ]; then
     echo "  NOTE: ${CONTAINER_NAME} already exists — a real run would REFUSE without --replace."
   fi
