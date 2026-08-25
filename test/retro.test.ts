@@ -906,8 +906,10 @@ test("mineFollowups: an already-harvested entry mints NOTHING again — a second
   const base = [
     `{"ts":"2026-05-02T00:00:00.000Z","run_id":"R1","task_id":"W1-T401","step":"report.followups","pr_url":"https://github.com/o/r/pull/401","entries":[{"type":"action","text":"rotate the leaked fixture token"},{"type":"research","text":"unaffected second entry, still unharvested"}]}`,
   ];
-  // Simulate: entry 0 was ALREADY harvested by a prior retro; entry 1 was not.
-  const alreadyHarvested = `{"ts":"2026-05-02T01:00:00.000Z","run_id":"R1","task_id":"W1-T401","step":"followup.harvested","entry_id":"R1:0"}`;
+  // Simulate: entry 0 was ALREADY harvested by a prior retro; entry 1 was not. The mark's
+  // entry_id (W1-T2252) is keyed on the SOURCE row's own run_id:ts:index, not just run_id:index —
+  // "2026-05-02T00:00:00.000Z" here is `base`'s own row ts above, not this mark's own ts.
+  const alreadyHarvested = `{"ts":"2026-05-02T01:00:00.000Z","run_id":"R1","task_id":"W1-T401","step":"followup.harvested","entry_id":"R1:2026-05-02T00:00:00.000Z:0"}`;
   const records = parseLedger([...base, alreadyHarvested].join("\n"));
   const first = mineFollowups(records);
   assert.equal(first.candidates.length, 1, "only the NOT-yet-harvested entry mints");
