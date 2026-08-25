@@ -1,0 +1,168 @@
+- id: W1-T2252
+  title: "THE FOLLOW-UP HARVEST KEY IS NOT UNIQUE, SO A THIRD OF EVERY DECLARATION IS SKIPPED AS ALREADY SEEN — `mineFollowups` keys an entry on `${run_id}:${index}` and the index restarts at zero per report, but one run emits up to five `report.followups` rows from four separate call sites, so 521 of 1,426 declared entries collide onto an id another entry already claimed and are dropped by `processed.has(entryId)` before they are ever considered"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/lib/retro.ts, test/followup-entry-key-collision.test.ts]
+  origin: oper#followup-harvest-key-collides-2026-08-25
+  plan_refs: ["W1-T105", "W1-T1013"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main 6a9aaac2 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS RATHER THAN THE 1.5 MB WORKING FILE.
+    EVERY STEP NAME BELOW WAS GREPPED OUT OF SOURCE AS A LITERAL BEFORE IT WAS QUERIED.
+    LEDGER FIGURES FROM `resolveLedgerUnion` AT THE STATE DIR: archiveCount 24, liveFileRead true,
+    ok true, unread none. Window 2026-08-08T22:00:04.710Z .. 2026-08-25T00:08:49.502Z. Newest row
+    per step: `report.followups` n=701 newest 2026-08-25T00:08:49.233Z; `followup.harvested`
+    n=1329 newest 2026-08-24T13:29:03.187Z; `followup.deduped` n=1 newest
+    2026-08-23T16:30:27.028Z; `retro.start` n=14; `retro.synthesized` n=11; `anchor.built` n=347.
+
+    (1) THE KEY, AND WHY IT COLLIDES. `mineFollowups` (`src/lib/retro.ts:2225-2268`) builds
+    `const entryId = ${r.run_id ?? "?"}:${i}` at `:2247` and returns immediately on
+    `if (processed.has(entryId)) return;` at `:2248`, where `processed` is seeded from every
+    prior `followup.harvested`/`followup.deduped` line. THE INDEX `i` IS THE POSITION WITHIN ONE
+    `report.followups` ROW, so it restarts at zero for every row. `harvestFollowupsFromReport`
+    (`src/run-task.ts:7532-7546`) is called from FOUR sites under one run: the fix rung at
+    `run-task.ts:6738`, recon at `:8834`, and implement at `:9177` and `:9400`. So one run emits
+    several rows, each numbering its entries from zero, and the second row's entry 0 is skipped
+    as though it were the first row's entry 0.
+
+    (2) MEASURED OVER THE UNION, AND THE LOSS IS A THIRD. 701 `report.followups` rows carry
+    1,426 entries, which collapse to 905 distinct `run_id:index` keys: 521 ENTRIES, 36.5%,
+    COLLIDE ONTO AN ID ANOTHER ENTRY ALREADY HOLDS. 268 of 398 distinct run_ids emit more than
+    one row, and one run emitted FIVE. CONTROL ON THE KIND FILTER, so this is not entries being
+    dropped for being the wrong type: `mineFollowups` accepts exactly `task`, `research` and
+    `action`, and the 1,426 entries are research 688, task 523, action 215 — ZERO carry any
+    other type.
+
+    (3) THE ROW CARRIES ENOUGH TO DISAMBIGUATE, SO THE FIX IS READER-SIDE AND THE HISTORY IS
+    SALVAGEABLE. THIS IS THE OPPOSITE OF THE WORST CASE AND IT MUST NOT BE MISREAD. The fields a
+    `report.followups` row actually holds are: `entries`, `host`, `lane`, `pr_url`, `run_id`,
+    `step`, `task_id`, `ts`. There is NO field naming the phase — `harvestFollowupsFromReport`
+    takes `label` ("recon" / "implement") and spends it ONLY on the human-facing `ctx.say` line
+    at `run-task.ts:7513`; the ledger call one line above never carries it. `pr_url` is present
+    on only 355 of 701 rows, so it cannot serve either. BUT `ts` CAN: across all 268 multi-row
+    run_ids, ZERO have a repeated `ts`, and keying on run_id plus `ts` plus index yields 1,426
+    DISTINCT IDS FOR 1,426 ENTRIES — exactly unique, with nothing left over. A content hash of
+    type plus text is a near miss at 1,425 of 1,426 (one genuinely duplicated declaration, zero
+    empty texts), which is why the timestamp is the better key and not the hash.
+
+    (4) SO NOTHING NEEDS TO CHANGE AT THE WRITER AND NO HISTORY IS LOST. The 701 existing rows
+    already carry the disambiguator; a reader that keys on it recovers every one of the 521
+    entries that were never considered. That is the fact that decides what can be salvaged, and
+    it is the reason this task is small.
+
+    (5) THE ORDER OF OPERATIONS IS THE POINT. W1-T1013 is FILED and QUEUED and fixes what the
+    harvest READS — the ledger union instead of the live file alone. IT DOES NOT TOUCH THE KEY.
+    Building W1-T1013 first surfaces far more entries per pass and STILL DROPS 36.5% OF THEM, so
+    the ABSOLUTE loss grows rather than shrinks. Today the live-file read has held the harvest to
+    848 distinct ids ever marked; a union read would hand `mineFollowups` all 1,426 entries and
+    the key would admit 905. CITED, NOT RE-FILED.
+
+    (6) AND THE SKIPS ARE NOT THE SAME DEFECT AS THE REPEATS. See the note's Q2 for the split;
+    the summary is that both are the same lookup failing in opposite directions from two
+    different causes, and only the key half belongs here.
+  note: |
+    ── Q1. WHAT A UNIQUE KEY WOULD BE, AND WHETHER THE ROW CARRIES IT ──────────────────────────
+
+    (i) RUN_ID PLUS PHASE PLUS INDEX WOULD WORK BUT IS UNAVAILABLE. The phase is the natural
+    discriminator, and the caller has it: `harvestFollowupsFromReport`'s `ctx.label` is "recon"
+    at `run-task.ts:8834` and "implement" at `:9177`/`:9400`. It is spent on `ctx.say` and never
+    reaches the row. A build that wants it would have to change the WRITER, which would fix new
+    rows and leave every one of the 701 existing rows still ambiguous.
+
+    (ii) RUN_ID PLUS TIMESTAMP PLUS INDEX WORKS TODAY, ON THE ROWS THAT ALREADY EXIST. Measured:
+    zero of the 268 multi-row run_ids has a duplicated `ts`, and the composite is exactly unique
+    across all 1,426 entries. `ts` is written by the ledger appender on every row without
+    exception, so it needs no producer change and cannot be absent.
+
+    (iii) A CONTENT HASH IS THE WEAKER OPTION AND SHOULD NOT BE CHOSEN. Hashing type plus text
+    yields 1,425 distinct values for 1,426 entries. The single collision is a genuinely repeated
+    declaration, which means a hash key would treat a real re-declaration of the same finding as
+    already handled. That may even be desirable, but it is a DIFFERENT decision from fixing an
+    accidental collision, and conflating the two is how this defect got here.
+
+    (iv) SO THE FIX IS AT THE READER AND THE ANSWER TO "WHAT CAN BE SALVAGED" IS EVERYTHING.
+    State this plainly in the build: no rows are unrecoverable, no backfill is needed, and no
+    writer change is required for correctness.
+
+    (v) BUT THE EXISTING MARKS DO NOT SURVIVE A KEY CHANGE, AND THAT IS THE ONE MIGRATION COST.
+    848 distinct `entry_id` values are already written in the old spelling. A reader keyed on the
+    new composite will match none of them, so the first pass after the change re-surfaces
+    everything it can see as unharvested. That is a ONE-TIME re-surfacing of already-seen
+    candidates, not a loop, and the build must say so where an operator will read it rather than
+    let it look like a regression. Whether to translate the old marks forward is a decision for
+    the build; the old key cannot be reconstructed from the new one, but the new one CAN be
+    computed from the same source rows, so a translation pass is possible if wanted.
+
+    ── Q2. WHETHER THE SKIPS AND THE REPEATS SHARE A CAUSE ─────────────────────────────────────
+
+    (vi) THEY ARE THE SAME LOOKUP FAILING IN OPPOSITE DIRECTIONS, FROM TWO DIFFERENT CAUSES, SO
+    THIS IS ONE TASK AND NOT TWO. A skip happens when `processed` contains the id and should not:
+    the key collided. A repeat happens when `processed` does NOT contain the id and should: the
+    mark was written but is not in the corpus being read. The first is a property of the KEY.
+    The second is a property of the CORPUS.
+
+    (vii) THE REPEAT HALF IS ALREADY FILED AND IS NOT THIS TASK. 1,329 `followup.harvested` rows
+    cover only 848 distinct `entry_id`s, so 481 are re-harvests and one entry has been harvested
+    FIVE times, across 10 harvest passes against 14 `retro.start` rows. That is W1-T1013's
+    corpus-loss shape exactly, and its own title records the same fact independently. DO NOT
+    RE-FILE IT AND DO NOT FIX IT HERE. Fixing the key alone leaves the repeats; fixing the corpus
+    alone leaves the skips; each is correct on its own and neither substitutes for the other.
+
+    (viii) A THIRD OBSERVATION, NAMED AND DELIBERATELY NOT FILED. `followup.deduped` has fired
+    exactly ONCE in seventeen days, against 1,329 `followup.harvested` rows on the same union.
+    That is the `openTitles` word-overlap dedup at `retro.ts:2202-2208`, a different mechanism
+    from the `entryId` skip, and a near-inert one. It may be correct, it may be starved of
+    `openTitles`, or its 0.6 overlap threshold may be too strict. IT IS NOT DIAGNOSED HERE, IT IS
+    NOT PART OF THIS TASK'S FILES, AND IT MUST NOT BE FIXED ON THE WAY PAST.
+
+    (ix) AND 57 DECLARED IDS WERE NEVER MARKED AT ALL, of 905 distinct. Recorded as an
+    observation rather than a claim: the newest declarations are simply waiting for the next
+    retro, so this number is partly a queue depth and not purely a loss.
+
+    ── Q3. WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────
+
+    (x) LAW 5 HOLDS AND A KEY FIX MUST NOT BECOME A FILING PATH. Nothing auto-files from a
+    metric. `harvestFollowupsFromReport`'s own doc pins Rule 15 verbatim: "this ledgers raw
+    declarations, it never files a task itself." Recovering 521 skipped entries makes the
+    candidate list LONGER; it must not make it self-executing.
+
+    (xi) `mineFollowups` STAYS PURE. It returns `harvestLines` and writes nothing; only
+    `recordFollowupHarvest` writes, from the single call site at `run-task.ts:15085`, and only on
+    a real retro so a dry run stays side-effect-free. A build that moves the write into the miner
+    to make the new key "stick" has broken the property that makes the dry run safe.
+
+    (xii) THE TERMINAL ARTEFACT STAYS A CANDIDATE LIST. The harvest is rendered to markdown and
+    handed to the Architect, which opens a PR a human merges. That chain does not change here.
+
+    (xiii) THE ENTRY TYPES STAY THREE. `task`, `research` and `action`, unchanged. This task
+    alters which entries are CONSIDERED, never how they are classified, and the measured zero
+    outside those three is the control proving nothing is being lost on kind today.
+
+    (xiv) RULE 19 BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as
+    spanning TWO concerns (the `retro` stem and this task's own test stem) and refuses that at
+    `risk: medium`. THE BAND IS RULE 19'S SPAN READING AND NOT A BLAST-RADIUS JUDGEMENT: the
+    change is confined to the key one function builds and matches on, adds no field, moves no
+    threshold, and perturbs no existing predicate. The corpus the harvest reads is W1-T1013's
+    concern and is deliberately out of scope.
+  acceptance:
+    - claim: "two entries declared in different reports of the same run are given different harvest keys and both are considered"
+      proof: "unit test: test/followup-entry-key-collision.test.ts"
+    - claim: "the key is derived only from fields a report.followups row already carries, so no writer change and no backfill is required"
+      proof: "unit test: test/followup-entry-key-collision.test.ts"
+    - claim: "an entry already marked under the new key is still skipped, so the dedup keeps working and re-mining the same ledger twice yields the same result"
+      proof: "unit test: test/followup-entry-key-collision.test.ts"
+    - claim: "harvest marks written under the old key spelling do not crash or silently match, and the one time re-surfacing they cause is named rather than hidden"
+      proof: "unit test: test/followup-entry-key-collision.test.ts"
+    - claim: "the miner still writes nothing and returns its harvest lines to the caller, so a dry run remains free of side effects"
+      proof: "unit test: test/followup-entry-key-collision.test.ts"
+    - claim: "recovering skipped entries produces candidates only, and no path files a task from the harvest"
+      proof: "unit test: test/followup-entry-key-collision.test.ts"
+    - claim: "the accepted entry types stay task, research and action, and an entry of any other type is still ignored"
+      proof: "unit test: test/followup-entry-key-collision.test.ts"
