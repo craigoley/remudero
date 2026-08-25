@@ -12,7 +12,28 @@
  * SIGNING IS OUT OF SCOPE, DELIBERATELY (v2 rung). This module imports nothing from `sigstore` or
  * `cosign` and never will until that follow-on task ships — the predicate shape here is a
  * standalone artifact a v2 signer wraps, not one built to already assume it.
+ *
+ * W1-T2257: `receiptCommand` used to hand `buildReceipt` the LIVE `ledger.ndjson` alone
+ * (`readLedgerLines(ledgerPathFor(config))`) — exactly the slice rotation empties, since rotation
+ * keeps only the newest rows per step and archives the rest. {@link resolveReceiptLedgerLines}
+ * is the fix: it reads the archive∪live UNION via {@link resolveLedgerUnion}, scoped to the nine
+ * `step`s {@link buildReceipt} actually reads ({@link RECEIPT_LEDGER_STEPS}) so the read stays
+ * tractable (an unscoped union over every archive exhausted a 4 GB heap before scoring a single
+ * receipt — see the task's rationale). A refused union (`ok: false` — zero archives matched, or a
+ * matched archive could not be read) is surfaced as a refusal, `{ ok: false, reason }`, never
+ * downgraded to an empty line list that would make every leaf read `absent` and look
+ * indistinguishable from "this run never emitted the row".
+ *
+ * W1-T2257 (second half): four of the five `log("pr.opened", ...)` call sites in `src/run-task.ts`
+ * write no `branch` field at all — a WRITER defect in that file's emitters, out of this module's
+ * scope to fix. What IS this module's job: when a single task's ledger carries MORE THAN ONE
+ * `pr.opened` line for the exact same `pr_url` (one emitter's call site fired, then later another
+ * did, for the same PR), {@link resolvePrOpened} makes sure a branch ANY of them recorded survives
+ * to the receipt — never shadowed by a later, blanker emission for that same PR, never a different
+ * PR's branch, never a guess.
  */
+
+import { resolveLedgerUnion, type LedgerGrepFsDeps } from "./ledger-grep.js";
 
 const IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1" as const;
 const REMUDERO_RECEIPT_PREDICATE_TYPE = "https://remudero.dev/attestations/run-receipt/v1" as const;
@@ -82,6 +103,105 @@ function noLineReason(step: string, taskId: string): string {
   return `no "${step}" ledger line found for task ${taskId}`;
 }
 
+/** The `step` names {@link buildReceipt} reads from, named once so a scoped ledger read (see
+ *  {@link resolveReceiptLedgerLines}) can never drift from what the generator actually consumes —
+ *  design (ii): "the nine step names are derivable from the reader itself". */
+const STEP = {
+  runStart: "run.start",
+  promptLinted: "prompt.linted",
+  learningsInjected: "learnings.injected",
+  implementDone: "implement.done",
+  prOpened: "pr.opened",
+  automergeArmed: "automerge.armed",
+  reviewPosted: "review.posted",
+  prMerged: "pr.merged",
+  correctionProvenance: "correction.provenance",
+} as const;
+
+/** The nine ledger `step`s {@link buildReceipt} reads, in no particular order — the SAME list
+ *  {@link resolveReceiptLedgerLines} compiles into its scoping pattern, so the two can never say
+ *  a different nine. */
+export const RECEIPT_LEDGER_STEPS: readonly string[] = Object.values(STEP);
+
+/**
+ * Everything {@link resolveReceiptLedgerLines} could resolve, or why it refused to. Mirrors
+ * {@link LedgerUnionResult}'s own `ok` discriminant one layer up: `lines` is only ever populated
+ * on `ok: true` — a refusal never degrades to an empty (and therefore indistinguishable from
+ * "nothing was ever emitted") line list.
+ */
+export type ReceiptLedgerRead = { ok: true; lines: ReceiptLedgerLine[] } | { ok: false; reason: string };
+
+/** Escapes a ledger `step` name for use inside the regex alternation below — every step here is a
+ *  plain `word.word` name today, but this stays correct if that ever grows a metacharacter. */
+function escapeForRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const RECEIPT_LEDGER_STEP_PATTERN = RECEIPT_LEDGER_STEPS.map(
+  (step) => `"step":"${escapeForRegExp(step)}"`,
+).join("|");
+
+/**
+ * Compiled once, ahead of any call, and handed to {@link resolveLedgerUnion} as a `RegExp`
+ * INSTANCE rather than the raw string above. `resolveLedgerUnion`'s string overload runs every
+ * pattern through `sanitizeRegExp` — a `MAX_PATTERN_LENGTH` of 200 chars and a nested-quantifier
+ * ReDoS guard — because ITS string input is `rmd ledger-grep <pattern>`'s OPERATOR-supplied
+ * argument (`ledger-grep.ts`'s own doc). Nine step names alternated is 219 chars, past that cap,
+ * but this pattern is neither operator input nor attacker-reachable: it is compiled once from
+ * {@link RECEIPT_LEDGER_STEPS}, a fixed literal list this module owns, so the cap built for a
+ * hostile CLI argument does not apply — passing the compiled `RegExp` is the same bypass
+ * `resolveLedgerUnion`'s own signature (`pattern: string | RegExp`) already offers a trusted
+ * internal caller.
+ */
+const RECEIPT_LEDGER_STEP_REGEXP = new RegExp(RECEIPT_LEDGER_STEP_PATTERN);
+
+/**
+ * Resolve the ledger lines {@link buildReceipt} needs from the archive∪live UNION
+ * (`resolveLedgerUnion`, `./ledger-grep.js`) rather than the live `ledger.ndjson` file alone —
+ * see this module's W1-T2257 header note for the defect this replaces.
+ *
+ * SCOPED BY STEP, NOT BY TASK. An unscoped union over every archive exhausted a 4 GB heap before
+ * scoring a single receipt; scoped to {@link RECEIPT_LEDGER_STEPS} (the nine steps this receipt
+ * actually reads) the same union returns comfortably. A task-id or time-window narrowing on top
+ * of this is a further tightening this task deliberately leaves undone (design (ii)) — it is not
+ * required for correctness, only for wall-clock, and bundling it here would widen this task past
+ * "the reader is correct" into "the reader is fast".
+ *
+ * REFUSES, NEVER DOWNGRADES. When `resolveLedgerUnion` reports `ok: false` (zero archives matched
+ * under `stateDir`, or a matched rotation could not be read), this returns `{ ok: false, reason }`
+ * — the caller must surface that refusal, never fall back to treating it as "zero lines found",
+ * which is exactly the silent-nulls shape this task exists to kill.
+ *
+ * PARSING NEVER FABRICATES. A matched line that fails to parse as a JSON object is corpus noise
+ * (a torn write, a decoy), not a value this generator may guess at — it is dropped, never turned
+ * into a leaf.
+ */
+export function resolveReceiptLedgerLines(stateDir: string, fsDeps?: LedgerGrepFsDeps): ReceiptLedgerRead {
+  const result = resolveLedgerUnion(stateDir, RECEIPT_LEDGER_STEP_REGEXP, fsDeps);
+  if (!result.ok) {
+    const reason =
+      result.archiveCount === 0
+        ? `zero ledger archive files matched under ${stateDir} — refusing to read the live ledger ` +
+          "file alone, which is exactly the rotation-emptied slice this refusal exists to avoid"
+        : `${result.unread.length} matched ledger rotation(s) under ${stateDir} could not be read: ` +
+          result.unread.join(", ");
+    return { ok: false, reason };
+  }
+  const lines: ReceiptLedgerLine[] = [];
+  for (const raw of result.matches) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue; // Not valid JSON — never guessed into a leaf, just dropped.
+    }
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      lines.push(parsed as ReceiptLedgerLine);
+    }
+  }
+  return { ok: true, lines };
+}
+
 /**
  * Assemble the deterministic run-receipt predicate for `opts.prUrl` from `ledgerLines` — the
  * ground truth the rationale verified live in the ledger (run.start, pr.opened,
@@ -97,21 +217,49 @@ function noLineReason(step: string, taskId: string): string {
  * `{ value: null, reason }` — see {@link ReceiptField}. Nothing here fabricates a value; a
  * receipt with three null fields is an honest receipt, not a broken one.
  */
+/**
+ * Which `pr.opened` line names `opts.prUrl`'s branch, when more than one exists for this task.
+ *
+ * W1-T2257: four of the five `log("pr.opened", ...)` call sites in `src/run-task.ts` write no
+ * `branch` field at all (a WRITER defect that file's own emitters, not this reader, must fix — see
+ * this module's header note). But a SINGLE task can pass through more than one of those call sites
+ * for the SAME PR over its lifecycle (an initial open, then a later re-open/adopt event) — so more
+ * than one `pr.opened` line can carry the identical `pr_url`. Naively taking the LAST such line
+ * (this function's predecessor) means a branch one emitter DID record for this exact PR can be
+ * shadowed by a later, blanker emission for that same PR — losing real, already-recorded
+ * information for no reason. THE READER'S JOB: whichever emitter recorded the branch it opened,
+ * for THIS pr_url, that record must survive to the receipt — never a different PR's branch, and
+ * never a guess, only what was genuinely written down for the PR the receipt is about.
+ *
+ * Ties (same tier, same branch-carrying-ness) still resolve to the LATEST line, unchanged from
+ * before — this only re-orders the search to look for a `branch` FIRST within a tier, it never
+ * widens which tier is searched (an exact `pr_url` match is still preferred wholesale over the
+ * task's other `pr.opened` lines, exactly as it was).
+ */
+function resolvePrOpened(lines: ReceiptLedgerLine[], prUrl: string): ReceiptLedgerLine | undefined {
+  const latestWithBranchElseLatest = (rows: ReceiptLedgerLine[]): ReceiptLedgerLine | undefined => {
+    const reversed = [...rows].reverse();
+    return reversed.find((l) => typeof l.branch === "string") ?? reversed[0];
+  };
+  const forThisPr = lines.filter((l) => l.step === STEP.prOpened && l.pr_url === prUrl);
+  if (forThisPr.length > 0) return latestWithBranchElseLatest(forThisPr);
+  const anyPrOpened = lines.filter((l) => l.step === STEP.prOpened);
+  return latestWithBranchElseLatest(anyPrOpened);
+}
+
 export function buildReceipt(ledgerLines: readonly ReceiptLedgerLine[], opts: BuildReceiptOptions): ReceiptPredicate {
   const { taskId, prUrl } = opts;
   const lines = ledgerLines.filter((l) => l.task_id === taskId);
 
-  const runStart = lines.find((l) => l.step === "run.start");
-  const prOpened =
-    [...lines].reverse().find((l) => l.step === "pr.opened" && l.pr_url === prUrl) ??
-    [...lines].reverse().find((l) => l.step === "pr.opened");
-  const learningsInjected = lines.find((l) => l.step === "learnings.injected");
-  const implementDone = [...lines].reverse().find((l) => l.step === "implement.done");
-  const reviewPosted = [...lines].reverse().find((l) => l.step === "review.posted");
-  const prMerged = lines.find((l) => l.step === "pr.merged");
-  const automergeArmed = [...lines].reverse().find((l) => l.step === "automerge.armed");
-  const hasCorrection = lines.some((l) => l.step === "correction.provenance");
-  const promptLinted = [...lines].reverse().find((l) => l.step === "prompt.linted");
+  const runStart = lines.find((l) => l.step === STEP.runStart);
+  const prOpened = resolvePrOpened(lines, prUrl);
+  const learningsInjected = lines.find((l) => l.step === STEP.learningsInjected);
+  const implementDone = [...lines].reverse().find((l) => l.step === STEP.implementDone);
+  const reviewPosted = [...lines].reverse().find((l) => l.step === STEP.reviewPosted);
+  const prMerged = lines.find((l) => l.step === STEP.prMerged);
+  const automergeArmed = [...lines].reverse().find((l) => l.step === STEP.automergeArmed);
+  const hasCorrection = lines.some((l) => l.step === STEP.correctionProvenance);
+  const promptLinted = [...lines].reverse().find((l) => l.step === STEP.promptLinted);
 
   return {
     _type: IN_TOTO_STATEMENT_TYPE,
@@ -122,7 +270,7 @@ export function buildReceipt(ledgerLines: readonly ReceiptLedgerLine[], opts: Bu
         run_id:
           runStart && typeof runStart.run_id === "string"
             ? present(runStart.run_id)
-            : absent(noLineReason("run.start", taskId)),
+            : absent(noLineReason(STEP.runStart, taskId)),
       },
       pr: {
         branch:
@@ -131,32 +279,32 @@ export function buildReceipt(ledgerLines: readonly ReceiptLedgerLine[], opts: Bu
             : absent(
                 prOpened
                   ? `"pr.opened" ledger line for ${prUrl} carries no branch field`
-                  : noLineReason("pr.opened", taskId),
+                  : noLineReason(STEP.prOpened, taskId),
               ),
       },
       learnings: {
         injected_ids:
           learningsInjected && Array.isArray(learningsInjected.matched_ids)
             ? present([...(learningsInjected.matched_ids as unknown[])].map((id) => String(id)))
-            : absent(noLineReason("learnings.injected", taskId)),
+            : absent(noLineReason(STEP.learningsInjected, taskId)),
       },
       implement: {
         model:
           implementDone && typeof implementDone.model === "string"
             ? present(implementDone.model)
-            : absent(noLineReason("implement.done", taskId)),
+            : absent(noLineReason(STEP.implementDone, taskId)),
         effort:
           implementDone && typeof implementDone.effort === "string"
             ? present(implementDone.effort)
-            : absent(noLineReason("implement.done", taskId)),
+            : absent(noLineReason(STEP.implementDone, taskId)),
         num_turns:
           implementDone && typeof implementDone.num_turns === "number"
             ? present(implementDone.num_turns)
-            : absent(noLineReason("implement.done", taskId)),
+            : absent(noLineReason(STEP.implementDone, taskId)),
         cost_usd:
           implementDone && typeof implementDone.cost_usd === "number"
             ? present(implementDone.cost_usd)
-            : absent(noLineReason("implement.done", taskId)),
+            : absent(noLineReason(STEP.implementDone, taskId)),
       },
       review: {
         reviewer_outcome:
@@ -165,18 +313,18 @@ export function buildReceipt(ledgerLines: readonly ReceiptLedgerLine[], opts: Bu
             : absent(
                 reviewPosted
                   ? `"review.posted" ledger line for task ${taskId} carries no reviewer_outcome field`
-                  : noLineReason("review.posted", taskId),
+                  : noLineReason(STEP.reviewPosted, taskId),
               ),
       },
       merge: {
         state:
           prMerged && typeof prMerged.state === "string"
             ? present(prMerged.state)
-            : absent(noLineReason("pr.merged", taskId)),
+            : absent(noLineReason(STEP.prMerged, taskId)),
         automerge_outcome:
           automergeArmed && typeof automergeArmed.outcome === "string"
             ? present(automergeArmed.outcome)
-            : absent(noLineReason("automerge.armed", taskId)),
+            : absent(noLineReason(STEP.automergeArmed, taskId)),
       },
       correction: { present: hasCorrection },
       prompt_template_hash:

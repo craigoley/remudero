@@ -562,7 +562,7 @@ import {
   type ReviewVerdict,
 } from "./lib/review.js";
 import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-audit.js";
-import { buildReceipt } from "./lib/receipt.js";
+import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
@@ -12191,20 +12191,30 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
 export interface ReceiptCommandDeps {
   gh?: (args: string[]) => unknown;
   config?: Config;
-  readLedgerLines?: (path: string) => Array<Record<string, unknown>>;
+  /** W1-T2257: defaults to the real {@link resolveReceiptLedgerLines} — the archive∪live UNION,
+   *  scoped to the steps `buildReceipt` reads, NEVER the live `ledger.ndjson` file alone (which
+   *  rotation empties). A test overrides this to drive both the resolved-lines and the refused
+   *  (`ok: false`) path without touching a real state dir. */
+  resolveReceiptLedgerLines?: (stateDir: string) => ReceiptLedgerRead;
 }
 
 /**
  * `rmd receipt <pr>` (W1-T71, ratifies P17) — the deterministic in-toto-style run receipt,
  * printed for a merged (or open) PR. Resolves the task id from the PR body's trailer via
  * {@link reviewTaskIdFromBody} (the SAME #119-hardened extractor `rmd review` already uses —
- * never a second dialect), reads this checkout's ledger, and hands both to the pure
- * {@link buildReceipt} (src/lib/receipt.ts). READ-ONLY: writes no ledger line, no state file,
- * posts nothing — the "posted on every merged PR" integration (design item 3) is a separate,
- * operator-observed call site (Rule 18), not this command's job.
+ * never a second dialect), reads this checkout's ledger via {@link resolveReceiptLedgerLines}
+ * (src/lib/receipt.ts) and hands the result to the pure {@link buildReceipt}. READ-ONLY: writes
+ * no ledger line, no state file, posts nothing — the "posted on every merged PR" integration
+ * (design item 3) is a separate, operator-observed call site (Rule 18), not this command's job.
  *
  * A PR whose body carries no resolvable task id (a hand-opened PR, or one predating the
  * trailer contract) REFUSES rather than guessing — never fabricates a receipt for the wrong task.
+ *
+ * W1-T2257: the ledger read is the archive∪live UNION, never `ledger.ndjson` alone — that live
+ * file is exactly the slice ledger rotation empties, keeping only the newest row per step and
+ * archiving the rest. A refused union (see {@link resolveReceiptLedgerLines}) REFUSES here too
+ * (non-zero exit, a named reason) rather than silently printing a receipt of null leaves that
+ * would look indistinguishable from "this run never emitted anything".
  */
 export async function receiptCommand(prArg: string, rest: string[] = [], deps: ReceiptCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("receipt", rest, ["--repo"]);
@@ -12232,9 +12242,13 @@ export async function receiptCommand(prArg: string, rest: string[] = [], deps: R
     return 1;
   }
   const config = deps.config ?? loadConfig();
-  const ledgerPath = ledgerPathFor(config);
-  const lines = (deps.readLedgerLines ?? readLedgerLines)(ledgerPath);
-  const receipt = buildReceipt(lines, { taskId, prUrl: view.url ?? prArg });
+  const stateDir = dirname(ledgerPathFor(config));
+  const resolved = (deps.resolveReceiptLedgerLines ?? resolveReceiptLedgerLines)(stateDir);
+  if (!resolved.ok) {
+    console.error(`rmd receipt: ${resolved.reason}`);
+    return 1;
+  }
+  const receipt = buildReceipt(resolved.lines, { taskId, prUrl: view.url ?? prArg });
   console.log(JSON.stringify(receipt, null, 2));
   return 0;
 }
