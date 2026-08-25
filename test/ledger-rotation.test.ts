@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -904,27 +914,37 @@ test("FALSIFIER — W1-T470 coverage-improvement dedupe: dropping the coverage.i
 // itself...) — the same reason W1-T951's check lives in dispatch-lifetime-breaker.test.ts
 // rather than inside open-pr-corroboration.test.ts, the file it actually mutates a consumer of.
 //
-// W1-T2276 INVESTIGATION NOTE (design (v)'s "why does this file emit a shifted record" question,
-// answered, not re-litigated): the mutation below writes the REAL, checked-out `src/lib/ledger.ts`
-// to disk for the duration of a child `node --test` spawn, then restores it in a `finally`. Its
-// own `needle` replaces FOUR source lines with ONE (`"report.followups",\n"followup.harvested",\n
-// "followup.deduped",\n]);` → `]); // ... MUTATION ...`) — a net change of exactly MINUS THREE
-// lines, below this point in the file. Under `node --test`'s default (parallel, multi-worker)
-// concurrency, any OTHER worker that transpiles/instruments `src/lib/ledger.ts` while this
-// window is open would source-map its coverage against a copy 3 lines shorter than the committed
-// file — the exact constant offset, and the exact direction (declarations land ABOVE their true
-// line), this task's own title and rationale measured on every one of the 16 corrupted functions.
-// This is a plausible mechanism for the corruption, not a proven one (reproducing it requires the
-// same full, slow multi-file coverage run the rationale used); scripts/diff-coverage.mjs's reader
-// is hardened against the symptom regardless of cause (this task's actual fix, proven by
-// test/lcov-function-record-attribution.test.ts). Closing the race itself — never letting a
-// concurrently-running worker observe a mutated on-disk `ledger.ts` at all, e.g. by mutating an
-// isolated copy instead of the checked-out file — is a separate, riskier change to an established,
-// already-reviewed mutation shape shared with test/dispatch-lifetime-breaker.test.ts's W1-T951
-// check, and is deliberately left as a follow-up rather than folded into this one-concern fix.
+// ISOLATION: THIS CHECK NO LONGER WRITES THE SHARED WORKSPACE. NOT A COVERAGE FIX.
+// It used to write the REAL, checked-out `src/lib/ledger.ts` for the duration of a child spawn,
+// restoring it in a `finally`. The restore always worked; the hazard was the WINDOW. `node --test`
+// runs files in parallel by default, so any other worker that read or instrumented
+// `src/lib/ledger.ts` inside that window saw a file whose `needle` had turned FOUR source lines
+// into ONE — a net MINUS THREE below that point. A test must not edit its own subject in a
+// workspace it shares with concurrent readers, whatever it restores afterwards. The mutation now
+// lands on a COPY in a temp root and the child is pointed at that, the same shape
+// test/unexecutable-proof-visibility.test.ts already uses (`cpSync(join(repoRoot, "src"), ...)`).
+//
+// WHAT THIS DOES NOT DO — AND THE MEASUREMENT SAYS SO PLAINLY. It does NOT fix the lcov
+// source-map corruption W1-T2276 hardened `scripts/diff-coverage.mjs`'s reader against. Measured
+// over the 57 test files importing `lib/ledger.js`: 16 duplicate `FN:` names on main, every pair
+// exactly 3 lines apart; 27 after this sandbox; 19 after ALSO stripping `NODE_V8_COVERAGE` from
+// the child; and 0 only when this test is skipped entirely. The decisive control — removing this
+// one file from the union — gives 0 shifted records and 1 `SF:` block.
+//
+// THE MECHANISM, RECORDED BECAUSE IT IS THE VALUABLE PART: `NODE_V8_COVERAGE` is set on the parent
+// under `--experimental-test-coverage` and is INHERITED by a plain `spawnSync` child. The child
+// collects coverage on the mutated copy, and the lcov reporter keys on the path RELATIVE to each
+// process's own cwd — so the parent's `src/lib/ledger.ts` and the child's `src/lib/ledger.ts`
+// resolve to the same key and MERGE. THE CORRUPTION TRAVELS BY RELATIVE PATH, NOT BY INODE, which
+// is exactly why moving the file cannot help and why this change does not claim to.
+//
+// NOT FIXED HERE, AND DELIBERATELY: `test/dispatch-lifetime-breaker.test.ts`'s own W1-T951 check
+// writes the real `src/lib/status.ts` in exactly this shape. A sibling instance of the same
+// defect, out of scope for this one-concern change, named so it is not mistaken for absent.
 test("W1-T964: removing the pinning fails the idempotency test", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const ledgerTsPath = join(repoRoot, "src", "lib", "ledger.ts");
+  const ledgerTsRelPath = join("src", "lib", "ledger.ts");
+  const ledgerTsPath = join(repoRoot, ledgerTsRelPath);
   const targetTestFile = "test/followup-rotation-idempotency.test.ts";
   const positiveTestName = "W1-T964: a re-mine after rotation yields the same candidate set";
 
@@ -948,11 +968,38 @@ test("W1-T964: removing the pinning fails the idempotency test", () => {
   assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
   const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
 
+  // THE MUTATION LANDS ON A COPY, NEVER ON THE CHECKED-OUT FILE. `src/`, `test/setup/`
+  // (the `--import ./test/setup/tmp-hygiene.ts` the child argv carries, plus the
+  // `./reapable-prefix.js` that file imports) and the ONE target test are copied into a temp
+  // sandbox; `node_modules` is symlinked so `tsx` resolves exactly as it does in the real tree.
+  // The child then runs with `cwd` set to the sandbox, so its `../src/lib/ledger.js` resolves to
+  // the MUTATED COPY while every concurrently-running worker in the real tree keeps reading the
+  // committed file. Only `src/` (135 files) and one test file are copied, never all of `test/`.
+  const sandbox = mkdtempSync(join(tmpdir(), "w1-t964-mutation-sandbox-"));
   let childResult: ReturnType<typeof spawnSync> | undefined;
   try {
-    writeFileSync(ledgerTsPath, mutated);
-    const mutatedSha = sha256(readFileSync(ledgerTsPath, "utf8"));
-    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change ledger.ts's bytes");
+    cpSync(join(repoRoot, "src"), join(sandbox, "src"), { recursive: true });
+    // `plan/` is NOT optional: `loadPolicy` reads `plan/policy.yaml` on the target test's import
+    // path, and without it the child dies with a PolicyError ENOENT — a NONZERO exit for entirely
+    // the wrong reason, which would satisfy the check below vacuously. MEASURED while building
+    // this fix: sandbox without `plan/` exits 1 on PolicyError; with it, exits 1 on the target
+    // test's own assertion. The stdout assertion below is what makes that distinction load-bearing
+    // rather than something a future sandbox change can silently lose again.
+    cpSync(join(repoRoot, "plan"), join(sandbox, "plan"), { recursive: true });
+    cpSync(join(repoRoot, "test", "setup"), join(sandbox, "test", "setup"), { recursive: true });
+    copyFileSync(join(repoRoot, targetTestFile), join(sandbox, targetTestFile));
+    for (const f of ["package.json", "tsconfig.json"]) copyFileSync(join(repoRoot, f), join(sandbox, f));
+    symlinkSync(join(repoRoot, "node_modules"), join(sandbox, "node_modules"));
+
+    writeFileSync(join(sandbox, ledgerTsRelPath), mutated);
+    const mutatedSha = sha256(readFileSync(join(sandbox, ledgerTsRelPath), "utf8"));
+    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change the sandbox copy's bytes");
+    assert.equal(
+      sha256(readFileSync(ledgerTsPath, "utf8")),
+      originalSha,
+      "the CHECKED-OUT ledger.ts must be untouched while the mutated child runs — a concurrent " +
+        "worker instrumenting it must never observe a copy 3 lines shorter than the committed file",
+    );
 
     // `NODE_TEST_CONTEXT` (set by node's OWN test runner on the process running THIS test) is
     // inherited by a plain `spawnSync` env by default — and node's test runner treats its
@@ -962,20 +1009,36 @@ test("W1-T964: removing the pinning fails the idempotency test", () => {
     // skipped child looks identical to a clean exit).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
-    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+    // `cwd: sandbox` is the whole point: the child's `../src/lib/ledger.js` must resolve to the
+    // MUTATED COPY, never to the checked-out file.
+    childResult = spawnSync(process.execPath, args, { cwd: sandbox, encoding: "utf8", timeout: 90_000, env: childEnv });
   } finally {
-    // RESTORED REGARDLESS of what the child run did — a throw, a timeout, or a pass must never
-    // leave the real checked-out source mutated.
-    writeFileSync(ledgerTsPath, original);
-    const restoredSha = sha256(readFileSync(ledgerTsPath, "utf8"));
-    assert.equal(restoredSha, originalSha, "ledger.ts must be restored byte-for-byte after the mutation check");
+    // The sandbox goes away regardless of what the child did. There is nothing to RESTORE: the
+    // checked-out tree was never written, so a throw or a timeout cannot leave it mutated — the
+    // failure mode the old restore-in-finally existed to bound is now structurally absent.
+    rmSync(sandbox, { recursive: true, force: true });
   }
 
+  assert.equal(
+    sha256(readFileSync(ledgerTsPath, "utf8")),
+    originalSha,
+    "the checked-out ledger.ts must be byte-identical after the check — it is never written at all",
+  );
   assert.ok(childResult, "sanity: the child process must actually have been spawned");
   assert.notEqual(
     childResult!.status,
     0,
     `removing the follow-up step pinning must fail the idempotency test — child exited ${childResult!.status}\n` +
+      `stdout:\n${childResult!.stdout}\nstderr:\n${childResult!.stderr}`,
+  );
+  // AND IT MUST HAVE FAILED ON THE TARGET TEST ITSELF. A nonzero exit alone is satisfied by a
+  // crashed import, a missing fixture or a runner error just as well as by the mutation being
+  // detected — the same "looks identical to a clean exit" hazard the NODE_TEST_CONTEXT note above
+  // guards on the other side. Requiring the child's own TAP line names the positive test as
+  // FAILING is what ties this check to the behaviour it claims to prove.
+  assert.ok(
+    String(childResult!.stdout ?? "").includes(`not ok 1 - ${positiveTestName}`),
+    `the child must fail ON the idempotency test, not merely exit nonzero for some other reason\n` +
       `stdout:\n${childResult!.stdout}\nstderr:\n${childResult!.stderr}`,
   );
 });
