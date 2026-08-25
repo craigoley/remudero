@@ -197,6 +197,62 @@
     container. Both are container-side; Docker's engine answers HTTP 500 on this workstation. NO SDK
     VERSION CHANGE, NO KEY MOVE AND NO REMEDY IS PROPOSED HERE — none is indicated by this evidence,
     and the channel experiment costs one probe run against a build already in service.
+
+    (19) THE OBSERVATION DESIGN (v) NAMED HAS NOW BEEN TAKEN, AND IT CAME BACK BROKEN.
+    OPERATOR-ATTRIBUTED, AND THIS SESSION COULD NOT RE-DERIVE IT — SAID PLAINLY RATHER THAN
+    CARRIED AS THOUGH MEASURED HERE. The operator reports `egress_contained` reading `false` on 79
+    of 79 probes carrying the field, with reason `egress PROVEN-BROKEN — the request to example.com
+    came back`, and 47 of those 79 runs still passing the gate at `contained: true`.
+
+    WHY IT COULD NOT BE RE-DERIVED FROM THIS HOST, WITH THE CONTROL THAT PROVES THE QUERY WORKED.
+    Over the full ledger corpus at the state dir — 666 `.gz`, 6 plain and 1 live file, swept with
+    the three-pattern idiom so no form is missed — `egress_contained` appears on ZERO rows, while the
+    control `"step":"containment.probe"` returns 669 on the same sweep. `resolveLedgerUnion` agrees:
+    ok, 672 archives, 0 unread, 669 probe rows, 0 carrying the field. The reason is not a broken
+    query: this host's probe rows stop at 2026-08-12T23:50Z and the egress arm shipped 2026-08-23,
+    so the field never existed in anything recorded here. The 79 ran on a container host whose
+    ledger is not on this machine. THE FIGURE IS THE OPERATOR'S; THE FAILURE TO REPRODUCE IT IS THIS
+    SESSION'S, AND NEITHER IS DISGUISED AS THE OTHER.
+
+    (20) Q1 — IT SATISFIES DESIGN (v), IT DISCHARGES §(5), AND IT DOES NOT UNBLOCK THIS TASK.
+    Design (v) asked for exactly this: "Reproduce a request to a NON-allowlisted host from inside a
+    LIVE worker sandbox and record whether it succeeds … if it succeeds, the boundary is confirmed
+    breached." It succeeded, 79 times. So §(5)'s disclaimer — "NOBODY HAS REPRODUCED A BLOCKED-HOST
+    REQUEST FROM INSIDE A LIVE WORKER SANDBOX … the case rests on 26 identical readings … not on a
+    direct test" — is DISCHARGED, and this task stops arguing from correlation.
+
+    BUT THE BLOCKING CONDITION IS NOT AN EVIDENCE CONDITION AND THIS EVIDENCE DOES NOT MEET IT.
+    §(iv) and ruling 3 place the block on an OPERATOR RISK DECISION about gating, not on a missing
+    measurement, and the gate condition they name is the probe reading `proven-holding`. This reads
+    `proven-broken`, which is the OTHER answer to the same question: it tells the operator the
+    boundary does not hold, and tells them nothing about whether to trade throughput for it. What
+    changes is the PRICE of ruling 3's arithmetic, from "a boundary that may or may not be
+    breachable" to one demonstrably breached — and that is a stronger argument for building the
+    enforcer, not a reason to arm a gate.
+
+    (21) Q2 — THE PROBE PROVES REACHABILITY AND NOTHING ABOUT MECHANISM, SO THE CHANNEL QUESTION IS
+    STILL OPEN. The arm's own verdict string is the whole of what it establishes: the request to the
+    blocked host CAME BACK. That proves the worker reached the public internet. It does not say
+    which mechanism was meant to stop it, and it CANNOT DISTINGUISH "the policy was never delivered"
+    from "it was delivered and ignored" — both produce a response from example.com and an identical
+    `egress_contained: false`. §(12)'s finding that the four domains travel via `settings` rather
+    than `managedSettings` is the leading HYPOTHESIS for which mechanism failed; 79/79 does not
+    confirm it, because a delivery-channel defect and an ignored-policy defect are observationally
+    the same through this probe. §(18)'s one-run channel experiment remains the discriminator and
+    remains untaken.
+
+    NOTE WHAT THE PROBE'S EPISTEMOLOGY DOES GET RIGHT, SO THIS READS AS A SCOPE LIMIT RATHER THAN A
+    FAULT. `egressDenialSeen` exists precisely to separate PROVEN-BROKEN from UNPROVEN, on the
+    documented ground that "an absent response is not evidence of a refusal, because the request may
+    never have been attempted". The arm is careful about the distinction it CAN make; the mechanism
+    question is simply outside what a reachability test can answer.
+
+    (22) AND NOTHING GATES ON EGRESS ON THIS AMENDMENT. The operator ruling stands that enforcement
+    comes before gating; the arm STAYS OBSERVATIONAL until an enforcer exists. 79 of 79 broken is an
+    argument for building the enforcer, not for refusing runs that were already refused nothing —
+    and 47 of those runs passing the gate is the same fact seen from the other side, not a second
+    defect. No number moves, no field becomes blocking, and no acceptance criterion is touched.
+
   design: |
     ONE CONCERN: give the declared egress boundary an enforcement owner this tree can test.
 
