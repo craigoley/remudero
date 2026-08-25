@@ -74,7 +74,17 @@ import {
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { IDLE_REASON_ID_CAP, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
-import { drainNowFilePath, pauseFilePath, pendingKicks, quietHoursFilePath, stopFilePath } from "./fleet-control.js";
+import {
+  drainNowFilePath,
+  pauseFilePath,
+  pendingKicks,
+  quietHoursFilePath,
+  readSharedPause,
+  realSharedPauseGitDeps,
+  sharedPauseRef,
+  stopFilePath,
+  type SharedPauseRead,
+} from "./fleet-control.js";
 import { readInflightLock } from "./inflight-lock.js";
 import { classifyGlobalArtifactRefusal } from "./learnings.js";
 import { DEFAULT_SUPERVISOR_INTERVAL_S } from "./launchd.js";
@@ -744,6 +754,19 @@ export interface StatusBoardDeps {
    * degrading `hasPushedRunBranch` to "nothing observed pushed" rather than blocking the board.
    */
   readPushedRunBranches?: (repoDir: string) => string;
+  /**
+   * W1-T2264: read of the fleet-wide shared PAUSE hold (fleet-control.ts's `sharedPauseRef`) — a
+   * git ref that {@link buildLatchRows}'s STATIC_LATCHES loop cannot see, because every one of
+   * those rows is sourced from `fs.existsSync` on a local path. Exactly ONE `git ls-remote`
+   * (fleet-control.ts's `readSharedPause`) — matching the task's own cost bound: never the second
+   * round trip `checkSharedPause`'s anchor lookup would cost, and never `checkSharedPause` itself,
+   * whose "local first" fold would render the SAME hold this board's own local PAUSE row already
+   * shows (see {@link buildLatchRows}'s dedup). Defaults to a real read via
+   * `realSharedPauseGitDeps(repoDir)`. Returns `"unreachable"` (never throws) when origin cannot be
+   * reached — the same fail-soft direction `readSharedPause` itself already keeps: an unreachable
+   * remote is never read as `"absent"`.
+   */
+  readSharedPauseState?: (repoDir: string) => SharedPauseRead;
 }
 
 // ── origin/main (local, no fetch) ───────────────────────────────────────────────────────────
@@ -772,6 +795,22 @@ function defaultReadPushedRunBranches(repoDir: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Real default for {@link StatusBoardDeps.readSharedPauseState} — see that field's own doc.
+ *
+ * GUARDED ON `.git` EXISTING FIRST (a synchronous, local, no-subprocess `fs.existsSync` — never a
+ * second round trip, and never a second git invocation either), so a `repoDir` that is not a git
+ * checkout at all (no remote could ever exist to be unreachable) reads as `"absent"` rather than
+ * `"unreachable"`. This is NOT the same failure this function's OWN `readSharedPause` already
+ * fails soft on: a checkout that IS real but cannot currently reach `origin` still reads
+ * `"unreachable"` exactly as designed (Q3: an unreachable remote is never scored `"absent"`) —
+ * this guard only keeps "there is no repo here" from being misread as "the remote is down".
+ */
+function defaultReadSharedPauseState(repoDir: string): SharedPauseRead {
+  if (!fs.existsSync(join(repoDir, ".git"))) return "absent";
+  return readSharedPause(realSharedPauseGitDeps(repoDir));
 }
 
 // ── Ledger derivation ────────────────────────────────────────────────────────────────────────
@@ -1013,6 +1052,10 @@ function buildLatchRows(
   root: string,
   nowMs: number,
   isPidAlive: (pid: number) => boolean,
+  // A pre-bound thunk (the caller has already closed over `deps.repoDir`) — mirrors `isPidAlive`
+  // just above: this function takes an already-resolved reader, never the raw deps field, so a
+  // test can inject any three-way answer without needing a real repo checkout.
+  readSharedPauseState: () => SharedPauseRead,
   // APPENDED LAST and optional, so no positional caller shifts. `undefined` (origin/main
   // unresolvable — an offline host, a missing remote) means NO supersession is claimed and the
   // instruction stands, which is the fail-closed direction: an unreadable answer must never
@@ -1031,6 +1074,42 @@ function buildLatchRows(
       consequence: def.consequence(json),
       superseded: def.superseded?.(json, originMainSha),
     });
+  }
+
+  // Shared cross-host PAUSE hold (W1-T2264) — `refs/rmd-pause/hold`, a git ref every row above is
+  // blind to, because every one of them is sourced from `fs.existsSync` on a local path. Read via
+  // exactly ONE `ls-remote` (never a second round trip for attribution — that stays behind the
+  // optional `ageMs`, which simply reads "unknown" here, same as an inflight/kick row with no
+  // cheap age available).
+  //
+  // DEDUP, LOCAL FIRST (mirrors fleet-control.ts's OWN `checkSharedPause` precedence, design (i)
+  // there): `rmd pause` on THIS host writes the local PAUSE flag AND best-effort pushes this same
+  // ref, so a host that paused itself would otherwise render its own hold twice — once as the
+  // PAUSE row above, once as this one. Skip the read entirely once a local PAUSE row already
+  // rendered: cheaper (no network call at all) and correct (the local row already tells this
+  // host's own story; a second host's hold, if one also stands, is that OTHER host's board to
+  // show).
+  if (!rows.some((r) => r.name === "PAUSE")) {
+    const sharedPause = readSharedPauseState();
+    if (sharedPause === "held") {
+      rows.push({
+        name: "SHARED_PAUSE",
+        consequence:
+          `no new task spawns fleet-wide until \`rmd resume\` clears ${sharedPauseRef()} — ` +
+          "any in-flight task still completes",
+      });
+    } else if (sharedPause === "unreachable") {
+      // FAIL SOFT, NEVER SILENT AND NEVER "CLEAR" (Q3): an unreachable remote is scored exactly
+      // like `readSharedPause` itself scores it for dispatch — held, not absent — but this row
+      // says which of the three states it actually saw rather than asserting a hold it cannot
+      // confirm.
+      rows.push({
+        name: "SHARED_PAUSE",
+        consequence:
+          `cannot reach origin to read ${sharedPauseRef()} — holding rather than dispatching ` +
+          "optimistically (an unreachable remote is never read as clear)",
+      });
+    }
   }
 
   // Inflight locks — one row per LIVE lock (a dead-pid lock is stale debris, not an active
@@ -1148,6 +1227,15 @@ const LATCHES_NEXT_ACTIONS: readonly NextActionRule<LatchesSection>[] = [
   {
     applies: (ctx) => ctx.rows.some((r) => r.name === "STOP"),
     action: () => "STOP is set — no action needed unless unexpected; it auto-clears when the halted run ends",
+  },
+  {
+    // W1-T2264: this row can be a hold ANOTHER host set (or an unreadable answer about one), so —
+    // unlike PAUSE below, set by whoever is reading this very board — this line never names the
+    // releasing action itself; the row's own consequence (buildLatchRows) already names the ref
+    // and the remedy verb for the confirmed-held case, and that is the more trustworthy place for
+    // it to live for a hold this host did not necessarily set.
+    applies: (ctx) => ctx.rows.some((r) => r.name === "SHARED_PAUSE"),
+    action: () => "a cross-host hold may be affecting dispatch beyond this host — see the SHARED_PAUSE row above before assuming it is local",
   },
   {
     applies: (ctx) => ctx.rows.some((r) => r.name === "PAUSE"),
@@ -1958,6 +2046,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const resolveOriginMainSha = deps.resolveOriginMainSha ?? defaultResolveOriginMainSha;
   const crashLoopWindow = deps.crashLoopWindow ?? DEFAULT_CRASHLOOP_WINDOW;
   const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
+  const readSharedPauseState = deps.readSharedPauseState ?? defaultReadSharedPauseState;
 
   const lines = readLedger(ledgerPath);
   const boots = deriveDaemonBoots(lines);
@@ -2012,7 +2101,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   };
 
   // ── LATCHES ──
-  const rows = buildLatchRows(root, nowMs, isPidAlive, originSha);
+  const rows = buildLatchRows(root, nowMs, isPidAlive, () => readSharedPauseState(deps.repoDir), originSha);
   const latchesSection: LatchesSection = { rows, nextAction: undefined };
   latchesSection.nextAction = pickNextAction(LATCHES_NEXT_ACTIONS, latchesSection);
 
