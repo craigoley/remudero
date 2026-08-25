@@ -1,0 +1,104 @@
+- id: W1-T2259
+  title: "THE ONLY FILE IN THE REPO NOTHING REFERENCES EXISTS TO FEED A REQUIRED TEST'S ALLOWLIST — `scripts/shell-screenshot.mjs` is named by no workflow, no package script, no claim, no source file, no doc and not even a test of its own; it writes two PNGs that the NUL-byte gate then allowlists, so the script, the images and two allowlist lines are ONE artefact and deleting the docs alone turns a required check red"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [scripts/shell-screenshot.mjs, docs/design-review/w1-t153/shell-390.png, docs/design-review/w1-t153/shell-1440.png, test/no-raw-nul.test.ts, test/screenshot-artefact-retired.test.ts]
+  origin: oper#screenshot-artefact-unreferenced-2026-08-25
+  plan_refs: ["W1-T153"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED AT origin/main 167c6844, WITH THE ZERO CONTROLLED.
+
+    (1) THE SCRIPT IS REFERENCED BY NOTHING AT ALL. `git grep -l shell-screenshot`, excluding the
+    file itself, returns ZERO — no workflow, no `package.json` script, no `plan/claims.yaml` entry,
+    no `src/`, no doc, and no test of its own. THE ZERO IS CONTROLLED: the identical query over
+    comparable scripts returns 119 other files for `diff-coverage`, 132 for `coverage-ratchet`, 23
+    for `test-with-retry` and 20 for `generate-cli-reference`. The query can see references; there
+    are none to see.
+
+    (2) IT WRITES INTO THE DIRECTORY THE GATE ALLOWLISTS. `scripts/shell-screenshot.mjs:106` builds
+    its output path as `join(process.cwd(), "docs", "design-review", "w1-t153")`, and that directory
+    holds exactly the two tracked PNGs.
+
+    (3) AND THE GATE NAMES BOTH OF THEM. `test/no-raw-nul.test.ts:106-107` lists
+    `docs/design-review/w1-t153/shell-1440.png` and `.../shell-390.png` in the `pngs` array of the
+    test "PROPERTY the three tracked PNGs still contain a NUL and still pass the gate unbanned".
+
+    SO THE COUPLING IS MECHANICAL, NOT STYLISTIC, AND THE DIRECTION MATTERS. That test asserts
+    `tracked.has(png) === true` for every listed path, with the failure message "is no longer
+    tracked — update this test's PNG list". DELETING THE IMAGES WITHOUT EDITING THE TEST TURNS A
+    REQUIRED CHECK RED. A docs-cleanup pass that declined to touch this was therefore correct, not
+    timid.
+
+    A FALSE POSITIVE WORTH RECORDING, BECAUSE IT WOULD REVERSE THE FINDING. `git grep -l
+    design-review` returns NINE files outside the artefact — `.remudero/skills/design-review.yaml`,
+    `MASTER-PLAN.md`, `LEARNINGS.md`, `src/lib/panel-skill-run.ts` and others. NONE of them
+    reference the docs directory: they name a SKILL that happens to share the string. Searched on
+    the PATH instead, `git grep -l docs/design-review` outside the artefact returns ZERO, against a
+    control showing the same path query matches twice in each of the two artefact files. A reader
+    who greps the bare token concludes the directory is live; it is not.
+
+    AND THE THIRD ENTRY IS NOT PART OF THIS ARTEFACT. The `pngs` array names THREE paths; the third,
+    under `plan/feedback/attachments/`, has nothing to do with W1-T153 and is out of scope. The
+    retirement removes two of three entries, so the test's list, its title's count and its trailing
+    comment all move together — this is not a two-line deletion.
+  note: |
+    Q1 — DOES THE ARTEFACT STILL SERVE ANYTHING, AND IS THE ALLOWLIST DEBT? Two separable answers,
+    and conflating them is the trap.
+    NOTHING REGENERATES OR READS THE IMAGES. The script that produces them is unreachable (finding 1
+    above), so no live process regenerates them; and `shell-1440.png` and `shell-390.png` are
+    referenced by ZERO files outside the artefact, so no live process reads them either. They are
+    one task's design-review output — W1-T153, the console shell UX overhaul — frozen at the moment
+    that review happened.
+    THE ALLOWLIST ENTRIES ARE NOT DEBT, AND THIS TASK MUST NOT BE READ AS SAYING THEY ARE. The
+    NUL-byte gate exists to catch binary committed by ACCIDENT into text-bearing paths. An allowlist
+    naming a small set of DELIBERATE, tracked PNGs is that mechanism working exactly as designed:
+    without it the gate would either flag every intentional image or would have to stop looking.
+    THE QUESTION IS NOT WHETHER THE ALLOWLIST IS SOUND — IT IS — BUT WHETHER THESE TWO ENTRIES
+    STILL HAVE A SUBJECT. If the images go, the entries go with them because they name nothing; if
+    the images stay, the entries stay and nothing is owed.
+
+    Q2 — ONE PR OR THREE, ARGUED RATHER THAN ASSUMED. THREE PRs IS NOT AVAILABLE, and the reason is
+    the assertion quoted above rather than a preference for tidiness: `tracked.has(png)` fails the
+    moment an image is deleted, so an images-only PR is red on a required check, and a test-only PR
+    that drops the entries first leaves the gate no longer covering files that are still tracked —
+    which is the gate silently narrowing, the opposite of what it is for. Only the script is
+    genuinely independent: it could be deleted alone today with nothing going red.
+    SO IT IS ONE PR, AND THIS IS THE RARE CASE WHERE ONE CONCERN SPANS A TEST, A SCRIPT AND A DOCS
+    DIRECTORY. The concern is not "delete three things"; it is "retire one artefact whose parts are
+    joined by an assertion". Rule 19's SPAN still counts three subsystems and the band is set high
+    accordingly — the band is the span, not the blast radius, which is a deleted generator, two
+    unread images and two entries naming them.
+
+    Q3 — WHAT MUST NOT CHANGE. THE NUL-BYTE GATE ITSELF STAYS, AND STAYS REQUIRED. Nothing here
+    weakens `rawNulViolations`, relaxes `COVERED_EXT_RE`, or makes the check optional; the two
+    remaining property tests keep their shape. THE THIRD ALLOWLIST ENTRY STAYS — the
+    `plan/feedback/attachments/` PNG is a different artefact and is untouched. AND NOTHING UNDER
+    `docs/adr/` OR `docs/audits/` IS IN SCOPE: those are report-only by operator ruling, and no part
+    of this task reads or writes them.
+
+    `verify: human` IS SET DELIBERATELY. The deliverable is a RETIREMENT — an irreversible deletion
+    of a generator and its output — and whether one task's design-review artefact should outlive the
+    task is a judgement about what the repository keeps, not a predicate a worker can settle.
+    `isDispatchEligible` (`src/lib/drain.ts`) refuses any task whose `verify` is not exactly `auto`,
+    so this cannot be selected by the fleet.
+
+    THE PROOF PATH DOES NOT YET EXIST, AND THAT IS THE FALSIFIER. `test/screenshot-artefact-retired.test.ts`
+    is absent today (measured: 0 files, against a control of 1 for an existing suite in the same
+    directory), so every criterion below fails now and can only pass once the retirement lands. A
+    criterion that already passes would prove nothing about a deletion that has not happened.
+  acceptance:
+    - claim: "the generator script is gone and the tree still has no reference to it"
+      proof: "unit test: test/screenshot-artefact-retired.test.ts"
+    - claim: "neither design-review image is tracked any longer"
+      proof: "unit test: test/screenshot-artefact-retired.test.ts"
+    - claim: "the nul-byte gate still runs and still allowlists the unrelated attachment image"
+      proof: "unit test: test/screenshot-artefact-retired.test.ts"
+    - claim: "a planted raw nul in a covered file is still caught after the allowlist shrinks"
+      proof: "unit test: test/screenshot-artefact-retired.test.ts"
