@@ -1,0 +1,129 @@
+- id: W1-T2263
+  title: "A SEMANTIC DOWNGRADE OVERWRITES THE ONLY FIELD THAT COULD NAME THE REMEDY — the reviewer's transcript is already in hand and narrowed to a boolean per criterion, then the floor's accumulated reason is REPLACED by a fixed eight-word constant, so the row that carries the judgement says the proof was non-responsive and never what would answer the claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: oper#downgrade-reason-overwritten-not-appended-2026-08-25
+  files: [src/lib/review.ts, test/downgrade-names-the-remedy.test.ts]
+  rationale: |
+    **THE ROW IS NOT IMPOVERISHED, AND SAYING SO FIRST MATTERS BECAUSE THE OBVIOUS REMEDY IS TO ADD
+    A FIELD TO IT.** Derived from the `log("review.posted", …)` object in `src/run-task.ts`, not
+    recalled: fifteen keys written directly (`context`, `state`, `head_sha`, `test_theater`,
+    `unmet_criteria`, `reasons`, `reviewer_outcome`, `proof_exec`, `floor_degraded`, `floor_state`,
+    `downgrade_suppressed`, `reward_hacking_gap`, `reachability_scanned`,
+    `changeset_claims_recognised`, `changeset_fence_unbalanced_at_eof`), plus two spread from
+    `degradedReasonLedgerFields` and nine from `reviewLedgerLegibilityFields` (`capped`,
+    `keyword_only`, `plan_only`, `capped_reason`, `unexecutable_count`, `unexecutable_proofs`,
+    `partially_executed`, `failure_class`, `failure_reason`). The `log` closure adds `run_id`,
+    `task_id`, `step`, `lane`; `appendLedger` prepends `ts` and `host`. Maximum thirty-two; five of
+    the payload keys are optional, so a row that omits three of them is twenty-nine. **The row's
+    schema is not the defect.**
+
+    **`reasons` IS ALREADY PER-CRITERION, WHICH NARROWS THE DEFECT FURTHER.** `reviewLedgerReasons`
+    maps the visible unmet criteria to `c.reason`, index-aligned with `unmet_criteria`, and the PR
+    comment renders the pair as a numbered claim with its reason beneath. A single-sentence
+    `reasons` array is a row with exactly one unmet criterion, not a row that collapsed several.
+    So there is no missing container and no missing alignment. **What is missing is content, and it
+    is destroyed at a line that can be named.**
+
+    **THE OVERWRITE.** In `judgeCriterion` (`src/lib/review.ts`), every earlier branch BUILDS
+    `reason` up — mechanical keyword coverage, execution outcome, and a dialect note appended in the
+    form `${reason} — NOTE: …`. The semantic arm then reads
+    `if (semantic === false && met) { met = false; reason = "reviewer judged the proof
+    non-responsive (semantic downgrade)"; }` — a BARE ASSIGNMENT, not an append, in the one branch
+    where the author most needs to know what was weighed. Everything the floor established about
+    that criterion is discarded, and the constant that replaces it names the conclusion and nothing
+    else. The fix shape is visible in the immediately preceding branch's own idiom.
+
+    **AND THE DISCARD HAPPENS TWICE.** `reviewerVerdictContract` instructs the reviewer to emit
+    "EXACTLY one line per criterion, in this form and nothing else on the line".
+    `parseReviewerVerdicts` compiles `/REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL)\b/gi`, keeps the
+    index and the token, and returns `(boolean | undefined)[]`. Its caller,
+    `reviewerSemanticVerdicts`, hands it `workerTranscript(reviewer)` — **the reviewer's whole
+    output, already materialised in memory at that point.** So the reviewer's reasoning is not
+    unavailable; it is narrowed to a boolean and dropped one frame below where it exists.
+
+    **Q1 — `downgrade_suppressed` NAMES AN EXISTING POLICY, AND ITS CONDITION IS THE INTERESTING
+    PART.** `applyVerdictStability` (`src/lib/review.ts`) suppresses only when `prior !== undefined`
+    AND `prior.headSha === headSha` AND `prior.state === "success"` AND `computed.state ===
+    "failure"` AND `floorState === "success"`. Suppression is therefore reserved for a RE-REVIEW OF
+    UNCHANGED BYTES where an earlier review passed: the repo already encodes the judgement that a
+    semantic downgrade contradicting an earlier pass on the SAME head is less trustworthy than the
+    deterministic floor. A FIRST review of a head is never suppressed, because there is no prior to
+    contradict — which is why a downgrade on a first review reads `false` and is fully binding.
+
+    **SO THE REMEDY IS NOT A NEW CONDITION AND NOT A NEW FIELD.** Widening the suppression condition
+    would suppress downgrades on first review, which is precisely the reviewer's power to refuse
+    test theatre. Adding a field duplicates a per-criterion string channel that already exists,
+    already reaches the ledger, and already reaches the PR comment. The change is to stop destroying
+    that channel's content and to let the reviewer put something in it.
+
+    **Q2 — OBTAINABLE FROM EXISTING OUTPUT, AND THE COST IS ZERO ADDITIONAL CALLS.** The transcript
+    is in hand at `reviewerSemanticVerdicts`; no second question and no second spawn is required.
+    The contract already prescribes a parenthetical after the token on each line, so capturing a
+    bounded trailing clause on FAIL lines widens a regex rather than a prompt. The marginal spend is
+    a short clause on lines the reviewer already emits, on the rare path only — a PASS line is
+    unchanged, and an absent clause must leave today's behaviour exactly as it is. Costed that way,
+    scoping to the downgrade path is not a concession; it is the whole change.
+
+    **Q3 — WHAT MUST NOT CHANGE.** The reviewer keeps its power to downgrade: the semantic arm stays
+    downgrade-only, still unable to rescue an unpasted or executed-fail proof, because a reviewer
+    that cannot say non-responsive passes test theatre. The parse stays ADVISORY and fail-open in
+    the sense its own doc states — an unparseable reviewer output yields an all-`undefined` array
+    and the deterministic floor stands alone, never a stall. `failure_class` stays a closed set; the
+    clause is prose attached to one criterion's reason, never a new class value. And nothing widens
+    the prompt toward narrative: W1-T1254 already files that the fix rung hands the reviewer worker
+    narrative, so the ask is a bounded clause on an existing line, not an explanation.
+
+    **THE COST FIGURES IN THIS FILING ARE ATTRIBUTED, NOT RE-DERIVED.** The state dir reachable here
+    holds no archives of either rotation form, so `resolveLedgerUnion` reports `ok: false` on it
+    rather than answering from the live file. On that live file, `review.posted` and
+    `review.downgrade_suppressed` each read zero against a control of three hundred and nine
+    `cli.invoked` rows and only two distinct steps present — this is a scratch ledger, not the
+    fleet's. The strike count, the identical proof string across a sibling shard's criteria, and the
+    field census on the blocking head therefore stand as the operator's measurement.
+  note: |
+    RULE 19 BAND, MEASURED RATHER THAN ASSUMED. `files:` is one source file and its test, and the
+    two edits inside it — capturing an optional bounded clause in the verdict parse, and appending
+    rather than overwriting in the semantic arm — are the two halves of one seam. Filed first at
+    `risk: medium`, the sizing check refused it as spanning two concerns, deriving those concerns
+    from the two basenames rather than from the subsystem: a source file and a test file whose name
+    does not match it read as a span whatever the change is. `risk: high` is therefore set for Rule
+    19's SPAN and carries no claim about blast radius, which is one function's reason string and one
+    regex.
+
+    NAMED, NOT FILED, AND RE-FILING NONE OF THEM. A sibling shard's fourth criterion asks for a
+    stand-down that the same shard's own rationale refuses: the rationale records that the claim
+    holds on the CI arm and is not demonstrated here, and states that the remedy is a correct mode
+    rather than a stand-down. A build that follows the rationale fails the criterion; a build that
+    satisfies the criterion contradicts the rationale. That contradiction is W1-T2254's subject —
+    Rule 21 guards one field of a merged shard while every other field, a proof included, stays
+    editable — and this is its first live instance. W1-T1254 owns the narrative-as-body defect on
+    the fix rung. W1-T2217 and its PR are the precedent for why the downgrade power must survive.
+    None of the three is re-filed here and `files:` is not widened toward any of them.
+
+    THE SAME SIBLING ALSO SHOWS WHY A REMEDY CLAUSE HAS TO BE PER-CRITERION RATHER THAN PER-REVIEW:
+    its criteria all carry one identical proof string, so a single test file was graded against
+    every claim and exactly one was downgraded. A per-review clause could not say which claim it
+    answered.
+  acceptance:
+    - claim: "a downgrade preserves the floor's accumulated reason rather than replacing it, and the surviving text still names the downgrade"
+      proof: "unit test: test/downgrade-names-the-remedy.test.ts"
+    - claim: "a reviewer line carrying a bounded trailing clause on a refusal has that clause reach the criterion's reason"
+      proof: "unit test: test/downgrade-names-the-remedy.test.ts"
+    - claim: "a reviewer line with no trailing clause leaves the parse result and the criterion outcome exactly as they are today"
+      proof: "unit test: test/downgrade-names-the-remedy.test.ts"
+    - claim: "an affirmative reviewer line gains no clause and still defers to the deterministic floor"
+      proof: "unit test: test/downgrade-names-the-remedy.test.ts"
+    - claim: "the semantic arm remains unable to raise a criterion the floor did not substantiate"
+      proof: "unit test: test/downgrade-names-the-remedy.test.ts"
+    - claim: "an unparseable reviewer output still yields a defer-to-floor result for every criterion"
+      proof: "unit test: test/downgrade-names-the-remedy.test.ts"
+    - claim: "the suppression condition keeps every one of its conjuncts, so a first review of a head is never suppressed"
+      proof: "unit test: test/downgrade-names-the-remedy.test.ts"
+    - claim: "an overlong or multi-line clause is bounded before it reaches the reason rather than carried whole"
+      proof: "unit test: test/downgrade-names-the-remedy.test.ts"
