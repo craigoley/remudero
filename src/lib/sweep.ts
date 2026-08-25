@@ -3686,6 +3686,20 @@ export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
   return outcome === "armed" || outcome === "direct-merged";
 }
 
+/**
+ * W1-T2231 — the SAME "undefined ⇒ the pre-existing assumption" idiom {@link armOutcomeArmed}
+ * already establishes for `deps.arm`, applied to `deps.dispatchFix`'s own return (see that
+ * field's own doc): a `false` return is the ONLY signal that stands a `blocked-fixable`/
+ * `conflicted` dispatch's `spent` field down to `false` — `undefined` (every existing fake, and
+ * today's real wiring) and `true` both read as spent, matching exactly what every caller already
+ * assumed before this task, which is why the count on every OTHER pre-existing ledger row is
+ * unchanged (rationale (5): zero phantom firings on the measured corpus).
+ */
+export function dispatchFixSpent(outcome: boolean | void): boolean {
+  if (outcome === undefined) return true;
+  return outcome;
+}
+
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
 export interface SweepDeps {
   /**
@@ -3764,8 +3778,22 @@ export interface SweepDeps {
    * once (W1-T94/W1-T100) — the FULL unmet set for a review-mode dispatch, or
    * ci-log evidence (failing check names + log tails) for a blocked_ci
    * dispatch. See {@link FixDispatchEvidence}.
+   *
+   * W1-T2231: MAY return whether this call demonstrably SPENT a strike — i.e. wrote its own
+   * `fix.dispatch` row — before returning. `false` means the lane was invoked and stood down
+   * internally (run-task.ts's own `dispatchStarted` names the live example: a preflight refusal
+   * or an uncreditable-head return, both clean returns that write no `fix.*` row at all) without
+   * spending anything; `true` means it did. `void`/`undefined` remains valid — every existing
+   * fake, and today's real wiring, keeps compiling and behaving EXACTLY as before ({@link
+   * dispatchFixSpent} treats an absent return as spent, the pre-existing assumption) — so this
+   * widening alone regresses no lane. See {@link SweepAction.spent}'s own doc for the field this
+   * feeds and why `acted` itself is never touched by it (design note (i) — a second field, never
+   * a redefinition of the first).
    */
-  dispatchFix: (pr: OpenPrView, evidence: FixDispatchEvidence) => void | Promise<void>;
+  dispatchFix: (
+    pr: OpenPrView,
+    evidence: FixDispatchEvidence,
+  ) => boolean | void | Promise<boolean | void>;
   /**
    * Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
    * {@link ClarificationQuestion} (W1-T78) — the real wiring logs it to the §2
@@ -3960,6 +3988,23 @@ export interface SweepAction {
    * `runSweep` and aborting the rest of the pass.
    */
   actionError?: string;
+  /**
+   * W1-T2231 — set ONLY for the two dispatch-based repair surfaces (`blocked-fixable`/
+   * `conflicted`) whose `deps.dispatchFix` call returned a concrete {@link
+   * dispatchFixSpent}-interpreted verdict: `true` ⇒ the invocation demonstrably spent a strike
+   * (its own `fix.dispatch` row exists), `false` ⇒ it was invoked and stood down internally
+   * without spending anything. `undefined` for every other disposition (no dispatch verb exists
+   * to answer the question) AND for a dispatch-based one whose `dispatchFix` still returns
+   * nothing (today's real wiring, {@link SweepDeps.dispatchFix}'s own doc) — `undefined` is
+   * deliberately NEVER read as "no repair" by {@link dueRepairFilings} below, only an EXPLICIT
+   * `false` is, so no pre-existing ledger row or fixture regresses.
+   *
+   * THIS IS NEVER `acted`, AND NEVER CHANGES IT (design note (i)): `acted` still means "the lane
+   * was invoked" (see that field's own doc) and stays the dedup gate's seed exactly as before
+   * (`priorActionsFromLedger`'s `fixed` set, design note (ii)/(iii)) — `spent` exists solely so
+   * {@link dueRepairFilings} can stop reading an invocation as a repair.
+   */
+  spent?: boolean;
 }
 
 /** The whole sweep's outcome — counts per disposition + the per-PR actions. */
@@ -4386,6 +4431,19 @@ export interface RepairFilingRecurrence {
  * (`runSweep`) decides whether a returned candidate is ACTUALLY worth writing (via the injected
  * {@link SweepDeps.captureRepairFeedback}, whose real wiring is what performs the idempotent
  * write — see that field's own doc).
+ *
+ * W1-T2231 — `acted: true` PROVES ONLY THAT THE LANE WAS INVOKED, NEVER THAT A REPAIR HAPPENED.
+ * `blocked-fixable`/`conflicted` never assign `acted` around their `deps.dispatchFix` call (it
+ * keeps whatever the pass-level default already set — see {@link SweepAction.acted}'s own doc),
+ * so a dispatch that stood down internally and opened no strike still reads `acted: true`. This
+ * fold additionally excludes any row whose {@link SweepAction.spent} reads EXPLICITLY `false` —
+ * a dispatch demonstrably invoked and demonstrably spending nothing. `spent === undefined` (every
+ * OTHER surface, which has no dispatch verb to answer the question, and any dispatch-based row
+ * whose `dispatchFix` fake/wiring still returns void — {@link SweepDeps.dispatchFix}'s own doc)
+ * counts exactly as it always has: this is a NARROWING of what counts as a repair, never a
+ * rejoin against a different key (`task_id`, `pr@head`, or anything else) — see rationale (5) for
+ * why a task_id join is the wrong shape here (a `task_id: "SWEEP"` seed is unjoinable BY
+ * CONSTRUCTION and must not be conflated with a genuine no-spend stand-down).
  */
 export function dueRepairFilings(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -4402,6 +4460,12 @@ export function dueRepairFilings(
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
     const surface = line.disposition as Disposition;
     if (!REPAIR_SURFACE_DISPOSITIONS.has(surface)) continue;
+    // W1-T2231: `acted: true` only proves the lane fired — a dispatch-based surface
+    // (blocked-fixable/conflicted) additionally marks a demonstrably-empty invocation
+    // `spent: false` (see `SweepAction.spent`'s own doc), and THAT is what a repair count must
+    // exclude. `undefined` (every other surface, and a dispatch whose return carried no verdict)
+    // is deliberately NOT treated as `false` here — only an explicit no-spend excludes a row.
+    if (line.spent === false) continue;
     const ts = typeof line.ts === "string" ? line.ts : undefined;
     if (!ts) continue;
     const tsMs = Date.parse(ts);
@@ -4410,7 +4474,10 @@ export function dueRepairFilings(
     if (prNumber === undefined) continue;
     const perPr = bySurface.get(surface) ?? new Map<number, RepairFilingInstance>();
     // Last-write-wins per PR (lines are read in ledger/append order) — a PR re-dispatched
-    // several times this window is counted ONCE, carrying its MOST RECENT repair's evidence.
+    // several times this window is counted ONCE, carrying its MOST RECENT SPENDING repair's
+    // evidence (W1-T2231: a later `spent: false` row for the same PR is excluded above, by
+    // `continue`, before ever reaching this `perPr.set` — it can never overwrite an earlier
+    // genuine repair with a no-spend reason).
     perPr.set(prNumber, {
       prNumber,
       prUrl: typeof line.pr_url === "string" ? line.pr_url : "",
@@ -4701,6 +4768,9 @@ export async function runSweep(
     standDownReason: string | undefined,
     depReviewOutcome: string | undefined,
     armOutcome: ArmOutcomeName | undefined,
+    // W1-T2231: {@link SweepAction.spent}'s own doc — `undefined` for every call site except the
+    // main per-PR walk's "blocked-fixable"/"conflicted" arms below.
+    spent: boolean | undefined,
   ): void {
     if (standDownReason) {
       // The site the TASK names ("a sweep disposition"), naming the state —
@@ -4718,6 +4788,7 @@ export async function runSweep(
       acted,
       question,
       ...(actionError ? { actionError } : {}),
+      ...(spent !== undefined ? { spent } : {}),
     };
 
     log("sweep.dispose", {
@@ -4761,6 +4832,11 @@ export async function runSweep(
         // same value `standDownReason`'s `arm outcome: ${armOutcome}` sentence names, so
         // the two can never drift apart — one write site, read twice.
         ...(armOutcome ? { arm_outcome: armOutcome } : {}),
+        // W1-T2231: present ONLY when the "blocked-fixable"/"conflicted" arm below captured a
+        // concrete `dispatchFixSpent` verdict for THIS call — see `SweepAction.spent`'s own doc.
+        // `dueRepairFilings` (below) reads this field, never `acted`, to decide whether a
+        // dispatch-based repair surface's row is an actual repair.
+        ...(spent !== undefined ? { spent } : {}),
         ...(question ? { question: question.question } : {}),
       };
       appendLine(deps.ledgerPath, disposedLine);
@@ -4993,6 +5069,11 @@ export async function runSweep(
     // `arm_outcome` field at all (acceptance: "a disposal with no arm attempt carries no
     // outcome field").
     let armOutcome: ArmOutcomeName | undefined;
+    // W1-T2231: set ONLY by the "blocked-fixable"/"conflicted" cases below when
+    // `deps.dispatchFix` returns a concrete (non-void) verdict — see `SweepAction.spent`'s own
+    // doc. Every other disposition, and a dispatch whose fake/real wiring still returns nothing,
+    // leaves this `undefined` so `finalizeDisposition` writes no `spent` field at all.
+    let spent: boolean | undefined;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate
     // straight out of `runSweep` as one un-attributed `sweep.error`, aborting
     // the WHOLE pass (every later PR in `openPrs` went unreconciled this
@@ -5213,12 +5294,20 @@ export async function runSweep(
               // independently-hardcoded check) — a failing review carries the
               // unmet set (review mode), a blocked_ci PR carries ci-log evidence
               // instead (never a mix; see FixDispatchEvidence).
-              await deps.dispatchFix(
+              //
+              // W1-T2231: capture whatever verdict `dispatchFix` returns — `acted` stays
+              // untouched (this call NEVER assigned it, and still never does; the dedup gate
+              // reads `acted`, not `spent` — design note (ii)/(iii)). A concrete (non-void)
+              // return sets `spent` for `dueRepairFilings` alone to read; `void` (today's real
+              // wiring, every pre-existing fake) leaves it `undefined` — no `spent` field is
+              // written at all, so no existing ledger row's shape changes.
+              const dispatchOutcome = await deps.dispatchFix(
                 pr,
                 isBlockedCi(pr)
                   ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
                   : { unmetCriteria: pr.unmetCriteria },
               );
+              if (dispatchOutcome !== undefined) spent = dispatchFixSpent(dispatchOutcome);
               break;
             }
             case "conflicted": {
@@ -5242,7 +5331,12 @@ export async function runSweep(
               // The DISPOSITION_RULES "conflicted" row already gated this on
               // isPureConcurrentAddition — dispatch carries the merge-conflict
               // evidence, never a mix with ci-log/reviewer-unmet shapes.
-              await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
+              //
+              // W1-T2231: the SAME "conflicted" analogue of blocked-fixable's own capture just
+              // above — REPAIR_SURFACE_DISPOSITIONS (below) treats both as dispatch-based repair
+              // surfaces, so both must feed `spent` the same way.
+              const conflictedDispatchOutcome = await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
+              if (conflictedDispatchOutcome !== undefined) spent = dispatchFixSpent(conflictedDispatchOutcome);
               break;
             }
             case "stale":
@@ -5433,6 +5527,7 @@ export async function runSweep(
           `duplicate review key (${reviewKey}) already claimed this pass — see PriorActions.reviewDelivered/reviewRefused's docs`,
           undefined,
           undefined,
+          undefined,
         );
       } else {
         claimedReviewKeys.add(reviewKey);
@@ -5453,6 +5548,7 @@ export async function runSweep(
       standDownReason,
       depReviewOutcome,
       armOutcome,
+      spent,
     );
   }
 
@@ -5508,6 +5604,7 @@ export async function runSweep(
       false,
       undefined,
       `review budget exhausted this pass (${reviewLanes} lane(s) in use) — re-derived next pass`,
+      undefined,
       undefined,
       undefined,
     );
@@ -5626,6 +5723,7 @@ export async function runSweep(
         false,
         actionError,
         standDownReason,
+        undefined,
         undefined,
         undefined,
       );
