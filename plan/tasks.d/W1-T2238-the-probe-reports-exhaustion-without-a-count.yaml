@@ -150,6 +150,70 @@
     from "the write may never have been attempted" (W1-T1281). This amendment records a rate and
     corrects its reading; it raises no bound and touches no acceptance criterion.
 
+    (16) THE COUNTER IS NOW RULED OUT BY MEASUREMENT, WHICH IS WHAT MAKES THIS INSTRUMENT THE ONLY
+    REMAINING TEST. The competing explanation for the exhaustion rate was that `probeCommandCount`
+    had gone blind to the commands the probe gained — W1-T2201's defect returning by another route.
+    IT HAS NOT. Evaluated against the CONSTRUCTED prompt rather than source layout, because the
+    prompt is a parameter and a grep of `containment.ts` reads zero and means nothing:
+    `probeCommandCount` returns 3 at `05f980f7` (2026-08-11, pre-egress) and 6 at current main. It
+    moved exactly in step with the egress, token-read and operator-home-read arms. THE DERIVATION
+    WORKS.
+
+    AND THE NAIVE "LESS SLACK" STORY FAILS IN THE SAME MEASUREMENT. Slack after commands-plus-REPORT
+    went UP, not down: 2 under the then-literal cap of 6 with three commands, against 3 today under
+    the derived cap of 10 with six. The probe has more room now than it has ever had.
+
+    WHAT THE SAME MEASUREMENT DOES SHOW IS A DIVERGENCE THE COUNTER CANNOT SEE. Prompt bytes went
+    474 to 1,737, a factor of 3.66, while the command count went 3 to 6, a factor of 2.00. The probe
+    grew faster than the quantity its budget is derived from. That is not a defect in the derivation
+    — a turn is spent per command, not per byte — but it is the reason the remaining hypothesis is
+    about cost per command rather than about the count.
+
+    (17) WHAT REMAINS IS AN ARGUMENT AND IS LABELLED AS ONE. The allowance is THREE NAMED TURNS FOR
+    THE WHOLE PROBE, while each cost it names — an ambiguous result, a retry, a deny-floor rework —
+    is a PER-COMMAND event. Doubling the commands roughly doubles the chance that at least one
+    fires, against an absorber that did not move. THAT IS A REASON THE HYPOTHESIS IS PLAUSIBLE, NOT
+    EVIDENCE THAT IT IS TRUE, and it cannot be tested today because `turns_exhausted` is a boolean
+    and no turn count is ledgered anywhere on this path. THAT IS THIS TASK'S SUBJECT, and it is why
+    the task is worth building rather than reasoned past.
+
+    (18) THE ONE COST DEMONSTRATED FIRST-HAND, RECORDED BECAUSE IT IS THE ONLY ONE. A recon lane's
+    own read-only verification command was refused by the deny floor for MERELY NAMING the tripwire
+    literal:
+
+    ```
+    deny-floor: blocked — <tripwire> path
+    ```
+
+    That is cost #3 in `PROBE_TURN_ALLOWANCE`'s own doc, live and current: the floor's rule 3 matches
+    the whole command string and cannot distinguish an attempt to CREATE the tripwire from an `ls`
+    that only names it. The lane paid the turn the doc predicts. Of the three costs the allowance
+    names, this is the only one anyone has shown happening; the other two remain plausible and
+    unobserved.
+
+    (19) Q1 — WHAT THE RECORDED COUNT MUST BE COMPARABLE TO, AND TODAY NOTHING IS. A RAW `num_turns`
+    IS NOT COMPARABLE TO A CAP OF 10. W1-T303 measured the mismatch on a different lane and its
+    title states it: `maxTurns` and the envelope's `num_turns` do not count the same unit, a recon
+    capped at 8 reported 17 on success, and under that single cap eleven failures all read
+    `num_turns: 9` while successes read 5, 6, 7, 8, 8, 8 and one read 17. A success at 17 under a cap
+    of 8 cannot be reconciled with `num_turns` being the quantity `maxTurns` bounds.
+
+    SO THIS INSTRUMENT MUST RECORD THE QUANTITY THE CAP ACTUALLY BOUNDS, NOT THE ONE THE ENVELOPE
+    HAPPENS TO OFFER. W1-T303's own criterion (3) says it in terms — if they are genuinely different
+    units, ledger the one that is comparable to the cap. Recording a raw `num_turns` beside a derived
+    cap of 10 would produce a second unreadable number and would satisfy this task's letter while
+    defeating its purpose. THE DEPENDENCY IS NAMED RATHER THAN ASSUMED AWAY: W1-T303 is merged and
+    `test/turn-budget-units.test.ts` is in the tree, so what it established is available to whoever
+    builds this and must be consulted before a field name is chosen.
+
+    (20) Q2 — THE OVERSHOOT MAGNITUDE IS NOT RECOVERABLE FOR THE EXHAUSTIONS ALREADY OBSERVED, AND
+    THE SHARD SAYS SO RATHER THAN IMPLYING A DIAGNOSABLE BACKLOG. `turnsExhausted` is derived from
+    `probe.subtype === "error_max_turns"` and nothing else from that envelope is kept: the probe path
+    never reads `numTurns` at all. MEASURED over the ledger union at the state dir, 672 archives, 0
+    unread: `num_turns` appears on 1,774 rows corpus-wide — the positive control, so the query can
+    see the field — and on ZERO of the 669 `containment.probe` rows. Nothing was recorded, so nothing
+    can be re-derived. THE INSTRUMENT ANSWERS FOR FUTURE RUNS ONLY.
+
   design: |
     ONE CONCERN: an exhausted probe must record how far it got. Not the cap, not the derivation, not
     the failure behaviour.
