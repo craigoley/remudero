@@ -7874,6 +7874,23 @@ export function planSha(worktreePath: string): string {
 }
 
 /**
+ * A declared file's content digest, or the `"absent"` sentinel — a SINGLE filesystem call
+ * (`readFileSync`), never a separate `existsSync`/`statSync` pre-check followed by a read of the
+ * same path: CodeQL's `js/file-system-race` flags exactly that shape (the file can change, or
+ * vanish, between the check and the read it gates). A missing file (a forward-referenced path not
+ * yet created) and a non-regular entry sharing the declared name (e.g. a directory) both throw out
+ * of `readFileSync` and both read as the same "absent" sentinel — the same semantics the old
+ * check-then-read had, without the race window.
+ */
+function fileDigestOrAbsent(p: string): string {
+  try {
+    return sha256Hex(readFileSync(p, "utf8"));
+  } catch {
+    return "absent";
+  }
+}
+
+/**
  * Content digest of the task's own declared `files:` — the OTHER invalidation key component
  * (MASTER-PLAN:1869-1870 names both, together, as the whole invalidation rule). Declared paths
  * are sorted before hashing so the digest is independent of the order `files:` happens to list
@@ -7882,13 +7899,7 @@ export function planSha(worktreePath: string): string {
  */
 export function filesDigest(worktreePath: string, files: ReadonlyArray<string>): string {
   const sorted = [...files].sort();
-  const combined = sorted
-    .map((f) => {
-      const p = join(worktreePath, f);
-      const body = existsSync(p) && statSync(p).isFile() ? sha256Hex(readFileSync(p, "utf8")) : "absent";
-      return `${f}:${body}`;
-    })
-    .join("\n");
+  const combined = sorted.map((f) => `${f}:${fileDigestOrAbsent(join(worktreePath, f))}`).join("\n");
   return sha256Hex(combined);
 }
 
