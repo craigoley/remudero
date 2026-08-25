@@ -14,11 +14,13 @@
  * were module-private and are exported here only because the file boundary now sits between them and
  * `reapBranchesCommand`. That widening is forced by the split, not a design change; `escapeEre` and
  * `RUN_TASK_BRANCH_TOKEN_SRC` have no caller outside this file and stay private.
+ *
+ * THIS MODULE IMPORTS NOTHING — not a node builtin, not another `src/lib` module. Every declaration
+ * here is pure or takes its effects as an injected parameter: `remoteBranchNames` receives its `exec`,
+ * `declaredGuardsBlockSpan` receives file TEXT rather than reading a path, and `planReverseBranchDrift`
+ * is a pure function of the facts handed to it. That is not incidental tidiness — a module with no
+ * imports cannot be one end of a cycle, which is what makes this the safe first region to move.
  */
-import { join } from "node:path";
-
-import { citation } from "./provenance.js";
-
 /**
  * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
  * decision is reviewable, alongside the name grep that derives the same answer independently.
