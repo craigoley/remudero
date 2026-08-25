@@ -4408,8 +4408,8 @@ async function runReview(args: {
 // because `OpenPrView` carries it and this module already imports OpenPrView
 // from sweep.js; the reverse import would be circular (W1-T100).
 
-/** The four known fix-rung failure modes. See the taxonomy note above. */
-export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | (string & {});
+/** The five known fix-rung failure modes. See the taxonomy note above. */
+export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | (string & {});
 
 /**
  * The block evidence a fix dispatch derives its MODE from. `review` carries a
@@ -4428,12 +4428,26 @@ export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-con
  * `routeFix`/`runSweep`) still constructs them mutually exclusively as a
  * matter of caller discipline, but the mode table's own correctness no
  * longer depends on that discipline holding.
+ *
+ * W1-T2236: `actionableGateFailures` carries the SAME structured, single-form remedy
+ * {@link OpenPrView.actionableGateFailures} already names on the sweep side (W1-T923) — a
+ * review can FAIL with `review.unmetCriteria` empty (every named criterion passed, or none
+ * was ever checkable) while the reviewer's own reasons still name ONE unambiguous gate
+ * failure (a changeset contradiction, test theater, a stale-criteria block). Before this
+ * field existed that remedy was computed, said out loud in the sweep's own disposed-line
+ * reason, and then DISCARDED at the dispatch boundary — `deriveFixMode`'s catch-all
+ * `reviewer-unmet` row matched instead, and the prompt carried nothing but an empty list
+ * (63% of that mode's measured dispatches, this task's own rationale). Populated ONLY when
+ * `review.unmetCriteria` is empty (design note i) — never a widening of `unmetCriteria`,
+ * never checked when it is non-empty (see {@link FIX_MODE_RULES}'s `gate-fix` row).
  */
 export interface FixEvidence {
   review?: { unmetCriteria: CriterionVerdict[]; summary: string };
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
   mergeConflict?: MergeConflictEvidence;
+  /** W1-T2236: the `gate-fix` mode's ONLY input — see this interface's own doc, above. */
+  actionableGateFailures?: ActionableGateFailure[];
   /**
    * W1-T78: an operator's answer to a clarification question, carried VERBATIM
    * as an added constraint on the prompt — never paraphrased, never dropped.
@@ -4449,8 +4463,12 @@ interface FixModeRule {
 
 /**
  * THE MODE TABLE (policy-as-data, rule 2). Precedence is table order (first
- * match wins); the terminal row (`reviewer-unmet`) matches unconditionally, so
- * a mode is ALWAYS derived — no undispatched evidence shape.
+ * match wins). W1-T2236: the terminal row (`reviewer-unmet`) is NAMED, never a
+ * `when: () => true` catch-all — a rule that matches every unclassified shape can
+ * never be wrong, which is exactly why it hid this task's own defect (63% of
+ * measured `reviewer-unmet` dispatches carried zero unmet criteria). `deriveFixMode`
+ * below still returns SOME mode for any input (its own total-function fallback), but
+ * the TABLE itself no longer claims "unconditional" as a virtue.
  *
  *   1. merge-conflict  — `evidence.mergeConflict` is set (W1-T106, the #170
  *                        DIRTY strand): the PR's merge state itself is dirty,
@@ -4486,15 +4504,36 @@ interface FixModeRule {
  *                        CI-red PR, PR 479's shape in the W1-T226 rationale)
  *                        rather than by any caller relying on that discipline
  *                        forever holding.
- *   3. body-coverage   — every unmet criterion's reason is a keyword-coverage
+ *   3. gate-fix        — W1-T2236: `evidence.actionableGateFailures` is non-empty — a
+ *                        review FAILED with `unmetCriteria` empty (design note i: every
+ *                        named criterion may already read MET) while the reviewer's own
+ *                        structured reasons still name ONE unambiguous gate failure (a
+ *                        changeset contradiction, test theater, a stale-criteria block —
+ *                        see {@link actionableGateFailuresFromReasons}, lib/sweep.ts).
+ *                        Reached only when merge-conflict/ci-log above also missed. By
+ *                        construction (every producer of `actionableGateFailures` checks
+ *                        `unmetCriteria.length === 0` first) this NEVER matches beside a
+ *                        non-empty `review.unmetCriteria`, so its ordering relative to
+ *                        body-coverage below is inert — placed first because it is the
+ *                        more specific, structured shape.
+ *   4. body-coverage   — every unmet criterion's reason is a keyword-coverage
  *                        gap ("matched N/M proof keywords") and NONE was an
  *                        OBSERVED `executed_fail` (an actual failed run always
  *                        means real code broke — never treat that as body-only,
  *                        the #157/#143 lesson). Reached only when ci-log's row
  *                        above also missed (no `ciFailures`) — a red required
  *                        check outranks a body-coverage-shaped review too.
- *   4. reviewer-unmet  — the default: a real reviewer-computed unmet set
- *                        (W1-T76, unchanged).
+ *   5. reviewer-unmet  — a real reviewer-computed unmet set (W1-T76, unchanged):
+ *                        `evidence.review.unmetCriteria` is non-empty. W1-T2236: NAMED,
+ *                        not unconditional — see this doc block's own header, above. An
+ *                        evidence shape that reaches NONE of these five rows (no unmet
+ *                        criteria, no named gate failure, no CI/merge-conflict evidence)
+ *                        is never expected to reach this function at all: `runFixRung`'s
+ *                        own pre-strike guard (site `rung.empty_review_evidence`) stands
+ *                        that shape down before a strike is ever spent — see its own doc.
+ *                        `deriveFixMode`'s fallback below still names `reviewer-unmet` for
+ *                        that unreachable-in-practice case, purely so the function stays
+ *                        total or a fixture calling it directly still gets a legible mode.
  */
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
@@ -4504,6 +4543,10 @@ export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
     mode: "ci-log",
     when: (e) => e.ciFailures !== undefined,
+  },
+  {
+    mode: "gate-fix",
+    when: (e) => (e.actionableGateFailures?.length ?? 0) > 0,
   },
   {
     mode: "body-coverage",
@@ -4518,7 +4561,7 @@ export const FIX_MODE_RULES: readonly FixModeRule[] = [
   },
   {
     mode: "reviewer-unmet",
-    when: () => true,
+    when: (e) => (e.review?.unmetCriteria.length ?? 0) > 0,
   },
 ];
 
@@ -4695,6 +4738,30 @@ export function renderFixPrompt(opts: {
       `push that broke this check. Your target is making CI GREEN on the SAME branch; do not`,
       `expand scope beyond what the failing check(s) below require — do not touch acceptance`,
       `criteria or task scope to chase a reviewer verdict here.`,
+      "",
+      rendered,
+      ...footer,
+    ].join("\n");
+  }
+
+  if (mode === "gate-fix") {
+    // W1-T2236: the ONE structured, single-form remedy the review floor already named —
+    // NEVER an unmet acceptance criterion (every named criterion may already read MET; that
+    // is exactly why this mode exists instead of `reviewer-unmet` rendering an empty list).
+    const failures = opts.evidence.actionableGateFailures ?? [];
+    const n = failures.length;
+    const rendered =
+      n > 0
+        ? failures.map((f, i) => `${i + 1}. ${f.reason}`).join("\n")
+        : "(no gate-failure detail was captured — re-check the review floor for the current state.)";
+    return [
+      header,
+      ...constraintBlock,
+      ...scopeBlock,
+      `The review gate is FAILING on ${n} actionable gate failure${n === 1 ? "" : "s"} the reviewer named a`,
+      `SINGLE, unambiguous remedy for — every named acceptance criterion may already read MET; this is NOT`,
+      `an unmet-criterion gap. Resolve EACH remedy below exactly as named — the review floor has already`,
+      `diagnosed it precisely; do not invent a different fix or re-litigate a criterion that already passed.`,
       "",
       rendered,
       ...footer,
@@ -5978,6 +6045,19 @@ export async function runFixRung(opts: {
    * `noReviewYet` reversion.
    */
   mergeConflict?: MergeConflictEvidence;
+  /**
+   * W1-T2236: the SWEEP's already-computed structured gate-failure remedy (W1-T923,
+   * {@link OpenPrView.actionableGateFailures}) — seeds ROUND 1 ONLY of a review-mode dispatch
+   * whose `initialReview` is a lossy ledger reconstruction (`buildFixRungDispatchArgs`: no
+   * `testTheater`/`changesetContradictions`, so `reviewLedgerReasons` on it alone would read
+   * `[]` even for the exact shape this field exists to carry). From round 2 on, this rung
+   * derives the gate-failure evidence FRESH off that round's own live re-review instead (the
+   * SAME `reviewLedgerReasons`/`actionableGateFailuresFromReasons` pair the ledger's own
+   * `review.posted` line and `actionableGateFailuresFromLedger` use) — never this stale seed —
+   * exactly like `ciFailures`' own per-round refresh via `deps.fetchCiFailures`. Present ONLY
+   * for a review-mode dispatch whose `unmetCriteria` is empty; undefined otherwise.
+   */
+  actionableGateFailures?: ActionableGateFailure[];
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     waitForCiGreen: (
@@ -6584,6 +6664,61 @@ export async function runFixRung(opts: {
       return { outcome: "escalated", review, strikes, reason: "instrument_entangled", issueUrl };
     }
 
+    // W1-T2236: holdout criteria are reviewer-visible but WORKER-hidden — computed here (rather
+    // than only at the evidence-building site further below) so the empty-review-evidence guard
+    // immediately below can read the SAME worker-visible unmet set the eventual dispatch would
+    // carry, never a second independently-recomputed copy.
+    const rawUnmet = review.criteria.filter((c) => !c.met);
+    const unmet = visibleCriteria(rawUnmet);
+    // W1-T2236: this round's structured gate-failure remedy (the `gate-fix` mode's ONLY input —
+    // see {@link FixEvidence.actionableGateFailures}'s own doc). Review-mode rounds only (never
+    // ci-log/merge-conflict, which carry their own evidence shape and stand-down guard already).
+    // ROUND 1 (`strikes === 0`) prefers the sweep's own already-computed seed
+    // (`opts.actionableGateFailures`, W1-T923's producer) — `review` this early is still
+    // `buildFixRungDispatchArgs`'s lossy ledger reconstruction (no `testTheater`/
+    // `changesetContradictions`), so deriving from it directly would read `[]` even for the exact
+    // shape this field exists to carry. Every LATER round re-derives FRESH off that round's own
+    // live re-review instead — never this stale seed — via the SAME `reviewLedgerReasons`/
+    // `actionableGateFailuresFromReasons` pair the ledger's own `review.posted` line uses,
+    // mirroring `currentCiFailures`' own per-round refresh via `deps.fetchCiFailures`. GATED ON
+    // `unmet.length === 0` — the SAME precondition `actionableGateFailuresFromLedger`
+    // (run-task.ts) enforces before ever calling `actionableGateFailuresFromReasons` — because
+    // `reviewLedgerReasons` returns ONE entry per VISIBLE unmet criterion too; without this
+    // guard a single genuine unmet criterion (`reasons.length === 1`, the ordinary case) would
+    // be misread as a single-form gate-failure remedy and wrongly derive `gate-fix` mode
+    // instead of `reviewer-unmet` (design note i is additive, never a widening of when a gate
+    // failure is claimed).
+    const gateFailuresNow: ActionableGateFailure[] | undefined =
+      currentMergeConflict === undefined && !noReviewYet && unmet.length === 0
+        ? strikes === 0 && opts.actionableGateFailures !== undefined
+          ? opts.actionableGateFailures
+          : actionableGateFailuresFromReasons(reviewLedgerReasons(review))
+        : undefined;
+
+    // W1-T2236 SITE — THE EMPTY-REVIEW-EVIDENCE GUARD, BEFORE `strikes++`: a review-mode round
+    // (merge-conflict/ci-log rounds carry their own evidence shape and their own guard above)
+    // whose review is FAILING with `rawUnmet` empty (design note i: NOT ONLY the worker-visible
+    // `unmet` — a review can fail on a holdout criterion ALONE (W1-T166), which empties the
+    // visible `unmet` set while `rawUnmet` still carries the real, hidden reason; that shape must
+    // keep dispatching exactly as before, via the review's own redacted summary, never stand
+    // down) AND no structured gate-failure remedy either has NOTHING to hand a fix worker.
+    // Dispatching it anyway was the measured defect this task fixes: `deriveFixMode`'s old
+    // `reviewer-unmet` catch-all (`when: () => true`) matched, and the prompt went out naming
+    // zero unmet criteria — 63% of that mode's measured dispatches (this task's own rationale).
+    // Mirrors the W1-T1282 ci-log guard immediately above (`rung.empty_ci_failures`): never falls
+    // through to a strike, never logs `fix.dispatch` (the one step a strike/`prior.fixed` dedup is
+    // counted from) — ledgers the reason and stands down instead. The review itself is left
+    // UNTOUCHED and still FAILING, so nothing here arms a merge (design note iv). Checked every
+    // round, not just the first — the contradictory shape can recur mid-rung too.
+    if (currentMergeConflict === undefined && !noReviewYet && rawUnmet.length === 0 && (gateFailuresNow?.length ?? 0) === 0) {
+      const reason =
+        "review failing with no unmet acceptance criterion and no actionable gate failure named — " +
+        "nothing to hand a fix worker; standing down rather than spending a strike on empty evidence";
+      deps.log("fix.stood_down", { site: "rung.empty_review_evidence", strike: strikes + 1, reason });
+      deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
+      return { outcome: "stood_down", review, strikes, reason, standDownReason: reason };
+    }
+
     // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
     // binary crash that debited a fix-rung strike, and escalated, on a worker that
     // never ran): `attempt` is only a CANDIDATE strike number until `deps.spawn`
@@ -6596,11 +6731,6 @@ export async function runFixRung(opts: {
     // enforces.
     const attempt = strikes + 1;
     const round: "resume" | "fresh" = attempt === 1 ? "resume" : "fresh";
-    // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden — the fix
-    // rung dispatches an actual coding worker, so its unmet-criteria block must
-    // never carry a holdout criterion's claim/proof text (visibleCriteria is the
-    // same filter renderAnchorBlock and runReview's ledger/PR-comment text use).
-    const unmet = visibleCriteria(review.criteria.filter((c) => !c.met));
     // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet
     // claim set the fix worker below is being sent to resolve — BEFORE
     // `review` is reassigned to this round's freshly computed verdict, so
@@ -6624,7 +6754,13 @@ export async function runFixRung(opts: {
           // exact regression `runFixRung`'s own "fetchCiFailures is optional" test
           // (below) locks against.
           { ciFailures: currentCiFailures ?? [], constraint: opts.constraint }
-        : { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint };
+        : // W1-T2236: `gateFailuresNow` — computed above, alongside the guard this evidence
+          // shape already passed — is this round's structured gate-failure remedy (undefined for
+          // a ci-log/merge-conflict round, which never reaches this branch anyway). Carried
+          // through unconditionally: `deriveFixMode`'s `gate-fix` row only fires when it is
+          // actually non-empty, so a `[]`/`undefined` value here is inert for a genuine
+          // reviewer-unmet dispatch (unmet.length > 0) exactly as before this task.
+          { review: { unmetCriteria: unmet, summary: review.summary }, actionableGateFailures: gateFailuresNow, constraint: opts.constraint };
     const fixMode = deriveFixMode(evidence);
     const prompt = renderFixPrompt({
       task: opts.task,
@@ -20843,6 +20979,10 @@ export function buildFixRungDispatchArgs(args: {
     constraint: pr.pendingAnswer?.constraint,
     ciFailures: evidence.ciFailures,
     mergeConflict: evidence.mergeConflict,
+    // W1-T2236: threaded through unconditionally, mirroring `ciFailures`/`mergeConflict` above —
+    // `runFixRung`'s round-1 gate only reads this when it is ALSO a review-mode round (neither
+    // merge-conflict nor ci-log), so its presence here for those two branches is inert.
+    actionableGateFailures: evidence.actionableGateFailures,
     reviewBase: args.reviewBase,
   };
 }
@@ -22783,10 +22923,16 @@ export async function routeFix(
     // W1-T100: the SAME evidence-shape selection runSweep uses, off the SAME
     // exported `isBlockedCi` predicate (never a second, independently-hardcoded
     // check) — a failing review carries the unmet set, a blocked_ci PR carries
-    // ci-log evidence instead.
+    // ci-log evidence instead. W1-T2236: `actionableGateFailures` rides along on the
+    // review-mode branch — the SAME structured, single-form remedy `DISPOSITION_RULES`'
+    // `blocked-fixable` row (sweep.ts) already required to route a gate failure here at all
+    // (see that row's own W1-T923 doc) — so the dispatch actually carries the remedy the
+    // disposition named, instead of discarding it at this exact boundary.
     await deps.dispatchFix(
       pr,
-      isBlockedCi(pr) ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] } : { unmetCriteria: pr.unmetCriteria },
+      isBlockedCi(pr)
+        ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
+        : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures },
     );
     return { outcome: "fixed", reason };
   }

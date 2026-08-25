@@ -3530,12 +3530,22 @@ export function operatorVerdictEvidence(
  * via review, W1-T76 unchanged), `ciFailures` for a checks-red PR — REGARDLESS
  * of what the review verdict beside it says, even a failing one (blocked-fixable
  * via ci-log, W1-T94/W1-T100, broadened by W1-T138 — see {@link isBlockedCi}).
+ *
+ * W1-T2236: `actionableGateFailures` rides ALONGSIDE `unmetCriteria` on a review-mode
+ * dispatch — the SAME {@link OpenPrView.actionableGateFailures} `DISPOSITION_RULES`'
+ * `blocked-fixable` row already required (as an alternative to a non-empty `unmetCriteria`) to
+ * route this PR here at all. Before this field existed, that structured remedy was computed and
+ * named in the disposed line's own reason and then discarded at exactly this boundary — the
+ * dispatch carried only `unmetCriteria` (`[]` for the gate-failure shape), and the fix rung's
+ * mode table fell through to its old `reviewer-unmet` catch-all with nothing to render.
  */
 export interface FixDispatchEvidence {
   unmetCriteria: CriterionVerdict[];
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict fix mode's input — populated for a `conflicted` dispatch only. */
   mergeConflict?: MergeConflictEvidence;
+  /** W1-T2236: see this interface's own doc, above. Populated ONLY when `unmetCriteria` is empty. */
+  actionableGateFailures?: ActionableGateFailure[];
 }
 
 /**
@@ -5250,7 +5260,12 @@ export async function runSweep(
               // predicate DISPOSITION_RULES routed on (never a second,
               // independently-hardcoded check) — a failing review carries the
               // unmet set (review mode), a blocked_ci PR carries ci-log evidence
-              // instead (never a mix; see FixDispatchEvidence).
+              // instead (never a mix; see FixDispatchEvidence). W1-T2236: the review-mode
+              // branch also carries `pr.actionableGateFailures` — the SAME structured remedy
+              // this disposition's OWN row (above) already required, as an alternative to a
+              // non-empty `unmetCriteria`, to route this PR to `blocked-fixable` at all; carrying
+              // it through here is what lets the fix rung's mode table select on it instead of
+              // discarding it at this boundary (see FixDispatchEvidence's own doc).
               //
               // W1-T2231: capture whatever verdict `dispatchFix` returns — `acted` stays
               // untouched (this call NEVER assigned it, and still never does; the dedup gate
@@ -5262,7 +5277,7 @@ export async function runSweep(
                 pr,
                 isBlockedCi(pr)
                   ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
-                  : { unmetCriteria: pr.unmetCriteria },
+                  : { unmetCriteria: pr.unmetCriteria, actionableGateFailures: pr.actionableGateFailures },
               );
               if (dispatchOutcome !== undefined) spent = dispatchFixSpent(dispatchOutcome);
               break;
