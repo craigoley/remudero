@@ -1,0 +1,149 @@
+- id: W1-T2269
+  title: "THE CONSOLE HOLDS A PERSONAL TOKEN FOR ITS WHOLE LIFETIME AND NOTHING EVER REPLACES IT — `serve.ts` never references `refreshInstallationToken`, its launcher copies `GH_TOKEN` out of the daemon container at spawn time, and that copy is terminal: the daemon's refresh failure falls back to the token it already had, while the console has no refresh to fall back FROM"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    **SIZE, STATED FIRST SO NOTHING BELOW IS READ AS THE GRAPHQL BURN'S CAUSE.** This is an
+    AUTHORITY AND STALENESS defect, not a volume one. The 10,064-point GraphQL burn traces to the
+    six-second CI poll inside workers; nothing here is that. Read as a burn diagnosis this shard
+    would be wrong, and the fix it proposes would relieve nothing.
+
+    **THE MECHANISM, RE-DERIVED FROM SOURCE.** `refreshInstallationToken` is referenced in
+    `src/lib/github-app.ts` (which declares it) and `src/run-task.ts` (which arms it). It is
+    referenced NOWHERE in `src/lib/serve.ts`. Control: the same probe finds it in exactly the two
+    modules named, so the reader is not blind.
+
+    **THE CONSOLE'S TOKEN IS A SPAWN-TIME COPY.** `deploy/serve-container.sh` prefers the invoking
+    shell's `GH_TOKEN` and otherwise captures one by `docker inspect` on the daemon container's own
+    environment, then passes it by NAME (`-e GH_TOKEN`, value never printed, never written to disk).
+    Whatever the daemon's token WAS at the moment the console started is what the console holds
+    until it is replaced by hand. `startInstallationTokenRefresh` runs in the daemon's process, not
+    the console's, so a daemon-side refresh updates `process.env.GH_TOKEN` in a DIFFERENT process
+    and the console's copy is untouched by construction.
+
+    **TWO CORRECTIONS TO THE BRIEF THAT COMMISSIONED THIS, BOTH MEASURED.**
+
+    (A) **THE CONSOLE DOES NOT CARRY ALL FOUR APP ENV NAMES — ON REPO EVIDENCE IT CARRIES ONE.**
+    `deploy/serve-container.sh` passes `GH_TOKEN` and never mentions `GH_APP_ID`,
+    `GH_APP_INSTALLATION_ID` or `GH_APP_PRIVATE_KEY_PATH`; it does not source
+    `deploy/runtime-env-vars.sh` at all. That file's own header declares itself the list of names
+    "the `remudero-daemon` container carries at runtime", and its console-side companion
+    `RMD_SERVE_RUNTIME_ENV_VARS` names only `RMD_SERVE_HOST` and `RMD_SERVE_NETWORK` — no GitHub
+    credential of any kind. The other console launch path, `deploy/host-update.sh`, passes no
+    `GH_TOKEN` either. **A LIVE `docker inspect` SHOWING FOUR NAMES WOULD NOT CONTRADICT THIS; IT
+    WOULD LOCATE A THIRD LAUNCH PATH NOT IN THIS REPO, WHICH IS ITSELF THE FINDING.** The build
+    step must re-take this on the host before assuming either reading.
+
+    (B) **THE CONSOLE IS NOT A PASSIVE TOKEN HOLDER — IT SPENDS THE TOKEN, ON BOTH ARMS.** The
+    brief's "no `gh pr view` calls of its own" is true of that one verb and false of the general
+    claim. `serve.ts` names no GitHub host and reads no `GH_TOKEN` directly; every `fetch(` in it is
+    browser-side, to the console's own routes. But it assembles gateways that shell `gh`:
+    `status.ts`'s board gateway calls `execFileSync("gh", …)` for reads, and `ghIssueCloser`
+    (`panel-actions.ts`) calls `execFileSync("gh", ["issue", "close", …])` for writes. `gh` reads
+    `GH_TOKEN` from its environment, so the spawn-time copy authenticates both.
+
+    **THE LEDGER HALF COULD NOT BE TAKEN HERE AND IS NOT REPORTED AS A ZERO.** The brief's host
+    `e5afe226f001` appearing in no `github_app.token_refreshed` row, against six daemon hosts across
+    172 rows, is a claim about the OPERATOR'S state root. The corpus reachable from the authoring
+    container holds one live ledger and no rotations in either form, and its POSITIVE CONTROL FAILS:
+    `run.start` reads zero there, so the file is this container's own local exhaust and cannot
+    answer the question. Reported as unmeasured rather than as an absence. The step name itself IS
+    confirmed from source — `github_app.token_refreshed` is emitted by `github-app.ts`.
+  design: |
+    **Q1 — WHAT THE CONSOLE DOES WITH THE TOKEN: IT WRITES, SO THIS IS AN AUTHORITY QUESTION AND
+    THE SHARD IS THE LARGER OF THE TWO SHAPES THE BRIEF OFFERED.**
+
+    The write routes are real and reach GitHub. `buildEscalationMarkHandledRoute` declares
+    `scope: "write"` and calls `deps.issues.close(input.issueUrl)`, whose production implementation
+    shells `gh issue close`. `/v1/manual/approve`, `/v1/inbox/approve`, `/v1/drain/kick`,
+    `/v1/drain/run` and `/v1/skills/run` are declared HIGH-TIER write paths. `ratify.approve` is a
+    DETACHED SPAWN that outlives the HTTP request that triggered it, which `gateStaleCodeExit`'s own
+    doc names as the case its counter cannot see.
+
+    So a permanent user-scoped credential is not merely stale — it is the authority under which an
+    operator-facing surface closes issues and files work. W1-T2211 already established that the
+    console's write-token file is readable by a worker, so a lane can approve its own work; the two
+    compose badly. This shard must not widen that: it changes WHICH credential authenticates, never
+    WHO may call the routes.
+
+    **Q2 — WHAT BREAKS ON EXPIRY OR REVOCATION: THE DAEMON DEGRADES, THE CONSOLE HAS NOTHING TO
+    DEGRADE TO.**
+
+    `github-app.ts` states the daemon's contract in terms: FALLBACK IS THE DEFAULT — missing config,
+    an unreadable key, a signing failure or a rejected exchange all leave `process.env.GH_TOKEN`
+    exactly as they found it, ledger a named reason, and never refuse to boot. `EXCHANGE_TIMEOUT_MS`
+    is 20s and, by its own doc, is reasoned from a bound rather than fitted to a measurement, so a
+    timeout costs one retry inside the `REFRESH_MARGIN_MS` cadence and never a missed refresh. That
+    is a fallback FROM a fresh token TO the previous one. The console's copy IS the previous one and
+    there is no rung beneath it.
+
+    On expiry the console does not fail silently in the way the pre-W1-T181 code did: that fix moved
+    the catch into the gateway's own `index`, so a throwing read is classified and marked rather
+    than returned as a bare empty list, and `readFailed()`/`readFailureReason()` back the
+    `github_unobservable` signal `derivePrPrecedence` consults BEFORE trusting an empty result. The
+    failure is also loud — `console.error` plus an injectable log.
+
+    **WHAT IS NOT ESTABLISHED, AND IS THE BUILD'S FIRST JOB:** the read-failure signal is produced in
+    `status.ts` and consumed in `board.ts`; `serve.ts` itself references none of `lastFetchFailed`,
+    `readFailed`, `readFailureReason` or `github_unobservable`. Control: `resolveFreshness` is
+    referenced in `serve.ts`, so that probe is not blind. Whether the operator SEES "GitHub
+    unreadable" rather than a quiet stale board therefore depends on a path through `board.ts` that
+    this shard did not trace. W1-T2218 and W1-T2235 both turned on the console rendering an unknown
+    as a finding; the same hazard applies here and the build must settle it by observation, not by
+    reading the producer and assuming the surface.
+
+    **Q3 — WHAT MUST NOT CHANGE.**
+
+    (i) The console stays READ-MOSTLY and its write tiers stay exactly as they are. Nothing here
+    grants a new scope, adds a route, or moves a route between tiers. A refresh mechanism changes
+    the credential's provenance, never its permissions.
+
+    (ii) **NOTHING COUPLES THE CONSOLE'S LIFETIME TO THE DAEMON'S.** It is deliberately a separate
+    container with its own `--restart=unless-stopped` policy. A design in which the console must
+    reach the daemon to obtain or renew a credential — an HTTP call, a shared file the daemon owns,
+    a startup ordering constraint — converts an independent restart policy into a dependent one and
+    is refused on that ground alone, however convenient. Note the tension this creates with the
+    spawn-time copy the console already takes from the daemon: that copy is a ONE-TIME read at
+    launch which the console survives without, and a renewal path must not turn it into a running
+    dependency.
+
+    (iii) No secret reaches a log line, a ledger row, argv, or disk. `serve-container.sh` and
+    `entrypoint.sh` both go out of their way to hold the token only in an environment, and
+    `github-app.ts` states the same rule for the refresher.
+  acceptance:
+    - claim: "the console obtains its GitHub credential through a path that can replace it, rather than holding a value fixed at spawn"
+      proof: "unit test: test/console-token-refresh.test.ts"
+    - claim: "a credential that cannot be replaced is reported by the console rather than presented as a working board"
+      proof: "unit test: test/console-token-refresh.test.ts"
+    - claim: "the console's write routes keep the tiers and scopes they already have"
+      proof: "unit test: test/console-token-refresh.test.ts"
+    - claim: "the console starts and serves when the daemon is absent, so no renewal path couples the two lifetimes"
+      proof: "unit test: test/console-token-refresh.test.ts"
+    - claim: "no credential value reaches a log line, a ledger row, or disk on any arm of the new path"
+      proof: "unit test: test/console-token-refresh.test.ts"
+  files: [src/lib/serve.ts, src/lib/github-app.ts, deploy/serve-container.sh, test/console-token-refresh.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#console-token-never-refreshes-2026-08-25"
+  plan_refs: ["W1-T2211", "W1-T1068", "W1-T1069", "W1-T1222", "W1-T2218", "W1-T2222", "W1-T2235", "W1-T181"]
+  note: |
+    RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. The declared files cross a runtime concern
+    (`serve.ts`, `github-app.ts`) and a deploy concern (`serve-container.sh`), which fails sizing at
+    `risk: medium`. The change itself is small and reversible; the band records the span.
+
+    THE LEDGER EVIDENCE IS OWED AND WAS NOT TAKEN. The rationale says why: the authoring container's
+    corpus fails its own positive control. Before building, re-take it against the operator's state
+    root, per form, with a control that fires — and re-take correction (A) with a live
+    `docker inspect` of the running console, because repo evidence and the commissioning brief
+    disagree about how many credential names that container carries, and which is right decides
+    whether the App path is already half-wired there or absent entirely.
+
+    NEITHER W1-T2211 NOR THE APP-TOKEN CHAIN IS RE-FILED HERE; both are cited. One figure in the
+    commissioning brief did not reproduce: the 36.5% in this repo belongs to W1-T2252's
+    followup-harvest key, and `EXCHANGE_TIMEOUT_MS`'s own doc says it was reasoned from a bound
+    rather than fitted to a measurement, so no exchange-timeout rate is claimed here.
