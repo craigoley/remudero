@@ -1,0 +1,137 @@
+- id: W1-T2278
+  title: "A REPLY IS A NEW ITEM AND THE LINK BACK TO WHAT IT ANSWERS IS WRITTEN TO A LEDGER ROW AND NOWHERE ELSE — the console already validates a reply against the entry it answers, then discards that edge into a step no durable record carries, leaves the answered entry in the state it was already in, and stores the relationship as prose inside the reply's own text"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: oper#inbox-holds-items-not-conversations-2026-08-25
+  files: [src/lib/feedback.ts, src/lib/panel-graph.ts, test/feedback-thread-survives-a-reply.test.ts]
+  rationale: |
+    **THE THREAD IDENTITY ALREADY EXISTS. IT IS VALIDATED, THEN THROWN AWAY.** `POST /v1/feedback`
+    accepts an optional `replyTo`, and its handler does real work with it: it reads the target
+    entry, refuses with a named detail when the id names nothing, and refuses again when the target
+    is not parked at `grilling`. So the route already knows what a reply is and already knows what
+    it is replying to. **Then it writes the answer as a FRESH entry whose `raw` text is prefixed
+    with a human-readable back-reference, and puts the machine-readable edge on a panel ledger row
+    as `reply_to`.** The target entry is not written at all.
+
+    **`reply_to` OCCURS ONCE IN ALL OF `src/`, AT THAT LEDGER CALL.** `FeedbackEntry` declares ten
+    fields and none of them is a reply link; the identifier does not appear anywhere in the module
+    that owns the entry schema, against a control of twenty-three `status` occurrences in that same
+    file. So the relationship between a question and its answer is durable only as English inside
+    the answer's own prose, and structured only in a row nothing reads back.
+
+    **Q1 — WHAT A THREAD NEEDS, AND WHAT EXISTS.** Taking the four requirements in turn:
+
+    *An identity that survives a reply* — PARTIALLY. `replyTo` names the target and is validated
+    against it, but the edge lands on neither entry, so nothing can enumerate a thread from either
+    end. Given an answer, its parent is recoverable only by parsing its own text.
+
+    *A state* — NO, and the gap is precise rather than total. The entry status set is
+    `new`, `grilling`, `proposed`, `accepted`, `rejected`. That is a lifecycle for a PROPOSAL
+    moving toward being filed, and it is the right lifecycle for that. It carries no
+    ANSWERED and no CLOSED, and answering does not advance it: a target validated as `grilling`
+    stays `grilling` after the reply lands, so the same entry can be answered any number of times
+    and still present as awaiting an answer.
+
+    *An author per message* — PARTIALLY, and asymmetrically. Each entry carries an `origin`, and
+    the ledger row additionally records the bearer-token identity of the caller. But because the
+    answer is a separate entry rather than a message within one, authorship is per-ITEM, which is
+    the same thing only as long as no thread ever has two participants.
+
+    *A subject the fleet can re-find* — NO for feedback, YES for the other channel, and that
+    difference is the most useful thing in this filing.
+
+    **THE TWO CHANNELS ARE NOT THE SAME SHAPE, AND ONE OF THEM ALREADY WORKS.** The question
+    channel (`POST /v1/questions/answer`) writes the answer to `plan/questions.ndjson`, and that
+    file IS read back: `operatorVerdictEvidence` (`src/lib/sweep.ts`) consumes an answered
+    clarification and turns it into the fix rung's steering input. So question-and-answer is a real
+    two-message exchange with a durable record and a consumer. What it lacks is state and closure —
+    the file is opened append-only, so nothing is ever updated, nothing is marked answered, and a
+    third message has no place to go. The feedback channel has the reply gesture and lacks the
+    durable edge. **Neither is a thread, and they fail in different directions.**
+
+    **Q2 — THE READER IS ALREADY BUILT, AND ITS KEY IS THE GAP.** The brief asks for a reader that
+    is not a gate, and names the fix rung taking judge-was-wrong evidence. That reader exists and is
+    wired end to end: `operatorVerdictEvidence` reads a `wrong`/`needs-follow-up` one-tap verdict's
+    steering note and quotes it VERBATIM with attribution into the fix worker's constraint, and
+    reads an answered clarification the same way. Its own doc is explicit that a `good` verdict —
+    praise — never contributes, because re-arming on praise would spin the rung forever. It routes
+    through the existing `blocked-fixable` disposition and the existing strike ceiling rather than
+    inventing a second re-arm. **This is EVIDENCE STEERING AN ATTEMPT, already shipped, and it is
+    the precedent this task should copy rather than a design it needs to propose.**
+
+    **The gap is that both of its sources key on `taskId` alone.** That is correct for what it does:
+    the fix rung dispatches per task, and an operator's verdict is a judgment on that task's current
+    attempt. But it means a thread whose subject is NOT a task — a proposal, a question about
+    direction, a piece of feedback not yet attached to any id — has no key any reader can address.
+    So the shape of the remedy is not a new consumer; it is a subject key that a thread can carry
+    and an existing consumer can already resolve.
+
+    **Q3 — WHAT MUST NOT CHANGE.** The operator gates every merge and deploy. There is no merge
+    route, no PR-close route and no reject route on the console, and their absence is a deliberate
+    property rather than an omission this task may correct — nothing here adds one. The console
+    keeps its three existing tiers, and any thread action is ASSIGNED one of them rather than given
+    a fourth invented for this: a reply is bookkeeping and belongs at the low tier where the
+    existing capture routes already sit, while anything that files work stays high. Nothing
+    auto-closes a thread the operator has not answered — a closure written by the fleet on the
+    operator's behalf is exactly the confusion between evidence and authority that W1-T2244's pins
+    (ix) and (x) exist to prevent, and the same reasoning that forbids a GATE consuming an operator
+    decision forbids a scheduler manufacturing one.
+
+    **WHAT I COULD NOT CONFIRM, AND WHY.** Fourteen distinct `panel.*` step names are confirmed
+    FROM SOURCE, which is the half that source can answer. The claim that all fourteen read zero on
+    the ledger union is NOT confirmed here and must not be presented as if it were: the state dir
+    reachable from this filing holds no archives of either rotation form, so `resolveLedgerUnion`
+    reports `ok: false` on it, and its live file carries zero `panel.*` rows AND zero rows keyed to
+    the console at all, against a control of three hundred and twenty-nine CLI rows across two
+    distinct steps. **That is a different zero from the one being claimed.** The claimed measurement
+    has console rows present and panel rows absent, which is evidence; mine has neither, which is
+    only evidence that this is a scratch ledger. The figure stands as the operator's, attributed.
+  note: |
+    RULE 19 BAND. `files:` spans the module owning the entry schema and its states, the module
+    owning the reply route, and a test; the sizing check reads that as a span and `risk: high` is
+    set for the SPAN. Blast radius is a field on a record and a write the route already declines to
+    make.
+
+    THE SMALLEST HONEST VERSION OF THIS TASK IS NOT A THREAD MODEL. Two of the four requirements are
+    already half-built, and the cheapest change that makes a conversation possible is to stop
+    discarding the edge: carry `reply_to` onto the record the way every other field of that record
+    is carried, and let answering advance the target out of the state that means awaiting an answer.
+    A build that begins by designing a new thread entity, a new store, or a new route family has
+    almost certainly skipped that step. The acceptance criteria below are deliberately written
+    against the existing record and the existing route for that reason.
+
+    CITED, RE-FILED NEITHER. W1-T2273 owns the option-to-action half — an escalation whose choices
+    are prose rather than things an operator can do — and this shard owns the thread model; they
+    meet where an option, once actionable, becomes a message in an exchange, and neither needs the
+    other to land first. W1-T2244 owns the record an operator's override must leave, and its pins
+    are the reason Q3 above forbids an auto-close as firmly as it forbids a gate reading a decision.
+
+    NAMED, NOT FILED. The INBOX block's `ready`/`not ready` counts are derived from the proposal
+    registry and the draft cache, not from anything conversational, so it is not a thread surface
+    that has decayed — it never modelled one. Whether a conversation belongs on that block, on a
+    new one, or on NEEDS ME is a rendering question owned by the board, and `files:` is not widened
+    toward it.
+  acceptance:
+    - claim: "the record of an answer carries the identifier of what it answers as a field rather than only inside its own text"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
+    - claim: "a thread is enumerable from the answered end, not only from the answering end"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
+    - claim: "answering advances the answered record out of the state that means awaiting an answer"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
+    - claim: "a second answer to an already-answered record is refused with a reason naming the state it is in"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
+    - claim: "a reply naming no known record is still refused exactly as it is refused today"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
+    - claim: "a submission carrying no reply reference behaves identically to today in record and in status"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
+    - claim: "the reply route keeps the tier it already carries rather than gaining a new one"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
+    - claim: "no code path advances a record to a closed state without an operator message causing it"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
+    - claim: "no route added by this change files work, merges, closes a pull request, or rejects on the operator's behalf"
+      proof: "unit test: test/feedback-thread-survives-a-reply.test.ts"
