@@ -1771,16 +1771,51 @@ export function isMergeCreditLine(line: Record<string, unknown>): boolean {
  * that resets on its own merge each pass is NOT this counter's remit and is unchanged:
  * {@link dispatchesEver} is the lifetime bound that catches it, and no step resets that.
  */
+/**
+ * W1-T2249: the containment preflight's `check` symbol for a probe whose OWN
+ * worker died on a transport/API failure (a 529, a dropped connection) before
+ * it ever attempted a write — see `src/lib/containment.ts`'s
+ * `spawn-transport-failure` arm. A run refused for THIS reason never reached
+ * the task worker at all: nothing about the task's own ability to produce a PR
+ * was tested, so it must not count toward "dispatched with no new owned PR"
+ * any more than a run that never dispatched would.
+ */
+const SPAWN_TRANSPORT_FAILURE_CHECK = "spawn-transport-failure";
+
 export function dispatchesWithoutNewOwnedPr(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
 ): number {
+  // W1-T2249 — PRE-SCAN, two passes over the (small, per-task) line set rather
+  // than one: a run's own `verdict` line always lands AFTER its `run.start` in
+  // ledger order, so the set of run_ids to EXCLUDE must be known before the
+  // counting pass below reaches their `run.start` lines. Narrow on purpose —
+  // ONLY the new spawn-transport-failure class is excluded here; NOTHING ELSE
+  // about the counter moves (design part (iv)): the threshold is unchanged,
+  // the `pr.opened`/merge-credit reset is unchanged, and a genuine dispatch
+  // that produces no PR still counts exactly as it does today.
+  const transportFailureRunIds = new Set<string>();
+  for (const line of lines) {
+    if (
+      line.task_id === taskId &&
+      line.step === "verdict" &&
+      line.verdict === "blocked_containment" &&
+      line.check === SPAWN_TRANSPORT_FAILURE_CHECK &&
+      typeof line.run_id === "string"
+    ) {
+      transportFailureRunIds.add(line.run_id);
+    }
+  }
   let count = 0;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "pr.opened" || isMergeCreditLine(line)) {
       count = 0; // forward progress — a new PR, or a credited merge, resets the streak
     } else if (line.step === "run.start") {
+      // W1-T2249: a run.start whose OWN run ended in spawn_transport_failure is an
+      // infrastructure refusal, not a dispatch that "produced nothing" — exclude it
+      // rather than let an API outage trip the breaker in the task worker's stead.
+      if (typeof line.run_id === "string" && transportFailureRunIds.has(line.run_id)) continue;
       count++;
     }
   }

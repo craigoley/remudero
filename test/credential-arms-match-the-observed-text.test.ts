@@ -98,13 +98,20 @@ test("ACCEPTANCE: a probe transcript carrying an unauthenticated-worker text is 
   assert.match(err.message, /spawn_credential_failure/);
 });
 
-// ── Acceptance (3): credential-shaped but not credential-dead ⇒ still unproven
+// ── Acceptance (3): credential-shaped but not credential-dead ⇒ NEITHER credential class
 
-test("ACCEPTANCE: a credential-shaped transcript that is not credential-dead still classifies as unproven", async () => {
+test("ACCEPTANCE: a credential-shaped transcript that is not credential-dead never classifies under either credential class", async () => {
   // Shares ONE fragment with the expired-token arm ("Failed to authenticate")
   // but is a transport/rate-limit error, not an expired token — the second
   // fragment ("OAuth access token has expired") never appears. A widened,
   // single-fragment arm would mislabel this; the two-fragment AND must not.
+  //
+  // UPDATED BY W1-T2249: this exact shape — "API Error: 529 Overloaded" — is
+  // the observed fleet signature that task's own transport-failure arm exists
+  // to name. Before that task this transcript fell through to the generic
+  // `outside-cwd-denial`/unproven path (asserted here originally); now it is
+  // correctly refused under the DISTINCT `spawn-transport-failure` class, one
+  // more step removed from the credential arms this file otherwise pins.
   const err = await rejectsWith(async () => ({
     transcript: "Failed to authenticate. API Error: 529 Overloaded, please retry",
     outsideWriteCreated: false,
@@ -112,10 +119,11 @@ test("ACCEPTANCE: a credential-shaped transcript that is not credential-dead sti
     isError: true,
   }));
   assert.equal(err.guard, "containment");
-  assert.equal(err.check, "outside-cwd-denial");
+  assert.equal(err.check, "spawn-transport-failure");
+  assert.notEqual(err.check, "outside-cwd-denial");
   assert.notEqual(err.observed, "spawn_credential_expired");
   assert.notEqual(err.observed, "spawn_credential_failure");
-  assert.notEqual(err.observed, "unproven"); // still NAMED (W1-T1281), just not credential
+  assert.notEqual(err.observed, "unproven"); // still NAMED, just not credential
 });
 
 // ── Acceptance (4): both arms still throw and still fail closed ────────────

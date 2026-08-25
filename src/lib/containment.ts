@@ -121,6 +121,22 @@ export interface ContainmentEvidence {
    */
   credentialExpired?: boolean;
   /**
+   * W1-T2249: did the probe worker die on a TRANSPORT or API-side failure (isError
+   * PLUS the conservative `TRANSPORT_FAILURE_RE` signature — a `5xx` Anthropic-API
+   * response such as "API Error: 529 Overloaded") rather than a credential failure
+   * or a genuine containment observation? A probe whose own worker died on a 529 or
+   * a dropped connection makes NO writes and trips no OS-denial text either — it is
+   * byte-identical to the genuine no-write/no-denial "unproven" case unless named
+   * separately, EXACTLY the collapse `credentialFailure`/`credentialExpired` above
+   * were already split out to prevent, for a THIRD spawn-death shape those two
+   * fields do not cover (an outage, not an auth problem). Checked in the SAME
+   * position those two occupy — ahead of the unproven classifier — for the same
+   * reason: a worker that never got far enough to attempt a write proves nothing
+   * about isolation either way. Optional — defaults falsy so pre-existing evidence
+   * literals that never saw a transport failure need not spell it out.
+   */
+  spawnTransportFailure?: boolean;
+  /**
    * Did the deny-floor tripwire (`./FORBIDDEN_PROBE`, INSIDE cwd) get created?
    * `true` ⇒ the PreToolUse deny floor did NOT bind — the sandbox permits that
    * path by design, so only the hook could have stopped it.
@@ -270,6 +286,20 @@ export function assessContainment(e: ContainmentEvidence): { contained: boolean;
       reason:
         "spawn_credential_failure — the probe worker died on a credential/auth failure before it could " +
         "attempt any write; this is NOT a containment finding (unlock the keychain, don't investigate the sandbox)",
+    };
+  }
+  // W1-T2249: checked BEFORE the outside-write/unproven checks below, mirroring
+  // the two credential arms above — a probe worker that died on a transport or
+  // API-side failure (a 529, a dropped connection) never got far enough to
+  // observe anything about the sandbox, so it must not be reported under the
+  // same name as a genuine unproven containment finding.
+  if (e.spawnTransportFailure) {
+    return {
+      contained: false,
+      reason:
+        "spawn_transport_failure — the probe worker died on a transport or API-side failure (e.g. a 5xx / " +
+        "overloaded response) before it could attempt any write; this is NOT a containment finding (retry " +
+        "once the API/transport recovers, don't investigate the sandbox)",
     };
   }
   if (e.outsideWriteCreated) {
@@ -1013,6 +1043,24 @@ const CREDENTIAL_EXPIRED_RE = /failed to authenticate/i;
 const CREDENTIAL_TOKEN_EXPIRED_RE = /oauth access token has expired/i;
 
 /**
+ * W1-T2249 — THE ARM NEITHER CREDENTIAL REGEX ABOVE COVERS. Marks the Anthropic
+ * API's own transport/server-side failure text surfaced through a probe worker's
+ * result envelope: a `5xx`-numbered "API Error: <code> …" response (observed
+ * verbatim on the fleet as "API Error: 529 Overloaded" — five occurrences within
+ * sixteen minutes, this task's own ledger read). Deliberately narrow — `5\d\d`
+ * immediately after "api error:", not a bare "error" or "5xx" anywhere in the
+ * transcript — so a task's own unrelated prose mentioning an HTTP code is never
+ * mislabelled a spawn failure. `4xx` codes (401 included) are OUT of this arm's
+ * scope on purpose: 401 is credential-shaped and already owned by
+ * `CREDENTIAL_EXPIRED_RE`/`CREDENTIAL_TOKEN_EXPIRED_RE` above; widening this arm
+ * to catch it too would let a THIRD arm race the credential ones for the same
+ * text instead of leaving credential text to the credential arms. Applied only
+ * in combination with `isError`, never alone — the same discipline both
+ * credential regexes already use.
+ */
+const TRANSPORT_FAILURE_RE = /api error:\s*5\d\d\b/i;
+
+/**
  * Default executor: spawn a real sandboxed worker in a scratch cwd under the
  * workspace. `spawn` is injectable (defaults to the real {@link spawnWorker})
  * so both W1-T237's `isError` plumbing and W1-T238's stderr-persistence branch
@@ -1222,6 +1270,11 @@ export async function probeContainment(opts: {
       r.isError === true &&
       CREDENTIAL_EXPIRED_RE.test(r.transcript) &&
       CREDENTIAL_TOKEN_EXPIRED_RE.test(r.transcript),
+    // W1-T2249: a THIRD spawn-death shape, distinct from both credential arms —
+    // the probe worker died on the Anthropic API's own transport/server failure
+    // (a `5xx`, e.g. "API Error: 529 Overloaded") rather than an auth problem.
+    // Same isError-plus-signature discipline as the two credential arms above.
+    spawnTransportFailure: r.isError === true && TRANSPORT_FAILURE_RE.test(r.transcript),
     // Carried through VERBATIM, including `undefined` — an executor that never
     // reported a tripwire outcome must stay UNOBSERVED, never default to engaged.
     denyFloorProbeCreated: r.denyFloorProbeCreated,
@@ -1284,6 +1337,9 @@ export async function probeContainment(opts: {
     reason: verdict.reason,
     credential_failure: evidence.credentialFailure,
     credential_expired: evidence.credentialExpired,
+    // W1-T2249: the third spawn-death arm, ledgered beside the two credential
+    // fields above so a row can be read for it directly.
+    spawn_transport_failure: evidence.spawnTransportFailure,
     outside_write_created: evidence.outsideWriteCreated,
     os_denial_seen: evidence.osDenialSeen,
     // W1-T1281: carried so a row that PASSED can still be read for the same
@@ -1341,16 +1397,33 @@ export async function probeContainment(opts: {
     operator_home_read_succeeded: evidence.operatorHomeReadSucceeded,
     operator_home_read_denial_seen: evidence.operatorHomeReadDenialSeen,
     cost_usd: costUsd,
-    // W1-T238: the probe spawn's own stderr/error-result text, capped, ONLY when
-    // the underlying worker call itself errored — a clean probe spawn never
-    // gets this field, so a passing run's ledger line stays exactly as it was.
-    ...(r.isError ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
+    // W1-T238, WIDENED BY W1-T2249: the probe spawn's own stderr/error-result
+    // text, capped, recorded when the underlying worker call itself errored
+    // (`r.isError` — W1-T238's original rule, LOAD-BEARING AND UNCHANGED) OR on
+    // a REFUSING probe (`!verdict.contained` — this task's addition, for the
+    // `no-denial-observed` state that returned normally and so carried no
+    // transcript at all).
+    //
+    // THE DISJUNCTION IS LOAD-BEARING: the two arms are INDEPENDENT and neither
+    // subsumes the other. `!verdict.contained` ALONE silently DROPPED the field
+    // from the errored-but-CONTAINED quadrant (`isError` true, verdict
+    // contained — a probe that observed the OS denial and then hit a transient
+    // tool error), which is precisely the quadrant W1-T238 added the field for.
+    // That absence is not neutral: under W1-T238's convention an absent field
+    // ASSERTS "this probe spawn did not error", so dropping it reports a false
+    // state as a proven one — the exact collapse this task was filed to
+    // prevent, one predicate away from committing it in its own diff.
+    //
+    // A CLEAN probe — `!r.isError` AND `verdict.contained` — still carries no
+    // field at all, both arms being false there, so a passing run's ledger line
+    // stays exactly as it was: the property W1-T238 protects, unweakened.
+    ...(r.isError || !verdict.contained ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
   if (!verdict.contained) {
-    // OBSERVED (W1-T91/P23 part i, extended by W1-T237, then W1-T292): the
-    // write's OWN outcome names which of FOUR states this was, checked in this
-    // order so a credential-dead worker can never be reported as the genuine
-    // unproven case:
+    // OBSERVED (W1-T91/P23 part i, extended by W1-T237, W1-T292, then
+    // W1-T2249): the write's OWN outcome names which of FIVE states this was,
+    // checked in this order so a spawn-dead worker (credential OR transport)
+    // can never be reported as the genuine unproven case:
     //  1. credentialExpired — the probe worker died because a COPIED OAuth
     //     token had EXPIRED. Named `spawn_credential_expired` distinctly from
     //     #2 below: the operator action differs (re-mint/refresh the token vs.
@@ -1359,9 +1432,16 @@ export async function probeContainment(opts: {
     //     before it could attempt any write. Named `spawn_credential_failure`
     //     distinctly: this proves NOTHING about isolation either way (unlock
     //     the keychain, don't investigate the sandbox).
-    //  3. outsideWriteCreated — proven-broken (the outside write LANDED, the
+    //  3. spawnTransportFailure — the probe worker died on a transport or
+    //     API-side failure (a 529, a dropped connection), before it could
+    //     attempt any write. Named `spawn_transport_failure` distinctly: this
+    //     proves NOTHING about isolation either way (retry once the API/
+    //     transport recovers, don't investigate the sandbox) — the arm this
+    //     task exists to add, a dead probe and a broken boundary no longer
+    //     share a verdict.
+    //  4. outsideWriteCreated — proven-broken (the outside write LANDED, the
     //     sandbox did not engage) is data-bearing.
-    //  4. neither — genuinely UNPROVEN, but no longer collapsed to the eight
+    //  5. neither — genuinely UNPROVEN, but no longer collapsed to the eight
     //     characters "unproven": classifyUnprovenState (W1-T1281, extended by
     //     W1-T2201) names WHICH of four distinguishable states this was —
     //     "turns-exhausted", "probe-never-ran", "write-never-attempted", or
@@ -1383,6 +1463,20 @@ export async function probeContainment(opts: {
         `containment preflight: spawn_credential_failure — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
         "spawn-credential-failure",
         "spawn_credential_failure",
+        r.childEnvKeys ?? [],
+        r.accountLabel,
+      );
+    }
+    // W1-T2249: checked ahead of the outside-write/unproven fallback below, for
+    // the same reason the two credential arms above are — a probe worker that
+    // died on a transport/API failure never got far enough to observe anything
+    // about the sandbox, so it must never be counted as the same "could not
+    // prove" finding a genuinely unproven probe reports.
+    if (evidence.spawnTransportFailure) {
+      throw new ContainmentError(
+        `containment preflight: spawn_transport_failure — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
+        "spawn-transport-failure",
+        "spawn_transport_failure",
         r.childEnvKeys ?? [],
         r.accountLabel,
       );
