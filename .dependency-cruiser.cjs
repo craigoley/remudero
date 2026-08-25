@@ -22,6 +22,27 @@ module.exports = {
       from: { path: "^src/lib" },
       to: { path: "^src/(spike|run-task)\\.ts$" },
     },
+    {
+      // WHY `warn` AND NOT `error`. Fifteen cycles already exist, fourteen of them entirely
+      // inside `src/lib`, knotting twenty-two modules around
+      // worker/worker-home/review/plan-architect/plan-pr-emitter/open-prs-rest/sweep/
+      // cost-anomaly/retro/task-linter/escalate/status. `error` would turn a REQUIRED check red
+      // on day one over pre-existing structure and force either a large refactor or an
+      // exclusion list, and this repo ships against these files daily. `warn` makes the count
+      // OBSERVABLE and stops it growing silently, which is the whole point: before this rule the
+      // cruise reported "no dependency violations found" over all fifteen, because nothing asked.
+      //
+      // RAISING THIS TO `error` IS A SEPARATE, REVIEWED DECISION and belongs with the work that
+      // actually cuts the cycles — the cheapest first cut is `open-prs-rest` <-> `sweep`, where
+      // the edge one way is `import type` only and therefore erased at runtime.
+      name: "no-circular",
+      severity: "warn",
+      comment:
+        "A cycle between modules makes load order significant and blocks extraction: neither " +
+        "end can move without the other. Reported, never blocking — see the severity note above.",
+      from: {},
+      to: { circular: true },
+    },
   ],
   options: {
     doNotFollow: {
