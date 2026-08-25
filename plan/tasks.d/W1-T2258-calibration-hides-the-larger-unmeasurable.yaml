@@ -1,0 +1,146 @@
+- id: W1-T2258
+  title: "THE CALIBRATION VERB REPORTS ONE UNMEASURABLE COUNT AND HAS TWO, AND HIDES THE LARGER — `mineVerdictRows` drops an `automerge.armed` row with no `head_sha` at `verdict-calibration.ts:137` before the join, with no `classifyWhy` and no entry in the unmeasurable list, so 336 of 1,087 arms never reach the denominator; the drop is a LANE SPLIT, not a sample, because only the review lane's arm path puts `head_sha` on the row, and the published class rates are therefore rates over review-lane arms presented as rates over all arms"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/run-task.ts, src/lib/verdict-calibration.ts, test/verdict-calibration-join-fraction.test.ts]
+  origin: oper#calibration-hides-the-larger-unmeasurable-2026-08-25
+  plan_refs: ["W1-T424", "W1-T1259"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main c67af25c IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS. EVERY STEP NAME WAS GREPPED OUT OF
+    SOURCE AS A LITERAL BEFORE IT WAS QUERIED. THE LEDGER IS THE UNION AT THE STATE DIR: that
+    path resolves `ok: true, archiveCount: 24`, while a checkout's own `state/` returns
+    `ok: false, archiveCount: 0` -- the refusal a prior lane correctly honoured. Newest row per
+    step at measurement: `automerge.armed` n=1087 newest 2026-08-25T01:20:38.023Z;
+    `review.posted` n=1018 newest 2026-08-25T01:20:33.004Z.
+
+    (1) THE DROP, AND WHY IT IS SILENT. `mineVerdictRows` (`src/lib/verdict-calibration.ts:137`)
+    reads `if (!taskId || !headSha || !armedTs) continue;` -- the row is discarded BEFORE the
+    join, with no `classifyWhy` and no entry in the verb's unmeasurable list. TWO LINES LATER,
+    at `:139-149`, the SAME function pushes `verdictClass: null` WITH a written reason for a row
+    that reaches the join and finds no `review.posted`. So the vocabulary for "counted, and here
+    is why it could not be classified" already exists in this function and this path skips it.
+    That contrast is the defect: not that a row is unusable, but that one unusable class is
+    named and the other is not.
+
+    (2) THE SIZE, MEASURED. Over the union: `automerge.armed` 1,087 rows; 751 reach the row list;
+    336 are dropped. JOIN FRACTION 69.1%. Of the 336, 321 lack `head_sha` and 15 lack both
+    `task_id` and `head_sha`. The verb's own reported unmeasurable count is SIX, every one of
+    them "the merge sha could not be recovered" -- a different failure entirely, on the git side.
+    AND THE CLASS-SIDE UNMEASURABLE IS GENUINELY ZERO: of the 751 rows that reach the join, ZERO
+    return `verdictClass: null`, so the reported six and the hidden 336 are the whole story.
+
+    (3) THE EXCLUSION IS SYSTEMATIC, AND THAT IS WHAT MAKES IT A DEFECT RATHER THAN A GAP.
+    By lane, KEPT: `review` 742, `undefined` 9. DROPPED: `run-task` 197, `operator` 79,
+    `undefined` 38, `sweep` 22. Both populations span the same dates -- kept
+    2026-08-09T15:49 .. 2026-08-25T01:20, dropped 2026-08-08T22:57 .. 2026-08-25T00:48 -- so this
+    is a lane split and not a historical artifact that will age out. THE PUBLISHED CLASS RATES
+    ARE RATES OVER REVIEW-LANE ARMS PRESENTED AS RATES OVER ALL ARMS.
+
+    (4) AND THE CAUSE IS ONE FIELD ON ONE OF THREE WRITE PATHS. There are exactly three places
+    an `automerge.armed` row is written, and only one carries `head_sha`:
+      (a) `src/run-task.ts:2770` -- the review-lane arm helper, `lane: "review"`, whose `extra`
+          includes `head_sha: ctx.headSha`. THIS IS THE ENTIRE KEPT POPULATION.
+      (b) `src/run-task.ts:2876` -- `armAndLogOutcome` calling `logArmAttribution`, whose `extra`
+          is `{outcome}` or `{outcome, error}`. NEITHER FUNCTION HAS A HEAD-SHA PARAMETER
+          (`armAndLogOutcome` at `:2862`, `logArmAttribution` at `:2676`), so none of its six
+          call sites -- dep-review `:11021`, retro `:15373`, `:21364`, triage `:24246`, plan
+          `:24618`, approve `:25320` -- can supply one without a signature change.
+      (c) `src/run-task.ts:9900` -- the at-verdict direct emitter, writing
+          `{at: "verdict", outcome, irreversible, reason?}` and no head.
+    `logArmAttribution` itself (`:2692-2699`) writes only `task_id`, `pr_number`, `pr_url`,
+    `lane` plus whatever `extra` it is handed, and NO log closure in this file injects `head_sha`
+    into every row, so a row carries it only when its own call site passes it.
+  note: |
+    ── Q1. WHY THE `run-task` AND `sweep` PATHS OMIT IT, AND WHICH REMEDY THAT DECIDES ─────────
+
+    (i) THEY CAN CARRY IT. THE FIX IS AT THE WRITER. This is the fork the brief names and it
+    resolves against the "structurally cannot" reading. At the at-verdict site (c),
+    `review.headSha` is already in scope in the same function a hundred lines above the emission,
+    so the head is in hand and simply not put on the row. And the at-open path cannot be excused
+    by ordering: this file's own doc states `armAutoMergeAtOpen` "fires ~16s AFTER the PR
+    exists", and a pull request cannot exist without a head sha. Path (b)'s six call sites all
+    hold a `prUrl` for a PR that already exists, so a head is recoverable there too; what they
+    lack is a parameter, not a fact.
+
+    (ii) SO THE HISTORY STAYS UNJOINABLE AND THE BUILD MUST SAY SO. Fixing the writer fixes rows
+    written AFTER the fix. The 336 already on disk carry no head and never will -- see (vi):
+    nothing backfills one. A build that quietly reports a rising join fraction without
+    distinguishing "new rows now join" from "old rows were repaired" would be claiming a repair
+    it did not make.
+
+    (iii) AND THE TWO HALVES ARE NOT INTERCHANGEABLE. Fixing only the writer leaves every
+    existing rate silently over-narrow and leaves a future gap invisible again the next time a
+    new lane forgets the field. Fixing only the reporter leaves the fleet permanently unable to
+    calibrate its non-review arms. BOTH ARE IN SCOPE, AND THE REPORTING HALF IS THE ONE THAT
+    MUST NOT BE DROPPED IF THE TASK NARROWS.
+
+    ── Q2. WHAT THE VERB SHOULD REPORT, AND WHETHER A 69% RATE IS PUBLISHABLE AT ALL ───────────
+
+    (iv) THE MINIMUM IS THE SHAPE THE FUNCTION ALREADY HAS: A COUNT WITH A REASON. A dropped row
+    should become a counted row carrying why it could not be classified, exactly as `:139-149`
+    already does for the no-review case, and the verb's summary should state the denominator it
+    is handing the consumer -- how many arms it saw, how many it could classify, and the split
+    by cause. A consumer that cannot see the denominator cannot tell a rate from a ratio of
+    whatever survived.
+
+    (v) BUT LABELLING IS NOT ENOUGH HERE, AND THE SHARD SAYS SO RATHER THAN SETTLING FOR A
+    CAVEAT. A caveat is adequate when the excluded slice is a random sample of the population;
+    it is not adequate when the exclusion tracks the very axis the measurement is about. HERE THE
+    EXCLUSION IS BY LANE, AND LANE IS NOT INDEPENDENT OF VERDICT CLASS -- the review lane is the
+    only one that posts a `review.posted` row at all, which is what the class is read from. So
+    the aggregate is not a caveated rate over all arms; IT IS A RATE OVER A DIFFERENT POPULATION
+    THAN ITS LABEL CLAIMS, and the honest presentation is per-lane or nothing. The build should
+    publish the review-lane rate NAMED AS SUCH, and refuse to publish a fleet-wide rate until the
+    non-review lanes are joinable. THAT IS A REPORTING DECISION, NOT A THRESHOLD.
+
+    ── Q3. WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────
+
+    (vi) NOTHING BACKFILLS A MISSING `head_sha`. Not from the PR's current head, not from a git
+    read, not from the newest `review.posted` for the same task. A head inferred after the fact
+    is not the head the arm was taken against, and a join built on it would look like a
+    measurement while being a guess. The 336 are unjoinable and must be REPORTED as unjoinable.
+
+    (vii) AND NO ROW IS ADMITTED BY RELAXING THE GUARD. The `continue` at `:137` is correct on
+    its own terms -- a row with no head genuinely cannot be joined. What is wrong is that it
+    leaves no trace. THE REMEDY IS REPORTING THE EXCLUSION, NEVER SWALLOWING IT, and a build that
+    keeps the row by defaulting the key has made the numbers worse rather than better.
+
+    (viii) THE VERB STAYS READ-ONLY. W1-T424's charter, in its own module's words: "v1 files
+    nothing and proposes nothing". This task adds counting and labelling; it must add no write
+    path, no proposal, and no policy read. CITED, NOT RE-FILED.
+
+    (ix) `MIN_POPULATION_FLOOR` STAYS AT 5. It is not the constraint here and must not be tuned
+    to make a thinner population look publishable. The keyword-floor class reads zero on this
+    corpus and stays UNMEASURABLE.
+
+    (x) AND THE CADENCE KEEPS ITS ZERO WRITE PATHS. W1-T1259 owns whether these verbs run on a
+    schedule; this task changes what one of them REPORTS when it runs, and touches neither the
+    cadence's decision nor its side effects. CITED, NOT RE-FILED.
+
+    (xi) RULE 19 BAND. `risk: high` is set UP FRONT because `files:` spans two source stems and
+    Rule 19 sizes on SPAN. THE BAND IS THE SPAN READING, NOT A BLAST-RADIUS JUDGEMENT: the change
+    adds a field to rows one emitter already has in scope, and turns a silent `continue` into a
+    counted row. No threshold moves and no existing predicate changes.
+  acceptance:
+    - claim: "an armed row with no head sha is counted and carries a written reason rather than being dropped in silence"
+      proof: "unit test: test/verdict-calibration-join-fraction.test.ts"
+    - claim: "the report states how many arms it saw and how many it could classify, so a consumer can see its denominator"
+      proof: "unit test: test/verdict-calibration-join-fraction.test.ts"
+    - claim: "the unclassifiable count is broken out by cause, so a missing head is not merged into the missing merge sha"
+      proof: "unit test: test/verdict-calibration-join-fraction.test.ts"
+    - claim: "a class rate is labelled with the lane population it was computed over rather than presented as fleet wide"
+      proof: "unit test: test/verdict-calibration-join-fraction.test.ts"
+    - claim: "the non review arm paths put the head sha they already hold onto the row they write"
+      proof: "unit test: test/verdict-calibration-join-fraction.test.ts"
+    - claim: "a row with no head sha is never admitted to the join by inferring or defaulting the key"
+      proof: "unit test: test/verdict-calibration-join-fraction.test.ts"
+    - claim: "the verb writes no ledger line and proposes nothing, and the minimum population floor is unchanged"
+      proof: "unit test: test/verdict-calibration-join-fraction.test.ts"
