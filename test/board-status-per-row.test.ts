@@ -9,10 +9,20 @@ import { DEFAULT_BOARD_POLL_TTL_MS } from "../src/lib/serve.js";
 // `state=closed` walk, whose combined status can never change again once the PR is merged or
 // closed. `buildBatchedGithub` already carries `.state` (`BatchedPr.state`, "OPEN"/"CLOSED"/
 // "MERGED") on the SAME batched index `reviewState` reads `.headRefName` off, so the fix reads
-// that field as the discriminator instead of making a fresh `gh` call, and caches a terminal
-// row's review state forever instead of re-expiring it every `ttlMs`. These tests exercise
-// `buildBatchedGithub` directly with an injected `exec`/`fetchAll`/`now`, counting exactly how
-// many times the injected `exec` (the stand-in for the synchronous `gh api …/status` call) fires.
+// that field as the discriminator instead of making a fresh `gh` call.
+//
+// W1-T2217's OWN fix cached a terminal row's review state forever instead of re-expiring it every
+// `ttlMs` — but the guard only ever consulted `.state` as a modifier on a CACHE HIT, so a terminal
+// row with no cache entry yet (every terminal row, the first time anything asked) fell straight
+// through to a network call keyed on `.headRefName`, a branch name GitHub deletes on merge. That
+// call 404s, the memo never fills, and the SAME row re-failed on every paint, forever — the exact
+// defect W1-T2235 fixes below. `.state` is now checked FIRST, ahead of any cache lookup and ahead
+// of any network call: a terminal row returns `"not-applicable"` directly and issues ZERO `gh`
+// calls, ever, cold or warm — not "at most one", the number W1-T2217's own tests below asserted.
+//
+// These tests exercise `buildBatchedGithub` directly with an injected `exec`/`fetchAll`/`now`,
+// counting exactly how many times the injected `exec` (the stand-in for the synchronous
+// `gh api …/status` call) fires.
 
 const REVIEW_CONTEXT = "remudero-review";
 
@@ -25,7 +35,7 @@ function pr(over: Partial<BatchedPr> & { number: number; url: string; state: str
   return { headRefName: `run-W1-T${over.number}-1`, ...over };
 }
 
-test("W1-T2217: a row whose pull request can no longer change is not statused on the request path", () => {
+test("W1-T2235: a row whose pull request can no longer change is not statused on the request path — ZERO calls, ever, not merely one", () => {
   let execCalls = 0;
   let clock = 1000;
   const merged = pr({ number: 1, url: "u1", state: "MERGED" });
@@ -38,22 +48,24 @@ test("W1-T2217: a row whose pull request can no longer change is not statused on
       return combinedStatusJson("success");
     },
   });
-  assert.equal(gh.reviewState?.(merged.url), "success");
-  assert.equal(execCalls, 1);
+  // `.state` is checked BEFORE any cache lookup or network call — a terminal row's `exec` fixture
+  // above is never even reached, proving the network isn't asked, not merely that its answer is
+  // memoised.
+  assert.equal(gh.reviewState?.(merged.url), "not-applicable");
+  assert.equal(execCalls, 0, "a terminal row must never reach the network, not even once");
   // Advance well past the TTL, several times, and re-read the SAME terminal row's review state.
   // A merged PR's combined status is immutable, so this must cost ZERO further `gh` calls.
   clock += 1_000_000;
-  assert.equal(gh.reviewState?.(merged.url), "success");
+  assert.equal(gh.reviewState?.(merged.url), "not-applicable");
   clock += 1_000_000;
-  assert.equal(gh.reviewState?.(merged.url), "success");
-  assert.equal(execCalls, 1, "a terminal row must be statused at most ONCE, ever");
+  assert.equal(gh.reviewState?.(merged.url), "not-applicable");
+  assert.equal(execCalls, 0, "a terminal row must be statused ZERO times, ever");
 });
 
-test("W1-T2217: the discriminator reads state already on the batched index rather than making a call", () => {
+test("W1-T2235: the discriminator reads state already on the batched index rather than making ANY call", () => {
   // A CLOSED (never-merged) row is just as terminal as a MERGED one — `.state !== \"OPEN\"` reads
-  // the SAME field the batched fetch already returned, so telling the two terminal cases apart
-  // from an OPEN row never costs a second `gh` invocation beyond the ONE combined-status read
-  // the row's own first resolution needs.
+  // the SAME field the batched fetch already returned, so a terminal row's own first resolution
+  // needs no combined-status call at all: it returns `"not-applicable"` straight from `.state`.
   let execCalls = 0;
   const closed = pr({ number: 2, url: "u2", state: "CLOSED" });
   const gh = buildBatchedGithub("o", "r", {
@@ -63,9 +75,9 @@ test("W1-T2217: the discriminator reads state already on the batched index rathe
       return combinedStatusJson("failure");
     },
   });
-  assert.equal(gh.reviewState?.(closed.url), "failure");
-  // Exactly the ONE call the review-state read itself needed — nothing extra to resolve `.state`.
-  assert.equal(execCalls, 1);
+  assert.equal(gh.reviewState?.(closed.url), "not-applicable");
+  // Not even the one call the pre-W1-T2235 memo needed for its first resolution.
+  assert.equal(execCalls, 0);
 });
 
 test("W1-T2217: an open row still resolves its review state live on every tick past the ttl", () => {
@@ -93,20 +105,21 @@ test("W1-T2217: an open row still resolves its review state live on every tick p
   assert.equal(execCalls, 2, "an OPEN row must be re-fetched on every tick past the ttl");
 });
 
-test("W1-T2217: the board still renders check state for the rows it shows", () => {
+test("W1-T2217/W1-T2235: the board still renders LIVE check state for OPEN rows, and 'not-applicable' (never a stale network value) for a terminal one", () => {
   const open = pr({ number: 4, url: "u4", state: "OPEN" });
   const merged = pr({ number: 5, url: "u5", state: "MERGED" });
   const gh = buildBatchedGithub("o", "r", {
     fetchAll: () => [open, merged],
     exec: (args) => {
-      // Distinguish which row's headRef the combined-status call targeted so each renders its
-      // own state, proving the board doesn't collapse every row to one answer.
+      // Distinguish which row's headRef the combined-status call targeted — only the OPEN row's
+      // headRef should ever appear here; a terminal row's headRef never reaches `exec` at all.
       const ref = args.join(" ");
+      if (ref.includes(merged.headRefName!)) throw new Error("a terminal row must never be statused over the network");
       return ref.includes(open.headRefName!) ? combinedStatusJson("pending") : combinedStatusJson("success");
     },
   });
   assert.equal(deriveReviewState(open.url, gh), "pending");
-  assert.equal(deriveReviewState(merged.url, gh), "success");
+  assert.equal(deriveReviewState(merged.url, gh), "not-applicable");
 });
 
 test("W1-T2217: no live status is served from a memo older than the ttl", () => {
@@ -131,7 +144,7 @@ test("W1-T2217: no live status is served from a memo older than the ttl", () => 
   assert.equal(execCalls, 1, "a fresh-within-ttl memo must not be re-fetched");
 });
 
-test("W1-T2217: a cold cache no longer issues one call for every row carrying a pull request", () => {
+test("W1-T2235: a cold cache issues ZERO calls for the terminal rows, on the FIRST tick too, not just the later ones", () => {
   // The shape rationale (3)/(4) name directly: N is board rows with a prUrl, fed by a COLD
   // `state=closed` walk that only grows as the fleet merges PRs. Seed a population dominated by
   // terminal rows (the accumulating merged/closed population) plus a small live OPEN set, then
@@ -153,20 +166,22 @@ test("W1-T2217: a cold cache no longer issues one call for every row carrying a 
     },
   });
 
-  // Tick 1 (cold cache): every row, terminal or open, is statused once.
+  // Tick 1 (cold cache): pre-W1-T2235, all 23 rows would be statused once here (the ORIGINAL
+  // W1-T2217 shape this test asserted). Post-fix, the 20 terminal rows never reach `exec` at
+  // all — only the 3 OPEN rows do, because `.state` is checked before any network call.
   for (const row of allRows) gh.reviewState?.(row.url);
-  assert.equal(execCalls, allRows.length);
+  assert.equal(execCalls, openRows.length, "only the OPEN rows may be statused, even on the very first (cold) tick");
 
-  // Ticks 2 and 3, each past the ttl: pre-fix, EVERY row (23) would be re-statused on EACH tick
-  // (46 more calls). Post-fix, only the 3 OPEN rows are still live.
+  // Ticks 2 and 3, each past the ttl: only the 3 OPEN rows are still live and re-fetched; the
+  // terminal population never adds a single call, on any tick.
   for (let tick = 0; tick < 2; tick++) {
     clock += 1000;
     for (const row of allRows) gh.reviewState?.(row.url);
   }
   assert.equal(
     execCalls,
-    allRows.length + openRows.length * 2,
-    "only the OPEN rows may be re-statused past the ttl — the terminal population must not scale the request path",
+    openRows.length * 3,
+    "only the OPEN rows may be (re-)statused past the ttl — the terminal population must not scale the request path at all",
   );
 });
 
