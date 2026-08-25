@@ -82,6 +82,9 @@ export type LintCheck =
   | "proof-scope"
   | "proof-name-resolution"
   | "post-merge-amendment"
+  | "post-merge-field-drift"
+  | "post-merge-criterion-removed"
+  | "post-merge-proof-changed"
   | "provenance"
   | "call-site"
   | "monolith-filing"
@@ -1243,17 +1246,19 @@ export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): 
  *  `lint-plan` refused a proof rewrite with the same message it uses for an
  *  actual amendment, on a task nobody added a promise to.
  *
- *  WHAT THIS STOPS CATCHING (named, not hidden): a claim KEPT with its proof
- *  swapped for a WEAKER one becomes invisible to rule 21 — the discriminating
- *  `grep:` this task's own criterion once had, replaced by a whole-file
- *  `unit test:` that always passes, would go unremarked here. `proof-dialect`
- *  and `proof-resolvability` (this file) and `executed_stale` (review.ts)
- *  each see PART of that gap — an unexecutable or non-discriminating proof —
- *  but none of them compares a NEW proof against the one it replaced, so a
- *  same-claim proof downgrade on an already-merged task is not caught by
- *  this check or by any other check today. Building that comparison is out
- *  of scope here; this comment exists so the next filing does not have to
- *  rediscover the gap. */
+ *  WHAT THIS ALONE STOPS CATCHING (named, not hidden): a claim KEPT with its
+ *  proof swapped for a WEAKER one — the discriminating `grep:` this task's own
+ *  criterion once had, replaced by a whole-file `unit test:` that always
+ *  passes — is invisible to THIS comparison, which is claim-only by design
+ *  (see WHY CLAIM-ONLY above). `proof-dialect` and `proof-resolvability` (this
+ *  file) and `executed_stale` (review.ts) each see PART of that gap — an
+ *  unexecutable or non-discriminating proof — but none of them compares a NEW
+ *  proof against the one it replaced. W1-T2254's {@link criteriaProofChanged},
+ *  wired into {@link postMergeAmendmentViolations} as a REPORT (`severity:
+ *  "warn"`, never a block — this function's own claim-added comparison stays
+ *  exactly as documented above), is that comparison: a same-claim proof
+ *  downgrade on an already-merged task is now named in the lint output, even
+ *  though it still is not, and is not meant to be, blocked. */
 function criterionKey(c: AcceptanceCriterion): string {
   const norm = (s: string) => s.trim().replace(/\s+/g, " ");
   return norm(c.claim ?? "");
@@ -1319,31 +1324,190 @@ export interface PostMergeAmendmentContext {
    *  whole changed set by the caller, since a single task's lint has no
    *  visibility into its siblings. */
   followUpFiled: boolean;
+  /** This task's WHOLE shard as it existed at the PR's base ref — not just its
+   *  `acceptance:` (see {@link baseAcceptance}). W1-T2254: the call site
+   *  (run-task.ts's `lintPlanCommand`) already resolves this base-ref task to
+   *  read `baseAcceptance` off it, so widening the context to carry the whole
+   *  object needs no new resolution, git read, or base-ref lookup — see that
+   *  check's own module comment for why only `acceptance` was wired at first.
+   *  Undefined under the same conditions as {@link baseAcceptance}. */
+  baseTask?: Task;
+}
+
+/** Fields on a merged task's shard that something ELSE in the system still reads
+ *  AFTER the task merges (W1-T2254 rationale §Q1 (ii)) — a post-merge edit here
+ *  silently changes live behaviour nobody signed off on: `status` feeds dispatch
+ *  eligibility (drain.ts's `t.status === "blocked"` branch), `files` feeds
+ *  W1-T171's overlap serialization (`partitionByFileOverlap`), `depends_on` feeds
+ *  the DAG, `priority` feeds the dispatch comparator, `risk`/`verify`/`type`/
+ *  `principles`/`budget_usd` each steer a lane/gate/spend cap, and `retirement`
+ *  feeds the board's bucketing.
+ *
+ *  DELIBERATELY EXCLUDED, NAMED RATHER THAN LEFT IMPLICIT (§Q1 (iii)): `title`,
+ *  `note` and `rationale` are prose an amendment is EXPECTED to touch — reporting
+ *  them would fire on every legitimate rationale edit and get muted within a
+ *  week. `hand_built` has exactly two mentions in `src/` (both in plan.ts, the
+ *  interface declaration and the loader's own copy) and zero consumers — a field
+ *  nothing reads cannot be poisoned, and reporting it would be pure noise. `id`,
+ *  `repo`, `attempts`, `pr`, `prompt` and `context` are likewise left unreported:
+ *  none of them has a documented post-merge consumer the way the ten below do.
+ *
+ *  The question a field must answer to be listed here is "does anything read
+ *  this after the task merges", never "is this field conceptually final" — see
+ *  §Q1 (iv). */
+const REPORTED_MERGED_FIELDS: readonly (keyof Task)[] = [
+  "status",
+  "files",
+  "depends_on",
+  "priority",
+  "risk",
+  "verify",
+  "type",
+  "principles",
+  "budget_usd",
+  "retirement",
+];
+
+/** Human-readable rendering of a reported field's value for a violation message
+ *  — never used to compare, only to display both sides once a change is already
+ *  detected via `JSON.stringify` equality (below). */
+function reportedFieldDisplay(v: unknown): string {
+  if (v === undefined) return "(absent)";
+  if (typeof v === "string") return JSON.stringify(v);
+  return JSON.stringify(v);
+}
+
+/** Every {@link REPORTED_MERGED_FIELDS} entry whose value differs between
+ *  `baseTask` and `task` — REPORT ONLY, `severity: "warn"`, never `"block"`:
+ *  W1-T2248 already ruled that a merged `files:` can be provably wrong and must
+ *  stay correctable, and this task's own design (§Q2) reconciles with that
+ *  ruling by building a DETECTOR, not a lock — a field changing is made a
+ *  declared, visible act, never forbidden. `baseTask` undefined (the task is new
+ *  in this PR, or the caller could not resolve a base version) ⇒ no violations,
+ *  same "nothing to diff against" contract {@link criteriaAdded} uses for
+ *  `baseAcceptance`. */
+export function mergedFieldChangeViolations(task: Task, baseTask: Task | undefined): LintViolation[] {
+  if (!baseTask) return [];
+  const violations: LintViolation[] = [];
+  for (const field of REPORTED_MERGED_FIELDS) {
+    const before = baseTask[field];
+    const after = task[field];
+    if (JSON.stringify(before) === JSON.stringify(after)) continue;
+    violations.push({
+      check: "post-merge-field-drift",
+      severity: "warn",
+      message:
+        `task ${task.id} is already MERGED, but this PR changes \`${String(field)}:\` from ` +
+        `${reportedFieldDisplay(before)} to ${reportedFieldDisplay(after)} — reported, not blocked ` +
+        "(a merged shard's declared fields can still be corrected, W1-T2248; this makes the " +
+        "correction a declared, visible act instead of a silent one).",
+    });
+  }
+  return violations;
+}
+
+/** Criteria in `baseCriteria` whose claim does not appear anywhere in
+ *  `currentCriteria` — the mirror image of {@link criteriaAdded}: a merged
+ *  criterion REMOVED outright rather than reworded or added-to. `criteriaAdded`
+ *  alone cannot see this (W1-T2254 rationale §(4)): removing an entry shrinks
+ *  the current set, so nothing in it fails to match a base key, and the check
+ *  reads as "no delta". Keyed on {@link criterionKey} — claim only, same as
+ *  every other comparison in this section. `baseCriteria` undefined ⇒ no
+ *  removals (nothing to diff against). */
+export function criteriaRemoved(
+  baseCriteria: AcceptanceCriterion[] | undefined,
+  currentCriteria: AcceptanceCriterion[],
+): AcceptanceCriterion[] {
+  if (!baseCriteria) return [];
+  const currentKeys = new Set(currentCriteria.map(criterionKey));
+  return baseCriteria.filter((c) => !currentKeys.has(criterionKey(c)));
+}
+
+/** Criteria present in BOTH `baseCriteria` and `currentCriteria` under the same
+ *  {@link criterionKey} (claim unchanged) whose `proof` text differs — the exact
+ *  gap `criterionKey`'s own doc comment names as unstopped: a claim kept with
+ *  its proof swapped for a WEAKER one is invisible to `criteriaAdded`, which
+ *  compares claims and never proofs. `baseCriteria` undefined ⇒ nothing to
+ *  compare. */
+export function criteriaProofChanged(
+  baseCriteria: AcceptanceCriterion[] | undefined,
+  currentCriteria: AcceptanceCriterion[],
+): Array<{ base: AcceptanceCriterion; current: AcceptanceCriterion }> {
+  if (!baseCriteria) return [];
+  const baseByKey = new Map(baseCriteria.map((c) => [criterionKey(c), c]));
+  const normProof = (p?: string) => (p ?? "").trim();
+  const changed: Array<{ base: AcceptanceCriterion; current: AcceptanceCriterion }> = [];
+  for (const c of currentCriteria) {
+    const base = baseByKey.get(criterionKey(c));
+    if (!base) continue; // no matching base claim — new/added, criteriaAdded's territory
+    if (normProof(base.proof) !== normProof(c.proof)) changed.push({ base, current: c });
+  }
+  return changed;
 }
 
 /** Every acceptance criterion this PR adds or changes on an ALREADY-MERGED
  *  task, absent a follow-up task in the same PR to carry it. No {@link
  *  LintOpts.postMergeAmendment} at all ⇒ this check is skipped entirely (the
  *  pre-dispatch call site never dispatches a merged task in the first place,
- *  so it never supplies this context). */
+ *  so it never supplies this context).
+ *
+ *  W1-T2254 widens this past the one BLOCKING case (a genuinely new/changed
+ *  claim with no follow-up): three REPORT-ONLY, `severity: "warn"` checks run
+ *  under the same three early exits (no context / unresolvable status / not
+ *  merged) but are NOT gated by `followUpFiled` — that escape hatch is specific
+ *  to the criteria-orphaning harm the BLOCK exists to prevent, and a warning
+ *  never blocks a merge regardless, so there is nothing for it to escape. See
+ *  {@link mergedFieldChangeViolations}, {@link criteriaRemoved} and {@link
+ *  criteriaProofChanged} for what each reports and why it stays a report. */
 export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const ctx = opts.postMergeAmendment;
   if (!ctx) return [];
   if (!ctx.statusResolvable) return []; // fail OPEN on an unreadable derived status
   if (!ctx.merged) return []; // only a merged task's criteria can orphan this way
-  const added = criteriaAdded(ctx.baseAcceptance, task.acceptance ?? []);
-  if (added.length === 0) return []; // no delta vs the base ref — reword/reorder-only, or unchanged
-  if (ctx.followUpFiled) return []; // the escape hatch: the same PR files the follow-up
-  return added.map((c) => ({
-    check: "post-merge-amendment",
-    severity: "block",
-    message:
-      `task ${task.id} is already MERGED, but this PR adds/changes acceptance criterion ` +
-      `("${(c.claim ?? "").slice(0, 80)}") with no follow-up task carrying it filed in the same PR — ` +
-      "Standing rule 21: MERGED is terminal (an amendment does not re-queue the task), the drain " +
-      "skips a merged id outright, and the retro sweep skips a closed one, so this criterion would " +
-      "orphan silently; file a follow-up task carrying it in this SAME PR",
-  }));
+  const currentCriteria = task.acceptance ?? [];
+  const violations: LintViolation[] = [];
+  const added = criteriaAdded(ctx.baseAcceptance, currentCriteria);
+  if (added.length > 0 && !ctx.followUpFiled) {
+    violations.push(
+      ...added.map((c) => ({
+        check: "post-merge-amendment" as const,
+        severity: "block" as const,
+        message:
+          `task ${task.id} is already MERGED, but this PR adds/changes acceptance criterion ` +
+          `("${(c.claim ?? "").slice(0, 80)}") with no follow-up task carrying it filed in the same PR — ` +
+          "Standing rule 21: MERGED is terminal (an amendment does not re-queue the task), the drain " +
+          "skips a merged id outright, and the retro sweep skips a closed one, so this criterion would " +
+          "orphan silently; file a follow-up task carrying it in this SAME PR",
+      })),
+    );
+  }
+  // W1-T2254: report-only widening past the single guarded field (`acceptance`'s claims).
+  // Never blocks — see this function's own doc comment for why `followUpFiled` does not gate
+  // these. Nothing here rewrites a field back to its base value; it only names the drift.
+  violations.push(...mergedFieldChangeViolations(task, ctx.baseTask));
+  violations.push(
+    ...criteriaRemoved(ctx.baseAcceptance, currentCriteria).map((c) => ({
+      check: "post-merge-criterion-removed" as const,
+      severity: "warn" as const,
+      message:
+        `task ${task.id} is already MERGED, but this PR removes acceptance criterion ` +
+        `("${(c.claim ?? "").slice(0, 80)}") that existed at the base ref — reported rather than ` +
+        "passing as no delta, since a removed criterion is invisible to the claim-added check above.",
+    })),
+  );
+  violations.push(
+    ...criteriaProofChanged(ctx.baseAcceptance, currentCriteria).map(({ base, current }) => ({
+      check: "post-merge-proof-changed" as const,
+      severity: "warn" as const,
+      message:
+        `task ${task.id} is already MERGED, but this PR rewrites the proof of acceptance criterion ` +
+        `("${(current.claim ?? "").slice(0, 80)}") from ${JSON.stringify(base.proof ?? "")} to ` +
+        `${JSON.stringify(current.proof ?? "")} — the claim is unchanged, so this is invisible to ` +
+        "the claim-added check above, but the executable half of the criterion moved and that is " +
+        "reported here.",
+    })),
+  );
+  return violations;
 }
 
 // ── PROVENANCE (Rules 16/17) ─────────────────────────────────────────────────
