@@ -123,6 +123,59 @@
     been emitted.** Recording the timing without that sentence would imply the corpus was the gap,
     and it was not.
 
+    ── ADDED 2026-08-25, RATIONALE ONLY, POST-MERGE. THE THIRD PAIR RESOLVES ───────────────────
+
+    (7) THE REMEDY THIS SHARD PRESCRIBED IS INCOMPLETE, AND THE FIX IS ONE OPERATION AWAY. This
+    record already carries its own counter-example (#2793): a THIRD pair whose slug-at-k=2 score
+    falls below the cutoff. MEASURED 2026-08-25 WITH `bestNearDuplicate` IMPORTED AND DRIVEN,
+    slugs read through `shardSlugFromPath`, slug at `DUPLICATE_SLUG_SHINGLE_K = 2`, title at
+    `DEFAULT_SHINGLE_K = 3`, cutoff `DEFAULT_DUPLICATE_CUTOFF = 0.2`:
+      A  W1-T1071 / W1-T1070   slug 0.200  title 0.000  max 0.200  CAUGHT
+      B  W1-T1075 / W1-T1074   slug 1.000  title 0.054  max 1.000  CAUGHT
+      C  W1-T2256 / W1-T2257   slug 0.100  title 0.278  max 0.278  CAUGHT
+    SLUG ALONE 2 OF 3. TITLE ALONE 1 OF 3. `max(slugScore, titleScore)` 3 OF 3, AT THE EXISTING
+    CUTOFF, WITH NO NEW METRIC INVENTED AND NO THRESHOLD MOVED. The slug figures reproduce this
+    shard's own rationale (4) exactly, which is the control that the harness is wired the same way
+    it was when those numbers were first taken.
+
+    (8) AND THE FALSE-POSITIVE HALF IS WHAT MAKES IT SAFE, BECAUSE AN IGNORED ADVISORY IS AN
+    ABSENT ONE. Over 584 shards on origin/main, all 169,071 pairs scored: SLUG ALONE crosses 0.2
+    on 40 pairs; `max()` crosses on 40; AND THE SETS ARE IDENTICAL. `max()` adds ZERO pairs the
+    shipped metric does not already flag, and there are ZERO title-only pairs. The single
+    title-crossing pair, `W1-T1062` / `W1-T403`, scores slug 1.000 as well — the DELIBERATE
+    re-file rationale (6) already documents. And across the recent burst W1-T2200..W1-T2271 (59
+    shards, 1,711 pairs) ZERO cross under slug, title or max. SO THE ADVISORY LOAD AN OPERATOR
+    SEES IS UNCHANGED AT 40, and those 40 are the load already accepted when the slug metric
+    shipped.
+
+    (9) AND THIS IS NOT THE CONCATENATION RATIONALE (5) REFUSED — STATED EXPLICITLY BECAUSE THE
+    OBVIOUS READING IS THAT IT WAS. Rationale (5) measured the JOINED text at 0.049 and 0.102
+    against the slug's 0.200 and 1.000, and named the cause: the long title floods the shingle set
+    and dilutes the signal the slug carries. THAT IS ONE FEATURE BUILT BY CONCATENATION. Scoring
+    two features SEPARATELY and taking the higher dilutes neither: pair B keeps its 1.000 and pair
+    C gains its 0.278. The two operations differ, rationale (5)'s measurement stands unchallenged,
+    and a builder must not read it as having already refused this.
+
+    (10) AND WHAT A BUILDER WILL FIND ALREADY DONE, SO NOBODY RE-DERIVES IT. THE CORPUS WIRING
+    SHIPPED. `duplicateCorpusOpts` (`src/run-task.ts:13809-13821`) supplies `openTaskTitles`,
+    `duplicateSlug` and `duplicateShingleK`; its ONLY call site is `run-task.ts:14200`, passing
+    `true` literally, under the comment "scope is populated iff `--base` was given, so this branch
+    IS the changed-tasks pass". SO THE CHECK IS ARMED WITH A CORPUS IN `--base` SCOPE TODAY, and
+    a lane running `lint-plan --base origin/main` had it live. THE GAP WAS ALWAYS THE METRIC AND
+    NEVER THE WIRING.
+
+    (11) ONE NUMERIC RECONCILIATION, SO NOBODY THINKS TWO MEASUREMENTS DISAGREE. Pair C's TITLE
+    scores 0.365 at k=2, 0.278 at k=3 and 0.241 at k=4. The shipped title path uses
+    `DEFAULT_SHINGLE_K = 3`, SO 0.278 IS THE OPERATIVE NUMBER — and the pair clears 0.2 at every k
+    measured, so the catch does not depend on that choice.
+
+    (12) AND ONE SIGNAL NOTED WITHOUT BEING RECOMMENDED. W1-T2256 and W1-T2257 both named
+    `receiptCommand`'s read at `run-task.ts:11727`, so a `files:`-or-citation OVERLAP signal
+    exists if a future pair ever defeats `max()`. IT WAS NOT MEASURED. Nobody should build it on
+    that observation alone: it must be scored on these same three pairs AND the same
+    false-positive windows first, exactly as slug and title were, or it is a hunch wearing a
+    metric's clothes.
+
   design: |
     (i) THE CORPUS IS OPEN PLAN PRs, SUPPLIED AT THE CALL SITE. The candidate is the shard being
     filed; the corpus is the shard title AND filename slug of every plan shard added by a currently
