@@ -1,0 +1,141 @@
+- id: W1-T2260
+  title: "FOUR LOCALLY-DECLARED CLI SYMBOLS PIN THE MONOLITH TOGETHER AND NO IMPORT SCAN CAN SEE THEM — an extraction plan built from a dependency graph reads imported bindings, these are declared in the file being emptied, and the compiler refuses before the cycle exists to be detected"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    **MEASURED BY BUILDING AN EXTRACTION AND LETTING `tsc` ADJUDICATE, NOT BY READING IMPORTS.**
+    Moving the branch-reaper cluster out of `src/run-task.ts` produces exactly four type errors, all
+    inside `reapBranchesCommand`, and all four resolve to symbols DECLARED IN `run-task.ts` ITSELF.
+    Re-derived on this head:
+
+      symbol             declared at         in-code refs   present in src/lib
+      repoRoot           run-task.ts:1195     165            0
+      resolveOwnerRepo   run-task.ts:1203      57            0
+      unknownArgError    run-task.ts:23429     44            0
+      commandSyntax      run-task.ts:27159     17            0
+
+    **NONE OF THE FOUR EXISTS ANYWHERE IN `src/lib/`.** The declaration lines match the operator's
+    reading exactly. The COUNTS differ and the measured ones are used: the brief's 219 / 52 / 48 / 18
+    are raw token occurrences; excluding comment and doc-comment lines the figures are 165 / 57 / 44 /
+    17. The two arg-parsing counts are within one of each other; `repoRoot` diverges most because 58
+    of its 223 raw occurrences are inside prose comments explaining why it is module-level.
+
+    **Q1 — TWO CONCERNS, BUT NOT TWO SYMMETRIC MODULES, AND THE ASYMMETRY IS THE ANSWER.**
+
+    REPO-LOCATION PLUMBING, 222 in-code references, is genuinely one cluster and is internally
+    coupled: `resolveOwnerRepo` shells `execFileSync("git", ["-C", repoRoot, ...])`, so it cannot move
+    without `repoRoot`. **AND IT IS THREE SYMBOLS, NOT TWO** — `repoRoot` is initialised by
+    `resolveRepoRoot(process.argv.slice(2), process.cwd())`, and `resolveRepoRoot` is ALSO declared in
+    `run-task.ts` and ALSO absent from `src/lib/`. A plan that moves two symbols discovers the third
+    at compile time, exactly as this task's own measurement discovered the four.
+
+    ARGUMENT-PARSING PLUMBING, 61 in-code references, **DOES NOT HOLD TOGETHER AS A PAIR.**
+    `unknownArgError` is already `export`ed and depends on nothing local — it is separable today.
+    `commandSyntax` is not: it calls `commandSpec(name)`, which reads the `COMMANDS` registry, and
+    that registry IS the CLI's identity. So the honest decomposition is ONE cluster of three
+    (repo-location), ONE separable symbol (`unknownArgError`), and ONE anchored symbol
+    (`commandSyntax`) — not two tidy modules.
+
+    **Q2 — THE HEADLINE CALL-SITE NUMBER IS MISLEADING, AND A RE-EXPORT STILL DOES NOT SAVE IT.**
+    A pure move plus a re-export changes ZERO call sites by construction, so 337 (or the measured 283)
+    is not the cost of relocation. It would be the cost only of a redesign nobody is proposing. But
+    two things specific to these four defeat the re-export, and they are different in kind:
+
+    (i) **`repoRoot` IS MODULE-LEVEL STATE, NOT A FUNCTION.** It is a `const` whose initialiser reads
+    `process.argv` and `process.cwd()` AT IMPORT TIME. Today that evaluation is scoped to the CLI
+    entrypoint, which is the only module that legitimately owns argv. Relocating the declaration into
+    `src/lib/` relocates the EVALUATION: every importer of that lib module — including a test that
+    imports it for an unrelated symbol — would parse argv on import. A re-export preserves the NAME
+    and not the EVALUATION LOCUS, so this is a behavioural change wearing a move's clothing.
+
+    (ii) **`commandSyntax` IS ANCHORED TO THE REGISTRY.** Moving it drags `commandSpec` and `COMMANDS`
+    into `src/lib`, or requires passing a spec in — and that is a signature change, which Q3 forbids.
+
+    **AND THE THIRD ROUTE IS CLOSED BY AN ENFORCED RULE, NOT MERELY BY GRAPH SHAPE.** Importing these
+    back from `src/lib` is not just "a cycle": `.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` runs
+    at **`severity: "error"`** with `from: ^src/lib`, `to: ^src/(spike|run-task)\.ts$`. A lib module
+    reaching back to the entrypoint fails a REQUIRED check outright. So all three routes the operator
+    named are closed, and one of them is closed by a gate that already exists rather than by taste.
+
+    **THE DETECTION GAP IS THE GENERALISABLE PART, AND IT IS WHY THIS IS A PREREQUISITE.** A pre-move
+    dependency scan enumerates IMPORTED BINDINGS. These four are DECLARED in the file being emptied,
+    so they carry no import statement and appear in no import graph — the scan reads clean and the
+    move still fails. `depcruise` cannot cover the gap either: the compiler refuses before any cycle
+    exists to be detected, so there is nothing for a cycle rule to see. **ANY FUTURE EXTRACTION PLAN
+    DERIVED FROM AN IMPORT GRAPH WILL HIT THIS THE SAME WAY**, which is why the remedy is to relocate
+    these declarations FIRST rather than to discover them once per attempted extraction.
+
+    **Q3 — WHAT MUST NOT CHANGE.** NO SIGNATURE CHANGES AND NO REDESIGN: this relocates declarations,
+    it does not improve them. `unknownArgError` keeps its four-parameter shape, `resolveOwnerRepo`
+    keeps returning `{owner, repo}`, and nothing gains a config object or an injectable seam as part
+    of this work. **AND THE CYCLE COUNT MUST NOT RISE.** Baseline on this head, by traversing the
+    import graph directly: 15 back-edges resolving to 14 canonical module-sets across a 22-module
+    knot, with `src/run-task.ts` ITSELF inside that knot — confirmed, not assumed. The operator's 40
+    paths reducing to 24 canonical is the same structure counted in dependency-cruiser's units rather
+    than in back-edges; the 22-module figure is common to both and is the one to hold. A relocation
+    that lowers the count is a bonus; one that raises it has failed regardless of what it tidied.
+  acceptance:
+    - claim: "the repo-location cluster is relocated together, including the initialiser its own declaration depends on"
+      proof: "unit test: test/cli-plumbing-extraction.test.ts"
+    - claim: "relocating the repo root does not move argv evaluation into a module a test can import for an unrelated symbol"
+      proof: "unit test: test/cli-plumbing-extraction.test.ts"
+    - claim: "the separable argument-parsing symbol moves without dragging the command registry with it"
+      proof: "unit test: test/cli-plumbing-extraction.test.ts"
+    - claim: "no relocated symbol changes its signature, and no call site is rewritten to accommodate the move"
+      proof: "unit test: test/cli-plumbing-extraction.test.ts"
+    - claim: "the layering rule still refuses a core module that reaches back to the entrypoint, and the cycle count does not rise"
+      proof: "unit test: test/cli-plumbing-extraction.test.ts"
+  files: [src/run-task.ts, test/cli-plumbing-extraction.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#locally-declared-cli-plumbing-2026-08-25"
+  note: |
+    **WHY THE PROOF PATH DOES NOT EXIST YET, AND HOW THE FALSIFIER DISCRIMINATES.**
+    `test/cli-plumbing-extraction.test.ts` is absent from the tree, and `files:` is a BARE SINGLE-LINE
+    list so `SHARD_FILES_LINE_RE` matches and the forward-reference exemption applies — a block-style
+    list would silently forfeit it. **A NON-EXISTENT CONTROL PATH DOES NOT DISCRIMINATE**: it reads
+    `hits: 0` and `verdict: fail` exactly as the declared target does, so it proves nothing. The
+    discriminating control is an EXISTING path, which resolves to real tests while the declared one
+    cannot.
+
+    **`files:` IS DRAWN AGAINST THE DEFECT.** The four declarations all live in `src/run-task.ts`, so
+    that file is where the relocation is performed regardless of where the symbols land. The
+    destination modules are not enumerated because naming files that do not exist would be a guess,
+    and an under-drawn declaration confines a fix (#2519) as surely as an over-drawn one invites
+    scope creep.
+
+    **RISK BAND — BOTH READINGS.** SPAN: `files:` crosses `src/` and `test/`, so Rule 19's span reading
+    is `high`. The band EXEMPTS the sizing check rather than clearing it — `sizingViolation` returns
+    `undefined` outright at `high` — so a clean lint is not evidence the span was vetted. BLAST RADIUS:
+    wider than a typical relocation, because `repoRoot` alone carries 165 in-code references and its
+    initialiser reads process state at import time. That is the whole reason this is filed as a
+    prerequisite rather than folded into an extraction.
+
+    **THE FALSIFIER.** Falsified if a relocation lands and a subsequent extraction attempt still
+    produces locally-declared-symbol errors — that would mean the set was larger than four and the
+    measurement was taken too narrowly. Also falsified if any relocated symbol's signature changed, if
+    any call site was rewritten, or if the canonical cycle count rose above its baseline.
+
+    **MEASUREMENT PROVENANCE.** Host `vm`, `/usr/bin/bash`, uid 0. Scratch worktree at a fresh path,
+    `HEAD == origin/main` proven by sha, `--is-shallow-repository` false (2182 commits) checked before
+    any history query, removed after. `src/run-task.ts` is 1,542,304 bytes — over the Contents API's
+    1 MB cap, where it returns an empty body that greps to a clean zero — so every figure came from
+    the sha-proven worktree, never that API. Fetched `refs/rmd-id/*` verified at 379 local against 379
+    remote BEFORE sweeping. Declaration lines were read BY LINE NUMBER, not from grep output.
+
+    **ID PROVENANCE — UNUSED, NOT OWNED.** The reservation ref exists against a namespace of 379; its
+    anchor was deliberately NOT checked, since the id was minted by the operator and its anchor cannot
+    match this host. What was verified is that the id is UNUSED on all eight surfaces, each control
+    pre-qualified on its own surface: reservation ref 1 of 379; shard filenames 0 (control `W1-T2241`
+    = 1); `- id:` lines 0 (control = 1); open-PR titles 0 (control `W1-T` = 1 across 5 open PRs);
+    open-PR head branches 0 (control `run-*` = 87); open-PR file lists 0 across 5 of 5 heads
+    enumerated and captured, control 8 file entries; anchored merged trailers 0 (control `W1-T2235`
+    = 1); merged subjects 0 (control `(W1-T2241)` = 1 across 2182). THE SUBJECT WAS SWEPT TOO:
+    `locally-declared` and `extraction.*prerequisite` read 0 across `plan/tasks.d/`, and the six shards
+    mentioning `unknownArgError` were each opened and are unrelated tasks that merely name the symbol —
+    against a control of 386 shards mentioning `run-task.ts`. Nothing is already filed.
