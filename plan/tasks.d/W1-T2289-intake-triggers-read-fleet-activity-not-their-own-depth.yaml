@@ -1,0 +1,167 @@
+- id: W1-T2289
+  title: "BOTH INTAKE RUNGS ASK WHETHER THE FLEET NEEDS WORK AND NEITHER ASKS HOW MUCH IS WAITING — the retro's trigger counts what shipped and auto-triage's counts whether the queue filled the lanes, so each is gated on a proxy for the fleet's OWN ACTIVITY rather than on its own input's depth; the consequence is that a busy fleet silently disables its own intake, and on 2026-08-25 sixteen operator-filed shards kept three lanes full for thirty-three hours while `decideAutoTriage` did not fire once and 23 feedback entries sat unread, the oldest twenty days old"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/auto-triage.ts, src/lib/retro.ts, src/run-task.ts, test/intake-triggers-read-their-own-depth.test.ts]
+  origin: oper#intake-triggers-never-ask-how-much-is-waiting-2026-08-25
+  plan_refs: ["W1-T469", "W1-T475", "W1-T160", "W1-T1259", "W1-T2288"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main 41405563 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA, CLEAN, NOT SHALLOW, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS AND EVERY SITE
+    CITED BY SYMBOL RATHER THAN LINE. Ledger figures come from `resolveLedgerUnion` at the state
+    dir: ok true, 27 archives, liveFileRead true, unread none.
+
+    (0) THE CORPUS IS FED BY THE DAEMON, NOT BY THE READER. The union carries 174,617 rows at
+    `task_id: DAEMON`, newest 0.4 minutes old, and the steps written in the preceding ten minutes
+    include `daemon.alive`, `sweep.pass`, `sweep.dispose` and `board_gateway.fetch_bytes` — rows a
+    read can never author. Recorded because one host today looked live for the opposite reason:
+    the reader was the writer, and its daemon-emitted steps had stopped on 2026-08-17.
+
+    (1) THE SHARED PROPERTY, WHICH IS WHAT THIS RECORD OWNS. Each intake rung is gated on a
+    quantity that describes THE FLEET, not its own queue. The retro's trigger asks how much
+    shipped; auto-triage's asks whether the lanes filled. Neither predicate can be made false by a
+    backlog growing, and neither can be made true by one. So the depth of the thing a rung exists
+    to consume has no path to the decision about whether to consume it.
+
+    (2) INSTANCE ONE, MEASURED. `decideAutoTriage`'s trigger is `deferralPending ||
+    capacityUnfilled`, where `capacityUnfilled = dispatchCount < laneBudget` and BOTH numbers are
+    handed in by the daemon from that tick's own dispatch. All 27 `auto_triage.skipped` rows in the
+    33 hours since the last fire carry one reason: "no trigger this pass — no pairing deferred, and
+    the queue filled all 3 available lane(s)".
+
+    (3) AND IT FLIPPED, WHICH IS WHAT MAKES IT A CONDITION RATHER THAN A CONSTANT. Before that
+    fire the skip reasons were 282 daily-cap, 227 min-interval, 65 queue-filled and 57 lock-held.
+    Since it: 0, 0, 27, 0. The rung was bound-limited and became trigger-dead.
+
+    (4) THE BOUNDS ARE PROVABLY INNOCENT. `minIntervalMinutes` is 15 and `maxPerDay` is 24, and
+    NEITHER has produced a single skip row in those 33 hours. Ten fires in 31 hours never came
+    near either. Nothing here is paced and nothing is capped.
+
+    (5) AND IT NEVER REACHES THE INPUT CHECK AT ALL. `decideAutoTriage` gates in order: enabled,
+    trigger, lock, marker, interval, cap, and only then `candidates.length === 0`. The trigger
+    short-circuits FOUR GATES before the only clause that mentions the backlog.
+
+    (6) THE BACKLOG IS REAL, AND ONE READING PATH RETURNS A FALSE ZERO. `candidates` comes from
+    `newFeedbackIdsOldestFirst(repoRoot)` — `repoRoot`, NOT `config.root`; a read against
+    `config.root` finds no `plan/feedback` directory at all and answers 0 without erroring.
+    Against the real corpus: 23 entries at `status: new`, the oldest `fb-1785969338913-dc3d0f` at
+    2026-08-05T22:35:38Z, twenty days. The control split proves the reader sees its corpus: 75
+    rejected, 28 proposed, 25 accepted, 1 grilling, 152 files in all.
+
+    (7) AND THE BACKLOG IS STRUCTURAL, NOT A PAUSE. `decideAutoTriage` returns `candidates[0]` —
+    ONE entry per fire, oldest first. At ten fires in 31 hours, 23 entries is over three days of
+    continuous firing. It was never going to catch up even while it was firing.
+
+    (8) INSTANCE TWO IS CITED AND NOT RE-FILED. W1-T2288 owns the retro's cause: `retroTriggerCheck`
+    counts RUNS rather than merges, `shippedSince` iterates `runs.filter(...)`, and `ownBranchOf`
+    rejects any head that is not `run-<id>-<epoch>`, so 41 hand-opened plan merges advanced the
+    retro by four. THAT IS A DIFFERENT CAUSE FROM THIS ONE: different corpus, different mechanism,
+    and no run-versus-commit arithmetic appears anywhere in auto-triage's path. This record owns
+    the shared property only and must not absorb either instance's cause.
+
+    (9) Q1 — THE DEPTH IS ALREADY IN HAND FOR BOTH RUNGS, SO THIS IS A REORDERED PREDICATE AND NOT
+    A NEW MEASUREMENT. For auto-triage the evidence is stronger than availability:
+    `autoTriageCheck` builds the whole `AutoTriageInputs` object as one argument expression, so
+    `newFeedbackIdsOldestFirst(repoRoot)` is CALLED ON EVERY TICK and its result is then discarded
+    by an early return four gates before anything reads it. The backlog is not merely reachable, it
+    is already paid for. For the retro, `mineFollowups` already exists as a pure builder over
+    ledger records, and `retroTriggerCheck` already performs the read it would need — it does
+    `readFileSync` on the ledger path, then `parseLedger`, then `gatherRuns` — before computing
+    `mergesSinceMarker`. So one existing pure function over a parse the trigger already does.
+
+    (10) THE MEASURED COST, IN ITS OWN WORDS. A HAND-FED QUEUE SILENTLY DISABLES INTAKE, AND
+    NOTHING IN EITHER RUNG CAN NOTICE. On 2026-08-25 sixteen operator-filed shards kept three lanes
+    full for thirty-three hours and auto-triage did not fire once. That is self-inflicted, which is
+    exactly why it went unnoticed: every visible signal read healthy, the lanes were full, the
+    board moved, and the only thing that stopped was the rung whose whole job is to notice what
+    nobody is looking at.
+  note: |
+    (i) Q2 ARGUED BOTH WAYS, BECAUSE THE CURRENT DESIGN IS NOT ARBITRARY. Triage MAKES work, and
+    making work while three lanes are full competes with dispatch for the same lanes, the same
+    budget and the same headroom. A rung that fires on depth alone would fire hardest exactly when
+    the fleet can least absorb its output, and `auto_triage.fired` costs a real worker at a
+    measured mean near a dollar. The case against the current shape is narrower and stronger: the
+    trigger is not a CAPACITY admission control, it is the only thing standing between the intake
+    and permanent silence, and capacity is already bounded twice over downstream by
+    `minIntervalMinutes`, `maxPerDay` and the lock. A depth conjunct does not spend anything the
+    existing bounds do not already govern.
+
+    (ii) AND AN AGE BOUND BUYS SOMETHING A DEPTH BOUND DOES NOT, WHICH IS WHY BOTH ARE NAMED. A
+    deep queue is a throughput claim and it is answered by firing more often. A twenty-day-old
+    entry is a DIFFERENT claim: that one specific item has been passed over by every fire since it
+    arrived, which no amount of throughput fixes if the ordering is wrong. `decideAutoTriage`
+    already sorts oldest-first for exactly this reason and its own comment says newest-first would
+    starve the tail forever. An age bound tests whether that ordering is actually working; a depth
+    bound tests only whether the pile is growing. A build may choose either, both, or neither, but
+    it must not silently treat them as the same signal.
+
+    (iii) RULE 15 IS UNTOUCHED. TRIAGE PROPOSES, THE ARCHITECT RATIFIES. Nothing in this task
+    auto-files a task or mints an id, and no change here may give a rung the power to.
+
+    (iv) NO CADENCE BOUND IS LOWERED TO MAKE EITHER RUNG FIRE MORE OFTEN. `minIntervalMinutes` and
+    `maxPerDay` are measured innocent in rationale (4) — zero skip rows on either in the whole
+    window — and tuning a bound that is not binding is the "bound tuned instead of its population
+    examined" shape this repo refused four times on 2026-08-25. The remedy is a predicate that can
+    see the backlog, never a smaller number in front of one that cannot.
+
+    (v) AND THE LANE BUDGET IS NOT RAISED. `laneDispatchBudget` returns `Math.min(lanes, headroom)`
+    over two clamped terms and is not this task's business. The memory governor is inert:
+    `memoryFloorMib` is 0 in policy and `daemon.memory_governor` reads n=0 across the union,
+    against live controls of `daemon.headroom` at 1,442 rows and `auto_triage.skipped` at 669 on
+    the same read. Raising a budget to make intake fire would spend the wrong resource on the
+    wrong problem.
+
+    (vi) THE TRIGGER MUST STILL BE ABLE TO SAY NO. Both existing signals stay: a deferred pairing
+    and unfilled capacity are real reasons to want more work and neither is being removed. This is
+    a widening of what the predicate may consider, not a replacement of what it already considers.
+
+    (vii) AND THE REFUSAL MUST KEEP NAMING WHICH BRANCH DECLINED. `decideAutoTriage`'s current
+    refusal deliberately distinguishes "the governor left no lane capacity" from "the queue filled
+    all N lanes" because those are opposite conditions that must never read the same in the ledger.
+    A depth conjunct adds a third way to decline and it must be named as distinctly as the two that
+    exist, or the next investigation is blind in a new place.
+
+    (viii) NOTHING IS AUTO-CLOSED, AUTO-REJECTED OR AGED OUT OF THE FEEDBACK CORPUS. A twenty-day
+    entry is evidence that the rung stopped, not evidence that the entry is stale. A build that
+    resolves this by expiring old feedback has removed the measurement rather than the defect.
+
+    (ix) AND THE FALSE-ZERO READING PATH IS PART OF THE SURFACE. Rationale (6) records that
+    `newFeedbackIdsOldestFirst(config.root)` answers 0 without erroring because the directory is
+    simply absent there. Any new caller of that reader must pass the same root the existing one
+    passes, and a test must hold that line, or this task ships a depth signal that is permanently
+    zero and looks like a healthy empty queue.
+
+    (x) THIS RECORD OWNS THE PROPERTY, NOT THE INSTANCES. W1-T2288 is cited and must not be
+    re-filed, amended or absorbed. If a build finds it cannot express the shared property without
+    also changing what `shippedSince` iterates, that is the signal that the two tasks have been
+    conflated and the retro half belongs on W1-T2288's id instead.
+
+    (xi) RULE 19 BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as
+    spanning more than one concern — the `auto-triage` stem, the `retro` stem, the `run-task`
+    wiring stem and this task's own test stem — and refuses that at `risk: medium`. THE BAND IS THE
+    SPAN READING AND NOT A BLAST-RADIUS JUDGEMENT: rationale (9) measures the change as a reordered
+    predicate over data both rungs already compute.
+  acceptance:
+    - claim: "each intake trigger can be declined by a shallow queue and admitted by a deep one, so the depth of its own input reaches the decision"
+      proof: "unit test: test/intake-triggers-read-their-own-depth.test.ts"
+    - claim: "the auto triage backlog is read from the same root the existing caller passes, so a depth of zero means an empty queue rather than an absent directory"
+      proof: "unit test: test/intake-triggers-read-their-own-depth.test.ts"
+    - claim: "a deferred pairing and unfilled capacity still admit a fire on their own, so no existing trigger is removed"
+      proof: "unit test: test/intake-triggers-read-their-own-depth.test.ts"
+    - claim: "a refusal caused by depth is named distinctly from a refusal caused by capacity and from one caused by an absent lane budget"
+      proof: "unit test: test/intake-triggers-read-their-own-depth.test.ts"
+    - claim: "the interval floor and the daily cap still hold after a depth admitted trigger, so the widening spends nothing the existing bounds do not govern"
+      proof: "unit test: test/intake-triggers-read-their-own-depth.test.ts"
+    - claim: "the age of the oldest waiting entry is available to the decision as a separate quantity from the count"
+      proof: "unit test: test/intake-triggers-read-their-own-depth.test.ts"
+    - claim: "the retro trigger reads its own input depth from the parse it already performs rather than a second read"
+      proof: "unit test: test/intake-triggers-read-their-own-depth.test.ts"
+    - claim: "no rung files a task or mints an id, and nothing expires an entry out of the feedback corpus"
+      proof: "unit test: test/intake-triggers-read-their-own-depth.test.ts"
