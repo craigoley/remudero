@@ -2030,8 +2030,12 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
         `task ${task.id} creates ${created.join(", ")} but no acceptance criterion proves a CALL SITE ` +
         `for it. Add one of the form: grep: <symbol>( in <the file that calls it> — the open paren is ` +
         `required (a bare symbol name passes on a comment), and the path must differ from the new ` +
-        `module. Eleven modules have merged green and unreached; this is the check that would have ` +
-        `caught six of them.`,
+        `module. WHAT "UNREACHED" MEANS HERE, because the word names three different sets and a ` +
+        `count without its definition is unusable: MEASURED across src/ at 167c6844, ZERO modules ` +
+        `have no importer at all, THREE have only TEST importers, and 77 of 2081 exported values ` +
+        `are referenced nowhere outside their own file (43 of those are SCREAMING_CASE constants). ` +
+        `This check targets the second set — a new module reached only by its own tests. Quote a ` +
+        `definition with any number you carry from here, and re-measure rather than citing these.`,
     },
   ];
 }
