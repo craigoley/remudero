@@ -54,6 +54,62 @@
     `run.start` reads zero there, so the file is this container's own local exhaust and cannot
     answer the question. Reported as unmeasured rather than as an absence. The step name itself IS
     confirmed from source — `github_app.token_refreshed` is emitted by `github-app.ts`.
+    ── ADDED 2026-08-25, RATIONALE ONLY, POST-MERGE OF #2819. THE APP-ENV DISAGREEMENT RESOLVES ──
+
+    (A) THE RUNNING CONSOLE CARRIES FOUR CREDENTIAL NAMES, AND THE SHARD's SOURCE READING WAS
+    RIGHT ABOUT THE SCRIPT. `docker inspect remudero-serve` reports `GH_TOKEN`, `GH_APP_ID`,
+    `GH_APP_INSTALLATION_ID` and `GH_APP_PRIVATE_KEY_PATH`, plus `RMD_SERVE_NETWORK` and the base
+    image's own `DISABLE_AUTOUPDATER`/`HOME`/`NODE_VERSION`/`PATH`/`YARN_VERSION`. And
+    `deploy/serve-container.sh` really does pass `GH_TOKEN` alone: it carries exactly TWO `-e`
+    flags, `-e GH_TOKEN` at `:206` and `-e "RMD_SERVE_NETWORK=…"` at `:207`, and names no
+    `GH_APP_*` anywhere. BOTH READINGS ARE CORRECT AND THEY DESCRIBE DIFFERENT THINGS.
+
+    (B) BECAUSE THE COMMITTED LAUNCHER POSTDATES THE RUNNING CONTAINER, AND THAT IS SHARPER THAN
+    "TWO COMMITS". `deploy/serve-container.sh` has been touched by exactly ONE commit in the
+    repo's whole history — `59ec3c2`, 2026-08-22T23:02:59Z, "record the remudero-serve console
+    container and its bring-up" (#2534). The image the container runs is labelled
+    `org.opencontainers.image.revision: 3873867205ad8ccd48474c6544b2533906efb8c8` and was Created
+    2026-08-22T21:42:30Z — EIGHTY MINUTES BEFORE that commit. `git cat-file -e
+    3873867:deploy/serve-container.sh` fails: THE LAUNCHER DID NOT EXIST AT THE SHA THE IMAGE WAS
+    BUILT AT. `3873867` is itself an ancestor of `59ec3c2`, so this is ordinary history, not a
+    rewrite. So the committed script cannot have started this container, and nothing drifted —
+    the script was written afterwards to record a container that was already running.
+
+    (C) AND THE OTHER APPARENT LAUNCH PATH IS NOT ONE. `deploy/host-update.sh:353` does contain
+    `docker run -d --name remudero-serve`, but it sits inside a `cat <<PRINTED` heredoc opened at
+    `:240` and terminated at `:379`, whose own first printed line reads "host-update: DAEMON-MODE
+    INVOCATION — printed only. Nothing has been started and nothing was run." The escaped `\\`
+    continuations and the escaped `\${RMD_SERVE_HOST:-0.0.0.0}` are the tell. BOTH `docker run`
+    occurrences in that file (`:313` daemon, `:353` serve) are inside that same heredoc, and
+    `:303` says so outright: "THIS ONLY CHANGES THE PRINTED TEXT: the operator re-runs `docker
+    run` by hand to apply it." IT IS THE KIND OF LINE THAT READS AS EXECUTABLE AND IS NOT. It also
+    passes no `GH_TOKEN` at all — only `-e RMD_SERVE_HOST` and `-e RMD_SERVE_NETWORK`.
+
+    (D) SO NEITHER COMMITTED PATH STARTED THE CONSOLE, AND THE THREE `GH_APP_*` NAMES ARE THERE BY
+    INHERITANCE. They reached the container from an operator shell that had them exported at the
+    moment of an ad-hoc `docker run`. THAT LANDS THIS TASK ON THE BRANCH ITS OWN NOTE ANTICIPATED
+    — A CAPABILITY PRESENT AND UNWIRED — WITH ONE ADDITION THAT CHANGES WHAT THE BUILD MUST DO:
+    IT IS PRESENT BY INHERITANCE RATHER THAN BY DESIGN. A console restarted from
+    `deploy/serve-container.sh` as committed would come up with `GH_TOKEN` and nothing else, and
+    the three `GH_APP_*` names would silently vanish. So a build that wires `serve.ts` to
+    `refreshInstallationToken` must not assume the inputs are present; the launcher has to pass
+    them, or the console has to say plainly that it cannot refresh.
+
+    (E) AND THE CAPABILITY IS ALREADY DECLARED ELSEWHERE IN THE SAME TREE, WHICH IS WHY THE GAP IS
+    NARROW. `deploy/runtime-env-vars.sh:38-40` already lists `GH_APP_ID`,
+    `GH_APP_INSTALLATION_ID` and `GH_APP_PRIVATE_KEY_PATH`, and `deploy/host-update.sh:68` carries
+    the same three in `RMD_DAEMON_RUNTIME_ENV_VARS`. The names exist and are maintained; only the
+    console's own launcher omits them.
+
+    (F) AN ADJACENT OBSERVATION, RECORDED WITHOUT WIDENING `files:`. The same printed runbook
+    documents `state/PAUSE` and `state/STOP` as PLAIN FILES under the state root —
+    `touch ${STATE_DIR}/state/PAUSE` and `touch ${STATE_DIR}/state/STOP`, with "no exec, no
+    console, works from a phone" as the stated reason. THAT IS A LOCAL PAUSE SURFACE DISTINCT FROM
+    `refs/rmd-pause/hold`. W1-T2264 found that the latch block can only see file-backed holds;
+    THIS IS WHY — the board was built when the file was the only pause there was, and the ref-
+    backed hold arrived later beside it rather than replacing it. CITED, NOT RE-FILED, AND
+    DELIBERATELY NOT IN THIS TASK'S `files:`.
+
   design: |
     **Q1 — WHAT THE CONSOLE DOES WITH THE TOKEN: IT WRITES, SO THIS IS AN AUTHORITY QUESTION AND
     THE SHARD IS THE LARGER OF THE TWO SHAPES THE BRIEF OFFERED.**
