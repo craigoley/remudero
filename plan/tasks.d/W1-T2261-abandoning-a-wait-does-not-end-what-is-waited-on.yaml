@@ -1,0 +1,161 @@
+- id: W1-T2261
+  title: "ABANDONING A SPAWN DOES NOT END IT — the reclaim exists and is awaited, but it kills only a process carrying an attribution marker that the fix-rung spawn never sets, so the loop inspects every process, matches none, and returns silently"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  rationale: |
+    **Q1 — THE BRIEF'S HYPOTHESIS IS REFUTED FROM SOURCE, AND WHAT IS THERE INSTEAD IS WORSE.** The
+    hypothesis offered was that abandonment "logs and returns while a reader stays attached to a live
+    child's stdout". That is not what the code does. `spawnFixWorkerBounded` (`src/run-task.ts:5834`)
+    races `deps.spawn(args)` against a `setTimeout` bound (`:5855`), and on the abandoned branch it
+    ledgers `fix.spawn_abandoned` FIRST (`:5861`) and then **AWAITS A KILLER**:
+    `await deps.reclaimWorker?.({ runId, taskId, elapsedMs })` at `:5869`, wrapped in a catch that
+    logs `fix.spawn_reclaim_failed`. Its own doc says so at `:5820-5822` — *"The real `deps.spawn`
+    promise is NEVER cancelled by this function alone … `deps.reclaimWorker` (best-effort) is what
+    actually stops the process."* The awaiter IS released and a kill IS attempted. So the question is
+    not "why is there no kill" but "why did the kill not fire".
+
+    **THE ANSWER IS A PREDICATE THAT CANNOT MATCH.** `reclaimAbandonedWorker` (`:5780`) is five
+    lines of logic: enumerate candidates, read each one's markers, and
+    `if (markers?.runId === info.runId) kill(candidate.pid)` (`:5800`). `defaultReadMarkers`
+    (`src/lib/worker-containment.ts:456`) reads a pid's ENVIRONMENT via `ps eww -o command= -p <pid>`
+    and returns a match only when BOTH `REMUDERO_RUN_ID` and `REMUDERO_TASK_ID` are present (`:463-465`).
+    Those markers reach a child exactly one way: `spawnWorker` merges
+    `workerMarkerEnv(args.runId, args.taskId)` into the child env (`src/lib/worker.ts:978`), and
+    `workerMarkerEnv` OMITS a key whose id is absent (`worker-containment.ts:300-301`).
+
+    **AND THE FIX-RUNG SPAWN NEVER SETS THEM.** `fixArgs` (`src/run-task.ts:6636-6653`) is the
+    `SpawnWorkerArgs` object the rung hands to `spawnFixWorkerBounded`. MEASURED ON THIS HEAD: it sets
+    **zero** of `runId`/`taskId`, against a control of **ten** other fields it does set on the same
+    object. `SpawnWorkerArgs` declares both as optional (`worker.ts:783-784`). So the worker is
+    launched with no attribution marker, `defaultReadMarkers` returns `undefined` for it, the
+    comparison is `undefined === info.runId`, and **THE KILL NEVER FIRES ON THE ONE PROCESS IT WAS
+    CALLED TO KILL.**
+
+    **AND `ps` IS NOT THE PROBLEM, WHICH IS WORTH STATING BECAUSE IT IS THE OBVIOUS SUSPECT.** MEASURED
+    ON THIS HOST: a probe process spawned with both markers is listed by `ps -eo pid=,command=` and
+    its environment IS readable via `ps eww` — both variables visible. The enumeration and the read
+    both work. The defect is upstream of them, in what was never written into the child's env.
+
+    **THE FAILURE IS SILENT IN BOTH DIRECTIONS.** `reclaimAbandonedWorker` returns `void` and wraps
+    its whole loop in `try { … } catch { /* best-effort */ }` (`:5797-5804`). A run that matched
+    nothing and a run that killed something are INDISTINGUISHABLE in the ledger: there is no log on
+    the no-match path, and `fix.spawn_reclaim_failed` can never fire for this function because it
+    swallows its own throws rather than propagating them. So the abandon line the operator saw —
+    `ABANDONED strike 1/2 — worker spawn exceeded its 3600015ms wall-clock bound` — is emitted
+    identically whether the process died or survived.
+
+    **WHAT THE OPERATOR OBSERVED IS CONSISTENT WITH THIS AND WITH NOTHING ELSE THAT WAS CHECKED.** At
+    03:42:23Z the rung logged the abandonment; at 06:53Z `ps` inside the container showed
+    `claude --output-format stream-json … --max-turns 400` alive at `04:10:51` elapsed, with two
+    `bwrap --die-with-parent` sandboxes beneath it — the bound had expired twenty-eight minutes
+    earlier and the process was still running. The alternatives were ruled out by the same capture:
+    core rate limit 5000/5000 and graphql 4984/5000 (not throttling), zero `refs/rmd-dispatch/*` (no
+    stranded claim), container `running` with `ExitCode=0` and `OOMKilled=false`, and
+    `state/drain.lock` holding the LIVE daemon's own inner node pid — so this is not W1-T1067's
+    restart-strands-the-lock: **THE HOLDER WAS ALIVE AND BLOCKED.**
+
+    **ONE THING THIS TASK DOES NOT CLAIM.** Why the daemon then wrote nothing for three hours eleven
+    minutes is NOT established from source here. The abandon path returns, and both the sweep tick
+    (`daemon.ts:1664`) and the fix spawn are separately bounded, so a released rung ought to let the
+    loop continue. The surviving worker is the confirmed defect; the stall that followed it is
+    consistent with, but not proven by, this mechanism, and saying otherwise would be inventing a
+    causal chain the evidence does not carry.
+
+    **Q2 — WHY NOTHING ALARMED, AND THE BRIEF'S FRAMING NEEDS ONE CORRECTION.** The brief says a stall
+    "looks identical to idle". Since W1-T1274 that is no longer true: `runDaemon` writes an
+    UNCONDITIONAL `daemon.tick` row as **literally the first statement of the loop body**
+    (`src/lib/daemon.ts:2372`), placed there deliberately — its own comment says *"before even
+    `checkStop`, so it cannot be skipped by any branch below"* — precisely because the `daemon.`
+    prefix had previously gone silent for 102.5 minutes on a live daemon. **SO ABSENCE OF
+    `daemon.tick` IS UNAMBIGUOUS: THE LOOP BODY DID NOT RUN.** An idle daemon still ticks.
+
+    **THE SIGNAL EXISTS, IS READ, AND ESCALATES NOWHERE.** `src/lib/daemon-health.ts` derives
+    last-poll from the max `ts` across every `daemon.`-prefixed line, and it is consumed by
+    `serve.ts`, `status-board.ts`, `doctor.ts`, `panel-actions.ts`, `idle-reasons-panel.ts` and
+    `account-usage.ts`. MEASURED: `escalate(` appears **zero** times in `daemon-health.ts`. **IT IS A
+    RENDERER, NOT AN ALARM.** A human looking at the console would have seen a last-poll timestamp
+    three hours stale; nothing paged, nothing opened an issue, and no rung acted. That is the half of
+    this that cost hours, and it is a different defect from the one above — the detector is present
+    and correct, and has no consumer that raises.
+
+    **Q3 — WHAT MUST NOT CHANGE. THE BOUND STAYS, AND STAYS AT ITS CURRENT VALUE.** W1-T1044 exists
+    because an unbounded spawn is worse: its own doc records that neither `maxTurns` nor
+    `maxBudgetUsd` can fire on a shell command that never returns — *"it burns no turn and no dollar.
+    This is the ONLY thing that can."* Lengthening the wait is not the remedy and is explicitly not
+    proposed. **NOTHING KILLS A WORKER THAT IS STILL PRODUCING OUTPUT** — the trigger stays the
+    wall-clock bound as it is today, not a new liveness heuristic over the output stream. **THE
+    CONTAINMENT SANDBOXES KEEP `--die-with-parent`**, which is what makes killing the parent group
+    sufficient rather than requiring the children be hunted individually. **THE REMEDY IS THAT
+    ABANDONING A WAIT MUST ALSO END WHAT IS BEING WAITED ON** — the marker the reclaim matches on has
+    to be set at the spawn that will later be abandoned, and a reclaim that matches nothing must say
+    so rather than returning like a success.
+  acceptance:
+    - claim: "a fix-rung spawn carries the attribution markers its own abandonment path later matches on"
+      proof: "unit test: test/abandon-reclaims-the-worker.test.ts"
+    - claim: "an abandonment whose markers match invokes the injected teardown seam exactly once for that candidate"
+      proof: "unit test: test/abandon-reclaims-the-worker.test.ts"
+    - claim: "a reclaim that matches no candidate records that outcome distinctly from one that invoked the teardown"
+      proof: "unit test: test/abandon-reclaims-the-worker.test.ts"
+    - claim: "the wall-clock bound keeps its committed value, and a spawn that has not exceeded it never reaches the teardown seam"
+      proof: "unit test: test/abandon-reclaims-the-worker.test.ts"
+    - claim: "a teardown seam that throws leaves the rung's verdict unchanged rather than propagating into it"
+      proof: "unit test: test/abandon-reclaims-the-worker.test.ts"
+  files: [src/run-task.ts, src/lib/worker-containment.ts, test/abandon-reclaims-the-worker.test.ts]
+  status: queued
+  attempts: 0
+  origin: "operator-brief#abandon-does-not-end-the-spawn-2026-08-25"
+  plan_refs: ["W1-T1044", "W1-T1274", "W1-T1067", "W1-T117"]
+  note: |
+    **`files:` IS DRAWN AGAINST THE DEFECT.** The marker must be set where the spawn is constructed
+    (`src/run-task.ts`) and is read by the primitives in `src/lib/worker-containment.ts`; a fix that
+    touched only the first would leave the read side unproven, and one that touched only the second
+    would fix nothing. The declaration is a bare single-line list so `SHARD_FILES_LINE_RE` matches and
+    the forward-reference exemption applies — a block-style list silently forfeits it.
+
+    **THE PROOF PATH DOES NOT EXIST, AND THE FALSIFIER FOR THAT MUST DISCRIMINATE.**
+    `test/abandon-reclaims-the-worker.test.ts` is absent from the tree. A NON-EXISTENT control path
+    reads `hits: 0` and `verdict: fail` exactly as the declared target does, so it proves nothing; the
+    discriminating control is an EXISTING path, which resolves to real tests while the declared one
+    cannot.
+
+    **WHAT THIS TASK DOES NOT OWN.** The bound's VALUE is W1-T1219's (one policy row derived from
+    sweep-tick durations and applied to a fix spawn) and is not re-litigated here. The
+    restart-strands-the-lock failure is W1-T1067's and was explicitly ruled out by the capture: the
+    lock held the live daemon's own inner pid. The liveness ROW is W1-T1274's and works; what is
+    missing is a consumer that escalates on it, which this shard records under Q2 rather than
+    re-filing.
+
+    **RISK BAND — BOTH READINGS.** SPAN: `files:` crosses `src/` and `test/` and names two source
+    files, so Rule 19's span reading is `high`. The band EXEMPTS the sizing check rather than clearing
+    it — `sizingViolation` returns `undefined` outright at `high` — so a clean lint is not evidence
+    the span was vetted. BLAST RADIUS: narrow on the marker itself (two fields on one object literal),
+    wider on the reclaim's reporting, because a no-match log turns a currently-silent path into one
+    that speaks on every abandonment.
+
+    **THE FALSIFIER.** Falsified if an abandoned spawn's process still survives after the markers are
+    set — that would mean the match is not the only thing blocking the kill. Also falsified if a
+    worker still producing output is killed, if the bound's value moves, or if a reclaim failure
+    begins throwing into the rung instead of degrading.
+
+    **MEASUREMENT PROVENANCE.** Host `vm`, `/usr/bin/bash`, uid 0. Scratch worktree at a fresh path,
+    `HEAD == origin/main` proven by sha, `--is-shallow-repository` false (2188 commits) checked before
+    any history query, removed after. `src/run-task.ts` is 1,542,304 bytes — over the Contents API's
+    1 MB cap, where it returns an empty body that greps to a clean zero — so every figure came from
+    the sha-proven worktree. Fetched `refs/rmd-id/*` verified 380 local against 380 remote BEFORE
+    sweeping. Source lines were read BY LINE NUMBER, not from grep output. **THE `ps` CLAIM WAS
+    MEASURED RATHER THAN RECALLED**: an earlier session note that `ps` could not read a process
+    environment did NOT hold here and was discarded rather than carried.
+
+    **ID PROVENANCE — UNUSED, NOT OWNED.** The reservation ref exists against a namespace of 380; its
+    anchor was deliberately NOT checked. Eight surfaces verified UNUSED, each control pre-qualified on
+    its own surface, and **ONE SURFACE RE-QUALIFIED TWICE**: the open-PR-title control `W1-T` read 0
+    across three open PRs, a second attempt on `fix(` also read 0, and it was finally qualified on
+    `refactor(` = 2 — reporting the target's zero under either failed control would have been
+    unsupported. THE SUBJECT WAS SWEPT: no shard names `fixArgs` or `workerMarkerEnv`, against a
+    control of one shard naming `spawnFixWorkerBounded` (W1-T1219, about the bound's value); the two
+    shards matching `reclaim.*silent` were opened and are W1-T1067 and W1-T396, neither this.
