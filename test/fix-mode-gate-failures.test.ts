@@ -18,12 +18,17 @@
  *   (ii)  `reviewer-unmet`'s own rule is now named (`unmetCriteria.length > 0`), never an
  *         unconditional catch-all — `deriveFixMode`'s total-function fallback still names it
  *         for the residual shape (no unmet criteria, no gate failure, no CI/merge-conflict
- *         evidence), unchanged from before this task: that shape still dispatches off the
- *         review's own `summary`, spends its strike, and — on exhaustion — still escalates,
- *         never silently suppressed (W1-T487, `test/escalation-evidence-floor.test.ts`,
- *         protected and out of this task's scope — round 1 of this task tried adding a
- *         pre-dispatch stand-down for that residual shape and it broke that protected
- *         invariant; removed here, not carried forward).
+ *         evidence). That shape's FIRST round still dispatches off the review's own `summary`
+ *         and spends a strike, exactly as before this task — an early attempt at this task
+ *         stood that shape down BEFORE its first strike and broke the protected W1-T487
+ *         invariant (`test/escalation-evidence-floor.test.ts`, out of this task's scope: every
+ *         one of its blocked_review fixtures pins this exact shape to dispatch-then-escalate on
+ *         its one and only round). `runFixRung`'s `rung.empty_review_evidence` guard now instead
+ *         stands the SAME shape down under a named reason — never silently defaulting again —
+ *         once it has ALREADY spent one honest strike and recurs UNCHANGED on a later round
+ *         (see the "mid-rung recurrence" test below): the review remains failing either way, so
+ *         exhaustion still escalates for a rung that keeps genuinely trying, and no strike is
+ *         ever wasted twice on the identical nothing-to-act-on shape.
  *   (iii) PINNED, UNCHANGED: the strike cap; a real unmet-criteria dispatch renders exactly
  *         as before; no review failure is ever treated as if it passed.
  */
@@ -282,11 +287,15 @@ test("runFixRung (criteria 1/2, round 1): unmetCriteria EMPTY but actionableGate
   assert.equal(dispatched[0].extra?.unmet_count, 0, "unmet_count is honestly 0 — the remedy is carried in a SEPARATE field, not manufactured as a fake criterion");
 });
 
-// ── criterion 4 — neither unmet criteria nor a named remedy: still dispatches, unchanged ────────
-// (round 1 of this task tried a pre-dispatch stand-down for this residual shape; it broke the
-// protected W1-T487 invariant in test/escalation-evidence-floor.test.ts — identical inputs
-// (an empty-criteria failing review) there are pinned to dispatch-then-escalate, never a
-// silent stand-down, so that behavior is not carried forward here. See this file's own header.)
+// ── criterion 4 — neither unmet criteria nor a named remedy ─────────────────────────────────────
+// ROUND 1 still dispatches, unchanged: an early attempt at this task tried a pre-dispatch
+// stand-down for this residual shape's very FIRST round and it broke the protected W1-T487
+// invariant in test/escalation-evidence-floor.test.ts — identical inputs (an empty-criteria
+// failing review) there are pinned to dispatch-then-escalate on THEIR one and only round, so
+// that early-round stand-down is not carried forward here. From round 2 on, once this exact
+// shape has already spent one honest strike and recurs UNCHANGED, `runFixRung` now DOES stand
+// the round down under a named reason instead of defaulting again — see the "mid-rung
+// recurrence" test below and this file's own header, design note (ii).
 
 test("runFixRung (criterion 4, round 1): unmetCriteria EMPTY and actionableGateFailures EMPTY/absent still dispatches as reviewer-unmet off the review's own summary — never defaults to a NEW stand-down that W1-T487 forbids for this exact shape", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
@@ -319,6 +328,49 @@ test("runFixRung (criterion 4, round 1): unmetCriteria EMPTY and actionableGateF
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0].extra?.mode, "reviewer-unmet", "the total-function fallback, unchanged from before this task");
   assert.equal(dispatched[0].extra?.unmet_count, 0, "honestly 0 — no gate-fix remedy was ever named for this shape");
+});
+
+test("runFixRung (criterion 1, mid-rung recurrence): unmetCriteria EMPTY and actionableGateFailures EMPTY recurring UNCHANGED on round 2 stands down under a named reason — round 1 still spends its honest strike, exactly as W1-T487 requires, but round 2 never wastes a second strike on the identical nothing-to-act-on shape", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const issues = fakeIssueStore();
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts({ id: "W1-T2236G", title: "some task" }),
+    strikeCap: 3,
+    initialReview: reviewVerdict({ criteria: [], summary: "remudero-review: FAIL — contradictory" }),
+    // No `actionableGateFailures:` — the genuinely-unclassifiable shape, both rounds.
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      // Every re-review is the SAME nothing-to-act-on shape: still failing, still zero criteria,
+      // no test theater — round 1's strike genuinely bought no new information.
+      runReview: async () => reviewVerdict({ state: "failure", criteria: [], testTheater: false, headSha: "sha-1" }),
+      push: () => {},
+      issues,
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => logs.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "round 1 dispatches honestly — the guard never fires before a rung's FIRST strike (W1-T487)");
+  assert.equal(outcome.outcome, "stood_down", "round 2 stands down instead of spending a second strike on the identical empty evidence");
+  assert.match(
+    outcome.standDownReason ?? "",
+    /no unmet acceptance criterion and no actionable gate failure named/,
+    "the stand-down carries a NAMED reason, never a silent default",
+  );
+  assert.equal(issues.calls.length, 0, "a stand-down is not an escalation — no needs-human issue opens here");
+  const dispatched = logs.filter((l) => l.step === "fix.dispatch");
+  assert.equal(dispatched.length, 1, "only round 1's strike was ever spent");
+  const stoodDown = logs.filter((l) => l.step === "fix.stood_down" && l.extra?.site === "rung.empty_review_evidence");
+  assert.equal(stoodDown.length, 1);
+  assert.equal(stoodDown[0].extra?.strike, 2, "logged against the strike it refused to spend");
 });
 
 test("runFixRung (criteria 1/2, mid-rung recurrence): round 2's fresh re-review is itself a gate failure (testTheater true) — derived FRESH off the live review, never the stale round-1 seed, and dispatches in gate-fix mode", async () => {

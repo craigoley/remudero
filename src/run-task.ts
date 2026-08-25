@@ -4528,16 +4528,17 @@ interface FixModeRule {
  *                        not unconditional — see this doc block's own header, above. An
  *                        evidence shape that reaches NONE of these five rows (no unmet
  *                        criteria, no named gate failure, no CI/merge-conflict evidence) still
- *                        DISPATCHES — `deriveFixMode`'s fallback below names `reviewer-unmet`
- *                        for it, exactly as the old unconditional catch-all did, so the
- *                        review's own `summary` (never empty for a failing review) still gives
- *                        a fix worker something to act on and, on exhaustion, the rung still
- *                        escalates rather than silently suppressing an empty-evidence failure
- *                        (W1-T487, `test/escalation-evidence-floor.test.ts` — protected, not in
- *                        this task's scope). This task narrows WHICH shapes fall through to
- *                        this row (naming `gate-fix` ahead of it whenever the sweep already
- *                        computed a structured remedy) — it does not add a new way to avoid
- *                        dispatching one at all.
+ *                        DISPATCHES on its FIRST such round — `deriveFixMode`'s fallback below
+ *                        names `reviewer-unmet` for it, exactly as the old unconditional
+ *                        catch-all did, so the review's own `summary` (never empty for a
+ *                        failing review) still gives a fix worker something to act on that one
+ *                        time, honoring `test/escalation-evidence-floor.test.ts` (W1-T487,
+ *                        protected, not in this task's scope — every one of its blocked_review
+ *                        fixtures pins this exact shape to dispatch-then-escalate on ITS one
+ *                        and only round). `runFixRung`'s own pre-strike guard (site
+ *                        `rung.empty_review_evidence`) stands the SAME shape down under a
+ *                        named reason, rather than defaulting again, once it has already spent
+ *                        one honest strike and recurs unchanged — see that guard's own doc.
  */
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
@@ -6671,8 +6672,12 @@ export async function runFixRung(opts: {
     // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden — the fix rung dispatches
     // an actual coding worker, so its unmet-criteria block must never carry a holdout criterion's
     // claim/proof text (visibleCriteria is the same filter renderAnchorBlock and runReview's
-    // ledger/PR-comment text use).
-    const unmet = visibleCriteria(review.criteria.filter((c) => !c.met));
+    // ledger/PR-comment text use). `rawUnmet` (unfiltered) is kept alongside `unmet` (visible-
+    // only) so the empty-review-evidence guard below can tell "genuinely nothing unmet" apart
+    // from "unmet, but only on a WORKER-hidden holdout criterion" (W1-T2236 design note i) —
+    // the latter must keep dispatching off the review's own redacted summary, never stand down.
+    const rawUnmet = review.criteria.filter((c) => !c.met);
+    const unmet = visibleCriteria(rawUnmet);
     // W1-T2236: this round's structured gate-failure remedy (the `gate-fix` mode's ONLY input —
     // see {@link FixEvidence.actionableGateFailures}'s own doc). Review-mode rounds only (never
     // ci-log/merge-conflict, which carry their own evidence shape). ROUND 1 (`strikes === 0`)
@@ -6689,17 +6694,54 @@ export async function runFixRung(opts: {
     // VISIBLE unmet criterion too; without this guard a single genuine unmet criterion
     // (`reasons.length === 1`, the ordinary case) would be misread as a single-form gate-failure
     // remedy and wrongly derive `gate-fix` mode instead of `reviewer-unmet` (design note i is
-    // additive, never a widening of when a gate failure is claimed, and NEVER a new reason to
-    // avoid dispatching: an evidence shape with neither a real unmet set nor a named gate
-    // failure still dispatches as `reviewer-unmet` off the review's own `summary`, spends its
-    // strike, and — on exhaustion — still escalates, exactly as before this task; see
-    // `test/escalation-evidence-floor.test.ts`, W1-T487, protected and out of this task's scope).
+    // additive, never a widening of when a gate failure is claimed). An evidence shape with
+    // neither a real unmet set nor a named gate failure still dispatches ONCE, as
+    // `reviewer-unmet` off the review's own `summary` (see the guard immediately below for
+    // what happens if it recurs) — see `test/escalation-evidence-floor.test.ts`, W1-T487,
+    // protected and out of this task's scope.
     const gateFailuresNow: ActionableGateFailure[] | undefined =
       currentMergeConflict === undefined && !noReviewYet && unmet.length === 0
         ? strikes === 0 && opts.actionableGateFailures !== undefined
           ? opts.actionableGateFailures
           : actionableGateFailuresFromReasons(reviewLedgerReasons(review))
         : undefined;
+
+    // W1-T2236 SITE — THE EMPTY-REVIEW-EVIDENCE GUARD, BEFORE `strikes++`: a review-mode round
+    // (merge-conflict/ci-log rounds carry their own evidence shape and their own guards above)
+    // whose review is FAILING with `rawUnmet` empty (design note i: NOT ONLY the worker-visible
+    // `unmet` — a review can fail on a holdout criterion ALONE (W1-T166), which empties the
+    // visible `unmet` set while `rawUnmet` still carries the real, hidden reason; that shape
+    // must keep dispatching exactly as before, via the review's own redacted summary, never
+    // stand down) AND no structured gate-failure remedy either has NOTHING to hand a fix worker.
+    //
+    // Round 1 of THIS rung (`strikes === 0`) ALWAYS dispatches on that shape regardless of this
+    // guard — see `test/escalation-evidence-floor.test.ts` (W1-T487, protected, out of this
+    // task's scope): every one of its blocked_review fixtures runs `strikeCap: 1` and pins this
+    // EXACT evidence shape (empty criteria, no gate failure) to dispatch-then-escalate on that
+    // single round; a pre-strike stand-down that ALSO fired on round 1 (this task's own first
+    // attempt) broke that pinned invariant and was reverted (see git history on this file). This
+    // guard only fires once that same nothing-to-act-on shape has ALREADY consumed one honest
+    // strike (`strikes > 0`) and then recurs UNCHANGED on a later round: spending a second,
+    // third, ... strike on literally the same empty evidence is exactly the waste W1-T1282's
+    // sibling ci-log guard (`rung.empty_ci_failures`, above) already refuses for the analogous
+    // shape. Never falls through to a strike, never logs `fix.dispatch` — ledgers the reason and
+    // stands down instead, exactly as `rung.empty_ci_failures` does. The review itself is left
+    // UNTOUCHED and still FAILING, so nothing here arms a merge (design note iv).
+    if (
+      currentMergeConflict === undefined &&
+      !noReviewYet &&
+      strikes > 0 &&
+      rawUnmet.length === 0 &&
+      (gateFailuresNow?.length ?? 0) === 0
+    ) {
+      const reason =
+        "review failing with no unmet acceptance criterion and no actionable gate failure named, " +
+        "recurring after an honest first strike already found this same nothing-to-act-on shape — " +
+        "standing down rather than spending another strike on unchanged empty evidence";
+      deps.log("fix.stood_down", { site: "rung.empty_review_evidence", strike: strikes + 1, reason });
+      deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
+      return { outcome: "stood_down", review, strikes, reason, standDownReason: reason };
+    }
 
     // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
     // binary crash that debited a fix-rung strike, and escalated, on a worker that
