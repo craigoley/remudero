@@ -27,7 +27,13 @@ import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
-import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "./compaction.js";
+import {
+  detectCompactionEvents,
+  detectCompactionFailures,
+  isQualitySuspect,
+  type CompactionEvent,
+  type CompactionFailure,
+} from "./compaction.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { pgrepFailureMeansZero } from "./deployer.js";
 import { isHolderStale, type IsHolderStaleOpts } from "./fs-race-safe.js";
@@ -189,6 +195,38 @@ export interface WorkerResult {
    * MASTER-PLAN §8B) — this call's acceptance proofs must be re-verified
    * against repo state (W1-T3F), never trusted from a possibly-lossy REPORT.
    */
+  /**
+   * W1-T2245: compaction ATTEMPTS that FAILED — read off the SDK's `compact_result: 'failed'`
+   * channel (`SDKStatusMessage`, sdk.d.ts:4684), which carries NO `compact_boundary` message and so
+   * was previously invisible to `compactionEvents`/`qualitySuspect` entirely: an attempted-and-
+   * failed compaction read identically to one that never happened. `[]` when no failure was seen —
+   * same "empty means checked, not absent" discipline as `compactionEvents` itself. Deliberately
+   * NOT folded into `qualitySuspect`: a FAILED attempt compacted nothing, so the call's content is
+   * no more suspect than before — `qualitySuspect` keeps its exact current meaning (fires ONLY off
+   * a real boundary), per this task's own constraint that existing compaction fields are untouched.
+   * Optional (never `[]`-by-force) purely so the dozens of hand-built `WorkerResult` fixtures across
+   * test/ that predate this task keep typechecking unmodified — `workerLedgerFields` below treats an
+   * absent value as `[]`, identical to what a real `collectWorkerResult` call always returns.
+   */
+  compactionFailures?: CompactionFailure[];
+  /**
+   * W1-T2245: whether THIS spawn's `Options` object carried `autoCompactEnabled: true` — the row's
+   * answer to "was auto-compaction even possible here", so `quality_suspect: false` +
+   * `compactionEvents: []` can be read as NEVER-NEEDED (configured, never fired) rather than
+   * guessed to mean the same thing as DISABLED (never configured at all). Read off `options`
+   * itself at the spawn call site (never a second source), via an index/`in` check rather than a
+   * property access: `Options` (sdk.d.ts 0.3.233 ground truth) declares NO `autoCompactEnabled` key
+   * at all — that lives only on the separate `Settings` interface, reachable only through a loaded
+   * settings file, and `spawnWorker` always passes `settingSources: []`. So this reads `false` on
+   * every call today, and that IS the finding this task exists to ledger: the fleet has no live
+   * channel to turn auto-compaction on, and the zero was previously silent about it. This task
+   * adds NO key to `options` — it only reads whatever is already there, so a future spawn path
+   * that legitimately sets the option (not this one) is picked up rather than needing this call
+   * site edited. Optional for the SAME reason `compactionFailures` above is: existing hand-built
+   * `WorkerResult` fixtures across test/ keep typechecking unmodified; `workerLedgerFields` treats
+   * an absent value as `false`, identical to what a real `collectWorkerResult` call always returns.
+   */
+  compactionConfigured?: boolean;
   /**
    * Worker-home grants that were LOST or HEALED for this spawn (see
    * {@link lostWorkerHomeGrants}) — absent when every grant landed, which is the overwhelmingly
@@ -352,6 +390,12 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * was configured with, beside `num_turns` rather than replacing it, means every
  * historical row stays checkable against its own cap forever, independent of
  * whatever mounts.yaml says today.
+ *
+ * `compaction_configured`/`compaction_failures` (W1-T2245) ride the SAME line for the SAME
+ * reason: a reader of `quality_suspect: false` / `compaction_events: []` could not previously
+ * tell DISABLED (compaction never configured) from NEVER-NEEDED (configured, just never fired)
+ * from FAILED (attempted, and the SDK's own `compact_result: 'failed'` channel went unread). All
+ * three now ride this one line, so the zero explains itself without a second query.
  */
 export function workerLedgerFields(r: WorkerResult): {
   model: string;
@@ -365,6 +409,8 @@ export function workerLedgerFields(r: WorkerResult): {
   verdict: string;
   quality_suspect: boolean;
   compaction_events: CompactionEvent[];
+  compaction_configured: boolean;
+  compaction_failures: CompactionFailure[];
   max_turns?: number;
   stderr_excerpt?: string;
   lost_grants?: string[];
@@ -398,6 +444,12 @@ export function workerLedgerFields(r: WorkerResult): {
     verdict: r.isError ? r.subtype : "success",
     quality_suspect: r.qualitySuspect,
     compaction_events: r.compactionEvents,
+    // W1-T2245: default `false`/`[]` for the same "optional so the pre-existing fixture literals
+    // across test/ keep typechecking" reason both fields on WorkerResult are optional — a real
+    // `collectWorkerResult` call always populates both explicitly, so this default is exercised
+    // only by hand-built results that predate this task.
+    compaction_configured: r.compactionConfigured ?? false,
+    compaction_failures: r.compactionFailures ?? [],
     // W1-T477: per-call wall-clock, mirrored verbatim off `WorkerResult.workerDurationMs` — see
     // that field's own doc. `undefined` (never a guessed 0) on a hand-built test fixture that
     // never went through a real spawn; JSON.stringify drops an undefined key, so an untimed call's
@@ -1086,6 +1138,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // caller configured no cap, never a guessed value.
             maxTurns: args.maxTurns,
             lostGrants,
+            // W1-T2245: see {@link WorkerResult.compactionConfigured}'s own doc — read off THIS
+            // spawn's `options` via `in`/index access (never a property access `Options`'s type
+            // does not declare), never written here. `options` never sets this key today, so this
+            // is `false` on every real spawn; it exists so the ledger row says so explicitly
+            // instead of a reader having to re-derive it from source.
+            compactionConfigured: (options as Record<string, unknown>).autoCompactEnabled === true,
             // W1-T942: forwarded verbatim (wrapped with the watchdog's own observer above when a
             // clock bound is configured) — see SpawnWorkerArgs.streamObserver's doc.
             streamObserver,
@@ -1440,6 +1498,12 @@ export async function collectWorkerResult(
     /** See {@link WorkerResult.lostGrants} — mirrored verbatim, never re-derived here. */
     lostGrants?: WorkerHomeGrantOutcome[];
     /**
+     * W1-T2245: configured input, mirrored verbatim — see {@link WorkerResult.compactionConfigured}.
+     * Defaults to `false` (never guessed `true`) for every existing caller/test that omits it,
+     * matching every call site in this repo today: `spawnWorker` never sets `autoCompactEnabled`.
+     */
+    compactionConfigured?: boolean;
+    /**
      * W1-T942: invoked per message, classified by kind, with THIS call's own injected clock
      * reading (never a second `Date.now()` read) — the ONE observer seam the design calls for.
      * Absent (every caller before this task, and every caller that omits it) ⇒ the loop below
@@ -1475,6 +1539,7 @@ export async function collectWorkerResult(
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let modelUsage: Record<string, ModelUsageEntry> = {};
   const compactionEvents: CompactionEvent[] = [];
+  const compactionFailures: CompactionFailure[] = [];
   const nowFn = opts.now ?? Date.now;
 
   try {
@@ -1486,6 +1551,12 @@ export async function collectWorkerResult(
         // same detector a fixture-driven unit test exercises (compaction.ts),
         // so "detected in a test" and "detected live" can never drift apart.
         compactionEvents.push(...detectCompactionEvents([raw]));
+        // W1-T2245: reads the SDK's OTHER compaction channel on the SAME message —
+        // `{type:"system", subtype:"status", compact_result:"failed"}` (sdk.d.ts:4684) — never
+        // matched by `detectCompactionEvents` above (it only matches `compact_boundary`), so a
+        // FAILED attempt used to leave no trace at all. No new SDK call, no second stream: this is
+        // the same raw message the boundary detector already receives.
+        compactionFailures.push(...detectCompactionFailures([raw]));
         // W1-T942: a heartbeat — no worker-authored text, but still proof-of-life for the
         // quiet floor (design note ii, "no message of ANY kind").
         opts.streamObserver?.({ kind: "message", tsMs: nowFn() });
@@ -1608,6 +1679,8 @@ export async function collectWorkerResult(
     tokens,
     modelUsage,
     compactionEvents,
+    compactionFailures,
+    compactionConfigured: opts.compactionConfigured ?? false,
     qualitySuspect: isQualitySuspect(compactionEvents),
     workerDurationMs: Date.now() - startedAtMs,
   };
