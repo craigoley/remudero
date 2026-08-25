@@ -1,0 +1,181 @@
+- id: W1-T2277
+  title: "THE DIGEST IS BUILT, HAS A CLI VERB, AND NOTHING EVER FIRES IT — `src/lib/digest.ts` ships `buildDigest`/`sendDigest`/`collectSince` and its own doc says it is 'SCHEDULED by the daemon loop later (W1-T12) — this module owns no clock/cron of its own'; the daemon loop references it zero times, its window is an explicit `since` with no configurable interval, and its ONE delivery adapter is Darwin-only iMessage on a fleet that runs on Linux"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/digest.ts, src/run-task.ts, plan/policy.yaml, test/fleet-digest-cadence.test.ts]
+  origin: oper#recurring-fleet-digest-2026-08-25
+  plan_refs: ["W1-T8", "W1-T12", "W1-T1259", "W1-T2266", "W1-T2257"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main 145099d4 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS. LEDGER FROM `resolveLedgerUnion` AT
+    THE STATE DIR.
+
+    (1) THE ASK IS SMALLER THAN IT LOOKS, BECAUSE THREE OF THE FOUR PARTS ALREADY EXIST, AND A
+    BUILD THAT DOES NOT KNOW THAT WILL REBUILD THEM. `src/lib/digest.ts` ships `collectSince`,
+    `buildDigest`, `sendDigest` and marker-aware siblings; `run-task.ts:25860` and `:25863`
+    already expose a `rmd digest` verb that builds and sends one; and `src/lib/notify.ts` already
+    defines `NotifyChannel { send, unavailable? }` with a `channelName` field — the pluggable
+    delivery seam, already an interface.
+
+    (2) WHAT IS MISSING IS THE CLOCK, AND THE MODULE SAYS SO ITSELF. `digest.ts`'s own header:
+    "assembled here, delivered here, SCHEDULED by the daemon loop later (W1-T12) — this module
+    owns no clock/cron of its own." A case-insensitive grep for "digest" across
+    `src/lib/daemon.ts` returns ONE line, and it is an unrelated comment about folding alert
+    counts into a digest — NO DEP, NO CALL, NO FIRE. THE SCHEDULER W1-T12 PROMISED WAS NEVER
+    WIRED.
+
+    (3) AND THE ONE DELIVERY ADAPTER CANNOT RUN ON THIS FLEET. `notify.ts` defaults
+    `channelName` to "imessage", which its own comment calls "the only adapter W1-T8 ships", and
+    that channel's `unavailable()` is DARWIN ONLY — it drives Messages.app through `osascript`,
+    which "exists on no other platform". THE FLEET RUNS ON LINUX. So even a scheduled digest
+    would report itself undeliverable on every fire until a second adapter exists.
+
+    (4) SO THE GAP IS THREE THINGS AND NOT A REWRITE: a cadence, a configurable window, and a
+    channel that resolves on this host. THE CONSOLE INBOX IS THAT CHANNEL AND IT NEEDS NO CHANGE
+    TO `notify.ts`: the inbox already lives as `inbox-proposals.json` / `inbox-drafts.json` under
+    `config.root`, served by `GET /v1/inbox`, so an inbox adapter is a `NotifyChannel`
+    implementation and nothing more.
+
+    (5) THE CADENCE FITS THE EXISTING ONE WITH NO NEW SCHEDULER AND NO NEW POLICY MACHINERY.
+    `decideMeasurementCadence` (`src/lib/measurement-cadence.ts:113`) already reads a marker,
+    refuses on `enabled: false`, FAILS CLOSED on a corrupt marker, enforces
+    `minIntervalMinutes` against the newest fire and `maxPerDay` against a rolling window, and
+    emits five steps: `measurement_cadence.fired`, `.ran`, `.skipped`, `.check_failed`,
+    `.run_failed`. Its Law 5 pin is in its own doc at `:28`: "Nothing in this module files a task
+    or mints an id."
+
+    (6) AND THE REQUESTED WINDOW SET FITS THE EXISTING POLICY BOUNDS — CHECKED, NOT ASSUMED.
+    `plan/policy.yaml`'s `measurementCadence` row carries `minIntervalMinutes` value 360 with
+    `min: 15, max: 1440`, and `maxPerDay` value 4 with `min: 1, max: 24`. THE REQUESTED SET
+    {1, 2, 4, 8, 12, 24} HOURS MAPS TO 60..1440 MINUTES, INSIDE THAT MIN/MAX, AND THE HOURLY
+    SETTING NEEDS `maxPerDay` 24, WHICH IS EXACTLY ITS DECLARED MAXIMUM. The digest needs its own
+    row rather than sharing the family's, because a 1-hour digest must not drag
+    `rule-efficacy`/`verdict-calibration`/`autonomy-rate` to an hourly cadence — but it needs no
+    new decision function.
+
+    (7) AND #1066'S LESSON IS RECORDED VERBATIM IN THIS TREE, AT `src/run-task.ts:14233`: that PR
+    "shipped the rung's CONSUMER … and never wired a producer … `deps.checkAutoTriage` was
+    therefore `undefined` in every production boot, the `if` was always false, and setting
+    `autoTriage.enabled: true` in policy did nothing at all." THE DIGEST IS THAT SHAPE TODAY —
+    a built consumer nothing constructs. THE PRODUCER FOR THIS FAMILY ALREADY EXISTS AND IS
+    NAMED: `buildMeasurementCadenceDaemonHooks` (`run-task.ts:14819-14847`), wired at `:18704`.
+    A build must reach the loop through it and prove it, or it ships #1066 twice.
+
+    (8) AND THE RETRO IS NOT THIS. The retro already produces a plan-only sync PR — #2814,
+    "r28 retro sync — 4/4 pre-registrations hit, mint P53, rule 12", merged 2026-08-25T11:11:58Z.
+    THE DIGEST SUMMARISES ACROSS RETROS AND MUST NOT RE-DERIVE WHAT ONE ALREADY WROTE: where a
+    retro exists in the window, the digest cites it and moves on.
+  note: |
+    ── Q1. THE DETERMINISTIC HALF AND THE GENERATIVE HALF ──────────────────────────────────────
+
+    (i) THEY BELONG IN ONE ARTIFACT AND MUST BE SEPARABLE INSIDE IT. Splitting them into two
+    deliveries means the operator reads one and not the other, which defeats the point of a
+    digest. Rendering them identically is the defect this repo keeps filing — a suggestion that
+    looks like a measurement is a claim wearing evidence's clothes.
+
+    (ii) THE DETERMINISTIC HALF IS RE-RUNNABLE AND CHECKABLE, AND MUST SAY SO. Merged PRs,
+    verdicts, retros, escalations, cost and containment refusals are a ledger and merged-PR read.
+    EVERY FIGURE IN THAT HALF CARRIES THE QUERY THAT PRODUCED IT, so a reader can re-run it and
+    get the same number. That is the same discipline every measurement in this repo already
+    carries and it is not new work.
+
+    (iii) THE GENERATIVE HALF IS TEXT SOMEBODY WROTE AND MUST BE MARKED AS SUCH — STRUCTURALLY,
+    NOT TYPOGRAPHICALLY. A heading is not enough: a reader skimming on a phone will not track
+    which section they are in. The mark travels with each item, so a suggestion quoted out of the
+    digest is still identifiable as a suggestion.
+
+    (iv) AND THE TEST FOR "HOW DOES A READER TELL THEM APART WITHOUT TRUSTING THE AUTHOR" IS
+    MECHANICAL: a deterministic item that carries no re-runnable query is a BUG, and a generative
+    item that carries one is MISLABELLED. Both are assertable without reading the prose.
+
+    ── Q2. WHAT THE WINDOW COSTS, AND WHY STEP-SCOPING IS THE WRONG AXIS ───────────────────────
+
+    (v) THE COST IS PER READ, NOT PER MATCH, AND THAT CHANGES THE ANSWER. `resolveLedgerUnion`
+    reads and decompresses EVERY rotation in the corpus and applies the pattern PER LINE
+    (`ledger-grep.ts`'s own loop over `rotations`). The pattern filters what is RETURNED, never
+    what is READ. So a step-scoped read costs the same as an unscoped one.
+
+    (vi) WHICH MEANS THE 79,145 ms FIGURE IS NINE FULL READS, NOT ONE READ FILTERED NINE WAYS.
+    Carried and ATTRIBUTED, not re-derived here: #2789 measured "9,101 ms per union read, and
+    79,145 ms across the nine steps a receipt needs, over roughly 150 MB", and W1-T2257 records
+    it as the operator's figure rather than that host's own. THE SAVING IS CALL COUNT, NOT
+    PATTERN NARROWNESS: one union call with an alternation over every step the digest needs,
+    never one call per step family.
+
+    (vii) AND A SCOPED READ DOES STILL INHERIT THE REFUSAL, WHICH IS THE HALF THAT MATTERS.
+    `ok` is "False when `archiveCount === 0` OR any rotation went unread" — COVERAGE, computed
+    from which files were opened, and INDEPENDENT OF THE PATTERN. So the digest can narrow its
+    pattern freely without becoming fast and untrustworthy. WHAT IT CANNOT DO IS READ FEWER
+    ARCHIVES AND KEEP THE REFUSAL; a bounded reader that skips rotations would have to carry its
+    own honest coverage statement, and that is a different task nobody has filed.
+
+    (viii) SO THE WINDOW SETTING BARELY CHANGES THE READ COST. A 1-hour digest and a 24-hour
+    digest read the same corpus; only the post-filter differs. The variable cost is delivery
+    frequency, not read size — which is the opposite of the intuition and is worth stating where
+    a builder will read it.
+
+    ── Q3. HOW DELIVERY STAYS PLUGGABLE, AND WHERE THE INTERVAL LIVES ──────────────────────────
+
+    (ix) THE SEAM IS `NotifyChannel` AND IT ALREADY EXISTS. `notify.ts` defines
+    `{ send(message), unavailable?() }` and ledgers a `notify.sent` line beside every send. The
+    digest must depend on that interface and on nothing below it: it must not know whether it is
+    reaching an inbox, a mailbox or a phone. AN INBOX ADAPTER IS AN IMPLEMENTATION OF THAT
+    INTERFACE AND REQUIRES NO CHANGE TO `notify.ts`, WHICH IS WHY `notify.ts` IS NOT IN `files:`.
+
+    (x) AND THE THREE-VALUED `unavailable()` IS ALREADY THE RIGHT CONTRACT FOR EMAIL LATER. Its
+    own doc pins the doctrine: "unavailable is never silently read as absent, and it is never
+    read as failure either." An email adapter that is not configured yet reports unavailable and
+    the digest still delivers to the inbox — no branch in the digest, no second code path.
+
+    (xi) THE INTERVAL IS A POLICY ROW AND THE CONSOLE WRITE IS MIDDLE TIER. `/v1/quiet-hours` is
+    `tier: "middle"` in `panel-actions.ts` and is the precedent: an operator preference that
+    changes fleet behaviour, gated above a bare acknowledgement and below anything that spends
+    budget. The digest interval belongs at the same tier for the same reason.
+
+    ── WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────────
+
+    (xii) LAW 5. NOTHING THE DIGEST SUGGESTS IS AUTO-FILED OR AUTO-MINTED. A suggestion is text an
+    operator reads. The cadence module's own pin — "Nothing in this module files a task or mints
+    an id" — extends to the fourth verb unchanged, and a build that has the digest open a PR or
+    reserve an id has broken the one rule this whole family is built around.
+
+    (xiii) THE CADENCE KEEPS ITS ZERO WRITE PATHS AND ITS EXISTING VERBS ARE UNTOUCHED.
+    `rule-efficacy`, `verdict-calibration` and `autonomy-rate` keep their shared row, their
+    interval and their behaviour. The digest gets its own row precisely so it cannot drag them.
+
+    (xiv) AND THE DIGEST NEVER SPAWNS A WORKER TO DECIDE WHAT TO SAY ABOUT A TASK. It reports on
+    work already done. If the generative half needs a model at all, it summarises the
+    deterministic half it was just handed — it does not re-open a task, re-read a diff, or form a
+    view about work in flight.
+
+    (xv) AND IT DOES NOT REPLACE THE RETRO. Where a retro landed inside the window, the digest
+    cites its PR and does not re-derive its findings.
+
+    (xvi) RULE 19 BAND. `risk: high` is set UP FRONT because `files:` spans two source stems plus
+    a policy file and Rule 19 sizes on SPAN. THE BAND IS THE SPAN READING AND NOT A BLAST-RADIUS
+    JUDGEMENT: the change adds a policy row, a window argument, and a hook the producer already
+    knows how to construct.
+  acceptance:
+    - claim: "the digest fires on its own cadence from the daemon loop rather than only when a verb is typed"
+      proof: "unit test: test/fleet-digest-cadence.test.ts"
+    - claim: "the interval is read from policy and every value the console offers is inside the declared bounds"
+      proof: "unit test: test/fleet-digest-cadence.test.ts"
+    - claim: "the existing three cadence verbs keep their own row and are not dragged to the digest interval"
+      proof: "unit test: test/fleet-digest-cadence.test.ts"
+    - claim: "every deterministic figure carries the query that reproduces it, and an item without one fails the render"
+      proof: "unit test: test/fleet-digest-cadence.test.ts"
+    - claim: "a generated item is marked per item rather than only by its section, so a quoted line stays identifiable"
+      proof: "unit test: test/fleet-digest-cadence.test.ts"
+    - claim: "the digest depends on the notify channel interface and never on a concrete delivery target"
+      proof: "unit test: test/fleet-digest-cadence.test.ts"
+    - claim: "the digest files nothing, mints nothing, and spawns no worker to judge a task"
+      proof: "unit test: test/fleet-digest-cadence.test.ts"
+    - claim: "a retro that landed inside the window is cited rather than re-derived"
+      proof: "unit test: test/fleet-digest-cadence.test.ts"
