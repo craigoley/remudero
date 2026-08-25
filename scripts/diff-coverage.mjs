@@ -27,9 +27,10 @@
 //
 // Defaults: --lcov coverage/lcov.info; --diff reads the unified diff from stdin if omitted.
 //
-// The pure functions below (parseLcovHitsByFile, addedLinesByFile, findUncoveredAddedLines) are
-// exported so a falsifier fixture test can exercise the CLI process directly (spawn + exit code)
-// as well as the parsing/comparison logic in isolation, the same split coverage-ratchet.mjs uses.
+// The pure functions below (parseLcovHitsByFile, reconcileDuplicateFunctionDeclarations,
+// addedLinesByFile, findUncoveredAddedLines) are exported so a falsifier fixture test can exercise
+// the CLI process directly (spawn + exit code) as well as the parsing/comparison logic in
+// isolation, the same split coverage-ratchet.mjs uses.
 
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
@@ -38,6 +39,20 @@ import { pathToFileURL } from 'node:url';
 /**
  * Parse an lcov report into `Map<filePath, Map<lineNumber, hitCount>>` -- one inner map per
  * `SF:`/`end_of_record` block, populated from that block's `DA:<line>,<hits>` records.
+ *
+ * MULTIPLE `SF:<path>` BLOCKS FOR THE SAME FILE ARE MERGED, NEVER LAST-WINS-REPLACED (W1-T2276).
+ * `--experimental-test-coverage`'s own multi-process merge can emit a SECOND, MALFORMED record
+ * for a file -- observed on `src/lib/ledger.ts`: a test file that cannot report its own coverage
+ * at all (a `startOffset` crash, zero-byte lcov standalone) instead contributes a shifted copy of
+ * ANOTHER module's function table when merged with any sibling, with every `FN:` declaration line
+ * exactly 3 lines above its true position. Before this fix, a second `SF:` line for a path already
+ * seen replaced `current` with a brand-new empty map, so whichever block the reporter happened to
+ * write LAST silently discarded the other block's `DA:` data outright -- measured: 99 lines a
+ * single clean process reports as executed (nonzero `DA:`) read `DA:<line>,0` in the merged
+ * report, over an IDENTICAL 1,510-line `DA:` line-number set (nothing phantom was added to the
+ * denominator; real hits were simply overwritten by a later, zero-valued duplicate). Reusing the
+ * SAME per-line map across every `SF:<path>` block for that path turns the DA: reconciliation
+ * below into the fix, rather than requiring a second pass.
  * @param {string} lcovText
  */
 export function parseLcovHitsByFile(lcovText) {
@@ -48,9 +63,12 @@ export function parseLcovHitsByFile(lcovText) {
   let currentPath = null;
   for (const line of lcovText.split('\n')) {
     if (line.startsWith('SF:')) {
-      current = new Map();
       currentPath = line.slice(3).trim();
-      files.set(currentPath, current);
+      current = files.get(currentPath);
+      if (!current) {
+        current = new Map();
+        files.set(currentPath, current);
+      }
     } else if (line.startsWith('FN:') && current) {
       // FN:<line>,<name> — a function DECLARED at <line>. Under --enable-source-maps the
       // tsx-compiled map scores declaration lines DA:0 even when the function body is fully
@@ -80,14 +98,68 @@ export function parseLcovHitsByFile(lcovText) {
       const enteredByName = fnHits.get(currentPath);
       enteredByName.set(name, (enteredByName.get(name) ?? false) || Number(hits) > 0);
     } else if (line.startsWith('DA:') && current) {
+      // ANY-HIGHER-WINS, never last-wins (W1-T2276, same ANY-NON-ZERO shape FNDA: above already
+      // uses for exactly this reason). A duplicate `DA:<line>,<hits>` for a line already seen in
+      // this file's OTHER `SF:` block(s) can only ever be evidence -- some process really did
+      // execute that line N times -- so keeping the larger of the two counts can never invent a
+      // false claim of coverage; overwriting a real, nonzero count with a later, zero-valued
+      // duplicate (last-wins, the pre-fix behaviour) is what erased 99 genuinely-covered lines to
+      // `DA:<line>,0` in the corrupted merge this task measured.
       const [lineNoStr, hitsStr] = line.slice(3).split(',');
-      current.set(Number(lineNoStr), Number(hitsStr));
+      const ln = Number(lineNoStr);
+      const hits = Number(hitsStr);
+      current.set(ln, Math.max(current.get(ln) ?? 0, hits));
     } else if (line.startsWith('end_of_record')) {
       current = null;
       currentPath = null;
     }
   }
+  reconcileDuplicateFunctionDeclarations(fnLines);
   return { hits: files, fnLines, fnHits };
+}
+
+/**
+ * THE THIRD (file, name) RECONCILIATION, BESIDE `fnLines`'s per-line name LIST and `fnHits`'s
+ * ANY-NON-ZERO merge above (W1-T2276): a merged lcov can carry the SAME function name declared at
+ * TWO DIFFERENT lines in one file -- not "one line declares several functions" (a legitimate,
+ * different shape those two mitigations already handle, W1-T481), but one function whose `FN:`
+ * record itself was emitted twice, at two different line numbers, by two different processes'
+ * merged coverage. Observed on `src/lib/ledger.ts`: 16 function names each carrying two `FN:`
+ * records, every one of the 16 pairs exactly 3 lines apart (`rotateLedger` at both 1095 and 1098;
+ * `appendLedger`, uncorrupted, carries exactly one). Mutates `fnLines` (`Map<path, Map<declLine,
+ * name[]>>`) IN PLACE, same shape as `dedupeRollupByLatestAttempt` (src/lib/sweep.ts): group by
+ * key -- here `(path, name)` -- and collapse every duplicate group down to exactly one entry.
+ *
+ * The kept line is the LARGEST of the duplicate's declared lines. This is not an arbitrary
+ * tie-break: every corrupted pair measured has the malformed record 3 lines ABOVE the function's
+ * true declaration (this task's own title), so the true line is always the larger one; a name
+ * that legitimately appears at only one line is untouched either way. The smaller (phantom) line's
+ * entry is removed for that name only -- never the whole line, which may still legitimately carry
+ * OTHER function names (W1-T481) -- so a function whose real declaration coincidentally shares a
+ * line with a phantom duplicate is unaffected.
+ * @param {Map<string, Map<number, string[]>>} fnLines
+ */
+export function reconcileDuplicateFunctionDeclarations(fnLines) {
+  for (const namesByLine of fnLines.values()) {
+    const linesByName = new Map();
+    for (const [ln, names] of namesByLine) {
+      for (const name of names) {
+        if (!linesByName.has(name)) linesByName.set(name, []);
+        linesByName.get(name).push(ln);
+      }
+    }
+    for (const [name, lines] of linesByName) {
+      if (lines.length <= 1) continue; // no duplicate for this name -- nothing to reconcile.
+      const canonical = Math.max(...lines);
+      for (const ln of lines) {
+        if (ln === canonical) continue;
+        const names = namesByLine.get(ln);
+        const idx = names.indexOf(name);
+        if (idx !== -1) names.splice(idx, 1);
+        if (names.length === 0) namesByLine.delete(ln);
+      }
+    }
+  }
 }
 
 /**

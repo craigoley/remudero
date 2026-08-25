@@ -903,6 +903,25 @@ test("FALSIFIER — W1-T470 coverage-improvement dedupe: dropping the coverage.i
 // re-enter this very mutation test recursively (the target file would spawn itself spawning
 // itself...) — the same reason W1-T951's check lives in dispatch-lifetime-breaker.test.ts
 // rather than inside open-pr-corroboration.test.ts, the file it actually mutates a consumer of.
+//
+// W1-T2276 INVESTIGATION NOTE (design (v)'s "why does this file emit a shifted record" question,
+// answered, not re-litigated): the mutation below writes the REAL, checked-out `src/lib/ledger.ts`
+// to disk for the duration of a child `node --test` spawn, then restores it in a `finally`. Its
+// own `needle` replaces FOUR source lines with ONE (`"report.followups",\n"followup.harvested",\n
+// "followup.deduped",\n]);` → `]); // ... MUTATION ...`) — a net change of exactly MINUS THREE
+// lines, below this point in the file. Under `node --test`'s default (parallel, multi-worker)
+// concurrency, any OTHER worker that transpiles/instruments `src/lib/ledger.ts` while this
+// window is open would source-map its coverage against a copy 3 lines shorter than the committed
+// file — the exact constant offset, and the exact direction (declarations land ABOVE their true
+// line), this task's own title and rationale measured on every one of the 16 corrupted functions.
+// This is a plausible mechanism for the corruption, not a proven one (reproducing it requires the
+// same full, slow multi-file coverage run the rationale used); scripts/diff-coverage.mjs's reader
+// is hardened against the symptom regardless of cause (this task's actual fix, proven by
+// test/lcov-function-record-attribution.test.ts). Closing the race itself — never letting a
+// concurrently-running worker observe a mutated on-disk `ledger.ts` at all, e.g. by mutating an
+// isolated copy instead of the checked-out file — is a separate, riskier change to an established,
+// already-reviewed mutation shape shared with test/dispatch-lifetime-breaker.test.ts's W1-T951
+// check, and is deliberately left as a follow-up rather than folded into this one-concern fix.
 test("W1-T964: removing the pinning fails the idempotency test", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const ledgerTsPath = join(repoRoot, "src", "lib", "ledger.ts");
