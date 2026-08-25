@@ -1,0 +1,139 @@
+- id: W1-T2256
+  title: "`receiptCommand` builds its receipt from `ledgerPathFor(config)` — the live file — while rotation has already moved what it needs into the archives, so 236 of 361 tasks yield a receipt whose every leaf is null; and a second, independent defect survives the union, because four of the five `pr.opened` emitters write no `branch` at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (261b23773f4a35e84074c360c0826393af52cde6), clone shallow-checked `false`. `src/run-task.ts` read
+    through git objects. No suite, no spawning verb, no poller. Ledger read through
+    `resolveLedgerUnion` at the STATE dir with step names grepped from source; every figure below was
+    produced by REBUILDING receipts with the module's own `buildReceipt`, never by inspection.
+
+    (1) THE MECHANISM, WITH THE CALL SITE NAMED. `receiptCommand` (`src/run-task.ts`) resolves
+    `const ledgerPath = ledgerPathFor(config)` and hands `readLedgerLines(ledgerPath)` straight to
+    `buildReceipt` on the next line. THAT IS THE LIVE FILE, NOT THE UNION. Meanwhile `rotateLedger`
+    retains only the newest rows per step and archives the rest, so by the time anyone asks for a
+    merged PR's receipt, the run's own `implement.done`, `pr.opened` and `learnings.injected` lines
+    have almost always left the file the verb reads. The reader is pointed at the one place the
+    evidence is least likely to still be.
+
+    (2) BOTH NUMBERS, BECAUSE THE UNION FIXES MOST OF IT AND NOT ALL OF IT. Rebuilding every receipt
+    the ledger knows, measured 2026-08-25 at 261b2377:
+
+      LIVE FILE, what the verb actually reads : 361 tasks — 0 full, 125 partial, 236 ENTIRELY NULL
+      FULL UNION, 672 archives, 0 unread      : 392 tasks — 0 full, 391 partial, 1 entirely null
+
+    So reading the union takes the entirely-null population from 236 to 1. IT DOES NOT PRODUCE A
+    SINGLE FULL RECEIPT: full stays 0 on both sides. Both numbers go in this shard because either one
+    alone misleads — the first makes the verb look broken beyond repair, the second makes the union
+    look like the fix.
+
+    (3) THE SECOND DEFECT SURVIVES THE UNION, AND IT IS A WRITER INCONSISTENCY RATHER THAN A READER
+    ONE. Over the union, `pr.branch` is null for 392 of 392 tasks, because `pr.opened` carries a
+    `branch` field on 3 of 484 rows. RE-DERIVED, ALL FIVE EMITTERS AT HEAD, READ AS LINES: four write
+    `{ pr_url }` — one bare, three adding `plan_only` and a lane discriminator — and exactly one, the
+    adoption path, writes `branch` beside it. The reader is asking for a field the dominant writer
+    never emits. Nothing about the union changes that; nothing about the reader changes it either.
+
+    (4) TWO THINGS THAT LOOK LIKE THE SAME DEFECT AND ARE NOT — WITHDRAWN HERE SO NOBODY RE-FINDS
+    THEM. `prompt_template_hash` reads 0 of 607 `prompt.linted` rows and `matched_ids` reads 17 of
+    590 `learnings.injected` rows. BOTH ARE EMITTED AT HEAD: `run-task.ts` writes
+    `log("prompt.linted", { provenance: "clean", prompt_template_hash: createHash("sha256")… })` and
+    writes `matched_ids: learningsResult.selectedIds` beside the pre-existing count (W1-T419). The
+    zeros are CORPUS AGE, not absence: this corpus's newest `prompt.linted` row is
+    2026-08-12T23:51:31Z and W1-T71's own commit merged 2026-08-19, so the field never existed in
+    anything recorded here. NEITHER IS IN SCOPE AND NEITHER SHOULD BE RE-OPENED FROM THIS DATA.
+
+    (5) Q1 — READING THE UNION IS SAFE, AND IT IS EXPENSIVE ENOUGH THAT UNSCOPED IS THE WRONG SHAPE.
+    SAFE: `resolveLedgerUnion` refuses a partial corpus and returns `ok: false` rather than a
+    silently short answer, so a receipt built on it INHERITS THE REFUSAL. That is the correct
+    direction for an attestation — a receipt assembled from a corpus the reader could not fully open
+    should not exist at all, and this module's whole discipline is that a missing fact is
+    absent-with-reason rather than defaulted.
+
+    THE COST, MEASURED RATHER THAN ASSUMED: one union read over this host's 672 archives takes
+    9,101 ms, and the nine steps `buildReceipt` reads take 79,145 ms — roughly eighty seconds of
+    wall clock, over about 150 MB, to answer ONE PR's receipt. A read-only informational verb that
+    takes a minute and a quarter will not be run, which is the same fate as reading the wrong file
+    by a different route. SO THE VERB SHOULD SCOPE THE UNION rather than read all of it: `buildReceipt`
+    already filters to `opts.taskId`, and every step it consults is a fixed, known list, so a scoped
+    read is available without inventing a new corpus concept. WHICHEVER SCOPE IS CHOSEN MUST STILL
+    INHERIT THE REFUSAL — a scoped read that cannot see its own slice must fail the same way an
+    unscoped one does, or the safety property above is traded away for the speed.
+
+    (6) Q2 — NEITHER DEFECT IS PREREQUISITE TO THE OTHER, AND SAYING SO PLAINLY MATTERS MORE THAN
+    SEQUENCING THEM. FIXING THE READER ALONE CHANGES NO RECEIPT FROM PARTIAL TO FULL: the union
+    already reads 0 full, and the leaf that blocks every one of the 392 is `pr.branch`, which the
+    union cannot supply because the rows do not carry it. FIXING THE WRITER ALONE leaves the live
+    file just as empty as it is today, because a `branch` on a row that rotated out of the file the
+    verb reads is a `branch` the verb never sees. THEY ARE INDEPENDENT AND MULTIPLICATIVE: only both
+    together can produce a receipt with no null leaf, and this shard carries both for that reason
+    rather than because they share a file.
+
+    THE HONEST FRAMING, STATED SO A BUILD DOES NOT OVERSELL IT: the reader fix is the large one by
+    population — 236 receipts move off "entirely null" — and the writer fix is the one that makes
+    "full" reachable at all. Neither is the fix; the pair is.
+  design: |
+    (i) THE READER TAKES ITS LINES FROM THE UNION, SCOPED. The refusal semantics are inherited, never
+    re-implemented: an unreadable corpus produces no receipt rather than a thinner one.
+
+    (ii) `pr.opened` CARRIES ITS BRANCH FROM EVERY EMITTER THAT HAS ONE. The adoption path already
+    shows the shape; the four that do not are the change. An emitter with genuinely no branch to
+    report writes none, and the receipt's absent-with-reason arm covers it — that is the existing
+    contract, not a new one.
+
+    (iii) THE FALSIFIER IS A RECEIPT WITH NO NULL LEAF, built over a fixture whose rows sit in the
+    archive half rather than the live half. Today no such receipt exists over real data; the test is
+    the first one.
+  acceptance:
+    - claim: "a receipt for a task whose rows have rotated out of the live file is assembled rather than returned as nulls"
+      proof: "unit test: test/receipt-corpus-and-branch.test.ts"
+    - claim: "a corpus the reader cannot fully open produces no receipt rather than a thinner one"
+      proof: "unit test: test/receipt-corpus-and-branch.test.ts"
+    - claim: "a pr opened line carries the branch it opened from every emitter that has one"
+      proof: "unit test: test/receipt-corpus-and-branch.test.ts"
+    - claim: "an emitter with no branch to report still yields absent with reason rather than a fabricated value"
+      proof: "unit test: test/receipt-corpus-and-branch.test.ts"
+    - claim: "the same ledger input still yields byte identical receipt bytes across two calls"
+      proof: "unit test: test/receipt-corpus-and-branch.test.ts"
+    - claim: "no receipt field is defaulted when its ledger line is missing"
+      proof: "unit test: test/receipt-corpus-and-branch.test.ts"
+  files: [src/run-task.ts, test/receipt-corpus-and-branch.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#receipt-reads-the-live-file-2026-08-25"
+  plan_refs: ["W1-T71", "W1-T419"]
+  note: |
+    THE MODULE NEVER FABRICATES, AND THAT IS NOT NEGOTIABLE HERE. Every leaf stays either `{ value }`
+    or `{ value: null, reason }`; a missing row stays ABSENT-WITH-REASON and is never defaulted,
+    never zero-filled, and never inferred from a neighbouring line. A receipt with null leaves is an
+    honest receipt — the defect this task fixes is that the leaves are null when the evidence EXISTS,
+    not that nulls appear at all.
+
+    DETERMINISM STAYS. Same ledger in, byte-identical bytes out: no wall-clock, no random ids, no
+    generation timestamp anywhere in the payload. A scoped union read must not introduce ordering
+    that varies between calls, which is the one way this change could quietly break the property it
+    must preserve — two calls over one corpus must still `JSON.stringify` identically.
+
+    NOTHING ABOUT SIGNING IS IN SCOPE. The unbanking test for that rung is that a NAMED CONSUMER
+    OUTSIDE THIS REPO READS A RECEIPT AND REJECTS IT FOR BEING UNSIGNED, and no such consumer exists:
+    the predicate type is a namespace nothing consumes, the command posts nowhere, and no signing
+    dependency or key material is present. Signing an artifact whose leaves are null proves nothing
+    to anyone, which is the ordering argument for doing this first and is not an argument about
+    Sigstore.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (receipt-corpus-and-branch, run-task) at
+      risk:medium — Rule 19: raise to risk:high or decompose into one task per concern The real blast radius is one read-only verb and one ledger
+    field; no gate, no merge path and no dispatch decision reads either.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/receipt-corpus-and-branch.test.ts`, declared in `files:` and absent
+    from this tree, so on the filing PR each resolves through W1-T456's forward-reference carve-out.
