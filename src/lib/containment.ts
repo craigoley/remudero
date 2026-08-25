@@ -165,6 +165,31 @@ export interface ContainmentEvidence {
    * (see {@link assessContainment}).
    */
   turnsExhausted?: boolean;
+  /**
+   * W1-T2238 — THE COUNT `turnsExhausted` NEVER CARRIED. `WorkerResult.numTurns`
+   * (the SDK's `num_turns` off the probe spawn's own result envelope), carried
+   * verbatim from {@link ProbeExecResult.numTurns}. Recorded on BOTH the
+   * exhausted AND the passing path — rationale (5): the passing path is the one
+   * whose distribution would say whether the allowance is tight, and only
+   * recording it on failure would throw that signal away. Optional so every
+   * pre-existing evidence literal that predates this field keeps compiling.
+   *
+   * W1-T303 GROUND TRUTH APPLIES UNCHANGED HERE: `numTurns` alone cannot be
+   * reasoned about against a cap unless the cap it actually ran under rides the
+   * SAME row — see {@link ContainmentEvidence.maxTurns} below, ledgered beside
+   * it for exactly that reason, never as a replacement.
+   */
+  numTurns?: number;
+  /**
+   * W1-T2238: the `maxTurns` THIS probe call was CONFIGURED with — {@link
+   * probeTurnBudget}'s own return value at spawn time, carried verbatim from
+   * {@link ProbeExecResult.maxTurns} (an INPUT, never a read-back off the
+   * envelope, mirroring `WorkerResult.maxTurns`'s own discipline, W1-T303).
+   * Ledgered beside `numTurns`, never replacing it, so a row can be checked
+   * against the cap it actually ran under without cross-referencing
+   * `PROBE_TURN_ALLOWANCE`'s current value, which can move over time.
+   */
+  maxTurns?: number;
 
   /**
    * W1-T2211 — THE READ ARM, MIRRORING THE EGRESS ARM FIELD FOR FIELD (itself
@@ -390,6 +415,20 @@ export interface ProbeExecResult {
    * see {@link classifyUnprovenState}'s `"turns-exhausted"` state.
    */
   turnsExhausted?: boolean;
+  /**
+   * W1-T2238: `WorkerResult.numTurns` off the probe spawn's own result envelope —
+   * already on the envelope, just never carried past this point. Optional so
+   * every pre-existing injected fake keeps compiling; a fake that omits it reads
+   * as unrecorded (`undefined`), never a guessed `0`.
+   */
+  numTurns?: number;
+  /**
+   * W1-T2238: the `maxTurns` this spawn call was actually invoked with —
+   * `probeTurnBudget(prompt)`'s own return value, carried through as an INPUT
+   * rather than re-derived at the row-building site, so a historical row stays
+   * checkable against the cap it ran under even if `PROBE_TURN_ALLOWANCE` moves.
+   */
+  maxTurns?: number;
 
   /** W1-T2211: did the read of the console's write-token path succeed? Optional —
    *  an executor that never attempted it stays UNOBSERVED, never "denied". */
@@ -911,6 +950,41 @@ export function assessDenyFloor(e: ContainmentEvidence): {
 }
 
 /**
+ * W1-T2238 — DESIGN PART (ii): a count of probe arms that reported, IN THE
+ * BUDGET'S OWN UNIT. `probeTurnBudget` counts COMMANDS; these twelve fields —
+ * named verbatim in rationale (6) — are each ONE command's own observation, so
+ * a count of how many fired is comparable to the cap on both the exhausted AND
+ * the success path, unlike `numTurns` (rationale (5)). ONE REDUCTION over
+ * fields the row already carries — no new evidence collection, no new arm.
+ *
+ * `true` is the only value counted: each of the twelve is either a positive
+ * observation (a write landed, a denial was seen, a read succeeded, the
+ * deny-floor engaged) or it is not, and only the former is a command the probe
+ * actually got far enough to report on. `deny_floor_engaged` is the one
+ * tri-state field on the row (undefined ⇒ UNOBSERVED); it is re-derived here
+ * via {@link assessDenyFloor} rather than stored a second time on
+ * `ContainmentEvidence`, so this count can never drift from the same field the
+ * row itself logs as `deny_floor_engaged`.
+ */
+export function probeArmsReported(e: ContainmentEvidence): number {
+  const arms: Array<boolean | undefined> = [
+    e.outsideWriteAttempted,
+    e.osDenialSeen,
+    e.insideWriteCreated,
+    assessDenyFloor(e).engaged,
+    e.egressBlockedReached,
+    e.egressAllowedReached,
+    e.egressDenialSeen,
+    e.tokenReadSucceeded,
+    e.stateReadSucceeded,
+    e.tokenReadDenialSeen,
+    e.operatorHomeReadSucceeded,
+    e.operatorHomeReadDenialSeen,
+  ];
+  return arms.filter((a) => a === true).length;
+}
+
+/**
  * Regex marking the CLI's credential/auth-dead result text, verified verbatim
  * (SDK 0.3.209 / CLI 2.1.209, see env.ts / worker-home.ts / FINDINGS.md): a
  * headless spawn with no usable OAuth token exits "Not logged in · Please run
@@ -1021,6 +1095,14 @@ export function defaultExecutor(
         // codebase — carried through so a turn-exhausted run can be REPORTED as
         // exhausted rather than silently read as an unattempted write.
         turnsExhausted: probe.subtype === "error_max_turns",
+        // W1-T2238: both fields were already on WorkerResult (W1-T303); this
+        // extraction site is where they were dropped one line away from the row
+        // that needed them — see ContainmentEvidence.numTurns/.maxTurns.
+        // `probe.maxTurns` (not a re-derivation) is `WorkerResult.maxTurns` —
+        // worker.ts's own mirror of the `maxTurns` this spawn call was actually
+        // invoked with, the same INPUT-never-read-back discipline W1-T303 set.
+        numTurns: probe.numTurns,
+        maxTurns: probe.maxTurns,
         denyFloorProbeCreated: existsSync(denyFloorPath),
         egressBlockedReached: existsSync(egressBlockedPath),
         egressAllowedReached: existsSync(egressAllowedPath),
@@ -1151,6 +1233,10 @@ export async function probeContainment(opts: {
     // W1-T2201: carried through VERBATIM, including `undefined`/falsy — see
     // ContainmentEvidence.turnsExhausted's doc for why this never flips a verdict.
     turnsExhausted: r.turnsExhausted,
+    // W1-T2238: carried through VERBATIM, including `undefined` — the pair this
+    // task exists to stop discarding. See ContainmentEvidence.numTurns/.maxTurns.
+    numTurns: r.numTurns,
+    maxTurns: r.maxTurns,
     // W1-T2211: carried through VERBATIM, including `undefined` — an executor that
     // reported no read attempt must stay UNOBSERVED, never default to "denied".
     // Same discipline as denyFloorProbeCreated/egressBlockedReached above.
@@ -1216,6 +1302,18 @@ export async function probeContainment(opts: {
     // above — recorded so a `containment.probe` row can be read for exhaustion
     // directly, without re-deriving it from `observed` on a thrown error.
     turns_exhausted: evidence.turnsExhausted,
+    // W1-T2238 — design (i): the pair `turns_exhausted` never carried, on BOTH
+    // the exhausted and the passing row, so the allowance can be tuned on the
+    // distribution rather than the boolean alone. `num_turns` is not comparable
+    // to `max_turns` on its own (W1-T303); ledgering them on the SAME row beside
+    // one another is what makes the comparison possible at all.
+    num_turns: evidence.numTurns,
+    max_turns: evidence.maxTurns,
+    // W1-T2238 — design (ii): how many of the twelve per-arm booleans this row
+    // ALREADY carries fired, in the same unit (commands) the budget above is
+    // derived from — comparable on the success path where num_turns is not
+    // (rationale (5)/(6)).
+    arms_reported: probeArmsReported(evidence),
     // W1-T2211 — THE READ ARM, OBSERVATIONAL for the same reason the deny-floor
     // and egress arms are: this is a brand-new probe whose behaviour under the
     // installed CLI is unmeasured, and design part (ii) is the proof that this
