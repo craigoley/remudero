@@ -74,6 +74,55 @@
     original under a fresh id because its own plan-only filing commit had credited it as built, and
     that body CITES `W1-T1004` rather than re-deriving it. It is an example of the knowledge pipeline
     working. It is not a duplicate this task would prevent, and it must not be counted as one.
+    ── ADDED 2026-08-25, RATIONALE ONLY. A THIRD PAIR, AND IT IS A COUNTER-EXAMPLE ──────────────
+
+    (8) THE THIRD PAIR, AND ITS CAUSE IS NOT THIS SHARD'S CAUSE. On 2026-08-25 the same defect was
+    filed twice: W1-T2256 as #2789 and W1-T2257 as #2790, both naming `receiptCommand`'s read of
+    `ledgerPathFor(config)` at `run-task.ts:11727-11729`. #2789 was CLOSED UNMERGED as superseded.
+    THE TWO PAIRS THIS SHARD RESTS ON WERE TWO LANES FILING MINUTES APART; THIS ONE WAS A SINGLE
+    OPERATOR ISSUING THE SAME BRIEF TWICE, HOURS APART, ONCE WITH AN UNFILLED ID PLACEHOLDER. So the
+    collision is UPSTREAM OF DISPATCH ENTIRELY — no lane-side coordination could have prevented it,
+    which is precisely the argument for a FILING-TIME corpus check rather than a dispatch-time lock.
+    Both shards swept all eight id surfaces clean and both were correct to: an id sweep answers "is
+    this id used", never "has this defect already been filed under another id".
+
+    (9) BUT SCORED WITH THIS SHARD'S OWN METRIC, THE REMEDY WOULD NOT HAVE CAUGHT IT. Re-derived by
+    importing `bestNearDuplicate` and passing `{ k }`, exactly as rationale (7) requires, over the
+    real corpus `shardSlugFromPath` reads — the shard FILENAMES, not the branch names:
+        W1-T2256  receipt-reads-the-live-file-rotation-already-took
+        W1-T2257  the-receipt-verb-reads-the-file-rotation-empties
+        k=2   SLUG 0.100   TITLE 0.365
+        k=3   SLUG 0.000   TITLE 0.278
+    `DEFAULT_DUPLICATE_CUTOFF` is 0.2 and `DUPLICATE_SLUG_SHINGLE_K` is 2, so **THE SLUG AT 0.100 IS
+    HALF THE CUTOFF AND WOULD NOT HAVE WARNED, WHILE THE TITLE AT 0.365 WOULD HAVE.** THAT IS THE
+    EXACT INVERSE OF PAIRS A AND B, where the slug scored 0.200 and 1.000 and the title 0.00 and
+    0.05. A THIRD AGREEMENT WOULD HAVE BEEN WORTH LITTLE; THIS IS A COUNTER-EXAMPLE AND IS RECORDED
+    AS ONE.
+
+    (10) WHAT THE COUNTER-EXAMPLE DOES AND DOES NOT OVERTURN. It does NOT overturn the choice to
+    score the slug: switching back to the title would take pairs A and B from CAUGHT to MISSED
+    (0.00 and 0.05, both under the cutoff), trading two catches for one. **NEITHER SIGNAL CATCHES
+    ALL THREE PAIRS, AND WITH n=3 THAT IS THE WHOLE OF WHAT THE EVIDENCE SUPPORTS.** The honest
+    reading is that the slug is the better single signal on the pairs measured and is not a
+    complete one — which is an argument for the check staying ADVISORY (design (iv)) rather than for
+    changing what it scores. An implementer must not read this section as a mandate to score both,
+    or to concatenate them: rationale (5) already measured the concatenation as WORSE than the slug
+    alone, and nothing here disturbs that.
+    ONE OBSERVATION, NOT A PROPOSAL: the BRANCH slugs for the same pair — `receipt-reads-the-live-file`
+    and `receipt-reads-the-rotated-file` — score 0.200 at k=2, exactly at cutoff. Branch names are
+    not the corpus `shardSlugFromPath` reads and this shard does not propose making them one; it is
+    recorded only so a later reader does not rediscover it as an unexplored option.
+
+    (11) Q2 — THE CORPUS WOULD PROBABLY HAVE SEEN IT, AND IT WOULD NOT HAVE MATTERED. #2789 was
+    created 2026-08-25T01:16:26Z and #2790 at 01:17:53Z — EIGHTY-SEVEN SECONDS APART — and #2789 was
+    still open (it closed at 01:19:52Z). The remedy builds its corpus from OPEN plan PRs via
+    `listOpenHeadBranches()` plus each PR's `changedFiles`, so a PR opened eighty-seven seconds
+    earlier is the marginal case for a list read, and this shard cannot prove from here whether that
+    read would have returned it. **BUT THE VISIBILITY QUESTION IS NOT THE BINDING CONSTRAINT: even
+    with #2789 fully visible, the slug score of 0.100 is below the cutoff and no warning would have
+    been emitted.** Recording the timing without that sentence would imply the corpus was the gap,
+    and it was not.
+
   design: |
     (i) THE CORPUS IS OPEN PLAN PRs, SUPPLIED AT THE CALL SITE. The candidate is the shard being
     filed; the corpus is the shard title AND filename slug of every plan shard added by a currently
