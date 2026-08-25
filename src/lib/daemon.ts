@@ -33,6 +33,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import type { MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
+import type { DigestCadenceRunResult } from "./digest.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
@@ -1288,6 +1289,24 @@ export interface DaemonDeps {
    * throw costs one logged tick, never the daemon's life.
    */
   runMeasurementCadence?: () => Promise<MeasurementCadenceRunResult>;
+  /**
+   * W1-T2277: THE DIGEST'S OWN CADENCE RUNG — decides whether the digest (lib/digest.ts's
+   * `runDigestCadenceReport`) fires THIS tick. Paced by its OWN policy-data bound
+   * (`minIntervalMinutes` + `maxPerDay`, `plan/policy.yaml`'s `digestCadence` row — a SEPARATE
+   * row from `measurementCadence`'s, on a SEPARATE marker file, so the two can never drag each
+   * other), reusing the SAME `decideMeasurementCadence` pure function `checkMeasurementCadence`
+   * above does. Optional: omitted ⇒ the loop behaves exactly as before this rung existed (the
+   * digest stays reachable only by an operator typing `rmd digest`).
+   */
+  checkDigestCadence?: () => MeasurementCadenceDecision;
+  /**
+   * W1-T2277: build and deliver one digest, returning what got sent — never inside the producer
+   * itself (same split `runMeasurementCadence`'s own disposition logging uses). NEVER FILES A
+   * TASK, NEVER MINTS AN ID, NEVER SPAWNS A WORKER (Law 5) — see lib/digest.ts's
+   * `runDigestCadenceReport` doc. Best-effort like `runMeasurementCadence` above: a throw costs
+   * one logged tick, never the daemon's life.
+   */
+  runDigestCadence?: () => Promise<DigestCadenceRunResult>;
   /**
    * W1-T160: evaluate the retro cadence trigger this tick — fires on
    * merges-since-marker >= N OR days-since-marker >= D (policy data),
@@ -2646,6 +2665,35 @@ export async function runDaemon(
         }
       } else if (decision) {
         log("measurement_cadence.skipped", { reason: decision.reason });
+      }
+    }
+
+    // DIGEST CADENCE (W1-T2277): "the digest fires on its own cadence from the daemon loop
+    // rather than only when a verb is typed" — SEPARATE from the measurement-cadence block just
+    // above (its own policy row, its own marker file, see `DaemonDeps.checkDigestCadence`'s
+    // doc), on the SAME "once per iteration" tick discipline. Best-effort by the SAME contract
+    // as `checkMeasurementCadence` above: a throw costs one logged tick, never the daemon's
+    // life, and a fired digest NEVER gates dispatch, fails a check, or changes a verdict.
+    // Optional: omitted ⇒ the loop behaves exactly as before this rung existed.
+    if (deps.checkDigestCadence) {
+      let digestDecision: MeasurementCadenceDecision | undefined;
+      try {
+        digestDecision = deps.checkDigestCadence();
+      } catch (e) {
+        log("digest_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (digestDecision?.fire) {
+        log("digest_cadence.fired", { reason: digestDecision.reason });
+        if (deps.runDigestCadence) {
+          try {
+            const result = await deps.runDigestCadence();
+            log("digest_cadence.ran", { channel: result.channelName, delivered: result.delivered });
+          } catch (e) {
+            log("digest_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (digestDecision) {
+        log("digest_cadence.skipped", { reason: digestDecision.reason });
       }
     }
 

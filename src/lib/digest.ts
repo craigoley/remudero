@@ -1,10 +1,18 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { readLedgerLines } from "./status.js";
-import { notify, type NotifyDeps } from "./notify.js";
+import { notify, type NotifyChannel, type NotifyDeps } from "./notify.js";
 import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
 import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js";
 import { renderInboxPollSummary, type InboxPollSummary } from "./inbox.js";
 import type { RundownLine } from "./drain.js";
 import type { LastSeenStore } from "./last-seen.js";
+import {
+  decideMeasurementCadence,
+  readMeasurementCadenceMarker,
+  recordMeasurementCadenceFire,
+  type MeasurementCadenceDecision,
+} from "./measurement-cadence.js";
 
 /**
  * Daily digest (W1-T8 title; assembled here, delivered here, SCHEDULED by the
@@ -14,6 +22,13 @@ import type { LastSeenStore } from "./last-seen.js";
  * MANUAL + hard-stop." BLOCKED escalations and ordinary run outcomes (merges,
  * blocked_* verdicts, notional cost) accumulate in the ledger all day and are
  * rolled into ONE message here, instead of paging on every one.
+ *
+ * W1-T2277 GIVES THIS MODULE THE CLOCK ITS OWN HEADER SAID IT DIDN'T OWN: the
+ * `digest cadence` section at the bottom of this file (search "W1-T2277") is the PURE
+ * decision half — `src/run-task.ts`'s `buildDigestCadenceDaemonHooks` is the PRODUCER
+ * that wires it into `lib/daemon.ts`'s poll loop, mirroring `lib/measurement-cadence.ts`'s
+ * own consumer/producer split exactly (see that module's header for why the split matters —
+ * #1066 shipped a consumer with no producer).
  */
 
 /** One ledger line, loosely typed like {@link readLedgerLines}'s return. */
@@ -664,4 +679,312 @@ export function sendMarkerAwareDigest(
   const text = sendDigest(ledgerPath, sinceIso, deps, consoleBaseUrl);
   store.advance(tokenId, nowIso);
   return text;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// W1-T2277 — THE DIGEST'S OWN CADENCE, INTERVAL, ITEM-MARKING AND DELIVERY SEAM
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// This section closes the three gaps this module's own header used to name (no clock, no
+// configurable window, no delivery adapter that runs on this fleet). It fits the EXISTING
+// cadence machinery rather than inventing a second one: `decideMeasurementCadence`
+// (measurement-cadence.ts) is reused VERBATIM — the same pure two-bound (minIntervalMinutes +
+// maxPerDay) decision function `rule-efficacy`/`verdict-calibration`/`autonomy-rate` already
+// share — but against the digest's OWN marker file and OWN `plan/policy.yaml` row, so a short
+// digest interval can never drag those three verbs to it (and a change to their cadence can
+// never drag the digest), and no new decision function had to be written at all.
+
+// ── The cadence: its OWN row, its OWN marker (claim: "fires on its own cadence ... existing
+//    three cadence verbs keep their own row and are not dragged to the digest interval") ──────
+
+/** The digest cadence's policy shape — deliberately a SUBSET of
+ *  {@link "./measurement-cadence.js".MeasurementCadencePolicy} (no `escalate`: the digest never
+ *  drafts a proposal, it only reads and sends) so `plan/policy.yaml`'s `digestCadence` row can
+ *  never be mistaken for `measurementCadence`'s. */
+export interface DigestCadencePolicy {
+  enabled: boolean;
+  minIntervalMinutes: number;
+  maxPerDay: number;
+}
+
+/** `<root>/state/last-digest-cadence.json` — the digest's OWN fire marker, distinct from
+ *  `measurementCadenceMarkerPath`'s `last-measurement-cadence.json` (design above): the two
+ *  cadences never read or write each other's file, so they can never throttle one another. */
+export function digestCadenceMarkerPath(root: string): string {
+  return join(root, "state", "last-digest-cadence.json");
+}
+
+/** The digest cadence's real decision, assembled from live state — mirrors
+ *  `measurement-cadence.ts`'s own `measurementCadenceCheck` shape exactly, reusing
+ *  {@link decideMeasurementCadence} (the SAME pure function) rather than a second one. */
+export function digestCadenceCheck(opts: { root: string; policy: DigestCadencePolicy; now?: Date }): MeasurementCadenceDecision {
+  const marker = readMeasurementCadenceMarker(digestCadenceMarkerPath(opts.root));
+  return decideMeasurementCadence({
+    policy: { ...opts.policy, escalate: false },
+    marker,
+    now: opts.now ?? new Date(),
+  });
+}
+
+/** Record a digest fire on the digest's OWN marker file — the SAME rolling-24h window
+ *  {@link recordMeasurementCadenceFire} already implements, just pointed at
+ *  {@link digestCadenceMarkerPath} instead of the measurement-cadence family's file. */
+export function recordDigestCadenceFire(root: string, at: Date): void {
+  const path = digestCadenceMarkerPath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  recordMeasurementCadenceFire(path, at, 24 * 60 * 60 * 1000);
+}
+
+// ── The interval: read from policy, every console-offered value checked against the declared
+//    bound (claim: "the interval is read from policy and every value the console offers is
+//    inside the declared bounds") ──────────────────────────────────────────────────────────────
+
+/** The console's offered digest-interval choices, in HOURS — {1, 2, 4, 8, 12, 24}. Exported so
+ *  a caller (a console route, or this file's own bound check below) never hand-copies the set. */
+export const DIGEST_INTERVAL_OPTIONS_HOURS: readonly number[] = [1, 2, 4, 8, 12, 24];
+
+/** {@link DIGEST_INTERVAL_OPTIONS_HOURS}, converted to the minutes unit
+ *  `digestCadence.minIntervalMinutes` is stored in. */
+export function digestIntervalOptionsMinutes(): number[] {
+  return DIGEST_INTERVAL_OPTIONS_HOURS.map((h) => h * 60);
+}
+
+/** One console-offered interval value that falls OUTSIDE a declared `[min, max]` bound. */
+export interface DigestIntervalBoundViolation {
+  hours: number;
+  minutes: number;
+  reason: string;
+}
+
+/**
+ * Every console-offered interval value that falls outside `bounds` — CHECKED, never assumed
+ * (mirrors this task's own rationale: "the requested window set fits the declared bounds —
+ * checked, not assumed"). Empty when every offered value is inside `bounds`; a future console
+ * change that widens the option set without widening `plan/policy.yaml`'s declared
+ * `digestCadence.minIntervalMinutes` bound is caught here rather than silently clamped.
+ * `bounds` is the caller's own read of `Policy.bounds["digestCadence.minIntervalMinutes"]`
+ * (policy.ts) — this function never reads `plan/policy.yaml` itself, so it stays a pure
+ * unit-testable predicate.
+ */
+export function digestIntervalOptionsOutOfBounds(bounds: { min: number; max: number }): DigestIntervalBoundViolation[] {
+  const out: DigestIntervalBoundViolation[] = [];
+  for (const hours of DIGEST_INTERVAL_OPTIONS_HOURS) {
+    const minutes = hours * 60;
+    if (minutes < bounds.min || minutes > bounds.max) {
+      out.push({ hours, minutes, reason: `${minutes}m (${hours}h) is outside the declared bound [${bounds.min}, ${bounds.max}]` });
+    }
+  }
+  return out;
+}
+
+// ── The two halves, marked per item (claims: "every deterministic figure carries the query
+//    that reproduces it, and an item without one fails the render" / "a generated item is
+//    marked per item rather than only by its section") ────────────────────────────────────────
+
+/** A RE-RUNNABLE, checkable figure — merged/blocked/cost/etc. `query` is the literal
+ *  instruction a reader re-runs to reproduce `value` byte-for-byte (a ledger predicate, a grep,
+ *  a command) — never prose describing the number, an actual re-runnable step. */
+export interface DeterministicDigestItem {
+  kind: "deterministic";
+  label: string;
+  value: string;
+  query: string;
+}
+
+/** Text somebody (or something) WROTE — a suggestion, never a measurement. Marked per item
+ *  (`kind: "generative"`) rather than only by a section heading, so a single line quoted out of
+ *  the digest still identifies itself. This module never GENERATES this text (Law 5's "the
+ *  digest never spawns a worker to judge a task" — see {@link runDigestCadenceReport}'s doc):
+ *  it only renders whatever a caller already produced. */
+export interface GenerativeDigestItem {
+  kind: "generative";
+  text: string;
+}
+
+export type DigestCadenceItem = DeterministicDigestItem | GenerativeDigestItem;
+
+/**
+ * Render ONE {@link DigestCadenceItem}. THE MECHANICAL TEST (design note (iv) of this task's
+ * rationale): a deterministic item with no re-runnable `query` is a BUG and FAILS THE RENDER —
+ * thrown, never silently printed unattributed; a generative item is always marked
+ * `[SUGGESTED]`, per item, never relying on a section heading alone.
+ */
+export function renderDigestCadenceItem(item: DigestCadenceItem): string {
+  if (item.kind === "deterministic") {
+    if (!item.query || item.query.trim().length === 0) {
+      throw new Error(
+        `digest cadence: deterministic item "${item.label}" carries no re-runnable query — refusing to render an unattributed figure`,
+      );
+    }
+    return `[FIGURE] ${item.label}: ${item.value}  (query: ${item.query})`;
+  }
+  return `[SUGGESTED] ${item.text}`;
+}
+
+/** Render every item — see {@link renderDigestCadenceItem}'s doc; throws on the FIRST
+ *  unattributed deterministic item, same fail-loud contract. */
+export function renderDigestCadenceItems(items: DigestCadenceItem[]): string[] {
+  return items.map(renderDigestCadenceItem);
+}
+
+/** The re-runnable query strings for the four counting figures {@link summarize} reduces —
+ *  the SAME reduction, described rather than re-derived, so {@link runDigestCadenceReport} can
+ *  mark each one deterministic with its own query (claim 4) without a second traversal. */
+function digestSummaryToDeterministicItems(s: DigestSummary, sinceIso: string): DeterministicDigestItem[] {
+  return [
+    {
+      kind: "deterministic",
+      label: "merged",
+      value: String(s.merged.length),
+      query: `ledger: step=="verdict" && verdict=="merged" && ts>="${sinceIso}"`,
+    },
+    {
+      kind: "deterministic",
+      label: "blocked",
+      value: String(s.blocked.length),
+      query: `ledger: step=="verdict" && verdict.startsWith("blocked") && ts>="${sinceIso}"`,
+    },
+    {
+      kind: "deterministic",
+      label: "escalations",
+      value: String(s.escalations.length),
+      query: `ledger: step=="escalation.issue_opened" && ts>="${sinceIso}"`,
+    },
+    {
+      kind: "deterministic",
+      label: "notional cost",
+      value: `$${s.costUsd.toFixed(2)}`,
+      query: `ledger: sum(cost_usd) over step=="verdict" && ts>="${sinceIso}"`,
+    },
+  ];
+}
+
+// ── The retro is cited, never re-derived (claim: "a retro that landed inside the window is
+//    cited rather than re-derived") ─────────────────────────────────────────────────────────
+
+/** One retro PR that landed (merged) inside the digest window — a CITATION, not a
+ *  re-computation: this reads the SAME `verdict` lines {@link summarize} already reduces
+ *  (`task_id === "RETRO"`, the id every retro run ledgers under — `src/run-task.ts`'s
+ *  `retroCommand`/`buildGather`), and names the PR. It never imports rule-efficacy.ts /
+ *  verdict-calibration.ts / autonomy.ts, so it is structurally incapable of re-deriving a
+ *  retro's own findings — the only thing it can ever do is point at the PR that already has them. */
+export interface RetroCitation {
+  taskId: "RETRO";
+  prUrl?: string;
+}
+
+/** Every retro that merged inside `[sinceIso, now]` — see {@link RetroCitation}'s doc for why
+ *  this is a citation and not a re-derivation. */
+export function citeRetrosInWindow(lines: LedgerLine[], sinceIso: string): RetroCitation[] {
+  const since = collectSince(lines, sinceIso);
+  const out: RetroCitation[] = [];
+  for (const l of since) {
+    if (l.step === "verdict" && l.task_id === "RETRO" && l.verdict === "merged") {
+      out.push({ taskId: "RETRO", prUrl: typeof l.pr_url === "string" ? l.pr_url : undefined });
+    }
+  }
+  return out;
+}
+
+// ── The delivery seam: the digest depends on NotifyChannel, never a concrete target (claim:
+//    "the digest depends on the notify channel interface and never on a concrete delivery
+//    target") — an INBOX adapter, because notify.ts's only shipped adapter (imessageChannel) is
+//    Darwin-only and this fleet runs on Linux (this module's own header). Kept HERE, not in
+//    notify.ts, precisely because an inbox adapter is an IMPLEMENTATION of NotifyChannel and
+//    requires no change to that interface at all. ─────────────────────────────────────────────
+
+/** `<root>/state/inbox-digests.json` — the console inbox's digest feed, mirroring
+ *  `lib/inbox.ts`'s own `inbox-proposals.json`/`inbox-drafts.json` convention (both live under
+ *  `config.root`, served by `GET /v1/inbox`). A plain JSON array of `{ts, text}` entries,
+ *  newest last. */
+export function inboxDigestsPath(root: string): string {
+  return join(root, "state", "inbox-digests.json");
+}
+
+interface InboxDigestEntry {
+  ts: string;
+  text: string;
+}
+
+function readInboxDigests(path: string): InboxDigestEntry[] {
+  if (!existsSync(path)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    return Array.isArray(raw) ? (raw as InboxDigestEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A {@link NotifyChannel} implementation over the console inbox — the digest's ON-THIS-FLEET
+ * delivery target: a plain file write has no platform gate, unlike `notify.ts`'s
+ * `imessageChannel`, whose `unavailable()` refuses on every non-Darwin host. The digest's own
+ * producer ({@link runDigestCadenceReport}) never imports this by name in a way that couples it
+ * to the digest's logic — it only ever depends on the {@link NotifyChannel} TYPE, and this is
+ * ONE implementation of it, freely swappable (a test fake today, an email adapter later) with
+ * zero change to {@link sendDigest}/{@link runDigestCadenceReport} themselves.
+ */
+export function inboxNotifyChannel(root: string): NotifyChannel {
+  return {
+    send(message: string) {
+      const path = inboxDigestsPath(root);
+      mkdirSync(dirname(path), { recursive: true });
+      const entries = readInboxDigests(path);
+      entries.push({ ts: new Date().toISOString(), text: message });
+      writeFileSync(path, JSON.stringify(entries, null, 2));
+    },
+    // No unavailable() at all — a file write is always available on every platform this fleet
+    // runs on, unlike osascript/Messages.app; omitting it (NotifyChannel's own optional field)
+    // means `notify()` always attempts the send, never reports a false "not delivered".
+  };
+}
+
+// ── The producer: Law 5, unconditionally (claim: "the digest files nothing, mints nothing, and
+//    spawns no worker to judge a task") ─────────────────────────────────────────────────────────
+
+/** {@link runDigestCadenceReport}'s return: the text actually sent, which channel name it went
+ *  out under, and whether the channel reported itself deliverable (mirrors `notify()`'s own
+ *  `delivered` ledger field, surfaced here for a caller/test that wants it without re-parsing
+ *  the ledger line `notify()` already writes). */
+export interface DigestCadenceRunResult {
+  text: string;
+  channelName: string;
+  delivered: boolean;
+}
+
+/**
+ * THE PRODUCER'S BODY for the digest cadence rung — mirrors `measurement-cadence.ts`'s
+ * `runMeasurementCadenceReport` role exactly. Builds the SAME digest text this module always
+ * shipped ({@link renderDigest} over {@link summarize}) — no rebuild of what already exists —
+ * plus this section's deterministic-figure queries, the retro citation, and any already-written
+ * `suggestions` (generative items — see {@link GenerativeDigestItem}'s doc: this function never
+ * GENERATES that text itself), then delivers over `opts.deps.channel`.
+ *
+ * LAW 5, UNCONDITIONALLY (claim 7): every parameter below is data, a {@link NotifyChannel} or a
+ * ledger path — there is no `spawn`/`gh`/task-filing/id-minting dependency anywhere in this
+ * function's signature for a caller to even wire one in, and its body opens no file other than
+ * the ledger it already reads and the channel's own `send`. It NEVER spawns a worker to decide
+ * what to say about a task (it reports on work already done); if a caller wants a generative
+ * half, it must have already produced that text itself and hands it in via `suggestions`.
+ */
+export function runDigestCadenceReport(opts: {
+  ledgerPath: string;
+  sinceIso: string;
+  deps: NotifyDeps;
+  consoleBaseUrl?: string;
+  /** Already-written generative items (never generated inside this function) — see
+   *  {@link GenerativeDigestItem}'s doc. Defaults to none: a purely deterministic digest. */
+  suggestions?: GenerativeDigestItem[];
+}): DigestCadenceRunResult {
+  const lines = readLedgerLines(opts.ledgerPath);
+  const summary = summarize(lines, opts.sinceIso);
+  const retros = citeRetrosInWindow(lines, opts.sinceIso);
+  const deterministicItems = digestSummaryToDeterministicItems(summary, opts.sinceIso);
+  const itemLines = renderDigestCadenceItems([...deterministicItems, ...(opts.suggestions ?? [])]);
+  const retroLines = retros.map((r) => `retro cited: ${r.taskId}${r.prUrl ? ` — ${r.prUrl}` : ""}`);
+  const text = [renderDigest(summary, opts.consoleBaseUrl), ...retroLines, ...itemLines].join("\n");
+  const unavailable = opts.deps.channel.unavailable?.();
+  notify(text, opts.deps);
+  return { text, channelName: opts.deps.channelName ?? "imessage", delivered: unavailable === undefined };
 }

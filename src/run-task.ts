@@ -160,7 +160,20 @@ import {
   resolveInstallRoot,
 } from "./lib/install-root.js";
 import { buildStatusBoard, deriveDispatchCadence, deriveQueueHead, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
-import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
+import {
+  buildDigest,
+  buildMarkerAwareDigest,
+  consoleCardUrl,
+  defaultDigestSinceIso,
+  digestCadenceCheck,
+  inboxNotifyChannel,
+  recordDigestCadenceFire,
+  runDigestCadenceReport,
+  sendDigest,
+  sendMarkerAwareDigest,
+  sendRundown,
+  type DigestCadenceRunResult,
+} from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import {
   deliversRealtime,
@@ -14846,6 +14859,76 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
 }
 
 /**
+ * W1-T2277: the DIGEST's own cadence rung PRODUCER, mirroring {@link buildMeasurementCadenceDaemonHooks}
+ * exactly — the CONSUMER (`daemon.ts` reads `deps.checkDigestCadence`/`deps.runDigestCadence` in
+ * its poll loop) is dead code without a line at the `daemonCommand` call site actually
+ * constructing this and wiring it in (PR #1066's own lesson, restated at
+ * `buildMeasurementCadenceDaemonHooks`'s header above).
+ *
+ * ITS OWN ROW, ITS OWN MARKER: `digestCadenceCheck`/`recordDigestCadenceFire` (lib/digest.ts)
+ * read/write `state/last-digest-cadence.json` against `plan/policy.yaml`'s `digestCadence` row
+ * — never `measurementCadence`'s marker or bounds — so a short digest interval can never drag
+ * `rule-efficacy`/`verdict-calibration`/`autonomy-rate` to it, or vice versa.
+ *
+ * THE INBOX CHANNEL, NOT IMESSAGE: `notify.ts`'s only shipped adapter (`imessageChannel`) is
+ * Darwin-only and this fleet runs on Linux (digest.ts's own module header) — production wires
+ * {@link inboxNotifyChannel} by default. `rmd digest` (the manual verb, `digestCommand` above)
+ * is UNCHANGED by this task and keeps defaulting to `imessageChannel` — this hook is additive,
+ * the daemon-fired cadence this task adds, never a change to the existing verb's own behaviour.
+ *
+ * SELF-TARGET ONLY (wired at the call site below, same as retro/auto-triage/measurement-cadence):
+ * the ledger/state this cadence reads and writes both live under THIS process's own
+ * `config.root`, never a drained target's.
+ */
+export function buildDigestCadenceDaemonHooks(deps: {
+  check?: () => MeasurementCadenceDecision;
+  run?: () => Promise<DigestCadenceRunResult>;
+  config?: Config;
+  now?: () => Date;
+  policy?: Policy;
+  channel?: NotifyChannel;
+} = {}): {
+  checkDigestCadence: () => MeasurementCadenceDecision;
+  runDigestCadence: () => Promise<DigestCadenceRunResult>;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const check =
+    deps.check ??
+    (() =>
+      digestCadenceCheck({
+        root: configFor().root,
+        policy: policyFor().values.digestCadence,
+        now: deps.now?.(),
+      }));
+  const run =
+    deps.run ??
+    (async () => {
+      const config = configFor();
+      const now = deps.now?.() ?? new Date();
+      // RECORD THE FIRE FIRST, deliberately — the SAME crash-safety discipline
+      // `buildMeasurementCadenceDaemonHooks`'s own `run` uses: a failure mid-run costs one
+      // skipped period, never an unbounded immediate retry.
+      recordDigestCadenceFire(config.root, now);
+      const ledgerPath = ledgerPathFor(config);
+      const nowIso = now.toISOString();
+      return runDigestCadenceReport({
+        ledgerPath,
+        sinceIso: defaultDigestSinceIso(nowIso),
+        deps: {
+          channel: deps.channel ?? inboxNotifyChannel(config.root),
+          ledgerPath,
+          runId: `DIGEST-${now.getTime()}`,
+          taskId: "DIGEST",
+          channelName: "inbox",
+        },
+        consoleBaseUrl: consoleUrl(config),
+      });
+    });
+  return { checkDigestCadence: check, runDigestCadence: run };
+}
+
+/**
  * W1-T322 (design (iii)): the RETRO-TIME consumer of the SAME reachability scan the review path
  * uses — MASTER-PLAN's own NET STATE section, re-checked against the CURRENT mainline checkout
  * (`repoRoot`, never a PR diff). Returns the report section to concatenate, or `""`.
@@ -18483,6 +18566,12 @@ export async function daemonCommand(
   // target's. Without this line `deps.checkMeasurementCadence` is undefined and the whole rung
   // is dead code, exactly how #1066 merged auto-triage's consumer with no producer.
   const measurementCadenceHooks = target.isSelf ? buildMeasurementCadenceDaemonHooks({ config }) : undefined;
+  // W1-T2277: the digest's own cadence rung. SELF-TARGET ONLY, same reason as the rungs above —
+  // the ledger this reads and the marker/inbox files it writes both live under THIS process's
+  // own config.root, never a drained target's. Without this line `deps.checkDigestCadence` is
+  // undefined and the whole rung is dead code, exactly how #1066 merged auto-triage's consumer
+  // with no producer.
+  const digestCadenceHooks = target.isSelf ? buildDigestCadenceDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -18712,6 +18801,12 @@ export async function daemonCommand(
         // defaults to running: it writes nothing unless `escalate` is separately opted in).
         checkMeasurementCadence: measurementCadenceHooks?.checkMeasurementCadence,
         runMeasurementCadence: measurementCadenceHooks?.runMeasurementCadence,
+        // DIGEST CADENCE RUNG (W1-T2277's design, wired here). Same shape as the
+        // measurement-cadence hooks immediately above and gated the same way — SAFE ON in
+        // policy data (plan/policy.yaml's `digestCadence` row): sending a digest spends nothing
+        // and writes nothing (Law 5), so it is safe to run unattended from the start.
+        checkDigestCadence: digestCadenceHooks?.checkDigestCadence,
+        runDigestCadence: digestCadenceHooks?.runDigestCadence,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once
