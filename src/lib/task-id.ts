@@ -90,6 +90,19 @@ export function mentionedTaskIds(text: string): number[] {
 export const MAX_ALLOCATABLE_TASK_ID = 100_000;
 
 /**
+ * How far a MENTION source (open PR text) may lead the plan's own ceiling before the mint stops
+ * believing it. RELATIVE, not absolute: it needs no recalibration as the plan grows.
+ *
+ * MEASURED 2026-08-25: the legitimate lead is 1 — the open PRs' highest mention was 2289 against a
+ * plan ceiling of 2288, which is one filing PR naming the id it is about to add. The observed
+ * failure led by 7,711 (a four-digit doc example in one PR body against a plan ceiling of 2288),
+ * and the mint handed out that ceiling plus one, then plus two. 100 is two orders above the legitimate
+ * lead
+ * and two orders below the observed failure, so it needs no precision to separate them.
+ */
+export const MAX_MENTION_LEAD = 100;
+
+/**
  * May this id number ever be MINTED? False for anything above {@link MAX_ALLOCATABLE_TASK_ID},
  * and for a non-positive or non-integer number — a parse that produced one of those is not an id
  * this allocator may hand out. Read by the per-source fold below; deliberately NOT consulted by
@@ -212,6 +225,49 @@ export function mintNextTaskId(opts: {
     shards: highest(shards.ids),
     openPrs: openPrsEnumerated ? highest(openPrIds) : null,
   };
+
+  // THE CORROBORATION CHECK (a source that is PRESENT AND ABSURD). `degraded` already covers a
+  // source that could not be READ; nothing covered a source that read fine and answered something
+  // no other source agrees with. Open PRs are the only MENTION source here: the plan records ids
+  // that EXIST, while a PR body is prose and may carry a fabricated id in a doc example, a
+  // placeholder or a quoted prompt — all of which `TASK_ID_MENTION_RE` matches correctly, because
+  // they ARE well-formed tokens. So the mention source may lead the plan (a filing PR naming the
+  // id it is about to add is normal) but only by {@link MAX_MENTION_LEAD}; beyond that it is
+  // asserting a run of ids nothing else has ever seen, and it is DROPPED rather than believed.
+  //
+  // WHY DROP-AND-SAY RATHER THAN REFUSE. A hard refusal would let one doc example in one open PR
+  // body stop every filing in the fleet until a human edited that body — a denial of service
+  // authored by a code comment. Dropping the uncorroborated source leaves the mint standing on
+  // the plan, which is the authoritative record, and the reservation refs still make a collision
+  // impossible. Both are strictly safer than the third option, which is what happened here:
+  // minting silently from the outlier.
+  //
+  // WHY IT KEYS ON A MENTION LEADING THE PLAN, NOT ON ANY TWO SOURCES DISAGREEING. The monolith
+  // and the shards legitimately disagree by thousands (280 against 2288 today, because the old
+  // monolith ids are low), so a symmetric "sources differ" rule would degrade the shards and
+  // break every mint.
+  //
+  // AND WHY THIS IS NOT `MAX_ALLOCATABLE_TASK_ID`'s JOB. That bound is ABSOLUTE and cannot be
+  // tightened to the real ceiling without also refusing the two above-bound ids the plan already
+  // carries. This one is RELATIVE, so it needs no calibration against the plan's size and does not
+  // move as the plan grows.
+  if (sources.openPrs !== null) {
+    const planCeiling = Math.max(0, ...[sources.monolith, sources.shards].filter((n): n is number => n != null));
+    const lead = sources.openPrs - planCeiling;
+    if (planCeiling > 0 && lead > MAX_MENTION_LEAD) {
+      degraded.push({
+        source: "open-prs",
+        reason:
+          `read fine but uncorroborated: its highest mention leads the plan's own ceiling by ${lead} ` +
+          `(> ${MAX_MENTION_LEAD}), so it was dropped rather than used as the ceiling — a mention is ` +
+          "prose and may name an id nothing has filed",
+      });
+      // NULLED so `describeMint` cannot echo the burned number back at an author, which is exactly
+      // how one gets copied into the next PR body — the same discipline `highest` already keeps.
+      sources.openPrs = null;
+    }
+  }
+
   // Every term here has already been through `highest`, so each is allocatable or null — the
   // bound is applied at the FOLD, not re-applied at the max.
   const maxSeen = Math.max(0, ...[sources.monolith, sources.shards, sources.openPrs].filter((n): n is number => n != null));
