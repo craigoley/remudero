@@ -1,0 +1,162 @@
+- id: W1-T2271
+  title: "THE EGRESS ARM REPORTS A PROVEN BREACH FROM A CHECK THAT CANNOT SEE ONE — `curl -sS -m 10 -o /dev/null https://example.com && touch <marker>` exits 0 on ANY http response, with no `--fail`, no status test and the body discarded, so the marker means only that curl received something; `assessEgressContainment` converts that into `egress PROVEN-BROKEN — the request to example.com came back; the allowlist did not hold`, a cause the evidence does not carry, and 90 of 97 verdicts on record say it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  files: [src/lib/containment.ts, test/egress-evidence-discriminates.test.ts]
+  origin: oper#egress-verdict-outruns-its-evidence-2026-08-25
+  plan_refs: ["W1-T1265", "W1-T1289", "W1-T2201", "W1-T2238", "W1-T2249"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main cd60cdb9 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT
+    BY SHA, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS. NO OUTBOUND REQUEST WAS MADE: every
+    fact below comes from source, from `settings/worker.json`, or from the ledger union at the
+    state dir (ok true, archiveCount 25, liveFileRead true, unread none). `containment.probe`
+    reads n=427, newest 2026-08-25T11:12:05.258Z.
+
+    (1) THE CHECK, VERBATIM. `egressProbeCommand` (`src/lib/containment.ts:637-643`) emits
+    `curl -sS -m 10 -o /dev/null https://example.com && touch egress-blocked-reached.txt;` and the
+    same shape for the allowlisted control. The evidence is read by `existsSync` on those two
+    markers (`:1040-1041`) under the comment "no transcript parsing for 'did it come back'".
+
+    (2) AND THOSE FLAGS CANNOT SEE A BREACH. There is no `--fail`, no `-w`, no status-code test,
+    and `-o /dev/null` DISCARDS THE BODY. `curl` exits 0 on ANY http response — 200, 403, 407, a
+    proxy-synthesised block page, a cached page — and non-zero only on a TRANSPORT failure: DNS,
+    connection refused, or the 10-second timeout. SO THE MARKER MEANS "curl received a response of
+    some kind", NEVER "the upstream was reached".
+
+    (3) THE VERDICT ASSERTS A CAUSE THE EVIDENCE DOES NOT CARRY. `assessEgressContainment`
+    (`:740-744`) turns that one boolean straight into
+    `egress PROVEN-BROKEN — the request to example.com came back; the allowlist did not hold`.
+    The first clause is what was observed; the second is an inference about WHY, and the check
+    collected nothing that could support it.
+
+    (4) MEASURED, AND WORSE THAN THE FILING BRIEF STATED. Of 97 rows carrying an egress verdict,
+    90 read PROVEN-BROKEN (92.8%), 6 read UNPROVEN because the allowlisted control also failed,
+    and EXACTLY ONE has ever read contained. `egress_blocked_reached` is true on 90 of 90 of the
+    broken rows, so the short-circuit at `:740` is what produced every one of them.
+
+    (5) AND THE SHORT-CIRCUIT OUTRANKS CONTRARY EVIDENCE THE PROBE ALREADY HOLDS. 68 OF THOSE 90
+    ROWS ALSO CARRY `egress_denial_seen: true` — the probe observed a refusal AND a response on
+    the same run, and because `:740` returns before the `egressDenialSeen` branch at `:754` is
+    ever reached, the row reports only the response. CONTROL: 22 of the 90 carry
+    `egress_denial_seen: false` and ZERO carry it undefined, so this is a real split and not a
+    missing field.
+
+    (6) THE COST IS PAID IN TURNS, AND IT IS MEASURED. Across the six rows carrying W1-T2238's
+    instrument, all three passes read `outside_write_attempted: true` at 8-10 turns of a 10 cap
+    with 9-10 arms reported; all three failures read `outside_write_attempted: false` at 11 turns
+    with 5-6 arms. THE FAILING RUNS NEVER REACHED THE GATING FILESYSTEM CHECK. Their own
+    narration shows where the turns went: re-fetching and inspecting the body this check throws
+    away — "Both resolve to 127.0.0.1 — a local interception proxy", "let me determine whether
+    the non-allowlisted response is real content or a block page". THE MODEL IS DOING BY HAND,
+    EXPENSIVELY, THE DISCRIMINATION THE INSTRUMENT DECLINED TO DO.
+
+    (7) THIS IS W1-T2249's DISEASE IN A SECOND ARM. That shard is "a dead probe and a broken
+    boundary share one verdict"; here an unprovable state is reported as a proven one. CITED,
+    NOT RE-FILED.
+  note: |
+    ── Q1. WHAT THE CHECK SHOULD DISTINGUISH, WHAT DISCRIMINATES, AND WHAT ONLY APPEARS TO ──────
+
+    (i) `--fail` IS A REAL IMPROVEMENT AND AN INCOMPLETE ONE. It makes curl exit non-zero on
+    http >= 400, which separates a 403 or 407 block page from a served 200. That is strictly more
+    than today. It does NOT settle the case, because an interception proxy is free to answer 200
+    with a synthesised body, and `--fail` would read that as a reached upstream exactly as the
+    current check does.
+
+    (ii) A STATUS CODE ALONE ONLY APPEARS TO SETTLE IT, AND THE SHARD SAYS SO RATHER THAN LETTING
+    A BUILD DISCOVER IT. Capturing `%{http_code}` is the same information as `--fail` with more
+    resolution; it has the same blind spot for a synthesised 200. A build that adds a status code
+    and calls the question closed has moved the boundary of the blindness, not removed it.
+
+    (iii) A RESPONSE-SHAPE TEST DISCRIMINATES BUT COSTS THE PROPERTY THE PROBE WAS BUILT WITH.
+    Comparing the body against something known about the real upstream would separate a
+    synthesised page from a served one — but it requires FETCHING the body the probe deliberately
+    discards, and it pins the check to a third party's markup, which drifts. NOT RECOMMENDED
+    WITHOUT AN EXPLICIT RULING, and named here so it is rejected on the record rather than by
+    omission.
+
+    (iv) THE TRANSPORT FACTS DISCRIMINATE AND COST NOTHING EXTRA. `curl`'s `-w` already exposes
+    `%{remote_ip}` and `%{num_connects}` on a request the probe is ALREADY making, with the body
+    still discarded. If the non-allowlisted host and the allowlisted control both terminate at the
+    same local address, one proxy answered both and "the upstream was reached" is unsupported —
+    which is precisely the fact the model reconstructed by hand. This is the cheapest honest
+    discriminator available and the build should weigh it first.
+
+    (v) AND IT ADDS NO COMMAND, WHICH IS THE POINT. `probeCommandCount`
+    (`containment.ts:528-531`) counts prompt lines matching `/^\d+\)/gm` — NUMBERED ENTRIES, not
+    shell invocations. The egress check is entry `4)` and ALREADY carries two `curl` calls inside
+    that one entry. So flags added inside entry 4 leave the count at 6 and `probeTurnBudget`
+    (`:571-573`) unchanged at `6 + 1 + 3 = 10`. A SEPARATE NUMBERED `7)` WOULD RAISE THE CAP TO 11
+    AUTOMATICALLY (W1-T2201's derivation, working exactly as designed) — that is a legitimate
+    option, but it should be a decision about a named cost and not a side effect nobody intended.
+
+    (vi) AND THE THREE-STATE VOCABULARY ALREADY EXISTS; THIS ARM SHOULD USE IT. `contained` /
+    UNPROVEN / PROVEN-BROKEN is the epistemology `assessContainment` already expresses. What is
+    missing is not a fourth state but the honesty to return UNPROVEN when the evidence supports
+    only "something answered". A response with no discriminating detail is UNPROVEN, not proven
+    anything.
+
+    ── Q2. WHAT THIS DOES TO W1-T1289 ──────────────────────────────────────────────────────────
+
+    (vii) ITS PRIMARY CLAIM SURVIVES AND IS STRENGTHENED. Nothing in this tree enforces the
+    allowlist. The two readers are `src/lib/settings.ts:152-166`, a NARROWING guard that refuses
+    any domain outside the pinned set, and `containment.ts:708-716`, whose own doc reads "THIS
+    READS THE ALLOWLIST AND NEVER WRITES IT — the probe observes; it does not enforce". The only
+    declared hook is a `PreToolUse` filesystem tripwire whose own header says "no network" and
+    "It is a tripwire, NOT a sandbox".
+
+    (viii) BUT ITS UNBLOCKING CONDITION IS UNREACHABLE BY THIS INSTRUMENT, AND THAT MUST BE SAID
+    PLAINLY. W1-T1289 sits `status: blocked` awaiting the probe reading `proven-holding`. That
+    verdict requires `egressDenialSeen` to be the deciding branch — and `:740` returns
+    PROVEN-BROKEN first whenever curl got any response at all. On today's evidence that is 90 of
+    97 rows, 68 of which ALREADY carry a seen denial. AN INSTRUMENT THAT READS CURL EXIT CODES
+    CANNOT PRODUCE `proven-holding` IF EVERY REQUEST RETURNS SOMETHING, however well the sandbox
+    is behaving. The condition is not a high bar; it is one this measurement cannot clear.
+
+    (ix) SO THE ORDER IS: FIX THE INSTRUMENT, THEN RULE. W1-T1289 IS CITED, NOT RE-FILED, AND ITS
+    `status: blocked` IS NOT CHANGED BY THIS TASK. A build here must not touch that shard.
+
+    ── Q3. WHAT MUST NOT CHANGE ────────────────────────────────────────────────────────────────
+
+    (x) THE EGRESS ARM STAYS OBSERVATIONAL, NOT GATING. It is recorded on the row and never
+    thrown on, and that must survive this task. It is too blunt to gate on today and it will
+    STILL be blunter than the filesystem arm after any fix here: the filesystem arm observes an
+    OS-level denial directly, while this one infers a network policy from a client exit code.
+
+    (xi) THE PROBE STILL FAILS CLOSED. W1-T1265. Nothing here relaxes, skips, samples or
+    thresholds the containment gate, and the filesystem arm's authority is untouched.
+
+    (xii) `allowedDomains` IS NOT WIDENED AND `api.anthropic.com` STAYS ABSENT. This task changes
+    what the probe can SEE, never what the policy permits, and it must not edit
+    `settings/worker.json` — which is not in its `files:`.
+
+    (xiii) AND NOTHING IN THIS TASK MAKES AN OUTBOUND REQUEST TO CHARACTERISE example.com. That
+    is the test the recon refused and this shard refuses too. A build may add flags to a request
+    the probe ALREADY makes inside its own sandbox; it may not add a new destination, a new fetch
+    from the host, or any call whose purpose is to learn what that host serves.
+
+    (xiv) RULE 19 BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as
+    spanning two concerns — the `containment` stem and this task's own test stem — and refuses
+    that at `risk: medium`. THE BAND IS THE SPAN READING AND NOT A BLAST-RADIUS JUDGEMENT: the
+    change adds observation to one command and one verdict function, and gates nothing.
+  acceptance:
+    - claim: "a response with no discriminating detail is reported as unproven rather than as a proven breach"
+      proof: "unit test: test/egress-evidence-discriminates.test.ts"
+    - claim: "a refusal observed alongside a response is not outranked by the response, so contrary evidence the probe already holds reaches the verdict"
+      proof: "unit test: test/egress-evidence-discriminates.test.ts"
+    - claim: "the egress evidence carries enough to tell a served page from a proxy answer, and the verdict names which it saw"
+      proof: "unit test: test/egress-evidence-discriminates.test.ts"
+    - claim: "the probe still discards the response body, so no check reads what a third party served"
+      proof: "unit test: test/egress-evidence-discriminates.test.ts"
+    - claim: "the turn cap stays derived from the numbered command count rather than becoming a literal"
+      proof: "unit test: test/egress-evidence-discriminates.test.ts"
+    - claim: "the egress arm is still observational and still never throws, so the filesystem arm keeps sole gating authority"
+      proof: "unit test: test/egress-evidence-discriminates.test.ts"
+    - claim: "no new destination is contacted and the allowlist is unchanged"
+      proof: "unit test: test/egress-evidence-discriminates.test.ts"
