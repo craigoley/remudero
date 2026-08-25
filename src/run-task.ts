@@ -756,6 +756,18 @@ import {
   planReverseBranchDrift,
   remoteBranchNames,
 } from "./lib/branch-reaper.js";
+// The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
+// initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
+// an interface change. `resolveRepoRoot` is re-exported below so every existing import path
+// (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
+// were not exported before this move and stay that way, used here under their original names.
+import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+export { resolveRepoRoot };
+// `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
+// anchored to the `commandSpec`/`COMMANDS` registry it reads. Re-exported below for
+// test/run-task.test.ts's existing import.
+import { unknownArgError } from "./lib/cli-args.js";
+export { unknownArgError };
 
 /**
  * The REAL reads behind the binary-pin rung, as one object so the wiring is a single argument and
@@ -1154,43 +1166,6 @@ export async function peekCommand(
   return 0;
 }
 
-/**
- * Resolve the repo root a `rmd` invocation GATES, in priority order — replacing the
- * old INSTALL-PATH derivation (`dirname(dirname(fileURLToPath(import.meta.url)))`,
- * which named WHERE THE SCRIPT LIVES, never where the operator is standing). The
- * #271 fixture: one checkout's `bin/rmd`, invoked with cwd inside a DIFFERENT work
- * tree, used to silently gate the INSTALL tree's plan — a false green that never
- * opened the file under test.
- *   1. an explicit `--repo-root <path>` escape hatch, read directly off argv (a
- *      GLOBAL flag scanned here rather than through any one command's own flag
- *      allow-list — see `stripRepoRootFlag` below for why `main()` strips it before
- *      per-command validation runs).
- *   2. CWD-ASCENT: `git rev-parse --show-toplevel` from `cwd` — the tree the
- *      INVOKING shell is standing in, not the tree the running code happens to live in.
- *   3. Fall back to the INSTALL path ONLY when `cwd` is not inside a git work tree
- *      at all (e.g. a bare/scripted context) — reported on stderr so the fallback
- *      is never silent.
- */
-export function resolveRepoRoot(
-  argv: string[],
-  cwd: string,
-  showToplevel: (dir: string) => string = (dir) =>
-    execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(),
-): string {
-  const flagIdx = argv.indexOf("--repo-root");
-  if (flagIdx >= 0 && argv[flagIdx + 1] !== undefined) return resolve(argv[flagIdx + 1]);
-  try {
-    return showToplevel(cwd);
-  } catch (e) {
-    const installRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-    console.error(
-      `### rmd: cwd (${cwd}) is not inside a git work tree (${(e as Error).message}) — ` +
-        `falling back to the install root (${installRoot})`,
-    );
-    return installRoot;
-  }
-}
-
 /** Strips a global `--repo-root <path>` pair off argv before per-command flag
  *  validation — so a command whose own allow-list doesn't mention `--repo-root`
  *  (nearly all of them) never rejects it as an unexpected argument. */
@@ -1200,21 +1175,9 @@ export function stripRepoRootFlag(argv: string[]): string[] {
   return [...argv.slice(0, i), ...argv.slice(i + 2)];
 }
 
-const repoRoot = resolveRepoRoot(process.argv.slice(2), process.cwd());
-
 /** Owner org, read from THIS repo's origin — no hardcoded account in the tree. */
 function resolveOwner(): string {
   return resolveOwnerRepo().owner;
-}
-
-/** Owner + repo, parsed from THIS repo's origin url — no hardcoded slug in the tree. */
-function resolveOwnerRepo(): { owner: string; repo: string } {
-  const url = execFileSync("git", ["-C", repoRoot, "config", "--get", "remote.origin.url"], {
-    encoding: "utf8",
-  }).trim();
-  const m = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
-  if (!m) throw new Error(`could not parse owner/repo from origin url`);
-  return { owner: m[1], repo: m[2] };
 }
 
 /**
@@ -23827,33 +23790,6 @@ export async function awayCommand(rest: string[]): Promise<number> {
 function flagValue(rest: string[], flag: string): string | undefined {
   const i = rest.indexOf(flag);
   return i >= 0 ? rest[i + 1] : undefined;
-}
-
-/**
- * Strict arg check for a FLAGS-ONLY subcommand: return an error string for the FIRST
- * unrecognized token (a bare positional, or a `--flag` not in `valueFlags`/`boolFlags`),
- * else null. `valueFlags` consume the following token as their value. This is what makes a
- * SPAWNING command fail loud on junk instead of draining — `rmd daemon install --dry-run`
- * silently ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored.
- */
-export function unknownArgError(
-  command: string,
-  rest: string[],
-  valueFlags: string[],
-  boolFlags: string[] = [],
-): string | null {
-  const vf = new Set(valueFlags);
-  const bf = new Set(boolFlags);
-  for (let i = 0; i < rest.length; i++) {
-    const tok = rest[i];
-    if (bf.has(tok)) continue;
-    if (vf.has(tok)) {
-      i++; // skip its value
-      continue;
-    }
-    return `rmd ${command}: unexpected argument '${tok}' — see \`rmd --help\``;
-  }
-  return null;
 }
 
 /** The repo + plan a `rmd daemon` run targets, resolved from its flags. */
