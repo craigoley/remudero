@@ -1,0 +1,193 @@
+- id: W1-T2276
+  title: "One test file makes node's coverage reporter emit a SECOND, malformed record for src/lib/ledger.ts in which every function is declared exactly three lines above where it is, so the merged lcov splits each function's hits across two FN entries and 99 lines that are demonstrably executed report zero — a corruption that exists only in a multi-process run and is therefore invisible to every scoped check"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  risk: high
+  rationale: |
+    Filed by measuring, from a scratch worktree PROVEN equal to origin/main by sha (57d47446),
+    clone shallow-checked `false`. RE-DERIVED ON origin/main, NOT on the PR that hit it — the
+    defect is already on main and predates #2828 entirely. No spawning verb, no daemon, no poller.
+
+    (1) MORE TESTS REPORT LESS COVERAGE, WHICH CANNOT HAPPEN. Two runs on the SAME tree with CI's
+    exact invocation (`--enable-source-maps --experimental-test-coverage
+    --test-coverage-exclude=test/** --test-reporter=lcov`), over `src/lib/ledger.ts`:
+        55 test files (every one importing ../src/lib/ledger.js):  LF 1510  LH 1337  FNF 65  FNH 53
+        1  test file  (ledger-rotation-convergence.test.ts):       LF 1510  LH 1350  FNF 33  FNH 21
+    **`LF` IS IDENTICAL AND THE DA LINE-NUMBER SET IS IDENTICAL** (1510 entries, `diff` of the two
+    sorted line-number columns is empty), so the denominator is stable and nothing phantom is added
+    to it. Yet running FIFTY-FOUR MORE TEST FILES reports THIRTEEN FEWER covered lines. Coverage is
+    monotonic in reality; a decrease is pure loss. Per line: **99 lines carry hits in the one-file
+    run and ZERO in the 55-file run** (line 1014 falls from 2,147 hits to 0; 1135 from 2,146 to 0),
+    against 86 that legitimately gain.
+
+    (2) THE OFFSET IS A CONSTANT THREE, ON EVERY SINGLE FUNCTION, AND IT IS NOT A ROUNDING STORY.
+    The 55-file lcov carries 65 `FN:` records where the one-file lcov carries 33, and **16 function
+    NAMES appear twice at different lines. All sixteen deltas are exactly 3** (`uniq -c` over the
+    per-pair deltas prints one row: `16 3`):
+        rotateLedger 1095/1098   isRenderRelevantStep 891/894   isHealthOrDeployStep 726/729
+        parseLedgerLine 1007/1010   ledgerExceedsRotationCeiling 985/988   readSyncRange 1018/1021
+        writeFileAtomic 1034/1037   datedArchivePath 1050/1053   StateBackupError 1335/1338
+        <static_initializer> 1334/1337   listStateFiles 1375/1378   copyStateFiles 1397/1400
+        datedStateBackupDir 1413/1416   snapshotState 1441/1444   restoreState 1489/1492
+        appendDailyCostCeilingOverrideAudit 945/948
+    CONTROL: **`appendLedger` is NOT among them** — one record, `FN:164`, `FNDA:3118` — so this
+    corrupts some functions and not others, and the query can see an uncorrupted one.
+
+    (3) THE CULPRIT IS ONE FILE AND IT IS NAMED. A quarter-split of the 55 (14/14/14/13) reproduced
+    the 16 duplicates in exactly one quarter (0 / 16 / 0 / 0). Each of that quarter's 14 files was
+    then run WITH ONE CLEAN PARTNER to force a two-process merge; thirteen produced 0 duplicates
+    and **`test/ledger-rotation.test.ts` produced all 16**.
+    **AND ALONE IT PRODUCES NO RECORD AT ALL**: run by itself under the same flags, node prints
+    `Warning: Could not report code coverage. TypeError: Cannot read properties of undefined
+    (reading 'startOffset')` and **the lcov is ZERO BYTES**. So the same file that cannot report its
+    own coverage at all, when merged with any sibling, contributes a whole shifted copy of
+    `ledger.ts`'s function table instead of failing loudly.
+
+    (4) THIS IS THE CLAUDE.md #781 CONSTRUCT IN A SECOND FILE, AND THE EXISTING RULE UNDERSTATES IT.
+    CLAUDE.md records that `test/run-task.test.ts` "intermittently crashes at FILE level under
+    `--experimental-test-coverage` (the W1-T240 registry tests), zeroing the coverage record for
+    everything in it". `test/ledger-rotation.test.ts` carries the SAME registry re-derivation
+    construct — it `readFileSync`s consumer source and regex-scans it to rebuild the expected
+    `DECISION_RELEVANT_LEDGER_STEPS` set. The rule as written names ONE file and prescribes "put the
+    test elsewhere"; the measurement says the construct poisons coverage in whatever file holds it,
+    and that the damage is not confined to that file's own record — it reaches into another
+    module's function table in the merged artifact.
+
+    (5) THE BRANCH-SIDE INSTANCE, WHICH IS HOW THIS WAS FOUND, AND IT IS DETERMINISTIC. On #2828's
+    head (97527edb), two independent full runs of all 57 ledger-importing files produced
+    BYTE-IDENTICAL figures: `FN:793,riskOverrideFromLedger` with `FNDA:49`, a second
+    `FN:790,riskOverrideFromLedger` with `FNDA:0`, `LF 1612`, `LH 1423`, `FNF 67`, `FNH 54`.
+    **`FNDA:49` IS EXACTLY 44 + 5 — the two test files' own hit counts** — so the evidence that the
+    function was entered forty-nine times sits in the same record as a DA map reading zero for every
+    one of its lines. `diff-coverage` then blocked the PR on `src/lib/ledger.ts:794` through `:815`,
+    which is that function's entire body.
+
+    (6) A SUB-CLAIM CARRIED INTO THIS FILING IS WITHDRAWN RATHER THAN REPEATED. The finding was
+    first reported with "`DA:785..815` carry hits and 785-790 are JSDoc comment lines" as evidence
+    of mis-mapping. **THAT DOES NOT DISCRIMINATE.** Measured here: **951 of the 1,337 hit-marked
+    lines in the 55-file run, and 972 of the 1,350 in the ONE-file run, have a comment or blank
+    source line.** Assigning hits to comment lines is this instrument's ordinary behaviour on this
+    file, in both runs, and is not evidence of anything. The load-bearing evidence is (1), (2) and
+    (3).
+
+    (7) THE LEDGER CANNOT SPEAK TO THIS AND THE ZERO IS CONTROLLED. The only coverage-adjacent step
+    name in source is `coverage.improvement.filed`. Over the union at the state dir it reads
+    **0 in all three file forms** (666 `.gz`, 6 plain, 1 live) while the control `run.start` reads
+    257438 / 1314 / 200 in the same three. Nothing records a coverage measurement, so no ledger
+    figure here is available to carry, corroborate or refute.
+  design: |
+    (i) Q1 — SAME SYMPTOM FAMILY AS W1-T210, DIFFERENT CAUSE, AND THE FLAG IS NEITHER INEFFECTIVE
+    NOR MISAPPLIED. Note first that W1-T210's SHARD is about fencing untrusted CI-log text in the
+    fix-worker prompt; the coverage flag comes from the comment `.github/workflows/ci.yml` labels
+    "W1-T210 round 2", added when that task's OWN new function was falsely blocked. That comment
+    states its failure mode precisely: WITHOUT the flag, DA positions are scored against the
+    tsx-transpiled JS, and the error is an offset that GROWS with intervening JSDoc — its example is
+    `neutralizeFenceMarkers` at true line 1120 reported at 506. **THIS IS THE OPPOSITE SHAPE ON BOTH
+    AXES.** The flag IS set, and the offset is a CONSTANT 3 on all sixteen functions regardless of
+    how much JSDoc separates them. It is also not a within-process error at all: a single process
+    maps this file correctly, and the wrong mapping arrives from a SECOND process and survives the
+    merge. So the existing flag addresses a different cause and could not have prevented this;
+    W1-T210 is CITED and NOT RE-FILED, and nothing in this task touches that flag.
+
+    (ii) Q2, FORWARD COST — MEASURED, NOT PREDICTED. It blocks the next PR that adds any function to
+    `src/lib/ledger.ts`. That is not a forecast: #2828 is blocked on it right now, on a function
+    covered by sixteen passing tests across two files, and a second test file added specifically to
+    move it changed nothing.
+
+    (iii) Q2, BACKWARD COST — THE NET IS UNDER-REPORTING, BUT THE MECHANISM IS REATTRIBUTION AND SO
+    AN OVER-REPORT IS STRUCTURALLY POSSIBLE. The net for this file is unambiguous: 1,337 covered
+    lines reported where one test file alone proves 1,350, with an identical denominator. **BUT THE
+    HITS ARE NOT DELETED, THEY ARE MOVED**, and one pair proves the phantom line can carry MORE than
+    the real one: `appendDailyCostCeilingOverrideAudit` records **4 hits at line 945 and 1 at line
+    948**, where 948 is the declaration. A line that receives borrowed hits reads as covered whether
+    or not its own code ever ran. **AND NEITHER GATE CAN TELL**: `scripts/coverage-ratchet.mjs`
+    contains the string `FN` zero times — `parseLcovTotals` sums only LF/LH/BRF/BRH — so the whole
+    corrupted function table is invisible to the aggregate floor, and a moved line-hit is
+    arithmetically indistinguishable from a real one. **SO THE HONEST ANSWER TO "HAS THE RATCHET
+    BEEN PASSING THINGS IT SHOULD NOT" IS: IT COULD HAVE BEEN, AND NOTHING IN THE ARTIFACT WOULD
+    SHOW IT.** How often is NOT measured here and this task must not assert a figure for it; what is
+    measured is that the direction is not uniform and the instrument cannot distinguish the cases.
+
+    (iv) `diff-coverage` ALREADY DEDUPES FN RECORDS — ON THE ONE KEY THAT CANNOT SEE THIS. Its
+    parser keys `fnLines` by `(file, declLine)` and carries a LIST of names per line, because
+    "282 (file, line) keys carry more than one FN record against 4,042 distinct keys"; and `fnHits`
+    keys by `(file, name)` with an ANY-NON-ZERO rule because "1,362 duplicate pairs, 48 of them with
+    more than one NON-ZERO value". Both mitigations are real and both miss this: the duplicate here
+    is the SAME NAME at DIFFERENT LINES, so the line key never collides, and the any-non-zero FNDA
+    rule correctly reports the function as ENTERED while the DA map it consults for the BODY still
+    reads zero. The remedy therefore belongs beside those two, as a third reconciliation on the
+    (file, name) key — the same shape as `dedupeRollupByLatestAttempt` — NOT as a new exemption.
+
+    (v) THE FIRST INVESTIGATION STEP, STATED AS A QUESTION AND NOT AS A CONCLUSION. Why does
+    `test/ledger-rotation.test.ts` emit a record three lines short? It is NOT the mutated-module-copy
+    shape `scripts/coverage-baseline.json`'s own `_rebased` note describes for W1-T421/#1564 — its
+    `withoutStep` helper filters ledger NDJSON DATA, never module source, and the tree's
+    `tmpdirModuleImports` detector (`test/architecture-fitness.test.ts`) is green. The `startOffset`
+    crash is the stronger lead: a reporter that cannot complete its own record for this file may be
+    emitting a partial one built from a stale or half-resolved source map. The task should answer
+    that before choosing between fixing the emitter, fixing the test, and hardening the reader.
+
+    (vi) Q3 — WHAT MUST NOT CHANGE.
+      **NO SOURCE IS REFORMATTED TO NUDGE A SOURCE MAP.** `src/lib/ledger.ts` is not touched. Moving
+      a JSDoc block or a declaration to make an instrument agree is contorting the module to suit
+      the instrument, and here the instrument is the thing that is wrong. The lane that found this
+      refused that edit and was right.
+      **NO BASELINE EDIT, NO THRESHOLD CHANGE, NO EXCLUSION, NO `diff-coverage` DIRECTIVE.** The
+      aggregate floor is green; this is the diff-scoped gate, and W1-T1277 records that four
+      ratchets already disarm on a malformed threshold, so reaching for one here would be the wrong
+      lever twice over.
+      **`diff-coverage` STAYS BLOCKING.** It was right to fail #2828 even while naming the wrong
+      lines: the reader's refusal arms genuinely had no coverage, and the block is what produced
+      them. A gate that misreports its evidence must be fixed, never softened.
+      **NO CLAIM ABOUT HOW LONG OR HOW OFTEN.** The duplicated records are present on main today;
+      for how long and across how many files is unmeasured, and this task must report what it finds
+      rather than inherit a number from this shard.
+
+    (vii) NOT IN SCOPE, NAMED: the `linesPct 95.62` floor (its own baseline comment already says it
+    is "stale LOW against a real ~98.3%" and needs its own ruling); the branch tier thresholds;
+    W1-T210's flag; W1-T421's tmpdir-copy detector; #2828's own merge; and any change to which
+    checks are required.
+  acceptance:
+    - claim: "a merged lcov carrying the same function name at two different declaration lines is reconciled rather than read as two functions"
+      proof: "unit test: test/lcov-function-record-attribution.test.ts"
+    - claim: "a function whose FNDA proves it was entered is not reported as having an uncovered body"
+      proof: "unit test: test/lcov-function-record-attribution.test.ts"
+    - claim: "the file that cannot report its own coverage no longer contributes a shifted function table for another module"
+      proof: "unit test: test/lcov-function-record-attribution.test.ts"
+    - claim: "a single-process run and a multi-process run over the same tree agree on which lines are covered"
+      proof: "unit test: test/lcov-function-record-attribution.test.ts"
+    - claim: "an lcov with no duplicate records is passed through unchanged, so the reconciliation cannot mask a real gap"
+      proof: "unit test: test/lcov-function-record-attribution.test.ts"
+    - claim: "diff-coverage still blocks a genuinely uncovered added line after the reconciliation"
+      proof: "unit test: test/lcov-function-record-attribution.test.ts"
+  files: [scripts/diff-coverage.mjs, test/ledger-rotation.test.ts, test/lcov-function-record-attribution.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#coverage-mapped-onto-the-wrong-lines-2026-08-25"
+  plan_refs: ["W1-T210", "W1-T212", "W1-T240", "W1-T421", "W1-T481", "W1-T1277", "W1-T2244"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so a script, an existing test and a new test named after neither trip it at
+    `medium`. The change is a reconciliation in one parser plus whatever (v) finds in the emitting
+    test; no `src/` file is touched at all.
+
+    NO PROOF IN THIS SHARD GREPS ITS OWN PATH. Every criterion uses the pure-path `unit test:` form
+    naming `test/lcov-function-record-attribution.test.ts`, declared in `files:`, so on this filing
+    PR it resolves through W1-T456's forward-reference carve-out to `not_yet_built`.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL, CONFIRMED PRESENT BEFORE IT
+    WAS BELIEVED. `rmd check-proof` on the declared path reads `exit: 1`, `hits: 0`, `verdict: fail`.
+    The SAME verb on an EXISTING pure path — `unit test: test/diff-coverage.test.ts`, the test file
+    for the very script this task changes — reads `verdict: pass`.
+
+    THE ID WAS RESERVED BY THE OPERATOR AND IS NOT RE-MINTED, AND NO MINT WAS CALLED. `refs/rmd-id/W1-T2276`
+    resolves to e2df05f22d503281830ddc513fa8a061daa5ca92; this shard VERIFIES THE ID IS UNUSED rather
+    than that it is this account's. Five surfaces swept, each control pre-qualified for its own
+    surface, remote ref counts read first (138 heads, 395 `refs/rmd-id/*`): shards on main 0 (control
+    W1-T2274 = 2); whole tree at HEAD 0 (control 2); remote head names 0 (control, 91 `run-*` heads
+    read); commit subjects and bodies on main 0 (control 3); open PR titles, bodies and head refs 0
+    across all 3 open PRs (control `W1-T2` = 3). Presence of a reservation is not usage.
