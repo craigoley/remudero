@@ -494,6 +494,59 @@ test("inboxNotifyChannel reports NO unavailable() at all — always deliverable,
   assert.equal(channel.unavailable, undefined);
 });
 
+// ── `readInboxDigests`' two unexercised arms (diff-coverage: src/lib/digest.ts:912 and :915) ──
+//
+// WHY 578 LINES OF TEST MISSED THEM. Every existing inbox test sends exactly ONCE into a fresh
+// `mkdtempSync` root, so `inboxNotifyChannel.send` always finds no inbox file: `existsSync`
+// returns false, `readInboxDigests` returns [] on its first line, and nothing below that ever
+// runs. The read-and-parse at :912 needs a SECOND send into the same root, and the `catch` at
+// :915 needs a file that exists and does not parse. Neither is a coverage nicety — the first is
+// the inbox's whole contract (it accumulates, it does not overwrite) and the second is the only
+// thing standing between a corrupt inbox file and a digest that cannot deliver.
+
+test("inboxNotifyChannel APPENDS to an existing inbox rather than overwriting it — the second send reads and parses what the first wrote", () => {
+  const dir = tmp("rmd-dc-inbox-append-");
+  try {
+    const channel: NotifyChannel = inboxNotifyChannel(dir);
+    channel.send("first digest");
+    const afterFirst = JSON.parse(readFileSync(inboxDigestsPath(dir), "utf8"));
+    assert.equal(afterFirst.length, 1, "sanity: the first send lands one entry");
+
+    // THIS is the line the gate names: the second send takes the existsSync branch FALSE, so it
+    // reads the file back and JSON.parses it before pushing.
+    channel.send("second digest");
+    const entries = JSON.parse(readFileSync(inboxDigestsPath(dir), "utf8"));
+    assert.equal(entries.length, 2, "the second send must APPEND, never replace");
+    assert.equal(entries[0].text, "first digest", "the earlier entry survives, oldest first");
+    assert.equal(entries[1].text, "second digest");
+    assert.ok(entries[0].ts <= entries[1].ts, "entries stay in send order, newest last");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("inboxNotifyChannel survives a CORRUPT inbox file — the unparseable content is discarded and the send still lands", () => {
+  const dir = tmp("rmd-dc-inbox-corrupt-");
+  try {
+    const path = inboxDigestsPath(dir);
+    mkdirSync(join(dir, "state"), { recursive: true });
+    writeFileSync(path, "{ this is not json at all");
+    assert.ok(existsSync(path), "sanity: the file EXISTS, so the existsSync early return is not what runs");
+
+    // The `catch` arm: JSON.parse throws, readInboxDigests returns [] rather than propagating,
+    // and the send completes. A throw here would take the whole digest cadence down.
+    const channel: NotifyChannel = inboxNotifyChannel(dir);
+    channel.send("after corruption");
+
+    const entries = JSON.parse(readFileSync(path, "utf8"));
+    assert.ok(Array.isArray(entries), "the corrupt file is replaced by a well-formed array");
+    assert.equal(entries.length, 1, "the unparseable content is discarded, never appended to");
+    assert.equal(entries[0].text, "after corruption");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("digest.ts imports NO concrete delivery target by name in its producer's TYPE signature — the NotifyDeps.channel field is NotifyChannel-typed only", () => {
   const src = readFileSync(join(REPO_ROOT, "src", "lib", "digest.ts"), "utf8");
   assert.match(src, /from "\.\/notify\.js"/, "sanity: digest.ts does import notify.ts for NotifyDeps/notify()/NotifyChannel");
