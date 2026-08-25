@@ -398,7 +398,7 @@ import { gunzipSync } from "node:zlib";
 import { ledgerRotationEntries, resolveLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import { injectCoverageImprovementTask } from "./lib/coverage-improvement.js";
-import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
+import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
   measurementCadenceCheck,
@@ -2829,6 +2829,15 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
  * fixture/lane override keeps working unchanged) OR the richer {@link ArmAttemptResult} the new
  * default, {@link armAutoMergeDetailed}, returns — either way the `error` text, when there is
  * one, is merged onto the SAME row this function already wrote, not a second line.
+ *
+ * W1-T2258 — appended LAST, the same convention every dep above follows: `headSha`, when the
+ * caller has one, rides onto the SAME `automerge.armed`/`arm_skipped`/`arm_failed` row this
+ * function already writes, as `head_sha`. This is the fix at the writer lib/verdict-calibration.ts's
+ * join needed — every non-review lane (dep-review, retro, triage, plan, approve, sweep) called
+ * this wrapper without ever putting a head on the row, so its `automerge.armed` line could never
+ * join to the matching `review.posted` line, no matter how the reader side counted. Optional and
+ * unenforced: an omitted head still logs the row (never blocks an arm) — it simply stays
+ * unjoinable, exactly as it does today.
  */
 export function armAndLogOutcome(
   prUrl: string,
@@ -2836,6 +2845,7 @@ export function armAndLogOutcome(
   log: (step: string, extra?: Record<string, unknown>) => void,
   arm: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult = armAutoMergeDetailed,
   lane: ArmLane = "operator",
+  headSha?: string,
 ): ArmOutcome {
   const result = arm(prUrl, taskId);
   const outcome = typeof result === "string" ? result : result.outcome;
@@ -2844,7 +2854,15 @@ export function armAndLogOutcome(
   // function already writes — see `logArmAttribution`'s own doc for the second, named step it
   // additionally emits.
   const rateLimit = typeof result === "string" ? undefined : result.rateLimit;
-  logArmAttribution(log, outcome, prUrl, taskId, lane, error !== undefined ? { outcome, error } : { outcome }, rateLimit);
+  logArmAttribution(
+    log,
+    outcome,
+    prUrl,
+    taskId,
+    lane,
+    { ...(error !== undefined ? { outcome, error } : { outcome }), ...(headSha !== undefined ? { head_sha: headSha } : {}) },
+    rateLimit,
+  );
   return outcome;
 }
 
@@ -10283,10 +10301,14 @@ async function runTask(
     const armOutcome: ArmOutcome | "no-merge-boundary-refused" = wipeTestArmDecision.armed
       ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
       : "no-merge-boundary-refused";
+    // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
+    // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
+    // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
     log("automerge.armed", {
       at: "verdict",
       outcome: armOutcome,
       irreversible,
+      head_sha: review.headSha,
       ...(wipeTestArmDecision.reason ? { reason: wipeTestArmDecision.reason } : {}),
     });
 
@@ -11404,7 +11426,9 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       dep_review: true,
       proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
     });
-    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm);
+    // W1-T2258: `view.headRefOid` is the SAME head the `review.posted` line just above was keyed
+    // to — already in hand, no extra read needed to close the join gap for this lane.
+    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm, "operator", view.headRefOid);
     console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`);
     // impl-FR — THE DETECTOR. This lane is the ONLY arm path for a Dependabot PR: the sweep's
     // ordered, first-match-wins DISPOSITION_RULES put `dep-review` above both `mergeable` and
@@ -12893,21 +12917,28 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
   if (gitReadError) {
     console.log(`  git history: UNAVAILABLE — ${gitReadError}`);
   }
+  // W1-T2258: THE DENOMINATOR, NAMED — how many arms this report saw and how many it could
+  // classify, so a consumer reading the class rates below can never mistake a ratio of whatever
+  // survived the join for a rate over every arm (design note (iv): "a consumer that cannot see
+  // the denominator cannot tell a rate from a ratio of whatever survived").
+  console.log(`  arms seen: ${report.armsSeen}, classified: ${report.armsClassified}, unmeasurable: ${report.unmeasurable.length}`);
   console.log("");
   console.log(`attribution policy: window ${report.policy.windowDays}d — ${report.policy.overlapRuleDescription}`);
   console.log("");
   for (const c of report.classes) {
     const label = c.verdictClass === "full-pass" ? "full PASS" : c.verdictClass === "keyword-floor" ? "keyword floor" : "degraded arm";
     if (c.revertRate === null) {
-      console.log(
-        `  ${label.padEnd(14)} n=${c.total} — UNMEASURABLE (below the minimum population floor of ${report.minPopulationFloor}; counts only)`,
-      );
+      const reason =
+        c.rateRefusedReason === "mixed-lane-population"
+          ? `spans more than one arm lane (${c.lanes}) — the honest presentation is per-lane, never a blended fleet-wide rate (W1-T2258 design note (v))`
+          : `below the minimum population floor of ${report.minPopulationFloor}; counts only`;
+      console.log(`  ${label.padEnd(14)} n=${c.total} — UNMEASURABLE (${reason})`);
       console.log(`  ${" ".repeat(14)}   reverted ${c.revertedCount}/${c.total}, follow-up-fixed ${c.followupFixedCount}/${c.total}`);
     } else {
       const revertPct = (c.revertRate * 100).toFixed(1);
       const fixPct = (c.followupFixRate! * 100).toFixed(1);
       console.log(
-        `  ${label.padEnd(14)} n=${c.total} — revert rate ${revertPct}% (${c.revertedCount}/${c.total}), follow-up-fix rate ${fixPct}% (${c.followupFixedCount}/${c.total})`,
+        `  ${label.padEnd(14)} n=${c.total} — revert rate ${revertPct}% (${c.revertedCount}/${c.total}), follow-up-fix rate ${fixPct}% (${c.followupFixedCount}/${c.total}) — lane(s): ${c.lanes}`,
       );
     }
   }
@@ -12916,8 +12947,12 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
     console.log("unmeasurable: none");
   } else {
     console.log(`unmeasurable: ${report.unmeasurable.length} row(s)`);
+    // W1-T2258: broken out BY CAUSE — "no head sha" is never merged into "merge sha could not
+    // be recovered" or "no matching review.posted line" (design note (iv)).
+    const causeOrder: UnmeasurableCause[] = ["no-head-sha", "no-review-posted", "merge-sha-unrecoverable", "git-history-unavailable"];
+    console.log(`  by cause: ${causeOrder.map((c) => `${c}=${report.unmeasurableByCause[c]}`).join(", ")}`);
     for (const u of report.unmeasurable) {
-      console.log(`  ${u.taskId} @ ${u.headSha}: ${u.why}`);
+      console.log(`  ${u.taskId} @ ${u.headSha ?? "no head sha"} [${u.cause}]: ${u.why}`);
     }
   }
 
@@ -15733,7 +15768,18 @@ async function retroCommand(
     // `review.posted` rows keyed exactly "RETRO" = 0, rows keyed RETRO* = 7795. The literal
     // has NEVER matched a verdict — every retro PR in this repo's history was refused here at
     // the W1-T230 gate, and then logged `automerge.armed` anyway. `runId` is the id in scope.
-    const armOutcome = armAndLogOutcome(prUrl, runId, log);
+    //
+    // W1-T2258: this lane holds no headSha variable of its own — `readHeadShaRest(prUrl)` is
+    // the SAME live REST read `reviewCommand` (just above) already made to post its own
+    // `review.posted` line, best-effort here too: a failed read leaves the row unjoinable,
+    // exactly as it is today, never blocking the arm itself.
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(prUrl);
+    } catch {
+      /* best-effort — see the comment above */
+    }
+    const armOutcome = armAndLogOutcome(prUrl, runId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     say(`retro PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
@@ -21738,6 +21784,9 @@ export function buildSweepEffects(
           return result;
         },
         "sweep",
+        // W1-T2258: `pr.headSha` (OpenPrView) is the head this disposition was decided against —
+        // already in hand, no extra read needed to close the join gap for this lane.
+        pr.headSha,
       );
       // The fold itself is `sweepArmAttemptOutcome` (pure, beside `armFailureAction`) so each of
       // its arms is a unit fixture rather than a branch only a whole sweep pass can reach.
@@ -24589,7 +24638,17 @@ async function triageCommandLocked(
     // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
     // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
     // must pass to find it.
-    const armOutcome = armAndLogOutcome(prUrl, taskId, log);
+    // W1-T2258: this lane holds no headSha variable of its own — `readHeadShaRest(prUrl)` is
+    // the SAME live REST read `reviewCommand` (just above) already made to post its own
+    // `review.posted` line, best-effort here too: a failed read leaves the row unjoinable,
+    // exactly as it is today, never blocking the arm itself.
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(prUrl);
+    } catch {
+      /* best-effort — see the comment above */
+    }
+    const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     say(`triage PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
@@ -24961,7 +25020,17 @@ export async function planCommand(
     // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
     // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
     // must pass to find it.
-    const armOutcome = armAndLogOutcome(prUrl, taskId, log);
+    // W1-T2258: this lane holds no headSha variable of its own — `readHeadShaRest(prUrl)` is
+    // the SAME live REST read `reviewCommand` (just above) already made to post its own
+    // `review.posted` line, best-effort here too: a failed read leaves the row unjoinable,
+    // exactly as it is today, never blocking the arm itself.
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(prUrl);
+    } catch {
+      /* best-effort — see the comment above */
+    }
+    const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     say(`plan PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
@@ -25663,7 +25732,17 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     // (see the no-trailer comment above) — reviewCommand's own taskId resolve
     // therefore falls back to `PR-${view.number}` and its review.posted ledger
     // line is keyed to that same fallback, not `proposalId`.
-    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log);
+    // W1-T2258: this lane holds no headSha variable of its own — `readHeadShaRest(result.prUrl)`
+    // is the SAME live REST read `reviewCommand` (just above) already made to post its own
+    // `review.posted` line, best-effort here too: a failed read leaves the row unjoinable,
+    // exactly as it is today, never blocking the arm itself.
+    let armHeadSha: string | undefined;
+    try {
+      armHeadSha = readHeadShaRest(result.prUrl);
+    } catch {
+      /* best-effort — see the comment above */
+    }
+    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
     return reviewCode;
