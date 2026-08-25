@@ -146,7 +146,9 @@ test("W1-T1013: an entry marked in an archived row is not proposed again", () =>
         run_id: "ARCH-MARKED",
         task_id: "W1-T1013-SRC",
         step: "followup.harvested",
-        entry_id: "ARCH-MARKED:0",
+        // W1-T2252: keyed on the SOURCE row's own run_id:ts:index — "2026-07-01T00:00:00.000Z"
+        // is the report.followups row's own ts above, not this mark line's ts.
+        entry_id: "ARCH-MARKED:2026-07-01T00:00:00.000Z:0",
         type: "task",
         text: "an entry already harvested in a prior, now-archived pass",
       })}\n`,

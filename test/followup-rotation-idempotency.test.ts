@@ -100,8 +100,11 @@ test("W1-T964: a re-mine after rotation yields the same candidate set", () => {
     // the mark step are the SAME 50 entries, not an independently-chosen 50 on each side.
     assert.ok(!sourceLive.some((r) => (r.entries as Array<{ text: string }>)?.[0]?.text === "harv followup entry 0"));
     assert.ok(sourceLive.some((r) => (r.entries as Array<{ text: string }>)?.[0]?.text === "harv followup entry 249"));
-    assert.ok(!markLive.some((r) => r.entry_id === "harv-0:0"));
-    assert.ok(markLive.some((r) => r.entry_id === "harv-249:0"));
+    // W1-T2252: entry_id is now `run_id:ts:index` — ts is the real wall-clock stamp
+    // `appendLedger` gave each source row, unknown ahead of time, so match by prefix/suffix
+    // rather than the full literal.
+    assert.ok(!markLive.some((r) => typeof r.entry_id === "string" && r.entry_id.startsWith("harv-0:") && r.entry_id.endsWith(":0")));
+    assert.ok(markLive.some((r) => typeof r.entry_id === "string" && r.entry_id.startsWith("harv-249:") && r.entry_id.endsWith(":0")));
 
     // THE ACCEPTANCE CLAIM: a re-mine after rotation yields the SAME candidate set it yielded
     // before the rotation — empty, because every surviving source row's mark survived alongside
@@ -136,7 +139,14 @@ test("W1-T964: a non-pinned step still archives in the same run", () => {
       writeFileSync(ledgerPath, noiseLine(n) + "\n", { flag: "a" });
     }
 
-    const ceiling = 2000;
+    // 4000, not 2000: W1-T2252 lengthened every followup.harvested mark's entry_id from
+    // `run_id:index` to `run_id:ts:index`, so the pinned 10-line core (5 report.followups + 5
+    // followup.harvested) sits close enough to a 2000-byte ceiling's shed-pass target
+    // (ceiling * 0.9) that the convergence invariant (rotateLedger's oldest-by-ts shed, ledger.ts)
+    // would evict some of the very rows this test asserts survive — a fixture-sizing artifact of
+    // the longer key, not a regression in pinning. 4000 keeps the pinned core comfortably under
+    // the shed target while the 300-line noise burst still safely exceeds it (asserted below).
+    const ceiling = 4000;
     assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling));
     const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
     assert.equal(result.rotated, true);
