@@ -1,0 +1,156 @@
+- id: W1-T2275
+  title: "The wait path classifies a check against a fail-closed RED set with no OK counterpart, so anything not literally `SUCCESS` is pending and `CANCELLED` is red — while the sweep one module over already keeps `SKIPPED` and `NEUTRAL` as green on GitHub's own merge-eligibility semantics, and neither wait predicate filters by the required list at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (3eb7055b165fb41e870472d8c5fc62e24b2f77d5), clone shallow-checked `false`. `src/run-task.ts` read
+    through git objects. No suite, no spawning verb, no poller. Ledger read at the STATE dir with
+    newest row per step, step names grepped from source; every zero controlled. REST and `git` only.
+
+    (1) ONE CONFLATION, TWO OPPOSITE SYMPTOMS, AND THE SITES DO NOT AGREE. GitHub's conclusion set is
+    eight values: `success`, `failure`, `neutral`, `cancelled`, `skipped`, `timed_out`,
+    `action_required`, `stale`. FOUR SITES CLASSIFY A CHECK AND EACH HANDLES A DIFFERENT SUBSET.
+
+    SITE A — THE PROGRESS CHECK. `checkWaitStalled` (`src/run-task.ts`) builds its pending list as
+    `!RED_CONCLUSIONS.has(state) && state !== "SUCCESS"`. That names exactly TWO of the eight — the
+    red set, and `SUCCESS`. EVERY OTHER VALUE READS AS PENDING, `neutral` and `skipped` included. A
+    check that concluded cleanly is reported as one that never finished.
+
+    SITE B — THE RED ROLLUP. `ciGateFromRollup` (`src/run-task.ts`) returns `"red"` on any member of
+    `RED_CONCLUSIONS`, which INCLUDES `CANCELLED`, and returns `"green"` only when the `ci` entry
+    reads `SUCCESS`. A check that never reported is a failure; a check that concluded `neutral` is
+    neither, so it falls through to pending.
+
+    THE TWO SHARE ONE SET WITH TWO DIFFERENT NEEDS. `RED_CONCLUSIONS`'s own doc says it is the set
+    that means "the gate is RED (fail closed on anything not green)" — correct for a GATE, wrong for
+    a PROGRESS predicate, because the wait path has NO GREEN SET AT ALL and falls back to a literal
+    `SUCCESS` comparison.
+
+    SITE C — THE SWEEP, WHICH ALREADY GETS THIS RIGHT. `checksStateFromRollup` (`src/lib/sweep.ts`)
+    reads `REQUIRED_CHECK_OK = {SUCCESS, SKIPPED, NEUTRAL}` against
+    `REQUIRED_CHECK_FAIL = {FAILURE, ERROR, TIMED_OUT, CANCELLED, ACTION_REQUIRED, STARTUP_FAILURE}`,
+    and its own comment states the ground: "a required check that reports SKIPPED or NEUTRAL still
+    counts as green" is "a claim about GITHUB'S merge-eligibility semantics".
+
+    SITE D — THE FAILING-LIST PRODUCER. `fetchCiFailures` filters on the EXPORTED
+    `REQUIRED_CHECK_FAIL`, which W1-T457 made shared precisely so a predicate and its evidence list
+    cannot drift — that task's own record names the #1728 defect where they did.
+
+    SO THE ANSWER ALREADY EXISTS ONE MODULE OVER AND THE WAIT PATH NEVER LEARNED IT. Sites C and D
+    agree with each other by construction; sites A and B agree with neither. AND `STALE` IS IN NO SET
+    ANYWHERE — grepped across `src/`, it appears in none of them, so the eighth value is unhandled at
+    every site.
+
+    (2) THE TWO SYMPTOMS, OPERATOR-CAPTURED 2026-08-25 AND ATTRIBUTED RATHER THAN RE-DERIVED.
+    #2830 and #2833 both went `blocked_ci (no progress for 5 consecutive polls — still pending:
+    osv-scanner)` and were left open, while that check on both heads read `completed / neutral` —
+    site A's defect exactly. And #2794 went `blocked_ci (required check red: coverage-ratchet)` when
+    that check's conclusion was `cancelled`, not `failure` — site B's. Four lost dispatches from one
+    missing distinction, in opposite directions.
+
+    THE LEDGER CANNOT CONFIRM THEM HERE AND THAT IS STATED RATHER THAN REPORTED AS A ZERO.
+    `ci.stalled` reads 0 rows over 672 archives with nothing unread, against a control of 3,037
+    `ci.polling` rows on the same union — but that corpus's newest polling row is 2026-08-14 and the
+    incidents are 2026-08-25, so the zero is the window, not the behaviour.
+
+    (3) Q1 — WHAT EACH VALUE SHOULD MEAN, AND WHICH DESERVES ITS OWN STATE. They are not
+    interchangeable and folding them into two buckets is what produced both symptoms.
+
+      DONE, COUNT AS GREEN: `success`, and `neutral` and `skipped` — a clean no-findings result and a
+      condition that excluded the check are both terminal, and site C already treats them so on
+      GitHub's own semantics. Keeping them out of green is what stalled #2830 and #2833.
+
+      RED: `failure`, `action_required` — the check ran and objected, or ran and requires a human.
+
+      NEITHER, AND THIS IS THE PART THAT NEEDS ITS OWN STATE: `cancelled`, `timed_out` and `stale`
+      are NOT results. Nothing was judged. Calling them red asserts a finding that was never made —
+      #2794's shape — and calling them green would be worse. W1-T1223 already files that nothing
+      requeues a cancelled required check, so the honest state is "never reported", which a requeue
+      rung can act on and a merge gate must not treat as a pass. CITED, NOT RE-FILED.
+
+      AND THIS IS THE SAME SHAPE AS W1-T2249, ALSO CITED AND NOT RE-FILED: a dead probe and a broken
+      boundary sharing one verdict is the same error as a cancelled check and a failing one sharing
+      one. Two causes, one bucket, and the reader cannot tell which happened.
+
+    (4) Q2 — WHETHER THE WAIT SHOULD SPAN NON-REQUIRED CHECKS, ARGUED BOTH WAYS AND NOT DECIDED HERE.
+    FIRST THE FACT: `osv-scanner` is NOT in `ci-gate.yml`'s `REQUIRED` list — the list names
+    `scan-pr / osv-scan`, a different check — and it blocked two PRs. AND NEITHER WAIT PREDICATE
+    FILTERS BY REQUIRED AT ALL: `ciGateFromRollup` filters only the review context and then scans
+    every entry, and `checkWaitStalled` takes no required-contexts argument, while
+    `checksStateFromRollup` one module over does take one. So the wait spans everything by omission
+    rather than by decision.
+
+      WAITING ON EVERYTHING catches a late failure in a check nobody marked required, which is a real
+      class — a required list is a policy statement, not a claim that the rest are harmless. Its cost
+      is that ANY hung or slow check can stop a lane, and today that cost was two dispatches.
+
+      WAITING ONLY ON REQUIRED arms as soon as the gating set is green and never stalls on a
+      non-required straggler. ITS BILL HAS NOT BEEN MEASURED AND MUST NOT BE ASSUMED ZERO: it would
+      arm PRs before non-required checks report, so a late non-required failure would land on an
+      already-armed PR, and nobody has counted how often a non-required check has ever caught
+      something. A build that picks this side without that count has traded a measured cost for an
+      unmeasured one.
+
+      THE SHARD DOES NOT PICK. Note that fixing §1 alone may make §4 moot for the observed cases — a
+      `neutral` osv-scanner stops being pending whether or not it is required — so the taxonomy is
+      the smaller change and the scope question can be ruled on separately.
+  design: |
+    (i) ONE TAXONOMY, CONSULTED BY EVERY SITE. The wait path gains a green set rather than a literal
+    `SUCCESS` comparison, and it is the SAME set site C already uses — never a fourth hand-copy, which
+    is the drift W1-T457 already had to close once between sites C and D.
+
+    (ii) "NEVER REPORTED" IS A STATE, NOT A SYNONYM. `cancelled`, `timed_out` and `stale` resolve to
+    it. What consumes that state is out of scope here; W1-T1223 owns the requeue question.
+
+    (iii) AN UNRECOGNISED CONCLUSION FAILS TOWARD WAITING OR TOWARD RED, NEVER TOWARD GREEN. GitHub
+    may add a ninth value, and the one direction that must be impossible is a silent pass.
+  acceptance:
+    - claim: "a check that concluded with a clean no-findings result is not reported as still pending"
+      proof: "unit test: test/check-conclusion-taxonomy.test.ts"
+    - claim: "a check excluded by a condition is not reported as still pending"
+      proof: "unit test: test/check-conclusion-taxonomy.test.ts"
+    - claim: "a check that never reported is distinguishable from one that ran and objected"
+      proof: "unit test: test/check-conclusion-taxonomy.test.ts"
+    - claim: "an unrecognised conclusion never resolves to green"
+      proof: "unit test: test/check-conclusion-taxonomy.test.ts"
+    - claim: "the wait still stops after five polls without movement"
+      proof: "unit test: test/check-conclusion-taxonomy.test.ts"
+    - claim: "the wait path and the sweep agree on every one of the eight conclusions"
+      proof: "unit test: test/check-conclusion-taxonomy.test.ts"
+  files: [src/run-task.ts, test/check-conclusion-taxonomy.test.ts]
+  status: queued
+  attempts: 0
+  origin: "recon#wait-path-has-no-green-set-2026-08-25"
+  plan_refs: ["W1-T382", "W1-T457", "W1-T1223", "W1-T2249"]
+  note: |
+    THE PROGRESS BOUND STAYS. Five identical polls without movement must still stop the wait: an
+    unbounded wait is worse than a wrong verdict, and W1-T382 sized that window against this repo's
+    real poll cadence. This task changes what counts as MOVEMENT and what counts as DONE; it does not
+    change how long the wait may run, and a build that widens the window has answered a different
+    question.
+
+    NOTHING TREATS AN UNRECOGNISED CONCLUSION AS SUCCESS. A value none of the sets names must fail
+    toward waiting or toward red, never toward green — `stale` is already such a value today, present
+    in no set anywhere, and GitHub may add a ninth.
+
+    `REQUIRED` IS NOT EDITED BY THIS TASK AND NO CHECK IS ADDED OR REMOVED. Whether the wait should
+    span non-required checks is design (§4)'s open question, and answering it by editing the list
+    would change which checks GATE rather than which the wait WAITS ON — a different and larger
+    change that this task does not authorise.
+
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS, AND THE BAND WAS MEASURED RATHER THAN CHOSEN.
+    Filed at `medium` first; `rmd lint-plan --base origin/main` exited 1 with, verbatim:
+
+      [sizing] spans 2 distinct subsystems/concerns (check-conclusion-taxonomy, run-task) at
+      risk:medium — Rule 19: raise to risk:high or decompose into one task per concern The real blast radius is two predicates on one wait path; the
+    merge gate's own classification is site C and is not touched.
+
+    NO PROOF GREPS ITS OWN PATH AND NONE NAMES AN EXISTING FILE. Every criterion uses the pure-path
+    `unit test:` form naming `test/check-conclusion-taxonomy.test.ts`, declared in `files:` and absent
+    from this tree, so on the filing PR each resolves through W1-T456's forward-reference carve-out.
