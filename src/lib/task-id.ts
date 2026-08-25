@@ -90,15 +90,23 @@ export function mentionedTaskIds(text: string): number[] {
 export const MAX_ALLOCATABLE_TASK_ID = 100_000;
 
 /**
+ * A BACKSTOP (W1-T1266), not a primary control — and the distinction is load-bearing here rather
+ * than ceremonial. What NORMALLY keeps the mint's ceiling honest is agreement between the sources:
+ * the plan records ids that exist, a filing PR names the one it is about to add, and the two track
+ * each other within a single id. This bound fires only once that agreement has ALREADY broken,
+ * which in practice means a literal has already been written into prose somewhere. On a healthy
+ * population it is never reached, and if it ever starts firing routinely the right response is to
+ * ask what is writing burnable literals, never to raise the number.
+ *
  * How far a MENTION source (open PR text) may lead the plan's own ceiling before the mint stops
  * believing it. RELATIVE, not absolute: it needs no recalibration as the plan grows.
  *
  * MEASURED 2026-08-25: the legitimate lead is 1 — the open PRs' highest mention was 2289 against a
  * plan ceiling of 2288, which is one filing PR naming the id it is about to add. The observed
  * failure led by 7,711 (a four-digit doc example in one PR body against a plan ceiling of 2288),
- * and the mint handed out that ceiling plus one, then plus two. 100 is two orders above the legitimate
- * lead
- * and two orders below the observed failure, so it needs no precision to separate them.
+ * and the mint handed out that ceiling plus one, then plus two. 100 is two orders above the
+ * legitimate lead and two orders below the observed failure, so it needs no precision to separate
+ * them — which is what a backstop's sizing should look like.
  */
 export const MAX_MENTION_LEAD = 100;
 
