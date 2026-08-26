@@ -5538,7 +5538,10 @@ export interface AcceptanceAuthorTimeResult {
  * Priority when more than one defect is present, in the SAME order rationale (1) states them:
  * no-header, no-trailer, unparseable, empty-proofs.
  */
-export function acceptanceAuthorTimeCheck(body: string, opts: { expectedTaskId?: string } = {}): AcceptanceAuthorTimeResult {
+export function acceptanceAuthorTimeCheck(
+  body: string,
+  opts: { expectedTaskId?: string; trailerResolves?: (taskId: string) => boolean } = {},
+): AcceptanceAuthorTimeResult {
   const text = body ?? "";
   const trailerMatch = TASK_TRAILER_RE.exec(text);
 
@@ -5557,7 +5560,22 @@ export function acceptanceAuthorTimeCheck(body: string, opts: { expectedTaskId?:
     };
   }
 
-  if (trailerMatch) {
+  // W1-T2297 — THE EXEMPTION MUST BE TRUE, NOT MERELY CLAIMED. This arm's whole warrant is that
+  // criteria come from the plan record instead of the body, so the body's own block need not be
+  // judgeable. That warrant fails when the trailer names nothing the plan declares: the reviewer
+  // then falls back to the body, and a body this gate never looked at ships with whatever its block
+  // actually parses to.
+  //
+  // MEASURED on #2908: `Remudero-Task: RETRO-1787714349337` resolves to ZERO ids across
+  // `plan/tasks.yaml` and every `plan/tasks.d/` shard (control: `W1-T2244` resolves), the gate
+  // returned ok with "criteria resolve from plan/tasks.yaml", and the body's block gave
+  // `bullets written: 5, criteria parsed: 1` — four criteria the reviewer could not see.
+  //
+  // `trailerResolves` OMITTED is today's behaviour byte for byte: a caller with no way to consult
+  // the plan trusts the trailer exactly as it always has, and only a caller that CAN resolve gets
+  // the stricter reading. Falling through re-uses the diagnostics arms below verbatim rather than
+  // adding a second spelling of "this block is unreadable" — two spellings of one fact drift.
+  if (trailerMatch && (opts.trailerResolves === undefined || opts.trailerResolves(trailerMatch[1]))) {
     return { ok: true, message: `Remudero-Task: ${trailerMatch[1]} trailer present — criteria resolve from plan/tasks.yaml` };
   }
 
