@@ -42,7 +42,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { execFileSync } from "node:child_process";
 import type { Route } from "./service.js";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
+import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
 import { isPaused, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
 import { hashToken } from "./last-seen.js";
@@ -570,6 +571,102 @@ export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
       sendJson(res, 200, { ok: true, taskId: input.taskId, issueUrl: input.issueUrl });
     }),
   };
+}
+
+// ── recordRiskOverride — an operator's record of a risk-judge escalation override (W1-T2244) ──
+//
+// THE GAP THIS CLOSES. A CAPPED verdict's own escape hatch — `rmd review <pr>
+// --override-capped-by <name> --override-capped-reason <text>` — writes an attributable,
+// calibratable `automerge.capped_override_granted` row (run-task.ts). The risk judge's own
+// escape hatch is the words "merge it by hand" (escalate.ts's `namesOperatorOnlyAct`): an
+// operator acting on a risk-judge escalation today can produce, at most,
+// `panel.escalation_marked_handled` — an issue-close bookkeeping row with no verdict, no
+// confidence, no disposition and no reason, so a calibrator reading it learns a button was
+// pressed and nothing about whether the judge was right. This function is the missing producer.
+//
+// NOT A MOUNTED ROUTE, DELIBERATELY. Every other write action in this module is a `Route`
+// (method + path + handler) because it is reachable today from a live `rmd serve` console. This
+// task's scope is the RECORD PRIMITIVE ONLY — the writer, the head-bound reader
+// (`ledger.ts`'s {@link import("./ledger.js").riskOverrideFromLedger}), and the never-rotated
+// registration (`RISK_OVERRIDE_RECORDED_STEP` in `DECISION_RELEVANT_LEDGER_STEPS`) — never the
+// transport that calls it. A CLI flag (the `--override-capped-by` shape) or a panel route can
+// call this function later; wiring either is a separate concern from making the record
+// possible at all.
+//
+// RECORDS, NEVER GRANTS (design ix/x). This never closes the escalation issue itself
+// (`/v1/escalation/mark-handled` already owns that check-off) and nothing in this codebase may
+// read the row it writes to decide whether to dispatch or merge — the escalation still blocks
+// and auto-merge still refuses no matter what this writes. See `riskOverrideFromLedger`'s own
+// doc for that boundary.
+
+/**
+ * The operator-supplied half of a risk-override record — the escalation it answers (task id,
+ * issue url, head sha), the judge's own verdict and confidence (copied VERBATIM off the
+ * `risk_judge.decision`/`risk_judge.escalated` line being responded to, never re-derived), the
+ * operator's disposition, and a closed-set reason class plus optional free text alongside it.
+ */
+export interface RiskOverrideRecordInput {
+  taskId: string;
+  issueUrl: string;
+  headSha: string;
+  verdict: RiskJudgeVerdictLabel;
+  confidence: number;
+  disposition: RiskOverrideDisposition;
+  reasonClass: RiskOverrideReasonClass;
+  reason?: string;
+}
+
+function validateRiskOverrideRecord(body: unknown): { error: string } | RiskOverrideRecordInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.taskId !== "string" || !body.taskId.trim()) return { error: "taskId is required" };
+  if (typeof body.issueUrl !== "string" || !body.issueUrl.trim()) return { error: "issueUrl is required" };
+  if (typeof body.headSha !== "string" || !body.headSha.trim()) return { error: "headSha is required" };
+  if (body.verdict !== "low" && body.verdict !== "high") return { error: 'verdict must be one of "low", "high"' };
+  if (typeof body.confidence !== "number" || !Number.isFinite(body.confidence) || body.confidence < 0 || body.confidence > 1) {
+    return { error: "confidence must be a number between 0 and 1" };
+  }
+  if (typeof body.disposition !== "string" || !(RISK_OVERRIDE_DISPOSITIONS as readonly string[]).includes(body.disposition)) {
+    return { error: `disposition must be one of ${RISK_OVERRIDE_DISPOSITIONS.join(", ")}` };
+  }
+  // The closed-set gate the design (vii) exists for: an unrecognised reasonClass is refused
+  // HERE, before any write, never coerced or accepted as free text alongside a guessed class.
+  if (typeof body.reasonClass !== "string" || !(RISK_OVERRIDE_REASON_CLASSES as readonly string[]).includes(body.reasonClass)) {
+    return { error: `reasonClass must be one of ${RISK_OVERRIDE_REASON_CLASSES.join(", ")}` };
+  }
+  if (body.reason !== undefined && typeof body.reason !== "string") return { error: "reason must be a string" };
+  return {
+    taskId: body.taskId,
+    issueUrl: body.issueUrl,
+    headSha: body.headSha,
+    verdict: body.verdict as RiskJudgeVerdictLabel,
+    confidence: body.confidence,
+    disposition: body.disposition as RiskOverrideDisposition,
+    reasonClass: body.reasonClass as RiskOverrideReasonClass,
+    reason: body.reason as string | undefined,
+  };
+}
+
+export type RiskOverrideRecordResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Record how an operator handled a risk-judge escalation. FAIL LOUD, the same discipline every
+ * route in this module already follows (module header): a malformed input is REFUSED and writes
+ * NOTHING — an unrecognised `reasonClass` can never sneak a polluting row past validation, and a
+ * caller can tell "refused" from "recorded" without inspecting the ledger.
+ */
+export function recordRiskOverride(deps: PanelActionDeps, body: unknown, origin: string): RiskOverrideRecordResult {
+  const validated = validateRiskOverrideRecord(body);
+  if ("error" in validated) return { ok: false, error: validated.error };
+  ledgerPanelAction(deps, RISK_OVERRIDE_RECORDED_STEP, validated.taskId, origin, {
+    issue_url: validated.issueUrl,
+    head_sha: validated.headSha,
+    verdict: validated.verdict,
+    confidence: validated.confidence,
+    disposition: validated.disposition,
+    reason_class: validated.reasonClass,
+    ...(validated.reason !== undefined ? { reason: validated.reason } : {}),
+  });
+  return { ok: true };
 }
 
 // ── POST /v1/drain/feedback ─────────────────────────────────────────────────

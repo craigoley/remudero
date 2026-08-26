@@ -453,6 +453,39 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  * {@link HEALTH_STEP_RETENTION_WINDOW_MS} rather than kept unconditionally like the rest of
  * this Set — see `rotateLedger`'s retention pipeline.
  */
+/**
+ * W1-T2244: the ONE row an operator produces when they act on a risk-judge escalation instead
+ * of exercising its "merge it by hand" escape hatch in silence — the CAPPED verdict's sibling
+ * escalation class had `automerge.capped_override_granted`
+ * (`--override-capped-by`/`--override-capped-reason`) as its attributable, calibratable record;
+ * the risk judge had nothing an operator could produce under its own name. Written by
+ * {@link import("./panel-actions.js").recordRiskOverride}, read back head-bound by
+ * {@link riskOverrideFromLedger} — the SAME "refuse a line whose head_sha does not match the
+ * CURRENT head" discipline `cappedOverrideFromLedger` (review.ts) already enforces, so a record
+ * never outlives the diff it was judged on (design viii). RECORDING ONLY: nothing in this
+ * codebase reads this row to decide whether to dispatch or merge — see that function's own doc
+ * for the boundary this task must not cross.
+ */
+export const RISK_OVERRIDE_RECORDED_STEP = "panel.risk_override_recorded";
+
+/**
+ * W1-T2244 (design vii): the two signals an override can carry, and they are OPPOSITE for a
+ * calibrator — "judge_wrong" means the escalation itself was a miscalibration (it should not
+ * have fired), "risk_accepted" means the escalation was correct and the operator knowingly took
+ * the cost anyway. A closed set the writer validates against, never free text alone: a single
+ * "overridden" flag would collapse both into "judge error" and drive calibration the wrong way,
+ * which the design explicitly calls worse than the silence there is today. Free text (`reason`)
+ * rides ALONGSIDE this class, never replacing it — the same shape `--override-capped-reason`
+ * already pairs with `--override-capped-by`.
+ */
+export const RISK_OVERRIDE_REASON_CLASSES = ["judge_wrong", "risk_accepted"] as const;
+export type RiskOverrideReasonClass = (typeof RISK_OVERRIDE_REASON_CLASSES)[number];
+
+/** W1-T2244 (design vi): what the operator actually did with the escalated head — a closed set
+ *  for the same reason {@link RISK_OVERRIDE_REASON_CLASSES} is closed. */
+export const RISK_OVERRIDE_DISPOSITIONS = ["merged_by_hand", "redispatched", "abandoned"] as const;
+export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number];
+
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
   "pr.opened",
@@ -572,6 +605,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // rows measured live at filing time.
   "review.unwired_advisory",
   "automerge.capped_override_granted",
+  // W1-T2244: the risk-judge escalation's own override record — see this Set's own doc, just
+  // above, for why it must sit beside its capped-verdict sibling rather than expire like
+  // `panel.escalation_marked_handled` (deliberately NOT registered here: it carries no verdict,
+  // confidence, disposition or reason a calibrator could read back, so it stays outside the
+  // never-rotated core exactly as it does today).
+  RISK_OVERRIDE_RECORDED_STEP,
   "daemon.boot",
   // W1-…/impl-DF: the idle rung's reason tally. A HUMAN reads this to tell "starved of work"
   // from "everything filtered", and it is emitted only on change -- so it is sparse by design and
@@ -715,6 +754,69 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "followup.harvested",
   "followup.deduped",
 ]);
+
+/**
+ * W1-T2244: one recorded operator override of a risk-judge escalation, as recovered off the
+ * ledger. The judged VERDICT and CONFIDENCE are carried here VERBATIM (copied off the
+ * `risk_judge.decision`/`risk_judge.escalated` line at write time, never re-derived), so the row
+ * stays self-contained once the escalation itself has rotated away.
+ */
+export interface RiskOverrideRecord {
+  taskId: string;
+  issueUrl: string;
+  headSha: string;
+  verdict: "low" | "high";
+  confidence: number;
+  disposition: RiskOverrideDisposition;
+  reasonClass: RiskOverrideReasonClass;
+  reason?: string;
+}
+
+/**
+ * Recover the most recent {@link RISK_OVERRIDE_RECORDED_STEP} line for `taskId`, "last one wins"
+ * — the SAME scanning idiom {@link import("./review.js").cappedOverrideFromLedger} uses for its
+ * capped-verdict sibling.
+ *
+ * HEAD-BOUND, deliberately mirroring `cappedOverrideFromLedger`'s W1-T219 binding (design viii):
+ * `headSha` — the CURRENT head being judged, supplied by the caller — must match the recorded
+ * line's own `head_sha` exactly, or the line is skipped as if it were never there. An override
+ * that outlived the head it judged would be evidence about a diff that no longer exists. A line
+ * whose `disposition`/`reason_class` does not fall inside the closed sets above is likewise
+ * skipped, never coerced — the ledger is append-only and unauthenticated, so a malformed or
+ * hand-edited row is treated as absent rather than trusted.
+ *
+ * READ FOR DISPLAY ONLY. Nothing in this codebase may call this to decide whether to dispatch or
+ * merge — the escalation still blocks and auto-merge still refuses regardless of what this
+ * returns (design ix/x). It exists so a reader can say an override WAS recorded and under which
+ * class, never to grant one.
+ */
+export function riskOverrideFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  headSha: string,
+): RiskOverrideRecord | undefined {
+  let found: RiskOverrideRecord | undefined;
+  for (const line of lines) {
+    if (line.step !== RISK_OVERRIDE_RECORDED_STEP || line.task_id !== taskId) continue;
+    if (typeof line.head_sha !== "string" || line.head_sha !== headSha) continue;
+    if (line.verdict !== "low" && line.verdict !== "high") continue;
+    if (typeof line.confidence !== "number") continue;
+    if (typeof line.issue_url !== "string") continue;
+    if (typeof line.disposition !== "string" || !(RISK_OVERRIDE_DISPOSITIONS as readonly string[]).includes(line.disposition)) continue;
+    if (typeof line.reason_class !== "string" || !(RISK_OVERRIDE_REASON_CLASSES as readonly string[]).includes(line.reason_class)) continue;
+    found = {
+      taskId,
+      issueUrl: line.issue_url,
+      headSha: line.head_sha,
+      verdict: line.verdict,
+      confidence: line.confidence,
+      disposition: line.disposition as RiskOverrideDisposition,
+      reasonClass: line.reason_class as RiskOverrideReasonClass,
+      ...(typeof line.reason === "string" ? { reason: line.reason } : {}),
+    };
+  }
+  return found;
+}
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,
  *  `deploy.pulled`, `deploy.kickstart`, `deploy.ok`, `deploy.unhealthy_rollback`, ... — see
