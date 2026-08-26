@@ -384,6 +384,7 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  runlessMergesSince,
   saveMarker,
   shippedSince,
   stampCitationsAndCommit,
@@ -14929,8 +14930,30 @@ function retroShippedGithubGateway(): ShippedGithub {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
     unavailable: () => probeGithubThrottle(),
+    // W1-T2288: backs `runlessMergesSince` (retro.ts) — the retro TRIGGER's only route to a
+    // merge that has no run at all (a plan/triage/feedback filing). Full history, unscoped,
+    // the SAME "no --since bound" discipline `citationStampPassFor`'s own git-log reader
+    // already uses for the identical reason (a marker-scoped read would need re-deriving on
+    // every threshold edit; a pure filter over the full corpus does not).
+    mergedCommits: () =>
+      parseGitLogCitationCommits(
+        execFileSync("git", ["-C", repoRoot, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
+          encoding: "utf8",
+          maxBuffer: 1 << 26,
+        }),
+      ),
   };
 }
+
+/**
+ * W1-T2288: every ledger step {@link gatherRuns} (lib/retro.ts) actually reads to reduce a
+ * RunSummary — matched in ONE `resolveLedgerUnion` pass, the same "narrow, not the whole
+ * ledger" discipline `FOLLOWUP_LEDGER_STEP_PATTERN` already uses. `run_id` itself is not part
+ * of the pattern: every line carrying one of these steps already carries a `run_id`, and
+ * `gatherRuns` groups by it after the fact.
+ */
+const RUN_LEDGER_STEP_PATTERN =
+  '"step":"run\\.start"|"step":"verdict"|"step":"pr\\.opened"|"step":"recon\\.done"|"step":"implement\\.done"|"step":"implement\\.resumed"|"step":"correction\\.provenance"';
 
 /**
  * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger +
@@ -14953,6 +14976,22 @@ function retroShippedGithubGateway(): ShippedGithub {
  * already use) instead of `evaluateRetroTrigger`'s own source-literal default; a test
  * injects a fixture `Policy` to prove a threshold edit changes the firing decision
  * with no source edit.
+ *
+ * W1-T2288: `mergesSinceMarker` is no longer `shippedSince(runs, ...).shipped.length` alone.
+ * `shippedSince` iterates `runs` (reduced from the ledger) — a merge with NO run at all (a
+ * plan/triage/feedback filing; every plan filing has none) has no loop iteration there and is
+ * structurally unreachable, not merely undercounted. `runlessMergesSince` (retro.ts) is the
+ * DISJOINT complement, read off `github.mergedCommits?.()` (this repo's own `git log`, never
+ * the ledger or a per-task search) rather than reimplementing `shippedSince`'s ledger∪GitHub
+ * crediting or its P9 ownership assert — both stay exactly as they were. `mergedCommits` is
+ * OPTIONAL on `ShippedGithub`: a fixture that does not implement it (every literal predating
+ * this task) contributes zero runless merges, not a thrown error.
+ *
+ * Also W1-T2288: the ledger read backing `runs` is now the archive∪live UNION
+ * (`resolveLedgerUnion`, lib/ledger-grep.ts) when at least one archive exists, so a run whose
+ * rows already rotated out of the live `state/ledger.ndjson` is still visible — falling back to
+ * the bare live-file read (today's exact behavior) only when zero archives are found, so a
+ * fresh state dir (or any fixture below with no rotations) is never read as an empty corpus.
  */
 export function retroTriggerCheck(
   now: Date = new Date(),
@@ -14966,9 +15005,18 @@ export function retroTriggerCheck(
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   const github = deps.github ?? retroShippedGithubGateway();
   if (github.unavailable?.()) return undefined;
-  const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+  const stateDir = join(config.root, "state");
+  const ledgerUnion = resolveLedgerUnion(stateDir, RUN_LEDGER_STEP_PATTERN);
+  const ledgerNdjson = ledgerUnion.ok
+    ? ledgerUnion.matches.join("\n")
+    : existsSync(ledgerPath)
+      ? readFileSync(ledgerPath, "utf8")
+      : "";
   const runs = gatherRuns(parseLedger(ledgerNdjson));
-  const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
+  const { shipped } = shippedSince(runs, marker?.ts, github);
+  const taskIdsWithRuns = new Set(runs.map((r) => r.taskId));
+  const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
+  const mergesSinceMarker = shipped.length + runlessMerges.length;
   const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
   return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now, {
     mergesThreshold: policy.values.retro.mergesThreshold,
