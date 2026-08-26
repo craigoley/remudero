@@ -187,6 +187,57 @@ test("GUARDED SITE stale-ci-gate wiring: reaggregateCiGate targets ci-gate's OWN
   assert.doesNotMatch(argv, /actions\/runs\/[^/]+\/rerun(?!-)/, `must never re-run the whole workflow run — argv was ${argv}`);
 });
 
+test("reaggregateCiGate degrades to a NAMED no-op (never throws out of runSweep's own loop) when its OWN fresh rollup read fails", async () => {
+  const captured: string[][] = [];
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const effects = buildEffects(
+    (file, args) => captured.push([file, ...args]),
+    async () => {
+      throw new Error("gh: rate limited");
+    },
+    (step, extra) => logged.push({ step, extra }),
+  );
+
+  // The transition itself is handed in verbatim — exactly as `runSweep` would, from an EARLIER
+  // successful `readCiGateRollup` read — so this exercises `reaggregateCiGate`'s OWN SECOND fresh
+  // read (design ii/iv above) failing on its own, independent of whatever produced `transition`.
+  await effects.reaggregateCiGate!(pr(), { siblingName: "coverage-ratchet", siblingStartedAt: "2026-08-26T17:03:13Z" });
+
+  assert.equal(captured.length, 0, "a failed rollup read resolves no job id — no gh call at all");
+  assert.ok(
+    logged.some((l) => l.step === "sweep.ci_gate_reaggregate.rollup_error"),
+    "the read failure is legible on the ledger log, never a silent no-op",
+  );
+  assert.ok(
+    logged.some((l) => l.step === "sweep.ci_gate_reaggregate.no_job_id"),
+    "an unresolved job id still stands down by the SAME named no-op path as the no-details_url case",
+  );
+});
+
+test("reaggregateCiGate logs and swallows a failed rerun dispatch — the gh call itself throwing never escapes into runSweep's own loop", async () => {
+  const readJson = fakeReadJson(STALE_ROUTES);
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const effects = buildEffects(
+    () => {
+      throw new Error("gh: api rate limited");
+    },
+    readJson,
+    (step, extra) => logged.push({ step, extra }),
+  );
+  const transition = staleCiGateTransition(await effects.readCiGateRollup!(pr()))!;
+
+  await effects.reaggregateCiGate!(pr(), transition);
+
+  assert.equal(
+    logged.some((l) => l.step === "sweep.ci_gate_reaggregate.dispatched"),
+    false,
+    "a throwing gh call never reaches the success log",
+  );
+  const errorLine = logged.find((l) => l.step === "sweep.ci_gate_reaggregate.error");
+  assert.ok(errorLine, "a throwing gh rerun call is legible on the ledger log, never a silent no-op");
+  assert.equal(errorLine!.extra?.job_id, "555555", "the log still names the job id the dispatch was aimed at");
+});
+
 test("reaggregateCiGate is a NAMED no-op when ci-gate's own rollup entry carries no resolvable job id — never a guessed target", async () => {
   const noJobIdRoutes = {
     [CHECK_RUNS_PATH]: {
