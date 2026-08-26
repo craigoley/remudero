@@ -3587,6 +3587,16 @@ export const DEFAULT_RETRO_DAYS_THRESHOLD = 7;
 export interface RetroTriggerPolicy {
   mergesThreshold: number;
   daysThreshold: number;
+  /**
+   * W1-T2289 — OPTIONAL. Fire once at least this many unharvested `report.followups` candidates
+   * are pending — the retro's OWN input depth, as distinct from `mergesThreshold`/
+   * `daysThreshold`, which both describe the FLEET's shipped activity rather than what the retro
+   * itself still has to process (this task's shared property). Undefined ⇒ reuses
+   * `mergesThreshold`: both are "how much has piled up since the marker" counts of the same
+   * rough order, and a genuinely distinct, measured number belongs in `plan/policy.yaml` as its
+   * own reviewed follow-up (see this task's REPORT), not invented here without evidence.
+   */
+  followupsThreshold?: number;
 }
 
 export function defaultRetroTriggerPolicy(): RetroTriggerPolicy {
@@ -3594,8 +3604,14 @@ export function defaultRetroTriggerPolicy(): RetroTriggerPolicy {
 }
 
 export type RetroTriggerDecision =
-  | { fire: false; mergesSinceMarker: number; daysSinceMarker: number }
-  | { fire: true; reason: "merges" | "days"; mergesSinceMarker: number; daysSinceMarker: number };
+  | { fire: false; mergesSinceMarker: number; daysSinceMarker: number; followupsPending?: number }
+  | {
+      fire: true;
+      reason: "merges" | "days" | "followups";
+      mergesSinceMarker: number;
+      daysSinceMarker: number;
+      followupsPending?: number;
+    };
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -3608,27 +3624,44 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * always eligible via `reason: "days"` unless the merge count alone already
  * clears the threshold.
  *
- * TIE-BREAK: when both thresholds are already crossed at the SAME evaluation
- * (a daemon that was paused/down a while, or the marker-absent case above
- * with a high merge count), `reason` prefers "merges" — the more informative
- * signal ("real work shipped"), never silently masked by the staleness floor.
- * Each threshold is independently sufficient to fire; this only decides which
- * name a simultaneous crossing gets in the ledger line.
+ * W1-T2289 — A THIRD, INDEPENDENT SIGNAL: `followupsPending >=
+ * (policy.followupsThreshold ?? policy.mergesThreshold)` fires with
+ * `reason: "followups"`. `mergesSinceMarker`/`daysSinceMarker` both describe
+ * the FLEET's shipped activity — a proxy this task's record names as the
+ * shared defect — never the retro's OWN queue: the unharvested
+ * `report.followups` candidates {@link mineFollowups} would otherwise mine on
+ * the next real run. `followupsPending` defaults to 0, so every existing
+ * caller that does not pass it is UNCHANGED. This is a WIDENING, not a
+ * replacement: the two existing thresholds are checked first and keep their
+ * exact prior behaviour.
+ *
+ * TIE-BREAK: when more than one threshold is already crossed at the SAME
+ * evaluation (a daemon that was paused/down a while, or the marker-absent
+ * case above with a high merge count), `reason` prefers "merges", then
+ * "days" — the more informative signals, never silently masked by a
+ * staleness or backlog floor. Each threshold is independently sufficient to
+ * fire; this only decides which name a simultaneous crossing gets in the
+ * ledger line.
  */
 export function evaluateRetroTrigger(
   mergesSinceMarker: number,
   markerTs: string | undefined,
   now: Date,
   policy: RetroTriggerPolicy = defaultRetroTriggerPolicy(),
+  followupsPending = 0,
 ): RetroTriggerDecision {
   const daysSinceMarker = markerTs === undefined ? Infinity : (now.getTime() - Date.parse(markerTs)) / MS_PER_DAY;
   if (mergesSinceMarker >= policy.mergesThreshold) {
-    return { fire: true, reason: "merges", mergesSinceMarker, daysSinceMarker };
+    return { fire: true, reason: "merges", mergesSinceMarker, daysSinceMarker, followupsPending };
   }
   if (daysSinceMarker >= policy.daysThreshold) {
-    return { fire: true, reason: "days", mergesSinceMarker, daysSinceMarker };
+    return { fire: true, reason: "days", mergesSinceMarker, daysSinceMarker, followupsPending };
   }
-  return { fire: false, mergesSinceMarker, daysSinceMarker };
+  const followupsThreshold = policy.followupsThreshold ?? policy.mergesThreshold;
+  if (followupsPending >= followupsThreshold) {
+    return { fire: true, reason: "followups", mergesSinceMarker, daysSinceMarker, followupsPending };
+  }
+  return { fire: false, mergesSinceMarker, daysSinceMarker, followupsPending };
 }
 
 export interface RetroIntegrityResult {

@@ -370,6 +370,7 @@ import {
   evaluateRetroTrigger,
   gatherRuns,
   loadMastMapping,
+  mineFollowups,
   mineGitLogCitations,
   mineLedgerCitations,
   netStateCapabilityAdvisories,
@@ -577,7 +578,7 @@ import {
 import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-audit.js";
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, gitDispatchClaimReserver, dispatchClaimRef, type DispatchClaimReserver } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
@@ -14969,13 +14970,29 @@ export function retroTriggerCheck(
   const github = deps.github ?? retroShippedGithubGateway();
   if (github.unavailable?.()) return undefined;
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
-  const runs = gatherRuns(parseLedger(ledgerNdjson));
+  // ONE parse feeds both reads below (W1-T2289 acceptance 7): `gatherRuns` for the fleet-activity
+  // signal this trigger already had, and `mineFollowups` for the retro's OWN queue depth — never
+  // a second `readFileSync`/`parseLedger` of the same path.
+  const records = parseLedger(ledgerNdjson);
+  const runs = gatherRuns(records);
   const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
+  // THE RETRO'S OWN INPUT, NOT THE FLEET'S ACTIVITY (W1-T2289). `openTitles` is intentionally
+  // omitted (defaults to none): the trigger only needs to know something is WAITING, and the full
+  // dedup-against-open-titles pass belongs to the real harvest a fired retro performs moments
+  // later — duplicating it here would be a second read of state this function has no other use
+  // for.
+  const followupsPending = mineFollowups(records).candidates.length;
   const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
-  return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now, {
-    mergesThreshold: policy.values.retro.mergesThreshold,
-    daysThreshold: policy.values.retro.daysThreshold,
-  });
+  return evaluateRetroTrigger(
+    mergesSinceMarker,
+    marker?.ts,
+    now,
+    {
+      mergesThreshold: policy.values.retro.mergesThreshold,
+      daysThreshold: policy.values.retro.daysThreshold,
+    },
+    followupsPending,
+  );
 }
 
 /**
@@ -15068,6 +15085,7 @@ export function autoTriageCheck(
   const config = opts.config ?? loadConfig();
   const policy = opts.policy ?? loadPolicy(policyPath(repoRoot));
   const held = readDrainLock(triageLockPath(config.root));
+  const now = opts.now ?? new Date();
   return decideAutoTriage({
     policy: policy.values.autoTriage,
     // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
@@ -15085,9 +15103,12 @@ export function autoTriageCheck(
     // applies, so a crashed run cannot wedge the rung shut forever.
     lockHeld: held !== null && defaultIsPidAlive(held.pid),
     marker: readAutoTriageMarker(autoTriageMarkerPath(config.root)),
-    now: opts.now ?? new Date(),
+    now,
     // repoRoot, NOT config.root — see this block's doc comment.
     candidates: newFeedbackIdsOldestFirst(repoRoot),
+    // SAME repoRoot, SAME reasoning, read through the SAME underlying walk (W1-T2289) — see
+    // `oldestFeedbackAgeMs`'s own doc for why this must never drift onto `config.root`.
+    oldestCandidateAgeMs: oldestFeedbackAgeMs(repoRoot, now),
   });
 }
 
@@ -15688,7 +15709,7 @@ async function retroCommand(
      * no follow-up harvest. An operator-run retro (`opts.automated` absent) is watched
      * by a human and keeps its existing behavior unchanged.
      */
-    automated?: { reason: "merges" | "days"; mergesSinceMarker: number; daysSinceMarker: number };
+    automated?: { reason: "merges" | "days" | "followups"; mergesSinceMarker: number; daysSinceMarker: number };
     /**
      * Injectable GitHub gateway for this command's two {@link projectPlan} passes (the plan-health
      * sweep and the orientation section) — the same shape `spawn` above already uses, and the
