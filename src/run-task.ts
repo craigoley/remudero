@@ -21735,6 +21735,21 @@ function reviewStateFromRollup(rollup: RollupCheck[] | undefined): OpenPrView["r
 }
 
 /**
+ * W1-T2299 — {@link OpenPrView.reviewVerdictPostedAt}'s producer: when the CURRENT `remudero-review`
+ * rollup entry started, off the SAME entry {@link reviewStateFromRollup} above already finds (no
+ * extra request). For the commit-status shape `remudero-review` is actually posted as (see
+ * lib/review.ts's `postStatus`, `repos/.../statuses/...`), this is the status's own `created_at` —
+ * `RestRollupEntry.startedAt`'s own doc (lib/open-prs-rest.ts) names exactly this mapping ("a
+ * status context's mapped from createdAt"). `undefined` when the rollup carries no matching entry
+ * or that entry has no dateable start — the same "cannot date it" case {@link OpenPrView.reviewVerdictPostedAt}'s
+ * own doc says reads as NOT superseded (fail closed).
+ */
+function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
+  const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
+  return r?.startedAt;
+}
+
+/**
  * W1-T176: has the deterministic `rmd review` post already been ATTEMPTED
  * and REFUSED for this exact `taskId@headSha`? Scans for a `review.post_refused`
  * ledger line matching both fields — deliberately NOT `review.post_failed`
@@ -22447,6 +22462,9 @@ export function buildOpenPrViews(
     const newest = peers.length ? Math.max(...peers) : pr.number;
     const supersededBy = newest > pr.number ? newest : undefined;
     const reviewState = reviewStateFromRollup(pr.statusCheckRollup);
+    // W1-T2299: the SAME rollup read `reviewState` above already scanned — no extra request. See
+    // `OpenPrView.reviewVerdictPostedAt`'s own doc for the disposition row this feeds.
+    const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(pr.statusCheckRollup);
     const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
     // W1-T1018: no `diffDigestForHead` passed here yet — see `reviewOrphansFor`'s own SCOPE note
     // for why (housekeeping-push detection is a bounded follow-up fetch, not yet wired). The
@@ -22489,6 +22507,7 @@ export function buildOpenPrViews(
       taskId,
       reviewState,
       reviewPendingSince,
+      reviewVerdictPostedAt,
       checksState,
       unmetCriteria: reviewState === "failure" && unmetKey ? unmetFromLedger(ledger, unmetKey) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
@@ -24996,6 +25015,8 @@ export async function fixCommand(
   const ledger = readLedgerLines(ledgerPath);
   const taskId = taskIdFromBody(raw.body ?? "");
   const reviewState = reviewStateFromRollup(raw.statusCheckRollup);
+  // W1-T2299: same producer as buildOpenPrViews above — see OpenPrView.reviewVerdictPostedAt's doc.
+  const reviewVerdictPostedAt = reviewVerdictPostedAtFromRollup(raw.statusCheckRollup);
   // W1-T103: same required-contexts gate as buildOpenPrViews — see
   // checksStateFromRollup's doc.
   const requiredContexts = ghRequiredStatusCheckContexts(owner, repo);
@@ -25005,6 +25026,7 @@ export async function fixCommand(
     prUrl: raw.url,
     taskId,
     reviewState,
+    reviewVerdictPostedAt,
     checksState,
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
     // W1-T440: same signal as buildOpenPrViews above — routeFix's deriveDisposition call
