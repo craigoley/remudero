@@ -80,6 +80,7 @@ export type LintCheck =
   | "proof-resolvability"
   | "proof-grep-safety"
   | "proof-grep-unmatchable"
+  | "proof-engine-divergence"
   | "proof-scope"
   | "proof-name-resolution"
   | "post-merge-amendment"
@@ -724,7 +725,7 @@ export function proofResolvabilityViolations(
 // ── PROOF-GREP-SAFETY (W1-T287) ──────────────────────────────────────────────
 //
 // A `grep:` proof's pattern is compiled by `execWhitelistedProof` as
-// `grep -rn -- <pattern> <path>` — a BASIC REGULAR EXPRESSION, not a fixed
+// `grep -arn -- <pattern> <path>` — a BASIC REGULAR EXPRESSION (BRE), not a fixed
 // string. Nothing in the dialect docs, the authoring prompts, or CLAUDE.md says
 // so, and guidance circulating in this project ("`grep -F` is case-sensitive")
 // actively teaches the wrong model. The result is measurable: 1,952 verdicts in
@@ -887,8 +888,8 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
         message:
           `${where} \`grep:\` pattern "${pattern.slice(0, 70)}" contains unescaped BRE ` +
           `metacharacter(s) ${blocking.map((x) => `\`${x}\``).join(", ")} — the executor runs ` +
-          `\`grep -rn -- <pattern> <path>\`, a REGEX, so this may never match the literal text ` +
-          `you mean (PR #1071: \`[call-site]\` was read as a character class). Escape it (\\${blocking[0]}) ` +
+          `\`grep -arn -- <pattern> <path>\`, a BASIC REGULAR EXPRESSION (BRE), so this may never ` +
+          `match the literal text you mean (PR #1071: \`[call-site]\` was read as a character class). Escape it (\\${blocking[0]}) ` +
           `or reword the pattern. Verify with \`rmd check-proof\`, never with \`grep -F\` — that is a ` +
           `different matcher and reports a false green.`,
       });
@@ -1068,6 +1069,157 @@ export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}):
           `written.${quoted}\nCopy the file's own capitalisation into the proof verbatim.`,
       });
     }
+  });
+  return violations;
+}
+
+// ── PROOF-ENGINE-DIVERGENCE (W1-T2294 — a `grep:` pattern whose meaning depends on the
+//    regex engine, nothing declares which one ran) ───────────────────────────────────
+//
+// The house `grep:` DIALECT (parseDialectGrep, review.ts) always compiles to `["-arn", "--",
+// pattern, path]` — no `-E` anywhere reachable, so BRE and only BRE, author-unselectable. That
+// arm can never diverge and is not this check's business (flagging it would fail patterns —
+// `mergeConflict?:` among them — that are CORRECT under the engine that always actually runs).
+//
+// The LEGACY fenced `` `grep ...` `` shape (parseWhitelistedProof's `GREP_FENCE_RE` branch,
+// review.ts) tokenises everything after `grep` as the author's own argv verbatim — `-E` is
+// reachable there, and nothing inspects it: `proofGrepSafetyViolations` above matches `^grep:`
+// before it does anything, so a backticked proof never reaches `breMetacharsIn` at all. That
+// arm is flagged here via {@link WhitelistedProof.authorSelectedArgv} (review.ts), which is set
+// ONLY by that branch — never re-derived from `args` shape, which is not reliably recoverable
+// (a single-flag legacy invocation like `` `grep -arn -- pat path` `` has the identical `args`
+// shape as the dialect form's own compiled argv).
+//
+// BEHAVIOURAL, NOT LEXICAL (design Q2): a pattern that is syntactically valid under BOTH engines
+// and MEANS DIFFERENT THINGS — `mergeConflict?: MergeConflictEvidence` is the measured case, 2
+// hits under BRE and 0 under ERE against src/lib/sweep.ts — carries nothing in its own text that
+// distinguishes it from an ordinary pattern; only running it both ways does. So this check
+// compiles the pattern as BOTH a BRE and an ERE and counts matching lines each way; the two
+// engines agreeing is the common case and draws no report, and disagreeing is the exact
+// condition the task's own title names.
+//
+// `?` MUST NOT move from `BRE_WARNING_METACHARS` above — see that constant's own comment. Under
+// the dialect form's fixed BRE, `?` is literal and the pattern is correct; this check never
+// touches the dialect arm at all, so the two checks cannot contradict each other about the same
+// proof.
+//
+// PURE, same discipline as {@link proofGrepUnmatchableViolations} just above: no fs, no exec —
+// the target file's text arrives via the SAME injected `opts.readGrepProofFile` reader (one
+// contract, two consumers of the same fact "what does this path's text look like today").
+
+/** The 7 characters that are ordinary METACHARACTERS in a POSIX EXTENDED regular expression
+ *  (quantifier/grouping/alternation) but LITERAL in a BASIC one unless escaped — the exact set
+ *  `grep-zero-cause.ts`'s own `JS_METACHAR_LITERAL_IN_BRE` already tracks for the same reason,
+ *  kept in sync only by both being the measured BRE/ERE difference, not by importing one from
+ *  the other (this task's declared `files:` does not include grep-zero-cause.ts). `.`, `*`,
+ *  `^`, `$`, `[`, `]` are NOT here because they mean the same thing in both engines and cannot
+ *  be the source of a BRE/ERE divergence. */
+const ERE_ONLY_METACHARS = new Set(["?", "+", "|", "(", ")", "{", "}"]);
+
+/** Characters that OPEN a BRE construct (grouping/interval) when a backslash precedes them —
+ *  the same two-character set {@link BRE_CONSTRUCT_AFTER_BACKSLASH} above already walks for
+ *  `breMetacharsIn`'s classification. */
+function breEmulatingSource(pattern: string): string {
+  let out = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") {
+      const next = pattern[i + 1];
+      if (next === undefined) {
+        out += "\\\\";
+        break;
+      }
+      out += BRE_CONSTRUCT_AFTER_BACKSLASH.includes(next) ? next : "\\" + next;
+      i++; // the escape consumes its next char
+      continue;
+    }
+    out += ERE_ONLY_METACHARS.has(ch) ? "\\" + ch : ch;
+  }
+  return out;
+}
+
+/** Longest translated regex source this check ever compiles — same bound `grep-zero-cause.ts`'s
+ *  own `sanitizeRegExp` and `ledger-grep.ts`'s `sanitizeRegExp` use, for the identical reason: a
+ *  pattern arrives as free-form proof text, not vetted input, and this module compiles it into
+ *  an in-process backtracking `RegExp` with no timeout of its own. */
+const MAX_ENGINE_PROBE_SOURCE_LENGTH = 200;
+
+/** Compile `source` as a `RegExp`, declining (returning `undefined`) rather than guessing when
+ *  it is too long, is ReDoS-shaped (the canonical nested-quantifier `(a+)+`/`(a*)*` trigger), or
+ *  is not syntactically valid JS regex at all. */
+function boundedRegExp(source: string, flags: string): RegExp | undefined {
+  if (source.length > MAX_ENGINE_PROBE_SOURCE_LENGTH) return undefined;
+  if (/\([^()]*[+*][^()]*\)[+*]/.test(source)) return undefined;
+  try {
+    return new RegExp(source, flags);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Count of lines in `fileText` the compiled pattern matches — the same unit `grep -n`'s hit
+ *  count is (this task's rationale measures BRE/ERE divergence in exactly these terms). */
+function lineHitCount(re: RegExp, fileText: string): number {
+  let hits = 0;
+  for (const line of fileText.split("\n")) if (re.test(line)) hits++;
+  return hits;
+}
+
+/** The (pattern, path) a LEGACY fenced `grep:` proof's raw argv names — the flag(s) before the
+ *  `--` separator (if any) are the author's own and irrelevant to WHAT is being searched; the
+ *  first non-flag token is the pattern, the last is the target path. `undefined` when the argv
+ *  does not carry at least a pattern and a path (e.g. `` `grep -c foo` `` with no target). */
+function legacyGrepPatternAndPath(args: readonly string[]): { pattern: string; path: string } | undefined {
+  const sepIdx = args.indexOf("--");
+  const rest = sepIdx === -1 ? args.filter((a) => !a.startsWith("-")) : args.slice(sepIdx + 1);
+  if (rest.length < 2) return undefined;
+  return { pattern: rest[0], path: rest[rest.length - 1] };
+}
+
+/** Every LEGACY (author-argv) `grep:` proof whose pattern reads a DIFFERENT hit count under BRE
+ *  than under ERE against its own named file — the condition the task title names: "a `grep:`
+ *  proof pattern's meaning depends on a regex engine nothing declares". Silent whenever: no
+ *  `opts.readGrepProofFile` reader (same "no predicate ⇒ no opinion" contract every injected
+ *  check here uses), the proof is the house DIALECT form (never diverges, see the module
+ *  comment), the named file is not on disk yet (a legitimate forward reference), either engine
+ *  declines to compile the pattern, or both engines agree on the hit count (design: "a pattern
+ *  that means the same thing under either engine draws no report"). WARN-only, matching {@link
+ *  proofGrepUnmatchableViolations}'s own posture for the same reason: this is a heuristic about
+ *  an author's intent (a proof pinned to one engine on purpose is not necessarily wrong) that
+ *  names the disagreement for a human to judge, never a block. */
+export function proofEngineDivergenceViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const readGrepProofFile = opts.readGrepProofFile;
+  if (!readGrepProofFile) return [];
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted || whitelisted.kind !== "grep" || !whitelisted.authorSelectedArgv) return;
+    const target = legacyGrepPatternAndPath(whitelisted.args);
+    if (!target || target.path.includes("..")) return;
+    const fileText = readGrepProofFile(target.path);
+    if (fileText === undefined) return; // not on disk yet — a legitimate forward reference
+    const bre = boundedRegExp(breEmulatingSource(target.pattern), "");
+    const ere = boundedRegExp(target.pattern, "");
+    if (!bre || !ere) return; // declines rather than guesses
+    const breHits = lineHitCount(bre, fileText);
+    const ereHits = lineHitCount(ere, fileText);
+    if (breHits === ereHits) return; // same meaning under either engine — nothing to report
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const where = `criterion ${i + 1} ("${claimHead}")`;
+    violations.push({
+      check: "proof-engine-divergence",
+      severity: "warn",
+      message:
+        `${where} \`grep\` proof pattern "${target.pattern.slice(0, 70)}" against ${target.path} ` +
+        `reads ${breHits} hit(s) under a BASIC regular expression (grep's default) and ${ereHits} ` +
+        `under an EXTENDED one (\`-E\`) — this proof's fenced \`` + "`grep ...`" + `\` form passes ` +
+        "the author's own argv through, so the engine is whichever flags happen to be present " +
+        "(unlike the house `grep:` dialect, which is always BRE and cannot diverge), and nothing " +
+        "records which one actually ran when this proof was last judged pass. Rewrite it as the " +
+        `house dialect (\`grep: ${target.pattern} in ${target.path}\`) — fixed BRE, no engine ` +
+        "choice — or reword the pattern so it means the same thing under both.",
+    });
   });
   return violations;
 }
@@ -2418,7 +2570,10 @@ export interface LintOpts {
   /** W1-T1225: a `grep:` proof's named path -> that file's own text, or `undefined` when the path
    *  is not on disk (the linter reads no disk itself) — for {@link proofGrepUnmatchableViolations}
    *  to feed {@link classifyGrepZeroHit}. Same "no predicate ⇒ no opinion" contract {@link
-   *  callSiteViolations}'s `opts.moduleExists` already uses. Absent ⇒ the check is silent. */
+   *  callSiteViolations}'s `opts.moduleExists` already uses. Absent ⇒ the check is silent.
+   *  ALSO consumed by {@link proofEngineDivergenceViolations} (W1-T2294) — same fact, same
+   *  reader, one contract for two checks that both need "what does this path's text look like
+   *  today". */
   readGrepProofFile?: (repoRelPath: string) => string | undefined;
 }
 
