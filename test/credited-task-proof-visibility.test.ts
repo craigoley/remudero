@@ -379,17 +379,67 @@ test("W1-T2280(8): the input plan's task objects are never mutated — no status
   }
 });
 
-test("W1-T2280(8): the dispatch gate (src/lib/drain.ts) still reads `acceptance` nowhere but a comment", () => {
+/**
+ * String-aware `//`/`/* *\/` comment stripper for one TS source file, mirroring
+ * scripts/assertion-discrimination-check.mjs's own `stripCStyleComments` (never treating a `/`
+ * inside a quoted string as a comment start). Deliberately re-implemented HERE, inline, rather
+ * than imported from that .mjs (which sits outside tsconfig's `include` — see
+ * test/assertion-discrimination-check.test.ts's own note on the same convention), so the very
+ * next assertion is evaluated against ALREADY-STRIPPED text instead of raw text.
+ */
+function stripCStyleCommentsForTest(text: string): string {
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (quote) {
+      out += ch;
+      if (ch === "\\" && i + 1 < text.length) {
+        out += text[i + 1];
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      const nl = text.indexOf("\n", i);
+      if (nl === -1) return out;
+      out += "\n";
+      i = nl;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const close = text.indexOf("*/", i + 2);
+      if (close === -1) return out;
+      i = close + 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+test("W1-T2280(8): the dispatch gate (src/lib/drain.ts) reads no `acceptance` field outside a comment", () => {
+  // Asserting the RAW-TEXT literal "acceptance" appears (as this test used to, via
+  // `source.match(/acceptance/g)`) is exactly the shape W1-T1051's assertion-discrimination gate
+  // exists to catch: the literal is present ONLY inside a comment here, so it disappears under
+  // comment-stripping and a raw-text match cannot tell "the dispatch gate never reads this
+  // field" from "someone merely wrote the word down." Stripping comments FIRST and asserting on
+  // the already-stripped text instead makes the claim discriminating: it is satisfiable only by
+  // the real absence of an `acceptance` field read in drain.ts's actual, non-comment code.
   const source = readFileSync(join(REPO_ROOT, "src", "lib", "drain.ts"), "utf8");
-  // Strip comments OURSELVES (rather than asserting the raw-text literal directly) so this
-  // assertion can only be satisfied by the REAL absence of an `acceptance` field-read in code --
-  // never by the word merely surviving inside a comment. That distinction is exactly what this
-  // test exists to pin: a real dispatch-gate field read would show up here even though the raw
-  // file also carries one documentary comment mentioning `acceptance` (W1-T2280 note (iv)).
-  const codeOnly = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const stripped = stripCStyleCommentsForTest(source);
   assert.ok(
-    !codeOnly.includes("acceptance"),
-    "src/lib/drain.ts is not in this task's files: — its dispatch gate must never read `acceptance` as real code, comments aside",
+    !stripped.includes("acceptance"),
+    "src/lib/drain.ts is not in this task's files: — it must be untouched, and its dispatch " +
+      "gate must never read `acceptance` outside a comment",
   );
 });
 
