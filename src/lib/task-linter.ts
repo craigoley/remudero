@@ -776,9 +776,49 @@ export function proofResolvabilityViolations(
  *  text — the silent-false-FAIL class. Blocking; measured retrofit 0. */
 const BRE_BLOCKING_METACHARS: ReadonlyArray<string> = ["[", "*", "^", "$"];
 
-/** BRE metacharacters that only WIDEN a match. The proof still finds its own
- *  text, so this warns rather than stranding the 4 tasks that use it. */
-const BRE_WARNING_METACHARS: ReadonlyArray<string> = ["."];
+/** BRE metacharacters that do NOT silently strand a proof under the executor's own
+ *  matcher, so they warn rather than block.
+ *
+ *  `.` only WIDENS a match: the proof still finds its own text (blocking it would
+ *  strand the 4 tasks that use it).
+ *
+ *  `?` is the OPPOSITE shape and is here for a different reason. It is LITERAL in a
+ *  BRE and a QUANTIFIER in an ERE, and the executor's argv is `grep -arn --` with no
+ *  `-E`, so a bare `?` genuinely works TODAY — blocking it would refuse patterns that
+ *  match. What it is not is portable: read by any ERE-defaulting grep the same pattern
+ *  finds nothing and reports a clean zero. Measured on `logUnavailable?: Cause`, BRE
+ *  matched and ERE missed. See {@link SINGLE_LITERAL_CLASS_CHARS} for why the remedy
+ *  is `[?]` and never `\?`. */
+const BRE_WARNING_METACHARS: ReadonlyArray<string> = [".", "?"];
+
+/** Characters for which `[X]` — a bracket holding exactly this one character and
+ *  nothing else — is the SANCTIONED literal escape, exempt from `[`'s blocking rule.
+ *
+ *  WHY THE EXEMPTION EXISTS. Without it this linter forbids the only portable remedy
+ *  for the very fragility it warns about: `[?]` tripped `[`'s block while the bare `?`
+ *  it replaces passed clean, so the rule pushed authors toward the fragile form. The
+ *  #1071 precedent (`[call-site]` read as a character class) is a DIFFERENT shape —
+ *  several characters forming a real class — and stays blocked, because nothing about
+ *  it is unambiguously a literal.
+ *
+ *  AND `\X` IS NOT AN ALTERNATIVE for the character that motivated this. `\?` is a
+ *  quantifier in GNU BRE and a literal in an ERE — exactly inverted from bare `?` — so
+ *  the obvious escape moves the failure rather than removing it. Only the bracket form
+ *  is literal under both.
+ *
+ *  MEASURED, not assumed: every member below matched its literal text under BOTH
+ *  `grep` and `grep -E` and matched nothing when the character was absent. `^` is
+ *  DELIBERATELY EXCLUDED — `[^]` opens a NEGATED class rather than closing a literal
+ *  one, and both engines error on it. */
+const SINGLE_LITERAL_CLASS_CHARS: ReadonlyArray<string> = ["?", ".", "*", "+", "$", "(", ")", "{", "}", "|", "[", "]"];
+
+/** The remedy sentence for each warning-tier metacharacter — the character's OWN fix,
+ *  never a generic one, because `.` and `?` fail in opposite directions and a shared
+ *  sentence would have to be vague enough to help with neither. */
+const BRE_WARNING_REMEDY: Readonly<Record<string, string>> = {
+  ".": "matches ANY character in a BRE — the proof still finds its own text but would also match text you did not intend. Escape it (\\.) to mean a literal dot.",
+  "?": "is LITERAL under the executor's own `grep -arn` (a BRE) but a QUANTIFIER under an ERE, so this pattern matches today and silently finds NOTHING under any grep that defaults to ERE — a clean zero, not an error. Write `[?]`, which is literal under both. Do NOT write `\\?`: that INVERTS the failure (a quantifier in GNU BRE, a literal in an ERE) and breaks the engine that works today.",
+};
 
 /** Characters that become a BRE construct when a backslash precedes them —
  *  grouping and intervals. `\.`-style escapes are NOT here: those are literals. */
@@ -803,6 +843,15 @@ export function breMetacharsIn(pattern: string): { blocking: string[]; warning: 
       }
       if (BRE_CONSTRUCT_AFTER_BACKSLASH.includes(next)) blocking.push("\\" + next);
       i++; // the escape consumes its next char — `\.` is a LITERAL dot, legitimate
+      continue;
+    }
+    // `[X]` — one metacharacter, immediately closed — is the SANCTIONED literal form
+    // (see SINGLE_LITERAL_CLASS_CHARS). Consume all three characters so the bracket does
+    // not block AND the character inside is not separately scored: `[?]` must be silent,
+    // not a warning about the very `?` it exists to escape. Anything else starting with
+    // `[` falls through to the blocking arm exactly as before — `[call-site]` included.
+    if (ch === "[" && pattern[i + 2] === "]" && SINGLE_LITERAL_CLASS_CHARS.includes(pattern[i + 1] ?? "")) {
+      i += 2;
       continue;
     }
     if (BRE_BLOCKING_METACHARS.includes(ch)) blocking.push(ch);
@@ -843,14 +892,18 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
           `different matcher and reports a false green.`,
       });
     }
-    if (warning.length) {
+    // ONE VIOLATION PER DISTINCT CHARACTER, never one aggregate line: `.` and `?` fail in
+    // OPPOSITE directions (one widens a match that still succeeds, the other succeeds here
+    // and misses entirely under another engine), so a shared sentence could only be vague
+    // enough to help with neither. A pattern carrying just one of them still yields exactly
+    // one violation, which is the shape this check has always had.
+    for (const ch of warning) {
       violations.push({
         check: "proof-grep-safety",
         severity: "warn",
         message:
-          `${where} \`grep:\` pattern "${pattern.slice(0, 70)}" contains an unescaped \`.\`, which ` +
-          `matches ANY character in a BRE — the proof still finds its own text but would also ` +
-          `match text you did not intend. Escape it (\\.) to mean a literal dot.`,
+          `${where} \`grep:\` pattern "${pattern.slice(0, 70)}" contains an unescaped \`${ch}\`, which ` +
+          `${BRE_WARNING_REMEDY[ch] ?? "is a BRE metacharacter — escape it or reword the pattern."}`,
       });
     }
   }

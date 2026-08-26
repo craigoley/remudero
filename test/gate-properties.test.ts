@@ -335,8 +335,13 @@ test("PROPERTY bodyContradictsDiff: a no-CLAIM about a non-path word stays silen
 
 /** The blocking/warning metacharacter set, escaped exactly as the lint message tells authors to. */
 const BRE_META = ["[", "*", "^", "$", "."];
-const escapeAllMeta = (s: string): string =>
-  [...s].map((c) => (BRE_META.includes(c) || c === "\\" ? "\\" + c : c)).join("");
+/** The character `proof-grep-safety` tells an author to write, PER CHARACTER — the property below
+ *  asserts the prescribed remedy clears the check, so it must apply the remedy the message actually
+ *  prescribes. A backslash is the remedy for every BRE metacharacter above. It is NOT the remedy for
+ *  `?`: `\?` is a quantifier in GNU BRE and a literal in an ERE, exactly inverted from bare `?`, so
+ *  escaping it moves the failure instead of removing it. The bracket form is literal under both. */
+const applyPrescribedRemedy = (s: string): string =>
+  [...s].map((c) => (c === "?" ? "[?]" : BRE_META.includes(c) || c === "\\" ? "\\" + c : c)).join("");
 
 const patternText = fc.oneof(
   fc.string({ maxLength: 24 }),
@@ -367,7 +372,7 @@ test("PROPERTY breMetacharsIn: escaping every metacharacter clears the block —
   // author would be stuck with no way to satisfy a blocking gate.
   fc.assert(
     fc.property(patternText, (p) => {
-      const r = breMetacharsIn(escapeAllMeta(p));
+      const r = breMetacharsIn(applyPrescribedRemedy(p));
       assert.deepEqual(r.blocking, [], `escaping did not clear ${JSON.stringify(p)}`);
       assert.deepEqual(r.warning, [], `escaping left a warning on ${JSON.stringify(p)}`);
     }),
@@ -378,8 +383,14 @@ test("PROPERTY breMetacharsIn: escaping every metacharacter clears the block —
 test("PROPERTY breMetacharsIn: a pattern containing no BRE metacharacter is never blocked", () => {
   // The false-positive lock. `( ) ] { } + ? |` are ERE metacharacters, NOT BRE ones — blocking them
   // would break the call-site rule's own proofs, which are shaped `someSymbol(`.
+  //
+  // `?` MOVED OUT of this alphabet and into its own property below. It is still never BLOCKED — the
+  // point this lock exists to hold — but it now carries a WARNING, because it is literal under the
+  // executor's own BRE argv and a quantifier under an ERE, so the same pattern silently finds
+  // nothing on an ERE-defaulting grep. Leaving it here would have asserted `warning: []` over a
+  // character that must warn, which is a stronger claim than this lock was ever making.
   const safeChars = fc
-    .array(fc.constantFrom("a", "Z", "0", "_", "-", "/", ":", "(", ")", "]", "{", "}", "+", "?", "|", " "), {
+    .array(fc.constantFrom("a", "Z", "0", "_", "-", "/", ":", "(", ")", "]", "{", "}", "+", "|", " "), {
       maxLength: 20,
     })
     .map((a) => a.join(""));
@@ -388,6 +399,24 @@ test("PROPERTY breMetacharsIn: a pattern containing no BRE metacharacter is neve
       const r = breMetacharsIn(p);
       assert.deepEqual(r.blocking, [], `false block on safe pattern ${JSON.stringify(p)}`);
       assert.deepEqual(r.warning, [], `false warning on safe pattern ${JSON.stringify(p)}`);
+    }),
+    CFG,
+  );
+});
+
+test("PROPERTY breMetacharsIn: a ? is ALWAYS warn-tier and NEVER blocking, wherever it sits", () => {
+  // The half of the false-positive lock `?` took with it when it left `safeChars`: a warning is a
+  // legibility signal, and blocking it would refuse patterns that genuinely match under the
+  // executor's own `grep -arn`. Nothing about position may change that.
+  const withQ = fc
+    .array(fc.constantFrom("a", "Z", "0", "_", "-", "/", ":", "(", ")", "]", "{", "}", "+", "|", " ", "?"), { maxLength: 20 })
+    .map((a) => a.join(""))
+    .filter((s) => s.includes("?"));
+  fc.assert(
+    fc.property(withQ, (p) => {
+      const r = breMetacharsIn(p);
+      assert.deepEqual(r.blocking, [], `? must never block, but did on ${JSON.stringify(p)}`);
+      assert.deepEqual(r.warning, ["?"], `? must warn, but did not on ${JSON.stringify(p)}`);
     }),
     CFG,
   );
