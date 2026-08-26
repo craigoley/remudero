@@ -42,8 +42,8 @@ forensic detail, so the narrative does not need to live here.
   regions and file paths stay silent (`shorthandIsAboutChangeset`, W1-T413). If the diff carries any
   file outside the claimed scope, the anchored phrase fails the PR — so do not write the shorthand
   in a body unless the predicate agrees, and do not fear it in quotes. *(#974, #984, #1685)*
-- **A test run with no `# tests` summary line is NOT A RESULT — check for the summary, never the
-  failure count.** A killed or timed-out run prints every assertion it reached and no totals, so its
+- **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
+  is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.** A killed or timed-out run prints every assertion it reached and no totals, so its
   failure set is a SUBSET BY CONSTRUCTION and reads as "fewer failures on this side". One session
   recorded 3436 assertions with no summary and was about to diff it against a complete 5660-test run,
   which would have manufactured a four-file regression that does not exist. This COMPOUNDS the
@@ -323,7 +323,8 @@ forensic detail, so the narrative does not need to live here.
 - **`gh pr create` is GraphQL and dies with "API rate limit already exceeded" when that budget is
   spent** (frequent on this account while REST/core stays healthy). Open PRs via REST:
   `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
-  Check with `gh api rate_limit` (`.resources.graphql.remaining` vs `.resources.core.remaining`).
+  Never read that budget from `gh api rate_limit` **on this host** — three calls in one second read
+  10383, 0, 10383 (2026-08-26). Use `gh api user -i`; match login AND reset at both ends.
   `rmd review` and `gh pr view --json` are ALSO GraphQL, so a hand-opened PR can't be reviewed until
   GraphQL resets. *(#766)*
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
