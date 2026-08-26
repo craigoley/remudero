@@ -193,7 +193,15 @@ export function findUnresolvedMermaidCitations(dir, repoRoot) {
   return findings;
 }
 
-function main(argv) {
+/**
+ * Exported (not merely local, like the sibling generators' own `main`) so a test can drive its
+ * error path -- the outer try/catch around corpus generation -- IN-PROCESS. A `spawnSync`'d child
+ * process runs under its own, unobserved V8 instance, so a subprocess-only CLI test can never
+ * move THIS process's `--experimental-test-coverage` report; calling `main()` directly (a
+ * bad `--dir`) is what lets that catch block show up as covered in this file's own diff
+ * (W1-T2282 round 1).
+ */
+export function main(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {

@@ -20,6 +20,7 @@ const {
   extractMermaidPathCitations,
   findUnresolvedMermaidCitations,
   findUnresolvedPathsInText,
+  main,
   parseDocEntry,
   serializeDocsIndex,
 } = (await import(GENERATOR_URL)) as {
@@ -27,6 +28,7 @@ const {
   extractMermaidPathCitations: (text: string) => string[];
   findUnresolvedMermaidCitations: (dir: string, repoRoot: string) => Array<{ doc: string; path: string }>;
   findUnresolvedPathsInText: (text: string, repoRoot: string) => string[];
+  main: (argv: string[]) => void;
   parseDocEntry: (text: string) => { title: string | null; summary: string };
   serializeDocsIndex: (entries: unknown[], dirLabel: string) => string;
 };
@@ -311,4 +313,60 @@ test("no existing document is rewritten: reading docs/system-diagrams.md through
 test("serializeDocsIndex: identical entries serialize identically (no timestamp -- what makes --check meaningful)", () => {
   const entries = [{ path: "docs/a.md", title: "A", summary: "s", grepHint: "A" }];
   assert.equal(serializeDocsIndex(entries, "docs"), serializeDocsIndex(entries, "docs"));
+});
+
+// ── truncate(): a summary longer than SUMMARY_MAX_CHARS is ellipsized, not left verbatim ─────────
+//
+// Every real doc under docs/ today happens to have a first body line under 160 chars, so this
+// branch of truncate() (the ellipsis path, as opposed to the pass-through-unchanged path already
+// exercised by every OTHER fixture above) had no covering case -- a fixture doc is the fix, not a
+// change to the generator.
+
+test("buildDocsIndex: a summary line over 160 chars is truncated to 160 chars total and ends in an ellipsis", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "docs-index-truncate-"));
+  try {
+    const longLine = "x".repeat(200);
+    writeFileSync(join(tmp, "long.md"), `# Long\n\n${longLine}\n`);
+    const entries = buildDocsIndex(tmp, join(tmp, "docs-index.json"));
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].summary.length, 160, entries[0].summary);
+    assert.ok(entries[0].summary.endsWith("…"), "a truncated summary must end with the ellipsis marker");
+    assert.ok(longLine.startsWith(entries[0].summary.slice(0, -1)), "the kept prefix must be a literal prefix of the original line");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ── main()'s own error path, IN-PROCESS ──────────────────────────────────────────────────────────
+//
+// Every other CLI test above drives the script via `spawnSync` -- a real, independent child
+// process with its OWN V8 instance, which `--experimental-test-coverage` never observes: it can
+// prove the CLI's stdout/exit code, but it cannot move this file's own coverage record. `main()`
+// is exported (see its own comment in scripts/generate-docs-index.mjs) exactly so its outer
+// try/catch -- reached only when corpus generation itself throws, e.g. a `--dir` that does not
+// exist -- shows up as covered from a call made in THIS process. `process.exitCode`/`console.*`
+// are saved and restored around the call, the same `withExitCode` shape
+// test/credit-surface-gate.test.ts and test/acceptance-author-gate.test.ts use for their own
+// exported `main`, so this test never corrupts its own suite's process.
+
+async function withExitCode(fn: () => void): Promise<{ exitCode: typeof process.exitCode; err: string[] }> {
+  const priorExit = process.exitCode;
+  const err: string[] = [];
+  const realErr = console.error;
+  console.error = (...a: unknown[]) => void err.push(a.join(" "));
+  try {
+    fn();
+    return { exitCode: process.exitCode, err };
+  } finally {
+    console.error = realErr;
+    process.exitCode = priorExit;
+  }
+}
+
+test("main(): a --dir that does not exist hits the outer catch -- non-zero exit, names the underlying read error", async () => {
+  const missingDir = join(tmpdir(), "docs-index-main-catch-does-not-exist");
+  rmSync(missingDir, { recursive: true, force: true }); // guarantee absence without depending on ordering
+  const { exitCode, err } = await withExitCode(() => main(["--dir", missingDir]));
+  assert.equal(exitCode, 1);
+  assert.match(err.join("\n"), /generate-docs-index:/);
 });
