@@ -9,17 +9,23 @@ import { TRIAGE_MAX_NEW_TASKS, triageCommand } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
-// W1-T1011: THE ORDERING THIS FILE PROVES. `rmd triage` mints a task id and reserves it on TWO
-// stores — a LOCAL one (this process's own sandbox, released on every exit path) and a REMOTE
-// one (a permanent `refs/rmd-id/<id>` ref, `task-id-reservation.ts`'s own "NOTHING RELEASES A
-// RESERVATION" doctrine). Before this task both were taken together, before the worker ever ran:
-// measured over the retained ledger union, 21 of 64 minted ids belonged to a run that then
-// errored, permanently burning a remote ref for work that produced nothing. This file drives the
-// REAL `triageCommandLocked` (via the exported `triageCommand`) against a real local bare
-// "origin" — the same fixture shape test/triage.test.ts's W1-T348 suite already established — and
-// reads the ordering/absence of `refs/rmd-id/*` back off that origin, never a mock of the
-// reservation primitive itself (that primitive is proven in isolation by
-// test/task-id-reservation.test.ts; this file's subject is WHEN the lane calls it).
+// W1-T1011 (REOPENED BY W1-T2326): THE ORDERING THIS FILE PROVES. `rmd triage` mints a task id
+// and reserves it on TWO stores — a LOCAL one (this process's own sandbox, released on every exit
+// path) and a REMOTE one (a permanent `refs/rmd-id/<id>` ref, `task-id-reservation.ts`'s own
+// "NOTHING RELEASES A RESERVATION" doctrine). Originally both were taken together, before the
+// worker ever ran: measured over the retained ledger union, 21 of 64 minted ids belonged to a run
+// that then errored, permanently burning a remote ref for work that produced nothing. W1-T1011
+// moved the remote half down to the `propose` branch to stop that burn; W1-T2326 moved it back
+// UP, ahead of the prompt, because a reservation nothing downstream reads is not a reservation —
+// the worker must be told the id it can actually file under. That re-opens the exact burn W1-T1011
+// closed, named and priced in that task's own rationale (up to 219 more permanently-held ids
+// measured on the fleet). Criteria 1 and 3 below now assert the REOPENED (bounded-burn) behavior,
+// not the zero-burn one W1-T1011 originally proved. This file drives the REAL
+// `triageCommandLocked` (via the exported `triageCommand`) against a real local bare "origin" —
+// the same fixture shape test/triage.test.ts's W1-T348 suite already established — and reads the
+// ordering/presence of `refs/rmd-id/*` back off that origin, never a mock of the reservation
+// primitive itself (that primitive is proven in isolation by test/task-id-reservation.test.ts;
+// this file's subject is WHEN the lane calls it).
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -165,9 +171,17 @@ function teardownFixture(f: Fixture, savedHome: string | undefined, savedPath: s
   for (const d of [f.bare, f.home, f.configRoot, f.shimDir]) rmSync(d, { recursive: true, force: true });
 }
 
-// ── Criterion 1: an error before a verdict exists takes no remote reservation ────────────────
+// ── Criterion 1: an error before a verdict STILL reserves — W1-T2326 reopens this, priced ────
+//
+// W1-T2326 moved `reserveTaskIdBlockRemote` from inside `decision.action === "propose"` to
+// immediately after `localIdBlock`, BEFORE the prompt is built — because a reservation nothing
+// downstream reads is not a reservation, and the worker must be told the id it can actually file
+// under. The unavoidable cost, named in that task's own rationale: a run that errors before any
+// verdict now ALSO burns the whole remote block permanently (task-id-reservation.ts's own
+// doctrine — nothing releases a reservation). This is no longer the zero-burn invariant W1-T1011
+// established; it is the bounded-burn invariant W1-T2326 replaced it with.
 
-test("W1-T1011: a triage run that fails before a verdict takes no remote reservation", async () => {
+test("W1-T2326: a triage run that fails before a verdict still takes the remote reservation (W1-T1011's zero-burn invariant is REOPENED)", async () => {
   const feedbackId = `fb-t1011-error-${Date.now()}`;
   const f = setupFixture(feedbackId, "t1011-error");
   const savedHome = process.env.HOME;
@@ -179,20 +193,23 @@ test("W1-T1011: a triage run that fails before a verdict takes no remote reserva
     await withLiveWritesAllowed(() =>
       triageCommand([feedbackId], {
         // The Architect prints no ALREADY_DECIDED:/AMBIGUOUS:/PROPOSED: line at all — decideTriage
-        // has no verdict to act on and returns `action: "error"` BEFORE any propose/grill branch,
-        // and in particular before the permanent remote reservation this task moved.
+        // has no verdict to act on and returns `action: "error"` — but the permanent remote
+        // reservation this task moved now runs BEFORE this branch is ever reached, not inside it.
         spawn: async () => fakeWorker("I looked into this feedback entry and I am still thinking about it."),
       }),
     ).catch(() => undefined); // triageCommandLocked rethrows the error path — we only care about the ref
 
-    assert.deepEqual(remoteReservedIds(f.bare), [], "an errored-before-verdict run must take NO refs/rmd-id/* ref");
+    // The whole block is burned, not just the head id — reserveTaskIdBlockRemote reserves
+    // TRIAGE_MAX_NEW_TASKS ids in one call, and that call now runs unconditionally.
+    const reserved = remoteReservedIds(f.bare);
+    assert.equal(reserved.length, TRIAGE_MAX_NEW_TASKS, `an errored-before-verdict run still burns the whole reserved block, got ${reserved.join(", ")}`);
 
     const ledger = readFileSync(join(f.configRoot, "state", "ledger.ndjson"), "utf8")
       .split("\n")
       .filter(Boolean)
       .map((l) => JSON.parse(l));
     assert.ok(ledger.some((row) => row.step === "triage.error"), "the run recorded its error step");
-    assert.ok(!ledger.some((row) => row.step === "triage.id_minted"), "no permanent mint was ever logged");
+    assert.ok(!ledger.some((row) => row.step === "triage.id_minted"), "no permanent mint was ever logged — id_minted still fires only on propose");
   } finally {
     teardownFixture(f, savedHome, savedPath);
   }
@@ -303,9 +320,14 @@ test("W1-T1011: a proposed verdict reserves the id before the shard is written",
   }
 });
 
-// ── Criterion 3: an ALREADY_DECIDED verdict takes no remote reservation ──────────────────────
+// ── Criterion 3: an ALREADY_DECIDED verdict STILL reserves — W1-T2326 reopens this, priced ───
+//
+// Same reopening as Criterion 1: the remote reservation is now taken unconditionally, before
+// `decideTriage` ever runs, so a verdict that resolves `no_task` (files nothing) still holds the
+// whole block permanently. `triage.id_minted` remains gated on `decision.action === "propose"`
+// unchanged — only the REF is unconditional now, not the ledger row.
 
-test("W1-T1011: an already decided verdict takes no remote reservation", async () => {
+test("W1-T2326: an already-decided verdict still takes the remote reservation (W1-T1011's zero-burn invariant is REOPENED)", async () => {
   const feedbackId = `fb-t1011-already-${Date.now()}`;
   const f = setupFixture(feedbackId, "t1011-already");
   const savedHome = process.env.HOME;
@@ -317,18 +339,20 @@ test("W1-T1011: an already decided verdict takes no remote reservation", async (
     await withLiveWritesAllowed(() =>
       triageCommand([feedbackId], {
         // ALREADY_DECIDED with no files changed ⇒ decideTriage returns `action: "no_task"`,
-        // never `"propose"` — the ONLY branch this task's permanent reservation now lives in.
+        // never `"propose"` — but the remote reservation now runs BEFORE decideTriage is even
+        // called, so this branch no longer decides whether the block gets burned.
         spawn: async () => fakeWorker("ALREADY_DECIDED: MASTER-PLAN.md §7B already covers this"),
       }),
     ).catch(() => undefined); // PR-gating steps have no real backend in this fixture
 
-    assert.deepEqual(remoteReservedIds(f.bare), [], "an already-decided verdict files nothing and reserves nothing remotely");
+    const reserved = remoteReservedIds(f.bare);
+    assert.equal(reserved.length, TRIAGE_MAX_NEW_TASKS, `an already-decided verdict files nothing but still burns the whole reserved block, got ${reserved.join(", ")}`);
 
     const ledger = readFileSync(join(f.configRoot, "state", "ledger.ndjson"), "utf8")
       .split("\n")
       .filter(Boolean)
       .map((l) => JSON.parse(l));
-    assert.ok(!ledger.some((row) => row.step === "triage.id_minted"), "no permanent mint was ever logged");
+    assert.ok(!ledger.some((row) => row.step === "triage.id_minted"), "no permanent mint was ever logged — id_minted still fires only on propose");
   } finally {
     teardownFixture(f, savedHome, savedPath);
   }
