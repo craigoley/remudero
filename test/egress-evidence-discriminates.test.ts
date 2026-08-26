@@ -25,12 +25,15 @@ import { test } from "node:test";
 import {
   EGRESS_ALLOWED_HOST_FALLBACK,
   EGRESS_ALLOWED_MARKER,
+  EGRESS_ALLOWED_REMOTE_IP_FILE,
   EGRESS_BLOCKED_HOST,
   EGRESS_BLOCKED_MARKER,
+  EGRESS_BLOCKED_REMOTE_IP_FILE,
   PROBE_TURN_ALLOWANCE,
   allowedHostFromSettings,
   assessEgressContainment,
   containmentProbePrompt,
+  defaultExecutor,
   egressProbeCommand,
   probeCommandCount,
   probeContainment,
@@ -38,6 +41,8 @@ import {
   type ContainmentEvidence,
   type ProbeExecResult,
 } from "../src/lib/containment.js";
+import type { Config } from "../src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
 function settingsFile(contents: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-egress-evidence-test-"));
@@ -149,6 +154,68 @@ test("acceptance 3: a DIFFERENT remote address than the control reads PROVEN-BRO
   assert.match(v.reason, /PROVEN-BROKEN/);
   assert.match(v.reason, /93\.184\.216\.34/);
   assert.match(v.reason, /140\.82\.112\.3/);
+});
+
+// ── readRemoteIp (defaultExecutor's own read of the two remote-ip files) ───────────
+//
+// The pure-verdict tests above hand `assessEgressContainment` an already-built
+// `ContainmentEvidence`; these two drive `defaultExecutor` itself so its private
+// `readRemoteIp` helper's two branches — a successful trimmed read, and the
+// catch-on-missing-file fallback — are each exercised through a real fake spawn
+// that writes into the SAME cwd the executor computed, exactly as curl's `-w
+// '%{remote_ip}' > file` redirection would.
+
+function fakeWorkerResult(): WorkerResult {
+  return {
+    sessionId: "s",
+    costUsd: 0,
+    numTurns: 1,
+    text: "",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+  } as unknown as WorkerResult;
+}
+
+test("readRemoteIp: a reached request with a written remote-ip file reads the trimmed content", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-egress-remoteip-test-"));
+  const config = { root: dir } as Config;
+  const fakeSpawn = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
+    // Same discipline curl's own redirection follows: the remote-ip file is
+    // written UNCONDITIONALLY, the touch marker only once the request "succeeds".
+    writeFileSync(join(args.cwd, EGRESS_BLOCKED_REMOTE_IP_FILE), "93.184.216.34\n");
+    writeFileSync(join(args.cwd, EGRESS_BLOCKED_MARKER), "");
+    writeFileSync(join(args.cwd, EGRESS_ALLOWED_REMOTE_IP_FILE), "140.82.112.3\n");
+    writeFileSync(join(args.cwd, EGRESS_ALLOWED_MARKER), "");
+    return fakeWorkerResult();
+  };
+  const exec = defaultExecutor("settings.json", config, undefined, fakeSpawn);
+  const result: ProbeExecResult = await exec("remoteIpTok");
+  assert.equal(result.egressBlockedRemoteIp, "93.184.216.34");
+  assert.equal(result.egressAllowedRemoteIp, "140.82.112.3");
+});
+
+test("readRemoteIp: a reached request whose remote-ip file never landed reads undefined, not a thrown error", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-egress-remoteip-test-"));
+  const config = { root: dir } as Config;
+  const fakeSpawn = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
+    // The touch marker says the request came back, but its paired remote-ip
+    // file is absent — readRemoteIp must catch the missing-file read and
+    // return undefined rather than throw, exactly as an executor that
+    // predates this field (or a redirect that never landed) would look.
+    writeFileSync(join(args.cwd, EGRESS_BLOCKED_MARKER), "");
+    writeFileSync(join(args.cwd, EGRESS_ALLOWED_MARKER), "");
+    return fakeWorkerResult();
+  };
+  const exec = defaultExecutor("settings.json", config, undefined, fakeSpawn);
+  const result: ProbeExecResult = await exec("remoteIpTok2");
+  assert.equal(result.egressBlockedReached, true);
+  assert.equal(result.egressAllowedReached, true);
+  assert.equal(result.egressBlockedRemoteIp, undefined);
+  assert.equal(result.egressAllowedRemoteIp, undefined);
 });
 
 // ── Criterion 4 — the body is still never read ──────────────────────────────────────
