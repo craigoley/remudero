@@ -81,6 +81,37 @@ test("CLAIM 1: a legacy backticked grep proof whose pattern reads different hit 
   assert.equal(/mergeConflic(t)?:/.test(DIVERGENT_FIXTURE_TEXT), false);
 });
 
+// Exercises breEmulatingSource's own backslash handling directly (it is not exported, so this
+// is observed only through proofEngineDivergenceViolations's verdict): `\(` and `\)` OPEN a
+// BRE group — the pair is dropped from the emulated source entirely, so `foo\(bar\)` means
+// "foo immediately followed by bar" (no literal parens required) under BRE, while the SAME two
+// characters are an ordinary escaped literal paren pair under ERE (`foo\(bar\)` there matches
+// only the literal text `foo(bar)`). A fixture line containing the literal text `foo(bar)`
+// therefore matches under ERE but NOT under BRE — real divergence, not a manufactured one.
+const PAREN_PATTERN = "foo\\(bar\\)";
+const PAREN_FIXTURE_PATH = "fixture/paren-divergent.ts";
+const PAREN_FIXTURE_TEXT = "  match: foo(bar) here\n";
+
+test("CLAIM 1 (BRE emulation treats \\( \\) as a BRE group-open/close, diverging from the same two characters read as literal parens under ERE)", () => {
+  const t = task({
+    id: "W1-T2294-PAREN-DIVERGENT",
+    acceptance: [
+      { claim: "the paren-wrapped call is present", proof: `\`grep -Ean -- ${PAREN_PATTERN} ${PAREN_FIXTURE_PATH}\`` },
+    ],
+  });
+  const opts = { readGrepProofFile: reader({ [PAREN_FIXTURE_PATH]: PAREN_FIXTURE_TEXT }) };
+  const violations = proofEngineDivergenceViolations(t, opts);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0]!.message, /0 hit\(s\) under a BASIC regular expression/);
+  assert.match(violations[0]!.message, /1 under an EXTENDED one/);
+
+  // The same fact, directly observable: under ERE the pattern is literally `foo(bar)`, which the
+  // fixture line contains verbatim; under BRE-emulation the parens vanish (a group, not a literal),
+  // so the fixture line — which never contains contiguous "foobar" — cannot match.
+  assert.equal(/foo\(bar\)/.test(PAREN_FIXTURE_TEXT), true);
+  assert.equal(/foo(bar)/.test(PAREN_FIXTURE_TEXT.replace("foo(bar)", "")), false);
+});
+
 test("CLAIM 1 (folded into lintTask's own aggregate): the divergence report is not lost when merged with the rest of the linter's violations", () => {
   const t = task({
     id: "W1-T2294-DIVERGENT-MERGED",
@@ -134,6 +165,34 @@ test("CLAIM 2 (forward reference stays silent): a path not yet on disk is not ju
     acceptance: [{ claim: "x", proof: `\`grep -Ean -- ${DIVERGENT_PATTERN} fixture/not-written-yet.ts\`` }],
   });
   assert.deepEqual(proofEngineDivergenceViolations(t, { readGrepProofFile: reader({}) }), []);
+});
+
+// A pattern ending in a lone, unescaped backslash is a DANGLING escape — invalid as a JS-compiled
+// regular expression (the direct ERE reading throws "\\ at end of pattern"), even though the SAME
+// trailing backslash is well-formed once emulated as BRE (it becomes an escaped literal backslash
+// there, since a BRE has no "backslash at all" state, only "escaped char" or "ordinary char").
+// boundedRegExp declines (returns undefined) on that throw rather than guessing a verdict from
+// only the engine that DID compile — matching every other decline case in this file.
+const TRAILING_BACKSLASH_PATTERN = "TODO\\"; // literal: T O D O \
+const TRAILING_BACKSLASH_FIXTURE_PATH = "fixture/trailing-backslash.ts";
+const TRAILING_BACKSLASH_FIXTURE_TEXT = "  // TODO\\ revisit\n";
+
+test("CLAIM 2 (declines rather than guesses): a pattern with a dangling trailing backslash fails to compile as an ERE, so no verdict is reported even though the BRE emulation compiles fine", () => {
+  const t = task({
+    id: "W1-T2294-TRAILING-BACKSLASH",
+    acceptance: [
+      {
+        claim: "x",
+        proof: `\`grep -Ean -- ${TRAILING_BACKSLASH_PATTERN} ${TRAILING_BACKSLASH_FIXTURE_PATH}\``,
+      },
+    ],
+  });
+  const opts = { readGrepProofFile: reader({ [TRAILING_BACKSLASH_FIXTURE_PATH]: TRAILING_BACKSLASH_FIXTURE_TEXT }) };
+  assert.deepEqual(proofEngineDivergenceViolations(t, opts), []);
+
+  // The same fact, directly observable: the raw pattern is not a compilable JS regex source at
+  // all (a dangling trailing backslash), which is exactly what makes the direct ERE reading fail.
+  assert.throws(() => new RegExp(TRAILING_BACKSLASH_PATTERN, ""));
 });
 
 // ── CLAIM 3: the engine the house dialect actually runs under is stated where an author reads
