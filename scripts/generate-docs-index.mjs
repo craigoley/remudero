@@ -83,11 +83,38 @@ function listMarkdownFiles(dir) {
   return out.sort();
 }
 
+/** A leading CALLOUT: a line wholly wrapped in emphasis, which markdown uses for a maintenance or
+ *  provenance banner rather than for the doc's first sentence. Matched on the RAW line, before
+ *  {@link stripEmphasis} removes the markers that identify it. */
+const WHOLLY_EMPHASISED_RE = /^(\*\*|__|\*|_)(?!\s).*\1\s*$/;
+
 /**
  * Parse one doc's markdown text into a {title, summary} pair: title is the first `# ` (H1)
  * heading with emphasis stripped, or null if the doc has none; summary is the first non-blank,
- * non-heading body line found after the title (truncated), or "" if the doc has no body prose
- * before its next heading / EOF.
+ * non-heading, NON-CALLOUT body line found after the title (truncated), or "" if the doc has no
+ * such prose before its next heading / EOF.
+ *
+ * WHY CALLOUTS ARE SKIPPED, AND WHY THAT IS NOT A SPECIAL CASE FOR ONE DOC. A summary exists so a
+ * reader scanning the index can tell what a doc is ABOUT. A banner saying who maintains the file
+ * and that hand edits are overwritten answers a different question, so it was never a summary --
+ * it was the heuristic picking up machinery because machinery happened to come first.
+ *
+ * IT IS ALSO WHY THE INDEX WENT STALE ON EVERY RETRO. `rmd retro` writes
+ * `_MAINTAINED BY \`rmd retro\` -- regenerated <ISO>._` into docs/ORIENTATION.md on every run
+ * (src/lib/retro.ts), and a first-prose-line heuristic copied that timestamp into the index --
+ * so a generator the retro knows nothing about summarised a line the retro rewrites. Skipping the
+ * callout takes the line BELOW it, which for that doc is a constant string literal in retro.ts
+ * ("A fresh Architect session should be able to orient from THIS doc alone...") and therefore
+ * survives a retro unchanged. Fixing the INPUT is what makes a freshness guard safe to add later;
+ * adding the guard first would have reddened the retro's own PR for a defect it did not cause.
+ *
+ * MEASURED over docs/ at f5ac7cb5: 26 docs, 25 whose first prose line is ordinary prose and
+ * exactly 1 that is a wholly-emphasised callout -- the same 1 whose line carries a timestamp. The
+ * rule selects it without naming it, and would select any future doc that opens the same way.
+ *
+ * KNOWN LIMIT, stated rather than hidden: a genuine one-line summary written entirely in emphasis
+ * would be skipped too. None exists today, and the fallback is the next prose line or "" -- never
+ * machinery.
  */
 export function parseDocEntry(text) {
   const lines = text.split("\n");
@@ -107,6 +134,7 @@ export function parseDocEntry(text) {
     const candidate = lines[j].trim();
     if (candidate.length === 0) continue;
     if (/^#{1,6}\s/.test(candidate)) break; // next heading -- no body prose under this title
+    if (WHOLLY_EMPHASISED_RE.test(candidate)) continue; // a banner, not this doc's first sentence
     summary = truncate(stripEmphasis(candidate), SUMMARY_MAX_CHARS);
     break;
   }
