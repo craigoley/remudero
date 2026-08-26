@@ -14999,6 +14999,10 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         stateDir: join(root, "state"),
         cwd: repoRoot,
         escalate: policyFor().values.measurementCadence.escalate,
+        // W1-T2266: the adoption report's shape-1/2/3 static scans read THIS process's own
+        // checkout, same as the git log join two lines above — never a drained target's (this
+        // hook is SELF-TARGET ONLY, per this function's own doc).
+        checkoutDir: repoRoot,
       });
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
