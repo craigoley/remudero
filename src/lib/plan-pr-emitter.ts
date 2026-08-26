@@ -56,7 +56,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { AcceptanceCriterion } from "./plan.js";
-import { parseAcceptanceBlock } from "./review.js";
+import { acceptanceBlockDiagnostics } from "./review.js";
 import { shapeCommitMessage } from "./commit-message.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 
@@ -119,26 +119,40 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
  * all (the only case the old trigger caught), and **22 parse to a criterion with an empty proof** —
  * every one of them `parsed=1 empty=1`. The missed shape is twice as common as the caught one.
  *
- * AN EMPTY PROOF IS THE WHOLE SIGNAL, DELIBERATELY. "Fewer criteria than were written" would be a
- * stronger check but has no basis at the only production call site: the body there comes from
- * `gh pr view --json body` (an LLM worker's output), so {@link renderAcceptanceBlock} never
- * produced it and no emitter count exists to compare against — `fallbackCriteria` is the block to
- * APPEND, not a record of what was written. Inventing a count would mean guessing at the author's
- * intent from the text, which is what the parser already refuses to do. An empty proof needs no
- * basis: a criterion with nothing to execute is malformed however many were intended.
+ * W1-T2316 — AN EMPTY PROOF IS NOT THE WHOLE SIGNAL AFTER ALL, because a wrap can truncate a block
+ * WITHOUT leaving an empty proof behind. `- <claim> | <proof>` resolves its proof from the `|` on
+ * the SAME physical line, so the first bullet in a wrapped block can parse with a perfectly real,
+ * non-empty proof — and then the very next physical line (an indented continuation the parser does
+ * not recognise, because the current criterion already has a proof) ends the block, discarding
+ * every bullet after it. `parsed.some((c) => !c.proof)` never sees this: every criterion that DID
+ * parse has a proof, so `bodyNeedsAcceptanceRepair` returned false and a five-criterion block that
+ * parsed to one read HEALTHY. This is the shape rationale (1)/(4) of W1-T2316 measured directly:
+ * `bulletsWritten: 5, criteriaParsed: 1`, no empty proof among the one that parsed.
  *
- * {@link parseAcceptanceBlock} is NOT changed. It must stay permissive — making it throw would fail
+ * THE OLD OBJECTION TO "FEWER CRITERIA THAN WERE WRITTEN" NO LONGER APPLIES, because the count it
+ * worried about inventing already exists, computed from the SAME body being checked, with no
+ * outside record required. {@link "./review.js".acceptanceBlockDiagnostics} counts `bulletsWritten`
+ * with the parser's OWN bullet regex and reports `truncatedAtBullet` — the index of the first
+ * bullet the parser did not reach — so "fewer criteria parsed than bullets written" is read off the
+ * text itself, never guessed from the author's intent and never dependent on
+ * {@link renderAcceptanceBlock} having produced the body in the first place.
+ *
+ * {@link "./review.js".parseAcceptanceBlock} is NOT changed. It must stay permissive — making it throw would fail
  * bodies that merge today (any with trailing prose under the block) and move a hard failure into the
  * gate, where the author is already gone. The parser keeps its contract; the repair widens.
  */
 export function bodyNeedsAcceptanceRepair(body: string): boolean {
-  const parsed = parseAcceptanceBlock(body);
-  if (parsed.length === 0) return true;
-  return parsed.some((c) => c.proof.trim().length === 0);
+  const diagnostics = acceptanceBlockDiagnostics(body);
+  // Zero criteria — the original trigger's own case (no header, or a header with no bullets).
+  if (diagnostics.criteriaParsed === 0) return true;
+  // W1-T2316 — a bullet the parser wrote but never reached, whether or not what DID parse is empty.
+  if (diagnostics.truncatedAtBullet !== undefined) return true;
+  // The pre-existing signal: everything parsed, but at least one resolved with nothing to execute.
+  return diagnostics.emptyProofs > 0;
 }
 
 /**
- * The header regex {@link parseAcceptanceBlock} matches, mirrored here for ONE purpose: to demote a
+ * The header regex {@link "./review.js".parseAcceptanceBlock} matches, mirrored here for ONE purpose: to demote a
  * defective header so the parser walks PAST it to the repaired block appended below. It requires the
  * line to be ONLY the header, so appending a suffix is sufficient to stop it matching — no content is
  * removed and the author's original text stays verbatim and readable.
