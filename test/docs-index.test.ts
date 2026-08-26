@@ -415,3 +415,33 @@ test("parseDocEntry: a doc whose ONLY prose is a callout gets an empty summary, 
   const { summary } = parseDocEntry(["# Generated", "", "_MAINTAINED BY a robot — regenerated 2026-01-01T00:00:00.000Z._", "", "## Next"].join("\n"));
   assert.equal(summary, "", "an empty summary is honest; a maintenance banner is not");
 });
+
+// ── The real docs/: the committed index is currently fresh ──────────────────────────────────────
+//
+// THE SIBLING SHAPE, AND docs/ WAS THE ONE CORPUS WITHOUT IT. `test/plan-index.test.ts` and
+// `test/capability-snapshot.test.ts` each assert that their COMMITTED artifact matches a fresh
+// regeneration, inside a suite `ci` already runs; this file asserted every fixture case and never
+// the real one, which is exactly why the index drifted silently and W1-T2282's own note below
+// records it going stale on every retro.
+//
+// IN THE EXISTING SUITE, NOT A NEW CI JOB, DELIBERATELY: a path-filtered required check that can go
+// silently absent is a shape this repo avoids, and `npm test` already runs this file on every PR.
+//
+// THE ORDERING MATTERED AND IS NOW SATISFIED. Before the summariser skipped a leading
+// wholly-emphasised callout, `docs/ORIENTATION.md`'s summary WAS the `rmd retro` maintenance banner,
+// timestamp and all, so this guard would have refused every retro PR by construction. MEASURED over
+// the 14-day window before it landed: 34 commits carried an index a fresh regeneration disagreed
+// with, and ALL 34 differed in exactly one entry, `docs/ORIENTATION.md`. Zero differed because a
+// doc's title or first prose line was edited without regenerating — the class this guard exists to
+// catch has a historical rate of zero, and the class it would have fired on is fixed.
+//
+// DEFAULT ARGS, cwd REPO_ROOT — the same reason test/plan-index.test.ts states for its own copy: a
+// `--dir`/`--out` override changes the recorded `dir` label and produces a false STALE unrelated to
+// real drift. Measured while building this: the override form reports STALE on a tree the default
+// form calls OK.
+test("the REAL committed docs/docs-index.json is NOT stale (this is what CI checks on every PR via `npm test`)", () => {
+  const result = spawnSync(process.execPath, [SCRIPT, "--check"], { cwd: REPO_ROOT, encoding: "utf8" });
+  const output = result.stdout + result.stderr;
+  assert.equal(result.status, 0, output);
+  assert.match(output, /OK -- docs\/docs-index\.json matches the current docs/);
+});
