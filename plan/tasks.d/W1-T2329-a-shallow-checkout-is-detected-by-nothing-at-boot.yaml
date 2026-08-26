@@ -1,4 +1,4 @@
-- id: W1-T2327
+- id: W1-T2329
   title: "A SHALLOW CANONICAL CHECKOUT BREAKS EVERY HISTORY READ SILENTLY AND NOTHING PROACTIVE ASKS — the boot record carries env, node path, node version and head sha but never the horizon those reads are computed over, `rmd doctor` has eleven arms and no depth sibling, and the only detector in the fleet is one linter's refusal that fires when it happens to need history"
   repo: remudero
   depends_on: []
@@ -108,7 +108,7 @@
         different concern; it would widen this task's span for no detection gain.
       - A per-WORKTREE depth check. A worker's worktree shares the canonical object store, so it is
         the same fact measured twice; if that stops being true it is a new finding, not this one.
-      - Deciding WHAT made the checkout shallow. That is W1-T2328, which this task does not depend
+      - Deciding WHAT made the checkout shallow. That is W1-T2330, which this task does not depend
         on and does not answer.
   acceptance:
     - claim: "the boot record states the history horizon the process will read over — whether the checkout is shallow and how many commits are reachable"
@@ -133,7 +133,7 @@
   status: queued
   attempts: 0
   origin: "feedback#fb-1786001088591-dbf763"
-  plan_refs: ["W1-T991", "W1-T1047", "W1-T1236", "W1-T1209", "W1-T2328"]
+  plan_refs: ["W1-T991", "W1-T1047", "W1-T1236", "W1-T1209", "W1-T2330"]
   note: |
     `risk: high` IS SET UP FRONT for the SPAN, per Rule 19 and `sizingViolation`
     (`src/lib/task-linter.ts` L200-L212): the declared `files:` cross three code modules, which
@@ -149,7 +149,7 @@
     `budget_usd 45` — three small edits plus their fixtures, sized against W1-T2326's 45 for a
     comparable multi-seam change in one module and its test.
 
-    NO `depends_on`. W1-T2328 asks what CAN shallow the checkout; this asks whether anything would
+    NO `depends_on`. W1-T2330 asks what CAN shallow the checkout; this asks whether anything would
     NOTICE. Either can ship first and neither weakens the other — a detector with no cause found is
     still a detector, and a cause found with no detector is still silent next time.
 
@@ -164,3 +164,13 @@
     duplicate a fact some existing row already carries, this is redundant. It does not — the eleven
     doctor arms and the six `daemon.boot` fields are enumerated in the rationale with their line
     numbers, and none of them is about history depth.
+
+    RENUMBERED FROM `W1-T2327` TO `W1-T2329` (this fix round): this shard was filed against a base
+    where `W1-T2327` was free; by the time this branch's CI ran, `#2992` had already merged a
+    DIFFERENT `W1-T2327` ("a workflow run that never started reads as one still running",
+    `src/lib/sweep.ts`) onto main, so `loadPlan` refused the duplicate id. Renumbering is the only
+    change this round makes — no acceptance criterion, file, or line of design text moved. `lint-plan`
+    ALSO flags this task as a `duplicate-title` candidate against the NEW `W1-T2327` (a title-similarity
+    heuristic, k=2) — the two are unrelated: that task is CI-rollup disposition for a startup-failed
+    workflow run, this one is boot-time checkout-depth detection. Advisory only, cited here per the
+    check's own instruction.

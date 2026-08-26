@@ -1,4 +1,4 @@
-- id: W1-T2328
+- id: W1-T2330
   title: "NOTHING FORBIDS A DEPTH-LIMITING GIT CALL AGAINST THE CANONICAL CHECKOUT — three suites create real `--depth 1` clones and each is safe only by how its fixture happens to be written, no gate reads that property, and the tree carries no evidence able to date the horizon that actually moved"
   repo: remudero
   depends_on: []
@@ -87,7 +87,7 @@
     own provisioning date on the affected host and state which of the two stories the evidence
     supports — recent cause, or shallow since the original clone. If the evidence is gone, SAY SO;
     "unrecoverable, and here is what would have recorded it" is a real answer and the recorder is
-    W1-T2327's boot field. No proof form can execute a host forensic, which is precisely why it is
+    W1-T2329's boot field. No proof form can execute a host forensic, which is precisely why it is
     not filed as one.
 
     (vi) EXPLICITLY NOT IN SCOPE.
@@ -96,7 +96,7 @@
         W1-T2237 and W1-T2248 already own.
       - Moving `test/lint-plan-merge-evidence.test.ts`'s fixture root. Its temp-dir placement is a
         different concern with its own owners, and property (i)(b) holds either way.
-      - Any detection at run time. That is W1-T2327 and this task does not duplicate it.
+      - Any detection at run time. That is W1-T2329 and this task does not duplicate it.
   acceptance:
     - claim: "a source scan refuses any depth-limiting flag on a git invocation in the shipped sources, and the refused flag set is a data table rather than a branch"
       proof: "unit test: test/no-shallowing-of-the-canonical-checkout.test.ts"
@@ -112,7 +112,7 @@
   status: queued
   attempts: 0
   origin: "feedback#fb-1786001088591-dbf763"
-  plan_refs: ["W1-T2327", "W1-T2317", "W1-T2291", "W1-T1258"]
+  plan_refs: ["W1-T2329", "W1-T2317", "W1-T2291", "W1-T1258"]
   note: |
     `risk: medium` — ONE declared file, test-only, no production behaviour changes and no path the
     fleet executes at run time. It argues down toward low and up only because a ratchet that is
@@ -122,7 +122,7 @@
     tree, provable with no network, no host and no live checkout.
 
     `budget_usd 30` — one test file with a fixture-driven negative arm and a table. Deliberately
-    below W1-T2327's 45: this ships no production code.
+    below W1-T2329's 45: this ships no production code.
 
     THE FORWARD REFERENCE IS DELIBERATE. `test/no-shallowing-of-the-canonical-checkout.test.ts` does
     not exist yet; it is declared in `files:` so the path-form proofs resolve under the
@@ -133,6 +133,16 @@
     reading. It claims that the property keeping that true is unwritten and ungated, which is the
     difference between being safe and being kept safe.
 
-    NO `depends_on` on W1-T2327 and no file overlap with it, so the two can batch rather than
-    serialise: this task declares one test file and W1-T2327 declares three modules and two other
+    NO `depends_on` on W1-T2329 and no file overlap with it, so the two can batch rather than
+    serialise: this task declares one test file and W1-T2329 declares three modules and two other
     tests.
+
+    RENUMBERED FROM `W1-T2328` TO `W1-T2330` (this fix round): this shard was filed against a base
+    where `W1-T2328` was free; by the time this branch's CI ran, `#2992` had already merged a
+    DIFFERENT `W1-T2328` ("the fix rung re-runs the failing check and never asks whether the verdict
+    moved", `src/lib/ledger-replay.ts`) onto main, so `loadPlan` refused the duplicate id. Renumbering
+    is the only change this round makes — no acceptance criterion, file, or line of design text moved.
+    `lint-plan` ALSO flags this task as a `duplicate-title` candidate against the NEW `W1-T2328` (a
+    title-similarity heuristic, k=2) — the two are unrelated: that task is fix-rung re-verification
+    after a re-run, this one is a source-scan ratchet against depth-limiting git flags. Advisory only,
+    cited here per the check's own instruction.
