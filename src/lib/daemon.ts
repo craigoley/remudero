@@ -33,6 +33,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import type { MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
+import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
@@ -1324,6 +1325,31 @@ export interface DaemonDeps {
    * one logged tick, never the daemon's life.
    */
   runDigestCadence?: () => Promise<DigestCadenceRunResult>;
+  /**
+   * W1-T2304's board-review rung, wired. THE RUNG WHOSE UNIT IS THE WHOLE OPEN BOARD — "is the
+   * board itself healthy" — rather than one PR, which is every other rung's unit.
+   *
+   * ITS OWN policy row and ITS OWN marker file (`state/last-board-review.json`), on the same
+   * check/run pair shape as `checkMeasurementCadence` and `checkDigestCadence` above, for the
+   * same reason: three cadences that shared one bound could not be tuned independently.
+   *
+   * THIS PAIR IS THE WHOLE POINT OF THE WIRING TASK. #2952 merged 385 lines of correct, tested
+   * board-review code on 2026-08-26 at 13:54:59Z and it never fired once — zero `board_review`
+   * rows all-time against 89 `measurement_cadence`, and no `state/last-board-review.json` on disk
+   * beside five sibling markers — because nothing ever called it. `buildBoardReview` sat behind
+   * `opts.boardReview ? … : undefined` in `runMeasurementCadenceReport` and no caller passed the
+   * key. That is PR #1066's lesson for the third time; the producer at `daemonCommand`'s call
+   * site is what makes it real, not this declaration.
+   */
+  checkBoardReview?: () => BoardReviewCadenceDecision;
+  /**
+   * Runs one board-review tick. READ-ONLY BY CONSTRUCTION: it writes one report artifact and
+   * drafts registry proposals, and nothing else — it does not push, merge, mint or file, and
+   * Rule 15 stands. Best-effort by the SAME contract as the two cadences above: a throw costs one
+   * logged tick, never the daemon's life, and a fired review NEVER gates dispatch, fails a check
+   * or changes a verdict.
+   */
+  runBoardReview?: () => Promise<BoardReviewReport>;
   /**
    * W1-T160: evaluate the retro cadence trigger this tick — fires on
    * merges-since-marker >= N OR days-since-marker >= D (policy data),
@@ -2711,6 +2737,44 @@ export async function runDaemon(
         }
       } else if (digestDecision) {
         log("digest_cadence.skipped", { reason: digestDecision.reason });
+      }
+    }
+
+    // BOARD REVIEW (W1-T2304's design, wired here). The rung whose unit is the WHOLE OPEN BOARD.
+    // Same shape and the same best-effort contract as the two cadences above, on its own policy
+    // row and its own marker file.
+    //
+    // THE LEDGER ROWS BELOW ARE PART OF THE FIX, NOT DECORATION. `board-review.ts` has no `log()`
+    // hook of its own, so before this block a fire would have written no ledger row at all and
+    // "did it run" was answerable only by the presence of a file nothing watches. These rows are
+    // what the digest already sweeps into the inbox, and they are what makes a future
+    // "has it fired" question a one-line ledger read instead of a recon.
+    if (deps.checkBoardReview) {
+      let boardDecision: BoardReviewCadenceDecision | undefined;
+      try {
+        boardDecision = deps.checkBoardReview();
+      } catch (e) {
+        log("board_review.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (boardDecision?.fire) {
+        log("board_review.fired", { reason: boardDecision.reason });
+        if (deps.runBoardReview) {
+          try {
+            const report = await deps.runBoardReview();
+            log("board_review.ran", {
+              oldestOpenAgeHours: report.oldestOpenAgeHours,
+              redCount: report.redCount,
+              unhandledEscalationCount: report.unhandledEscalationCount,
+              itemsConsidered: report.itemsConsidered,
+              proposals: report.proposalIds.length,
+              proposalIds: report.proposalIds,
+            });
+          } catch (e) {
+            log("board_review.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (boardDecision) {
+        log("board_review.skipped", { reason: boardDecision.reason });
       }
     }
 
