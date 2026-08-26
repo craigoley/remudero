@@ -67,7 +67,7 @@ test("a declared path named twice on the same head renders once", () => {
   assert.match(out, /- `src\/lib\/other\.ts`/, "the distinct path must still render");
 });
 
-test("singular and plural wording both read correctly", () => {
+test("singular and plural wording both read correctly for untouched declared paths", () => {
   assert.match(inverseScopeAdvisorySection([inverse(["src/a.ts"])]) ?? "", /declares a file this diff never touched/);
   assert.match(
     inverseScopeAdvisorySection([inverse(["src/a.ts", "src/b.ts"])]) ?? "",
