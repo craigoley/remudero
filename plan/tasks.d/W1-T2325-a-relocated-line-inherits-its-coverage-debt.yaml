@@ -1,4 +1,4 @@
-- id: W1-T2316
+- id: W1-T2325
   title: "`diff-coverage` blocks a line it has already declared out of scope — its own header says an already-uncovered PRE-EXISTING line is the aggregate ratchet's problem, and then `addedLinesByFile` throws away the `-` lines that are the only evidence a `+` line is a RELOCATION rather than an addition, so restructuring an untested region converts a silent gap into a blocking failure and the gate penalises the refactor it exists to reward"
   repo: remudero
   depends_on: []
@@ -119,7 +119,7 @@
     - claim: "the relocation set is derived from the removed lines the diff already carries, with no second coverage run"
       proof: "grep: removedLinesByFile( in scripts/diff-coverage.mjs"
     - claim: "the shard records why a pre-existing-debt annotation is refused as the alternative"
-      proof: "grep: AN ANNOTATION CANNOT BE CHECKED in plan/tasks.d/W1-T2316-a-relocated-line-inherits-its-coverage-debt.yaml"
+      proof: "grep: AN ANNOTATION CANNOT BE CHECKED in plan/tasks.d/W1-T2325-a-relocated-line-inherits-its-coverage-debt.yaml"
   origin: "feedback#fb-1785984602111-18ffd8"
   plan_refs: ["W1-T212", "W1-T221", "W1-T481", "W1-T421", "W1-T1075"]
   files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts, test/fixtures/diff-coverage/relocated-block.diff, test/fixtures/diff-coverage/relocated-block.lcov, test/fixtures/diff-coverage/relocated-duplicate.diff, test/fixtures/diff-coverage/relocated-duplicate.lcov]
