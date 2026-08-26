@@ -85,8 +85,21 @@ export function isValidFeedbackOrigin(origin: string): origin is FeedbackOrigin 
   );
 }
 
-/** The status lifecycle a feedback entry moves through (§7B: capture -> triage -> gate). */
-export const FEEDBACK_STATUSES = ["new", "grilling", "proposed", "accepted", "rejected"] as const;
+/**
+ * The status lifecycle a feedback entry moves through (§7B: capture -> triage -> gate), PLUS
+ * `answered` (W1-T2278): the state a `grilling` entry advances to the moment a `replyTo` names
+ * it and that reply is captured. This is a SEPARATE arm from the triage lifecycle's own
+ * `grilling` -> `proposed` advance (a grill answer is not itself a proposal) — both are reachable
+ * from `grilling`, and {@link setFeedbackStatus}'s own contract already leaves "which transition
+ * is legal" to the caller, not to this list. `answered` is a genuine CLOSED state for the
+ * question/answer exchange: once set, a second `replyTo` naming the same entry is refused for
+ * exactly the same reason a `proposed`/`accepted`/`rejected` target already is (not parked at
+ * `grilling`) — see `buildSubmitFeedbackRoute` in panel-graph.ts, the only place this status is
+ * ever written, and always because an operator's own reply text just arrived, never on a timer
+ * or a scheduler (W1-T2244 pins (ix)/(x): nothing here manufactures a decision on the operator's
+ * behalf).
+ */
+export const FEEDBACK_STATUSES = ["new", "grilling", "proposed", "accepted", "rejected", "answered"] as const;
 export type FeedbackStatus = (typeof FEEDBACK_STATUSES)[number];
 
 /** One `plan/feedback/<id>.yaml` entry — the exact §7B schema shape. */
@@ -97,6 +110,27 @@ export interface FeedbackEntry {
   attachments: string[];
   origin: FeedbackOrigin;
   status: FeedbackStatus;
+  /**
+   * The id of the `grilling` entry THIS entry answers, when this entry was captured via
+   * `POST /v1/feedback`'s `replyTo` (W1-T2278) — carried as a FIELD on the record, the same way
+   * every other edge on this entry (`proposal_pr`, `upstream.pr_url`) is a field rather than
+   * prose folded into `raw`. `null` for a submission carrying no reply reference — the
+   * unchanged, pre-W1-T2278 shape. Set ONCE at capture time and never revised afterward: an
+   * answer never gets re-parented. Optional (like `summary`/`expansion`/`upstream` below) so
+   * every FeedbackEntry fixture predating this task stays a valid literal with no edit required;
+   * a written-by-{@link captureFeedback} entry always carries it explicitly (`null` when absent),
+   * never `undefined`.
+   */
+  reply_to?: string | null;
+  /**
+   * The id of the entry that answered THIS one — the reverse edge of `reply_to` (W1-T2278), so a
+   * thread is enumerable from the ANSWERED end too, not only by reading a reply's own
+   * `reply_to`. Set exactly once, by {@link setFeedbackStatus} in the same call that advances
+   * this entry to `status: "answered"`; `null`/absent otherwise (every entry never replied to,
+   * which is every entry captured before this task and every entry that is not itself parked
+   * `grilling` and answered).
+   */
+  answered_by?: string | null;
   /** Set once `rmd triage` (W1-T41) opens a proposal PR for this entry; null until then. */
   proposal_pr: string | null;
   /**
@@ -856,6 +890,15 @@ export interface CaptureFeedbackOptions {
    */
   expansion?: FeedbackExpansion | null;
   /**
+   * W1-T2278: the id of the `grilling` entry this capture answers, ALREADY VALIDATED by the
+   * caller (panel-graph.ts's `buildSubmitFeedbackRoute` reads the target and confirms it is
+   * parked `grilling` before this function ever runs — this function itself does no such
+   * lookup, mirroring `expansion` above: the caller assembles and validates, this module only
+   * stores). `undefined`/omitted leaves `reply_to: null` on the written entry — a submission
+   * carrying no reply reference is byte-identical to today's shape plus this one added field.
+   */
+  replyTo?: string;
+  /**
    * W1-T397 test seam ONLY — injectable `git`/`gh` for the home-repo self-check and the
    * upstream PR attempt. Real callers never set this, so they get the actual `git`/`gh` calls;
    * a test injects fakes so the routing decision (self vs. not) and the PR-open attempt are
@@ -909,6 +952,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     attachments,
     origin,
     status: "new",
+    reply_to: opts.replyTo ?? null,
     proposal_pr: null,
     summary: null,
     expansion: opts.expansion ?? null,
@@ -999,7 +1043,19 @@ export function setFeedbackStatus(
   root: string,
   id: string,
   status: FeedbackStatus,
-  opts: { proposalPr?: string; land?: LandFeedbackOpts; summary?: DecisionSummary | null } = {},
+  opts: {
+    proposalPr?: string;
+    land?: LandFeedbackOpts;
+    summary?: DecisionSummary | null;
+    /**
+     * W1-T2278: the id of the entry that just answered THIS one — passed ONLY by
+     * `buildSubmitFeedbackRoute` (panel-graph.ts) in the same call that advances a `grilling`
+     * target to `status: "answered"`. `undefined` (every other caller — `rmd triage`, the
+     * accept/reject decision route) leaves whatever this entry already had, mirroring
+     * `summary`'s own "unset means untouched" discipline immediately below.
+     */
+    answeredBy?: string | null;
+  } = {},
 ): FeedbackEntry {
   if (!(FEEDBACK_STATUSES as readonly string[]).includes(status)) {
     throw new FeedbackError(`invalid status "${status}" — must be one of ${FEEDBACK_STATUSES.join(", ")}`);
@@ -1014,6 +1070,7 @@ export function setFeedbackStatus(
     // byte-identical entries. A caller that DOES pass one ({@link proposeFeedbackWithSummary},
     // below) overwrites unconditionally, including with `null` (a fail-open summarizer result).
     summary: opts.summary !== undefined ? opts.summary : (entry.summary ?? null),
+    answered_by: opts.answeredBy !== undefined ? opts.answeredBy : (entry.answered_by ?? null),
   };
   const content = stringifyYaml(updated);
   if (opts.land) {

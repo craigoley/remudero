@@ -15,7 +15,7 @@ raw: "OPERATOR-CHECKOUT SYNC IS MANUAL TOIL — the W1-T79 auto-sync guard
   recipe the operator types twice is a spec."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1949
 summary:
   headline: Add rmd sync verb to automate operator checkout recipe

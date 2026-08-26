@@ -340,3 +340,81 @@ test("W1-T1048: loadBaseline refuses the same id listed twice", () => {
   writeFileSync(p, JSON.stringify([{ id: "W1-T1", reason: "first" }, { id: "W1-T2", reason: "second" }]));
   assert.deepEqual([...mod.loadBaseline(p).keys()], ["W1-T1", "W1-T2"]);
 });
+
+// ── The doc-safe placeholder form (2026-08-25) ───────────────────────────────────────────────
+//
+// A literal in a PR body -- inside a code span -- burned the mint's ceiling and cost two
+// reservation refs. The author backticked it and reasonably assumed that was enough. It is not:
+// `mentionedTaskIds` extracts the same number from a bare literal, a code span and a fenced
+// block alike. This gate already refuses an unresolvable literal in shipped source, and it caught
+// a third attempt the same night when a source comment spelled the ids out -- but its refusal
+// named only two exits, both of which assume the id was MEANT as a claim. The case that actually
+// costs money is the third: an EXAMPLE. These tests pin the escape hatch so a later change to
+// either reader cannot silently take it away.
+
+test("task-id-existence: the placeholder form in shipped source does NOT trip the gate", () => {
+  const root = mkFixtureRoot();
+  const remote = makeEmptyBareRemote();
+  try {
+    // Every placeholder in one file, in the roles an author actually writes them in.
+    writeFileSync(
+      join(root, "src", "docs.ts"),
+      [
+        "// reserveTaskIdRemote(W1-T<n>) claims the id on origin",
+        "// see also dispatchClaimRef(\"W1-T<id>\")",
+        "// the ref is refs/rmd-id/W1-TNNNN",
+      ].join("\n") + "\n",
+    );
+    const baseline = writeBaseline(root, []);
+    const result = runCli(["--cwd", root, "--baseline", baseline, "--remote", remote]);
+    const output = result.stdout + result.stderr;
+    assert.equal(result.status, 0, output);
+    assert.doesNotMatch(output, /FAILED/, "a placeholder is not a claim and must not be read as one");
+  } finally {
+    cleanup(root, remote);
+  }
+});
+
+test("task-id-existence: the refusal NAMES the placeholder form, so an example author has a way out", () => {
+  const root = mkFixtureRoot();
+  const remote = makeEmptyBareRemote();
+  try {
+    // The exact shape that burned us: a literal inside a code span, in a comment.
+    writeFileSync(join(root, "src", "example.ts"), "// see `dispatchClaimRef(\"W1-T88002\")` for the shape\n");
+    const baseline = writeBaseline(root, []);
+    const result = runCli(["--cwd", root, "--baseline", baseline, "--remote", remote]);
+    const output = result.stdout + result.stderr;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /W1-T88002/, "sanity: the code span did not hide it from the scan either");
+    assert.match(output, /placeholder form/, "the refusal must offer the example author the third exit");
+    assert.match(output, /W1-T<n>/, "and must spell the form out");
+    assert.match(output, /Backticks and fenced blocks do NOT help/, "and must say why the obvious guess fails");
+  } finally {
+    cleanup(root, remote);
+  }
+});
+
+test("the placeholder forms are inert against BOTH readers, driven rather than reasoned about", async () => {
+  // The mint's mention scan.
+  const { mentionedTaskIds } = await import("../src/lib/task-id.js");
+  for (const safe of ["W1-T<n>", "W1-T<id>", "W1-TNNNN", "W1-Txxxx", "W1-T…", "W1-T88003x"]) {
+    assert.deepEqual(mentionedTaskIds(`dispatchClaimRef("${safe}")`), [], `${safe} must extract nothing`);
+  }
+  // CONTROL, in all three renderings the author might reach for: the literal is read identically.
+  for (const unsafe of ['W1-T88004', '`W1-T88004`', "```\nW1-T88004\n```"]) {
+    assert.deepEqual(mentionedTaskIds(unsafe), [88004], "a literal is read the same bare, spanned or fenced");
+  }
+
+  // The plan-history scan's own shape (`git log -p` added lines declaring an id). Mirrored here
+  // rather than imported because ADDED_TASK_ID_RE is private to run-task.ts; the control below is
+  // what proves the mirror is the right shape.
+  const added = /^\+\s*(?:-\s*)?id:\s*["']?W1-T(\d+)/gm;
+  const run = (line: string) => {
+    added.lastIndex = 0;
+    return [...line.matchAll(added)].map((m) => m[1]);
+  };
+  assert.deepEqual(run("+  - id: W1-T88005"), ["88005"], "control: a real declaration IS seen");
+  for (const safe of ["+  - id: W1-T<n>", "+  - id: W1-T<id>", "+  - id: W1-TNNNN"]) {
+    assert.deepEqual(run(safe), [], `${safe} must declare nothing`);
+  }
+});

@@ -21,7 +21,7 @@ raw: "TWO IDIOM TRAPS THAT COST CI ROUNDS AND FALSE FINDINGS, both mechanical.
   path, the ordering does not matter and only the id recipe needs its caveat."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2439
 summary:
   headline: "Fix two CI mechanical traps: ID detection and title edits"

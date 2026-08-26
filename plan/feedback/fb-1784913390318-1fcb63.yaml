@@ -22,7 +22,7 @@ raw: "DAEMON GETS ITS OWN CHECKOUT — the daemon runs from the operator's WIP
   not."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1997
 summary:
   headline: Separate daemon installation folder from work folder

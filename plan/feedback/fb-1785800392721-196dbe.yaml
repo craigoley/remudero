@@ -23,7 +23,7 @@ raw: "DISK FILLED TO ENOSPC AND CRASH-LOOPED THE DAEMON — 2026-08-03T23:32Z, /
   free-space or ENOSPC check belongs in the daemon's own health path."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2352
 summary:
   headline: Disk Filled Causing Daemon Crash-Loop; Enable scratchReap and Investigate

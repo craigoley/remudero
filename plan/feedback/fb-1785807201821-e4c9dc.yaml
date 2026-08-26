@@ -29,7 +29,7 @@ raw: "TEST FIXTURES LEAK TEMP DIRS AT SCALE AND daemon.tmp_sweep REAPS NONE OF
   owner rather than a repair."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2359
 summary:
   headline: Test temp directories leak; daemon.tmp_sweep won't clean them

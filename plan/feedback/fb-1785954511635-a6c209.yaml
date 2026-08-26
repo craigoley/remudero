@@ -27,7 +27,7 @@ raw: "ADDENDUM to fb-1785954227448-7b2bb0 — THE FALSIFYING CHECK IS ANSWERED A
   the gap is exactly the skip path and nothing else needs changing."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2580
 summary:
   headline: Implement auto-clearing for stuck deployment markers

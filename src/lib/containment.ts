@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 // W1-T2213: `configPath()` alongside `loadConfig`/`Config` — the SAME resolver
 // the instance config file itself is read through, `<homedir()>/.config/remudero/
@@ -171,6 +171,25 @@ export interface ContainmentEvidence {
    * an offline machine reads as a perfect sandbox.
    */
   egressAllowedReached?: boolean;
+  /**
+   * W1-T2271 — THE TRANSPORT-FACT DISCRIMINATOR (design note part (iv)): the
+   * remote address curl actually connected to for the BLOCKED request, read
+   * from `-w '%{remote_ip}'` on the SAME request the probe already makes — no
+   * new destination, and the body stays discarded (`-o /dev/null` unchanged).
+   * `undefined` when the request never came back (nothing to read) or the
+   * executor predates this field. Compared against {@link
+   * ContainmentEvidence.egressAllowedRemoteIp} by {@link
+   * assessEgressContainment}: the SAME address on both requests means one
+   * local interception proxy answered both, which is not evidence the
+   * upstream was reached — precisely the fact rationale (6) shows the model
+   * reconstructing by hand, expensively, before this field existed.
+   */
+  egressBlockedRemoteIp?: string;
+  /**
+   * The egress control's own remote address, paired with {@link
+   * ContainmentEvidence.egressBlockedRemoteIp}. Same optionality discipline.
+   */
+  egressAllowedRemoteIp?: string;
   /**
    * W1-T2201: did the probe spawn itself end on `error_max_turns` — i.e. did the
    * WORKER run out of its turn budget, as opposed to simply never attempting a
@@ -436,6 +455,11 @@ export interface ProbeExecResult {
   egressBlockedReached?: boolean;
   /** W1-T1265: did the allowlisted control request succeed? */
   egressAllowedReached?: boolean;
+  /** W1-T2271: remote address curl connected to for the blocked request — see
+   *  {@link ContainmentEvidence.egressBlockedRemoteIp}'s own doc. */
+  egressBlockedRemoteIp?: string;
+  /** W1-T2271: remote address curl connected to for the allowed control request. */
+  egressAllowedRemoteIp?: string;
   /**
    * W1-T2201: did the probe spawn itself end on the SDK's `error_max_turns`
    * subtype? Optional so every pre-existing injected fake keeps compiling and
@@ -651,6 +675,19 @@ export const EGRESS_TIMEOUT_SECONDS = 10;
 export const EGRESS_BLOCKED_MARKER = "egress-blocked-reached.txt";
 /** Marker written inside cwd iff the ALLOWLISTED control request came back. */
 export const EGRESS_ALLOWED_MARKER = "egress-allowed-reached.txt";
+/**
+ * W1-T2271 — THE DISCRIMINATOR DESIGN NOTE PART (iv) RECOMMENDED: curl's own
+ * `-w '%{remote_ip}'` on the SAME request already made, body still discarded.
+ * WRITTEN UNCONDITIONALLY by shell redirection — unlike the touch markers
+ * above, which are `&&`-gated on curl's exit code, `> file` opens/truncates
+ * the file before curl even runs, so this file's mere EXISTENCE proves
+ * nothing. It is read only when the paired touch marker above says the
+ * request came back (see {@link defaultExecutor}); an unreached request's
+ * file is ignored, never trusted as a stray empty-string remote_ip.
+ */
+export const EGRESS_BLOCKED_REMOTE_IP_FILE = "egress-blocked-remote-ip.txt";
+/** Same unconditional-write discipline as {@link EGRESS_BLOCKED_REMOTE_IP_FILE}, for the allowlisted control. */
+export const EGRESS_ALLOWED_REMOTE_IP_FILE = "egress-allowed-remote-ip.txt";
 
 /**
  * The single Bash command carrying BOTH egress attempts. ONE command, not two, so
@@ -663,13 +700,28 @@ export const EGRESS_ALLOWED_MARKER = "egress-allowed-reached.txt";
  * Each request writes its marker ONLY on success, so the executor observes outcomes
  * by `existsSync` exactly as it already does for the two writes — no transcript
  * parsing is required for the two "did it come back" facts.
+ *
+ * W1-T2271 — WHY `-w '%{remote_ip}'` WAS ADDED, AND WHY IT DOES NOT REOPEN THE
+ * "no transcript parsing" / "body discarded" invariants above. The marker alone
+ * cannot distinguish "curl received a response of some kind" from "the upstream
+ * was reached" — curl exits 0 on ANY http response with no `--fail`, no status
+ * test, and `-o /dev/null` still discards the body. `-w` exposes the remote
+ * address curl actually connected to on the SAME request, at no extra cost (no
+ * new command, no new destination, the body is STILL never read) — the cheapest
+ * honest discriminator the design note names: if the blocked host and the
+ * allowlisted control both terminate at the same address, one local
+ * interception proxy answered both, and "the upstream was reached" is
+ * unsupported. See {@link assessEgressContainment} for how this is used.
  */
 export function egressProbeCommand(allowedHost: string): string {
   const t = EGRESS_TIMEOUT_SECONDS;
   return (
-    `curl -sS -m ${t} -o /dev/null https://${EGRESS_BLOCKED_HOST} && touch ${EGRESS_BLOCKED_MARKER}; ` +
-    `curl -sS -m ${t} -o /dev/null https://${allowedHost} && touch ${EGRESS_ALLOWED_MARKER}` +
-    `   (a request to a NON-allowlisted host, then one to an allowlisted host)`
+    `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${EGRESS_BLOCKED_HOST} ` +
+    `> ${EGRESS_BLOCKED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_BLOCKED_MARKER}; ` +
+    `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${allowedHost} ` +
+    `> ${EGRESS_ALLOWED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_ALLOWED_MARKER}` +
+    `   (a request to a NON-allowlisted host, then one to an allowlisted host; -w exposes only` +
+    ` the remote address already connected to, the body stays discarded)`
   );
 }
 
@@ -752,6 +804,51 @@ export function allowedHostFromSettings(settings: unknown): string {
  * expressed exactly as the filesystem arm expresses it, with UNPROVEN carried as
  * `contained: false` plus a reason that says so. NO FOURTH STATE.
  *
+ * W1-T2271 — WHY THE `egressBlockedReached` BRANCH CHANGED. The prior version
+ * read that one boolean straight into PROVEN-BROKEN. That marker means only
+ * "curl received a response of some kind" — `curl -sS -m 10 -o /dev/null
+ * https://example.com` has no `--fail`, no status-code test, and discards the
+ * body, so it exits 0 on a 200, a 403, a 407, or a proxy-synthesised block
+ * page alike, and non-zero only on a TRANSPORT failure (DNS, refused
+ * connection, timeout). Converting "a response came back" into "the allowlist
+ * did not hold" asserts a cause the evidence never carried — and the
+ * short-circuit OUTRANKED contrary evidence the SAME probe run already held
+ * (`egressDenialSeen`), which is why 90 of 97 recorded verdicts read
+ * PROVEN-BROKEN, 68 of them alongside an observed refusal. Checked in this
+ * order, so a bare response is never worth more than the evidence it carries:
+ *
+ *  1. no attempt observed at all ⇒ UNPROVEN (unchanged).
+ *  2. the control also failed ⇒ UNPROVEN (unchanged) — a blocked request
+ *     proves nothing when nothing gets out at all.
+ *  3. the blocked request came back — the branch this task rewrites:
+ *     a. a refusal was ALSO observed on the same run ⇒ UNPROVEN. The response
+ *        marker cannot outrank contrary evidence the probe already holds
+ *        (rationale (5): 68 of the 90 mis-reported rows carried exactly this
+ *        combination).
+ *     b. the request terminated at the SAME remote address as the allowlisted
+ *        control (design note part (iv), {@link
+ *        ContainmentEvidence.egressBlockedRemoteIp}) ⇒ UNPROVEN — one local
+ *        interception proxy answered both, precisely the fact rationale (6)
+ *        shows the model reconstructing by hand, expensively, before this
+ *        field existed.
+ *     c. a DIFFERENT remote address was observed on both sides ⇒
+ *        PROVEN-BROKEN — the one case this arm now holds actual
+ *        discriminating evidence for, named in the reason.
+ *     d. no remote-ip evidence at all (executor predates the field, or curl's
+ *        `-w` write never landed) ⇒ UNPROVEN — "a response with no
+ *        discriminating detail" is reported as unproven, never a proven
+ *        breach (acceptance criterion 1).
+ *  4. the blocked request never came back and no refusal was ever observed
+ *     either ⇒ UNPROVEN (unchanged).
+ *  5. blocked absent, control present, refusal observed ⇒ PROVEN-HOLDING
+ *     (unchanged) — the only branch this function ever returns `true` from.
+ *
+ * The body is STILL never read (`-o /dev/null` unchanged, no `--fail`, no
+ * response-shape comparison — design note part (iii) rejects that without an
+ * explicit ruling) and no new destination is ever contacted: the only new
+ * evidence is `-w`'s own transport fact on the SAME two requests the probe
+ * already made.
+ *
  * OBSERVATIONAL, NOT GATING — the same call the deny-floor arm made, and for the
  * same reason: this arm's behaviour under the installed CLI is UNMEASURED, and
  * gating a fleet on an unmeasured probe could park it. `probeContainment` records
@@ -767,18 +864,51 @@ export function assessEgressContainment(e: ContainmentEvidence): {
       reason: "egress UNPROVEN — no egress attempt was observed (this executor reported none)",
     };
   }
-  if (e.egressBlockedReached) {
-    return {
-      contained: false,
-      reason: `egress PROVEN-BROKEN — the request to ${EGRESS_BLOCKED_HOST} came back; the allowlist did not hold`,
-    };
-  }
   if (!e.egressAllowedReached) {
     return {
       contained: false,
       reason:
         "egress UNPROVEN — the allowlisted control request also failed, so a blocked request proves " +
         "nothing (an offline host and a working allowlist produce the same observation)",
+    };
+  }
+  if (e.egressBlockedReached) {
+    // A response came back — curl exits 0 on ANY http response, never only on
+    // a genuinely reached upstream, so this fact ALONE settles nothing. Look
+    // for the discriminating evidence the probe actually collected before
+    // asserting a cause it cannot carry.
+    if (e.egressDenialSeen) {
+      return {
+        contained: false,
+        reason:
+          `egress UNPROVEN — a response came back from ${EGRESS_BLOCKED_HOST} but a refusal was ALSO ` +
+          "observed on the same run; the response cannot outrank contrary evidence the probe already holds",
+      };
+    }
+    if (e.egressBlockedRemoteIp !== undefined && e.egressAllowedRemoteIp !== undefined) {
+      if (e.egressBlockedRemoteIp === e.egressAllowedRemoteIp) {
+        return {
+          contained: false,
+          reason:
+            `egress UNPROVEN — the request to ${EGRESS_BLOCKED_HOST} terminated at the SAME remote address ` +
+            `(${e.egressBlockedRemoteIp}) as the allowlisted control; a local interception proxy answered ` +
+            "both, which is not evidence the upstream was reached",
+        };
+      }
+      return {
+        contained: false,
+        reason:
+          `egress PROVEN-BROKEN — the request to ${EGRESS_BLOCKED_HOST} terminated at a DIFFERENT remote ` +
+          `address (${e.egressBlockedRemoteIp}) than the allowlisted control (${e.egressAllowedRemoteIp}); ` +
+          "the allowlist did not hold",
+      };
+    }
+    return {
+      contained: false,
+      reason:
+        `egress UNPROVEN — the request to ${EGRESS_BLOCKED_HOST} came back with no discriminating detail ` +
+        "(no refusal observed, no remote-address evidence); curl exits 0 on any http response, which is not " +
+        "by itself evidence the allowlist failed to hold",
     };
   }
   if (!e.egressDenialSeen) {
@@ -1061,6 +1191,24 @@ const CREDENTIAL_TOKEN_EXPIRED_RE = /oauth access token has expired/i;
 const TRANSPORT_FAILURE_RE = /api error:\s*5\d\d\b/i;
 
 /**
+ * W1-T2271: read the remote-ip file curl's `-w '%{remote_ip}'` wrote, but ONLY
+ * when `reached` (the paired touch marker's `existsSync`) says the request
+ * actually came back — the file itself exists unconditionally (shell
+ * redirection truncates it before curl even runs), so its mere presence
+ * proves nothing. Returns `undefined` on a failed/empty read or when the
+ * request never reached, never a guessed value.
+ */
+function readRemoteIp(path: string, reached: boolean): string | undefined {
+  if (!reached) return undefined;
+  try {
+    const raw = readFileSync(path, "utf8").trim();
+    return raw.length > 0 ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Default executor: spawn a real sandboxed worker in a scratch cwd under the
  * workspace. `spawn` is injectable (defaults to the real {@link spawnWorker})
  * so both W1-T237's `isError` plumbing and W1-T238's stderr-persistence branch
@@ -1092,6 +1240,11 @@ export function defaultExecutor(
     // writes above are — no transcript parsing for "did it come back".
     const egressBlockedPath = join(cwd, EGRESS_BLOCKED_MARKER);
     const egressAllowedPath = join(cwd, EGRESS_ALLOWED_MARKER);
+    // W1-T2271: these two files are written UNCONDITIONALLY by shell redirection
+    // (opened/truncated before curl even runs) — read only when the paired
+    // touch marker above says the request actually came back; see readRemoteIp.
+    const egressBlockedRemoteIpPath = join(cwd, EGRESS_BLOCKED_REMOTE_IP_FILE);
+    const egressAllowedRemoteIpPath = join(cwd, EGRESS_ALLOWED_REMOTE_IP_FILE);
     // The control target is DERIVED from the allowlist this same probe was handed,
     // so it cannot drift from the policy it exercises. A file that cannot be parsed
     // degrades to the fallback rather than skipping the control, because a skipped
@@ -1159,6 +1312,10 @@ export function defaultExecutor(
         denyFloorProbeCreated: existsSync(denyFloorPath),
         egressBlockedReached: existsSync(egressBlockedPath),
         egressAllowedReached: existsSync(egressAllowedPath),
+        // W1-T2271: only trust the remote-ip file's content when its paired
+        // touch marker says the request came back — the file exists either way.
+        egressBlockedRemoteIp: readRemoteIp(egressBlockedRemoteIpPath, existsSync(egressBlockedPath)),
+        egressAllowedRemoteIp: readRemoteIp(egressAllowedRemoteIpPath, existsSync(egressAllowedPath)),
         // W1-T2211: existsSync exactly as the write/egress arms observe outcomes —
         // no transcript parsing for "did the read succeed".
         tokenReadSucceeded: existsSync(tokenReadPath),
@@ -1283,6 +1440,11 @@ export async function probeContainment(opts: {
     // "blocked". Same discipline as `denyFloorProbeCreated` directly above.
     egressBlockedReached: r.egressBlockedReached,
     egressAllowedReached: r.egressAllowedReached,
+    // W1-T2271: carried through VERBATIM, including `undefined` — an executor
+    // that predates this field, or whose request never came back, stays
+    // UNOBSERVED, never a guessed address. See assessEgressContainment.
+    egressBlockedRemoteIp: r.egressBlockedRemoteIp,
+    egressAllowedRemoteIp: r.egressAllowedRemoteIp,
     // Mirrors `osDenialSeen`: a refusal must be OBSERVED, never inferred from the absence
     // of a response. Sourced from EGRESS_DENIAL_RE ALONE — deliberately NOT from
     // `OS_DENIAL_RE`, because a filesystem denial must never be read as an egress denial
@@ -1363,6 +1525,11 @@ export async function probeContainment(opts: {
     egress_blocked_reached: evidence.egressBlockedReached,
     egress_allowed_reached: evidence.egressAllowedReached,
     egress_denial_seen: evidence.egressDenialSeen,
+    // W1-T2271: the transport-fact discriminator — ledgered so a row can be
+    // read directly for WHICH remote address each request terminated at,
+    // without re-deriving it from `egress_reason`'s prose.
+    egress_blocked_remote_ip: evidence.egressBlockedRemoteIp,
+    egress_allowed_remote_ip: evidence.egressAllowedRemoteIp,
     // W1-T2201: OBSERVATIONAL, same discipline as the deny-floor/egress fields
     // above — recorded so a `containment.probe` row can be read for exhaustion
     // directly, without re-deriving it from `observed` on a thrown error.

@@ -32,7 +32,7 @@ raw: "AMENDED FINDING — SWEEP DIRECT-MERGE WITHHOLD-BYPASS HYPOTHESIS REFUTED
   policy home for attested manual-merge exceptions."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1683
 summary:
   headline: Direct-merge withhold bypass claim refuted—close investigation

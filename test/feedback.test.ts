@@ -254,7 +254,9 @@ test("setFeedbackStatus moves an entry through the §7B lifecycle and can attach
   // proposal_pr survives a later transition that doesn't pass a new one:
   assert.equal(accepted.proposal_pr, "https://github.com/x/y/pull/1");
 
-  assert.deepEqual(FEEDBACK_STATUSES, ["new", "grilling", "proposed", "accepted", "rejected"]);
+  // W1-T2278 adds "answered" -- a `grilling` entry's OTHER exit, taken when a reply lands
+  // rather than when triage proposes it (buildSubmitFeedbackRoute, panel-graph.ts).
+  assert.deepEqual(FEEDBACK_STATUSES, ["new", "grilling", "proposed", "accepted", "rejected", "answered"]);
 });
 
 test("setFeedbackStatus rejects a status outside the closed enum", () => {

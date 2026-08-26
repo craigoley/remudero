@@ -1,0 +1,164 @@
+- id: W1-T2291
+  title: "Two tests still rewrite a TRACKED file under `src/` while every other test in the run reads the same workspace, and nothing forbids it — the population is exactly two files and four call sites, small enough that a scan of `test/` for a mutating fs call resolving under the tracked `src/` can BLOCK rather than warn"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  risk: high
+  rationale: |
+    Filed by measuring, from a scratch worktree PROVEN equal to origin/main by sha (9f8eb325),
+    clone shallow-checked `false`, `node_modules` linked and `tsx` confirmed present before any
+    count was believed. Worktree removed. No suite, no poller, no spawning verb.
+
+    (1) THE PROPERTY, STATED ONCE: a test whose correctness depends on the state of the workspace
+    it SHARES with every other test in the run. `node --test` runs files concurrently across
+    workers, so a file rewritten by one test is observed by every other worker that transpiles,
+    instruments or reads it during that window. The write is restored in a `finally`; the WINDOW
+    is the defect, not the residue.
+
+    (2) THE POPULATION IS TWO FILES AND FOUR CALL SITES, AND THE SCAN THAT SAYS SO IS CONTROLLED.
+    Over all 721 tracked `test/**/*.ts`, resolving each `writeFileSync`/`rmSync`/`renameSync`/
+    `cpSync`/`appendFileSync`/`unlinkSync` target and exempting `mkdtemp`/`tmpdir()`-rooted paths:
+        test/dispatch-lifetime-breaker.test.ts  writeFileSync(statusTsPath)  ×2
+        test/task-id-reservation.test.ts        writeFileSync(srcPath)       ×2
+    where `statusTsPath = join(repoRoot, "src", "lib", "status.ts")` and
+    `srcPath = join(repoRoot, "src", "lib", "task-id-reservation.ts")`.
+    CONTROL: the SAME scan with the tmpdir exemption removed widens to SIX files, so the exemption
+    is doing real work and the two is not a broken query. The raw call population it filters is
+    large — 2,209 `writeFileSync` sites across 388 files — which is exactly why the guard must
+    resolve the TARGET rather than count calls.
+
+    (3) ONE OF THE THREE BRIEFED INSTANCES IS ALREADY FIXED, AND THIS SHARD DOES NOT RE-FILE IT.
+    `test/ledger-rotation.test.ts`'s W1-T964 check no longer touches the tracked tree: #2881
+    (`test(ledger-rotation): mutate a copy, never the shared workspace`) moved it to
+    `mkdtempSync` + `cpSync(join(repoRoot, "src"), join(sandbox, "src"))` and mutates the copy.
+    **THAT COMMIT IS THE EXEMPLAR THIS TASK GENERALISES**, not a defect to re-open. Its own
+    in-file note already records the correction that matters to anyone repeating the fix:
+    *"`delete env.NODE_V8_COVERAGE` IS A NO-OP — node re-injects the variable into every child …
+    Only `NODE_V8_COVERAGE: \"\"` lands"*.
+
+    (4) AND THE SECOND OFFENDER WAS NOT IN THE BRIEF. `test/task-id-reservation.test.ts` writes
+    `src/lib/task-id-reservation.ts` in the identical mutate/spawn/restore shape. It was found by
+    the scan, not by reading the two known names — which is the argument for a mechanical guard
+    over two hand-applied fixes: the family had a member nobody had counted.
+
+    (5) THE THIRD BRIEFED SURFACE IS A DIFFERENT PROPERTY AND IS CITED, NOT FOLDED IN. Three tests
+    read their own module's source via `import.meta.url` and assert it is UNALTERED, which is
+    incoherent inside a Stryker sandbox whose job is to alter it; #2867 guards them with a sandbox
+    detector. That is the same property observed from the READING side, and its remedy is a
+    detector rather than a write constraint — so this task does not absorb it.
+
+    (6) THE COST IS MEASURED AND ATTRIBUTED, NOT RE-DERIVED HERE. The operator's figures stand as
+    given: 16 duplicate `FN:` names every pair exactly 3 apart over the 57-file union, 0 shifted
+    with that file removed, and PR #2828 blocked all day by `diff-coverage` naming 22 lines of
+    `riskOverrideFromLedger` uncovered while `FNDA=49` proved the function was entered. What THIS
+    session verified independently is the MECHANISM, reproduced in miniature: two child reads of
+    the same absolute path with three lines removed between them produce ONE `SF:` block carrying
+    two line-sets for the same functions and a split `FNDA`, while a copy under a different root
+    produces a SECOND `SF:` block instead of merging.
+
+    (7) THE LEDGER CANNOT CORROBORATE ANY OF IT AND SAYS SO. At the state dir the newest row with
+    `task_id: DAEMON` is **2026-08-17T02:08:25.417Z** (`daemon.summary`) and `task_id: DAEMON`
+    rows dated today read **0**, against a control of **1,059 rows today** — every one of them
+    `cli.invoked` with `verb: deploy-run`, i.e. this session's own supervisor traffic. THE READER
+    IS THE WRITER: this host is eight days stale for daemon-emitted steps, so no figure above
+    rests on it.
+  design: |
+    (i) Q1 — THE GUARD, AND EXACTLY WHAT IT CATCHES. A scan of tracked `test/**/*.ts` for a
+    mutating fs call — `writeFileSync`, `rmSync`, `renameSync`, `cpSync`, `appendFileSync`,
+    `unlinkSync` — whose FIRST argument resolves under the tracked `src/`, with `mkdtemp`- and
+    `tmpdir()`-rooted roots exempt. It catches the shape both live offenders have: a `const` bound
+    to `join(<repo root>, "src", …)` and passed as a write target, and the same expression written
+    inline. It is a static path-resolution check, not a runtime one.
+
+    (ii) AND WHAT IT CANNOT CATCH — STATED SO NO READER MISTAKES IT FOR A PROOF OF ABSENCE.
+    A path assembled at RUNTIME (a root read from an env var, a segment from a fixture, a
+    `join` over a computed array) is invisible to it. A write through an INJECTED SEAM — the test
+    hands a `writeFile` dep to production code that does the write — is invisible to it. A CHILD
+    PROCESS writing on the test's behalf is invisible to it, and that is not hypothetical: the
+    W1-T964 shape spawns a real `node --test` child. And a `cpSync` whose SOURCE is the tracked
+    tree but whose DESTINATION is a temp root is correctly silent, so the check must resolve the
+    destination argument specifically. **THE GUARD RAISES THE COST OF THE ACCIDENT; IT DOES NOT
+    PROVE THE TREE IS UNWRITTEN.** Any acceptance wording that claims otherwise is wrong.
+
+    (iii) Q2 — THE POPULATION DECIDES THE SEVERITY, AND IT SAYS `block`. Two files, four call
+    sites. That is affordable: the fix per site is the one #2881 already shipped, and a bound that
+    fires on a healthy condition — the shape this repo has refused repeatedly — is not in play at
+    two. **THE ORDER IS LOAD-BEARING: the two offenders must be isolated FIRST and the guard
+    turned on AFTER**, or the gate lands red on main. If the implementation finds the population
+    has grown beyond a handful by the time it runs, it must report the new count and re-decide the
+    severity rather than inherit `block` from this shard.
+
+    (iv) Q3 — WHAT MUST NOT CHANGE.
+      **W1-T964 AND W1-T951 KEEP CHECKING WHAT THEY CHECK.** Both are mutation detectors, both are
+      load-bearing, and both must still fail when their pinning is removed. The remedy is WHERE
+      the mutation lands, never WHETHER it happens.
+      **THE GUARD CONSTRAINS WHERE A TEST MAY WRITE, NEVER WHAT IT MAY ASSERT.** It has no opinion
+      about assertions, coverage, or test content.
+      **NOTHING EXCLUDES A TEST FROM COVERAGE TO SATISFY IT.** No coverage exclusion, no narrowed
+      mutation scope, no baseline or threshold edit, and `diff-coverage` stays blocking.
+      **AND NOTHING PACES OR SLEEPS TO WIDEN THE WINDOW SHUT.** Serialising the suite to avoid the
+      race is not a remedy; isolation is.
+
+    (v) NOT IN SCOPE, NAMED: #2867's sandbox detector and the three read-side tests it guards;
+    `scripts/diff-coverage.mjs`'s duplicate-record reconciliation (shipped as #2872); the
+    `NODE_V8_COVERAGE` child-inheritance behaviour, which is recorded in `ledger-rotation.test.ts`'s
+    own note and needs no task; and any change to how `node --test` schedules files.
+  acceptance:
+    - claim: "a test writing a tracked file under src is named by the scan with its file and call site"
+      proof: "unit test: test/tracked-source-write-guard.test.ts"
+    - claim: "a write whose target is a mkdtemp or tmpdir root is not flagged"
+      proof: "unit test: test/tracked-source-write-guard.test.ts"
+    - claim: "a cpSync reading the tracked tree into a temp destination is not flagged"
+      proof: "unit test: test/tracked-source-write-guard.test.ts"
+    - claim: "the scan reports zero across the tracked test corpus once both offenders are isolated"
+      proof: "unit test: test/tracked-source-write-guard.test.ts"
+    - claim: "the two mutation detectors still fail when their pinning is removed"
+      proof: "unit test: test/tracked-source-write-guard.test.ts"
+    - claim: "the guard makes no claim about runtime-built paths, injected seams, or child-process writes"
+      proof: "unit test: test/tracked-source-write-guard.test.ts"
+  files: [scripts/tracked-source-write-check.mjs, test/tracked-source-write-guard.test.ts, test/dispatch-lifetime-breaker.test.ts, test/task-id-reservation.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#tests-mutate-tracked-source-2026-08-25"
+  plan_refs: ["W1-T951", "W1-T964", "W1-T2276"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so a scanner script, a new test and two existing tests named after neither trip it
+    at `medium`. The change is one scanner plus the isolation #2881 already demonstrated, applied
+    twice.
+
+    EVERY PROOF PATH IS INSIDE `files:`, CHECKED PROGRAMMATICALLY RATHER THAN BY EYE — the single
+    proof path `test/tracked-source-write-guard.test.ts` is a declared member.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL, AND THE CONTROL NAMES A TEST
+    FILE THAT ACTUALLY EXISTS ON MAIN. `rmd check-proof` on the declared path reads `exit: 1`,
+    `hits: 0`, `verdict: fail`. The same verb on `unit test: test/dispatch-lifetime-breaker.test.ts`
+    — a file this task itself declares and which is present at 9f8eb325 — reads `verdict: pass`.
+    The control was confirmed present by `ls` BEFORE the falsifier was believed, precisely because
+    a control naming a path another shard has declared and not yet built discriminates nothing.
+
+    THE ID WAS VERIFIED **UNUSED**, NOT MINE, ACROSS ALL EIGHT SURFACES, RE-VERIFIED AFTER A
+    TRANSPOSITION CORRECTION (this shard was first filed under a transposed id that was never minted).
+    Each zero is paired with a control that fires on its OWN surface, and every merged-surface
+    control is drawn from an ACTUALLY-MERGED id rather than one sitting on an open PR. Matched
+    ANCHORED as `W1-T2291([^0-9]|$)` so an id sitting inside an epoch timestamp cannot match.
+    Remote counts read first: 141 heads, 407 `refs/rmd-id/*`.
+      reservation refs **1** (control W1-T2284 = 1) — the id IS minted, and that surface reading
+        ONE rather than zero is what distinguishes this number from the transposed one it replaces;
+      shard filenames on main 0 (control W1-T2276 = 1); declared `- id:` lines on main 0
+        (control 1); head branches 0 (control 88 `run-*`); open-PR titles 0 and bodies 0 (control:
+        3 titles and 5 bodies across 6 open PRs carry some `W1-T` id); merged `Remudero-Task:`
+        trailers 0 (control W1-T2277 = 1, ON origin/main and therefore merged, out of 629);
+        merged commit subjects 0 (control W1-T2276 = 2, merged as #2872, out of 814 citations).
+    THE OPERATOR RESERVED FOUR CONSECUTIVE IDS — four consecutive ids beginning at W1-T2290, this one third of them — all four
+    present on origin. This shard takes W1-T2291 and mints nothing.
+
+    AND THE TRANSPOSITION IS NOT ISOLATED, WHICH IS WORTH RECORDING WHERE THE NEXT FILING WILL SEE
+    IT. At the time of this correction the open-PR set carries THREE four-digit ids in the same
+    transposed band — this PR (corrected here), one on #2890 and one on #2888 —
+    against the reserved band. The transposed forms are deliberately NOT written out in this shard:
+    writing one is exactly what raises the mint's ceiling. So correcting this one shard does NOT restore
+    `./bin/rmd next-task-id`, whose ceiling is set by the HIGHEST such id, currently #2888's.

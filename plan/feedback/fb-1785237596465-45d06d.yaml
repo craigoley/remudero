@@ -15,7 +15,7 @@ raw: "GLOBAL LEARNINGS ARTIFACT MISSING — every worker spawn logs
   measure, don't assume)."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2029
 summary:
   headline: Global learnings artifact missing—81% of knowledge dropped

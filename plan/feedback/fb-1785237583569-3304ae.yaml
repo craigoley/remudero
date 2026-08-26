@@ -16,7 +16,7 @@ raw: "RESILIENCE DRILL CADENCE — this week's incidents (binary husk, daemon
   to the drill'."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2025
 summary:
   headline: Establish periodic fault-injection drills to validate guards
