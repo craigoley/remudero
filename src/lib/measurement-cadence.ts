@@ -5,6 +5,13 @@ import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } f
 import { mineVerdictRows, verdictCalibrationReport } from "./verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
 import { resolveLedgerUnion, type LedgerUnionResult } from "./ledger-grep.js";
+import {
+  buildBoardReview,
+  type BoardItem,
+  type BoardReviewMarkerResolution,
+  type BoardReviewPolicy,
+  type BoardReviewReport,
+} from "./board-review.js";
 
 /**
  * lib/measurement-cadence.ts — W1-T1259: gives `rule-efficacy`, `verdict-calibration` and
@@ -623,6 +630,12 @@ export interface MeasurementCadenceRunResult {
    *  daemon's injected dependency, never calling this module's own producer) still type-checks —
    *  {@link runMeasurementCadenceReport} itself NEVER omits it. */
   adoptionReport?: AdoptionReportResult;
+  /** W1-T2304's board-review rung — a further verb on this SAME spine (never a further cadence,
+   *  that task's own design (i)). Optional on the TYPE for the same reason `adoptionReport` is:
+   *  a hand-built test literal simulating the daemon's injected dependency from before this field
+   *  existed still type-checks. {@link runMeasurementCadenceReport} sets it only when
+   *  `opts.boardReview` is supplied. */
+  boardReview?: BoardReviewReport;
 }
 
 /** The verdict-calibration/autonomy-rate git join's only I/O — the SAME shallow-clone refusal
@@ -666,6 +679,20 @@ export interface MeasurementCadenceReportOpts {
   shipDateFor?: (checkoutDir: string, file: string, needle?: string) => string;
   /** Injectable ONLY for tests — production takes {@link resolveLedgerUnion}. */
   ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult;
+  /** W1-T2304: the board-review rung's own input — the whole open board, plus its own policy row
+   *  and marker (read by the caller, same convention `measurementCadenceCheck` uses for THIS
+   *  module's own marker). Optional, mirroring `checkoutDir` immediately above: omitted skips
+   *  {@link buildBoardReview} entirely, so an EXISTING caller that hasn't opted in pays no new I/O
+   *  and gets no new report. Production wiring a live board fetch is a follow-up, out of this
+   *  module's own file scope. */
+  boardReview?: {
+    policy: BoardReviewPolicy;
+    marker: BoardReviewMarkerResolution;
+    items: readonly BoardItem[];
+    reportPath: string;
+    registryPath: string;
+    rerunDeadCheck?: (item: BoardItem) => void;
+  };
 }
 
 /**
@@ -761,5 +788,17 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
     ledgerUnion: opts.ledgerUnion ?? resolveLedgerUnion,
   });
 
-  return { ruleEfficacy, verdictCalibration, autonomyRate, adoptionReport };
+  // ── the board-review rung (W1-T2304): reads the whole open board, never one PR ───────────────
+  const boardReview = opts.boardReview
+    ? buildBoardReview({
+        policy: opts.boardReview.policy,
+        marker: opts.boardReview.marker,
+        items: opts.boardReview.items,
+        reportPath: opts.boardReview.reportPath,
+        registryPath: opts.boardReview.registryPath,
+        rerunDeadCheck: opts.boardReview.rerunDeadCheck,
+      })
+    : undefined;
+
+  return { ruleEfficacy, verdictCalibration, autonomyRate, adoptionReport, boardReview };
 }

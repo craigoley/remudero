@@ -561,6 +561,23 @@ export interface ShippedGithub {
    * with its polarity — unavailable is never silently read as absent.
    */
   unavailable?(): string | undefined;
+  /**
+   * W1-T2288: every commit merged into this repo's own default branch, full history — the
+   * SAME shape {@link GitLogCommit} already names (`citationStampPassFor`'s git-log reader,
+   * run-task.ts, feeds it identically). Backs {@link runlessMergesSince}, the retro TRIGGER's
+   * only route to a merge that {@link shippedSince}'s run-scoped iteration structurally
+   * cannot reach (a plan/triage/feedback filing never has a run, so it never appears in
+   * `runs` at all).
+   *
+   * OPTIONAL, DEGRADING TO ZERO ADDED MERGES — never a thrown error, and never a required
+   * implementer: every `ShippedGithub` literal written before this task (every fixture in
+   * test/retro-trigger-check.test.ts, `ledgerOnlyShipped`'s callers, `buildGather`'s own
+   * gather) omits this method and keeps compiling, unchanged, with {@link retroTriggerCheck}
+   * reading `github.mergedCommits?.() ?? []` — the identical fail-soft shape `unavailable`
+   * above already uses. Wired for real only in `retroShippedGithubGateway` (run-task.ts),
+   * which is the ONE production construction path; every test drives a bespoke literal.
+   */
+  mergedCommits?(): GitLogCommit[];
 }
 
 /** The result of the SHIPPED union: what got credited, and every named discrepancy. */
@@ -655,6 +672,49 @@ function ledgerOnlyShipped(merged: RunSummary[]): ShippedRecord[] {
   return merged
     .filter((r): r is RunSummary & { prUrl: string } => typeof r.prUrl === "string")
     .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const }));
+}
+
+// ── W1-T2288: the retro TRIGGER's merges beyond shippedSince's reach ─────────────────────────
+//
+// `shippedSince` above iterates `runs` (a RunSummary[], reduced from the LEDGER) — a merge with
+// NO run at all has no loop iteration and is therefore structurally unreachable, not merely
+// undercounted. A plan/triage/feedback filing is exactly that case: it is merged from a branch
+// that was never `ownBranchOf` any run, and it never had a run to begin with. `runlessMergesSince`
+// below is the DISJOINT complement, read off this repo's own `git log` (via
+// `ShippedGithub.mergedCommits`) rather than the ledger or a per-task GitHub search — commit
+// history needs no ledger and cannot rotate out from under a slow-moving marker.
+
+/** The exact anchored form `findMergedByTrailer`'s own doc measures against real PR bodies
+ *  (status.ts `TRAILER_RE`, autonomy.ts `TRAILER_RE`) — reused here, not reinvented, so a
+ *  trailer this function fails to see is a trailer none of this repo's other credit paths see
+ *  either. */
+const RETRO_TRAILER_RE = /^Remudero-Task:\s*(\S+)\s*$/m;
+
+/**
+ * Every commit in `commits` merged strictly after `sinceTs` (the SAME "strictly after" boundary
+ * {@link shippedSince} scopes `runs` by, `r.startTs > sinceTs`) whose task has NO run at all —
+ * a commit with no `Remudero-Task:` trailer (a plan/triage/feedback filing; see run-task.ts's
+ * `LINT_FILING_SUBJECT_RE` for the same filing vocabulary) is always included; a trailered commit
+ * is included ONLY when `taskIdsWithRuns` (every task id a {@link RunSummary} exists for, ledgered
+ * or not credited — the caller's FULL `runs` list, unscoped) does not contain its id.
+ *
+ * A trailered commit naming a task `taskIdsWithRuns` DOES contain is deliberately EXCLUDED:
+ * that merge is `shippedSince`'s to credit — ledger-native or gate-side alike — and counting it
+ * again here would double it. This is the "preserve the gate-side crediting that already works,
+ * never reimplement it" boundary: this function never inspects a PR's head branch, never calls
+ * `findMergedByTrailer`/`headRefName`, and never re-derives the P9 ownership assert — it only
+ * decides which commits are OUTSIDE `shippedSince`'s domain in the first place.
+ */
+export function runlessMergesSince(
+  commits: GitLogCommit[],
+  sinceTs: string | undefined,
+  taskIdsWithRuns: ReadonlySet<string>,
+): GitLogCommit[] {
+  return commits.filter((c) => {
+    if (sinceTs && !(c.date > sinceTs)) return false;
+    const taskId = RETRO_TRAILER_RE.exec(c.message)?.[1];
+    return !taskId || !taskIdsWithRuns.has(taskId);
+  });
 }
 
 /** Count LEARNINGS entries (top-level `- ` bullets) — used for the added-since delta. */

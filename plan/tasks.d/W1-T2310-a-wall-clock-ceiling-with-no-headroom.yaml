@@ -1,0 +1,223 @@
+- id: W1-T2310
+  title: "THE TIGHTEST WALL-CLOCK CEILING IN THE TREE HAS NO HEADROOM ON THE MACHINE THAT JUDGES IT, AND THE REGRESSION IT GUARDS IS COUNTABLE RATHER THAN TIMEABLE — on a GitHub runner the asserted quantity reads 400ms on a good pass and 525-567ms on a bad one against a 500ms bound, while the falsifier it exists to catch is a 46x gap that an injected counting reader resolves as ledgerReads 1 versus 220 with no clock at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 20.00
+  files: [test/w1-t187-benchmark.test.ts]
+  origin: oper#a-wall-clock-ceiling-with-no-headroom-2026-08-26
+  plan_refs: ["W1-T187", "W1-T220", "W1-T1128", "W1-T1266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL FIGURES BELOW WERE MEASURED IN A WORKTREE AT /Users/craigoleyagent/Remudero/t2310, SHA
+    78710a5e, ON A 10-CORE HOST. Main has since moved to afafa0bb; `test/w1-t187-benchmark.test.ts`
+    is byte-identical between the two, and only two commits have ever touched it.
+
+    (0) THREE CORRECTIONS TO THE COMMISSIONING BRIEF. ONE OF THEM CHANGES THE SIZE OF THE PROBLEM
+    AND THE OTHER TWO CHANGE WHERE IT LIVES. READ THIS FIRST.
+
+    THE BRIEF NAMES `duration_ms: 1037.1` AS THE BREACH. THAT IS THE TEST'S OWN DURATION, NOT THE
+    ASSERTED QUANTITY. The assertions are on `coldMs` and `warmMs`, each timed around a single
+    `projectPlan` call; the test's `duration_ms` is those two calls plus the fixture load. Measured
+    here: `duration_ms` 200.5-240.2ms across five runs while `coldMs` is 96.1-102.0 and `warmMs`
+    90.3-94.9 — the reported duration is very close to twice the asserted value. The same ratio
+    holds on the failing CI run: `duration_ms: 1037.100978` beside an error naming 525.3ms.
+
+    SO THE BRIEF'S "main sits within 8% of the ceiling at rest" MEASURES THE WRONG QUANTITY. Its
+    worst main reading of 542ms is a `duration_ms`; the asserted value underneath it is roughly
+    271ms, or 54% of the ceiling. On the operator's own numbers main was never close to breaching,
+    and "the base itself breaches it" does not survive the correction. The real breach values are
+    the ones in the failure records: **warm 525.3ms** and **cold 567.4ms**.
+
+    AND THE FAILURE DID NOT LEAVE #2945 RED. That PR's head 9273dd50 is green on every check today
+    and the CI workflow run reads `conclusion: success` — because it is on `run_attempt: 2`. The
+    red was job 98167106709, the `ci` job of attempt 1, and it failed there TWICE: `test:ci` wraps
+    the suite in `scripts/test-with-retry.mjs`, and both passes hit it — `# fail 1` at 12:09:01Z
+    and again at 12:19:53Z, the first naming warm at 525.3ms, the second naming cold at 567.4ms.
+    The retry bought nothing. Attempt 1 carried 15 jobs, 14 of them green, so re-running the whole
+    run to clear one test is exactly the 14 re-spent siblings the brief counts.
+
+    WHAT SURVIVES IS WORSE THAN THE BRIEF STATES, AND IT IS LOCATED SOMEWHERE ELSE. This host is
+    not the machine that judges. On the GitHub runner the asserted quantity reads about 400ms on
+    the passing attempt (`duration_ms: 801.81906` for both calls plus the load) and 525-567ms on
+    the failing one — 0% to 25% headroom. On this host the same code reads 96-102ms cold and
+    90-95ms warm, roughly five times clear. A quiet local machine cannot see this defect at all,
+    which is why three lanes have now diagnosed it and none has fixed it.
+
+    (1) Q1 — WHAT THE ASSERTION SHOULD BE. THE STRONGEST ANSWER IS NOT EITHER CANDIDATE IN THE
+    BRIEF, AND IT IS AVAILABLE TODAY.
+
+    THE REGRESSION THIS TEST EXISTS TO CATCH IS COUNTABLE, NOT TIMEABLE. Its own doc states the
+    falsifier: before the W1-T187 hoist, `projectPlan` re-read and re-parsed the ledger once per
+    task — 5,229ms warm and 8,207ms cold against 113ms for the identical derivations with a single
+    hoisted read. That is not a speed property. It is a read count. `DeriveDeps.readLedger` is an
+    optional injectable seam that already exists in `src/lib/status.ts`, and a counting wrapper
+    around the real reader, driven over the committed corpus, returns:
+
+      tasks=220 projected=220 ledgerReads=1
+
+    One read for 220 tasks. Reintroducing the defect makes that 220. The assertion is exact, has no
+    clock in it, and cannot flake on a busy runner.
+
+    ARGUING AGAINST MYSELF: A READ COUNT CATCHES THIS REGRESSION AND NO OTHER. It would not see an
+    O(n^2) introduced inside the projection, a slower NDJSON parse, a per-task GitHub call, or a
+    corpus that simply grew. So the clock assertion must stay — the brief's "the test keeps
+    asserting something" is right. What changes is that the clock stops being the only thing
+    between a real regression and a merge, and that is precisely what earns it the right to be
+    sized for the runner rather than for the falsifier.
+
+    CANDIDATE (a), RELATIVE-TO-BASELINE. WHERE IT WOULD LIVE IS ALREADY ANSWERED BY THE HOUSE: this
+    repo carries eleven tracked `scripts/*-baseline.json` files, each with a regenerating script,
+    and `scripts/bound-kind-baseline.json` already records `capturedAt`, `captureCommand` and
+    `capturedAgainst` — the exact provenance fields a stale baseline needs. AGAINST IT, DECISIVELY:
+    every one of those eleven measures a DETERMINISTIC quantity — a byte count, a coverage
+    percentage, a cycle count, a mutation count. A timing baseline would be the first
+    non-deterministic member, and the machine that regenerates it is not the machine that checks
+    it. The same code reads 96ms here and 400-567ms on the runner; a baseline captured on either is
+    wrong about the other by four to six times. Regenerating it inside CI needs a quiet runner,
+    which is the one thing CI does not have. This is the "baseline copied from a brief goes stale"
+    hazard with an extra axis, and it should be refused.
+
+    CANDIDATE (b), A CEILING SIZED AGAINST OBSERVED VARIANCE. WHAT CONTENTION ACTUALLY COSTS,
+    MEASURED — 10 cores, then the same probe with 20 busy workers running beside it:
+
+      quiet   cold 98.8-100.4   warm min 68.5-70.7   warm max 91.3-94.1
+      loaded  cold 307.1-348.6  warm min 126.4-203.5 warm max 349.8-414.7
+
+    Contention degrades the cold sample by about 3.4x and the warm maximum by about 4.4x. That is
+    the same order as the gap between this host's quiet reading and the runner's, so contention
+    alone explains the CI breach; nothing about the diff under review is implicated, which the
+    brief already proved by symbol. Against a falsifier gap of 46x, a 2000ms ceiling absorbs every
+    contention level observed here and still fails the pre-fix code by 2.6x on warm and 4.1x on
+    cold. 2000ms is also not a new number: thirteen of this repo's other wall-clock upper bounds
+    already use it.
+
+    WHAT THAT STOPS CATCHING, STATED PLAINLY BECAUSE THE BRIEF IS RIGHT TO ASK. A regression
+    between roughly 4x and 17x — 113ms becoming 1,500ms — passes at 2000 and fails at 500. That is
+    a real loss of sensitivity and it is the whole reason the read-count invariant has to carry the
+    weight the clock gives up. It is also why the ceiling must not simply be set to today's worst
+    observation plus a margin: 567.4ms plus slack would be a number chosen by a busy runner rather
+    than by an argument.
+
+    A THIRD THING THE NUMBERS ARGUE FOR, AND IT COSTS NOTHING. The test takes two samples and
+    requires BOTH to clear. That is worst-of-two, and it doubles the exposure to a scheduling
+    spike. The assertion order also throws away evidence: in the first failing run the error names
+    WARM, so cold was measured and cleared the ceiling; in the second it names COLD, so warm was
+    never measured at all. One of the two observed failures is PROVEN to have had a sub-ceiling
+    sample in hand at the moment it went red. Measuring every sample before asserting on any of
+    them is free and makes the failure record complete.
+
+    (2) Q2 — W1-T187'S OWN INTENT SURVIVES INTACT, AND IT ARGUES AGAINST CANDIDATE (a)
+    SPECIFICALLY.
+
+    The test says why the absolute form was chosen, in its own words: "Stated ABSOLUTELY on purpose
+    (the task's own design note): a relative claim ('faster than before') cannot fail." It was
+    protecting against a proof that would pass on a still-broken system — the same class of defect
+    this repo calls test theatre. THAT REASON STILL HOLDS, WORD FOR WORD, and it is the reason
+    candidate (a) is not merely awkward to host but wrong in kind. So the brief's reading is
+    correct: the remedy is headroom, the form does not change, and the task is smaller than it
+    looks. The number moves and one deterministic assertion is added beside it.
+
+    BUT THIS BOUND HAS ALREADY BEEN THROUGH THIS ONCE AND HEADROOM WAS NOT WHAT IT CHOSE. W1-T220
+    (#507, the only commit ever to touch this file after the original #445) hit the identical wall:
+    its comment records a coverage-ratchet job on PR #497 measuring 1,074ms against the same 500ms
+    ceiling. The remedy taken then was `COVERAGE_INSTRUMENTED` — detect the coverage flags in
+    `process.execArgv` and skip the timing assertions in that job only. The comment's own
+    justification is that the ceiling "stays fully enforced, unrelaxed, by the sibling `ci` job's
+    uninstrumented `npm test` run of this exact file". THE `ci` JOB IS THE JOB THAT JUST WENT RED.
+    Confirmed on the same head: on the coverage-ratchet job the test took 1,789.2ms and passed,
+    because the assertions are skipped there. The first remedy narrowed where the flake could land
+    and left the cause untouched, and that is why this is the second diagnosis and not the first.
+
+    (3) Q3 — IT IS NOT THE ONLY ONE, BUT IT IS THE ONLY ONE AT RISK.
+
+    CENSUS, WITH ITS CONTROL. A line-based grep over `test/` is the obvious instrument and it is
+    WRONG here: `assert.ok(` and `coldMs < 500,` sit on different physical lines, so a line scan
+    misses the very assertions under discussion. The control for the corrected multiline scan is
+    that it reports both of them by name at lines 86 and 91. Over 729 tracked `test/**/*.test.ts`
+    files it finds 24 identifier-versus-numeric-literal upper-bound comparisons, of which three are
+    `sleepSync` argument guards comparing against 0 rather than elapsed time.
+
+    TWENTY-ONE REAL WALL-CLOCK UPPER BOUNDS ACROSS TEN FILES. Their values: 500 twice, 1000 once,
+    2000 thirteen times, 4000 twice, 5000 twice, 45000 once. SO THE CONVENTION ALREADY EXISTS AND
+    ITS NUMBER IS 2000. The benchmark's 500 is the tightest ceiling in the tree and the only one
+    that has ever breached.
+
+    HEADROOM ON THE MACHINE THAT JUDGES, read from #2945's passing CI job rather than from this
+    host: W1-T187 criterion 5 times two HTTP round trips against 2000ms each and completes in
+    735.3ms total; the first-paint family reads 472.0ms, 548.4ms and 697.2ms against 2000ms; the
+    benchmark reads 801.8ms against two separate 500ms bounds. Only the benchmark is within a
+    factor of two of its bound. The 1000ms bound in `test/status-board-reads-rotations.test.ts`
+    cannot breach on CI at all — it is the suite's single `# SKIP host ledger absent`.
+
+    SO THE BRIEF'S OWN TEST ANSWERS ITSELF IN BOTH DIRECTIONS AND THE RESOLUTION IS NOT A SPLIT.
+    Twenty-one is a convention by count; one at risk is a fix by exposure. Fix the outlier, adopt
+    the convention's own number, and do not sweep the other twenty — none of them has evidence of
+    a problem and touching them would be a scope widening bought with no measurement.
+
+    (4) WHY NOW, IN MEASURED COST RATHER THAN IN PRINCIPLE.
+
+    Three diagnoses are on the record for one bound: W1-T220 on PR #497, this test's second breach
+    on #2945 attempt 1, and the operator's own investigation today. The clearing cost is not the
+    diagnosis alone — attempt 1 re-ran 15 jobs to clear 1, and the in-job retry wrapper spent a
+    second full 10,067-test suite pass, roughly ten minutes of runner time, before failing again.
+  note: |
+    SIZING BAND: `risk: medium`, set up front, and the band is Rule 19's SPAN — one test file, one
+    concern. No source module is touched; `src/lib/status.ts` is READ for its `DeriveDeps.readLedger`
+    seam, which already exists and needs no change.
+
+    WHAT MUST NOT CHANGE.
+
+    THE TEST KEEPS ASSERTING SOMETHING. It is not deleted, it is not skipped on CI, and the
+    existing `COVERAGE_INSTRUMENTED` skip is NOT widened to the `ci` job — widening it is the
+    W1-T220 remedy applied a second time to the job that remained, and it would leave the criterion
+    unenforced everywhere.
+
+    NO CEILING IS RAISED WITHOUT AN ARGUMENT FOR WHY THE NUMBER STILL CATCHES A REGRESSION. The
+    argument on offer is the 46x falsifier gap, and it is stated with its cost: sensitivity between
+    about 4x and 17x is genuinely surrendered, which is why the deterministic read-count invariant
+    is part of the same change rather than a follow-up. A ceiling raised without that invariant
+    landing beside it is a weakening, not a repair. The house doctrine here is already written
+    down in `scripts/clock-sweep-baseline.json`: a ceiling may FALL when the thing is genuinely
+    fixed and must never be RAISED to paper over a regression.
+
+    NOTHING PACES OR SLEEPS TO MAKE A TIMING TEST PASS. No warm-up loop, no retry-until-fast, no
+    backoff, no `sleep` anywhere on this path — W1-T1066 stands, and a timing test that retries
+    until it is lucky asserts nothing at all.
+
+    NO SOURCE IS REFORMATTED AND NO OTHER TEST'S BOUND IS TOUCHED. The other twenty wall-clock
+    upper bounds enumerated in section 3 stay exactly as they are; the census is evidence that they
+    are not at risk, not a work list.
+
+    ID PROVENANCE: verified UNUSED across all eight surfaces, every match anchored on an explicit
+    digit class rather than a shorthand escape. Surface 1, the reservation ref, reads 1 as required
+    — the id is RESERVED and this shard claims it. Shard filenames on origin/main read 0 against a
+    control of 1 over 617 filenames; declared id lines 0 against a control of 1 over 872 ids;
+    open-PR titles 0 against a control of 1; open-PR bodies 0 against a control of 1; head branches
+    0 against a control of 1; merged trailers 0 against a control of 2 over 506 trailer lines;
+    merged subjects 0 against a control of 1 over 2,311 subjects. Merged-surface controls are drawn
+    from an actually-merged id; open-surface controls from an id live on an open PR. The
+    open-PR-title surface carries no canonical-case id at all today, because commitlint lower-cases
+    the subject, so that control is stated case-insensitively and fires on the one id present.
+    Re-checked against a freshly fetched origin/main immediately before commit.
+  acceptance:
+    - claim: "the ledger read count is asserted deterministically, so the hoist regression is caught without a clock"
+      proof: "unit test: test/w1-t187-benchmark.test.ts"
+    - claim: "the falsifier still fails: a per-task read reintroduced makes the read-count assertion fail"
+      proof: "unit test: test/w1-t187-benchmark.test.ts"
+    - claim: "the timing assertion survives as an absolute ceiling and is never expressed relative to a stored baseline"
+      proof: "unit test: test/w1-t187-benchmark.test.ts"
+    - claim: "the raised ceiling still fails the measured pre-fix cost on both the cold and the warm sample"
+      proof: "unit test: test/w1-t187-benchmark.test.ts"
+    - claim: "every sample is measured before any of them is asserted, so a failure record names both"
+      proof: "unit test: test/w1-t187-benchmark.test.ts"
+    - claim: "the coverage-instrumented skip is unchanged and is not widened to the uninstrumented job"
+      proof: "unit test: test/w1-t187-benchmark.test.ts"
+    - claim: "the functional assertions over the corpus size still run unconditionally in every mode"
+      proof: "unit test: test/w1-t187-benchmark.test.ts"
+    - claim: "no wait, warm-up, retry cadence or backoff is introduced anywhere in this test"
+      proof: "unit test: test/w1-t187-benchmark.test.ts"

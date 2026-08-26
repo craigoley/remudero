@@ -1,0 +1,203 @@
+- id: W1-T2315
+  title: "TWO RESOLVERS DECIDE WHETHER A PR BODY IS JUDGED AND NOTHING RECONCILES THEM — the CI gate answers from a line scan that survives a plan refusal while the reviewer answers from loadPlan and silently falls through to the body when it throws, so a duplicate id makes the gate keep exempting every trailered body while the reviewer grades those same PRs off blocks that 180 of 206 recent merges would have failed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/run-task.ts, test/resolver-divergence-detector.test.ts]
+  origin: oper#two-resolvers-decide-and-nothing-reconciles-them-2026-08-26
+  plan_refs: ["W1-T952", "W1-T2251", "W1-T2297", "W1-T923"]
+  status: queued
+  attempts: 0
+  rationale: |
+    EVERY COUNT BELOW CARRIES THE TREE IT WAS TAKEN IN. Symbol facts re-confirmed in a worktree at
+    /Users/craigoleyagent/Remudero/t2315, sha 45c65828. The merged-PR population was measured at
+    sha 3b3b2db9 the same day over 579 merged PRs, numbers 2264 through 2957, merged 2026-08-20 to
+    2026-08-26; the shas differ by a few hours and none of the cited symbols moved between them.
+
+    (0) THE DEFECT, AS TWO FUNCTIONS THAT ARE EACH CORRECT.
+
+    `reviewCommand` (run-task.ts) resolves a body trailer through `loadPlan`, inside a try whose
+    catch says in its own words that a bad or absent plan is not the reviewer's concern and falls
+    through to the body. `loadPlan` (plan.ts) REFUSES a plan carrying a duplicate id. The CI gate
+    resolves through `declaredPlanTaskIds` (scripts/acceptance-author-gate.mjs), whose own doc
+    calls itself A LINE SCAN, NOT loadPlan, and states the reason: a gate that inherited that
+    refusal would go red on a plan defect having nothing to do with the body it is judging.
+
+    Driven on a scratch plan tree with a control both ways:
+
+      clean plan            loadPlan LOADED, byId has the id   |  gate resolves TRUE
+      one id declared twice loadPlan THREW duplicate task id   |  gate resolves TRUE
+
+    So during a double-mint the gate keeps handing every trailered body its exemption while the
+    reviewer, unable to load the plan, judges those same PRs off blocks nobody ever validated.
+    CLAUDE.md records two double-mints — W1-T488 and the W1-T533 plus W1-T534 pair — each of which
+    made `loadPlan` refuse origin/main outright.
+
+    (1) THE BLAST RADIUS, MEASURED, AND WHAT IT IS AND IS NOT.
+
+    Over the 579 merged PRs above: 258 carry a `Remudero-Task:` trailer, 206 of which resolve
+    against the 874 ids main declares. Running the real `acceptanceAuthorTimeCheck` twice per body
+    — once as CI calls it and once with the resolver arm disabled — 180 of those 206 would FAIL on
+    their own block, and all 206 shipped ok under the real gate.
+
+    THE HONEST SUB-SPLIT MATTERS AND IT SHRINKS THE NUMBER. 29 of the 180 wrote no Acceptance
+    header at all, which is LEGITIMATE on a trailered PR and must stay legitimate. 151 WROTE a
+    block and it is defective: 43 unparseable, 108 empty-proofs. Across those 151, 319 bullets
+    written against 122 parsed — 197 criteria an author wrote that the parser cannot resolve.
+
+    CONTROLLED BOTH DIRECTIONS. #2928 reproduces exactly: trailer resolves, gate ok, own block
+    unparseable at 9 bullets and 1 parsed, truncated at bullet 2. And 26 resolving-trailer bodies
+    PASS on their own block, so the resolver-disabled run is not uniformly failing and the 180 is
+    not an artefact of the instrument.
+
+    (2) Q1 — WHICH RESOLVER IS RIGHT. BOTH ARE, AND ONE RESOLVER IS NOT AVAILABLE EVEN IN
+    PRINCIPLE, SO THE FIX IS A DETECTOR.
+
+    The gate cannot adopt `loadPlan` without acquiring the refusal its doc exists to avoid: it
+    would go red on a duplicate id while judging a body that duplicate has nothing to do with,
+    and a gate that red-lights the whole board on a plan defect is worse than the exposure it
+    would close.
+
+    AND THE REVIEWER CANNOT ADOPT THE LINE SCAN, WHICH IS THE HALF THAT IS NOT A JUDGEMENT CALL.
+    A line scan yields IDS, not criteria. The reviewer does not need to know an id exists; it
+    needs that task's parsed `acceptance` list to quote criteria from, and only a real parse
+    produces one. Swapping its resolver would resolve the id and then still have nothing to
+    judge, landing it in the same fallback by a longer route.
+
+    So neither can be made to be the other, and the defect is precisely what the brief names:
+    NOTHING RECONCILES THEM. The two answers already exist at review time and disagreeing is
+    already representable; what is missing is anything that notices. The minimal correct change
+    is a detector at the reviewer's own resolution site — when a trailer is present and the plan
+    lookup produced nothing, say so and record it, rather than arriving at the body fallback by a
+    path indistinguishable from having no trailer at all.
+
+    (3) Q2 — WHAT MUST BE TRUE FOR THE FALLBACK TO BE SAFE, AND WHAT REFUSING WOULD ACTUALLY COST.
+
+    The fallback is only correct if the body was ever validated. On today's numbers it usually was
+    not: 180 of 206.
+
+    A BROAD REFUSAL IS WRONG AND THE NUMBER SAYS SO. 321 of the 579 merged PRs carry no trailer at
+    all and are judged entirely off their bodies — the manual plan-or-doc shape `parseAcceptanceBlock`'s
+    own doc names as legitimate. Refusing the fallback wholesale would fail closed on a majority of
+    the corpus for a defect none of them has.
+
+    A NARROW REFUSAL IS THE ONE WORTH ARGUING, AND IT IS NOT EXPRESSIBLE TODAY. The reviewer's
+    guard is a bare test that no criteria were resolved, which is reached identically whether the
+    body carried no trailer or carried one whose plan lookup failed. Those are different facts with
+    different remedies, and the code cannot tell them apart at the point it decides.
+
+    ⚠ AND THE BRIEF IS WRONG ABOUT WHAT REFUSING BREAKS, IN THE DIRECTION THAT MAKES THE FIX
+    CHEAPER. It states that a synthetic PR-numbered task has no plan match by construction and that
+    `fixRungTaskFor` depends on exactly this path. It does not. `fixRungTaskFor` calls
+    `parseAcceptanceBlock` ITSELF on the head's body at its own sweep call site and returns the
+    result as the synthetic task's `acceptance`, which the judge then reads DIRECTLY off the task —
+    the same doc notes it never re-reads the PR body. That is a second, independent body-reading
+    path. A narrow refusal inside `reviewCommand` leaves it untouched, so the cost of refusing is
+    bounded by the untrailered population above and does not reach the fix rung at all.
+
+    (4) THE OPERATOR-FACING HALF, WHICH IS WHY AUTHORS KEEP WRITING DEFECTIVE BLOCKS.
+
+    Nothing reads the block on a resolving-trailer PR. Every consumer of `parseAcceptanceBlock` is
+    gated on the trailer FAILING: `reviewCommand` only when it resolved nothing, `checkAcceptanceCommand`
+    only when the trailer did not resolve, `fixRungTaskFor` only for a synthetic task, and
+    `acceptanceGateBodyRepair` calls `acceptanceAuthorTimeCheck` with NO resolver argument at all,
+    so a trailer exempts it at face value and the repair rung never fires on a trailered PR either.
+
+    AND THE PRE-FLIGHT VERB IS BLIND THE SAME WAY. W1-T2251 changed `rmd check-acceptance` to mirror
+    the reviewer, so run against #2928's stored body it reports the criteria source as that task's
+    shard via the body trailer, 9 criteria parsed, 0 empty proofs — no mention of the truncation. An
+    author who does the right thing and checks before pushing is told the body is fine. The one cue
+    naming the source is a console line that never reaches the PR.
+
+    (5) Q3 — THE RETIREMENT PATH IS ARMED AND HAS NOT FIRED. RECORDED AT THAT STRENGTH AND NO MORE.
+
+    `RETIREMENT_REASONS` is retired, closed, withdrawn, validated by `loadPlan`. A FIELD retirement
+    flips nothing: the one retired task in the plan today keeps its id line and its acceptance list,
+    so both resolvers still answer for it.
+
+    BUT RETIREMENT HAS ALSO BEEN DONE BY DELETING THE SHARD. Commit ad5b859e retired two shards that
+    way on 2026-07-21. Of 33 shard files ever deleted from plan/tasks.d, 31 were moves that stayed
+    declared elsewhere; exactly 2 ids stopped resolving anywhere, and they are that commit's two.
+
+    IT HAS NOT FIRED. One of the two carries a single merged trailer line, on a PR that merged about
+    sixteen hours BEFORE the deletion; the other carries none. Both were judged while their shard
+    still resolved, and nothing re-reviews a merged PR. What is armed rather than fired: #2923 is
+    merged, trailered to the single retired task, and its body FAILS on its own block.
+
+    THE DUPLICATE-ID FLIP IS THE ONE TO SIZE THE TASK AGAINST, because it needs no retirement, it
+    has occurred twice, and it takes the whole plan with it rather than one id.
+
+    (6) WHAT #2934 BOUGHT, SO THIS IS NOT READ AS A REGRESSION FROM IT.
+
+    #2934 made an UNRESOLVABLE trailer stop buying an exemption, and that was correct. Of the 52
+    merged PRs in the window whose trailer does not resolve, 51 ALREADY PASSED on their own block.
+    The half it closed was nearly empty; the half it left open is the 180. This task is the
+    remainder of that work, not a reversal of it.
+  note: |
+    SIZING BAND: `risk: high`, set UP FRONT, and the band is Rule 19's SPAN — one source module and
+    its test — not blast radius. The behavioural change is one distinguishable state carried to a
+    decision site that today conflates it with a different one.
+
+    WHAT MUST NOT CHANGE.
+
+    NOTHING RE-REVIEWS A MERGED PR, AND THIS TASK DOES NOT PROPOSE STARTING. The measured population
+    is evidence of exposure. A merged PR's verdict is settled and stays settled.
+
+    THE GATE KEEPS ITS ABILITY TO EXEMPT A TRAILERED BODY. 29 PRs in the window wrote no Acceptance
+    block at all and that is CORRECT on a trailered PR — the criteria come from the shard. A fix that
+    made the gate demand a block from every trailered body would break the exemption's whole warrant.
+
+    NO ONE IS ASKED TO REPAIR 151 MERGED BODIES. Rule 21 freezes merged acceptance, and a task that
+    tried would be filing 151 post-merge amendments against a rule the linter enforces by name.
+
+    THE GATE KEEPS ITS LINE SCAN. `declaredPlanTaskIds` failing OPEN on an unreadable plan is a
+    deliberate contract stated in its own doc, and the omission of a resolver is the documented
+    byte-for-byte-unchanged path. This task adds a reconciliation, never a second refusal.
+
+    AND NOTHING PACES OR SLEEPS: no retry, no wait, no backoff is added on any review path — W1-T1066
+    stands.
+
+    ⚠ CORRECTION TO THE COMMISSIONING BRIEF, KEPT PROMINENT. It states that `fixRungTaskFor` depends
+    on the reviewer's body fallback. It does not — it parses the body itself and hands the criteria
+    in on the task object. Section 3 carries the detail; the consequence is that a narrow refusal
+    costs less than the brief assumes, and a task built on the brief's version would have protected a
+    dependency that is not there.
+
+    ⚠ SECOND CORRECTION, ABOUT AN ID RAIL RATHER THAN THE SUBJECT. The brief states that the open-PR
+    title surface carries no canonical-case id because commitlint lower-cases the subject, and asks
+    for that zero to be controlled case-insensitively. THAT IS A ONE-TIME OBSERVATION GENERALISED
+    INTO A RULE. Measured on today's open set: three canonical-case ids sit in open PR titles, so the
+    surface was controlled CASE-SENSITIVELY and the control fired. Commitlint constrains how a
+    subject STARTS; it does not lower-case an id appearing later in one or inside parentheses.
+
+    ID PROVENANCE: verified UNUSED across all eight surfaces, anchored on an explicit digit class
+    rather than a shorthand escape, each zero paired with a control firing on its own surface.
+    Surface 1, the reservation ref, reads 1 as required. Filenames 0 against a control of 1 over 619;
+    declared ids 0 against 1 over 874; open-PR titles 0 against 1, case-sensitively, over 4; open-PR
+    bodies 0 against 1; head branches 0 against 1 over 4; merged trailers 0 against 2 over 512;
+    merged subjects 0 against 1 over 2,320. Merged-surface controls are drawn from an actually-merged
+    id; open-surface controls from ids live on open PRs. Re-checked against a freshly fetched
+    origin/main immediately before commit.
+  acceptance:
+    - claim: "a trailer that is present but resolves nothing is distinguishable at the reviewer's decision site from a body with no trailer"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"
+    - claim: "a plan the reviewer cannot load is recorded as a divergence rather than passing silently into the body fallback"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"
+    - claim: "the falsifier holds: a duplicate id still makes the plan load throw and the line scan still resolves that id"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"
+    - claim: "an untrailered body is still judged from its own block, unchanged, so the manual plan or doc shape survives"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"
+    - claim: "the synthetic fix-rung task still resolves its criteria from the head body by its own independent path"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"
+    - claim: "the gate still exempts a trailered body that wrote no acceptance block at all"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"
+    - claim: "the gate resolver still fails open on an unreadable plan and no second refusal is introduced"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"
+    - claim: "no merged pull request is re-reviewed and no merged acceptance record is amended"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"
+    - claim: "no wait, retry cadence or backoff is added to any review path"
+      proof: "unit test: test/resolver-divergence-detector.test.ts"

@@ -1,0 +1,159 @@
+- id: W1-T2312
+  title: "THE ONE SURFACE THAT SEES A WORKER'S `npm ci` CARRIES NO npm RULE — hooks/deny-floor.sh is a PreToolUse tripwire on every worker Bash call and its seven numbered rules mention npm nowhere, while the only enforcement (SymlinkInstallRefusal) guards rmd's OWN install path: add rule 8 refusing an installing package manager when the project's node_modules is a symlink, with the allow-side negative control that keeps it from crying wolf"
+  repo: remudero
+  depends_on: [W1-T2313]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  rationale: |
+    Filed from feedback#fb-1785982194342-bb9d81 (the 2026-08-05 outage: the shared node_modules
+    emptied under two live runs, W1-T361 and W1-T362). THE FEEDBACK'S RECON ASKED WHETHER THE
+    WORKER CONTRACT FORBIDS `npm ci` AND WHETHER ANYTHING ENFORCES IT. Grounding answers it and
+    REVERSES THE DIRECTION: the contract did not forbid the act, IT COMMANDED IT.
+
+    THIS SHARD IS THE REFUSAL ONLY. The instruction that commanded the act is swept by W1-T2313
+    and locked by W1-T2314 — see the note for why the split is forced and why the ORDER matters.
+
+    (1) THE INSTRUCTION WAS IN THE CONTRACT. `plan/tasks.yaml`'s "BINDING RULES for every task
+    below" header read, verbatim — kept on ONE line, inside quotes, so W1-T2314's lock can tell a
+    citation from an instruction:
+    "Fresh worktrees have NO node_modules: npm ci in the worktree before typecheck/test."
+    That premise WAS true once and was made FALSE by
+    `linkWorktreeNodeModules` (src/lib/worker.ts), which symlinks every worker worktree's
+    node_modules to the canonical tree on purpose — `worktreeAdd` calls it unconditionally. A
+    worker following the contract installs THROUGH the link. The feedback's operator briefs did
+    forbid it; the plan the workers are actually rendered from did not. THAT HEADER LINE IS
+    CORRECTED IN THE SAME PR THAT FILES THIS TASK, so this shard is the CONTROL, not the wording.
+
+    (2) THE EVIDENCE IS NOT ACTUALLY DESTROYED, AND IT DISPOSES OF THE FEEDBACK'S OWN FALSIFYING
+    CHECK. The feedback offered: "if W1-T362's worktree node_modules was created by the operator's
+    npm ci propagating through the symlink rather than by the worker, the direction is reversed."
+    IT CANNOT HAVE BEEN. An `npm ci` run in the CANONICAL checkout writes into a real directory
+    THERE and leaves every worktree's symlink a symlink — nothing about it reifies a real 286-entry
+    directory INSIDE a worktree. Only an install whose cwd is that worktree does that: the clear
+    phase empties the shared tree through the link, then npm materialises a private real directory
+    where the link was. That is exactly the observed pair (shared emptied at 21:54, W1-T362's real
+    directory created 21:55, W1-T361's still a symlink). The direction stands: worker-side, and
+    the worker was obeying the contract. The three package counts (286/291/403) reconcile nothing
+    and are deliberately NOT relied on here, per the feedback's own caution.
+
+    (3) THE ONE ENFORCEMENT THAT EXISTS CANNOT SEE THIS. `SymlinkInstallRefusal` (src/run-task.ts)
+    is real and correct — `ensureInstallFresh` lstats `node_modules`, and throws rather than
+    installing through a symlink. But it guards ONE call path: rmd's own freshness gate, reached
+    from `serviceFreshnessGate` on daemon/serve/build boots. A worker that types `npm ci` into a
+    Bash tool call inside the implement phase executes npm directly and reaches that class never.
+    This is precisely why the ledger showed NO npm step for W1-T362 while its 21 steps were
+    ordinary — an unledgered shell command is invisible to every in-process control rmd has.
+
+    (4) THE SURFACE THAT *CAN* SEE IT ALREADY EXISTS AND IS ALREADY NUMBERED. `hooks/deny-floor.sh`
+    is a PreToolUse tripwire matching `Bash|Write|Edit|MultiEdit|NotebookEdit`; exit 2 blocks the
+    call and feeds stderr back to the model. It carries SEVEN numbered rules today (force-push to
+    default, `gh auth` mutation, the planted probe path, `gh api` commit-status POST, the
+    operator's deny.local paths, the W1-T1066 inline `gh` polling loop, the W1-T2262 pause
+    namespace) and NOT ONE of them mentions npm. It is loaded by BOTH `settings/worker.json` and
+    `.claude/settings.json`, so one rule reaches workers and interactive lanes alike. This is rule
+    8 in an existing file with an existing test — not new machinery.
+
+    (5) THIS IS LAW 4 EXACTLY, AND CLAUDE.md ALREADY CONCEDES IT. That file's own header says
+    "Nothing in this file is a gate... a rule stated ONLY here can be violated silently and
+    repeatedly... the fix is to make something refuse it — file the task; do not sharpen the
+    wording and call it closed." Its "Operating this host" bullet has forbidden this since
+    2026-07-29 and the tree emptied twice more anyway (2026-08-05, 2026-08-11). A convention binds
+    only where compliance is verifiable at the moment of invocation, and you cannot revert a
+    promise: an emptied shared tree is not recoverable by review.
+
+    (6) WHY NOT THE OTHER TWO REMEDIES THE FEEDBACK FLOATED. WRITE-PROTECTING THE SYMLINK DOES NOT
+    WORK: chmod on a symlink follows to the TARGET on Linux, so protecting it protects the shared
+    tree from the daemon that must write it, and npm's clear phase runs as the same uid regardless.
+    A SANDBOX `denyWrite` ON THE CHECKOUT IS ALREADY WITHDRAWN IN THIS PLAN — W1-T452 §(iii)
+    records that `preflight --ci-parity`, `check-proof`, `review` and `gh pr create` all write
+    there, so denying writes breaks the gates the fleet requires. Refusal at the tool boundary is
+    the only lever that reaches the population that ran the command.
+  design: |
+    (i) RULE 8 IN `hooks/deny-floor.sh`, THE SAME SHAPE AS RULES 1-7. Deny a command that invokes an
+    INSTALLING package manager (`npm ci`, `npm i`/`npm install`, and the `pnpm`/`yarn` install
+    equivalents if cheap) WHEN the project directory's `node_modules` is a SYMLINK. The symlink test
+    is the discriminator and it is what keeps this from crying wolf: a fresh clone with a real or
+    absent `node_modules` still installs normally, which is the legitimate case `ensureInstallFresh`
+    itself already carves out. Use `[ -L ... ]` on the hook's own project dir — VERIFY from the
+    installed hook and the SDK's hook payload which variable actually names the worktree
+    (`CLAUDE_PROJECT_DIR` is what the settings files pass today, and `.tool_input` may carry a cwd);
+    do not trust this note's spelling (Standing rule 7). Keep it under the file's <1s, no-network,
+    no-forks-beyond-jq budget.
+
+    (ii) THE REASON STRING IS PART OF THE DELIVERABLE, AND CRITERION 3 GREPS IT. The model gets
+    stderr back, so say the MECHANISM and the REMEDY, not "blocked": that an install here empties
+    the shared node_modules through the symlink under every live run, that the deps are already
+    present via the link so typecheck/test can just run, and that genuinely-newer deps come from
+    refreshing the canonical checkout. A refusal a worker cannot act on becomes a retry loop.
+    The exact phrase criterion 3 greps — `empties the shared node_modules through the symlink` —
+    must sit on ONE line of the reason string: the proof executor greps line-by-line, so a line
+    break inside that phrase reads as a zero hit and fails a correct implementation.
+
+    (iii) THE NEGATIVE CONTROL IS PART OF THE DELIVERABLE, NOT AN EXTRA. `test/deny-floor.test.ts`
+    must assert BOTH directions: an install with a symlinked `node_modules` is refused, and an
+    install with a REAL or ABSENT `node_modules` is allowed, as are `npm run <script>`, `npm test`,
+    `npm ls` and every other non-installing npm verb. A refusal rule with no allow-side test is how
+    a gate that cries wolf ships.
+
+    (iv) OUT OF SCOPE, NAMED. `SymlinkInstallRefusal` and `ensureInstallFresh` are CORRECT and are
+    not touched — this adds the seam they cannot see, it does not replace them. NO PLAN FILE IS
+    TOUCHED BY THIS TASK: the plan-text sweep is W1-T2313's whole content and the regression lock
+    is W1-T2314's, and pulling either back in here re-creates the rule15-filing refusal recorded in
+    the note. The D-11 cell topology (one instance per codebase, nothing mutable shared) remains the
+    durable structural answer and is OPEN and unratified; this task is the control that holds until
+    then, and must not be read as deciding D-11. The multi-tool-call installer — a worker that
+    shells `cd` and `npm` in two separate calls — is NOT addressable at this seam, exactly as
+    W1-T1066 recorded for its own rule; raise the cost of the observed shape, do not claim
+    impossibility in the PR body.
+  acceptance:
+    - claim: "an npm install run where the worktree node_modules is a symlink is refused at the tool boundary"
+      proof: "unit test: test/deny-floor.test.ts"
+    - claim: "an install where node_modules is real or absent is still allowed, as are non-installing npm verbs"
+      proof: "unit test: test/deny-floor.test.ts"
+    - claim: "the refusal names the shared-tree mechanism and the remedy rather than a bare blocked"
+      proof: "grep: empties the shared node_modules through the symlink in hooks/deny-floor.sh"
+  risk: high
+  origin: "feedback#fb-1785982194342-bb9d81"
+  plan_refs: ["W1-T1066", "W1-T151", "W1-T452", "W1-T2313", "W1-T2314", "D-11"]
+  files: [hooks/deny-floor.sh, test/deny-floor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    WHY THIS IS THREE TASKS AND NOT ONE — THE LINTER FORCED IT, AND IT WAS RIGHT. The first filing
+    declared `plan/tasks.yaml` alongside `hooks/deny-floor.sh` and the test tree at `verify: auto`,
+    and `rule15-filing` (task-linter.ts) refuses exactly that shape: sweeping the instruction out of
+    a task record NECESSARILY removes/rewrites `claim:`/`proof:`-adjacent lines, and `judgeReview`'s
+    `planOnly` carve-out (`diffFiles.every(isInPlanScope)`) evaporates the moment one declared path
+    is outside plan scope — so `criteriaTampered` refuses the PR however good the work is. That is
+    #1295 and #1416 verbatim, both recovered only by splitting. A dispatched worker gets ONE PR and
+    cannot produce the split itself. So: W1-T2313 is the plan-only sweep, W1-T2314 is the regression
+    lock, and this shard is the refusal.
+
+    THE ORDER IS LOAD-BEARING, WHICH IS WHY `depends_on: [W1-T2313]` IS SET. The original note
+    declined decomposition on the ground that shipping the refusal while the plan still COMMANDS the
+    install means every worker that obeys its own contract walks into a hard refusal it was told to
+    trigger. That concern is REAL and is answered by the DEPENDENCY SPINE rather than by packaging:
+    W1-T2313 removes the instruction FIRST, and `isDispatchEligible` will not dispatch this shard
+    until it has merged. The rule and the removal of the instruction that provokes it stay ordered
+    without being one PR.
+
+    `risk: high` IS RETAINED, ON BLAST RADIUS, NOT SPAN. Rule 19's span question is now moot — this
+    shard holds ONE concern (`hooks/deny-floor.sh` plus its own test, a single module id). High is
+    kept because the deny floor is loaded by BOTH `settings/worker.json` and `.claude/settings.json`:
+    a mis-written pattern refuses legitimate Bash calls for every worker and every interactive lane
+    at once, and the allow-side control in design (iii) is what bounds that.
+
+    THE CONTAINMENT PROBE WILL RUN, AND THAT IS CORRECT. `CONTAINMENT_PATH_PATTERNS`
+    (src/lib/specialist-panel.ts) matches `hooks/`, so this diff trips the required
+    `containment-probe` job. Named here so nobody reads it as a surprise.
+
+    WHY THIS IS NOT ALREADY-DECIDED. MASTER-PLAN D-11 cites this exact incident class as evidence
+    (a) for cells and notes the mechanism is "now refused in code, SymlinkInstallRefusal" — but D-11
+    is OPEN and awaiting operator ratification and dispatches nothing, and the refusal it names
+    covers only rmd's own install path. Neither closes the worker-Bash seam.
+
+    THE MEASUREMENTS ARE QUERIES, NOT QUOTED NUMBERS. Re-derive the deny-floor rule count from the
+    installed `hooks/deny-floor.sh` and the symlink wiring from `linkWorktreeNodeModules`'s call
+    site in `worktreeAdd`.

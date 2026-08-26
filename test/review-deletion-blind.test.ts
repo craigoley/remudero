@@ -146,5 +146,13 @@ test("every consumer of the shared changed-file list is enumerated, so a new one
   );
   // detectInstrumentEntanglement takes the SAME list by argument rather than re-walking, so
   // it is a consumer that this regex cannot see — pinned separately.
-  assert.match(src, /detectInstrumentEntanglement\(diffFiles\)/);
+  //
+  // THE VERDICT CHANGE THIS PIN EXISTS TO FORCE A STATEMENT OF: the rule now also receives the
+  // PATCH, so a `src/` path counts as the product half of an entanglement only when its own hunks
+  // carry executable content. A diff whose `src/` half is comments or usage strings alone no
+  // longer blocks (measured: #2884, split by hand over one appended usage sentence). A behavioural
+  // `src/` change beside an instrument still blocks, unchanged (measured: #2934 pre-split, whose
+  // own split commit calls it "a true positive"). The second argument is OPTIONAL and omitting it
+  // reproduces the path-only reading byte for byte, so a caller that forgets fails CLOSED.
+  assert.match(src, /detectInstrumentEntanglement\(diffFiles, evidence\.diff\)/);
 });

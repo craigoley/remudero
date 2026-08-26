@@ -24,7 +24,16 @@
 #    two prompt errors caught this way (WS-0: allowedDomains nesting; W1-T1: the SDK schema is $loose and
 #    silently strips unknown keys). This document can be wrong too.
 #  - tdd: strict => the REPORT must paste RED->GREEN proof (failing test output, then passing).
-#  - Fresh worktrees have NO node_modules: npm ci in the worktree before typecheck/test.
+#  - NEVER RUN `npm ci` / `npm install` IN A WORKTREE. The old rule here read "Fresh worktrees have
+#    NO node_modules: npm ci in the worktree before typecheck/test" — that PREMISE IS FALSE and the
+#    instruction was the destroyer. `linkWorktreeNodeModules` (src/lib/worker.ts) SYMLINKS every
+#    worktree's node_modules to the canonical tree ON PURPOSE, so the deps are ALREADY there: just
+#    run typecheck/test. An install's CLEAR PHASE follows that symlink and EMPTIES THE SHARED TREE
+#    through it, killing every live run with `node_modules/.bin/tsx: No such file or directory`
+#    (2026-07-29 and 2026-08-05 outages). A worktree that genuinely needs newer deps is served by
+#    refreshing the CANONICAL checkout, after which the symlink serves the fresh tree with no
+#    install here at all. Enforced by `SymlinkInstallRefusal` (src/run-task.ts) on rmd's OWN install
+#    path only — a raw Bash `npm ci` reaches no gate today; W1-T2312 adds the tool-boundary refusal.
 #  - git push WITHOUT -u inside worktrees (shared .git/config is outside the sandbox write scope).
 #  - Never merge a PR to remudero whose required checks are not green (W1-T1B).
 #  - A blocked worker ADDS the missing work or ESCALATES; it NEVER edits acceptance criteria to match its
