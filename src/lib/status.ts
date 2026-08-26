@@ -4451,8 +4451,16 @@ export function buildBatchedGithub(
   // numbers, a FOUR-SECOND increase in the worst-case age of the rollup a sweep disposition reads.
   // It is not a blanket raise: it is self-sizing from a cost the gateway already paid, and can
   // never exceed one fetch.
+  //
+  // `ttlMs === 0` IS EXEMPT FROM THE FLOOR. A zero TTL is not "a fast cache" — it is the
+  // established test-suite idiom for "never cache, refetch every call" (see
+  // test/board-prs-rest.test.ts, test/read-failed-not-attempted.test.ts,
+  // test/serve-board-pacer-wiring.test.ts), used to isolate a single method's behaviour from the
+  // gateway's memoisation. Flooring it would silently turn "always stale" into "stale after one
+  // fetch duration", breaking that idiom for no production benefit — nothing in this process ever
+  // constructs a gateway with `ttlMs: 0` outside a test.
   let lastFetchDurationMs = 0;
-  const effectiveTtlMs = (): number => Math.max(ttlMs, lastFetchDurationMs);
+  const effectiveTtlMs = (): number => (ttlMs === 0 ? 0 : Math.max(ttlMs, lastFetchDurationMs));
   // W1-T1005: an explicit `opts.pacer` always wins (design iii); omitted, every gateway built in
   // this process falls back to the SAME module-scoped instance (created once, on whichever
   // gateway needs it first) rather than each discovering the secondary rate limit on its own.
