@@ -35,7 +35,9 @@
         "body-fetch-guards-on-http-not-size",
         "diff-coverage-needs-cis-own-flags",
         "diff-coverage-ok-can-be-vacuous",
+        "lease-is-not-a-supersession-guard",
         "required-check-poster",
+        "rerun-the-job-not-the-run",
         "rollup-dedupe-by-latest-attempt",
         "skipped-check-deadlock"
       ],
@@ -43,6 +45,7 @@
         ".github/**",
         ".github/workflows/ci.yml",
         "scripts/diff-coverage.mjs",
+        "src/lib/git-push.ts",
         "src/lib/open-prs-rest.ts",
         "src/lib/review.ts",
         "src/lib/status.ts",

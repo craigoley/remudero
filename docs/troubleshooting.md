@@ -4,7 +4,7 @@ Symptom → cause → fix for the operator-visible failures the fleet has alread
 diagnose. This is a **Tier B** doc (MASTER-PLAN §12A): it needs context absent from the
 codebase, so it is human/Architect-authored and reviewer-gated, never generated.
 
-**Seeded from the learnings corpus.** Every entry below traces to one `operator_impact: true`
+**Seeded from the learnings corpus.** Most entries below trace to one `operator_impact: true`
 record in [`learnings/failures.yaml`](../learnings/failures.yaml) — the incident/postmortem
 shard of the durable, provenance-tagged knowledge base (W1-T33). Not every `failures.yaml`
 entry gets an entry here: only the ones whose SYMPTOM is something *you*, the operator, would
@@ -159,3 +159,52 @@ fast-forwards on every boot, so the source tree is current regardless of image a
 which means one was written and the other was not. It deliberately does not fail on an old
 image or on an image built before this landed: both read as `UNKNOWN` and warn. An old image
 is old, not wrong.
+
+## A background job's processes are alive and its output is growing, but the artifact never appears
+
+**Symptom.** A long-running job — a coverage run, a full-suite run, anything writing into a
+worktree — still shows live processes, its log is still growing, and yet the file it is
+supposed to produce never turns up. Nothing has errored and nothing has exited non-zero.
+
+**Cause.** The directory it is writing into was removed while it was running. On POSIX a
+process keeps its open file descriptors and its current directory after the path is unlinked,
+so it goes on "working" against an inode nobody can reach: `ls` in the parent shows nothing,
+and the artifact is written to a location with no name. Two ways to get there. You can do it
+to yourself, by cleaning up a worktree while a job you started in the background still holds
+it. Or the fleet can do it to you: `reapStaleWorktrees` (`src/run-task.ts`) runs from the
+daemon's per-poll sweep hook and from `rmd sweep` outside `--dry-run`, judges entries under
+`<config.root>/worktrees` terminal on its own cadence, and `rm -rf`s them without asking
+whether anything is still writing there. (The boot-time rung added beside `runTask` deletes
+nothing today — `worktreeReapBoot.enabled` is `false` in `plan/policy.yaml`, so it only
+surveys — but the two older call sites are live.)
+
+**Fix.** Check before you remove, and do not put a long job somewhere the reaper owns.
+`lsof +D <dir>` lists every process holding anything under that directory; if it prints
+anything, the directory is in use and removing it will silently destroy the job's output
+rather than failing. Cut interactive and long-running worktrees somewhere the fleet does not
+scan — `~/Remudero/<name>-work` rather than `<config.root>/worktrees` — and commit more often
+than feels necessary. If you are already in this state, the compute is not recoverable: kill
+the orphaned processes by the pid you captured at spawn (never by matching the command text —
+`pkill -f` matches the shell running the search) and start again in a directory nothing reaps.
+
+## The full test suite cannot pass inside the agent container
+
+**Symptom.** A full-suite run in the container fails widely, with failures that look unrelated
+to whatever changed and that do not reproduce on the mini. Or worse, it *passes* a fixture that
+should have failed.
+
+**Cause.** Three independent causes, none of them a regression in the code under test.
+**The container runs as uid 0**, and root ignores permission bits, so a fixture that does
+`chmod 000` on a file to prove an unreadable-path branch reads it happily and the test passes
+*vacuously* — a green that means nothing. **`browserType.launch` fails** with a hook-level
+error, so every `test/serve.*.test.ts` Playwright test dies at `hookFailed` rather than
+asserting anything. And **`git commit` fixtures wedge** on an unreachable MCP endpoint at
+`127.0.0.1:33883`, hanging rather than failing.
+
+**Fix.** Do not run the full suite here, and do not read a container-only green as evidence.
+Run the specific test files your change touches, and let CI — which runs as a non-root user
+with the pinned browser build and no MCP endpoint in the loop — be the authority on the whole
+suite. Two of these fail loudly and are merely wasted time; the uid-0 one is the dangerous
+member of the set, because it converts a permission-branch test into a silent pass. If you
+need one of those fixtures verified, verify it on the mini or read CI's own log — a local
+result on this host cannot distinguish "the branch works" from "root ignored the bits."

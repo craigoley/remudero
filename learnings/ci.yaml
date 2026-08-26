@@ -37,10 +37,11 @@
     A check-runs listing with ?filter=all returns SUPERSEDED attempts forever, so a check that was
     re-run and went green still shows its old failure and a triage pass reports a false red. Dedupe by
     the latest startedAt per check name before judging — the repo's own dedupeRollupByLatestAttempt
-    (sweep.ts), keyed on name ?? context.
+    (sweep.ts), keyed on name ?? context. ?filter=latest is NOT that fix: it dedupes within ONE run,
+    so two attempts on one sha made by different runs both survive it.
   assertion: 'grep -q "dedupeRollupByLatestAttempt" src/lib/sweep.ts'
-  src: operator-report 2026-08-23; dedupe rule re-derived at 682c5d5a
-  cited: "2026-08-23"
+  src: operator-report 2026-08-23; dedupe rule re-derived at 682c5d5a; filter=latest arm 2026-08-26
+  cited: "2026-08-26"
 - id: diff-coverage-needs-cis-own-flags
   subsystem: coverage
   lifecycle: active
@@ -77,3 +78,25 @@
   assertion: 'grep -q "no Acceptance header" src/run-task.ts'
   src: measured 2026-08-23 — gh absent in the container, rc=127
   cited: "2026-08-23"
+- id: rerun-the-job-not-the-run
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  fact: >-
+    Two GitHub re-run endpoints, very different cost: jobs/{job_id}/rerun re-runs ONE job, while
+    runs/{run_id}/rerun-failed-jobs re-runs the whole run and re-spends every green sibling in it.
+    Measured: one lane re-spent 14 green jobs to retry one.
+  assertion: 'grep -q "jobs/{job_id}/rerun" src/lib/sweep.ts'
+  src: operator-report 2026-08-26; endpoint choice already reasoned in sweep.ts (W1-T1223)
+  cited: "2026-08-26"
+- id: lease-is-not-a-supersession-guard
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/git-push.ts]
+  fact: >-
+    --force-with-lease guards CONCURRENCY, not SUPERSESSION: it only requires the remote to still
+    equal the ref you last FETCHED, so fetching the head you are about to overwrite makes the lease
+    pass. Assert local != lease base before pushing.
+  assertion: 'grep -q -- "--force-with-lease=" src/lib/git-push.ts'
+  src: operator-report 2026-08-26; explicit-form precondition documented at git-push.ts gitPushEmptyCommit
+  cited: "2026-08-26"
