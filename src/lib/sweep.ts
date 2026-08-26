@@ -1703,6 +1703,36 @@ export function mainHealthShouldStandDownDispatch(observation: MainHealthObserva
 export const CI_GATE_CHECK_NAME = "ci-gate";
 
 /**
+ * W1-T2296 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE.
+ *
+ * `ci-gate` is a DOWNSTREAM AGGREGATOR: its failing step is literally "Aggregate sibling check
+ * results", and its own annotations read `required check(s) failing — entering a 600s grace window`
+ * then `required check(s) FAILED — holding merge`. It goes red BECAUSE a sibling is red and green
+ * when its inputs are. So a failure list naming both `ci-gate` and the sibling that caused it
+ * reports two failures where there is one, and the second is not fixable in isolation — a fix-rung
+ * worker handed it can only chase a symptom.
+ *
+ * MEASURED 2026-08-26 across the open board: on 5 of 6 red PRs `ci-gate` was one of the reported
+ * failures, always downstream, never independently fixable.
+ *
+ * THE ONE CASE THAT IS KEPT is `ci-gate` failing ALONE. That is the real signal — the aggregate
+ * concluded against siblings that are not (or are no longer) failing, which is the stale-verdict
+ * shape {@link staleCiGateTransition} exists to name. Dropping it there would erase the only
+ * evidence that anything is wrong, so this filter never empties a non-empty list.
+ *
+ * PURE, and deliberately NOT a change to what a check REPORTS: this narrows what the fleet is
+ * TOLD failed, never what CI decided. `checksStateFromRollup`'s red verdict is untouched, so a PR
+ * whose only red is `ci-gate` still reads red and still holds the merge.
+ */
+export function withoutDownstreamGateFailure(failures: readonly CiFailure[]): CiFailure[] {
+  const others = failures.filter((f) => f.name !== CI_GATE_CHECK_NAME);
+  // Nothing else failed ⇒ the gate IS the signal. Also covers the empty list unchanged.
+  if (others.length === 0) return [...failures];
+  return others;
+}
+
+
+/**
  * W1-T1275 (design iii/iv) — the ONE (head, sibling-transition) shape that makes `ci-gate`'s own
  * concluded verdict stale: its own latest (deduped) attempt concluded a NON-SUCCESS terminal
  * state, and a required sibling's own latest (deduped) attempt is a terminal SUCCESS that started
