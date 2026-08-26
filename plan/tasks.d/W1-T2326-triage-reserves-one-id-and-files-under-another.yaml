@@ -1,0 +1,210 @@
+- id: W1-T2326
+  title: "The triage lane reserves one id remotely and prompts its worker with a different one — `reservedTaskId` is derived from the LOCAL block, `reserveTaskIdBlockRemote` runs 100+ lines later, and `remoteIdBlock.taskIds` reaches nothing but a ledger row, so the reservation layer is not broken, it is unread"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (fc2bedcf9f99908285d2ed422c45a96ed535e029), clone shallow-checked `false`. Source read from that
+    tree. Ledger read READ-ONLY on the fleet host, per form, every zero controlled. Open PRs
+    enumerated over REST with the enumeration itself controlled. No spawning verb, no restart.
+
+    (1) THE MECHANISM, BY SYMBOL AND IN SOURCE ORDER, INSIDE `triageCommandLocked` (`src/run-task.ts`).
+    `localIdBlock = reserveTaskIdBlock(mint.n, TRIAGE_MAX_NEW_TASKS, ...)` takes the LOCAL block.
+    `const reservedIds = localIdBlock.ids.map(...)` and `const reservedTaskId = reservedIds[0]` are
+    therefore ADVISORY-DERIVED — `localIdBlock` starts from `mint.n`, the advisory number.
+    `triagePrompt(entry, runId, reservedTaskId, reservedIds.slice(1))` hands that to the worker, and
+    `lintFiledTasks(worktreePath, reservedIds, ...)` grades against the same list.
+    `reserveTaskIdBlockRemote` does not run until the `decision.action === "propose"` branch, 100+
+    lines further down, and its result `remoteIdBlock.taskIds` appears in exactly two places — both
+    inside the `log("triage.id_minted", ...)` call, as `minted_id` and `reserved_ids`. NOTHING
+    DOWNSTREAM CONSUMES IT. The prompt is already sent, the worktree already written, the linter
+    already pointed at the other list.
+
+    (2) THE NAME IS MOST OF WHY THIS SURVIVED. The variable is `reservedTaskId` and it is not the
+    reserved id. Every reader who checked "does the worker get the reserved id" read that line and
+    stopped. The one that IS reserved on the remote has no name outside the log call.
+
+    (3) THE SIBLING IN THE SAME FILE DOES IT TWICE OVER. `planCommand` writes
+    `const reservedIds = planRemoteIdBlock.taskIds` — the REMOTE block — and builds
+    `planArchitectPrompt(mode, brief, runId, reservedIds)` from it. It then runs a SECOND check
+    triage has no counterpart for: `unreservedFiledIds(planDiff, reservedIds)` with a
+    `log("plan.id_check", ...)` row and a warning line. So the correct pattern and the correct
+    verification both already exist, exported, in this repo — and triage has neither.
+
+    (4) THE OUTCOME, MEASURED OVER 96 `triage.id_minted` ROWS ON THE FLEET HOST, AND IT CORRECTS THE
+    BRIEF'S FIGURE. Comparing the fields that actually answer the question — `minted_id` (which is
+    `remoteIdBlock.taskIds[0]`) against `mint_id` (the advisory) — the reservation DIFFERS from the
+    advisory in **42 of 96 rows (44%)**, not 31. Thirty-one is what `reserved_above_mint` reports,
+    and that field answers a different question (see (6)); the two disagree on 11 rows.
+
+    THE SHARPEST SINGLE COMPARISON. Of the 96 rows, the number the lane RESERVED
+    (`reserved_ids[0]`) was later filed on main **44** times; the number it did NOT reserve (the
+    advisory) was filed **49** times. THE LANE'S OWN RESERVATION IS FILED LESS OFTEN THAN THE NUMBER
+    IT DOES NOT RESERVE — which is exactly what "reserve one, prompt with another" predicts, because
+    only the advisory ever reaches the worker.
+
+    ACROSS THOSE 96 RUNS THE LANE HAS TAKEN 141 DISTINCT REMOTE IDS AND 54 OF THEM WERE EVER FILED;
+    87 WERE NOT. That 87 is NOT all waste and must not be read as such: 24 of the rows reserved a
+    block wider than one (72 ids between them) and a run that files one task legitimately leaves the
+    block's tail unused. The unambiguous half is the head-of-block figure above.
+
+    (5) THE TWO DEGRADED RUNS OF 2026-08-26, TRACED TO THE PRs THEY ACTUALLY OPENED — AND THIS
+    CORRECTS THE BRIEF IN THE OTHER DIRECTION. At 12:26:56Z the advisory was W1-T2305 and the
+    reservation was the block starting W1-T2307; the run opened PR #2951, which FILED NO TASK AT ALL
+    (it amended MASTER-PLAN). At 15:02:17Z the advisory was W1-T2316, the reservation was the block
+    starting W1-T2320, and the run opened PR #2970 — which filed **W1-T2325**. NEITHER THE ADVISORY
+    NOR THE RESERVATION. So no duplicate `- id:` reached a PR on either run, and both advisory ids
+    are singly declared on main today; they were filed by hand-authored PRs, not by these runs.
+
+    WHAT DID HAPPEN IS WORSE THAN A NEAR-MISS IN ONE RESPECT AND MILDER IN ANOTHER. Milder: the
+    collision the advisory set up never landed. Worse: the 15:02 run took three permanent remote ids
+    — W1-T2320, W1-T2321, W1-T2322, all three carrying a reservation ref and none declared anywhere —
+    and then filed under a fourth number. The reservation was not merely unread; it was paid for and
+    discarded inside the same run.
+
+    (6) THE FIELD THAT LOOKS LIKE IT ALREADY CHECKS THIS. `reserved_above_mint` is written as
+    `localIdBlock.ids[0] !== mint.n` — LOCAL versus ADVISORY, never RESERVED versus ADVISORY. It
+    reads `False` on BOTH degraded rows above, at the exact moments the reservation and the advisory
+    diverged by two and by four. Anyone auditing the ledger for this defect using the field named
+    after it would have found nothing on both occasions.
+  design: |
+    (i) Q1 — BUILD THE PROMPT FROM `remoteIdBlock.taskIds`, AS `planCommand` ALREADY DOES. The
+    substitution itself is trivial; the ORDERING is the task. `reserveTaskIdBlockRemote` must move
+    from the `decision.action === "propose"` branch up to before `runRelintLoop`, and
+    `reservedIds`/`reservedTaskId` must be re-derived from its result. Everything between the two
+    points that consumes the advisory-derived list moves with it: the `triagePrompt(...)` call, the
+    `filedIds:` argument, the `lintFiledTasks(worktreePath, reservedIds, ...)` call inside the loop,
+    and the `say(...)` line that announces the id. THE `triage.id_minted` ROW STAYS WHERE IT IS —
+    it records the durable allocation and the allocation is unchanged; only who reads it moves.
+
+    RENAME AS PART OF THE MOVE, NOT AFTER IT. `reservedTaskId` must not survive as a name bound to
+    an advisory-derived value at any commit, because that name is (2)'s whole failure mode.
+
+    (ii) WHAT `localIdBlock` IS FOR, AND WHETHER IT SURVIVES — IT SURVIVES, AND IT MUST. Its own
+    comment states the guarantee: it is taken BEFORE `spawn` so that a minter that cannot reserve
+    never spends. An unwritable local store throws out of the command and the paid worker (median
+    $0.96 by that comment's own figure) is never started. It also has a release path —
+    `localIdBlock?.releaseAll()` in the `finally` — which the remote half deliberately does not.
+    NOTHING IN THIS TASK REMOVES IT: the local block stays exactly where it is and keeps being the
+    spend gate. What changes is only which list the prompt and the linter read.
+
+    (iii) NAME THE COST HONESTLY: THIS RE-OPENS W1-T1011, AND THE PRICE IS MEASURABLE TODAY. W1-T1011
+    moved the remote half DOWN to the propose branch precisely because a run that errors or resolves
+    no_task or grill never files, while a `refs/rmd-id/` ref has no release path — it measured 21 of
+    64 minted ids burned by runs that filed nothing. RE-MEASURED ON THE FLEET HOST FOR THIS SHARD:
+    169 `triage.start` rows against 96 `triage.id_minted`, so **73 of 169 runs (43%) never reach
+    propose** — 62 errored, 2 already_done, 2 grill_opened. At a block width of three that is up to
+    219 additional permanently-held ids across the same population. The ratio has gone UP since
+    W1-T1011 measured it, not down.
+
+    (iv) THE SHARD PICKS, AND IT PICKS THE MOVE — ON THE DOCTRINE ALREADY WRITTEN ONE FILE OVER.
+    `src/lib/task-id-reservation.ts` states it in capitals: A HOLE IS NOT A DEFECT; A COLLISION IS.
+    The same doc prices the whole corpus of reservations at roughly 24 KiB and calls an abandoned
+    filing's burned id acceptable by construction. W1-T1011 traded collision-safety for
+    hole-avoidance; that trade is backwards against the doctrine, and the measured consequence is
+    (4)'s 44-versus-49. The holes are the cheap side and this task buys the expensive one.
+
+    IF THE BURN IS TO BE BOUNDED ANYWAY, BOUND IT BY WIDTH, NOT BY POSITION. Reserving ONE id before
+    the prompt and extending the block on propose keeps the pre-spawn guarantee, hands the worker a
+    real reservation, and reduces the non-propose burn from up to three ids to one. That is the only
+    variant this shard sanctions; anything that puts the prompt back on an unreserved number has
+    answered a different question.
+
+    (v) Q2 — THE CHEAP HARDENING, INDEPENDENT OF (i) AND WORTH SHIPPING EVEN IF (i) IS DEFERRED. It
+    is a PORT, not an invention: `unreservedFiledIds` (`src/lib/plan-architect.ts`) is already
+    exported, already report-only by construction, and already called by `planCommand`. Calling it in
+    triage's propose branch — where the worker's diff and `remoteIdBlock.taskIds` are BOTH in hand —
+    is one call plus one `triage.id_check` row.
+
+    CHEAPER STILL, AND STRICTLY FROM DATA ALREADY ON DISK: `triage.id_minted` already carries
+    `minted_id` and `reserved_ids`, so an assertion that the filed `- id:` equals `reserved_ids[0]`
+    is one comparison over a row that is already written. Either form would have flagged both
+    2026-08-26 runs. REPORT-ONLY, MATCHING ITS SIBLING'S POSTURE: an unreserved id is not necessarily
+    a collision, `lint-plan`'s duplicate-id check already refuses a real one downstream, and this
+    lane must not gain a new refusal.
+
+    AND FIX OR RETIRE THE FALSE FRIEND. `reserved_above_mint` should either be re-derived as
+    reserved-versus-advisory or joined by a field that is, so the ledger stops answering a question
+    nobody asked in a field named as though it answers the one they did.
+  acceptance:
+    - claim: "the worker prompt is built from the remote reservation block, not from the advisory-derived local block"
+      proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
+    - claim: "the remote reservation is taken before the prompt is built, and the local block still gates spending before any worker is started"
+      proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
+    - claim: "no identifier bound to an advisory-derived value is named as though it were reserved"
+      proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
+    - claim: "the linter and the relint loop grade against the same list the worker was prompted with"
+      proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
+    - claim: "a run that files an id outside the reserved block is reported, and the report names both lists"
+      proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
+    - claim: "the report is advisory and changes no decision, refuses no run and opens no escalation"
+      proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
+    - claim: "a ledger row distinguishes reserved-versus-advisory from local-versus-advisory rather than conflating them"
+      proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
+    - claim: "a run that never reaches propose is bounded in how many permanent remote ids it can hold"
+      proof: "unit test: test/triage-files-under-the-reserved-id.test.ts"
+  files: [src/run-task.ts, test/triage-files-under-the-reserved-id.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#triage-reserves-one-id-and-files-another-2026-08-26"
+  plan_refs: ["W1-T2324", "W1-T2315", "W1-T1011", "W1-T949", "W1-T509", "W1-T1066"]
+  note: |
+    Q3 — THE DIVERGENCE, SIZED WITHOUT OVERSTATING IT, AND ONE HALF OF IT IS SMALLER THAN IT LOOKS.
+    Against origin/main at the filing sha: 439 reservation refs, 864 distinct filed ids, 328 carrying
+    both. 111 RESERVED-BUT-NEVER-FILED (25% of refs) and 536 FILED-BUT-NEVER-RESERVED (62% of filed).
+
+    THE NEWEST ORPHANS ARE LEGITIMATELY IN FLIGHT AND MUST NOT BE COUNTED AS DRIFT. The top of the
+    reserved-but-unfiled tail is 2255, 2256, 2285, 2307, 2308, 2309, 2319, 2320, 2321, 2322, 2323 and
+    this task's own id — nine at or above 2300, including this shard, an id whose filing PR is open,
+    and both blocks the two degraded runs of 2026-08-26 took and discarded.
+
+    BUT 536 IS ALMOST ENTIRELY A PRE-MECHANISM BACKLOG, AND SAYING OTHERWISE WOULD OVERSTATE IT.
+    Split by era, using the ledger's own contemporaneous ceilings as the boundary: 498 of the 536 sit
+    below the id current when remote refs first landed (W1-T509, 2026-08-15, ceiling 503); 38 sit in
+    the window where only the FIRST id of a block took a ref; and **ZERO sit above the ceiling
+    current when every minted id began taking one (2026-08-19, ceiling 1019)**. Since that date every
+    filed id carries a reservation. FILING IS NOT RUNNING BESIDE THE RESERVATION LAYER TODAY, and the
+    claim that it has been doing so for weeks does not survive the split.
+
+    THAT MAKES THE BACKLOG A SEPARATE OBSERVATION AND EXPLICITLY OUT OF THIS TASK'S SCOPE — it is
+    historical, it is closed, and nothing here proposes reconciling it. It also strengthens this
+    task rather than competing with it: the reservation layer is now UNIVERSAL, which is precisely
+    why being unread is the entire remaining defect.
+
+    WHAT MUST NOT CHANGE.
+
+    THE EIGHT-SURFACE OPERATOR CHECK STAYS. It caught this while the refs were working and the
+    advisory was not, and it is the only reader that spans reservations, shards, open PRs and
+    history at once. Nothing in this task replaces it, and a build that argues the check is now
+    redundant has misread which layer failed.
+
+    THE FLEET KEEPS FILING. An intake rung that stops on a budget shortfall is a worse failure than
+    a rare collision. Contention must keep ADVANCING rather than refusing, per
+    `reserveTaskIdRemote`'s own doctrine, and no arm added here may turn a divergence into a refusal.
+
+    NOTHING PACES, THROTTLES OR SLEEPS — W1-T1066. This task changes WHICH NUMBER a worker is given
+    and WHEN the remote block is taken; it adds no wait, no retry cadence and no rate control.
+
+    W1-T2324 IS NOT AMENDED BY THIS. It is correct within its own layer: it fixes how the mint
+    DERIVES a ceiling when the open-PR surface is refused. This task fixes what happens to the
+    reservation AFTER a number exists. The two are adjacent, not overlapping, and neither subsumes
+    the other — a perfectly derived advisory that nothing reserves against still gets filed, and a
+    perfectly read reservation still starts from whatever ceiling the mint found. THEY DO SHARE
+    `src/run-task.ts` IN `files:`, so `partitionByFileOverlap` will serialize them; that is correct
+    and expected, not a reason to widen or merge either.
+
+    W1-T2315 IS CITED AS THE ADJACENT READ-VERSUS-WRITE SHAPE — two resolvers deciding one thing with
+    nothing reconciling them — and is NOT re-filed here. Neither is W1-T2324.
+
+    THE FORWARD REFERENCE IS DELIBERATE. `test/triage-files-under-the-reserved-id.test.ts` does not
+    exist yet; it is declared in `files:` so the pure-path proofs resolve under the forward-reference
+    carve-out and read `not_yet_built` until the build lands.
+
+    RULE 19 BAND. `risk: high` is set UP FRONT for the SPAN of the declared `files:` — one module and
+    its test — not for blast radius. The edit is an ordering change inside one function plus one
+    ported report call.
