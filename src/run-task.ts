@@ -43,6 +43,7 @@ import {
   type Config,
 } from "./lib/config.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
+import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
 import {
@@ -8708,6 +8709,36 @@ export function renderDiagnosePrompt(task: Pick<Task, "id" | "title">, failureEv
  * ever-growing learnings corpus must (cache-aware ordering, W1-T35). `""` (the default) when the
  * task carries no notes.
  */
+/**
+ * The named parts `renderImplementPrompt` assembles into its `# CONTEXT` + `# TASK` blocks, ONE
+ * derivation shared by the renderer below and by the W1-T2297 `prompt.manifest` call site
+ * (`runTask`, further down) — so "what the manifest fingerprints" can never drift from "what the
+ * worker actually received": both read this exact array, never two independently-maintained
+ * copies of the same five expressions.
+ */
+export function implementPromptParts(
+  task: Task,
+  reconContext: string,
+  runId: string,
+  matchedLearnings = "",
+  operatorNotesBlock = "",
+): Array<{ name: string; value: string }> {
+  const contextClaims = (task.context ?? [])
+    .map((c) => `- ${c.claim} ${citation(c.src)}`)
+    .join("\n");
+  const body = (task.prompt ?? task.title)
+    .split("${RUN_ID}").join(runId)
+    .split("${TASK_ID}").join(task.id);
+  return [
+    { name: "doctrine", value: renderDoctrinePreamble() },
+    { name: "task_claims", value: contextClaims },
+    { name: "recon", value: reconContext },
+    { name: "operator_notes", value: operatorNotesBlock },
+    { name: "matched_learnings", value: matchedLearnings },
+    { name: "task_body", value: body },
+  ];
+}
+
 export function renderImplementPrompt(
   task: Task,
   reconContext: string,
@@ -8715,12 +8746,8 @@ export function renderImplementPrompt(
   matchedLearnings = "",
   operatorNotesBlock = "",
 ): string {
-  const contextClaims = (task.context ?? [])
-    .map((c) => `- ${c.claim} ${citation(c.src)}`)
-    .join("\n");
-  const body = (task.prompt ?? task.title)
-    .split("${RUN_ID}").join(runId)
-    .split("${TASK_ID}").join(task.id);
+  const parts = implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
+  const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
 
   return [
     // THE ROLE, FIRST — mirroring `renderReconPrompt`, whose own first sentence is "You are a RECON
@@ -8730,14 +8757,14 @@ export function renderImplementPrompt(
     ...IMPLEMENT_ROLE_LINES,
     "",
     "# CONTEXT",
-    renderDoctrinePreamble(),
-    contextClaims,
-    reconContext,
-    operatorNotesBlock,
-    matchedLearnings,
+    partValue("doctrine"),
+    partValue("task_claims"),
+    partValue("recon"),
+    partValue("operator_notes"),
+    partValue("matched_learnings"),
     "",
     "# TASK",
-    body,
+    partValue("task_body"),
     "",
     // Shared verbatim with the post-compaction ANCHOR (compaction.ts,
     // MASTER-PLAN §8B / W1-T36) — ONE source of literal text so the anchor
@@ -9798,6 +9825,20 @@ async function runTask(
     // (a one-line addition, per the task's own design), never a second ledger step.
     log("prompt.linted", { provenance: "clean", prompt_template_hash: createHash("sha256").update(prompt).digest("hex") });
     say("prompt provenance-linted: clean");
+    // W1-T2297: RECORDS the composition of the prompt this run just spawned with. `prompt.linted`
+    // above already fingerprints the WHOLE rendered prompt; this ledgers the per-PART breakdown
+    // (`implementPromptParts` — the SAME array `renderImplementPrompt` itself assembled from, so
+    // this can never fingerprint a different composition than the one the worker actually got) —
+    // doctrine / task claims / recon / operator notes / matched learnings / task body — each as a
+    // sha256 + byte length, NEVER the part's own text (rows stay greppable forever and rotate
+    // through archives; republishing prompt content into them is out of scope by design). An
+    // absent part (operator notes nobody wrote, a recon context that rendered empty) is recorded
+    // `present: false` rather than a hash of the empty string standing in for "nothing here" — see
+    // `buildPromptManifest`'s own doc. A RECORD, never a gate: nothing reads this to decide
+    // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
+    log("prompt.manifest", {
+      parts: buildPromptManifest(implementPromptParts(task, reconContext, runId, matchedLearnings, operatorNotesBlock)),
+    });
 
     // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
     // criteria + hard constraints, built ONCE and ledgered here so the anchor
