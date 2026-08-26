@@ -17770,7 +17770,11 @@ export function escalateStarvation(
  */
 export function breakerGateFor(
   ledgerPath: string,
-  openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
+  openHeadBranches:
+    | ReadonlyArray<PrRef>
+    | null
+    | undefined
+    | (() => ReadonlyArray<PrRef> | null | undefined),
 ): {
   isIndeterminate: (taskId: string) => boolean;
   isTripped: (taskId: string) => boolean;
@@ -17787,11 +17791,38 @@ export function breakerGateFor(
 } {
   const cache = createDispatchBreakerCache();
   let memo: { taskId: string; detail: DispatchBreakerDetail } | undefined;
+  // W1-T2318: A THUNK IS RESOLVED HERE, ON FIRST READ, NOT BY THE CALLER AT BOOT.
+  //
+  // `listOpenHeadBranches()` costs a full board walk — MEASURED 26 sequential REST calls, 22.2s, of
+  // which the one open page the consumers need took 432ms. Computing it eagerly put that on the
+  // daemon's boot critical path, where it blocked the event loop past
+  // `refreshInstallationToken`'s abort timer. Its VALUE is unchanged; only WHEN it is computed
+  // moves — to the first dispatch decision, which is the first read (`evaluateDispatchBreaker
+  // CorroboratedDetailed` returns before touching the list unless a task's ledger breaker is
+  // already tripped, so for every clear task it is never read at all).
+  //
+  // MEMOISED ON THE FIRST RESOLVE, so this stays the ONE cache per invocation `breakerGateFor`'s
+  // own doc promises — a thunk called twice would be two board walks, which is worse than the
+  // eager version it replaces.
+  //
+  // AN ARRAY, `null` AND `undefined` ALL STILL PASS STRAIGHT THROUGH, byte for byte: every
+  // existing caller and fixture that hands a value keeps today's behaviour, and `null` still means
+  // "read failed" all the way down to `corroboratesForwardProgress`, which answers "unreadable"
+  // and leaves a tripped task tripped. That fail-closed path is NOT touched by this change.
+  let resolvedBranches: ReadonlyArray<PrRef> | null | undefined;
+  let branchesResolved = false;
+  const branchesFor = (): ReadonlyArray<PrRef> | null | undefined => {
+    if (!branchesResolved) {
+      resolvedBranches = typeof openHeadBranches === "function" ? openHeadBranches() : openHeadBranches;
+      branchesResolved = true;
+    }
+    return resolvedBranches;
+  };
   const detailFor = (taskId: string) => {
     if (memo?.taskId !== taskId) {
       memo = {
         taskId,
-        detail: evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, taskId, cache, openHeadBranches),
+        detail: evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, taskId, cache, branchesFor),
       };
     }
     return memo.detail;
@@ -18345,7 +18376,24 @@ async function drainCommand(
   // this is exactly one extra batched call per invocation, never one per task. Resolved AFTER
   // the `--dry-run` early return above (never before it): a preview spawns/reads nothing beyond
   // `refreshMerged`'s own projection, and the breaker is never consulted on that path.
-  const openHeadBranchesForBreaker = githubFactory(owner, repo).listOpenHeadBranches?.();
+  // W1-T2318: DEFERRED, NOT REMOVED. `listOpenHeadBranches()` is a full board walk — MEASURED at
+  // 26 sequential REST calls and 22.2s, of which the single open page its consumers actually read
+  // took 432ms — and computing it HERE put all of it on the boot critical path, synchronously,
+  // before anything needed the result. The closed half of that walk is still built, still shared,
+  // and still correct for `findMergedByTrailer`/`findMergedByTrailerAll`/`findMergedByHeadBranch`
+  // (W1-T377's design, deliberately untouched); it is simply no longer this caller's boot cost.
+  //
+  // MEMOISED HERE TOO, not just inside `breakerGateFor`, because `isFeedbackOpenPr` below reads the
+  // SAME list and must not trigger a second walk.
+  let openHeadBranchesMemo: ReadonlyArray<PrRef> | null | undefined;
+  let openHeadBranchesRead = false;
+  const openHeadBranchesForBreaker = (): ReadonlyArray<PrRef> | null | undefined => {
+    if (!openHeadBranchesRead) {
+      openHeadBranchesMemo = githubFactory(owner, repo).listOpenHeadBranches?.();
+      openHeadBranchesRead = true;
+    }
+    return openHeadBranchesMemo;
+  };
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
   const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
@@ -19059,7 +19107,24 @@ export async function daemonCommand(
   // before it — a preview must spawn/read nothing beyond `refreshMerged`'s own projection), and
   // once at boot, like `breakerGateFor`'s own cache immediately below, rather than re-fetched
   // per tick.
-  const openHeadBranchesForBreaker = githubFactory(target.owner, target.repo).listOpenHeadBranches?.();
+  // W1-T2318: DEFERRED, NOT REMOVED. `listOpenHeadBranches()` is a full board walk — MEASURED at
+  // 26 sequential REST calls and 22.2s, of which the single open page its consumers actually read
+  // took 432ms — and computing it HERE put all of it on the boot critical path, synchronously,
+  // before anything needed the result. The closed half of that walk is still built, still shared,
+  // and still correct for `findMergedByTrailer`/`findMergedByTrailerAll`/`findMergedByHeadBranch`
+  // (W1-T377's design, deliberately untouched); it is simply no longer this caller's boot cost.
+  //
+  // MEMOISED HERE TOO, not just inside `breakerGateFor`, because `isFeedbackOpenPr` below reads the
+  // SAME list and must not trigger a second walk.
+  let openHeadBranchesMemo: ReadonlyArray<PrRef> | null | undefined;
+  let openHeadBranchesRead = false;
+  const openHeadBranchesForBreaker = (): ReadonlyArray<PrRef> | null | undefined => {
+    if (!openHeadBranchesRead) {
+      openHeadBranchesMemo = githubFactory(target.owner, target.repo).listOpenHeadBranches?.();
+      openHeadBranchesRead = true;
+    }
+    return openHeadBranchesMemo;
+  };
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
   const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
@@ -19555,7 +19620,7 @@ export async function daemonCommand(
         // `lastProj`-backed read — newest PR wins on a multi-hit, mirroring status.ts's own rung.
         isFeedbackOpenPr: (feedbackId) => {
           const wantTaskId = `TRIAGE-${feedbackId}`;
-          const hit = (openHeadBranchesForBreaker ?? [])
+          const hit = (openHeadBranchesForBreaker() ?? [])
             .filter((pr) => pr.state.toUpperCase() === "OPEN" && taskIdFromRunBranch(pr.headRefName) === wantTaskId)
             .sort((a, b) => b.number - a.number)[0];
           return hit?.number;
