@@ -270,7 +270,38 @@ export interface CiFailure {
    * undefined` is a sound test for "the log could not be read" and never fires on a real tail.
    */
   logUnavailable?: CiLogUnavailableCause;
+  /**
+   * WHICH SOURCE filled {@link logTail}, when one did. `"log"` is the job's own failing-log tail —
+   * the preferred source, and the only one that existed before W1-T2298. `"annotations"` is the
+   * check-run annotation fallback, used ONLY when the log read came back empty or failed, so a
+   * readable log can never be displaced by it and every existing recogniser keeps matching exactly
+   * what it matched before. ABSENT whenever `logTail` is empty, which is the same condition under
+   * which {@link logUnavailable} is PRESENT — the two are complements, never both meaningful at once.
+   */
+  tailSource?: CiTailSource;
+  /**
+   * WHAT THE ANNOTATION FALLBACK DID, when it was reached at all — present only after the log read
+   * came back empty or failed, absent entirely when the log answered. `recovered` means the tail in
+   * {@link logTail} came from annotations; `empty` means the endpoint answered with no message;
+   * `failed` means the fetch itself threw, `detail` carrying the error as observed.
+   *
+   * SEPARATE FROM {@link logUnavailable} ON PURPOSE. W1-T2291 gave every way of failing a NAMED
+   * cause, and a fallback that overwrote that name would take the answer back: `fetch-failed` and
+   * `empty-log` still mean exactly what they meant, and this field says what was tried afterwards.
+   * A reader wanting "why is there no tail" reads the cause; one wanting "was the second source
+   * tried, and what did it say" reads this.
+   */
+  annotationFallback?: CiAnnotationFallback;
 }
+
+/** The sources {@link CiFailure.logTail} can come from, in preference order. */
+export type CiTailSource = "log" | "annotations";
+
+/** The outcome of the annotation fallback, recorded rather than folded into the log's own cause. */
+export type CiAnnotationFallback =
+  | { outcome: "recovered" }
+  | { outcome: "empty" }
+  | { outcome: "failed"; detail: string };
 
 /**
  * The closed set of reasons a failing check's log tail came back empty — a NAMED
@@ -7090,6 +7121,52 @@ export const CAPABILITY_SNAPSHOT_FIX_CLASS: FixClass = {
 
 /** The live class table this reconciler consults by default — a new systemic fix is a row appended
  *  here (design note i), never a change to {@link runPostFixReverification}. */
+/**
+ * The DIFF-SCOPED coverage failure's own wording — `scripts/diff-coverage.mjs`'s blocking sentence,
+ * NOT the aggregate ratchet's. {@link COVERAGE_TIER_FIX_CLASS} keys on "BLOCKED -- coverage is below
+ * a floor", which `scripts/coverage-ratchet.mjs` prints; the per-diff gate that actually blocks most
+ * PRs prints a different sentence and therefore matched nothing at all.
+ */
+const DIFF_COVERAGE_BLOCK_RE = /diff-coverage: BLOCKED -- this diff adds source line\(s\) with zero covering tests/i;
+
+/** `  - src/lib/foo.ts:123` — one uncovered line as the gate lists them. */
+const UNCOVERED_LINE_RE = /^\s*-\s+(\S+:\d+)\s*$/;
+
+/** What {@link diffCoverageReport} found: the check that blocked and the lines it named. */
+export interface DiffCoverageReport {
+  check: string;
+  uncovered: string[];
+}
+
+/**
+ * REPORTS a diff-scoped coverage block and the lines it names. **A REPORTER, NEVER A REPAIRER, AND
+ * THE DISTINCTION IS STRUCTURAL RATHER THAN STYLISTIC** (W1-T2298 design Q2): {@link FixClass}
+ * requires a `fixPrNumber` whose documented meaning is the merged PR whose fix resolves the class,
+ * and the reconciler gates on that number having merged before it consults the predicate at all.
+ * All three existing rows are that shape — a PR failing against a stale tree some merged PR already
+ * fixed, cleared by re-driving. A diff-coverage block is not: its remedy is a test for a specific
+ * line in a specific file, different for every PR, and no merged PR resolves it. A fourth row would
+ * mean inventing a number that does not mean what the field says, and a match would dispatch a
+ * redrive that re-runs the same gate and fails identically — a cycle spent to learn nothing.
+ *
+ * So this names the failing check and the uncovered lines on a surface an operator or a later agent
+ * already reads, and dispatches nothing. It is also why the annotation fallback matters: before
+ * W1-T2298 the lines existed only in a check-run annotation nothing read, so this function would
+ * have had an empty tail to search however well it was written.
+ */
+export function diffCoverageReport(failures: readonly CiFailure[]): DiffCoverageReport | undefined {
+  for (const f of failures) {
+    if (!DIFF_COVERAGE_BLOCK_RE.test(f.logTail)) continue;
+    const uncovered: string[] = [];
+    for (const line of f.logTail.split("\n")) {
+      const m = line.match(UNCOVERED_LINE_RE);
+      if (m?.[1]) uncovered.push(m[1]);
+    }
+    return { check: f.name, uncovered };
+  }
+  return undefined;
+}
+
 export const DEFAULT_FIX_CLASSES: readonly FixClass[] = [
   CI_GATE_TIMEOUT_FIX_CLASS,
   COVERAGE_TIER_FIX_CLASS,
