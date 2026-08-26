@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -173,6 +173,102 @@ export function searchGroundingSources(root: string, skill: Skill, query: string
     if (excerpts.length > 0) notes.push({ source, excerpts });
   }
   return notes;
+}
+
+// ── grounding-source resolution: does what a skill DECLARES actually exist? (W1-T2281) ─────────
+//
+// `validateSkill` checks SHAPE only — a non-empty string, a non-empty list of non-empty strings.
+// Nothing previously asked whether a declared `grounding_sources` entry resolves to real content,
+// and `grounding_sources` is the one §5B field with a live runtime consumer
+// (`searchGroundingSources`, `panel-skill-run.ts`) — the four others (`tools`, `permission_profile`,
+// `tier`, `gate`) are read nowhere outside this module's own loader and stay unvalidated on
+// purpose (W1-T2266 owns whether they ever gain a reader).
+//
+// `searchGroundingSources`'s `catch { continue }` DELIBERATELY stays: a source that vanishes at
+// runtime must still degrade to "found nothing there", not throw, so a caller gets an answer
+// against a half-populated repo. What that degradation cannot do is tell a caller "this skill's
+// ENTIRE declared corpus was unopenable" apart from "this skill's corpus was searched and had no
+// match" — both currently return `[]`. The functions below are the declaration-time check that
+// closes that gap: run before a query, not from inside one.
+//
+// `path#fragment` is RESOLVED, not refused (see the shard's design (ii)): a fragment resolves when
+// its file contains a Markdown heading (`#` through `######`) whose text starts with the fragment
+// on a word boundary — `#7C` matches `## 7C. Design Review` and nothing shorter or longer (`#7`
+// cannot match `7C`; `#7C2` cannot match `7C`). A bare path (no `#`) resolves when it exists on
+// disk at all (file OR directory — `feedback.yaml`'s `plan/feedback` is a tracked directory of
+// per-entry files, a legitimate declared source, not a broken one).
+
+/** One `grounding_sources` entry split into its file path and optional `#section` anchor. */
+export interface ParsedGroundingSource {
+  /** Repo-relative file path — the part before `#`, or the whole string when there is no `#`. */
+  path: string;
+  /** The section anchor after `#`, or `undefined` when the entry names no fragment. */
+  fragment?: string;
+}
+
+/** Split a `grounding_sources` entry on its FIRST `#` into `{ path, fragment }`. */
+export function parseGroundingSource(source: string): ParsedGroundingSource {
+  const i = source.indexOf("#");
+  if (i === -1) return { path: source };
+  return { path: source.slice(0, i), fragment: source.slice(i + 1) };
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Whether `text` contains a Markdown heading (`#` through `######`) whose text starts with
+ * `fragment` on a word boundary — the shape every `#<section>` grounding_sources entry names
+ * (`7C`, `3A`, `10`, `Calibration`, ...). A file that merely MENTIONS the fragment inline (bold
+ * text, a body paragraph) does not count — only a heading line does, so a fragment can never be
+ * satisfied by accident.
+ */
+export function hasMarkdownSection(text: string, fragment: string): boolean {
+  return new RegExp(`^#{1,6}\\s+${escapeRegExp(fragment)}\\b`, "m").test(text);
+}
+
+/**
+ * Whether ONE `grounding_sources` entry resolves under `root`. A bare path must exist on disk
+ * (file or directory); a `path#fragment` entry must be a FILE containing a heading matching
+ * `fragment` ({@link hasMarkdownSection}) — a fragment is never silently dropped and widened to
+ * "the whole file matched" just because the file itself exists. Never throws: a missing file, an
+ * unreadable file, or a fragment with no matching heading all resolve `false`.
+ */
+export function groundingSourceResolves(root: string, source: string): boolean {
+  const { path, fragment } = parseGroundingSource(source);
+  const fullPath = join(root, path);
+  if (fragment === undefined) return existsSync(fullPath);
+  try {
+    return hasMarkdownSection(readFileSync(fullPath, "utf8"), fragment);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every `grounding_sources` entry `skill` declares that does NOT resolve under `root` — `[]` when
+ * every declared source resolves. This is what distinguishes a skill grounded against NOTHING
+ * (every entry unresolvable, so this returns the whole list) from one whose corpus is real but a
+ * particular query simply had no match (this returns `[]`, same as `searchGroundingSources`
+ * itself would for a genuine non-match) — a distinction `searchGroundingSources` alone cannot
+ * make, by design, because its degradation is intentionally silent per-source.
+ */
+export function unresolvedGroundingSources(root: string, skill: Skill): string[] {
+  return skill.grounding_sources.filter((source) => !groundingSourceResolves(root, source));
+}
+
+/**
+ * Throws {@link SkillError} naming `skill` and every `grounding_sources` entry it declares that
+ * does not resolve under `root`. The declaration-time refusal `searchGroundingSources`'s runtime
+ * `catch { continue }` deliberately does not provide — a caller (a registry lint pass, a loader
+ * that wants to fail loud) invokes this explicitly; it is never called from inside a search.
+ */
+export function assertGroundingSourcesResolve(root: string, skill: Skill): void {
+  const unresolved = unresolvedGroundingSources(root, skill);
+  if (unresolved.length > 0) {
+    throw new SkillError(`skill '${skill.name}': grounding_sources entries do not resolve under '${root}': ${unresolved.join(", ")}`);
+  }
 }
 
 /** Render `rmd skill list`'s human-readable listing — one block per skill, every field resolved. */

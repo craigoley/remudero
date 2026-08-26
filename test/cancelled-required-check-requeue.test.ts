@@ -121,7 +121,15 @@ test("run-task.ts's cancelledRequiredChecks and fetchCiFailures AGREE on which c
     { name: "coverage-ratchet", conclusion: "CANCELLED", startedAt: "2026-08-22T01:26:04Z", detailsUrl: "https://github.com/x/y/actions/runs/1/job/22" },
   ];
   const failing = fetchCiFailures("craigoley", "remudero", rollup);
-  assert.deepEqual(failing.map((f) => f.name).sort(), ["ci-gate", "coverage-ratchet"], "checksState's evidence list names BOTH — it does not distinguish cause");
+  // W1-T2296 CHANGED THIS ASSERTION, AND THE OLD ONE DESCRIBED THE DEFECT. It used to read
+  // `["ci-gate", "coverage-ratchet"]` with the note "names BOTH -- it does not distinguish cause".
+  // `ci-gate` is a downstream aggregator: on THIS fixture it is FAILURE only because
+  // `coverage-ratchet` is CANCELLED. Naming both made `runSweep`'s own cancelled-check stand-down
+  // MISS -- `genuineFailures` (lib/sweep.ts) subtracts the cancelled names from `ciFailures`, so it
+  // was left holding `["ci-gate"]`, length 1, and the lane fell through to `dispatchFix` and spent a
+  // strike on an aggregate no worker can repair. That is the #2434/#2444 shape this fixture is named
+  // for. Filtered, `genuineFailures` is empty and the lane stands down as designed.
+  assert.deepEqual(failing.map((f) => f.name), ["coverage-ratchet"], "the aggregate is dropped; its CAUSE is what the evidence names");
 
   const cancelled = cancelledRequiredChecks(rollup, required);
   assert.deepEqual(cancelled.map((c) => c.name), ["coverage-ratchet"], "the NEW observable names ONLY the absent verdict");
@@ -394,4 +402,17 @@ test("buildSweepEffects().requeueCheck is a NAMED no-op when the rollup carried 
   );
 
   assert.equal(captured.length, 0, "no jobId — no gh call at all");
+});
+
+
+test("W1-T2296: on that same #2444 fixture the cancelled-check stand-down has nothing left over -- no strike is spent on the aggregate", () => {
+  const rollup = [
+    { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-08-22T01:26:02Z", detailsUrl: "https://github.com/x/y/actions/runs/1/job/11" },
+    { name: "coverage-ratchet", conclusion: "CANCELLED", startedAt: "2026-08-22T01:26:04Z", detailsUrl: "https://github.com/x/y/actions/runs/1/job/22" },
+  ];
+  const ciFailures = fetchCiFailures("craigoley", "remudero", rollup);
+  const cancelled = cancelledRequiredChecks(rollup, ["ci-gate", "coverage-ratchet"]);
+  // The exact subtraction `runSweep` performs before deciding whether to spend a fix-rung strike.
+  const genuineFailures = ciFailures.filter((f) => !cancelled.some((c) => c.name === f.name));
+  assert.deepEqual(genuineFailures, [], "nothing genuine remains, so the lane stands down instead of dispatching");
 });

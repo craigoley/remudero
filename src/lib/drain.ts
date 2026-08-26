@@ -21,7 +21,13 @@ import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";
-import { partitionByFileOverlap, serializedLedgerPayload, settledSetPayload } from "./dispatch-overlap.js";
+import {
+  NO_OBSERVED_SCOPE,
+  partitionByFileOverlap,
+  serializedLedgerPayload,
+  settledSetPayload,
+  type ObservedScopeByTask,
+} from "./dispatch-overlap.js";
 import { taskIdFromRunBranch } from "./status.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
@@ -207,6 +213,17 @@ export interface NextRunnableOpts {
    * Omitted ⇒ behaves EXACTLY as before this check existed.
    */
   readLiveState?: (taskId: string, prNumber: number) => string | undefined;
+  /**
+   * W1-T2286: each candidate's OBSERVED file scope (W1-T2237's `ObservedScopeByTask`), consulted
+   * ONLY by {@link runnableCandidates}' packing (`packDisjointFirst`/`isDisjointFromEvery`) — the
+   * SAME map handed to `partitionByFileOverlap`'s own downstream call in `runDrainLanes`/
+   * `runDaemon`, so the pack's disjointness pre-check and the real partition agree on one
+   * effective scope rather than picking a candidate the partition then serializes away. Omitted
+   * ⇒ every candidate is scored on its bare declaration, byte-identical to before this field
+   * existed — see {@link ObservedScopeByTask}'s own doc for why no production caller supplies one
+   * yet.
+   */
+  observedByTask?: ObservedScopeByTask;
   /**
    * Called once per task whose CACHED in-flight snapshot this live re-check
    * overturned — one PR-level observation, fired for EVERY freshly-observed
@@ -609,7 +626,7 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
   for (const t of dispatchOrder(plan.tasks)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
   }
-  return packDisjointFirst(eligible, limit);
+  return packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE);
 }
 
 /**
@@ -631,11 +648,11 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
  * the result is byte-identical to the old plain-truncation order. The pack never reorders what it
  * cannot improve.
  */
-function packDisjointFirst(eligible: readonly Task[], limit: number): Task[] {
+function packDisjointFirst(eligible: readonly Task[], limit: number, observedByTask: ObservedScopeByTask): Task[] {
   const collected: Task[] = [];
   const remaining = [...eligible];
   while (collected.length < limit && remaining.length > 0) {
-    let pickIndex = remaining.findIndex((candidate) => isDisjointFromEvery(collected, candidate));
+    let pickIndex = remaining.findIndex((candidate) => isDisjointFromEvery(collected, candidate, observedByTask));
     if (pickIndex === -1) pickIndex = 0; // no disjoint candidate remains — fall back to dispatchOrder position
     collected.push(remaining[pickIndex]);
     remaining.splice(pickIndex, 1);
@@ -643,12 +660,15 @@ function packDisjointFirst(eligible: readonly Task[], limit: number): Task[] {
   return collected;
 }
 
-/** True iff `candidate`'s `files:` overlaps NONE of `collected` — one pairwise
- *  `partitionByFileOverlap` check per already-collected task, so an undeclared-scope task (which
- *  `overlappingPaths` fail-closes as overlapping everything) never passes once anything is
- *  collected, exactly mirroring the real downstream partition's own verdict. */
-function isDisjointFromEvery(collected: readonly Task[], candidate: Task): boolean {
-  return collected.every((c) => partitionByFileOverlap([c, candidate]).dispatch.length === 2);
+/** True iff `candidate`'s EFFECTIVE scope (declared `files:` unioned with `observedByTask`, W1-T2286)
+ *  overlaps NONE of `collected`'s — one pairwise `partitionByFileOverlap` check per already-collected
+ *  task, so an undeclared-scope task (which `overlappingPaths` fail-closes as overlapping everything)
+ *  never passes once anything is collected, exactly mirroring the real downstream partition's own
+ *  verdict. `observedByTask` is passed straight through to that same check — see its own call site
+ *  in `runnableCandidates` for why this must be the SAME map the caller later hands the real
+ *  `partitionByFileOverlap` pass, not a second, possibly-different one. */
+function isDisjointFromEvery(collected: readonly Task[], candidate: Task, observedByTask: ObservedScopeByTask): boolean {
+  return collected.every((c) => partitionByFileOverlap([c, candidate], observedByTask).dispatch.length === 2);
 }
 
 /** Reason a drain stopped — every terminal state is one of these. */
@@ -1367,6 +1387,16 @@ export interface DrainDeps {
    */
   readClosedRunBranchPrs?: () => string;
   /**
+   * W1-T2286: the same {@link ObservedScopeByTask} threaded to {@link NextRunnableOpts.observedByTask}
+   * for the pack step AND to `partitionByFileOverlap`'s own direct call in `runDrainLanes` below —
+   * ONE dependency, read twice, so the candidates the pack step admits and the partition that
+   * decides `dispatch`/`serialized` for them never disagree about what each task's effective
+   * scope is. Optional — omitted, both call sites fall back to `NO_OBSERVED_SCOPE` and dispatch
+   * is byte-identical to before this dependency existed; no production caller supplies one yet
+   * (see {@link ObservedScopeByTask}'s own doc).
+   */
+  observedByTask?: ObservedScopeByTask;
+  /**
    * The per-task dispatch CIRCUIT BREAKER (P29(ii)), re-derived from the
    * ledger each call — same freshness contract as `refreshMerged`/`isOpenPr`.
    * Optional — omitted, dispatch behaves exactly as before this breaker
@@ -1665,6 +1695,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
 
     const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T2286: unused by this single-lane path (`nextRunnable`/`nextCurated` never pack or
+      // partition) — carried here only so `NextRunnableOpts` is filled the same way at both
+      // `skipOpts` construction sites. See `DrainDeps.observedByTask`'s own doc.
+      observedByTask: deps.observedByTask,
       // W1-T916: the argument W1-T534 declared and nothing supplied. `pushedRunBranches` is
       // resolved ONCE above this loop, so this closure is a set-membership test and never a round
       // trip. Undefined when no reader was injected ⇒ `hasPushedRunBranch` stays undefined ⇒
@@ -2018,6 +2052,10 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
 
     const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T2286: the SAME map handed to `partitionByFileOverlap` below (where this pass calls
+      // it directly) — see `DrainDeps.observedByTask`'s own doc for why the pack step and the
+      // real partition must never disagree.
+      observedByTask: deps.observedByTask,
       // W1-T916: the argument W1-T534 declared and nothing supplied. `pushedRunBranches` is
       // resolved ONCE above this loop, so this closure is a set-membership test and never a round
       // trip. Undefined when no reader was injected ⇒ `hasPushedRunBranch` stays undefined ⇒
@@ -2106,7 +2144,12 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // or (far more commonly) has an OPEN PR of its own, so the in-flight
     // guard above excludes it from candidates entirely and the collision
     // never recurs. Self-resolving; no bookkeeping needed here.
-    const partition = partitionByFileOverlap(candidates);
+    //
+    // W1-T2286: `deps.observedByTask` — the SAME map `skipOpts.observedByTask` fed the pack step
+    // above — is passed EXPLICITLY rather than omitted, so this call site no longer relies on
+    // `partitionByFileOverlap`'s own default parameter. `?? NO_OBSERVED_SCOPE` keeps today's
+    // behaviour byte-identical when no observer is wired (no production caller supplies one yet).
+    const partition = partitionByFileOverlap(candidates, deps.observedByTask ?? NO_OBSERVED_SCOPE);
     for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
     const dispatchSet = partition.dispatch;
     // DEFENSIVE, NOT A DISTINCT CAUSE: `partitionByFileOverlap` places its first candidate against

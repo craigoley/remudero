@@ -1299,7 +1299,15 @@ test("W1-T350: the FIRST Answer submit PREVIEWS the expansion (POST /v1/feedback
   const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler, "no needs-me-list submit handler found");
   assert.match(submitHandler, /needs-me-answer-submit/);
-  assert.match(submitHandler, /postJson\("\/v1\/feedback\/preview", \{ text: answer, replyTo \}\)/, "must preview before the confirmed file");
+  // W1-T2301: this call now opts OUT of postJson's automatic ack ({ suppressAck: true }) -- the
+  // preview's own "nothing is filed yet" ack must never paint on the fail-open leg that files
+  // right behind it on this same click; the armed leg fires it manually once it has the
+  // expansion in hand (see the acceptance tests in test/serve.write-ack.test.ts).
+  assert.match(
+    submitHandler,
+    /postJson\("\/v1\/feedback\/preview", \{ text: answer, replyTo \}, \{ suppressAck: true \}\)/,
+    "must preview before the confirmed file",
+  );
 });
 
 test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, reading its claim back in the button label — never a bare 'Confirm?'", () => {
@@ -1307,7 +1315,11 @@ test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, r
   const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler);
   assert.match(submitHandler, /submitBtn\.dataset\.confirming === "true"/, "a second submit must be distinguished from the first");
-  assert.match(submitHandler, /postJson\("\/v1\/feedback", \{ text: answer, replyTo, expansion \}\)/, "the confirmed submit must file WITH the previewed expansion");
+  assert.match(
+    submitHandler,
+    /postJson\("\/v1\/feedback", \{ text: answer, replyTo, expansion, submissionKey \}\)/,
+    "the confirmed submit must file WITH the previewed expansion AND the per-submission key (W1-T2302)",
+  );
   assert.match(submitHandler, /submitBtn\.textContent =\s*\n?\s*`Confirm: \$\{expansion\.claim\}/, "the armed label must read back the expansion");
 });
 
@@ -1398,8 +1410,53 @@ test("W1-T350: an expander failure/outage (nothing to show) leaves the FIRST cli
   assert.ok(submitHandler);
   const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
   assert.ok(noExpansionBranch, "no `if (!expansion)` fallback branch found");
-  assert.match(noExpansionBranch, /postJson\("\/v1\/feedback", \{ text: answer, replyTo \}\)/, "must file WITHOUT an expansion key, exactly the pre-W1-T350 request shape");
-  assert.doesNotMatch(noExpansionBranch, /expansion,/, "the fallback file must never send a null/undefined expansion field either");
+  assert.match(
+    noExpansionBranch,
+    /postJson\("\/v1\/feedback", \{ text: answer, replyTo, submissionKey \}\)/,
+    "must file WITHOUT an expansion key (pre-W1-T350 shape) but WITH the per-submission key (W1-T2302)",
+  );
+  assert.doesNotMatch(noExpansionBranch, /\{ text: answer, replyTo, expansion/, "the fallback file must never send a null/undefined expansion field either");
+});
+
+// ── W1-T2302: the console mints a per-submission key and sends it on the filing click from
+// BOTH the confirm leg and the fail-open leg (acceptance 4) — the identity a repeat POST
+// /v1/feedback (a reload, a second tab, a re-entrant click) is recognised BY server-side.
+
+test("W1-T2302: a per-replyTo submissionKey map + mint function exist, and the key is minted BEFORE either the fail-open leg or the later confirm leg can fire", () => {
+  const html = renderShellHtml();
+  assert.match(html, /const answerSubmissionKeys = new Map\(\);/, "keyed per replyTo, the same discipline as answerConfirmTimers/answerExpansions");
+  assert.match(
+    html,
+    /function mintSubmissionKey\(\) \{[\s\S]*?randomUUID[\s\S]*?\n  \}/,
+    "must mint an opaque per-submission id, never derived from the answer text",
+  );
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  const mintIdx = submitHandler.indexOf("answerSubmissionKeys.set(replyTo, mintSubmissionKey())");
+  const previewIdx = submitHandler.indexOf('postJson("/v1/feedback/preview"');
+  assert.ok(mintIdx >= 0, "the key must be minted (or reused) somewhere in the submit handler");
+  assert.ok(mintIdx < previewIdx, "the key must exist before the preview fetch fires, so BOTH the fail-open leg right after it and the confirm leg on a later click can read the SAME one back");
+});
+
+test("W1-T2302: the fail-open leg sends the minted submissionKey on the filing POST (acceptance 4)", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
+  assert.ok(noExpansionBranch);
+  assert.match(noExpansionBranch, /const submissionKey = answerSubmissionKeys\.get\(replyTo\)/);
+  assert.match(noExpansionBranch, /postJson\("\/v1\/feedback", \{ text: answer, replyTo, submissionKey \}\)/);
+});
+
+test("W1-T2302: the confirm leg sends the SAME per-replyTo submissionKey on the filing POST, reading it back rather than minting a fresh one (acceptance 4)", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  assert.match(
+    submitHandler,
+    /if \(submitBtn\.dataset\.confirming === "true"\) \{[\s\S]*?if \(!answerSubmissionKeys\.has\(replyTo\)\) answerSubmissionKeys\.set\(replyTo, mintSubmissionKey\(\)\);[\s\S]*?const submissionKey = answerSubmissionKeys\.get\(replyTo\);[\s\S]*?postJson\("\/v1\/feedback", \{ text: answer, replyTo, expansion, submissionKey \}\)/,
+    "the confirm leg must read the key back (lazily minting only if somehow absent), never mint a fresh one unconditionally",
+  );
 });
 
 test("W1-T350: 'File raw' ALWAYS skips the preview and files immediately — never armed, never a second click", () => {

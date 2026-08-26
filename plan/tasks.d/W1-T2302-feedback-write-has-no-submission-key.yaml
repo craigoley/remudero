@@ -1,0 +1,104 @@
+- id: W1-T2302
+  title: "a repeat of the SAME console feedback submission files a SECOND durable entry — the arm-then-confirm is client-only, POST /v1/feedback carries no submission key, and captureFeedback mints a fresh id per call, so nothing on the server can tell a retry from a new filing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    THE COST IS DATED AND IT WAS PAID BY HAND (feedback#fb-1785969338913-dc3d0f). Two byte-identical
+    entries five seconds apart from one operator's clicks — fb-1785969044581-c341bd at
+    22:30:44.584Z and fb-1785969049475-f40327 at 22:30:49.475Z, both origin: ui, both expansion:
+    null. One was withdrawn by hand. Nothing in the system noticed; nothing could have.
+
+    THE ANSWER TO THE ENTRY'S THIRD RECON QUESTION — does an id or nonce make a repeat click
+    idempotent — IS NO, AND IT IS NO BY CONSTRUCTION, established from source:
+    (1) POST /v1/feedback (src/lib/panel-graph.ts, buildSubmitFeedbackRoute) validates text,
+        attachments, replyTo and expansion. There is no submission key in the body shape, no dedup,
+        and no read of the recent corpus. The route is declared tier: "low".
+    (2) captureFeedback (src/lib/feedback.ts) takes `opts.id ?? generateFeedbackId()` and
+        generateFeedbackId is `fb-<epoch-ms>-<6 hex>` — a fresh, distinct, durable entry per call.
+    (3) THE ARM IS CLIENT-ONLY AND THIS IS RE-VERIFIED, NOT REPEATED FROM THE ENTRY. The whole
+        arm-then-confirm state lives in the served client script (the per-replyTo confirm timers,
+        cached expansions and in-flight set in src/lib/serve.ts). The console's own second factor —
+        the confirm-nonce round trip in postJson — is applied to exactly five HIGH-tier paths
+        (/v1/manual/approve, /v1/drain/kick, /v1/drain/run, /v1/inbox/approve, /v1/skills/run), and
+        /v1/feedback is not one of them. So any caller speaking HTTP, any retry, any reload bypasses
+        the arm completely.
+    (4) W1-T2206 (#2710) closed the double-click WINDOW in ONE browser tab: its in-flight guard is a
+        Set in the client script, and it clears the input after a filing. That is a real fix and it
+        is not re-filed here. IT DID NOT MAKE THE WRITE IDEMPOTENT — a guard held in one page's
+        memory cannot survive a reload, a second tab, a retried fetch, or a direct POST.
+
+    W1-T350'S RULING STANDS AND IS NOT RE-LITIGATED: the arm is a READ-BACK, never an authorization
+    control, and THE WRITE TOKEN IS WHAT AUTHORISES. This task adds no second factor and no
+    server-side enforcement of the confirm step. It adds IDENTITY for a submission — the thing that
+    lets a repeat be RECOGNISED as the same submission — which is a different property from
+    authorization and does not disturb that ruling.
+
+    AND THE SEAM ALREADY EXISTS, WITH A TRAP IN IT THAT MUST BE NAMED BEFORE ANYONE USES IT.
+    captureFeedback ACCEPTS a caller-supplied `opts.id`, so "pass the client's key through as the id"
+    is the obvious implementation — and it is WRONG. The write is an unconditional writeFileSync
+    over feedbackEntryPath(root, id): re-using an id would OVERWRITE the existing entry and reset its
+    status, proposal_pr, summary and expansion. An entry already triaged to rejected or accepted
+    would silently return to new. A repeat must return the entry that already exists, untouched.
+  design: |
+    THE SUBMISSION IS THE UNIT OF IDENTITY, NOT THE TEXT.
+    (i) A KEY MINTED PER SUBMISSION BY THE CONSOLE and carried on POST /v1/feedback. A repeat
+    carrying a key that already filed answers with the entry it already filed — same shape, 200, no
+    second write, no second ledger line for a filing that did not happen. The key is minted where
+    the operator's intent is (one draft, one submit), never derived from a hash of the text alone.
+    (ii) NEVER CLOBBER. A key resolving to an existing entry must not re-write that entry's file.
+    captureFeedback's unconditional writeFileSync is the trap named in the rationale: whatever shape
+    is chosen, a repeat must be a READ. Assert it against an entry whose status has already moved.
+    (iii) WHERE THE KEY LIVES IS THE DESIGN QUESTION — ESTABLISH IT, DO NOT PICK IT. A bounded
+    in-process map is the cheap answer and it dies with the serve process, which is the same class
+    of lesson the confirm-nonce store already taught (W1-T451: a per-process map with no eviction is
+    both unbounded growth and standing state). A durable field on the entry needs no new store at
+    all, which is the constraint W1-T1076 states in terms — no file, no index, no second thing to go
+    stale — and it is readable by the same listFeedback the inbox already runs. State the choice and
+    the reasoning, and say what happens to a repeat that arrives after a restart.
+    (iv) THE FALSIFIER RUNS BOTH WAYS AND THE SECOND HALF IS THE ONE THAT MATTERS: two DELIBERATELY
+    separate submissions carrying the same text must still file two entries. An operator re-filing
+    the same observation on purpose is not a duplicate, and a check that cannot tell those apart is
+    worse than none — which is precisely why the key is per-submission rather than per-text.
+    (v) THE REPLY EDGE MUST NOT BREAK. A submission carrying replyTo advances the target from
+    grilling to answered with answered_by (W1-T2278), and the route already refuses a second reply to
+    an already-answered target. A recognised repeat must not attempt that transition a second time
+    and must not turn its own refusal into an error the operator sees.
+    (vi) SCOPE IS THE CONSOLE WRITE ROUTE AND THE CAPTURE BOUNDARY IT CALLS. NOT IN SCOPE: dedup of
+    cli/issue/alert-origin feedback, any near-duplicate or similarity scoring (W1-T1076 owns
+    duplicate detection at task-filing time and its lesson is that a similarity metric needs its own
+    measured false-positive load — nothing here scores text), the banner wording (W1-T2301), wiring
+    the expander (W1-T2303), write tiers or a second factor for this route, and removing the
+    duplicate already withdrawn by hand.
+  acceptance:
+    - claim: "a second submission carrying a key that already filed writes no second entry and answers with the entry already filed"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "a recognised repeat never rewrites the existing entry, so a status already recorded against it survives and its reply target is not transitioned twice"
+      proof: "unit test: test/feedback.test.ts"
+    - claim: "two deliberately separate submissions carrying identical text still file two entries"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "the console mints a submission key per submission and sends it on the filing click from both the confirm leg and the fail-open leg"
+      proof: "unit test: test/serve.test.ts"
+  risk: high
+  origin: feedback#fb-1785969338913-dc3d0f
+  plan_refs: ["W1-T350", "W1-T2206", "W1-T2278", "W1-T451", "§7B"]
+  files: [src/lib/serve.ts, src/lib/panel-graph.ts, src/lib/feedback.ts, test/serve.test.ts, test/panel-graph.test.ts, test/feedback.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — the route half asserts in-process against a temp root the way every other
+    panel-graph route test already does; the client half asserts against the served shell with an
+    injected response, the way #2710's own pending-state claims do. Nothing here needs an operator.
+    risk:high, set UP FRONT: three subsystems by the linter's count (serve, panel-graph, feedback),
+    and Rule 19 refuses that at medium. DECOMPOSITION IS DECLINED WITH A REASON: a key the client
+    mints but the route ignores changes nothing, and a route that accepts a key over a capture
+    function that clobbers on re-use is worse than today. The three edits are one mechanism.
+    budget_usd 45 — the cost is not the diff, it is the falsifiers: the never-clobber assertion
+    against an already-moved status, the two-separate-submissions control, and the reply-edge case.
+    NO depends_on: the sibling shards from this same entry change the banner (W1-T2301) and wire the
+    expander (W1-T2303); neither is a prerequisite for recognising a repeat. All three declare
+    src/lib/serve.ts, so overlappingPaths already keeps them out of one batch.
+    ONE CONCERN: whether the system can tell a repeat of one submission from a new one.

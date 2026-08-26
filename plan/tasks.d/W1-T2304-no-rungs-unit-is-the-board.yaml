@@ -1,0 +1,104 @@
+- id: W1-T2304
+  title: "NO RUNG'S UNIT IS THE BOARD — the sweep and the fix rung read one PR, the retro reads runs since a marker, auto-triage reads queue capacity, and the sweep's whole cross-PR vocabulary is one function that is undefined below two PRs; an operator ran the missing loop by hand for a night and it produced four merged fixes and five shards none of which was reachable from inside a single PR's diff"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/lib/board-review.ts, src/lib/measurement-cadence.ts, test/board-review.test.ts]
+  origin: "operator-brief#no-rungs-unit-is-the-board-2026-08-26"
+  plan_refs: ["W1-T2288", "W1-T2289", "W1-T2240", "W1-T1259"]
+  status: queued
+  attempts: 0
+  rationale: |
+    FOUR RUNGS, FOUR UNITS, MEASURED 2026-08-26. `runSweep`'s `DISPOSITION_RULES` rows and the fix
+    rung read ONE PR. `retroTriggerCheck` reads runs since a marker. `decideAutoTriage` reads queue
+    capacity (`deferralPending || dispatchCount < laneBudget`). The sweep holds exactly ONE
+    cross-PR reading — `baseCausedCheckName(pr, allPrs)`, which returns undefined below two PRs and
+    can ask only "is this red base-caused". `DEFAULT_FIX_CLASSES` is exactly three rows. So three
+    things are unowned: CROSS-PR RELATIONS beyond base-cause (the sibling-caused-red class that
+    became #2918's `withoutDownstreamGateFailure`); THE AUTOMATION'S OWN SILENCES — "why didn't the
+    fix rung catch this" is a question no rung asks, and asking it produced #2891 (the CI log tail
+    whose emptiness finally got a name); and MINING BOARD FINDINGS INTO THE PLAN, where the retro
+    mines runs. An operator ran that loop by hand across 2026-08-25/26 and it produced #2891,
+    #2911, #2914, #2918 and five filed shards — none reachable from inside a single PR's diff.
+
+    WHY THE RUNG IS READ-ONLY, MECHANICALLY AND NOT MERELY PRUDENTIALLY. `fix.stood_down` fires on
+    a foreign push, and `autonomy.ts` counts a `fix.stood_down` line carrying `issue_url` as HUMAN
+    EVIDENCE in the zero-touch join. An unattended rung pushing to lane branches would therefore
+    trip the fleet's own stand-down machinery AND be scored as a human touch — corrupting the
+    autonomy metric in the very act of working. The write half of the hand loop also has a home
+    already: its fixes landed as sweep improvements and fix-class rows (a new systemic fix is "a
+    ROW, never a branch"), so the board rung feeds the cheap rungs and never replaces them.
+
+    THE COST OF THE STATUS QUO IS STRUCTURALLY UNKNOWABLE, WHICH IS ITS OWN ARGUMENT. W1-T2240
+    records that the ledger meters SPAWNS and no step records an operator session's spend — the
+    hand loop ran as operator sessions, so a night of Opus-class board reads left no cost record
+    on any host. A rung is meterable; a heroic habit is not.
+
+    THE INTAKE-TRIGGER LESSON IS ALREADY FILED TWICE AND THIS SHARD RE-FILES NEITHER. W1-T2288:
+    the retro's trigger counts what shipped. W1-T2289: auto-triage asks whether lanes filled, and
+    on 2026-08-25 a hand-fed queue silently disabled intake for thirty-three hours while its
+    cadence bounds were provably not binding. Both are cited as the reason this rung's trigger
+    reads its own input's depth — the board — and nothing else.
+  design: |
+    (i) THE TRIGGER IS THIS SHARD'S FIRST CONCERN, NOT A SEPARATE TASK — a rung without its
+    trigger is the merged-green-unreached class. Depth signals only, thresholds derived rather
+    than chosen, measured 2026-08-26: OLDEST OPEN NON-DRAFT AGE ≥ ~8h (3× the P90 of 2.5h across
+    the last 50 merged PRs, median 23 minutes; the night's two real stragglers sat at 19h and
+    13h); RED-COUNT ≥ 2 (structural — one red is the fix rung's home turf, and
+    `baseCausedCheckName` is undefined below two); ANY UNHANDLED ESCALATION (a threshold above
+    one would re-erase the signal). OPEN COUNT IS NOT A SIGNAL: the board cycled at 4-7 open all
+    night while the hand loop found five defects. Ownership: `decideMeasurementCadence`'s
+    marker / `minIntervalMinutes` / `maxPerDay` primitive — a FOURTH VERB on the existing spine
+    (W1-T1259), never a fourth cadence, with its own policy row. No existing bound moves: W1-T2289
+    records the bounds were not what silenced intake.
+
+    (ii) AUTHORITY, READ-ONLY BY CONSTRUCTION. The rung reads the whole open board, diagnoses,
+    writes ONE report artifact, files registry proposals, and refreshes its own status output.
+    Plus exactly one sanctioned action: re-running a check that died before any test body ran, at
+    most once. It pushes to no branch, resolves no conflict, edits no PR body, and never touches
+    a draft — `isDraft === true` stays the operator's hold. Write authority beyond that is an
+    operator decision for after this rung has a track record, and is OUT OF SCOPE here.
+
+    (iii) MINING RIDES THE EXISTING RULE-15 VEHICLES UNCHANGED. Findings become proposal
+    candidates through `updateProposalRegistry` — the single writer, with the inbox's tiering and
+    operator ratification owning their fate — exactly as the retro's own harvest is "never
+    auto-filed (rule 15)". The rung FILES NOTHING AND MINTS NOTHING. Attribution is
+    registry-assigned at ratification, not written at diagnosis time: the hand loop's one night
+    already left a mis-citation in merged source (a comment attributing the downstream-gate
+    narrowing to W1-T2296, the unrelated incident-replay shard), because a lane cited against a
+    frontier that moved four times. The registry path makes identity late-bound and collision-free.
+
+    (iv) THE RECURSION, BOUNDED THREE WAYS. A rung that proposes tasks about automation failures
+    produces builds that can fail, which feeds the next board read. Bounds: every product passes
+    RATIFICATION and then the MERGE GATE — the loop cannot cycle without a human turn; the
+    cadence's `maxPerDay` caps fires regardless; and the rung NEVER REPORTS ON WORK ITS OWN
+    PROPOSALS PRODUCED until that work has merged or died — it diagnoses the board it found,
+    never the board it made.
+
+    (v) WHAT MUST NOT CHANGE, REFUSED BY NAME. The fix rung keeps its two-strike ceiling, its
+    unchanged-tree stand-down and its escape — this rung feeds it rows, never replaces it. No
+    gate is weakened, no bound tuned to reduce a count, no cadence bound lowered. Nothing
+    auto-merges; drafts stay untouched; the operator gates every merge and deploy.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS — a new pure module, the cadence-spine
+    wiring and a test file read as two concerns to the linter. Nothing on the dispatch, review or
+    arm paths moves.
+  acceptance:
+    - claim: "a board younger than every depth threshold produces no fire"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "an oldest-open age past the threshold fires the trigger"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "a red count below two does not by itself fire the trigger"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "an unhandled escalation fires the trigger"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "the rung's only writes are its report and its registry proposals"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "work born from the rung's own proposals is excluded until merged or dead"
+      proof: "unit test: test/board-review.test.ts"
+    - claim: "the cadence spine calls the board reader rather than shipping it unreached"
+      proof: "grep: buildBoardReview( in src/lib/measurement-cadence.ts"

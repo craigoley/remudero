@@ -29,7 +29,23 @@ raw: "THE CONSOLE FEEDBACK PATH FILES ON EVERY CLICK WHILE THE BANNER SAYS
   state."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
-summary: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/2927
+summary:
+  headline: Feedback files duplicate; confirmation message is false
+  what_happened: Two operator clicks filed two identical entries, but the banner
+    falsely claimed 'nothing filed yet—review and confirm.'
+  decision: Disable console-feedback writes until the confirmation button actually
+    controls whether data files.
+  options:
+    - label: Disable immediately
+      consequence: Stops silent duplicates now; feature offline until full fix with
+        working confirmation is deployed.
+    - label: Deploy deduplication today
+      consequence: Prevents exact duplicates via server-side nonce but false
+        confirmation remains; plan full fix for next sprint.
+    - label: Fast-track confirmation fix
+      consequence: Solves root cause but feature stays live with known defect until
+        deployed; manual cleanup may be needed.
 expansion: null
+answered_by: null

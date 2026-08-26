@@ -52,7 +52,13 @@ import {
 // W1-T343 (ADOPT DRAIN'S LANE MACHINERY, NEVER A SECOND IMPLEMENTATION): the SAME pure
 // overlap partition `runDrainLanes` (drain.ts) already composes with `runnableCandidates`/
 // `laneDispatchBudget` above — reused here verbatim rather than re-derived.
-import { partitionByFileOverlap, serializedLedgerPayload, settledSetPayload } from "./dispatch-overlap.js";
+import {
+  NO_OBSERVED_SCOPE,
+  partitionByFileOverlap,
+  serializedLedgerPayload,
+  settledSetPayload,
+  type ObservedScopeByTask,
+} from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
@@ -871,6 +877,17 @@ export interface DaemonDeps {
    * type-checks. Optional — omitted, dispatch behaves exactly as before this existed.
    */
   readPushedRunBranches?: () => string;
+  /**
+   * W1-T2286 — the same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, for the
+   * daemon's own dispatch path (W1-T343 reuses `runnableCandidates`/`partitionByFileOverlap`
+   * rather than re-deriving them, and this dependency follows that reuse). Threaded to BOTH the
+   * pack step (`dispatchOpts.observedByTask` below) and `partitionByFileOverlap`'s own direct
+   * call in the dispatch-set branch below, so the two never disagree about a candidate's
+   * effective scope — see `DrainDeps.observedByTask`'s own doc for the full contract. Optional —
+   * omitted, both call sites fall back to `NO_OBSERVED_SCOPE` and dispatch is byte-identical to
+   * before this dependency existed; no production caller supplies one yet.
+   */
+  observedByTask?: ObservedScopeByTask;
   /**
    * WHAT THE BREAKER SAW for a task, supplied by the SAME memoised evaluation the
    * `isCircuitTripped`/`isIndeterminate` predicates answered from (run-task.ts's
@@ -3073,6 +3090,10 @@ export async function runDaemon(
         : undefined;
       const dispatchOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T2286: the SAME map handed to `partitionByFileOverlap`'s own direct call below — see
+      // `DaemonDeps.observedByTask`'s own doc for why the pack step and the real partition must
+      // never disagree.
+      observedByTask: deps.observedByTask,
       // W1-T916: the argument W1-T534 declared and nothing supplied — see DrainDeps'
       // `readPushedRunBranches` for why the reader is injected and the parse hoisted.
       ...(pushedRunBranches
@@ -3202,7 +3223,10 @@ export async function runDaemon(
         });
       }
       const candidates = runnableCandidates(planForBatch, isMerged, budget, dispatchOpts);
-      const partition = partitionByFileOverlap(candidates);
+      // W1-T2286: `deps.observedByTask` passed EXPLICITLY (`?? NO_OBSERVED_SCOPE`) rather than
+      // omitted, so this call site no longer relies on `partitionByFileOverlap`'s own default
+      // parameter — see `DaemonDeps.observedByTask`'s own doc.
+      const partition = partitionByFileOverlap(candidates, deps.observedByTask ?? NO_OBSERVED_SCOPE);
       for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
       deferredPairings = partition.serialized.length;
       laneBudget = budget;

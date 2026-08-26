@@ -2,6 +2,17 @@
 # folded into the §5B registry unchanged ("retro -> the existing retro
 # Architect (rmd retro), folded in"). Syncs plan/tasks.yaml from the ledger's
 # observed outcomes (src/lib/retro.ts's gather + calibration table).
+#
+# grounding_sources deliberately does NOT name a `state/` path (W1-T2281):
+# `state/` is gitignored (CLAUDE.md, W1-T255/W1-T256) so `state/ledger.ndjson`
+# is absent from every fresh checkout by construction, and the true ledger
+# UNION (live file + rotated `.ndjson.gz` archives) can only be assembled by
+# `resolveLedgerUnion`/`ledgerRotationEntries` (src/lib/ledger-grep.ts,
+# W1-T444) — a multi-file, gzip-aware reader, not a path a flat
+# `readFileSync` list can express. `MASTER-PLAN.md#Calibration` is the
+# checked-in prose home of exactly the observed-outcomes data this skill's
+# own output_contract already describes reconciling against ("the gather +
+# calibration table").
 tools:
   - Read
   - Grep
@@ -16,7 +27,7 @@ output_contract: >
   the gather + calibration table only, proposing nothing.
 
 grounding_sources:
-  - state/ledger.ndjson
+  - MASTER-PLAN.md#Calibration
   - plan/tasks.yaml
   - LEARNINGS.md
 

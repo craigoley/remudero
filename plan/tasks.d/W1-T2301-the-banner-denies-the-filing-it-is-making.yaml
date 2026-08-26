@@ -1,0 +1,107 @@
+- id: W1-T2301
+  title: "the console banner says NOTHING IS FILED YET on the very click that files — the write-ack is keyed by ROUTE and never by OUTCOME, so the fail-open leg fires the preview's acknowledgement and then files the entry behind it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: |
+    FROM THE OPERATOR, MEASURED, NOT INFERRED (feedback#fb-1785969338913-dc3d0f, 2026-08-05 22:35Z).
+    Two byte-identical entries landed five seconds apart from one operator at one form —
+    fb-1785969044581-c341bd at 22:30:44.584Z and fb-1785969049475-f40327 at 22:30:49.475Z, both
+    origin: ui, both raw text identical. The banner he was left looking at read "Preview generated —
+    nothing is filed yet. Review it, then submit again to confirm and file." It had already filed
+    twice. One duplicate was withdrawn by hand; the survivor is on disk today at status: rejected.
+
+    THE ENTRY'S FALSIFYING CHECK IS ANSWERED, AND IT FAILS. The check was: if those two entries came
+    from two genuinely separate submissions rather than one operator clicking twice, the banner is
+    honest. BOTH ENTRIES CARRY expansion: null, AND THAT IS THE FAIL-OPEN LEG'S SIGNATURE — the
+    confirm leg files WITH the expansion it read back (src/lib/serve.ts, the answer submit handler's
+    data-confirming branch posts {text, replyTo, expansion}), so an entry filed by a CONFIRMED
+    submission cannot be expansion: null. Two fail-open filings, five seconds apart, and the banner
+    denied both.
+
+    THE MECHANISM, ESTABLISHED FROM SOURCE (this is the RECON the entry asked for, the banner half).
+    (a) The acknowledgement table is keyed by ROUTE: WRITE_ACK in src/lib/serve.ts maps
+        "/v1/feedback/preview" to the exact string above and "/v1/feedback" to "Answer recorded."
+    (b) showWriteAck(path) fires from ONE place — postJson's ok arm — for all twelve write controls.
+        That one place knows the ROUTE and knows NOTHING about what the caller does next. This
+        single-site discipline is deliberate and correct (it is why the thirteenth control cannot
+        forget an ack); the defect is that the preview route's wording asserts a fact about the
+        CLICK, not about the request.
+    (c) The fail-open leg of the answer submit handler calls postJson("/v1/feedback/preview") — which
+        fires "nothing is filed yet" — and then, ON THAT SAME CLICK, calls postJson("/v1/feedback"),
+        which files. The claim is false from the moment the first ack paints until the second
+        replaces it.
+    (d) AND THAT INTERVAL IS NOT INSTANTANEOUS. captureFeedback (src/lib/feedback.ts) writes the
+        entry, then calls landFeedback, and then — when a home-repo pointer is configured — can open
+        an UPSTREAM PULL REQUEST over the network (openUpstreamFeedbackPr) before the route replies.
+        The false banner stands for the whole of that, and the reply is what clears it.
+
+    WHY EVERY PRODUCTION SUBMISSION TAKES THAT LEG, NAMED HERE SO NOBODY FIXES IT TWICE.
+    PanelGraphDeps.expandFeedback is assigned NOWHERE in src/, so POST /v1/feedback/preview returns
+    {expansion: null} unconditionally in production and the console always falls through to the
+    filing leg. That absence is W1-T2303's whole concern and is NOT this task's to close. THIS task
+    owns one thing: the console must never assert that nothing was filed while the same click is
+    filing — and it must stay true even after W1-T2303 lands, because the fail-open leg survives as
+    the expander-outage path W1-T350 requires.
+
+    WHAT W1-T2206 (#2710) ALREADY FIXED, SO IT IS NOT RE-FILED HERE. It renders a pending state for
+    the whole preview call, refuses re-entry per replyTo, widens and surfaces the arm's expiry, and
+    labels the fail-open leg's BUTTON "Filed (no expansion available)". THE BANNER WAS LEFT
+    UNTOUCHED, deliberately: that shard's NOT IN SCOPE names "the truthfulness of the WRITE_ACK
+    banner text" as belonging to feedback#fb-1785969338913-dc3d0f. This is that half. The button now
+    says one thing and the banner says the opposite, which is the state this closes.
+  design: |
+    ACKNOWLEDGE THE OUTCOME, NOT THE ROUTE — AND KEEP THE ONE-PLACE DISCIPLINE.
+    (i) THE PREVIEW ACK MUST NOT SURVIVE A CLICK THAT FILES. Two shapes are live and either is
+    acceptable if argued: suppress the preview's ack at the ONE call site that is going to file on
+    the same click (a caller-supplied opt-out on postJson), or fire the preview ack only from the
+    ARM leg once the expansion is in hand. What is NOT acceptable is a second ack mechanism beside
+    postJson's: the single ok-path ack is what covers every other write control, and it must still
+    cover them unchanged after this.
+    (ii) THE WORDING STAYS FOR THE LEG IT IS TRUE FOR. On the armed leg the preview really does file
+    nothing, and W1-T350's read-back depends on the operator being told so. Do not delete the string
+    and do not weaken it into a neutral "recorded" — the fallback wording every unlisted route gets
+    is exactly the false reading this table entry exists to prevent.
+    (iii) THE FILING LEG MUST LEAVE THE OPERATOR WITH A TRUE STATEMENT, not merely with the false one
+    removed. Silence is its own defect (it is the dead-button class #2710 just closed); the leg that
+    files must end with an acknowledgement that says so.
+    (iv) A FAILED FILING STILL SPEAKS. postJson's not-ok arm clears the ack and calls showWriteError;
+    suppressing the preview ack must not create a leg where a 401/500 on the filing POST leaves the
+    operator with nothing at all. Assert that exit, it is the one a suppression is most likely to
+    break.
+    (v) NOT IN SCOPE, NAMED SO THE THREE SIBLINGS CANNOT ANSWER THE SAME QUESTION TWICE: idempotency
+    or dedup of a repeated submission (W1-T2302), wiring a real expander so the confirm leg runs at
+    all (W1-T2303), the pending/armed/expiry states on the control itself (W1-T2206, merged), the
+    confirm step's existence or length (W1-T350's standing constraint: the operator must see and be
+    able to correct the expansion before it files), and every other route's ack wording.
+  acceptance:
+    - claim: "on the leg where one click previews and then files, the acknowledgement the operator is left with names the filing and never claims that nothing was filed"
+      proof: "unit test: test/serve.write-ack.test.ts"
+    - claim: "on the leg where the preview returns an expansion and writes nothing, the preview acknowledgement still tells the operator nothing is filed yet and that submitting again confirms"
+      proof: "unit test: test/serve.write-ack.test.ts"
+    - claim: "a filing that fails after its preview succeeded leaves the operator with the error rather than with a stale acknowledgement, and every other write control's acknowledgement is unchanged"
+      proof: "unit test: test/serve.write-ack.test.ts"
+  risk: high
+  origin: feedback#fb-1785969338913-dc3d0f
+  plan_refs: ["W1-T350", "W1-T2206", "§7B"]
+  files: [src/lib/serve.ts, test/serve.write-ack.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — every claim is an assertion over the served shell's own client script with an
+    injected preview/submit response, which is how test/serve.write-ack.test.ts already drives the
+    ack banner and how the serve suites already drive this control. No operator, no live console.
+    risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS, and is set UP FRONT so sizingViolation returns
+    early: moduleIdFromPath reads src/lib/serve.ts as "serve" and test/serve.write-ack.test.ts as
+    "serve.write-ack", which is two subsystems by the linter's count. The blast radius is genuinely
+    small — one ack call site and one table entry, no route change, no server change, no spend path.
+    budget_usd 30 — one file, one string, and the cost is the falsifiers: three legs (armed,
+    fail-open, rejected filing) plus the unchanged-elsewhere control.
+    NO depends_on. W1-T2303 changes which leg production TAKES but not what either leg must SAY, and
+    W1-T2302 changes the body of the filing POST, not its acknowledgement. All three declare
+    src/lib/serve.ts or its client, so overlappingPaths keeps them out of one batch without an
+    ordering edge; whichever lands first, the others rebase.
+    ONE CONCERN: what the banner claims versus what the click did.

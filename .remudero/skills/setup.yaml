@@ -23,7 +23,7 @@ output_contract: >
 
 grounding_sources:
   - MASTER-PLAN.md#5A
-  - MASTER-PLAN.md#WS-4
+  - MASTER-PLAN.md#10
   - DECISIONS.md
   - CODEOWNERS
 
