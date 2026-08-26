@@ -647,6 +647,9 @@ import {
   type ArmedStalledPr,
   type CancelledRequiredCheck,
   type CiFailure,
+  type CiLogUnavailableCause,
+  describeCiLogUnavailable,
+  MAX_CI_LOG_FAILURE_DETAIL,
   type ClarificationQuestion,
   type CostGovernorResult,
   type CreditCandidate,
@@ -4891,13 +4894,24 @@ export function renderFixPrompt(opts: {
     const rendered =
       failures.length > 0
         ? failures
-            .map(
-              (f, i) =>
+            .map((f, i) => {
+              // A named unavailability replaces the `log tail:` line entirely rather than sitting
+              // beside an empty one: an empty `log tail:` is precisely the rendering that reads
+              // as "this check printed nothing", which is the confusion this branch exists to
+              // end. The cause text is authored HERE, never by CI, but it is still neutralized
+              // and kept inside the fence — the check name beside it is attacker-influenceable,
+              // and a reader must not have to know which half of a fenced block to trust.
+              const body = f.logUnavailable
+                ? `   ${neutralizeFenceMarkers(describeCiLogUnavailable(f.logUnavailable))}\n` +
+                  `   TREAT THIS AS "I CANNOT SEE WHY THIS FAILED", NOT AS A CLEAN CHECK.\n`
+                : `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n`;
+              return (
                 `${i + 1}. ${CI_LOG_FENCE_OPEN}\n` +
                 `   check: ${neutralizeFenceMarkers(f.name)}\n` +
-                `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n` +
-                CI_LOG_FENCE_CLOSE,
-            )
+                body +
+                CI_LOG_FENCE_CLOSE
+              );
+            })
             .join("\n\n")
         : "(no failing check detail was captured — re-check `gh pr checks` for the current state.)";
     return [
@@ -21008,9 +21022,13 @@ export function reviewOrphansFor(
 /**
  * W1-T100 (the #170 fix): failing required-check names + a tail of each one's
  * log — the ci-log fix mode's ONLY input (deriveFixMode/renderFixPrompt,
- * W1-T94). Best-effort: a log-fetch failure degrades to an EMPTY tail
- * (renderFixPrompt already renders "no failing check detail was captured" for
- * that case) — NEVER throws, so one unreadable log never strands the sweep.
+ * W1-T94). Best-effort: a log-fetch failure degrades to an EMPTY tail and
+ * NEVER throws, so one unreadable log never strands the sweep — but it no
+ * longer degrades SILENTLY. Every empty tail now carries a
+ * {@link CiLogUnavailableCause} naming why, because an unrecorded failed read
+ * is byte-indistinguishable from a check that simply printed nothing, and all
+ * three {@link DEFAULT_FIX_CLASSES} rows match by REGEX ON `logTail` — so an
+ * unexplained empty tail silently made every one of them unmatchable.
  * `owner`/`repo` are REQUIRED and passed as `--repo` on the `gh` call — the
  * daemon/sweep can target a repo other than its own checkout's cwd (the
  * daemon-repo-targeting design), so this must never rely on `gh`'s ambient
@@ -21045,6 +21063,11 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
     failing.map((c) => {
     const name = c.name ?? c.context ?? "unknown";
     let logTail = "";
+    // The named outcome for an empty tail. STILL BEST-EFFORT: every path below either assigns a
+    // cause or leaves one assigned, and NONE of them rethrows — a log that cannot be read must
+    // never take down the fix attempt that needs it. What changes is only that the reason now
+    // SURVIVES the read, instead of being swallowed with the error that carried it.
+    let logUnavailable: CiLogUnavailableCause | undefined = { kind: "no-job-id" };
     try {
       const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
       if (jobId) {
@@ -21053,11 +21076,27 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
           stdio: ["ignore", "pipe", "ignore"],
         });
         logTail = out.split("\n").slice(-tailLines).join("\n");
+        // A read that SUCCEEDS but yields nothing is a genuinely quiet job, not a failed read —
+        // the one case where an empty tail is the honest answer, and the one the other two
+        // causes must stay distinguishable from.
+        logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
       }
-    } catch {
-      /* best-effort — degrades to an empty tail, never throws */
+    } catch (err) {
+      // Reading the error's own text must not itself throw, or the best-effort contract would
+      // leak an exception out of the very catch that exists to contain one.
+      let detail = "unknown error";
+      try {
+        const e = err as { code?: unknown; message?: unknown };
+        const code = typeof e?.code === "string" && e.code ? `${e.code}: ` : "";
+        const message = typeof e?.message === "string" && e.message ? e.message : String(err);
+        detail = `${code}${message}`.slice(0, MAX_CI_LOG_FAILURE_DETAIL);
+      } catch {
+        /* keep the placeholder — a cause is still named, which is the whole point */
+      }
+      logUnavailable = { kind: "fetch-failed", detail };
+      logTail = "";
     }
-    return { name, logTail };
+    return logUnavailable === undefined ? { name, logTail } : { name, logTail, logUnavailable };
   }),
   );
 }

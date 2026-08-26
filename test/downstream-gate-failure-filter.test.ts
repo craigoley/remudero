@@ -96,3 +96,25 @@ test("REAL BOARD SHAPES, 2026-08-26: five reds narrow to their actual causes, #2
     );
   }
 });
+
+test("W1-T2296 x W1-T2287: the surviving failure keeps its NAMED unavailability cause through the filter", () => {
+  // The interaction the merge with `origin/main` created: `fetchCiFailures` now attaches a
+  // `logUnavailable` cause (a failed read vs a genuinely quiet job) and this filter runs over its
+  // result. Dropping the aggregate must not strip the cause off the entry that survives — that
+  // cause is the whole reason an empty tail is legible rather than silent.
+  const withCause: CiFailure[] = [
+    { name: CI_GATE_CHECK_NAME, logTail: "" },
+    { name: "coverage-ratchet", logTail: "", logUnavailable: { kind: "fetch-failed", detail: "403" } } as CiFailure,
+  ];
+  const out = withoutDownstreamGateFailure(withCause);
+  assert.deepEqual(
+    out.map((f) => f.name),
+    ["coverage-ratchet"],
+  );
+  assert.deepEqual(
+    (out[0] as CiFailure & { logUnavailable?: unknown }).logUnavailable,
+    { kind: "fetch-failed", detail: "403" },
+    "the named cause rides through untouched",
+  );
+});
+
