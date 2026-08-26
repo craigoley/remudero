@@ -61,7 +61,22 @@ import { pathToFileURL } from "node:url";
 import { join, relative } from "node:path";
 
 const TASK_ID_RE = /\bW1-T[0-9]+\b/g;
-const DECLARED_ID_LINE_RE = /^\s*-\s*id:\s*(W1-T[0-9]+)\s*$/;
+// THE ID GRAMMAR, DERIVED FROM WHAT THE PLAN ACTUALLY DECLARES, not from the `W1-T<n>` shorthand
+// every brief uses. Measured 2026-08-26 over plan/tasks.yaml + plan/tasks.d/: 901 declared ids, of
+// which 21 carry a single-letter suffix (W1-T1B, W1-T9a, W1-T12e, W1-T3F, ...) and 14 sit in another
+// workstream (W2-T1, W3-T3, W12-T1). The previous `W1-T[0-9]+` form saw 866 of them and DROPPED 35.
+//
+// DROPPED, NEVER TRUNCATED, and the difference decides what kind of defect this was. The `$` anchor
+// means `- id: W1-T1B` matches NOTHING; it does not read as `W1-T1`. So there was no false collision
+// between lettered siblings — there was a HOLE: a re-issued lettered or non-W1 id was invisible to
+// the collision check, which is the worse direction for a gate. Driven directly: the old regex
+// returns NO MATCH for `W1-T1B`, `W1-T9a` and `W3-T3`, and `W1-T1` only for `- id: W1-T1`.
+//
+// THE BOUNDARY IS THE LINE ANCHOR, NOT A CHARACTER CLASS. This repo's other id matches use
+// `W1-T<n>([^0-9]|$)`, which is right for finding an id inside prose and WRONG here for the same
+// reason the old form was: it would accept `W1-T1` as a prefix of `W1-T1B`. A declared id is the
+// WHOLE line after `- id:`, so `^...$` is the exact boundary and needs no class.
+const DECLARED_ID_LINE_RE = /^\s*-\s*id:\s*(W[0-9]+-T[0-9]+[A-Za-z]?)\s*$/;
 const EXCLUDED_DIR_NAMES = new Set(["node_modules", "dist", "build", ".git", "coverage"]);
 const BINARY_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot",
@@ -251,7 +266,7 @@ export function scanDeclaredPlanIdOccurrences(cwd, opts = {}) {
 export function resolveBaseDeclaredIds(baseRef, cwd) {
   const result = spawnSync(
     "git",
-    ["grep", "-lE", "^[[:space:]]*- id: W1-T[0-9]+", baseRef, "--", "plan/tasks.yaml", "plan/tasks.d/"],
+    ["grep", "-lE", "^[[:space:]]*-[[:space:]]*id:[[:space:]]*W[0-9]+-T[0-9]+", baseRef, "--", "plan/tasks.yaml", "plan/tasks.d/"],
     { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
   );
   // git grep exits 1 for "ref resolved, no matches" — a real answer. 128 (bad revision) is not.

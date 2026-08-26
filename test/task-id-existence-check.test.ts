@@ -528,3 +528,80 @@ test("W1-T2324 FALSIFIER: a duplicate-at-head scan alone would MISS every real c
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── W1-T2324: the id grammar is `W<n>-T<n>` with an OPTIONAL single-letter suffix, across
+// workstreams. The first cut of the collision check matched `W1-T[0-9]+` anchored at end-of-line,
+// which DROPPED 35 of the plan's 901 declared ids: 21 lettered siblings (W1-T1B, W1-T9a, W1-T12e …)
+// and 14 outside W1 (W2-T1, W3-T3, W12-T1).
+//
+// DROPPED, NOT TRUNCATED — the distinction decides which direction the bug ran. `$` after `[0-9]+`
+// means `- id: W1-T1B` matched NOTHING, so two lettered siblings never collapsed into one id; the
+// gate simply could not SEE them, which is a hole rather than a false alarm. These tests pin both
+// halves: siblings stay distinct, and a real re-issue of a lettered id is still refused.
+
+test("W1-T2324 CONTROL: lettered siblings are DISTINCT ids — adding W1-T1B while W1-T1C exists is SILENT", () => {
+  const dir = planRepo({ "W1-T1C-existing.yaml": "W1-T1C" });
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T1B-new.yaml"), '- id: W1-T1B\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 0, `W1-T1B and W1-T1C are different tasks: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /ALREADY DECLARED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 CONTROL: a lettered id is not confused with its unlettered stem — W1-T1B beside W1-T1 is SILENT", () => {
+  const dir = planRepo({ "W1-T1-stem.yaml": "W1-T1" });
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T1B-suffixed.yaml"), '- id: W1-T1B\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 0, `W1-T1B must not read as W1-T1: ${r.stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324: a genuinely RE-ISSUED lettered id is still refused — the grammar widened, the gate did not soften", () => {
+  const dir = planRepo({ "W1-T1B-original.yaml": "W1-T1B" });
+  try {
+    rmSync(join(dir, "plan", "tasks.d", "W1-T1B-original.yaml"));
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T1B-reissued.yaml"), '- id: W1-T1B\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 1, "a re-issued lettered id must be refused like any other");
+    assert.match(r.stderr, /W1-T1B/);
+    assert.match(r.stderr, /W1-T1B-original\.yaml/, "names the base's file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324: an id outside workstream 1 is seen at all — W3-T3 re-issued is refused", () => {
+  const dir = planRepo({ "W3-T3-original.yaml": "W3-T3" });
+  try {
+    rmSync(join(dir, "plan", "tasks.d", "W3-T3-original.yaml"));
+    writeFileSync(join(dir, "plan", "tasks.d", "W3-T3-reissued.yaml"), '- id: W3-T3\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 1, "W2/W3/W12 ids are declared ids too");
+    assert.match(r.stderr, /W3-T3/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 FALSIFIER: the pre-fix pattern DROPPED these ids rather than truncating them", () => {
+  const preFix = /^\s*-\s*id:\s*(W1-T[0-9]+)\s*$/;
+  // The shipped grammar, mirrored here so this test states it rather than importing a private const.
+  const DECLARED_ID_LINE_RE_FOR_TEST = /^\s*-\s*id:\s*(W[0-9]+-T[0-9]+[A-Za-z]?)\s*$/;
+  for (const line of ["  - id: W1-T1B", "  - id: W1-T9a", "  - id: W3-T3"]) {
+    assert.equal(preFix.exec(line), null, `${line} matched nothing before the fix — dropped, not truncated`);
+  }
+  // ...and matches now, which is what closed the hole.
+  for (const [line, id] of [
+    ["  - id: W1-T1B", "W1-T1B"],
+    ["  - id: W1-T9a", "W1-T9a"],
+    ["  - id: W3-T3", "W3-T3"],
+  ] as const) {
+    assert.equal(DECLARED_ID_LINE_RE_FOR_TEST.exec(line)?.[1], id);
+  }
+});
