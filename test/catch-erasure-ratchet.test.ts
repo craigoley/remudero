@@ -191,13 +191,13 @@ interface ConflatorSite {
 function conflatorViolations(root: string, baseline: ConflatorSite[]): ConflatorSite[] {
   const remaining = new Map<string, number>();
   for (const site of baseline) {
-    const key = `${site.file} ${site.text}`;
+    const key = `${site.file}\u0000${site.text}`;
     remaining.set(key, (remaining.get(key) ?? 0) + 1);
   }
   const violations: ConflatorSite[] = [];
   for (const file of trackedSrcFiles(root)) {
     for (const text of findConflatorSites(readFileSync(join(root, file), "utf8"))) {
-      const key = `${file} ${text}`;
+      const key = `${file}\u0000${text}`;
       const left = remaining.get(key) ?? 0;
       if (left > 0) remaining.set(key, left - 1);
       else violations.push({ file, text });
