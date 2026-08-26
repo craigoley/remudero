@@ -49,6 +49,56 @@
     window; similar distributions kill it. This hypothesis is the reason the shard
     matters if true and merely tidy if false, and the shard's gate stands on the counted
     evidence either way.
+
+    ★ THE FALSIFIER WAS RUN 2026-08-26, AND THE HYPOTHESIS ABOVE IS NOT SUPPORTED. ADDITIVE —
+    nothing above is edited, re-ordered or removed, and no acceptance criterion changes. The
+    paragraph above stays exactly as filed, including its own sentence that the gate stands on
+    the counted evidence either way; this section records the run and its limit.
+
+    WHAT WAS MEASURED. 281 `fix(` commits over a 14-day window, 223 of them recoverable at 79
+    percent, classified INSTRUMENT 126 / PRODUCT 88 / BORDERLINE 9. Introduced-to-diagnosed
+    latency medians read 23 days for instrument against 24 for product, with matching quantiles
+    from p25 through p90, and instrument's heavy tail LIGHTER rather than heavier — 27 percent
+    against 30 percent at thirty days or more. On the falsifier's own stated terms, similar
+    distributions kill it, and these are similar in the direction that would have had to be
+    reversed.
+
+    ⚠ AND THE MORE IMPORTANT HALF: THE MEASURE CANNOT SEE THE EFFECT THE HYPOTHESIS NAMES, SO
+    THIS IS NOT A REFUTATION AND MUST NEVER BE READ AS ONE. Introduced-to-diagnosed latency is
+    dominated by DORMANCY — how long the faulty line sat unnoticed — and not by diagnosis effort
+    once someone noticed. Weeks of dormancy swamp hours of investigation. The directional
+    anecdotes the paragraph above cites are all in HOURS: a 23-hour coverage block, a five-hour
+    investigation against a lying endpoint, a pull request open 12.5 hours across four fixture
+    diagnoses. The median here is 23 DAYS and only 6 to 8 percent of the corpus is same-day, so
+    the quantity measured and the quantity claimed differ by roughly two orders of magnitude and
+    are not the same variable. The timestamp that would separate them is FIRST-OBSERVABLE-SYMPTOM,
+    which is a fleet-ledger fact rather than a git fact, and the ledger reachable from here is
+    not the fleet's: 0 archives, 2 distinct steps, and 0 `review.posted` rows against a control
+    of 459 for that step on a healthy corpus.
+
+    THE CENSORING, RECORDED BECAUSE IT BOUNDS THE TAIL AND NOT THE MEDIAN. Both classes max at
+    exactly 42 days against a repository 43 days old, so every latency in the corpus is a FLOOR
+    rather than a value — the true introduction of anything older is unobservable. It bites the
+    tail: 8 percent of one class and 11 percent of the other sit within five days of that
+    ceiling. The medians, at 23 and 24 days, are far enough inside the window that the censoring
+    does not move them, which is why the comparison above is reported at all.
+
+    SO THE HONEST CLASSIFICATION IS STILL UNMEASURED, AND UNMEASURABLE FROM THIS REPOSITORY'S
+    DATA. The measure tests dormancy; the hypothesis is about effort; and the distinguishing
+    timestamp is unrecoverable here. Recording it as DEAD would be a stronger claim than the
+    evidence carries and would foreclose a question that a fleet-ledger corpus could still
+    answer. It stays labelled and unresolved, exactly as filed, with this run attached.
+
+    WHAT THIS CHANGES FOR THE SHARD, STATED PLAINLY: ON THIS EVIDENCE THE RATCHET IS TIDINESS,
+    NOT LEVERAGE, and it must not be justified by a per-defect cost premium, because no such
+    premium has been demonstrated. A reviewer weighing this shard should weigh it as tidiness
+    until someone measures effort rather than dormancy.
+
+    AND WHAT SURVIVES UNTOUCHED, WHICH IS THE ARGUMENT THE SHARD WAS ACTUALLY BUILT ON: none of
+    the eight measured defects had a fixture driving the arm that failed. That is a STRUCTURAL
+    claim about coverage — a surface nothing ever asked to fail — and it is established by
+    counting fixtures, not by comparing latencies. It never needed the premium, it does not rest
+    on the hypothesis above, and nothing in this run touches it.
   design: |
     (i) THE RATCHET, IN THE FORM THE HOUSE HAS PROVEN TWICE — no-raw-NUL (W1-T438) and the
     catch-erasure ratchet (W1-T2295). One test walking the enumerable surfaces: every exported
