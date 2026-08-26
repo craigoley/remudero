@@ -2110,16 +2110,25 @@ test("W1-T181: a successful batched fetch logs its payload byte size and PR coun
     log: (event, extra) => events.push([event, extra]),
   });
   gh.warm?.();
-  const bytesEvent = events.find(([e]) => e === "board_gateway.fetch_bytes");
-  assert.ok(bytesEvent, "a successful fetch must log its payload byte size — the ceiling must be observable before it is crossed");
+  // W1-T2323: ONE ROW PER HALF, because the halves are now fetched on their own clocks — so the
+  // criterion this test exists for (the payload size must stay observable before the ceiling is
+  // crossed) is the SUM across the rows of one refresh, exactly as `bytes` was already the sum
+  // across the requests of one walk. Nothing observable was lost; it arrives in two rows instead
+  // of one, and each row now names which half it is.
+  const bytesEvents = events.filter(([e]) => e === "board_gateway.fetch_bytes");
+  assert.ok(bytesEvents.length > 0, "a successful fetch must log its payload byte size — the ceiling must be observable before it is crossed");
   const prArgvs = argvs.filter((a) => (a[1] ?? "").includes("/pulls"));
-  assert.equal(bytesEvent?.[1]?.bytes, Buffer.byteLength(openPage, "utf8") + Buffer.byteLength(emptyPage, "utf8") * (prArgvs.length - 1));
+  const sum = (key: string) => bytesEvents.reduce((n, [, extra]) => n + Number(extra?.[key] ?? 0), 0);
+  assert.equal(sum("bytes"), Buffer.byteLength(openPage, "utf8") + Buffer.byteLength(emptyPage, "utf8") * (prArgvs.length - 1));
   // W1-T265 adds the request count to the same event: the whole claim of the REST migration is
   // that a refresh stays at 2 requests, so it is measured in the ledger rather than asserted once
   // in a test and never observed again.
-  assert.equal(bytesEvent?.[1]?.restCalls, prArgvs.length);
-  assert.equal(bytesEvent?.[1]?.mode, "full", "the first fetch has no cache to delta against");
-  assert.equal(bytesEvent?.[1]?.truncated, false);
+  assert.equal(sum("restCalls"), prArgvs.length);
+  assert.deepEqual(bytesEvents.map(([, extra]) => extra?.half), ["open", "closed"], "and each row names its half");
+  for (const [, extra] of bytesEvents) {
+    assert.equal(extra?.mode, "full", "the first fetch has no cache to delta against");
+    assert.equal(extra?.truncated, false);
+  }
   const okEvent = events.find(([e]) => e === "board_gateway.fetch_ok");
   assert.ok(okEvent, "a successful fetch must also log fetch_ok");
   assert.equal(okEvent?.[1]?.prCount, 1);
