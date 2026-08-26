@@ -29,7 +29,8 @@ raw: "THE CONSOLE'S ANSWER BUTTON FILES A REPLY AND NEVER CLOSES THE QUESTION â€
   and the gap is only that it had not run yet."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null

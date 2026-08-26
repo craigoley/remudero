@@ -3922,8 +3922,21 @@ Architect → research → synthesis → a hand-pasted prompt → a plan PR. Thi
 
 **FEEDBACK IS AN ARTIFACT, NOT A COMMAND.** `plan/feedback/` is a durable, diffable inbox — one entry per
 item: `{id, ts, raw text, attachments[] (multimodal — screenshots, terminal dumps, links), origin:
-cli|ui|issue, status: new|grilling|proposed|accepted|rejected, proposal_pr}`. Captured async by
-`rmd feedback` (W1-T40); never lost in a chat scrollback.
+cli|ui|issue, status: new|grilling|proposed|accepted|rejected|answered, proposal_pr, reply_to,
+answered_by}`. Captured async by `rmd feedback` (W1-T40); never lost in a chat scrollback.
+
+**`answered` IS THE SIXTH STATUS, AND IT IS THE ONLY EXIT FROM `grilling` THAT IS NOT A PROPOSAL**
+(W1-T2278, PR #2894; ratified here from feedback#fb-1785974009303-125530). A grill parks an entry at
+`grilling`; the operator's reply — `POST /v1/feedback` carrying `replyTo` — is captured as its own entry
+carrying `reply_to: <question id>`, and the SAME handler advances the question to `answered` with
+`answered_by: <reply id>`. The thread is therefore walkable from both ends, and NEEDS ME (which renders
+only `grilling`/`proposed`) drops the question the moment it is answered, so the operator can tell an
+answered question from an unanswered one. **`answered` is NOT `accepted`:** `accepted` means a proposal
+PR merged — a decision about filed WORK — whereas `answered` means the operator supplied the information
+asked of him, which is why reusing `accepted` here was refused and a new member added instead. The
+transition is caused ONLY by an operator's own reply landing on that route — never a timer, never a
+scheduler, never a lane acting on his behalf (W1-T2244 pins (ix)/(x)) — and `answered` is CLOSED for the
+exchange: a second `replyTo` at the same entry is refused by the same not-parked-at-`grilling` check.
 
 **THE INTAKE LOOP (`rmd triage`, W1-T41)** — an ARCHITECT worker, **HIGHER TIER than implement (G-17)**:
 1. **GROUND** — grep the plan, learnings, ledger, and DECISIONS for what is ALREADY decided. Re-deciding a
