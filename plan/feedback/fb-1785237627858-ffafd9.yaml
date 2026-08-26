@@ -21,7 +21,7 @@ raw: "LIVE WORKER OBSERVABILITY — workers are opaque between spawn and verdict
   filing produces them."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2031
 summary:
   headline: Enable live visibility of worker activity during runs

@@ -22,7 +22,7 @@ raw: "COST SENSORS AND LEVERS — the fleet spends without measuring its own
   thresholds."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2004
 summary:
   headline: Authorize fleet cost-measurement system

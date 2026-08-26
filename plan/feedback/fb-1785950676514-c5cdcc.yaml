@@ -33,7 +33,7 @@ raw: "A LANES OVERRIDE MUST NEVER LOWER — standing constraint recorded from
   lanes-specific half is moot."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2574
 summary:
   headline: "Lanes Override: Enforce Constraint or Reject Feature"

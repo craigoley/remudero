@@ -15,7 +15,7 @@ raw: "AN ENV-HYGIENE TEST SCRUBS ANTHROPIC_API_KEY BUT NOT ANTHROPIC_BASE_URL â€
   names the omission, this is documentation rather than a defect."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2368
 summary:
   headline: Env-hygiene test failsâ€”BASE_URL omitted from scrub list

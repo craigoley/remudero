@@ -23,7 +23,7 @@ raw: "A SHARED TEST HELPER DOUBLES EVERY VERDICT LINE AND SILENTLY FAILS THE
   fix."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2689
 summary:
   headline: Test helper silently breaks verdict parsing
