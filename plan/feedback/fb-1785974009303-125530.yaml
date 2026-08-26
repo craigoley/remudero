@@ -30,7 +30,27 @@ raw: "THE CONSOLE'S ANSWER BUTTON FILES A REPLY AND NEVER CLOSES THE QUESTION â€
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2951
+summary:
+  headline: Answered questions stay open indefinitely
+  what_happened: When an operator answers a question, a reply is filed but the
+    original question remains on the board with its original status and no link.
+    A question answered 14 days ago still shows grilling status (a dead-end with
+    zero exits across 131 corpus entries), and this is the third defect from
+    this workflow filed tonight.
+  decision: Escalate to engineering. Confirm whether Answer was designed to close
+    the original, identify the correct status for answered questions, and
+    explain why grilling has no exit transitions. Investigate why three defects
+    occurred in a single interaction tonight.
+  options:
+    - label: "Code bug: transition unwired"
+      consequence: Answer creates entry but never closes original. Operator cannot
+        track whether answer was accepted. Blockingâ€”needs immediate code fix.
+    - label: "Design flaw: missing status"
+      consequence: No status represents answered questions. They accumulate in
+        grilling or stay open permanently. Needs new status type and rules.
+    - label: Intended separation
+      consequence: Answers intentionally unlinked from originals. If by design,
+        document for operators and close as expected behavior.
 expansion: null
 answered_by: null
