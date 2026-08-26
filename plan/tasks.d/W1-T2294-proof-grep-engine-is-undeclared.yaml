@@ -1,0 +1,170 @@
+- id: W1-T2294
+  title: "A `grep:` PROOF PATTERN'S MEANING DEPENDS ON A REGEX ENGINE NOTHING DECLARES — the dialect form is hardcoded BRE, a bare backticked form passes the author's own argv through so `-E` is reachable, and the same pattern reads a different number of hits under each while BOTH verdicts read pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    **SIZE, STATED FIRST: THIS IS PREVENTIVE, NOT REMEDIAL.** Across every shard on this head, no
+    `grep:` dialect pattern contains a `?`, and no proof anywhere uses the backticked form. The
+    scanner that returned those zeros is controlled — over the same 325 dialect patterns it counts
+    `(` 46 times, `.` 15 and `]` twice, so it reads real patterns and the `?` zero is a real zero.
+    Nothing is broken in the plan today. What is missing is a declaration, and the cost of not
+    having one is paid the first time an author writes an optional-field pattern.
+
+    **THE MECHANISM, MEASURED ON A FIELD THAT EXISTS.** `mergeConflict?: MergeConflictEvidence`
+    against `src/lib/sweep.ts` reads **2 hits under BRE and 0 under ERE**. The control isolates the
+    cause: the same pattern with the `?` removed reads 6 under both. It is not a harness artifact —
+    `/usr/bin/grep` scores the identical pair 2 and 0. Under BRE `?` is an ordinary character, so
+    the pattern matches the literal declaration text; under ERE it is a quantifier, so the pattern
+    asks for `mergeConflic` + an optional `t` + `:` and the literal `?` in the source can never match.
+
+    **BOTH ENGINES ARE REACHABLE, AND THE SECOND ONE IS THE UNGUARDED ARM.** `parseDialectGrep`
+    (`src/lib/review.ts`) compiles the house form to `["-arn", "--", pattern, path]` — no `-E`, so
+    BRE, hardcoded and not author-selectable. But `parseWhitelistedProof` has a SECOND arm: a bare
+    backticked `grep …` proof is tokenised and everything after `grep` becomes argv verbatim.
+    Measured through the executor itself, on the same pattern and file:
+
+      `grep -an  -- mergeConflict?: src/lib/sweep.ts`   parse OK, hits 2, verdict pass
+      `grep -Ean -- mergeConflict?: src/lib/sweep.ts`   parse OK, hits 1, verdict pass
+
+    **TWO ENGINES, TWO DIFFERENT ANSWERS, TWO PASSES.** Nothing anywhere records which was in force.
+
+    **AND THE SAFETY CHECK NEVER LOOKS AT THAT ARM.** `proofGrepSafetyViolations`
+    (`src/lib/task-linter.ts`) matches `^grep:` before it does anything, so a backticked proof is
+    never examined for metacharacters at all. Measured against both linters' own objects: the
+    backticked ERE proof draws zero violations from `proof-dialect` and zero from
+    `proof-grep-safety`, while the controls fire correctly — free prose blocks on `proof-dialect`,
+    and a `[` pattern blocks on `proof-grep-safety`. So the only arm where an author can CHOOSE the
+    engine is the only arm nothing inspects.
+
+    **`?` MUST NOT BE ADDED TO THE METACHARACTER LISTS, AND THAT IS THE POINT.** `breMetacharsIn`
+    blocks `[`, `*`, `^`, `$` and the backslash-opened constructs, and warns on `.`. `?` is in
+    neither list and belongs in neither: under the dialect form's declared BRE it is literal and the
+    pattern is CORRECT. A check that flagged it would fail a working proof — the same false-positive
+    class that check's own comment records having already removed once.
+
+    **THE COMMISSIONING EXAMPLE REPRODUCES EXACTLY — ON THE BRANCH THAT INTRODUCES THE SYMBOL.**
+    `CiLogUnavailableCause` is added by the open PR #2891 (`fix-ci-log-unavailable-named`) and does
+    not exist on `main` yet. Measured on that branch's head, `logUnavailable?: CiLogUnavailableCause`
+    against `src/lib/sweep.ts` reads **1 hit under BRE and 0 under ERE**, with the control (same
+    pattern, `?` removed) reading 3 under both, and `/usr/bin/grep` scoring the identical pair. An
+    earlier draft of this shard reported the example as not reproducing; that reading measured
+    `origin/main`, where the symbol legitimately is not, and was wrong about the example rather than
+    about the mechanism. Both demonstrations are kept: the `mergeConflict?:` one because it holds on
+    `main` and will survive #2891 either way, and this one because it is the case that was actually
+    observed in the wild.
+
+    **AND #2891 IS A LIVE COUNTER-EXAMPLE TO THE COMFORTABLE ANSWER, WHICH THE DESIGN BELOW RECORDS
+    RATHER THAN EXPLAINS AWAY.** Its posted verdict reads *"proof executed and FAILED on the PR
+    head"* for that criterion. Re-run through the shipped executor on the SAME head sha, the same
+    proof returns `verdict: pass`, 1 hit — and so does the bracket-escaped `logUnavailable[?]:` form
+    the body now carries. The failure is therefore not reproducible from the tree, the sha, or the
+    proof string, which is precisely the condition this task exists to make impossible to reach
+    silently.
+
+    **THE NEAREST THING TO A DECLARATION IS ITSELF DRIFTED.** `proof-grep-safety`'s own violation
+    message tells the author the executor runs `grep -rn -- <pattern> <path>`. The argv
+    `parseDialectGrep` actually emits is `-arn`. The flag that differs is the one that makes the
+    executor read binary-ish files rather than skip them, which is a separate hazard this repo has
+    already been bitten by; the drift matters because that message is where an author looks.
+  design: |
+    **Q1 — CAN THE EXECUTOR AND THE REVIEWER DIFFER IN ENGINE, AND HOW WOULD AN AUTHOR FIND OUT?**
+
+    **FROM SOURCE, THEY CANNOT — AND AN OBSERVED CASE SAYS OTHERWISE, SO THE SOURCE READING IS NOT
+    THE WHOLE ANSWER.** `execWhitelistedProof` is a single exported function; `rmd check-proof`
+    calls it and the reviewer judges through it (W1-T387 collapsed those two precisely so a
+    hand-rolled second check could not drift). On that reading the same string yields the same argv
+    and therefore the same engine in both consumers.
+
+    **BUT #2891 DISAGREES WITH THAT READING ON ITS OWN HEAD**, as the rationale records: a verdict of
+    *executed and FAILED* against a proof that returns `pass` when re-run through the shipped
+    executor on the same sha. The build must not assume the source reading and must not assume the
+    engine either — it must first establish WHAT the reviewer actually ran, because three
+    explanations survive and they imply different fixes: a judge running code older than the argv it
+    is assumed to use (`src/lib/self-sync.ts` covers process startup only, so a long-lived
+    orchestrator's `judgeReview` can be arbitrarily stale); a different checkout under the reviewer
+    than the head the verdict names; or a genuine engine difference, which is the thesis this task
+    was commissioned on. **RECORDING WHICH ENGINE AND WHICH TREE A PROOF ACTUALLY RAN UNDER IS
+    THEREFORE PART OF THE DELIVERABLE, NOT A DIAGNOSTIC AID** — no verdict today carries either, and
+    that absence is why the question cannot be settled from the outside.
+
+    **THE DIVERGENCE IS NOT BETWEEN CONSUMERS, IT IS BETWEEN FORMS.** The dialect form is BRE by
+    construction and the author cannot change it. The backticked form is whatever the author typed.
+    So "which engine is in force" is decided by a syntactic choice the dialect documentation does not
+    mention and no gate reports.
+
+    **HOW AN AUTHOR FINDS OUT TODAY: ONLY BY RUNNING `rmd check-proof` AND READING `hits:`.** The
+    verdict line will not tell them — both forms above read `pass`. Nothing in the written dialect
+    says BRE, and the one message that names an invocation names the wrong flags. An author who
+    reasons from ordinary regex intuition will assume ERE, because that is what most tools default to
+    in practice, and will be wrong in the direction that silently widens or empties a match.
+
+    **Q2 — WHAT A CHECK CAN FLAG, AND WHAT IT CANNOT.**
+
+    CAN, and already does: shape under a DECLARED engine. `proof-grep-safety` is correct within its
+    contract — it polices the `grep:` form, whose engine is fixed, and classifies characters by
+    whether they can make a pattern never match its literal text.
+
+    CANNOT, by construction: a pattern that is VALID UNDER BOTH ENGINES AND MEANS DIFFERENT THINGS.
+    `mergeConflict?: MergeConflictEvidence` is well-formed under BRE and under ERE. Its shape is
+    identical in both. Only the surrounding argv differs, and that argv lives in a different arm of
+    the parser. **NO AMOUNT OF INSPECTING THE PATTERN STRING DISTINGUISHES THE TWO CASES** — the
+    information simply is not in the string. This is the part a shape-based check cannot be extended
+    to cover, and a plan that proposes "add `?` to the metacharacter list" has misread the defect.
+
+    WHAT WOULD ACTUALLY WORK is behavioural, not lexical: execute the pattern under both engines
+    against the same path and flag DISAGREEMENT. That is a real signal — equal counts mean the
+    engine is immaterial for this pattern and the author needs no warning; different counts mean the
+    proof's meaning depends on a choice nothing declares, which is exactly the condition worth
+    reporting. It costs one extra `grep` per `grep:` proof at lint time.
+
+    The cheaper half, and possibly sufficient on its own: make the engine EXPLICIT where an author
+    reads it — correct the drifted invocation in the violation message, and decide whether the
+    backticked arm should accept an engine flag at all. Refusing `-E` there would remove the
+    divergence outright rather than reporting it, at the cost of a form nothing currently uses.
+    Both directions are open; the build should pick one and say why, not do both.
+
+    **Q3 — WHAT MUST NOT CHANGE.**
+
+    (i) **NO NEW PROOF DIALECT.** `unit test:` and `grep:` remain the whole vocabulary. A third
+    prefix — a regex-flavour selector, an `ere:` sibling — would multiply the very ambiguity this
+    task exists to remove.
+
+    (ii) **`grep:` KEEPS ITS CURRENT INVOCATION.** The dialect form stays `grep -arn -- <pattern>
+    <path>`, BRE, author-unselectable. Every merged shard's proofs were written against that engine
+    and were correct against it; changing it would silently re-interpret 325 live patterns, including
+    the 46 containing `(` and the 15 containing `.` whose current meanings depend on BRE semantics.
+
+    (iii) **NOTHING REWRITES A MERGED SHARD'S ACCEPTANCE BLOCK.** Rule 21 freezes it. Whatever this
+    task adds applies to proofs written after it, and any finding about an already-merged proof is
+    reported, never edited into place.
+  acceptance:
+    - claim: "a proof whose meaning changes with the regex engine is reported rather than passing silently under whichever engine happened to run"
+      proof: "unit test: test/proof-engine-declaration.test.ts"
+    - claim: "a pattern that means the same thing under either engine draws no report, so the check does not fire on ordinary proofs"
+      proof: "unit test: test/proof-engine-declaration.test.ts"
+    - claim: "the engine the house dialect actually runs under is stated where an author reads it, and matches the argv the parser emits"
+      proof: "unit test: test/proof-engine-declaration.test.ts"
+    - claim: "the house dialect still compiles to the same invocation it does today, so existing proofs keep their meaning"
+      proof: "unit test: test/proof-engine-declaration.test.ts"
+  files: [src/lib/task-linter.ts, src/lib/review.ts, test/proof-engine-declaration.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#proof-grep-engine-undeclared-2026-08-26"
+  plan_refs: ["W1-T387", "W1-T460", "W1-T273", "W1-T362"]
+  note: |
+    RISK BAND IS RULE 19'S SPAN, NOT BLAST RADIUS. The declared files cross the linter and the
+    reviewer/parser; the change itself is small. The band records the span.
+
+    THE EXPOSURE IS ZERO TODAY AND THE SHARD SAYS SO FIRST. If a build finds that unattractive, the
+    honest response is to close this unbuilt rather than to inflate it — the rationale's own control
+    is what makes the zero trustworthy, and a preventive task that has to pretend otherwise is not
+    worth building.
+
+    ONE DIRECTION IS EXPLICITLY NOT SANCTIONED HERE: adding `?` to `breMetacharsIn`'s lists. Under
+    the dialect form's BRE that character is literal and such patterns are correct, so flagging it
+    would fail working proofs. The design says why at length because it is the obvious wrong fix.
