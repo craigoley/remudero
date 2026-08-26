@@ -370,9 +370,19 @@ void test("the worker quiet watchdog budget is not widened by anything here", ()
   assert.ok(RUN_TASK_SRC.includes("DEFAULT_WORKER_QUIET_FLOOR_MS"), "and the daemon still reads it");
 });
 
-void test("W1-T2319's abort-label defect is still present and still someone else's task to close", () => {
+void test("W1-T2319's abort-label defect is closed, and the catch no longer reads the clock first", () => {
+  // WAS a tripwire asserting the defect PRESENT, with "still someone else's task to close" naming
+  // W1-T2319 as the owner. W1-T2319 is this change, so the tripwire fired by doing its job. It is
+  // updated rather than deleted, because what it was really guarding — that nothing here silently
+  // alters how the exchange catch names what it caught — still needs a guard; only the expected
+  // direction flipped.
   const APP_SRC = readFileSync(new URL("../src/lib/github-app.ts", import.meta.url), "utf8");
-  assert.match(APP_SRC, /timeoutController\.signal\.aborted \? "exchange timed out"/);
+  // The bare clock-first ternary is gone…
+  assert.doesNotMatch(APP_SRC, /timeoutController\.signal\.aborted \? "exchange timed out"/);
+  // …replaced by a helper the catch arm consults, which decides from the ERROR's identity first
+  // and falls back to the signal only when the error identifies nothing.
+  assert.match(APP_SRC, /function describeExchangeCatch\(/);
+  assert.match(APP_SRC, /err === timeoutController\.signal\.reason/);
 });
 
 void test("nothing added to the gateway paces, throttles or sleeps", () => {
