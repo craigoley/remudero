@@ -4612,8 +4612,11 @@ export function buildBatchedGithub(
    * ONE HALF OF THE BOARD, OVER REST — W1-T2323 option C's whole mechanism.
    *
    * The body below is byte-for-byte what the single combined fetch always did, parameterised by
-   * WHICH half it walks. `"both"` reproduces the old call exactly and is what an injected
-   * `opts.fetchAll` gateway still runs through; `"open"` and `"closed"` are the split.
+   * WHICH half it walks — but this gateway only ever calls it with `"open"` or `"closed"` (see
+   * `openRows`/`mergedRows` below). A gateway built with an injected `opts.fetchAll` never reaches
+   * this function at all: `bothHalves` below calls `opts.fetchAll` directly, so `"both"` stays a
+   * valid {@link BoardFetchHalf} for `fetchBoardPrsRest`'s own default but is not something this
+   * wrapper is ever asked to walk.
    *
    * MEASURED 2026-08-26 on this repo: `"open"` is 1 request, 6 rows, 432 ms. `"closed"` cold is
    * 25 requests, 2,400 rows, 21,813 ms. Welded together, `listOpenHeadBranches` — the daemon's
@@ -4653,12 +4656,12 @@ export function buildBatchedGithub(
       // `lastFetchFailed` above, so a later untruncated refresh clears an earlier truncated one.
       // W1-T2323: recorded against the half that produced it, so `readTruncated()`'s OR keeps a
       // live truncation from either walk instead of the last one to finish winning outright.
+      // ONLY "open"/"closed" EVER REACH HERE — `bothHalves()` below calls the injected
+      // `opts.fetchAll` directly, never this function, so a THIRD `half === "both"` arm would be
+      // dead code no fixture could ever exercise; coverage-ratchet caught exactly that when it
+      // still existed (W1-T2323 follow-up).
       if (half === "open") lastOpenTruncated = fetched.truncated;
-      else if (half === "closed") lastClosedTruncated = fetched.truncated;
-      else {
-        lastOpenTruncated = false;
-        lastClosedTruncated = fetched.truncated;
-      }
+      else lastClosedTruncated = fetched.truncated;
       // W1-T181 design (vi): log the payload size on every SUCCESSFUL fetch, so the next
       // approach to whatever ceiling is set above is observable in advance instead of arriving
       // as a silent outage the way tonight's did. `restCalls`/`mode` are W1-T265 additions — the
@@ -4676,7 +4679,6 @@ export function buildBatchedGithub(
       });
       return fetched.rows;
   };
-  const fetchAll = opts.fetchAll ?? (() => restFetchHalf("both"));
   /**
    * W1-T2323: TRUE ONLY WHEN THIS GATEWAY OWNS ITS OWN FETCHES. An injected `opts.fetchAll`
    * returns the WHOLE board in one call and every fixture in this repo counts on it being called
@@ -4967,7 +4969,12 @@ export function buildBatchedGithub(
    */
   const bothHalves = (): { open: BatchedPr[]; merged: BatchedPr[] } => {
     if (!openHalf || !mergedHalf || now() - openHalf.at >= effectiveOpenTtlMs()) {
-      const all = attemptFetch(fetchAll, "both");
+      // `bothHalves` is only ever reached through the two `!splitHalves` guards above, and
+      // `splitHalves` is `opts.fetchAll === undefined` — so `opts.fetchAll` is always set on
+      // every path that lands here. The assertion states that invariant instead of carrying a
+      // `?? restFetchHalf("both")` fallback that could never actually run (the dead branch
+      // coverage-ratchet flagged before this fix).
+      const all = attemptFetch(opts.fetchAll as () => BatchedPr[], "both");
       const at = now();
       openHalf = { at, rows: all.filter((p) => p.state === "OPEN") };
       mergedHalf = { at, rows: all.filter((p) => p.state !== "OPEN") };
