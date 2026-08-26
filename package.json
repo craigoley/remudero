@@ -61,7 +61,7 @@
     "changelog": "commit-and-tag-version"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.233",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.241",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "yaml": "^2.9.0"
@@ -71,12 +71,12 @@
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21.2.0",
     "@stryker-mutator/core": "^9.6.1",
-    "@swc/core": "^1.16.0",
+    "@swc/core": "^1.16.1",
     "@types/node": "^22.20.1",
     "commit-and-tag-version": "^13.1.2",
     "dependency-cruiser": "^18.2.0",
     "fast-check": "^4.9.0",
-    "jscpd": "^5.0.15",
+    "jscpd": "^5.0.16",
     "playwright": "^1.62.1"
   },
   "overrides": {
