@@ -1,0 +1,8 @@
+{
+  "_comment": "CANONICAL CYCLE-COUNT CEILING (see scripts/cycle-ratchet.mjs). The number of DISTINCT dependency cycles `.dependency-cruiser.cjs`'s `no-circular` rule reports over `src`. Never raise this to make a PR pass -- ratchet it DOWN when cycles are genuinely cut, exactly as #2798 did. A PR that adds a cycle fails the depcruise job.",
+  "capturedAt": "2026-08-26",
+  "capturedAtSha": "63889e5b021ee5ed92a1b158a75141aff62b7e15",
+  "maxCycles": 13,
+  "_methodology": "Re-derived at the sha above from THE REPO'S OWN CONFIG, not an ad-hoc one: `depcruise src --config .dependency-cruiser.cjs --output-type json`, filtered to violations whose `rule.name` is `no-circular`, each ring canonicalised by rotating to its lexicographically smallest member so the same ring reported from two entry points cannot count twice. At capture the reported violation count and the distinct-ring count were BOTH 13 -- dependency-cruiser already reports each ring once -- so the canonicalisation is a guard against a future double-count, not a correction to today's figure.",
+  "_history": "#2798 cut the `open-prs-rest` <-> `sweep` type-only edge and took the count from 24 to 13. That measurement was taken with a config held outside the repo; nothing in CI held the result, so the remaining 13 could grow back silently. This file is what holds it."
+}
