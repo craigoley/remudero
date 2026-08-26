@@ -168,6 +168,18 @@ export interface FeedbackEntry {
     pr_url?: string;
     error?: string;
   };
+  /**
+   * W1-T2302: the console-minted per-submission key `POST /v1/feedback` carried on this
+   * capture, when the caller supplied one — the identity a REPEAT of this exact submission (a
+   * reload, a second tab, a retried fetch) is recognised BY, distinct from `id` (a fresh id is
+   * still minted every capture; this is a separate field precisely because re-using `id` for
+   * dedup would OVERWRITE the entry, see {@link captureFeedback}'s doc). A DURABLE field on the
+   * entry rather than a second store: readable by the same {@link listFeedback} every other
+   * caller already runs, survives a daemon restart, and needs nothing new to go stale. `null`/
+   * absent for every entry captured without one (the CLI, machine-origin intake, or a console
+   * call that predates this task) — `raw` and every other field stay byte-identical either way.
+   */
+  submission_key?: string | null;
 }
 
 // ── Decision summaries (W1-T313) ─────────────────────────────────────────────
@@ -905,6 +917,34 @@ export interface CaptureFeedbackOptions {
    * both assertable with no real subprocess and no live GitHub call.
    */
   upstream?: { git?: UpstreamGitExec; gh?: UpstreamGhExec };
+  /**
+   * W1-T2302: a per-submission key minted by the CALLER (the console, `POST /v1/feedback`) that
+   * identifies ONE operator submit action — never derived from `raw` (two deliberately separate
+   * submissions carrying identical text must still each file, design point (iv), which a
+   * text-derived key could not tell apart). When given and an entry ALREADY carries this exact
+   * key ({@link findFeedbackBySubmissionKey}), this call is a REPEAT of a submission that already
+   * filed: it returns that existing entry completely UNTOUCHED — no write, no re-land, no
+   * re-upstream-attempt — even when that entry's `status` has since moved on from `new` (the
+   * trap named in this function's own doc: re-using `id` for this purpose would silently reset
+   * an already-triaged entry). `undefined` (every non-console caller, and a console call with no
+   * key) always files a fresh entry, exactly today's behavior.
+   */
+  submissionKey?: string;
+}
+
+/**
+ * Find an existing feedback entry by its console-minted `submission_key` (W1-T2302) —
+ * {@link captureFeedback}'s never-clobber guard, run BEFORE it ever writes: a repeat `POST
+ * /v1/feedback` carrying a key that already filed must read back the entry AS IT STANDS,
+ * whatever its status has moved to since, never re-write it. `null` when nothing carries this
+ * key — a genuinely new submission, or no key at all (every non-console caller). A linear scan
+ * over {@link listFeedback} rather than a second index/store: design point (iii)'s durable-field
+ * choice trades an O(n) scan (n = this checkout's whole feedback corpus, already read whole by
+ * every other panel-graph route) for "no file, no index, no second thing to go stale" — and it
+ * survives a daemon restart, unlike a bounded in-process map.
+ */
+export function findFeedbackBySubmissionKey(root: string, key: string): FeedbackEntry | null {
+  return listFeedback(root).find((e) => e.submission_key === key) ?? null;
 }
 
 /**
@@ -933,6 +973,10 @@ export interface CaptureFeedbackOptions {
  * this one entry file: a reporting-only instance needs no arbiter.
  */
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
+  if (opts.submissionKey) {
+    const existing = findFeedbackBySubmissionKey(root, opts.submissionKey);
+    if (existing) return existing;
+  }
   const raw = opts.raw.trim();
   if (!raw) throw new FeedbackError("feedback text must not be empty");
   const origin = opts.origin ?? "cli";
@@ -956,6 +1000,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     proposal_pr: null,
     summary: null,
     expansion: opts.expansion ?? null,
+    submission_key: opts.submissionKey ?? null,
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   try {
