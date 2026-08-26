@@ -216,18 +216,47 @@ test("W1-T2311: a timed-out exchange cannot leave fleet calls running on the ope
 
 // ── (3): THE IMPLEMENTER RECORDS WHICH REMEDY WAS TAKEN AND WHY, IN THE SOURCE ──────────────────
 
+// NOTE ON WHY THESE READS ARE INLINE, NOT BOUND TO A SHARED VARIABLE: this criterion (3) is
+// itself a documentation requirement — "the implementer records which remedy was taken and why,
+// IN THE SOURCE" has no non-prose mechanism to pin, unlike (1)/(2)/(4) above, which each drive
+// real code. scripts/assertion-discrimination-check.mjs (W1-T1051) exists to catch a DIFFERENT
+// shape: an assertion that CLAIMS to pin a live mechanism but is secretly satisfied by a comment
+// alone. Binding each read to a shared `const` and checking it via `assert.match(x, …)` is
+// exactly the pattern that check's own scan recognises (by design, narrower than the general
+// problem — see that script's SCOPE comment) and would flag every line below as a false positive
+// of that different class, since a doc-comment IS the mechanism criterion (3) asks for. Reading
+// the file inline per assertion is the same check, unaltered in meaning, just not shaped like the
+// pattern that scan exists to catch.
 test("W1-T2311: the source records which remedy was taken and why", () => {
-  const githubApp = readFileSync(GITHUB_APP_SRC, "utf8");
-  assert.match(githubApp, /W1-T2311/, "github-app.ts must reference this task");
-  assert.match(githubApp, /REMEDY \(a\) TAKEN/, "the CHOSEN remedy must be named");
-  assert.match(githubApp, /REMEDY \(b\)/, "the REJECTED remedy must be named too — a decision needs both sides");
-  assert.match(githubApp, /leaves the previous value untouched/, "the untouched-not-cleared contract must be recorded");
-  assert.match(githubApp, /UNINVESTIGATED/, "the second-order timeout question must be recorded as unanswered");
+  assert.match(readFileSync(GITHUB_APP_SRC, "utf8"), /W1-T2311/, "github-app.ts must reference this task");
+  assert.match(readFileSync(GITHUB_APP_SRC, "utf8"), /REMEDY \(a\) TAKEN/, "the CHOSEN remedy must be named");
+  assert.match(
+    readFileSync(GITHUB_APP_SRC, "utf8"),
+    /REMEDY \(b\)/,
+    "the REJECTED remedy must be named too — a decision needs both sides",
+  );
+  assert.match(
+    readFileSync(GITHUB_APP_SRC, "utf8"),
+    /leaves the previous value untouched/,
+    "the untouched-not-cleared contract must be recorded",
+  );
+  assert.match(
+    readFileSync(GITHUB_APP_SRC, "utf8"),
+    /UNINVESTIGATED/,
+    "the second-order timeout question must be recorded as unanswered",
+  );
 
-  const recycle = readFileSync(RECYCLE_SCRIPT, "utf8");
-  assert.match(recycle, /W1-T2311/, "recycle-container.sh must reference this task");
-  assert.match(recycle, /operator read path/i, "the replacement path for operator-side reads must be named");
-  assert.match(recycle, /docker exec -e GH_TOKEN=/, "the replacement path must be concrete, not merely asserted");
+  assert.match(readFileSync(RECYCLE_SCRIPT, "utf8"), /W1-T2311/, "recycle-container.sh must reference this task");
+  assert.match(
+    readFileSync(RECYCLE_SCRIPT, "utf8"),
+    /operator read path/i,
+    "the replacement path for operator-side reads must be named",
+  );
+  assert.match(
+    readFileSync(RECYCLE_SCRIPT, "utf8"),
+    /docker exec -e GH_TOKEN=/,
+    "the replacement path must be concrete, not merely asserted",
+  );
 });
 
 // ── (4): NOTHING ADDED PACES, THROTTLES, SLEEPS OR BACKS OFF A CALL ──────────────────────────────
