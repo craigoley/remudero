@@ -1,0 +1,146 @@
+- id: W1-T2335
+  title: "BLOCKERS BY CLASS renders `circuit_broken` for a task DISPATCH WILL NEVER TAKE — `deriveCircuitBrokenBlockers` is a pure ledger read with no dispatchability check, so a withdrawn task prints 'investigate before it re-dispatches again' forever while `isDispatchEligible` refuses it two guards earlier"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: feedback#fb-1786014552648-2aa351
+  plan_refs: ["§7", "W1-T280", "W1-T306", "W1-T309", "W1-T1205", "W1-T1287", "W1-T391"]
+  files: [src/lib/status-board.ts, test/blockers-name-only-dispatchable-work.test.ts]
+  rationale: |
+    RE-DERIVED FROM SOURCE AT THIS SHA. THE OPERATOR'S READING OF THE MECHANISM IS CORRECT AND
+    EVERY LINE BELOW WAS CONFIRMED BY READING, NOT ASSUMED.
+
+    (1) THE ORDER IN `isDispatchEligible` (`src/lib/drain.ts`) SETTLES THAT THE NEXT ACTION IS
+    IMPOSSIBLE. `isMerged(t.id)` returns false at :504 and `t.status === "blocked"` returns false
+    at :527, both BEFORE `opts.isCircuitTripped?.(t.id)` at :548. A task in either population can
+    never reach the breaker, so no breaker it carries can ever fire again and no re-dispatch it
+    warns about can ever happen.
+
+    (2) THE RENDERER ASKS NOTHING ABOUT DISPATCHABILITY. `deriveCircuitBrokenBlockers`
+    (`src/lib/status-board.ts`) is four lines: walk `distinctDispatchedTaskIds(lines)`, skip
+    anything `isDispatchBreakerTripped` says is clear, push a row. It takes `lines` ONLY — no
+    plan, no projections — so a withdrawn task and a live one produce the identical row. The
+    next-action rule at the head of `BLOCKERS_NEXT_ACTIONS` then emits
+    "…investigate before it re-dispatches again" off that row, and being FIRST in the rule list it
+    displaces every later rule — so one impossible row also suppresses whatever true next action
+    the section had.
+
+    (3) THE SIBLING CLASS IN THE SAME FILE ALREADY DOES THE OPPOSITE, WHICH IS WHY THIS IS AN
+    OMISSION RATHER THAN A POLICY. `deriveIndeterminateBlockers` takes `projections` and skips a
+    task the batched projection confirms MERGED — its own comment reads "landed since — no longer
+    news". The same function's `deriveRetiredBlockers` (W1-T1287) takes the PLAN. So `deriveBlockers`
+    ALREADY HOLDS both the plan and the projections at the call site; the circuit-broken class is
+    the one class that consults neither.
+
+    (4) THE MEASURED INSTANCE. W1-T314 reads `status: blocked` in
+    `plan/tasks.d/W1-T314-console-four-tab-separation.yaml`, carrying its own withdrawal record
+    ("WITHDRAWN AND DECOMPOSED 2026-08-04") after six PR-less dispatches. Its work was inherited by
+    W1-T334/W1-T335/W1-T336, none of which credits W1-T314 — which is exactly why its streak was
+    never reset and why the row is, as history, TRUE. The row is not wrong about the past; it is
+    wrong about the present, which is what a BLOCKER claims. W1-T306 already fixed this same shape
+    for `blocked_pr` and stated the rule in its own design: "A BLOCKER IS A CLAIM ABOUT NOW.
+    Re-derive it, or do not print it." That rule was applied to PR merge state and never to task
+    dispatchability.
+
+    (5) THE FALSIFYING CHECK THE FEEDBACK ASKED FOR IS ANSWERED, AND IT ANSWERS DISPLAY-ONLY.
+    Every consumer of the breaker was enumerated: `drain.ts:548` and `daemon.ts:3137`
+    (`isCircuitTripped`, reached only after the merged/blocked filters above), `panel-graph.ts:907`
+    (fed to `runnableCandidates`, which applies the same status filter), `run-task.ts:18703`/`:19621`
+    (`breakerGate`, supplied to those same selectors) and `status-board.ts:1721` (QUEUE HEAD, which
+    only ranks candidates). NOT ONE of them reads breaker state for a task the plan has already
+    excluded. So no consumer needs the state preserved FOR a withdrawn task, and equally no consumer
+    is repaired by clearing it — which settles the second half of the recon:
+
+    (6) THE STATE MUST NOT BE TOUCHED, AND NOT ONLY BECAUSE IT GUARDS SPEND. The breaker has no
+    state to clear: `dispatchesWithoutNewOwnedPr` is a PURE FUNCTION over an append-only ledger.
+    "Clearing on withdrawal" would mean either writing a synthetic reset line into the ledger — a
+    fabricated fact in the fleet's own receipt, the exact hazard MASTER-PLAN §"cannot-observe ⇒
+    permitted" names — or a second exception table beside the counter W1-T271 and W1-T414 both
+    deliberately left alone. This task therefore changes ONE renderer and no dispatch decision.
+  design: |
+    (i) THE CIRCUIT-BROKEN CLASS CONSULTS WHAT THE DISPATCHER ALREADY EXCLUDED, AND MINTS NO
+    VOCABULARY OF ITS OWN. `deriveBlockers` already receives `plan` and `projections`; pass them
+    down. A task is skipped when the plan itself says dispatch will never take it — plan-declared
+    `status: "blocked"` (whether or not it carries W1-T1287's `retirement:`), and a task the
+    projection already credits MERGED, which is the skip `deriveIndeterminateBlockers` performs on
+    the very next lines and is copied rather than invented. Do NOT re-implement
+    `isDispatchEligible`'s predicate chain here and do NOT import drain.ts into the renderer to get
+    it: the two conditions above are plan facts this module already reads, and W1-T280's standing
+    design fence ("the board mints no blocker taxonomy that named-reason/breaker signals don't
+    already carry") is satisfied by consuming the plan's own words.
+
+    (ii) SUPPRESSION IS REVERSIBLE BECAUSE THE STATE SURVIVES, AND THAT IS THE WHOLE ANSWER TO THE
+    OPERATOR-BLOCK CASE. W1-T391 PROVED, with a live test fixture, that `blocked` holds two
+    populations: retirement records and tasks an operator blocked INTENDING TO UNBLOCK LATER. This
+    task must not need that distinction and must not attempt it. Because the ledger is untouched,
+    the row for an operator-blocked task RETURNS, byte-identical, the moment its status returns to a
+    dispatchable one — the warning reappears exactly when the possibility it warns about reappears.
+    A design that instead deleted or reset the count would silently un-arm the breaker for that
+    second population; this one cannot.
+
+    (iii) THE NEXT ACTION MUST FALL THROUGH, NOT GO BLANK. The `circuit_broken` rule is FIRST in
+    `BLOCKERS_NEXT_ACTIONS`; once a suppressed row no longer feeds it, the later rules must be given
+    their turn, so a section whose only remaining rows are `blocked_pr`/`indeterminate`/`retired`
+    still gets that class's action. Losing the impossible line must not cost the possible one.
+
+    (iv) DEGRADE TOWARD TODAY, NEVER TOWARD SILENCE. W1-T309's fence in this same function is
+    explicit that a missing or unreadable plan must not withhold a class GitHub could answer for.
+    Same here inverted: with no plan in hand the renderer cannot know a task is withdrawn, so it
+    renders exactly what it renders today. A suppression that fires on absent evidence would be the
+    W1-T306 failure pointed the other way — under-alarm from an unread source.
+
+    (v) NOTHING IS LOST THAT AN OPERATOR NEEDS, AND THE ARCHIVE IS NAMED. The withdrawn task's
+    dispatch history stays in its own plan record (W1-T314's `note:` carries the six runs and the
+    spend verbatim) and, where an operator has recorded `retirement:`, in the `retired` blocker class
+    W1-T1287 shipped for precisely this. `rmd status` is a claim about now, not the archive.
+
+    (vi) NOT IN SCOPE, NAMED SO IT IS NOT WIDENED BY ACCIDENT: any change to
+    `dispatchesWithoutNewOwnedPr`, `isDispatchBreakerTripped`, the lifetime cap, or any threshold
+    (W1-T271/W1-T414 own those and this task must leave the counter byte-identical); any new
+    `TASK_STATUSES` member or schema field (W1-T391 holds that ruling); recording `retirement:` on
+    W1-T314 or any other shard, which W1-T2266 states is an operator ruling per shard and is NOT a
+    worker's edit; QUEUE HEAD's own predicate parity, which is W1-T1205's and already shipped; and
+    the starvation census's recoverable/non-recoverable split (W1-T391).
+  acceptance:
+    - claim: "a plan-declared blocked task contributes no circuit-broken blocker row, whatever dispatch streak the ledger still carries for it"
+      proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
+    - claim: "the blockers next action is never computed from a task dispatch will never take, and the later rules still produce their action for the rows that remain"
+      proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
+    - claim: "rendering writes no ledger line and leaves the breaker reading tripped for the same task afterwards, so no dispatch decision anywhere changes"
+      proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
+    - claim: "the same task returned to a dispatchable status renders its circuit-broken row again from the same untouched ledger"
+      proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
+    - claim: "a task the projection already credits merged contributes no circuit-broken row, matching the merged skip the indeterminate class already performs"
+      proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
+    - claim: "with no plan and no projections available the class renders exactly as it does today rather than withholding rows"
+      proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
+    - claim: "a dispatchable task with a tripped breaker keeps its row and its reset wording unchanged"
+      proof: "unit test: test/blockers-name-only-dispatchable-work.test.ts"
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. `files:` names one source file and one test
+    whose stem does not match it, which the sizing check reads as two concerns however small the
+    change is — the same band and the same reason W1-T2264 and W1-T1287 carry. The actual change is
+    two extra arguments and one skip inside a four-line function that sits beside two functions
+    already doing the same skip.
+
+    verify:auto — every criterion is decidable in-process against a seeded ledger array and a
+    constructed plan object. No network, nothing spawned, no operator present.
+
+    PROOFS ARE ALL THE PURE-PATH `unit test:` FORM against a file declared in `files:` and not yet
+    built, so on the filing PR they resolve as forward references rather than as dead proofs.
+
+    FILE OVERLAP, NOT A DEPENDENCY. `src/lib/status-board.ts` is also declared by W1-T1205 and
+    W1-T1287. Both touch DIFFERENT functions in it (`deriveQueueHead`, `deriveRetiredBlockers`);
+    neither needs this task's output and this task needs neither of theirs. That is a matter for
+    dispatch-overlap partitioning, exactly as W1-T271's note records for `ledger.ts`.
+
+    WHAT WAS NOT RE-DERIVED. The two-day duration of the observed row and the "~$45 over six
+    dispatches" figure are the operator's account and W1-T314's own note; no ledger was read for
+    this filing. Nothing in the design rests on either — the defect is established from the source
+    order in rationale (1)-(3), which a reader reproduces with two greps.
