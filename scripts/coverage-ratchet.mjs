@@ -20,7 +20,7 @@
 // fixture test can exercise the CLI process directly (spawn + exit code) as well as the
 // parsing/comparison logic in isolation.
 
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
@@ -179,6 +179,61 @@ export function classifyCoverageTier(actual, thresholds = {}) {
   return { tier: 'healthy', blocking: false, message: `branches ${pct.toFixed(2)}% is at or above ${pass}%` };
 }
 
+// ── SELF-DESCRIBING FAILURES (the check-run annotation channel) ──────────────
+//
+// WHY THIS EXISTS. A red run's uncovered-line list lived ONLY in the job log, and the log blob is
+// unreachable from a diagnosing agent: `GET /actions/jobs/<id>/logs` 302s to
+// `productionresultssa11.blob.core.windows.net`, which a proxied environment refuses (measured: the
+// CONNECT tunnel returns 403), and the blob is ~12MB against execFileSync's 1MB default buffer.
+// Meanwhile the check-run itself carried ONE annotation reading, in full, `Process completed with
+// exit code 1.` -- so #2828 sat 13 hours and #2895 could not be diagnosed at all.
+//
+// THE CHANNEL IS THE ANNOTATION, NOT `output.summary`. A job cannot write `output.summary` (that
+// field belongs to whoever created the check run -- Actions itself -- and is empty on every run
+// here, measured). What a job CAN write with no extra token or permission is a workflow command,
+// which GitHub turns into a check-run annotation readable at
+// `GET /repos/<o>/<r>/check-runs/<id>/annotations` -- an endpoint that returns 200 through the same
+// proxy that 403s the blob. `%0A` encoding keeps the whole list inside ONE annotation message.
+// $GITHUB_STEP_SUMMARY is written too (same shape scripts/test-with-retry.mjs already uses) so the
+// list is also on the run page for a human; that channel has no REST endpoint, so it is a
+// convenience, never the fix.
+//
+// OPT-IN, AND DELIBERATELY NOT `GITHUB_ACTIONS`. This job runs the whole suite to produce its lcov,
+// and test/{coverage-ratchet,diff-coverage}.test.ts spawn THIS script over BLOCKING fixtures with
+// no `env` override -- so a `GITHUB_ACTIONS`-gated emit would publish fixture failures as real
+// annotations and make this instrument untrustworthy exactly where it is meant to be trusted.
+// `RMD_CI_REPORT` is set per-STEP on the two gate steps in ci.yml (never job-wide, which would
+// reach the test step too), so only a real gate invocation reports.
+
+/** Render a blocked/clean report as one plain-text block. Pure: no env, no I/O. */
+export function formatCiReport(tool, headline, details, { cap = 100 } = {}) {
+  const shown = details.slice(0, cap);
+  const lines = [`${tool}: ${headline}`, ...shown.map((d) => `  - ${d}`)];
+  // NO SILENT CAPS (the same rule the exempt-line printing below follows): if the list is trimmed,
+  // the report says so and names the cap, so a truncated read is never mistaken for a short list.
+  if (details.length > shown.length) {
+    lines.push(`  ... ${details.length - shown.length} more not listed (cap ${cap})`);
+  }
+  return lines.join('\n');
+}
+
+/** Encode a report for a `::error::` workflow command. `%` FIRST or the escapes eat each other. */
+export function encodeAnnotation(text) {
+  return text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+/** Write the report to the two channels a job can actually reach. No-op unless RMD_CI_REPORT is set. */
+export function emitCiReport(tool, report, { blocked, env = process.env, log = console.log, append = null } = {}) {
+  if (!env.RMD_CI_REPORT) return false;
+  if (blocked) log(`::error title=${tool}::${encodeAnnotation(report)}`);
+  const summaryPath = env.GITHUB_STEP_SUMMARY;
+  if (summaryPath) {
+    const write = append ?? appendFileSync;
+    write(summaryPath, `### ${tool}\n\n\u0060\u0060\u0060\n${report}\n\u0060\u0060\u0060\n\n`);
+  }
+  return true;
+}
+
 function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -227,13 +282,18 @@ function main(argv) {
   const blockers = [...(tier.blocking ? [tier.message] : []), ...violations];
 
   if (blockers.length > 0) {
-    console.error('coverage-ratchet: BLOCKED -- coverage is below a floor:');
+    const headline = 'BLOCKED -- coverage is below a floor:';
+    console.error(`coverage-ratchet: ${headline}`);
     for (const b of blockers) console.error(`  - ${b}`);
+    emitCiReport('coverage-ratchet', formatCiReport('coverage-ratchet', headline, blockers), { blocked: true });
     process.exitCode = 1;
     return;
   }
 
   console.log('coverage-ratchet: OK -- at or above baseline.');
+  emitCiReport('coverage-ratchet', formatCiReport('coverage-ratchet', 'OK -- at or above baseline.', []), {
+    blocked: false,
+  });
   process.exitCode = 0;
 }
 
