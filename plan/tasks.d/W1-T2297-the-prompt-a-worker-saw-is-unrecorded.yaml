@@ -1,0 +1,94 @@
+- id: W1-T2297
+  title: "THE PROMPT A WORKER SAW IS UNRECORDED — `renderImplementPrompt` assembles doctrine, task claims, recon, operator notes and matched learnings into one context block, `run.start` logs repo, type, risk and routing class, and no ledger step carries any fingerprint of what was injected, so after the fact 'what did this worker actually see' has no answer but assumption"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/lib/prompt-manifest.ts, src/run-task.ts, test/prompt-manifest.test.ts]
+  origin: "operator-brief#innovation-expansion-2026-08-25"
+  plan_refs: ["W1-T71", "W1-T86", "W1-T35", "W1-T2241"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE ASSEMBLY, RE-DERIVED AT HEAD. `renderImplementPrompt` (src/run-task.ts) joins, in order:
+    the role lines, `renderDoctrinePreamble()`, the task's cited context claims, `reconContext`,
+    `operatorNotesBlock` (`renderOperatorNotes`, src/lib/operator-notes.ts), `matchedLearnings`,
+    the task body, and the shared output-contract lines. Its own doc explains the ordering as
+    STABLE-FIRST, VOLATILE-LAST so a growing learnings corpus can never bust the cache for the
+    doctrine and recon bytes ahead of it (the W1-T35 cache discipline).
+
+    WHAT IS RECORDED TODAY IS THE ROUTING, NEVER THE CONTENT. `run.start` carries repo, type, risk
+    and the routing-class pair; the learnings half emits `learnings.injected`. Beyond those,
+    nothing: the queries `prompt_sha`, `promptHash` and `context_manifest` return zero hits across
+    src/ (measured 2026-08-25 at head, positive control on the same corpus: `run.start` matches in
+    run-task.ts, non-zero). So the composition of every worker prompt ever sent is invisible after
+    the spawn returns. When an incident asks "did this worker receive the learning that warns about
+    exactly this?" or "which recon text did the second dispatch actually get?", the record offers
+    routing metadata and an aggregate injection count, and the answer is re-derived by assumption
+    from what the corpus PROBABLY contained at that sha.
+
+    THREE CONSUMERS FOR THE MISSING RECORD ALREADY SIT IN THE TREE. (a) The calibration join reads
+    exactly two steps — `run.start` and `verdict` (the step filter in src/lib/analytics-route.ts) —
+    so outcome analysis can condition on risk and class but never on injected knowledge; W1-T86,
+    the wipe-test A/B harness (filed, never yet run), would measure learning utility ACROSS runs,
+    and a manifest makes each run's exposure a recorded fact instead of a reconstruction, which is
+    what an A/B split needs to be auditable. (b) `buildReceipt` (src/lib/receipt.ts) marks every
+    field with no ledger source as absent-with-reason — a prompt fingerprint is precisely the field
+    class a later receipt rung would want to attest, and today it would be absent for every run in
+    history. (c) The stable-first cache claim is asserted in prose and checkable only with part
+    fingerprints: with them, prefix stability across consecutive dispatches becomes a measurement
+    rather than a design intention.
+
+    THE TIMING ARGUMENT: W1-T2241 mints the recon VERIFY-AND-EXTEND artifact, adding one more
+    injected part whose whole value claim is "the next dispatch received it." A manifest row is how
+    `recon.reused` stops being self-reported and becomes checkable against the same run's own
+    spawn record.
+
+    FIELD CONTEXT, MARKED AS CONTEXT AND NOT EVIDENCE: the deterministic-control-plane literature
+    content-addresses prompts and configs by SHA-256 precisely so "what did the agent run with" is
+    a lookup, not an interview. Nothing in this shard's argument rests on it; the case is made from
+    this repo's own seams, and the citation is carried the way W1-T2243 carries its own.
+  design: |
+    (i) THE SHAPE: ONE PURE HELPER, ONE NEW STEP, ZERO PROMPT BYTES IN THE LEDGER. A pure function
+    (src/lib/prompt-manifest.ts) takes the named parts and returns, per part: the part name, a
+    sha256 over its bytes, and the byte length. The spawn path logs ONE step carrying that list
+    beside the ids `run.start` already carries. Full prompt text NEVER enters the ledger: rows are
+    greppable forever and rotate through archives with different handling than task text deserves —
+    the fingerprint answers identity questions without republishing content.
+
+    (ii) THE PROMPT ITSELF IS UNTOUCHED, AND A TEST PROVES THE NON-CHANGE. The manifest OBSERVES
+    assembly; it must not alter it. The test renders a prompt with the manifest wired and asserts
+    byte-identity with the pre-change assembly for the same inputs — the same non-change discipline
+    the compaction anchor uses for its shared literal text.
+
+    (iii) ABSENT PARTS ARE RECORDED AS ABSENT. An empty `operatorNotesBlock` or an absent recon
+    context is a fact worth keeping — the row says absent, never an empty-string hash masquerading
+    as content, mirroring `ReceiptField`'s present/absent split. A manifest that cannot distinguish
+    "no notes existed" from "notes were empty" would re-create the silent-empty class P48 exists to
+    refuse.
+
+    (iv) WHAT MUST NOT CHANGE, REFUSED BY NAME. The assembly ORDER stays stable-first,
+    volatile-last — this task neither reorders parts nor gives anything a reason to.
+    `learnings.injected` stays exactly as it is — the manifest complements the aggregate count with
+    identity, never replaces it. And the manifest is a RECORD, never a gate: no dispatch, review or
+    arm decision reads it.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS — the declared files span a new pure module
+    and the spawn wiring, two concerns to the linter. The runtime change is one additional ledger
+    step; every byte the worker receives is identical before and after.
+  acceptance:
+    - claim: "every injected context part yields one manifest row with a stable fingerprint"
+      proof: "unit test: test/prompt-manifest.test.ts"
+    - claim: "identical parts in produce identical fingerprints out"
+      proof: "unit test: test/prompt-manifest.test.ts"
+    - claim: "the rendered worker prompt is byte-identical with the manifest wired and without it"
+      proof: "unit test: test/prompt-manifest.test.ts"
+    - claim: "no manifest row ever carries prompt text"
+      proof: "unit test: test/prompt-manifest.test.ts"
+    - claim: "an absent optional part is recorded as absent rather than as empty content"
+      proof: "unit test: test/prompt-manifest.test.ts"
+    - claim: "the spawn path calls the manifest helper rather than shipping it unreached"
+      proof: "grep: buildPromptManifest( in src/run-task.ts"
