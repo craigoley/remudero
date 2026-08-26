@@ -46,6 +46,37 @@
  * `expires_at` and a fixed reason string.
  */
 
+// ── W1-T2311 DECISION RECORD: THE BOOT ENV CARRIED THE PAT, NOT THIS MODULE ─────────────────────
+//
+// MEASURED 2026-08-26: the container's boot env carried a 93-character personal token under
+// GH_TOKEN (fingerprint 8d073b4c, user 4397075) from the moment the daemon process started, and
+// `refreshInstallationToken` below only ever overwrites `process.env.GH_TOKEN` IN THIS PROCESS —
+// so the personal token was never reached by falling back to it, it WAS the default, and the
+// App-minted token was the thing that had to arrive to displace it. The root cause sat one layer
+// out: `deploy/recycle-container.sh` reads a container's env through `docker inspect`, which
+// reports only the STATIC config a container was started with, never a value this module mutates
+// in a running process — so no amount of successful refreshing here was ever visible to the NEXT
+// recycle, and every recycle re-booted the next container on the same standing personal token.
+//
+// REMEDY (a) TAKEN (see plan/tasks.d/W1-T2311-*.yaml's Q1): THE BOOT ENV NOW CARRIES NO GH_TOKEN.
+// `deploy/recycle-container.sh` still captures the outgoing container's token — its own
+// refusal-if-uncaptured guard is unchanged, so an operator never silently loses the only copy —
+// but that value is no longer forwarded into the incoming container's own environment (see that
+// script's own W1-T2311 section for exactly where, and for the operator read path this displaces:
+// a `docker exec` invocation carries its own token per call rather than the fleet holding one on
+// an operator's behalf). REMEDY (b) — having the fallback REFUSE on a failed exchange rather than
+// degrade — was NOT taken: nothing in THIS module ever introduced a personal token to refuse
+// around, and refusing here would still sit in tension with the retry loop's own "degrade, never
+// refuse" contract (W1-T1068, REFRESH_MARGIN_MS below), which stays exactly as it was. A
+// timed-out exchange still leaves the previous value untouched rather than clearing it — the same
+// behaviour as before this task, on a boot value that is no longer a credential worth protecting.
+// Nothing added here paces, throttles, sleeps or backs off a call (W1-T1066's own standing rule).
+//
+// THE SECOND-ORDER QUESTION IS UNINVESTIGATED, RECORDED HERE SO IT IS NOT RE-DERIVED OR GUESSED
+// AT BY THE NEXT READER: why did roughly one exchange in three time out at EXCHANGE_TIMEOUT_MS
+// when the same container reached GitHub's API in milliseconds unauthenticated? That is its own
+// defect, on its own measurement, and closing this task must not be read as having explained it.
+
 import { readFileSync } from "node:fs";
 import { sign as cryptoSign } from "node:crypto";
 

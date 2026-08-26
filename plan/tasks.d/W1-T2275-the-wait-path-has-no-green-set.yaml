@@ -130,6 +130,47 @@
     it is named here so the next filer recognises the shape — no task is filed for it and `files:` is
     not widened.
 
+    (7) STATUS CORRECTED TO `blocked` — THE RECORD WAS THE WRONG SIDE, NOT THE READER. Section (5)
+    recorded the retirement and deliberately left every other declared field byte-identical,
+    `status: queued` included. That is exactly what made the ruling inert. `retirement` is read by
+    NOTHING that decides dispatch: `isDispatchEligible` (`src/lib/drain.ts`) excludes on
+    `t.status === "blocked"` alone, and `assertRunnable` (`src/lib/plan.ts`) and `isOpenLintTask`
+    (`src/run-task.ts`) do the same — `plan.ts`'s own field doc states it in terms, that a task with
+    and without `retirement` "filters identically at all three". So `status:` is the only key that
+    can carry a retirement into effect, and the field's one consumer, `deriveRetiredBlockers`
+    (`src/lib/status-board.ts`), gates on `t.status === "blocked" && t.retirement !== undefined` in
+    agreement with that doc rather than in conflict with it.
+
+    THE HARM IS MEASURED, NOT HYPOTHETICAL. The retirement merged at 2026-08-25T15:32:41Z (#2840).
+    The fleet dispatched this id anyway — head `run-W1-T2275-1787726210679` — and merged #2923 at
+    2026-08-26T10:32:04Z: 18h59m after the ruling, and 6h01m after the survivor W1-T2274 merged its
+    own implementation as #2910. The duplicate build this retirement was recorded to prevent
+    happened while the record still read `queued`.
+
+    WHY NOT WIDEN THE READER INSTEAD. Rendering a `retired` row for a `queued` task would have the
+    board announce a retirement the dispatcher is simultaneously free to ignore. That is a false
+    reassurance and strictly worse than today's silence, because widening the row changes no filter
+    — the three that decide dispatch would still never see the field. `status: blocked` is the one
+    change that both stops the dispatch and renders the row.
+
+    WHY NOT `merged`, NOW THAT #2923 EXISTS. Merge credit is derived from the `Remudero-Task:`
+    trailer and from the `run-<id>-<epoch>` head ref, never from this key, so `merged` would tell
+    the credit path nothing it does not already know while leaving the ruling unreadable a second
+    time. `status:` here is a declaration of what the fleet may do with this record, and the
+    operator has already ruled that it may do nothing.
+
+    THE DRIFT WARNING IS DISCLOSED, NOT ROUTED AROUND. This task is merged, so
+    `mergedFieldChangeViolations` (`src/lib/task-linter.ts`) reports `post-merge-field-drift` on
+    `status:` at `severity: "warn"`, which never reaches `lint-plan`'s exit code. That report is
+    CORRECT and is the intended outcome: W1-T2254 built a DETECTOR, not a lock, precisely so a
+    merged shard's declared field stays correctable and the correction is a visible act. The
+    warning is expected on the PR that makes this edit and must not be suppressed.
+
+    WHAT IS NOT RULED ON HERE. Whether the retirement should stand now that #2923 shipped the suite
+    this shard names is the operator's call and is untouched: `retirement: retired` is preserved
+    byte-for-byte, no acceptance criterion moves, and the three-word vocabulary is not
+    re-litigated.
+
   design: |
     (i) ONE TAXONOMY, CONSULTED BY EVERY SITE. The wait path gains a green set rather than a literal
     `SUCCESS` comparison, and it is the SAME set site C already uses — never a fourth hand-copy, which
@@ -154,7 +195,7 @@
     - claim: "the wait path and the sweep agree on every one of the eight conclusions"
       proof: "unit test: test/check-conclusion-taxonomy.test.ts"
   files: [src/run-task.ts, test/check-conclusion-taxonomy.test.ts]
-  status: queued
+  status: blocked
   retirement: retired
   attempts: 0
   origin: "recon#wait-path-has-no-green-set-2026-08-25"
