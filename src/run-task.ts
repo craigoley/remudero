@@ -12674,19 +12674,10 @@ export function replayCommand(
   const taskId = flagValue(rest, "--task");
   const stepPrefix = flagValue(rest, "--step");
 
-  const stateDir =
-    opts.stateDir ??
-    (() => {
-      try {
-        return join(loadConfig().root, "state");
-      } catch {
-        return undefined;
-      }
-    })();
-  if (stateDir === undefined) {
-    console.error("rmd replay: cannot resolve a state dir — unreadable config");
-    return 1;
-  }
+  // Mirrors receiptCommand's own stateDir derivation (design (i): "the verb wiring in
+  // run-task.ts mirrors the receipt verb's registration") rather than introducing a second,
+  // defensively-caught derivation idiom for the same job.
+  const stateDir = opts.stateDir ?? dirname(ledgerPathFor(loadConfig()));
   const resolved = (opts.resolveReplayLedgerLines ?? resolveReplayLedgerLines)(stateDir);
   if (!resolved.ok) {
     console.error(`rmd replay: ${resolved.reason}`);
