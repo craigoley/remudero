@@ -4528,9 +4528,16 @@ async function runReview(args: {
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
   // {@link "./lib/review.js".UnwiredAdvisory}'s doc), naming the PR (taskId + headSha + prUrl), the
   // reason code and the offending symbols — this is the dataset W1-T323's measurement window reads.
-  // NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts), deliberately: nothing DECIDES
-  // anything off this step yet — see design (v), which defers registration to W1-T323's own change,
-  // the same rotation discipline `run.start`/other analytical-only steps already follow.
+  // ADVISORY BECAUSE NO ARM READS IT, NOT BECAUSE IT IS EXCLUDED FROM ROTATION RETENTION. This
+  // comment used to say the step was "NOT added to DECISION_RELEVANT_LEDGER_STEPS, deliberately",
+  // deferring registration to W1-T323's own change. That became false when W1-T1017 registered
+  // `review.unwired_advisory` in that Set (lib/ledger.ts) AHEAD of the flip, because rotation was
+  // dropping 95%+ of these rows — live 4 / rotations 83, against a `review.posted` control of live
+  // 219 / rotations 390 — and the corpus W1-T323 must be adjudicated against was being archived
+  // out from under it. MEMBERSHIP IN THAT SET MEANS RETENTION, NOT BLOCKING: it keeps the newest
+  // rows past rotation and gives no arm a reason to consult them. The conclusion above is
+  // unchanged — nothing in the verdict or arm path decides off this step — only the stated reason
+  // was wrong, and a lane wrote a test asserting the absence this comment implied.
   for (const advisory of verdict.unwiredAdvisories ?? []) {
     log("review.unwired_advisory", {
       pr_url: prUrl,
