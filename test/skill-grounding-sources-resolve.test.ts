@@ -147,6 +147,15 @@ test("groundingSourceResolves: a `path#fragment` entry resolves FALSE when the f
   });
 });
 
+test("groundingSourceResolves: a `path#fragment` entry resolves FALSE when the file itself does not exist — the missing-file catch, not just a no-match heading", () => {
+  withTempDir((dir) => {
+    // No `doc.md` is written at all: `readFileSync` throws (ENOENT), which must land on the same
+    // `false` a present-but-non-matching file gives — a fragment is never satisfied just because
+    // nothing threw an unhandled error.
+    assert.equal(groundingSourceResolves(dir, "doc.md#7C"), false);
+  });
+});
+
 test("the shipped registry's `#fragment` entries each resolve to a REAL heading, not a silently-widened whole-file match", () => {
   const skills = loadSkillRegistry(skillsDir(repoRoot));
   const fragmentEntries = skills.flatMap((s) => s.grounding_sources.map((source) => ({ skill: s.name, source, ...parseGroundingSource(source) }))).filter((e) => e.fragment !== undefined);
