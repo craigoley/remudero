@@ -515,6 +515,12 @@ interface RestCheckRun {
   /** "success" | "failure" | "neutral" | … — `null` while the run is still incomplete. */
   conclusion?: string | null;
   details_url?: string | null;
+  /**
+   * W1-T2300 — ISO8601, when THIS attempt started. Present on every entry a live check-runs
+   * response carries (verified against a real response for a recent head — see the task's own
+   * rationale point 4), mirrored to {@link RestRollupEntry.startedAt} by {@link rollupFromRest}.
+   */
+  started_at?: string | null;
 }
 
 /** One commit status as REST reports it. */
@@ -523,6 +529,14 @@ interface RestStatus {
   /** "success" | "failure" | "pending" | "error" — lowercase, where GraphQL reports "SUCCESS". */
   state?: string;
   target_url?: string | null;
+  /**
+   * W1-T2300 — ISO8601 creation time. A StatusContext carries NO `started_at` of its own (the
+   * combined-status endpoint's entries carry `created_at`/`updated_at` only) — this is the SAME
+   * key {@link RollupCheckEntry.startedAt}'s own doc (lib/sweep.ts) already names as what the real
+   * `gh` gateway maps a status context's `startedAt` from: "a status context's mapped from
+   * createdAt". Mirrored to {@link RestRollupEntry.startedAt} by {@link rollupFromRest}.
+   */
+  created_at?: string | null;
 }
 
 /**
@@ -545,6 +559,16 @@ export interface RestRollupEntry {
   state?: string;
   detailsUrl?: string;
   targetUrl?: string;
+  /**
+   * W1-T2300 — when THIS attempt started, mapped by {@link rollupFromRest} from a check run's own
+   * `started_at` or (absent that shape) a status context's `created_at`. Absent ONLY on a
+   * malformed/short row — never left unset by choice, unlike before this task, when NEITHER REST
+   * source populated it at all. This is the SAME field {@link RollupCheckEntry.startedAt}
+   * (lib/sweep.ts) names as what `dedupeRollupByLatestAttempt` sorts on and what
+   * `staleCiGateTransition` requires to fire — see that file's own doc for why an entry with none
+   * used to sort as though every REST attempt shared one array-order tie.
+   */
+  startedAt?: string;
 }
 
 /**
@@ -574,6 +598,13 @@ function upper(v: string | null | undefined): string | undefined {
  * entry from it would invent a pending check that GraphQL never reported, and (per
  * `checksStateFromRollup`) an invented entry on an otherwise-empty rollup flips "none" to
  * "pending". Only real `statuses[]` rows become entries.
+ *
+ * W1-T2300 — BOTH entry shapes are also mapped to {@link RestRollupEntry.startedAt} here, by TWO
+ * DIFFERENT source keys, because the two REST endpoints do not agree on one: a check run carries
+ * its own `started_at`, while a status context carries no `started_at` at all and is mapped from
+ * `created_at` instead — the SAME split {@link RollupCheckEntry.startedAt}'s own doc (lib/sweep.ts)
+ * already documents for the real `gh` gateway. A build that read only `started_at` would silently
+ * leave every status-context entry (`remudero-review` among them) untimestamped forever.
  */
 export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]): RestRollupEntry[] {
   const fromRuns = checkRuns.map((c) => {
@@ -583,6 +614,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
     if (status !== undefined) e.status = status;
     if (conclusion !== undefined) e.conclusion = conclusion;
     if (c.details_url) e.detailsUrl = c.details_url;
+    if (c.started_at) e.startedAt = c.started_at;
     return e;
   });
   const fromStatuses = statuses.map((s) => {
@@ -593,6 +625,9 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
     // `fetchCiFailures` mines `detailsUrl` for an Actions job id. Surfacing a status's target
     // URL as `detailsUrl` would feed a non-Actions URL to that miner.
     if (s.target_url) e.targetUrl = s.target_url;
+    // A StatusContext has no `started_at` of its own — `created_at` is the nearest equivalent
+    // (design note above), and IS what the real `gh` gateway maps this same field from.
+    if (s.created_at) e.startedAt = s.created_at;
     return e;
   });
   return [...fromRuns, ...fromStatuses];
