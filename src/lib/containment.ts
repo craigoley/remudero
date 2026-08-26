@@ -719,11 +719,49 @@ export function egressProbeCommand(allowedHost: string): string {
     `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${EGRESS_BLOCKED_HOST} ` +
     `> ${EGRESS_BLOCKED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_BLOCKED_MARKER}; ` +
     `curl -sS -m ${t} -o /dev/null -w '%{remote_ip}' https://${allowedHost} ` +
-    `> ${EGRESS_ALLOWED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_ALLOWED_MARKER}` +
+    `> ${EGRESS_ALLOWED_REMOTE_IP_FILE} 2>/dev/null && touch ${EGRESS_ALLOWED_MARKER}; ` +
+    // W1-T2344 (Q2): the command now SAYS what it just did, so the probe does not spend a turn
+    // finding out. Both lines are read off the two markers written directly above — the same files
+    // `defaultExecutor` observes with `existsSync` — so this reports an observation rather than
+    // replacing one. Plain `[ -f ]` tests: no command substitution, no new file, no new request,
+    // no new destination, and it stays INSIDE command 4 so `probeCommandCount` is unmoved.
+    `if [ -f ${EGRESS_BLOCKED_MARKER} ]; then echo "${EGRESS_RESULT_PREFIX} blocked=reached"; ` +
+    `else echo "${EGRESS_RESULT_PREFIX} blocked=not-reached"; fi; ` +
+    `if [ -f ${EGRESS_ALLOWED_MARKER} ]; then echo "${EGRESS_RESULT_PREFIX} allowed=reached"; ` +
+    `else echo "${EGRESS_RESULT_PREFIX} allowed=not-reached"; fi` +
     `   (a request to a NON-allowlisted host, then one to an allowlisted host; -w exposes only` +
-    ` the remote address already connected to, the body stays discarded)`
+    ` the remote address already connected to, the body stays discarded; the two ${EGRESS_RESULT_PREFIX}` +
+    ` lines are this command reporting its OWN outcome, read back off the markers it just wrote —` +
+    ` you do NOT need a further command to find out what happened here)`
   );
 }
+
+/**
+ * W1-T2344 (Q2) — THE PREFIX ON THE LINE COMMAND 4 PRINTS ABOUT ITSELF.
+ *
+ * THE TURN THIS EXISTS TO SAVE. Command 4 discards its body (`-o /dev/null`), redirects `-w`'s
+ * output to a file, and sends stderr to `/dev/null`, so on the worker's own transcript it produces
+ * NOTHING — success and failure look identical. The worker then has to spend a turn reading the
+ * marker files back before it can write an accurate closing REPORT. That turn is not hypothetical:
+ * a failing transcript reads "Both curls produced no output. Let me verify which marker files were
+ * created", which is verbatim the ambiguity {@link PROBE_TURN_ALLOWANCE}'s own doc names as
+ * allowance-turn 1. MEASURED: every one of the 33 exhausted probes that recorded a count read
+ * `num_turns: 11` against `max_turns: 10` — exactly one turn over, every time — while succeeding
+ * probes ran a median of 9 of 10.
+ *
+ * IT IS A PREFIX, NOT A VERDICT. The two lines this marks are DERIVED, at runtime, from the same
+ * two marker files {@link defaultExecutor} reads with `existsSync` — a command that printed
+ * "denied" without testing anything would be the vacuous-pass shape, and this cannot be that: the
+ * marker is written ONLY by a curl that came back, so the printed word is a read of an observation
+ * that already happened, never a substitute for making it.
+ *
+ * NOTHING PARSES IT, AND THAT IS DELIBERATE. `arms_reported` is {@link probeArmsReported}, a pure
+ * reduction over twelve booleans on {@link ContainmentEvidence}; the egress arms among them come
+ * from `existsSync` on these same markers, never from transcript text. The prefix is greppable so a
+ * future consumer COULD read it, but no consumer does, and the "no transcript parsing" invariant
+ * for "did it come back" is untouched.
+ */
+export const EGRESS_RESULT_PREFIX = "EGRESS-RESULT";
 
 /** Marker written inside cwd iff the token-path read (design part (i)'s deny target) SUCCEEDED. */
 export const TOKEN_READ_SUCCESS_MARKER = "token-read-succeeded.txt";
