@@ -9070,7 +9070,10 @@
     the head SHA on the rmd review path; NEVER the operator's working checkout. VERIFY the judge call
     site's current checkout source in run-task.ts by reading it first; the call site passing the head
     checkout path into the judge is a NAMED DELIVERABLE of this task (the orphaned-call-site lesson).
-    Test proofs run after npm ci in that checkout (fresh worktrees have no node_modules).
+    Test proofs run with no install step at all: node_modules is a symlink to the canonical tree
+    (linkWorktreeNodeModules, src/lib/worker.ts), so the deps are already there and an install
+    whose cwd is the worktree would empty the shared tree through that link; genuinely-newer
+    deps come from refreshing the canonical checkout, never from an install inside a worktree.
   acceptance:
     - claim: "a criterion SATISFIED in repo state but not keyword-claimed in the report is judged MET by the floor (the #100 case)"
       proof: "unit test over an injected executor: proof names a test/grep, executor returns pass/match, report contains NO proof keywords -> criterion MET with proof_exec=executed_pass"
