@@ -3220,6 +3220,16 @@ export function deriveChangesetClaimUpdate(body: string, diffFiles: string[]): s
 }
 
 /**
+ * W1-T2272: the check-run name `.github/workflows/acceptance-author-gate.yml` reports under
+ * (its job's own `name:` field — the SAME string GitHub's status-check rollup, and therefore
+ * `CiFailure.name`, carries). `runFixRung`'s pre-strike body-repair site matches on this
+ * EXACTLY — never "any ci-log round" — so a PR failing for an unrelated reason (a real test
+ * failure, a lint error) is never short-circuited into a body edit that does nothing for the
+ * check that is actually red.
+ */
+const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
+
+/**
  * W1-T2272: the fallback criterion appended to a body an author-time gate refusal was repaired
  * against. Deliberately generic and task-AGNOSTIC — worded so the claim is about the BODY'S OWN
  * SHAPE, never about the underlying diff or any task's acceptance (this task's own Q2 boundary:
@@ -6559,26 +6569,31 @@ export async function runFixRung(opts: {
     }
 
     // W1-T2272 SITE — ACCEPTANCE-AUTHOR-GATE BODY REPAIR, BEFORE `strikes++`/any commit (design
-    // note ii — "a body-only defect needs no commit"). SCOPED TO CI-LOG ROUNDS
-    // (`currentMergeConflict === undefined && noReviewYet`): `acceptance-author-gate` is a required
-    // CI check (scripts/acceptance-author-gate.mjs), so a PR refused by it surfaces exactly the way
-    // any other red required check does — `checksState === "red"` — which is what routes a
-    // dispatch into ci-log mode in the first place. Narrowing here (rather than running on every
-    // mode) also keeps this SITE from ever touching `body-coverage`'s own `fetchPrBody` /
-    // `deriveChangesetClaimUpdate` arm (W1-T307/W1-T1254) below, which judges the report/changeset
-    // of a REVIEW-mode strike's OWN commit — a different concern this task's design note (iv)
-    // explicitly leaves untouched. It is a structural no-op for any plan-tracked task's PR either
-    // way: `ensureTaskTrailer` stamps a real `Remudero-Task:` trailer unconditionally, which
-    // short-circuits `acceptanceAuthorTimeCheck` to `ok: true` before it ever inspects the body's
-    // own Acceptance block. It only ever fires for the untracked/synthetic PRs `fixRungTaskFor`
-    // (W1-T923) already made this rung eligible to touch — never a widening of WHICH PRs the rung
-    // may act on (this task's note, Q1/Q2).
+    // note ii — "a body-only defect needs no commit"). SCOPED TO A CI-LOG ROUND WHOSE OWN EVIDENCE
+    // NAMES THE GATE (`currentCiFailures` contains `ACCEPTANCE_AUTHOR_GATE_CHECK_NAME`) — never
+    // "any ci-log round": a PR failing for an UNRELATED reason (a real test failure, a lint error)
+    // must still reach the ordinary strike below, and short-circuiting on some incidental body
+    // defect of its own would spend the round on a check that was never what's blocking it
+    // (MEASURED regression while building this: `test/fix-dedup-seed.test.ts`'s own header-less
+    // fixture body, dispatched for an unrelated `ci` check failure, was "repaired" and consumed
+    // the only strike before the real fix worker ever ran). This also keeps this SITE from ever
+    // touching `body-coverage`'s own `fetchPrBody`/`deriveChangesetClaimUpdate` arm (W1-T307/
+    // W1-T1254) below, a different concern this task's design note (iv) leaves untouched. It is a
+    // structural no-op for any plan-tracked task's PR either way: `ensureTaskTrailer` stamps a
+    // real `Remudero-Task:` trailer unconditionally, which short-circuits `acceptanceAuthorTimeCheck`
+    // to `ok: true` before it ever inspects the body's own Acceptance block. It only ever fires for
+    // the untracked/synthetic PRs `fixRungTaskFor` (W1-T923) already made this rung eligible to
+    // touch — never a widening of WHICH PRs the rung may act on (this task's note, Q1/Q2).
     //
     // `acceptanceGateBodyRepair` (pure, above) is `undefined` for a healthy body, for `no-trailer`/
     // `unparseable` (design note i — not deterministically repairable, so left for the ordinary
     // strike below), and whenever the live fetch itself fails (fail OPEN, same discipline as every
     // other best-effort read in this rung).
-    if (currentMergeConflict === undefined && noReviewYet) {
+    if (
+      currentMergeConflict === undefined &&
+      noReviewYet &&
+      currentCiFailures?.some((f) => f.name === ACCEPTANCE_AUTHOR_GATE_CHECK_NAME)
+    ) {
       const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
       let liveBody: string | undefined;
       try {
