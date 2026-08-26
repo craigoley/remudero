@@ -14394,15 +14394,17 @@ function earliestCreditTimestamps(
   return earliest;
 }
 
-/** A `plan/tasks.d/<id>-<slug>.yaml` shard, repo-relative to `repoRoot` — or `undefined` when
- *  `taskId` is declared inline in the `plan/tasks.yaml` monolith instead (W1-T2280 note ix: the
- *  amendment signal has no per-file history to read for those, counted as `unmeasurable`). Reuses
- *  `taskRecordPath` (lib/plan.ts) — the ONE derivation of "which file holds this task's record" —
- *  never a re-guessed `plan/tasks.d/<id>-*.yaml` glob. */
-function creditedTaskShardPath(planPath: string, taskId: string): string | undefined {
+/** A `plan/tasks.d/<id>-<slug>.yaml` shard, relative to `cwd` (the checkout `git log` will run
+ *  in — see {@link defaultCreditedAmendmentEvidence}, never hardcoded to the module's own
+ *  `repoRoot`, which a test's scratch checkout is not) — or `undefined` when `taskId` is declared
+ *  inline in the `plan/tasks.yaml` monolith instead (W1-T2280 note ix: the amendment signal has
+ *  no per-file history to read for those, counted as `unmeasurable`). Reuses `taskRecordPath`
+ *  (lib/plan.ts) — the ONE derivation of "which file holds this task's record" — never a
+ *  re-guessed `plan/tasks.d/<id>-*.yaml` glob. */
+function creditedTaskShardPath(planPath: string, taskId: string, cwd: string): string | undefined {
   const resolved = taskRecordPath(planPath, taskId);
   if (resolved === undefined || resolved === planPath) return undefined;
-  return relative(repoRoot, resolved);
+  return relative(cwd, resolved);
 }
 
 /**
@@ -14412,6 +14414,12 @@ function creditedTaskShardPath(planPath: string, taskId: string): string | undef
  * `shardPath` itself (the follow-up escape hatch W1-T2217's commit `ecd1ccc0` used, W1-T2280
  * rationale (11))? Returns `undefined` — FAIL OPEN, never a guessed flag — on a shallow checkout
  * or any git failure, the same posture `defaultMergeEvidenceLog` already takes.
+ *
+ * TWO PASSES, DELIBERATELY. `git log --name-status -- <path>` FILTERS the printed file list down
+ * to only the pathspec's own matches — it does not name a commit's OTHER changed files, which is
+ * exactly what "a follow-up filed alongside" needs to see. Pass 1 finds the CANDIDATE commit shas
+ * (scoped to `shardPath`, cheap); pass 2 asks each candidate's FULL, unfiltered file list (via
+ * `git show`, no pathspec) whether it also added a different shard.
  */
 function defaultCreditedAmendmentEvidence(
   cwd: string,
@@ -14422,26 +14430,27 @@ function defaultCreditedAmendmentEvidence(
   try {
     const shallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd, encoding: "utf8" }).trim();
     if (shallow === "true") return undefined;
-    const out = execFileSync(
+    const shaList = execFileSync(
       "git",
-      ["log", `--since=${creditedAtIso}`, "--name-status", "--format=%x02%H", "origin/main", "--", shardPath],
+      ["log", `--since=${creditedAtIso}`, "--format=%H", "origin/main", "--", shardPath],
       { cwd, encoding: "utf8", maxBuffer: 1 << 24 },
-    );
-    const trimmed = out.trim();
-    if (!trimmed) return { amended: false, followUpFiled: false };
+    )
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (shaList.length === 0) return { amended: false, followUpFiled: false };
     const addedShardRe = /^A\s+(plan\/tasks\.d\/[^/\t]+\.yaml)\s*$/;
-    const followUpFiled = trimmed
-      .split("\x02")
-      .filter(Boolean)
-      .some((block) =>
-        block
-          .split("\n")
-          .slice(1)
-          .some((line) => {
-            const m = addedShardRe.exec(line.trim());
-            return m !== null && m[1] !== shardPath;
-          }),
-      );
+    const followUpFiled = shaList.some((sha) => {
+      const files = execFileSync("git", ["show", "--name-status", "--format=", sha], {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 1 << 24,
+      });
+      return files.split("\n").some((line) => {
+        const m = addedShardRe.exec(line.trim());
+        return m !== null && m[1] !== shardPath;
+      });
+    });
     return { amended: true, followUpFiled };
   } catch {
     return undefined; // an unreadable/unexpected git state is UNMEASURABLE, never a guess
@@ -14497,7 +14506,7 @@ export function creditedProofVisibility(
   const earliest = ledgerPath ? earliestCreditTimestamps(dirname(ledgerPath), deps.ledgerUnion ?? resolveLedgerUnion) : undefined;
   const facts: CreditedAmendmentFact[] = creditedTasks.map((t) => ({
     taskId: t.id,
-    shardPath: creditedTaskShardPath(planPath, t.id),
+    shardPath: creditedTaskShardPath(planPath, t.id, cwd),
   }));
   const amendedSinceCredit =
     deps.amendedSinceCredit ??

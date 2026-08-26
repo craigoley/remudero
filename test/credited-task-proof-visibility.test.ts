@@ -28,6 +28,7 @@
  *   9. the verb exits 0 on every population it audits, offenders or not — a report, never a gate.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -436,4 +437,111 @@ test("W1-T2280(9): every declared cause — including the credited-only fourth o
 test("W1-T2280(9): a malformed invocation still refuses with a non-zero exit, unaffected by --credited's addition", async () => {
   const { exitCode } = await runAuditCapturing(["--bogus"]);
   assert.equal(exitCode, 2);
+});
+
+// ── (4/5) the REAL git-log wiring, over a scratch repo — not just the injected predicate ────
+//
+// The pure `creditedAmendmentVisibility` tests above prove the DECISION logic; these prove the
+// production DEFAULT (`defaultCreditedAmendmentEvidence`, run-task.ts) actually reads git
+// history correctly — a commit's own file list, `origin/main`-scoped, `--since` a dated credit.
+
+const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+
+function git(dir: string, args: string[], whenIso?: string): string {
+  const env = whenIso ? { ...GIT_ENV, GIT_AUTHOR_DATE: whenIso, GIT_COMMITTER_DATE: whenIso } : GIT_ENV;
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env });
+}
+
+function makeScratchRepoWithArchive(): { repoDir: string; ledgerDir: string; ledgerPath: string } {
+  const repoDir = mkdtempSync(join(tmpdir(), "w1-t2280-git-repo-"));
+  mkdirSync(join(repoDir, "plan", "tasks.d"), { recursive: true });
+  git(repoDir, ["init", "--quiet", "-b", "main"]);
+  git(repoDir, ["config", "user.email", "t@t"]);
+  git(repoDir, ["config", "user.name", "t"]);
+
+  const ledgerDir = mkdtempSync(join(tmpdir(), "w1-t2280-git-ledger-"));
+  // A dummy rotation so resolveLedgerUnion's zero-archive refusal doesn't fire (a fresh state
+  // dir with only a live file is treated as untrustworthy by design — see that module's doc).
+  writeFileSync(join(ledgerDir, "ledger.dummy-archive.ndjson"), "", "utf8");
+  const ledgerPath = join(ledgerDir, "ledger.ndjson");
+  return { repoDir, ledgerDir, ledgerPath };
+}
+
+function creditLine(taskId: string, ts: string): string {
+  return JSON.stringify({ task_id: taskId, step: "verdict.merged", ts }) + "\n";
+}
+
+/** A minimally-VALID shard record — `parseTasksFromYaml` (lib/plan.ts) throws on a task missing
+ *  `id`/`title`/`repo`/`type`, and `taskRecordPath`'s `holdsTask` swallows that throw as "not
+ *  held here", so an under-specified fixture would silently read as no-shard-found rather than
+ *  failing loud. `extra` appends additional YAML lines (e.g. a `note:`) to simulate an amend. */
+function shardYaml(id: string, extra = ""): string {
+  return [`- id: ${id}`, '  title: "fixture"', "  repo: remudero", "  type: implement", extra, ""].join("\n");
+}
+
+test("W1-T2280(4): REAL git history — a shard amended after credit with NO other file in that commit is flagged", () => {
+  const { repoDir, ledgerDir, ledgerPath } = makeScratchRepoWithArchive();
+  try {
+    const shard = join(repoDir, "plan", "tasks.d", "W9-GITPROBE-a-x.yaml");
+    writeFileSync(shard, shardYaml("W9-GITPROBE-A"), "utf8");
+    git(repoDir, ["add", "-A"], "2026-01-01T00:00:00Z");
+    git(repoDir, ["commit", "--quiet", "-m", "chore: add W9-GITPROBE-A shard"], "2026-01-01T00:00:00Z");
+
+    writeFileSync(shard, shardYaml("W9-GITPROBE-A", "  note: amended"), "utf8");
+    git(repoDir, ["add", "-A"], "2026-01-03T00:00:00Z");
+    git(repoDir, ["commit", "--quiet", "-m", "chore: amend W9-GITPROBE-A"], "2026-01-03T00:00:00Z");
+    git(repoDir, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    writeFileSync(ledgerPath, creditLine("W9-GITPROBE-A", "2026-01-02T00:00:00.000Z"), "utf8");
+
+    const plan = planOf([fixtureTask({ id: "W9-GITPROBE-A", acceptance: [] })]);
+    const result = creditedProofVisibility(join(repoDir, "plan", "tasks.yaml"), plan, {
+      ledgerPath,
+      cwd: repoDir,
+      pathExists: () => true,
+    });
+
+    assert.equal(result.amendment.measurable, 1);
+    assert.deepEqual(result.amendment.flagged, ["W9-GITPROBE-A"], "amended after credit, no follow-up shard alongside it");
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(ledgerDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2280(5): REAL git history — a shard amended IN THE SAME COMMIT as a new shard's addition is NOT flagged", () => {
+  const { repoDir, ledgerDir, ledgerPath } = makeScratchRepoWithArchive();
+  try {
+    const shard = join(repoDir, "plan", "tasks.d", "W9-GITPROBE-b-x.yaml");
+    writeFileSync(shard, shardYaml("W9-GITPROBE-B"), "utf8");
+    git(repoDir, ["add", "-A"], "2026-01-01T00:00:00Z");
+    git(repoDir, ["commit", "--quiet", "-m", "chore: add W9-GITPROBE-B shard"], "2026-01-01T00:00:00Z");
+
+    // The SAME commit both amends the credited shard AND files a brand-new follow-up shard —
+    // W1-T2217's own escape-hatch shape.
+    writeFileSync(shard, shardYaml("W9-GITPROBE-B", "  note: amended"), "utf8");
+    writeFileSync(
+      join(repoDir, "plan", "tasks.d", "W9-GITPROBE-FOLLOWUP-y.yaml"),
+      shardYaml("W9-GITPROBE-FOLLOWUP"),
+      "utf8",
+    );
+    git(repoDir, ["add", "-A"], "2026-01-03T00:00:00Z");
+    git(repoDir, ["commit", "--quiet", "-m", "chore: amend W9-GITPROBE-B, file its follow-up"], "2026-01-03T00:00:00Z");
+    git(repoDir, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    writeFileSync(ledgerPath, creditLine("W9-GITPROBE-B", "2026-01-02T00:00:00.000Z"), "utf8");
+
+    const plan = planOf([fixtureTask({ id: "W9-GITPROBE-B", acceptance: [] })]);
+    const result = creditedProofVisibility(join(repoDir, "plan", "tasks.yaml"), plan, {
+      ledgerPath,
+      cwd: repoDir,
+      pathExists: () => true,
+    });
+
+    assert.equal(result.amendment.measurable, 1);
+    assert.deepEqual(result.amendment.flagged, [], "a follow-up shard filed in the SAME commit suppresses the flag");
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(ledgerDir, { recursive: true, force: true });
+  }
 });
