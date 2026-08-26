@@ -21104,12 +21104,20 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
 /**
  * W1-T1223 (design i) — the real gateway's producer for {@link OpenPrView.cancelledRequiredChecks},
  * mirroring how {@link fetchCiFailures} is the real gateway's producer for `ciFailures`: both name
- * their required checks off the SAME `cancelledRequiredCheckNames`/`REQUIRED_CHECK_FAIL` predicates
- * lib/sweep.ts owns, so this producer and `checksStateFromRollup`'s red verdict can never drift into
- * disagreeing about which check is cancelled. `jobId` is parsed from the SAME `detailsUrl` shape
- * `fetchCiFailures` already reads (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined`
- * when it cannot be read, so `requeueCheck`'s real wiring degrades to a named no-op rather than
- * guessing a re-queue target.
+ * off the SAME `cancelledRequiredCheckNames` predicate lib/sweep.ts owns, so this producer and
+ * `checksStateFromRollup`'s red verdict can never drift into disagreeing about which check is
+ * cancelled. `jobId` is parsed from the SAME `detailsUrl` shape `fetchCiFailures` already reads
+ * (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined` when it cannot be read, so
+ * `requeueCheck`'s real wiring degrades to a named no-op rather than guessing a re-queue target.
+ *
+ * W1-T2283 — `requiredContexts` is READ (still the one precondition — see
+ * {@link cancelledRequiredCheckNames}'s own doc) but no longer narrows WHICH cancelled check gets
+ * named: `ci-gate`, the ONE name branch protection on this repo actually declares required, is a
+ * downstream aggregator that reports FAILURE — never CANCELLED — when a sibling it depends on
+ * (`coverage-ratchet`, itself not a declared-required context) is cancelled. Narrowing to
+ * `requiredContexts` before testing for CANCELLED therefore named nothing on both measured
+ * incidents (#2794, #2841); this producer now agrees with {@link fetchCiFailures}, which already
+ * reads CANCELLED off this same rollup with no such narrowing.
  */
 export function cancelledRequiredChecks(
   rollup: RollupCheck[] | undefined,
@@ -21559,7 +21567,18 @@ export function buildOpenPrViews(
       // W1-T1223 — the "absence of a verdict" observable, populated alongside `ciFailures`
       // above off the SAME rollup read (no extra request); see `cancelledRequiredChecks`'s own
       // doc.
-      cancelledRequiredChecks: checksState === "red" ? cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts) : undefined,
+      //
+      // W1-T2283 — COMPUTED UNCONDITIONALLY, NEVER GATED ON `checksState === "red"`. While a
+      // cancellation is fresh and the required aggregate (`ci-gate`) has not yet concluded, this
+      // PR's `checksState` reads "pending" for up to ~10.5 measured minutes (#2794, #2841) before
+      // it flips to "red" — gating this field on "red" made the observation `undefined` for that
+      // whole window even though the SAME already-fetched rollup carried it the entire time. This
+      // is a pure read of a rollup already in hand (no extra `gh` call either way, exactly like
+      // `ciFailures` above), so there is no cost to carrying it rather than discarding it; whether
+      // `runSweep` ACTS on a cancellation before the gate concludes red is a separate question
+      // `isBlockedCi` still gates (lib/sweep.ts) — this only stops the data itself from being
+      // thrown away while pending.
+      cancelledRequiredChecks: cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts),
       // W1-T176: only meaningful in the zero-runs shape post-review routes on;
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.

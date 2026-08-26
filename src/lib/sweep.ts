@@ -1342,15 +1342,34 @@ export interface CancelledRequiredCheck {
 }
 
 /**
- * W1-T1223 (design i) — which of `requiredContexts`' checks have a LATEST (deduped) attempt that
- * is CANCELLED, on the exact SAME gate {@link checksStateFromRollup} reads red from: same
- * required-contexts filter, same {@link dedupeRollupByLatestAttempt} rule, so this can never name
- * a check `checksStateFromRollup` itself would disagree is even in the gate. A check genuinely
- * FAILING (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE) is never named here — only the
- * literal CANCELLED conclusion is, which is what distinguishes "nobody reached a verdict" from
- * "a verdict came back bad" (the falsifier design note vii states explicitly). `requiredContexts`
- * empty/undefined names nothing, the same fail-toward-"no positive claim" direction
- * `checksStateFromRollup` takes when it cannot confirm what is actually required.
+ * W1-T1223 (design i) — which check on this rollup has a LATEST (deduped) attempt that is
+ * CANCELLED. A check genuinely FAILING (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE)
+ * is never named here — only the literal CANCELLED conclusion is, which is what distinguishes
+ * "nobody reached a verdict" from "a verdict came back bad" (the falsifier design note vii states
+ * explicitly). `requiredContexts` empty/undefined names nothing, the same fail-toward-"no
+ * positive claim" direction `checksStateFromRollup` takes when it cannot confirm what is actually
+ * required — reading it stays the ONE precondition (branch protection must be confirmed readable
+ * before this arm acts at all), never written, and never used to narrow WHICH check gets named.
+ *
+ * W1-T2283 — NO LONGER NARROWED TO `requiredContexts` ITSELF. The pre-fix version filtered the
+ * candidate set down to declared-required contexts BEFORE testing for CANCELLED — on this
+ * repository branch protection names exactly `remudero-review` and `ci-gate`, so that filter left
+ * a candidate set of one name, and the check that actually gets cancelled (`coverage-ratchet`, a
+ * REQUIRED sibling of the aggregate `ci-gate` rather than a declared-required context itself) was
+ * dropped before its CANCELLED conclusion was ever read. `ci-gate` — the aggregate — reports its
+ * OWN conclusion as FAILURE, never CANCELLED, when a sibling it depends on is cancelled (measured
+ * live on #2794 and #2841), so the old filter-then-test order could never reach a positive result
+ * in this repository: two independent refusals, and widening either alone reached nothing.
+ * {@link fetchCiFailures} (run-task.ts) already reads CANCELLED off the SAME rollup with no
+ * required-contexts narrowing at all — this brings the arm that ACTS on a cancellation into
+ * agreement with the evidence miner that already SEES it, rather than inventing a second,
+ * disagreeing rule. `required.size === 0` still refuses (branch protection unreadable — the one
+ * case a live CI mutation must never be attempted from), and {@link REVIEW_CONTEXT} stays excluded
+ * unconditionally (design note iv — it is a status the fleet posts itself, never a job to
+ * re-queue), but a NAMED check no longer has to be a member of `required` to be surfaced: `ci-gate`
+ * failing because a dependency was cancelled is not the same event as `ci-gate` failing because a
+ * test broke, and only the CANCELLED conclusion — read here off the check that actually carries
+ * it — names the first.
  */
 export function cancelledRequiredCheckNames(
   rollup: RollupCheckEntry[] | undefined,
@@ -1359,7 +1378,7 @@ export function cancelledRequiredCheckNames(
   const required = new Set(requiredContexts ?? []);
   if (required.size === 0) return [];
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
-  const gate = dedupeRollupByLatestAttempt(all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")));
+  const gate = dedupeRollupByLatestAttempt(all);
   return gate
     .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
     .map((c) => c.name ?? c.context ?? "unknown");
