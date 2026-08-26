@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
 
 // ── W1-T2291: TRACKED-SOURCE-WRITE GUARD ─────────────────────────────────────────────────────
@@ -31,8 +33,30 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   scanSource: (source: string, relPath: string) => Array<{ file: string; line: number; call: string; label: string; targetExpr: string }>;
   scanRepo: (repoRoot: string) => { violations: unknown[]; filesScanned: number };
   listTrackedTestFiles: (repoRoot: string) => string[];
+  targetCandidates: (name: string, args: string[]) => Array<{ expr: string; label: string }>;
+  main: (opts?: {
+    repoRoot?: string;
+    scan?: (repoRoot: string) => { violations: unknown[]; filesScanned: number };
+    log?: (s: string) => void;
+    error?: (s: string) => void;
+  }) => number;
 };
-const { scanSource, scanRepo, listTrackedTestFiles } = mod;
+const { scanSource, scanRepo, listTrackedTestFiles, targetCandidates, main } = mod;
+
+/** A fresh git repo with a `test/` tree added to its index -- `listTrackedTestFiles`/`scanRepo`
+ *  and `main`'s default `scan` collaborator all shell out to `git ls-files`, so the fixture must
+ *  be a REAL repo, not merely a directory that happens to contain the right files. Mirrors
+ *  test/state-citation-check.test.ts's `mkFixtureRepo`/`gitAdd` pair -- no identity config needed,
+ *  `git add` alone is enough to make a file appear in `git ls-files`. */
+function mkFixtureRepo(): string {
+  const root = mkdtempSync(join(tmpdir(), "tracked-source-write-guard-fixture-"));
+  execFileSync("git", ["init", "--quiet", root], { encoding: "utf8" });
+  return root;
+}
+
+function gitAdd(root: string) {
+  execFileSync("git", ["-C", root, "add", "-A"], { encoding: "utf8" });
+}
 
 // ── claim: "a test writing a tracked file under src is named by the scan with its file and call
 // site" ───────────────────────────────────────────────────────────────────────────────────────
@@ -89,6 +113,75 @@ test("renameSync flags EITHER end that resolves under tracked src/ -- the old pa
     violations.map((v) => v.label).sort(),
     ["newPath", "oldPath"],
   );
+});
+
+test('a bare `"src/..."` string literal target (no `join`) is caught the same way as a resolved `join(...)`', () => {
+  const source = [
+    'import { writeFileSync } from "node:fs";',
+    "",
+    'writeFileSync("src/lib/direct-literal-target.ts", "mutated");',
+  ].join("\n");
+
+  const violations = scanSource(source, "test/fixture.test.ts");
+  assert.equal(violations.length, 1, "a whole string literal shaped like `src/...` is a resolvable target on its own");
+  assert.equal(violations[0].targetExpr, '"src/lib/direct-literal-target.ts"');
+});
+
+test('a bare string literal target that does NOT start `src/` is unknown, not flagged', () => {
+  const source = ['import { writeFileSync } from "node:fs";', "", 'writeFileSync("dist/lib/build-output.ts", "built");'].join("\n");
+
+  assert.deepEqual(scanSource(source, "test/fixture.test.ts"), []);
+});
+
+// ── claim: "a `/* ... */` block comment inside a call's own argument list does not corrupt the
+// hand-rolled bracket/arg parsing" -- the real tracked test/**/*.ts corpus this task's own
+// end-to-end test scans below apparently carries no mutating call whose parens hold a BLOCK
+// comment (only `//` line comments, which that same real-corpus scan already exercises), so this
+// shape needs its own fixture rather than relying on the real corpus to exercise it. ─────────────
+
+test("a /* ... */ comment nested inside a call's parens (with a comma and a paren INSIDE the comment text) is skipped whole, never mistaken for structure", () => {
+  const source = [
+    'import { writeFileSync } from "node:fs";',
+    'import { dirname, join } from "node:path";',
+    'import { fileURLToPath } from "node:url";',
+    "",
+    'const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");',
+    'writeFileSync(join(repoRoot, "src", /* a (paren) and a , comma, safely ignored */ "lib", "status.ts"), "mutated");',
+  ].join("\n");
+
+  const violations = scanSource(source, "test/fixture.test.ts");
+  assert.equal(
+    violations.length,
+    1,
+    "a block comment inside the call's own parens must not throw off bracket matching or argument splitting",
+  );
+  assert.match(violations[0].targetExpr, /^join\(repoRoot, "src",/);
+});
+
+// ── claim: "a call whose parens never close (a truncated/malformed fixture) is skipped, not
+// mistaken for a match or thrown on" -- exercises the hand-rolled bracket matcher's own "no match
+// found" return, which a well-formed call (every real one in this corpus) never reaches. ─────────
+
+test("an unclosed call (no matching closing paren) is silently skipped, not flagged and not thrown on", () => {
+  const source = [
+    'import { writeFileSync } from "node:fs";',
+    'import { dirname, join } from "node:path";',
+    'import { fileURLToPath } from "node:url";',
+    "",
+    'const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");',
+    'writeFileSync(join(repoRoot, "src", "lib", "status.ts")', // deliberately missing the call's own closing `)`
+  ].join("\n");
+
+  assert.deepEqual(scanSource(source, "test/fixture.test.ts"), [], "an unmatched opening bracket must not crash or false-flag the scan");
+});
+
+// ── claim: "targetCandidates' defensive default is real code, even though no live caller can
+// reach it" -- scanSource only ever calls it with a name drawn from MUTATING_CALLS, and every one
+// of those six already has its own explicit `case`, so the `default` arm is unreachable through
+// the one caller today. Driven directly here rather than left as dead, untested code. ─────────────
+
+test("targetCandidates returns no candidates for a call name outside the six mutating calls", () => {
+  assert.deepEqual(targetCandidates("someUnrelatedCall", ["a", "b"]), []);
 });
 
 // ── claim: "a write whose target is a mkdtemp or tmpdir root is not flagged" ────────────────────
@@ -178,6 +271,65 @@ test("listTrackedTestFiles reads via `git ls-files`, not a raw directory walk --
     assert.ok(f.startsWith("test/"), `every listed file must be under test/: ${f}`);
     assert.ok(f.endsWith(".ts"), `every listed file must be a .ts file: ${f}`);
   }
+});
+
+test("listTrackedTestFiles throws, naming the repo root, when `git ls-files` fails (not a git repository at all)", () => {
+  const root = mkdtempSync(join(tmpdir(), "tracked-source-write-guard-not-a-repo-"));
+  try {
+    assert.throws(() => listTrackedTestFiles(root), /tracked-source-write-check: `git ls-files` failed in/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── claim: "the CLI entry point (`main`) reports clean/violations and returns the matching exit
+// code" -- `main` is injectable (repoRoot/scan/log/error, same shape as scripts/clock-sweep.mjs's
+// own `main`) so both paths are driven IN-PROCESS: no subprocess, and no risk that a fixture's
+// outcome leaks into this test file's own `process.exitCode`, since `main` returns a code rather
+// than assigning one itself. ─────────────────────────────────────────────────────────────────────
+
+test("main() returns 0 and logs \"clean\" against a repo with no violations (its real default repoRoot, read-only)", () => {
+  const logged: string[] = [];
+  const code = main({ log: (s: string) => logged.push(s), error: () => assert.fail("must not log to error on a clean scan") });
+  assert.equal(code, 0);
+  assert.match(logged.join("\n"), /tracked-source-write-check: clean -- 0 tracked-src writes across \d+ tracked test\S* files\./);
+});
+
+test("main() returns 1 and names the file:line/call/target when the scanned repo has a real violation", () => {
+  const root = mkFixtureRepo();
+  try {
+    mkdirSync(join(root, "test"), { recursive: true });
+    writeFileSync(
+      join(root, "test", "offender.test.ts"),
+      [
+        'import { writeFileSync } from "node:fs";',
+        'import { dirname, join } from "node:path";',
+        'import { fileURLToPath } from "node:url";',
+        "",
+        'const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");',
+        'writeFileSync(join(repoRoot, "src", "lib", "fixture-target.ts"), "mutated");',
+      ].join("\n"),
+    );
+    gitAdd(root);
+
+    const logged: string[] = [];
+    const errored: string[] = [];
+    const code = main({ repoRoot: root, log: (s: string) => logged.push(s), error: (s: string) => errored.push(s) });
+    assert.equal(code, 1);
+    const errorText = errored.join("\n");
+    assert.match(errorText, /tracked-source-write-check: FAILED/);
+    assert.match(errorText, /test\/offender\.test\.ts:6: writeFileSync\(\.\.\.\) -- path/);
+    assert.match(errorText, /resolves under the tracked src\/ tree/);
+    assert.equal(logged.length, 0, "the violation path must never also log the clean message");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the CLI, run directly (no injected collaborators), exits 0 and prints clean against the real repo", () => {
+  const result = spawnSync(process.execPath, [SCRIPT], { encoding: "utf8" });
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.match(result.stdout, /tracked-source-write-check: clean/);
 });
 
 // ── claim: "the two mutation detectors still fail when their pinning is removed" ────────────────
