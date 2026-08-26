@@ -186,6 +186,19 @@ test("two envs in one file: the properly-blanked one is silent, the unblanked on
   assert.equal(suspects[0].ident, "badEnv");
 });
 
+test("an env declaration whose object literal never closes (unbalanced `{`) is not mistaken for a blanked identifier", () => {
+  // Exercises matchBraceClose's own unbalanced-brace return (-1): a truncated/malformed object
+  // literal must not be treated as "found and inspected the body for NODE_V8_COVERAGE" -- the
+  // declaration is skipped, so the identifier is never added to `blanked`, and a NODE_TEST_CONTEXT
+  // strip against that same identifier is still reported as a suspicion, not silently cleared.
+  const source = ["const env = { ...process.env,", "delete env.NODE_TEST_CONTEXT;"].join("\n");
+  const { defects, suspects } = scanSource(source, "test/fixture.test.ts");
+  assert.deepEqual(defects, []);
+  assert.equal(suspects.length, 1, "the unclosed declaration must not count as a blanking of NODE_V8_COVERAGE");
+  assert.equal(suspects[0].ident, "env");
+  assert.equal(suspects[0].line, 2);
+});
+
 test("delete process.env.NODE_TEST_CONTEXT -- mutating the REAL process environment, not a child env object -- is NOT reported", () => {
   // test/check-proof-executor-parity.test.ts does exactly this: `delete process.env.NODE_TEST_CONTEXT`
   // around a call whose spawn inherits `process.env` BY DESIGN (never a copy), restoring it in a
