@@ -47,13 +47,24 @@
     pattern is CORRECT. A check that flagged it would fail a working proof — the same false-positive
     class that check's own comment records having already removed once.
 
-    **THE COMMISSIONING EXAMPLE DID NOT REPRODUCE AND IS REPLACED, NOT REPEATED.**
-    `CiLogUnavailableCause` appears nowhere under `src/` on this head, so
-    `grep: logUnavailable?: CiLogUnavailableCause in src/lib/sweep.ts` reads 0 under BOTH engines and
-    demonstrates nothing. That zero is controlled rather than assumed: `sweep.ts` is readable, at 147
-    `export` hits under both the harness grep and `/usr/bin/grep`. The mechanism is real and general;
-    only the example needed replacing, and the reviewer's failure of that proof is explained by the
-    named symbol's absence, not by an engine difference.
+    **THE COMMISSIONING EXAMPLE REPRODUCES EXACTLY — ON THE BRANCH THAT INTRODUCES THE SYMBOL.**
+    `CiLogUnavailableCause` is added by the open PR #2891 (`fix-ci-log-unavailable-named`) and does
+    not exist on `main` yet. Measured on that branch's head, `logUnavailable?: CiLogUnavailableCause`
+    against `src/lib/sweep.ts` reads **1 hit under BRE and 0 under ERE**, with the control (same
+    pattern, `?` removed) reading 3 under both, and `/usr/bin/grep` scoring the identical pair. An
+    earlier draft of this shard reported the example as not reproducing; that reading measured
+    `origin/main`, where the symbol legitimately is not, and was wrong about the example rather than
+    about the mechanism. Both demonstrations are kept: the `mergeConflict?:` one because it holds on
+    `main` and will survive #2891 either way, and this one because it is the case that was actually
+    observed in the wild.
+
+    **AND #2891 IS A LIVE COUNTER-EXAMPLE TO THE COMFORTABLE ANSWER, WHICH THE DESIGN BELOW RECORDS
+    RATHER THAN EXPLAINS AWAY.** Its posted verdict reads *"proof executed and FAILED on the PR
+    head"* for that criterion. Re-run through the shipped executor on the SAME head sha, the same
+    proof returns `verdict: pass`, 1 hit — and so does the bracket-escaped `logUnavailable[?]:` form
+    the body now carries. The failure is therefore not reproducible from the tree, the sha, or the
+    proof string, which is precisely the condition this task exists to make impossible to reach
+    silently.
 
     **THE NEAREST THING TO A DECLARATION IS ITSELF DRIFTED.** `proof-grep-safety`'s own violation
     message tells the author the executor runs `grep -rn -- <pattern> <path>`. The argv
@@ -63,10 +74,23 @@
   design: |
     **Q1 — CAN THE EXECUTOR AND THE REVIEWER DIFFER IN ENGINE, AND HOW WOULD AN AUTHOR FIND OUT?**
 
-    For a GIVEN proof string they cannot. `execWhitelistedProof` is a single exported function;
-    `rmd check-proof` calls it and the reviewer judges through it (W1-T387 collapsed those two into
-    one executor precisely so a hand-rolled second check could not drift). The same string yields
-    the same argv and therefore the same engine in both consumers.
+    **FROM SOURCE, THEY CANNOT — AND AN OBSERVED CASE SAYS OTHERWISE, SO THE SOURCE READING IS NOT
+    THE WHOLE ANSWER.** `execWhitelistedProof` is a single exported function; `rmd check-proof`
+    calls it and the reviewer judges through it (W1-T387 collapsed those two precisely so a
+    hand-rolled second check could not drift). On that reading the same string yields the same argv
+    and therefore the same engine in both consumers.
+
+    **BUT #2891 DISAGREES WITH THAT READING ON ITS OWN HEAD**, as the rationale records: a verdict of
+    *executed and FAILED* against a proof that returns `pass` when re-run through the shipped
+    executor on the same sha. The build must not assume the source reading and must not assume the
+    engine either — it must first establish WHAT the reviewer actually ran, because three
+    explanations survive and they imply different fixes: a judge running code older than the argv it
+    is assumed to use (`src/lib/self-sync.ts` covers process startup only, so a long-lived
+    orchestrator's `judgeReview` can be arbitrarily stale); a different checkout under the reviewer
+    than the head the verdict names; or a genuine engine difference, which is the thesis this task
+    was commissioned on. **RECORDING WHICH ENGINE AND WHICH TREE A PROOF ACTUALLY RAN UNDER IS
+    THEREFORE PART OF THE DELIVERABLE, NOT A DIAGNOSTIC AID** — no verdict today carries either, and
+    that absence is why the question cannot be settled from the outside.
 
     **THE DIVERGENCE IS NOT BETWEEN CONSUMERS, IT IS BETWEEN FORMS.** The dialect form is BRE by
     construction and the author cannot change it. The backticked form is whatever the author typed.
