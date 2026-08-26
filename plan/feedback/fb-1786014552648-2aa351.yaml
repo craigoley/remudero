@@ -27,7 +27,22 @@ raw: "rmd status WARNS ABOUT A CIRCUIT BREAKER ON A TASK THAT CANNOT DISPATCH â€
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/3011
+summary:
+  headline: Stale circuit breaker warning on permanently-blocked task
+  what_happened: Task W1-T314 is permanently blocked and cannot dispatch.
+    Monitoring still warns about its circuit breaker saying 'investigate before
+    re-dispatch,' but this action is now impossible.
+  decision: Choose which fix to implement
+  options:
+    - label: Filter breaker from display for blocked tasks
+      consequence: Hides stale warning immediately with minimal risk; leaves
+        historical state in system
+    - label: Clear breaker state when task is withdrawn
+      consequence: Cleans up state semantically; risky without first verifying no
+        other code depends on that state
+    - label: Filter display now, then review state reset
+      consequence: Stops stale warning immediately; defers risky change until
+        cost-control impact is verified
 expansion: null
 answered_by: null
