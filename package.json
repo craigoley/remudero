@@ -33,6 +33,7 @@
     "test:ci": "node scripts/test-with-retry.mjs node --test --import tsx --import ./test/setup/tmp-hygiene.ts \"test/**/*.test.ts\"",
     "lint-plan": "tsx src/run-task.ts lint-plan",
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
+    "cycle-ratchet": "node scripts/cycle-ratchet.mjs",
     "jscpd": "jscpd src --config .jscpd.json",
     "claims": "node scripts/claims-check.mjs",
     "assertion-discrimination": "node scripts/assertion-discrimination-check.mjs",

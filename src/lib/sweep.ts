@@ -270,7 +270,38 @@ export interface CiFailure {
    * undefined` is a sound test for "the log could not be read" and never fires on a real tail.
    */
   logUnavailable?: CiLogUnavailableCause;
+  /**
+   * WHICH SOURCE filled {@link logTail}, when one did. `"log"` is the job's own failing-log tail —
+   * the preferred source, and the only one that existed before W1-T2298. `"annotations"` is the
+   * check-run annotation fallback, used ONLY when the log read came back empty or failed, so a
+   * readable log can never be displaced by it and every existing recogniser keeps matching exactly
+   * what it matched before. ABSENT whenever `logTail` is empty, which is the same condition under
+   * which {@link logUnavailable} is PRESENT — the two are complements, never both meaningful at once.
+   */
+  tailSource?: CiTailSource;
+  /**
+   * WHAT THE ANNOTATION FALLBACK DID, when it was reached at all — present only after the log read
+   * came back empty or failed, absent entirely when the log answered. `recovered` means the tail in
+   * {@link logTail} came from annotations; `empty` means the endpoint answered with no message;
+   * `failed` means the fetch itself threw, `detail` carrying the error as observed.
+   *
+   * SEPARATE FROM {@link logUnavailable} ON PURPOSE. W1-T2291 gave every way of failing a NAMED
+   * cause, and a fallback that overwrote that name would take the answer back: `fetch-failed` and
+   * `empty-log` still mean exactly what they meant, and this field says what was tried afterwards.
+   * A reader wanting "why is there no tail" reads the cause; one wanting "was the second source
+   * tried, and what did it say" reads this.
+   */
+  annotationFallback?: CiAnnotationFallback;
 }
+
+/** The sources {@link CiFailure.logTail} can come from, in preference order. */
+export type CiTailSource = "log" | "annotations";
+
+/** The outcome of the annotation fallback, recorded rather than folded into the log's own cause. */
+export type CiAnnotationFallback =
+  | { outcome: "recovered" }
+  | { outcome: "empty" }
+  | { outcome: "failed"; detail: string };
 
 /**
  * The closed set of reasons a failing check's log tail came back empty — a NAMED
@@ -1342,15 +1373,34 @@ export interface CancelledRequiredCheck {
 }
 
 /**
- * W1-T1223 (design i) — which of `requiredContexts`' checks have a LATEST (deduped) attempt that
- * is CANCELLED, on the exact SAME gate {@link checksStateFromRollup} reads red from: same
- * required-contexts filter, same {@link dedupeRollupByLatestAttempt} rule, so this can never name
- * a check `checksStateFromRollup` itself would disagree is even in the gate. A check genuinely
- * FAILING (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE) is never named here — only the
- * literal CANCELLED conclusion is, which is what distinguishes "nobody reached a verdict" from
- * "a verdict came back bad" (the falsifier design note vii states explicitly). `requiredContexts`
- * empty/undefined names nothing, the same fail-toward-"no positive claim" direction
- * `checksStateFromRollup` takes when it cannot confirm what is actually required.
+ * W1-T1223 (design i) — which check on this rollup has a LATEST (deduped) attempt that is
+ * CANCELLED. A check genuinely FAILING (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED/STARTUP_FAILURE)
+ * is never named here — only the literal CANCELLED conclusion is, which is what distinguishes
+ * "nobody reached a verdict" from "a verdict came back bad" (the falsifier design note vii states
+ * explicitly). `requiredContexts` empty/undefined names nothing, the same fail-toward-"no
+ * positive claim" direction `checksStateFromRollup` takes when it cannot confirm what is actually
+ * required — reading it stays the ONE precondition (branch protection must be confirmed readable
+ * before this arm acts at all), never written, and never used to narrow WHICH check gets named.
+ *
+ * W1-T2283 — NO LONGER NARROWED TO `requiredContexts` ITSELF. The pre-fix version filtered the
+ * candidate set down to declared-required contexts BEFORE testing for CANCELLED — on this
+ * repository branch protection names exactly `remudero-review` and `ci-gate`, so that filter left
+ * a candidate set of one name, and the check that actually gets cancelled (`coverage-ratchet`, a
+ * REQUIRED sibling of the aggregate `ci-gate` rather than a declared-required context itself) was
+ * dropped before its CANCELLED conclusion was ever read. `ci-gate` — the aggregate — reports its
+ * OWN conclusion as FAILURE, never CANCELLED, when a sibling it depends on is cancelled (measured
+ * live on #2794 and #2841), so the old filter-then-test order could never reach a positive result
+ * in this repository: two independent refusals, and widening either alone reached nothing.
+ * {@link fetchCiFailures} (run-task.ts) already reads CANCELLED off the SAME rollup with no
+ * required-contexts narrowing at all — this brings the arm that ACTS on a cancellation into
+ * agreement with the evidence miner that already SEES it, rather than inventing a second,
+ * disagreeing rule. `required.size === 0` still refuses (branch protection unreadable — the one
+ * case a live CI mutation must never be attempted from), and {@link REVIEW_CONTEXT} stays excluded
+ * unconditionally (design note iv — it is a status the fleet posts itself, never a job to
+ * re-queue), but a NAMED check no longer has to be a member of `required` to be surfaced: `ci-gate`
+ * failing because a dependency was cancelled is not the same event as `ci-gate` failing because a
+ * test broke, and only the CANCELLED conclusion — read here off the check that actually carries
+ * it — names the first.
  */
 export function cancelledRequiredCheckNames(
   rollup: RollupCheckEntry[] | undefined,
@@ -1359,7 +1409,7 @@ export function cancelledRequiredCheckNames(
   const required = new Set(requiredContexts ?? []);
   if (required.size === 0) return [];
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
-  const gate = dedupeRollupByLatestAttempt(all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")));
+  const gate = dedupeRollupByLatestAttempt(all);
   return gate
     .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
     .map((c) => c.name ?? c.context ?? "unknown");
@@ -1703,7 +1753,14 @@ export function mainHealthShouldStandDownDispatch(observation: MainHealthObserva
 export const CI_GATE_CHECK_NAME = "ci-gate";
 
 /**
- * W1-T2296 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE.
+ * #2918 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE.
+ *
+ * ATTRIBUTED TO THE PR, NOT A TASK, DELIBERATELY: #2918 carries no task id on any credit path —
+ * no `Remudero-Task:` trailer on its body or either commit, and its head `fix/ci-gate-not-a-peer-
+ * failure` is not the `run-<id>-<epoch>` shape the branch-name path reads. This block previously
+ * cited W1-T2296, which is the incident-replay shard filed the same night for an unrelated
+ * purpose; the existence gate accepted it because that id resolves, not because it matched. Do
+ * not "restore" a task id here without one that actually owns this work.
  *
  * `ci-gate` is a DOWNSTREAM AGGREGATOR: its failing step is literally "Aggregate sibling check
  * results", and its own annotations read `required check(s) failing — entering a 600s grace window`
@@ -7064,6 +7121,52 @@ export const CAPABILITY_SNAPSHOT_FIX_CLASS: FixClass = {
 
 /** The live class table this reconciler consults by default — a new systemic fix is a row appended
  *  here (design note i), never a change to {@link runPostFixReverification}. */
+/**
+ * The DIFF-SCOPED coverage failure's own wording — `scripts/diff-coverage.mjs`'s blocking sentence,
+ * NOT the aggregate ratchet's. {@link COVERAGE_TIER_FIX_CLASS} keys on "BLOCKED -- coverage is below
+ * a floor", which `scripts/coverage-ratchet.mjs` prints; the per-diff gate that actually blocks most
+ * PRs prints a different sentence and therefore matched nothing at all.
+ */
+const DIFF_COVERAGE_BLOCK_RE = /diff-coverage: BLOCKED -- this diff adds source line\(s\) with zero covering tests/i;
+
+/** `  - src/lib/foo.ts:123` — one uncovered line as the gate lists them. */
+const UNCOVERED_LINE_RE = /^\s*-\s+(\S+:\d+)\s*$/;
+
+/** What {@link diffCoverageReport} found: the check that blocked and the lines it named. */
+export interface DiffCoverageReport {
+  check: string;
+  uncovered: string[];
+}
+
+/**
+ * REPORTS a diff-scoped coverage block and the lines it names. **A REPORTER, NEVER A REPAIRER, AND
+ * THE DISTINCTION IS STRUCTURAL RATHER THAN STYLISTIC** (W1-T2298 design Q2): {@link FixClass}
+ * requires a `fixPrNumber` whose documented meaning is the merged PR whose fix resolves the class,
+ * and the reconciler gates on that number having merged before it consults the predicate at all.
+ * All three existing rows are that shape — a PR failing against a stale tree some merged PR already
+ * fixed, cleared by re-driving. A diff-coverage block is not: its remedy is a test for a specific
+ * line in a specific file, different for every PR, and no merged PR resolves it. A fourth row would
+ * mean inventing a number that does not mean what the field says, and a match would dispatch a
+ * redrive that re-runs the same gate and fails identically — a cycle spent to learn nothing.
+ *
+ * So this names the failing check and the uncovered lines on a surface an operator or a later agent
+ * already reads, and dispatches nothing. It is also why the annotation fallback matters: before
+ * W1-T2298 the lines existed only in a check-run annotation nothing read, so this function would
+ * have had an empty tail to search however well it was written.
+ */
+export function diffCoverageReport(failures: readonly CiFailure[]): DiffCoverageReport | undefined {
+  for (const f of failures) {
+    if (!DIFF_COVERAGE_BLOCK_RE.test(f.logTail)) continue;
+    const uncovered: string[] = [];
+    for (const line of f.logTail.split("\n")) {
+      const m = line.match(UNCOVERED_LINE_RE);
+      if (m?.[1]) uncovered.push(m[1]);
+    }
+    return { check: f.name, uncovered };
+  }
+  return undefined;
+}
+
 export const DEFAULT_FIX_CLASSES: readonly FixClass[] = [
   CI_GATE_TIMEOUT_FIX_CLASS,
   COVERAGE_TIER_FIX_CLASS,

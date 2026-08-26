@@ -31,7 +31,8 @@ raw: "THE LEDGER ARCHIVES ARE NOW GZIPPED — grep -h ledger.*.ndjson MATCHES
   build a new one."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null

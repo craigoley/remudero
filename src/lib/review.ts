@@ -3748,7 +3748,7 @@ export function judgeReview(
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s
   // doc. Reuses the SAME `diffFiles` every other structural check above
   // already computed — no new diff walk.
-  const instrumentEntanglement = detectInstrumentEntanglement(diffFiles);
+  const instrumentEntanglement = detectInstrumentEntanglement(diffFiles, evidence.diff);
   const instrumentEntangled = instrumentEntanglement.entangled;
 
   // W1-T352 (DECISIONS.md entry provenance floor): see {@link
@@ -5538,7 +5538,10 @@ export interface AcceptanceAuthorTimeResult {
  * Priority when more than one defect is present, in the SAME order rationale (1) states them:
  * no-header, no-trailer, unparseable, empty-proofs.
  */
-export function acceptanceAuthorTimeCheck(body: string, opts: { expectedTaskId?: string } = {}): AcceptanceAuthorTimeResult {
+export function acceptanceAuthorTimeCheck(
+  body: string,
+  opts: { expectedTaskId?: string; trailerResolves?: (taskId: string) => boolean } = {},
+): AcceptanceAuthorTimeResult {
   const text = body ?? "";
   const trailerMatch = TASK_TRAILER_RE.exec(text);
 
@@ -5557,7 +5560,22 @@ export function acceptanceAuthorTimeCheck(body: string, opts: { expectedTaskId?:
     };
   }
 
-  if (trailerMatch) {
+  // W1-T2297 — THE EXEMPTION MUST BE TRUE, NOT MERELY CLAIMED. This arm's whole warrant is that
+  // criteria come from the plan record instead of the body, so the body's own block need not be
+  // judgeable. That warrant fails when the trailer names nothing the plan declares: the reviewer
+  // then falls back to the body, and a body this gate never looked at ships with whatever its block
+  // actually parses to.
+  //
+  // MEASURED on #2908: `Remudero-Task: RETRO-1787714349337` resolves to ZERO ids across
+  // `plan/tasks.yaml` and every `plan/tasks.d/` shard (control: `W1-T2244` resolves), the gate
+  // returned ok with "criteria resolve from plan/tasks.yaml", and the body's block gave
+  // `bullets written: 5, criteria parsed: 1` — four criteria the reviewer could not see.
+  //
+  // `trailerResolves` OMITTED is today's behaviour byte for byte: a caller with no way to consult
+  // the plan trusts the trailer exactly as it always has, and only a caller that CAN resolve gets
+  // the stricter reading. Falling through re-uses the diagnostics arms below verbatim rather than
+  // adding a second spelling of "this block is unreadable" — two spellings of one fact drift.
+  if (trailerMatch && (opts.trailerResolves === undefined || opts.trailerResolves(trailerMatch[1]))) {
     return { ok: true, message: `Remudero-Task: ${trailerMatch[1]} trailer present — criteria resolve from plan/tasks.yaml` };
   }
 
@@ -6344,8 +6362,110 @@ export const ENTANGLEMENT_EXEMPT_INSTRUMENTS: ReadonlySet<string> = new Set([
  * {@link INSTRUMENT_SURFACE} at all (it stays on that surface for every OTHER purpose: docs
  * awareness, the completeness alarm, `USER_VISIBLE_SURFACE_RE`).
  */
+/**
+ * DECLARATIONS WHOSE DATA HAS GRADING POWER OVER OTHER PRs. A changed line inside one of these
+ * counts as EXECUTABLE even when it is a bare string literal, because adding a path here is not
+ * documentation — it decides what {@link detectInstrumentEntanglement} treats as an instrument,
+ * and what it exempts. Without this carve-out the literal-only rule below would let a diff
+ * register (or exempt) its own instrument in the same breath as editing it, which is precisely
+ * the "an instrument edited to pass the code it judges" risk Standing rule 25 exists to stop.
+ * Matched against the enclosing declaration git names in the hunk header, never against the
+ * line's own text — the line is a bare string in every case and carries no signal of its own.
+ */
+const GRADING_POWER_DECLARATIONS: readonly string[] = [
+  "INSTRUMENT_SURFACE",
+  "INSTRUMENT_SURFACE_EXCLUSIONS",
+  "ENTANGLEMENT_EXEMPT_INSTRUMENTS",
+  "ENFORCEMENT_DATA",
+];
+
+/**
+ * Does one changed line carry code an instrument could actually mis-grade?
+ *
+ * NON-EXECUTABLE, and why each shape qualifies: a blank line; a `//` line comment; a JSDoc or
+ * block-comment body line (this codebase opens every one with `*`); and a line whose entire
+ * non-comment content is string or template-literal text plus punctuation — the usage-table and
+ * doc-literal shape. What survives the strip is what a reviewer's falsifiers could be graded on.
+ *
+ * FAIL-CLOSED BY CONSTRUCTION. Anything this cannot confidently classify — an unusual comment
+ * style, a line that is half literal and half call — keeps an identifier after the strip and is
+ * therefore EXECUTABLE. The rule only ever subtracts shapes it can positively recognise.
+ *
+ * TYPE-ONLY DECLARATIONS ARE DELIBERATELY NOT EXEMPTED HERE. A type member (`x?: T;`) and a value
+ * in an object literal (`x: t,`) are the same bytes; separating them needs a parser, not a regex,
+ * and guessing wrong on a Rule 25 gate fails OPEN. They stay executable until something can read
+ * them properly.
+ */
+export function changedLineIsExecutable(text: string): boolean {
+  const t = text.trim();
+  if (t === "") return false;
+  if (t.startsWith("//")) return false;
+  if (t.startsWith("*") || t.startsWith("/*")) return false;
+  // Strip literal CONTENTS (keeping the quotes as punctuation) so a usage sentence cannot look
+  // like code, then strip a trailing line comment. Escapes are honoured so an embedded quote
+  // cannot end the literal early and leak its tail into the executable residue.
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (quote) {
+      if (c === "\\") { i++; continue; }
+      if (c === quote) { quote = null; out += c; }
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { quote = c; out += c; continue; }
+    if (c === "/" && t[i + 1] === "/") break;
+    out += c;
+  }
+  // An identifier or keyword surviving the strip is executable content; punctuation alone
+  // (`,` `;` `+` from the diff marker already removed by the caller) is not.
+  return /[A-Za-z0-9_$]/.test(out);
+}
+
+/**
+ * Does this file's half of the patch change executable code, or only prose?
+ *
+ * Reads the hunk headers git already emits (`@@ … @@ <enclosing declaration>`) so a bare string
+ * added to a {@link GRADING_POWER_DECLARATIONS} table is never mistaken for a usage line.
+ *
+ * `true` when the patch cannot be read for this file at all — an absent or unparseable diff must
+ * never quietly exempt a path (the same fail-closed direction {@link changedLineIsExecutable}
+ * takes line by line).
+ */
+export function srcChangeIsExecutable(diff: string, file: string): boolean {
+  let current = "";
+  let context = "";
+  let sawChangedLine = false;
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      const m = raw.match(/\sb\/(\S+)\s*$/);
+      current = m ? m[1] : "";
+      context = "";
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      const plus = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      if (plus !== "/dev/null") current = plus;
+      continue;
+    }
+    if (raw.startsWith("@@")) {
+      context = raw.slice(raw.indexOf("@@", 2) + 2);
+      continue;
+    }
+    if (raw.startsWith("--- ")) continue;
+    if (current !== file) continue;
+    if (!raw.startsWith("+") && !raw.startsWith("-")) continue;
+    sawChangedLine = true;
+    if (GRADING_POWER_DECLARATIONS.some((d) => context.includes(d))) return true;
+    if (changedLineIsExecutable(raw.slice(1))) return true;
+  }
+  // No changed line for this file anywhere in the patch ⇒ the patch does not describe it.
+  return !sawChangedLine;
+}
+
 export function detectInstrumentEntanglement(
   diffFiles: string[],
+  diff?: string,
 ): { entangled: boolean; instrumentPaths: string[]; srcPaths: string[] } {
   const instrumentPaths = diffFiles.filter(
     (f) => INSTRUMENT_SURFACE_RE.test(f) && !ENTANGLEMENT_EXEMPT_INSTRUMENTS.has(f),
@@ -6371,7 +6491,22 @@ export function detectInstrumentEntanglement(
   // `src/` today, so this subtraction removes nothing from any present diff and changes no verdict —
   // it only makes a future exemption POSSIBLE to express. Granting one is a separate decision and is
   // NOT taken here.
-  const srcPaths = diffFiles.filter((f) => isProductPath(f) && !INSTRUMENT_SURFACE_RE.test(f));
+  //
+  // AND THE `src/` HALF MUST CARRY EXECUTABLE CONTENT (`diff` supplied). The rule's premise is that
+  // "the code's own falsifiers were graded by the very version of the instrument that shipped
+  // beside them" — which presupposes there IS code to grade. A `src/` hunk that appends a sentence
+  // to a usage string, or a comment, has no falsifiers an instrument could mis-grade, so counting
+  // it names an entanglement that cannot exist. MEASURED: #2884 was split by hand over one appended
+  // usage sentence and both halves then passed unchanged; a later lane DUPLICATED a helper across
+  // two `.mjs` files rather than register a path on {@link INSTRUMENT_SURFACE}, because that meant
+  // editing this file and tripping this rule — the rule had begun shaping code to avoid itself.
+  //
+  // OMITTING `diff` KEEPS TODAY'S BEHAVIOUR EXACTLY. A caller that cannot supply the patch gets the
+  // path-only reading it has always got — strictly the stricter of the two, so a caller that
+  // forgets fails closed rather than silently widening the exemption.
+  const srcPaths = diffFiles.filter(
+    (f) => isProductPath(f) && !INSTRUMENT_SURFACE_RE.test(f) && (diff === undefined || srcChangeIsExecutable(diff, f)),
+  );
   return { entangled: instrumentPaths.length > 0 && srcPaths.length > 0, instrumentPaths, srcPaths };
 }
 

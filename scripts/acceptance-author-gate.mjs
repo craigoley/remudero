@@ -40,9 +40,10 @@
 // the defect and message (from `acceptanceAuthorTimeCheck`/`acceptanceBlockDiagnostics`, verbatim
 // — design item (ii), W1-T1060) printed to stderr.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.ts";
 
 /**
@@ -91,20 +92,70 @@ export function readEventPayload(eventPath) {
   return { readable: true, body: typeof pr.body === "string" ? pr.body : "", authorLogin };
 }
 
+/** Repo root, derived from this script's own location — never a cwd assumption. */
+export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * Every task id the plan DECLARES, across `plan/tasks.yaml` and every `plan/tasks.d/*.yaml` shard.
+ *
+ * FAILS OPEN, AND THAT IS THE WHOLE CONTRACT. `undefined` means "this gate could not read the
+ * plan", which is different from an empty set: an empty set resolves NOTHING and would make the
+ * gate start refusing every trailer-bearing body it accepts today. Any read failure — a missing
+ * directory, an unreadable file, a torn shard — returns `undefined` and the caller passes NO
+ * resolver, which is `acceptanceAuthorTimeCheck`'s documented today-behaviour-byte-for-byte path.
+ *
+ * A LINE SCAN, NOT `loadPlan`. This gate must answer "does the plan declare this id" on a tree it
+ * may not be able to parse; `loadPlan` refuses a plan with a duplicate id outright, and a gate
+ * that inherits that refusal would go red on a defect that has nothing to do with the body it is
+ * judging. The `- id:` line is the same surface `rmd next-task-id` scans for the same reason.
+ *
+ * @param {string} root
+ * @returns {Set<string> | undefined}
+ */
+export function declaredPlanTaskIds(root = REPO_ROOT) {
+  const ids = new Set();
+  try {
+    const shardDir = join(root, "plan", "tasks.d");
+    const files = [join(root, "plan", "tasks.yaml"), ...readdirSync(shardDir).filter((f) => f.endsWith(".yaml")).map((f) => join(shardDir, f))];
+    for (const file of files) {
+      for (const m of readFileSync(file, "utf8").matchAll(/^\s*- id:\s*([A-Za-z0-9-]+)\s*$/gm)) ids.add(m[1]);
+    }
+  } catch {
+    return undefined; // unreadable plan — fail OPEN, never a set that resolves nothing
+  }
+  return ids.size > 0 ? ids : undefined; // a plan that declares nothing is unreadable in every sense that matters here
+}
+
+/**
+ * The `trailerResolves` predicate `acceptanceAuthorTimeCheck` takes, or `undefined` when the plan
+ * could not be read — omission is the signal, never a resolver that answers false for everything.
+ * @param {string} root
+ * @returns {((taskId: string) => boolean) | undefined}
+ */
+export function planTrailerResolver(root = REPO_ROOT) {
+  const ids = declaredPlanTaskIds(root);
+  return ids === undefined ? undefined : (taskId) => ids.has(taskId);
+}
+
 /**
  * The gate's own verdict: the bot exemption first, then `acceptanceAuthorTimeCheck` verbatim (no
- * `expectedTaskId` — this job has no plan lookup of its own, the same general-case call shape
- * `rmd check-acceptance` itself uses).
- * @param {{ body: string, authorLogin?: string }} input
+ * `expectedTaskId` — this job has no PR-to-task binding of its own, the same general-case call
+ * shape `rmd check-acceptance` itself uses).
+ *
+ * W1-T2297's OTHER HALF. The predicate has taken an optional `trailerResolves` since #2934; this
+ * caller is what supplies it, so a `Remudero-Task:` trailer naming an id the plan does not declare
+ * stops buying an exemption. `trailerResolves` OMITTED — which is what a caller with an unreadable
+ * plan passes — leaves the verdict byte for byte what it was before this wiring.
+ * @param {{ body: string, authorLogin?: string, trailerResolves?: (taskId: string) => boolean }} input
  */
-export function evaluateGate({ body, authorLogin }) {
+export function evaluateGate({ body, authorLogin, trailerResolves }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
       message: `author "${authorLogin}" is exempt — the dep-review lane owns arming for these (W1-T1060 rationale (5))`,
     };
   }
-  return acceptanceAuthorTimeCheck(body);
+  return acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
 }
 
 /**
@@ -143,7 +194,7 @@ export function main(argv) {
     return;
   }
 
-  const result = evaluateGate({ body: payload.body, authorLogin: payload.authorLogin });
+  const result = evaluateGate({ body: payload.body, authorLogin: payload.authorLogin, trailerResolves: planTrailerResolver() });
   if (!result.ok) {
     console.error(`acceptance-author-gate: REFUSED (${result.defect}) — ${result.message}`);
     process.exitCode = 1;

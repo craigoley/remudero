@@ -384,6 +384,7 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  runlessMergesSince,
   saveMarker,
   shippedSince,
   stampCitationsAndCommit,
@@ -661,6 +662,8 @@ import {
   type CiLogUnavailableCause,
   describeCiLogUnavailable,
   MAX_CI_LOG_FAILURE_DETAIL,
+  type CiTailSource,
+  type CiAnnotationFallback,
   type ClarificationQuestion,
   type CostGovernorResult,
   type CreditCandidate,
@@ -10539,10 +10542,14 @@ async function runTask(
     // `change.description`) and `review.headSha` is the SAME head `cappedOverrideFromLedger`
     // read a few statements earlier — the head this candidate change was actually assessed at,
     // not whatever `gh pr view` would report if re-read after the judge returns.
+    // W1-T2284: `description` is the ONLY place `task.title` reaches the judge — it used to
+    // ALSO ride along as `planContext.title` below, the same string under a second label,
+    // which is what let #2853 read as a double confirmation of a defect rather than one
+    // description of one change. `planContext` now carries `taskId`/`taskType` only.
     const riskJudgeInput: RiskJudgeInput = {
       change: { description: `${task.title} — ${prUrl}`, files: task.files },
       gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
-      planContext: { taskId: task.id, title: task.title, taskType: task.type },
+      planContext: { taskId: task.id, taskType: task.type },
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
@@ -15194,8 +15201,30 @@ function retroShippedGithubGateway(): ShippedGithub {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
     unavailable: () => probeGithubThrottle(),
+    // W1-T2288: backs `runlessMergesSince` (retro.ts) — the retro TRIGGER's only route to a
+    // merge that has no run at all (a plan/triage/feedback filing). Full history, unscoped,
+    // the SAME "no --since bound" discipline `citationStampPassFor`'s own git-log reader
+    // already uses for the identical reason (a marker-scoped read would need re-deriving on
+    // every threshold edit; a pure filter over the full corpus does not).
+    mergedCommits: () =>
+      parseGitLogCitationCommits(
+        execFileSync("git", ["-C", repoRoot, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
+          encoding: "utf8",
+          maxBuffer: 1 << 26,
+        }),
+      ),
   };
 }
+
+/**
+ * W1-T2288: every ledger step {@link gatherRuns} (lib/retro.ts) actually reads to reduce a
+ * RunSummary — matched in ONE `resolveLedgerUnion` pass, the same "narrow, not the whole
+ * ledger" discipline `FOLLOWUP_LEDGER_STEP_PATTERN` already uses. `run_id` itself is not part
+ * of the pattern: every line carrying one of these steps already carries a `run_id`, and
+ * `gatherRuns` groups by it after the fact.
+ */
+const RUN_LEDGER_STEP_PATTERN =
+  '"step":"run\\.start"|"step":"verdict"|"step":"pr\\.opened"|"step":"recon\\.done"|"step":"implement\\.done"|"step":"implement\\.resumed"|"step":"correction\\.provenance"';
 
 /**
  * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger +
@@ -15218,6 +15247,22 @@ function retroShippedGithubGateway(): ShippedGithub {
  * already use) instead of `evaluateRetroTrigger`'s own source-literal default; a test
  * injects a fixture `Policy` to prove a threshold edit changes the firing decision
  * with no source edit.
+ *
+ * W1-T2288: `mergesSinceMarker` is no longer `shippedSince(runs, ...).shipped.length` alone.
+ * `shippedSince` iterates `runs` (reduced from the ledger) — a merge with NO run at all (a
+ * plan/triage/feedback filing; every plan filing has none) has no loop iteration there and is
+ * structurally unreachable, not merely undercounted. `runlessMergesSince` (retro.ts) is the
+ * DISJOINT complement, read off `github.mergedCommits?.()` (this repo's own `git log`, never
+ * the ledger or a per-task search) rather than reimplementing `shippedSince`'s ledger∪GitHub
+ * crediting or its P9 ownership assert — both stay exactly as they were. `mergedCommits` is
+ * OPTIONAL on `ShippedGithub`: a fixture that does not implement it (every literal predating
+ * this task) contributes zero runless merges, not a thrown error.
+ *
+ * Also W1-T2288: the ledger read backing `runs` is now the archive∪live UNION
+ * (`resolveLedgerUnion`, lib/ledger-grep.ts) when at least one archive exists, so a run whose
+ * rows already rotated out of the live `state/ledger.ndjson` is still visible — falling back to
+ * the bare live-file read (today's exact behavior) only when zero archives are found, so a
+ * fresh state dir (or any fixture below with no rotations) is never read as an empty corpus.
  */
 export function retroTriggerCheck(
   now: Date = new Date(),
@@ -15231,9 +15276,18 @@ export function retroTriggerCheck(
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   const github = deps.github ?? retroShippedGithubGateway();
   if (github.unavailable?.()) return undefined;
-  const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+  const stateDir = join(config.root, "state");
+  const ledgerUnion = resolveLedgerUnion(stateDir, RUN_LEDGER_STEP_PATTERN);
+  const ledgerNdjson = ledgerUnion.ok
+    ? ledgerUnion.matches.join("\n")
+    : existsSync(ledgerPath)
+      ? readFileSync(ledgerPath, "utf8")
+      : "";
   const runs = gatherRuns(parseLedger(ledgerNdjson));
-  const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
+  const { shipped } = shippedSince(runs, marker?.ts, github);
+  const taskIdsWithRuns = new Set(runs.map((r) => r.taskId));
+  const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
+  const mergesSinceMarker = shipped.length + runlessMerges.length;
   const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
   return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now, {
     mergesThreshold: policy.values.retro.mergesThreshold,
@@ -21320,12 +21374,40 @@ export function reviewOrphansFor(
  * test/sweep-superseded-check-run.test.ts drives it straight, rather than only indirectly through
  * the wider sweep pipeline.
  */
-export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck[] | undefined, tailLines = 60): CiFailure[] {
+/**
+ * Reads a check run's ANNOTATION messages — the fallback source for {@link fetchCiFailures}'s log
+ * tail. Deliberately the REST annotations endpoint and not the log blob: measured on this repo's
+ * own proxy, `GET /actions/jobs/<id>/logs` and `gh run view --log-failed` both answer 403 while
+ * `GET /check-runs/<id>/annotations` answers 200, which is the entire reason this seam exists.
+ *
+ * INJECTABLE, WITH THE PARAMETER APPENDED LAST at the call site so no positional caller shifts.
+ * The default really shells out; a test that supplies its own recorder proves the wiring, and a
+ * test that lets this run proves the default is reachable at all.
+ */
+export type CiAnnotationFetch = (owner: string, repo: string, checkRunId: string) => string[];
+
+/** The real annotations read: `gh api` against the endpoint that answers, parsed as JSON. */
+export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId: string): string[] {
+  const out = execFileSync(
+    "gh",
+    ["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`, "--jq", ".[].message"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  );
+  return out.split("\n").filter((l) => l.trim() !== "");
+}
+
+export function fetchCiFailures(
+  owner: string,
+  repo: string,
+  rollup: RollupCheck[] | undefined,
+  tailLines = 60,
+  fetchAnnotations: CiAnnotationFetch = defaultCiAnnotationFetch,
+): CiFailure[] {
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
   });
-  // W1-T2296: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
+  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
   // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
   // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
   return withoutDownstreamGateFailure(
@@ -21337,8 +21419,12 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
     // never take down the fix attempt that needs it. What changes is only that the reason now
     // SURVIVES the read, instead of being swallowed with the error that carried it.
     let logUnavailable: CiLogUnavailableCause | undefined = { kind: "no-job-id" };
+    let tailSource: CiTailSource | undefined;
+    // W1-T2298: the id parsed here is ALSO the check-run id — measured equal on twelve checks across
+    // four PRs — so the annotation fallback below needs no new id plumbing and no new rollup field.
+    // Hoisted out of the `try` so the fallback can reach it after the read has already failed.
+    const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
     try {
-      const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
       if (jobId) {
         const out = execFileSync("gh", ["run", "view", "--job", jobId, "--repo", `${owner}/${repo}`, "--log-failed"], {
           encoding: "utf8",
@@ -21349,6 +21435,7 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
         // the one case where an empty tail is the honest answer, and the one the other two
         // causes must stay distinguishable from.
         logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
+        if (logUnavailable === undefined) tailSource = "log";
       }
     } catch (err) {
       // Reading the error's own text must not itself throw, or the best-effort contract would
@@ -21365,7 +21452,51 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
       logUnavailable = { kind: "fetch-failed", detail };
       logTail = "";
     }
-    return logUnavailable === undefined ? { name, logTail } : { name, logTail, logUnavailable };
+    // W1-T2298 - THE FALLBACK, PLACED WHERE THE BLOB READ GIVES UP RATHER THAN BESIDE IT. The log
+    // tail stays PREFERRED: this runs only when that read failed or returned nothing, so a readable
+    // log can never be displaced and every existing recogniser keeps matching exactly what it
+    // matched before. On a container lane the blob read is a standing 403 - measured with this
+    // function's own argv - which left every logTail-keyed recogniser scanning an empty string
+    // while the same detail sat unread in a check-run annotation the API serves 200.
+    //
+    // BEST-EFFORT, AND IT NEVER OVERWRITES THE LOG'S OWN NAMED CAUSE. W1-T2291 made `fetch-failed`
+    // and `empty-log` mean something; a fallback that replaced them would take that back. On
+    // success the cause is CLEARED because a tail now exists; on failure the cause stands and the
+    // attempt is recorded beside it.
+    let annotationFallback: CiAnnotationFallback | undefined;
+    if (jobId && logUnavailable !== undefined) {
+      try {
+        const messages = fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
+        if (messages.length > 0) {
+          logTail = messages.join("\n").split("\n").slice(-tailLines).join("\n");
+          logUnavailable = undefined;
+          tailSource = "annotations";
+          annotationFallback = { outcome: "recovered" };
+        } else {
+          annotationFallback = { outcome: "empty" };
+        }
+      } catch (err) {
+        let detail = "unknown error";
+        try {
+          const e = err as { code?: unknown; message?: unknown };
+          const code = typeof e?.code === "string" && e.code ? `${e.code}: ` : "";
+          detail = `${code}${typeof e?.message === "string" && e.message ? e.message : String(err)}`.slice(
+            0,
+            MAX_CI_LOG_FAILURE_DETAIL,
+          );
+        } catch {
+          /* keep the placeholder - an outcome is still named, which is the whole point */
+        }
+        annotationFallback = { outcome: "failed", detail };
+      }
+    }
+    return {
+      name,
+      logTail,
+      ...(logUnavailable === undefined ? {} : { logUnavailable }),
+      ...(tailSource ? { tailSource } : {}),
+      ...(annotationFallback ? { annotationFallback } : {}),
+    };
   }),
   );
 }
@@ -21373,12 +21504,20 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
 /**
  * W1-T1223 (design i) — the real gateway's producer for {@link OpenPrView.cancelledRequiredChecks},
  * mirroring how {@link fetchCiFailures} is the real gateway's producer for `ciFailures`: both name
- * their required checks off the SAME `cancelledRequiredCheckNames`/`REQUIRED_CHECK_FAIL` predicates
- * lib/sweep.ts owns, so this producer and `checksStateFromRollup`'s red verdict can never drift into
- * disagreeing about which check is cancelled. `jobId` is parsed from the SAME `detailsUrl` shape
- * `fetchCiFailures` already reads (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined`
- * when it cannot be read, so `requeueCheck`'s real wiring degrades to a named no-op rather than
- * guessing a re-queue target.
+ * off the SAME `cancelledRequiredCheckNames` predicate lib/sweep.ts owns, so this producer and
+ * `checksStateFromRollup`'s red verdict can never drift into disagreeing about which check is
+ * cancelled. `jobId` is parsed from the SAME `detailsUrl` shape `fetchCiFailures` already reads
+ * (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined` when it cannot be read, so
+ * `requeueCheck`'s real wiring degrades to a named no-op rather than guessing a re-queue target.
+ *
+ * W1-T2283 — `requiredContexts` is READ (still the one precondition — see
+ * {@link cancelledRequiredCheckNames}'s own doc) but no longer narrows WHICH cancelled check gets
+ * named: `ci-gate`, the ONE name branch protection on this repo actually declares required, is a
+ * downstream aggregator that reports FAILURE — never CANCELLED — when a sibling it depends on
+ * (`coverage-ratchet`, itself not a declared-required context) is cancelled. Narrowing to
+ * `requiredContexts` before testing for CANCELLED therefore named nothing on both measured
+ * incidents (#2794, #2841); this producer now agrees with {@link fetchCiFailures}, which already
+ * reads CANCELLED off this same rollup with no such narrowing.
  */
 export function cancelledRequiredChecks(
   rollup: RollupCheck[] | undefined,
@@ -21828,7 +21967,18 @@ export function buildOpenPrViews(
       // W1-T1223 — the "absence of a verdict" observable, populated alongside `ciFailures`
       // above off the SAME rollup read (no extra request); see `cancelledRequiredChecks`'s own
       // doc.
-      cancelledRequiredChecks: checksState === "red" ? cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts) : undefined,
+      //
+      // W1-T2283 — COMPUTED UNCONDITIONALLY, NEVER GATED ON `checksState === "red"`. While a
+      // cancellation is fresh and the required aggregate (`ci-gate`) has not yet concluded, this
+      // PR's `checksState` reads "pending" for up to ~10.5 measured minutes (#2794, #2841) before
+      // it flips to "red" — gating this field on "red" made the observation `undefined` for that
+      // whole window even though the SAME already-fetched rollup carried it the entire time. This
+      // is a pure read of a rollup already in hand (no extra `gh` call either way, exactly like
+      // `ciFailures` above), so there is no cost to carrying it rather than discarding it; whether
+      // `runSweep` ACTS on a cancellation before the gate concludes red is a separate question
+      // `isBlockedCi` still gates (lib/sweep.ts) — this only stops the data itself from being
+      // thrown away while pending.
+      cancelledRequiredChecks: cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts),
       // W1-T176: only meaningful in the zero-runs shape post-review routes on;
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.
