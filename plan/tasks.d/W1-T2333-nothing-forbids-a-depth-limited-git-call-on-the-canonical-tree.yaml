@@ -1,0 +1,152 @@
+- id: W1-T2333
+  title: "NOTHING FORBIDS A DEPTH-LIMITING GIT CALL AGAINST THE CANONICAL CHECKOUT — three suites create real `--depth 1` clones and each is safe only by how its fixture happens to be written, no gate reads that property, and the tree carries no evidence able to date the horizon that actually moved"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: medium
+  rationale: |
+    FILED FROM SOURCE READING ONLY, in the triage worktree — no command was run. Every claim below
+    names its file and line so the implementer re-derives rather than trusts. Prompted by feedback
+    fb-1786001088591-dbf763, whose RECON asks whether anything in the fleet or its suites can shallow
+    the canonical checkout.
+
+    (1) THE SUSPECTED CULPRIT IS EXONERATED BY READING, AND SAYING SO IS PART OF THE FILING. The
+    feedback named two candidates, neither confirmed. The first — the suite that asserts the
+    shallow-clone refusal — reads CLEAN in all three of its instances, and the reason is the same
+    each time: the clone SOURCE is a fixture repo the test creates itself with `git init`, never the
+    checkout under test.
+      - `test/lint-plan-merge-evidence.test.ts` L189-L206: `git init` into
+        `mkdtempSync(join(REPO_ROOT, "test", ".tmp-evid-src-"))`, one empty seed commit, then
+        `clone -q --depth 1 file://<that temp repo> <that temp repo>/shallow-clone`.
+      - `test/measurement-cadence.test.ts` L121-L133: identical shape, seeded under `tmpdir()`.
+      - `test/verdict-calibration.test.ts` L292-L303: identical shape, seeded under `tmpdir()`.
+    A `--depth` clone writes its `.git/shallow` in the DESTINATION; the source repository is not
+    modified, and in all three the source is a two-object fixture regardless. THIS IS A READ, NOT A
+    REPRODUCTION — it is offered as the leading hypothesis to falsify first, not as a verdict.
+
+    (2) BUT ONE OF THE THREE IS SAFE BY ACCIDENT OF ITS FIXTURE ROOT, WHICH IS THE ACTUAL FINDING.
+    `test/lint-plan-merge-evidence.test.ts` L190 seeds INSIDE the real working tree
+    (`join(REPO_ROOT, "test", ...)`) while its two siblings use `tmpdir()`. Nothing anywhere states
+    which is required, nothing checks it, and the difference between "clones from a fixture" and
+    "clones from the tree it is running in" is one argument on one line. The property that makes all
+    three harmless today is UNWRITTEN AND UNGATED.
+
+    (3) THE PRODUCTION PATHS READ CLEAN TOO, AND THE SEARCH THAT SAYS SO IS CONTROLLED. `--depth`
+    appears NOWHERE under `src/` — the only occurrences repo-wide are the three test fixtures above
+    and `.github/workflows/fleet-heartbeat-watch.yml` L245, which runs on a hosted runner and cannot
+    reach any host checkout. The fleet's own git invocations are full-history by construction:
+    `git fetch --quiet origin` (`src/lib/self-sync.ts` L224 and L514), `git clone --quiet -b main`
+    with no depth flag (`src/lib/install-root.ts` L229), `git clone "$REPO_URL" "$TREE"`
+    (`deploy/entrypoint.sh` L386), `git fetch origin main` (`src/lib/ci-parity.ts` L328-L342).
+    POSITIVE CONTROL for the query: the same scan finds the `--depth=1` in the workflow and all three
+    fixtures, so it is a filter and not an empty result.
+
+    (4) SO THE READING FAVOURS THE FALSIFIER THE FEEDBACK ITSELF WROTE, AND IT MUST BE RUN FIRST. "If
+    the checkout was shallow from its original clone days ago, then everything above about a recent
+    cause is wrong and the finding is only that nothing detected it for that long." Nothing in the
+    tree can settle it: `.git/shallow`'s own mtime, the reflog and the container/host provisioning
+    record are the only evidence, and none of them is code. THAT ASYMMETRY IS THE POINT — the cause
+    may be unrecoverable, while the ABSENCE OF A GUARD is recoverable today and is what this task
+    ships.
+
+    (5) THE SECOND CANDIDATE — an operator `npm ci` recovery in the same tree — TOUCHES NO GIT
+    OBJECT and is not a plausible mechanism for a moved horizon. It is recorded here so the next
+    reader does not re-derive it, not as a conclusion.
+  design: |
+    (i) THE DELIVERABLE IS A SOURCE-SCAN RATCHET, IN ONE NEW TEST FILE, AND NOTHING ELSE SHIPS. It
+    reads this repository's own tracked sources and asserts two properties.
+      (a) NO DEPTH-LIMITING FLAG MAY BE PASSED TO A GIT INVOCATION THAT COULD NAME THE REAL
+          CHECKOUT. The flag set is DATA, not a branch — `--depth`, `--shallow-since`,
+          `--shallow-exclude`, `--filter`, `--unshallow` excluded as the repair — so a new flag is a
+          row and not an edit. Scope: `src/`, `scripts/`, `deploy/` and `.github/workflows/`.
+      (b) A FIXTURE THAT CREATES A SHALLOW CLONE MUST CLONE FROM A REPOSITORY THE FIXTURE ITSELF
+          CREATED. Scope: `test/`. This is the property rationale (2) shows is currently unwritten,
+          and the three existing fixtures satisfy it, so the ratchet lands GREEN over the tree it is
+          written against.
+
+    (ii) THE ALLOWLIST IS PART OF THE DESIGN, KEYED BY PATH PLUS REASON. The heartbeat workflow's
+    `--depth=1` is legitimate — a hosted runner, a single named branch ref, no host checkout in
+    reach — and must pass by a stated exemption rather than by a hole in the pattern. An exemption
+    with no reason string is itself a failure of the ratchet.
+
+    (iii) IT MUST FAIL FOR A REASON IT CAN NAME. The negative arm is not optional: the scan is
+    driven over a FIXTURE source string that DOES carry an offending call, and the failure message
+    must name the file, the line and the flag. A recogniser never shown failing is the shape
+    W1-T2317 exists for, and this ratchet must not join that population.
+
+    (iv) A ZERO IS ONLY TRUSTWORTHY WITH A CONTROL. The scan must assert that it found the known
+    call sites at all (rationale (3)'s positive control) before reporting no offenders — an
+    unreadable path or a pattern that stopped matching must FAIL, never quietly report clean. This
+    repo's measured failure mode is a read that failed being reported as a read that said no.
+
+    (v) THE FALSIFIER IS AN INVESTIGATION STEP, NOT AN ACCEPTANCE CRITERION, AND IS RECORDED IN THE
+    PULL REQUEST BODY. Before writing the ratchet, check `.git/shallow`'s mtime against the tree's
+    own provisioning date on the affected host and state which of the two stories the evidence
+    supports — recent cause, or shallow since the original clone. If the evidence is gone, SAY SO;
+    "unrecoverable, and here is what would have recorded it" is a real answer and the recorder is
+    W1-T2332's boot field. No proof form can execute a host forensic, which is precisely why it is
+    not filed as one.
+
+    (vi) EXPLICITLY NOT IN SCOPE.
+      - Repairing any offender the scan finds. If one exists it is a separate filing with its own
+        declared paths; guessing those paths here would produce exactly the wrong-`files:` defect
+        W1-T2237 and W1-T2248 already own.
+      - Moving `test/lint-plan-merge-evidence.test.ts`'s fixture root. Its temp-dir placement is a
+        different concern with its own owners, and property (i)(b) holds either way.
+      - Any detection at run time. That is W1-T2332 and this task does not duplicate it.
+  acceptance:
+    - claim: "a source scan refuses any depth-limiting flag on a git invocation in the shipped sources, and the refused flag set is a data table rather than a branch"
+      proof: "unit test: test/no-shallowing-of-the-canonical-checkout.test.ts"
+    - claim: "a fixture that builds a shallow clone must clone from a repository the fixture itself created, and this is asserted rather than left to convention"
+      proof: "unit test: test/no-shallowing-of-the-canonical-checkout.test.ts"
+    - claim: "the scan fails on a seeded offending source and its message names the file, the line and the flag"
+      proof: "unit test: test/no-shallowing-of-the-canonical-checkout.test.ts"
+    - claim: "an exemption carries a stated reason, and an exemption without one fails the scan"
+      proof: "unit test: test/no-shallowing-of-the-canonical-checkout.test.ts"
+    - claim: "a clean result is reported only when the scan proves it read the known call sites, and an unreadable input fails instead of reporting clean"
+      proof: "unit test: test/no-shallowing-of-the-canonical-checkout.test.ts"
+  files: [test/no-shallowing-of-the-canonical-checkout.test.ts]
+  status: queued
+  attempts: 0
+  origin: "feedback#fb-1786001088591-dbf763"
+  plan_refs: ["W1-T2332", "W1-T2317", "W1-T2291", "W1-T1258"]
+  note: |
+    `risk: medium` — ONE declared file, test-only, no production behaviour changes and no path the
+    fleet executes at run time. It argues down toward low and up only because a ratchet that is
+    wrong in the permissive direction is worse than none; medium is the honest middle.
+
+    `verify: auto` — every criterion is a pure scan over supplied source text or over the tracked
+    tree, provable with no network, no host and no live checkout.
+
+    `budget_usd 30` — one test file with a fixture-driven negative arm and a table. Deliberately
+    below W1-T2332's 45: this ships no production code.
+
+    THE FORWARD REFERENCE IS DELIBERATE. `test/no-shallowing-of-the-canonical-checkout.test.ts` does
+    not exist yet; it is declared in `files:` so the path-form proofs resolve under the
+    forward-reference carve-out and read `not_yet_built` until the build lands.
+
+    WHAT THIS TASK DOES NOT CLAIM. It does not claim the canonical checkout was shallowed by
+    anything in this repository — rationale (1) says the opposite on the evidence available by
+    reading. It claims that the property keeping that true is unwritten and ungated, which is the
+    difference between being safe and being kept safe.
+
+    NO `depends_on` on W1-T2332 and no file overlap with it, so the two can batch rather than
+    serialise: this task declares one test file and W1-T2332 declares three modules and two other
+    tests.
+
+    RENUMBERED `W1-T2328` -> `W1-T2330` -> `W1-T2333`, AND THE SECOND HOP IS WHY THERE IS A THIRD.
+    This shard was filed against a base where `W1-T2328` was free; by the time this branch's CI ran,
+    `#2992` had already merged a DIFFERENT `W1-T2328` ("the fix rung re-runs the failing check and
+    never asks whether the verdict moved", `src/lib/ledger-replay.ts`) onto main, so a merge would
+    have handed `loadPlan` a duplicate id. The first fix round moved this shard to `W1-T2330`, an id
+    this run does hold a reservation ref for but which sits in a block reserved seconds before the
+    filing commit, so ownership of it reads ambiguously from the refs alone. `W1-T2333` is reserved
+    to the operator's own host and is unambiguous. Renumbering is the only change either round makes
+    — no acceptance criterion, no `files:` entry, and no line of design text has moved. `lint-plan`
+    ALSO flags this task as a `duplicate-title` candidate against the merged `W1-T2328` (a
+    title-similarity heuristic, k=2) — the two are unrelated: that task is fix-rung re-verification
+    after a re-run, this one is a source-scan ratchet against depth-limiting git flags. Advisory
+    only, cited here per the check's own instruction.

@@ -1,0 +1,180 @@
+- id: W1-T2332
+  title: "A SHALLOW CANONICAL CHECKOUT BREAKS EVERY HISTORY READ SILENTLY AND NOTHING PROACTIVE ASKS — the boot record carries env, node path, node version and head sha but never the horizon those reads are computed over, `rmd doctor` has eleven arms and no depth sibling, and the only detector in the fleet is one linter's refusal that fires when it happens to need history"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    FILED FROM SOURCE READING ONLY, in the triage worktree — no command was run, no ledger was read,
+    and every figure below is a TREE FACT with its file and line named so the implementer re-derives
+    rather than trusts. The incident that prompted it is feedback fb-1786001088591-dbf763.
+
+    (1) THE INCIDENT, AND WHY IT IS A DETECTION FINDING RATHER THAN A GIT FINDING. The canonical
+    checkout answered `--is-shallow-repository` true holding 208 commits against a repo with 980,
+    with a normal `remote.origin.fetch` refspec and no partial-clone filter. It surfaced only because
+    #1407's merge-evidence split REFUSES on a shallow clone BY NAME — `src/run-task.ts` around
+    L14508-L14517, "shallow clone — truncated history would misread absent commits as absent
+    evidence". That guard is correct and earned itself; it is also an ACCIDENTAL detector, because it
+    only speaks when a linter that needs history happens to run.
+
+    (2) THE ASYMMETRY, WHICH IS THE WHOLE ARGUMENT. A shallow clone breaks READS and breaks nothing
+    LOUDLY. Every history-shaped answer stays plausible and is computed over a fraction of the
+    corpus: `git log -S` symbol archaeology, merge-base checks, `git log --follow`, and the
+    implementing-commit evidence recons rest on. `docs/operator-guide.md` L450-L457 already MEASURED
+    this class — a 120-commit clone answered ZERO deletions for a file deleted before its horizon and
+    zero for any path, while the obvious "does this query return rows" control passed loudly at 1,495
+    additions. Its remedy is a HUMAN DISCIPLINE ("unshallow before asking anything about history, and
+    report `git rev-list --count HEAD` alongside the answer"). A discipline is not a detector.
+
+    (3) THE FLEET'S EXISTING SHALLOW HANDLING IS PER-READER AND SPLIT DOWN THE MIDDLE, so no single
+    reader's posture generalises. REFUSE-BY-NAME: `src/run-task.ts` L14508-L14517 and L13425-L13437,
+    `src/lib/measurement-cadence.ts` L641-L649. FAIL-OPEN-BY-DESIGN, each for its own stated and
+    defensible reason: `src/run-task.ts` L14646-L14647 returns `undefined` on shallow, L14842 fails
+    open on a shallow checkout, `src/lib/image-drift.ts` L37-L38 and L140 resolve to "unmeasurable",
+    `src/lib/proof-queue-audit.ts` L341 fails open. NOTHING IS WRONG WITH EITHER POSTURE — what is
+    missing is the one place that asks the question when nobody needed an answer.
+
+    (4) THE BOOT RECORD ALREADY CARRIES EVERY SIBLING FACT AND NOT THIS ONE. `daemonBoot`
+    (`src/lib/daemon.ts` L1943-L1950) logs `daemon.boot` with `env_clean`, `billing_mode`,
+    `node_path`, `node_version`, optional `node_drift` and optional `head_sha` — the identity of the
+    code, the runtime and the billing mode, and no statement of the HISTORY HORIZON those readers
+    will compute over. The precedent for adding one is exact and in the same function: W1-T991's node
+    provenance, and `bootHeadSha`, which the CALLER measures (`src/run-task.ts` L19489-L19498,
+    `git rev-parse HEAD` in a try/catch, omitted rather than guessed on failure) because
+    `src/lib/daemon.ts` never touches the filesystem by its own header.
+
+    (5) `rmd doctor` HAS ELEVEN ARMS AND NO DEPTH SIBLING. `buildDoctorReport`
+    (`src/lib/doctor.ts` L710-L722) composes: ledger-freshness, dispatch-stall, repair-stall,
+    dispatch-liveness, sweep-liveness, pause-honoured, lock-vs-process, lane-less-workers, git-locks,
+    disk-headroom, memory. `git-locks` is the closest kin — it already reports a REPO-STATE fault
+    (`judgeStaleGitLocks`, L489-L497) and stops there. A checkout-depth arm is the same shape at the
+    same layer, and the reader seam beside it already exists (`readGitLocks` wired at
+    `src/run-task.ts` L20985).
+
+    (6) THE COST OF HAVING NO RECORD IS ALREADY PAID, AND IT IS THE FEEDBACK'S OWN OPEN QUESTION.
+    "UNKNOWN: when it became shallow and what did it." Nothing anywhere writes the depth of the
+    canonical checkout at any time, so there is no series to difference and the question is
+    unanswerable after the fact — not hard, unanswerable. A `commit_count` on every `daemon.boot` row
+    turns the next occurrence into a bounded interval between two boots.
+
+    (7) THE CONVENTION THIS REPLACES IS REAL, MANUAL AND REPEATED. At least six shards record a
+    hand-run depth check in their provenance blocks before trusting any history query —
+    W1-T2201 L123, W1-T2204 L153, W1-T2241 L141, W1-T2260 L125, W1-T2261 L146, W1-T1284 L136, plus
+    W1-T1258 L68-L69 which states outright that a shallow clone would have made one of its paths a
+    false negative WITH A PASSING CONTROL. Every one of those is a human remembering. This task does
+    not remove that discipline; it stops the fleet depending on it.
+  design: |
+    (i) MEASURE AT THE CALLER, RECORD AT BOOT, JUDGE IN A PURE FUNCTION — the three-way split this
+    repo already uses for node provenance and the head sha. The caller reads
+    `git rev-parse --is-shallow-repository` and `git rev-list --count HEAD` exactly where it already
+    reads `bootHeadSha` (`src/run-task.ts` L19489-L19498): best-effort, in a try/catch, OMITTING the
+    fields rather than inventing them when git is unavailable. `daemonBoot` takes them as a TRAILING
+    parameter — that function's own "no positional caller shifts" discipline is explicit at
+    `src/lib/daemon.ts` L1911-L1932 — and records them on the existing `daemon.boot` row. NO NEW
+    LEDGER ROW; the boot record is the boot record.
+
+    (ii) A SHALLOW CHECKOUT MUST NOT HALT THE BOOT. T197 doctrine, restated in this same function for
+    the keychain rung (`src/lib/daemon.ts` L1969-L1976): the daemon sleeps through problems, the
+    fault is ledgered with its named class, and boot continues. A daemon that refuses to come up on a
+    shallow tree converts a silent read fault into a total outage, and the readers that MUST NOT
+    compute already refuse for themselves (rationale (3)).
+
+    (iii) THE DOCTOR ARM, `checkout-depth`, AS A PURE JUDGE. `judgeCheckoutDepth(...)` in
+    `src/lib/doctor.ts` beside `judgeStaleGitLocks`, added to `buildDoctorReport`'s list, taking
+    already-measured inputs so every verdict arm is reachable from a test with no git and no daemon
+    — that file's header (L31-L33) requires exactly this.
+      - shallow ⇒ FAIL, measured as the reachable commit count, threshold "full history", detail
+        naming the remedy `git fetch --unshallow` in the operator-guide's own words. FAIL RATHER THAN
+        WARN IS DELIBERATE: the fault is invisible by construction and the remedy is one command.
+      - unreadable (no git, not a repository, a throw) ⇒ WARN "unreadable", NEVER OK. A read that
+        FAILED reported as a read that SAID NO is the eighth instance of a class this repo has
+        measured seven times (W1-T472 design (v) names the count).
+      - full ⇒ OK, measured as the commit count, so the horizon is printed even when it is fine —
+        that is the operator-guide's own prescription, applied where a reader already looks.
+
+    (iv) REPORT ONLY, AND NOTHING UNSHALLOWS ANYTHING. `rmd doctor` refuses `--fix` BY NAME with a
+    stated reason (`src/lib/doctor.ts` L732-L738: a second actor mutating state a live daemon depends
+    on). An automatic `git fetch --unshallow` at boot is exactly that second actor, on a possibly
+    metered link, fetching the whole history at the least convenient moment. THE ARM PRINTS AND
+    STOPS.
+
+    (v) EXPLICITLY NOT IN SCOPE, each with its reason.
+      - Changing any existing refuse-by-name or fail-open reader. Both postures are defensible per
+        reader and rationale (3) makes no argument against either.
+      - Unifying the three duplicated refusal strings into one shared helper. Real, small, and a
+        different concern; it would widen this task's span for no detection gain.
+      - A per-WORKTREE depth check. A worker's worktree shares the canonical object store, so it is
+        the same fact measured twice; if that stops being true it is a new finding, not this one.
+      - Deciding WHAT made the checkout shallow. That is W1-T2333, which this task does not depend
+        on and does not answer.
+  acceptance:
+    - claim: "the boot record states the history horizon the process will read over — whether the checkout is shallow and how many commits are reachable"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "an unreadable depth measurement omits the fields rather than recording a guessed value, and the boot continues either way"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "a shallow checkout is recorded and the boot still completes rather than refusing to start"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "a health check reports a shallow checkout as a failure naming the reachable commit count and the remedy command"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "a depth measurement that could not be taken reports as unreadable rather than as healthy"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "a full checkout still prints its reachable commit count so the horizon is legible when it is fine"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "the new arm is report-only: it repairs nothing, fetches nothing and changes no exit path other than its own verdict"
+      proof: "unit test: test/doctor.test.ts"
+    - claim: "the verdict is a pure function over measured inputs, callable with no git and no live process"
+      proof: "grep: judgeCheckoutDepth( in src/lib/doctor.ts"
+    - claim: "the measurement is taken by the caller that already resolves the boot head sha, not inside the module that must touch no filesystem"
+      proof: "grep: readCheckoutDepth( in src/run-task.ts"
+  files: [src/lib/daemon.ts, src/lib/doctor.ts, src/run-task.ts, test/daemon.test.ts, test/doctor.test.ts]
+  status: queued
+  attempts: 0
+  origin: "feedback#fb-1786001088591-dbf763"
+  plan_refs: ["W1-T991", "W1-T1047", "W1-T1236", "W1-T1209", "W1-T2333"]
+  note: |
+    `risk: high` IS SET UP FRONT for the SPAN, per Rule 19 and `sizingViolation`
+    (`src/lib/task-linter.ts` L200-L212): the declared `files:` cross three code modules, which
+    refuses `medium` by construction. The edit itself is small in each — one trailing parameter and
+    two record fields, one pure judge plus one line in a composition list, one measurement closure
+    beside an existing one and one seam in the check inputs.
+
+    `verify: auto` IS HONEST HERE. Every deliverable is a pure function over supplied numbers or a
+    field on a record a test already asserts — no live checkout, no network and no daemon is needed
+    to prove any acceptance criterion. The one thing a test cannot prove is that the canonical
+    checkout on any given host is deep, which is not what this task claims.
+
+    `budget_usd 45` — three small edits plus their fixtures, sized against W1-T2326's 45 for a
+    comparable multi-seam change in one module and its test.
+
+    NO `depends_on`. W1-T2333 asks what CAN shallow the checkout; this asks whether anything would
+    NOTICE. Either can ship first and neither weakens the other — a detector with no cause found is
+    still a detector, and a cause found with no detector is still silent next time.
+
+    WHY THIS IS NOT ALREADY COVERED, CHECKED BEFORE FILING. `MASTER-PLAN.md`, `LEARNINGS.md` and
+    `DECISIONS.md` contain the string "shallow" ZERO times each. The plan corpus contains it only in
+    provenance blocks (a human's hand-run check), in W1-T472 design (v) as a NAMED TRAP inside a
+    different task's scope, and in W1-T1260's rationale as an observation that the whole-plan lint
+    signal was byte-identical shallow and unshallow except for the one clause that refused. No task
+    owns proactive detection.
+
+    THE FALSIFIER FOR THIS TASK'S PREMISE, STATED SO IT CAN FAIL: if a boot-time depth field would
+    duplicate a fact some existing row already carries, this is redundant. It does not — the eleven
+    doctor arms and the six `daemon.boot` fields are enumerated in the rationale with their line
+    numbers, and none of them is about history depth.
+
+    RENUMBERED `W1-T2327` -> `W1-T2329` -> `W1-T2332`, AND THE SECOND HOP IS WHY THERE IS A THIRD.
+    This shard was filed against a base where `W1-T2327` was free; by the time this branch's CI ran,
+    `#2991` had already merged a DIFFERENT `W1-T2327` ("a workflow run that never started reads as
+    one still running", `src/lib/sweep.ts`) onto main, so a merge would have handed `loadPlan` a
+    duplicate id. The first fix round moved this shard to `W1-T2329`, an id this run does hold a
+    reservation ref for but which sits in a block reserved seconds before the filing commit, so
+    ownership of it reads ambiguously from the refs alone. `W1-T2332` is reserved to the operator's
+    own host and is unambiguous. Renumbering is the only change either round makes — no acceptance
+    criterion, no `files:` entry, and no line of design text has moved. `lint-plan` ALSO flags this
+    task as a `duplicate-title` candidate against the merged `W1-T2327` (a title-similarity
+    heuristic, k=2) — the two are unrelated: that task is CI-rollup disposition for a startup-failed
+    workflow run, this one is boot-time checkout-depth detection. Advisory only, cited here per the
+    check's own instruction.
