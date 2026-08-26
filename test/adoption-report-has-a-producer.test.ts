@@ -19,6 +19,30 @@ import type { Config } from "../src/lib/config.js";
 // that order, against SYNTHETIC fixtures (never this host's live repo/ledger state, which the
 // task's own rationale (2) already measured moves under a snapshot).
 
+/**
+ * The two tests below make a file unreadable with a mode-zero `chmodSync` and assert that the
+ * producer DEGRADES to empty text rather than throwing or counting the content as real. Under
+ * uid 0 that premise cannot hold: root bypasses the permission bits and reads the file anyway,
+ * so the producer sees the content, the "must never be seen" assertion fires, and the test fails
+ * for a reason that has nothing to do with what it tests.
+ *
+ * MEASURED 2026-08-26 in a root container: `chmod 000 <file>` then reading it back SUCCEEDS. Both
+ * tests failed there, and they fail identically on `origin/main` and on every PR head — which
+ * reads as a base-caused outage and sends an investigation looking for a regression that does not
+ * exist. A vacuous red costs more than an honest skip.
+ *
+ * SO THE REASON BELOW NAMES THE PREMISE, NOT THE SKIP. "Skipped under root" would leave the next
+ * reader to rediscover why. This is NOT a weakened assertion and NOT a broader guard: the
+ * assertions are unchanged, the `chmod` is unchanged, and the condition is `uid === 0` and
+ * nothing else — CI's runner is non-root, so both tests still execute and can still fail there,
+ * which is the only place their failure would mean anything.
+ */
+const ROOT_CANNOT_BE_DENIED_A_READ: string | false =
+  typeof process.getuid === "function" && process.getuid() === 0
+    ? "uid 0 — chmod 000 cannot deny root a read, so this test's unreadable-file premise never holds here; " +
+      "the assertion is unchanged and still runs on CI's non-root runner"
+    : false;
+
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
@@ -399,7 +423,7 @@ test("SHAPE 2: no src/lib/plan.ts in the checkout ⇒ the schema read's own catc
   }
 });
 
-test("SHAPE 2: an unreadable plan/ file degrades to empty text — the writer search still finds the readable file", () => {
+test("SHAPE 2: an unreadable plan/ file degrades to empty text — the writer search still finds the readable file", { skip: ROOT_CANNOT_BE_DENIED_A_READ }, () => {
   const checkoutDir = buildFixtureCheckout();
   const stateDir = join(checkoutDir, "state");
   buildLedgerFixture(stateDir);
@@ -471,7 +495,7 @@ test("SHAPE 4: a malformed JSON line that still text-matches the pattern is skip
   }
 });
 
-test("SHAPE 3: an unreadable .github/workflows file degrades to empty text, never throws", () => {
+test("SHAPE 3: an unreadable .github/workflows file degrades to empty text, never throws", { skip: ROOT_CANNOT_BE_DENIED_A_READ }, () => {
   const checkoutDir = buildFixtureCheckout();
   const stateDir = join(checkoutDir, "state");
   buildLedgerFixture(stateDir);

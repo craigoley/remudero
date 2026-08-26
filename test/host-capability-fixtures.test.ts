@@ -254,9 +254,14 @@ const DECLARED: readonly Declared[] = [
       "(src/lib/measurement-cadence.ts) pushes a child only on `e.isFile()`, so a DIRECTORY at the path — the " +
       "EISDIR shape — is skipped at ENUMERATION and never reaches the readFileSync whose catch degrades to \"\". " +
       "Substituting it would silently stop covering the branch, which is test theatre, not a safer fixture. " +
-      "Root bypasses read denial, so at uid 0 the file IS read: the content is then seen as a real write, the " +
-      "expected finding is absent, and the assertion FAILS LOUDLY. It does not go vacuous — the uid-0 failure " +
-      "direction here is red, never green.",
+      "Root bypasses read denial, so at uid 0 the file IS read, the content is seen as a real write and the " +
+      "expected finding is absent. That failure is LOUD rather than vacuously green — but it is also not a " +
+      "RESULT: it fires identically on origin/main and on every PR head, so it reads as a base-caused outage " +
+      "and sends investigation after a regression that does not exist. Both sites therefore now carry an " +
+      "explicit uid-0 skip whose reason names the PREMISE rather than the skip. Nothing is weakened: the " +
+      "assertions and the chmods are unchanged and the condition is uid 0 and nothing broader, so on a " +
+      "non-root runner both still execute and can still fail — the only place their failure would mean " +
+      "anything.",
   },
   {
     kind: "chmod",
