@@ -130,22 +130,34 @@ test("BEHAVIORAL: the real waitForCiGreen waits through a long-running ci and re
   // requires "green" instead. The fake counts its own invocations, so the run genuinely crosses
   // the old bound (STALL_WINDOW identical readings) before `ci` resolves.
   const fakeBinDir = mkdtempSync(join(tmpdir(), "wait-ci-green-running-bin-"));
+  // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view` — one poll
+  // iteration is now a PR-row read (the poll counter, incremented here) plus the two
+  // `rollupFor` reads (check-runs, combined-status), which consult the SAME counter without
+  // advancing it so all three reads in one iteration agree on running-vs-green.
   const counter = join(fakeBinDir, "calls");
   writeFileSync(
     join(fakeBinDir, "gh"),
     [
       "#!/bin/bash",
-      `n=$(cat ${counter} 2>/dev/null || echo 0)`,
-      "n=$((n+1))",
-      `echo "$n" > ${counter}`,
-      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      `if [[ "$1" == "api" ]]; then`,
+      '  case "$2" in',
+      "    */pulls/*)",
+      `      n=$(cat ${counter} 2>/dev/null || echo 0)`,
+      "      n=$((n+1))",
+      `      echo "$n" > ${counter}`,
+      '      echo \'{"number":1,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}\'',
+      "      exit 0 ;;",
+      "    */check-runs*)",
+      `      n=$(cat ${counter} 2>/dev/null || echo 0)`,
       // Well past STALL_WINDOW identical polls, then green.
-      `  if (( n > ${STALL_WINDOW * 3} )); then`,
-      '    echo \'{"statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}\'',
-      "  else",
-      '    echo \'{"statusCheckRollup":[{"name":"ci","status":"IN_PROGRESS"}]}\'',
-      "  fi",
-      "  exit 0",
+      `      if (( n > ${STALL_WINDOW * 3} )); then`,
+      '        echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\'',
+      "      else",
+      '        echo \'{"check_runs":[{"name":"ci","status":"in_progress"}]}\'',
+      "      fi",
+      "      exit 0 ;;",
+      '    */status) echo \'{"statuses":[]}\'; exit 0 ;;',
+      "  esac",
       "fi",
       "exit 1",
       "",

@@ -208,10 +208,12 @@ test("W1-T963: end-to-end — a sibling's landed fix closes an already-done tria
     execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
     execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
 
-    // `statusCheckRollup` is `waitForCiGreen`'s OWN poll — the shim pushes the sibling's READY
-    // commit to the bare origin right THERE, reproducing the exact window the incident PRs raced
-    // in: this run's branch has already forked (pre-flip) and its own commit already pushed, but
-    // `origin/main` only advances to the SAME post-flip state while THIS run is waiting on CI.
+    // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view --json
+    // statusCheckRollup`. The single-PR read (`repos/…/pulls/…`) is `waitForCiGreen`'s OWN
+    // poll — the shim pushes the sibling's READY commit to the bare origin right THERE,
+    // reproducing the exact window the incident PRs raced in: this run's branch has already
+    // forked (pre-flip) and its own commit already pushed, but `origin/main` only advances to
+    // the SAME post-flip state while THIS run is waiting on CI.
     writeFileSync(
       join(shimDir, "gh"),
       [
@@ -225,7 +227,9 @@ test("W1-T963: end-to-end — a sibling's landed fix closes an already-done tria
         `  *"--json headRefName"*) git -C ${JSON.stringify(bare)} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
         "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
         '  *"pr diff"*) echo "" ;;',
-        `  *"statusCheckRollup"*) git -C ${JSON.stringify(siblingDir)} push --quiet origin main; echo '{"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS"}]}' ;;`,
+        '  *"/check-runs"*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;',
+        '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
+        `  *"api repos/"*"/pulls/"*) git -C ${JSON.stringify(siblingDir)} push --quiet origin main; echo '{"number":998,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}' ;;`,
         '  *"pr close"*) exit 0 ;;',
         "  *) exit 0 ;;",
         "esac",
@@ -265,7 +269,10 @@ test("W1-T963: end-to-end — a sibling's landed fix closes an already-done tria
     // NEVER MERGED: `reviewCommand`/`armAndLogOutcome` are only reached AFTER the `if` this task
     // adds `return`s from (see run-task.ts's `triageCommandLocked`) — so CI is polled exactly
     // ONCE. A second poll would mean the close path fell through to a real re-review/arm attempt.
-    const rollupPolls = argv.split("\n").filter((l) => l.includes("statusCheckRollup")).length;
+    // W1-T2268: one `waitForCiGreen` iteration is now THREE REST reads (the PR row, then the
+    // composed rollup's own check-runs + combined-status) rather than one GraphQL call — count
+    // the check-runs read specifically, the one call unique to a single iteration.
+    const rollupPolls = argv.split("\n").filter((l) => l.includes("/check-runs")).length;
     assert.equal(rollupPolls, 1, `CI must be polled exactly once, not fall through to a real review/arm; argv log:\n${argv}`);
   } finally {
     process.env.HOME = savedHome;

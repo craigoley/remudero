@@ -191,6 +191,8 @@ import {
   type PresenceMode, prReferentFromIssueText,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
+  checkRunsRestArgs,
+  combinedStatusRestArgs,
   createGhCallPacer,
   fetchOpenPrsRest,
   fetchSinglePrRest,
@@ -199,10 +201,13 @@ import {
   liveStateFromRest,
   mapRestPr,
   paceGhEntry,
+  prStateFromRest,
+  rollupFor,
   singlePrRestArgs,
   type GhApiFetcher,
   type GhCallPacer,
   type RestPullRow,
+  type RestRollupEntry,
 } from "./lib/open-prs-rest.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
@@ -3709,6 +3714,59 @@ async function ghJsonAsync(args: string[]): Promise<unknown> {
   return JSON.parse(stdout);
 }
 
+// ── W1-T2268: THE LAST GRAPHQL IN THE RUN PATH ───────────────────────────────────────────────
+//
+// Both poll loops below used to spend `gh pr view --json state,statusCheckRollup` /
+// `--json statusCheckRollup` every `everySec` — a GraphQL read whose point cost scales with the
+// head's check count, against a GraphQL budget MEASURED at filing time as `used 10064, limit
+// 10000, remaining 0` — already over. Every other rollup read in the sweep moved to REST
+// (`rollupFromRest`/`rollupFor`, this file's `open-prs-rest.js` import) after the 2026-07-28
+// exhaustion; these two were the last holdouts, on a DIFFERENT budget (the run path, never the
+// sweep's) that was simply never migrated. `rollupFor` composes the two REST reads
+// (`checkRunsRestArgs` + `combinedStatusRestArgs`) into the same shape GraphQL's union reported —
+// including a `remudero-review` commit status, which a check-runs-only read would drop — and is
+// now exported for exactly this: {@link restRollupFor} below points both loops at it.
+//
+// WHY NOT CALL `rollupFor` DIRECTLY WITH A BLOCKING `fetch`. `rollupFor`'s `fetch` parameter is
+// synchronous, and every existing caller (`fetchOpenPrsRest`, `fetchSinglePrRest`) supplies the
+// blocking `ghJson` — widening that would ripple through callers well outside this task's
+// declared `files:`. Reverting these two loops to a blocking read would also UNDO half of
+// W1-T463's fix (see this file's block above `yieldingSleep`): the loops would once again hold
+// the daemon's event loop for the duration of every `gh` call, for the whole of a CI wait. So the
+// REST reads happen for real over `read` — the SAME async, non-blocking seam `ghJsonAsync` already
+// fills — and `rollupFor` is handed a synchronous stand-in that replays the two already-resolved
+// responses in the exact order `rollupFor`'s own body requests them (check-runs, then
+// combined-status — unchanged, tested source). The composed result is byte-identical to calling
+// `rollupFor` with a truly synchronous fetch; only the I/O is non-blocking.
+async function restRollupFor(
+  owner: string,
+  repo: string,
+  sha: string,
+  read: (args: string[]) => Promise<unknown>,
+): Promise<RestRollupEntry[]> {
+  const runs = await read(checkRunsRestArgs(owner, repo, sha));
+  const combined = await read(combinedStatusRestArgs(owner, repo, sha));
+  const resolved: unknown[] = [runs, combined];
+  let next = 0;
+  return rollupFor(owner, repo, sha, () => resolved[next++]);
+}
+
+/**
+ * Resolve `owner`/`repo`/`number` from a poll loop's `prUrl`, or refuse loudly. Mirrors
+ * {@link headShaRestArgs}'s own refusal below: a URL that fails to parse is a broken caller, never
+ * a reason to fall back onto the `gh pr view` GraphQL argv this migration removes.
+ */
+function pollRestTarget(prUrl: string, who: string): { owner: string; repo: string; number: number } {
+  const target = prUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(
+      `${who}: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to fall back ` +
+        "to `gh pr view --json`, whose GraphQL budget exhaustion is the defect this poll was migrated off",
+    );
+  }
+  return target;
+}
+
 /**
  * The two seams the poll loops below take, both defaulted to the real thing. Injectable ONLY so a
  * test can drive the real loop without a network or a six-second wall clock — production supplies
@@ -3733,15 +3791,16 @@ export async function pollToGate(
 ): Promise<GateOutcome> {
   const read = deps.readJson ?? ghJsonAsync;
   const sleep = deps.sleep ?? yieldingSleep;
+  // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
+  const { owner, repo, number } = pollRestTarget(prUrl, "pollToGate");
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const v = (await read(["pr", "view", prUrl, "--json", "state,statusCheckRollup"])) as {
-      state: string;
-      statusCheckRollup?: RollupEntry[];
-    };
-    if (v.state === "MERGED") return { merged: true, reason: "checks green" };
-    if (v.state === "CLOSED") return { merged: false, reason: "pr closed" };
-    const roll = v.statusCheckRollup ?? [];
+    const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
+    const state = prStateFromRest(row);
+    if (state === "MERGED") return { merged: true, reason: "checks green" };
+    if (state === "CLOSED") return { merged: false, reason: "pr closed" };
+    const sha = mapRestPr(row).headRefOid;
+    const roll = await restRollupFor(owner, repo, sha, read);
     const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
       log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
@@ -3767,7 +3826,7 @@ export async function pollToGate(
       if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
-        state: v.state,
+        state,
         checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
       });
     }
@@ -3959,18 +4018,20 @@ async function waitForCiGreen(
 ): Promise<"green" | "red" | "timeout"> {
   const read = deps.readJson ?? ghJsonAsync;
   const sleep = deps.sleep ?? yieldingSleep;
+  // W1-T2268: REST, never GraphQL — see the block above `restRollupFor`.
+  const { owner, repo, number } = pollRestTarget(prUrl, "waitForCiGreen");
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const v = (await read(["pr", "view", prUrl, "--json", "statusCheckRollup"])) as {
-      statusCheckRollup?: RollupEntry[];
-    };
-    const state = ciGateFromRollup(v.statusCheckRollup);
+    const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
+    const sha = mapRestPr(row).headRefOid;
+    const roll = await restRollupFor(owner, repo, sha, read);
+    const state = ciGateFromRollup(roll);
     if (state === "red") return "red";
     if (state === "green") return "green";
-    readings.push(v.statusCheckRollup ?? []);
+    readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
-    const ci = (v.statusCheckRollup ?? []).find((c) => (c.name ?? c.context) === "ci");
+    const ci = roll.find((c) => (c.name ?? c.context) === "ci");
     // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
     // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
     // WORKING one, and the polling row beside it cannot carry that decision because the rotator

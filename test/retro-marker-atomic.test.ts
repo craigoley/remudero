@@ -621,9 +621,16 @@ function setupFakeRetroFixture(
       headRefNameOut === undefined
         ? `  if [[ "$5" == 'headRefName' ]]; then echo '{}'; exit 0; fi`
         : `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${headRefNameOut}"}'; exit 0; fi`,
-      // --json statusCheckRollup  (waitForCiGreen) -- RED on the first poll, so
+      `fi`,
+      // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view --json
+      // statusCheckRollup`. RED on the first poll (via the composed check-run), so
       // retroCommand exits right after the marker-advance line with no further gh calls.
-      `  if [[ "$5" == 'statusCheckRollup' ]]; then echo '{"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}'; exit 0; fi`,
+      `if [[ "$1" == 'api' ]]; then`,
+      `  case "$2" in`,
+      `    */pulls/*) echo '{"number":999999,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}'; exit 0 ;;`,
+      `    */check-runs*) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"failure"}]}'; exit 0 ;;`,
+      `    */status) echo '{"statuses":[]}'; exit 0 ;;`,
+      `  esac`,
       `fi`,
       // the REST create (the no-PR_URL-in-report fallback, W1-T1202)
       `if [[ "$1" == 'api' && "$2" == '--method' && "$3" == 'POST' ]]; then echo '{"html_url":"https://github.com/craigoley/remudero/pull/424242","number":424242}'; exit 0; fi`,

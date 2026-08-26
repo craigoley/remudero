@@ -182,8 +182,11 @@ function writeGhShim(
       opts.matchRealBranch
         ? '  *"headRefName"*)\n' + `    ${resolveBranch}\n` + '    printf \'{"headRefName":"%s"}\\n\' "${branch:-main}" ;;'
         : '  *"headRefName"*)\n' + "    # echo back whatever branch the caller is on, read from the shim env\n" + '    printf \'{"headRefName":"%s"}\\n\' "${RMD_SHIM_BRANCH:-main}" ;;',
-      // W1-T903 (via waitForCiGreen): resolved on the FIRST poll — never a real wait.
-      `  *"statusCheckRollup"*) echo '{"statusCheckRollup":[{"name":"ci","conclusion":"${opts.ciConclusion ?? "SUCCESS"}"}]}' ;;`,
+      // W1-T2268 (via waitForCiGreen/pollToGate): REST, never `gh pr view --json
+      // statusCheckRollup` — resolved on the FIRST poll (the composed check-runs read), never
+      // a real wait.
+      `  *"/check-runs"*) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"${(opts.ciConclusion ?? "SUCCESS").toLowerCase()}"}]}' ;;`,
+      '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
       '  *"--json body"*) echo \'{"body":""}\' ;;',
       opts.failPrDiff
         ? '  *"pr diff"*) echo "gh: transient diff failure" 1>&2; exit 1 ;;'

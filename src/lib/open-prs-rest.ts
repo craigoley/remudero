@@ -750,8 +750,18 @@ export function prStateFromRest(row: { state?: string; merged?: boolean; merged_
   return (row.state ?? "").toUpperCase() || "UNKNOWN";
 }
 
-/** Fetch and attach one PR head's composed rollup. Split out so both orchestrators share it. */
-function rollupFor(owner: string, repo: string, sha: string, fetch: GhApiFetcher): RestRollupEntry[] {
+/**
+ * Fetch and attach one PR head's composed rollup. Split out so both orchestrators share it.
+ *
+ * EXPORTED for W1-T2268: `run-task.ts`'s two run-path poll loops (`pollToGate`/`waitForCiGreen`)
+ * were the last GraphQL reads on the point-priced budget (`gh pr view --json statusCheckRollup`,
+ * every 6s for the whole CI wait); this is the composed-rollup read they migrate onto, unchanged
+ * and reused rather than re-derived — the union-merge behaviour (a `remudero-review` commit
+ * status surviving, an empty head composing to an empty rollup) is exactly what
+ * `test/open-prs-rest.test.ts` already pins for `fetchOpenPrsRest`/`fetchSinglePrRest`, and
+ * `test/poll-rollup-over-rest.test.ts` proves the two poll loops see the same composition.
+ */
+export function rollupFor(owner: string, repo: string, sha: string, fetch: GhApiFetcher): RestRollupEntry[] {
   const runs = fetch(checkRunsRestArgs(owner, repo, sha)) as { check_runs?: RestCheckRun[] };
   const combined = fetch(combinedStatusRestArgs(owner, repo, sha)) as { statuses?: RestStatus[] };
   return rollupFromRest(runs?.check_runs ?? [], combined?.statuses ?? []);

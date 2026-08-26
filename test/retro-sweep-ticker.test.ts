@@ -302,18 +302,33 @@ function blockingSleep(ms: number): Promise<void> {
   return Promise.resolve();
 }
 
-/** A `gh pr view --json statusCheckRollup` fake: `n` pending reads, then `final`. */
+/**
+ * W1-T2268: `pollToGate`/`waitForCiGreen` now read REST across THREE calls per iteration — the
+ * PR row, then the composed rollup's own check-runs + combined-status — never one combined
+ * `gh pr view --json statusCheckRollup`. `n` pending iterations, then `final`; `calls()` still
+ * counts ITERATIONS (the PR-row read), exactly as it counted single combined reads before.
+ */
 function rollupReads(n: number, final: Array<Record<string, unknown>>): {
   read: (args: string[]) => Promise<unknown>;
   calls: () => number;
 } {
   let i = 0;
+  let step = 0;
+  let current: Array<Record<string, unknown>> = [];
   return {
     read: async () => {
-      const pending = [{ name: "ci", status: "IN_PROGRESS" }];
-      const out = i < n ? pending : final;
-      i++;
-      return { state: "OPEN", statusCheckRollup: out };
+      const which = step % 3;
+      step++;
+      if (which === 0) {
+        const pending = [{ name: "ci", status: "IN_PROGRESS" }];
+        current = i < n ? pending : final;
+        i++;
+        return { number: 1, state: "open", merged: false, merged_at: null, head: { sha: "deadbeef" } };
+      }
+      if (which === 1) {
+        return { check_runs: current.map((c) => ({ name: c.name, status: c.status, conclusion: c.conclusion })) };
+      }
+      return { statuses: [] };
     },
     calls: () => i,
   };
@@ -330,7 +345,7 @@ test("W1-T463 FALSIFIER: a timer scheduled BEFORE the CI wait FIRES DURING it", 
   const timer = setTimeout(() => {
     firedAt = Date.now();
   }, 30);
-  const outcome = await waitForCiGreen("u/1", () => {}, 0.02, { readJson: read });
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.02, { readJson: read });
   clearTimeout(timer);
   assert.equal(outcome, "green");
   assert.notEqual(firedAt, undefined, "the timer never fired -- the event loop did not turn during the wait");
@@ -348,7 +363,7 @@ test("W1-T463 MUTANT: a BLOCKING sleep starves that same timer -- the falsifier 
     fired = true;
   }, 30);
   // Same function, same reads, same cadence -- only the sleep is the pre-W1-T463 shape.
-  const outcome = await waitForCiGreen("u/1", () => {}, 0.05, { readJson: read, sleep: blockingSleep });
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.05, { readJson: read, sleep: blockingSleep });
   clearTimeout(timer);
   assert.equal(outcome, "green", "the mutant still RETURNS correctly, which is exactly why a return-value test proves nothing");
   assert.equal(fired, false, "a blocking sleep must starve the timer -- if this fires, the falsifier above is vacuous");
@@ -357,7 +372,7 @@ test("W1-T463 MUTANT: a BLOCKING sleep starves that same timer -- the falsifier 
 test("W1-T463: the poll CADENCE is unchanged -- one sleep per poll, at everySec * 1000 ms", async () => {
   const { read, calls } = rollupReads(4, GREEN);
   const slept: number[] = [];
-  const outcome = await waitForCiGreen("u/1", () => {}, 6, {
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 6, {
     readJson: read,
     sleep: async (ms) => {
       slept.push(ms);
@@ -371,7 +386,7 @@ test("W1-T463: the poll CADENCE is unchanged -- one sleep per poll, at everySec 
 test("W1-T463: the ci.polling LOG cadence is unchanged -- i === 0 || i % 5 === 0", async () => {
   const { read } = rollupReads(12, GREEN);
   const steps: string[] = [];
-  await waitForCiGreen("u/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
+  await waitForCiGreen("https://github.com/acme/remudero/pull/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
   // 13 polls (0..12): logged at i = 0, 5, 10 -- three rows, exactly as before. 467 recorded rows
   // imply ~2,335 real polls precisely because of this 1-in-5 sampling.
   assert.equal(steps.filter((s) => s === "ci.polling").length, 3);
@@ -379,7 +394,7 @@ test("W1-T463: the ci.polling LOG cadence is unchanged -- i === 0 || i % 5 === 0
 
 test("W1-T463: the RED direction still returns red, and stops polling immediately", async () => {
   const { read, calls } = rollupReads(1, [{ name: "ci", conclusion: "FAILURE" }]);
-  const outcome = await waitForCiGreen("u/1", () => {}, 6, { readJson: read, sleep: async () => {} });
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 6, { readJson: read, sleep: async () => {} });
   assert.equal(outcome, "red", "blocked_ci handling depends on this exact value");
   assert.equal(calls(), 2, "one pending read then the red one -- it must not keep polling past a red");
 });
@@ -388,41 +403,62 @@ test("W1-T463: the TIMEOUT direction still returns timeout on a stalled rollup",
   // Every read identical AND NOT RUNNING: `checkWaitStalled` refuses to call a still-moving check
   // stalled (`rollupHasRunningCheck`, the W1-T382 correction), so `IN_PROGRESS` here would poll
   // forever -- correctly. QUEUED is pending-but-not-moving, which is the real stall shape.
-  const read = async () => ({ state: "OPEN", statusCheckRollup: [{ name: "ci", status: "QUEUED" }] });
+  let step = 0;
+  const read = async () => {
+    const which = step % 3;
+    step++;
+    if (which === 0) return { number: 1, state: "open", merged: false, merged_at: null, head: { sha: "deadbeef" } };
+    if (which === 1) return { check_runs: [{ name: "ci", status: "queued" }] };
+    return { statuses: [] };
+  };
   const steps: string[] = [];
-  const outcome = await waitForCiGreen("u/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
+  const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
   assert.equal(outcome, "timeout");
   assert.ok(steps.includes("ci.stalled"), "and it must say which checks were still pending when it gave up");
 });
 
 test("W1-T463: pollToGate yields too -- fixing ONE of the two daemon sites would leave the symptom alive", async () => {
-  let reads = 0;
+  let prReads = 0;
+  let step = 0;
   const read = async () => {
-    reads++;
-    return reads < 3
-      ? { state: "OPEN", statusCheckRollup: [{ name: "ci", status: "IN_PROGRESS" }] }
-      : { state: "MERGED", statusCheckRollup: GREEN };
+    const which = step % 3;
+    step++;
+    if (which === 0) {
+      prReads++;
+      return prReads < 3
+        ? { number: 1, state: "open", merged: false, merged_at: null, head: { sha: "deadbeef" } }
+        : { number: 1, state: "closed", merged: true, merged_at: "2026-01-01T00:00:00Z", head: { sha: "deadbeef" } };
+    }
+    if (which === 1) return { check_runs: [{ name: "ci", status: "in_progress" }] };
+    return { statuses: [] };
   };
   let fired = false;
   const timer = setTimeout(() => {
     fired = true;
   }, 30);
-  const outcome = await pollToGate("u/1", () => {}, 0.02, { readJson: read });
+  const outcome = await pollToGate("https://github.com/acme/remudero/pull/1", () => {}, 0.02, { readJson: read });
   clearTimeout(timer);
   assert.equal(outcome.merged, true, "a MERGED pr still resolves merged");
   assert.equal(fired, true, "pollToGate must release the loop as well -- it is the same shape and the same freeze");
 });
 
 test("W1-T463: pollToGate's red and closed directions are unchanged", async () => {
-  const red = await pollToGate("u/1", () => {}, 6, {
-    readJson: async () => ({ state: "OPEN", statusCheckRollup: [{ name: "ci", conclusion: "FAILURE" }] }),
+  let redStep = 0;
+  const red = await pollToGate("https://github.com/acme/remudero/pull/1", () => {}, 6, {
+    readJson: async () => {
+      const which = redStep % 3;
+      redStep++;
+      if (which === 0) return { number: 1, state: "open", merged: false, merged_at: null, head: { sha: "deadbeef" } };
+      if (which === 1) return { check_runs: [{ name: "ci", status: "completed", conclusion: "failure" }] };
+      return { statuses: [] };
+    },
     sleep: async () => {},
   });
   assert.equal(red.merged, false);
   assert.match(red.reason, /required check red/);
 
-  const closed = await pollToGate("u/1", () => {}, 6, {
-    readJson: async () => ({ state: "CLOSED", statusCheckRollup: [] }),
+  const closed = await pollToGate("https://github.com/acme/remudero/pull/1", () => {}, 6, {
+    readJson: async () => ({ number: 1, state: "closed", merged: false, merged_at: null }),
     sleep: async () => {},
   });
   assert.equal(closed.merged, false);
@@ -460,15 +496,23 @@ test("W1-T463: the DEFAULT gh read is driven for real -- an async execFile, not 
   const stub = join(dir, "gh");
   writeFileSync(
     stub,
-    ["#!/usr/bin/env bash", 'printf %s "{\\"state\\":\\"OPEN\\",\\"statusCheckRollup\\":[{\\"name\\":\\"ci\\",\\"conclusion\\":\\"SUCCESS\\"}]}"', ""].join(
-      "\n",
-    ),
+    [
+      "#!/usr/bin/env bash",
+      // W1-T2268: `waitForCiGreen`'s default reader now shells `gh api …` (REST), never `gh pr
+      // view --json statusCheckRollup` — three distinct endpoints, matched on argv[2] (`$2`).
+      'case "$2" in',
+      '  */check-runs*) printf %s \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;',
+      '  */status) printf %s \'{"statuses":[]}\' ;;',
+      '  *) printf %s \'{"number":1,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}\' ;;',
+      "esac",
+      "",
+    ].join("\n"),
     { mode: 0o755 },
   );
   const prevPath = process.env.PATH;
   process.env.PATH = `${dir}:${prevPath ?? ""}`;
   try {
-    const outcome = await waitForCiGreen("u/1", () => {}, 0.02);
+    const outcome = await waitForCiGreen("https://github.com/acme/remudero/pull/1", () => {}, 0.02);
     assert.equal(outcome, "green", "the default reader must really parse the child's stdout");
   } finally {
     process.env.PATH = prevPath;

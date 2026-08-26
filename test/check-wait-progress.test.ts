@@ -127,12 +127,17 @@ test("BEHAVIORAL (W1-T382): the real waitForCiGreen stalls on an unmoving rollup
     join(fakeBinDir, "gh"),
     [
       "#!/bin/bash",
-      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view`. The PR row's
+      // head sha is fixed, so the two check endpoints below answer the SAME rollup every poll —
       // QUIESCENT, and it must stay that way: with any check IN_PROGRESS this fake answers the
       // same running rollup forever, and the wait would (correctly, now) never give up — an
       // infinite loop in the suite rather than a failing assertion.
-      '  echo \'{"statusCheckRollup":[{"name":"lint","status":"QUEUED"},{"name":"remudero-review","state":"PENDING"}]}\'',
-      "  exit 0",
+      'if [[ "$1" == "api" ]]; then',
+      '  case "$2" in',
+      '    */pulls/*) echo \'{"number":1,"state":"open","merged":false,"merged_at":null,"head":{"sha":"deadbeef"}}\'; exit 0 ;;',
+      "    */check-runs*) echo '{\"check_runs\":[{\"name\":\"lint\",\"status\":\"queued\"}]}'; exit 0 ;;",
+      "    */status) echo '{\"statuses\":[{\"context\":\"remudero-review\",\"state\":\"pending\"}]}'; exit 0 ;;",
+      "  esac",
       "fi",
       "exit 1",
       "",
