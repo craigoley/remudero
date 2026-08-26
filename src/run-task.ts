@@ -196,6 +196,7 @@ import {
   combinedStatusRestArgs,
   createGhCallPacer,
   fetchOpenPrsRest,
+  type OpenPrRest,
   fetchSinglePrRest,
   hydrateMergeConflictEvidence,
   hydrateMergeStates,
@@ -429,6 +430,16 @@ import {
   type MeasurementCadenceDecision,
   type MeasurementCadenceRunResult,
 } from "./lib/measurement-cadence.js";
+import {
+  boardReviewMarkerPath,
+  buildBoardReview,
+  decideBoardReviewCadence,
+  readBoardReviewMarker,
+  recordBoardReviewFire,
+  type BoardItem,
+  type BoardReviewCadenceDecision,
+  type BoardReviewReport,
+} from "./lib/board-review.js";
 import {
   assertRunnable,
   loadPlan,
@@ -15807,6 +15818,116 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
 }
 
 /**
+ * W1-T2304's board-review rung: the OPEN BOARD, as {@link BoardItem}s the rung can reason over.
+ *
+ * PURE — this does the mapping and nothing else, so every field's fail-direction is testable
+ * without a network. {@link defaultBoardReviewItems} below is the one real read that feeds it,
+ * mirroring `defaultPlanLifecycleCounts`'s own reader/mapper split.
+ *
+ * WHERE EACH FIELD COMES FROM, AND WHAT ABSENCE MEANS:
+ *  - `ageHours` from `createdAt`. A row without one is age ZERO, never age infinity: an unknown
+ *    age must not manufacture the very "this has sat 14h" finding the rung exists to raise.
+ *  - `redCheckCount` from the rollup `fetchOpenPrsRest` ALREADY hydrates per PR — no second read.
+ *    `rollupUnreadable` counts as ZERO red, the same fail-open direction `checksStateFromRollup`
+ *    takes: an unreadable check is not evidence of a failing one.
+ *  - `unhandledEscalations` from the SAME `projectPlan` projection every other plan reader
+ *    derives from (`StatusProjection.needsHuman`), joined to the PR by `prNumber`. A projection
+ *    that could not be read yields zero, never a fabricated escalation.
+ */
+export function boardItemsFromOpenPrs(
+  prs: readonly OpenPrRest[],
+  now: Date,
+  needsHumanByPrNumber: ReadonlySet<number> = new Set(),
+): BoardItem[] {
+  return prs.map((pr) => {
+    const openedMs = pr.createdAt ? Date.parse(pr.createdAt) : Number.NaN;
+    const ageHours = Number.isNaN(openedMs) ? 0 : Math.max(0, (now.getTime() - openedMs) / 3_600_000);
+    const red = (pr.statusCheckRollup ?? []).filter((e) => e.conclusion === "FAILURE" || e.conclusion === "TIMED_OUT").length;
+    return {
+      id: `#${pr.number}`,
+      isDraft: pr.isDraft === true,
+      status: "open" as const,
+      ageHours,
+      redCheckCount: red,
+      unhandledEscalations: needsHumanByPrNumber.has(pr.number) ? 1 : 0,
+    };
+  });
+}
+
+/** The three real reads {@link defaultBoardReviewItems} chains, injectable as one bundle so a
+ *  test can drive the whole reader over synthetic rows — the same one-seam discipline
+ *  {@link PlanLifecycleCountsIo} already follows. */
+export interface BoardReviewItemsIo {
+  fetchOpenPrs?: (owner: string, repo: string) => OpenPrRest[];
+  resolveOwnerRepo?: () => { owner: string; repo: string };
+  loadPlan?: (path: string) => Plan;
+  projectPlan?: (plan: Plan, deps: DeriveDeps, cachePath?: string) => Map<string, StatusProjection>;
+  now?: () => Date;
+}
+
+/**
+ * The board-review rung's ONE real read — the injected edge, exactly the role
+ * {@link buildOpenPrViews} plays for the sweep.
+ *
+ * ONE LIST CALL PLUS THE ROLLUPS IT ALREADY CARRIES. `fetchOpenPrsRest` hydrates
+ * `statusCheckRollup` per PR itself, so the red arm costs nothing this read was not already
+ * paying, and the whole thing runs at most `boardReview.maxPerDay` times a day.
+ *
+ * NEVER THROWS, and that is a deliberate fail direction: a GitHub outage must degrade this rung
+ * to "no items, therefore no fire", never take out the daemon tick that hosts it. An empty list
+ * makes {@link decideBoardReviewTrigger} answer `fire: false`, which is the same thing a healthy
+ * empty board says — acceptable here precisely because this rung only ever REPORTS, so a missed
+ * report costs one period, whereas a thrown tick costs the loop.
+ */
+export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo = {}): BoardItem[] {
+  try {
+    const { owner, repo } = (io.resolveOwnerRepo ?? resolveOwnerRepo)();
+    const prs = (io.fetchOpenPrs ?? ((o: string, r: string) => fetchOpenPrsRest(o, r, ghJson)))(owner, repo);
+    let needsHuman = new Set<number>();
+    try {
+      const plan = (io.loadPlan ?? loadPlan)(join(repoRoot, "plan", "tasks.yaml"));
+      const proj = (io.projectPlan ?? projectPlan)(
+        plan,
+        { ledgerPath: ledgerPathFor(config), github: buildBatchedGithub(owner, repo) },
+        join(config.root, "state", "status.json"),
+      );
+      needsHuman = new Set([...proj.values()].filter((p) => p.needsHuman && p.prNumber !== undefined).map((p) => p.prNumber!));
+    } catch {
+      // The escalation arm degrades to zero rather than taking the whole read down — the open-PR
+      // list is the arm that qualified on 2026-08-26 and it is already in hand.
+    }
+    return boardItemsFromOpenPrs(prs, io.now?.() ?? new Date(), needsHuman);
+  } catch {
+    // AN OUTAGE YIELDS NO ITEMS, AND THAT IS THE CHOSEN FAIL DIRECTION, not an oversight. An
+    // empty board makes `decideBoardReviewTrigger` answer `fire: false`, which is the same thing
+    // a genuinely healthy empty board says — acceptable ONLY because this rung exclusively
+    // REPORTS: the cost of the confusion is one missed report, bounded by `minIntervalMinutes`,
+    // whereas letting the throw escape would cost the daemon tick that hosts it. The distinction
+    // is not lost to the operator either: `check` returns its reason and the tick ledgers
+    // `board_review.skipped` with it.
+    return [];
+  }
+}
+
+/** `<root>/state/board-review-latest.json` — WHERE THE REPORT LANDS, and it is a real choice.
+ *
+ *  A STABLE PATH, OVERWRITTEN EACH FIRE, not an accumulating pile: the artifact answers "what did
+ *  the last board read see", and a directory of timestamped reports is a thing nobody prunes and
+ *  nobody reads. History is not lost — every fire also writes a `board_review.ran` ledger row
+ *  carrying the same counts, and the ledger is the append-only record.
+ *
+ *  WHAT ACTUALLY SURFACES IT, because a report nobody reads costs the same as one that never ran:
+ *   1. the `board_review.fired`/`.ran` ledger rows the daemon tick emits — which `digest.ts`'s
+ *      cadence already sweeps into the operator's inbox on its own schedule;
+ *   2. the registry proposals the rung drafts into `state/inbox-proposals.json`, which the inbox
+ *      already reads and renders (`renderInbox`) — the same registry `updateProposalRegistry`
+ *      serves for every other rung.
+ *  The JSON file is the detail view those two point at, never the only copy. */
+export function boardReviewReportPath(root: string): string {
+  return join(root, "state", "board-review-latest.json");
+}
+
+/**
  * W1-T2277: the DIGEST's own cadence rung PRODUCER, mirroring {@link buildMeasurementCadenceDaemonHooks}
  * exactly — the CONSUMER (`daemon.ts` reads `deps.checkDigestCadence`/`deps.runDigestCadence` in
  * its poll loop) is dead code without a line at the `daemonCommand` call site actually
@@ -15874,6 +15995,93 @@ export function buildDigestCadenceDaemonHooks(deps: {
       });
     });
   return { checkDigestCadence: check, runDigestCadence: run };
+}
+
+/**
+ * W1-T2304's board-review rung PRODUCER, mirroring {@link buildDigestCadenceDaemonHooks} exactly.
+ *
+ * THIS FUNCTION IS THE FIX. #2952 merged the rung on 2026-08-26 at 13:54:59Z and it never fired:
+ * zero `board_review` rows all-time against 89 `measurement_cadence`, and no
+ * `state/last-board-review.json` beside five sibling markers. `buildBoardReview` was reachable
+ * only through `runMeasurementCadenceReport`'s `opts.boardReview ? … : undefined`, and its one
+ * caller never passed the key. It also left `recordBoardReviewFire` and `boardReviewMarkerPath`
+ * referenced by nothing but their own test, which is exactly why no marker existed.
+ *
+ * SELF-TARGET ONLY, same reason as every rung beside it: the marker, the report artifact and the
+ * proposal registry all live under THIS process's own `config.root`, never a drained target's.
+ *
+ * RECORD THE FIRE FIRST — the same crash-safety discipline `buildMeasurementCadenceDaemonHooks`'s
+ * `run` uses, and the step `buildBoardReview` deliberately does NOT do for itself (its own doc
+ * says so): if the read throws or the process dies mid-run, the marker has already advanced and
+ * the interval/cap bounds still hold, so a failure costs one skipped period rather than an
+ * unbounded immediate retry.
+ *
+ * THE ITEMS ARE READ TWICE ON A FIRING TICK, once by `check` and once by `run`, and that is
+ * deliberate: the board can change between the two, and the report must describe the board it
+ * actually diagnosed rather than the one that justified the decision. On a non-firing tick — the
+ * overwhelming majority — `run` is never called and the cost is the single `check` read.
+ */
+export function buildBoardReviewDaemonHooks(deps: {
+  check?: () => BoardReviewCadenceDecision;
+  run?: () => Promise<BoardReviewReport>;
+  config?: Config;
+  now?: () => Date;
+  policy?: Policy;
+  /** Injectable ONLY for tests — production takes {@link defaultBoardReviewItems}. */
+  items?: () => BoardItem[];
+  /** Injectable ONLY for tests — production takes the real {@link buildBoardReview}. */
+  build?: typeof buildBoardReview;
+} = {}): {
+  checkBoardReview: () => BoardReviewCadenceDecision;
+  runBoardReview: () => Promise<BoardReviewReport>;
+} {
+  const configFor = () => deps.config ?? loadConfig();
+  const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const itemsFor = () => (deps.items ?? (() => defaultBoardReviewItems(configFor())))();
+  const check =
+    deps.check ??
+    (() => {
+      const root = configFor().root;
+      return decideBoardReviewCadence({
+        policy: policyFor().values.boardReview,
+        marker: readBoardReviewMarker(boardReviewMarkerPath(root)),
+        now: deps.now?.() ?? new Date(),
+        items: itemsFor(),
+      });
+    });
+  const run =
+    deps.run ??
+    (async () => {
+      const root = configFor().root;
+      const now = deps.now?.() ?? new Date();
+      recordBoardReviewFire(boardReviewMarkerPath(root), now, 24 * 60 * 60 * 1000);
+      return (deps.build ?? buildBoardReview)({
+        policy: policyFor().values.boardReview,
+        // AN EMPTY MARKER, DELIBERATELY, AND IT IS NOT A LIE ABOUT DISK.
+        //
+        // `buildBoardReview` re-runs `decideBoardReviewCadence` internally to stamp the report's
+        // own `fire`/`reason`. By the time `run` is called the pacing question is already settled
+        // — `check` answered it, and the line above has ALREADY recorded the fire — so re-reading
+        // the real marker here would hand that internal call a `fires` array containing the run
+        // it is currently performing, compute `0.0m since the last run`, and write a report
+        // stamped `fire: false` on the very tick that fired. Worse, `buildBoardReview` returns
+        // before mining on a non-firing decision, so the proposals would never be drafted at all.
+        //
+        // Passing an empty marker says exactly what is true at this point: the bound has been
+        // cleared for this run. The real marker on disk is untouched by this argument and is what
+        // bounds the NEXT tick.
+        marker: { kind: "ok", marker: { fires: [] } },
+        items: itemsFor(),
+        now,
+        reportPath: boardReviewReportPath(root),
+        registryPath: join(root, "state", "inbox-proposals.json"),
+        // NO `rerunDeadCheck`: the rung's one sanctioned action is deliberately NOT wired here.
+        // This PR makes the rung run; it keeps it strictly report-plus-propose, so the first
+        // thing it ever does unattended cannot be an action. Omitted ⇒ `buildBoardReview` takes
+        // no action at all, which is its own documented default.
+      });
+    });
+  return { checkBoardReview: check, runBoardReview: run };
 }
 
 /**
@@ -19585,6 +19793,12 @@ export async function daemonCommand(
   // undefined and the whole rung is dead code, exactly how #1066 merged auto-triage's consumer
   // with no producer.
   const digestCadenceHooks = target.isSelf ? buildDigestCadenceDaemonHooks({ config }) : undefined;
+  // W1-T2304: the board-review rung. SELF-TARGET ONLY, same reason as the rungs above — the
+  // marker, the report artifact and the proposal registry all live under THIS process's own
+  // config.root. WITHOUT THIS LINE `deps.checkBoardReview` is undefined and the whole rung is
+  // dead code, which is not a hypothetical here: that is precisely what shipped in #2952 and
+  // stayed dead for the eight hours between its merge and this fix.
+  const boardReviewHooks = target.isSelf ? buildBoardReviewDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -19820,6 +20034,12 @@ export async function daemonCommand(
         // and writes nothing (Law 5), so it is safe to run unattended from the start.
         checkDigestCadence: digestCadenceHooks?.checkDigestCadence,
         runDigestCadence: digestCadenceHooks?.runDigestCadence,
+        // BOARD-REVIEW RUNG (W1-T2304's design, wired here). Same shape as the two cadences
+        // immediately above and gated the same way — SAFE ON in policy data (plan/policy.yaml's
+        // `boardReview` row): the rung writes one report artifact and drafts registry proposals,
+        // and nothing it produces auto-files (Rule 15).
+        checkBoardReview: boardReviewHooks?.checkBoardReview,
+        runBoardReview: boardReviewHooks?.runBoardReview,
         // W1-T1019: W1-T300's OWN in-flight guard (daemon.ts, `deps.isFeedbackOpenPr`/
         // `deps.readFeedbackLiveState`) shipped consulted-but-never-supplied — `?.` with no `??`
         // fallback, so `openPrNumber` read `undefined` on every pass and the guard never once

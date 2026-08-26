@@ -647,6 +647,12 @@ export interface RestPullRow {
   /** The merge timestamp, or `null` when unmerged. Returned by BOTH endpoints, so this — not
    *  {@link RestPullRow.merged} — is what {@link prStateFromRest} decides MERGED on. */
   merged_at?: string | null;
+  /** W1-T2304 wiring: when the PR OPENED. The board-review rung's age arm
+   *  ({@link BOARD_REVIEW_OLDEST_OPEN_AGE_HOURS}) is a function of this and nothing else, and it
+   *  is the arm that qualified on 2026-08-26. Optional so a fixture written before this task
+   *  keeps type-checking; {@link mapRestPr} omits the key entirely when the row lacks it, rather
+   *  than inventing an epoch that would read as an infinitely old PR. */
+  created_at?: string;
   /** `null` on an empty body, where GraphQL reports "". */
   body?: string | null;
   updated_at: string;
@@ -704,6 +710,9 @@ export interface OpenPrRest {
    * which would launder "GitHub did not say" into "definitely not a draft".
    */
   isDraft?: boolean;
+  /** REST's `created_at`, carried for the board-review rung's age arm. Absent on a malformed row
+   *  — a consumer must treat absence as "age unknown", never as age zero or age infinity. */
+  createdAt?: string;
 }
 
 /**
@@ -738,6 +747,8 @@ export function mapRestPr(row: RestPullRow): OpenPrRest {
     // exactly the pre-W1-T528 object and the shape-identity assertion above it stays meaningful
     // (`deepStrictEqual` compares own keys, so an always-present `isDraft: undefined` would not).
     ...(row.draft === undefined ? {} : { isDraft: row.draft }),
+    // Same omitted-rather-than-defaulted discipline as `isDraft` directly above.
+    ...(row.created_at === undefined ? {} : { createdAt: row.created_at }),
   };
 }
 

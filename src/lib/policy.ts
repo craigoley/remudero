@@ -177,6 +177,31 @@ export interface PolicyValues {
     minIntervalMinutes: number;
     maxPerDay: number;
   };
+  /** W1-T2304's board-review rung — its OWN row, deliberately separate from
+   *  {@link PolicyValues.measurementCadence} and {@link PolicyValues.digestCadence}, so the three
+   *  cadences can never drag one another. No `escalate` field: this rung drafts proposals through
+   *  the registry unconditionally when it finds something, and drafting a proposal is the whole
+   *  point of the rung rather than an opt-in side effect.
+   *
+   *  THE VALUES ARE DERIVED, not copied from a sibling. `minIntervalMinutes: 120` is read off the
+   *  board's own behaviour: on 2026-08-26 the depth trigger was continuously satisfied for 2h26m
+   *  (#2895 aged past the 8h bar at 08:55Z and stayed open until 16:20:51Z, with two reds landing
+   *  inside the same stretch). At 120m that stretch yields TWO reports — one when the condition
+   *  appears and one confirming it persisted — rather than one per poll, which for a condition an
+   *  operator can only act on every hour or so is noise, not signal. `maxPerDay: 6` bounds a
+   *  pathological day (a board red from morning to night) to twelve hours of coverage at that
+   *  interval and caps the cost at six whole-board reads. Both sit deliberately between
+   *  `measurementCadence` (360m / 4, a heavy ledger+git join over history that moves slowly) and a
+   *  per-tick check: the board changes faster than the ledger's shape does, and slower than a poll.
+   *
+   *  ABSENT ⇒ the same safe defaults, matching every other cadence's absent-means-default shape.
+   *  Defaults to ENABLED because the rung is read-only: it writes one report artifact and drafts
+   *  registry proposals, and Rule 15 still stands — nothing it produces auto-files. */
+  boardReview: {
+    enabled: boolean;
+    minIntervalMinutes: number;
+    maxPerDay: number;
+  };
   headroom: {
     curve: PolicyHeadroomRung[];
     reservePct: number;
@@ -277,6 +302,9 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "digestCadence.enabled": "net-new",
   "digestCadence.minIntervalMinutes": "net-new",
   "digestCadence.maxPerDay": "net-new",
+  "boardReview.enabled": "net-new",
+  "boardReview.minIntervalMinutes": "net-new",
+  "boardReview.maxPerDay": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
@@ -546,6 +574,17 @@ export function validatePolicy(raw: unknown): Policy {
         maxPerDay: numberField("digestCadence.maxPerDay", digestCadenceRaw.maxPerDay, origin),
       }
     : { enabled: true, minIntervalMinutes: 1440, maxPerDay: 24 };
+  // W1-T2304's board-review row — same optional, absent-means-default shape as the two cadences
+  // above. See `PolicyValues.boardReview`'s doc for where 120/6 come from; they are derived from
+  // the board's measured behaviour, not copied from a sibling row.
+  const boardReviewRaw = raw.boardReview as Record<string, unknown> | undefined;
+  const boardReview = boardReviewRaw
+    ? {
+        enabled: booleanField("boardReview.enabled", boardReviewRaw.enabled, origin),
+        minIntervalMinutes: numberField("boardReview.minIntervalMinutes", boardReviewRaw.minIntervalMinutes, origin, bounds),
+        maxPerDay: numberField("boardReview.maxPerDay", boardReviewRaw.maxPerDay, origin),
+      }
+    : { enabled: true, minIntervalMinutes: 120, maxPerDay: 6 };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 
@@ -599,6 +638,7 @@ export function validatePolicy(raw: unknown): Policy {
       autoTriage,
       measurementCadence,
       digestCadence,
+      boardReview,
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
