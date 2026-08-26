@@ -29,7 +29,7 @@ raw: "CONFIRMED WITHIN THE HOUR — fb-1785898381737-50b031's hypothesis is now 
   console's consumption needs fixing."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2489
 summary:
   headline: Completed job lost to GitHub quota; needs recovery logic

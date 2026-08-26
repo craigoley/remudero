@@ -29,7 +29,7 @@ raw: "CLOSING fb-1785936728348-a9efd3 — STARVATION IS REFUTED, AND THE ERROR I
   nothing reads it."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2567
 summary:
   headline: Close false alarm; add visibility to sweep outages

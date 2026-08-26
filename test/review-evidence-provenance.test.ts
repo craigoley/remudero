@@ -101,7 +101,16 @@ test("W1-T1100 acceptance #3: a substituted report never reports a criterion as 
   const substituted = judgeCriterion(CRITERION, reportTokens, undefined, undefined, true);
   assert.equal(substituted.met, false, "the SAME coverage over a substitute must not substantiate the claim");
   assert.doesNotMatch(substituted.reason, /substantiated/, "the reason must not claim substantiation");
-  assert.match(substituted.reason, /unreadable/i, "the reason must name the missing body, not merely say 'unmet'");
+  // Reworded 2026-08-25: this call supplies no CAUSE, and the old text asserted a failed fetch
+  // that had never once occurred. The intent below is unchanged -- the reason must name the
+  // missing body rather than merely saying "unmet" -- and it now does so without inventing a
+  // failure. See test/substitute-cause-is-named.test.ts for both causes driven explicitly.
+  assert.match(
+    substituted.reason,
+    /worker's own text rather than the PR body/,
+    "the reason must name the missing body, not merely say 'unmet'",
+  );
+  assert.doesNotMatch(substituted.reason, /failed body fetch/, "and must not assert a failure that did not happen");
 
   // "on keyword coverage ALONE" — real, whitelisted proof EXECUTION observes repo state, not
   // report text, and must still be able to credit the SAME substituted-report criterion.

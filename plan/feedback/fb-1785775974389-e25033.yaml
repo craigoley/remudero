@@ -15,7 +15,7 @@ raw: "WORKER-HOME CONFIG RACE — 14 recon runs between 2026-08-03T00:54Z and
   check: if the message recurs after 2026-08-03T16:00Z, it was never fixed."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2119
 summary:
   headline: Config file briefly missing — no jobs failed

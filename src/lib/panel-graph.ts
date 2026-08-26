@@ -48,6 +48,10 @@
  * to the parked entry is legible to the next triage pass, and re-enters the SAME capture → triage
  * pipeline every other feedback item does. `replyTo` is validated against a REAL `grilling`
  * entry (404/400 otherwise) so it can only ever be used to answer something actually parked.
+ * W1-T2278: the edge is now durable structure, not only prose — the reply carries `reply_to` as
+ * a field, and the SAME handler call advances the target from `grilling` to `answered` with
+ * `answered_by` naming the reply, so the thread is enumerable from either end and a second
+ * `replyTo` at the same target is refused for real (see `buildSubmitFeedbackRoute`'s own doc).
  *
  * RE-PRIORITIZE (design doc, not acceptance bar). MASTER-PLAN §7B's design prose also names
  * "re-prioritize" as a future panel action. plan/tasks.yaml carries NO priority/ordering field
@@ -382,8 +386,21 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
  *
  * `replyTo`, when given, must name an existing entry parked `grilling` (404/400 otherwise) —
  * this is "answer a grill" v1 (see this module's header for why): the answer is captured as a
- * FRESH feedback entry, prefixed with a back-reference so the next triage pass can see what it's
- * answering, and re-enters the same capture → triage pipeline every other feedback item does.
+ * FRESH feedback entry, prefixed with a human-readable back-reference so the next triage pass
+ * can see what it's answering, and re-enters the same capture → triage pipeline every other
+ * feedback item does.
+ *
+ * W1-T2278: THE EDGE IS NOW DURABLE ON BOTH ENDS, not only inside the reply's own `raw` prose.
+ * The new entry carries `reply_to: <target id>` as a field (`captureFeedback`'s `replyTo` opt),
+ * and — in the SAME handler, after that capture succeeds — the target itself is advanced from
+ * `grilling` to `answered` with `answered_by: <this entry's id>` (`setFeedbackStatus`'s new
+ * `answeredBy` opt), so a thread is walkable from either end: forward via the answer's
+ * `reply_to`, backward via the question's `answered_by`. This transition is caused ONLY by an
+ * operator's own reply text landing here — never a scheduler, never a timer (W1-T2244 pins
+ * (ix)/(x)) — and it is the ONLY code path in the tree that ever writes `status: "answered"`.
+ * Once a target is `answered`, a second `replyTo` naming it is refused by the SAME
+ * not-parked-at-`grilling` check just below, now naming the real terminal state instead of a
+ * `grilling` that never moved.
  */
 export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
   return {
@@ -410,7 +427,19 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         }
       }
       const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
-      const entry = captureFeedback(deps.root, { raw, attachments: input.attachments, origin: "ui", expansion: input.expansion });
+      const entry = captureFeedback(deps.root, {
+        raw,
+        attachments: input.attachments,
+        origin: "ui",
+        expansion: input.expansion,
+        replyTo: input.replyTo,
+      });
+      if (input.replyTo !== undefined) {
+        setFeedbackStatus(deps.root, input.replyTo, "answered", {
+          answeredBy: entry.id,
+          ...(deps.feedbackLand ? { land: deps.feedbackLand } : {}),
+        });
+      }
       const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,

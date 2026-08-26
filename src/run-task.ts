@@ -632,6 +632,7 @@ import {
   renderClarificationQuestion,
   renderSweepSummary,
   REQUIRED_CHECK_FAIL,
+  REQUIRED_CHECK_OK,
   runCreditBackfill,
   runEscalationReconcile,
   runPostFixReverification,
@@ -1373,15 +1374,33 @@ export function syncPlanOrRefuse(
   }
 }
 
-/** Check-run conclusions that mean the gate is RED (fail closed on anything not green). */
-const RED_CONCLUSIONS = new Set([
-  "FAILURE",
-  "CANCELLED",
-  "TIMED_OUT",
-  "ACTION_REQUIRED",
-  "STARTUP_FAILURE",
-  "ERROR",
-]);
+/**
+ * Conclusions that mean "nobody reached a verdict" rather than "a verdict came back bad"
+ * (W1-T1223's own distinction for CANCELLED, `src/lib/sweep.ts`'s `cancelledRequiredCheckNames`
+ * doc) — STALE joins it here for the identical reason (a stale run's result can no longer be
+ * attributed to the head, so it is equally "void" rather than "failed"). Both are members of
+ * `REQUIRED_CHECK_FAIL` (the sweep's own bounded arm-gate folds them into "red", same as it
+ * always has for CANCELLED), but a POLL LOOP must not repeat that fold: `checksStateFromRollup`
+ * is read once per sweep pass and re-derived fresh next time, while a poll loop's read is
+ * TERMINAL — returning a `blocked_ci` verdict here stops polling forever, even though the check
+ * may still be re-run and go green (W1-T2274's #2794 case: a CANCELLED `coverage-ratchet`
+ * attempt superseded 18 minutes later by a SUCCESS the loop never lived to see). Excluded from
+ * {@link isTerminalRed} below so the two poll loops fall through to the ordinary bounded
+ * pending/stall path ({@link checkWaitStalled}, `STALL_WINDOW` unchanged) instead of a false
+ * "required check red" verdict naming a check that never actually ran to a verdict.
+ */
+const NO_VERDICT_CONCLUSIONS = new Set(["CANCELLED", "STALE"]);
+
+/**
+ * Read the SAME red vocabulary `checksStateFromRollup` reads (`REQUIRED_CHECK_FAIL`,
+ * `src/lib/sweep.ts` — W1-T2274 replaces this file's own private, narrower `RED_CONCLUSIONS`
+ * with it), except {@link NO_VERDICT_CONCLUSIONS}: a poll loop must never terminate on a
+ * conclusion that means "no verdict" as if it meant "bad verdict". `state` is expected already
+ * upper-cased the way every real GitHub conclusion enum value is reported.
+ */
+function isTerminalRed(state: string): boolean {
+  return REQUIRED_CHECK_FAIL.has(state) && !NO_VERDICT_CONCLUSIONS.has(state);
+}
 
 interface RollupEntry {
   __typename?: string;
@@ -3222,6 +3241,72 @@ export function deriveChangesetClaimUpdate(body: string, diffFiles: string[]): s
   return body.slice(0, firstIdx) + newClaim + body.slice(firstIdx + claim.length);
 }
 
+/**
+ * W1-T2272: the check-run name `.github/workflows/acceptance-author-gate.yml` reports under
+ * (its job's own `name:` field — the SAME string GitHub's status-check rollup, and therefore
+ * `CiFailure.name`, carries). `runFixRung`'s pre-strike body-repair site matches on this
+ * EXACTLY — never "any ci-log round" — so a PR failing for an unrelated reason (a real test
+ * failure, a lint error) is never short-circuited into a body edit that does nothing for the
+ * check that is actually red.
+ */
+const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
+
+/**
+ * W1-T2272: the fallback criterion appended to a body an author-time gate refusal was repaired
+ * against. Deliberately generic and task-AGNOSTIC — worded so the claim is about the BODY'S OWN
+ * SHAPE, never about the underlying diff or any task's acceptance (this task's own Q2 boundary:
+ * "a fix worker … MAY NOT claim that the PR satisfies any task's acceptance"). Mirrors
+ * `repairRetroAcceptanceBlock`'s own fallback shape (a claim about gate-compliance, not content),
+ * the SAME instrument, applied here to a different PR-authoring path.
+ */
+const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
+  {
+    claim:
+      "this PR body carries a judgeable Acceptance block (mechanically repaired by the fix rung " +
+      "after acceptance-author-gate refused it) — not a claim that the underlying diff is correct, " +
+      "or that any task's acceptance is met",
+    proof: "acceptanceAuthorTimeCheck (src/lib/review.ts) — the same predicate scripts/acceptance-author-gate.mjs runs in CI — now returns ok:true for this body",
+  },
+];
+
+/** {@link acceptanceGateBodyRepair}'s verdict. */
+export interface AcceptanceGateBodyRepair {
+  /** Which of `acceptanceAuthorTimeCheck`'s defects this repair was chosen for. */
+  defect: "no-header" | "empty-proofs";
+  /** The body to write via `updatePrBody` — `ok: true` under a fresh `acceptanceAuthorTimeCheck`. */
+  repairedBody: string;
+}
+
+/**
+ * W1-T2272 (design note i): is a live PR body's `acceptanceAuthorTimeCheck` defect one the fix
+ * rung can repair DETERMINISTICALLY, without a commit — and if so, the repaired body.
+ *
+ * CHOSEN FROM THE GATE'S OWN TYPED DEFECT NAME, never from a guess at the body's content (design
+ * note i, acceptance criterion 2): `acceptanceAuthorTimeCheck` is `scripts/acceptance-author-gate.mjs`'s
+ * OWN predicate, reused verbatim (never re-derived) with the SAME general call shape that script
+ * uses (no `expectedTaskId`).
+ *
+ * `no-header` and `empty-proofs` are both instances of `bodyNeedsAcceptanceRepair`'s own trigger
+ * (plan-pr-emitter.ts: no criteria parsed at all, or a parsed criterion with an empty proof) —
+ * `ensureJudgeableBody` demotes any defective header and APPENDS a fresh, judgeable block built
+ * from a generic fallback claim, which — because `acceptanceAuthorTimeCheck` checks for a trailer
+ * or a header FIRST and unconditionally, before ever inspecting bullet content — is enough to flip
+ * a fresh check on the repaired body back to `ok: true`.
+ *
+ * TWO DEFECTS ARE NEVER ATTEMPTED, RETURNING `undefined`: `no-trailer` (this general-shape call —
+ * no `expectedTaskId` — can never actually produce it; it exists only for the `expectedTaskId`-given
+ * call shape this rung does not use) and `unparseable` (a claim WRAPPED onto a second line —
+ * `bodyNeedsAcceptanceRepair` does not reliably trigger on it, since the criteria it DID parse may
+ * already carry non-empty proofs; repairing it would mean guessing which line break the author
+ * intended, which design note i explicitly refuses). A body that is already `ok: true` also
+ * returns `undefined` — nothing to repair.
+ */
+export function acceptanceGateBodyRepair(body: string): AcceptanceGateBodyRepair | undefined {
+  const check = acceptanceAuthorTimeCheck(body);
+  if (check.ok || (check.defect !== "no-header" && check.defect !== "empty-proofs")) return undefined;
+  return { defect: check.defect, repairedBody: ensureJudgeableBody(body, ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK) };
+}
+
 function ensureTaskTrailer(prUrl: string, taskId: string): void {
   const trailer = `Remudero-Task: ${taskId}`;
   try {
@@ -3642,7 +3727,7 @@ export async function pollToGate(
     if (v.state === "MERGED") return { merged: true, reason: "checks green" };
     if (v.state === "CLOSED") return { merged: false, reason: "pr closed" };
     const roll = v.statusCheckRollup ?? [];
-    const red = roll.find((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "")));
+    const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
       log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
       return { merged: false, reason: `required check red: ${red.name ?? red.context ?? "unknown"}` };
@@ -3692,7 +3777,7 @@ export async function pollToGate(
  */
 export function ciGateFromRollup(rollup: RollupEntry[] | undefined): "green" | "red" | "pending" {
   const roll = (rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX);
-  const red = roll.find((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "")));
+  const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
   if (red) return "red";
   const ci = roll.find((c) => (c.name ?? c.context) === "ci");
   if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
@@ -3801,12 +3886,16 @@ export function rollupHasRunningCheck(rollup: RollupEntry[] | undefined): boolea
  *
  * WHAT STILL BOUNDS THE WAIT, since this only ever makes the predicate MORE permissive. Three
  * things, none of them this function: (1) `IN_PROGRESS` is provider-bounded — GitHub cancels an
- * over-running job, and a CANCELLED/TIMED_OUT conclusion is in `RED_CONCLUSIONS`, which both
+ * over-running job, and a TIMED_OUT conclusion is a member of `isTerminalRed`'s set, which both
  * callers short-circuit on before they ever reach this predicate; (2) `ci-gate`'s own
  * `WAIT_CAP_SECONDS` (2400s, `.github/workflows/ci-gate.yml`) fails that required check when a
  * required check never registers, which again surfaces here as RED; (3) this predicate itself,
  * unchanged, for a QUIESCENT rollup — nothing running and nothing changing is still a stall and
  * is still caught. So the exemption is scoped to a state that is transient by construction.
+ * A CANCELLED conclusion is DELIBERATELY NOT one of the three (W1-T2274, {@link
+ * NO_VERDICT_CONCLUSIONS}) — it means no verdict was reached, not that one came back bad, so it
+ * is left to fall through to (3): a check whose latest attempt reads CANCELLED and never moves
+ * again is still caught, on the SAME bound, by the ordinary quiescent-rollup path.
  */
 export function checkWaitStalled(readings: ReadonlyArray<RollupEntry[] | undefined>): {
   stalled: boolean;
@@ -3821,7 +3910,11 @@ export function checkWaitStalled(readings: ReadonlyArray<RollupEntry[] | undefin
   const pending = last
     .filter((c) => {
       const state = String(c.conclusion ?? c.status ?? c.state ?? "");
-      return !RED_CONCLUSIONS.has(state) && state !== "SUCCESS";
+      // W1-T2274: "done" is REQUIRED_CHECK_OK (SUCCESS/SKIPPED/NEUTRAL — the same set
+      // checksStateFromRollup reads), not the literal "SUCCESS" this used to test alone, which
+      // read a cleanly-concluded NEUTRAL or SKIPPED check as still pending forever (#1698's
+      // shape, one file over). A conclusion isTerminalRed already ruled out never reaches here.
+      return !REQUIRED_CHECK_OK.has(state) && !isTerminalRed(state);
     })
     .map((c) => c.name ?? c.context ?? "unknown");
   return { stalled: true, pending };
@@ -3933,6 +4026,9 @@ async function runReview(args: {
    * this task already gets.
    */
   reportIsSubstitute?: boolean;
+  /** (2026-08-25) WHY it is a substitute, threaded into `judgeReview`'s evidence so the refusal
+   *  can name the never-fetched case instead of asserting a fetch failure that did not happen. */
+  reportSubstituteCause?: import("./lib/review.js").ReportSubstituteCause;
   settingsFile: string;
   config: Config;
   budgetUsd?: number;
@@ -4130,6 +4226,7 @@ async function runReview(args: {
     report,
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
     reportIsSubstitute: args.reportIsSubstitute,
+    reportSubstituteCause: args.reportSubstituteCause,
     semantic,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
@@ -6512,6 +6609,79 @@ export async function runFixRung(opts: {
       return { outcome: "stood_down", review, strikes, reason: preStrikeStandDown.reason, standDownReason: preStrikeStandDown.reason };
     }
 
+    // W1-T2272 SITE — ACCEPTANCE-AUTHOR-GATE BODY REPAIR, BEFORE `strikes++`/any commit (design
+    // note ii — "a body-only defect needs no commit"). SCOPED TO A CI-LOG ROUND WHOSE OWN EVIDENCE
+    // NAMES THE GATE (`currentCiFailures` contains `ACCEPTANCE_AUTHOR_GATE_CHECK_NAME`) — never
+    // "any ci-log round": a PR failing for an UNRELATED reason (a real test failure, a lint error)
+    // must still reach the ordinary strike below, and short-circuiting on some incidental body
+    // defect of its own would spend the round on a check that was never what's blocking it
+    // (MEASURED regression while building this: `test/fix-dedup-seed.test.ts`'s own header-less
+    // fixture body, dispatched for an unrelated `ci` check failure, was "repaired" and consumed
+    // the only strike before the real fix worker ever ran). This also keeps this SITE from ever
+    // touching `body-coverage`'s own `fetchPrBody`/`deriveChangesetClaimUpdate` arm (W1-T307/
+    // W1-T1254) below, a different concern this task's design note (iv) leaves untouched. It is a
+    // structural no-op for any plan-tracked task's PR either way: `ensureTaskTrailer` stamps a
+    // real `Remudero-Task:` trailer unconditionally, which short-circuits `acceptanceAuthorTimeCheck`
+    // to `ok: true` before it ever inspects the body's own Acceptance block. It only ever fires for
+    // the untracked/synthetic PRs `fixRungTaskFor` (W1-T923) already made this rung eligible to
+    // touch — never a widening of WHICH PRs the rung may act on (this task's note, Q1/Q2).
+    //
+    // `acceptanceGateBodyRepair` (pure, above) is `undefined` for a healthy body, for `no-trailer`/
+    // `unparseable` (design note i — not deterministically repairable, so left for the ordinary
+    // strike below), and whenever the live fetch itself fails (fail OPEN, same discipline as every
+    // other best-effort read in this rung).
+    if (
+      currentMergeConflict === undefined &&
+      noReviewYet &&
+      currentCiFailures?.some((f) => f.name === ACCEPTANCE_AUTHOR_GATE_CHECK_NAME)
+    ) {
+      const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
+      let liveBody: string | undefined;
+      try {
+        liveBody = await fetchBody(opts.prUrl);
+      } catch (e) {
+        deps.log("fix.body_gate_check_error", { strike: strikes + 1, error: String((e as Error)?.message ?? e) });
+      }
+      const repair = liveBody !== undefined ? acceptanceGateBodyRepair(liveBody) : undefined;
+      if (repair) {
+        const attempt = strikes + 1;
+        const writeBody = deps.updatePrBody ?? updatePrBodyViaGh;
+        try {
+          await writeBody(opts.prUrl, repair.repairedBody);
+          // A body repair COUNTS exactly as any other attempt (this task's note, Q3) — the SAME
+          // `fix.dispatch` step `priorStrikesFor` reads toward the strike cap, tagged distinctly
+          // (`mode: "body-repair"`) so ledger forensics can still tell a repair apart from a
+          // spawned worker. No worker runs, no commit lands, and the head sha is UNMOVED by
+          // construction — `updatePrBody` is `gh pr edit --body`, never a push (acceptance
+          // criterion 1). Never recorded against `unmet_count`/any task's own criteria (acceptance
+          // criterion 4) — this only ever fixes the body's SHAPE.
+          strikes = attempt;
+          deps.log("fix.dispatch", {
+            strike: strikes,
+            strike_cap: opts.strikeCap,
+            unmet_count: 0,
+            round: attempt === 1 ? "resume" : "fresh",
+            mode: "body-repair",
+            defect: repair.defect,
+          });
+          deps.say(
+            `fix rung: strike ${strikes}/${opts.strikeCap} — repaired an author-time acceptance-gate ` +
+              `defect (${repair.defect}) with a body-only write; head sha unmoved: ${opts.prUrl}`,
+          );
+          // No worker spawned and no commit made this round — the unchanged-tree gate (W1-T1284,
+          // `rung.strike` above) catches an unproductive repeat on the VERY NEXT iteration
+          // (acceptance criterion 6), so loop back to the top rather than falling through to an
+          // ordinary strike this round.
+          continue;
+        } catch (e) {
+          deps.log("fix.body_gate_repair_error", { strike: attempt, error: String((e as Error)?.message ?? e) });
+          // Best-effort, mirroring W1-T307's own `fix.body_claim_update_error` discipline: a
+          // failed write falls through to the ordinary strike path below rather than blocking
+          // the rung on an infrastructure hiccup.
+        }
+      }
+    }
+
     // W1-T1282 SITE — THE ZERO-ENUMERABLE-FAILURES GUARD, BEFORE `strikes++`: dispatch's own
     // `checksState` (the check-run/status rollup) and this rung's ci-log EVIDENCE (`ciFailures`,
     // a separate miner keyed off `detailsUrl`) are two independent readers — see this shard's own
@@ -7081,6 +7251,10 @@ export async function runFixRung(opts: {
     // fetch correct for free. W1-T1100 (#2415) added this flag and guarded both consumers; none
     // of its hunks reached this call site, whose `report:` line still blames to #762.
     let reviewReportIsSubstitute = true;
+    // The DEFAULT cause matches the default flag: these three modes never ask for the body,
+    // so "never-fetched" is the truth and the mode name is the actionable half of it. Only
+    // the catch below may overwrite it, so a fetch failure can never be asserted by accident.
+    let reviewReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause = { kind: "never-fetched", fixMode };
     if (fixMode === "body-coverage") {
       const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
       try {
@@ -7089,6 +7263,7 @@ export async function runFixRung(opts: {
         // the flag true, which is the honest reading: the catch below logs and falls through.
         reviewReportIsSubstitute = false;
       } catch (e) {
+        reviewReportSubstituteCause = { kind: "fetch-failed" };
         deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
       // W1-T307: THE COMMIT THAT CHANGES THE DIFF OWNS THE CLAIM ABOUT THE DIFF. This strike
@@ -7145,6 +7320,7 @@ export async function runFixRung(opts: {
       task: opts.task,
       report: reviewReport,
       reportIsSubstitute: reviewReportIsSubstitute,
+      reportSubstituteCause: reviewReportSubstituteCause,
       settingsFile: opts.settingsFile,
       config: opts.config,
       budgetUsd: opts.budgetUsd,
@@ -10003,10 +10179,14 @@ async function runTask(
     // so `bodyContradictsDiff` and the keyword floor both know this is not the PR body.
     let reviewReport = fullText(impl);
     let reviewReportIsSubstitute = true;
+    let reviewReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause | undefined;
     try {
       reviewReport = await fetchPrBodyFn(prUrl);
       reviewReportIsSubstitute = false;
     } catch (e) {
+      // This path ALWAYS attempts the fetch, so a substitute here can only mean the read
+      // FAILED -- unlike the fix rung, where three of four modes never ask at all.
+      reviewReportSubstituteCause = { kind: "fetch-failed" };
       log("review.body_fetch_error", { error: String((e as Error)?.message ?? e) });
     }
     let review = await runReviewFn({
@@ -10016,6 +10196,7 @@ async function runTask(
       task,
       report: reviewReport,
       reportIsSubstitute: reviewReportIsSubstitute,
+      reportSubstituteCause: reviewReportSubstituteCause,
       settingsFile,
       config,
       budgetUsd,
@@ -27576,7 +27757,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "next-task-id",
     usage:
-      "rmd next-task-id [--plan <path>] [--offline] [--reserve]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation.",
+      "rmd next-task-id [--plan <path>] [--offline] [--reserve]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. Without the flag the verb is byte-identical to before, reserving nothing, because ~50 ids are already reserved-but-unfiled and nothing releases a reservation. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/.",
   },
   {
     name: "emissions",

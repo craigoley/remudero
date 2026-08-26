@@ -58,8 +58,9 @@ import { classifyGrepZeroHit } from "./grep-zero-cause.js";
  * before either check existed does not brick overnight), proof-dialect always
  * warns (regardless of that option) for a `unit test:` proof whose body reads as a
  * runtime narrative rather than a literal test-title substring, and proof-scope
- * (W1-T310) warns EVERYWHERE by default (`opts.proofScope`, default "warn") — see
- * that check's own module comment for the measured retrofit count behind the call, and
+ * (W1-T310) warns by default (`opts.proofScope`, default "warn") EXCEPT one
+ * conjunction it auto-escalates to "block" (W1-T2287: mis-declared, absent at head,
+ * `verify: auto` — see that check's own module comment for why), and
  * dispatch-priority (W1-T422) always warns, unconditionally, like budget-sanity.
  * advisory-routing (W1-T519) is WARN-only BY CONSTRUCTION — it carries no `opts` severity
  * knob at all, anywhere, the only violation family with that property: a task whose title,
@@ -776,9 +777,49 @@ export function proofResolvabilityViolations(
  *  text — the silent-false-FAIL class. Blocking; measured retrofit 0. */
 const BRE_BLOCKING_METACHARS: ReadonlyArray<string> = ["[", "*", "^", "$"];
 
-/** BRE metacharacters that only WIDEN a match. The proof still finds its own
- *  text, so this warns rather than stranding the 4 tasks that use it. */
-const BRE_WARNING_METACHARS: ReadonlyArray<string> = ["."];
+/** BRE metacharacters that do NOT silently strand a proof under the executor's own
+ *  matcher, so they warn rather than block.
+ *
+ *  `.` only WIDENS a match: the proof still finds its own text (blocking it would
+ *  strand the 4 tasks that use it).
+ *
+ *  `?` is the OPPOSITE shape and is here for a different reason. It is LITERAL in a
+ *  BRE and a QUANTIFIER in an ERE, and the executor's argv is `grep -arn --` with no
+ *  `-E`, so a bare `?` genuinely works TODAY — blocking it would refuse patterns that
+ *  match. What it is not is portable: read by any ERE-defaulting grep the same pattern
+ *  finds nothing and reports a clean zero. Measured on `logUnavailable?: Cause`, BRE
+ *  matched and ERE missed. See {@link SINGLE_LITERAL_CLASS_CHARS} for why the remedy
+ *  is `[?]` and never `\?`. */
+const BRE_WARNING_METACHARS: ReadonlyArray<string> = [".", "?"];
+
+/** Characters for which `[X]` — a bracket holding exactly this one character and
+ *  nothing else — is the SANCTIONED literal escape, exempt from `[`'s blocking rule.
+ *
+ *  WHY THE EXEMPTION EXISTS. Without it this linter forbids the only portable remedy
+ *  for the very fragility it warns about: `[?]` tripped `[`'s block while the bare `?`
+ *  it replaces passed clean, so the rule pushed authors toward the fragile form. The
+ *  #1071 precedent (`[call-site]` read as a character class) is a DIFFERENT shape —
+ *  several characters forming a real class — and stays blocked, because nothing about
+ *  it is unambiguously a literal.
+ *
+ *  AND `\X` IS NOT AN ALTERNATIVE for the character that motivated this. `\?` is a
+ *  quantifier in GNU BRE and a literal in an ERE — exactly inverted from bare `?` — so
+ *  the obvious escape moves the failure rather than removing it. Only the bracket form
+ *  is literal under both.
+ *
+ *  MEASURED, not assumed: every member below matched its literal text under BOTH
+ *  `grep` and `grep -E` and matched nothing when the character was absent. `^` is
+ *  DELIBERATELY EXCLUDED — `[^]` opens a NEGATED class rather than closing a literal
+ *  one, and both engines error on it. */
+const SINGLE_LITERAL_CLASS_CHARS: ReadonlyArray<string> = ["?", ".", "*", "+", "$", "(", ")", "{", "}", "|", "[", "]"];
+
+/** The remedy sentence for each warning-tier metacharacter — the character's OWN fix,
+ *  never a generic one, because `.` and `?` fail in opposite directions and a shared
+ *  sentence would have to be vague enough to help with neither. */
+const BRE_WARNING_REMEDY: Readonly<Record<string, string>> = {
+  ".": "matches ANY character in a BRE — the proof still finds its own text but would also match text you did not intend. Escape it (\\.) to mean a literal dot.",
+  "?": "is LITERAL under the executor's own `grep -arn` (a BRE) but a QUANTIFIER under an ERE, so this pattern matches today and silently finds NOTHING under any grep that defaults to ERE — a clean zero, not an error. Write `[?]`, which is literal under both. Do NOT write `\\?`: that INVERTS the failure (a quantifier in GNU BRE, a literal in an ERE) and breaks the engine that works today.",
+};
 
 /** Characters that become a BRE construct when a backslash precedes them —
  *  grouping and intervals. `\.`-style escapes are NOT here: those are literals. */
@@ -803,6 +844,15 @@ export function breMetacharsIn(pattern: string): { blocking: string[]; warning: 
       }
       if (BRE_CONSTRUCT_AFTER_BACKSLASH.includes(next)) blocking.push("\\" + next);
       i++; // the escape consumes its next char — `\.` is a LITERAL dot, legitimate
+      continue;
+    }
+    // `[X]` — one metacharacter, immediately closed — is the SANCTIONED literal form
+    // (see SINGLE_LITERAL_CLASS_CHARS). Consume all three characters so the bracket does
+    // not block AND the character inside is not separately scored: `[?]` must be silent,
+    // not a warning about the very `?` it exists to escape. Anything else starting with
+    // `[` falls through to the blocking arm exactly as before — `[call-site]` included.
+    if (ch === "[" && pattern[i + 2] === "]" && SINGLE_LITERAL_CLASS_CHARS.includes(pattern[i + 1] ?? "")) {
+      i += 2;
       continue;
     }
     if (BRE_BLOCKING_METACHARS.includes(ch)) blocking.push(ch);
@@ -843,14 +893,18 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
           `different matcher and reports a false green.`,
       });
     }
-    if (warning.length) {
+    // ONE VIOLATION PER DISTINCT CHARACTER, never one aggregate line: `.` and `?` fail in
+    // OPPOSITE directions (one widens a match that still succeeds, the other succeeds here
+    // and misses entirely under another engine), so a shared sentence could only be vague
+    // enough to help with neither. A pattern carrying just one of them still yields exactly
+    // one violation, which is the shape this check has always had.
+    for (const ch of warning) {
       violations.push({
         check: "proof-grep-safety",
         severity: "warn",
         message:
-          `${where} \`grep:\` pattern "${pattern.slice(0, 70)}" contains an unescaped \`.\`, which ` +
-          `matches ANY character in a BRE — the proof still finds its own text but would also ` +
-          `match text you did not intend. Escape it (\\.) to mean a literal dot.`,
+          `${where} \`grep:\` pattern "${pattern.slice(0, 70)}" contains an unescaped \`${ch}\`, which ` +
+          `${BRE_WARNING_REMEDY[ch] ?? "is a BRE metacharacter — escape it or reword the pattern."}`,
       });
     }
   }
@@ -1020,18 +1074,34 @@ export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}):
 
 // ── PROOF-SCOPE (W1-T310 — a proof naming a path the task never declared) ───
 //
-// scopeGuardOutOfScopeFiles (run-task.ts) refuses to push any branch whose diff
-// touches a path outside the task's declared `files:` — EXACT Set membership,
-// `declared.has(f)`, never a prefix or glob (read directly off that guard so
-// this check can never disagree with it about what "in scope" means, design
-// point 2). A proof naming a path outside that same declared set is therefore
-// GUARANTEED to trip the guard once the work satisfying it is done — W1-T309's
-// own postmortem: `files: [src/lib/status-board.ts]`, two of its three proofs
-// named `test/status-blockers-live.test.ts`, refused after 106 turns / $4.36.
-// ALL TWELVE tasks filed that day (W1-T298..W1-T309) carried the flaw and
-// `lint-plan` passed every one of them — it validates proof SHAPE
-// (proof-dialect) and RESOLVABILITY (proof-resolvability), never whether the
-// artifact a proof names is inside the scope the SAME task declares.
+// scopeGuardOutOfScopeFiles (run-task.ts) compares a branch's diff against the
+// task's declared `files:` — EXACT Set membership, `declared.has(f)`, never a
+// prefix or glob (read directly off that guard so this check can never
+// disagree with it about what "in scope" means, design point 2). A proof
+// naming a path outside that same declared set is therefore GUARANTEED to
+// trip the guard once the work satisfying it is done — W1-T309's own
+// postmortem: `files: [src/lib/status-board.ts]`, two of its three proofs
+// named `test/status-blockers-live.test.ts`. ALL TWELVE tasks filed that day
+// (W1-T298..W1-T309) carried the flaw and `lint-plan` passed every one of
+// them — it validates proof SHAPE (proof-dialect) and RESOLVABILITY
+// (proof-resolvability), never whether the artifact a proof names is inside
+// the scope the SAME task declares.
+//
+// (W1-T2287) THE GUARD NO LONGER REFUSES, and the message below used to claim
+// it does. W1-T309's own 106-turn / $4.36 postmortem WAS a refusal, at the
+// time; the implement path's disposition since changed to push-and-flag:
+// `scope_guard.overrun` is logged and the branch pushes anyway — "pushed and
+// flagged rather than refused: the branch is the only evidence that separates
+// a phantom revert from an under-declared files:, and a refusal reaped it"
+// (run-task.ts's own ledger line at the `scopeGuardOutOfScopeFiles` call
+// site). The consequence that IS real and IS a verdict, and that the old
+// message never named: `judgeCriterion` (review.ts) grades a pure-path
+// `unit test:` proof `not_yet_built` only when its path is a member of
+// `ProofExecContext.forwardReferenceFiles`, built from (among other sources)
+// this task's own declared `files:`. A path OUTSIDE `files:` can never take
+// that carve-out, so if it is still absent when the PR is reviewed, the
+// criterion grades `executed_fail` instead — overriding keyword coverage and
+// failing the PR outright, not a refusal but a wrong verdict.
 //
 // REUSES parseWhitelistedProof (review.ts) — the SAME parse the reviewer's
 // executor runs (design point 1) — so this check can never disagree with
@@ -1061,6 +1131,25 @@ export function proofGrepUnmatchableViolations(task: Task, opts: LintOpts = {}):
 // — an operator can flip any call site (whole-plan, or just pre-dispatch, via
 // a follow-up run-task.ts edit) to "block" with zero further engine changes,
 // once the backlog is repaired or the risk is judged acceptable.
+//
+// (W1-T2287) ONE CONJUNCTION AUTO-ESCALATES TO "block" ANYWAY, measured at
+// ZERO in the live plan today (see this task's own filing rationale): a
+// mis-declared path that is ALSO absent at head AND whose task is
+// `verify: auto` — the exact conjunction under which the grade above actually
+// goes wrong, rather than merely looking untidy. `opts.moduleExists` (the SAME
+// injected disk-existence predicate {@link callSiteViolations} already uses —
+// this module stays pure, no fs of its own) answers "absent at head"; absent
+// that predicate this check makes no attempt to escalate, exactly like every
+// other injected-predicate check here — the plain "warn" default holds. A
+// `verify: human` task never escalates regardless: `isDispatchEligible`
+// (drain.ts) refuses it before the linter is ever consulted, so it can never
+// reach the review that would grade it wrong. A path that EXISTS at head also
+// never escalates: `judgeCriterion` never takes the forward-reference branch
+// for an existing path, so the proof executes for real and is graded on its
+// own merits — mis-declared but harmless, the 325-task `verify: auto`
+// population an outright `block` default would otherwise have failed. An
+// explicit `opts.proofScope` still wins outright over this computed value, in
+// either direction — the operator override this module has always honoured.
 
 /** The repo-relative path a {@link WhitelistedProof} names, or `undefined` when
  *  it names none. Mirrors exactly how {@link parseWhitelistedProof}'s own
@@ -1077,12 +1166,16 @@ function proofScopePath(w: WhitelistedProof): string | undefined {
 }
 
 /** Every criterion whose proof names a path OUTSIDE the task's declared
- *  `files:` — the mismatch {@link scopeGuardOutOfScopeFiles} (run-task.ts)
- *  refuses AFTER the work satisfying it is done. WARN by default; see the
- *  module comment above for the measured retrofit count driving that default. */
+ *  `files:` — a mismatch {@link scopeGuardOutOfScopeFiles} (run-task.ts) now
+ *  PUSHES AND FLAGS rather than refuses, and that {@link judgeCriterion}
+ *  (review.ts) can grade `executed_fail` instead of `not_yet_built` because
+ *  the path is not in `files:` (W1-T2287 — see the module comment above).
+ *  WARN by default, auto-escalated to "block" only when the path is also
+ *  absent at head (per `opts.moduleExists`) and the task is `verify: auto`;
+ *  see the module comment above for the measured count driving both. */
 export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
-  const severity: LintSeverity = opts.proofScope ?? "warn";
   const declared = new Set(task.files ?? []);
+  const dispatchable = task.verify === "auto";
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
     if (c.satisfied_by) return; // Architect-only; no proof text to parse
@@ -1091,15 +1184,25 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
     const path = proofScopePath(whitelisted);
     if (!path) return; // names no path (design point 4) — nothing to compare
     if (declared.has(path)) return; // inside the declared scope — silent
+    // NO PREDICATE ⇒ NO ESCALATION (W1-T2287) — the same "no fs of its own" contract
+    // {@link callSiteViolations}'s `opts.moduleExists` already keeps: absent the predicate this
+    // stays the plain "warn" default rather than guessing at disk state.
+    const absentAtHead = opts.moduleExists ? !opts.moduleExists(path) : false;
+    const severity: LintSeverity = opts.proofScope ?? (absentAtHead && dispatchable ? "block" : "warn");
     const claimHead = (c.claim ?? "").slice(0, 60);
     violations.push({
       check: "proof-scope",
       severity,
       message:
         `criterion ${i + 1} ("${claimHead}") proof names "${path}", which is OUTSIDE this task's ` +
-        `declared files: [${[...declared].join(", ")}] — the scope guard (run-task.ts's ` +
-        "scopeGuardOutOfScopeFiles) will refuse a branch touching it, AFTER the work is done; add " +
-        `"${path}" to files: or rewrite the proof to name a path already in scope`,
+        `declared files: [${[...declared].join(", ")}]. The scope guard (run-task.ts's ` +
+        "scopeGuardOutOfScopeFiles) does NOT refuse this — it pushes the branch and logs " +
+        "scope_guard.overrun, flagged rather than blocked. The real consequence is graded, not " +
+        `refused: judgeCriterion (review.ts) can only carve this proof out as not_yet_built when ` +
+        `"${path}" is a member of this task's declared files: — since it is not, if "${path}" is ` +
+        "still absent when this is reviewed, the criterion grades executed_fail instead, which " +
+        `overrides keyword coverage and fails the PR. Add "${path}" to files: or rewrite the proof ` +
+        "to name a path already in scope.",
     });
   });
   return violations;

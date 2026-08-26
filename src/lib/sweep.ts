@@ -1157,8 +1157,13 @@ export interface RollupCheckEntry {
  * required check that reports SKIPPED or NEUTRAL still counts as green — only
  * a genuinely unresolved/incomplete check (anything not in this set and not a
  * failure below) holds checksState at "pending".
+ *
+ * EXPORTED (W1-T2274) so run-task.ts's poll loops (`checkWaitStalled`, `pollToGate`,
+ * `ciGateFromRollup`) can read the SAME ok-set this file's checksState predicate reads, instead
+ * of the narrower private literal (`state !== "SUCCESS"`) that read a cleanly-concluded NEUTRAL
+ * or SKIPPED check as still pending — the same #1698/#1699 shape this set already fixed here.
  */
-const REQUIRED_CHECK_OK = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
+export const REQUIRED_CHECK_OK = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
 
 /**
  * Conclusions that veto a required check outright — checksState goes "red". EXPORTED (W1-T457)
@@ -1168,8 +1173,23 @@ const REQUIRED_CHECK_OK = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
  * entry this set includes, while `fetchCiFailures` filtered to FAILURE|ERROR only and reported
  * nothing — a red predicate with an empty evidence list, dispatching the ci-log fix rung against
  * nothing to fix).
+ *
+ * STALE ADDED (W1-T2274): GitHub marks a check run STALE when its result can no longer be
+ * attributed to the head — "this reading is void", closer to CANCELLED than to either pole, and
+ * previously in NEITHER set anywhere in the tree, which held `checksStateFromRollup` at
+ * "pending" forever for it (the one conclusion even the #1698 fix left unclassified). Folded in
+ * here rather than given a fifth `checksState` member, exactly as CANCELLED already is — this
+ * file's own doc on that decision (see `cancelledRequiredCheckNames`) is the reason, unchanged.
  */
-export const REQUIRED_CHECK_FAIL = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
+export const REQUIRED_CHECK_FAIL = new Set([
+  "FAILURE",
+  "ERROR",
+  "TIMED_OUT",
+  "CANCELLED",
+  "ACTION_REQUIRED",
+  "STARTUP_FAILURE",
+  "STALE",
+]);
 
 /**
  * Group rollup entries by check name (a CheckRun's `name`) or commit-status context (a

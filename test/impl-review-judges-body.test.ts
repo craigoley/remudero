@@ -43,7 +43,10 @@ test("recon-GK: a failed body read falls back to the worker text rather than blo
   // spawn: a throwing fetcher must be caught and ledgered, never propagate.
   const at = SRC.indexOf("reviewReport = await fetchPrBodyFn(prUrl)");
   assert.notEqual(at, -1);
-  const window = SRC.slice(at - 200, at + 300);
+  // Widened +300 -> +500 on 2026-08-25: the catch arm gained a cause assignment and the comment
+  // explaining it, which pushed `review.body_fetch_error` to 348 chars past the fetch. The
+  // CONTRACT below is unchanged -- a failed read is still caught and still ledgered.
+  const window = SRC.slice(at - 200, at + 500);
   assert.match(window, /let reviewReport = fullText\(impl\)/, "the fallback value is the worker text");
   assert.match(window, /catch/, "a failed read is caught");
   assert.match(window, /review\.body_fetch_error/, "and is ledgered rather than silent");
