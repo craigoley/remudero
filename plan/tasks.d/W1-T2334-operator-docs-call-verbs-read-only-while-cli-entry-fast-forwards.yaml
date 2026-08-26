@@ -1,0 +1,138 @@
+- id: W1-T2334
+  title: "THE OPERATOR-FACING DOCS PROMISE READ-ONLY VERBS THAT THE CLI ENTRY POINT CAN FAST-FORWARD — `docs/operator-guide.md` says `rmd check-proof` is `Read-only: writes no cache, no ledger line, no state file` and the generated `docs/cli-reference.md` says `emissions` is `READ-ONLY: writes nothing, spawns nothing`, but `checkCliFreshness` runs `git merge --ff-only origin/main` BEFORE any verb body on a clean, behind, on-`main` checkout: state the entry-point condition where operators read it and document `RMD_SELF_SYNC_DONE=1` as the read-only idiom"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    FILED FROM fb-1786006232525-6d94d8 (2026-08-06, origin cli — the 07:25Z monitor correcting two
+    claims it had itself propagated). SOURCE-VERIFIED IN THIS TREE AT TRIAGE; every quotation below
+    was read, not carried.
+
+    (1) THE MUTATION IS REAL AND IT RUNS BEFORE THE VERB. `checkCliFreshness`
+    (`src/lib/self-sync.ts`) ends with `git(["merge", "--ff-only", "origin/main"])`, then `say()`,
+    then `reexec()`. `main()` (`src/run-task.ts`) calls it at entry for every verb except
+    `daemon`/`serve` (their own `serviceFreshnessGate`), `deploy-run` (no gate) and `sync`
+    (W1-T907's exemption). So `status`, `lint-plan` and `check-proof` — the three an operator brief
+    reaches for precisely BECAUSE they are believed inert — can advance the checkout's `main` as a
+    side effect of being asked a question.
+
+    (2) THE CONDITION IS NARROW AND MUST BE STATED NARROWLY, OR THE CORRECTION IS ITS OWN FALSE
+    CLAIM. The ff-merge is reached only when ALL of these hold, in this order, from the function
+    itself: `RMD_SELF_SYNC_DONE` unset (`alreadySelfSynced`), not CI (`isCiEnv`), the fetch and both
+    `rev-parse`s succeed, HEAD != origin/main, the repo is NOT a linked worktree (W1-T452 returns
+    `{status: "worktree"}` above every refusal), no dirty path intersects the incoming diff
+    (W1-T446's `treeFfSafe`), HEAD IS an ancestor of origin/main, and `symbolic-ref --short -q HEAD`
+    says `main` (W1-T445). A DETACHED HEAD REFUSES — so on the container, whose `deploy/entrypoint.sh`
+    boots `git checkout --detach`, the failure mode is exit 1 (W1-T1134's subject), NOT a silent
+    pull. The population that actually mutates is a non-worktree checkout sitting on `main`, which
+    W1-T446's Q3 measured as the operator's own `~/Remudero/remudero` — the same tree
+    `com.remudero.daemon` and `com.remudero.serve` run their `bin/rmd` from.
+
+    (3) THE DOCS SAY OTHERWISE, IN THE TWO PLACES AN OPERATOR ACTUALLY READS. Verbatim at triage:
+      - `docs/operator-guide.md` (hand-written verb table): "Read-only: writes no cache, no ledger
+        line, no state file." — of `rmd check-proof`.
+      - `docs/cli-reference.md` (GENERATED from the `COMMANDS` registry in `src/run-task.ts`, W1-T47):
+        "READ-ONLY: writes nothing, spawns nothing" — of `rmd emissions`.
+      - `docs/operator-guide.md`, "Where to run a verb, and why the wrong place answers confidently":
+        "Every item below is read-only or near enough, so the failure mode is not damage".
+    EACH SENTENCE IS TRUE ABOUT THE VERB'S OWN BODY AND FALSE ABOUT THE INVOCATION, and an operator
+    cannot tell the difference from the page. `RMD_SELF_SYNC_DONE` appears NOWHERE under `docs/`
+    outside `docs/research/`, so the escape hatch is undocumented on every surface that makes the
+    promise.
+
+    (4) THE AGENT-FACING HALF IS ALREADY CLOSED AND MUST NOT BE REDONE. `CLAUDE.md` carries
+    "Run EVERY `rmd` verb as `RMD_SELF_SYNC_DONE=1 ./bin/rmd <verb>` — there are no read-only verbs"
+    (established 2026-08-06, the same monitor). THIS TASK IS THE OPERATOR-FACING HALF ONLY: the
+    guide, the generated reference and the registry blurbs those two are built from. Restating the
+    bullet into CLAUDE.md again is out of scope and would be duplication, not coverage.
+
+    (5) WHY DOCUMENTATION IS THE RIGHT INSTRUMENT HERE RATHER THAN A BEHAVIOUR CHANGE. The feedback
+    also asks whether the fast-forward should be opt-in for read verbs. THAT QUESTION ALREADY HAS
+    OWNERS AND IS NOT REOPENED: W1-T445 (#1662, merged) owns which ref may move; W1-T446 owns the
+    dirty predicate and is `verify: human` precisely because relaxing this guard is a policy call;
+    W1-T907 owns the explicit `rmd sync` verb that is the sanctioned deliberate form; W1-T924 owns
+    the structural fix for "a verb takes a pull the deploy owns" — giving the install its own
+    checkout written ONLY by the supervisor, and it already names `checkCliFreshness` on the shared
+    tree among its measured costs; W1-T1134 owns which verbs the freshness GATE may refuse. What
+    none of them touches is the prose, and the prose is what the operator acted on.
+  design: |
+    (i) THE SURVEY IS THE FIRST DELIVERABLE AND IT IS MECHANICAL. Enumerate every operator-facing
+    claim of read-only-ness: `docs/operator-guide.md`, `docs/cli-reference.md`, and the `COMMANDS`
+    registry blurbs in `src/run-task.ts` that the reference is generated from. Report the count in
+    the PR body. Code-internal doc comments (e.g. `src/run-task.ts`'s "STRICTLY READ-ONLY. It writes
+    no cache, no ledger line, and no state file" above `check-proof`'s implementation) are ACCURATE
+    ABOUT THE FUNCTION and are NOT a bulk rewrite target — rewriting thirty of them would be motion,
+    not correction.
+
+    (ii) THE FIX IS A SCOPED CLAIM PLUS ONE STATED CONDITION, NOT A DELETED WORD. A blurb keeps
+    saying what the verb's own body does; what must be added is that the CLI ENTRY POINT may
+    fast-forward the checkout first, under exactly the conditions in rationale (2), and that
+    `RMD_SELF_SYNC_DONE=1` is the form that provably does not. Say it ONCE, prominently, where
+    operators read (the guide's verb table preamble and the "Where to run a verb" section), and
+    reference it from the generated surface rather than pasting a paragraph onto forty rows.
+
+    (iii) DO NOT OVERSTATE IT EITHER. "Every rmd verb mutates your checkout" is as wrong as the
+    sentence it replaces: a worktree, a detached HEAD, a CI runner, a dirty overlapping path and an
+    already-guarded process ALL decline to merge. The doc must let a reader decide which case they
+    are in — the conditions are cheap to state and a bare warning is not actionable.
+
+    (iv) THE WORDING MUST BE HELD BY A CHECK, OR IT DRIFTS BACK. `test/docs-claims.test.ts` (W1-T213,
+    MASTER-PLAN §12A) is the existing home: one exported PURE check per contradiction, wired into
+    `plan/claims.yaml` so a doc that regresses fails CI by name. Add the check there, derive the verb
+    population from the `COMMANDS` registry the way that suite's verb-coverage check already does
+    rather than hand-listing verbs, and prove it RED on the current wording as a fixture before it
+    goes green on the new — a check that has never failed on the real defect is not evidence.
+
+    (v) REGENERATE, NEVER HAND-EDIT, `docs/cli-reference.md`. It is generated from `COMMANDS`
+    (`scripts/generate-cli-reference.mjs`, W1-T47) and `test/cli-reference.test.ts` pins the
+    committed file against the registry; editing the markdown directly leaves the two disagreeing and
+    reds that suite.
+
+    (vi) EXPLICITLY NOT IN SCOPE, WITH OWNERS NAMED: changing `checkCliFreshness`'s behaviour in any
+    direction (W1-T445 / W1-T446 / W1-T907), which verbs the entry gate refuses (W1-T1134), a ledger
+    row for the `synced` branch (adjacent to W1-T486, which instruments the three REFUSALS only),
+    the dedicated install checkout (W1-T924), and any edit to `CLAUDE.md`, whose bullet already
+    states this for agents.
+  acceptance:
+    - claim: "the operator-facing guide names the entry-point fast-forward and documents RMD_SELF_SYNC_DONE=1 as the form that does not mutate the checkout"
+      proof: "grep: RMD_SELF_SYNC_DONE in docs/operator-guide.md"
+    - claim: "a pure check turns RED on the current unqualified read-only wording and GREEN on the corrected wording, so the correction cannot silently drift back"
+      proof: "unit test: test/docs-claims.test.ts"
+    - claim: "the check derives the verbs it audits from the COMMANDS registry rather than a hand-written list, so a verb added later is covered without redoing this task"
+      proof: "unit test: test/docs-claims.test.ts"
+    - claim: "docs/cli-reference.md is regenerated from the corrected registry blurbs and still matches the registry byte for byte"
+      proof: "unit test: test/cli-reference.test.ts"
+  risk: high
+  origin: feedback#fb-1786006232525-6d94d8
+  plan_refs: ["W1-T79", "W1-T213", "W1-T445", "W1-T446", "W1-T452", "W1-T907", "W1-T924", "W1-T1134"]
+  files: [docs/operator-guide.md, docs/cli-reference.md, src/run-task.ts, test/docs-claims.test.ts, test/cli-reference.test.ts, plan/claims.yaml]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — every criterion is decidable in-process over text: a pure check with a red fixture
+    and a green one, plus the existing registry/reference sync suite. Nothing here asks the operator
+    to rule on anything; the one question that DOES need a ruling (opt-in vs opt-out fast-forward) is
+    deliberately left with W1-T446/W1-T924 rather than smuggled in behind a docs change.
+
+    risk:high IS RULE 19's SPAN, NOT BLAST RADIUS. `subsystemsOf` reads `files:` plus acceptance text
+    and this set crosses `docs/`, `src/`, `test/` and `plan/`; `sizingViolation` blocks at >=2
+    subsystems while risk<high, so the band is raised up front — same call W1-T907 made for the same
+    span. The actual change is prose plus one pure function.
+
+    `src/run-task.ts` IS DECLARED AND UNAVOIDABLE: `docs/cli-reference.md` is GENERATED from the
+    `COMMANDS` registry that lives there, so the `READ-ONLY: writes nothing, spawns nothing` blurb
+    cannot be corrected anywhere else without the two surfaces disagreeing. That file is the repo's
+    known serialiser (W1-T471) and the cost is accepted rather than hidden.
+    `test/cli-reference.test.ts` IS DECLARED because the fourth criterion names it: an undeclared
+    proof path is exactly the `proof-scope` warning W1-T1134's note took rather than argued with.
+    `plan/claims.yaml` IS DECLARED because design (iv) wires the new check in by name, which is the
+    W1-T213 mechanism that makes the check a CI gate rather than a test nobody runs.
+
+    THE QUOTED DOC LINES ARE QUERIES, NOT CONSTANTS. Re-derive them with a grep for `ead-only` and
+    `EAD-ONLY` under `docs/` before writing; the two quoted in rationale (3) were read at triage and
+    the surrounding tables move weekly. THE CONDITION LIST IN RATIONALE (2) MUST ALSO BE RE-READ FROM
+    `src/lib/self-sync.ts` rather than copied from here — W1-T446 is queued against that exact
+    predicate, and a doc that states a stale condition is the same defect wearing a fix.
