@@ -211,6 +211,141 @@ export function addedLinesByFile(diffText) {
 }
 
 /**
+ * The mirror of `addedLinesByFile`: walk the same unified diff and return
+ * `Map<filePath, Map<oldLineNo, removedText>>` for lines the diff REMOVES (`-` lines only).
+ * Keyed by the file's `+++ b/<path>` identity (the SAME key `addedLinesByFile` and the lcov
+ * report use), not `--- a/<path>` -- a relocation match compares an added line in the new tree
+ * against a removed line from the SAME file's old content, and this repo's diffs are read (and
+ * this gate's own fixtures are written) without a rename in play, so the `+++` path is both the
+ * simpler read and the one every other map in this file already keys by. Old-file line numbers
+ * (from the hunk header's `@@ -oldStart,oldLines +newStart,newLines @@`) are what a human reading
+ * `git diff` sees beside a `-` line, so the relocation report below names counterparts by them.
+ * @param {string} diffText
+ */
+export function removedLinesByFile(diffText) {
+  const files = new Map();
+  let currentFile = null;
+  let oldLineNo = null;
+  for (const raw of diffText.split('\n')) {
+    if (raw.startsWith('diff --git ')) {
+      currentFile = null;
+      oldLineNo = null;
+      continue;
+    }
+    if (raw.startsWith('+++ ')) {
+      const path = raw.slice(4).trim();
+      currentFile = path === '/dev/null' ? null : path.replace(/^b\//, '');
+      oldLineNo = null;
+      continue;
+    }
+    if (raw.startsWith('@@')) {
+      const m = /@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(raw);
+      oldLineNo = m ? Number(m[1]) : null;
+      continue;
+    }
+    if (currentFile === null || oldLineNo === null) continue;
+    if (raw.startsWith('-')) {
+      if (!files.has(currentFile)) files.set(currentFile, new Map());
+      files.get(currentFile).set(oldLineNo, raw.slice(1));
+      oldLineNo += 1;
+    } else if (raw.startsWith('+')) {
+      // Added line -- exists only in the new file; does not consume an old-file line number.
+    } else if (raw.startsWith('\\')) {
+      // "\ No newline at end of file" -- not a content line, no line number to consume.
+    } else {
+      // Context line -- exists in both files.
+      oldLineNo += 1;
+    }
+  }
+  return files;
+}
+
+/**
+ * A RELOCATION, not an addition: a contiguous run of added lines whose trimmed text matches an
+ * unconsumed, equally contiguous run of removed lines in the SAME diff (W1-T2325). The header
+ * comment above already settles the policy question -- "an already-uncovered pre-existing line is
+ * the aggregate ratchet's problem, not a new regression this diff introduced)" -- and a line that
+ * merely moved to a new offset during a restructure IS pre-existing text by that definition, even
+ * though the diff can only ever show it as a `+`. This function recovers the ONLY evidence that
+ * distinguishes the two cases: identical text on the `-` side of the SAME changeset.
+ *
+ * THREE BOUNDS keep this from becoming a bypass (see the shard's design, Q3):
+ *
+ * (i) CONSUME-ONCE. Each removed line matches AT MOST ONE added line -- `consumed` below is a
+ * per-file Set of removed-array indices, checked before every candidate match. Duplicating an
+ * untested block three times exempts only the first copy; the other two have no unconsumed
+ * counterpart left and still block (relocated-duplicate.diff/.lcov fixture).
+ *
+ * (ii) A RUN, NOT A LINE. `MIN_RELOCATION_RUN` lines of identical, line-number-contiguous text are
+ * required before a match counts at all -- a lone `return;` or `const x = 0;` collides with base
+ * text by coincidence far too often to trust. This was MEASURED, not picked by taste: scanning
+ * src/run-task.ts (29,352 lines) for non-trivial trimmed-text runs that recur anywhere else in the
+ * same file, the coincidental-collision rate falls from 1,065/15,376 (~6.9%) at a 1-line run to
+ * 77/7,510 (~1.0%) at 5 lines -- a single line is roughly 7x more likely to be a coincidence than a
+ * genuine relocation than a 5-line run is.
+ *
+ * (iii) GREEDY, LONGEST-FIRST, LEFT TO RIGHT. For each added line not yet claimed by an earlier
+ * match, every unconsumed removed line with matching text is tried as a possible run start, and the
+ * LONGEST resulting contiguous match wins (ties keep the first candidate found). This makes the
+ * match deterministic and biases toward the strongest evidence rather than the first coincidence.
+ *
+ * Every accepted line pairs 1:1 with exactly one counterpart old-line number, so the caller can
+ * print the exact counterpart per Q3(iii) of the design ("PRINT EVERY EXEMPTION, naming the
+ * counterpart") -- never just "this file had a relocation somewhere".
+ * @param {Map<string, Map<number, string>>} added
+ * @param {Map<string, Map<number, string>>} removed
+ * @param {{minRun?: number}} [opts]
+ * @returns {Map<string, Map<number, {counterpartLine: number, runLength: number}>>}
+ */
+export const MIN_RELOCATION_RUN = 5;
+export function computeRelocatedLines(added, removed, { minRun = MIN_RELOCATION_RUN } = {}) {
+  const relocated = new Map();
+  for (const [file, addedLines] of added) {
+    const removedLines = removed.get(file);
+    if (!removedLines) continue;
+    const A = [...addedLines.entries()].sort((a, b) => a[0] - b[0]);
+    const R = [...removedLines.entries()].sort((a, b) => a[0] - b[0]);
+    const consumed = new Set();
+    const fileMap = new Map();
+    let i = 0;
+    while (i < A.length) {
+      let bestJ = -1;
+      let bestLen = 0;
+      for (let j = 0; j < R.length; j++) {
+        if (consumed.has(j)) continue;
+        if (R[j][1].trim() !== A[i][1].trim()) continue;
+        let len = 1;
+        while (
+          i + len < A.length &&
+          j + len < R.length &&
+          !consumed.has(j + len) &&
+          A[i + len][0] === A[i + len - 1][0] + 1 && // added run stays contiguous in the new file
+          R[j + len][0] === R[j + len - 1][0] + 1 && // removed run stays contiguous in the old file
+          R[j + len][1].trim() === A[i + len][1].trim()
+        ) {
+          len++;
+        }
+        if (len > bestLen) {
+          bestLen = len;
+          bestJ = j;
+        }
+      }
+      if (bestJ !== -1 && bestLen >= minRun) {
+        for (let k = 0; k < bestLen; k++) {
+          consumed.add(bestJ + k);
+          fileMap.set(A[i + k][0], { counterpartLine: R[bestJ + k][0], runLength: bestLen });
+        }
+        i += bestLen;
+      } else {
+        i += 1;
+      }
+    }
+    if (fileMap.size > 0) relocated.set(file, fileMap);
+  }
+  return relocated;
+}
+
+/**
  * A line that cannot carry executable coverage no matter what lcov says about it: blank, a
  * pure `//` line, or a line living entirely inside `/* ... *\/` block-comment furniture
  * (`/**`, ` * ...`, ` *\/`). Under `--enable-source-maps` (W1-T210 round 2) the tsx-compiled
@@ -477,7 +612,13 @@ function main(argv) {
   const diffText = values.diff ? readFileSync(values.diff, 'utf8') : readFileSync(0, 'utf8');
   const lcovHits = parseLcovHitsByFile(lcovText);
   const added = addedLinesByFile(diffText);
+  const removed = removedLinesByFile(diffText);
   const rawViolations = findUncoveredAddedLines(added, lcovHits);
+  // W1-T2325: an added line whose identical text was REMOVED elsewhere in the SAME diff is
+  // pre-existing text that merely moved, not a new regression -- see computeRelocatedLines for the
+  // consume-once / contiguous-run bounds that keep this from becoming a bypass. Derived entirely
+  // from the diff's own `+`/`-` lines, no second coverage run.
+  const relocatedByFile = computeRelocatedLines(added, removed);
 
   // Resolve `// diff-cov: process-boundary` directives PLUS automatic type-only-declaration
   // ranges (interface/type-literal bodies -- see computeTypeOnlyRanges), but ONLY for files that
@@ -519,8 +660,23 @@ function main(argv) {
     const file = v.slice(0, idx);
     const ln = Number(v.slice(idx + 1));
     const hit = (rangesByFile.get(file) ?? []).find((r) => ln >= r.start && ln <= r.end);
-    if (hit) exempt.push({ v, reason: hit.reason, kind: hit.kind ?? 'process-boundary' });
-    else blocking.push(v);
+    if (hit) {
+      exempt.push({ v, reason: hit.reason, kind: hit.kind ?? 'process-boundary' });
+      continue;
+    }
+    // Relocation is resolved per EXACT line (a 1:1 consume-once pairing with one counterpart old
+    // line), never a range -- see computeRelocatedLines. Checked after, never instead of, the
+    // existing carve-outs above: none of them change behaviour.
+    const reloc = relocatedByFile.get(file)?.get(ln);
+    if (reloc) {
+      exempt.push({
+        v,
+        reason: `relocated from ${file}:${reloc.counterpartLine} (${reloc.runLength}-line contiguous match against the diff's removed lines)`,
+        kind: 'relocated',
+      });
+      continue;
+    }
+    blocking.push(v);
   }
 
   // No silent caps: every exempted line is printed with its declared reason, so each use of the

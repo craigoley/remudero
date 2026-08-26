@@ -328,3 +328,92 @@ test("computeTypeOnlyRanges: an object-`type` ALIAS (`type X = { ... }`), not ju
     },
   ]);
 });
+
+// ── W1-T2325: a RELOCATED line inherits its coverage debt, it doesn't manufacture a new one ─────
+//
+// The gate's own header comment already settles the policy: "an already-uncovered pre-existing
+// line is the aggregate ratchet's problem, not a new regression this diff introduced". A line that
+// was uncovered at the merge base and moves to a new offset during a restructure IS pre-existing
+// text by that sentence -- but `addedLinesByFile` only ever saw the `+` side, so a pure relocation
+// (identical text removed and re-added in the SAME diff) used to read exactly like a fresh
+// regression and blocked the refactor the gate exists to reward.
+
+test("removedLinesByFile: mirrors addedLinesByFile -- records `-` lines keyed by OLD (not new) line number, and does not consume a line number for `+` or context lines", async () => {
+  const { removedLinesByFile } = await import(pathToFileURL(SCRIPT).href);
+  const diff = [
+    "diff --git a/src/x.ts b/src/x.ts",
+    "+++ b/src/x.ts",
+    "@@ -1,3 +1,2 @@",
+    " head",
+    "-gone",
+    " tail",
+    "",
+  ].join("\n");
+  const removed = removedLinesByFile(diff);
+  assert.deepEqual([...removed.get("src/x.ts").entries()], [[2, "gone"]]);
+});
+
+test("diff-coverage CLI: an added block whose identical text was REMOVED elsewhere in the same diff is a RELOCATION -- it does not block even though lcov marks it DA:0, and every relocated line is printed naming its counterpart old line", () => {
+  const result = runDiffCoverage("relocated-block.lcov", "relocated-block.diff");
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const out = result.stdout.toString();
+  assert.match(out, /exempt \(relocated\) src\/reloc\.ts:6 -- relocated from src\/reloc\.ts:2/);
+  assert.match(out, /exempt \(relocated\) src\/reloc\.ts:7 -- relocated from src\/reloc\.ts:3/);
+  assert.match(out, /exempt \(relocated\) src\/reloc\.ts:8 -- relocated from src\/reloc\.ts:4/);
+  assert.match(out, /exempt \(relocated\) src\/reloc\.ts:9 -- relocated from src\/reloc\.ts:5/);
+  assert.match(out, /exempt \(relocated\) src\/reloc\.ts:10 -- relocated from src\/reloc\.ts:6/);
+  assert.match(out, /OK -- every added source line/);
+});
+
+test("diff-coverage FALSIFIER: each removed counterpart exempts AT MOST ONE added line -- a block pasted TWICE against a single removal exempts the first copy and still BLOCKS the second (consume-once)", () => {
+  const result = runDiffCoverage("relocated-duplicate.lcov", "relocated-duplicate.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const out = result.stdout.toString();
+  const err = result.stderr.toString();
+  // First copy (new lines 6-10) consumed the sole removed counterpart -- exempt.
+  assert.match(out, /exempt \(relocated\) src\/reloc-dup\.ts:6 -- relocated from src\/reloc-dup\.ts:2/);
+  assert.match(out, /exempt \(relocated\) src\/reloc-dup\.ts:10 -- relocated from src\/reloc-dup\.ts:6/);
+  // Second copy (new lines 15-19) has no unconsumed counterpart left -- still blocks.
+  assert.match(err, /BLOCKED/);
+  assert.match(err, /src\/reloc-dup\.ts:15/);
+  assert.match(err, /src\/reloc-dup\.ts:16/);
+  assert.match(err, /src\/reloc-dup\.ts:17/);
+  assert.match(err, /src\/reloc-dup\.ts:18/);
+  assert.match(err, /src\/reloc-dup\.ts:19/);
+  assert.doesNotMatch(err, /src\/reloc-dup\.ts:6\b/, "the relocated copy must not also appear in the blocking list");
+});
+
+test("computeRelocatedLines: a run SHORTER than MIN_RELOCATION_RUN is never recognised as a relocation, even with identical text on both sides -- a single coincidental line match must not exempt anything", async () => {
+  const { addedLinesByFile, removedLinesByFile, computeRelocatedLines } = await import(pathToFileURL(SCRIPT).href);
+  const diff = [
+    "diff --git a/src/y.ts b/src/y.ts",
+    "+++ b/src/y.ts",
+    "@@ -1,2 +1,1 @@",
+    "-return;",
+    " tail",
+    "@@ -5,1 +4,2 @@",
+    " head2",
+    "+return;",
+    "",
+  ].join("\n");
+  const added = addedLinesByFile(diff);
+  const removed = removedLinesByFile(diff);
+  const relocated = computeRelocatedLines(added, removed);
+  assert.equal(relocated.get("src/y.ts"), undefined);
+});
+
+test("computeRelocatedLines: a genuinely new added line with NO merge-base counterpart is never marked relocated -- the residual regression case must still surface", async () => {
+  const { addedLinesByFile, removedLinesByFile, computeRelocatedLines } = await import(pathToFileURL(SCRIPT).href);
+  const diff = [
+    "diff --git a/src/z.ts b/src/z.ts",
+    "+++ b/src/z.ts",
+    "@@ -1,1 +1,2 @@",
+    " head",
+    "+brandNewLine1",
+    "",
+  ].join("\n");
+  const added = addedLinesByFile(diff);
+  const removed = removedLinesByFile(diff);
+  const relocated = computeRelocatedLines(added, removed);
+  assert.equal(relocated.get("src/z.ts"), undefined);
+});
