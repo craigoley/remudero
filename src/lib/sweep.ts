@@ -1753,7 +1753,14 @@ export function mainHealthShouldStandDownDispatch(observation: MainHealthObserva
 export const CI_GATE_CHECK_NAME = "ci-gate";
 
 /**
- * W1-T2296 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE.
+ * #2918 — `ci-gate` REPORTED AS A FAILURE IT CANNOT BE.
+ *
+ * ATTRIBUTED TO THE PR, NOT A TASK, DELIBERATELY: #2918 carries no task id on any credit path —
+ * no `Remudero-Task:` trailer on its body or either commit, and its head `fix/ci-gate-not-a-peer-
+ * failure` is not the `run-<id>-<epoch>` shape the branch-name path reads. This block previously
+ * cited W1-T2296, which is the incident-replay shard filed the same night for an unrelated
+ * purpose; the existence gate accepted it because that id resolves, not because it matched. Do
+ * not "restore" a task id here without one that actually owns this work.
  *
  * `ci-gate` is a DOWNSTREAM AGGREGATOR: its failing step is literally "Aggregate sibling check
  * results", and its own annotations read `required check(s) failing — entering a 600s grace window`

@@ -21086,7 +21086,7 @@ export function fetchCiFailures(
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
   });
-  // W1-T2296: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
+  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
   // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
   // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
   return withoutDownstreamGateFailure(
