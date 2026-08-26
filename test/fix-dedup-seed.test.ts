@@ -91,11 +91,15 @@ function ghShim(dir: string, headRefName: string): void {
       "#!/bin/sh",
       'case "$*" in',
       '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
-      '  *"statusCheckRollup"*) echo \'{"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS"}]}\' ;;',
+      // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view --json
+      // statusCheckRollup`. The composed rollup's own check-runs read answers CI green.
+      '  *"/check-runs"*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;',
+      '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
       // The REST live-state read `ghLiveState`/`dispatchFixPreflightStandDown` both use
       // (`gh api repos/{owner}/{repo}/pulls/{n}`) — an OPEN, unmerged PR every time, so the
-      // preflight never stands the dispatch down for either fixture below.
-      '  *"api"*"pulls/"*) echo \'{"state":"open","merged":false}\' ;;',
+      // preflight never stands the dispatch down for either fixture below. `waitForCiGreen`
+      // reads this SAME endpoint now too, for its own PR-row/head-sha lookup (W1-T2268).
+      '  *"api"*"pulls/"*) echo \'{"state":"open","merged":false,"head":{"sha":"deadbeef"}}\' ;;',
       "  *) echo '{}' ;;",
       "esac",
       "",
