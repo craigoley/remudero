@@ -619,6 +619,7 @@ import {
   checkMemoryGovernor,
   checkQueueGovernor,
   cancelledRequiredCheckNames,
+  withoutDownstreamGateFailure,
   checksStateFromRollup,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
@@ -21037,7 +21038,11 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
   });
-  return failing.map((c) => {
+  // W1-T2296: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
+  // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
+  // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
+  return withoutDownstreamGateFailure(
+    failing.map((c) => {
     const name = c.name ?? c.context ?? "unknown";
     let logTail = "";
     try {
@@ -21053,7 +21058,8 @@ export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck
       /* best-effort — degrades to an empty tail, never throws */
     }
     return { name, logTail };
-  });
+  }),
+  );
 }
 
 /**
