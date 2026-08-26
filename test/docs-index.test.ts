@@ -370,3 +370,48 @@ test("main(): a --dir that does not exist hits the outer catch -- non-zero exit,
   assert.equal(exitCode, 1);
   assert.match(err.join("\n"), /generate-docs-index:/);
 });
+
+// ── W1-T2323-adjacent: a SUMMARY IS NOT A MAINTENANCE BANNER ────────────────────────────────
+//
+// `rmd retro` writes `_MAINTAINED BY \`rmd retro\` — regenerated <ISO>._` into docs/ORIENTATION.md
+// on every run (src/lib/retro.ts), and the first-prose-line heuristic copied that timestamp into
+// the index — so the index went stale on EVERY retro, by construction, and neither retro.ts nor
+// run-task.ts references docs-index at all. The operator's ruling was to stop the index
+// summarising a volatile line rather than to add a freshness guard: fixing the INPUT makes a guard
+// safe afterwards, while adding the guard first moves the breakage onto a lane that did not cause
+// it. These pin the input fix, in both directions.
+
+test("parseDocEntry: a leading wholly-emphasised CALLOUT is skipped, and the next prose line is the summary", () => {
+  const { summary, title } = parseDocEntry(
+    ["# ORIENTATION", "", "_MAINTAINED BY `rmd retro` — regenerated 2026-08-26T13:38:19.806Z._", "", "What this doc is about."].join("\n"),
+  );
+  assert.equal(title, "ORIENTATION");
+  assert.equal(summary, "What this doc is about.", "the banner is machinery, not this doc's first sentence");
+});
+
+test("parseDocEntry: a retro rewriting the callout's timestamp does NOT change the entry — the whole point", () => {
+  const doc = (stamp: string) =>
+    ["# ORIENTATION", "", `_MAINTAINED BY \`rmd retro\` — regenerated ${stamp}._`, "", "A fresh Architect session should orient from THIS doc."].join("\n");
+  const a = parseDocEntry(doc("2026-08-26T13:38:19.806Z"));
+  const b = parseDocEntry(doc("2099-01-02T03:04:05.678Z"));
+  assert.deepEqual(a, b, "two retros a lifetime apart must produce the same index entry");
+});
+
+test("parseDocEntry FALSIFIER: without the skip, the timestamp WOULD land in the summary", () => {
+  // The pre-fix behaviour, stated rather than described: the first prose line after the H1.
+  const lines = ["# ORIENTATION", "", "_MAINTAINED BY `rmd retro` — regenerated 2026-08-26T13:38:19.806Z._", "", "What this doc is about."];
+  const preFix = lines.slice(1).find((l) => l.trim() && !/^#{1,6}\s/.test(l.trim()))!.trim();
+  assert.match(preFix, /2026-08-26T13:38:19/, "the old heuristic picked the volatile line");
+  assert.doesNotMatch(parseDocEntry(lines.join("\n")).summary, /2026-08-26T13:38:19/, "and the fix does not");
+});
+
+test("parseDocEntry CONTROL: a line with emphasis INSIDE it is ordinary prose and is NOT skipped", () => {
+  // 25 of docs/'s 26 first prose lines are this shape; skipping them would empty the index.
+  const { summary } = parseDocEntry(["# ADR", "", "MASTER-PLAN §5 TIER 3: **ADR discipline for IRREVERSIBLE calls.** A short note."].join("\n"));
+  assert.match(summary, /MASTER-PLAN/, "emphasis inside a sentence does not make it a banner");
+});
+
+test("parseDocEntry: a doc whose ONLY prose is a callout gets an empty summary, never machinery", () => {
+  const { summary } = parseDocEntry(["# Generated", "", "_MAINTAINED BY a robot — regenerated 2026-01-01T00:00:00.000Z._", "", "## Next"].join("\n"));
+  assert.equal(summary, "", "an empty summary is honest; a maintenance banner is not");
+});
