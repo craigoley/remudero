@@ -26,7 +26,8 @@ raw: "rmd status WARNS ABOUT A CIRCUIT BREAKER ON A TASK THAT CANNOT DISPATCH â€
   must stay."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
 summary: null
 expansion: null
+answered_by: null
