@@ -304,6 +304,20 @@ test("W1-T1048: scanDeclaredPlanIds tolerates an absent tasks file and an absent
   assert.deepEqual([...mod.scanDeclaredPlanIds(root)].sort(), ["W1-T4243", "W1-T4244"]);
 });
 
+test("W1-T2324: scanDeclaredPlanIdOccurrences tolerates an absent tasks file and an absent shard directory", () => {
+  const root = scratch();
+  const byId = mod.scanDeclaredPlanIdOccurrences(root, { planTasksFile: "no-such.yaml", planTasksDir: "no-such.d" });
+  assert.equal(byId.size, 0);
+  // Positive control on the same call shape: a real file and a real shard dir both resolve, and a
+  // path that IS the shard-dir name but is a plain file (ENOTDIR) tolerates the same way.
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "- id: W1-T4243\n");
+  writeFileSync(join(root, "plan", "tasks.d"), "not a directory\n");
+  const withFileInsteadOfDir = mod.scanDeclaredPlanIdOccurrences(root);
+  assert.deepEqual([...withFileInsteadOfDir.keys()], ["W1-T4243"]);
+  assert.deepEqual(withFileInsteadOfDir.get("W1-T4243"), [{ file: "plan/tasks.yaml", line: 1 }]);
+});
+
 test("W1-T1048: loadBaseline refuses an unreadable file, naming the path", () => {
   assert.throws(
     () => mod.loadBaseline(join(scratch(), "absent.json")),
