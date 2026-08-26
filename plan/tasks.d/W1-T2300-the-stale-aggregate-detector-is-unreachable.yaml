@@ -1,0 +1,145 @@
+- id: W1-T2300
+  title: "A CORRECT STALE-AGGREGATE DETECTOR HAS BEEN UNREACHABLE SINCE IT SHIPPED — staleCiGateTransition is real, needs no log tail, and is already re-driven once per head and sibling transition by runSweep, but nothing in the CLI calls its producer and its input type carries no startedAt, so it cannot fire; supplying that field is not free, because the dedupe every REST check-state read depends on sorts on it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 55.00
+  files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/run-task.ts, test/rest-rollup-started-at.test.ts, test/stale-ci-gate-wiring.test.ts]
+  origin: oper#stale-aggregate-detector-unreachable-2026-08-26
+  plan_refs: ["W1-T457", "W1-T1066", "W1-T1275", "W1-T2299"]
+  status: queued
+  attempts: 0
+  rationale: |
+    RE-DERIVED IN A SCRATCH WORKTREE PROVEN EQUAL TO origin/main at 6a0626bf. run-task.ts is over a
+    megabyte and was read through a git object, never from the working tree. Symbols are cited by
+    name rather than line, because lines drift. NO LEDGER CLAIM APPEARS ANYWHERE IN THIS SHARD:
+    resolveLedgerUnion returns archiveCount zero and ok false at both candidate state roots
+    reachable from this container, which is the union's own coverage refusal, so the ledger was not
+    consulted for any statement below.
+
+    (1) THE DETECTOR IS REAL AND IT IS NOT THE PROBLEM. staleCiGateTransition reads a deduped
+    rollup, requires the gate entry to carry a startedAt, and names the single most recent sibling
+    whose own startedAt is strictly later. It consults no log tail. runSweep already keys its
+    recompute on the pair of head and sibling transition, and the field doc for that key states the
+    intent directly: a sibling that transitions again at a new startedAt is a DIFFERENT key earning
+    its own bounded recompute. Nothing about the detector needs redesigning.
+
+    (2) BLOCKER ONE, UNWIRED. readCiGateRollup and reaggregateCiGate each appear ZERO times in
+    run-task.ts, measured against three controls read the same way in the same file: requeueCheck,
+    escalateCancelledCheck and dispatchFix all appear, the last of them dozens of times. So the zero
+    is absence, not a blind query. staleCiGateTransition itself also appears zero times there. All
+    three live only in sweep.ts. W1-T1275 is named repeatedly in that file and its own scoping left
+    the producer out deliberately; the follow-up that would have supplied it was never filed.
+
+    (3) BLOCKER TWO, THE INPUT LACKS THE FIELD. RestRollupEntry declares name, context, status,
+    conclusion, state, detailsUrl and targetUrl -- and no startedAt. Neither the camel-case field
+    nor the REST payload key appears anywhere in open-prs-rest.ts, against a control of the
+    conclusion key which appears there repeatedly. So a REST-sourced rollup can never satisfy the
+    detector's first requirement.
+
+    (4) AND THE FIELD IS AVAILABLE, CHECKED AGAINST A REAL RESPONSE RATHER THAN ASSUMED. Every
+    entry in a live check-runs response for a recent head carried a non-null started_at, matching
+    the count of entries carrying a conclusion. THE TWO REST SOURCES DO NOT AGREE ON THE KEY,
+    THOUGH: the combined-status endpoint's entries carry created_at and updated_at and NO
+    started_at. That is the same split the gateway path already handles -- RollupCheckEntry's own
+    doc records that the exporter fills this from a check run's startedAt and from a status
+    context's createdAt -- so a correct REST mapping must read two different source keys by entry
+    shape, and a build that maps only the check-run half will silently leave every status context
+    untimestamped.
+  note: |
+    ── Q1. WHAT POPULATING THE FIELD CHANGES, AND EVERY READER IT REACHES ──────────────────────
+
+    (i) THE READERS, BY SYMBOL. dedupeRollupByLatestAttempt is called by checksStateFromRollup,
+    cancelledRequiredCheckNames, stillRedRequiredNames, mainHealthFromRollup and
+    staleCiGateTransition in sweep.ts, and by fetchCiFailures and cancelledRequiredChecks in
+    run-task.ts. Every one of them is a check-state decision. Only the last of the sweep five is the
+    lane this task wants; the other six change as collateral.
+
+    (ii) WHAT THE SORT DOES TODAY ON A REST ROLLUP. The comparison keeps an entry when its startedAt,
+    defaulted to the empty string, is greater than or equal to the prior one's. On REST every entry
+    is undefined, so the comparison is empty string against empty string, which is true for every
+    pair, and the LAST ENTRY ENCOUNTERED WINS. Today's REST dedupe is therefore array order, not
+    recency.
+
+    (iii) CORRECT BY ACCIDENT, NOT BY DESIGN -- AND THE FUNCTION SAYS SO ITSELF. Its doc states that
+    an entry with no startedAt sorts as older than any timestamped entry sharing its key, that a tie
+    keeps the last one encountered, and that ITS CONTRACT IS ONLY THAT DUPLICATES COLLAPSE TO ONE
+    ROW PER NAME, NEVER THAT ARRAY ORDER CARRIES MEANING ON ITS OWN. So the ordering the fleet gets
+    from REST today rests on the order GitHub happens to return attempts in, which the contract
+    explicitly declines to guarantee. Anything relying on it is relying on a disclaimed property.
+
+    (iv) SO SUPPLYING THE REAL FIELD IMPROVES IT RATHER THAN MERELY CHANGING IT -- but the
+    improvement is a real behaviour change and must be tested as one. The gateway path already
+    carries the field on every entry it reports, per the field's own doc, so REST and the gateway
+    currently dedupe the SAME pull request by two different rules. Populating REST makes them agree.
+    That is the argument for doing it; it is not an argument that nothing moves.
+
+    (v) THE ONE READER THAT MOVES MOST, NAMED SO THE BUILD DOES NOT MEET IT BY SURPRISE.
+    stillRedRequiredNames returns early, treating a name as still red, whenever the fresh entry is
+    absent OR carries no startedAt, with the comment calling that fail-open. On a REST rollup TODAY
+    that early return fires for EVERY name, because none of them has the field. Populating it takes
+    that function off its fail-open path for the first time since it shipped, which is the single
+    largest delta in this change and needs its own test on both sides.
+
+    ── Q2. SEQUENCING: THE FIELD FIRST, AND NOT IN ONE PR ──────────────────────────────────────
+
+    (vi) WIRING FIRST IS THE FAILURE MODE THIS REPO HAS ALREADY FILED TWICE. A lane wired to a
+    producer whose input can never satisfy its first requirement looks live and is cold -- the
+    observedByTask shape, shipped and never supplied, and the requeueCheck shape, built and wired
+    and sitting at zero while checks were being requeued by hand. Wiring before the field would
+    reproduce it exactly, and worse, it would LOOK like this task had shipped.
+
+    (vii) FIELD FIRST IS SAFE TO LAND ALONE, WHICH IS WHAT MAKES SEQUENCING POSSIBLE. With the
+    producer still uncalled, populating startedAt fires no new lane at all -- it changes only the
+    six collateral readers in (i), under test, with the detector still dark. That is a bounded,
+    reviewable change with a single blast radius. Wiring afterwards then turns on a lane whose input
+    is already known good.
+
+    (viii) SO: TWO CHANGES, ORDERED, NOT ONE. One PR carrying both would mix a fleet-wide dedupe
+    change with a new lane, giving a reviewer two blast radii and no way to attribute a regression
+    to either. The order is not a preference: field-then-wiring is observable at each step, and
+    wiring-then-field has an intermediate state that is indistinguishable from success.
+
+    ── Q3. WHAT MUST NOT CHANGE ───────────────────────────────────────────────────────────────
+
+    (ix) THE RE-DRIVE STAYS BOUNDED. Once per head and sibling transition, never a loop. W1-T1066
+    records a polling loop that locked the operator out of his own repository for ninety minutes.
+    The existing key already encodes the bound; wiring must consume it, never widen it, and must not
+    introduce any retry of its own on top.
+
+    (x) THE SINGLE-JOB ENDPOINT STAYS. requeueCheck already re-runs one job by id, and its own
+    comment gives the reason: a whole-run re-run re-spends sibling jobs that are already green,
+    which is the very waste this family of incidents is about. Nothing here may substitute a
+    whole-run re-run for it.
+
+    (xi) NOTHING WEAKENS THE GATE'S ABILITY TO HOLD A MERGE. This makes a stale aggregate
+    DETECTABLE; it does not make a red gate passable, and no part of it may relax a required-context
+    judgement.
+
+    (xii) CITE, DO NOT RE-FILE. withoutDownstreamGateFailure, which stops the gate being counted as
+    a peer failure and closed the genuine-failures subtraction leak, is a separate and already-landed
+    concern; W1-T1275 scoped the producer out deliberately. THIS TASK OWNS THE FIELD AND THE WIRING,
+    NOT THE FILTER. A build that touches the filter has widened past its brief.
+
+    (xiii) RULE 19 BAND. risk high is set up front because the file list spans three source stems --
+    the entry type in open-prs-rest.ts, the readers in sweep.ts, and the producer call site in
+    run-task.ts -- and Rule 19 sizes on SPAN. The band is the span reading, not a blast-radius
+    judgement.
+  acceptance:
+    - claim: "a REST-sourced rollup entry carries the attempt start time, mapped from the check-run key for a check run and from the creation key for a status context, so neither entry shape is left untimestamped"
+      proof: "unit test: test/rest-rollup-started-at.test.ts"
+    - claim: "deduping a REST rollup keeps the latest attempt by time rather than the last element encountered, and two attempts of one name still collapse to exactly one row"
+      proof: "unit test: test/rest-rollup-started-at.test.ts"
+    - claim: "the reader that treats a name as still red when the fresh entry carries no start time is exercised on both sides of the change, since on a REST rollup that early return currently fires for every name"
+      proof: "unit test: test/rest-rollup-started-at.test.ts"
+    - claim: "the stale-aggregate producer is reachable from the CLI and its detector fires on a rollup where required siblings started after the gate concluded and read success"
+      proof: "unit test: test/stale-ci-gate-wiring.test.ts"
+    - claim: "the recompute stays bounded to one per head and sibling transition and no retry loop is introduced on top of it"
+      proof: "unit test: test/stale-ci-gate-wiring.test.ts"
+    - claim: "a requeue still targets a single job by id and never substitutes a whole-run re-run that would re-spend already-green siblings"
+      proof: "unit test: test/stale-ci-gate-wiring.test.ts"
+    - claim: "no required-context judgement is relaxed — a gate that should hold a merge still holds it with the detector wired"
+      proof: "unit test: test/stale-ci-gate-wiring.test.ts"
