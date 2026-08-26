@@ -57,7 +57,43 @@
     carrying no trailer — control: the anchored regex finds 58 W1 trailers across the last 400
     commits, so its zero for W1-T463 is real. **W1-T458 itself was credited via `ledger`** (#1772).
     So the untrailered-merge route the brief worried about is already covered four ways over. What is
-    NOT covered is the case where the PR is correctly trailered — for a DIFFERENT task."
+    NOT covered is the case where the PR is correctly trailered — for a DIFFERENT task.
+    AMENDED 2026-08-26, RECORD ONLY — this corrects a premise stated above and decides nothing else.
+    Nothing below proposes wiring the advisory, proposes removing it, or amends W1-T458.
+    THE PREMISE THAT IS FALSE. This rationale states that W1-T458's `unresolved_task_scope` advisory
+    was live and correctly did not fire on #1777, and design (iv) repeats that it is live, correct,
+    and answering a different question. THE ADVISORY HAS NEVER FIRED AND CANNOT FIRE.
+    WHY IT CANNOT. `unresolvedTaskScopeOverlaps` (src/lib/review.ts) returns early on
+    `!openTaskDeclaredFiles`, and `ReviewEvidence.openTaskDeclaredFiles` HAS ZERO PRODUCERS IN src/:
+    measured 2026-08-26, every src/ mention is the field declaration or a consumer reading it, and
+    only four test files ever construct one. CONTROL, on the same surface: the wired sibling
+    `openTaskIds` has a real producer, `openTaskIdsFromPlan`, populated at three src/ sites.
+    SO THE SILENCE ESTABLISHES NOTHING. Silence cannot distinguish correctly-did-not-fire from
+    cannot-fire, and #1777's quiet review is consistent with both. The observation is real; the
+    inference drawn from it above is not available.
+    LEDGER CONTROL FOR THE SAME ZERO. Over the last 120 merged PRs on main, distinct PRs carrying a
+    review.unwired_advisory row by reason code: scope_violation 13, inverse_scope 5, unwired_export
+    4, and unresolved_task_scope 0. Three siblings fire on that exact sample; this one does not.
+    THE CAUSE, RECORDED SO THE CORRECTION CARRIES IT. The owner is W1-T458, merged 2026-08-14 as
+    #1772. Its design named the plan loader as the source and said NO NEW DATA IS FETCHED, but its
+    declared `files:` were src/lib/review.ts plus four test files — no src/run-task.ts, which is
+    exactly where the sibling producer sits and where judgeReview's evidence is assembled. The merge
+    touched the consumer and never a producer site. There is no SHIPS-UNWIRED or WIRED-AT marker on
+    it, though 25 such markers exist in src/ so the convention was available, and no follow-up was
+    filed. Twelve days as of this amendment.
+    WHAT A PRODUCER WOULD CATCH, MEASURED AND NOT ACTED ON. A retrofit over the last 120 merged PRs
+    on main measures 19 of 120 — 15.8 percent — that would fire if `openTaskDeclaredFiles` were
+    populated. That sits close to the roughly 11 percent W1-T458 measured at filing time, and above
+    scope_violation's 10.8 percent on the same 120-PR sample.
+    THE UPPER-BOUND CAVEAT, WHICH THE FIGURE MUST NOT BE QUOTED WITHOUT. The 19 uses the anchored
+    Remudero-Task trailer as a proxy for no-task-resolved, while the reviewer also resolves a task by
+    head branch, so PRs credited that way are counted unresolved when they were not. 19 is therefore
+    a CEILING, not a measurement of the advisory's true firing rate.
+    WHAT THIS AMENDMENT DOES NOT TOUCH. This task's own title still carries the original claim, and
+    it is left exactly as filed: the title is a guarded field and correcting it is not what a
+    purely-additive amendment may do. A reader taking the title at face value should read this
+    paragraph. Whether to wire the producer, leave the check unfired, or retire it is the operator's
+    decision and is not made here."
   design: "(i) **WHAT TO DETECT, AND WHY IT IS A REPORT RATHER THAN A GATE.** A merge-time gate that
     refused a PR for a trailer mismatch would fire on **every filing** — filings are REQUIRED to omit
     the trailer (#1527 fixed a defect where one credited a task the moment its filing merged), so
