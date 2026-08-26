@@ -162,6 +162,46 @@ export interface RefreshResult {
 }
 
 /**
+ * W1-T2319 design (v) — Q2, RECORDABILITY DECLARED IN CODE, CHECKED BY A TEST, NOT A NEW GATE.
+ *
+ * Every reason this module (or its sibling function below) can put on a `RefreshResult.reason` /
+ * a `TOKEN_REFRESH_FAILED_STEP` ledger row, declared once so a later sweep can tell an
+ * UNRECORDABLE zero (this member cannot fire) from a genuinely unobserved one, and a PREFIX form
+ * (carries a variable suffix — matching it as a literal reads a false zero, rationale (4)) from a
+ * LITERAL one.
+ *
+ *   - `recordable`: whether a `log(TOKEN_REFRESH_FAILED_STEP, ...)` call site exists that can
+ *     produce this reason. `app not configured` is the one `false`: it RETURNS before any `log`
+ *     call (design ii — absent config is not an attempt), so its zero is unrecordable by
+ *     construction, never a measurement.
+ *   - `form`: `"literal"` reasons match a ledger row's `reason` field exactly. `"prefix"` reasons
+ *     are TEMPLATES — the string here is the fixed stem a real row's `reason` STARTS WITH, never
+ *     the whole value (e.g. a row reads `exchange rejected: 403`, not `exchange rejected: `).
+ *   - `writer`: which function's own `log` call can produce this reason. `refresh threw: ` is
+ *     `startInstallationTokenRefresh`'s, not `refreshInstallationToken`'s — a sweep scoped to only
+ *     one of the two silently misses the other (rationale (4)).
+ */
+export type TokenRefreshReasonForm = "literal" | "prefix";
+
+export interface TokenRefreshReasonDeclaration {
+  recordable: boolean;
+  form: TokenRefreshReasonForm;
+  writer: "refreshInstallationToken" | "startInstallationTokenRefresh";
+}
+
+export const TOKEN_REFRESH_REASONS: Readonly<Record<string, TokenRefreshReasonDeclaration>> = {
+  "app not configured": { recordable: false, form: "literal", writer: "refreshInstallationToken" },
+  "private key unreadable": { recordable: true, form: "literal", writer: "refreshInstallationToken" },
+  "jwt signing failed": { recordable: true, form: "literal", writer: "refreshInstallationToken" },
+  "exchange timed out": { recordable: true, form: "literal", writer: "refreshInstallationToken" },
+  "exchange request failed: ": { recordable: true, form: "prefix", writer: "refreshInstallationToken" },
+  "exchange rejected: ": { recordable: true, form: "prefix", writer: "refreshInstallationToken" },
+  "exchange response unparsable": { recordable: true, form: "literal", writer: "refreshInstallationToken" },
+  "exchange response missing token": { recordable: true, form: "literal", writer: "refreshInstallationToken" },
+  "refresh threw: ": { recordable: true, form: "prefix", writer: "startInstallationTokenRefresh" },
+};
+
+/**
  * Signs a GitHub App JWT with `crypto.sign` — an IN-PROCESS, ONE-SHOT call (Node's own
  * `node:crypto`, confirmed `typeof crypto.sign === "function"` under the fleet's own runtime) —
  * never an `openssl` shell-out and never a new dependency (design i). Exported so a test can
@@ -178,6 +218,61 @@ export function signAppJwt(appId: string, privateKeyPem: string, now: () => numb
     "base64url",
   );
   return `${signingInput}.${signature}`;
+}
+
+/**
+ * W1-T2319 design (iv) — the error's OWN identifier, when it carries one: `err.cause.code` where
+ * present (Node's `fetch` wraps a real connection failure — ECONNREFUSED, ENOTFOUND, a TLS
+ * failure — in a `TypeError` whose `.cause` is the underlying `SystemError`/`AggregateError`
+ * carrying `.code`), else `err.name` PROVIDED it is more specific than the bare `Error` a plain
+ * `new Error(message)` carries by default. A bare `Error` — the shape "a test fixture's own
+ * rejection once its signal fires" takes (design ii) — identifies nothing, so this returns
+ * `undefined` for it rather than the uninformative literal string `"Error"`, which is what lets
+ * the caller fall through to the abort-only branch instead of manufacturing a fake identity.
+ */
+function fetchFailureIdentifier(err: unknown): string | undefined {
+  if (err instanceof Error) {
+    const cause = err.cause;
+    if (cause && typeof cause === "object" && "code" in cause && typeof (cause as { code: unknown }).code === "string") {
+      return (cause as { code: string }).code;
+    }
+    if (err.name && err.name !== "Error") {
+      return err.name;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * W1-T2319 — THE ONE HELPER THE CATCH ARM CONSULTS, ORDER IS THE WHOLE FIX (design i).
+ *
+ *   1. IDENTITY FIRST. `AbortController.abort(reason)` sets `signal.reason` to that exact object
+ *      and a spec-compliant `fetch` rejects with THAT SAME OBJECT, so `err === signal.reason`
+ *      identifies OUR OWN abort with no string match and no `err.name` sniff (which a caller's
+ *      unrelated signal could also satisfy) — see the abort call above, which always passes an
+ *      explicit reason for exactly this.
+ *   2. THE ERROR'S OWN IDENTIFIER SECOND, REACHABLE EVEN ON AN ALREADY-ABORTED SIGNAL (design
+ *      iii/iv): a rejection that names its own cause — a refused connection, a DNS failure, a TLS
+ *      failure — is named for what it is rather than folded into the timeout bucket just because
+ *      the 20s budget happened to also have expired.
+ *   3. THE ABORT-ONLY FALLBACK LAST, reached only when the error identifies nothing (design ii) —
+ *      the seam the existing test suite already relies on: a fixture that rejects with a bare
+ *      `Error` once its signal fires still reads as a timeout.
+ *   4. Otherwise: a genuine, unidentified rejection that arrived before any abort — reachable in
+ *      principle (design (7)), named without inventing a code that was never offered.
+ */
+function describeExchangeCatch(err: unknown, timeoutController: AbortController): string {
+  if (err === timeoutController.signal.reason) {
+    return "exchange timed out";
+  }
+  const identifier = fetchFailureIdentifier(err);
+  if (identifier !== undefined) {
+    return `exchange request failed: ${identifier}`;
+  }
+  if (timeoutController.signal.aborted) {
+    return "exchange timed out";
+  }
+  return "exchange request failed: unknown";
 }
 
 /**
@@ -221,9 +316,9 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   }
 
   // W1-T1068: the exchange is ABANDONED, never awaited forever — see EXCHANGE_TIMEOUT_MS's doc
-  // for why 20s. `signal.aborted` (not the caught error's shape) is what distinguishes a timeout
-  // from any other network failure, so this works whether the injected `fetchImpl` throws a real
-  // AbortError or a test fixture's own rejection once its signal fires.
+  // for why 20s. The timer is armed BEFORE the fetch is issued, exactly as before this task —
+  // W1-T2319 changes only how the catch below NAMES what it caught, never when or whether the
+  // exchange is abandoned.
   let res: Response;
   const timeoutController = new AbortController();
   const timeoutTimer = setTimeout(
@@ -240,8 +335,12 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
       },
       signal: timeoutController.signal,
     });
-  } catch {
-    const reason = timeoutController.signal.aborted ? "exchange timed out" : "exchange request failed";
+  } catch (err) {
+    // W1-T2319: DECIDE FROM THE CAUGHT ERROR FIRST, FROM THE ABORT ONLY WHEN THE ERROR SAYS
+    // NOTHING (design i/ii) — never from `signal.aborted` alone, which is true for the WHOLE
+    // twenty seconds since the timer was armed and says nothing about whether the network was
+    // ever touched during it.
+    const reason = describeExchangeCatch(err, timeoutController);
     log(TOKEN_REFRESH_FAILED_STEP, { reason });
     return { ok: false, reason };
   } finally {
