@@ -22,7 +22,7 @@ raw: "HEADROOM GOVERNOR BECOMES A FLAG, DEFAULT OFF — OPERATOR RULING
   headroom condition pauses dispatch, proven by test."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1953
 summary:
   headline: Headroom Governor Disabled by Default, Operator Enables as Needed

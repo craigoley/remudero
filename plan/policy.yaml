@@ -777,6 +777,37 @@ measurementCadence:
     # rule-efficacy's ONE write (a promote-to-instrument proposal); verdict-calibration and
     # autonomy-rate never consult this field at all.
 
+# W1-T2277: THE DIGEST'S OWN CADENCE ROW — deliberately SEPARATE from `measurementCadence`
+# immediately above, so a short digest interval can never drag rule-efficacy/verdict-
+# calibration/autonomy-rate to it (and vice versa). Reuses the SAME pure two-bound decision
+# function (`decideMeasurementCadence`) those three verbs already share — this row supplies it
+# a DIFFERENT policy value and a DIFFERENT marker file (state/last-digest-cadence.json), never a
+# second decision function.
+#
+# `minIntervalMinutes` is the operator-facing "digest interval": the console offers
+# {1, 2, 4, 8, 12, 24} hours (60..1440 minutes) — every one of those six values is inside this
+# row's own [15, 1440] bound, checked (not assumed) by `digest.ts`'s
+# `digestIntervalOptionsOutOfBounds`. Default 1440 (once/day), matching the digest's pre-cadence
+# behaviour (MASTER-PLAN §4's "daily digest").
+#
+# `maxPerDay` ships at its declared MAXIMUM (24) so `minIntervalMinutes` is the ONLY bound that
+# actually paces the digest — an operator who dials the console down to a 1-hour interval is
+# never additionally throttled by a stale daily cap left over from the 1440m default.
+digestCadence:
+  enabled:
+    value: true
+    origin: "net-new"   # safe (read-only default, sends nothing that spends budget or writes)
+  minIntervalMinutes:
+    value: 1440
+    origin: "net-new"
+    min: 15
+    max: 1440
+  maxPerDay:
+    value: 24
+    origin: "net-new"
+    min: 1
+    max: 24
+
 retro:
   mergesThreshold:
     value: 25

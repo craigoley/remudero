@@ -1,0 +1,149 @@
+- id: W1-T2293
+  title: "AN INFRASTRUCTURE FAULT HAS NO DISPOSITION EXCEPT BUILD — `FIX_MODE_RULES` is a closed table of five evaluated in order, merge-conflict then ci-log then gate-fix then body-coverage then reviewer-unmet, and every one of the five is a BUILD mode; a grep for report, observe, advise or noop across that table returns 0 against a control of 6 for `mode`, so a floor failure whose reason is WE DID NOT READ YOUR BODY routes identically to one saying YOUR BODY IS WRONG, and the only response the rung can offer is to edit the PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  files: [src/run-task.ts, test/infrastructure-fault-has-a-disposition.test.ts]
+  origin: oper#an-infrastructure-fault-has-no-disposition-except-build-2026-08-25
+  plan_refs: ["W1-T1100", "W1-T1282", "W1-T205", "W1-T2263", "W1-T94"]
+  status: queued
+  attempts: 0
+  rationale: |
+    ALL SOURCE CLAIMS RE-DERIVED AT origin/main 9f8eb325 IN A SCRATCH WORKTREE PROVEN EQUAL TO IT BY
+    SHA, CLEAN, NOT SHALLOW, WITH `src/run-task.ts` READ THROUGH GIT OBJECTS AND EVERY SITE CITED BY
+    SYMBOL RATHER THAN LINE. Ledger figures come from `resolveLedgerUnion` at the state dir: ok
+    true, 27 archives, liveFileRead true, unread none, 259,184 rows.
+
+    (0) THE CORPUS IS DAEMON-FED, NOT READER-FED. 176,228 rows carry `task_id: DAEMON`, newest 0.7
+    minutes old, and the steps written in the preceding ten minutes include `sweep.pass`,
+    `sweep.dispose`, `daemon.alive` and `sweep.post_review.attempt` — rows a read can never author.
+    Recorded because one host today looked live for the opposite reason: its reader was its writer.
+
+    (1) THE CLOSED SET, AND EVERY MEMBER OF IT BUILDS. `FIX_MODE_RULES` holds five rows evaluated in
+    order — merge-conflict, ci-log, gate-fix, body-coverage, reviewer-unmet — and `deriveFixMode`
+    returns the first whose `when` matches, defaulting to reviewer-unmet. A case-insensitive grep
+    for report, observe, advis or noop across that table reads 0, against a control of 6 for `mode`
+    on the same range. There is no disposition that reports.
+
+    (2) SO THE ROUTER CANNOT EXPRESS THE ONE FACT THAT MATTERS. `reviewer-unmet`'s own prompt says
+    "The review gate is FAILING (N UNMET acceptance criteria). Resolve ALL of them together in this
+    ONE pass." That instruction is correct when the criteria describe the diff. It is not merely
+    unhelpful but actively wrong when the reason is that the rung never read the body: there is
+    nothing in the diff to resolve, and every edit makes the PR worse.
+
+    (3) ONE NUANCE THAT MAKES THE REMEDY CHEAPER THAN IT LOOKS. `FixMode` is declared as the five
+    literals UNIONED WITH `(string & {})`, so the TYPE already admits a sixth member; only the TABLE
+    is closed. A new disposition therefore needs a table row and its prompt, not a type change and
+    not a migration of the five that exist.
+
+    (4) THE COST, TWICE, BOTH TODAY. PR-2850 at 17:45Z: the rung built 1,116 lines of implementation
+    into a plan-only filing PR, which had to be split apart by hand into two. And PR-2877 at
+    22:40:32 and 22:57:43: both strikes spent against a diff that never changed, escalated, and
+    merged by hand at one file and 167 added lines. Neither PR needed a line of code.
+
+    (5) THE POPULATION IS NEWLY TRIGGERED, NOT RARE. 3 `review.posted` rows carry the
+    substituted-body reason, all on 2026-08-25, zero before, out of 1,106 rows on the same read.
+    The trigger is new because plan-only PRs started reaching the fix rung at all; the rate is not
+    a measure of how often this can happen from here.
+
+    (6) WHAT IS ALREADY RULED OUT, RECORDED SO NOBODY RE-DERIVES IT. NO FETCH FAILED:
+    `review.body_fetch_error` and `fix.body_fetch_error` both read n=0 across the whole union,
+    against live controls of `review.posted` at 1,106 and `fix.dispatch` at 184 on the same read.
+    The body is fetched only when the mode is body-coverage; the flag defaults true for the other
+    three by initialiser. CONTROL: body-coverage has dispatched 4 times all-time against ci-log 140
+    and reviewer-unmet 40, and both failing PRs ran only the latter two.
+
+    (7) AND THE SPAWNED REVIEWER IS NOT THE CAUSE EITHER. The semantic layer is downgrade-only — it
+    can never rescue an unpasted proof — and `reviewerOutcome` appears 0 times in `sweep.ts`
+    against a control of 36 for `reviewState`, so no sweep disposition reads it. BODY SIZE IS
+    REFUTED TOO: a 9,899-byte body from the same day exceeds both failures, at 7,943 and 8,937, and
+    was judged normally; `fetchPrBodyViaGh` carries no `maxBuffer`, no truncation and no length
+    check.
+
+    (8) Q1 — THE MISSING DISPOSITION, AND WHY IT IS A STAND-DOWN RATHER THAN A SIXTH MODE. The
+    nearest existing thing is already correct in shape: the arm that logs `fix.stood_down` at site
+    `rung.empty_ci_failures` fires BEFORE `strikes++`, ledgers its reason, and returns
+    `outcome: "stood_down"` without spending a strike. Measured, it works: `fix.stood_down` reads 23
+    rows split `rung.strike` 18, `rung.empty_ci_failures` 3, `rung.exhaustion` 2 — so the
+    empty-evidence arm fired 3 times today and correctly. THE GAP IS ITS QUESTION, NOT ITS SHAPE: it
+    asks whether there is ANY evidence, and here there is plenty — eight unmet criteria, fully
+    populated. It never asks whether the evidence names a fault the rung cannot fix.
+
+    (9) Q2 — THE ROUTER ALREADY HOLDS THE FACT, AND NEEDS NOTHING NEW TO RECOGNISE THIS CASE.
+    `deriveFixMode` has already computed the mode when the prompt is rendered, and the mode alone
+    settles it: on ci-log, reviewer-unmet and merge-conflict the body was never fetched, by the
+    initialiser. So the narrow recognition costs one predicate over data in hand. #2886 is adding a
+    `reportSubstituteCause` that distinguishes never-fetched from fetch-failed, which makes the
+    same recognition exact rather than inferred — CITED, AND THIS TASK MUST NOT WAIT ON IT. A build
+    that lands first reads the mode; one that lands after reads the cause; neither blocks.
+
+    (10) BUT THE GENERAL NOTION IS THE ONE WORTH BUILDING, AND IT IS BROADER THAN THIS BUG. The
+    property is "this reason is about US, not about the diff" — a fault in the reviewing apparatus
+    rather than in the change under review. The substituted body is one instance; a materialisation
+    failure, an unreadable required-contexts read and an indeterminate live-head read are others
+    the codebase already names separately. A router that can only say BUILD will mis-route every
+    one of them, and each new one costs another pair of strikes to discover.
+  note: |
+    (i) THE FLOOR KEEPS FAILING CLOSED. Nothing here relaxes `reportSubstituted`. The proof it must
+    keep is the 22:57:43.941Z row: coverage 6 of 6, every proof keyword substantiated, and it still
+    failed all eight criteria, because coverage is withheld in EITHER direction. That is W1-T1100
+    design (iii) working, and it is the fail-open case the rule exists to refuse — a worker
+    describing its own change in the proof's own vocabulary. A build that makes a high-coverage
+    substitute pass has rebuilt the defect.
+
+    (ii) AND THE REFUSAL IS NOT THE DEFECT. The verdict was right both times; only the DISPOSITION
+    was wrong. A build that reaches this by softening the verdict has fixed the wrong half.
+
+    (iii) W1-T205's PLAN-ONLY CARVE-OUT IS NOT WIDENED INTO A BLANKET EXEMPTION FOR `plan/` DIFFS.
+    The carve-out is an exemption from a SEMANTIC downgrade on a plan-only diff, and it is already
+    correct. "This PR touches only plan/, so do not fail it" is a different and much larger rule
+    that would stop a genuinely defective shard from ever being caught, and it is refused here.
+
+    (iv) THE TWO-STRIKE CEILING AND THE ESCAPE BOTH STAY. A new disposition must fire BEFORE
+    `strikes++`, exactly as the empty-evidence arm does, and must not add a third strike, a retry
+    budget or a clock. Standing down is not a new way to keep trying.
+
+    (v) NOTHING AUTO-EDITS OR AUTO-CLOSES A PULL REQUEST. The disposition reports; a human or an
+    existing escalation path decides. A rung that responds to "we could not read your body" by
+    rewriting the body has rebuilt the same defect facing the other way.
+
+    (vi) AND IT MUST NOT SUPPRESS THE ESCALATION. Standing down without a strike must still leave a
+    visible record — the empty-evidence arm ledgers its reason and returns a named outcome, and the
+    new one must do at least that. A silent stand-down would turn a two-strike waste into an
+    invisible stall, which is worse.
+
+    (vii) THE RECOGNITION MUST NOT BE A PROSE MATCH ON THE REASON STRING. Keying on the words of a
+    message is how a wording change silently disarms a router; rationale (9) names two structured
+    inputs already in hand. A build that greps the refusal text has built something that will rot
+    the next time the refusal is reworded, which happened to this very string today.
+
+    (viii) AND A GENUINE UNMET CRITERION STILL ROUTES TO BUILD. The whole value of the existing
+    five is that a real defect reaches a worker. A disposition that swallowed those would stop the
+    drain against every red PR, which is strictly worse than today's waste.
+
+    (ix) RULE 19 BAND. `risk: high` is set UP FRONT because the sizing check reads `files:` as
+    spanning more than one concern — the `run-task` routing stem and this task's own test stem —
+    and refuses that at `risk: medium`. THE BAND IS THE SPAN READING AND NOT A BLAST-RADIUS
+    JUDGEMENT: rationale (3) measures the change as one table row plus a predicate over data the
+    router already computes.
+  acceptance:
+    - claim: "a floor failure whose reason is a fault in the reviewing apparatus rather than in the diff reaches a disposition that is not build"
+      proof: "unit test: test/infrastructure-fault-has-a-disposition.test.ts"
+    - claim: "that disposition spends no strike, so a pull request cannot exhaust its ceiling on a fault it cannot fix"
+      proof: "unit test: test/infrastructure-fault-has-a-disposition.test.ts"
+    - claim: "the stand down still leaves a ledgered reason and a named outcome rather than going silent"
+      proof: "unit test: test/infrastructure-fault-has-a-disposition.test.ts"
+    - claim: "the recognition reads a structured input rather than matching words in the refusal text"
+      proof: "unit test: test/infrastructure-fault-has-a-disposition.test.ts"
+    - claim: "a genuinely unmet acceptance criterion still routes to a build mode, so a real defect still reaches a worker"
+      proof: "unit test: test/infrastructure-fault-has-a-disposition.test.ts"
+    - claim: "a substituted report at full keyword coverage still fails, so the floor is unchanged"
+      proof: "unit test: test/infrastructure-fault-has-a-disposition.test.ts"
+    - claim: "the two strike ceiling is unchanged and the new disposition fires before a strike is counted"
+      proof: "unit test: test/infrastructure-fault-has-a-disposition.test.ts"
+    - claim: "no pull request body or state is written by the disposition itself"
+      proof: "unit test: test/infrastructure-fault-has-a-disposition.test.ts"

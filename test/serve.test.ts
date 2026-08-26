@@ -1299,7 +1299,15 @@ test("W1-T350: the FIRST Answer submit PREVIEWS the expansion (POST /v1/feedback
   const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(submitHandler, "no needs-me-list submit handler found");
   assert.match(submitHandler, /needs-me-answer-submit/);
-  assert.match(submitHandler, /postJson\("\/v1\/feedback\/preview", \{ text: answer, replyTo \}\)/, "must preview before the confirmed file");
+  // W1-T2301: this call now opts OUT of postJson's automatic ack ({ suppressAck: true }) -- the
+  // preview's own "nothing is filed yet" ack must never paint on the fail-open leg that files
+  // right behind it on this same click; the armed leg fires it manually once it has the
+  // expansion in hand (see the acceptance tests in test/serve.write-ack.test.ts).
+  assert.match(
+    submitHandler,
+    /postJson\("\/v1\/feedback\/preview", \{ text: answer, replyTo \}, \{ suppressAck: true \}\)/,
+    "must preview before the confirmed file",
+  );
 });
 
 test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, reading its claim back in the button label — never a bare 'Confirm?'", () => {

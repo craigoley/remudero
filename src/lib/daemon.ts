@@ -33,6 +33,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import type { MeasurementCadenceDecision, MeasurementCadenceRunResult } from "./measurement-cadence.js";
+import type { DigestCadenceRunResult } from "./digest.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
@@ -51,7 +52,13 @@ import {
 // W1-T343 (ADOPT DRAIN'S LANE MACHINERY, NEVER A SECOND IMPLEMENTATION): the SAME pure
 // overlap partition `runDrainLanes` (drain.ts) already composes with `runnableCandidates`/
 // `laneDispatchBudget` above — reused here verbatim rather than re-derived.
-import { partitionByFileOverlap, serializedLedgerPayload, settledSetPayload } from "./dispatch-overlap.js";
+import {
+  NO_OBSERVED_SCOPE,
+  partitionByFileOverlap,
+  serializedLedgerPayload,
+  settledSetPayload,
+  type ObservedScopeByTask,
+} from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
@@ -871,6 +878,17 @@ export interface DaemonDeps {
    */
   readPushedRunBranches?: () => string;
   /**
+   * W1-T2286 — the same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, for the
+   * daemon's own dispatch path (W1-T343 reuses `runnableCandidates`/`partitionByFileOverlap`
+   * rather than re-deriving them, and this dependency follows that reuse). Threaded to BOTH the
+   * pack step (`dispatchOpts.observedByTask` below) and `partitionByFileOverlap`'s own direct
+   * call in the dispatch-set branch below, so the two never disagree about a candidate's
+   * effective scope — see `DrainDeps.observedByTask`'s own doc for the full contract. Optional —
+   * omitted, both call sites fall back to `NO_OBSERVED_SCOPE` and dispatch is byte-identical to
+   * before this dependency existed; no production caller supplies one yet.
+   */
+  observedByTask?: ObservedScopeByTask;
+  /**
    * WHAT THE BREAKER SAW for a task, supplied by the SAME memoised evaluation the
    * `isCircuitTripped`/`isIndeterminate` predicates answered from (run-task.ts's
    * `breakerGateFor().detailFor`) — never a second call to the predicate. Spread onto the
@@ -1288,6 +1306,24 @@ export interface DaemonDeps {
    * throw costs one logged tick, never the daemon's life.
    */
   runMeasurementCadence?: () => Promise<MeasurementCadenceRunResult>;
+  /**
+   * W1-T2277: THE DIGEST'S OWN CADENCE RUNG — decides whether the digest (lib/digest.ts's
+   * `runDigestCadenceReport`) fires THIS tick. Paced by its OWN policy-data bound
+   * (`minIntervalMinutes` + `maxPerDay`, `plan/policy.yaml`'s `digestCadence` row — a SEPARATE
+   * row from `measurementCadence`'s, on a SEPARATE marker file, so the two can never drag each
+   * other), reusing the SAME `decideMeasurementCadence` pure function `checkMeasurementCadence`
+   * above does. Optional: omitted ⇒ the loop behaves exactly as before this rung existed (the
+   * digest stays reachable only by an operator typing `rmd digest`).
+   */
+  checkDigestCadence?: () => MeasurementCadenceDecision;
+  /**
+   * W1-T2277: build and deliver one digest, returning what got sent — never inside the producer
+   * itself (same split `runMeasurementCadence`'s own disposition logging uses). NEVER FILES A
+   * TASK, NEVER MINTS AN ID, NEVER SPAWNS A WORKER (Law 5) — see lib/digest.ts's
+   * `runDigestCadenceReport` doc. Best-effort like `runMeasurementCadence` above: a throw costs
+   * one logged tick, never the daemon's life.
+   */
+  runDigestCadence?: () => Promise<DigestCadenceRunResult>;
   /**
    * W1-T160: evaluate the retro cadence trigger this tick — fires on
    * merges-since-marker >= N OR days-since-marker >= D (policy data),
@@ -2649,6 +2685,35 @@ export async function runDaemon(
       }
     }
 
+    // DIGEST CADENCE (W1-T2277): "the digest fires on its own cadence from the daemon loop
+    // rather than only when a verb is typed" — SEPARATE from the measurement-cadence block just
+    // above (its own policy row, its own marker file, see `DaemonDeps.checkDigestCadence`'s
+    // doc), on the SAME "once per iteration" tick discipline. Best-effort by the SAME contract
+    // as `checkMeasurementCadence` above: a throw costs one logged tick, never the daemon's
+    // life, and a fired digest NEVER gates dispatch, fails a check, or changes a verdict.
+    // Optional: omitted ⇒ the loop behaves exactly as before this rung existed.
+    if (deps.checkDigestCadence) {
+      let digestDecision: MeasurementCadenceDecision | undefined;
+      try {
+        digestDecision = deps.checkDigestCadence();
+      } catch (e) {
+        log("digest_cadence.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (digestDecision?.fire) {
+        log("digest_cadence.fired", { reason: digestDecision.reason });
+        if (deps.runDigestCadence) {
+          try {
+            const result = await deps.runDigestCadence();
+            log("digest_cadence.ran", { channel: result.channelName, delivered: result.delivered });
+          } catch (e) {
+            log("digest_cadence.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else if (digestDecision) {
+        log("digest_cadence.skipped", { reason: digestDecision.reason });
+      }
+    }
+
     // HEADROOM: never hammer a nearly-exhausted pool. An at/near-limit reading
     // gates new spawns WITHOUT halting the loop (see the DaemonStopReason doc
     // above — a launchd KeepAlive unit restart-loops on any exit, so exiting
@@ -3025,6 +3090,10 @@ export async function runDaemon(
         : undefined;
       const dispatchOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T2286: the SAME map handed to `partitionByFileOverlap`'s own direct call below — see
+      // `DaemonDeps.observedByTask`'s own doc for why the pack step and the real partition must
+      // never disagree.
+      observedByTask: deps.observedByTask,
       // W1-T916: the argument W1-T534 declared and nothing supplied — see DrainDeps'
       // `readPushedRunBranches` for why the reader is injected and the parse hoisted.
       ...(pushedRunBranches
@@ -3154,7 +3223,10 @@ export async function runDaemon(
         });
       }
       const candidates = runnableCandidates(planForBatch, isMerged, budget, dispatchOpts);
-      const partition = partitionByFileOverlap(candidates);
+      // W1-T2286: `deps.observedByTask` passed EXPLICITLY (`?? NO_OBSERVED_SCOPE`) rather than
+      // omitted, so this call site no longer relies on `partitionByFileOverlap`'s own default
+      // parameter — see `DaemonDeps.observedByTask`'s own doc.
+      const partition = partitionByFileOverlap(candidates, deps.observedByTask ?? NO_OBSERVED_SCOPE);
       for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
       deferredPairings = partition.serialized.length;
       laneBudget = budget;

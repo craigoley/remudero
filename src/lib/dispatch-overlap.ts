@@ -76,13 +76,19 @@ export interface ObservedScope {
 
 /**
  * Per-task observed scope, keyed by task id — OPTIONAL input to
- * {@link partitionByFileOverlap}. A task absent from this map (every candidate,
- * on every production call site as of W1-T2237 — this is wired ONLY through this
- * function's default parameter, never threaded from drain.ts or daemon.ts) is
- * scored on its DECLARATION alone, exactly as before this shard: W1-T2237 §5 (Q1)
- * is explicit that arming the observed side against LIVE dispatch needs its own
- * throughput measurement first, so this shard builds the capability without
- * wiring it into either dispatch loop.
+ * {@link partitionByFileOverlap}. A task absent from this map is scored on its
+ * DECLARATION alone, exactly as before W1-T2237 added this parameter.
+ *
+ * W1-T2286 THREADS THIS THROUGH ALL THREE PRODUCTION CALL SITES (drain.ts's
+ * `packDisjointFirst`/`isDisjointFromEvery` and its own `runDrainLanes`, plus
+ * daemon.ts's `runDaemon`) via each caller's existing `DrainDeps.observedByTask`
+ * / `DaemonDeps.observedByTask` optional dependency — but picks NO live
+ * PRODUCER for it (see that task's rationale §4: the two candidate producers,
+ * a ledger read and a git-derived diff, both need their own throughput
+ * measurement first). Every caller that omits its `observedByTask` dependency
+ * still gets {@link NO_OBSERVED_SCOPE} at the call site, so production dispatch
+ * is UNCHANGED until a later task supplies a real producer — this shard is the
+ * plumbing, not the arming.
  */
 export type ObservedScopeByTask = ReadonlyMap<string, ObservedScope>;
 
@@ -102,7 +108,15 @@ export interface ScopeOverrunReport {
   overrun: string[];
 }
 
-const NO_OBSERVED_SCOPE: ObservedScopeByTask = new Map();
+/**
+ * The empty union — every candidate scored on its declaration alone. Exported (W1-T2286) so a
+ * call site that has no `observedByTask` dependency wired can pass this EXPLICITLY rather than
+ * omitting the argument and relying on {@link partitionByFileOverlap}'s own default parameter —
+ * the difference between "this call site was never wired" (before) and "this call site is wired,
+ * currently to nothing" (after), which is what makes the wiring itself something a caller can
+ * later replace with a real producer without touching this module again.
+ */
+export const NO_OBSERVED_SCOPE: ObservedScopeByTask = new Map();
 
 /**
  * True iff glob `a` and glob `b` can describe the SAME repo-relative path — i.e.

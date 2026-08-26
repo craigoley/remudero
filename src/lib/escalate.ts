@@ -8,6 +8,7 @@ import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } fro
 import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
+import type { WriteTier } from "./service.js";
 
 /**
  * Escalations as GitHub issues (W1-T8, MASTER-PLAN §4 "Escalation taxonomy").
@@ -29,10 +30,122 @@ import { resolveRiskJudgeMount } from "./risk-judge.js";
  */
 export type EscalationClass = "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
 
-/** One choice a human can make to resolve the escalation. */
+/**
+ * The closed set of routes an EXECUTABLE escalation option (see {@link EscalationOptionKind})
+ * may name, each mapped to the SAME {@link WriteTier} serve.ts's real route table
+ * (panel-actions.ts / panel-graph.ts / panel-skill-run.ts, assembled by `buildServeRoutes`)
+ * already declares for it — copied here, never re-derived, so this vocabulary and the live
+ * route table cannot drift apart (the "two-enumerator defect" the task's own note (iii) warns
+ * against). This map is deliberately CLOSED: an option naming any path outside it is refused
+ * by {@link validateEscalationOptionKind} before an issue is ever opened, so "no merge route,
+ * no PR-close route, no reject route" (W1-T2273 note (v)) holds BY CONSTRUCTION — none of those
+ * paths is, or can silently become, a member — rather than by code-review discipline alone.
+ * Sourced 2026-08-25 from the live route declarations themselves (`grep -n 'path: "/v1\|tier:'`
+ * across panel-actions.ts/panel-graph.ts/panel-skill-run.ts/serve.ts), not merely copied from
+ * a prior rationale's prose.
+ */
+export const ESCALATION_OPTION_ROUTES = {
+  "/v1/manual/approve": "high",
+  "/v1/drain/kick": "high",
+  "/v1/drain/run": "high",
+  "/v1/inbox/approve": "high",
+  "/v1/skills/run": "high",
+  "/v1/control/pause": "middle",
+  "/v1/control/resume": "middle",
+  "/v1/control/stop": "middle",
+  "/v1/quiet-hours": "middle",
+  "/v1/escalation/mark-handled": "low",
+  "/v1/questions/answer": "low",
+  "/v1/drain/feedback": "low",
+  "/v1/auth/scope": "low",
+} as const satisfies Record<string, WriteTier>;
+
+/** One path from the closed {@link ESCALATION_OPTION_ROUTES} set. */
+export type EscalationOptionRoute = keyof typeof ESCALATION_OPTION_ROUTES;
+
+/**
+ * An escalation option's machine-readable KIND (W1-T2273) — a closed set, exactly as
+ * {@link EscalationClass}/{@link CLASS_LABEL} below are already closed. Per the task's own
+ * design note (i)/(ii): an option either CAN be executed by the console — it names the route
+ * it posts to, the payload, and the {@link WriteTier} that route is ALREADY gated at — or it
+ * CANNOT, because the act named is the operator's alone (Q2), and is marked `operator-only`
+ * rather than rendered identically and silently doing nothing. There is no third shape.
+ */
+export type EscalationOptionKind =
+  | {
+      readonly type: "executable";
+      /** One of {@link ESCALATION_OPTION_ROUTES}'s own keys — never a route this task invents. */
+      readonly route: EscalationOptionRoute;
+      /**
+       * MUST equal `ESCALATION_OPTION_ROUTES[route]` — carried explicitly (not merely looked
+       * up at render time) so {@link validateEscalationOptionKind} can catch a caller whose
+       * claimed tier disagrees with the route's REAL tier, rather than silently trusting
+       * whichever value the caller happened to write down. Note (vii)/(xii): always one of the
+       * THREE EXISTING tiers — this field's type is {@link WriteTier} itself, so a fourth tier
+       * is not even expressible, let alone reachable.
+       */
+      readonly tier: WriteTier;
+      /** The JSON body the console would POST to `route`. Omitted when the route needs none. */
+      readonly payload?: Readonly<Record<string, unknown>>;
+    }
+  | { readonly type: "operator-only" };
+
+/**
+ * One choice a human can make to resolve the escalation. `kind` is OPTIONAL on the type
+ * (W1-T2273) so every existing producer — run-task.ts's `parseOptionFlags` and its dozens of
+ * inline `{ label, detail }` option literals, triage.ts's `parseGrillOptions` — keeps
+ * compiling and rendering byte-identical to today without this task touching any of those
+ * files (none is in this task's own `files:` scope). An option with no `kind` renders exactly
+ * like one marked `operator-only`: prose only, no button — today's behavior for every option
+ * in this fleet. `label`/`detail` are UNCHANGED by this task: the prose survives on every
+ * option, typed or not (note (xiv)) — {@link EscalationOptionKind} adds a machine-readable
+ * SIBLING, it never replaces the sentence with an enum.
+ */
 export interface EscalationOption {
   label: string;
   detail: string;
+  /** The option's machine-readable kind — see {@link EscalationOptionKind}. */
+  kind?: EscalationOptionKind;
+}
+
+/**
+ * Refuse an option whose declared {@link EscalationOption.kind} is not a member of the closed
+ * {@link EscalationOptionKind} set, whose `route` is outside {@link ESCALATION_OPTION_ROUTES},
+ * or whose declared `tier` disagrees with that route's real tier — W1-T2273 acceptance "an
+ * unrecognised option kind is refused at the emitter rather than rendered as an inert button".
+ * `undefined` (no kind declared) and `operator-only` both pass untouched: validation only ever
+ * narrows what an EXECUTABLE option is allowed to claim, it never requires a caller to opt in.
+ * Called from {@link escalate}/{@link escalateWithJudge} — the SAME choke point the zero-options
+ * refusal immediately above each already uses — so no caller can reach `createEscalationIssue`
+ * with an option the console has no honest way to render.
+ */
+export function validateEscalationOptionKind(option: EscalationOption): void {
+  const kind = option.kind;
+  if (kind === undefined || kind.type === "operator-only") return;
+  if (kind.type !== "executable") {
+    throw new Error(
+      `escalation option "${option.label}" carries an unrecognised kind ` +
+        `${JSON.stringify((kind as { type?: unknown }).type)} — must be "executable" or "operator-only"`,
+    );
+  }
+  const realTier = (ESCALATION_OPTION_ROUTES as Record<string, WriteTier | undefined>)[kind.route];
+  if (realTier === undefined) {
+    throw new Error(
+      `escalation option "${option.label}" names route ${JSON.stringify(kind.route)}, which is not in the ` +
+        `closed set of routes an escalation option may execute`,
+    );
+  }
+  if (realTier !== kind.tier) {
+    throw new Error(
+      `escalation option "${option.label}" declares tier ${JSON.stringify(kind.tier)} for route ` +
+        `${JSON.stringify(kind.route)}, but that route is actually tier ${JSON.stringify(realTier)}`,
+    );
+  }
+}
+
+/** Validate {@link validateEscalationOptionKind} across every option on an escalation. */
+function validateEscalationOptionKinds(e: Escalation): void {
+  for (const option of e.options) validateEscalationOptionKind(option);
 }
 
 export interface Escalation {
@@ -1111,6 +1224,7 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
+  validateEscalationOptionKinds(e);
   const resolved = refuseUnlessResolvable(e);
   const dup = findDuplicateEscalation(resolved, deps);
   if (dup) return recordDuplicateEscalation(resolved, dup, deps);
@@ -1139,6 +1253,7 @@ export async function escalateWithJudge(
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
+  validateEscalationOptionKinds(e);
   const resolved = refuseUnlessResolvable(e);
   const dup = findDuplicateEscalation(resolved, deps);
   if (dup) return recordDuplicateEscalation(resolved, dup, deps);

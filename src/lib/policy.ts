@@ -165,6 +165,18 @@ export interface PolicyValues {
     maxPerDay: number;
     escalate: boolean;
   };
+  /** W1-T2277: the daemon's digest cadence rung — its OWN row, deliberately separate from
+   *  {@link PolicyValues.measurementCadence} above, so a short digest interval can never drag
+   *  `rule-efficacy`/`verdict-calibration`/`autonomy-rate` to it (or vice versa). No `escalate`
+   *  field: the digest only reads and sends, it never drafts a proposal. OPTIONAL, same
+   *  absent-means-default shape as `measurementCadence`, defaulting to the SAFE always-on daily
+   *  cadence (`enabled: true`, once per day) — sending a digest spends nothing and writes
+   *  nothing (Law 5), so it is safe to run unattended from the start. */
+  digestCadence: {
+    enabled: boolean;
+    minIntervalMinutes: number;
+    maxPerDay: number;
+  };
   headroom: {
     curve: PolicyHeadroomRung[];
     reservePct: number;
@@ -262,6 +274,9 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "measurementCadence.minIntervalMinutes": "net-new",
   "measurementCadence.maxPerDay": "net-new",
   "measurementCadence.escalate": "net-new",
+  "digestCadence.enabled": "net-new",
+  "digestCadence.minIntervalMinutes": "net-new",
+  "digestCadence.maxPerDay": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
@@ -515,6 +530,22 @@ export function validatePolicy(raw: unknown): Policy {
         escalate: booleanField("measurementCadence.escalate", measurementCadenceRaw.escalate, origin),
       }
     : { enabled: true, minIntervalMinutes: 360, maxPerDay: 4, escalate: false };
+  // W1-T2277: THE DIGEST'S OWN CADENCE ROW — its OWN policy block, deliberately separate from
+  // `measurementCadence` immediately above (see `PolicyValues.digestCadence`'s doc for why).
+  // OPTIONAL, same absent-means-default shape — the default is the SAFE always-on daily
+  // cadence, since sending a digest spends nothing and writes nothing. `bounds` is recorded for
+  // `minIntervalMinutes` (unlike `measurementCadence`'s row, which no runtime consumer
+  // currently validates a write against) because `digest.ts`'s
+  // `digestIntervalOptionsOutOfBounds` is exactly that runtime consumer: it checks the
+  // console's offered interval set against THIS committed bound, never a second hand-copied one.
+  const digestCadenceRaw = raw.digestCadence as Record<string, unknown> | undefined;
+  const digestCadence = digestCadenceRaw
+    ? {
+        enabled: booleanField("digestCadence.enabled", digestCadenceRaw.enabled, origin),
+        minIntervalMinutes: numberField("digestCadence.minIntervalMinutes", digestCadenceRaw.minIntervalMinutes, origin, bounds),
+        maxPerDay: numberField("digestCadence.maxPerDay", digestCadenceRaw.maxPerDay, origin),
+      }
+    : { enabled: true, minIntervalMinutes: 1440, maxPerDay: 24 };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 
@@ -567,6 +598,7 @@ export function validatePolicy(raw: unknown): Policy {
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
       autoTriage,
       measurementCadence,
+      digestCadence,
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },

@@ -57,7 +57,7 @@ raw: "CORRECTS THE MECHANISM IN fb-1785898381737-50b031 — that entry's
   'the raw raw text above stays byte-identical'."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/2552
 summary:
   headline: PR fetch cadence, not issue fetch, drains GraphQL budget

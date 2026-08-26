@@ -11,7 +11,7 @@ raw: "AA16B6 ROOT CAUSE (follow-up): the npm-global claude symlink was rewritten
   preflight naming the real errno."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1932
 summary:
   headline: Auto-updater overwrote spawnable binary; decide on build safeguards

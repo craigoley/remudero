@@ -634,12 +634,18 @@ test("W1-T1265: blocked refused plus the control succeeding verdicts egress PROV
   assert.match(v.reason, /control request succeeded/);
 });
 
-test("W1-T1265: the blocked host coming back verdicts egress PROVEN-BROKEN", () => {
+test("W1-T2271: the blocked host coming back with NO discriminating detail verdicts UNPROVEN, not PROVEN-BROKEN", () => {
+  // This is the exact evidence shape that used to short-circuit straight to
+  // PROVEN-BROKEN: curl exited 0 (no --fail, no status test, body discarded),
+  // so the marker means only "curl received a response of some kind", never
+  // "the upstream was reached". Superseded by
+  // test/egress-evidence-discriminates.test.ts's full matrix.
   const v = assessEgressContainment(
     egressEvidence({ egressBlockedReached: true, egressAllowedReached: true, egressDenialSeen: false }),
   );
   assert.equal(v.contained, false);
-  assert.match(v.reason, /PROVEN-BROKEN/);
+  assert.match(v.reason, /UNPROVEN/);
+  assert.ok(!/PROVEN-BROKEN/.test(v.reason), "a bare response must never assert a proven breach");
   assert.match(v.reason, new RegExp(EGRESS_BLOCKED_HOST.replace(".", "\\.")));
 });
 
