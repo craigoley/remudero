@@ -1,0 +1,207 @@
+- id: W1-T2319
+  title: "`refreshInstallationToken`'s catch decides its reason from `timeoutController.signal.aborted` rather than from the caught error, and the abort is armed at t=0 — so ANY 20 seconds of wall-clock unavailability between arming and settling reports `exchange timed out` whether or not the network was ever touched, which is why one label covered 145 failures whose real cause was a 19.8-second synchronous board walk blocking the loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  rationale: |
+    Filed by reading only, from a scratch worktree PROVEN equal to origin/main by sha
+    (fa67f0dc6cd9b2dff89a9c25d76466a6b6c819f7), clone shallow-checked `false`. Source read from that
+    tree. Ledger read READ-ONLY over the fleet host's own state directory, per form, every zero
+    controlled. No spawning verb, no daemon touch, no restart.
+
+    (1) THE MECHANISM, IN ONE LINE OF SOURCE. `refreshInstallationToken` (`src/lib/github-app.ts`)
+    wraps its exchange in a catch whose whole decision is:
+
+      const reason = timeoutController.signal.aborted ? "exchange timed out" : "exchange request failed";
+
+    The signal is armed BEFORE the fetch is issued, with a fixed `EXCHANGE_TIMEOUT_MS` (20s) timer.
+    So the predicate does not ask what went wrong; it asks whether twenty seconds have elapsed since
+    the timer was armed. Those are the same question only when the process was free to make progress
+    the whole time. THE CAUGHT ERROR IS DISCARDED — the catch binds nothing (`} catch {`), so
+    whatever the exchange actually reported is unavailable to the line that names it.
+
+    (2) THE ARMING IS AT t=0, WHICH IS WHAT MAKES THE LABEL UNFALSIFIABLE. Any stall between arming
+    and settling — a blocked event loop, a stopped container, a suspended host — spends the budget
+    without any network being consulted, and the catch then reports the network. A genuine network
+    error has to land inside the same window to be named correctly, so on a blocked loop the abort
+    wins by construction rather than by fact.
+
+    (3) THE COST, NAMED. W1-T2318 measures the true cause on the observed head: a synchronous board
+    walk enumerating ~2,400 closed PRs blocks the loop for 19.8s, the abort timer fires with a
+    215ms margin, and the catch reads the signal rather than the error. THE MARGIN IS THE POINT —
+    the abort did not win by a landslide, it won by 215ms of a window the network had no access to
+    for the first 19.8s of. So `exchange timed out` is TRUE ABOUT THE CLOCK AND FALSE ABOUT THE
+    CAUSE, and being technically true is exactly why nobody asked. W1-T2318 also records the
+    second-order cost: because the App token never arrives, the daemon keeps its boot PAT, so the
+    call that starves the exchange is billed to the identity the exchange exists to replace
+    (W1-T2311's subject).
+
+    (4) THE VOCABULARY, ENUMERATED FROM SOURCE. Nine reasons are producible. Eight are written by
+    `refreshInstallationToken`: `app not configured`, `private key unreadable`, `jwt signing failed`,
+    `exchange timed out`, `exchange request failed`, `exchange rejected: <status>`, `exchange
+    response unparsable`, `exchange response missing token`. The ninth, `refresh threw: <message>`,
+    is written by a DIFFERENT function — `startInstallationTokenRefresh`'s rejection handler — which
+    is why a sweep scoped to the first function does not see it.
+
+    TWO CARRY VARIABLE SUFFIXES AND MUST BE SEARCHED BY PREFIX: `exchange rejected: ` and `refresh
+    threw: ` are TEMPLATES, not literals. A sweep that greps either as a literal reads a false zero,
+    which is the same hazard in miniature as the one this task is about.
+
+    (5) THE COUNT, RE-DERIVED HERE RATHER THAN CARRIED, AND IT CORRECTS THE BRIEF'S FIGURE UPWARD.
+    Over the fleet host's ledger, the corpus is THREE FORMS and the file counts are
+    `.gz` 0, dated-rotation 31, live 1. THE `.gz` FORM IS EMPTY ON THIS HOST — consistent with
+    nothing in the repo running `gzip` — so its zero is an empty form, not a missed one, and the
+    31-file figure names the rotations ALONE. Reading rotations plus live:
+
+      failed rows 145   (rotations 142, live 3)   refreshed rows 246   (rotations 234, live 12)
+
+    So 142 is the ROTATION-ONLY count and 145 is the union. Every one of the 145 carries
+    `reason: exchange timed out`; zero carry no reason key at all. The window is
+    2026-08-20T22:38:05.720Z to 2026-08-26T14:57:21.803Z, spread 4/27/29/27/21/21/16 per day rather
+    than concentrated in one burst.
+
+    THREE CONTROLS, EACH ON ITS OWN SURFACE, BECAUSE EIGHT OF NINE READ ZERO. (a) PER FORM: each
+    non-empty form was counted separately and `run.start` fires on each of them (rotations 5,842,
+    live 205), so no form was silently unglobbed. (b) THE EXTRACTOR: the same
+    `reason`-field extraction run across ALL steps returns tens of thousands of distinct non-timeout
+    reasons (top rows: 23,743 / 14,332 / 10,967), so a zero for the other eight is the corpus
+    speaking, not a broken query. (c) THE ONE `ledger*` FILE THE UNION GLOB DOES NOT COVER,
+    `ledger.ndjson.bak`, holds 0 failure rows against 204 `run.start` rows, so nothing hides there.
+
+    (6) NOT EVERY ZERO MEANS THE SAME THING, AND THAT IS THE SECOND DEFECT. Of the eight reasons
+    reading zero, `app not configured` RETURNS BEFORE ANY `log(...)` CALL and can therefore never
+    appear in the ledger AT ALL — deliberately, since the module's header rules that absent config
+    is not an attempt. Its zero is UNRECORDABLE BY CONSTRUCTION, not unobserved. `refresh threw:
+    <message>` is written by the other function and is OUT OF SCOPE of a sweep that names only the
+    first, so its zero is unknown rather than measured. The remaining six are genuinely unobserved.
+    A vocabulary in which one member cannot fire, one is invisible to the obvious query, and two
+    must be matched by prefix is not measuring what a reader thinks it is measuring.
+
+    (7) `exchange request failed` — SHARPENED, BECAUSE "STRUCTURALLY UNREACHABLE" OVERSTATES IT. It
+    is reachable in principle: a fetch that rejects while the signal has NOT yet aborted lands
+    there, and a refused connection or a DNS failure rejects in milliseconds. What is measured is
+    that it has never been reached in 145 failures — which is exactly what a population consisting
+    entirely of blocked-loop failures would look like, since on a blocked loop the signal has always
+    already aborted by the time the catch runs. So the honest statement is UNREACHABLE IN THIS
+    DEPLOYMENT'S OBSERVED POPULATION, NOT BY CONSTRUCTION, and the fix should make it reachable
+    rather than assume it cannot be.
+  design: |
+    (i) DECIDE FROM THE ERROR FIRST, FROM THE ABORT ONLY WHEN THE ERROR SAYS NOTHING. One named
+    helper in `github-app.ts`, consulted by the ONE catch arm, which starts binding its error. The
+    order is what the task buys; the helper is only where it lives.
+
+    THE EXACT DISCRIMINATOR IS AN IDENTITY TEST, NOT A SHAPE TEST. `AbortController.abort(reason)`
+    sets `signal.reason` to that object and `fetch` rejects with THAT SAME OBJECT, so
+    `err === timeoutController.signal.reason` identifies OUR abort exactly, with no string match, no
+    `err.name` sniff, and nothing an injected fixture can satisfy by accident. Prefer it over
+    checking `err.name === "AbortError"`, which a caller's own unrelated signal would also produce.
+
+    (ii) THE FALLBACK THE SEAM REQUIRES, AND WHY IT IS NOT A LOOPHOLE. The existing comment states
+    the constraint the test suite already relies on: the arm must work "whether the injected
+    `fetchImpl` throws a real AbortError or a test fixture's own rejection once its signal fires".
+    A fixture that rejects with a bare error AFTER the signal fired is not identity-equal to
+    `signal.reason`, so it must still read as a timeout. THAT is the abort-only branch, and it is
+    reached only when the error carries nothing identifying — which is the rule the task asks for,
+    stated as code rather than as a comment.
+
+    (iii) WHAT CHANGES FOR EACH OF THE NINE, EXHAUSTIVELY. SEVEN ARE UNTOUCHED. `app not configured`,
+    `private key unreadable` and `jwt signing failed` are decided before the exchange and never
+    consult the signal. `exchange rejected: <status>`, `exchange response unparsable` and `exchange
+    response missing token` are on the resolved-response path, downstream of the catch entirely.
+    `refresh threw: <message>` is in the other function. ONLY THE TWO CATCH-ARM REASONS MOVE:
+    `exchange timed out` NARROWS to our own abort plus the uninformative-error fallback, and
+    `exchange request failed` BECOMES REACHABLE for every rejection that identifies itself. That
+    two-of-nine bound is the whole blast radius.
+
+    (iv) THE NEW ARM NAMES THE CODE, OR IT REPEATS THE MISTAKE ONE LEVEL DOWN. `exchange request
+    failed` with nothing after it is another label that says the code's choice rather than the
+    fault. Carry the error's own identifier — `err.cause.code` where present, else `err.name` —
+    as `exchange request failed: <code>`. THIS MAKES IT A THIRD PREFIX FORM, which the declaration
+    in (v) must record; the shard picks this deliberately rather than leaving it open, because a
+    diagnosis that cannot name ECONNREFUSED apart from a TLS failure has bought nothing.
+
+    (v) Q2 — RECORDABILITY IS DECLARED IN CODE AND CHECKED BY A TEST, NOT BY A NEW GATE. One
+    module-owned table maps each reason to how it can be read: whether it is RECORDABLE (a
+    `log(TOKEN_REFRESH_FAILED_STEP, ...)` call site exists), and whether it is a LITERAL or a PREFIX
+    form. `app not configured` is declared UNRECORDABLE, because it returns before any log call.
+    `refresh threw: ` is declared as belonging to the OTHER function, so a sweep knows to widen.
+
+    THE TEST IS THE ENFORCEMENT AND IT IS BIDIRECTIONAL: every reason the source can log appears in
+    the table marked recordable, and every reason marked unrecordable has no logging call site. That
+    turns "cannot fire" from a footnote into a checked claim, and it makes a sweep's zero
+    interpretable — an unrecordable zero is expected, a recordable zero is a measurement. NO NEW CI
+    JOB, NO THRESHOLD, NO RATCHET, NO WORKFLOW EDIT: it is a test in the existing suite, which is
+    the only reason it is in scope at all.
+
+    (vi) Q1's SECOND HALF — THE REASON IS DISPLAY-ONLY, WHICH BOUNDS THE CHANGE. Measured across
+    `src/` and `scripts/`: every occurrence of every reason literal is inside `github-app.ts` itself
+    (13 hits), plus ONE doc comment in `status-board.ts` that describes the field as carried
+    "verbatim off the row". The two consumers are `deriveNeedsMe` (`src/lib/status-board.ts`), which
+    copies it into `tokenFallback.reason`, and `trackGithubCredentialState` (`src/lib/serve.ts`),
+    which copies it into `lastFailureReason`. NEITHER COMPARES IT. No gate reads it, no retry
+    branches on it, no escalation differs by it. So relabelling changes what a human reads and what
+    a sweep tallies, and nothing else — which is why this can be done without touching either
+    consumer.
+  acceptance:
+    - claim: "the catch arm binds its error and decides the reason from it, consulting the abort only when the error identifies nothing"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+    - claim: "a rejection that is identity-equal to the controller's own abort reason reads as a timeout"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+    - claim: "a rejection carrying its own error code reads as a request failure naming that code, even when the signal has already aborted"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+    - claim: "a fixture that rejects with an uninformative error after its signal fires still reads as a timeout, so the existing seam keeps working"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+    - claim: "the seven reasons outside the catch arm are byte-identical to before, each asserted individually"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+    - claim: "every reason the source can log is declared recordable in the table, and every reason declared unrecordable has no logging call site"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+    - claim: "each prefix-form reason is declared as a prefix, so a sweep matching it as a literal is a declared error rather than a silent zero"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+    - claim: "a failed refresh leaves the environment token exactly as it found it on every arm of the new decision"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+    - claim: "the exchange timeout constant is unchanged and the abort is still armed before the fetch is issued"
+      proof: "unit test: test/token-refresh-reason-provenance.test.ts"
+  files: [src/lib/github-app.ts, test/token-refresh-reason-provenance.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#one-label-covered-three-causes-2026-08-26"
+  plan_refs: ["W1-T2318", "W1-T2311", "W1-T1068", "W1-T1024"]
+  note: |
+    Q3 — WHAT MUST NOT CHANGE, AND THE BUILD IS WRONG IF ANY OF IT MOVES.
+
+    THE EXCHANGE STAYS FAIL-SAFE. A failed refresh leaves the previous token completely untouched;
+    the environment seam is written only on the success path, after both body checks. Every new arm
+    of the decision must preserve that, and it is asserted per arm rather than once, because a
+    decision that grew a branch is exactly where a single end-to-end assertion stops covering.
+
+    NO PACING AND NO SLEEP, AND `EXCHANGE_TIMEOUT_MS` IS UNCHANGED AT 20s. This task changes how a
+    caught error is NAMED, never whether or when the exchange is abandoned. The timer stays armed
+    before the fetch is issued and stays cleared in `finally`; the rearm on failure stays
+    unconditional, so a failed mint still reschedules on the margin rather than going silent.
+
+    THIS IS NOT THE BOARD-WALK FIX. W1-T2318 owns the 19.8-second synchronous enumeration that
+    caused the observed population, and CLOSING W1-T2318 MUST NOT BE READ AS CLOSING THIS. The two
+    are independent in both directions: fixing the walk removes today's dominant cause and leaves
+    the label just as unfalsifiable for the next stall, and fixing the label does not make the walk
+    any faster. A build that closes this by making the loop faster has answered the other task.
+
+    NEITHER CITED TASK IS RE-FILED. W1-T2318 and W1-T2311 are named in `plan_refs` and their
+    findings are cited, not restated as work: the board walk is W1-T2318's, and the boot-PAT
+    identity question is W1-T2311's.
+
+    THE COUNT IS A QUERY, NOT A NUMBER TO CARRY. The 145/142 split above is stamped with its window
+    and its per-form file counts precisely so a later reader re-runs it rather than quoting it; the
+    corpus grows, and the rotation-only figure will keep drifting from the union figure for as long
+    as the live file is excluded from the glob.
+
+    THE FORWARD REFERENCE IS DELIBERATE. `test/token-refresh-reason-provenance.test.ts` does not
+    exist yet; it is declared in `files:` so the pure-path proofs resolve under the W1-T456
+    forward-reference carve-out and read `not_yet_built` until the build lands.
+
+    RULE 19 BAND. `risk: high` is set for the SPAN of the declared `files:` — one module and its
+    test — not for blast radius. The change is confined to one catch arm and one declaration table
+    in a module whose consumers do not read the value it produces.
