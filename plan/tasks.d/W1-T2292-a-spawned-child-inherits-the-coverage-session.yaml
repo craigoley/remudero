@@ -1,0 +1,149 @@
+- id: W1-T2292
+  title: "A TEST THAT SPAWNS A NODE CHILD UNDER A COVERAGE SESSION SILENTLY ENROLS IT, AND THE ONE FORM THE REPO USES TO OPT OUT IS A NO-OP — `delete env.NODE_V8_COVERAGE` leaves the child pointed at the parent's coverage directory, so the child's own function table merges into the parent's report keyed on the absolute path; ten test files strip `NODE_TEST_CONTEXT` from a child env and NONE of them blanks the coverage session, while the one file that tries uses the form that does nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [scripts/coverage-session-blanking-check.mjs, test/coverage-session-blanking.test.ts]
+  origin: oper#a-spawned-child-inherits-the-coverage-session-2026-08-25
+  plan_refs: ["W1-T964", "W1-T951", "W1-T2276", "W1-T2266"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (0) THE BEHAVIOUR, MEASURED HERE, AND ONE CORRECTION TO THE BRIEF THAT COMMISSIONED THIS.
+
+    From a parent running under `--experimental-test-coverage`, spawning a child four ways and
+    counting the `SF:` blocks the child contributes to the PARENT's lcov:
+
+      inherit (no env option)          child sees the parent's coverage dir   SF blocks: 1
+      delete env.NODE_V8_COVERAGE      child sees the parent's coverage dir   SF blocks: 1
+      NODE_V8_COVERAGE: undefined      child sees it ABSENT                   SF blocks: 0
+      NODE_V8_COVERAGE: ""             child sees ""                          SF blocks: 0
+
+    `delete` IS THE NO-OP: node's own `child_process` force-injects the variable into every child
+    regardless of the `env` option, and a hand-built `{ PATH, HOME }` still carries it. BUT THE
+    COMMISSIONING BRIEF SAID ONLY `""` LANDS, AND THAT IS TOO NARROW — `undefined` lands too, and
+    the distinction matters because `src/lib/review.ts`'s proof executor ALREADY passes
+    `NODE_V8_COVERAGE: undefined` and already documents the force-injection in its own comment.
+    A check that mandated the empty string would have flagged correct code as wrong. Both blanking
+    forms are acceptable; only `delete` is not.
+
+    (1) WHY IT MATTERS: THE LCOV MERGE KEY IS THE ABSOLUTE PATH.
+
+    An enrolled child collects coverage on whatever source IT imports and writes into the parent's
+    directory. Two readers of the SAME absolute path merge into ONE `SF:` block carrying BOTH line
+    sets — reproduced in miniature as one block holding two `FN:` sets for the same three functions
+    with the hits split across them. On `src/lib/ledger.ts` that produced 16 duplicate `FN:` names,
+    every pair exactly 3 lines apart, and made `diff-coverage` name a 22-line range as uncovered
+    while `FNDA` proved the function had been entered, bracketed by covered lines on both sides.
+    The decisive control was removing the offending test file from the union: 0 shifted records and
+    1 `SF:` block. (Those ledger-side figures are the operator's measurement, taken on the fleet
+    host; this checkout's ledger is not daemon-fed — its newest `task_id: DAEMON` row is
+    2026-08-17 — so they are attributed, not re-derived. The four-variant table in §0 IS re-derived
+    here.)
+
+    (2) Q1 — THE INVARIANT, AND AN HONEST ACCOUNT OF WHAT A CHECK CAN AND CANNOT SEE.
+
+    THE INVARIANT: a test that spawns a Node child while running under a coverage session must
+    blank `NODE_V8_COVERAGE` explicitly. It is not "fix these callers" — the callers are today's
+    instances of a rule that binds every spawn written after them.
+
+    MECHANICALLY CHECKABLE, IN PART, AND THE PARTS ARE DIFFERENT IN KIND:
+
+      (a) A DEFINITE DEFECT, decidable from source text: any `delete <expr>.NODE_V8_COVERAGE`.
+          It is always wrong — it reads as an opt-out and is not one. Exactly one site today,
+          `test/base-blob-read-failure.test.ts`, whose own comment says the variable "is stripped
+          from the child" while the form it uses leaves the child enrolled.
+      (b) A STRONG SUSPICION, not a proof: a child env object that deletes `NODE_TEST_CONTEXT` and
+          does not blank `NODE_V8_COVERAGE`. Stripping `NODE_TEST_CONTEXT` is this repo's own
+          marker for "I am spawning a nested node runner", so the two belong together. TEN test
+          files do the first today and NONE does the second.
+
+    WHAT SUCH A CHECK WOULD MISS, AND THIS MUST BE STATED IN THE CHECK'S OWN OUTPUT RATHER THAN
+    DISCOVERED LATER:
+
+      - a spawn with NO `env` option at all, which inherits by default and is the commonest shape;
+        217 test files call `spawnSync`/`execFileSync` and a text scan cannot tell which of them
+        spawn a NODE child versus `git`, `gh` or a shell — and only a node child collects coverage;
+      - an env assembled at runtime, or spread from a helper, where no literal appears at the site;
+      - a spawn routed through a wrapper, where the env is built one layer away;
+      - anything outside `test/`.
+
+    SO THE CHECK PROVES PRESENCE OF A DEFECT, NEVER ABSENCE OF ONE. It must say so in its own
+    failure text, the way this repo's other scans do, or its first clean run will be read as a
+    clearance it cannot give.
+
+    (3) Q2 — THE DEFENCE-IN-DEPTH ALTERNATIVE, ARGUED BOTH WAYS AND DECIDED BY NOBODY HERE.
+
+    READER-SIDE (`scripts/diff-coverage.mjs` reconciles what it reads): protects spawn sites nobody
+    has written yet, needs no author to remember anything, and covers every gap in §2's miss list.
+    Its cost is that it makes the reader tolerant of malformed input, and a tolerant reader is
+    harder to reason about precisely when a real corruption appears.
+
+    PER-CALLER BLANKING: protects only the sites that adopt it, and every future spawn is a fresh
+    chance to forget — which is exactly the shape a check exists to catch. Its benefit is that it
+    fixes the CAUSE, so the artefact is correct rather than repaired.
+
+    AND A READER-SIDE FIX ALREADY SHIPPED FOR A DIFFERENT INSTANCE OF THIS SYMPTOM AND DID NOT
+    CLEAR THE BLOCKED PR — NOBODY SHOULD EXPECT THE NEXT ONE TO. W1-T2276 merged a reader-side
+    reconciliation that merges duplicate `FN:`/`DA:` records rather than letting a later record
+    overwrite an earlier one. Measured on the blocked head, it could not help: BOTH of its
+    `DA:`-side repairs need a SECOND SOURCE of `DA:` data — the cross-block merge needs two blocks,
+    and the any-higher-wins merge needs a nonzero duplicate to win over. That file's artefact
+    carried ONE `SF:` block whose `DA:` values across the flagged range were uniformly zero, so
+    `max(0, 0)` is 0 and there was nothing to merge. Its `FN:` reconciliation DID work — it rescued
+    the declaration line — but the flagged range was function BODY lines, which no declaration-line
+    exemption reaches. A reader-side fix repairs a collision between two records; it cannot invent
+    line evidence that was never collected.
+
+    (4) SCOPE OF THE BUILD.
+
+    A scan in the shape of this repo's existing `scripts/*-check.mjs` family, plus its test. It
+    reports (a) as a defect and (b) as a finding that names the file and says what to do; it states
+    its own blind spots in its output; and it does not edit any caller. Fixing the sites is
+    separate work, one concern each, and this task deliberately does not do it — naming the rule
+    and making a violation visible is the whole deliverable.
+  note: |
+    SIZING BAND: `risk: high` is set UP FRONT and the band is Rule 19's SPAN, not blast radius —
+    a scanner plus its test. Nothing under `src/` is touched and no caller is edited.
+
+    WHAT MUST NOT CHANGE. The two mutation detectors keep detecting what they detect: W1-T964's
+    check must still fail when the follow-up step pinning is removed, and W1-T951's must still fail
+    when its own mutation stops being caught. Both are load-bearing and neither is weakened,
+    narrowed or skipped by anything here. NO COVERAGE EXCLUSION, NO NARROWED MUTATION SCOPE, NO
+    BASELINE OR THRESHOLD EDIT. AND `diff-coverage` STAYS BLOCKING — it is correctly refusing to
+    certify lines for which the artefact holds no line-level evidence, and it caught a real gap in
+    another PR's guards even while misreporting these; a task that made it quieter would be
+    trading a true refusal for a convenient one.
+
+    ONE SITE IS ALREADY FIXED FOR THE OTHER HALF OF ITS PROBLEM AND STILL HAS THIS ONE:
+    `test/ledger-rotation.test.ts` was sandboxed so its mutation no longer touches the tracked
+    file, and that change explicitly did not and could not fix the coverage half — the child still
+    enrols. `test/dispatch-lifetime-breaker.test.ts` writes the real `src/lib/status.ts` in the
+    same shape and is untouched on both halves.
+
+    ID PROVENANCE: W1-T2292 was verified UNUSED across all eight surfaces — reservation refs, shard
+    filenames on origin/main, declared `- id:` lines, open-PR titles, head branches, PR bodies,
+    merged `Remudero-Task:` trailers and merged subjects — each match anchored and each zero paired
+    with a control that fires on its own surface, every merged-surface control drawn from an
+    actually-merged id. Surface 1 reads the reservation ref as PRESENT; the other seven read zero.
+  acceptance:
+    - claim: "a delete of the coverage variable from a child env is reported as a defect wherever it appears"
+      proof: "unit test: test/coverage-session-blanking.test.ts"
+    - claim: "blanking by explicit undefined and by empty string are both accepted, and neither is reported"
+      proof: "unit test: test/coverage-session-blanking.test.ts"
+    - claim: "a child env that drops the nested runner marker without blanking the coverage session is reported by file"
+      proof: "unit test: test/coverage-session-blanking.test.ts"
+    - claim: "the falsifier holds against a real file: test/base-blob-read-failure.test.ts is named while its delete stands"
+      proof: "unit test: test/coverage-session-blanking.test.ts"
+    - claim: "the check states its own blind spots in its output so a clean run is never read as a clearance"
+      proof: "unit test: test/coverage-session-blanking.test.ts"
+    - claim: "a spawn with no env option is named as unreachable by the scan rather than silently passed"
+      proof: "unit test: test/coverage-session-blanking.test.ts"
+    - claim: "no caller is edited by this task and no existing mutation detector changes behaviour"
+      proof: "unit test: test/coverage-session-blanking.test.ts"
+    - claim: "the reader side reconciliation is left alone, so the blocking gate keeps refusing lines with no evidence"
+      proof: "unit test: test/coverage-session-blanking.test.ts"
