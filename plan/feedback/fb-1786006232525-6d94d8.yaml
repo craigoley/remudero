@@ -25,7 +25,23 @@ raw: "THREE CORRECTIONS FROM THE 07:25Z MONITOR, TWO OF THEM TO CLAIMS I
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/3003
+summary:
+  headline: "Retract: rmd verbs mutate state, not pure readers"
+  what_happened: "Three rmd verbs (status, lint-plan, check-proof) documented as
+    pure readers actually run git merge --ff-only, mutating the checkout. Two
+    prior false claims on dry-run caller identity and #1392 production
+    confirmation are also retracted."
+  decision: "Choose remediation for rmd mutation: switch to RMD_SELF_SYNC_DONE=1
+    immediately, make merge opt-in, or halt live-worker rmd pending review."
+  options:
+    - label: Immediately switch to RMD_SELF_SYNC_DONE=1 read-only form
+      consequence: Eliminates mutation risk but requires urgent audit of all recent
+        live-worker rmd usage.
+    - label: Implement opt-in fast-forward before re-enabling rmd
+      consequence: Safer long-term design but delays operations until code change and
+        testing complete.
+    - label: Halt all live-worker rmd until documentation and code are fixed
+      consequence: Maximum safety but significant operational pause during implementation.
 expansion: null
 answered_by: null
