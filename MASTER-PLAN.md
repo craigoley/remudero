@@ -1554,7 +1554,8 @@ and are maintained IN PLACE, not per-cycle.
   one host id raise the infrastructure arm exactly once, never ten times; **the recurrence-trend line
   prints the state histogram beside the count, never the count alone.**
 - **★ TASK N (P52/P50 — JOIN THE PROBE'S OWN NUMBERS TO THE GUARD ROW THAT KILLED THE RUN; R29's mint,
-  UNBUILT).** GROUND TRUTH: **W1-T2238/#2794 shipped a `(numTurns, maxTurns)` pair onto the containment
+  UNBUILT).**
+  GROUND TRUTH: **W1-T2238/#2794 shipped a `(numTurns, maxTurns)` pair onto the containment
   probe's own ledger row on 2026-08-25.** R29's gather printed **18** guard-fired block lines and
   **R30's printed 8** — every one of the **26** for a run that started AFTER that merge, every one
   reading `containment/outside-cwd-denial — observed: turns-exhausted`, and **not one carrying a
