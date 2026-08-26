@@ -1,16 +1,27 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   BOARD_REVIEW_MIN_RED_COUNT,
   BOARD_REVIEW_OLDEST_OPEN_AGE_HOURS,
   boardItemsInScope,
+  boardReviewMarkerPath,
   buildBoardReview,
   decideBoardReviewCadence,
   decideBoardReviewTrigger,
+  readBoardReviewMarker,
+  recordBoardReviewFire,
   type BoardItem,
   type BoardReviewPolicy,
 } from "../src/lib/board-review.js";
+import { runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
 import type { Proposal } from "../src/lib/inbox.js";
+
+function tmp(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
 
 // ── W1-T2304: NO RUNG'S UNIT IS THE BOARD. The sweep and the fix rung read one PR, the retro
 // reads runs since a marker, auto-triage reads queue capacity — nothing reads the whole open
@@ -316,4 +327,146 @@ test("a first run with an absent marker fires immediately once the depth trigger
   const items = [item({ id: "pr-1", ageHours: 1000 })];
   const d = decideBoardReviewCadence({ policy: ON, marker: { kind: "absent" }, now: NOW, items });
   assert.equal(d.fire, true);
+});
+
+// ── the marker read/write shape — a deliberate, small duplication of measurement-cadence.ts's own
+// marker functions (see this file's header doc) ─────────────────────────────────────────────────
+
+test("boardReviewMarkerPath is state/last-board-review.json under the given root", () => {
+  assert.equal(boardReviewMarkerPath("/some/root"), join("/some/root", "state", "last-board-review.json"));
+});
+
+test("readBoardReviewMarker resolves absent for a missing file", () => {
+  const root = tmp("rmd-br-marker-absent-");
+  try {
+    const path = boardReviewMarkerPath(root);
+    assert.deepEqual(readBoardReviewMarker(path), { kind: "absent" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("readBoardReviewMarker fails closed to corrupt on invalid JSON and on a wrong shape", () => {
+  const root = tmp("rmd-br-marker-corrupt-");
+  try {
+    const path = boardReviewMarkerPath(root);
+    mkdirSync(join(root, "state"), { recursive: true });
+
+    writeFileSync(path, "{not json");
+    assert.deepEqual(readBoardReviewMarker(path), { kind: "corrupt" });
+
+    writeFileSync(path, JSON.stringify({ fires: [1, 2, 3] }));
+    assert.deepEqual(readBoardReviewMarker(path), { kind: "corrupt" });
+
+    writeFileSync(path, JSON.stringify(null));
+    assert.deepEqual(readBoardReviewMarker(path), { kind: "corrupt" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recordBoardReviewFire appends a fire, trims to the window, and round-trips through readBoardReviewMarker", () => {
+  const root = tmp("rmd-br-marker-record-");
+  try {
+    const path = boardReviewMarkerPath(root);
+    mkdirSync(join(root, "state"), { recursive: true });
+
+    const windowMs = 24 * 60 * 60 * 1000;
+    const stale = new Date(NOW.getTime() - windowMs - 1);
+    const inWindow = new Date(NOW.getTime() - 1000);
+    writeFileSync(path, JSON.stringify({ fires: [stale.toISOString(), inWindow.toISOString()] }));
+
+    const marker = recordBoardReviewFire(path, NOW, windowMs);
+    assert.deepEqual(marker.fires, [inWindow.toISOString(), NOW.toISOString()], "the stale fire is trimmed, the fresh one and the new one survive");
+
+    const reread = readBoardReviewMarker(path);
+    assert.equal(reread.kind, "ok");
+    if (reread.kind === "ok") assert.deepEqual(reread.marker.fires, marker.fires);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── mining also drafts an escalation finding, not only a staleness one ─────────────────────────
+
+test("an unhandled escalation is mined into its own proposal candidate, distinct from staleness", () => {
+  const items = [item({ id: "pr-1", ageHours: 1, unhandledEscalations: 2 })];
+  let registryState: Proposal[] = [];
+
+  const report = buildBoardReview({
+    policy: ON,
+    marker: { kind: "absent" },
+    items,
+    now: NOW,
+    reportPath: "/state/report.json",
+    registryPath: "/state/inbox-proposals.json",
+    writeReport: () => {},
+    updateRegistry: (_p, update) => {
+      const next = update(registryState);
+      if (next !== null) registryState = next;
+      return next;
+    },
+  });
+
+  assert.equal(report.fire, true);
+  assert.deepEqual(report.proposalIds, ["board-review:escalation:pr-1"]);
+  assert.equal(registryState.length, 1);
+  assert.match(registryState[0].summary, /carries 2 unhandled escalation\(s\)/);
+});
+
+// ── W1-T2304's own producer wiring into measurement-cadence.ts's spine (design's own "Ownership"
+// note): buildBoardReview is only reachable through runMeasurementCadenceReport when a caller
+// actually opts in with opts.boardReview — an EXISTING caller that hasn't opted in is untouched ──
+
+test("runMeasurementCadenceReport wires the board-review rung through when opts.boardReview is supplied", () => {
+  const root = tmp("rmd-mc-boardreview-");
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(stateDir, { recursive: true });
+    const items = [item({ id: "pr-1", ageHours: BOARD_REVIEW_OLDEST_OPEN_AGE_HOURS + 5 })];
+    let rerunCalls = 0;
+
+    const result = runMeasurementCadenceReport({
+      stateDir,
+      cwd: process.cwd(),
+      escalate: false,
+      gitLog: () => ({ dump: "", ref: "test" }),
+      boardReview: {
+        policy: ON,
+        marker: { kind: "absent" },
+        items,
+        reportPath: join(stateDir, "board-review-report.json"),
+        registryPath: join(stateDir, "inbox-proposals.json"),
+        rerunDeadCheck: () => {
+          rerunCalls += 1;
+        },
+      },
+    });
+
+    assert.ok(result.boardReview, "the board-review report must actually be reachable off the cadence result");
+    assert.equal(result.boardReview?.fire, true);
+    assert.deepEqual(result.boardReview?.proposalIds, ["board-review:stale:pr-1"]);
+    assert.equal(rerunCalls, 0, "no dead-before-test-body check on this board — no rerun fires");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runMeasurementCadenceReport skips the board-review rung entirely when opts.boardReview is omitted", () => {
+  const root = tmp("rmd-mc-noboardreview-");
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(stateDir, { recursive: true });
+
+    const result = runMeasurementCadenceReport({
+      stateDir,
+      cwd: process.cwd(),
+      escalate: false,
+      gitLog: () => ({ dump: "", ref: "test" }),
+    });
+
+    assert.equal(result.boardReview, undefined, "an existing caller that hasn't opted in gets no new report");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
