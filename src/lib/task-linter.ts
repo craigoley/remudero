@@ -1574,8 +1574,26 @@ export function criteriaAdded(
  */
 export function followUpCarriesCriteria(added: AcceptanceCriterion[], candidateTasks: Task[]): boolean {
   if (added.length === 0) return true;
-  const addedKeys = new Set(added.map(criterionKey));
-  return candidateTasks.some((t) => (t.acceptance ?? []).some((c) => addedKeys.has(criterionKey(c))));
+  // EVERY added criterion, not just one. The code here read `candidateTasks.some(t => t.acceptance
+  // .some(...))` until 2026-08-26 -- at least ONE added criterion carried by at least one task --
+  // while the doc above has always said "every criterion in `added`". The doc is what W1-T180 was
+  // for: its own shard says the follow-up carries "the amended criteria", plural, and the whole
+  // purpose is that the criteria have a home that will actually be dispatched. One carried
+  // criterion gives the other four no home, so a PR could add five criteria to a MERGED task, carry
+  // one, and pass -- the exact orphaning Rule 21 exists to stop, reached through its own escape.
+  //
+  // NOTHING WRITTEN ANYWHERE CHOSE `some`: the introducing commit (bd59a51d, W1-T180, #928) says
+  // nothing about the quantifier, and the shard argues the other way.
+  //
+  // RETROFIT, MEASURED BEFORE THE CHANGE over all 823 plan commits: 93 criteria amendments, 4 with
+  // a new task in the same PR, 34 adding more than one criterion, and exactly 1 that is both --
+  // `1dd397fc` (#396) adding two to W1-T136 beside a new W1-T176, which carried NEITHER, so it
+  // fails `some` AND `every` and was never permitted by the looseness. The only amendment where
+  // this escape has ever actually fired is `13a73d57` (W1-T2327/W1-T2340), which carries its one
+  // added criterion and passes under both readings. TIGHTENING REFUSES NOTHING THAT HAS EVER
+  // HAPPENED.
+  const carried = new Set(candidateTasks.flatMap((t) => (t.acceptance ?? []).map(criterionKey)));
+  return added.every((c) => carried.has(criterionKey(c)));
 }
 
 /**
