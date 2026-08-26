@@ -107,27 +107,32 @@ test("W1-T523: a failed read stays indeterminate and never reads as unknown", ()
   assert.notEqual(proj.source, "none", "a throttled read must never collapse to the ordinary-absence shape");
 });
 
-// ── acceptance 3: the rollup read has no REST form and is left on GraphQL ──────────────────────
+// ── acceptance 3 (SUPERSEDED by W1-T2268): the rollup read now HAS a REST form ──────────────────
 
-test("W1-T523: the rollup read is still issued over GraphQL", async () => {
-  // `statusCheckRollup` is a `CheckRun`/`StatusContext` union with no single REST field (design
-  // (i)/rationale (3)) and is NOT read anywhere on `ghGateway` — it lives in `src/run-task.ts`
-  // (e.g. `pollToGate`, the post-review CI gate poll), untouched by this task. This is the negative
-  // control: the one read this task does NOT convert must still shell `gh pr view --json
-  // state,statusCheckRollup`, exactly as before.
+test("W1-T2268: pollToGate's rollup read now goes over REST too, not `gh pr view`", async () => {
+  // `statusCheckRollup` is a `CheckRun`/`StatusContext` union with no SINGLE REST field
+  // (design (i)/rationale (3) of W1-T523, which this task does not dispute), but it DOES have a
+  // composed REST form across two endpoints — `rollupFromRest`/`rollupFor` (`open-prs-rest.ts`),
+  // built for the sweep and reused here. `pollToGate` was W1-T523's own named negative control
+  // ("the one read this task does NOT convert"); W1-T2268 converts exactly it, closing the last
+  // GraphQL read in the run path. This replaces that stale pin: `pollToGate` now issues ONLY
+  // `gh api` reads, never `pr view`.
   const calls: string[][] = [];
   const outcome = await pollToGate("https://github.com/craigoley/remudero/pull/1862", () => {}, 6, {
     readJson: async (args) => {
       calls.push(args);
-      return { state: "MERGED", statusCheckRollup: [] };
+      if (args[1] === "repos/craigoley/remudero/pulls/1862") {
+        return { number: 1862, state: "closed", merged: true, merged_at: "2026-01-01T00:00:00Z", head: { sha: "abc" } };
+      }
+      return {};
     },
   });
 
   assert.equal(outcome.merged, true);
   assert.deepEqual(
     calls,
-    [["pr", "view", "https://github.com/craigoley/remudero/pull/1862", "--json", "state,statusCheckRollup"]],
-    "the rollup read is untouched GraphQL, not a `gh api` REST call",
+    [["api", "repos/craigoley/remudero/pulls/1862"]],
+    "a merged PR resolves off the single-PR REST read alone — no rollup fetch, no `gh pr view`",
   );
 });
 

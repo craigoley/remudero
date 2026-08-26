@@ -296,6 +296,28 @@ if [ -z "${CAPTURED_TOKEN}" ]; then
 fi
 echo "recycle-container: GH_TOKEN captured $([ "${CONTAINER_EXISTS}" -eq 1 ] && echo "from ${CONTAINER_NAME}'s own environment" || echo "from this shell")"
 
+# ── W1-T2311: THE CAPTURE ABOVE IS READ, NEVER RE-BOOTED AS THE DAEMON'S OWN DEFAULT ────────────
+# MEASURED 2026-08-26: `docker inspect` (above) reports only the STATIC config a container was
+# started with — it never sees `refreshInstallationToken` (src/lib/github-app.ts) mutating
+# `process.env.GH_TOKEN` inside the running daemon. So no matter how many times a daemon
+# successfully refreshed onto an App-minted token, this capture always read back the ORIGINAL
+# boot-time personal token, and every past recycle re-booted the NEXT container on that same
+# standing PAT forever — the container's boot env carried the operator's own token as its
+# DEFAULT credential, not as a fallback. The capture and its refusal above are UNCHANGED: an
+# operator never silently loses the only copy of a token that is never written to disk. What
+# changes is what happens to it below — it is no longer forwarded into the new container's own
+# environment (see the RUN_ENV_ARGS loop), so the new daemon's default credential is no longer a
+# personal token (remedy (a); see src/lib/github-app.ts's own W1-T2311 decision record for why
+# remedy (b) — refusing rather than degrading — was not taken instead).
+#
+# THE OPERATOR READ PATH THIS DISPLACES, NAMED RATHER THAN LEFT IMPLICIT. An operator who needs a
+# working `gh`/`git` inside the recycled container no longer gets one baked into its boot
+# environment. Supply your OWN token per invocation instead — the fleet never holds it for you:
+#   docker exec -e GH_TOKEN=<your own token> ${CONTAINER_NAME} gh ...
+# `docker exec -e` sets the variable for that one exec'd process only; it never touches the
+# container's own configured environment, so nothing is left standing for the next recycle to
+# re-capture and re-propagate. This is the operator read path for interactive debugging.
+
 # Names only, never values (same discipline as the line above) — the rest of the declared list that
 # actually had something to carry across this recycle.
 OTHER_CAPTURED_NAMES=""
@@ -311,12 +333,21 @@ else
 fi
 
 # The full docker-run `-e` argument list, built from the declared names rather than retyped —
-# EVERY declared name is passed (even when its captured value is empty), matching the shape GH_TOKEN
-# and RMD_RESTART_THROTTLE_S already had before this change and never re-passing anything the image
+# EVERY declared name is passed (even when its captured value is empty), matching the shape
+# RMD_RESTART_THROTTLE_S already had before this change and never re-passing anything the image
 # itself already supplies (PATH, NODE_VERSION, ... are never in RMD_DAEMON_RUNTIME_ENV_VARS).
+#
+# GH_TOKEN IS THE ONE DECLARED NAME DELIBERATELY FORWARDED EMPTY (W1-T2311, see the note above).
+# The NAME stays declared — a future runtime value would still be caught by the drift check above
+# — but the VALUE just captured off the outgoing container is never handed to the incoming one, so
+# the new daemon's default credential is no longer a personal token.
 RUN_ENV_ARGS=()
 for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
-  RUN_ENV_ARGS+=(-e "${name}=${CAPTURED[${name}]-}")
+  if [ "${name}" = "GH_TOKEN" ]; then
+    RUN_ENV_ARGS+=(-e "GH_TOKEN=")
+  else
+    RUN_ENV_ARGS+=(-e "${name}=${CAPTURED[${name}]-}")
+  fi
 done
 
 # ── 4. AUTHENTICATE, THEN PULL — A FAILURE HERE REFUSES AND NEVER STARTS ANYTHING ────────────────

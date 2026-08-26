@@ -42,8 +42,8 @@ forensic detail, so the narrative does not need to live here.
   regions and file paths stay silent (`shorthandIsAboutChangeset`, W1-T413). If the diff carries any
   file outside the claimed scope, the anchored phrase fails the PR — so do not write the shorthand
   in a body unless the predicate agrees, and do not fear it in quotes. *(#974, #984, #1685)*
-- **A test run with no `# tests` summary line is NOT A RESULT — check for the summary, never the
-  failure count.** A killed or timed-out run prints every assertion it reached and no totals, so its
+- **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
+  is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.** A killed or timed-out run prints every assertion it reached and no totals, so its
   failure set is a SUBSET BY CONSTRUCTION and reads as "fewer failures on this side". One session
   recorded 3436 assertions with no summary and was about to diff it against a complete 5660-test run,
   which would have manufactured a four-file regression that does not exist. This COMPOUNDS the
@@ -71,8 +71,8 @@ forensic detail, so the narrative does not need to live here.
   DASH — reads as part of the CLAIM, so the bullet parses as one claim with NO proof and
   `acceptanceAuthorTimeCheck` (`src/lib/review.ts`) refuses `empty-proofs`, reddening
   `acceptance-author-gate`. IT IS SILENT: the body reads correctly to a human and `check-proof`
-  never sees a proof to check. #2534, #2535 and #2555 each shipped a whole block that way;
-  converting every ` — proof: ` to ` | ` clears it. *(2026-08-23)*
+  never sees a proof to check; #2534/#2535/#2555 each shipped one. Convert every ` — proof: ` to
+  ` | `. *(2026-08-23)*
   **"two-line `claim:`/`proof:` form" READS AS UNBULLETED AND
   THAT IS THE TRAP** — it is two lines, but the first is still a `-` bullet. The DIFFERENT hazard
   that phrase warns of is writing `| proof:`: the pipe already delimits, so the label doubles, the
@@ -81,10 +81,9 @@ forensic detail, so the narrative does not need to live here.
   **RUN BOTH VERBS — NEITHER CATCHES THE OTHER'S FAILURE:** that doubled-label body passes
   `check-acceptance` `OK`/exit 0; an unbulleted body fails it while every proof inside is valid.
   `gh api repos/<o>/<r>/pulls/<n> --jq .body > /tmp/b.md && RMD_SELF_SYNC_DONE=1 ./bin/rmd check-acceptance /tmp/b.md`
-  **GUARD THE FETCH ON STRUCTURE, NEVER ON SIZE**: reject on a non-200 HTTP code or a missing/null
-  `.body` key before judging the file — a 537-byte rate-limit payload landed in `/tmp/b.md` and
-  read as `DEFECTIVE: no Acceptance header`, failing a body that was fine. A size floor cannot tell
-  a short body from an error payload; the key can. *(2026-08-14)*
+  **GUARD THE FETCH ON STRUCTURE, NEVER ON SIZE**: reject a non-200 or a missing/null `.body` before
+  judging — a rate-limit payload reads as `DEFECTIVE: no Acceptance header`. A size floor cannot
+  tell a short body from an error payload; the key can. *(2026-08-14)*
   **AND REPAIRING THE BODY CLEARS NOTHING ON ITS OWN.** The sweep's post-review row fires only at
   `pr.checksState === "green" && pr.reviewState === "none"` (`src/lib/sweep.ts`), so once a verdict
   is posted that sha is never re-reviewed — the designed path for a stale verdict is A NEW HEAD. A
@@ -150,6 +149,10 @@ forensic detail, so the narrative does not need to live here.
   merged their substance** — measured twice in two days: the queue held open operator questions
   whose answers had shipped under a different id. The check: grep the shard's load-bearing symbols
   across merged trailers/subjects before escalating its questions. *(#984; siblings 2026-08-13/14)*
+
+- **An operator message names the actor, what happened, what to do — `docs/operator-message-standard.md`.**
+  Its test pins THAT DOC and the source lines it quotes VERBATIM, so rewording a quoted message
+  reddens it; no message of yours is checked. *(W1-T2279)*
 
 ## Coverage traps
 
@@ -313,7 +316,7 @@ forensic detail, so the narrative does not need to live here.
   FAILURE→SUCCESS on the SAME head sha needs no new commit and no manual re-run (W1-T261); its wait
   cap is sized against this repo's real required-check wall-clock, so a green-in-progress sibling is
   waited out rather than timed out (W1-T312, `WAIT_CAP_SECONDS` in `.github/workflows/ci-gate.yml`).
-  Both defects are FIXED; the citations are the forensic detail. *(#873/#877, W1-T261/#885, W1-T312)*
+  Both are FIXED; the citations are the detail. *(#873/#877, W1-T261/#885, W1-T312)*
 - **NEVER BACKGROUND A POLLER OR ARM A CHECK-IN — do not loop on `gh pr view`, `gh run view` or any
   API call waiting for a state change. Report what you know and STOP.** A lane polled 80 times at a
   45-second cadence against an 8-13 minute CI cycle, exhausted the shared budget and locked the
@@ -323,7 +326,8 @@ forensic detail, so the narrative does not need to live here.
 - **`gh pr create` is GraphQL and dies with "API rate limit already exceeded" when that budget is
   spent** (frequent on this account while REST/core stays healthy). Open PRs via REST:
   `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
-  Check with `gh api rate_limit` (`.resources.graphql.remaining` vs `.resources.core.remaining`).
+  Never read that budget from `gh api rate_limit` **on this host** — three calls in one second read
+  10383, 0, 10383 (2026-08-26). Use `gh api user -i`; match login AND reset at both ends.
   `rmd review` and `gh pr view --json` are ALSO GraphQL, so a hand-opened PR can't be reviewed until
   GraphQL resets. *(#766)*
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
@@ -487,15 +491,13 @@ forensic detail, so the narrative does not need to live here.
   broken engine. What actually fails is `\b` ADJACENT TO A NON-WORD CHARACTER, which asserts a
   boundary that is usually absent: `git grep -lE '/usr/bin/(date|security)' -- src/` returns **3**
   while `\b/usr/bin/(date|security)\b` returns **0**, because the leading `\b` sits before `/` and
-  needs a word character to its left where the text has a space. **GNU `/usr/bin/grep -E` SCORES THE
-  IDENTICAL PAIR 1 AND 0** on `run /usr/bin/date now`, so this reproduces everywhere and is portable
-  regex semantics, not a harness quirk — and `/usr/bin/grep -E '\busr'` on that same line returns 1,
-  the same as git's. Anchor on the non-word character itself (`[[:space:]]/usr/bin/`), use `-w`, or
+  needs a word character to its left where the text has a space. **GNU `grep -E` SCORES THE IDENTICAL
+  PAIR 1 AND 0**, so this is portable regex semantics, not a harness quirk. Anchor on the non-word
+  character itself (`[[:space:]]/usr/bin/`), use `-w`, or
   drop the `\b`. Never `\s` under `awk`. *(2026-08-12)*
 - **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
-  absence.** **WHAT SURVIVES: the tool is still blind**, so any UNTRACKED or
-  newly-added file the gate has not seen reads as absent, and **BARE `rg` IS BLIND THE SAME WAY**
+  absence.** **The tool is still blind**, so any UNTRACKED file reads as absent, and **BARE `rg` IS BLIND TOO**
   (`rg -l` empty, `rg -la` fine) — "use grep -a or rg" is NOT the rule. `/usr/bin/grep` is
   unaffected, which is why it hid for months. Use `grep -ar`, `rg -la` or `git grep` for ANY sweep
   deciding a `files:` list, a violation count or a scope audit. Never carry a count; run
@@ -520,13 +522,10 @@ forensic detail, so the narrative does not need to live here.
 - **(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE
   — AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.** (a)-(d) are all ZEROS; THIS ONE IS A
   CONFIDENT NON-ZERO, which is why the section's own framing does not catch it. MEASURED 2026-08-13:
-  `tsc` reported four `api-client` errors inside a session's ad-hoc container; stashing and re-running
-  on a CLEAN TREE got the IDENTICAL FOUR, reported as pre-existing. **THAT CONTROLLED FOR THE TREE AND
-  NOT FOR THE ENVIRONMENT.** The cause was never in the repo:
-  `node_modules/@remudero/api-client -> ../../packages/api-client` is a RELATIVE link, and that
-  container mounted `node_modules` and `.git` but never `packages/`, so the link resolved to nothing.
-  Mounting `packages/` and `apps/` alone made `tsc` exit 0; CI ran the same check as a required step,
-  green, the whole time. AN ENVIRONMENTAL DEFECT REPRODUCES EXACTLY, so agreement between two readings
+  `tsc` reported four `api-client` errors in a container; re-running on a CLEAN TREE got the IDENTICAL
+  FOUR, read as pre-existing. **THAT CONTROLLED FOR THE TREE AND NOT FOR THE ENVIRONMENT** — a RELATIVE
+  `node_modules` symlink resolved outside that container's mount set, and CI was green throughout.
+  AN ENVIRONMENTAL DEFECT REPRODUCES EXACTLY, so agreement between two readings
   taken the same way is one measurement performed twice, and the confidence it buys is counterfeit.
   THE CHECK: when a result surprises you, RE-RUN IT SOMEWHERE ELSE before believing it — a second
   host, CI's own logs, or a differently-provisioned container. Vary the ENVIRONMENT, not just the
@@ -669,6 +668,10 @@ forensic detail, so the narrative does not need to live here.
 
 ## Code traps
 
+- **`src/run-task.ts` has ZERO headroom on the bare-catch ratchet — 64 of 64, so the NEXT bare
+  erasing `catch {}` reddens `test/catch-erasure-ratchet.test.ts`.** Rethrow, record, carry the
+  distinction in the return shape, or state the reason INSIDE the braces. NEVER raise the
+  baseline — that is the move the gate exists to refuse. *(W1-T2295)*
 - **`src/lib/serve.ts`'s client JS lives inside a backtick template literal — never put a backtick
   inside a client-code comment** (e.g. `` `lastLiveAt` ``). It terminates the outer template and
   esbuild fails with `Expected ";" but found …`. Sanity-check by rendering the shell and parsing the

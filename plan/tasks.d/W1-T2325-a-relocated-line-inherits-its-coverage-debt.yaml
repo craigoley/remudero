@@ -1,0 +1,156 @@
+- id: W1-T2325
+  title: "`diff-coverage` blocks a line it has already declared out of scope — its own header says an already-uncovered PRE-EXISTING line is the aggregate ratchet's problem, and then `addedLinesByFile` throws away the `-` lines that are the only evidence a `+` line is a RELOCATION rather than an addition, so restructuring an untested region converts a silent gap into a blocking failure and the gate penalises the refactor it exists to reward"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  rationale: |
+    **THIS IS A FIDELITY BUG AGAINST THE GATE'S OWN STATED CONTRACT, NOT A REQUEST TO WEAKEN IT.**
+    `scripts/diff-coverage.mjs`'s header comment already settles the policy question in the
+    affirmative: it polices "only lines the diff itself added (an already-uncovered pre-existing
+    line is the aggregate ratchet's problem, not a new regression this diff introduced)". A line
+    that was uncovered on the merge base and appears at a new offset after a restructure IS an
+    already-uncovered pre-existing line by that sentence's own definition. The gate blocks it
+    anyway, because the only thing it can see is that a `+` carried it.
+
+    **THE EVIDENCE IS IN THE INPUT AND IS DISCARDED AT PARSE TIME.** `addedLinesByFile` walks the
+    three-dot unified diff and records `+` lines only; its `-` branch is an empty arm whose whole
+    body is the comment "Removed line -- exists only in the old file; does not consume a new-file
+    line number." A pure relocation is exactly a `-` line and a `+` line carrying identical text in
+    the same changeset. So the discriminator the RECON asks about is already present in the bytes
+    the gate reads, and is thrown away before any comparison happens. No new git call, no new CI
+    input, no second checkout is needed to recover it.
+
+    **THE FALSIFYING CHECK THE FEEDBACK NAMES HAS ALREADY BEEN RUN AND DOES NOT FIRE.** CLAUDE.md
+    records it as settled practice: "`diff-coverage` flags ADDED lines, so restructuring an untested
+    region inherits its debt at the gate — measure MAIN's coverage of that region before assuming
+    the PR caused it", citing #1399, "every line of the comment-assembly block scored 0 hits on
+    origin/main; the PR only moved it". The 10 lines were MOVED, not new. So the documentation half
+    of this feedback is already closed and nothing here re-opens it; what is unfiled is the gate
+    behaviour that documentation exists to work around.
+
+    **AND IT IS UNFILED.** The four diff-coverage shards on the board are different defects and must
+    not be trailered for this: W1-T481 is FN/FNDA keying, W1-T421 is a tmpdir mutant-module copy
+    destroying the gate's INPUT, W1-T1074/W1-T1075 are about the gate running too late to be
+    actionable. None of them names relocation, removed lines, or pre-existing debt. The `-` arm of
+    `addedLinesByFile` is untouched since the gate shipped.
+
+    **WHY IT MATTERS BEYOND ONE PR.** The rational response to a gate that prices a restructure by
+    the debt of the region being restructured is to leave dead regions alone. That is the exact
+    inverse of what the repo wants from a codebase that has already shipped eleven unreached
+    modules, and it compounds: the longer a region stays untested, the more expensive it becomes to
+    touch, so the regions most in need of a refactor are the ones the gate most strongly forbids.
+  design: |
+    **Q1 — CAN THE DIFF DISTINGUISH NEW FROM MOVED? YES, PARTIALLY, AND THE PARTIAL IS NAMED HERE.**
+
+    Recover the removed side (`removedLinesByFile`, the mirror of `addedLinesByFile`, keyed by the
+    OLD line number so the report can name the counterpart) and treat an added line as RELOCATED
+    when its trimmed text has an unconsumed identical counterpart among the diff's removed lines.
+    What this establishes is that the text EXISTED AT THE MERGE BASE. What it does NOT establish is
+    whether that text was COVERED at the merge base — the gate holds exactly one lcov, built at
+    head, and answering the coverage question would require a SECOND full-suite coverage run at the
+    merge base. Price that alternative in the PR body rather than assuming it: it roughly doubles
+    the coverage leg of every CI run and is the reason this design does not take it.
+
+    **Q2 — WHAT THE CHEAP FORM GIVES UP, STATED AS A RESIDUAL RATHER THAN WAVED AWAY.**
+
+    It cannot separate moved-and-was-uncovered (which should pass) from moved-and-was-covered-but-
+    is-now-not (which should not). That second case is a coverage LOSS, which is the aggregate
+    ratchet's job by the same header sentence this task is enforcing — but the ratchet is a floor
+    with margin, and a small loss can hide inside it. THE IMPLEMENTER MUST MEASURE THE CURRENT
+    MARGIN in `scripts/coverage-baseline.json` against a full-suite lcov and record, in the PR body,
+    how many lost lines the floor absorbs today. That number is the honest size of the residual; a
+    design that does not state it has not done this task.
+
+    **Q3 — THREE BOUNDS, AND THEY ARE WHAT KEEP THIS FROM BECOMING A BYPASS.**
+
+    (i) CONSUME-ONCE. Each removed counterpart exempts AT MOST ONE added line. Copying an untested
+    block three times exempts the first copy and blocks the other two, so the obvious abuse —
+    duplicate a pre-existing dead region to launder new lines through it — costs nothing to close.
+
+    (ii) A RUN, NOT A LINE. Prefer requiring a CONTIGUOUS RUN of matched lines over a single-line
+    match: a lone `return;` or `const x = 0;` collides with base text by coincidence, an N-line
+    contiguous block does not. Measure N against the repo's real diffs and justify it; do not pick
+    it by taste.
+
+    (iii) PRINT EVERY EXEMPTION, naming the counterpart's old line number, exactly as the
+    `process-boundary` directive already prints `diff-coverage: exempt (process-boundary)
+    file:line — reason`. No line is ever silently waved through, and the exemption stays visible to
+    the review gate and to a human reading the log.
+
+    **Q4 — AN ANNOTATION CANNOT BE CHECKED, WHICH IS WHY IT IS REFUSED HERE.**
+
+    The RECON asks whether a marked pre-existing-debt annotation is the honest alternative. It is
+    not, and the reason is structural rather than stylistic. `computeBoundaryRanges` honours
+    `// diff-cov: process-boundary` only after VERIFYING a property of the guarded declaration that
+    the annotation cannot lie about — it must contain a real boundary call (`spawnSync`/
+    `execFileSync(process.execPath …)`, `process.exit`, a direct `spawnWorker(`) and stay under 15
+    executable lines — and any other use fails the gate CLOSED. A pre-existing-debt annotation
+    asserts a fact about MAIN's coverage, which is precisely the fact the gate cannot see, so no
+    validator can refuse a false one. Nothing stops it becoming a routine bypass because nothing
+    CAN. Relocation detection is preferred exactly because it is mechanically checkable against the
+    diff the gate already parses.
+
+    **Q5 — THE ASYMMETRY THAT MUST SURVIVE, ENUMERATED SO A REVIEWER CAN CHECK IT.**
+
+    (i) A genuinely new uncovered source line with no counterpart at the merge base STILL FAILS. If
+    the fixture suite cannot show that, the change is indistinguishable from switching the gate off.
+    (ii) No threshold, baseline or exclusion moves: `scripts/coverage-baseline.json` is not touched.
+    (iii) The gate stays BLOCKING; nothing here converts a red gate into a warning.
+    (iv) Every existing carve-out (`isNonExecutableLine`, `computeTypeOnlyRanges`,
+    `computeBoundaryRanges`, `declEntered`) keeps behaving exactly as it does today; relocation is
+    an ADDITIONAL, independently-reported exemption kind, never a rewrite of an existing one.
+    (v) THIS IS AN INSTRUMENT-ONLY CHANGESET — `scripts/diff-coverage.mjs` matches
+    `INSTRUMENT_SURFACE`, so Rule 25 refuses any diff that also carries a product path.
+  acceptance:
+    - claim: "an added line whose identical text is removed in the same diff is recognised as relocated, not added"
+      proof: "unit test: test/diff-coverage.test.ts"
+    - claim: "a genuinely new uncovered source line with no merge-base counterpart still fails the gate"
+      proof: "unit test: test/diff-coverage.test.ts"
+    - claim: "each removed counterpart exempts at most one added line, so a duplicated untested block still blocks"
+      proof: "unit test: test/diff-coverage.test.ts"
+    - claim: "every honoured relocation exemption is printed and names its counterpart, so no line is silently waved through"
+      proof: "unit test: test/diff-coverage.test.ts"
+    - claim: "the existing non-executable, type-only and process-boundary carve-outs are unchanged"
+      proof: "unit test: test/diff-coverage.test.ts"
+    - claim: "the relocation set is derived from the removed lines the diff already carries, with no second coverage run"
+      proof: "grep: removedLinesByFile( in scripts/diff-coverage.mjs"
+    - claim: "the shard records why a pre-existing-debt annotation is refused as the alternative"
+      proof: "grep: AN ANNOTATION CANNOT BE CHECKED in plan/tasks.d/W1-T2325-a-relocated-line-inherits-its-coverage-debt.yaml"
+  origin: "feedback#fb-1785984602111-18ffd8"
+  plan_refs: ["W1-T212", "W1-T221", "W1-T481", "W1-T421", "W1-T1075"]
+  files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts, test/fixtures/diff-coverage/relocated-block.diff, test/fixtures/diff-coverage/relocated-block.lcov, test/fixtures/diff-coverage/relocated-duplicate.diff, test/fixtures/diff-coverage/relocated-duplicate.lcov]
+  status: queued
+  attempts: 0
+  note: |
+    `risk: high` IS SET UP FRONT, for the same reason W1-T481 sets it: `sizingViolation`
+    (`src/lib/task-linter.ts`) blocks at >=2 subsystems while risk<high, and `files:` spans
+    `scripts/` and `test/`. The band is Rule 19's SPAN, not blast radius — the runtime effect is one
+    gate reading one line differently.
+
+    THE ACCEPTANCE IS THE FALSIFIER, NOT THE SYMPTOM. A gate change that proves only that the false
+    positive is gone is indistinguishable from switching the gate off, so the fixture pair must
+    demonstrate BOTH directions on a same-tree pair: `relocated-block` passes, `relocated-duplicate`
+    (the same block pasted twice against one removal) still blocks. Build the lcov and the diff from
+    the SAME tree, commit before measuring, and NAME THE SHA in the PR body — the reuse-a-stale-
+    artifact failure voided a whole prior measurement session.
+
+    A SCOPED LOCAL RUN IS A FILTER, NOT A WORK LIST (LEARNINGS.md, PR #2037): it over-reports
+    against a widely-exercised source file. Take the flagged set from CI's own log; capture with
+    `cmd > out 2> err`, never `2>&1 > file`, and assert the capture non-empty before believing a
+    zero from it.
+
+    `files:` IS DERIVED BY INVOCATION, NOT BY MENTION. `docs/review-gate.md` carries the
+    "diff-coverage round N" log and would be the natural place to write round 6 up, but it is
+    DELIBERATELY NOT DECLARED: Rule 25 refuses an instrument diff that also carries a product path,
+    and the doc entry can ride a later plan-only PR. `src/run-task.ts` is not declared either — at
+    ~19.5k lines every task naming it serialises against every other that does (W1-T471), and this
+    change does not touch it. This shard's own path is not declared, because declaring it converts
+    the endemic proof-scope warnings into a hard `rule15-filing` violation.
+
+    WHAT IS NOT CLAIMED. That the ten lines on #1399 are reproducible from any current tree — they
+    are not; the argument rests on CLAUDE.md's recorded measurement of main's coverage of that block
+    and on the `-`-discarding arm of `addedLinesByFile`, both readable from source today.

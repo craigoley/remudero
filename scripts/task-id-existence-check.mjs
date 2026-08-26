@@ -61,7 +61,22 @@ import { pathToFileURL } from "node:url";
 import { join, relative } from "node:path";
 
 const TASK_ID_RE = /\bW1-T[0-9]+\b/g;
-const DECLARED_ID_LINE_RE = /^\s*-\s*id:\s*(W1-T[0-9]+)\s*$/;
+// THE ID GRAMMAR, DERIVED FROM WHAT THE PLAN ACTUALLY DECLARES, not from the `W1-T<n>` shorthand
+// every brief uses. Measured 2026-08-26 over plan/tasks.yaml + plan/tasks.d/: 901 declared ids, of
+// which 21 carry a single-letter suffix (W1-T1B, W1-T9a, W1-T12e, W1-T3F, ...) and 14 sit in another
+// workstream (W2-T1, W3-T3, W12-T1). The previous `W1-T[0-9]+` form saw 866 of them and DROPPED 35.
+//
+// DROPPED, NEVER TRUNCATED, and the difference decides what kind of defect this was. The `$` anchor
+// means `- id: W1-T1B` matches NOTHING; it does not read as `W1-T1`. So there was no false collision
+// between lettered siblings — there was a HOLE: a re-issued lettered or non-W1 id was invisible to
+// the collision check, which is the worse direction for a gate. Driven directly: the old regex
+// returns NO MATCH for `W1-T1B`, `W1-T9a` and `W3-T3`, and `W1-T1` only for `- id: W1-T1`.
+//
+// THE BOUNDARY IS THE LINE ANCHOR, NOT A CHARACTER CLASS. This repo's other id matches use
+// `W1-T<n>([^0-9]|$)`, which is right for finding an id inside prose and WRONG here for the same
+// reason the old form was: it would accept `W1-T1` as a prefix of `W1-T1B`. A declared id is the
+// WHOLE line after `- id:`, so `^...$` is the exact boundary and needs no class.
+const DECLARED_ID_LINE_RE = /^\s*-\s*id:\s*(W[0-9]+-T[0-9]+[A-Za-z]?)\s*$/;
 const EXCLUDED_DIR_NAMES = new Set(["node_modules", "dist", "build", ".git", "coverage"]);
 const BINARY_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot",
@@ -192,6 +207,121 @@ export function resolveReservedIds(remote, cwd) {
 }
 
 /**
+ * Every plan file that DECLARES each id in the working tree, keyed by id — the multiplicity
+ * {@link scanDeclaredPlanIds}'s Set discards, and the whole signal this gate needs.
+ */
+export function scanDeclaredPlanIdOccurrences(cwd, opts = {}) {
+  const planTasksFile = opts.planTasksFile ?? "plan/tasks.yaml";
+  const planTasksDir = opts.planTasksDir ?? "plan/tasks.d";
+  const byId = new Map();
+  const scanFile = (abs, rel) => {
+    let text;
+    try {
+      text = readFileSync(abs, "utf8");
+    } catch (err) {
+      if (err.code === "ENOENT") return;
+      throw err;
+    }
+    text.split("\n").forEach((line, i) => {
+      const m = DECLARED_ID_LINE_RE.exec(line);
+      if (!m) return;
+      if (!byId.has(m[1])) byId.set(m[1], []);
+      byId.get(m[1]).push({ file: rel, line: i + 1 });
+    });
+  };
+  scanFile(join(cwd, planTasksFile), planTasksFile);
+  const dirAbs = join(cwd, planTasksDir);
+  let entries;
+  try {
+    entries = readdirSync(dirAbs, { withFileTypes: true });
+  } catch (err) {
+    if (err.code !== "ENOENT" && err.code !== "ENOTDIR") throw err;
+    entries = [];
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue;
+    scanFile(join(dirAbs, entry.name), `${planTasksDir}/${entry.name}`);
+  }
+  return byId;
+}
+
+/**
+ * Ids DECLARED in the plan at `baseRef`, used to attribute which side of a collision this PR added.
+ *
+ * `origin/main` AT CHECK TIME, NOT the PR's merge-base, and the difference is the defect itself: a
+ * merge-base answers "what did main look like when this branch was cut", and main landed a PR about
+ * every twenty minutes on 2026-08-26. W1-T2316 merged at 14:59:02Z, AFTER the branch that reissued
+ * it was cut, so a merge-base read would have found nothing. What this read cannot see is an id
+ * added by another still-open PR (open-vs-open) — those ids sit on no ref it can reach, and getting
+ * them needs the mint's open-PR surface, which is W1-T2324's OTHER half and a separate concern.
+ *
+ * `readable: false` is the read FAILING (shallow clone with no `origin/main`, unresolvable ref).
+ * It is never "the base declares nothing" — reading an unreadable surface as an empty one is the
+ * false zero that produced all three 2026-08-26 collisions, so the caller REFUSES on it.
+ *
+ * Returns id -> the plan files declaring it AT THE BASE. The files, not just the ids: an id whose
+ * declaring file is the SAME on both sides is a shard this change merely carries along, while the
+ * SAME id declared from a DIFFERENT file is a re-issue. `-l` with the ref prefix gives both.
+ */
+export function resolveBaseDeclaredIds(baseRef, cwd) {
+  const result = spawnSync(
+    "git",
+    ["grep", "-lE", "^[[:space:]]*-[[:space:]]*id:[[:space:]]*W[0-9]+-T[0-9]+", baseRef, "--", "plan/tasks.yaml", "plan/tasks.d/"],
+    { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  // git grep exits 1 for "ref resolved, no matches" — a real answer. 128 (bad revision) is not.
+  if (result.error || (result.status !== 0 && result.status !== 1)) return { readable: false, byId: new Map() };
+  const byId = new Map();
+  for (const raw of result.stdout.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const file = line.startsWith(`${baseRef}:`) ? line.slice(baseRef.length + 1) : line;
+    const show = spawnSync("git", ["show", `${baseRef}:${file}`], { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (show.error || show.status !== 0) return { readable: false, byId: new Map() };
+    for (const l of show.stdout.split("\n")) {
+      const m = DECLARED_ID_LINE_RE.exec(l);
+      if (!m) continue;
+      if (!byId.has(m[1])) byId.set(m[1], new Set());
+      byId.get(m[1]).add(file);
+    }
+  }
+  return { readable: true, byId };
+}
+
+/**
+ * Ids the working tree declares MORE THAN ONCE — two differently-named shards carrying one id, the
+ * shape git merges cleanly and `loadPlan` then refuses on `origin/main`, taking every plan-reading
+ * verb with it.
+ *
+ * DETECTION IS A DUPLICATE AT HEAD AND NEEDS NO BASE READ. `base` only ATTRIBUTES: an id the base
+ * already declares is one this PR re-issued, which is the sentence an author needs. An unreadable
+ * base therefore costs the attribution and never the refusal — deliberately, because the alternative
+ * (treat an unreadable base as empty) is the exact false zero this gate exists to stop.
+ *
+ * ADDED IS A SET DIFFERENCE, NEVER A PER-FILE SCAN. Measured while retrofitting: reading every
+ * `- id:` out of each plan file a PR merely TOUCHED reports 232 "added" ids for an open PR that
+ * edits the monolith and adds none — every one a false collision. A PR that only CITES an existing
+ * id declares nothing new and stays silent, which is what this gate already did and must keep doing.
+ */
+export function evaluateAddedIdCollisions(occurrencesById, base) {
+  if (!base.readable) return { refused: true, unreadableBase: true, collisions: [] };
+  const collisions = [];
+  for (const [id, occurrences] of occurrencesById) {
+    const headFiles = [...new Set(occurrences.map((o) => o.file))];
+    // (a) the same id declared from two files IN THIS TREE.
+    // (b) the same id declared from a file the BASE does not declare it in, while the base declares
+    //     it elsewhere — the shape a branch that is BEHIND main produces, and the one every 2026-08-26
+    //     collision took: locally each id appears once, so a head-only duplicate scan sees nothing.
+    const baseFiles = base.byId.get(id);
+    const reissued = baseFiles ? headFiles.filter((f) => !baseFiles.has(f)) : [];
+    if (headFiles.length < 2 && reissued.length === 0) continue;
+    collisions.push({ id, headFiles, baseFiles: baseFiles ? [...baseFiles] : [], occurrences });
+  }
+  collisions.sort((a, b) => a.id.localeCompare(b.id));
+  return { refused: collisions.length > 0, unreadableBase: false, collisions };
+}
+
+/**
  * Parse+validate scripts/task-id-existence-baseline.json into a Map from id to its written
  * reason. THROWS on a structurally invalid file OR on any entry missing a non-empty `reason` --
  * an exemption with no recorded reason would let the baseline grow silently, which is exactly the
@@ -270,6 +400,7 @@ function main(argv) {
       "plan-tasks-dir": { type: "string", default: "plan/tasks.d" },
       baseline: { type: "string", default: "scripts/task-id-existence-baseline.json" },
       remote: { type: "string", default: "origin" },
+      base: { type: "string" },
       cwd: { type: "string" },
     },
   });
@@ -299,6 +430,53 @@ function main(argv) {
         `(network blip or unresolvable remote). Any id that fails to resolve against declared plan ` +
         `records alone is reported as an UNKNOWN, not a failure, until the remote is reachable again.`,
     );
+  }
+
+  // W1-T2324 (Q3 half): an ADDED id that already exists is refused BEFORE the merge. git merges two
+  // differently-named shards carrying one id with no conflict, `lint-plan` only notices afterwards at
+  // exit 2, and `loadPlan` then refuses origin/main and takes every plan-reading verb with it.
+  const occurrencesById = scanDeclaredPlanIdOccurrences(cwd, {
+    planTasksFile: values["plan-tasks-file"],
+    planTasksDir: values["plan-tasks-dir"],
+  });
+  // OPT-IN VIA `--base`, AND THE DEFAULT IS ANNOUNCED, NEVER SILENT. Failing closed on an
+  // unreadable base is right when a base was ASKED for and wrong as a default: every existing
+  // invocation drives this CLI against a scratch repo with no `origin/main`, and defaulting the
+  // refusal on regressed three of them. CI passes `--base origin/main` (with `fetch-depth: 0`, or
+  // the ref is absent and this refuses).
+  if (values.base === undefined) {
+    console.log(
+      "task-id-existence: collision check SKIPPED -- no --base given, so no id was compared against " +
+        "a base. Pass --base origin/main to enable it.",
+    );
+  }
+  const collisionVerdict =
+    values.base === undefined
+      ? { refused: false, unreadableBase: false, collisions: [] }
+      : evaluateAddedIdCollisions(occurrencesById, resolveBaseDeclaredIds(values.base, cwd));
+  if (collisionVerdict.unreadableBase) {
+    console.error(
+      `task-id-existence: FAILED -- could not read declared plan ids at base "${values.base}". This ` +
+        `REFUSES rather than passing: an unreadable surface read as an empty one is the false zero ` +
+        `that produced every id collision on 2026-08-26. Fetch the base (\`git fetch origin main\`, ` +
+        `or \`fetch-depth: 0\` in CI) and re-run.`,
+    );
+    process.exitCode = 1;
+  } else if (collisionVerdict.refused) {
+    console.error("\ntask-id-existence: FAILED -- the following id(s) are ALREADY DECLARED:\n");
+    for (const c of collisionVerdict.collisions) {
+      const who = c.baseFiles.length
+        ? `-- the base declares it in ${c.baseFiles.join(", ")}, so this change RE-ISSUED it`
+        : "-- declared from two files within this change";
+      console.error(`  ${c.id} ${who}`);
+      for (const occ of c.occurrences) console.error(`    ${occ.file}:${occ.line}`);
+    }
+    console.error(
+      "\nRenumber to a fresh reserved id. Two shards carrying one id merge with NO git conflict, and " +
+        "`loadPlan` then refuses origin/main -- seven historical repairs exist with subjects like " +
+        '"a duplicate id made the plan unreadable".\n',
+    );
+    process.exitCode = 1;
   }
 
   const results = evaluateIds(citedHits, declaredIds, reservation, baseline);
@@ -343,9 +521,14 @@ function main(argv) {
     return;
   }
 
+  // W1-T2324: never CLEAR a refusal the collision check already set. `process.exitCode = 0` here
+  // silently overwrote it — the existence half and the collision half are independent verdicts and
+  // either one failing is a failure.
+  if (process.exitCode) return;
   console.log(
     `\ntask-id-existence: OK -- every id cited under ${dirs.join(", ")} resolves to a reservation or a ` +
-      `plan record (${baselined.length} baselined, ${unknown.length} unknown).`,
+      `plan record (${baselined.length} baselined, ${unknown.length} unknown)` +
+      (values.base === undefined ? "." : `, and no declared id collides with "${values.base}".`),
   );
   process.exitCode = 0;
 }

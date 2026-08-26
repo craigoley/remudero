@@ -1,0 +1,26 @@
+diff --git a/src/reloc-dup.ts b/src/reloc-dup.ts
++++ b/src/reloc-dup.ts
+@@ -1,7 +1,2 @@
+ head
+-alpha
+-beta
+-gamma
+-delta
+-epsilon
+ tail
+@@ -8,2 +5,7 @@
+ mid1
++alpha
++beta
++gamma
++delta
++epsilon
+ mid2
+@@ -12,2 +14,7 @@
+ mid3
++alpha
++beta
++gamma
++delta
++epsilon
+ mid4

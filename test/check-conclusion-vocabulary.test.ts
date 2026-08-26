@@ -22,7 +22,16 @@
 // naming a check that never ran to a verdict). `STALL_WINDOW` (5, unchanged) still bounds the
 // wait regardless: this file's last test pins that down directly.
 //
-// Every predicate under test here is PURE — no I/O, no clock — so all assertions run in-process.
+// Every PREDICATE under test here is pure — no I/O, no clock. The three `pollToGate` cases are
+// not: they drive the real loop through an injected reader. W1-T2268 moved that loop off
+// `gh pr view --json state,statusCheckRollup` onto REST (`singlePrRestArgs` + `restRollupFor`),
+// so the reader now answers THREE argv shapes per iteration — the pull row, the head's
+// check-runs, the head's combined status — and `pollToGate` resolves owner/repo/number from the
+// URL, refusing an unparseable one rather than falling back onto the GraphQL argv it was
+// migrated off. The fixtures below are the REST shape for that reason; every assertion about
+// the CONCLUSION VOCABULARY is unchanged, and the read counts are expressed in POLL ITERATIONS
+// rather than raw reads so they say what they always meant and no longer depend on how many
+// HTTP calls one iteration happens to make.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -94,16 +103,39 @@ test("CONTROL: ciGateFromRollup still reads a genuinely FAILED check as red — 
   assert.equal(ciGateFromRollup(rollup), "red", "a real failure must still gate red");
 });
 
-test("BITES (#2794 shape, end to end): pollToGate never returns a terminal 'required check red' verdict for a CANCELLED check — it keeps polling toward the bounded stall path instead", async () => {
-  let reads = 0;
-  const rollup = [{ name: "coverage-ratchet", conclusion: "CANCELLED" }];
-  const outcome = await pollToGate("u/2794", () => {}, 6, {
+const PR_URL = "https://github.com/acme/remudero/pull/42";
+const HEAD_SHA = "deadbeefcafe";
+
+/**
+ * The REST reader `pollToGate` now drives, in the same shape test/poll-rollup-over-rest.test.ts's
+ * own `restPoll` uses: three calls per iteration (pull row, check-runs, combined status), with the
+ * rollup handed back as REST spells it — LOWERCASE enums, which `rollupFromRest` uppercases on the
+ * way in, exactly as a live payload would.
+ */
+function restReader(entries: Array<{ name: string; status?: string; conclusion?: string }>): {
+  readJson: (args: string[]) => Promise<unknown>;
+  iterations: () => number;
+} {
+  let step = 0;
+  let iterations = 0;
+  return {
+    iterations: () => iterations,
     readJson: async () => {
-      reads++;
-      return { state: "OPEN", statusCheckRollup: rollup };
+      const which = step % 3;
+      step++;
+      if (which === 0) {
+        iterations++;
+        return { number: 42, state: "open", merged: false, merged_at: null, head: { sha: HEAD_SHA } };
+      }
+      if (which === 1) return { check_runs: entries };
+      return { statuses: [] };
     },
-    sleep: async () => {},
-  });
+  };
+}
+
+test("BITES (#2794 shape, end to end): pollToGate never returns a terminal 'required check red' verdict for a CANCELLED check — it keeps polling toward the bounded stall path instead", async () => {
+  const { readJson, iterations } = restReader([{ name: "coverage-ratchet", status: "completed", conclusion: "cancelled" }]);
+  const outcome = await pollToGate(PR_URL, () => {}, 6, { readJson, sleep: async () => {} });
   assert.equal(outcome.merged, false);
   assert.doesNotMatch(
     outcome.reason,
@@ -111,21 +143,15 @@ test("BITES (#2794 shape, end to end): pollToGate never returns a terminal 'requ
     "a CANCELLED check must never produce the terminal red verdict — nobody reached a verdict on it",
   );
   assert.match(outcome.reason, /no progress/, "it must instead resolve via the bounded stall path");
-  assert.ok(reads >= STALL_WINDOW, "the loop must actually keep polling CANCELLED rather than returning on the first read");
+  assert.ok(iterations() >= STALL_WINDOW, "the loop must actually keep polling CANCELLED rather than returning on the first read");
 });
 
 test("CONTROL: pollToGate still returns the terminal 'required check red' verdict immediately for a genuine FAILURE", async () => {
-  let reads = 0;
-  const outcome = await pollToGate("u/fail", () => {}, 6, {
-    readJson: async () => {
-      reads++;
-      return { state: "OPEN", statusCheckRollup: [{ name: "ci", conclusion: "FAILURE" }] };
-    },
-    sleep: async () => {},
-  });
+  const { readJson, iterations } = restReader([{ name: "ci", status: "completed", conclusion: "failure" }]);
+  const outcome = await pollToGate(PR_URL, () => {}, 6, { readJson, sleep: async () => {} });
   assert.equal(outcome.merged, false);
   assert.match(outcome.reason, /required check red: ci/);
-  assert.equal(reads, 1, "a genuine failure must short-circuit on the very first read, unlike CANCELLED");
+  assert.equal(iterations(), 1, "a genuine failure must short-circuit on the very first poll iteration, unlike CANCELLED");
 });
 
 // ── acceptance 4: STALE is classified, not left holding the wait open forever ────────────────
@@ -137,10 +163,8 @@ test("BITES: checksStateFromRollup no longer holds 'pending' forever for a STALE
 });
 
 test("STALE is grouped with CANCELLED, not with a genuine failure's terminal poll-loop behaviour: pollToGate does not fold it into terminal red either", async () => {
-  const outcome = await pollToGate("u/stale", () => {}, 6, {
-    readJson: async () => ({ state: "OPEN", statusCheckRollup: [{ name: "ci-gate", conclusion: "STALE" }] }),
-    sleep: async () => {},
-  });
+  const { readJson } = restReader([{ name: "ci-gate", status: "completed", conclusion: "stale" }]);
+  const outcome = await pollToGate(PR_URL, () => {}, 6, { readJson, sleep: async () => {} });
   assert.doesNotMatch(outcome.reason, /required check red/, "STALE means the reading is void, not that a verdict came back bad");
   assert.match(outcome.reason, /no progress/, "a run that will never conclude again is still caught by the bounded stall path");
 });

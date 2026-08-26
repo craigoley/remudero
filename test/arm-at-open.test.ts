@@ -425,11 +425,19 @@ function armOpenFakeGh(branch: string, callLogPath: string): string {
       "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
       `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
       "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
-      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then",
-      "    echo 'poll' >> \"$CALLLOG\"",
-      "    echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"FAILURE\"}]}'",
-      "    exit 0",
-      "  fi",
+      "fi",
+      // W1-T2268: `pollToGate`/`waitForCiGreen` now read REST (`gh api …`), never `gh pr view
+      // --json statusCheckRollup`. RED on the composed check-run — same "poll" log line as
+      // before, so a test asserting WHEN the poll happened relative to the arm is unaffected.
+      "if [[ \"$1\" == 'api' ]]; then",
+      "  case \"$2\" in",
+      "    */pulls/*) echo '{\"number\":1,\"state\":\"open\",\"merged\":false,\"merged_at\":null,\"head\":{\"sha\":\"deadbeef\"}}'; exit 0 ;;",
+      "    */check-runs*)",
+      "      echo 'poll' >> \"$CALLLOG\"",
+      "      echo '{\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}'",
+      "      exit 0 ;;",
+      "    */status) echo '{\"statuses\":[]}'; exit 0 ;;",
+      "  esac",
       "fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'merge' ]]; then",
@@ -653,11 +661,6 @@ function armOpenCappedFakeGh(branch: string, callLogPath: string, headSha: strin
       `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
       "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
       `  if [[ "$5" == 'headRefOid' ]]; then echo '{"headRefOid":"${headSha}"}'; exit 0; fi`,
-      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then",
-      "    echo 'poll' >> \"$CALLLOG\"",
-      "    echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}]}'",
-      "    exit 0",
-      "  fi",
       "fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'merge' ]]; then",
@@ -671,10 +674,19 @@ function armOpenCappedFakeGh(branch: string, callLogPath: string, headSha: strin
       "  exit 0",
       "fi",
       // W1-T511: `ghLiveState` reads live PR state over REST (`gh api repos/{o}/{r}/pulls/{n}`).
-      // This arm MUST precede the generic `api` arm below, which answers `[]` for the open-issue
-      // dedup read — an array folds to NOT-OPEN, so without this the fix rung stands down
-      // (`fix.stood_down`) before the branch under test is reached.
-      "if [[ \"$1\" == 'api' && \"$2\" =~ ^repos/[^/]+/[^/]+/pulls/[0-9]+$ ]]; then echo '{\"state\":\"open\",\"merged\":false}'; exit 0; fi",
+      // W1-T2268: `pollToGate`/`waitForCiGreen` ALSO read this same endpoint now (never `gh pr
+      // view --json statusCheckRollup`), so it carries `head.sha` too — the composed rollup
+      // read (`check-runs`/`status`) below keys off it. This arm MUST precede the generic
+      // `api` arm below, which answers `[]` for the open-issue dedup read — an array folds to
+      // NOT-OPEN, so without this the fix rung stands down (`fix.stood_down`) before the
+      // branch under test is reached.
+      `if [[ "$1" == 'api' && "$2" =~ ^repos/[^/]+/[^/]+/pulls/[0-9]+$ ]]; then echo '{"state":"open","merged":false,"head":{"sha":"${headSha}"}}'; exit 0; fi`,
+      `if [[ "$1" == 'api' && "$2" =~ /commits/.*/check-runs ]]; then`,
+      `  echo 'poll' >> "$CALLLOG"`,
+      `  echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}'`,
+      `  exit 0`,
+      `fi`,
+      `if [[ "$1" == 'api' && "$2" =~ /commits/.*/status$ ]]; then echo '{"statuses":[]}'; exit 0; fi`,
       "if [[ \"$1\" == 'api' ]]; then echo '[]'; exit 0; fi",
       "exit 1",
       "",
@@ -1109,16 +1121,26 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
       `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
       "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
       `  if [[ "$5" == 'headRefOid' ]]; then echo '{"headRefOid":"${headSha}"}'; exit 0; fi`,
-      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then",
-      "    echo 'ci-poll' >> \"$CALLLOG\"",
-      "    echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}]}'",
-      "    exit 0",
-      "  fi",
-      "  if [[ \"$5\" == 'state,statusCheckRollup' ]]; then",
-      "    echo 'gate-poll' >> \"$CALLLOG\"",
-      "    echo '{\"state\":\"MERGED\",\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}]}'",
-      "    exit 0",
-      "  fi",
+      "fi",
+      // W1-T2268: `pollToGate`/`waitForCiGreen` now BOTH read the SAME REST endpoints (never
+      // `gh pr view --json statusCheckRollup`/`state,statusCheckRollup`) — a merged, green PR
+      // answers every poll identically regardless of which of the two loops is asking, so a
+      // single `ci-poll` marker (on the check-runs read, the composed rollup's own fetch)
+      // covers both; nothing in this test's assertions distinguishes the two loops' polls.
+      // W1-T1031's `pulls/{n}/files` risk-judge read matches the generic `pulls/*` case too
+      // (no `/files` suffix in the endpoints below), so it is answered by the SAME arm — an
+      // empty JSON object, which the risk judge's own file-list mapper reads as zero files.
+      "if [[ \"$1\" == 'api' ]]; then",
+      "  case \"$2\" in",
+      `    */pulls/*/files*) echo '[]'; exit 0 ;;`,
+      `    */pulls/*) echo '{"number":702,"state":"closed","merged":true,"merged_at":"2026-01-01T00:00:00Z","head":{"sha":"${headSha}"}}'; exit 0 ;;`,
+      "    */check-runs*)",
+      "      echo 'ci-poll' >> \"$CALLLOG\"",
+      "      echo '{\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\"}]}'",
+      "      exit 0 ;;",
+      "    */status) echo '{\"statuses\":[]}'; exit 0 ;;",
+      "  esac",
+      "  echo '[]'; exit 0",
       "fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'merge' ]]; then",
@@ -1126,13 +1148,6 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
       "  if [[ \"$4\" == '--disable-auto' ]]; then echo \"disarm $3\" >> \"$CALLLOG\"; exit 0; fi",
       "  exit 0",
       "fi",
-      // W1-T1031: the risk judge now fetches the PR's ACTUAL change view over REST
-      // (`gh api repos/{o}/{r}/pulls/{n}/files`) before its own spawn runs — answered here
-      // with an empty file list, the same shape `armOpenCappedFakeGh`'s generic `api` catch
-      // above already answers for its own tests. Without this, the REST call fails, and the
-      // risk judge fails closed to ESCALATE before ever reaching the LOW-risk spawn below,
-      // which is exactly what this positive-control test exists to rule out.
-      "if [[ \"$1\" == 'api' ]]; then echo '[]'; exit 0; fi",
       "exit 1",
       "",
     ].join("\n"),

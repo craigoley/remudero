@@ -1,0 +1,161 @@
+- id: W1-T2327
+  title: "A WORKFLOW RUN THAT NEVER STARTED IS INDISTINGUISHABLE FROM ONE STILL RUNNING — a run that fails before it schedules a job contributes zero check-runs, so the rollup it should have filled reads pending forever and every disposition that waits on checks waits on something that will never arrive"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  origin: oper#startup-failure-reads-as-pending-2026-08-26
+  files: [src/lib/sweep.ts, test/startup-failure-is-not-pending.test.ts]
+  rationale: |
+    **THE WHOLE BOARD IS DERIVED FROM CHECK-RUNS, AND A RUN THAT NEVER STARTS PRODUCES NONE.**
+    Every row of `DISPOSITION_RULES` reasons over `checksState`, and `checksStateFromRollup` derives
+    that from the rollup's entries. A workflow run whose conclusion is a startup failure schedules
+    no job at all — MEASURED DIRECTLY on run 32984363018, which produced **0 jobs**. Zero jobs means
+    zero check-runs, means the rollup carries nothing from that workflow, means `checksState` reads
+    **pending** and the sweep holds.
+
+    **OBSERVED ON TWO PULL REQUESTS ON 2026-08-26.** PR #2971 (head 444e87f1) sat 166 minutes: its
+    CI run was queued for 160 of them, two runs concluded as startup failures and one as a failure.
+    PR #2976 (head 1a2aa53d) sat 151 minutes with three workflow runs and one check-run in total.
+    A board read of either shows zero succeeded, zero failed, two running — **which reads as in
+    flight and was in fact dead for two and a half hours.**
+
+    **AND THE QUEUE WAS HEALTHY AT THE TIME, WHICH IS THE CHECK THAT MADE THIS LEGIBLE.** Repo-wide
+    at that moment: zero runs queued, eight in progress, none older than twenty-five minutes. So
+    this is not backlog and not capacity. Without that comparison the reading is "three slow pull
+    requests"; with it, it is "two dead ones".
+
+    **Q1 — THE DETECTOR, AND IT NEEDS NO LOG AND NO NEW CREDENTIAL.** For a head sha, read
+    `actions/runs` filtered by that sha. Two shapes mean stalled rather than pending: a run whose
+    conclusion is a startup failure, and a run still queued past a threshold while having scheduled
+    no job. Both are fields already on responses the fleet's existing token can fetch; nothing here
+    needs the log blob, which is unreachable from at least one host anyway.
+
+    **THE THRESHOLD MUST COME FROM MEASURED NORMAL LATENCY, AND TODAY'S 160 MINUTES IS NOT IT.**
+    Measured on this repo: run creation to first job start over ten successive successful runs was
+    **2 seconds minimum, 3 seconds median, 9 seconds worst**. Normal is SECONDS. A threshold in the
+    tens of minutes is therefore two orders of magnitude clear of the worst healthy start and cannot
+    fire on one — which is the property that matters, because a bound that fires on a healthy run is
+    worse than the blindness it replaces, and this repo has shipped that mistake before.
+    **A CAVEAT THE BUILD MUST HONOUR: ten samples from one quiet interval fixes the ORDER OF
+    MAGNITUDE, not the number.** Re-derive it over a wider window before pinning a value, and
+    record the sample the value came from beside it. Note also that the run-level start field is
+    useless here — across a hundred completed runs it equalled the creation time every time, giving
+    a uniform zero; the recoverable measure is the earliest JOB start.
+
+    **Q2 — THE REMEDY IS BOUNDED BY A REFUSAL, NOT BY CAUTION.** The obvious remedy is refused
+    outright: re-running such a run returns **403, this workflow run cannot be retried** (measured
+    against run 32984170197). A startup failure needs a NEW HEAD, so the arm must **name the
+    condition on the disposed row and escalate once** and must **never auto-retry** — a retry loop
+    would spin against that 403 for as long as the pull request stays open, which is the shape a
+    ninety-minute lockout already taught this fleet not to build.
+
+    **AND IT IS NOT THE EXISTING RE-PUSH ARM, WHICH ITS OWN DISCRIMINATOR EXCLUDES.** The absent
+    check-suite remedy is capped by `ABSENT_REPUSH_CAP` and does push a fresh sha, so the shape
+    exists. But its trigger is `checksState` reading none, and its own documentation states that
+    only a COMPLETELY EMPTY rollup returns none while anything partially registered returns
+    pending. **MEASURED: the two pull requests above carried two check-runs and one check-run
+    respectively — non-empty, therefore pending, therefore that arm cannot reach either.** A
+    startup failure leaves a PARTIAL rollup, which is precisely the case the re-push arm was
+    designed to stay away from. This is a sibling arm, keyed on a different fact, and whether it
+    should also re-push is a decision the build must put to the operator rather than assume: the
+    existing arm's caution about destroying an in-flight run applies here unchanged.
+
+    **Q3 — THE FAMILY IT BELONGS TO, AND THE ONE IT MUST NOT BE ROUTED INTO.** CLAUDE.md already
+    records the sibling trap where a conflicting pull request registers no check runs and a zero
+    total reads as still queued while the real state is a dirty merge. Same family: a legitimate
+    absence of check-runs standing in for a state nobody can see. Different cause, and no detector
+    exists for this one.
+
+    **IT MUST NOT BE CONFLATED WITH A CANCELLED REQUIRED CHECK.** That case is already handled, and
+    handled correctly — `cancelledRequiredCheckNames` fired as designed on two pull requests at
+    15:34 the same day. But it keys on an entry whose state reads as cancelled, and **a startup
+    failure produces no entry at all to carry any state**. Routing one into the cancelled lane would
+    hand the re-queue arm a check name that does not exist, and the re-queue endpoint a job id that
+    was never created.
+
+    **WHAT MUST NOT CHANGE.** Nothing paces, throttles or sleeps: a watcher that waits on a queued
+    run is exactly the polling shape that once locked an operator out of this repository for ninety
+    minutes, and the detector must therefore be a READ taken when the sweep already runs, never a
+    loop of its own. No gate is weakened — a required check that never ran must still block the
+    merge, and this task changes what the fleet SAYS about that state, never what the state permits.
+    The fix rung keeps its two-strike ceiling, its unchanged-tree stand-down and its escape. And the
+    operator gates every merge and every deploy.
+
+    **AMENDMENT 2026-08-26 — Q1's SECOND SHAPE WOULD NOT HAVE FIRED ON ONE OF THE TWO PULL REQUESTS
+    THIS SHARD WAS WRITTEN FROM. NOTHING ABOVE IS WITHDRAWN; THE JOB-COUNT HALF OF THE DISCRIMINATOR
+    IS.** Q1 names two shapes: a run whose conclusion is a startup failure, and a run still queued
+    past a threshold *while having scheduled no job*. The first is correct and stands. The second
+    keys on job count, and job count is not what was wrong.
+
+    MEASURED ON `#2974` AT HEAD `7ca8ba51`, one of the two pull requests above. Seven runs: four
+    concluded startup failure, three concluded failure, **none queued**. And those four startup
+    failures **had scheduled six jobs between them — two, two, one and one**. Dependency Review:
+    success and success. CodeQL: cancelled and cancelled. Acceptance author gate: success. Semgrep:
+    one job, `queued`, and it stayed queued.
+
+    SO THE HEAD CARRIED TWENTY-THREE CHECK-RUNS, THREE OF THEM GREEN, FROM RUNS THAT HAD ALREADY
+    CONCLUDED STARTUP FAILURE. A shape the rationale above does not describe: the runs were terminal
+    and their jobs were not. An earlier board pass read that head as busy and moved on.
+
+    **THE CORRECTED DISCRIMINATOR, TO BE BUILT INSTEAD OF THE JOB-COUNT ONE: a job whose status is
+    non-terminal inside a run whose conclusion is terminal.** Not an absence of jobs — a job pinned
+    non-terminal by a run that has already finished. A reader that consults check-runs and never the
+    RUN's own conclusion cannot tell that from work in flight, and waits forever; and the run
+    conclusion is precisely what a check-runs listing never exposes, so the join is the whole fix.
+    The `note:` below carries the same premise in its own words ("ANY run that produces no jobs has
+    this shape") and is corrected by this paragraph rather than rewritten by it; acceptance criterion
+    1 is likewise built on the job-count reading, and a build satisfying it literally would ship the
+    wrong predicate.
+
+    WHAT THIS AMENDMENT DOES NOT TOUCH. The 403 stands — re-running such a run still returns *this
+    workflow run cannot be retried*, and a new head is still the remedy; that was re-confirmed on
+    this same head, and the merge that supplied the new head cleared it. The threshold derivation
+    stands: creation to first job at two seconds minimum, three median, nine worst over ten
+    successful runs, with its own caveat that ten samples fix the order of magnitude and not the
+    number. The queued-past-a-threshold shape stands as a real one; only the conjunction with an
+    empty job list is wrong, and a queued job inside a TERMINAL run needs no threshold at all,
+    because a terminal run will never schedule anything again.
+  note: |
+    RULE 19 BAND. `files:` spans the module that owns the disposition vocabulary and a test; the
+    sizing check reads a source file and a differently-named test as a span, so `risk: high` is set
+    for that SPAN and carries no claim about blast radius, which is one predicate and one row.
+
+    THE TRIGGERING EVENT IS RARE AND THAT IS NOT THE ARGUMENT. Recorded without proposing any
+    machinery for it: a separate reconnaissance measured startup failures at ZERO across this
+    repository's entire forty-three day history before this date, against controls of 1,472 failures
+    and 32,482 successes in 36,853 runs. So the specific outage is uncommon. **The blindness is
+    not** — ANY run that produces no jobs has this shape, whatever caused it, and the detector earns
+    its cost for making the reading honest rather than for catching that one outage. A shard that
+    argued from the outage would be arguing from a sample of two.
+
+    NOT PROPOSED HERE, DELIBERATELY. Whether the arm should push a new head of its own is left open
+    above rather than decided, because the existing re-push arm's own reasoning — that re-pushing a
+    pull request whose checks merely have not started is destructive churn — applies to this case
+    too and deserves the operator's ruling rather than a filing's assumption.
+  acceptance:
+    - claim: "a head whose runs include one that scheduled no job is reported as stalled rather than pending"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "a head whose runs are all progressing normally keeps the reading it has today"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "a run still waiting to begin is only called stalled once it passes the configured bound"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "the bound is read from configuration rather than written into the predicate"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "a partially registered rollup still reads pending, so the existing re-push arm is not reached"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "a stalled head is never routed into the cancelled-check lane, which has no entry to name"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "the arm records the condition once and takes no retry action of any kind"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "a second pass over the same unchanged head does not record the condition a second time"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "a required check that never ran still leaves the merge blocked"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "the detector performs no waiting and no repeated fetching within a single pass"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
+    - claim: "an unreadable run listing leaves the reading exactly as it is today rather than inventing a stall"
+      proof: "unit test: test/startup-failure-is-not-pending.test.ts"
