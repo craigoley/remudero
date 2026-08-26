@@ -278,3 +278,43 @@ test("replayCommand rejects an unknown flag before touching the ledger — fail 
     console.error = realError;
   }
 });
+
+test("a malformed ledger line is DROPPED, never guessed into a row and never thrown", () => {
+  // `diff-coverage` named `src/lib/ledger-replay.ts`'s `catch { continue }` as an added line with
+  // zero covering tests, and it was right: every other fixture here feeds well-formed JSON, so the
+  // parse-failure arm was unreachable. It is the arm that decides whether one torn write during a
+  // rotation loses a row or aborts the whole narration — the ledger is appended to live, so a
+  // half-written final line is the ordinary case, not an exotic one.
+  //
+  // THE TORN LINE MUST CARRY `"step":"`. `resolveReplayLedgerLines` greps the union with
+  // REPLAY_LEDGER_LINE_PATTERN before anything is parsed, so a malformed line WITHOUT that token
+  // never reaches `JSON.parse` at all — measured: a first draft of this test used a torn line with
+  // no `step` field and left line 174 uncovered exactly as before.
+  const stateDir = "/fake/state-replay-malformed";
+  const archivePath = join(stateDir, "ledger.2026-08-25T00-00-00-000Z.ndjson");
+  const livePath = join(stateDir, "ledger.ndjson");
+  const good = { ts: "2026-08-25T10:41:03.000Z", run_id: "RUN-GOOD", task_id: "W1-T2245", step: "automerge.armed" };
+  const torn = '{"ts":"2026-08-25T10:42:00.000Z","run_id":"RUN-TORN","step":"automerge.armed"';
+  const files = {
+    [archivePath]: JSON.stringify(good) + "\n" + torn + "\n",
+    [livePath]: '{"step":"run.start","run_id":"RUN-LIVE-TORN"' + "\n",
+  };
+  const fsDeps = fakeFsDeps(files, ["ledger.2026-08-25T00-00-00-000Z.ndjson", "ledger.ndjson"]);
+
+  const resolved = resolveReplayLedgerLines(stateDir, fsDeps);
+  assert.equal(resolved.ok, true, "malformed input must not turn a readable union into a refusal");
+  if (!resolved.ok) return;
+  assert.ok(
+    resolved.lines.some((l) => l.run_id === "RUN-GOOD"),
+    "the well-formed row survives alongside the malformed ones",
+  );
+  assert.equal(
+    resolved.lines.some((l) => l.run_id === "RUN-TORN" || l.run_id === "RUN-LIVE-TORN"),
+    false,
+    "a torn line is dropped rather than half-parsed into a row",
+  );
+
+  const narration = buildReplay(resolved.lines, { since: SINCE, until: UNTIL });
+  assert.match(narration, /RUN-GOOD/);
+  assert.doesNotMatch(narration, /RUN-TORN/, "a dropped line must not surface in the narration either");
+});
