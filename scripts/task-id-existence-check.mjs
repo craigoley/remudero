@@ -327,6 +327,18 @@ function main(argv) {
         `${values.baseline} with a written reason. If it was never reserved or filed, it should not ` +
         "have been written into shipped source -- reserve/file it, or remove the reference.",
     );
+    // THE THIRD EXIT, AND THE ONE THIS GATE USED TO LEAVE UNSAID. The two remedies above both
+    // assume the id was MEANT as a claim. The case that actually cost this repo was neither: a
+    // doc example, written to illustrate a call, which `TASK_ID_MENTION_RE` then read as a real
+    // ceiling. A code span does not help -- the extractor reads `W1-T9999`, "`W1-T9999`" and a
+    // fenced block identically -- so an author who backticked it and moved on had no sanctioned
+    // way to write an example at all. Say the placeholder form here, where the refusal is read.
+    console.error(
+      "\nIf it is an EXAMPLE rather than a claim, use the placeholder form instead: W1-T<n> (also " +
+        "W1-T<id>, W1-TNNNN). Backticks and fenced blocks do NOT help -- the id extractor reads a " +
+        "literal the same inside them as outside. The placeholder forms carry no digits, so neither " +
+        "the mint's mention scan nor the plan-history scan can see them.",
+    );
     process.exitCode = 1;
     return;
   }
