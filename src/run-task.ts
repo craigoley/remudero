@@ -4828,6 +4828,70 @@ export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule
 }
 
 /**
+ * W1-T2293 (AN INFRASTRUCTURE FAULT HAS NO DISPOSITION EXCEPT BUILD). Every one of
+ * {@link FIX_MODE_RULES}' five rows — and `deriveFixMode`'s own fallback — resolves to a BUILD
+ * mode: correct when an unmet criterion names something wrong with the diff, and actively wrong
+ * when the reviewer never read the PR body at all (`ReportSubstituteCause`, lib/review.ts,
+ * W1-T1100/#2886) — every one of that round's unmet criteria is then the keyword floor withheld
+ * for lack of a real body to check (design (i)/(ii), `judgeCriterion`'s `reportSubstituted`
+ * branch), not a diff fact the next fix worker's edit can resolve (rationale (1)/(2), measured on
+ * PR-2850 and PR-2877, both of which needed no line of code). This is deliberately NOT a sixth
+ * `FIX_MODE_RULES` row (rationale (3)/(8)) — the remedy is a STAND-DOWN, the same disposition
+ * `rung.empty_ci_failures`/`rung.empty_review_evidence` (below, in `runFixRung`) already use for
+ * "this round has nothing a fix worker can act on": no strike spent, a ledgered reason, a named
+ * outcome, never an edit to the PR itself (design notes iv/v/vi).
+ *
+ * STRUCTURAL RECOGNITION ONLY (design note vii): `substituteCause` is the PREVIOUS round's own
+ * `reportSubstituteCause` — the SAME structured fact `runFixRung` already threads into its own
+ * `deps.runReview` call, never a match on any criterion's `reason` prose (which rots the moment
+ * the wording changes, exactly as it did to the string this task's rationale cites). `undefined`
+ * on round 1 (`opts.initialReview` is always a real body fetch computed outside this rung) and on
+ * every round whose evidence never reached a real re-review at all (a ci-log/merge-conflict round
+ * mid-flight). Both `ReportSubstituteCause` kinds stand down — "never-fetched" (the ONLY kind
+ * measured so far, rationale (6)) and "fetch-failed" alike — because either way the review this
+ * round would dispatch against was never judged off the real body, which is the one fact this
+ * predicate exists to act on.
+ *
+ * `unmet` MUST be non-empty — an EMPTY unmet set is the different, already-handled shape
+ * `rung.empty_review_evidence` stands down for beside this guard. `capped` — {@link
+ * ReviewVerdict.capped}, ALREADY computed by `judgeReview` (W1-T185): true only when NOTHING in
+ * the whole review was OBSERVED anywhere (every criterion's `proof_exec` is `not_executable`/
+ * `exec_error`) — MUST be true too: a review with even ONE executed proof (pass or fail) rests on
+ * something besides the withheld keyword floor, so an ordinary in-progress multi-strike fix (a
+ * fresh head each round, the SAME criterion still unmet while real work converges — every sibling
+ * pre-strike guard's own fixture models exactly this, always with `capped: false`) is never
+ * mistaken for the infra-fault shape. Composed with the executed_fail exclusion below (design note
+ * viii, the SAME exclusion {@link FIX_MODE_RULES}'s `body-coverage` row already applies for the
+ * identical reason — a genuine, OBSERVED defect still routes to build): `capped` alone already
+ * implies no criterion anywhere executed_fail (that IS an observation), but the explicit check
+ * keeps this function's own contract legible independent of `capped`'s.
+ *
+ * PURE: no I/O, mirrors {@link fixRungScopeStandDownReason}'s own shape.
+ */
+export function reportSubstituteStandDownReason(
+  unmet: readonly CriterionVerdict[],
+  capped: boolean,
+  substituteCause: import("./lib/review.js").ReportSubstituteCause | undefined,
+): string | undefined {
+  if (!substituteCause) return undefined;
+  if (!capped) return undefined;
+  if (unmet.length === 0) return undefined;
+  if (unmet.some((c) => c.proof_exec === "executed_fail")) return undefined;
+  const who =
+    substituteCause.kind === "never-fetched"
+      ? substituteCause.fixMode
+        ? `the "${substituteCause.fixMode}" fix mode never fetches it`
+        : "this round never fetched it"
+      : "a fetch was attempted and the read failed";
+  return (
+    `the review this round would dispatch against was judged with the PR body NOT READ (${who}) — its ` +
+    `${unmet.length} unmet criteri${unmet.length === 1 ? "on names" : "a name"} an unread body, not a diff ` +
+    `defect the next fix worker could resolve; standing down rather than spending a strike on a fault this ` +
+    `rung cannot fix`
+  );
+}
+
+/**
  * Render the fix worker's prompt. The prompt NAMES its derived MODE and
  * carries ONLY that mode's inputs — never a mix, never the other modes'
  * fields. `reviewer-unmet` and `body-coverage` both come from `evidence.review`
@@ -6543,6 +6607,12 @@ export async function runFixRung(opts: {
   // {@link branchAuthorshipStandDownReason} documents: round 1 never reads
   // as foreign no matter what the live head is.
   let rungOwnHeadSha: string | undefined;
+  // W1-T2293: the PREVIOUS round's own `reportSubstituteCause` (below, where `deps.runReview` is
+  // called) — `undefined` for `opts.initialReview` (always a real body fetch, computed outside
+  // this rung entirely) and for every round that never reached a real re-review at all. Read at
+  // the TOP of the NEXT round's pre-strike gate by `reportSubstituteStandDownReason`, so a review
+  // this rung itself judged off an unread body never dispatches another strike against it.
+  let lastReportSubstituteCause: import("./lib/review.js").ReportSubstituteCause | undefined;
   // W1-T1284: the (gate identity, worktree snapshot) pair recorded the last time this
   // invocation's pre-strike gate ran — `undefined` on the first round (nothing recorded yet;
   // see {@link unchangedTreeStandDownReason}'s own "first round" contract) and whenever
@@ -7096,6 +7166,28 @@ export async function runFixRung(opts: {
       return { outcome: "stood_down", review, strikes, reason, standDownReason: reason };
     }
 
+    // W1-T2293 SITE — THE INFRASTRUCTURE-FAULT GUARD, BEFORE `strikes++`: unlike the guard just
+    // above, this round HAS evidence (`rawUnmet` is non-empty, PLENTY of it — rationale (8)) but
+    // that evidence is the keyword floor withheld because the PREVIOUS round's own re-review never
+    // read the real PR body (`lastReportSubstituteCause`, set beside `deps.runReview` above). Every
+    // one of {@link FIX_MODE_RULES}' five rows is a BUILD mode, so without this guard `deriveFixMode`
+    // below always lands on `reviewer-unmet` for this shape and asks a worker to edit a diff that
+    // was never judged (design (v): nothing here edits the PR either — it only stands down).
+    // `reportSubstituteStandDownReason` (pure, above) reads the STRUCTURED cause and `review.capped`
+    // (nothing anywhere in this review was ever OBSERVED), never `reason` prose (design note vii),
+    // and refuses whenever ANY criterion carries an OBSERVED `executed_fail`/`executed_pass` — real
+    // evidence about the repo the next fix worker can still act on (design note viii); an ordinary
+    // in-progress multi-strike round (a fresh head each strike, real work converging) is never
+    // `capped`, so it is never caught here.
+    if (currentMergeConflict === undefined && !noReviewYet) {
+      const infraFaultReason = reportSubstituteStandDownReason(rawUnmet, review.capped, lastReportSubstituteCause);
+      if (infraFaultReason) {
+        deps.log("fix.stood_down", { site: "rung.report_substituted", strike: strikes + 1, reason: infraFaultReason });
+        deps.say(`fix rung: standing down before strike ${strikes + 1} — ${infraFaultReason}`);
+        return { outcome: "stood_down", review, strikes, reason: infraFaultReason, standDownReason: infraFaultReason };
+      }
+    }
+
     // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
     // binary crash that debited a fix-rung strike, and escalated, on a worker that
     // never ran): `attempt` is only a CANDIDATE strike number until `deps.spawn`
@@ -7413,6 +7505,10 @@ export async function runFixRung(opts: {
     // strike stays review-mode from here. W1-T138: this can still flip back
     // to true on a LATER strike if ITS push regresses CI again (see above).
     noReviewYet = false;
+    // W1-T2293: record THIS round's own substitute cause for the NEXT round's pre-strike gate —
+    // `undefined` unless the report actually WAS a substitute (mirrors `reviewReportIsSubstitute`
+    // itself; a throwing/absent `fetchPrBody` in body-coverage mode leaves both true).
+    lastReportSubstituteCause = reviewReportIsSubstitute ? reviewReportSubstituteCause : undefined;
     // W1-T296: this round's OWN push produced the head this review just
     // evaluated — it becomes the reference the NEXT round's pre-strike
     // authorship check compares the live head against (sha lineage).
