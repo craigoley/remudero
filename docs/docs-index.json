@@ -1,0 +1,161 @@
+{
+  "dir": "docs",
+  "entries": [
+    {
+      "path": "docs/ORIENTATION.md",
+      "title": "ORIENTATION",
+      "summary": "_MAINTAINED BY `rmd retro` — regenerated 2026-08-25T10:55:15.645Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml inste…",
+      "grepHint": "ORIENTATION"
+    },
+    {
+      "path": "docs/account-selection.md",
+      "title": "Account selection: which account a run uses",
+      "summary": "Decision record, W1-T266. Depends on W1-T265 (shipped, PR #1022 / commit 843ecce), which made",
+      "grepHint": "Account selection: which account a run uses"
+    },
+    {
+      "path": "docs/adr/README.md",
+      "title": "Architecture Decision Records",
+      "summary": "MASTER-PLAN §5 TIER 3: ADR discipline for IRREVERSIBLE calls. A short",
+      "grepHint": "Architecture Decision Records"
+    },
+    {
+      "path": "docs/adr/template.md",
+      "title": "NNNN. Short title, imperative mood",
+      "summary": "Status: Proposed | Accepted | Superseded by [NNNN](NNNN-title.md)",
+      "grepHint": "NNNN. Short title, imperative mood"
+    },
+    {
+      "path": "docs/alert-lane.md",
+      "title": "Alert-fix lane (W1-T90, ratifies P20)",
+      "summary": "§5D lane 2 (W1-T55 surface → W1-T56 triage, both SHIPPED — `src/lib/ops.ts`)",
+      "grepHint": "Alert-fix lane (W1-T90, ratifies P20)"
+    },
+    {
+      "path": "docs/architecture.md",
+      "title": "Architecture",
+      "summary": "Remudero is a headless fleet of Claude Code agents that carries plan items from",
+      "grepHint": "Architecture"
+    },
+    {
+      "path": "docs/audits/README.md",
+      "title": "Audit fixtures",
+      "summary": "Golden inputs for the `rmd audit` rung (MASTER-PLAN §6 process proposals, P36).",
+      "grepHint": "Audit fixtures"
+    },
+    {
+      "path": "docs/audits/recon-2026-07-21.md",
+      "title": "Remudero — Production Readiness Review (fresh-eyes recon)",
+      "summary": "Date: 2026-07-21 · Reviewer: external recon pass, no project history · Method: 7 parallel source audits + direct measurement of the live clone, state dir, laun…",
+      "grepHint": "Remudero — Production Readiness Review (fresh-eyes recon)"
+    },
+    {
+      "path": "docs/cli-reference.md",
+      "title": "rmd CLI reference",
+      "summary": "Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` registry `rmd --help` and `rmd <cmd> --help` render from (W1-T47) -- this file…",
+      "grepHint": "rmd CLI reference"
+    },
+    {
+      "path": "docs/control-surface.md",
+      "title": "Control surface — fleet commands & safe dispatch",
+      "summary": "The `rmd` CLI is the control surface for an unattended daemon, so it must be safe and",
+      "grepHint": "Control surface — fleet commands & safe dispatch"
+    },
+    {
+      "path": "docs/dep-review.md",
+      "title": "Dependency-PR review lane (W1-T54 + W1-T54b)",
+      "summary": "`remudero-review` is a REQUIRED status check on `main` (see",
+      "grepHint": "Dependency-PR review lane (W1-T54 + W1-T54b)"
+    },
+    {
+      "path": "docs/deploy-supervisor.md",
+      "title": "Deploy supervisor — self-updating the daemon",
+      "summary": "The daemon runs `tsx src/…` (loaded once at start) and dispatches in-process, so a",
+      "grepHint": "Deploy supervisor — self-updating the daemon"
+    },
+    {
+      "path": "docs/open-decisions.md",
+      "title": "Open decisions — the rulings only the operator makes",
+      "summary": "Three things are currently undecided, and each one blocks work that is otherwise ready. They are",
+      "grepHint": "Open decisions — the rulings only the operator makes"
+    },
+    {
+      "path": "docs/operator-guide.md",
+      "title": "Operator guide",
+      "summary": "This is the day-to-day view: what you actually type, what to watch, and what",
+      "grepHint": "Operator guide"
+    },
+    {
+      "path": "docs/operator-message-standard.md",
+      "title": "Operator Message Standard (W1-T2279)",
+      "summary": "Status: NORMATIVE. Scope: `rmd status`'s rendered board, the console's rendered rows reading",
+      "grepHint": "Operator Message Standard (W1-T2279)"
+    },
+    {
+      "path": "docs/plan-sync.md",
+      "title": "Plan-sync: the in-repo PR flow (W1-T15)",
+      "summary": "`MASTER-PLAN.md` and `plan/tasks.yaml` are the one artifact whose edit history",
+      "grepHint": "Plan-sync: the in-repo PR flow (W1-T15)"
+    },
+    {
+      "path": "docs/probe.md",
+      "title": "Mount Routing Probe — Deterministic Task-Class Routing (W1-T167)",
+      "summary": "The mount routing probe is the decision structure that routes a task to a dynamically-selected model and effort based on what the task actually touches: determ…",
+      "grepHint": "Mount Routing Probe — Deterministic Task-Class Routing (W1-T167)"
+    },
+    {
+      "path": "docs/research/README.md",
+      "title": "Recovered research artefacts",
+      "summary": "Four agent-written reports, recovered and committed verbatim. They are dated artefacts: each records",
+      "grepHint": "Recovered research artefacts"
+    },
+    {
+      "path": "docs/research/recon-guard-complements.md",
+      "title": "Recon: the guard complements — what each gate structurally cannot see — 2026-08-11",
+      "summary": "Run at origin/main `3b18d956a46e8fc6be05868146437a8e7cd6af58` (toplevel /home/user/remudero, branch",
+      "grepHint": "Recon: the guard complements — what each gate structurally cannot see — 2026-08-11"
+    },
+    {
+      "path": "docs/research/recon-open-failing-composition.md",
+      "title": "Recon: what the 176 open-failing number is actually made of — 2026-08-06",
+      "summary": "Run at origin/main `c7233cfb89e14a14ec53ad8a5d36ee4a25787832` (toplevel /home/user/remudero, branch main;",
+      "grepHint": "Recon: what the 176 open-failing number is actually made of — 2026-08-06"
+    },
+    {
+      "path": "docs/research/recon-proof-survey.md",
+      "title": "Recon: the proofs that may certify nothing — the name-filtered survey — 2026-08-06",
+      "summary": "Run at origin/main `deadef68c4727a2207319bd698bcc8265f136afd` (toplevel /home/user/remudero, branch",
+      "grepHint": "Recon: the proofs that may certify nothing — the name-filtered survey — 2026-08-06"
+    },
+    {
+      "path": "docs/research/research-laws-and-gaps-2026-08-05.md",
+      "title": "Research: the laws this system has learned, and where its plan disagrees with its own evidence — 2026-08-05",
+      "summary": "Written at origin/main `88b6eb78efd6731b3ad1c0b49d739a3addc2f56f` (toplevel /home/user/remudero, branch",
+      "grepHint": "Research: the laws this system has learned, and where its plan disagrees with its own evidence — 2026-08-05"
+    },
+    {
+      "path": "docs/review-gate.md",
+      "title": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)",
+      "summary": "`remudero-review` is a REQUIRED status check on `main`, alongside `ci-gate`.",
+      "grepHint": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)"
+    },
+    {
+      "path": "docs/system-diagrams.md",
+      "title": "System diagrams",
+      "summary": "Three Mermaid diagrams of how remudero actually runs: the two hosts, the daemon loop, and the",
+      "grepHint": "System diagrams"
+    },
+    {
+      "path": "docs/task-lifecycle.md",
+      "title": "Task lifecycle",
+      "summary": "This traces what happens to one task from `plan/tasks.yaml` when it is run",
+      "grepHint": "Task lifecycle"
+    },
+    {
+      "path": "docs/troubleshooting.md",
+      "title": "Troubleshooting",
+      "summary": "Symptom → cause → fix for the operator-visible failures the fleet has already paid to",
+      "grepHint": "Troubleshooting"
+    }
+  ]
+}

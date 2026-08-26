@@ -1,5 +1,16 @@
 import { strict as assert } from "node:assert";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -431,9 +442,19 @@ test("W1-T949: reserveTaskIdBlockRemote refuses a non-positive count instead of 
 // matches that one test's name and no other's, so THIS test (a different name) is never invoked
 // by the child and no recursive re-entry occurs.
 
+// ISOLATION (W1-T2291): THIS CHECK NO LONGER WRITES THE SHARED WORKSPACE. NOT A COVERAGE FIX.
+// It used to write the REAL, checked-out `src/lib/task-id-reservation.ts` for the duration of a
+// child spawn, restoring it in a `finally`. The restore always worked; the hazard was the
+// WINDOW -- `node --test` runs files in parallel by default, so any other worker that read or
+// instrumented `src/lib/task-id-reservation.ts` inside that window saw the per-id reservation
+// loop already collapsed to one. A test must not edit its own subject in a workspace it shares
+// with concurrent readers, whatever it restores afterwards. The mutation now lands on a COPY in
+// a temp root and the child is pointed at that -- the exact shape test/ledger-rotation.test.ts's
+// own W1-T964 check uses (fixed by #2881), reproduced here rather than re-derived.
 test("W1-T949: removing the per id reservation fails the N ref test", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const srcPath = join(repoRoot, "src", "lib", "task-id-reservation.ts");
+  const srcRelPath = join("src", "lib", "task-id-reservation.ts");
+  const srcPath = join(repoRoot, srcRelPath);
   const targetTestFile = "test/task-id-reservation.test.ts";
   const positiveTestName = "W1-T949: a filing that creates N ids reserves N refs";
 
@@ -464,11 +485,32 @@ test("W1-T949: removing the per id reservation fails the N ref test", () => {
   assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
   const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
 
+  // `src/`, `plan/` (loadDefaultPolicy's plan/policy.yaml, self-located from a copied module's
+  // own install path -- see ledger-rotation.test.ts's identical note) and `test/setup/` are
+  // copied into a temp sandbox; `node_modules` is symlinked so `tsx` resolves exactly as it does
+  // in the real tree. The child runs with `cwd` set to the sandbox, so its own
+  // `--test-name-pattern`-narrowed run of THIS file resolves `../src/lib/task-id-reservation.js`
+  // to the MUTATED COPY while every concurrently-running worker in the real tree keeps reading
+  // the committed file.
+  const sandbox = mkdtempSync(join(tmpdir(), "w1-t949-mutation-sandbox-"));
   let childResult: ReturnType<typeof spawnSync> | undefined;
   try {
-    writeFileSync(srcPath, mutated);
-    const mutatedSha = sha256(readFileSync(srcPath, "utf8"));
-    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change task-id-reservation.ts's bytes");
+    cpSync(join(repoRoot, "src"), join(sandbox, "src"), { recursive: true });
+    cpSync(join(repoRoot, "plan"), join(sandbox, "plan"), { recursive: true });
+    cpSync(join(repoRoot, "test", "setup"), join(sandbox, "test", "setup"), { recursive: true });
+    copyFileSync(join(repoRoot, targetTestFile), join(sandbox, targetTestFile));
+    for (const f of ["package.json", "tsconfig.json"]) copyFileSync(join(repoRoot, f), join(sandbox, f));
+    symlinkSync(join(repoRoot, "node_modules"), join(sandbox, "node_modules"));
+
+    writeFileSync(join(sandbox, srcRelPath), mutated);
+    const mutatedSha = sha256(readFileSync(join(sandbox, srcRelPath), "utf8"));
+    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change the sandbox copy's bytes");
+    assert.equal(
+      sha256(readFileSync(srcPath, "utf8")),
+      originalSha,
+      "the CHECKED-OUT task-id-reservation.ts must be untouched while the mutated child runs -- a " +
+        "concurrent worker instrumenting it must never observe the per-id reservation already removed",
+    );
 
     // `NODE_TEST_CONTEXT` (set by node's OWN test runner on the process running THIS test) is
     // inherited by a plain `spawnSync` env by default — node's test runner treats its presence
@@ -478,15 +520,19 @@ test("W1-T949: removing the per id reservation fails the N ref test", () => {
     // reason (test/dispatch-lifetime-breaker.test.ts's W1-T951 mutation test notes the same trap).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
-    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+    childResult = spawnSync(process.execPath, args, { cwd: sandbox, encoding: "utf8", timeout: 90_000, env: childEnv });
   } finally {
-    // RESTORED REGARDLESS of what the child run did — a throw, a timeout, or a pass must never
-    // leave the real checked-out source mutated.
-    writeFileSync(srcPath, original);
-    const restoredSha = sha256(readFileSync(srcPath, "utf8"));
-    assert.equal(restoredSha, originalSha, "task-id-reservation.ts must be restored byte-for-byte after the mutation check");
+    // The sandbox goes away regardless of what the child did. There is nothing to RESTORE: the
+    // checked-out tree was never written, so a throw or a timeout cannot leave it mutated -- the
+    // failure mode the old restore-in-finally existed to bound is now structurally absent.
+    rmSync(sandbox, { recursive: true, force: true });
   }
 
+  assert.equal(
+    sha256(readFileSync(srcPath, "utf8")),
+    originalSha,
+    "the checked-out task-id-reservation.ts must be byte-identical after the check -- it is never written at all",
+  );
   assert.ok(childResult, "sanity: the child process must actually have been spawned");
   assert.notEqual(
     childResult!.status,

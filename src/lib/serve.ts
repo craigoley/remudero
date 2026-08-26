@@ -1514,11 +1514,18 @@ export function renderShellHtml(
     if (el) { el.hidden = true; el.textContent = ""; el.dataset.ackKind = ""; }
     clearTimeout(writeAckTimer);
   }
-  function postJson(path, body) {
+  function postJson(path, body, opts) {
     // fetch() rejects only on a NETWORK failure -- an HTTP 401/404/500 resolves normally, which is
     // why every call site discarding this result showed the operator nothing. Check .ok HERE, once,
     // so all twelve write controls are covered by one place rather than twelve patches.
     //
+    // W1-T2301: opts.suppressAck lets ONE call site opt OUT of the automatic ack below -- for the
+    // single caller (the answer submit handler's fail-open leg) that already knows this same click
+    // is about to fire a SECOND postJson (the filing POST) whose own ack is the true one. Every other
+    // call site passes nothing and is unaffected: the ok-path ack still fires from this one place for
+    // all twelve OTHER write controls, and even the opted-out call still clears a stale error and
+    // still runs showWriteError on failure (design (iv) -- suppressing an ack must never suppress the
+    // error path a 401/500 needs).
     // impl-W1-T500: the five paths below are the console's own HIGH-tier write routes (service.ts's
     // Route.tier "high", declared at panel-actions.ts's /v1/manual/approve + /v1/drain/kick +
     // /v1/drain/run, panel-graph.ts's /v1/inbox/approve, panel-skill-run.ts's /v1/skills/run). A
@@ -1547,11 +1554,12 @@ export function renderShellHtml(
           return res.json().then(function (confirmed) { return doWrite(confirmed.nonce); });
         })
       : doWrite(undefined);
+    var suppressAck = !!(opts && opts.suppressAck);
     return chain.then(function (res) {
       // impl-EA: the acknowledgement fires HERE, on the ok path only, for the same reason #1003 put
       // the .ok check here - one place covers all twelve write controls, so nobody has to remember
       // to add it to the thirteenth.
-      if (res.ok) { clearWriteError(); showWriteAck(path); return res; }
+      if (res.ok) { clearWriteError(); if (!suppressAck) showWriteAck(path); return res; }
       clearWriteAck(); // a failure must never leave a stale "done" from the previous write on screen
       // Surface the server's own message when it supplies one; fall back to the bare status.
       return res.text().then(function (raw) {
@@ -3436,6 +3444,23 @@ export function renderShellHtml(
   // once) -- keyed by replyTo, mirroring approveConfirmTimers's own per-proposalId keying.
   const answerConfirmTimers = new Map();
   const answerExpansions = new Map();
+  // W1-T2302: one submission key PER answer form, keyed by replyTo, mirroring
+  // answerConfirmTimers/answerExpansions's own per-replyTo discipline -- minted ONCE for
+  // whichever submit episode is currently unresolved for a given grill (preview -> fail-open,
+  // or preview -> arm -> confirm both read the SAME key back rather than minting a fresh one),
+  // and sent to the server so a repeat POST /v1/feedback (a reload, a second tab, a stray
+  // re-entrant click landing while the first request is still in flight) is recognised as the
+  // SAME submission instead of filing a second durable entry. Cleared only once a filing POST
+  // for that replyTo actually resolves.
+  const answerSubmissionKeys = new Map();
+  // W1-T2302: crypto.randomUUID when available (every modern browser), a Math.random fallback
+  // otherwise -- either way this is an opaque per-submission identity, never derived from the
+  // answer text itself (two deliberately separate submissions carrying identical text must
+  // still each file as their own entry).
+  function mintSubmissionKey() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+    return "sk-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+  }
   // W1-T2206: replyTo keys with a preview currently in flight -- membership (not a single
   // shared flag) is what keeps two DIFFERENT grill answers mid-preview at once independent,
   // matching answerConfirmTimers/answerExpansions's own per-replyTo discipline. This set is
@@ -3502,8 +3527,14 @@ export function renderShellHtml(
       // read back -- the round trip's whole point (never file an unseen rewrite).
       if (submitBtn.dataset.confirming === "true") {
         const expansion = answerExpansions.get(replyTo) ?? null;
+        // W1-T2302: read back the SAME key this submission was minted under (below, on the
+        // click that armed it) rather than minting a fresh one -- confirm is the SECOND half of
+        // ONE submission, not a new one.
+        if (!answerSubmissionKeys.has(replyTo)) answerSubmissionKeys.set(replyTo, mintSubmissionKey());
+        const submissionKey = answerSubmissionKeys.get(replyTo);
         resetAnswerButton(submitBtn);
-        await postJson("/v1/feedback", { text: answer, replyTo, expansion });
+        await postJson("/v1/feedback", { text: answer, replyTo, expansion, submissionKey });
+        answerSubmissionKeys.delete(replyTo);
         input.value = "";
         refreshAll();
         return;
@@ -3513,11 +3544,23 @@ export function renderShellHtml(
       // the WHOLE call, and clear it on every exit below (expansion, no expansion, or a thrown/
       // rejected preview fetch) -- a pending state that survives a rejected fetch is a worse dead
       // button than the unguarded await it replaces.
+      //
+      // W1-T2301: this ONE call site's outcome branches below into either the fail-open leg (which
+      // files on THIS SAME click) or the arm leg (which files nothing). postJson's automatic ack
+      // cannot know which branch it is about to fall into -- it fires synchronously on the preview's
+      // own 200, before either branch runs -- so it would paint "nothing is filed yet" even on the
+      // fail-open leg that is about to file behind it (the defect this task closes). suppressAck
+      // opts out of that automatic ack HERE; the arm leg below fires it manually, by hand, only once
+      // it has confirmed (via the resolved expansion) that this really is the leg the text is true for.
+      // W1-T2302: mint (or reuse, on a re-entrant click landing before the first request settles)
+      // ONE key for this submission BEFORE either branch below can fire it -- both the fail-open
+      // leg just past the preview and the arm's later confirm leg above read this SAME map entry.
+      if (!answerSubmissionKeys.has(replyTo)) answerSubmissionKeys.set(replyTo, mintSubmissionKey());
       answerPending.add(replyTo);
       setAnswerPending(submitBtn, true);
       let expansion = null;
       try {
-        const previewRes = await postJson("/v1/feedback/preview", { text: answer, replyTo });
+        const previewRes = await postJson("/v1/feedback/preview", { text: answer, replyTo }, { suppressAck: true });
         if (previewRes && previewRes.ok) {
           const previewBody = await previewRes.json();
           expansion = previewBody.expansion ?? null;
@@ -3533,7 +3576,15 @@ export function renderShellHtml(
         // it must never borrow the armed vocabulary below, so an operator who just watched a
         // filing happen can tell it apart from a preview that armed instead.
         submitBtn.textContent = "Filed (no expansion available)";
-        await postJson("/v1/feedback", { text: answer, replyTo });
+        // W1-T2301: the filing POST below is NOT suppressed -- its own ok-path ack ("Answer
+        // recorded.") is the true statement this leg leaves the operator with, and its own
+        // not-ok-path showWriteError (unchanged, design (iv)) still speaks if the filing itself
+        // fails, rather than leaving the operator with a stale ack painted by the preview above.
+        // W1-T2302: the SAME key minted above the try/catch, so a repeat of THIS click is
+        // recognised as the same submission instead of filing a second entry.
+        const submissionKey = answerSubmissionKeys.get(replyTo);
+        await postJson("/v1/feedback", { text: answer, replyTo, submissionKey });
+        answerSubmissionKeys.delete(replyTo);
         input.value = "";
         refreshAll();
         return;
@@ -3541,6 +3592,11 @@ export function renderShellHtml(
       // ARM: the armed control shows the expansion's read-back AND states plainly that nothing
       // is filed yet and the NEXT click is the one that files -- design (iii), the exact
       // ambiguity the operator hit ("no idea if I still need to address this... or not").
+      // W1-T2301: fire the preview's own WRITE_ACK text by hand -- this is the leg it is actually
+      // true for (design (ii): the wording stays, unweakened, for the leg that really files
+      // nothing). Same table, same showWriteAck, just invoked here instead of from postJson's
+      // ok arm, which stayed suppressed above precisely so it could not fire early.
+      showWriteAck("/v1/feedback/preview");
       answerExpansions.set(replyTo, expansion);
       submitBtn.dataset.confirming = "true";
       submitBtn.setAttribute("aria-pressed", "true");

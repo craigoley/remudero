@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -458,9 +458,19 @@ test("W1-T951: runnableCandidates carries the SAME onSinglePathCredit observatio
 // open-pr-corroboration.test.ts from inside itself would re-enter this very mutation test
 // recursively (the target file would spawn itself spawning itself...).
 
+// ISOLATION (W1-T2291): THIS CHECK NO LONGER WRITES THE SHARED WORKSPACE. NOT A COVERAGE FIX.
+// It used to write the REAL, checked-out `src/lib/status.ts` for the duration of a child spawn,
+// restoring it in a `finally`. The restore always worked; the hazard was the WINDOW -- `node
+// --test` runs files in parallel by default, so any other worker that read or instrumented
+// `src/lib/status.ts` inside that window saw the durable-credit lookup already removed. A test
+// must not edit its own subject in a workspace it shares with concurrent readers, whatever it
+// restores afterwards. The mutation now lands on a COPY in a temp root and the child is pointed
+// at that -- the exact shape test/ledger-rotation.test.ts's own W1-T964 check uses (fixed by
+// #2881), reproduced here rather than re-derived.
 test("W1-T951: removing the durable credit lookup fails the positive test", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const statusTsPath = join(repoRoot, "src", "lib", "status.ts");
+  const statusTsRelPath = join("src", "lib", "status.ts");
+  const statusTsPath = join(repoRoot, statusTsRelPath);
   const targetTestFile = "test/open-pr-corroboration.test.ts";
   const positiveTestName = "W1-T951: a branch-only id is credited from the durable record";
 
@@ -483,11 +493,31 @@ test("W1-T951: removing the durable credit lookup fails the positive test", () =
   assert.ok(whitelisted!.nameFiltered, "sanity: it must be the name-filtered shape (carries --test-name-pattern)");
   const args = narrowNameFilteredArgs(whitelisted!.args, [targetTestFile]);
 
+  // `src/`, `plan/` (loadDefaultPolicy's plan/policy.yaml, self-located from a copied module's
+  // own install path -- see ledger-rotation.test.ts's identical note) and `test/setup/` are
+  // copied into a temp sandbox; `node_modules` is symlinked so `tsx` resolves exactly as it does
+  // in the real tree. The child runs with `cwd` set to the sandbox, so its own
+  // `../src/lib/status.js` resolves to the MUTATED COPY while every concurrently-running worker
+  // in the real tree keeps reading the committed file.
+  const sandbox = mkdtempSync(join(tmpdir(), "w1-t951-mutation-sandbox-"));
   let childResult: ReturnType<typeof spawnSync> | undefined;
   try {
-    writeFileSync(statusTsPath, mutated);
-    const mutatedSha = sha256(readFileSync(statusTsPath, "utf8"));
-    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change status.ts's bytes");
+    cpSync(join(repoRoot, "src"), join(sandbox, "src"), { recursive: true });
+    cpSync(join(repoRoot, "plan"), join(sandbox, "plan"), { recursive: true });
+    cpSync(join(repoRoot, "test", "setup"), join(sandbox, "test", "setup"), { recursive: true });
+    copyFileSync(join(repoRoot, targetTestFile), join(sandbox, targetTestFile));
+    for (const f of ["package.json", "tsconfig.json"]) copyFileSync(join(repoRoot, f), join(sandbox, f));
+    symlinkSync(join(repoRoot, "node_modules"), join(sandbox, "node_modules"));
+
+    writeFileSync(join(sandbox, statusTsRelPath), mutated);
+    const mutatedSha = sha256(readFileSync(join(sandbox, statusTsRelPath), "utf8"));
+    assert.notEqual(mutatedSha, originalSha, "the mutation must actually change the sandbox copy's bytes");
+    assert.equal(
+      sha256(readFileSync(statusTsPath, "utf8")),
+      originalSha,
+      "the CHECKED-OUT status.ts must be untouched while the mutated child runs -- a concurrent " +
+        "worker instrumenting it must never observe the durable-credit lookup already removed",
+    );
 
     // `NODE_TEST_CONTEXT` (set by node's OWN test runner on the process running THIS test) is
     // inherited by a plain `spawnSync` env by default -- and node's test runner treats its
@@ -497,15 +527,19 @@ test("W1-T951: removing the durable credit lookup fails the positive test", () =
     // reason (a silently-skipped child looks identical to a clean exit).
     const childEnv = { ...process.env };
     delete childEnv.NODE_TEST_CONTEXT;
-    childResult = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 90_000, env: childEnv });
+    childResult = spawnSync(process.execPath, args, { cwd: sandbox, encoding: "utf8", timeout: 90_000, env: childEnv });
   } finally {
-    // RESTORED REGARDLESS of what the child run did -- a throw, a timeout, or a pass must never
-    // leave the real checked-out source mutated.
-    writeFileSync(statusTsPath, original);
-    const restoredSha = sha256(readFileSync(statusTsPath, "utf8"));
-    assert.equal(restoredSha, originalSha, "status.ts must be restored byte-for-byte after the mutation check");
+    // The sandbox goes away regardless of what the child did. There is nothing to RESTORE: the
+    // checked-out tree was never written, so a throw or a timeout cannot leave it mutated -- the
+    // failure mode the old restore-in-finally existed to bound is now structurally absent.
+    rmSync(sandbox, { recursive: true, force: true });
   }
 
+  assert.equal(
+    sha256(readFileSync(statusTsPath, "utf8")),
+    originalSha,
+    "the checked-out status.ts must be byte-identical after the check -- it is never written at all",
+  );
   assert.ok(childResult, "sanity: the child process must actually have been spawned");
   assert.notEqual(
     childResult!.status,

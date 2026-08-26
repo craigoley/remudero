@@ -1,0 +1,176 @@
+- id: W1-T2305
+  title: "Every reading this repo takes of its own GitHub budget comes from an endpoint that does not report one — ten consecutive billed calls left `used` frozen at a value above its own limit while `remaining: 0` refused nothing, three same-second reads returned two different numbers and a zero, and the fleet's four readers all consult it; the repo's own worker module already measured the same disagreement and adopted the fix nowhere else"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  risk: high
+  rationale: |
+    Filed by reading, from a scratch worktree PROVEN equal to origin/main by sha (5b47c38c),
+    clone shallow-checked `false`, `node_modules` linked and `tsx` confirmed present. `src/run-task.ts`
+    read via git objects and cited BY SYMBOL. No suite, no poller, no spawning verb, no token read.
+
+    (1) THE OBSERVATION IS THE OPERATOR'S AND IS CARRIED AS ATTRIBUTED, NOT RE-DERIVED. Measured
+    2026-08-26 on the Azure host from one shell: ten consecutive BILLED GraphQL calls eight seconds
+    apart, all HTTP 200, with `used` frozen at 10383 / `rem` 0 / one fixed reset across all ten —
+    while the reported limit is 5000. A counter cannot simultaneously sit above its own limit,
+    report nothing remaining, and refuse nothing. When it does move it moves in bulk
+    (6003 -> 8807 -> 10383, then frozen), which is lazy batched accounting: a flush landing between
+    two reads shows as an instantaneous jump regardless of when the usage occurred. The dedicated
+    endpoint is worse — three calls in the SAME SECOND returned 10383, 0, 10383, and sixteen
+    consecutive reads all gave limit 5000 / used 0 / reset exactly one hour ahead TO THE SECOND,
+    which is a window manufactured at request time rather than a bucket. NOT LOCAL: proxy env reads
+    zero in the daemon container, the responses carry GitHub's own `Server` and a distinct request
+    id per call.
+
+    (2) THIS REPO ALREADY MEASURED THE SAME DISAGREEMENT AND WROTE IT DOWN — IN ONE MODULE.
+    `src/lib/worker.ts`'s own header for its `X-Ratelimit-*` parser says it in terms: that probe
+    "is FREE (measured: ten such calls moved `used` by 4 while ten real calls moved it by 23)"
+    and "it answers about a DIFFERENT bucket with a DIFFERENT reset — measured back to back, an
+    ordinary `gh api repos/…` call carried remaining=3259 while `gh api rate_limit` in the same
+    window reported remaining=4960." That module therefore reads the rate-limit headers off THE
+    SAME RESPONSE the metered call already carried, "never a separate probe". **THE REMEDY IS
+    ALREADY BUILT AND ADOPTED EXACTLY ONCE.** This task is the adoption, not the invention.
+
+    (3) Q1 — EVERY READER, BY SYMBOL, AND WHAT IT DOES WITH THE ANSWER. Four call sites, all of
+    them the same endpoint:
+      **`readGhRateLimitRemaining`** (`src/lib/daemon-health.ts`) — parses `resources.core.remaining`
+        for the console widget's own display value. A wrong reading is NOISY ONLY.
+      **`readGhRateLimitBuckets`** (`src/lib/daemon-health.ts`) — both buckets off ONE exec; it is
+        the shared reader behind the two consequential consumers below.
+      **`reportDrainQuotaExhaustion`** (`src/run-task.ts`) — reads that pair, logs a `drain.quota`
+        row per bucket, and on `isBucketExhausted` (which is exactly `remaining <= 0`) calls
+        `escalate`. A fabricated zero OPENS A NEEDS-HUMAN ISSUE. It is gated behind
+        `stopReason === "no_runnable"` and a positive indeterminate-decline count, so it is not
+        fired every tick — but the gate is about the DRAIN's state, never about the reading's
+        credibility.
+      **the daemon tick's `readGhQuota` / `onQuotaExhausted`** (`src/run-task.ts`) — same reader,
+        every tick, into `escalateQuotaExhaustion`. Its own comment is the reassuring half:
+        "observe-and-surface only — dispatch is NOT paused by this hook".
+      **`probeGithubThrottle`** (`src/lib/retro.ts`) — the fifth reading and a DIFFERENT FIELD: it
+        asks for the legacy `.rate.remaining` object rather than `resources.core`. It backs
+        `retroShippedGithubGateway`'s `unavailable()`, so a degraded answer makes the retro
+        cadence check SKIP ONE TICK, which the daemon retries next tick.
+    **SO THE WRONG-OUTCOME SET IS SMALL AND WORTH SAYING PLAINLY: no reader paces a call, sleeps,
+    or pauses dispatch.** The whole consequence of a fabricated reading is a spurious needs-human
+    issue plus one skipped retro tick. That is a real cost and a bounded one, and it is the reason
+    this shard proposes no governor.
+
+    (4) Q2 — THE FLEET'S OWN BUCKET HAS NEVER BEEN READ, AND THE REASON IS STRUCTURAL. The
+    operator's measurement: the fleet's `gh` children carry a 383-character app installation token
+    (fingerprint b15a86ee, 35 of 35 sampled), while every shell an operator can open carries a
+    93-character PAT (8d073b4c, resolving to login cao825), because the installation-token refresh
+    writes only the daemon's OWN process environment and an exec into the container inherits the
+    BOOT environment. **EVERY MEASUREMENT IN THIS INVESTIGATION THEREFORE READ A BUCKET THE FLEET
+    DOES NOT SPEND.** Identity work here is logins, character lengths and sha256 prefixes only; no
+    token is read, printed, scoped or rotated, and this shard does not propose that any be.
+
+    (5) THE LEDGER CANNOT SPEAK TO THIS AND NO LEDGER CLAIM IS MADE. At the state dir the archive
+    halves are present (666 compressed rotations, 6 plain, 1 live), so the union's preconditions
+    hold — but the newest row carrying `task_id: DAEMON` is 2026-08-17T02:08:25.417Z and rows
+    dated today with that task id read ZERO against a control of 442 rows dated today, every one of
+    them this host's own CLI traffic. The reader is the writer here; the fleet's own rows live on
+    the Azure host. No figure in this shard rests on the ledger.
+
+    (6) THE COST ALREADY PAID. An investigation spanning five hours and four lanes was founded on a
+    burst figure derived from two calls to this endpoint. A reset followed by a nonzero `used` is
+    exactly what it produces at random, and bulk accounting makes the same pair equally consistent
+    with the identical usage spread over the preceding hour. The burst was never established, and
+    nothing in the endpoint's behaviour could have established it.
+  design: |
+    (i) THE REMEDY IS PROVENANCE, NOT A NEW PROBE. Every reading must come from a response that was
+    itself metered — the actor in the body and the bucket in the response headers, from ONE call —
+    and must carry which resource it describes. The repo already parses those headers in
+    `src/lib/worker.ts` for its own arm path; this task lifts that reader to a shared one and points
+    the four sites in Q1 at it. `probeGithubThrottle`'s legacy-object read is folded into the same
+    reader rather than left as a fifth, differently-shaped answer.
+
+    (ii) THE BRACKET RULE IS PART OF THE DELIVERABLE AND IS NOT OBVIOUS. **THE LOGIN DOES NOT
+    IDENTIFY THE BUCKET.** Two readings both naming the same login had their reset epoch move and
+    their `used` fall to zero across a ten-minute gap that was not an hour rollover. A window is
+    valid ONLY if login AND reset epoch match at both ends; if either differs the window is
+    DISCARDED, never subtracted. A reader that cannot express "these two readings are not
+    comparable" will reproduce this defect with better inputs.
+
+    (iii) Q2's ANSWER — READ THE FLEET'S BUCKET WITHOUT TOUCHING A TOKEN. The daemon already shells
+    `gh` with the installation credential many times a tick. ONE of those existing calls, logged
+    with its own response headers — resource, used, limit, reset, plus the actor's login — answers
+    what the fleet's bucket is, with no rotation, no restart, no extra call and no value printed
+    beyond what a ledger row already carries. That is an OBSERVATION added to an existing call, not
+    a new probe, and it is the only proposal here that touches the fleet's identity at all.
+
+    (iv) WHAT A WRONG READING MAY STILL DO, AFTER THIS TASK. It may still be wrong — GitHub's
+    reporting is not this repo's to fix. What must change is that a reading carries its provenance
+    so a consumer can refuse it: an escalation raised off a bucket whose reset epoch does not match
+    the window it claims to describe is the one outcome this task must make impossible.
+
+    (v) Q3 — WHAT MUST NOT CHANGE.
+      **NOTHING PACES, THROTTLES OR SLEEPS A CALL.** W1-T1066 records a polling loop that locked the
+      operator out of his own repository for ninety minutes; the `GhPaceFloorStandDownError` path
+      stays exactly as it is. No reader added here may gate, delay or retry a call.
+      **NO GOVERNOR IS PROPOSED, AND THAT IS THE POINT.** A budget nobody can measure is not a
+      budget anyone should enforce. This task improves what a reading MEANS; it must not convert any
+      reading into a dispatch decision, and the daemon hook's own "dispatch is NOT paused by this
+      hook" must remain true afterwards.
+      **NO TOKEN IS ROTATED, SCOPED, PRINTED OR READ.** Identity work stays logins, lengths and
+      sha256 prefixes.
+      **THE ESCALATION PATHS KEEP THEIR ABILITY TO FIRE.** The remedy is that they fire on a
+      credible reading, never that they fire less.
+
+    (vi) ONE UNRESOLVED OBSERVATION, RECORDED RATHER THAN SMOOTHED. With the same environment,
+    `gh auth status` reports the 93-character token INVALID while `gh api user` returns 200 and the
+    expected login. Named, not explained. It is not a precondition for this task and must not be
+    quietly resolved into a story by whoever builds it.
+
+    (vii) NOT IN SCOPE, NAMED: any change to `GhPaceFloorStandDownError` or the pacer; any dispatch
+    gate; the installation-token refresh path; the `gh auth status` disagreement in (vi); and any
+    attempt to make GitHub's own reporting accurate.
+  acceptance:
+    - claim: "a rate-limit reading carries the actor and the resource it describes, from the response that was metered"
+      proof: "unit test: test/rate-limit-reading-provenance.test.ts"
+    - claim: "a bracket whose two ends disagree on reset epoch is discarded rather than subtracted"
+      proof: "unit test: test/rate-limit-reading-provenance.test.ts"
+    - claim: "a bracket whose two ends disagree on actor is discarded rather than subtracted"
+      proof: "unit test: test/rate-limit-reading-provenance.test.ts"
+    - claim: "matching actor and reset epoch at both ends yields a usable window"
+      proof: "unit test: test/rate-limit-reading-provenance.test.ts"
+    - claim: "an exhaustion escalation is never raised off a reading whose provenance does not match the window it claims"
+      proof: "unit test: test/rate-limit-reading-provenance.test.ts"
+    - claim: "no reading path paces, sleeps or defers a call"
+      proof: "unit test: test/rate-limit-reading-provenance.test.ts"
+    - claim: "the daemon quota hook still surfaces without pausing dispatch"
+      proof: "unit test: test/rate-limit-reading-provenance.test.ts"
+  files: [src/lib/daemon-health.ts, src/lib/retro.ts, src/run-task.ts, test/rate-limit-reading-provenance.test.ts]
+  status: queued
+  attempts: 0
+  origin: "oper#rate-limit-endpoint-reports-no-budget-2026-08-26"
+  plan_refs: ["W1-T132", "W1-T249", "W1-T372", "W1-T525", "W1-T1066"]
+  note: |
+    `risk: high` IS RULE 19'S SPAN, NOT BLAST RADIUS. Rule 19 derives a concern from each declared
+    path's stem, so three source modules and a test named after none of them trip it at `medium`.
+    The change is one shared reader plus the four call sites that adopt it.
+
+    EVERY PROOF PATH IS INSIDE `files:`, CHECKED PROGRAMMATICALLY RATHER THAN BY EYE — the single
+    proof path is a declared member.
+
+    THE FORWARD REFERENCE IS FALSIFIED WITH A DISCRIMINATING CONTROL NAMING A TEST FILE THAT EXISTS
+    ON MAIN. `rmd check-proof` on the declared path reads `exit: 1`, `hits: 0`, `verdict: fail`; the
+    same verb on `unit test: test/rate-limit-bucket-surface.test.ts` — present at 5b47c38c, and the
+    suite that already pins this repo's rate-limit bucket surface — reads `verdict: pass`. The
+    control was confirmed present by `ls` BEFORE the falsifier was believed.
+
+    THE ID WAS VERIFIED **UNUSED**, NOT MINE, ACROSS EIGHT SURFACES, MATCHED ANCHORED AS
+    `W1-T2305([^0-9]|$)` with a bracket class and never a backslash-d escape. Remote counts read
+    first: 142 heads, 418 reservation refs.
+      **reservation refs 1** (control: the sibling reserved id also reads 1) — surface one reading
+        ONE rather than zero is what proves this is the right number;
+      shard filenames on main 0 (control 1); declared `- id:` lines on main 0 (control 1); head
+        branches 0 (control 92 run-shaped heads); open-PR titles 0 and bodies 0 (control: 1 title
+        and 5 bodies across 7 open PRs carry some task id); merged trailers 0 (control 1, drawn
+        from an id present on origin/main and therefore merged, out of 505); merged subjects 0
+        (control 1, drawn from an id merged as its own PR, out of 830).
+    Every task id cited anywhere in this shard was checked to be REAL before it was written — each
+    resolves to a declared plan record on origin/main — so no example id in this file can be
+    mistaken for a mint.

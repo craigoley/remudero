@@ -389,6 +389,7 @@ import {
   renderPromotionProposals,
   renderPlanStateTruth,
   resolveMarkerForGather,
+  runlessMergesSince,
   saveMarker,
   shippedSince,
   stampCitationsAndCommit,
@@ -578,8 +579,17 @@ import {
   type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
+  type NameFilterResolution,
 } from "./lib/review.js";
-import { proofQueueAudit, PROOF_QUEUE_AUDIT_CAUSES } from "./lib/proof-queue-audit.js";
+import {
+  proofQueueAudit,
+  PROOF_QUEUE_AUDIT_CAUSES,
+  CREDITED_PROOF_QUEUE_AUDIT_CAUSES,
+  creditedAmendmentVisibility,
+  type CreditedAmendmentFact,
+  type CreditedAmendmentReport,
+  type ProofQueueAuditReport,
+} from "./lib/proof-queue-audit.js";
 import { buildReceipt, resolveReceiptLedgerLines, type ReceiptLedgerRead } from "./lib/receipt.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, type AutoTriageDecision, type TriageClaimReserver, type TriageClaimResult } from "./lib/auto-triage.js";
@@ -615,6 +625,8 @@ import {
   type BranchFacts,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
+  readMergeCreditedTaskIds,
+  isMergeCreditLine,
 } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -624,6 +636,7 @@ import {
   checkMemoryGovernor,
   checkQueueGovernor,
   cancelledRequiredCheckNames,
+  withoutDownstreamGateFailure,
   checksStateFromRollup,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
@@ -651,6 +664,11 @@ import {
   type ArmedStalledPr,
   type CancelledRequiredCheck,
   type CiFailure,
+  type CiLogUnavailableCause,
+  describeCiLogUnavailable,
+  MAX_CI_LOG_FAILURE_DETAIL,
+  type CiTailSource,
+  type CiAnnotationFallback,
   type ClarificationQuestion,
   type CostGovernorResult,
   type CreditCandidate,
@@ -4951,13 +4969,24 @@ export function renderFixPrompt(opts: {
     const rendered =
       failures.length > 0
         ? failures
-            .map(
-              (f, i) =>
+            .map((f, i) => {
+              // A named unavailability replaces the `log tail:` line entirely rather than sitting
+              // beside an empty one: an empty `log tail:` is precisely the rendering that reads
+              // as "this check printed nothing", which is the confusion this branch exists to
+              // end. The cause text is authored HERE, never by CI, but it is still neutralized
+              // and kept inside the fence — the check name beside it is attacker-influenceable,
+              // and a reader must not have to know which half of a fenced block to trust.
+              const body = f.logUnavailable
+                ? `   ${neutralizeFenceMarkers(describeCiLogUnavailable(f.logUnavailable))}\n` +
+                  `   TREAT THIS AS "I CANNOT SEE WHY THIS FAILED", NOT AS A CLEAN CHECK.\n`
+                : `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n`;
+              return (
                 `${i + 1}. ${CI_LOG_FENCE_OPEN}\n` +
                 `   check: ${neutralizeFenceMarkers(f.name)}\n` +
-                `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n` +
-                CI_LOG_FENCE_CLOSE,
-            )
+                body +
+                CI_LOG_FENCE_CLOSE
+              );
+            })
             .join("\n\n")
         : "(no failing check detail was captured — re-check `gh pr checks` for the current state.)";
     return [
@@ -10574,10 +10603,14 @@ async function runTask(
     // `change.description`) and `review.headSha` is the SAME head `cappedOverrideFromLedger`
     // read a few statements earlier — the head this candidate change was actually assessed at,
     // not whatever `gh pr view` would report if re-read after the judge returns.
+    // W1-T2284: `description` is the ONLY place `task.title` reaches the judge — it used to
+    // ALSO ride along as `planContext.title` below, the same string under a second label,
+    // which is what let #2853 read as a double confirmation of a defect rather than one
+    // description of one change. `planContext` now carries `taskId`/`taskType` only.
     const riskJudgeInput: RiskJudgeInput = {
       change: { description: `${task.title} — ${prUrl}`, files: task.files },
       gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
-      planContext: { taskId: task.id, title: task.title, taskType: task.type },
+      planContext: { taskId: task.id, taskType: task.type },
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
@@ -14351,6 +14384,227 @@ export function defaultMergeEvidenceLog(cwd: string): { dump: string; ref: strin
  *  network, the same DI shape `LintPlanStatusDeps.readMergeEvidenceLog` already uses. */
 export interface ProofQueueAuditDeps {
   readMergeEvidenceLog?: typeof defaultMergeEvidenceLog;
+  /** W1-T2280: overrides the whole `--credited` resolution — the one seam a test needs to drive
+   *  every branch below without a real ledger/git checkout. */
+  creditedProofVisibility?: typeof creditedProofVisibility;
+}
+
+/** {@link creditedProofVisibility}'s return: what it found over the merge-credited population. */
+export interface CreditedProofVisibilityResult {
+  /** `creditedIds.size` — how many tasks {@link readMergeCreditedTaskIds} named, regardless of
+   *  whether any of them have an offending proof or amendment. */
+  creditedCount: number;
+  proof: ProofQueueAuditReport;
+  amendment: CreditedAmendmentReport;
+}
+
+/**
+ * Every real I/O seam {@link creditedProofVisibility} needs, injectable so a test drives the
+ * whole credited pass over fixtures — no real ledger, git history or checkout. Mirrors
+ * `ProofQueueAuditDeps`'s own "one caller supplies both predicates, bound to a real checkout"
+ * contract (lib/proof-queue-audit.ts's module doc).
+ */
+export interface CreditedProofVisibilityDeps {
+  /** Defaults to `ledgerPathFor(loadConfig())`, fail-open to `undefined` on an unreadable config
+   *  (the same posture `emissionsCommand`'s own `stateDir` resolution already takes) — a credited
+   *  pass over a config-less checkout finds zero credited tasks rather than crashing. */
+  ledgerPath?: string;
+  /** THE READER THE DISPATCHER ALREADY TRUSTS (W1-T2280 note x) — never re-derived by hand. */
+  readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
+  /** Used ONLY to date a credit (earliest `ts` per task id) — the population itself always comes
+   *  from `readMergeCreditedTaskIds` above, never from this union's own matches. */
+  ledgerUnion?: typeof resolveLedgerUnion;
+  pathExists?: (repoRelPath: string) => boolean;
+  resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
+  symbolFoundAt?: (symbol: string, path: string) => boolean;
+  /** Overrides the real git-log read entirely — see {@link defaultCreditedAmendmentEvidence}. */
+  amendedSinceCredit?: (taskId: string, shardPath: string, creditedAtIso: string) => { amended: boolean; followUpFiled: boolean } | undefined;
+  cwd?: string;
+}
+
+/** Every ledger line matching either shape {@link isMergeCreditLine} accepts, pre-filtered by a
+ *  cheap raw-text regex before the expensive `JSON.parse` — mirrors every other
+ *  `resolveLedgerUnion` caller's own narrow-pattern convention (e.g. lib/coverage-improvement.ts's
+ *  `COVERAGE_IMPROVEMENT_LEDGER_PATTERN`). Deliberately broader than exactly-precise (a raw-text
+ *  match on `"verdict":"merged"` also fires on an unrelated field ordering) — precision is
+ *  `isMergeCreditLine` itself, applied after parsing; this pattern only bounds what gets parsed. */
+const CREDIT_TIMESTAMP_PATTERN = /"step":"verdict\.merged"|"verdict":"merged"/;
+
+/**
+ * The EARLIEST `ts` (ISO-8601, lexicographically comparable) each credited task's merge-credit
+ * ledger line carries, across the archive∪live union — never a single-file read (see
+ * `readMergeCreditedTaskIds`'s own arithmetic for why rotation drops credit past 200 rows/step).
+ * `undefined` when the union itself could not be trusted (`resolveLedgerUnion`'s `ok: false`) —
+ * FAIL OPEN: an amendment check with no dated credit to compare against simply never fires
+ * (`creditedAmendmentVisibility`'s `amendedSinceCredit` returns `undefined` for that task).
+ */
+function earliestCreditTimestamps(
+  stateDir: string,
+  ledgerUnion: typeof resolveLedgerUnion,
+): Map<string, string> | undefined {
+  const union = ledgerUnion(stateDir, CREDIT_TIMESTAMP_PATTERN);
+  if (!union.ok) return undefined;
+  const earliest = new Map<string, string>();
+  for (const raw of union.matches) {
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      continue; // a torn/corrupt line costs its own timestamp, never the whole read
+    }
+    if (!isMergeCreditLine(obj)) continue;
+    const id = obj.task_id;
+    const ts = obj.ts;
+    if (typeof id !== "string" || typeof ts !== "string") continue;
+    const prev = earliest.get(id);
+    if (prev === undefined || ts < prev) earliest.set(id, ts);
+  }
+  return earliest;
+}
+
+/** A `plan/tasks.d/<id>-<slug>.yaml` shard, relative to `cwd` (the checkout `git log` will run
+ *  in — see {@link defaultCreditedAmendmentEvidence}, never hardcoded to the module's own
+ *  `repoRoot`, which a test's scratch checkout is not) — or `undefined` when `taskId` is declared
+ *  inline in the `plan/tasks.yaml` monolith instead (W1-T2280 note ix: the amendment signal has
+ *  no per-file history to read for those, counted as `unmeasurable`). Reuses `taskRecordPath`
+ *  (lib/plan.ts) — the ONE derivation of "which file holds this task's record" — never a
+ *  re-guessed `plan/tasks.d/<id>-*.yaml` glob. */
+function creditedTaskShardPath(planPath: string, taskId: string, cwd: string): string | undefined {
+  const resolved = taskRecordPath(planPath, taskId);
+  if (resolved === undefined || resolved === planPath) return undefined;
+  return relative(cwd, resolved);
+}
+
+/**
+ * REAL git-log read behind {@link creditedAmendmentVisibility}'s `amendedSinceCredit`: was
+ * `shardPath` touched by a commit reachable from `origin/main` strictly after `creditedAtIso`,
+ * and did that SAME commit also ADD a brand-new `plan/tasks.d/*.yaml` shard other than
+ * `shardPath` itself (the follow-up escape hatch W1-T2217's commit `ecd1ccc0` used, W1-T2280
+ * rationale (11))? Returns `undefined` — FAIL OPEN, never a guessed flag — on a shallow checkout
+ * or any git failure, the same posture `defaultMergeEvidenceLog` already takes.
+ *
+ * TWO PASSES, DELIBERATELY. `git log --name-status -- <path>` FILTERS the printed file list down
+ * to only the pathspec's own matches — it does not name a commit's OTHER changed files, which is
+ * exactly what "a follow-up filed alongside" needs to see. Pass 1 finds the CANDIDATE commit shas
+ * (scoped to `shardPath`, cheap); pass 2 asks each candidate's FULL, unfiltered file list (via
+ * `git show`, no pathspec) whether it also added a different shard.
+ */
+function defaultCreditedAmendmentEvidence(
+  cwd: string,
+  taskId: string,
+  shardPath: string,
+  creditedAtIso: string,
+): { amended: boolean; followUpFiled: boolean } | undefined {
+  try {
+    const shallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd, encoding: "utf8" }).trim();
+    if (shallow === "true") return undefined;
+    const shaList = execFileSync(
+      "git",
+      ["log", `--since=${creditedAtIso}`, "--format=%H", "origin/main", "--", shardPath],
+      { cwd, encoding: "utf8", maxBuffer: 1 << 24 },
+    )
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (shaList.length === 0) return { amended: false, followUpFiled: false };
+    const addedShardRe = /^A\s+(plan\/tasks\.d\/[^/\t]+\.yaml)\s*$/;
+    const followUpFiled = shaList.some((sha) => {
+      const files = execFileSync("git", ["show", "--name-status", "--format=", sha], {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 1 << 24,
+      });
+      return files.split("\n").some((line) => {
+        const m = addedShardRe.exec(line.trim());
+        return m !== null && m[1] !== shardPath;
+      });
+    });
+    return { amended: true, followUpFiled };
+  } catch {
+    return undefined; // an unreadable/unexpected git state is UNMEASURABLE, never a guess
+  }
+}
+
+/**
+ * W1-T2280: `proofQueueAudit` and `creditedAmendmentVisibility` (lib/proof-queue-audit.ts) over
+ * the MERGE-CREDITED population — never the open+unmerged one `proofQueueAuditCommand`'s default
+ * path already covers. The population itself comes from `readMergeCreditedTaskIds` — the SAME
+ * reader `runCreditBackfill` (lib/sweep.ts) already trusts (note x) — never a second hand-copy of
+ * what a merge credit looks like. PURE ORCHESTRATION: every real read (ledger, git, filesystem)
+ * is a default that a caller can override wholesale via `deps`, so this stays testable without a
+ * real checkout, mirroring `proofQueueAuditCommand`'s own injected-dep contract.
+ */
+export function creditedProofVisibility(
+  planPath: string,
+  plan: Plan,
+  deps: CreditedProofVisibilityDeps = {},
+): CreditedProofVisibilityResult {
+  const cwd = deps.cwd ?? repoRoot;
+  const ledgerPath =
+    deps.ledgerPath ??
+    (() => {
+      try {
+        return ledgerPathFor(loadConfig());
+      } catch {
+        // ABSENT AND UNREADABLE COINCIDE FOR EVERY CONSUMER OF THIS VALUE, so `undefined` erases
+        // nothing here. `loadConfig` throws on a missing or empty config — every CI checkout — and
+        // the only use this verb has for it is locating a ledger. Undefined flows to exactly two
+        // places below: `creditedIds` becomes an empty set and `earliest` is skipped, which is the
+        // same report a host with no ledger produces, rendered honestly as zero credited tasks.
+        // This is a READ-ONLY report (proofQueueAudit exits 0 on its own analysis regardless of
+        // what it names), so no verdict rests on the difference. Same reasoning, same shape, as the
+        // `stateDir` defaults in emissionsCommand and its siblings above.
+        return undefined;
+      }
+    })();
+  const readCredited = deps.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds;
+  const creditedIds = ledgerPath
+    ? readCredited(ledgerPath, { maxRotations: Number.MAX_SAFE_INTEGER }).credited
+    : new Set<string>();
+
+  const creditedTasks = plan.tasks.filter((t) => creditedIds.has(t.id));
+
+  const proof = proofQueueAudit(creditedTasks, {
+    resolveNameFilteredCandidates: deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(cwd, rawName)),
+    pathExists: deps.pathExists ?? ((rel) => existsSync(join(cwd, rel))),
+    creditedIds,
+    symbolFoundAt:
+      deps.symbolFoundAt ??
+      ((symbol, path) => {
+        try {
+          return readFileSync(join(cwd, path), "utf8").includes(symbol);
+        } catch {
+          // "NOT VISIBLE AT THIS PATH" is the whole question this predicate answers, and an absent
+          // file and an unreadable one answer it identically — the sibling `pathExists` above is
+          // `existsSync`, which is false for both for the same reason. STATED PLAINLY BECAUSE IT IS
+          // a conflation, not an identity: a file that exists but cannot be read would be reported
+          // as "symbol not found". That costs one line in a REPORT that exits 0 regardless of how
+          // many offenders it names, never a gate verdict and never a strike — which is why the
+          // distinction is not carried in the return shape, whose `boolean` every caller reads as
+          // exactly this question.
+          return false;
+        }
+      }),
+  });
+
+  const earliest = ledgerPath ? earliestCreditTimestamps(dirname(ledgerPath), deps.ledgerUnion ?? resolveLedgerUnion) : undefined;
+  const facts: CreditedAmendmentFact[] = creditedTasks.map((t) => ({
+    taskId: t.id,
+    shardPath: creditedTaskShardPath(planPath, t.id, cwd),
+  }));
+  const amendedSinceCredit =
+    deps.amendedSinceCredit ??
+    ((taskId: string, shardPath: string, creditedAtIso: string) =>
+      defaultCreditedAmendmentEvidence(cwd, taskId, shardPath, creditedAtIso));
+  const amendment = creditedAmendmentVisibility(facts, {
+    amendedSinceCredit: (taskId, shardPath) => {
+      const ts = earliest?.get(taskId);
+      if (ts === undefined) return undefined; // no dated credit to compare against — fail open
+      return amendedSinceCredit(taskId, shardPath, ts);
+    },
+  });
+
+  return { creditedCount: creditedIds.size, proof, amendment };
 }
 
 /**
@@ -14378,7 +14632,7 @@ export interface ProofQueueAuditDeps {
  * which is the only place it is wired; nothing in the daemon/CI/arm path calls it.
  */
 export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAuditDeps = {}): Promise<number> {
-  const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], []);
+  const badArg = unknownArgError("proof-queue-audit", rest, ["--plan"], ["--credited"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -14391,6 +14645,43 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   } catch (e) {
     console.error(`### rmd proof-queue-audit: ${(e as Error).message}`);
     return 2;
+  }
+
+  // W1-T2280: an ADDITIVE, opt-in second population — the default open+unmerged path below is
+  // completely untouched when `--credited` is absent (note v: byte-identical to before this
+  // task). It is a REPORT, not a gate, same as the default path: exits 0 regardless of counts.
+  if (rest.includes("--credited")) {
+    const result = (deps.creditedProofVisibility ?? creditedProofVisibility)(planPath, plan);
+    console.log(
+      `### rmd proof-queue-audit --credited: ${result.creditedCount} merge-credited task(s), ` +
+        `${result.proof.criterionCount} proof(s) resolved`,
+    );
+    const offendingTaskCount = new Set(result.proof.offenders.map((o) => o.taskId)).size;
+    console.log(`  ${result.proof.offenders.length} unresolvable proof(s) across ${offendingTaskCount} task(s), by cause:`);
+    for (const cause of CREDITED_PROOF_QUEUE_AUDIT_CAUSES) {
+      const ids = result.proof.byCause[cause];
+      console.log(`    ${cause.padEnd(24)} ${String(ids.length).padStart(3)} task(s): ${ids.join(", ") || "(none)"}`);
+    }
+    for (const o of result.proof.offenders) {
+      console.log(`  ✗ ${o.taskId} criterion ${o.criterionIndex + 1} [${o.cause}] proof: "${o.proof.slice(0, 90)}"`);
+    }
+    for (const r of result.proof.relocated) {
+      console.log(
+        `  ↷ ${r.taskId} criterion ${r.criterionIndex + 1} [relocated to ${r.relocatedTo}] proof: "${r.proof.slice(0, 90)}"`,
+      );
+    }
+    console.log(
+      `\n  amendment signal: ${result.amendment.measurable} credited task(s) measurable via their own shard file, ` +
+        `${result.amendment.unmeasurable} unmeasurable (declared inline in plan/tasks.yaml, W1-T2280 note ix) — ` +
+        `${result.amendment.flagged.length} amended after credit with no follow-up filed alongside: ` +
+        `${result.amendment.flagged.join(", ") || "(none)"}`,
+    );
+    console.log(
+      "\nrmd proof-queue-audit --credited is a REPORT, not a gate — no dispatch, CI job or arm decision may " +
+        "consult this verdict (lib/proof-queue-audit.ts); no ledger line is appended and no status moves. " +
+        "Exits 0 unconditionally, regardless of the counts above.",
+    );
+    return 0;
   }
 
   const openIds = plan.tasks.filter(isOpenLintTask).map((t) => t.id);
@@ -14971,8 +15262,30 @@ function retroShippedGithubGateway(): ShippedGithub {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
     unavailable: () => probeGithubThrottle(),
+    // W1-T2288: backs `runlessMergesSince` (retro.ts) — the retro TRIGGER's only route to a
+    // merge that has no run at all (a plan/triage/feedback filing). Full history, unscoped,
+    // the SAME "no --since bound" discipline `citationStampPassFor`'s own git-log reader
+    // already uses for the identical reason (a marker-scoped read would need re-deriving on
+    // every threshold edit; a pure filter over the full corpus does not).
+    mergedCommits: () =>
+      parseGitLogCitationCommits(
+        execFileSync("git", ["-C", repoRoot, "log", "--format=%x1e%aI%x1f%s%x1f%b"], {
+          encoding: "utf8",
+          maxBuffer: 1 << 26,
+        }),
+      ),
   };
 }
+
+/**
+ * W1-T2288: every ledger step {@link gatherRuns} (lib/retro.ts) actually reads to reduce a
+ * RunSummary — matched in ONE `resolveLedgerUnion` pass, the same "narrow, not the whole
+ * ledger" discipline `FOLLOWUP_LEDGER_STEP_PATTERN` already uses. `run_id` itself is not part
+ * of the pattern: every line carrying one of these steps already carries a `run_id`, and
+ * `gatherRuns` groups by it after the fact.
+ */
+const RUN_LEDGER_STEP_PATTERN =
+  '"step":"run\\.start"|"step":"verdict"|"step":"pr\\.opened"|"step":"recon\\.done"|"step":"implement\\.done"|"step":"implement\\.resumed"|"step":"correction\\.provenance"';
 
 /**
  * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger +
@@ -14995,6 +15308,22 @@ function retroShippedGithubGateway(): ShippedGithub {
  * already use) instead of `evaluateRetroTrigger`'s own source-literal default; a test
  * injects a fixture `Policy` to prove a threshold edit changes the firing decision
  * with no source edit.
+ *
+ * W1-T2288: `mergesSinceMarker` is no longer `shippedSince(runs, ...).shipped.length` alone.
+ * `shippedSince` iterates `runs` (reduced from the ledger) — a merge with NO run at all (a
+ * plan/triage/feedback filing; every plan filing has none) has no loop iteration there and is
+ * structurally unreachable, not merely undercounted. `runlessMergesSince` (retro.ts) is the
+ * DISJOINT complement, read off `github.mergedCommits?.()` (this repo's own `git log`, never
+ * the ledger or a per-task search) rather than reimplementing `shippedSince`'s ledger∪GitHub
+ * crediting or its P9 ownership assert — both stay exactly as they were. `mergedCommits` is
+ * OPTIONAL on `ShippedGithub`: a fixture that does not implement it (every literal predating
+ * this task) contributes zero runless merges, not a thrown error.
+ *
+ * Also W1-T2288: the ledger read backing `runs` is now the archive∪live UNION
+ * (`resolveLedgerUnion`, lib/ledger-grep.ts) when at least one archive exists, so a run whose
+ * rows already rotated out of the live `state/ledger.ndjson` is still visible — falling back to
+ * the bare live-file read (today's exact behavior) only when zero archives are found, so a
+ * fresh state dir (or any fixture below with no rotations) is never read as an empty corpus.
  */
 export function retroTriggerCheck(
   now: Date = new Date(),
@@ -15008,9 +15337,18 @@ export function retroTriggerCheck(
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   const github = deps.github ?? retroShippedGithubGateway();
   if (github.unavailable?.()) return undefined;
-  const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+  const stateDir = join(config.root, "state");
+  const ledgerUnion = resolveLedgerUnion(stateDir, RUN_LEDGER_STEP_PATTERN);
+  const ledgerNdjson = ledgerUnion.ok
+    ? ledgerUnion.matches.join("\n")
+    : existsSync(ledgerPath)
+      ? readFileSync(ledgerPath, "utf8")
+      : "";
   const runs = gatherRuns(parseLedger(ledgerNdjson));
-  const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
+  const { shipped } = shippedSince(runs, marker?.ts, github);
+  const taskIdsWithRuns = new Set(runs.map((r) => r.taskId));
+  const runlessMerges = runlessMergesSince(github.mergedCommits?.() ?? [], marker?.ts, taskIdsWithRuns);
+  const mergesSinceMarker = shipped.length + runlessMerges.length;
   const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
   return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now, {
     mergesThreshold: policy.values.retro.mergesThreshold,
@@ -21068,9 +21406,13 @@ export function reviewOrphansFor(
 /**
  * W1-T100 (the #170 fix): failing required-check names + a tail of each one's
  * log — the ci-log fix mode's ONLY input (deriveFixMode/renderFixPrompt,
- * W1-T94). Best-effort: a log-fetch failure degrades to an EMPTY tail
- * (renderFixPrompt already renders "no failing check detail was captured" for
- * that case) — NEVER throws, so one unreadable log never strands the sweep.
+ * W1-T94). Best-effort: a log-fetch failure degrades to an EMPTY tail and
+ * NEVER throws, so one unreadable log never strands the sweep — but it no
+ * longer degrades SILENTLY. Every empty tail now carries a
+ * {@link CiLogUnavailableCause} naming why, because an unrecorded failed read
+ * is byte-indistinguishable from a check that simply printed nothing, and all
+ * three {@link DEFAULT_FIX_CLASSES} rows match by REGEX ON `logTail` — so an
+ * unexplained empty tail silently made every one of them unmatchable.
  * `owner`/`repo` are REQUIRED and passed as `--repo` on the `gh` call — the
  * daemon/sweep can target a repo other than its own checkout's cwd (the
  * daemon-repo-targeting design), so this must never rely on `gh`'s ambient
@@ -21093,39 +21435,150 @@ export function reviewOrphansFor(
  * test/sweep-superseded-check-run.test.ts drives it straight, rather than only indirectly through
  * the wider sweep pipeline.
  */
-export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck[] | undefined, tailLines = 60): CiFailure[] {
+/**
+ * Reads a check run's ANNOTATION messages — the fallback source for {@link fetchCiFailures}'s log
+ * tail. Deliberately the REST annotations endpoint and not the log blob: measured on this repo's
+ * own proxy, `GET /actions/jobs/<id>/logs` and `gh run view --log-failed` both answer 403 while
+ * `GET /check-runs/<id>/annotations` answers 200, which is the entire reason this seam exists.
+ *
+ * INJECTABLE, WITH THE PARAMETER APPENDED LAST at the call site so no positional caller shifts.
+ * The default really shells out; a test that supplies its own recorder proves the wiring, and a
+ * test that lets this run proves the default is reachable at all.
+ */
+export type CiAnnotationFetch = (owner: string, repo: string, checkRunId: string) => string[];
+
+/** The real annotations read: `gh api` against the endpoint that answers, parsed as JSON. */
+export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId: string): string[] {
+  const out = execFileSync(
+    "gh",
+    ["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`, "--jq", ".[].message"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  );
+  return out.split("\n").filter((l) => l.trim() !== "");
+}
+
+export function fetchCiFailures(
+  owner: string,
+  repo: string,
+  rollup: RollupCheck[] | undefined,
+  tailLines = 60,
+  fetchAnnotations: CiAnnotationFetch = defaultCiAnnotationFetch,
+): CiFailure[] {
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
   });
-  return failing.map((c) => {
+  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
+  // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
+  // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
+  return withoutDownstreamGateFailure(
+    failing.map((c) => {
     const name = c.name ?? c.context ?? "unknown";
     let logTail = "";
+    // The named outcome for an empty tail. STILL BEST-EFFORT: every path below either assigns a
+    // cause or leaves one assigned, and NONE of them rethrows — a log that cannot be read must
+    // never take down the fix attempt that needs it. What changes is only that the reason now
+    // SURVIVES the read, instead of being swallowed with the error that carried it.
+    let logUnavailable: CiLogUnavailableCause | undefined = { kind: "no-job-id" };
+    let tailSource: CiTailSource | undefined;
+    // W1-T2298: the id parsed here is ALSO the check-run id — measured equal on twelve checks across
+    // four PRs — so the annotation fallback below needs no new id plumbing and no new rollup field.
+    // Hoisted out of the `try` so the fallback can reach it after the read has already failed.
+    const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
     try {
-      const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
       if (jobId) {
         const out = execFileSync("gh", ["run", "view", "--job", jobId, "--repo", `${owner}/${repo}`, "--log-failed"], {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         });
         logTail = out.split("\n").slice(-tailLines).join("\n");
+        // A read that SUCCEEDS but yields nothing is a genuinely quiet job, not a failed read —
+        // the one case where an empty tail is the honest answer, and the one the other two
+        // causes must stay distinguishable from.
+        logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
+        if (logUnavailable === undefined) tailSource = "log";
       }
-    } catch {
-      /* best-effort — degrades to an empty tail, never throws */
+    } catch (err) {
+      // Reading the error's own text must not itself throw, or the best-effort contract would
+      // leak an exception out of the very catch that exists to contain one.
+      let detail = "unknown error";
+      try {
+        const e = err as { code?: unknown; message?: unknown };
+        const code = typeof e?.code === "string" && e.code ? `${e.code}: ` : "";
+        const message = typeof e?.message === "string" && e.message ? e.message : String(err);
+        detail = `${code}${message}`.slice(0, MAX_CI_LOG_FAILURE_DETAIL);
+      } catch {
+        /* keep the placeholder — a cause is still named, which is the whole point */
+      }
+      logUnavailable = { kind: "fetch-failed", detail };
+      logTail = "";
     }
-    return { name, logTail };
-  });
+    // W1-T2298 - THE FALLBACK, PLACED WHERE THE BLOB READ GIVES UP RATHER THAN BESIDE IT. The log
+    // tail stays PREFERRED: this runs only when that read failed or returned nothing, so a readable
+    // log can never be displaced and every existing recogniser keeps matching exactly what it
+    // matched before. On a container lane the blob read is a standing 403 - measured with this
+    // function's own argv - which left every logTail-keyed recogniser scanning an empty string
+    // while the same detail sat unread in a check-run annotation the API serves 200.
+    //
+    // BEST-EFFORT, AND IT NEVER OVERWRITES THE LOG'S OWN NAMED CAUSE. W1-T2291 made `fetch-failed`
+    // and `empty-log` mean something; a fallback that replaced them would take that back. On
+    // success the cause is CLEARED because a tail now exists; on failure the cause stands and the
+    // attempt is recorded beside it.
+    let annotationFallback: CiAnnotationFallback | undefined;
+    if (jobId && logUnavailable !== undefined) {
+      try {
+        const messages = fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
+        if (messages.length > 0) {
+          logTail = messages.join("\n").split("\n").slice(-tailLines).join("\n");
+          logUnavailable = undefined;
+          tailSource = "annotations";
+          annotationFallback = { outcome: "recovered" };
+        } else {
+          annotationFallback = { outcome: "empty" };
+        }
+      } catch (err) {
+        let detail = "unknown error";
+        try {
+          const e = err as { code?: unknown; message?: unknown };
+          const code = typeof e?.code === "string" && e.code ? `${e.code}: ` : "";
+          detail = `${code}${typeof e?.message === "string" && e.message ? e.message : String(err)}`.slice(
+            0,
+            MAX_CI_LOG_FAILURE_DETAIL,
+          );
+        } catch {
+          /* keep the placeholder - an outcome is still named, which is the whole point */
+        }
+        annotationFallback = { outcome: "failed", detail };
+      }
+    }
+    return {
+      name,
+      logTail,
+      ...(logUnavailable === undefined ? {} : { logUnavailable }),
+      ...(tailSource ? { tailSource } : {}),
+      ...(annotationFallback ? { annotationFallback } : {}),
+    };
+  }),
+  );
 }
 
 /**
  * W1-T1223 (design i) — the real gateway's producer for {@link OpenPrView.cancelledRequiredChecks},
  * mirroring how {@link fetchCiFailures} is the real gateway's producer for `ciFailures`: both name
- * their required checks off the SAME `cancelledRequiredCheckNames`/`REQUIRED_CHECK_FAIL` predicates
- * lib/sweep.ts owns, so this producer and `checksStateFromRollup`'s red verdict can never drift into
- * disagreeing about which check is cancelled. `jobId` is parsed from the SAME `detailsUrl` shape
- * `fetchCiFailures` already reads (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined`
- * when it cannot be read, so `requeueCheck`'s real wiring degrades to a named no-op rather than
- * guessing a re-queue target.
+ * off the SAME `cancelledRequiredCheckNames` predicate lib/sweep.ts owns, so this producer and
+ * `checksStateFromRollup`'s red verdict can never drift into disagreeing about which check is
+ * cancelled. `jobId` is parsed from the SAME `detailsUrl` shape `fetchCiFailures` already reads
+ * (`…/actions/runs/<run>/job/<job>`) — best-effort, `undefined` when it cannot be read, so
+ * `requeueCheck`'s real wiring degrades to a named no-op rather than guessing a re-queue target.
+ *
+ * W1-T2283 — `requiredContexts` is READ (still the one precondition — see
+ * {@link cancelledRequiredCheckNames}'s own doc) but no longer narrows WHICH cancelled check gets
+ * named: `ci-gate`, the ONE name branch protection on this repo actually declares required, is a
+ * downstream aggregator that reports FAILURE — never CANCELLED — when a sibling it depends on
+ * (`coverage-ratchet`, itself not a declared-required context) is cancelled. Narrowing to
+ * `requiredContexts` before testing for CANCELLED therefore named nothing on both measured
+ * incidents (#2794, #2841); this producer now agrees with {@link fetchCiFailures}, which already
+ * reads CANCELLED off this same rollup with no such narrowing.
  */
 export function cancelledRequiredChecks(
   rollup: RollupCheck[] | undefined,
@@ -21575,7 +22028,18 @@ export function buildOpenPrViews(
       // W1-T1223 — the "absence of a verdict" observable, populated alongside `ciFailures`
       // above off the SAME rollup read (no extra request); see `cancelledRequiredChecks`'s own
       // doc.
-      cancelledRequiredChecks: checksState === "red" ? cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts) : undefined,
+      //
+      // W1-T2283 — COMPUTED UNCONDITIONALLY, NEVER GATED ON `checksState === "red"`. While a
+      // cancellation is fresh and the required aggregate (`ci-gate`) has not yet concluded, this
+      // PR's `checksState` reads "pending" for up to ~10.5 measured minutes (#2794, #2841) before
+      // it flips to "red" — gating this field on "red" made the observation `undefined` for that
+      // whole window even though the SAME already-fetched rollup carried it the entire time. This
+      // is a pure read of a rollup already in hand (no extra `gh` call either way, exactly like
+      // `ciFailures` above), so there is no cost to carrying it rather than discarding it; whether
+      // `runSweep` ACTS on a cancellation before the gate concludes red is a separate question
+      // `isBlockedCi` still gates (lib/sweep.ts) — this only stops the data itself from being
+      // thrown away while pending.
+      cancelledRequiredChecks: cancelledRequiredChecks(pr.statusCheckRollup, requiredContexts),
       // W1-T176: only meaningful in the zero-runs shape post-review routes on;
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.

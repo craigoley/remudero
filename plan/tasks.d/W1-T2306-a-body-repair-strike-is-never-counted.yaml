@@ -1,0 +1,143 @@
+- id: W1-T2306
+  title: "A BODY-REPAIR STRIKE IS SPENT WITHOUT A REGIME TAG, SO IT IS AMNESTIED FOREVER AND NEVER COUNTS TOWARD THE TWO-STRIKE CAP — one of the two writers of a fix dispatch row omits the field the amnesty reads, an untagged row grades keyword only by construction, and once the task has a review that executed a proof every such strike is skipped by the counter: driven directly, two untagged strikes plus an executed review score ZERO, and three score zero too"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 30.00
+  files: [src/run-task.ts, test/body-repair-strike-counts.test.ts]
+  origin: oper#a-body-repair-strike-is-never-counted-2026-08-26
+  plan_refs: ["W1-T1282", "W1-T2272"]
+  status: queued
+  attempts: 0
+  rationale: |
+    (0) TWO PREMISES IN THE COMMISSIONING BRIEF ARE WRONG, AND ONE OF THEM CAME FROM ME. READ THIS
+    BEFORE THE REST, BECAUSE THE DEFECT THAT SURVIVES IS NARROWER AND REAL.
+
+    THE BRIEF SAID THE STRIKE COUNT IS KEYED ON A SHA. IT IS NOT. `priorStrikesFor` (run-task.ts)
+    is keyed on `task_id` and reads no head sha at all:
+
+      if (line.step !== "fix.dispatch" || line.task_id !== taskId) continue;
+
+    So the absence of a head sha on a dispatch row is irrelevant to the cap. Nothing needs a sha
+    added for the counter to work.
+
+    THE BRIEF SAID THE CAP HAS NEVER BOUND, MEASURED AS THREE PASSES EACH REPORTING STRIKE ONE OF
+    TWO. THAT MEASUREMENT WAS A FIXTURE ARTIFACT AND I PRODUCED IT. `priorStrikes` is a FIELD on
+    the PR view (`OpenPrView`, sweep.ts), populated ONCE where the view is built
+    (`priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId))`, run-task.ts), and
+    `runSweep` only ever READS `pr.priorStrikes` — it never re-derives it. Production rebuilds
+    that view from the ledger on every pass, so the count advances. The probe that produced the
+    three identical readings passed the SAME candidate object, built once with `priorStrikes: 0`,
+    into three `runSweep` calls. The counter did not fail to advance; nothing asked it to.
+
+    A SHARD FILED ON EITHER PREMISE WOULD HAVE BEEN FILED ON NOTHING. What follows is what is left
+    after both were driven and refuted, and it was found while refuting them.
+
+    (1) THE REAL DEFECT, DRIVEN DIRECTLY AGAINST THE EXPORTED FUNCTIONS.
+
+    A dispatch row's regime is read as `line.verdict_regime === "executed" ? "executed" :
+    "keyword_only"` — so a row with NO such field grades keyword only BY CONSTRUCTION, never by a
+    decision anyone made. The counter then skips exactly those rows once the task's own regime has
+    moved on:
+
+      if (currentRegime === "executed" && strikeRegimeOf(line) === "keyword_only") continue;
+
+    and the current regime is taken from the LATEST review row for the task, executed as soon as
+    any entry of its proof list is anything other than not executable. Driven with representative
+    rows:
+
+      2 TAGGED strikes   + an executed review  -> regime executed      priorStrikes 2
+      2 UNTAGGED strikes + an executed review  -> regime executed      priorStrikes 0
+      2 UNTAGGED strikes + a keyword review    -> regime keyword only  priorStrikes 2
+      2 UNTAGGED strikes + NO review at all    -> regime keyword only  priorStrikes 2
+      3 UNTAGGED strikes + an executed review  -> regime executed      priorStrikes 0
+
+    THE COUNT DOES NOT GROW. It is zero at two strikes and zero at three, so the cap cannot bind
+    on untagged rows, however many are spent.
+
+    (2) Q1 — WHERE IT IS KEYED, WHAT IT READS, WHO WRITES THE ROW, AND WHETHER THE OMISSION IS A
+    CHOICE.
+
+    Keyed on `task_id`; reads `fix.dispatch` rows and their `verdict_regime` field; the regime it
+    compares against comes from the latest review row's proof list. THERE ARE TWO WRITERS OF
+    `fix.dispatch` IN run-task.ts AND ONLY ONE TAGS THE REGIME. The main dispatch writes `strike`,
+    `strike_cap`, `unmet_count`, `round`, `mode`, `verdict_regime` and an elapsed measure. The
+    body-repair arm — the one that repairs an author-time acceptance-gate defect with a body-only
+    write and says so in its own console line, head sha unmoved — writes `strike`, `strike_cap`,
+    `unmet_count`, `round`, `mode` and `defect`, AND NO `verdict_regime`.
+
+    IT IS AN OVERSIGHT, NOT A RECORDED CHOICE. The amnesty exists so that a strike spent long ago
+    against a keyword-only verdict does not gate a rung that has since converged on executed
+    evidence — its own doc argues that case from a measured pair of PRs. Nothing anywhere states
+    that a body-repair strike should be exempt, and the exemption it gets is not scoped to age or
+    to evidence: it applies to a strike spent seconds earlier in the same run. A grep for the
+    field name across the writers is the whole story — one has it, one does not, and no comment
+    sits beside the absence.
+
+    (3) Q2 — WHAT THE COUNTER SHOULD KEY ON, AND WHETHER THIS IS ONE MECHANISM OR TWO.
+
+    IT SHOULD NOT NEED A SHA, AND ADDING ONE WOULD NOT FIX THIS. The failure is not that the
+    counter cannot tell one head from another; it is that a row it should count is misclassified
+    before any keying happens. The minimal correct change is that every writer of a dispatch row
+    states the regime that strike was spent under, so the amnesty applies to the rows it was
+    written for and to no others.
+
+    THEY SHOULD STAY TWO MECHANISMS, AND EACH CATCHES WHAT THE OTHER CANNOT. The cap counts
+    ATTEMPTS against a task and bounds spend: it fires whether or not the tree ever moved, and it
+    is what stops an unbounded rung. The unchanged-tree stand-down reads worktree CONTENT and
+    catches a rung that ran and changed nothing — a different failure, detectable within a single
+    strike, and one the cap would only reach after exhausting the budget the stand-down saves.
+    Folding them together would lose the early stand-down for a task whose first strike is also
+    its last, and would make a content read a precondition for a spend bound that must hold even
+    when no worktree exists. A body-repair strike is exactly the case that separates them: it
+    moves no head by design, so the content-based reader sees nothing to report while the attempt
+    it made is precisely what the cap is meant to count.
+
+    (4) WHY IT IS WORTH FIXING NOW RATHER THAN WHEN IT NEXT BITES.
+
+    The body-repair arm is reached on a PR whose acceptance block is defective at author time, and
+    that is the population most likely to need several attempts — so it is the arm where an
+    unbounded strike count costs the most workers. The reachability argument the brief makes about
+    the pending transport PR stands on its own: that PR replaces the poll transport, and a rung
+    that previously threw before finishing now runs to completion, so more of this path executes
+    per pass than did before. That PR is cited as context, not as a cause, and is not re-filed.
+  note: |
+    SIZING BAND: `risk: high` is set UP FRONT and the band is Rule 19's SPAN, not blast radius —
+    one source module and its test. The behavioural change is one added field on one existing
+    ledger write.
+
+    WHAT MUST NOT CHANGE. The unchanged-tree stand-down stays, and so does the escape to
+    escalation; neither is folded into the counter, for the reasons in section 3. THE CAP STAYS AT
+    TWO — a counter that starts counting must not be compensated for by raising the ceiling it
+    reports against, which would convert a repaired bound back into the unbounded one. AND NOTHING
+    PACES OR SLEEPS A DISPATCH: the fleet has already lost ninety minutes of operator access to a
+    polling loop, and no part of this task adds a wait, a retry cadence or a backoff.
+
+    ALSO UNCHANGED: the arm that stands the rung down when no failing check can be enumerated is
+    cited for its own scope and is untouched. The pending transport PR is cited as the context that
+    makes this path run further per pass, and is likewise untouched.
+
+    ID PROVENANCE: verified UNUSED across all eight surfaces with matches anchored on a digit class
+    rather than a shorthand escape — reservation ref PRESENT, and shard filenames on origin/main,
+    declared id lines, open-PR titles, head branches and bodies, merged trailers and merged
+    subjects all zero, each zero paired with a control drawn from an actually-merged id.
+  acceptance:
+    - claim: "every writer of a fix dispatch row records the verdict regime that strike was spent under"
+      proof: "unit test: test/body-repair-strike-counts.test.ts"
+    - claim: "a body repair strike counts toward the cap once the task has a review that executed a proof"
+      proof: "unit test: test/body-repair-strike-counts.test.ts"
+    - claim: "the amnesty still exempts a genuinely keyword era strike, so its original purpose survives"
+      proof: "unit test: test/body-repair-strike-counts.test.ts"
+    - claim: "the counter is still keyed on the task rather than on a head sha, and no sha is introduced"
+      proof: "unit test: test/body-repair-strike-counts.test.ts"
+    - claim: "the falsifier holds: removing the regime tag again returns the count to zero at two strikes"
+      proof: "unit test: test/body-repair-strike-counts.test.ts"
+    - claim: "the unchanged tree stand down is unmodified and still fires within a single strike"
+      proof: "unit test: test/body-repair-strike-counts.test.ts"
+    - claim: "the strike ceiling is still two and no policy default is raised"
+      proof: "unit test: test/body-repair-strike-counts.test.ts"
+    - claim: "no wait, retry cadence or backoff is added to any dispatch path"
+      proof: "unit test: test/body-repair-strike-counts.test.ts"

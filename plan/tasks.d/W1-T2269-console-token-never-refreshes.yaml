@@ -204,3 +204,28 @@
     commissioning brief did not reproduce: the 36.5% in this repo belongs to W1-T2252's
     followup-harvest key, and `EXCHANGE_TIMEOUT_MS`'s own doc says it was reasoned from a bound
     rather than fitted to a measurement, so no exchange-timeout rate is claimed here.
+
+    **SCOPE STATEMENT, ADDED 2026-08-26 — THIS NOTE IS NOT A LIST OF OUTSTANDING DEBTS, AND THE
+    PARAGRAPH ABOVE READS LIKE ONE.** No measurement is owed by this record. The paragraph beginning
+    "THE LEDGER EVIDENCE IS OWED" was written at filing time and has not been rewritten since; two
+    things about it are now stale in DIFFERENT ways, and neither is an omission.
+
+    **ESTABLISHED, NOT OUTSTANDING: the live `docker inspect` behind correction (A).** It was taken
+    on the operator's host and its result is recorded in `rationale:` under **RESOLVED 2026-08-25** —
+    the running `remudero-serve` carries all four credential names, (A)'s repo reading is
+    simultaneously correct, and the image predates the committed launcher, which settles the question
+    more firmly than agreement would have. The rationale says so in terms ("THIS DISCHARGES THE SECOND
+    MEASUREMENT THE `note:` OWES"). The request above it is therefore already answered; a reader who
+    acts on it would re-take a measurement that exists.
+
+    **SCOPED OUT, NOT SKIPPED: why this note still says otherwise.** The amendment that carried that
+    result was instructed to touch `rationale:` and nothing else, so it could not correct the note it
+    discharged. That boundary was deliberate — an amendment doing only what it was scoped to do is the
+    convention working, not a gap in it — and this addition is the follow-through the scope excluded,
+    not a new finding.
+
+    **AND THE ONE LINE THAT SURVIVES IS A BUILD PRECONDITION, NOT A DEBT.** The rationale keeps the
+    ledger half unmeasured and says why the authoring container could not take it. That stands as
+    written and is addressed to WHOEVER BUILDS THIS TASK, to be taken against the operator's state
+    root with a control that fires. It is not evidence owed by the filing or by the amendment, and
+    nothing here re-opens it: this paragraph adds no measurement and changes no claim.

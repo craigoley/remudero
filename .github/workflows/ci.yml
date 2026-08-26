@@ -669,6 +669,16 @@ jobs:
       - name: dependency-cruiser fitness rules
         run: npm run --silent depcruise
 
+      # THE CYCLE-COUNT RATCHET. `no-circular` is deliberately `warn` (see .dependency-cruiser.cjs's
+      # own severity note): `error` would fail every PR touching any module in an existing ring, and
+      # thirteen rings knot much of src/lib. So the cruise above REPORTS cycles and this step holds
+      # their COUNT at or below scripts/cycle-baseline.json's ceiling -- net growth blocks, touching
+      # a ring does not. #2798 cut the count from 24 to 13 with a config held outside the repo and
+      # nothing held the result; this is what holds it. Runs in THIS job rather than a new one so it
+      # adds no required context that could go silently absent (the #102 deadlock class).
+      - name: Cycle-count ratchet (blocks a diff that ADDS a dependency cycle; existing rings stay warn-only)
+        run: npm run --silent cycle-ratchet
+
   containment-probe:
     # MASTER-PLAN §5 TIER 1 (W1-T28): "Containment probe as a REQUIRED check —
     # on any diff touching sandbox / deny-floor / env" (WS-0 FF10a: a settings

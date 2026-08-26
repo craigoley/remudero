@@ -475,6 +475,100 @@ test("POST /v1/feedback with replyTo naming a NON-grilling entry -> 400 (nothing
   });
 });
 
+// ── W1-T2302: submissionKey — a repeat of the SAME console submission must never file a second
+// durable entry (fb-1785969338913-dc3d0f: two byte-identical entries, five seconds apart, from
+// one operator's clicks — nothing on the server could tell a retry from a new filing). ────────
+
+test("POST /v1/feedback: a second submission carrying a submissionKey that already filed writes NO second entry and answers with the entry already filed (acceptance 1)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const deps = depsFor(root, planPath);
+
+  await withService(deps, async (base) => {
+    const first = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "the drain retry banner overlaps the status pill", submissionKey: "sk-repeat-1" });
+    assert.equal(first.status, 200);
+    const firstBody = (await first.json()) as { entry: FeedbackEntry };
+
+    // A repeat -- same key, same click replayed by a reload/second-tab/retried fetch.
+    const second = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "the drain retry banner overlaps the status pill", submissionKey: "sk-repeat-1" });
+    assert.equal(second.status, 200);
+    const secondBody = (await second.json()) as { entry: FeedbackEntry };
+    assert.equal(secondBody.entry.id, firstBody.entry.id, "the repeat answers with the SAME entry, not a fresh id");
+  });
+
+  // The literal proof artifact: exactly ONE plan/feedback/<id>.yaml exists, not two.
+  const files = readdirSync(feedbackDir(root)).filter((f) => f.endsWith(".yaml"));
+  assert.equal(files.length, 1, "a repeat carrying the same submissionKey must write no second entry file");
+
+  // "no second ledger line for a filing that did not happen" (rationale).
+  const lines = readLedgerLines(deps.ledgerPath);
+  assert.equal(lines.length, 1, "the repeat must not append a second panel.feedback_submitted ledger line");
+});
+
+test("POST /v1/feedback: a recognised repeat never re-attempts the reply-target 'answered' transition and never turns its own refusal into an operator-visible error (acceptance 2 / design v)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const deps = depsFor(root, planPath);
+  const parked = captureFeedback(root, { raw: "does this want a CLI flag or a config default?", origin: "cli" });
+  setFeedbackStatus(root, parked.id, "grilling");
+
+  let answerId = "";
+  await withService(deps, async (base) => {
+    const first = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "a config default, please", replyTo: parked.id, submissionKey: "sk-answer-1" });
+    assert.equal(first.status, 200);
+    const firstBody = (await first.json()) as { entry: FeedbackEntry };
+    answerId = firstBody.entry.id;
+    assert.equal(readFeedbackEntry(root, parked.id).status, "answered", "the first submission DOES transition the target");
+
+    // The repeat carries a DELIBERATELY WRONG replyTo -- if the route re-validated replyTo
+    // before checking submissionKey, this would 400. It must not: the submissionKey short-
+    // circuit runs FIRST, before replyTo is ever looked at again.
+    const second = await post(base, "/v1/feedback", WRITE_TOKEN, {
+      text: "a config default, please",
+      replyTo: "fb-does-not-exist",
+      submissionKey: "sk-answer-1",
+    });
+    assert.equal(second.status, 200, "a recognised repeat must never surface an error to the operator");
+    const secondBody = (await second.json()) as { entry: FeedbackEntry };
+    assert.equal(secondBody.entry.id, firstBody.entry.id);
+  });
+
+  // The reply target's own status/answered_by survive untouched -- never re-transitioned, never
+  // reset -- and setFeedbackStatus's answered_by still names the ONE real answer.
+  const target = readFeedbackEntry(root, parked.id);
+  assert.equal(target.status, "answered");
+  assert.equal(target.answered_by, answerId, "answered_by still names the ONE real answer, never re-set by the repeat");
+  const lines = readLedgerLines(deps.ledgerPath);
+  assert.equal(lines.length, 1, "the repeat must not append a second ledger line either");
+});
+
+test("POST /v1/feedback: two DELIBERATELY separate submissions carrying identical text (different/absent submissionKeys) each file their own entry (acceptance 3 / design iv)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const a = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "the same observation, filed on purpose, twice", submissionKey: "sk-a" });
+    const b = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "the same observation, filed on purpose, twice", submissionKey: "sk-b" });
+    const aBody = (await a.json()) as { entry: FeedbackEntry };
+    const bBody = (await b.json()) as { entry: FeedbackEntry };
+    assert.notEqual(aBody.entry.id, bBody.entry.id);
+
+    // No key at all (a caller predating this task) is equally never deduped against anything.
+    const c = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "the same observation, filed on purpose, twice" });
+    const cBody = (await c.json()) as { entry: FeedbackEntry };
+    assert.notEqual(cBody.entry.id, aBody.entry.id);
+  });
+  assert.equal(readdirSync(feedbackDir(root)).filter((f) => f.endsWith(".yaml")).length, 3);
+});
+
+test("POST /v1/feedback: an empty-string submissionKey -> 400 (must be a non-empty string when present, same discipline as replyTo)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "x", submissionKey: "" });
+    assert.equal(res.status, 400);
+  });
+});
+
 // ── POST /v1/feedback/preview (W1-T350: the feedback interpreter's preview seam) ────────────
 //
 // Acceptance criterion 1 (plan/tasks.d/W1-T350...): "the preview endpoint returns a four-section
