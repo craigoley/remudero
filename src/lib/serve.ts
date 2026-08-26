@@ -3444,6 +3444,23 @@ export function renderShellHtml(
   // once) -- keyed by replyTo, mirroring approveConfirmTimers's own per-proposalId keying.
   const answerConfirmTimers = new Map();
   const answerExpansions = new Map();
+  // W1-T2302: one submission key PER answer form, keyed by replyTo, mirroring
+  // answerConfirmTimers/answerExpansions's own per-replyTo discipline -- minted ONCE for
+  // whichever submit episode is currently unresolved for a given grill (preview -> fail-open,
+  // or preview -> arm -> confirm both read the SAME key back rather than minting a fresh one),
+  // and sent to the server so a repeat POST /v1/feedback (a reload, a second tab, a stray
+  // re-entrant click landing while the first request is still in flight) is recognised as the
+  // SAME submission instead of filing a second durable entry. Cleared only once a filing POST
+  // for that replyTo actually resolves.
+  const answerSubmissionKeys = new Map();
+  // W1-T2302: crypto.randomUUID when available (every modern browser), a Math.random fallback
+  // otherwise -- either way this is an opaque per-submission identity, never derived from the
+  // answer text itself (two deliberately separate submissions carrying identical text must
+  // still each file as their own entry).
+  function mintSubmissionKey() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+    return "sk-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+  }
   // W1-T2206: replyTo keys with a preview currently in flight -- membership (not a single
   // shared flag) is what keeps two DIFFERENT grill answers mid-preview at once independent,
   // matching answerConfirmTimers/answerExpansions's own per-replyTo discipline. This set is
@@ -3510,8 +3527,14 @@ export function renderShellHtml(
       // read back -- the round trip's whole point (never file an unseen rewrite).
       if (submitBtn.dataset.confirming === "true") {
         const expansion = answerExpansions.get(replyTo) ?? null;
+        // W1-T2302: read back the SAME key this submission was minted under (below, on the
+        // click that armed it) rather than minting a fresh one -- confirm is the SECOND half of
+        // ONE submission, not a new one.
+        if (!answerSubmissionKeys.has(replyTo)) answerSubmissionKeys.set(replyTo, mintSubmissionKey());
+        const submissionKey = answerSubmissionKeys.get(replyTo);
         resetAnswerButton(submitBtn);
-        await postJson("/v1/feedback", { text: answer, replyTo, expansion });
+        await postJson("/v1/feedback", { text: answer, replyTo, expansion, submissionKey });
+        answerSubmissionKeys.delete(replyTo);
         input.value = "";
         refreshAll();
         return;
@@ -3529,6 +3552,10 @@ export function renderShellHtml(
       // fail-open leg that is about to file behind it (the defect this task closes). suppressAck
       // opts out of that automatic ack HERE; the arm leg below fires it manually, by hand, only once
       // it has confirmed (via the resolved expansion) that this really is the leg the text is true for.
+      // W1-T2302: mint (or reuse, on a re-entrant click landing before the first request settles)
+      // ONE key for this submission BEFORE either branch below can fire it -- both the fail-open
+      // leg just past the preview and the arm's later confirm leg above read this SAME map entry.
+      if (!answerSubmissionKeys.has(replyTo)) answerSubmissionKeys.set(replyTo, mintSubmissionKey());
       answerPending.add(replyTo);
       setAnswerPending(submitBtn, true);
       let expansion = null;
@@ -3553,7 +3580,11 @@ export function renderShellHtml(
         // recorded.") is the true statement this leg leaves the operator with, and its own
         // not-ok-path showWriteError (unchanged, design (iv)) still speaks if the filing itself
         // fails, rather than leaving the operator with a stale ack painted by the preview above.
-        await postJson("/v1/feedback", { text: answer, replyTo });
+        // W1-T2302: the SAME key minted above the try/catch, so a repeat of THIS click is
+        // recognised as the same submission instead of filing a second entry.
+        const submissionKey = answerSubmissionKeys.get(replyTo);
+        await postJson("/v1/feedback", { text: answer, replyTo, submissionKey });
+        answerSubmissionKeys.delete(replyTo);
         input.value = "";
         refreshAll();
         return;

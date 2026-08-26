@@ -92,6 +92,7 @@ import {
   captureFeedback,
   expandFeedbackDraft,
   FEEDBACK_STATUSES,
+  findFeedbackBySubmissionKey,
   listFeedback,
   readFeedbackEntry,
   recentFeedbackFewShot,
@@ -334,6 +335,7 @@ interface SubmitFeedbackInput {
   attachments: string[];
   replyTo?: string;
   expansion?: FeedbackExpansion | null;
+  submissionKey?: string;
 }
 
 /**
@@ -348,6 +350,12 @@ interface SubmitFeedbackInput {
  * every other body field on this route already gets), so a malformed/tampered expansion is
  * rejected loud rather than silently stored. Omitting it entirely is the file-raw escape (design
  * (iv)): the entry captures exactly as it did before this task.
+ *
+ * `submissionKey`, if present, is the per-submission key the console mints once per submit
+ * action (W1-T2302) — an opaque string, never re-validated against any shape beyond
+ * "non-empty" (unlike `expansion`, this one carries no structure to check: its only job is to
+ * be comparable). Omitting it is every caller that predates this task: always a fresh capture,
+ * exactly today's behavior.
  */
 function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedbackInput {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
@@ -368,6 +376,9 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   if (body.replyTo !== undefined && (typeof body.replyTo !== "string" || !body.replyTo.trim())) {
     return { error: "replyTo must be a non-empty string when present" };
   }
+  if (body.submissionKey !== undefined && (typeof body.submissionKey !== "string" || !body.submissionKey.trim())) {
+    return { error: "submissionKey must be a non-empty string when present" };
+  }
   let expansion: FeedbackExpansion | null | undefined;
   if (body.expansion !== undefined && body.expansion !== null) {
     expansion = validateFeedbackExpansion(body.expansion);
@@ -375,7 +386,13 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   } else if (body.expansion === null) {
     expansion = null;
   }
-  return { text: body.text, attachments, replyTo: body.replyTo as string | undefined, expansion };
+  return {
+    text: body.text,
+    attachments,
+    replyTo: body.replyTo as string | undefined,
+    expansion,
+    submissionKey: body.submissionKey as string | undefined,
+  };
 }
 
 /**
@@ -401,6 +418,17 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
  * Once a target is `answered`, a second `replyTo` naming it is refused by the SAME
  * not-parked-at-`grilling` check just below, now naming the real terminal state instead of a
  * `grilling` that never moved.
+ *
+ * W1-T2302: `submissionKey`, when present, is checked FIRST, before anything else runs — a
+ * repeat POST carrying a key that already filed answers immediately with the entry that filing
+ * already produced (200, `entry` unchanged) and does NOTHING else: no `replyTo` re-validation,
+ * no second {@link captureFeedback} write, no second `setFeedbackStatus` reply-target
+ * transition, no second `panel.feedback_submitted` ledger line. This is deliberately a route-
+ * level check (not left to `captureFeedback`'s own never-clobber guard alone): the reply-target
+ * transition and the ledger line are THIS route's own side effects, and a recognised repeat must
+ * skip both, not merely avoid re-writing the entry file (design point (v) — a recognised repeat
+ * must never re-attempt a transition the target's own refusal would otherwise turn into an
+ * operator-visible error).
  */
 export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
   return {
@@ -410,6 +438,13 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
     // W1-T404: LOW — bookkeeping, trivially reversible (capture-only).
     tier: "low",
     handler: jsonAction(validateSubmitFeedback, (input, req, res) => {
+      if (input.submissionKey) {
+        const existing = findFeedbackBySubmissionKey(deps.root, input.submissionKey);
+        if (existing) {
+          sendJson(res, 200, { ok: true, entry: existing });
+          return;
+        }
+      }
       if (input.replyTo !== undefined) {
         let target: FeedbackEntry;
         try {
@@ -433,6 +468,7 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         origin: "ui",
         expansion: input.expansion,
         replyTo: input.replyTo,
+        submissionKey: input.submissionKey,
       });
       if (input.replyTo !== undefined) {
         setFeedbackStatus(deps.root, input.replyTo, "answered", {

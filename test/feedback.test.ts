@@ -14,6 +14,7 @@ import {
   expandFeedbackDraft,
   feedbackAttachmentsDir,
   feedbackEntryPath,
+  findFeedbackBySubmissionKey,
   isValidFeedbackOrigin,
   listFeedback,
   parseFeedbackAddArgs,
@@ -543,4 +544,62 @@ test("captureFeedback: an explicit null expansion (a confirm whose preview never
   const r = root();
   const entry = captureFeedback(r, { raw: "x", expansion: null });
   assert.equal(entry.expansion, null);
+});
+
+// ── W1-T2302: submissionKey — the console-minted per-submission key that lets a repeat POST
+// /v1/feedback be RECOGNISED, never re-derived from raw text (fb-1785969338913-dc3d0f: two
+// byte-identical entries, five seconds apart, from one operator's clicks). ─────────────────────
+
+test("captureFeedback: an entry captured WITH a submissionKey stores it durably as submission_key; findFeedbackBySubmissionKey finds it", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "the drain retry banner overlaps the status pill", submissionKey: "sk-abc123" });
+  assert.equal(entry.submission_key, "sk-abc123");
+  assert.deepEqual(findFeedbackBySubmissionKey(r, "sk-abc123"), entry);
+  assert.deepEqual(readFeedbackEntry(r, entry.id), entry, "the field is durable -- present on disk, not just the in-memory return");
+});
+
+test("captureFeedback: the file-raw escape (no submissionKey given) leaves submission_key null, exactly today's shape plus this one added field", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "just file this as-is" });
+  assert.equal(entry.submission_key, null);
+});
+
+test("findFeedbackBySubmissionKey: no entry carries the given key -> null (a genuinely new submission, or a caller that never sent one)", () => {
+  const r = root();
+  captureFeedback(r, { raw: "x", submissionKey: "sk-one" });
+  assert.equal(findFeedbackBySubmissionKey(r, "sk-does-not-exist"), null);
+  assert.equal(findFeedbackBySubmissionKey(r, "sk-one-typo"), null);
+});
+
+test("captureFeedback: a repeat call carrying the SAME submissionKey never rewrites the existing entry -- a status/edge already recorded against it survives untouched, this call is a pure READ (acceptance 2)", () => {
+  const r = root();
+  const first = captureFeedback(r, { raw: "[answer to feedback#fb-parked] a config default, please", submissionKey: "sk-repeat-1", replyTo: "fb-parked" });
+  // Simulate exactly the trap this task's rationale names by NAME: something has already moved
+  // this entry on since it was captured -- the reply-target edge (W1-T2278's answered_by lives
+  // on the OTHER entry in the real flow, but the SAME never-clobber property must hold for any
+  // status/field already recorded against THIS entry, e.g. rmd triage moving it to `grilling`).
+  const moved = setFeedbackStatus(r, first.id, "grilling");
+  assert.equal(moved.status, "grilling");
+
+  const repeat = captureFeedback(r, {
+    raw: "[answer to feedback#fb-parked] a config default, please",
+    submissionKey: "sk-repeat-1",
+    replyTo: "fb-parked",
+  });
+  assert.equal(repeat.id, first.id, "the repeat resolves to the SAME entry, not a fresh id");
+  assert.equal(repeat.status, "grilling", "the status already recorded against it survives -- never reset to 'new'");
+  assert.equal(repeat.reply_to, "fb-parked", "the reply edge already recorded survives too");
+
+  // The literal proof this was a READ, not a second write: the on-disk entry is still exactly
+  // what setFeedbackStatus left it as, and only ONE entry file exists.
+  assert.deepEqual(readFeedbackEntry(r, first.id), moved);
+  assert.equal(listFeedback(r).length, 1, "no second entry, no second write");
+});
+
+test("captureFeedback: two DELIBERATELY separate submissions carrying identical text but DIFFERENT submissionKeys each file their own entry (design iv)", () => {
+  const r = root();
+  const a = captureFeedback(r, { raw: "the same observation, filed on purpose, twice", submissionKey: "sk-a" });
+  const b = captureFeedback(r, { raw: "the same observation, filed on purpose, twice", submissionKey: "sk-b" });
+  assert.notEqual(a.id, b.id);
+  assert.equal(listFeedback(r).length, 2, "identical text is never itself the dedup key -- only the submission identity is");
 });
