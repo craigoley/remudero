@@ -418,3 +418,113 @@ test("the placeholder forms are inert against BOTH readers, driven rather than r
     assert.deepEqual(run(safe), [], `${safe} must declare nothing`);
   }
 });
+
+// ── W1-T2324 (Q3 half): an ADDED id that already exists on the base is refused BEFORE the merge ──
+//
+// THREE COLLISIONS IN ONE DAY, ALL FROM ONE CAUSE. Each time the mint printed `DEGRADED: open-prs`
+// because `gh pr list` was refused on an exhausted GraphQL bucket, so the ceiling came from three
+// surfaces and the missing one was the only one holding ids that exist but are not yet on main.
+// GIT DOES NOT CATCH IT: two differently-named shards declaring one id merge with no conflict.
+// `lint-plan` catches it only AFTER the merge at exit 2, and `loadPlan` then refuses origin/main.
+//
+// THE PREDICATE IS PER-ID DECLARING FILE, HEAD VS BASE — not a duplicate-at-head scan, and this is
+// the correction that made it work. Every real collision was authored on a branch BEHIND main, so
+// locally each id appeared exactly once: replaying #2993's colliding head, a head-only duplicate
+// scan finds nothing. What separates them is that the base declares the id from a DIFFERENT file.
+//
+// Driven through the real CLI as a subprocess against scratch git repos, never by importing the
+// .mjs — the same convention the tests above use.
+function planRepo(shards: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), "t2324-plan-"));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir, env });
+  execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir, env });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: dir, env });
+  mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(dir, "plan", "tasks.yaml"), "[]\n");
+  for (const [name, id] of Object.entries(shards)) {
+    writeFileSync(join(dir, "plan", "tasks.d", name), `- id: ${id}\n  title: "t"\n`);
+  }
+  execFileSync("git", ["add", "-A"], { cwd: dir, env });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: dir, env });
+  return dir;
+}
+function runCheck(cwd: string, base: string) {
+  return spawnSync(process.execPath, [SCRIPT, "--cwd", cwd, "--base", base, "--dir", "src", "--baseline", join(REPO_ROOT, "scripts", "task-id-existence-baseline.json")], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+  });
+}
+
+test("W1-T2324: an id the base declares from a DIFFERENT file is REFUSED, naming both sides", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    // The branch is BEHIND: it drops main's shard and adds its own carrying the same id — exactly
+    // #2993's shape. Each id appears ONCE in this tree, so a duplicate-at-head scan sees nothing.
+    rmSync(join(dir, "plan", "tasks.d", "W1-T900-original.yaml"));
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), '- id: W1-T900\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 1, `expected a refusal, got ${r.status}: ${r.stderr}`);
+    assert.match(r.stderr, /ALREADY DECLARED/);
+    assert.match(r.stderr, /W1-T900/);
+    assert.match(r.stderr, /W1-T900-original\.yaml/, "names the file the BASE declares it in");
+    assert.match(r.stderr, /W1-T900-reissued\.yaml/, "and the file THIS change declares it in");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 CONTROL: a genuinely new id is SILENT — adding an id is the normal case", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T901-new.yaml"), '- id: W1-T901\n  title: "t"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 0, `a new id must not be refused: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /ALREADY DECLARED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 CONTROL: a change that only CITES ids and declares nothing new is SILENT", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    // Citing is the normal case and what this gate already judged; touching a plan file is not
+    // adding an id. A per-file scan reads every `- id:` in a touched file and would refuse here.
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "a.ts"), "// see W1-T900 for why\n");
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T900-original.yaml"), '- id: W1-T900\n  title: "edited"\n');
+    const r = runCheck(dir, "main");
+    assert.equal(r.status, 0, `citing must stay silent: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /ALREADY DECLARED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324: an UNREADABLE base REFUSES rather than passing — the false zero is the whole defect", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    const r = runCheck(dir, "no-such-ref-xyzzy");
+    assert.equal(r.status, 1, "an unreadable base must not be read as an empty one");
+    assert.match(r.stderr, /could not read declared plan ids at base/);
+    assert.match(r.stderr, /false zero/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T2324 FALSIFIER: a duplicate-at-head scan alone would MISS every real collision", () => {
+  const dir = planRepo({ "W1-T900-original.yaml": "W1-T900" });
+  try {
+    rmSync(join(dir, "plan", "tasks.d", "W1-T900-original.yaml"));
+    writeFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), '- id: W1-T900\n  title: "t"\n');
+    // The head tree declares W1-T900 exactly ONCE. Anything keyed on head multiplicity is blind.
+    const declared = readFileSync(join(dir, "plan", "tasks.d", "W1-T900-reissued.yaml"), "utf8");
+    assert.equal((declared.match(/^- id: /gm) ?? []).length, 1, "one declaration at head");
+    assert.equal(runCheck(dir, "main").status, 1, "and it is still refused, because the BASE is consulted");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
