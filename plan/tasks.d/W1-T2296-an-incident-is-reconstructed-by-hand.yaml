@@ -1,0 +1,87 @@
+- id: W1-T2296
+  title: "AN INCIDENT IS RECONSTRUCTED BY HAND EVERY TIME — the ledger holds every disposition, refusal, arm and escalation with its reason, `rmd receipt` proves ONE run to an outsider, the console shows NOW, and no verb answers the operator's actual question after a bad hour, which is what happened across the fleet in this window and why"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 35.00
+  files: [src/run-task.ts, src/lib/replay.ts, test/replay.test.ts]
+  origin: "operator-brief#innovation-expansion-2026-08-25"
+  plan_refs: ["W1-T71", "W1-T444", "W1-T2244", "W1-T2245"]
+  status: queued
+  attempts: 0
+  rationale: |
+    WHAT EXISTS IS REFUSED BY NAME, BECAUSE EACH ONE ANSWERS A DIFFERENT QUESTION. `buildReceipt`
+    (src/lib/receipt.ts) is per-run: a deterministic in-toto-style predicate whose own header
+    scopes it to proving ONE run's ledger truth outward — P17's "the ledger proves our runs to US;
+    nothing proves them to anyone ELSE." The console (src/lib/serve.ts) is a live glance —
+    freshness, queue, open PRs, NOW — with no history surface. `rmd status` projects plan state,
+    not events. And `rmd ledger-grep` (`ledgerRotationEntries`, `resolveLedgerUnion`,
+    src/lib/ledger-grep.ts) retrieves ROWS matching a pattern — it is the sanctioned reader, and it
+    hands back lines, not an account. None of the four can answer: between 10:40Z and 11:20Z, what
+    did the fleet decide, in what order, and for what recorded reasons?
+
+    THE COST IS NOT HYPOTHETICAL; EVERY DIAGNOSIS IN THE RECORD IS A HAND-JOIN OVER THE SAME SHAPE.
+    The armAutoMerge write-order defect was settled only when a session hand-joined refusal rows to
+    their own `review.posted` lines and saw every refusal precede its cause by 0-1ms — after FOUR
+    consecutive PRs had rewritten the path without fixing it (the #968-#981 chain, recorded in
+    CLAUDE.md's investigation discipline). The 2026-08-21 branch-close incident and the 2026-08-20
+    rate-limit lockout were each reconstructed the same way: filter a window, join steps by run and
+    task, order by timestamp, read the reason fields. That operation is performed by hand, from
+    scratch, under incident pressure, every time — and the recently filed W1-T2244 (operator
+    overrides leave no record) and W1-T2245 (a zero with three causes) show the fleet is actively
+    paying to make ledger rows MORE legible while nothing consumes their legibility as a story.
+
+    THE KERNEL IS ALREADY PROVEN ONE MODULE OVER, SO THIS IS AN APPLICATION, NOT AN INVENTION.
+    `buildReceipt` established the house discipline for exactly this job: a PURE generator over the
+    loose ledger-line shape (`Array<Record<string, unknown>>`), byte-identical output for identical
+    input, no clock reads, no fabrication — a field with no ledger source renders absent WITH a
+    reason, never invented (`ReceiptField`). `rmd replay <since> <until>` reuses that discipline
+    over a WINDOW instead of a run: resolve the corpus through `resolveLedgerUnion` (which already
+    refuses partial coverage rather than narrating half a history), filter to the window, group by
+    run/task, order by timestamp, and render each row's own outcome and reason fields as one
+    plain-text account. Optional narrowing by task id or step family. Text to stdout is the whole
+    first rung — no HTML, no server, no new reader idiom beside the sanctioned one.
+  design: |
+    (i) READ-ONLY BY CONSTRUCTION, AND THE TEST ASSERTS IT. The verb takes ledger lines in and
+    returns a string; it performs no GitHub call, no fetch, no write, no state mutation. The pure
+    generator (`buildReplay`, src/lib/replay.ts) is testable without any I/O at all, exactly as
+    `buildReceipt` is; the verb wiring in run-task.ts mirrors the receipt verb's registration and
+    stays a thin shell around it.
+
+    (ii) DETERMINISM IS THE CONTRACT, NOT A NICETY. Same rows in, byte-identical narration out — an
+    operator pasting a replay into an incident note must be able to regenerate it later and diff
+    clean. No `Date.now()`, no relative-time rendering ("3m ago"), no randomness. Timestamps render
+    as the rows carry them.
+
+    (iii) ABSENT IS SAID, NEVER PAPERED. A row family with no reason field (the pre-#981
+    `automerge.armed` rows are the canonical population — 135 rows recorded no `head_sha` and can
+    never be adjudicated) narrates as absent-with-reason in the receipt's own style. A replay that
+    silently smooths over blind rows would manufacture the confidence this repo's evidence
+    discipline exists to prevent.
+
+    (iv) WHAT MUST NOT CHANGE, REFUSED BY NAME. The ledger stays append-only — replay never
+    back-fills, annotates or rewrites a row. `resolveLedgerUnion` stays the ONE corpus reader —
+    this task adds a consumer, never a fourth glob idiom. `rmd receipt` stays the external-trust
+    artifact — replay emits no attestation and no predicate, and a replay is EVIDENCE for a human,
+    never an input any gate consumes. And the verb inherits the union's refusal posture: a partial
+    corpus is an error, not a shorter story.
+
+    THE RISK BAND IS RULE 19's SPAN, NOT BLAST RADIUS — three declared files spanning verb wiring
+    and a new pure module read as two concerns to the linter. The runtime change is one read-only
+    verb; nothing on the dispatch, review or arm paths moves.
+  acceptance:
+    - claim: "a window of ledger rows renders as one ordered narration carrying each row's own reason"
+      proof: "unit test: test/replay.test.ts"
+    - claim: "identical rows in produce byte-identical narration out"
+      proof: "unit test: test/replay.test.ts"
+    - claim: "a row with no reason field narrates as absent rather than invented"
+      proof: "unit test: test/replay.test.ts"
+    - claim: "rows outside the requested window never appear in the narration"
+      proof: "unit test: test/replay.test.ts"
+    - claim: "a partial ledger corpus is refused rather than narrated"
+      proof: "unit test: test/replay.test.ts"
+    - claim: "the verb wiring calls the pure generator rather than shipping it unreached"
+      proof: "grep: buildReplay( in src/run-task.ts"
