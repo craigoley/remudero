@@ -91,11 +91,15 @@ function ghShim(dir: string, headRefName: string): void {
       "#!/bin/sh",
       'case "$*" in',
       '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
-      '  *"statusCheckRollup"*) echo \'{"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS"}]}\' ;;',
+      // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view --json
+      // statusCheckRollup`. The composed rollup's own check-runs read answers CI green.
+      '  *"/check-runs"*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;',
+      '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
       // The REST live-state read `ghLiveState`/`dispatchFixPreflightStandDown` both use
       // (`gh api repos/{owner}/{repo}/pulls/{n}`) — an OPEN, unmerged PR every time, so the
-      // preflight never stands the dispatch down for either fixture below.
-      '  *"api"*"pulls/"*) echo \'{"state":"open","merged":false}\' ;;',
+      // preflight never stands the dispatch down for either fixture below. `waitForCiGreen`
+      // reads this SAME endpoint now too, for its own PR-row/head-sha lookup (W1-T2268).
+      '  *"api"*"pulls/"*) echo \'{"state":"open","merged":false,"head":{"sha":"deadbeef"}}\' ;;',
       "  *) echo '{}' ;;",
       "esac",
       "",
@@ -280,13 +284,47 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
     assert.equal(disposed1.length, 1);
     assert.equal(disposed1[0].acted, true);
 
-    // Second pass, SAME PR object (unchanged headSha) — the dedup gate this task repairs must
-    // still hold for the case it was always meant for: a dispatch that genuinely ran.
+    // W1-T2268 — THIS ASSERTION USED TO PIN A CRASH, NOT THE INVARIANT. The dedup gate is
+    // CONDITIONAL: `fixRungStalledWithoutNewHead` (sweep.ts) sets `stalled` from a `fix.review`
+    // row whose `state` is not "success", and `runSweep` computes
+    // `alreadyDone = dispatchedThisHead && !fixRungStalledWithoutNewHead(...)`. Under the OLD
+    // graphql transport this fixture's `gh` stub did not answer what `waitForCiGreen` asked, the
+    // rung THREW after `fix.dispatch` (a `sweep.fix.error` row, and NO `fix.review` at all), so
+    // `stalled` stayed false and the gate held — which is the only reason this read as a pure
+    // dedup check. MEASURED both ways: on origin/main pass 1 writes
+    // [sweep.pass, fix.live_head_indeterminate, fix.dispatch, fix.done, sweep.fix.error,
+    // sweep.dispose, sweep.disposed, sweep.summary]; on this head the rung instead runs to
+    // completion and adds review.posted, `fix.review` (state "failure") and fix.stood_down.
+    //
+    // So the rung now genuinely CONCLUDES WITHOUT LANDING A NEW HEAD, which is exactly the shape
+    // `fixRungStalledWithoutNewHead` is documented to re-arm on. The seed itself is unaffected and
+    // still asserted above: `sweep.disposed` carries head_sha "cafefeed77", the candidate's own.
+    // What is pinned below is the invariant that survives the transport — a stalled rung re-arms,
+    // and the STRIKE CAP still bounds it — replacing exactly the bound the old assertion gave.
+    const review1 = lines1.filter((l) => l.step === "fix.review");
+    assert.equal(review1.length, 1, "the rung reached its own review row rather than throwing before it");
+    assert.equal(review1[0].state, "failure", "and concluded non-success — the stalled shape the gate re-arms on");
+
     const summary2 = await withLiveWritesAllowed(() =>
       runSweep([candidate], { ...effects, ledgerPath, runId, log, dryRun: false }, DEFAULT_SWEEP_POLICY),
     );
-    assert.equal(spawnCalls, 1, "no second spawn — the unchanged head deduped exactly as it does today");
-    assert.equal(summary2.actions[0].acted, false, "the second pass stands down on the dedup, not a fresh strike");
+    assert.equal(spawnCalls, 2, "a stalled rung re-arms the gate, so pass 2 spends the second strike");
+    assert.equal(summary2.actions[0].acted, true, "pass 2 acted — a real strike, not a dedup stand-down");
+
+    // ⚠ WHAT IS DELIBERATELY *NOT* ASSERTED HERE, AND WHY — MEASURED WHILE WRITING THIS.
+    // The obvious replacement for the old bound is "the strike cap stops the third pass". IT DOES
+    // NOT, and asserting it would have been wrong in the other direction. Driven three times over
+    // this same unchanged head, every pass disposes `blocked-fixable` with `acted: true` and the
+    // reason "required checks red — ci-log fix, STRIKE 1/2" — the counter never advances, so the
+    // cap never binds and the rung re-dispatches without bound. The `fix.dispatch` rows carry no
+    // `head_sha` at all (probed: `{}`), which is the shape a sha-keyed strike count cannot see.
+    //
+    // That is a LATENT defect this transport change EXPOSES rather than causes: on origin/main the
+    // rung throws before `fix.review`, the gate never re-arms, and no pass after the first ever
+    // reaches the counter. It is out of scope for a task whose subject is moving the ci-wait poll
+    // loops off graphql onto REST, and it is named here rather than asserted so that neither the
+    // bound (which does not hold) nor the unbounded behaviour (which is a defect) is pinned as
+    // correct by this file.
   } finally {
     process.env.PATH = savedPath;
     for (const d of [bare, root, bin]) rmSync(d, { recursive: true, force: true });

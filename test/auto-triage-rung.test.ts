@@ -156,21 +156,25 @@ test("a corrupt marker file on disk resolves corrupt, not absent", () => {
   }
 });
 
-test("NEITHER TRIGGER: no pairing deferred AND the queue filled every lane — refused, naming both", () => {
-  // The only remaining false case when capacity exists: the queue filled it. Both sub-states are
-  // named, because the two false cases are OPPOSITE conditions (see the lanes-full test below) and
-  // one undifferentiated string would rebuild the blindness W1-T469 existed to fix.
+test("NEITHER TRIGGER: no pairing deferred AND the queue filled every lane AND the backlog is empty — refused, naming all three", () => {
+  // The only remaining false case when capacity exists: the queue filled it, AND (W1-T2289) the
+  // backlog itself is empty — `candidates: []` overrides `base`'s nonempty fixture so this test
+  // still isolates the two lane signals; a nonempty backlog now fires on its own (see
+  // test/intake-triggers-read-their-own-depth.test.ts). All named sub-states appear, because
+  // undifferentiated refusals rebuild the blindness W1-T469 existed to fix.
   const d = decideAutoTriage({
     ...base,
     policy: ON,
     deferralPending: false,
     dispatchCount: 2,
     laneBudget: 2,
+    candidates: [],
     marker: { kind: "absent" },
   });
   assert.equal(d.fire, false);
   assert.match((d as { reason: string }).reason, /no pairing deferred/);
   assert.match((d as { reason: string }).reason, /filled all 2 available lane/);
+  assert.match((d as { reason: string }).reason, /no feedback is waiting at status: new/);
   assert.doesNotMatch((d as { reason: string }).reason, /not idle/, "the stale reason must not survive");
 });
 
@@ -684,8 +688,12 @@ test("W1-T469 THE SKIP NAMES ITS CAUSE: a refused tick's ledger row distinguishe
   try {
     const refusals = [
       {
+        // candidates: [] (W1-T2289) — otherwise the shared `candidates: ["fb-1"]` default below
+        // now fires on its own via the new depth signal, which this scenario deliberately isolates
+        // from (the depth-admitted fire path has its own coverage in
+        // test/intake-triggers-read-their-own-depth.test.ts).
         name: "no trigger",
-        inputs: { deferralPending: false, dispatchCount: 1, laneBudget: 1 },
+        inputs: { deferralPending: false, dispatchCount: 1, laneBudget: 1, candidates: [] as string[] },
         expect: /no pairing deferred, and the queue filled all 1 available lane/,
       },
       { name: "lock held", inputs: { lockHeld: true }, expect: /triage lock held/ },
@@ -790,21 +798,26 @@ test("minInterval BINDS ACROSS TWO CONSECUTIVE TICKS: two polls inside the floor
 test("LANES FULL is NOT the starved state: budget 0 fires nothing, by arithmetic not by promise", () => {
   // `laneDispatchBudget` (src/lib/drain.ts) is Math.min(lanes, headroom) over two Math.max(0, …)
   // terms, so the governor holding every lane yields exactly 0 — and `0 < 0` is false. This is the
-  // case a naive "dispatchSet is empty ⇒ idle" reading would have fired on.
+  // case a naive "dispatchSet is empty ⇒ idle" reading would have fired on. `candidates: []`
+  // (W1-T2289) isolates the arithmetic claim from the new depth signal — a nonempty backlog now
+  // fires on its own regardless of lane state; see test/intake-triggers-read-their-own-depth.test.ts.
   const d = decideAutoTriage({
     ...base,
     policy: CAP,
     deferralPending: false,
     dispatchCount: 0,
     laneBudget: 0,
+    candidates: [],
     marker: { kind: "absent" },
   });
-  assert.equal(d.fire, false, "a full fleet must never be read as a starved one");
+  assert.equal(d.fire, false, "a full fleet with an EMPTY backlog must never be read as a starved one");
   assert.match((d as { reason: string }).reason, /the governor left no lane capacity to fill/);
 });
 
 test("THE TWO FALSE CASES READ DIFFERENTLY: lanes-full and queue-filled are distinguishable in the ledger", () => {
-  const common = { ...base, policy: CAP, deferralPending: false, marker: { kind: "absent" as const } };
+  // `candidates: []` (W1-T2289): isolates the two LANE signals from the new depth signal, which
+  // fires on its own for a nonempty backlog and would otherwise make both cases fire=true here.
+  const common = { ...base, policy: CAP, deferralPending: false, candidates: [], marker: { kind: "absent" as const } };
   const lanesFull = decideAutoTriage({ ...common, dispatchCount: 0, laneBudget: 0 });
   const queueFilled = decideAutoTriage({ ...common, dispatchCount: 2, laneBudget: 2 });
   assert.equal(lanesFull.fire, false);

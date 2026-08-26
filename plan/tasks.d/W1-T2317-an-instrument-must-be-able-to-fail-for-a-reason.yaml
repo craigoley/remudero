@@ -1,0 +1,151 @@
+- id: W1-T2317
+  title: "AN INSTRUMENT MUST BE ABLE TO FAIL FOR A REASON IT CAN NAME — fifty-eight recogniser surfaces have never been asked to, five of the eight measured instrument defects of 2026-08-25/26 lacked exactly one artefact, a fixture driving the unhealthy arm, and the remedy is the ratchet shape this house has proven twice"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 35.00
+  files: [test/negative-reachability-ratchet.test.ts]
+  origin: "operator-brief#instrument-negative-reachability-2026-08-26"
+  plan_refs: ["W1-T2295", "W1-T2300", "W1-T438"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE EVIDENCE IS A COUNTED SYNTHESIS OVER 2026-08-25/26, AND ITS HEADLINE DIED SO THIS COULD
+    LIVE. The instrument-defect rate is arithmetic: 67% of clearly-classifiable code is instrument
+    (~47,700 LOC against ~23,900 product) and on ordinary days 67% of defect fixes are too
+    (window 08-22 to 08-25: 76 instrument / 29 product / 9 borderline of 114 classifiable); a
+    sweep-driven day runs 77%, and the ten-point excess is the selection effect, present and
+    small. THERE IS NO ANOMALOUS RATE TO EXPLAIN. What survived is the SILENCE: of eight measured
+    instrument defects, five fit one shape — a distinction dying at a seam whose type admits a
+    legal value identical to the healthy case — and all five lacked the same artefact: A FIXTURE
+    DRIVING THE INSTRUMENT'S UNHEALTHY ARM AND ASSERTING A DISTINGUISHABLE OUTPUT.
+
+    NONE OF THESE ARMS HAD EVER BEEN EXERCISED. The 403 arm of the log fetch (`logTail`
+    permanently "", so all three `DEFAULT_FIX_CLASSES` recognisers matched nothing and reported
+    the same output a healthy PR produces). The garbage arm of `TASK_TRAILER_RE`, which accepts
+    any non-whitespace token. The lying-endpoint arm of the rate-limit reader, which returned
+    10383, then 0, then 10383 inside one second. Six of the nine token-exchange reasons, one of
+    which is structurally unreachable because the abort wins every race. And the root-runner arm
+    of the permission tests, where chmod 000 cannot deny root a read.
+
+    THE SURFACE IS COUNTABLE, AND THE COUNT BELOW IS RE-DERIVED AT 2fbcf0e18 RATHER THAN CARRIED
+    FROM ANY BRIEF OR REPORT: `git grep -hE 'export const [A-Z_]+_RE' -- src/` reads 55 exported
+    validators, and `DEFAULT_FIX_CLASSES` (src/lib/sweep.ts) carries 3 rows — 58 enumerable
+    recogniser surfaces. The implementing worker MUST re-run both queries at its own head and
+    baseline on what it measures, never on this paragraph: the last shard that inherited a census
+    number had it go stale inside a day. BARE CATCHES ARE NOT IN SCOPE — that half is owned by
+    W1-T2295 (the catch-erasure ratchet, implementing as #2931), and W1-T2300 is a member of this
+    class already filed piecemeal (a detector whose unhealthy arm is unreachable). This shard
+    re-files neither; it generalises the property they each hold locally.
+
+    ★ HYPOTHESIS, LABELLED AND UNRESOLVED — CARRIED WITH ITS FALSIFIER, NEVER ASSERTED:
+    "instrument defects cost more per defect because they fail silent while product defects fail
+    loud." The evidence is directional only — a 23-hour coverage block, a five-hour investigation
+    on a lying endpoint, a PR open 12.5 hours across four fixture diagnoses. FALSIFIER: compare
+    introduced-to-diagnosed latency for instrument-class versus product-class defects over one
+    window; similar distributions kill it. This hypothesis is the reason the shard
+    matters if true and merely tidy if false, and the shard's gate stands on the counted
+    evidence either way.
+
+    ★ THE FALSIFIER WAS RUN 2026-08-26, AND THE HYPOTHESIS ABOVE IS NOT SUPPORTED. ADDITIVE —
+    nothing above is edited, re-ordered or removed, and no acceptance criterion changes. The
+    paragraph above stays exactly as filed, including its own sentence that the gate stands on
+    the counted evidence either way; this section records the run and its limit.
+
+    WHAT WAS MEASURED. 281 `fix(` commits over a 14-day window, 223 of them recoverable at 79
+    percent, classified INSTRUMENT 126 / PRODUCT 88 / BORDERLINE 9. Introduced-to-diagnosed
+    latency medians read 23 days for instrument against 24 for product, with matching quantiles
+    from p25 through p90, and instrument's heavy tail LIGHTER rather than heavier — 27 percent
+    against 30 percent at thirty days or more. On the falsifier's own stated terms, similar
+    distributions kill it, and these are similar in the direction that would have had to be
+    reversed.
+
+    ⚠ AND THE MORE IMPORTANT HALF: THE MEASURE CANNOT SEE THE EFFECT THE HYPOTHESIS NAMES, SO
+    THIS IS NOT A REFUTATION AND MUST NEVER BE READ AS ONE. Introduced-to-diagnosed latency is
+    dominated by DORMANCY — how long the faulty line sat unnoticed — and not by diagnosis effort
+    once someone noticed. Weeks of dormancy swamp hours of investigation. The directional
+    anecdotes the paragraph above cites are all in HOURS: a 23-hour coverage block, a five-hour
+    investigation against a lying endpoint, a pull request open 12.5 hours across four fixture
+    diagnoses. The median here is 23 DAYS and only 6 to 8 percent of the corpus is same-day, so
+    the quantity measured and the quantity claimed differ by roughly two orders of magnitude and
+    are not the same variable. The timestamp that would separate them is FIRST-OBSERVABLE-SYMPTOM,
+    which is a fleet-ledger fact rather than a git fact, and the ledger reachable from here is
+    not the fleet's: 0 archives, 2 distinct steps, and 0 `review.posted` rows against a control
+    of 459 for that step on a healthy corpus.
+
+    THE CENSORING, RECORDED BECAUSE IT BOUNDS THE TAIL AND NOT THE MEDIAN. Both classes max at
+    exactly 42 days against a repository 43 days old, so every latency in the corpus is a FLOOR
+    rather than a value — the true introduction of anything older is unobservable. It bites the
+    tail: 8 percent of one class and 11 percent of the other sit within five days of that
+    ceiling. The medians, at 23 and 24 days, are far enough inside the window that the censoring
+    does not move them, which is why the comparison above is reported at all.
+
+    SO THE HONEST CLASSIFICATION IS STILL UNMEASURED, AND UNMEASURABLE FROM THIS REPOSITORY'S
+    DATA. The measure tests dormancy; the hypothesis is about effort; and the distinguishing
+    timestamp is unrecoverable here. Recording it as DEAD would be a stronger claim than the
+    evidence carries and would foreclose a question that a fleet-ledger corpus could still
+    answer. It stays labelled and unresolved, exactly as filed, with this run attached.
+
+    WHAT THIS CHANGES FOR THE SHARD, STATED PLAINLY: ON THIS EVIDENCE THE RATCHET IS TIDINESS,
+    NOT LEVERAGE, and it must not be justified by a per-defect cost premium, because no such
+    premium has been demonstrated. A reviewer weighing this shard should weigh it as tidiness
+    until someone measures effort rather than dormancy.
+
+    AND WHAT SURVIVES UNTOUCHED, WHICH IS THE ARGUMENT THE SHARD WAS ACTUALLY BUILT ON: none of
+    the eight measured defects had a fixture driving the arm that failed. That is a STRUCTURAL
+    claim about coverage — a surface nothing ever asked to fail — and it is established by
+    counting fixtures, not by comparing latencies. It never needed the premium, it does not rest
+    on the hypothesis above, and nothing in this run touches it.
+  design: |
+    (i) THE RATCHET, IN THE FORM THE HOUSE HAS PROVEN TWICE — no-raw-NUL (W1-T438) and the
+    catch-erasure ratchet (W1-T2295). One test walking the enumerable surfaces: every exported
+    `_RE` validator and every `DEFAULT_FIX_CLASSES` row, enumerated at run time by the gate's own
+    grep, never a hand-kept list. PER-FILE COUNT OF FIXTURE-LESS SURFACES HELD AT THE BASELINE
+    THE GATE MEASURES AT ITS OWN HEAD; a NEW or CHANGED surface pays immediately; NO ALLOWLIST
+    FILE — baselines are a table inside the test, a reduction is a one-line reviewed diff, and a
+    renamed file enters at zero so the ratchet only tightens.
+
+    (ii) WHAT SATISFIES A SURFACE, STATED SO THE BAR CANNOT ROT: a fixture that DRIVES THE
+    UNHEALTHY VERDICT and ASSERTS AN OUTPUT DISTINGUISHABLE FROM THE HEALTHY ONE —
+    not merely a test that touches the symbol. A validator's fixture feeds it input it must
+    refuse and asserts the refusal is distinct from acceptance; a recogniser row's fixture feeds
+    the evidence it must match and asserts the match names its class. A test that imports the
+    symbol, exercises only its healthy arm, or asserts an output the healthy arm also produces
+    satisfies nothing.
+
+    (iii) THE THREE OBJECTIONS, CARRIED RATHER THAN REPLACED WITH WEAKER ONES. (a) THE
+    FIVE-REFUSED-GATES PRECEDENT: this repo has refused five proposed gates because they would
+    fire on a healthy live population. That precedent does not apply here and the shard says
+    exactly why: this gate fires on FILES AT BUILD TIME — the live population is untouched, no
+    live bound, ceiling or cadence moves, and a healthy instrument passes by having the one
+    fixture its contract already implies. (b) FIXTURE THEATRE, CONCEDED: a fixture can drive the
+    unhealthy arm with an input that never occurs live, and this check cannot see that. The
+    golden-verdicts discipline — a fixture pins what the judgment must conclude, in the judge's
+    own vocabulary — is the mitigation, and it is a mitigation, not a guarantee. (c) IS IT
+    ALREADY COVERED? `assertion-discrimination` gates a neighbouring property (assertions that
+    discriminate from comments), `test/golden-verdicts` pins one judge end-to-end, and the
+    falsifier discipline covers fixes. The increment is the NEGATIVE ARM OF EVERY RECOGNISER:
+    none of the eight measured defects had a fixture on the arm that failed, and none of the
+    three existing disciplines would have required one.
+
+    (iv) WHAT MUST NOT CHANGE, REFUSED BY NAME. NO GATE IS WEAKENED, NO BOUND TUNED, NO CEILING
+    RAISED. A STRUCTURALLY-TOTAL VALIDATOR — one that genuinely cannot fail — passes by the same
+    in-place sentence W1-T2295 priced at one line, NEVER by an allowlist. And the surface count
+    is a baseline and not a work list: the baseline freezes the debt, only new or changed
+    surfaces pay immediately, and nothing schedules a backfill sweep.
+  acceptance:
+    - claim: "a fixture-less surface past its file baseline fails naming file and surface"
+      proof: "unit test: test/negative-reachability-ratchet.test.ts"
+    - claim: "a test that merely touches the symbol does not satisfy its surface"
+      proof: "unit test: test/negative-reachability-ratchet.test.ts"
+    - claim: "a fixture driving the unhealthy verdict with a distinct output satisfies it"
+      proof: "unit test: test/negative-reachability-ratchet.test.ts"
+    - claim: "a structurally-total validator passes by its in-place sentence"
+      proof: "unit test: test/negative-reachability-ratchet.test.ts"
+    - claim: "a file dropping below its baseline passes with no edit to the gate"
+      proof: "unit test: test/negative-reachability-ratchet.test.ts"
+    - claim: "a new surface in a changed file pays immediately rather than entering the baseline"
+      proof: "unit test: test/negative-reachability-ratchet.test.ts"

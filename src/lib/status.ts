@@ -2012,7 +2012,7 @@ export function evaluateDispatchBreakerDetailed(
   opts: {
     maxDispatches?: number;
     ledgerFs?: LedgerFsDeps;
-    openHeadBranches?: ReadonlyArray<PrRef> | null;
+    openHeadBranches?: OpenHeadBranchesSource;
   } = {},
 ): DispatchBreakerDetail {
   const maxDispatches = opts.maxDispatches ?? DEFAULT_MAX_TASK_DISPATCHES;
@@ -2034,7 +2034,14 @@ export function evaluateDispatchBreakerDetailed(
   if (ledgerState !== "tripped" || !("openHeadBranches" in opts)) {
     return { ...base, state: ledgerState, ledgerState };
   }
-  const corroboration = corroboratesForwardProgress(opts.openHeadBranches, taskId);
+  // W1-T2318: RESOLVED HERE, PAST THE GUARD — this is the only line that may read the list, and it
+  // is reached only for a task whose ledger breaker is ALREADY tripped. Resolving a thunk at the
+  // call site instead would evaluate it as an argument on every call, clear tasks included, which
+  // is the eager boot cost this task exists to remove (a board walk MEASURED at 26 REST calls and
+  // 22.2s). An array/null/undefined is returned untouched, so every existing caller is unchanged
+  // and `null` still reaches `corroboratesForwardProgress` as "read failed" -> "unreadable".
+  const branches = resolveOpenHeadBranches(opts.openHeadBranches);
+  const corroboration = corroboratesForwardProgress(branches, taskId);
   return { ...base, ledgerState, corroboration, state: corroboration === "corroborated" ? "clear" : "tripped" };
 }
 
@@ -2113,11 +2120,30 @@ export function evaluateDispatchBreakerCorroborated(
 }
 
 /** {@link evaluateDispatchBreakerCorroborated}'s detail — the values the gate consumed. */
+/**
+ * The open-head-branch list, or a thunk that produces it on demand (W1-T2318). A thunk lets the
+ * daemon/drain boot path hand over the ABILITY to walk the board without paying for the walk: the
+ * only site that resolves it sits past the already-tripped guard, so a clear task never triggers
+ * one. A plain array, `null` and `undefined` all behave exactly as before this type existed.
+ */
+export type OpenHeadBranchesSource =
+  | ReadonlyArray<PrRef>
+  | null
+  | undefined
+  | (() => ReadonlyArray<PrRef> | null | undefined);
+
+/** Collapse an {@link OpenHeadBranchesSource} to the value `corroboratesForwardProgress` reads. */
+export function resolveOpenHeadBranches(
+  source: OpenHeadBranchesSource,
+): ReadonlyArray<PrRef> | null | undefined {
+  return typeof source === "function" ? source() : source;
+}
+
 export function evaluateDispatchBreakerCorroboratedDetailed(
   ledgerPath: string,
   taskId: string,
   cache: DispatchBreakerCache,
-  openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
+  openHeadBranches: OpenHeadBranchesSource,
   opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
 ): DispatchBreakerDetail {
   return evaluateDispatchBreakerDetailed(ledgerPath, taskId, cache, { ...opts, openHeadBranches });
