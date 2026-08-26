@@ -263,7 +263,10 @@ test("wiring: runReview computes the scope section AND pushes it into the commen
   const runReviewSrc = src.slice(start, end);
 
   assert.match(runReviewSrc, /const scopeSection = scopeAdvisorySection\(/, "runReview must render the section");
-  assert.match(runReviewSrc, /if \(hasUnmet \|\| rubricSection \|\| scopeSection\)/, "…gate the comment on it…");
+  // `\b` not `\)`: the guard gained a fourth disjunct when `unwired_export` got its own section
+  // (test/unwired-export-advisory-section.test.ts). What this must pin is that `scopeSection`
+  // GATES the comment, never how many siblings share the gate with it.
+  assert.match(runReviewSrc, /if \(hasUnmet \|\| rubricSection \|\| scopeSection\b/, "…gate the comment on it…");
   assert.match(runReviewSrc, /if \(scopeSection\) parts\.push\(scopeSection\)/, "…and actually append it to the body");
 
   // INDEPENDENCE: the binding verdict never sees it. Advisory means advisory.

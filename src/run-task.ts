@@ -566,6 +566,7 @@ import {
   lastPendingReviewStatusFromLedger,
   rubricAdvisorySection,
   scopeAdvisorySection,
+  unwiredExportAdvisorySection,
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
   acceptanceAuthorTimeCheck,
@@ -4593,7 +4594,14 @@ async function runReview(args: {
   // W1-T401's measured majority), and it is exactly the passing case where nothing else would
   // ever mention it.
   const scopeSection = scopeAdvisorySection(verdict.unwiredAdvisories);
-  if (hasUnmet || rubricSection || scopeSection) {
+  // The `unwired_export` sibling, folded into the SAME comment for the same reasons: it reads the
+  // advisory the loop above has already ledgered (so comment and `review.unwired_advisory` cannot
+  // disagree), it gets no separate network path to fail on, and it is present INDEPENDENT of
+  // `verdict.state` — an unreached export is normal on an otherwise-passing review, and the
+  // passing case is exactly where nothing else would ever mention it. Advisory only: whether an
+  // unwired export should BLOCK is W1-T323's open operator adjudication, not this call site's.
+  const unwiredSection = unwiredExportAdvisorySection(verdict.unwiredAdvisories);
+  if (hasUnmet || rubricSection || scopeSection || unwiredSection) {
     // Post the full unmet list (+ the advisory rubric section, if any) as a PR
     // comment so a blocked PR — or one with a rubric concern — names its gap in
     // one place a human (or the next run) reads. Best-effort — never blocks the
@@ -4610,6 +4618,7 @@ async function runReview(args: {
     }
     if (rubricSection) parts.push(rubricSection);
     if (scopeSection) parts.push(scopeSection);
+    if (unwiredSection) parts.push(unwiredSection);
     const body = parts.join("\n\n---\n\n");
     try {
       execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
