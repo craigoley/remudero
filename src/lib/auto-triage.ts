@@ -476,6 +476,18 @@ export interface AutoTriageInputs {
   now: Date;
   /** Feedback ids at `status: new`, oldest first. Empty ⇒ nothing to do. */
   candidates: string[];
+  /**
+   * W1-T2289 — THE AGE OF THE OLDEST CANDIDATE, in ms, kept DELIBERATELY SEPARATE from
+   * `candidates.length`. A count answers "how much is piling up"; an age answers "has the head
+   * of the queue been passed over by every fire since it arrived," which no amount of
+   * throughput fixes if the ordering itself is broken (note (ii) on this task's own record). It
+   * is surfaced in the fire reason for observability but is NOT itself a trigger here — only
+   * `candidates.length > 0` (below) is; an age-admitted trigger is a build a later task may
+   * still choose to add. Conflating the two into one number is exactly what keeping this field
+   * separate refuses to do. Optional, defaulting to 0, so every caller that does not care about
+   * age (nearly every existing test) is unaffected.
+   */
+  oldestCandidateAgeMs?: number;
 }
 
 export type AutoTriageDecision =
@@ -494,20 +506,30 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   if (!i.policy.enabled) return { fire: false, reason: "auto-triage disabled (policy.autoTriage.enabled=false)" };
-  // ── THE TRIGGER: EITHER SIGNAL, NOT BOTH (operator ruling, reversing W1-T469) ────────────────
-  // Two DIFFERENT shapes of "the fleet could use more work", and the second is the one the starved
-  // state produces. Requiring the first ALONE was circular — see `deferralPending`'s own doc.
+  // ── THE TRIGGER: ANY ONE OF THREE SIGNALS (W1-T2289 widens the W1-T469/operator-ruling OR) ───
+  // Two shapes of "the fleet could use more work" already existed here, and BOTH describe THIS
+  // TICK's dispatch rather than the queue this rung exists to drain — a fleet that is busy AND
+  // fully dispatching (3 lanes full for 33h, 2026-08-25) can hold both false forever while
+  // `candidates` grows without bound, because neither predicate can be made false by a backlog
+  // growing or true by one. `backlogPresent` is the THIRD signal that closes that gap, and it is
+  // read off the SAME `candidates` this function already received — a reordering of an existing
+  // read (rationale (9): "already paid for"), never a new one.
   const capacityUnfilled = i.dispatchCount < i.laneBudget;
-  if (!i.deferralPending && !capacityUnfilled) {
+  const backlogPresent = i.candidates.length > 0;
+  if (!i.deferralPending && !capacityUnfilled && !backlogPresent) {
     // THE REFUSAL NAMES WHICH BRANCH DECLINED, because one undifferentiated string would rebuild
-    // the exact blindness W1-T469 existed to fix, one layer further in. The two false cases are
-    // OPPOSITE conditions and must never read the same in the ledger.
+    // the exact blindness W1-T469 existed to fix, one layer further in. The two lane-signal false
+    // cases are OPPOSITE conditions and must never read the same in the ledger; the depth signal
+    // is a THIRD, independently named way to decline (note (vii)) — appended, never merged into
+    // either lane phrase, so a later investigation can tell "the lanes disagreed" from "the queue
+    // itself was empty" without cross-referencing candidates.length by hand.
     return {
       fire: false,
       reason:
-        i.laneBudget <= 0
+        (i.laneBudget <= 0
           ? "no trigger this pass — no pairing deferred, and the governor left no lane capacity to fill"
-          : `no trigger this pass — no pairing deferred, and the queue filled all ${i.laneBudget} available lane(s)`,
+          : `no trigger this pass — no pairing deferred, and the queue filled all ${i.laneBudget} available lane(s)`) +
+        ", and no feedback is waiting at status: new (own-input depth 0)",
     };
   }
   if (i.lockHeld) return { fire: false, reason: "triage lock held — a run is already in flight" };
@@ -557,10 +579,15 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   // looking for an idle period that never happened.
   // AND THE FIRED ROW NAMES ITS TRIGGER TOO. A fire that said only "under both bounds" would leave
   // the next investigation unable to tell a collision-driven fire from a starvation-driven one —
-  // the same question the refusal above answers, asked from the other side.
+  // the same question the refusal above answers, asked from the other side. W1-T2289 adds the
+  // THIRD name: a depth-admitted fire says so explicitly, carrying the count AND the age of the
+  // oldest entry as two SEPARATE numbers (note (ii)) rather than folding one into the other.
   const trigger = i.deferralPending
     ? "a pairing deferred"
-    : `capacity went unfilled (${i.dispatchCount}/${i.laneBudget} lanes)`;
+    : capacityUnfilled
+      ? `capacity went unfilled (${i.dispatchCount}/${i.laneBudget} lanes)`
+      : `the backlog's own depth reached ${i.candidates.length} at status: new while neither lane signal tripped ` +
+        `(oldest waiting ${((i.oldestCandidateAgeMs ?? 0) / DAY_MS).toFixed(1)}d)`;
   return {
     fire: true,
     feedbackId: i.candidates[0],
@@ -569,13 +596,18 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
 }
 
 /**
- * Feedback ids at `status: new`, OLDEST FIRST, read from `<root>/plan/feedback/*.yaml`.
+ * THE ONE READ of `<root>/plan/feedback/*.yaml` — both {@link newFeedbackIdsOldestFirst} (the
+ * COUNT) and {@link oldestFeedbackAgeMs} (the AGE) build on this, so there is exactly one place
+ * that walks the directory and exactly one root-passing convention for a caller to get right
+ * (W1-T2289 note (ix): a caller that passes `config.root` here instead of `repoRoot` finds no
+ * directory at all and answers empty/zero without erroring — a false "healthy" reading a second
+ * copy of this walk could silently reintroduce).
  *
- * Deliberately reads only the entry's OWN state. recon-CQ/recon-CS classified a large subset
+ * Deliberately reads only each entry's OWN state. recon-CQ/recon-CS classified a large subset
  * (17 ANSWERED, 14 CLEARLY LIVE, 38 UNCERTAIN) but those verdicts live in report files, not in the
  * entries — consuming them would couple this rung to a markdown artifact nobody maintains.
  */
-export function newFeedbackIdsOldestFirst(root: string): string[] {
+function feedbackEntriesOldestFirst(root: string): Array<{ id: string; ts: string }> {
   const dir = join(root, "plan", "feedback");
   if (!existsSync(dir)) return [];
   const out: Array<{ id: string; ts: string }> = [];
@@ -594,5 +626,33 @@ export function newFeedbackIdsOldestFirst(root: string): string[] {
   // `ts` sorts lexicographically because it is ISO-8601; the id is the tiebreak so the order is
   // total and stable rather than dependent on readdir order.
   out.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
-  return out.map((e) => e.id);
+  return out;
+}
+
+/** Feedback ids at `status: new`, OLDEST FIRST — the COUNT half of {@link feedbackEntriesOldestFirst}'s
+ *  one read; see {@link oldestFeedbackAgeMs} for the AGE half. */
+export function newFeedbackIdsOldestFirst(root: string): string[] {
+  return feedbackEntriesOldestFirst(root).map((e) => e.id);
+}
+
+/**
+ * W1-T2289 — THE AGE OF THE OLDEST `status: new` FEEDBACK ENTRY, in ms. A quantity kept
+ * DELIBERATELY SEPARATE from {@link newFeedbackIdsOldestFirst}'s count (see
+ * {@link AutoTriageInputs.oldestCandidateAgeMs}'s own doc for why): a count says the pile is
+ * growing, an age says the head of the queue is being passed over, and a build must not treat
+ * the two as the same signal even though both are read off the same directory.
+ *
+ * Reads through the SAME {@link feedbackEntriesOldestFirst} this file's count reader uses —
+ * never a second directory walk with its own root-passing convention to get wrong. Zero when
+ * the queue is empty, or when the oldest entry's `ts` fails to parse (fail-soft, matching the
+ * unreadable-entry skip above: one dud timestamp must not crash the read, and NOTHING here ever
+ * drops or expires an entry — a bad `ts` still leaves the entry in `candidates`, it is simply
+ * read as age 0 rather than aged out).
+ */
+export function oldestFeedbackAgeMs(root: string, now: Date): number {
+  const entries = feedbackEntriesOldestFirst(root);
+  if (entries.length === 0) return 0;
+  const parsed = Date.parse(entries[0].ts);
+  if (Number.isNaN(parsed)) return 0;
+  return Math.max(0, now.getTime() - parsed);
 }
