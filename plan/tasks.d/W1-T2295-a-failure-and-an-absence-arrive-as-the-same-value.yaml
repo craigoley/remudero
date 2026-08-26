@@ -1,0 +1,99 @@
+- id: W1-T2295
+  title: "A FAILURE AND AN ABSENCE ARRIVE AS THE SAME VALUE AT 227 SEAMS — 30% of catch sites map every error to a bare legal value with no record, no reason and no marker, the house's own absent-with-reason pattern is already the plurality practice everywhere else, and the line is held by the test lineage that already stopped a burned id, never by a prose rule at a byte cap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  budget_usd: 35.00
+  files: [test/catch-erasure-ratchet.test.ts]
+  origin: "operator-brief#a-failure-and-an-absence-2026-08-25"
+  plan_refs: ["W1-T438", "W1-T2266", "W1-T2260"]
+  status: queued
+  attempts: 0
+  rationale: |
+    THE CENSUS, MEASURED 2026-08-25 AT 4381f5bb OVER 135 src FILES (brace-matched extraction of
+    every catch body; positive controls: the serve.ts `.catch(() => null)` family appears in the
+    13, and `fetchCiFailures`' empty commented catch classifies as a deliberate skip). 755 catch
+    sites — 742 `try/catch`, 13 `.catch()`. Of them: 110 rethrow, 154 record, 172 CARRY THE
+    DISTINCTION in their return shape (the house vocabulary — `unreadable`, `{kind: "corrupt"}`,
+    `ok: false`, `status: "measured" | "refused"`), 92 are commented deliberate skips, and
+    **227 (30.1%) return a bare null/[]/{}/""/false/0 with no record, no reason and no marker.**
+    Beside them: 11 negated optional-chain conflators across 7 files, of which the daemon
+    liveness rule (`!ctx.services.find((s) => s.service === "daemon")?.running`,
+    src/lib/status-board.ts) is one — no row and `running: false` are one value.
+
+    PRECISION IS STATED AS AN ESTIMATE, NOT A COUNT. A hand-read sample found containment.ts
+    REASONED IN PLACE — the comment ("a skipped control is what makes every 'blocked' reading
+    unfalsifiable") sits one brace OUTSIDE the catch, a false positive for the detector — and
+    analytics-route.ts's `readAnalyticsLedgerLines` rendering an unreadable state dir as an
+    EMPTY LEDGER, a true positive and the exact "corpus that looked live and was not" hazard
+    that cost two lanes the same night. Roughly half of the 227 are true erasures; 227 is the
+    CANDIDATE CEILING and this shard carries it as such.
+
+    WHY THIS FAMILY AND NOT ITS SIBLING. The 2026-08-25 fourteen-investigation day sorted into
+    two families: ERASURE (a distinction dies at a seam whose type admits a legal value identical
+    to the healthy case) and ORPHAN (a value produced with no consumer wired). The orphan family
+    is already owned — W1-T2266 taxonomizes it in four shapes and the plan linter's call-site
+    criterion gates its newest front. Erasure is the unowned half, and its per-instance fixes are
+    already landing one at a time (the empty-log-tail fix names its emptiness now) — what does
+    not exist is the check that stops the POPULATION growing back, one unexamined seam at a time,
+    which is how it reached 227.
+
+    WHY A TEST AND NOT PROSE. CLAUDE.md stands at 65,324 of 65,536 bytes; a rule there costs a
+    fold its own baseline says it cannot carry, and the same day's measured fact is terminal for
+    prose anyway: a lane's draft rule wrote the very literal it was prohibiting. The thing that
+    actually stopped a burned id was `test/task-id-existence-check.test.ts`; the no-raw-NUL gate
+    (W1-T438) holds its population at zero the same way; and origin/main's tip commit at filing
+    time is itself "the operator-message standard and its enforcement test". The vehicle is
+    proven; this shard adds one more car to that train.
+  design: |
+    (i) THE CHECK. One new test walking `git ls-files`-tracked `src/**/*.ts` with two detectors:
+    (a) negated optional-chain conflators — any NEW site beyond the reviewed eleven fails, naming
+    the site; (b) bare erasing catches — a PER-FILE count of catch sites that neither rethrow,
+    nor record, nor carry the distinction in their return shape, nor state a reason inside the
+    braces, held AT OR BELOW a baseline table embedded in the test file itself. No allowlist
+    file: the baseline is per-file counts, a reduction is a one-line reviewed diff, a NEW file
+    enters at zero, and a renamed file enters at zero — the ratchet only ever tightens. A catch
+    passes by ANY of the four routes, and the fourth (a sentence inside the braces) is also
+    where the next investigator will look, so compliance doubles as documentation placement.
+
+    (ii) WHAT THE RATCHET CANNOT SEE, NAMED AS RESIDUE — NOT A GAP TO BE CLOSED LATER. Semantic
+    erasure is invisible to any regex: one step name for a whole read path, a message written
+    for the other arm of its own guard, a channel-less type (`LatchesSection` carries no failure
+    field, so "no active latches" and "could not read latches" CANNOT render differently no
+    matter what the catch does). Those stay where the fourteen were caught: in review, aided by
+    the in-file commentary this repo runs at 47.2% of src/lib lines. The check covers two of the
+    three erasure operators and says so; a third detector is not planned, because its false
+    positives would spend the credibility the first two earn.
+
+    (iii) WHY A REQUIRED RESULT TYPE IS REFUSED. The house already invented the right type,
+    organ by organ — `ReceiptField`'s present/absent-with-reason, `LedgerUnionResult`'s
+    `ok: false`, the cadence's `status: "measured" | "refused"` — and the census's 172 carried
+    catches show it is the plurality practice among non-rethrow handlers. But REQUIRING it
+    across 227 seams is a migration, and this repo has costed that class of move and declined
+    it: run-task.ts's extraction alone was measured at 22.8% of source with fan-out 108 and
+    ~300 tasks (W1-T2260), and this is the same shape smaller. The ratchet gets the growth
+    stopped without the migration; adoption of the type stays organic, seam by seam, where a
+    diff already touches.
+
+    (iv) WHAT MUST NOT CHANGE. THE CHECK DOES NOT OUTLAW ERASURE — IT PRICES IT AT ONE IN-PLACE
+    SENTENCE; a catch whose absence and failure genuinely coincide for every consumer writes
+    that sentence and passes. No gate is weakened and no bound is tuned to reduce a count — the
+    227 and the 11 stand as measured, and the baseline is today's population, not a target. No
+    comment is shortened anywhere: the byte pressure is on CLAUDE.md, which is capped and
+    injected per session, never on src commentary, which is read on demand and is the asset that
+    made the fourteen investigations tractable. And run-task.ts's extraction stays
+    not-the-subject at 22.8% of source and ~300 tasks.
+  acceptance:
+    - claim: "a new negated optional-chain conflator fails the gate naming its site"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+    - claim: "a file whose bare-catch count exceeds its baseline fails naming file and count"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+    - claim: "a catch stating its reason inside the braces passes the gate"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+    - claim: "a catch carrying the distinction in its return shape passes the gate"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
+    - claim: "a file dropping below its baseline passes with no edit to the gate"
+      proof: "unit test: test/catch-erasure-ratchet.test.ts"
