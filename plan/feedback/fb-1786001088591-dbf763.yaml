@@ -29,7 +29,24 @@ raw: "THE CANONICAL CHECKOUT WAS SHALLOW AND NOTHING NOTICED UNTIL #1407 REFUSED
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2993
+summary:
+  headline: Main codebase history 79% incomplete; safety guard caught it
+  what_happened: Production repository contained only 208 of 980 commits (79%
+    missing). A safety guard detected this and blocked operation, preventing
+    false reports about code authorship and merge history; timing of loss is
+    unknown.
+  decision: Restore full repository; identify what caused history loss; deploy
+    boot-time detection for future prevention
+  options:
+    - label: History lost days ago
+      consequence: All findings from this repo for days are suspect; audit reports on
+        authors, merges, and code history
+    - label: History lost recently by test or npm operation
+      consequence: Isolate and fix the operation; narrow audit scope to recent work;
+        restore repository from full backup
+    - label: Root cause unknown or unreproducible
+      consequence: Deploy detection immediately; treat all history-based findings as
+        questionable; manually verify critical decisions from this data
 expansion: null
 answered_by: null
