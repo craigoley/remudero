@@ -4425,6 +4425,34 @@ export function buildBatchedGithub(
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
+  // W1-T2323: A CACHE MUST SERVE FOR AT LEAST AS LONG AS IT COST TO BUILD.
+  //
+  // `cache.at` is already stamped on COMPLETION, not on request — `now()` inside the cache literal
+  // below runs AFTER `fetchAll` returns — so a reading is never older than it claims. That half was
+  // ALREADY CORRECT and nothing asserted it; this task PINS it
+  // (test/board-index-ttl-outlives-its-fetch.test.ts) rather than rewriting it.
+  //
+  // WHAT THIS FLOOR ACTUALLY BUYS, MEASURED RATHER THAN ASSUMED. A cold gateway's first walk is
+  // FULL: 26 sequential REST calls, 18.7-19.5 s measured on the live board. Once `knownBoardPrs` is
+  // populated, a later expiry is a DELTA walk — MEASURED at 825 ms across the raw 15 s boundary, not
+  // another 19 s. So the raw TTL was costing sub-second delta refetches, and this floor removes
+  // those: a read 15.5 s after a 19 s walk now costs 0 ms instead of 825 ms.
+  //
+  // WHAT IT DOES NOT BUY, SAID PLAINLY. The expensive walks are the FULL ones, and they come from
+  // COLD GATEWAY INSTANCES, not from TTL expiry: `knownBoardPrs` is per-instance (declared below),
+  // so every `buildBatchedGithub` call pays one ~19 s walk on its first read however long the TTL
+  // is. 65 of today's 170 walks were full. THIS CHANGE DOES NOT REDUCE THAT COUNT, and the boot
+  // burst of three full walks in 100 s on 2026-08-26 was three cold instances, not three expiries.
+  // Reducing instance count, or separating the open and merged clocks so a cold walk is one page
+  // rather than 26, is the larger win and is NOT taken here.
+  //
+  // THE STALENESS IT ACCEPTS, NAMED. A cached board reading may be up to
+  // `max(ttlMs, lastFetchDurationMs)` old instead of `ttlMs` — 19 s rather than 15 s on today's
+  // numbers, a FOUR-SECOND increase in the worst-case age of the rollup a sweep disposition reads.
+  // It is not a blanket raise: it is self-sizing from a cost the gateway already paid, and can
+  // never exceed one fetch.
+  let lastFetchDurationMs = 0;
+  const effectiveTtlMs = (): number => Math.max(ttlMs, lastFetchDurationMs);
   // W1-T1005: an explicit `opts.pacer` always wins (design iii); omitted, every gateway built in
   // this process falls back to the SAME module-scoped instance (created once, on whichever
   // gateway needs it first) rather than each discovering the secondary rate limit on its own.
@@ -4632,7 +4660,8 @@ export function buildBatchedGithub(
   }
   let cache: Index | undefined;
   const index = (): Index => {
-    if (!cache || now() - cache.at >= ttlMs) {
+    if (!cache || now() - cache.at >= effectiveTtlMs()) {
+      const fetchStartedAt = now();
       // W1-T181: the catch lives HERE, wrapping `fetchAll()` itself — not only inside the
       // default `run`-based implementation above — so an INJECTED `fetchAll` (every unit-test
       // fixture, and any future caller-supplied implementation) that throws is classified and
@@ -4676,6 +4705,9 @@ export function buildBatchedGithub(
         // absence — the signal W1-T179's github_unobservable marking is designed to consume.
         all = [];
       }
+      // Recorded on BOTH arms — a failed fetch blocked the loop just as long as a successful one,
+      // so it earns the same floor. `at` stays `now()`: completion-stamped, unchanged.
+      lastFetchDurationMs = Math.max(0, now() - fetchStartedAt);
       cache = {
         at: now(),
         byUrl: new Map(all.map((p) => [p.url, p])),
