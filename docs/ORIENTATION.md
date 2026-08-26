@@ -1,35 +1,29 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-25T10:55:15.645Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-26T03:42:13.873Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-45 run(s) since the last retro marker. Verdicts: {"blocked":3,"blocked_ci":7,"blocked_containment":16,"incomplete":1,"merged":18}.
+47 run(s) since the last retro marker. Verdicts: {"blocked":4,"blocked_ci":10,"blocked_containment":18,"incomplete":1,"merged":14}.
 
 ### Shipped since marker
-- W1-T2211 → https://github.com/craigoley/remudero/pull/2729
-- W1-T2212 → https://github.com/craigoley/remudero/pull/2730 (gate-side merge; run ended blocked_ci)
-- W1-T2213 → https://github.com/craigoley/remudero/pull/2732
-- W1-T2215 → https://github.com/craigoley/remudero/pull/2731
-- W1-T2217 → https://github.com/craigoley/remudero/pull/2734
-- W1-T2218 → https://github.com/craigoley/remudero/pull/2738 (gate-side merge; run ended blocked_ci)
-- W1-T2222 → https://github.com/craigoley/remudero/pull/2763
-- W1-T2223 → https://github.com/craigoley/remudero/pull/2766
-- W1-T2224 → https://github.com/craigoley/remudero/pull/2760
-- W1-T2225 → https://github.com/craigoley/remudero/pull/2771
-- W1-T2228 → https://github.com/craigoley/remudero/pull/2782
-- W1-T2229 → https://github.com/craigoley/remudero/pull/2779
-- W1-T2231 → https://github.com/craigoley/remudero/pull/2801
-- W1-T2232 → https://github.com/craigoley/remudero/pull/2776
-- W1-T2234 → https://github.com/craigoley/remudero/pull/2777
-- W1-T2235 → https://github.com/craigoley/remudero/pull/2786
-- W1-T2237 → https://github.com/craigoley/remudero/pull/2799
-- W1-T2239 → https://github.com/craigoley/remudero/pull/2805
-- W1-T2240 → https://github.com/craigoley/remudero/pull/2806
-- W1-T2243 → https://github.com/craigoley/remudero/pull/2809
+- W1-T2251 → https://github.com/craigoley/remudero/pull/2839
+- W1-T2254 → https://github.com/craigoley/remudero/pull/2844
+- W1-T2257 → https://github.com/craigoley/remudero/pull/2869
+- W1-T2260 → https://github.com/craigoley/remudero/pull/2851
+- W1-T2261 → https://github.com/craigoley/remudero/pull/2862
+- W1-T2264 → https://github.com/craigoley/remudero/pull/2874
+- W1-T2265 → https://github.com/craigoley/remudero/pull/2873
+- W1-T2267 → https://github.com/craigoley/remudero/pull/2879
+- W1-T2269 → https://github.com/craigoley/remudero/pull/2876
+- W1-T2270 → https://github.com/craigoley/remudero/pull/2880
+- W1-T2273 → https://github.com/craigoley/remudero/pull/2885
+- W1-T2276 → https://github.com/craigoley/remudero/pull/2872
+- W1-T2278 → https://github.com/craigoley/remudero/pull/2894
+- W1-T2279 → https://github.com/craigoley/remudero/pull/2897
 
 ## Next runnable task
 
