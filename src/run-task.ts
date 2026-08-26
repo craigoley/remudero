@@ -14478,6 +14478,14 @@ export function creditedProofVisibility(
       try {
         return ledgerPathFor(loadConfig());
       } catch {
+        // ABSENT AND UNREADABLE COINCIDE FOR EVERY CONSUMER OF THIS VALUE, so `undefined` erases
+        // nothing here. `loadConfig` throws on a missing or empty config — every CI checkout — and
+        // the only use this verb has for it is locating a ledger. Undefined flows to exactly two
+        // places below: `creditedIds` becomes an empty set and `earliest` is skipped, which is the
+        // same report a host with no ledger produces, rendered honestly as zero credited tasks.
+        // This is a READ-ONLY report (proofQueueAudit exits 0 on its own analysis regardless of
+        // what it names), so no verdict rests on the difference. Same reasoning, same shape, as the
+        // `stateDir` defaults in emissionsCommand and its siblings above.
         return undefined;
       }
     })();
@@ -14498,6 +14506,14 @@ export function creditedProofVisibility(
         try {
           return readFileSync(join(cwd, path), "utf8").includes(symbol);
         } catch {
+          // "NOT VISIBLE AT THIS PATH" is the whole question this predicate answers, and an absent
+          // file and an unreadable one answer it identically — the sibling `pathExists` above is
+          // `existsSync`, which is false for both for the same reason. STATED PLAINLY BECAUSE IT IS
+          // a conflation, not an identity: a file that exists but cannot be read would be reported
+          // as "symbol not found". That costs one line in a REPORT that exits 0 regardless of how
+          // many offenders it names, never a gate verdict and never a strike — which is why the
+          // distinction is not carried in the return shape, whose `boolean` every caller reads as
+          // exactly this question.
           return false;
         }
       }),
